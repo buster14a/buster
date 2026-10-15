@@ -66,9 +66,17 @@ BUSTER_GLOBAL_LOCAL bool external_projects_record(Arena* arena, u32 project, Str
         external_project_names[project], status, elapsed_us, os_get_environment_variable(S8("GITHUB_SHA")),
         os_get_environment_variable(S8("GITHUB_RUN_ID")), os_get_environment_variable(S8("GITHUB_RUN_ATTEMPT")),
         project == EXTERNAL_PROJECT_RAD ? S8("Release;allocations-on;debug-info-off") :
-        project == EXTERNAL_PROJECT_FFMPEG ? S8("Release;FFmpeg-7.1.3;portable") : S8("Release;default-harness"));
+        project == EXTERNAL_PROJECT_FFMPEG ? S8("Release;FFmpeg-7.1.3;portable-c17;portable-gnu17;optimized-gnu17;external-NASM") : S8("Release;default-harness"));
     bool result = file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(text));
     string_print(S8("EXTERNAL_PROJECT_V1 {S8}"), text);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool external_projects_ffmpeg_record(Arena* arena, String8* status)
+{
+    String8 profiles = string_format(arena, S8("profile\tresult\nportable-c17\t{S8}\nportable-gnu17\t{S8}\noptimized-gnu17\t{S8}\n"),
+        status[0], status[1], status[2]);
+    bool result = file_write(S8("build/ffmpeg-profiles.tsv"), BUSTER_SLICE_TO_BYTE_SLICE(profiles));
     return result;
 }
 
@@ -134,7 +142,29 @@ BUSTER_GLOBAL_LOCAL ProcessResult external_projects_execute(Arena* arena, u32 pr
         case EXTERNAL_PROJECT_FFMPEG:
         {
             String8 args[] = {S8("--portable"), S8("external/ffmpeg"), S8("build/ffmpeg-portable"), S8("build/Release/ide")};
-            result = ffmpeg_main(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(args), build_running_driver(arena));
+            String8 portable_args[] = {S8("--portable-gnu17"), S8("external/ffmpeg"), S8("build/ffmpeg-portable-gnu17"), S8("build/Release/ide")};
+            String8 optimized_args[] = {S8("--optimized-gnu17"), S8("external/ffmpeg"), S8("build/ffmpeg-optimized-gnu17"), S8("build/Release/ide"), executable_resolve_in_path(arena, S8("nasm"))};
+            String8 driver = build_running_driver(arena);
+            SliceString8 profiles[] = {BUSTER_ARRAY_TO_SLICE(args), BUSTER_ARRAY_TO_SLICE(portable_args), BUSTER_ARRAY_TO_SLICE(optimized_args)};
+            String8 status[] = {S8("not-run"), S8("not-run"), S8("not-run")};
+            bool recorded = external_projects_ffmpeg_record(arena, status);
+            bool passed = true;
+            // Keep ISO acceptance independent and attempt both GNU controls
+            // even when an earlier census fails. Publish incomplete state
+            // before each profile so job interruption cannot look complete.
+            for (u32 i = 0; recorded && i < BUSTER_ARRAY_LENGTH(profiles); i += 1)
+            {
+                status[i] = S8("started;incomplete");
+                recorded = external_projects_ffmpeg_record(arena, status);
+                if (recorded)
+                {
+                    ProcessResult profile = ffmpeg_main(arena, profiles[i], driver);
+                    status[i] = profile == PROCESS_RESULT_SUCCESS ? S8("pass") : S8("fail");
+                    recorded = external_projects_ffmpeg_record(arena, status);
+                    passed = profile == PROCESS_RESULT_SUCCESS && passed;
+                }
+            }
+            result = recorded && passed ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
         }
         break;
         default: break;

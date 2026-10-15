@@ -27,7 +27,7 @@ Assignments describe the harness coverage, not a passing qualification claim.
 | cJSON/Lua/SQLite descriptor preflight, dependency/resource/runtime closures and admission receipts | Linux x86-64; distinct exact functional-admission operations retained after passing full harnesses | Real-source; indirectly apt-input reusable caller |
 | Git 2.51.0 pristine Makefile build/local-operation census | Linux x86-64, same Release compiler; native Clang/GCC harness controls retained | Git qualification manual-only workflow |
 | RAD pinned Linux diagnostic campaign | Linux x86-64, separate Release tree with allocations on and debug-info off; pristine controls, tests and self-host retained | RAD main-only workflow |
-| FFmpeg 7.1.3 portable census | Linux x86-64 only, exact FFmpeg pin; full reference/Buster census plus required H.264 C actions and process-resource evidence | No prior workflow owner |
+| FFmpeg 7.1.3 profiles | Linux x86-64 only, exact pin; retained ISO portable census followed by matched GNU17 portable and optimized/NASM censuses; independent reference/Buster records | No prior workflow owner |
 | Every project above on native macOS AArch64 | Pending/unqualified; inventory only, no project execution | No existing native project workflow |
 | Every project above on native Windows x86-64 | Pending/unqualified; inventory only, no project execution | No existing native project workflow |
 
@@ -58,7 +58,8 @@ yyjson, LZ4, sbase, DoomGeneric, musl/libc-test, CPython and the Linux kernel
 frontier ([guide](agents/compatibility/linux-kernel.md)) have opt-in native
 harnesses but no ordinary workflow input owner at this revision. Their
 source/input/platform intake remains pending. FFmpeg's assignment covers only
-the pinned Linux x86-64 portable census; macOS and Windows remain pending. The unlanded userspace,
+the pinned Linux x86-64 ISO portable control and GNU17 portable/optimized
+censuses; macOS and Windows remain pending. The unlanded userspace,
 curl, PostgreSQL, OpenSSL, QEMU, Linux, MuPDF and SDL3 milestones retain
 [#3176](https://github.com/buster14a/buster/issues/3176)'s evidence contracts.
 Do not enable nonexistent/unqualified input recipes or introduce a child
@@ -102,11 +103,16 @@ Buster first-party license; that decision remains unselected under
 ## FFmpeg cost and acceptance limits
 
 The existing Linux x86-64 job stays at its 360-minute limit and keeps every
-current project stage before FFmpeg. FFmpeg's four stages on each of two sides
+current project stage before FFmpeg. For each portable profile, four stages on
+each of two sides
 have 900-second child deadlines, and its probes and preparation add at most 660
 seconds, for a 131-minute command ceiling. The pristine-input checks run before
 and after the harness; each runs six Git child commands with 600-second
-deadlines, adding 120 minutes. The configured child-deadline sum is 251 minutes.
+deadlines, adding 120 minutes. Each portable profile's configured child-deadline
+sum is 251 minutes. The optimized profile adds 30 minutes of checkasm build
+limits, 2 minutes of checkasm invocation limits and 2 minutes of NASM probes,
+making 285 minutes. The three profiles sum to 787 minutes of child limits;
+nested per-action deadlines are contained within their parent stages.
 It sums limits, not observed runtime. Spawn and cleanup work, file operations,
 checkout/verification, and artifact upload are outside that sum and use the
 same job budget. This ceiling does not establish headroom after earlier
@@ -114,6 +120,19 @@ portfolio stages. No existing watchdog or job deadline is raised. Since FFmpeg
 runs last, earlier project stages keep their current order; if the shared job
 reaches its fixed deadline first, the FFmpeg receipt remains incomplete and the
 portfolio must fail.
+
+The FFmpeg route preserves the original ISO portable action before attempting
+the separately named GNU17 portable and optimized profiles. It installs an
+upstream-compatible external NASM; the harness records its version and SHA-256.
+Both GNU profiles use upstream `--stdc=gnu17` on both compilers, preserving
+the ISO diagnostic contract and the unchanged-action gate owned by #4296.
+`build/ffmpeg-profiles.tsv` publishes not-run and started/incomplete records
+before execution and final per-profile pass/fail records after it. A failed
+earlier profile does not suppress later diagnostics; all three must pass the
+portfolio result. No sampled media, performance experiment or unsupported ISA
+is requested. These are scheduled diagnostic recipes, not completed optimized
+qualification. The first actual main-push run must supply measured cost and
+artifact-size evidence; the fixed cap is not a headroom guarantee.
 
 Run 38428249840 completed its listed Linux project stages in 31 minutes 49
 seconds and retained a 3,290,671,945-byte artifact, but its later functional
@@ -147,6 +166,10 @@ owner route and text-only artifact allowlist, rejecting a broad build-directory
 upload. Native event fixtures separately cover main advancing while a queued
 original SHA is tested. The scanner admits a restricted canonical
 owner syntax, not general YAML; topology changes must update its fixtures.
+The expanded FFmpeg allowlist retains only text action/configuration/checkasm
+evidence from all three profiles, including independent-Clang and external-NASM
+actions. Mutation controls reject broad GNU build-directory/object uploads,
+missing NASM installation and GNU full-project commands in nonowner workflows.
 
 Extra OS jobs require retained evidence of an actual 360-minute hosted timeout:
 run/attempt, SHA, machine/image, complete assignment, per-project phase
