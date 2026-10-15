@@ -20,6 +20,23 @@ BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType ty
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
 
+// The real array-suffix word classifier: producer token visits, sparse-index
+// comparisons/hits and original scalar token visits. The bypass keeps every
+// other semantic/query path unchanged and forces the original classification.
+typedef struct CTestArrayBoundWordWork CTestArrayBoundWordWork;
+struct CTestArrayBoundWordWork
+{
+    u64 producer_tokens;
+    u64 comparisons;
+    u64 hits;
+    u64 scalar_tokens;
+    // Row payload only: excludes index header, arena alignment and scratch.
+    u64 summary_row_bytes;
+};
+BUSTER_F_DECL CTestArrayBoundWordWork c_test_array_bound_word_work_take(void);
+BUSTER_F_DECL void c_test_array_bound_word_rescan_set(bool rescan);
+BUSTER_F_DECL bool c_test_array_bound_words_agree(Arena* arena, CPreprocessResult preprocess);
+
 // Type-task steps, operator-token visits, expression-end table/walk rows,
 // and TYPEOF completion membership-node visits.
 BUSTER_F_DECL u64 c_test_assignment_chain_work(void);

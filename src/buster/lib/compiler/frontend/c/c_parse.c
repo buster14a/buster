@@ -244,6 +244,18 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_assignment_chain_work;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_test_type_parse_frame_capacity_limit;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestConstantPrefixWork c_constant_prefix_work;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_constant_prefix_rescan;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestArrayBoundWordWork c_array_bound_word_work;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_array_bound_word_rescan;
+CTestArrayBoundWordWork c_test_array_bound_word_work_take(void)
+{
+    CTestArrayBoundWordWork result = c_array_bound_word_work;
+    c_array_bound_word_work = (CTestArrayBoundWordWork){0};
+    return result;
+}
+void c_test_array_bound_word_rescan_set(bool rescan)
+{
+    c_array_bound_word_rescan = rescan;
+}
 CTestConstantPrefixWork c_test_constant_prefix_work_take(void)
 {
     CTestConstantPrefixWork result = c_constant_prefix_work;
@@ -352,6 +364,7 @@ enum
 BUSTER_C_INTERNAL u16 c_parse_word_bits_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_INTERNAL bool c_parse_auto_type_word_token(CPreprocessResult preprocess, CToken token);
 BUSTER_C_INTERNAL bool c_parse_type_qualifier_word_token(CPreprocessResult preprocess, CToken token, CType* type);
+BUSTER_C_INTERNAL void c_parse_array_bound_words_build(CParseResult* result, CPreprocessResult preprocess, Arena* scratch);
 BUSTER_C_INTERNAL bool c_parse_atomic_declaration_prefix_token(CPreprocessResult preprocess, CToken token, CType* qualifiers);
 
 // The declaration-keyword pair answered from class_bits by symbol id; the
@@ -990,6 +1003,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_position_index_visit_delimiter(CPre
     CPunctuator punctuator = (CPunctuator)(shape & C_TOKEN_SHAPE_PUNCTUATOR_MASK);
     if (opening)
     {
+        index->array_bound_word_count += punctuator == C_PUNCTUATOR_LEFT_BRACKET;
         bool aggregate_body = punctuator == C_PUNCTUATOR_LEFT_BRACE ? c_parse_aggregate_brace_at(preprocess, token_index)
             : *stack_count && stack[*stack_count - 1].aggregate_body;
         stack[(*stack_count)++] = (CParseDelimiterStackEntry){
@@ -1196,6 +1210,7 @@ BUSTER_C_INTERNAL void c_parse_position_index_build(CParseResult* result, CPrepr
                 index->type_identity_rows_plus_one[slot] = row + 1;
         }
     }
+    c_parse_array_bound_words_build(result, preprocess, temporary.arena);
     scratch_end(temporary);
     index->built = true;
 }
@@ -27705,6 +27720,227 @@ BUSTER_C_INTERNAL bool c_parse_typedef_name_position(CPreprocessResult preproces
     return open > start && index == start;
 }
 
+enum
+{
+    C_ARRAY_BOUND_WORD_STATIC = 1 << 0,
+    C_ARRAY_BOUND_WORD_CONST = 1 << 1,
+    C_ARRAY_BOUND_WORD_STAR = 1 << 2,
+};
+
+// The original full-span classifier, shared by the immutable producer and
+// scalar fallback. Nested groups deliberately contribute their words too.
+BUSTER_C_INTERNAL bool c_parse_array_bound_word(CPreprocessResult preprocess, CToken token, bool* is_static, bool* is_const)
+{
+    String8 spelling = c_token_spelling(preprocess.spelling_base, token);
+    *is_static = string_equal(spelling, S8("static"));
+    CType qualifiers = {0};
+    bool word = !*is_static && !(token.kind == C_TOKEN_IDENTIFIER &&
+        (c_parse_type_qualifier_word_token(preprocess, token, &qualifiers) || c_parse_nullability_word(spelling)));
+    *is_const = qualifiers.is_const;
+    return word;
+}
+
+BUSTER_C_INTERNAL void c_parse_array_bound_words_build(CParseResult* result, CPreprocessResult preprocess, Arena* scratch)
+{
+    typedef struct CParseArrayBoundWordFrame CParseArrayBoundWordFrame;
+    struct CParseArrayBoundWordFrame
+    {
+        u32 row;
+        u32 statics;
+        u32 consts;
+        u32 words;
+    };
+    CTokenPositionIndex* positions = result->position_index;
+    u32 count = !positions->delimiter_mismatch_count && preprocess.token_count <= UINT32_MAX ? positions->array_bound_word_count : 0;
+    positions->array_bound_word_count = 0;
+    bool room = count && c_parse_arena_can_allocate(scratch, (u64)count * sizeof(CParseArrayBoundWordFrame), BUSTER_ALIGN_OF(CParseArrayBoundWordFrame)) &&
+        c_parse_arena_can_allocate(result->arena, (u64)count * sizeof(CArrayBoundWords), BUSTER_ALIGN_OF(CArrayBoundWords));
+    if (room)
+    {
+        CParseArrayBoundWordFrame* stack = arena_allocate(scratch, CParseArrayBoundWordFrame, count);
+        CArrayBoundWords* rows = arena_allocate(result->arena, CArrayBoundWords, count);
+        u32 stack_count = 0;
+        u32 row_count = 0;
+        u32 statics = 0;
+        u32 consts = 0;
+        u32 words = 0;
+        u32 last_word = 0;
+        bool valid = true;
+        for (u64 token_index = 0; valid && token_index < preprocess.token_count; token_index += 1)
+        {
+#if BUSTER_INCLUDE_TESTS
+            c_array_bound_word_work.producer_tokens += 1;
+#endif
+            u32 token = (u32)token_index;
+            CToken current = preprocess.tokens[token];
+            if (c_token_is_punctuator(&current, C_PUNCTUATOR_RIGHT_BRACKET))
+            {
+                valid = stack_count && rows[stack[stack_count - 1].row].close == token;
+                if (valid)
+                {
+                    CParseArrayBoundWordFrame frame = stack[--stack_count];
+                    rows[frame.row].flags = (statics != frame.statics ? C_ARRAY_BOUND_WORD_STATIC : 0) |
+                        (consts != frame.consts ? C_ARRAY_BOUND_WORD_CONST : 0) |
+                        (words - frame.words == 1 && c_token_is_punctuator(preprocess.tokens + last_word, C_PUNCTUATOR_STAR)
+                            ? C_ARRAY_BOUND_WORD_STAR : 0);
+                }
+            }
+            bool is_static;
+            bool is_const;
+            bool word = c_parse_array_bound_word(preprocess, current, &is_static, &is_const);
+            statics += is_static;
+            consts += is_const;
+            words += word;
+            if (word) last_word = token;
+            if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
+            {
+                u32 close = positions->matching_delimiters_plus_one[token] - 1;
+                valid = row_count < count && stack_count < count && close > token && close < preprocess.token_count;
+                if (valid)
+                {
+                    rows[row_count] = (CArrayBoundWords){.open = token, .close = close};
+                    stack[stack_count++] = (CParseArrayBoundWordFrame){.row = row_count++, .statics = statics, .consts = consts, .words = words};
+                }
+            }
+        }
+        if (valid && !stack_count && row_count == count)
+        {
+            positions->array_bound_words = rows;
+            positions->array_bound_word_count = count;
+            positions->array_bound_tokens = preprocess.tokens;
+            positions->array_bound_token_count = preprocess.token_count;
+            positions->array_bound_spelling_base = preprocess.spelling_base;
+            positions->array_bound_symbols = preprocess.symbols;
+            positions->array_bound_dialect = preprocess.dialect;
+#if BUSTER_INCLUDE_TESTS
+            c_array_bound_word_work.summary_row_bytes += (u64)count * sizeof(CArrayBoundWords);
+#endif
+        }
+    }
+}
+
+BUSTER_C_INTERNAL u8 c_parse_array_bound_words(CParseResult* result, CPreprocessResult preprocess, u32 open, u32 close)
+{
+    CTokenPositionIndex const* positions = result->position_index;
+    bool indexed = positions && positions->built && !positions->delimiter_mismatch_count && positions->array_bound_words &&
+        positions->array_bound_tokens == preprocess.tokens && positions->array_bound_token_count == preprocess.token_count &&
+        positions->array_bound_spelling_base == preprocess.spelling_base && positions->array_bound_symbols == preprocess.symbols &&
+        positions->array_bound_dialect == preprocess.dialect && close < preprocess.token_count &&
+        positions->matching_delimiters_plus_one[open] == close + 1 &&
+        c_token_is_punctuator(preprocess.tokens + close, C_PUNCTUATOR_RIGHT_BRACKET);
+#if BUSTER_INCLUDE_TESTS
+    indexed &= !c_array_bound_word_rescan;
+#endif
+    u32 low = 0;
+    u32 high = indexed ? positions->array_bound_word_count : 0;
+    while (low < high)
+    {
+#if BUSTER_INCLUDE_TESTS
+        c_array_bound_word_work.comparisons += 1;
+#endif
+        u32 middle = low + (high - low) / 2;
+        if (positions->array_bound_words[middle].open < open) low = middle + 1;
+        else high = middle;
+    }
+    bool found = indexed && low < positions->array_bound_word_count && positions->array_bound_words[low].open == open &&
+        positions->array_bound_words[low].close == close;
+    u8 flags = found ? positions->array_bound_words[low].flags : 0;
+    if (found)
+    {
+#if BUSTER_INCLUDE_TESTS
+        c_array_bound_word_work.hits += 1;
+#endif
+    }
+    else
+    {
+        u32 words = 0;
+        u32 last_word = open;
+        for (u32 token = open + 1; token < close; token += 1)
+        {
+#if BUSTER_INCLUDE_TESTS
+            c_array_bound_word_work.scalar_tokens += 1;
+#endif
+            bool is_static;
+            bool is_const;
+            if (c_parse_array_bound_word(preprocess, preprocess.tokens[token], &is_static, &is_const))
+            {
+                words += 1;
+                last_word = token;
+            }
+            flags |= (is_static ? C_ARRAY_BOUND_WORD_STATIC : 0) | (is_const ? C_ARRAY_BOUND_WORD_CONST : 0);
+        }
+        if (words == 1 && c_token_is_punctuator(preprocess.tokens + last_word, C_PUNCTUATOR_STAR)) flags |= C_ARRAY_BOUND_WORD_STAR;
+    }
+    return flags;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool c_test_array_bound_words_agree(Arena* arena, CPreprocessResult preprocess)
+{
+    CTokenPositionIndex positions = {0};
+    CParseResult parse = {.arena = arena, .position_index = &positions};
+    c_parse_position_index_ensure(&parse, preprocess);
+    bool previous_rescan = c_array_bound_word_rescan;
+    CTestArrayBoundWordWork previous_work = c_array_bound_word_work;
+    bool agree = true;
+    CToken* other_tokens = arena_allocate(arena, CToken, preprocess.token_count ? preprocess.token_count : 1);
+    u32* other_matches = arena_allocate(arena, u32, preprocess.token_count ? preprocess.token_count : 1);
+    if (preprocess.token_count)
+    {
+        memcpy(other_tokens, preprocess.tokens, preprocess.token_count * sizeof(CToken));
+        memcpy(other_matches, positions.matching_delimiters_plus_one, preprocess.token_count * sizeof(u32));
+    }
+    u64 spelling_bytes = 0;
+    for (u32 token = 0; token < preprocess.token_count; token += 1)
+        spelling_bytes = BUSTER_MAX(spelling_bytes, preprocess.tokens[token].offset + c_token_length(preprocess.spelling_base, preprocess.tokens[token]));
+    char8* other_spelling = arena_allocate(arena, char8, spelling_bytes ? spelling_bytes : 1);
+    if (spelling_bytes) memcpy(other_spelling, preprocess.spelling_base, spelling_bytes);
+    CSymbolTable other_symbols = preprocess.symbols ? *preprocess.symbols : (CSymbolTable){0};
+    for (u32 token = 0; token < preprocess.token_count; token += 1)
+    {
+        if (!c_token_is_punctuator(preprocess.tokens + token, C_PUNCTUATOR_LEFT_BRACKET)) continue;
+        u32 close = c_parse_matching_delimiter_indexed(&parse, preprocess, token);
+        if (close <= token || close >= preprocess.token_count) continue;
+        for (u32 mode = 0; mode < 10; mode += 1)
+        {
+            CTokenPositionIndex view = positions;
+            CParseResult probe = parse;
+            probe.position_index = &view;
+            CPreprocessResult input = preprocess;
+            u32 limit = close;
+            if (mode == 1) probe.position_index = 0;
+            if (mode == 2) input.tokens = other_tokens;
+            if (mode == 3 && close + 1 < preprocess.token_count) input.token_count -= 1;
+            if (mode == 3 && input.token_count == preprocess.token_count) view.array_bound_token_count += 1;
+            if (mode == 4) input.spelling_base = other_spelling;
+            if (mode == 5) input.symbols = &other_symbols;
+            if (mode == 6) input.dialect = preprocess.dialect == C_PREPROCESS_DIALECT_C11 ? C_PREPROCESS_DIALECT_GNU17 : C_PREPROCESS_DIALECT_C11;
+            if (mode == 7)
+            {
+                other_matches[token] = 0;
+                view.matching_delimiters_plus_one = other_matches;
+            }
+            if (mode == 8) view.delimiter_mismatch_count += 1;
+            if (mode == 9 && close > token + 1) limit -= 1;
+            if (mode == 9 && limit == close) view.array_bound_word_count = 0;
+            c_array_bound_word_rescan = true;
+            u8 scalar = c_parse_array_bound_words(&probe, input, token, limit);
+            c_array_bound_word_rescan = false;
+            c_test_array_bound_word_work_take();
+            agree &= scalar == c_parse_array_bound_words(&probe, input, token, limit);
+            CTestArrayBoundWordWork work = c_test_array_bound_word_work_take();
+            bool hit = mode == 0 && !positions.delimiter_mismatch_count && positions.array_bound_words;
+            agree &= work.hits == (hit ? 1u : 0u);
+            other_matches[token] = positions.matching_delimiters_plus_one[token];
+        }
+    }
+    agree &= !positions.delimiter_mismatch_count || !positions.array_bound_words;
+    c_array_bound_word_rescan = previous_rescan;
+    c_array_bound_word_work = previous_work;
+    return agree;
+}
+#endif
+
 BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocessResult preprocess, CTypeId element_type, u32* index, u32 end)
 {
     u32 first_bound = result->array_bound_count;
@@ -27722,30 +27958,11 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
         }
         u32 bound_start = open + 1;
         u32 bound_count = *index - bound_start - 1;
-        bool is_static = false;
-        bool is_const = false;
         // `[*]` may carry the same qualifiers and `static` any other array
         // parameter bound may -- `int a[const *]` is what a prototype writes
         // for a definition's `int a[const n]` -- so the star is looked for
         // among what is left after them rather than as the bound's only token.
-        u32 bound_word_count = 0;
-        u32 bound_word_index = bound_start;
-        for (u32 token_index = bound_start; token_index < bound_start + bound_count; token_index += 1)
-        {
-            CToken bound_token = preprocess.tokens[token_index];
-            String8 bound_spelling = c_token_spelling(preprocess.spelling_base, bound_token);
-            bool is_static_word = string_equal(bound_spelling, S8("static"));
-            is_static |= is_static_word;
-            CType bound_qualifiers = {0};
-            if (!is_static_word && !(bound_token.kind == C_TOKEN_IDENTIFIER && (c_parse_type_qualifier_word_token(preprocess, bound_token, &bound_qualifiers) ||
-                                                                                   c_parse_nullability_word(bound_spelling))))
-            {
-                bound_word_index = token_index;
-                bound_word_count += 1;
-            }
-            is_const |= bound_qualifiers.is_const;
-        }
-        bool is_star = bound_word_count == 1 && c_token_is_punctuator(&preprocess.tokens[bound_word_index], C_PUNCTUATOR_STAR);
+        u8 words = c_parse_array_bound_words(result, preprocess, open, close);
         if (!c_parse_result_reserve_array_bounds(result, 1))
         {
             valid = false;
@@ -27754,9 +27971,9 @@ BUSTER_C_SHARED CTypeId c_parse_array_suffixes(CParseResult* result, CPreprocess
         result->array_bounds[result->array_bound_count++] = (CArrayBound){
             .token_start = bound_start,
             .token_count = bound_count,
-            .is_static = is_static,
-            .is_star = is_star,
-            .is_const = is_const,
+            .is_static = (words & C_ARRAY_BOUND_WORD_STATIC) != 0,
+            .is_star = (words & C_ARRAY_BOUND_WORD_STAR) != 0,
+            .is_const = (words & C_ARRAY_BOUND_WORD_CONST) != 0,
         };
     }
     if (!valid) result->array_bound_count = first_bound;
@@ -42718,6 +42935,8 @@ BUSTER_C_INTERNAL CTestTypeConstantQuery c_test_protected_expression_query(Arena
         {result->definition_index ? result->definition_index->slots : 0, 0,
             result->definition_index ? (u64)result->definition_index->slot_count * sizeof(CDefinitionIndexSlot) : 0},
         {result->position_index, 0, result->position_index ? sizeof(CTokenPositionIndex) : 0},
+        {result->position_index ? result->position_index->array_bound_words : 0, 0,
+            result->position_index ? (u64)result->position_index->array_bound_word_count * sizeof(CArrayBoundWords) : 0},
         {result->symbols, 0, result->symbols ? sizeof(CSymbolTable) : 0},
         {result->type_layout_statistics, 0, result->type_layout_statistics ? sizeof(CTypeLayoutStatistics) : 0},
         {c_parse_type_interning(result), 0, c_parse_type_interning(result) ? sizeof(CTypeInterning) : 0},

@@ -2146,8 +2146,25 @@ struct CAggregateLookup
 // the checkpointed CParseResult body via a stable pointer so speculative
 // rollbacks can neither invalidate it nor force a rebuild.
 typedef struct CTokenPositionIndex CTokenPositionIndex;
+typedef struct CArrayBoundWords CArrayBoundWords;
+struct CArrayBoundWords
+{
+    u32 open;
+    u32 close;
+    u8 flags;
+};
 struct CTokenPositionIndex
 {
+    // Immutable lexical classification of each matched bracket's complete
+    // contents, in opening-token order. No semantic or numeric answer lives
+    // here. The supplying stream and spelling/keyword view must still match.
+    CArrayBoundWords* array_bound_words;
+    CToken const* array_bound_tokens;
+    char8 const* array_bound_spelling_base;
+    CSymbolTable const* array_bound_symbols;
+    u64 array_bound_token_count;
+    u32 array_bound_word_count;
+    CPreprocessDialect array_bound_dialect;
     u32* vector_size_positions;
     u32* type_identity_positions;
     u32 type_identity_count;

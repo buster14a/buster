@@ -12428,6 +12428,147 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_initializer_slot_tables(UnitTestArgume
     return result;
 }
 
+// #1313: the independent reference semantic provider evaluates every original
+// bound. Only its immutable full-span lexical classification is reused.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_bound_word_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depths[] = {16, 64, 256};
+    u64 previous = 0;
+    u64 original[2] = {0};
+    for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(depths); sample += 1)
+    {
+        for (u32 rescan = 0; rescan < (sample < 2 ? 2u : 1u); rescan += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u32 depth = depths[sample];
+            String8 head = S8("int values[");
+            String8 open = S8("sizeof(char[");
+            String8 close = S8("])");
+            String8 tail = S8("]; int main(void){return values[0];}");
+            u64 length = head.length + (open.length + close.length) * depth + 1 + tail.length;
+            char8* source = arena_allocate(temporary.arena, char8, length);
+            u64 cursor = 0;
+            c_test_append_source(source, length, &cursor, head);
+            for (u32 level = 0; level < depth; level += 1) c_test_append_source(source, length, &cursor, open);
+            source[cursor++] = '1';
+            for (u32 level = 0; level < depth; level += 1) c_test_append_source(source, length, &cursor, close);
+            c_test_append_source(source, length, &cursor, tail);
+            CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){source, length},
+                (CPreprocessOptions){.target = target_native, .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+            syntax.reference_tokens = true;
+            c_test_array_bound_word_work_take();
+            c_test_array_bound_word_rescan_set(rescan != 0);
+            CAnalysisResult model = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+            c_test_array_bound_word_rescan_set(false);
+            CTestArrayBoundWordWork work = c_test_array_bound_word_work_take();
+            BUSTER_TEST(arguments, !tokens.diagnostic_count && model.analysis_complete && !model.diagnostic_count);
+            u64 visits = work.producer_tokens + work.comparisons;
+            u32 lookup_levels = 0;
+            for (u32 rows = depth + 2; rows; rows >>= 1) lookup_levels += 1;
+            BUSTER_TEST(arguments, work.comparisons <= work.hits * lookup_levels);
+            string_print(S8("ARRAY_BOUND_WORD_WORK depth={u32} rescan={u32} producer={u64} comparisons={u64} hits={u64} scalar={u64} row_payload={u64}\n"),
+                depth, rescan, work.producer_tokens, work.comparisons, work.hits, work.scalar_tokens, work.summary_row_bytes);
+            BUSTER_TEST(arguments, work.producer_tokens <= tokens.token_count && work.summary_row_bytes <= (u64)(depth + 2) * sizeof(CArrayBoundWords));
+            if (rescan)
+            {
+                original[sample] = work.scalar_tokens;
+                BUSTER_TEST(arguments, work.hits == 0 && work.scalar_tokens > (u64)depth * depth);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, work.scalar_tokens == 0 && work.hits >= depth && visits <= 128 * (u64)depth * depth &&
+                    (!sample || visits <= 32 * previous));
+                previous = visits;
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    BUSTER_TEST(arguments, original[1] > original[0] * 20);
+    String8 sources[] = {
+        S8("void f(int a[const static 3]);"),
+        S8("void f(int a[static const 3]);"),
+        S8("void f(int a[volatile restrict _Nonnull *]);"),
+        S8("void f(int a[_Nullable const static *]);"),
+        S8("int probe[sizeof(const int[3])];"),
+        S8("int probe[sizeof(const int[static 3])];"),
+        S8("int f(int n){int a[n++];return n+sizeof a;}"),
+        S8("int probe[sizeof(struct S {int v[3];})];struct S later;"),
+        S8("struct S;int probe[sizeof(struct S {int v[3];})];struct S later;"),
+        S8("int probe[sizeof(struct S {int v[sizeof(const char[3])];})];struct S later;"),
+        S8("int probe[sizeof(char[sizeof(\"static\")])];"),
+        S8("int probe[-1];"),
+        S8("int probe[sizeof(char[1])]; int broken[2);"),
+        S8("int probe[sizeof(char[1]);"),
+    };
+    for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(sources); sample += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, sources[sample],
+            (CPreprocessOptions){.target = target_native, .dialect = C_PREPROCESS_DIALECT_GNU17});
+        BUSTER_TEST_RAW(arguments, c_test_array_bound_words_agree(temporary.arena, tokens), sources[sample]);
+        CParseResult models[2] = {0};
+        for (u32 mode = 0; mode < 2; mode += 1)
+        {
+            c_test_array_bound_word_rescan_set(mode != 0);
+            models[mode] = c_parse_for_lowering(temporary.arena, tokens);
+            c_test_array_bound_word_rescan_set(false);
+        }
+        CParseResult* a = models;
+        CParseResult* b = models + 1;
+        BUSTER_TEST_RAW(arguments, a->type_count == b->type_count && a->array_bound_count == b->array_bound_count &&
+            a->member_count == b->member_count && a->enum_member_count == b->enum_member_count && a->parameter_count == b->parameter_count &&
+            a->type_alignment_count == b->type_alignment_count && a->noreturn_function_type_count == b->noreturn_function_type_count &&
+            a->alignment_count == b->alignment_count && a->aggregate_attribute_count == b->aggregate_attribute_count &&
+            a->entity_count == b->entity_count && a->scope_count == b->scope_count && a->identifier_use_count == b->identifier_use_count &&
+            a->type_identity_query_count == b->type_identity_query_count && a->diagnostic_count == b->diagnostic_count &&
+            a->warning_count == b->warning_count && a->deferred_static_assert_count == b->deferred_static_assert_count &&
+            a->deferred_bit_field_width_diagnostic_count == b->deferred_bit_field_width_diagnostic_count, sources[sample]);
+        for (u32 row = 0; row < BUSTER_MIN(a->array_bound_count, b->array_bound_count); row += 1)
+        {
+            CArrayBound x = a->array_bounds[row];
+            CArrayBound y = b->array_bounds[row];
+            BUSTER_TEST(arguments, x.token_start == y.token_start && x.token_count == y.token_count &&
+                x.is_static == y.is_static && x.is_const == y.is_const && x.is_star == y.is_star &&
+                x.has_invalid_element_type == y.has_invalid_element_type && x.has_inferred_count == y.has_inferred_count);
+        }
+        for (u32 row = 0; row < BUSTER_MIN(a->diagnostic_count, b->diagnostic_count); row += 1)
+        {
+            CDiagnostic x = a->diagnostics[row];
+            CDiagnostic y = b->diagnostics[row];
+            BUSTER_TEST(arguments, x.kind == y.kind && x.severity == y.severity && x.location.offset == y.location.offset &&
+                x.location.line == y.location.line && x.location.column == y.location.column);
+            BUSTER_STRING_TEST(arguments, x.message, y.message);
+        }
+        if (!a->diagnostic_count && !b->diagnostic_count)
+        {
+            for (u32 mode = 0; mode < 2; mode += 1)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("array-bound-words.c"), tokens, models[mode], target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = mode != 0});
+                BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified, sources[sample]);
+            }
+        }
+        if (sample == 4)
+        {
+            u32 begin = 0;
+            u32 end = 0;
+            for (u32 token = 0; token < tokens.token_count; token += 1)
+                if (string_equal(c_token_spelling(tokens.spelling_base, tokens.tokens[token]), S8("sizeof")))
+                {
+                    begin = token;
+                    end = models[0].position_index->matching_delimiters_plus_one[token + 1];
+                    break;
+                }
+            CTestTypeConstantQuery query = c_test_type_integer_constant(temporary.arena, tokens, models, (CScopeId){0}, begin, end);
+            BUSTER_TEST(arguments, query.model_unchanged && query.constant.valid && query.constant.magnitude == 12);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // #1568: signed bounds retain their target type through constraint checking.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_array_element_constraints(UnitTestArguments* arguments)
 {
@@ -70100,6 +70241,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_constexpr_leaf_storage);
     C_TEST_FIXTURE(arguments, c_test_controlled_body_extents_linear);
     C_TEST_FIXTURE(arguments, c_test_controlling_expression_scope);
+    C_TEST_FIXTURE(arguments, c_test_array_bound_word_index);
     C_TEST_FIXTURE(arguments, c_test_array_object_size_limits);
     C_TEST_FIXTURE(arguments, c_test_static_assert_object_size_scaling);
     C_TEST_FIXTURE(arguments, c_test_alignas_typed_query_chain);
