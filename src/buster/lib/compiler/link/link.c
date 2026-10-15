@@ -14538,6 +14538,15 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
     if (result.error == LINK_ERROR_NONE)
     {
         thread_local_indices = arena_allocate(arena, u32, object->symbol_count);
+        // A declaration without an emitted reference must not become an eager
+        // dyld bind. Synthetic destructor and TLV calls have no object relocation.
+        u8* import_referenced = arena_allocate(arena, u8, object->symbol_count);
+        memset(import_referenced, 0, object->symbol_count);
+        for (u32 relocation = 0; relocation < object->relocation_count; relocation += 1)
+        {
+            u32 symbol = object->relocations[relocation].symbol;
+            if (symbol < object->symbol_count) import_referenced[symbol] = 1;
+        }
         for (u32 symbol_index = 0; symbol_index < object->symbol_count && result.error == LINK_ERROR_NONE; symbol_index += 1)
         {
             import_indices[symbol_index] = UINT32_MAX;
@@ -14550,6 +14559,11 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 {
                     thread_local_indices[symbol_index] = thread_local_count++;
                 }
+                continue;
+            }
+            bool synthetic = symbol_index == atexit_symbol_index || string_equal(symbol->name, S8("_tlv_bootstrap"));
+            if (!import_referenced[symbol_index] && !synthetic)
+            {
                 continue;
             }
             // Functions and data alike: each import has a bound GOT slot, which

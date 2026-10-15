@@ -7180,6 +7180,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_mach_got_loads(UnitTestArguments* a
         {.name = S8("main"), .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
         {.name = S8("imported_data"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
         {.name = S8("imported_function"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("unused_missing_function"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+        {.name = S8("unused_missing_data"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_DATA, .global = true},
     };
     for (u32 architecture = 0; architecture < 2; architecture += 1)
     {
@@ -7224,6 +7226,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_mach_got_loads(UnitTestArguments* a
             u64 got_size = link_read_u64(image.pointer, got_header + 40);
             u64 data_slot = x86 ? link_test_mach_rip_target(image, text_header, 3) : link_test_mach_page_target(image, text_header, 0, true);
             u64 definition = x86 ? link_test_mach_rip_target(image, text_header, 10) : link_test_mach_page_target(image, text_header, 8, false);
+            BUSTER_TEST(arguments, got_size == 2 * sizeof(u64));
             BUSTER_TEST(arguments, data_slot >= got_address && data_slot < got_address + got_size && !(data_slot & 7));
             BUSTER_TEST(arguments, definition == text_address);
             if (x86)
