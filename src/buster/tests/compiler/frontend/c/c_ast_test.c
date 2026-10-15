@@ -8871,7 +8871,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_call_builtin_facts(UnitTestArgumen
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
             S8("void _mm_pause(void); int ordinary(void); void f(void) { "
-               "void (*p)(void) = _mm_pause; _mm_pause(); __builtin_ia32_pause(); p(); (void)ordinary(); }"),
+               "void (*p)(void) = _mm_pause; _mm_pause(); __builtin_ia32_pause(); p(); (void)ordinary(); "
+               "(_mm_pause)(); ((ordinary))(); (p)(); }"),
             C_PREPROCESS_DIALECT_GNU17);
         CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
         CAstFacts facts = {0};
@@ -8894,9 +8895,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_call_builtin_facts(UnitTestArgumen
                         u32 builtin = c_ast_facts_call_builtin(&built.ast, &facts, node);
                         u32 callee = c_ast_child_at(&built.ast, node, 0);
                         String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[built.ast.tokens[callee]]);
-                        bool expected = string_equal(name, S8("_mm_pause")) || string_equal(name, S8("__builtin_ia32_pause"));
+                        bool expected = !c_ast_parentheses(&built.ast, callee).count &&
+                            (string_equal(name, S8("_mm_pause")) || string_equal(name, S8("__builtin_ia32_pause")));
                         builtins += builtin != 0;
                         BUSTER_TEST(arguments, facts.payloads[node] != C_AST_FACT_NONE && (builtin != 0) == expected);
+                        BUSTER_TEST(arguments, c_test_ast_call_builtin_fact(&built.ast, &preprocess, node) == builtin);
+                        CPreprocessResult cold = preprocess;
+                        cold.symbols = 0;
+                        BUSTER_TEST(arguments, c_test_ast_call_builtin_fact(&built.ast, &cold, node) == builtin);
+                        CPreprocessResult bounded = preprocess;
+                        bounded.token_count = 0;
+                        BUSTER_TEST(arguments, c_test_ast_call_builtin_fact(&built.ast, &bounded, node) == 0);
+                        bounded = preprocess;
+                        bounded.tokens = 0;
+                        BUSTER_TEST(arguments, c_test_ast_call_builtin_fact(&built.ast, &bounded, node) == 0);
                         if (builtin)
                         {
                             BUSTER_TEST(arguments, !builtin_family || builtin_family == builtin);
@@ -8914,7 +8926,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_call_builtin_facts(UnitTestArgumen
                         BUSTER_TEST(arguments, c_ast_facts_call_builtin(&built.ast, &facts, node) == C_AST_FACT_NONE);
                     }
                 }
-                BUSTER_TEST(arguments, calls == 4 && builtins == 2 && designators == 2);
+                BUSTER_TEST(arguments, calls == 7 && builtins == 2 && designators == 3);
                 BUSTER_TEST(arguments, c_ast_facts_retain_in_arena(temporary.arena, &facts) != 0 && !facts.arena);
                 u32 sealed = 0;
                 for (u32 node = 0; node < built.ast.node_count; node += 1)

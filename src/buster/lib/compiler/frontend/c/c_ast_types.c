@@ -3887,22 +3887,34 @@ BUSTER_GLOBAL_LOCAL CSymbolBuiltin c_ast_types_call_builtin(CAst const* ast, CPr
     CSymbolBuiltin result = C_SYMBOL_BUILTIN_NONE;
     u32 kind = callee < ast->node_count ? ast->kinds[callee] : C_AST_KIND_COUNT;
     bool named = kind == C_AST_IDENTIFIER;
-    if (named && !c_ast_parentheses(ast, callee).count)
+    if (named)
     {
         u32 anchor = ast->tokens[callee];
-        CToken token = preprocess->tokens[anchor];
-        CSymbolTable* symbols = preprocess->symbols;
-        if (token.symbol && symbols && token.symbol <= symbols->predefined_limit)
+        // Classification now precedes the grouping query, including for a
+        // parenthesized callee. A bounded private view must not read outside
+        // its token column before that grouping can exclude the builtin.
+        if (preprocess->tokens && anchor < preprocess->token_count)
         {
-            result = (CSymbolBuiltin)symbols->builtin_kinds[token.symbol];
-        }
-        else
-        {
-            String8 spelling = c_token_spelling(preprocess->spelling_base, token);
-            if (!token.symbol || !symbols || string_starts_with_sequence(spelling, S8("__builtin_")) || string_equal(spelling, S8("__rdtsc")))
+            CToken token = preprocess->tokens[anchor];
+            CSymbolTable* symbols = preprocess->symbols;
+            if (token.symbol && symbols && token.symbol <= symbols->predefined_limit)
             {
-                result = c_symbol_builtin_from_spelling(spelling);
+                result = (CSymbolBuiltin)symbols->builtin_kinds[token.symbol];
             }
+            else
+            {
+                String8 spelling = c_token_spelling(preprocess->spelling_base, token);
+                if (!token.symbol || !symbols || string_starts_with_sequence(spelling, S8("__builtin_")) || string_equal(spelling, S8("__rdtsc")))
+                {
+                    result = c_symbol_builtin_from_spelling(spelling);
+                }
+            }
+        }
+        // Ordinary names already have the finished NONE identity and need
+        // no binary searches through the unit's delimiter provenance rows.
+        if (result != C_SYMBOL_BUILTIN_NONE && c_ast_parentheses(ast, callee).count)
+        {
+            result = C_SYMBOL_BUILTIN_NONE;
         }
     }
     return result;
@@ -3960,6 +3972,11 @@ BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast,
 // ---- verification and test seams ---------------------------------------------------
 
 #if BUSTER_INCLUDE_TESTS
+u32 c_test_ast_call_builtin_fact(CAst const* ast, CPreprocessResult const* preprocess, u32 node)
+{
+    return (u32)c_ast_types_call_builtin(ast, preprocess, node);
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_verify_enabled;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_facts_uncached_enabled;
 
