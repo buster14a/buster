@@ -90,9 +90,9 @@ hosts execute its independent expected-value fixture.
 - Selection emits canonical blocks in reverse postorder from the entry
   (`machine_selection_canonical_layout`), not in IR creation order. A valid
   single-block function already has identity layout and needs no traversal
-  workspace. The C frontend creates a `for` step and an `if` join before the nested blocks that
-  reach them, and FAST/QUALITY read any jump to a lower block as a loop back
-  edge. Reverse postorder puts every reachable block after its dominators, so
+  workspace. The C frontend creates a `for` step and an `if` join before the
+  nested blocks that reach them, and FAST/QUALITY read any jump to a lower
+  block as a loop back edge. Reverse postorder puts every reachable block after its dominators, so
   only real back edges jump down. A conditional's first target follows its
   source, and unreachable blocks keep canonical order at the end. Asm-goto
   continuations move with their source block's expansion.
@@ -291,9 +291,9 @@ hosts execute its independent expected-value fixture.
   was removed in [#269](https://github.com/buster14a/buster/pull/269), resolving
   [#42](https://github.com/buster14a/buster/issues/42).
 - Each target selector decodes canonical operands once per function, in its
-  first target-order row walk. That walk accumulates value/use,
+  first canonical-row walk. That walk accumulates value/use,
   local-promotion and direct-call facts and the aliasing/fusion candidate
-  rows, and later prepasses consume those. The fact walk
+  rows, and later prepasses consume those. The x86-64 fact walk
   keeps use counts for every operand and CFG argument, but alias-only
   use-block and last-use facts are collected only when the initial sparse
   local table has a candidate. Qualification can only remove candidates;
