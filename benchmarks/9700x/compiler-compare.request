@@ -185,3 +185,4 @@ request: issue #1125 owner-requested 9700X measurement of the x86-64 per-process
 profile: process-floor-v1
 request: issue #2676 owner-requested 9700X deep-nesting evidence (2026-10-13 session): frontend-nesting-v1 from PR #4015 on main 5899677b8, eleven nesting families at depths 2000/8000/32000, -fsyntax-only and -c; byte-identical objects required
 profile: frontend-nesting-v1
+request: issues #4009 (home-coloring slice), #351, #1912 and #4257 user-requested exact-head placement qualification (2026-10-15: file the issues and solve all of them); stable repair sorting, empty home pools, rejected QUALITY frame/arena work and certified exhausted home coloring; preserve frozen output; implementation c05d9b1945eca31adc01a2681b1dcfd301c7cbdf over baseline 84f051c13044938bcb8cbe1ac48ea3ee79defcff; fresh compiler-compare-v1 for the inherited physical-host acceptance gates
