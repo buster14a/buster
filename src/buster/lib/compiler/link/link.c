@@ -14562,7 +14562,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 continue;
             }
             bool synthetic = symbol_index == atexit_symbol_index || string_equal(symbol->name, S8("_tlv_bootstrap"));
-            if (!import_referenced[symbol_index] && !synthetic)
+            if (symbol->global && symbol->name.length && !import_referenced[symbol_index] && !synthetic)
             {
                 continue;
             }
