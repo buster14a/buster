@@ -999,6 +999,105 @@ BUSTER_GLOBAL_LOCAL bool machine_selection_test_folded_index(IrFunction* functio
            index->immediates[0] < (1u << 20);
 }
 
+// CAST and INDEX can consume the same constant. An ordinary or edge reader
+// keeps it live; otherwise both folded readers disappear together. The
+// oracle examines canonical readers independently of the selector's scratch.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_folded_read_lifetimes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("void sink(void*);\n"
+                       "void folded_only(long* p) { sink((void*)3L); sink(&p[3L]); }\n"
+                       "long folded_shared(long* p, long x) { sink((void*)3L); sink(&p[3L]); return x + 3L; }\n"
+                       "long folded_edge(long* p, int flag) { long n; if (flag) { sink((void*)3L); sink(&p[3L]); n = 3L; } else n = 4L; return n; }\n"
+                       "void folded_limits(long* p, long i) { sink((char*)(unsigned char*)(void*)3L); sink(&p[-1L]); sink(&p[0x100000000L]); sink(&p[i]); }\n");
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
+    IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
+    BUSTER_TEST(arguments, program && program->module_count == 1);
+    u32 mixed_dead = 0;
+    u32 mixed_kept = 0;
+    u32 edge_kept = 0;
+    u32 limit_kept = 0;
+    u32 unfolded_indices = 0;
+    if (program && program->module_count == 1)
+    {
+        IrModule* module = program->modules;
+        IrValidationResult prepared = ir_prepare_canonical_module(program, module, false);
+        BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+        for (u32 function_index = 0; prepared.error == IR_VALIDATION_NONE && function_index < module->function_count; function_index += 1)
+        {
+            IrFunction* function = module->functions + function_index;
+            if (function->state != IR_FUNCTION_LOWERED)
+            {
+                continue;
+            }
+            MachineSelectResult selected = machine_select_canonical_function(arguments->arena, program, function, target);
+            MachineVerifyResult verified = selected.supported ? machine_verify_function(&selected.function) : (MachineVerifyResult){0};
+            BUSTER_TEST_RAW(arguments, selected.supported && verified.error == MACHINE_VERIFY_NONE,
+                            string_format(arguments->arena, S8("{S8} supported={u32} verify={u32} row={u32}"),
+                                          function->name, (u32)selected.supported, (u32)verified.error, verified.instruction));
+            if (!selected.supported)
+            {
+                continue;
+            }
+            u8* readers = arena_allocate(arguments->arena, u8, function->value_count);
+            u8* defined = arena_allocate(arguments->arena, u8, function->value_count);
+            memset(readers, 0, function->value_count);
+            memset(defined, 0, function->value_count);
+            for (u32 row_index = 0; row_index < function->instruction_count; row_index += 1)
+            {
+                IrInstruction* row = function->instructions + row_index;
+                bool copy = machine_selection_test_copies_constant(function, row);
+                bool index = machine_selection_test_folded_index(function, row);
+                unfolded_indices += row->opcode == IR_OPCODE_INDEX && !index;
+                for (u32 operand = 0; operand < row->operand_count; operand += 1)
+                {
+                    u32 value = row->operands[operand].value;
+                    if (value < function->value_count)
+                    {
+                        readers[value] |= (u8)(copy ? 1u : index && operand == 1 ? 2u : 4u);
+                    }
+                }
+            }
+            for (u32 edge = 0; edge < function->published_cfg->argument_count; edge += 1)
+            {
+                readers[function->published_cfg->arguments[edge].value] |= 8u;
+            }
+            for (u32 reg = 0; reg < selected.function.virtual_register_count; reg += 1)
+            {
+                MachineVirtualRegister* value = selected.function.virtual_registers + reg;
+                if (value->typed_origin < function->value_count && value->definition_point != MACHINE_POINT_INVALID)
+                {
+                    defined[value->typed_origin] = 1;
+                }
+            }
+            for (u32 value = 0; value < function->value_count; value += 1)
+            {
+                IrInstruction* row = machine_selection_test_definition(function, (IrValueId){.value = value});
+                if (row && row->opcode == IR_OPCODE_CONSTANT_INTEGER && (readers[value] & 3u))
+                {
+                    bool kept = (readers[value] & 12u) != 0;
+                    BUSTER_TEST(arguments, defined[value] == kept);
+                    mixed_dead += (readers[value] & 3u) == 3u && !kept;
+                    mixed_kept += (readers[value] & 3u) == 3u && kept;
+                    edge_kept += (readers[value] & 8u) != 0 && defined[value];
+                }
+                if (row && row->opcode == IR_OPCODE_CONSTANT_INTEGER && row->immediate_count &&
+                    (row->immediate_is_negative || row->immediates[0] == 0x100000000ull))
+                {
+                    BUSTER_TEST(arguments, defined[value]);
+                    limit_kept += defined[value];
+                }
+            }
+        }
+    }
+    BUSTER_TEST_RAW(arguments, mixed_dead && mixed_kept && edge_kept && limit_kept && unfolded_indices >= 3,
+                    string_format(arguments->arena, S8("dead={u32} shared={u32} edge={u32} limits={u32} unfolded={u32}"),
+                                  mixed_dead, mixed_kept, edge_kept, limit_kept, unfolded_indices));
+    c_test_release_preprocess_arenas_since(preprocess_mark);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_index_fold(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -1190,6 +1289,7 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
     c_test_unit_registry_prewarm();
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_constant_index_fold);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_constant_copy_casts);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_folded_read_lifetimes);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_direct_call_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_address_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_address_targets);
