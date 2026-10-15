@@ -4,7 +4,11 @@
 u64 align_forward(u64 n, u64 a)
 {
     u64 result;
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(align_forward_checked(n, a, &result));
+=======
+    BUSTER_CHECK(align_forward_checked(n, a, &result));
+>>>>>>> Stashed changes
     return result;
 }
 

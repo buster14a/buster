@@ -3613,7 +3613,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_sizeof_handoff_unit(UnitTestArguments* 
             }
         }
         c_preprocess_release(&preprocess);
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(arena_destroy(arena, 1));
+=======
+        BUSTER_CHECK(arena_destroy(arena, 1));
+>>>>>>> Stashed changes
     }
     return result;
 }

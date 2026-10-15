@@ -450,10 +450,17 @@ BUSTER_C_INTERNAL char8* c_space_allocate(CSpellingSpace* space, u64 size)
     {
         char8* result = (char8*)arena_allocate_bytes(space->arena, size, 1);
         space->used = (u64)(result - space->base) + size;
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(space->used <= UINT32_MAX);
         return result;
     }
     BUSTER_RT_CHECK(space->used + size <= space->capacity);
+=======
+        BUSTER_CHECK(space->used <= UINT32_MAX);
+        return result;
+    }
+    BUSTER_CHECK(space->used + size <= space->capacity);
+>>>>>>> Stashed changes
     char8* result = space->base + space->used;
     space->used += size;
     return result;
@@ -2365,7 +2372,11 @@ BUSTER_C_INTERNAL void c_diagnostic_push(CLexState* state, u64 offset, CDiagnost
 {
     IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTICS_RECORDED, 1);
     CLexResult* result = state->result;
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(result->diagnostic_count < state->maximum_diagnostic_count);
+=======
+    BUSTER_CHECK(result->diagnostic_count < state->maximum_diagnostic_count);
+>>>>>>> Stashed changes
     if (state->diagnostic_storage == C_LEX_DIAGNOSTIC_STORAGE_NONE)
     {
         c_lex_diagnostic_storage_begin(state);
@@ -4270,12 +4281,20 @@ BUSTER_C_SHARED u64 c_macro_name_hash(String8 name)
 // entries; the caller guarantees every defined symbol id lies below it.
 BUSTER_C_INTERNAL void c_macro_index_rebuild(Arena* arena, CMacro* first, u32 capacity)
 {
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(first && capacity);
+=======
+    BUSTER_CHECK(first && capacity);
+>>>>>>> Stashed changes
     CMacro** by_symbol = arena_allocate(arena, CMacro*, capacity);
     memset(by_symbol, 0, sizeof(*by_symbol) * capacity);
     for (CMacro* macro = first; macro; macro = macro->next)
     {
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(macro->symbol < capacity);
+=======
+        BUSTER_CHECK(macro->symbol < capacity);
+>>>>>>> Stashed changes
         by_symbol[macro->symbol] = macro;
     }
     first->by_symbol = by_symbol;
@@ -5382,7 +5401,11 @@ BUSTER_C_INTERNAL void c_symbol_table_seed(CSymbolTable* table)
     {
         c_symbol_intern(table, c_symbol_classified_extras[index]);
     }
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(table->count < C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+=======
+    BUSTER_CHECK(table->count < C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+>>>>>>> Stashed changes
     table->predefined_limit = table->count;
     for (u32 id = 1; id <= table->count; id += 1)
     {
@@ -5601,7 +5624,11 @@ BUSTER_C_INTERNAL u32 c_pp_stamp_push(CPpStampTable* stamps, CSourceLocation loc
         stamps->entries = entries;
         stamps->capacity = capacity;
     }
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(stamps->count < C_PP_STAMP_MASK);
+=======
+    BUSTER_CHECK(stamps->count < C_PP_STAMP_MASK);
+>>>>>>> Stashed changes
     stamps->entries[stamps->count] = location;
     stamps->count += 1;
     return stamps->count;
@@ -6656,7 +6683,11 @@ BUSTER_C_INTERNAL void c_macro_context_output_push(Arena* arena, Arena* expansio
         {
             context->output_tokens = slot;
         }
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(slot == context->output_tokens + context->output_count);
+=======
+        BUSTER_CHECK(slot == context->output_tokens + context->output_count);
+>>>>>>> Stashed changes
         *slot = token;
         context->output_count += 1;
     }
@@ -6673,7 +6704,11 @@ BUSTER_C_INTERNAL void c_macro_context_output_push(Arena* arena, Arena* expansio
 BUSTER_C_INTERNAL void c_macro_expansion_tasks_reserve(Arena* arena, CMacroExpansionTaskStack* tasks, u64 token_count, bool enable)
 {
     u64 maximum_count = UINT64_MAX / sizeof(CMacroExpansionTask);
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(tasks->count < maximum_count && token_count <= maximum_count - tasks->count - enable);
+=======
+    BUSTER_CHECK(tasks->count < maximum_count && token_count <= maximum_count - tasks->count - enable);
+>>>>>>> Stashed changes
     u64 required = tasks->count + token_count + enable;
     if (required > tasks->capacity)
     {
@@ -6814,7 +6849,11 @@ BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, CMacroExpansio
                     {
                         run = slot;
                     }
+<<<<<<< Updated upstream
                     BUSTER_RT_CHECK(slot == run + run_count);
+=======
+                    BUSTER_CHECK(slot == run + run_count);
+>>>>>>> Stashed changes
                     *slot = token;
                     run_count += 1;
                     arguments[current].token_count += 1;
@@ -7750,7 +7789,11 @@ BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansion
             }
         }
     }
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(cursor == batch + 1);
+=======
+    BUSTER_CHECK(cursor == batch + 1);
+>>>>>>> Stashed changes
     tasks->count += 1 + token_count;
     *trailing_space_out = pending_space;
 }

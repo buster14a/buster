@@ -404,7 +404,11 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             .initial_size = BUSTER_KB(64),
             .flags = {.no_pool = 1, .prefault_pages = prefaulting_mode},
         });
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(arena != 0);
+=======
+        BUSTER_CHECK(arena != 0);
+>>>>>>> Stashed changes
         if (string_equal(failure_mode, S8("commit")) || prefaulting_mode)
         {
             arena_test_fail_next_commit();
@@ -498,8 +502,13 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
 
     // Companion to the reserved_size bound: filling an arena up to its
     // reservation stays within bounds and keeps working. Requests past
+<<<<<<< Updated upstream
     // reserved_size violate a BUSTER_RT_CHECK precondition; checked builds
     // test that diagnostic in a child process.
+=======
+    // reserved_size abort via BUSTER_CHECK, so they cannot be observed
+    // in-process.
+>>>>>>> Stashed changes
     {
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1)});
         BUSTER_TEST(arguments, arena != 0);

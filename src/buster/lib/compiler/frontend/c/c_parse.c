@@ -1515,7 +1515,11 @@ BUSTER_C_INTERNAL bool c_parse_declaration_keyword_at(CParseResult* result, CPre
 BUSTER_C_SHARED void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message)
 {
     IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTICS_RECORDED, 1);
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(result->diagnostic_count < result->diagnostic_capacity);
+=======
+    BUSTER_CHECK(result->diagnostic_count < result->diagnostic_capacity);
+>>>>>>> Stashed changes
     result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
         .message = message,
         .location = location,
@@ -2600,7 +2604,11 @@ BUSTER_C_INTERNAL void c_parse_finalize_flexible_array_members(CTypeParseMachine
                         machine->failed = true;
                         break;
                     }
+<<<<<<< Updated upstream
                     BUSTER_RT_CHECK(stack_count < capacity);
+=======
+                    BUSTER_CHECK(stack_count < capacity);
+>>>>>>> Stashed changes
                     visited[child_id.value] = generation;
                     stack[stack_count++] = (CParsePromotedMemberWork){.type = child_id};
                     work_count += 1;
@@ -6407,7 +6415,11 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
     }
     if (attribute_arena)
     {
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(arena_destroy(attribute_arena, 1));
+=======
+        BUSTER_CHECK(arena_destroy(attribute_arena, 1));
+>>>>>>> Stashed changes
     }
     return result;
 }
@@ -13142,7 +13154,11 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_workspace(CTypeParseMachine* mach
             u32* visited = arena_allocate_zeroed(workspace, u32, capacity);
             if (machine->promoted_member_arena)
             {
+<<<<<<< Updated upstream
                 BUSTER_RT_CHECK(arena_destroy(machine->promoted_member_arena, 1));
+=======
+                BUSTER_CHECK(arena_destroy(machine->promoted_member_arena, 1));
+>>>>>>> Stashed changes
             }
             machine->promoted_member_arena = workspace;
             machine->promoted_member_work = work;
@@ -13163,7 +13179,11 @@ BUSTER_C_INTERNAL void c_parse_promoted_member_workspace_release(CTypeParseMachi
 {
     if (machine->promoted_member_arena)
     {
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(arena_destroy(machine->promoted_member_arena, 1));
+=======
+        BUSTER_CHECK(arena_destroy(machine->promoted_member_arena, 1));
+>>>>>>> Stashed changes
         machine->promoted_member_arena = 0;
     }
 }
@@ -19062,7 +19082,11 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             bool microsoft_anonymous = preprocess.target.os == OPERATING_SYSTEM_WINDOWS && (defined_in_place || unqualified->is_complete);
             if ((defined_in_place && !base->tag.length) || microsoft_anonymous)
             {
+<<<<<<< Updated upstream
                 BUSTER_RT_CHECK(result->member_count < result->member_capacity);
+=======
+                BUSTER_CHECK(result->member_count < result->member_capacity);
+>>>>>>> Stashed changes
                 result->members[result->member_count++] = (CMember){
                     .location = c_preprocess_token_site(frame->preprocess, frame->first),
                     .type = frame->base_type,
@@ -19447,7 +19471,11 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                           member_record->definition_start + member_record->definition_token_count <= frame->start;
     bool has_incomplete_type = member_record && (member_record->kind == C_TYPE_STRUCT || member_record->kind == C_TYPE_UNION) &&
                                !member_record->is_complete && !defined_in_place && !defined_before;
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(result->member_count < result->member_capacity);
+=======
+    BUSTER_CHECK(result->member_count < result->member_capacity);
+>>>>>>> Stashed changes
     result->members[result->member_count++] = (CMember){
         .name = c_token_spelling(preprocess.spelling_base, name),
         .location = c_preprocess_token_site(&preprocess, name),
@@ -23165,7 +23193,11 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             {
                 declaration_type = c_parse_expression_scalar_type(result, C_TYPE_INT);
             }
+<<<<<<< Updated upstream
             BUSTER_RT_CHECK(result->enum_member_count < result->enum_member_capacity);
+=======
+            BUSTER_CHECK(result->enum_member_count < result->enum_member_capacity);
+>>>>>>> Stashed changes
             result->enum_members[result->enum_member_count++] = (CEnumMember){
                 .name = c_token_spelling(preprocess.spelling_base, name),
                 .location = c_preprocess_token_site(&preprocess, name),
@@ -23966,7 +23998,11 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
     for (u32 bound = first_bound; bound < result->array_bound_count; bound += 1)
         result->array_bounds[bound].is_parameter_declarator = true;
     type = c_parse_adjust_parameter_type(result, type);
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(result->parameter_count < result->parameter_capacity);
+=======
+    BUSTER_CHECK(result->parameter_count < result->parameter_capacity);
+>>>>>>> Stashed changes
     result->parameters[result->parameter_count++] = (CParameter){
         .name = c_token_spelling(preprocess.spelling_base, name),
         .location = c_preprocess_token_site(&preprocess, name),
@@ -24409,7 +24445,11 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                         {
                             break;
                         }
+<<<<<<< Updated upstream
                         BUSTER_RT_CHECK(result->parameter_count < result->parameter_capacity);
+=======
+                        BUSTER_CHECK(result->parameter_count < result->parameter_capacity);
+>>>>>>> Stashed changes
                         result->parameters[result->parameter_count++] = (CParameter){
                             .name = spelling,
                             .location = c_preprocess_token_site(&preprocess, name),
@@ -25778,7 +25818,11 @@ BUSTER_C_INTERNAL u32 c_parse_binding_bind(CParseResult* result, CScopeId scope,
         {
             if (scope.value)
             {
+<<<<<<< Updated upstream
                 BUSTER_RT_CHECK(result->binding_undo_count < result->binding_undo_capacity);
+=======
+                BUSTER_CHECK(result->binding_undo_count < result->binding_undo_capacity);
+>>>>>>> Stashed changes
                 result->binding_undo[result->binding_undo_count++] = (CParseBindingUndo){
                     .symbol = symbol,
                     .previous = result->binding_by_symbol[symbol],
@@ -25945,7 +25989,11 @@ BUSTER_C_INTERNAL bool c_parse_scope_cursor_seek(CParseResult* result, CParseSco
                     if (symbol && symbol < cursor->symbol_capacity && entity.value < cursor->entity_capacity &&
                         result->entities[entity.value].scope.value == pushed.value)
                     {
+<<<<<<< Updated upstream
                         BUSTER_RT_CHECK(cursor->stack_count < cursor->entity_capacity);
+=======
+                        BUSTER_CHECK(cursor->stack_count < cursor->entity_capacity);
+>>>>>>> Stashed changes
                         cursor->shadowed[entity.value] = cursor->by_symbol[symbol];
                         cursor->stack[cursor->stack_count++] = entity;
                         cursor->by_symbol[symbol] = entity;
@@ -26855,7 +26903,11 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         entity = C_ENTITY_ID_INVALID;
     }
     bool first_use = token_index < result->identifier_use_by_token_capacity && !result->identifier_use_by_token_plus_one[token_index];
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(result->identifier_use_count < result->identifier_use_capacity);
+=======
+    BUSTER_CHECK(result->identifier_use_count < result->identifier_use_capacity);
+>>>>>>> Stashed changes
     u32 use_index = result->identifier_use_count++;
     result->identifier_uses[use_index] = (CIdentifierUse){
         .token_index = token_index,
@@ -27989,7 +28041,11 @@ BUSTER_C_INTERNAL void c_parse_bind_statement_expression_body(CTypeParseMachine*
                                                                 CPreprocessResult preprocess, CScopeId scope, u32 declaration_index,
                                                                 u32 body_start, u32 body_end)
 {
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(result->scope_count < result->scope_capacity);
+=======
+    BUSTER_CHECK(result->scope_count < result->scope_capacity);
+>>>>>>> Stashed changes
     CScopeId child = {
         .value = result->scope_count,
     };
@@ -28162,7 +28218,11 @@ BUSTER_GLOBAL_LOCAL void c_parse_enumerator_redefinition(CParseResult* result, A
 // an enum a controlling expression or direct expression type name defines.
 BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 declaration_index, u32 member_start, u32 member_end)
 {
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(member_start <= member_end && member_end <= result->enum_member_count);
+=======
+    BUSTER_CHECK(member_start <= member_end && member_end <= result->enum_member_count);
+>>>>>>> Stashed changes
     for (u32 member_index = member_start; member_index < member_end; member_index += 1)
     {
         CEnumMember* member = &result->enum_members[member_index];
@@ -28179,7 +28239,11 @@ BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPrepr
         CEntityId entity = {
             .value = result->entity_count,
         };
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(result->entity_count < result->entity_capacity);
+=======
+        BUSTER_CHECK(result->entity_count < result->entity_capacity);
+>>>>>>> Stashed changes
         result->entities[result->entity_count++] = (CEntity){
             .name = member->name,
             .location = member->location,
@@ -28970,7 +29034,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
         CEntityId entity = {
             .value = result->entity_count,
         };
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(result->entity_count < result->entity_capacity);
+=======
+        BUSTER_CHECK(result->entity_count < result->entity_capacity);
+>>>>>>> Stashed changes
         result->entities[result->entity_count++] = (CEntity){
             .name = c_token_spelling(preprocess.spelling_base, name),
             .location = c_preprocess_token_site(&preprocess, name),
@@ -30237,7 +30305,11 @@ BUSTER_C_INTERNAL CParsePendingTypeofDeclaration* c_parse_pending_typeof_grow(Ar
     if (count == *capacity)
     {
         u32 next_capacity = *capacity ? (*capacity > maximum / 2 ? maximum : *capacity * 2) : BUSTER_MIN(maximum, 4u);
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(next_capacity > count && next_capacity <= maximum);
+=======
+        BUSTER_CHECK(next_capacity > count && next_capacity <= maximum);
+>>>>>>> Stashed changes
         CParsePendingTypeofDeclaration* next = arena_allocate(arena, CParsePendingTypeofDeclaration, next_capacity);
         if (*frames)
         {
@@ -31750,7 +31822,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
                 CScopeId statement_scope = {
                     .value = result->scope_count,
                 };
+<<<<<<< Updated upstream
                 BUSTER_RT_CHECK(result->scope_count < result->scope_capacity);
+=======
+                BUSTER_CHECK(result->scope_count < result->scope_capacity);
+>>>>>>> Stashed changes
                 result->scopes[result->scope_count++] = (CScope){
                     .parent = scope_stack[scope_count - 1],
                     .first_entity = C_ENTITY_ID_INVALID,
@@ -31812,7 +31888,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
             CScopeId child = {
                 .value = result->scope_count,
             };
+<<<<<<< Updated upstream
             BUSTER_RT_CHECK(result->scope_count < result->scope_capacity);
+=======
+            BUSTER_CHECK(result->scope_count < result->scope_capacity);
+>>>>>>> Stashed changes
             result->scopes[result->scope_count++] = (CScope){
                 .parent = parent,
                 .first_entity = C_ENTITY_ID_INVALID,
@@ -31929,7 +32009,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
                     CScopeId loop_scope = {
                         .value = result->scope_count,
                     };
+<<<<<<< Updated upstream
                     BUSTER_RT_CHECK(result->scope_count < result->scope_capacity);
+=======
+                    BUSTER_CHECK(result->scope_count < result->scope_capacity);
+>>>>>>> Stashed changes
                     result->scopes[result->scope_count++] = (CScope){
                         .parent = parent,
                         .first_entity = C_ENTITY_ID_INVALID,
@@ -31952,7 +32036,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
                                                                   &typeof_operand_end, &typeof_body_start, &typeof_body_end,
                                                                   &typeof_group_end))
                     {
+<<<<<<< Updated upstream
                         BUSTER_RT_CHECK(pending_typeof_count < body_token_count + 1);
+=======
+                        BUSTER_CHECK(pending_typeof_count < body_token_count + 1);
+>>>>>>> Stashed changes
                         *c_parse_pending_typeof_grow(temporary.arena, &pending_typeof, &pending_typeof_capacity,
                                                      pending_typeof_count, body_token_count + 1) = (CParsePendingTypeofDeclaration){
                             .scope = loop_scope,
@@ -32048,7 +32136,11 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
                 c_parse_typeof_statement_expression_after(result, preprocess, index, end, index, &typeof_operand_end, &typeof_body_start,
                                                           &typeof_body_end, &typeof_group_end))
             {
+<<<<<<< Updated upstream
                 BUSTER_RT_CHECK(pending_typeof_count < body_token_count + 1);
+=======
+                BUSTER_CHECK(pending_typeof_count < body_token_count + 1);
+>>>>>>> Stashed changes
                 *c_parse_pending_typeof_grow(temporary.arena, &pending_typeof, &pending_typeof_capacity,
                                              pending_typeof_count, body_token_count + 1) = (CParsePendingTypeofDeclaration){
                     .scope = scope_stack[scope_count - 1],
@@ -33566,7 +33658,11 @@ BUSTER_C_INTERNAL void c_parser_parse_function_body(Arena* arena, CPreprocessRes
         }
         if (!frame->parenthesis_depth && !frame->bracket_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
+<<<<<<< Updated upstream
             BUSTER_RT_CHECK(frame_count < declaration->body_token_count + 1);
+=======
+            BUSTER_CHECK(frame_count < declaration->body_token_count + 1);
+>>>>>>> Stashed changes
             if (frame_count == body_frames->capacity)
             {
                 c_parser_body_frames_reserve(arena, body_frames, frame_count);
@@ -37517,7 +37613,11 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
         {
             c_parse_body_scratch_refuse();
             bool fixed_buffers_destroyed = arena_destroy(fixed_buffer_arena, 1);
+<<<<<<< Updated upstream
             BUSTER_RT_CHECK(fixed_buffers_destroyed);
+=======
+            BUSTER_CHECK(fixed_buffers_destroyed);
+>>>>>>> Stashed changes
             fixed_buffer_arena = 0;
         }
         if (fixed_buffer_arena)
@@ -37720,10 +37820,17 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
             if (model_private)
             {
                 bool model_destroyed = arena_destroy(model_private, 1);
+<<<<<<< Updated upstream
                 BUSTER_RT_CHECK(model_destroyed);
             }
             bool fixed_buffers_destroyed = arena_destroy(fixed_buffer_arena, 1);
             BUSTER_RT_CHECK(fixed_buffers_destroyed);
+=======
+                BUSTER_CHECK(model_destroyed);
+            }
+            bool fixed_buffers_destroyed = arena_destroy(fixed_buffer_arena, 1);
+            BUSTER_CHECK(fixed_buffers_destroyed);
+>>>>>>> Stashed changes
         }
     }
     return constant;
@@ -46679,7 +46786,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         c_analysis_failure(&result, S8("could not reserve the retained C semantic node index"));
         machine.failed = true;
     }
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(result.scope_count < result.scope_capacity);
+=======
+    BUSTER_CHECK(result.scope_count < result.scope_capacity);
+>>>>>>> Stashed changes
     result.scopes[result.scope_count++] = (CScope){
         .parent = C_SCOPE_ID_INVALID,
         .first_entity = C_ENTITY_ID_INVALID,
@@ -46739,7 +46850,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                 }
             }
         }
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(result.declaration_count < result.declaration_capacity);
+=======
+        BUSTER_CHECK(result.declaration_count < result.declaration_capacity);
+>>>>>>> Stashed changes
         CDeclaration* declaration = &result.declarations[result.declaration_count++];
         *declaration = (CDeclaration){
             .name = name,
@@ -47136,7 +47251,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                              declaration->name));
         }
         declaration->entity = entity;
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(result.entity_count < result.entity_capacity);
+=======
+        BUSTER_CHECK(result.entity_count < result.entity_capacity);
+>>>>>>> Stashed changes
         result.entities[result.entity_count++] = (CEntity){
             .name = declaration->name,
             .location = declaration->location,
@@ -47198,7 +47317,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             CEntityId entity = {
                 .value = result.entity_count,
             };
+<<<<<<< Updated upstream
             BUSTER_RT_CHECK(result.entity_count < result.entity_capacity);
+=======
+            BUSTER_CHECK(result.entity_count < result.entity_capacity);
+>>>>>>> Stashed changes
             result.entities[result.entity_count++] = (CEntity){
                 .name = member->name,
                 .location = member->location,
@@ -47315,7 +47438,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             .value = result.scope_count,
         };
         declaration->scope = scope;
+<<<<<<< Updated upstream
         BUSTER_RT_CHECK(result.scope_count < result.scope_capacity);
+=======
+        BUSTER_CHECK(result.scope_count < result.scope_capacity);
+>>>>>>> Stashed changes
         CScope* function_scope = &result.scopes[result.scope_count++];
         *function_scope = (CScope){
             .parent =
@@ -47381,7 +47508,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                 .value = result.entity_count,
             };
             parameter->entity = entity;
+<<<<<<< Updated upstream
             BUSTER_RT_CHECK(result.entity_count < result.entity_capacity);
+=======
+            BUSTER_CHECK(result.entity_count < result.entity_capacity);
+>>>>>>> Stashed changes
             result.entities[result.entity_count++] = (CEntity){
                 .name = parameter->name,
                 .location = parameter->location,
@@ -47453,7 +47584,11 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // and never records.
     scratch_end(machine_temporary);
     c_parse_promoted_member_workspace_release(&machine);
+<<<<<<< Updated upstream
     BUSTER_RT_CHECK(arena_destroy(machine_buffer_arena, 1));
+=======
+    BUSTER_CHECK(arena_destroy(machine_buffer_arena, 1));
+>>>>>>> Stashed changes
     if (phase_arena)
     {
         result.phase_released_bytes = machine.phase_released_bytes + arena_release_to_position(phase_arena, phase_start);
