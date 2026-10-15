@@ -110,10 +110,10 @@ class ChecksLayoutCLITests(unittest.TestCase):
         branches = ("codex/ci-checks-combined-overlap", "codex/ci-checks-combined-all-builds",
                     "codex/2120-evidence-v2-combined-overlap", "codex/2120-evidence-v2-combined-all-builds")
         self.assertEqual(github_ci_time.COMBINED_QUALIFICATION_BRANCHES, branches)
-        self.assertEqual(len(github_ci_time.combination_jobs()), 25)
+        self.assertEqual(len(github_ci_time.combination_jobs()), 23)
         self.assertEqual(len(github_ci_time.HISTORICAL_SPLIT_COMBINATION_JOBS), 27)
         self.assertEqual(len(github_ci_time.MACOS_SPLIT_COMBINATION_JOBS), 29)
-        self.assertEqual(len(github_ci_time.combination_jobs("combined")), 21)
+        self.assertEqual(len(github_ci_time.combination_jobs("combined")), 19)
         for branch in branches:
             for event in ("pull_request", "push", "merge_group", "workflow_dispatch"):
                 with self.subTest(event=event, branch=branch):
@@ -541,7 +541,7 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                     self.assertEqual(result["reconciled_checks"][-1]["check"]["conclusion"],
                                      "neutral" if form == "superseded" else "cancelled")
                     self.assertIn("terminal_recovery", result["reconciled_checks"][-1]["publisher_provenance"])
-                    self.assertEqual(len(result["jobs"]), 25)
+                    self.assertEqual(len(result["jobs"]), 23)
 
     def test_supersession_rejects_unproved_jobs_attempts_and_report_claims(self):
         cases = ("jobs-missing", "jobs-null", "jobs-string", "jobs-bool", "jobs-float", "jobs-incomplete", "jobs-recorded",
@@ -618,7 +618,7 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
         self.assertEqual(proof["controller"]["id"], 38261177183)
         self.assertEqual(proof["writer"]["id"], 114851763130)
         self.assertEqual(proof["artifact"]["id"], 11752441561)
-        self.assertEqual(len(result["jobs"]), 25)
+        self.assertEqual(len(result["jobs"]), 23)
 
     def test_terminal_announcement_rejects_forged_incomplete_or_moving_provenance(self):
         cases = ("check-id", "app", "head", "marker-attempt", "measurement-success", "title", "protocol",
@@ -759,7 +759,7 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                     self.benchmark(mode, status, conclusion)
                     result = self.gate()
                     self.assertTrue(result["success"], result["errors"])
-                    self.assertEqual(len(result["jobs"]), 25)
+                    self.assertEqual(len(result["jobs"]), 23)
                     metadata = result["reconciled_checks"][-1]
                     self.assertEqual(metadata["job"], self.jobs[-1])
                     self.assertEqual(metadata["raw_check"], self.checks[-1])

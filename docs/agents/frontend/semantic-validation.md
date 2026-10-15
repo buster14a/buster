@@ -68,14 +68,49 @@ unevaluated operands. This addresses the constant-designator validation residual
 of [#1570](https://github.com/buster14a/buster/issues/1570); shared parser/lowering
 member authority and nonconstant-index validation remain separate work.
 
+The iterative `c_parse_expression_place_range` helper follows only the
+retained selected-expression range for `_Generic`; it never infers a place
+from the controller or discarded associations. Place shape, modifiable-update
+checks, address eligibility and register-address validation consume that same
+selected range. Selected ordinary objects and members remain addressable, and
+selected function designators remain valid address operands. Enumerators and
+C23's `true`, `false`, and `nullptr` scalar constants remain non-places;
+before C23, `true` and `false` may still name ordinary objects. The bit-field
+validator continues to reject selected bit-fields before lowering (#3758).
+Register-address validation uses the shared unary-address classification and
+full prefix-operand extent, then normalizes through the retained selected
+range. Under [WG14 DR 017.06](https://open-std.org/JTC1/SC22/WG14/issues/c90/issue0017.06.html),
+member access and array subscripting retain the register root, so `&(v.i)`
+and an array member's element remain non-addressable. Arrow access, pointer
+subscripts and unary dereference reach another object and retain their valid
+pointee behavior. Prototype-style parameter records retain their register
+storage on the parameter entity through array adjustment; prior compatible
+prototypes do not supply storage for a later definition. Parenthesized selections and a surrounding `(void)` cast
+stay under the register-address constraint without misclassifying binary `&`.
 `c_parse_validate_bit_field_addresses` checks unary address operands against
 semantic member widths before constant folding, including parenthesized,
 indirect and promoted anonymous members. GNU `__extension__` prefixes before
-`&` and around its operand retain the same constraint. Unevaluated and unselected operands
-retain this constraint; binary `&` remains a value operation. The registered
-`compiler_driver_test_bit_field_addresses` matrix requires matching structured
-syntax-only/object diagnostics and no object for rejected source in four C
-dialects, three frontend routes and three target layouts (#3743).
+`&` and around its operand retain the same constraint. Unevaluated and
+unselected operands retain this constraint; binary `&` remains a value
+operation. The registered `compiler_driver_test_bit_field_addresses` matrix
+covers selected ordinary object/member positives beside selected-bit-field
+negatives, selected-enumerator and C23 keyword-constant address/update
+refusals, direct, selected, and Generic-postfix register-member and array-subobject
+refusals, adjusted register array-parameter address controls, a wide promoted
+anonymous-member lookup followed by cache reuse, and
+direct/parenthesized/cast selected-register address refusals, C17 objects named
+`true`/`false`, and valid pointer-member, arrow/dereference, selected
+update/function-address, binary and pointee controls. It checks syntax-only/object diagnostic parity and no
+object on refusal across four C dialects, three frontend routes and three
+target layouts (#3743, #3758).
+
+For a direct prefix or postfix update of a selected `_Generic` place, C lowering
+defers the selection to its iterative place frames. That path lowers only the
+retained association as a place, forcing its call-preparation pass even inside
+an enclosing call argument; selected-arm calls therefore run once. Generic
+update ownership and the selected arm use retained syntax nodes, preserving
+the topology-based place and call walks without reintroducing token walkers. Ordinary
+Generic values and Generic-selected call callees retain the expression path.
 
 ## Block-scope static initializers
 
@@ -1034,3 +1069,15 @@ with independent Linux GCC/Clang rejection controls. Workspace ownership has its
 own registered fault/recovery control: a failed replacement preserves the old
 reservation and generation, a later search recovers, and production teardown
 returns the private reservation count to its starting value.
+
+## Block-scope function prototypes
+
+When registering a local function declaration against an existing file-scope
+function, check its type with `c_parse_types_compatible` before merging inline
+attributes. The first local declaration needs this check even when no name
+has yet been declared in that block. A conflict produces
+`C_DIAGNOSTIC_CONFLICTING_DECLARATION` with both declaration sites; compatible
+repeats and inherited internal linkage retain their existing behavior.
+The registered local-linkage controls include FFmpeg's variadic ioctl-probe
+shape without platform headers, return/arity/variadic conflicts, a nested
+extern declaration, typedef prototypes and compatible static declarations.

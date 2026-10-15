@@ -1277,6 +1277,8 @@ struct CTypeParseFrame
     // The parent operator scan proved this cast operand suffix has no
     // top-level operator, without constructing or mutating semantic rows.
     bool expression_operators_checked;
+    // PARAMETER frames retain declaration storage across declarator children.
+    bool parameter_is_register;
 };
 
 typedef struct CTypeLayoutCache CTypeLayoutCache;

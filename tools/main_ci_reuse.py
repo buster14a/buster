@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only queue-to-main CI reuse for issue #1808.
 
-Native, mobile, UEFI, desktop and analyzer validation are reusable. Desktop
+Native, UEFI, desktop and analyzer validation are reusable. Desktop
 jobs retain main's Zig cache lifecycle, analyzer retains a truthful receipt,
 and lint still checks the main history. This module
 never creates a check or changes a ref. A missing proof schedules the normal
@@ -41,7 +41,7 @@ RESULT_SCHEMA = "buster-main-ci-reuse-result-v1"
 MAX_RECEIPT_BYTES = 32768
 DISCOVERY_DELAYS = (1, 2)
 DISCOVERY_PATH = f"actions/workflows/{WORKFLOW_ID}/runs"
-# Exact GitHub-normalized spelling observed for the two unexpanded matrices
+# Exact GitHub-normalized spelling observed for the unexpanded native matrix
 # in run 36835320572. Never accept an arbitrary expression-looking job name.
 UNEXPANDED_REUSE_NAME = (
     "${{ matrix.name }}${{ (((github.event_name == 'pull_request') && "
@@ -57,8 +57,6 @@ REUSED = (
     ("macOS AArch64 native", "native-macos-aarch64", "Execution-mode matrix"),
     ("Windows x86-64 native", "native-windows-x86_64", "Execution-mode matrix (Windows)"),
     ("Windows AArch64 native", "native-windows-aarch64", "Execution-mode matrix (Windows)"),
-    ("Android x86-64", "mobile-android-x86_64", "Test (Android)"),
-    ("iOS AArch64", "mobile-ios-aarch64", "Test (iOS simulator)"),
     ("UEFI firmware boot", "uefi-boot", "Build compiler and boot both architectures in all allocators"),
 )
 REUSED_NAMES = frozenset(row[0] for row in REUSED)
@@ -419,9 +417,9 @@ def verify_source(api, sha, current_run_id, workflow_blob, now, *, expected=None
 def separate_skipped_jobs(rows, sha, run_id, diagnostics):
     """Account for skipped groups before the name-based executed-job reader.
 
-    GitHub emits two same-name, unexpanded matrix placeholders when job-level
-    if prevents expansion. They are not two executions of one logical job.
-    The workflow separately requires native/mobile/UEFI needs results skipped.
+    GitHub emits one unexpanded native-matrix placeholder when its job-level
+    condition prevents expansion. UEFI is a separate skipped job.
+    The workflow separately requires native/UEFI needs results skipped.
     """
     require(isinstance(rows, list) and all(isinstance(row, dict) for row in rows),
             "malformed current job inventory")
@@ -431,7 +429,7 @@ def separate_skipped_jobs(rows, sha, run_id, diagnostics):
     skipped = [row for row in rows if row.get("name") in REUSED_NAMES or
                row.get("name") == UNEXPANDED_REUSE_NAME]
     names = Counter(row["name"] for row in skipped)
-    require(names in (Counter(REUSED_NAMES), Counter({UNEXPANDED_REUSE_NAME: 2, "UEFI firmware boot": 1})),
+    require(names in (Counter(REUSED_NAMES), Counter({UNEXPANDED_REUSE_NAME: 1, "UEFI firmware boot": 1})),
             "reused main job groups are missing, duplicated or mixed")
     for row in skipped:
         require(row.get("run_id") == run_id and row.get("head_sha") == sha and
@@ -617,7 +615,7 @@ def cli():
                           f"[run {receipt['source_run_id']}, attempt 1]"
                           f"(https://github.com/{REPOSITORY}/actions/runs/"
                           f"{receipt['source_run_id']}/attempts/1). "
-                          "Native, mobile and UEFI jobs did not execute on main. "
+                          "Native and UEFI jobs did not execute on main. "
                           "Desktop jobs ran only the main Zig cache lifecycle and analyzer only retained a receipt; "
                           "their validation did not repeat.\n")
         else:

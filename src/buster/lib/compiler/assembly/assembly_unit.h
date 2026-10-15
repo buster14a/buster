@@ -69,14 +69,14 @@ struct AssemblyUnitSymbol
     // finished unit also sets it on a defined global or weak label in an
     // executable section, which is an entry point the linker must call.
     bool function;
-    // `.type` named this symbol's kind, as function or object.
+    // `.type` named this symbol's kind, as function, object or TLS object.
     bool typed;
     // The ELF writer states STT_NOTYPE: a defined local label in an
     // executable section that no `.type` described, as GNU as writes it.
     // `function` stays what consumers of the unit read; this only changes
     // the symbol type a disassembler sees.
     bool untyped;
-    u8 reserved[1];
+    bool is_thread_local;
 };
 
 typedef struct AssemblyUnitRelocation AssemblyUnitRelocation;

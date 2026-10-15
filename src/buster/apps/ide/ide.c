@@ -20,9 +20,6 @@
 #include <buster/lib/os.h>
 #include <buster/lib/system_headers.h>
 #include <buster/lib/file.h>
-#if BUSTER_INCLUDE_TESTS || BUSTER_FUZZ_AVAILABLE
-#include <buster/lib/image.h>
-#endif
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/aarch64_exact_bridge.h>
@@ -88,7 +85,6 @@
 // still be included before the region, as simd.h's fallbacks are here;
 // `./build.sh optnone_audit` fails when one is not.
 #include <buster/lib/simd.h>
-#include <buster/apps/disk_builder_verification.c>
 #if BUSTER_COMPILER_CLANG
 #pragma clang optimize off
 #endif
@@ -107,18 +103,11 @@
 #include <buster/lib/simd.c>
 #include <buster/lib/file.c>
 #if BUSTER_ANDROID || BUSTER_IOS
-// Mobile platforms own the process lifecycle through the window module even
-// though the compiler program itself is headless.
+// Preserved mobile lifecycle source; automatic compiler CI targets desktop hosts.
 #include <buster/lib/window.c>
 #endif
 #include <buster/lib/time.c>
 #include <buster/lib/float.c>
-#if BUSTER_INCLUDE_TESTS
-#include <buster/lib/truetype.c>
-#endif
-#if BUSTER_INCLUDE_TESTS || BUSTER_FUZZ_AVAILABLE
-#include <buster/lib/image.c>
-#endif
 #include <buster/lib/compiler/frontend/c/c.c>
 #include <buster/lib/compiler/assembly/aarch64_encoding.c>
 #include <buster/lib/compiler/assembly/aarch64_exact_bridge.c>
@@ -576,16 +565,6 @@ s32 buster_fuzz_test_input(const u8* pointer, size_t size)
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(128)});
         if (arena)
         {
-            ByteSlice image_bytes = {.pointer = (u8*)pointer, .length = size};
-            image_decode(arena, image_bytes,
-                         (ImageDecodeOptions){
-                             .max_width = 4096,
-                             .max_height = 4096,
-                             .max_pixels = BUSTER_MB(8),
-                             .max_decoded_bytes = BUSTER_MB(32),
-                             .max_work = BUSTER_MB(64),
-                         });
-            arena_reset_to_start(arena);
             String8 source = {.pointer = pointer ? (char8*)pointer : S8("").pointer, .length = size};
             CPreprocessResult preprocess = c_preprocess(arena, source,
                                                         (CPreprocessOptions){

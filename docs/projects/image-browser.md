@@ -1,5 +1,11 @@
 # Native image browser and inspector
 
+Status: **preserved, unmaintained source**. This area has no default build,
+compiler-test, fuzz, analyzer or automatic CI coverage. Existing source, tests,
+CMake fragments and earlier procedures below are retained for reference; their
+buildability and behavior are not a current support promise. Reconnecting a
+consumer requires an explicit maintenance decision.
+
 [Catalogue](../../PROJECTS.md) · [Media contract](media.md) ·
 [Graphics contract](graphics-ui.md) · Area: `image-browser`
 

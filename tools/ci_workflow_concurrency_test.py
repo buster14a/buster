@@ -116,8 +116,7 @@ class MainPushConcurrencyTests(unittest.TestCase):
                     self.assertTrue(groups.isdisjoint(other_groups))
 
     def test_auxiliary_validation_preserves_candidate_policy_and_isolates_pushes(self):
-        for name, cancel_pr in (("debug-lifetime-slice.yml", False),
-                                ("hot-reload-demo.yml", True)):
+        for name, cancel_pr in (("debug-lifetime-slice.yml", False),):
             fields = self.fields((ROOT / ".github/workflows" / name).read_text())
             with self.subTest(workflow=name):
                 self.assertNotIn("queue", fields)
@@ -138,11 +137,6 @@ class MainPushConcurrencyTests(unittest.TestCase):
                 groups = {self.resolved_group(fields["group"], c) for c in pushes}
                 self.assertEqual(len(groups), 3)
                 self.assertNotIn(self.resolved_group(fields["group"], pr), groups)
-                if name == "hot-reload-demo.yml":
-                    manual = self.context("workflow_dispatch")
-                    manual["github.ref"] = "refs/heads/main"
-                    self.assertFalse(self.cancelled(fields["cancel-in-progress"], manual))
-                    self.assertNotIn(self.resolved_group(fields["group"], manual), groups)
 
 
 if __name__ == "__main__":

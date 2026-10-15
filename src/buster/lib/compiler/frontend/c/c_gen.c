@@ -1936,6 +1936,9 @@ struct CIrPreparedCall
     // The child expression that owns that operand prepares it itself, which
     // needs builder->preparing_calls cleared for the duration.
     bool deferred_calls;
+    // A direct update of a Generic-selected place is consumed by the place
+    // machine, which evaluates only the retained association as a place.
+    bool deferred_place_selection;
     // The GNU `__atomic_*` spelling of an operation the `__c11_atomic_*` family
     // also has: an ordinary pointer where the C11 form wants a pointer to an
     // `_Atomic` object, and the argument-count differences that go with it.
@@ -16126,7 +16129,8 @@ struct CIrLowerFrame
             u32 emission_index;
             u32 first_new;
             bool previous_preparing_calls;
-            u8 reserved[3];
+            bool force_preparing_calls;
+            u8 reserved[2];
         } prepare_calls;
         struct
         {
@@ -16174,8 +16178,12 @@ struct CIrLowerFrame
             u32 node_plus_one;
             u32 suffix_count;
             u32 suffix_cursor;
+            u32 selection_start;
+            u32 selection_end;
+            u32 selection_node;
             u8 continuation;
-            u8 reserved[3];
+            bool selection_context;
+            u8 reserved[2];
         } place;
         struct
         {
@@ -16360,6 +16368,8 @@ typedef enum CIrPlaceContinuation
     C_IR_PLACE_CONTINUATION_EXPRESSION,
     C_IR_PLACE_CONTINUATION_REAL_PART,
     C_IR_PLACE_CONTINUATION_IMAGINARY_PART,
+    C_IR_PLACE_CONTINUATION_GENERIC_PREPARE,
+    C_IR_PLACE_CONTINUATION_GENERIC_PLACE,
 } CIrPlaceContinuation;
 
 typedef enum CIrCompoundContinuation
@@ -16501,6 +16511,8 @@ BUSTER_C_INTERNAL void c_ir_lower_vla_index_place_step(CIntegerIrBuilder* builde
 
 BUSTER_C_INTERNAL CIrPreparedCall* c_ir_prepared_call_find(CIntegerIrBuilder* builder, u32 node);
 BUSTER_C_INTERNAL IrValueId c_ir_emit_field_index_place(CIntegerIrBuilder* builder, IrValueId place, u32 field_index, IrSourceRange source);
+BUSTER_C_INTERNAL bool c_ir_prepare_calls_selected_frame_push(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end);
+
 
 BUSTER_C_INTERNAL u32 c_ir_core_wraps(CIntegerIrBuilder* builder, u32 node, u32 limit);
 BUSTER_C_INTERNAL BUSTER_INLINE bool c_ir_core_wrapped(CIntegerIrBuilder* builder, u32 node);
@@ -16589,6 +16601,57 @@ BUSTER_C_INTERNAL bool c_ir_place_expression_child(CIntegerIrBuilder* builder, C
         .kind = C_IR_LOWER_FRAME_EXPRESSION,
         .as.expression = {.node_plus_one = node + 1, .start = first, .end = end},
     });
+}
+
+// A direct update retains its Generic node until the place machine consumes
+// the selected arm. Parentheses live in span records, so they do not change
+// this node identity or require another token walk.
+BUSTER_C_INTERNAL bool c_ir_lower_place_try_generic_selection(CIntegerIrBuilder* builder, CIrLowerFrame* frame)
+{
+    CAst const* ast = builder->syntax_tree;
+    u32 node = frame->as.place.node_plus_one - 1;
+    bool generic = node < ast->node_count && ast->kinds[node] == C_AST_GENERIC_SELECTION;
+    CIrPreparedCall* call = generic ? c_ir_prepared_call_find(builder, node) : 0;
+    bool handled = generic && (frame->as.place.selection_context || (call && call->deferred_place_selection));
+    if (handled)
+    {
+        u32 first = builder->syntax_spans->first[node];
+        u32 end = builder->syntax_spans->end[node];
+        u32 selected_start = 0;
+        u32 selected_end = 0;
+        u32 selected_node = c_ast_facts_selection(builder->syntax_facts, node);
+        bool valid = selected_node < node;
+        if (valid)
+        {
+            c_ir_span_expanded(ast, builder->syntax_spans, selected_node, &selected_start, &selected_end);
+            valid = selected_start >= first && selected_start < selected_end && selected_end < end;
+        }
+        if (valid)
+        {
+            bool nested_generic = ast->kinds[selected_node] == C_AST_GENERIC_SELECTION;
+            frame->as.place.place = IR_VALUE_ID_INVALID;
+            frame->as.place.source = c_ir_anchor_source_range(builder, c_source_anchor_at(&builder->preprocess, first));
+            frame->as.place.selection_start = selected_start;
+            frame->as.place.selection_end = selected_end;
+            frame->as.place.selection_node = selected_node;
+            frame->as.place.index = frame->as.place.end;
+            frame->as.place.continuation = nested_generic ? C_IR_PLACE_CONTINUATION_GENERIC_PLACE
+                                                        : C_IR_PLACE_CONTINUATION_GENERIC_PREPARE;
+            frame->stage = C_IR_LOWER_STAGE_CHILD;
+            valid = nested_generic
+                        ? c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                              .kind = C_IR_LOWER_FRAME_PLACE,
+                              .as.place = {.node_plus_one = selected_node + 1, .start = selected_start,
+                                           .end = selected_end, .selection_context = true},
+                          })
+                        : c_ir_prepare_calls_selected_frame_push(builder, selected_node, selected_start, selected_end);
+        }
+        if (!valid)
+        {
+            c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+        }
+    }
+    return handled;
 }
 
 // Set up one place from topology. The type-name calls retain their previous
@@ -16846,6 +16909,10 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
     CIrLowerMachine* machine = &builder->lower_machine;
     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
+        if (c_ir_lower_place_try_generic_selection(builder, frame))
+        {
+            return;
+        }
         if (!c_ir_place_node_begin(builder, frame))
         {
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
@@ -16863,8 +16930,27 @@ BUSTER_C_INTERNAL void c_ir_lower_place_step(CIntegerIrBuilder* builder, CIrLowe
             c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
             return;
         }
-        if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_REAL_PART ||
-            frame->as.place.continuation == C_IR_PLACE_CONTINUATION_IMAGINARY_PART)
+        if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_GENERIC_PREPARE)
+        {
+            frame->as.place.continuation = C_IR_PLACE_CONTINUATION_GENERIC_PLACE;
+            u32 selected_node = frame->as.place.selection_node;
+            if (!c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                    .kind = C_IR_LOWER_FRAME_PLACE,
+                    .as.place = {.node_plus_one = selected_node + 1, .start = frame->as.place.selection_start,
+                                 .end = frame->as.place.selection_end, .selection_context = true},
+                }))
+            {
+                c_ir_lower_frame_finish(builder, false, IR_VALUE_ID_INVALID);
+            }
+            return;
+        }
+        else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_GENERIC_PLACE)
+        {
+            frame->as.place.place = machine->child_result.value;
+            frame->as.place.index = frame->as.place.end;
+        }
+        else if (frame->as.place.continuation == C_IR_PLACE_CONTINUATION_REAL_PART ||
+                 frame->as.place.continuation == C_IR_PLACE_CONTINUATION_IMAGINARY_PART)
         {
             IrValueId operand = machine->child_result.value;
             bool imaginary = frame->as.place.continuation == C_IR_PLACE_CONTINUATION_IMAGINARY_PART;
@@ -17210,6 +17296,16 @@ BUSTER_C_INTERNAL bool c_ir_prepare_calls_node_frame_push(CIntegerIrBuilder* bui
 }
 
 
+
+// Selected-arm calls have not been visited by the outer Generic discovery.
+// Preserve the surrounding preparation state while discovering this exact node.
+BUSTER_C_INTERNAL bool c_ir_prepare_calls_selected_frame_push(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end)
+{
+    return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+        .kind = C_IR_LOWER_FRAME_PREPARE_CALLS,
+        .as.prepare_calls = {.node_plus_one = node + 1, .start = start, .end = end, .force_preparing_calls = true},
+    });
+}
 
 BUSTER_C_INTERNAL bool c_ir_lower_place_node_frame_push(CIntegerIrBuilder* builder, u32 node, u32 start, u32 end)
 {
@@ -22958,6 +23054,13 @@ BUSTER_C_INTERNAL bool c_ir_tree_calls_discover(CIntegerIrBuilder* builder, u32 
             bool parenthesized = false;
             bool shaped = generic || c_ir_tree_callee_shape(builder, node, start, active_calls, active_call_count, &callee_start, &indexed, &parenthesized);
             CIrPreparedCall call = c_ir_call_classify(builder, node);
+            // A unary update's only child is the immediately preceding
+            // postorder node. Do not borrow a parent outside this discovery.
+            u32 parent = node + 1;
+            u32 parent_kind = node < root && parent < ast->node_count ? ast->kinds[parent] : C_AST_KIND_COUNT;
+            bool update = parent_kind == C_AST_PRE_INCREMENT || parent_kind == C_AST_PRE_DECREMENT ||
+                          parent_kind == C_AST_POST_INCREMENT || parent_kind == C_AST_POST_DECREMENT;
+            call.deferred_place_selection = generic && update && c_ast_child_at(ast, parent, 0) == node;
             arguments = true;
             if (!generic && c_ast_facts_call_builtin(ast, builder->syntax_facts, node) == C_AST_FACT_NONE)
             {
@@ -23808,6 +23911,15 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 return C_IR_PREPARED_CALL_STEP_FAILED;
             }
             c_ir_span_expanded(builder->syntax_tree, builder->syntax_spans, association_node, &association_start, &association_end);
+            if (selected->deferred_place_selection)
+            {
+                // The update's place consumer evaluates the selected arm
+                // directly as a place, avoiding an unused pre-load.
+                selected->argument_count = 1;
+                selected->emitted = true;
+                remaining -= 1;
+                continue;
+            }
             if (continuation == C_IR_PREPARED_CALL_CONTINUATION_GENERIC)
             {
                 if (!child_success)
@@ -26235,7 +26347,7 @@ BUSTER_C_INTERNAL void c_ir_prepare_calls_step(CIntegerIrBuilder* builder, CIrLo
     if (frame->stage == C_IR_LOWER_STAGE_BEGIN)
     {
         frame->as.prepare_calls.previous_preparing_calls = builder->preparing_calls;
-        if (builder->preparing_calls)
+        if (builder->preparing_calls && !frame->as.prepare_calls.force_preparing_calls)
         {
             c_ir_lower_frame_finish(builder, true, IR_VALUE_ID_INVALID);
             return;
@@ -30061,8 +30173,8 @@ BUSTER_C_INTERNAL u32 c_ir_core_chain_node_unit(CIntegerIrBuilder* builder, CIrE
 }
 
 // Runs the place machine over [start, end) for a unit, off the dispatch
-// loop: a place suspends only under a runtime VLA subscript, so its result is
-// almost always consumed here (c_ir_core_consume_place) without the loop's
+// loop: a place can suspend for a runtime VLA subscript or a selected
+// Generic arm. Other results are consumed here (c_ir_core_consume_place) without the loop's
 // child dispatch and this frame's re-dispatch. A suspension resumes through
 // the loop at `stage`.
 BUSTER_C_INTERNAL CIrCoreStatus c_ir_core_consume_place(CIntegerIrBuilder* builder, CIrLowerFrame* frame, CIrExpressionCoreState* state);
@@ -31224,8 +31336,8 @@ BUSTER_C_INTERNAL CIrCoreStatus c_ir_lower_expression_core_begin(CIntegerIrBuild
             state->pending_update_kind = kind;
             frame->stage = (u8)C_IR_LOWER_STAGE_EXPRESSION_CORE_ROOT_UPDATE;
             status = C_IR_CORE_SUSPENDED;
-            // Run the place now, off the dispatch loop: a place suspends only
-            // under a runtime VLA subscript, so its result is almost always
+            // Run the place now, off the dispatch loop: a runtime VLA subscript
+            // or selected Generic arm can suspend. Other results are
             // consumed here without the loop's child dispatch and this
             // frame's re-dispatch. A suspension resumes through the loop
             // unchanged.

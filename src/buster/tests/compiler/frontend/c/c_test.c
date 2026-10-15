@@ -7339,6 +7339,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations(UnitTestA
         S8("int z = 3; int test(void) { extern int z, z; { extern int z; extern int z; } return z - 3; }"),
         S8("static int dead_target(int x) { return x; } static int dead_owner(void) { int dead_target(int); extern int dead_target(int); return dead_target(1); } int test(void) { return 0; }"),
         S8("static int add(int x) { return x + 1; } int test(void) { int add(int); extern int add(int); return (&add)(3) - 4; }"),
+        S8("int request(int, unsigned long, ...); int test(void) { int request(int, unsigned long, ...); return 0; }"),
+        S8("static int request(int x) { return x; } int test(void) { extern int request(int); { int request(int); } return request(0); }"),
+        S8("typedef int Request(int, unsigned long, ...); Request request; int test(void) { Request request; return 0; }"),
         S8("int add(int x) { return x + 1; } int test(void) { int add(int); int add(); return add(3) - 4; }"),
     };
     typedef struct CLocalRedeclarationFailure CLocalRedeclarationFailure;
@@ -7348,6 +7351,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_local_linkage_redeclarations(UnitTestA
         CDiagnosticKind kind;
     };
     CLocalRedeclarationFailure rejected[] = {
+        {S8("int request(int, unsigned long, ...); int test(void) { int request(int, int, ...); return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
+        {S8("int request(int); int test(void) { void request(int); return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
+        {S8("int request(int); int test(void) { int request(int, ...); return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
+        {S8("int request(int, int); int test(void) { int request(int); return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
+        {S8("int request(int, unsigned long, ...); int test(void) { { extern int request(int, int, ...); } return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
         {S8("int test(void) { extern int z; extern long z; return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
         {S8("int test(void) { int add(int); int add(long); return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},
         {S8("int test(void) { extern int z; int z(void); return 0; }"), C_DIAGNOSTIC_CONFLICTING_DECLARATION},

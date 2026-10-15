@@ -2,7 +2,12 @@
 
 [Agent instructions](../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
-## Platform and backend boundaries
+## Preserved graphics/window reference
+
+The graphics/window/font code and its tests remain in the tree as unmaintained
+source. These reference contracts are not current automatic CI promises.
+The maintained compiler uses only the OS/process/memory/file services below.
+
 
 - In rendering and windowing, keep platform-neutral policy and data flow in
   the module front door (`rendering.c`, `window.c`). Native API calls
@@ -53,16 +58,10 @@
   unsigned indices, scale-sensitive curve goldens, the subdivision cap and
   a deterministic malformed-parameter sweep in sanitizer and fuzz-enabled CI
   configurations.
-- The active headless `ide` target has no production TrueType caller. It adds
-  the `truetype` module exactly when `BUSTER_INCLUDE_TESTS` is enabled, for the
-  registered `truetype_tests` consumer; use value tests (`#if`), because CMake
-  always defines this macro as either zero or one. Android and iOS add `window`
-  for process lifecycle only and do not add a font consumer. The reusable
-  `truetype` module and dormant `font_provider` source remain available for a
-  future product target, which must register both dependencies explicitly.
-  `tests/truetype_dependency_test.py` checks the generated split graphs,
-  builds the tests-disabled split compiler in Debug and Release, and checks
-  the actual Release unity preprocessing closure for tests on and off.
+- The headless `ide` target includes no font or image module, even when tests
+  or fuzzing are enabled. Their source and tests are preserved but unregistered.
+  Mobile
+  lifecycle source is retained without automatic host CI.
 - TrueType horizontal kerning uses the legacy version-0 `kern` table's
   format-0 subtables. Matching pair values add in subtable order; the override
   coverage bit replaces the accumulated value, and later subtables can add to

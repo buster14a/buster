@@ -1,12 +1,13 @@
 # Buster
 
-Buster is a personal monorepo for applications, shared C components, development
-tools, and experiments. The from-scratch C compiler and toolchain is one project
-in that collection, not the boundary of what belongs here.
+Buster is a personal monorepo. The headless C compiler and toolchain are the
+maintained product; applications and shared GUI/media components remain as
+preserved, unmaintained source.
 
-Start with the [project catalogue](PROJECTS.md) to find each project's source,
-features, consumers, and documentation. Existing components are not all packaged
-products: retained source and standalone tools have explicit integration limits.
+Automatic builds and CI compile and test the compiler and its dependencies.
+They do not build or test the retained applications, graphics/UI, image/font
+libraries, packaged examples or mobile application host. See the
+[project catalogue](PROJECTS.md) for these boundaries.
 
 ## Find your way
 
@@ -27,9 +28,8 @@ execution-affecting changes earlier in the PR, and a prose-only merge group
 queued behind code changes still runs full validation.
 
 The `ide` target is currently headless; its historical name does not advertise a
-working graphical IDE. See the compiler page for its entry point. Adding another
-application does not require making it a compiler feature or linking its modules
-into `ide`.
+working graphical IDE. See the compiler page for its entry point. Preserved applications and components have no automatic CI or compatibility
+promise and are not dependencies of `ide`.
 
 For attribution and third-party terms, see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
 and [LICENSES](LICENSES/). Do not infer a license grant for Buster's own code from

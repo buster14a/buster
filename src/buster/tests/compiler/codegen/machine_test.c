@@ -12321,6 +12321,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // A one-chunk stream is already contiguous in the builder arena. Finish
     // must publish its live payload directly rather than copying it, while
     // retaining the ordinary row values and block layout.
+    u64 alias_position = arguments->arena->position;
     MachineFunctionBuilder alias_builder = machine_function_builder_begin(arguments->arena);
     u32 alias_parameter = machine_builder_virtual_register(&alias_builder, (MachineVirtualRegister){
                                                                .definition_point = MACHINE_POINT_INVALID,
@@ -12335,6 +12336,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     MachineBuilderChunk* alias_virtual_register_chunk = alias_builder.virtual_registers.first;
     MachineBuilderChunk* alias_block_chunk = alias_builder.blocks.first;
     MachineFunction alias_function = machine_function_builder_finish(arguments->arena, &alias_builder);
+    // Four tiny populated streams and the register index must fit this
+    // per-function scratch budget; full 16 KiB initial chunks exceeded it.
+    BUSTER_TEST(arguments, arguments->arena->position - alias_position <= BUSTER_KB(20));
     BUSTER_TEST(arguments, alias_function.instructions == (MachineInstruction*)(alias_instruction_chunk + 1));
     BUSTER_TEST(arguments, alias_function.virtual_registers == (MachineVirtualRegister*)(alias_virtual_register_chunk + 1));
     BUSTER_TEST(arguments, alias_function.blocks == (MachineBlock*)(alias_block_chunk + 1));
@@ -12342,7 +12346,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, machine_verify_function(&alias_function).error == MACHINE_VERIFY_NONE);
 
     // The chunked builder must survive chunk boundaries: enough rows to
-    // spill across several 16 KiB chunks, flattened back in exact order.
+    // spill across several chunks, flattened back in exact order.
     u32 large_count = 3000;
     MachineFunctionBuilder large_builder = machine_function_builder_begin(arguments->arena);
     machine_builder_block_begin(&large_builder);

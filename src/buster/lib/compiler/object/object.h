@@ -245,10 +245,11 @@ typedef enum ObjectRelocationKind
     OBJECT_RELOCATION_COUNT,
 } ObjectRelocationKind;
 
-// The four x86-64 GOT spellings share every rule but relaxation: one
-// rip-relative 32-bit field, a -4 addend, and a value taken from the slot
-// holding the symbol's address. Ask this instead of naming all three
-// wherever only that shared contract matters.
+// The x86-64 GOT spellings name a rip-relative 32-bit field and a value
+// taken from the slot holding the symbol's address. Relaxable kinds also
+// promise an opcode form. Addends follow the source field: instruction fields
+// use -4, while a data expression such as `symbol@GOTPCREL - .` uses 0.
+// Ask this for family membership, not to validate a consumer's addend.
 BUSTER_F_DECL bool object_relocation_kind_is_x86_got(ObjectRelocationKind kind);
 // Shared field facts: two bytes for COFF_SECTION16, eight for the 64-bit
 // data forms, two for i386 16-bit fields, four for the remaining kinds. Invalid kinds have zero width

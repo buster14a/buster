@@ -1,5 +1,12 @@
 # GitHub Actions CI
 
+Current scope: automatic CI maintains the headless compiler on Linux, Windows
+and macOS. Application, graphics/UI, image/font and mobile-hosting sources remain
+preserved but are not built or tested automatically. Earlier mobile/component
+commands and measurements below describe preserved paths or historical runs,
+not current CI coverage. See [current build guidance](agents/build.md) and
+[component status](../PROJECTS.md).
+
 `.github/workflows/ci.yml` owns the active GitHub CI matrix on **standard**
 hosted runners. The former Forgejo workflows and source-free broker were
 removed in commit `02c0400a34d04be9e984f29a59291750b3998d3f`; they do not run
