@@ -190,7 +190,14 @@ hosts execute its independent expected-value fixture.
   `machine_frame_internal.h`. Each home, colored slot group, dedicated slot
   and edge-copy tile checks wide addition/alignment before publishing a
   32-bit offset; outgoing storage and push parity are checked before the final
-  frame is published. x86-64 actual offsets and allocation sizes fit signed
+  frame is published. Win64 reserves aligned objects relative to the actual
+  frame-base residue after callee-saved pushes: an odd save count shifts RBP
+  by eight bytes, so rounding offsets alone would misalign a sixteen-byte
+  object. Colored vector homes use the same bias; incoming arguments,
+  final push parity and unwind remain in their existing coordinates.
+  The driver EMMS state fixture exercises real aligned FXSAVE objects with
+  FAST/QUALITY and both frontend SSA forms on native x86-64 (#4318).
+  x86-64 actual offsets and allocation sizes fit signed
   disp32. AArch64 retains unsigned offsets and checks the encoder's footer and
   Windows save areas. Capacity refusals remain distinct from malformed MIR,
   including strict verification, and reach the driver as `codegen.capacity`.

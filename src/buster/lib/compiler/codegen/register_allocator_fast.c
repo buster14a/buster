@@ -5907,6 +5907,21 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_fast_placement_scan_prepassed(
     return placement;
 }
 
+// Reserve offsets relative to the encoder's actual frame-base residue.
+// Win64 establishes RBP after the callee-saved pushes; an odd save count
+// shifts it by eight bytes. The shared checked authority still owns extent
+// and alignment arithmetic, now in coordinates whose origin is aligned.
+BUSTER_GLOBAL_LOCAL bool machine_fast_frame_reserve(u64* running, u64 size, u32 alignment, u32 base_bias)
+{
+    u64 aligned = *running + base_bias;
+    bool valid = aligned >= *running && machine_stack_frame_reserve(&aligned, size, alignment);
+    if (valid)
+    {
+        *running = aligned - base_bias;
+    }
+    return valid;
+}
+
 // Frame construction consumes only a completed scan and immutable prepass.
 // QUALITY calls it after its traffic and pin checks accept a probe.
 BUSTER_GLOBAL_LOCAL void machine_fast_placement_finish(Arena* arena, MachineFunction* function, MachineFastPrepass const* prepass,
@@ -6226,16 +6241,17 @@ BUSTER_GLOBAL_LOCAL void machine_fast_placement_finish(Arena* arena, MachineFunc
     // frame byte below it is reserved for them. See the frame-size note
     // below — subtracting a save area that is not there sizes the allocation
     // short and buries the deepest slots under the stack pointer.
+    u32 frame_base_bias = description->saves_precede_frame_pointer && (push_count & 1u) ? 8u : 0u;
     u32 pool_base = description->saves_precede_frame_pointer ? 0u : 8 * push_count;
     u64 running = pool_base;
-    bool frame_capacity = machine_stack_frame_reserve(&running, (u64)pool_size * 8u, 1u);
+    bool frame_capacity = machine_fast_frame_reserve(&running, (u64)pool_size * 8u, 1u, frame_base_bias);
     // Sixty-four-byte vector homes on a sixteen-byte offset boundary,
     // mirroring the canonical frame layout's vector clamp; every access is
     // the unaligned vmovdqu8 either way.
-    u64 vector_base = (running + 15u) & ~(u64)15u;
+    u64 vector_base = ((running + frame_base_bias + 15u) & ~(u64)15u) - frame_base_bias;
     if (vector_pool_size)
     {
-        frame_capacity = frame_capacity && machine_stack_frame_reserve(&running, (u64)vector_pool_size * 64u, 16u);
+        frame_capacity = frame_capacity && machine_fast_frame_reserve(&running, (u64)vector_pool_size * 64u, 16u, frame_base_bias);
     }
     for (u32 register_index = 0; frame_capacity && register_index < function->virtual_register_count; register_index += 1)
     {
@@ -6258,7 +6274,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_placement_finish(Arena* arena, MachineFunc
         }
         // A home the colorer never saw — no memory edit gave it a range —
         // still gets a slot of its own so the layout stays sound.
-        frame_capacity = machine_stack_frame_reserve(&running, is_vector ? 64u : 8u, is_vector ? 16u : 1u);
+        frame_capacity = machine_fast_frame_reserve(&running, is_vector ? 64u : 8u, is_vector ? 16u : 1u, frame_base_bias);
         if (frame_capacity)
         {
             placement.virtual_register_offsets[register_index] = (u32)running;
@@ -6266,7 +6282,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_placement_finish(Arena* arena, MachineFunc
     }
     for (u32 group = 0; frame_capacity && group < group_count; group += 1)
     {
-        frame_capacity = machine_stack_frame_reserve(&running, group_sizes[group], group_alignments[group]);
+        frame_capacity = machine_fast_frame_reserve(&running, group_sizes[group], group_alignments[group], frame_base_bias);
         if (frame_capacity)
         {
             group_offsets[group] = (u32)running;
@@ -6288,7 +6304,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_placement_finish(Arena* arena, MachineFunc
             continue;
         }
         u32 slot_alignment = function->stack_slot_alignments ? function->stack_slot_alignments[slot_index] : 8;
-        frame_capacity = machine_stack_frame_reserve(&running, function->stack_slot_sizes[slot_index], slot_alignment);
+        frame_capacity = machine_fast_frame_reserve(&running, function->stack_slot_sizes[slot_index], slot_alignment, frame_base_bias);
         if (frame_capacity)
         {
             placement.stack_slot_offsets[slot_index] = (u32)running;
@@ -6296,7 +6312,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_placement_finish(Arena* arena, MachineFunc
     }
     u64 edge_copy_temporary_size = machine_function_edge_copy_temporary_size(function);
     placement.edge_copy_temporary_offset = (u32)running;
-    frame_capacity = frame_capacity && machine_stack_frame_reserve(&running, edge_copy_temporary_size, 1u) &&
+    frame_capacity = frame_capacity && machine_fast_frame_reserve(&running, edge_copy_temporary_size, 1u, frame_base_bias) &&
                      machine_stack_frame_finish(function, running, pool_base, push_count, &placement.frame_size);
     placement.capacity_exceeded = !frame_capacity;
     placement.valid = frame_capacity;
