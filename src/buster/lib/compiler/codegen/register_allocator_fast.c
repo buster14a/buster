@@ -798,7 +798,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge(MachineFastState* state, Mach
     }
     while (pending)
     {
-        BUSTER_CHECK(allow_moves);
+        BUSTER_RT_CHECK(allow_moves);
         bool progressed = false;
         for (u64 remaining = pending; remaining; remaining &= remaining - 1u)
         {
@@ -941,7 +941,7 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_edge_can_move(MachineFunction* function, M
 BUSTER_GLOBAL_LOCAL void machine_fast_load_edge_source(MachineFastState* state, MachineBuilderStream* stream, MachinePoint point, MachineRef source,
                                                        u32 physical)
 {
-    BUSTER_CHECK(machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER);
+    BUSTER_RT_CHECK(machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER);
     u32 source_value = machine_ref_payload(source);
     if (state->rematerialize_immediates[source_value] != UINT32_MAX)
     {
@@ -1342,7 +1342,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         temporary_offset += vector ? 64u : 8u;
         if (captured[copy_index] == UINT32_MAX && !direct)
         {
-            BUSTER_CHECK(machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER);
+            BUSTER_RT_CHECK(machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER);
             u32 source_value = machine_ref_payload(source);
             u32 scratch = vector ? state->description->vector_slot_scratch[0] : state->description->slot_scratch[0];
             if (state->rematerialize_immediates[source_value] != UINT32_MAX)
@@ -1398,7 +1398,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_conform_edge_parameters(MachineFastState* 
         else if (!parallel)
         {
             MachineRef source = state->function->edge_copy_sources[edge->copy_offset + copy_index];
-            BUSTER_CHECK(machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER);
+            BUSTER_RT_CHECK(machine_ref_kind(source) == MACHINE_REF_VIRTUAL_REGISTER);
             u32 source_value = machine_ref_payload(source);
             stored = target != UINT32_MAX ? target : state->description->slot_scratch[0];
             if (state->rematerialize_immediates[source_value] != UINT32_MAX)
@@ -1749,7 +1749,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_pick_hinted(MachineFastState* state, u64 cl
             {
                 best = dead;
             }
-            BUSTER_CHECK(best < state->active_register_count); // The caller must leave an allocatable candidate.
+            BUSTER_RT_CHECK(best < state->active_register_count); // The caller must leave an allocatable candidate.
             machine_fast_spill(state, best);
             result = best;
         }

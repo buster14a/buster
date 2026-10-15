@@ -1753,7 +1753,7 @@ BUSTER_GLOBAL_LOCAL void c_test_append_u32(char8* destination, u64 capacity, u64
         digits[digit_count++] = (char8)('0' + value % 10);
         value /= 10;
     } while (value);
-    BUSTER_CHECK(destination && length && *length <= capacity && digit_count <= capacity - *length);
+    BUSTER_RT_CHECK(destination && length && *length <= capacity && digit_count <= capacity - *length);
     while (digit_count)
     {
         destination[(*length)++] = digits[--digit_count];
@@ -15939,7 +15939,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_noreturn_call_expression_statements(Un
 
 // #1325: casts whose operand is itself a parenthesized cast, and operands
 // that call a noreturn callee or __builtin_unreachable before a comma --
-// among them the optimized BUSTER_CHECK. Each unit is one function, because
+// among them the optimized BUSTER_RT_CHECK. Each unit is one function, because
 // the expression-type task budget is the unit's token count and the nested
 // cast shapes only exhausted it in a unit this small.  Every shape must lower
 // to canonical IR in both frontend forms; a call that ends its expression
@@ -19354,7 +19354,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_frontend_lex_differential(UnitTestArgu
 // stay clear of the tail where an overlap could end the literal early.
 BUSTER_GLOBAL_LOCAL String8 c_test_giant_literal(Arena* arena, u64 spelling_length, char8 delimiter, String8* decoded_out)
 {
-    BUSTER_CHECK(spelling_length >= 8);
+    BUSTER_RT_CHECK(spelling_length >= 8);
     char8* spelling = arena_allocate(arena, char8, spelling_length);
     u64 content_length = spelling_length - 2;
     char8* content = spelling + 1;

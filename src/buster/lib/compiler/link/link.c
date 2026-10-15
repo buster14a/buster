@@ -4673,7 +4673,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
             memcpy(bytes, result->executable.pointer, result->executable.length);
         }
         u8* tail = arena_allocate_zeroed(arena, u8, total_size - result->executable.length);
-        BUSTER_CHECK(tail == bytes + result->executable.length);
+        BUSTER_RT_CHECK(tail == bytes + result->executable.length);
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(link_elf_debug_kinds); index += 1)
         {
             ByteSlice data = object->sections[link_elf_debug_kinds[index]].data;
@@ -4835,7 +4835,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_section_table_append(Arena* arena, NativeExecu
                     symbol_entry += 1;
                 }
             }
-            BUSTER_CHECK(symbol_entry == symbol_layout.symbol_count + 1 && symbol_name_cursor == symbol_layout.string_offset + symbol_layout.string_size);
+            BUSTER_RT_CHECK(symbol_entry == symbol_layout.symbol_count + 1 && symbol_name_cursor == symbol_layout.string_offset + symbol_layout.string_size);
         }
         u64 name_cursor = section_string_offset + 1;
         for (u32 index = 0; index < descriptor_count; index += 1)
@@ -9346,7 +9346,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
         if (!shared || bind_now) BUSTER_LINK_DYNAMIC(ELF_DYNAMIC_TAG_FLAGS_1, (shared ? 0 : ELF_DYNAMIC_FLAG_1_PIE) | (bind_now ? ELF_DYNAMIC_FLAG_1_NOW : 0));
         BUSTER_LINK_DYNAMIC(0, 0);
 #undef BUSTER_LINK_DYNAMIC
-        BUSTER_CHECK(dynamic_cursor == dynamic_offset + dynamic_size);
+        BUSTER_RT_CHECK(dynamic_cursor == dynamic_offset + dynamic_size);
         bytes[0] = 0x7f;
         bytes[1] = 'E';
         bytes[2] = 'L';
@@ -9398,7 +9398,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
         BUSTER_LINK_PROGRAM_HEADER(0x6474e551, 6, 0, 0, 0, 16);
         BUSTER_LINK_PROGRAM_HEADER(0x6474e552, 4, writable_start, relro_end - writable_start, relro_end - writable_start, 1);
 #undef BUSTER_LINK_PROGRAM_HEADER
-        BUSTER_CHECK(program_header == ELF_HEADER_SIZE + program_header_size);
+        BUSTER_RT_CHECK(program_header == ELF_HEADER_SIZE + program_header_size);
         link_elf_section_table_append(arena, &result, object, 0, section_offsets,
                                       (LinkElfSectionTableLayout){
                                           .eh_frame_header_offset = eh_frame_header_offset,

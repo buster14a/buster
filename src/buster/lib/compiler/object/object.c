@@ -928,7 +928,7 @@ BUSTER_GLOBAL_LOCAL ObjectAssemblyIndex object_assembly_build_index(Arena* arena
         u32 section = object->symbols[index].section;
         if (section < object->section_count)
         {
-            BUSTER_CHECK(result.symbols && result.original_symbols);
+            BUSTER_RT_CHECK(result.symbols && result.original_symbols);
             u32 slot = result.sections[section].symbol_end++;
             result.symbols[slot] = result.original_symbols[slot] = index;
         }
@@ -938,7 +938,7 @@ BUSTER_GLOBAL_LOCAL ObjectAssemblyIndex object_assembly_build_index(Arena* arena
         u32 section = object->relocations[index].section;
         if (section < object->section_count)
         {
-            BUSTER_CHECK(result.relocations);
+            BUSTER_RT_CHECK(result.relocations);
             result.relocations[result.sections[section].relocation_end++] = index;
         }
     }
@@ -955,7 +955,7 @@ BUSTER_GLOBAL_LOCAL ObjectAssemblyIndex object_assembly_build_index(Arena* arena
             u32 count = end - begin;
             if (count < 2) continue;
             // A nonempty range was counted before allocating its index array.
-            BUSTER_CHECK(symbols ? result.symbols != 0 : result.relocations != 0);
+            BUSTER_RT_CHECK(symbols ? result.symbols != 0 : result.relocations != 0);
             u32* indices = (symbols ? result.symbols : result.relocations) + begin;
             bool ordered = true;
             for (u32 index = 1; index < count && ordered; index += 1)
@@ -11657,7 +11657,7 @@ BUSTER_GLOBAL_LOCAL void object_append_codeview(ObjectFile* object, CodeviewResu
                 ObjectSymbol* candidate = object->symbols + candidate_index;
                 by_name = candidate->section != OBJECT_SECTION_UNDEFINED && string_equal(candidate->name, relocation.symbol_name) ? candidate_index : UINT32_MAX;
             }
-            BUSTER_CHECK(by_name == symbol_index);
+            BUSTER_RT_CHECK(by_name == symbol_index);
 #endif
         }
         else if (relocation.symbol_name.length)
@@ -11808,7 +11808,7 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
             relocation_symbol = by_program_symbol;
 #if BUSTER_REFERENCE_CHECKS
             ObjectSymbolNameSlot* slot = object_symbol_name_slot(name_index, relocation.symbol_name);
-            BUSTER_CHECK(slot->used && slot->defined == relocation_symbol);
+            BUSTER_RT_CHECK(slot->used && slot->defined == relocation_symbol);
 #endif
         }
         else if (relocation.symbol_address && relocation.symbol_name.length)

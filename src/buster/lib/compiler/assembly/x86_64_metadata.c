@@ -461,7 +461,7 @@ BUSTER_GLOBAL_LOCAL void buster_x86_metadata_decode_blob_range(u8* out, BusterX8
     u8 groups[((BUSTER_X86_METADATA_RANGE_DECODE_CAPACITY + 4u) / 3u + 1u) * 3u];
     u64 first_group = first_byte / 3u;
     u64 end_group = (first_byte + byte_count + 2u) / 3u;
-    BUSTER_CHECK(byte_count <= BUSTER_X86_METADATA_RANGE_DECODE_CAPACITY && (end_group - first_group) * 3u <= sizeof(groups));
+    BUSTER_RT_CHECK(byte_count <= BUSTER_X86_METADATA_RANGE_DECODE_CAPACITY && (end_group - first_group) * 3u <= sizeof(groups));
     WORK_LEDGER_RECORD(TARGET_X86_BASE64_BYTES_DECODED, (end_group - first_group) * 3u);
     for (u64 group = first_group; group < end_group;)
     {
@@ -8708,7 +8708,7 @@ BUSTER_GLOBAL_LOCAL bool buster_x86_metadata_emit_machine_fast(
     u32 width_index = 0;
     if (plan->machine_fast_data_width_count)
     {
-        BUSTER_CHECK(query.operands); // A width binding requires a validated physical operand.
+        BUSTER_RT_CHECK(query.operands); // A width binding requires a validated physical operand.
         u8 binding_index = plan->machine_fast_data_width_bindings[0];
         BusterX86MetadataPhysicalOperand physical = query.operands[binding_index];
         u16 width = physical.width;
@@ -10693,7 +10693,7 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataEmitResult buster_x86_metadata_emit_form_wi
     if (scratch.byte_count) memory_copy_small(query.output, scratch.bytes, scratch.byte_count);
     if (scratch.relocation_count)
     {
-        BUSTER_CHECK(query.relocations); // Nonzero count passed the output-capacity check.
+        BUSTER_RT_CHECK(query.relocations); // Nonzero count passed the output-capacity check.
         memcpy(query.relocations, scratch.relocations, scratch.relocation_count * sizeof(*scratch.relocations));
     }
     result.byte_count = scratch.byte_count;
