@@ -4798,8 +4798,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_emms_tests(UnitTestArguments*
                 String8 executable = buster_test_temporary_path(arena, S8("buster-emms-state"), BUSTER_WINDOWS ? S8(".exe") : S8(""));
                 String8 command[] = {S8("-mcpu=baseline"), S8("-std=c17"), forms[form], allocators[allocator], S8("-fno-machine-fallback"),
                     S8("-fverify-codegen"), S8("-o"), executable, source_path};
-                CompilerDriverError error = compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                if (BUSTER_REQUIRE(arguments, error == COMPILER_DRIVER_ERROR_NONE))
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                if (compiled.error != COMPILER_DRIVER_ERROR_NONE)
+                {
+                    compiler_driver_object_path_test_report(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), compiled);
+                }
+                if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE))
                 {
                     String8 run[] = {executable};
                     ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
@@ -4828,8 +4833,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_emms_tests(UnitTestArguments*
                     BUSTER_TEST(arguments, valid);
                     if (!valid)
                     {
-                        arguments->show(arguments, S8("EMMS state oracle failed: result={u32} stdout='{S8}' stderr='{S8}'\n"),
-                            (u32)waited.result, BYTE_SLICE_TO_STRING(8, output), BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+                        arguments->show(arguments, S8("EMMS state oracle failed: form={S8} allocator={S8} result={u32} platform_status={u32} stdout='{S8}' stderr='{S8}'\n"),
+                            forms[form], allocators[allocator], (u32)waited.result, waited.platform_status,
+                            BYTE_SLICE_TO_STRING(8, output), BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+                        for (u32 symbol_index = 0; symbol_index < compiled.object.symbol_count; symbol_index += 1)
+                        {
+                            ObjectSymbol symbol = compiled.object.symbols[symbol_index];
+                            bool selected = string_equal(symbol.name, S8("probe")) || string_equal(symbol.name, S8("main")) ||
+                                            string_equal(symbol.name, S8("emit"));
+                            if (selected && symbol.section < compiled.object.section_count)
+                            {
+                                ByteSlice bytes = compiled.object.sections[symbol.section].data;
+                                if (bytes.pointer && symbol.value <= bytes.length)
+                                {
+                                    u64 size = symbol.size ? symbol.size : bytes.length - symbol.value;
+                                    size = BUSTER_MIN(size, BUSTER_MIN(bytes.length - symbol.value, UINT64_C(1024)));
+                                    char8 hexadecimal[2048];
+                                    char8 const digits[] = "0123456789abcdef";
+                                    for (u64 byte = 0; byte < size; byte += 1)
+                                    {
+                                        u8 value = bytes.pointer[symbol.value + byte];
+                                        hexadecimal[2 * byte] = digits[value >> 4];
+                                        hexadecimal[2 * byte + 1] = digits[value & 15];
+                                    }
+                                    arguments->show(arguments, S8("EMMS_STATE_CODE symbol={S8} offset={u64} bytes={S8}\n"),
+                                        symbol.name, symbol.value, (String8){.pointer = hexadecimal, .length = 2 * size});
+                                }
+                            }
+                        }
                     }
                 }
                 os_file_delete(executable);
