@@ -2280,11 +2280,31 @@ BUSTER_GLOBAL_LOCAL OsTestWindowsHandleObservation os_test_windows_handle_observ
     if (result.valid)
     {
         result.flags = flags;
-        SetLastError(0);
-        result.same_object = CompareObjectHandles(original, witness) != 0;
-        if (!result.same_object) result.compare_error = GetLastError();
+        // This API lives in KernelBase, outside the import set shared by the
+        // native compiler matrix. Borrow its already loaded module; diagnostics
+        // must not create a new library handle inside the census interval.
+        typedef BOOL(WINAPI* CompareObjectHandlesProc)(HANDLE, HANDLE);
+        CompareObjectHandlesProc compare = (CompareObjectHandlesProc)(void (*)(void))
+            GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "CompareObjectHandles");
+        if (compare)
+        {
+            SetLastError(0);
+            result.same_object = compare(original, witness) != 0;
+            if (!result.same_object) result.compare_error = GetLastError();
+        }
+        else result.compare_error = ERROR_PROC_NOT_FOUND;
     }
     else result.query_error = GetLastError();
+    return result;
+}
+
+// Only an explicit different-object result or a closed original proves this
+// handle value no longer names the witnessed object. Observation failure does not.
+BUSTER_GLOBAL_LOCAL bool os_test_windows_handle_released(OsTestWindowsHandleObservation observation)
+{
+    bool result = !observation.same_object &&
+        ((observation.valid && observation.compare_error == ERROR_NOT_SAME_OBJECT) ||
+         (!observation.valid && observation.query_error == ERROR_INVALID_HANDLE));
     return result;
 }
 
@@ -2327,20 +2347,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_windows_handle_observation(UnitTestAr
         OsTestWindowsHandleCensus after = os_test_windows_handle_census(GetCurrentProcess());
         OsTestWindowsHandleObservation live = os_test_windows_handle_observe(owned, witness);
         OsTestWindowsHandleObservation different = os_test_windows_handle_observe(unrelated, witness);
+        OsTestWindowsHandleObservation invalid_witness = os_test_windows_handle_observe(owned, 0);
         BUSTER_TEST(arguments, unrelated && before.valid && after.valid && before.count == after.count);
         BUSTER_TEST(arguments, live.valid && live.same_object && !live.query_error && !live.compare_error);
-        BUSTER_TEST(arguments, different.valid && !different.same_object && !different.query_error);
+        BUSTER_TEST(arguments, different.valid && !different.same_object && !different.query_error &&
+            different.compare_error == ERROR_NOT_SAME_OBJECT && os_test_windows_handle_released(different));
+        BUSTER_TEST(arguments, !os_test_windows_handle_released(live));
+        // The former !same_object && valid predicate accepted a failed compare.
+        // Keep a real live original and invalidate only its independent witness.
+        BUSTER_TEST(arguments, invalid_witness.valid && !invalid_witness.same_object &&
+            invalid_witness.compare_error == ERROR_INVALID_HANDLE && !os_test_windows_handle_released(invalid_witness));
         HANDLE closed = owned;
         bool owned_closed = CloseHandle(owned) != 0;
         BUSTER_TEST(arguments, owned_closed);
         if (owned_closed) owned = 0;
         OsTestWindowsHandleObservation released = os_test_windows_handle_observe(closed, witness);
-        BUSTER_TEST(arguments, !released.valid && !released.same_object && released.query_error == ERROR_INVALID_HANDLE);
+        BUSTER_TEST(arguments, !released.valid && !released.same_object && released.query_error == ERROR_INVALID_HANDLE &&
+            os_test_windows_handle_released(released));
         OsTestWindowsHandleCensus failed = os_test_windows_handle_census(0);
         BUSTER_TEST(arguments, !failed.valid && failed.error != 0 && failed.count == 0);
         arguments->show(arguments, S8("WINDOWS_HANDLE_OBSERVATION_CONTROL_V1 count_before={u32} count_after={u32} "
-            "balanced_live_same={u32} different_same={u32} closed_error={u32} failed_census_error={u32}\n"),
-            before.count, after.count, (u32)live.same_object, (u32)different.same_object, released.query_error, failed.error);
+            "balanced_live_same={u32} different_same={u32} closed_error={u32} failed_census_error={u32} invalid_witness_error={u32}\n"),
+            before.count, after.count, (u32)live.same_object, (u32)different.same_object, released.query_error, failed.error, invalid_witness.compare_error);
     }
     if (witness) BUSTER_TEST(arguments, CloseHandle(witness) != 0);
     if (owned) BUSTER_TEST(arguments, CloseHandle(owned) != 0);
@@ -2477,7 +2505,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_process_shutdown_exit_windows(UnitTes
                         modes[index], spawn.windows_owner_id, roles[handle_index], (u64)originals[handle_index],
                         (u64)witnesses[handle_index], (u32)observation.valid, (u32)observation.same_object,
                         observation.flags, observation.query_error, observation.compare_error);
-                    BUSTER_TEST(arguments, !observation.same_object && (observation.valid || observation.query_error == ERROR_INVALID_HANDLE));
+                    BUSTER_TEST(arguments, os_test_windows_handle_released(observation));
                     BUSTER_TEST(arguments, CloseHandle(witnesses[handle_index]) != 0);
                 }
             }
