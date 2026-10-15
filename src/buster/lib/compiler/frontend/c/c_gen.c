@@ -25482,12 +25482,15 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
                 else
                     return c_ir_prepared_call_request_expression_node(builder, frame, C_IR_PREPARED_CALL_CONTINUATION_VENDOR_ARGUMENT, c_ir_call_argument_node(builder, selected, written), starts[written], ends[written], false);
             }
-            IrTypeId type = IR_TYPE_ID_INVALID;
-            if (!c_ir_vendor_result_type(builder, selected->node, &type))
+            // Fixed void builtins keep the statement placeholder emitted by
+            // their lowering; void is not an operand conversion destination.
+            bool fixed_void = fixed && signature.types[0].kind == C_TYPE_VOID;
+            IrTypeId type = fixed_void ? builder->void_type : IR_TYPE_ID_INVALID;
+            if (!fixed_void && !c_ir_vendor_result_type(builder, selected->node, &type))
                 return C_IR_PREPARED_CALL_STEP_FAILED;
             selected->result = fixed ? c_ir_emit_vendor_builtin(builder, name, selected->arguments, emitted_count, token) :
                 c_ir_emit_vendor_generic(builder, name, type, selected->arguments, emitted_count, token);
-            if (fixed && selected->result.value != IR_ID_UNDERLYING_INVALID)
+            if (fixed && !fixed_void && selected->result.value != IR_ID_UNDERLYING_INVALID)
                 selected->result = c_ir_emit_cast(builder, selected->result, type, c_ir_anchor_source_range(builder, token));
             if (selected->result.value == IR_ID_UNDERLYING_INVALID) return C_IR_PREPARED_CALL_STEP_FAILED;
             selected->argument_count = count;

@@ -8655,8 +8655,10 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
                                         String8* name_out, bool* quoted_out);
 BUSTER_C_INTERNAL u32 c_include_name_token_count(CToken* tokens, u32 token_count);
 
-BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu_arch, OperatingSystem os)
+BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, Target target)
 {
+    CpuArch cpu_arch = target.cpu_arch;
+    OperatingSystem os = target.os;
     static char const* supported[] = {
         "__builtin___clear_cache", "__builtin_abs",
         "__builtin_labs",          "__builtin_llabs",
@@ -8770,7 +8772,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
                  (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM &&
                   (native || string_starts_with_sequence(name, S8("__builtin_bswap")))) ||
                  ((builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC) &&
-                  c_semantic_vendor_builtin_supported((Target){.cpu_arch = cpu_arch}, name)) ||
+                  c_semantic_vendor_builtin_supported(target, name)) ||
                  (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64)) ||
                  // The libm rounding/fma/ldexp calls are floating imports: eBPF has
                  // no floating point, and Wasm64 lowers no long double (#1394).
@@ -8994,8 +8996,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         else if ((has_builtin || has_attribute) && argument_count == 1 && arguments[0].kind == C_TOKEN_IDENTIFIER)
         {
             supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]),
-                                                                    options ? options->target.cpu_arch : CPU_ARCH_COUNT,
-                                                                    options ? options->target.os : OPERATING_SYSTEM_FREESTANDING)
+                                                                    options ? options->target : (Target){.cpu_arch = CPU_ARCH_COUNT,
+                                                                                                        .os = OPERATING_SYSTEM_FREESTANDING})
                                     : c_conditional_attribute_supported(base, arguments[0],
                                                                         options ? options->target : target_native);
         }
