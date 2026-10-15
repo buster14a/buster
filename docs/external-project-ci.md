@@ -27,6 +27,7 @@ Assignments describe the harness coverage, not a passing qualification claim.
 | cJSON/Lua/SQLite descriptor preflight, dependency/resource/runtime closures and admission receipts | Linux x86-64; distinct exact functional-admission operations retained after passing full harnesses | Real-source; indirectly apt-input reusable caller |
 | Git 2.51.0 pristine Makefile build/local-operation census | Linux x86-64, same Release compiler; native Clang/GCC harness controls retained | Git qualification manual-only workflow |
 | RAD pinned Linux diagnostic campaign | Linux x86-64, separate Release tree with allocations on and debug-info off; pristine controls, tests and self-host retained | RAD main-only workflow |
+| FFmpeg 7.1.3 portable census | Linux x86-64 only, exact FFmpeg pin; full reference/Buster census plus required H.264 C actions and process-resource evidence | No prior workflow owner |
 | Every project above on native macOS AArch64 | Pending/unqualified; inventory only, no project execution | No existing native project workflow |
 | Every project above on native Windows x86-64 | Pending/unqualified; inventory only, no project execution | No existing native project workflow |
 
@@ -53,9 +54,11 @@ are unchanged. Broad build/test entry points were inspected for external action
 dispatch: full harnesses require explicit commands and inputs, and ordinary
 `test_all` does not dispatch the portfolio.
 
-yyjson, LZ4, sbase, DoomGeneric, musl/libc-test and CPython have opt-in native
+yyjson, LZ4, sbase, DoomGeneric, musl/libc-test, CPython and the Linux kernel
+frontier ([guide](agents/compatibility/linux-kernel.md)) have opt-in native
 harnesses but no ordinary workflow input owner at this revision. Their
-source/input/platform intake remains pending. The unlanded FFmpeg, userspace,
+source/input/platform intake remains pending. FFmpeg's assignment covers only
+the pinned Linux x86-64 portable census; macOS and Windows remain pending. The unlanded userspace,
 curl, PostgreSQL, OpenSSL, QEMU, Linux, MuPDF and SDL3 milestones retain
 [#3176](https://github.com/buster14a/buster/issues/3176)'s evidence contracts.
 Do not enable nonexistent/unqualified input recipes or introduce a child
@@ -89,9 +92,48 @@ its Unity/JSON-patch fixture terms; stb retains its dual-license document; Lua
 retains production and test-suite headers; SQLite retains its source and
 autosetup license files; Git retains COPYING plus sha1dc/reftable/Clar/xdiff and
 host-dependency terms. RAD's pristine harness records its upstream license.
-This scheduling change imports no upstream implementation and does not grant a
+FFmpeg records the pinned upstream `LICENSE.md`; the workflow keeps its
+default LGPL configuration by disabling GPL, nonfree and version-3 components.
+It does not upload the FFmpeg checkout, generated objects or binaries. This
+scheduling change imports no upstream implementation and does not grant a
 Buster first-party license; that decision remains unselected under
 [LICENSES/README.md](../LICENSES/README.md) and #621.
+
+## FFmpeg cost and acceptance limits
+
+The existing Linux x86-64 job stays at its 360-minute limit and keeps every
+current project stage before FFmpeg. FFmpeg's four stages on each of two sides
+have 900-second child deadlines, and its probes and preparation add at most 660
+seconds, for a 131-minute command ceiling. The pristine-input checks run before
+and after the harness; each runs six Git child commands with 600-second
+deadlines, adding 120 minutes. The configured child-deadline sum is 251 minutes.
+It sums limits, not observed runtime. Spawn and cleanup work, file operations,
+checkout/verification, and artifact upload are outside that sum and use the
+same job budget. This ceiling does not establish headroom after earlier
+portfolio stages. No existing watchdog or job deadline is raised. Since FFmpeg
+runs last, earlier project stages keep their current order; if the shared job
+reaches its fixed deadline first, the FFmpeg receipt remains incomplete and the
+portfolio must fail.
+
+Run 38428249840 completed its listed Linux project stages in 31 minutes 49
+seconds and retained a 3,290,671,945-byte artifact, but its later functional
+admission failed. It is useful historical scheduling context, not a green
+end-to-end portfolio receipt or a guaranteed headroom measurement. The workflow
+does not claim that this one run bounds future variation or artifact growth.
+Only text evidence, selected generated configuration files and captured logs
+are added to the immediate FFmpeg artifact; upstream source, objects and
+binaries remain excluded.
+
+The portable collector requires both pinned H.264 translation units to have a
+successful Buster `cc` action, nonempty output object, complete captured
+argv/stdout/stderr/status, clean capture/process cleanup and observed CPU and
+memory measurements. It also retains the full reference-versus-candidate
+configuration, build, media, no-sample FATE and pristine-after checks.
+Unrelated failures in the existing census continue to fail the FFmpeg result.
+This portfolio run supplies functional/resource diagnostics only; it is not a
+performance qualification. The original #4050 acceptance stays open until a
+main-only run records the requested pristine translation-unit completion and
+time/RSS evidence. Broader #3177/#4078 qualification remains separate.
 
 ## Scheduling policy and future changes
 
@@ -100,8 +142,10 @@ It checks the complete workflow directory, sole owner, exact event-SHA checkout,
 three standard OS jobs, no fan-out/call/dispatch bypass, 360-minute caps and
 main-burst retention. Mutation fixtures reject altered events, tags, branches,
 SHA binding, budget, runner, cancellation, duplicate/missing assignment and a
-fourth reusable job. Native event fixtures separately cover main advancing while
-a queued original SHA is tested. The scanner admits a restricted canonical
+fourth reusable job. FFmpeg controls also bind the exact upstream pin, Linux
+owner route and text-only artifact allowlist, rejecting a broad build-directory
+upload. Native event fixtures separately cover main advancing while a queued
+original SHA is tested. The scanner admits a restricted canonical
 owner syntax, not general YAML; topology changes must update its fixtures.
 
 Extra OS jobs require retained evidence of an actual 360-minute hosted timeout:

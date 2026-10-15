@@ -1153,13 +1153,13 @@ class CompareStatisticsTests(unittest.TestCase):
 
 @unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
 class CompareFlowTests(Fakes, unittest.TestCase):
-    def compare(self, arguments, candidate=None, baseline=None, perf=None):
+    def compare(self, arguments, candidate=None, baseline=None, perf=None, script=FAKE_IDE):
         root, ide, fake_perf = self.fakes("new")
         perf = perf(root) if perf else fake_perf
-        write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
+        write_script(ide, script, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
                                         "COMPILE_LOG": os.path.join(root, "compile-a.jsonl")}, **(baseline or {})))
         other = os.path.join(root, "ide-b")
-        write_script(other, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
+        write_script(other, script, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
                                           "COMPILE_LOG": os.path.join(root, "compile-b.jsonl")}, **(candidate or {})))
         output = os.path.join(root, "cmp")
         stdout = sys.stdout
@@ -1340,6 +1340,34 @@ class CompareFlowTests(Fakes, unittest.TestCase):
                 self.assertEqual(summary["phases"] is not None, enabled)
                 self.assertIn("phase metrics collection: " + ("enabled" if enabled else "disabled"), report)
 
+    def test_retirement_operations_keep_default_arms_and_disable_timed_metrics(self):
+        syntax_script = FAKE_IDE.replace('out = args[args.index("-o") + 1]',
+                                         'out = args[args.index("-o") + 1] if "-o" in args else sys.argv[0] + ".syntax-probe"')
+        cases = (("unity-object", "-c", None), ("unity-syntax-only", "-fsyntax-only", None),
+                 ("tiny_startup-syntax-only", "-fsyntax-only", None), ("backend_pressure-object-quality", "-c", "quality"))
+        for cell, operation, allocator in cases:
+            with self.subTest(cell=cell):
+                summary, _, output = self.compare(["--pairs", "2", "--warmups", "1", "--ast-retirement-cell", cell], script=syntax_script)
+                self.assertEqual(summary["plan"]["complete_pairs"], 2)
+                self.assertTrue(summary["outputs_identical"])
+                self.assertTrue(summary["diagnostics_identical"])
+                self.assertFalse(summary["phase_metrics"]["enabled"])
+                self.assertIsNone(summary["phases"])
+                for key, role in lab.VARIANTS:
+                    own = lab.load_meta(os.path.join(output, key))
+                    self.assertEqual(own["config"]["ast_retirement_cell"], cell)
+                    self.assertEqual(own["config"]["extra"], [])
+                    self.assertTrue(summary[role]["metrics_out_supported"])
+                    self.assertFalse(summary[role]["metrics_out_enabled"])
+                    calls = self.compile_arguments(output, key)
+                    flagged = [arg for call in calls for arg in call if arg.startswith("-fmetrics-out=")]
+                    self.assertEqual(flagged, ["-fmetrics-out=" + os.path.join(output, key, "probe.ccmetrics")])
+                    for call in calls:
+                        self.assertIn(operation, call)
+                        self.assertEqual("-o" in call, operation == "-c")
+                        self.assertFalse(any("c-ast-pilot" in arg for arg in call))
+                        selected = [arg for arg in call if arg.startswith("-fregister-allocator=")]
+                        self.assertEqual(selected, ["-fregister-allocator=" + allocator] if allocator else [])
     def test_supported_flag_without_phase_records_is_still_enabled(self):
         summary, report, output = self.compare(["--pairs", "2"], {"METRICS": "CC_METRICS wall_ns=1\n"})
         self.assertTrue(summary["phase_metrics"]["enabled"])
@@ -2347,6 +2375,42 @@ class ConstantReusePairTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary, self.assertRaises(SystemExit):
             lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
                       "--output", os.path.join(temporary, "out"), "--constant-reuse-pair", "table"])
+
+
+class ProcessFloorPairTest(unittest.TestCase):
+    def test_fixed_cell_gives_a_the_x86_64_object_compile_and_b_the_cell_command(self):
+        for cell, command in lab.PROCESS_FLOOR_CELLS.items():
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(cell=cell):
+                root = os.path.abspath(temporary)
+                ide = os.path.join(root, "ide")
+                open(ide, "wb").close()
+                arguments = type("Args", (), {"baseline": ide, "candidate": ide, "perf": "perf", "repo_root": root,
+                                             "sudo": False, "fresh_copy": True, "process_floor_pair": cell})()
+                labs = lab.compare_labs(arguments, root, 2, [])
+                self.assertEqual((labs["a"].extra, labs["b"].extra), ([], []))
+                self.assertEqual((labs["a"].compile, labs["b"].compile), (lab.PROCESS_FLOOR_OBJECT, command))
+                self.assertEqual(labs["a"].workload("OUT"), [ide, "cc", "-g0", "-c", "tiny.c", "-o", "OUT"])
+                self.assertEqual(labs["b"].writes_output, cell != "syntax-only")
+                self.assertEqual("-o" in labs["b"].workload("OUT"), cell != "syntax-only")
+                for key in ("a", "b"):
+                    self.assertTrue(labs[key].transcripts)
+                    self.assertEqual(labs[key].repo_root, root)
+                    self.assertEqual(labs[key].meta["config"]["process_floor_cell"], cell)
+                    self.assertNotIn("constant_reuse_cell", labs[key].meta["config"])
+        self.assertIn("-target", lab.PROCESS_FLOOR_CELLS["aarch64"])
+        self.assertEqual(lab.PROCESS_FLOOR_CELLS["aa"], lab.PROCESS_FLOOR_OBJECT)
+
+    def test_fixed_cell_rejects_request_flags_other_pairs_and_profile_steps(self):
+        for extra in (["--", "-O3"], ["--canonical-inline-pair"], ["--ast-pilot-pair", "object"],
+                      ["--constant-reuse-pair", "intern"], ["--profile-steps", "topdown"]):
+            with tempfile.TemporaryDirectory() as temporary, self.subTest(extra=extra):
+                with self.assertRaises(SystemExit) as raised:
+                    lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
+                              "--output", os.path.join(temporary, "out"), "--process-floor-pair", "aa", *extra])
+                self.assertIn("accepts no", str(raised.exception.code))
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaises(SystemExit):
+            lab.main(["compare", "--baseline", "a", "--candidate", "b", "--cpu", "-1",
+                      "--output", os.path.join(temporary, "out"), "--process-floor-pair", "x86"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,30 @@
+{
+  "aarch64-fast-census.log": {
+    "local_path": "/home/david/Documents/Codex/2026-10-13/sol/work/results-v2/aarch64-fast-census.log",
+    "size": 70629113,
+    "sha256": "d8907f5d51437a7e98e11a4a33addcc6bffab8a99137b75c182421a3a38428d3",
+    "projection": "traces/aarch64-fast-selected.log",
+    "projection_size": 16655668
+  },
+  "aarch64-quality-census.log": {
+    "local_path": "/home/david/Documents/Codex/2026-10-13/sol/work/results-v2/aarch64-quality-census.log",
+    "size": 187049698,
+    "sha256": "c22974aaf97569fc9fc503f9bcaa8d2e83ce6b2e53112b78fd76782718dbce46",
+    "projection": "traces/aarch64-quality-selected.log",
+    "projection_size": 16015208
+  },
+  "x86_64-fast-census.log": {
+    "local_path": "/home/david/Documents/Codex/2026-10-13/sol/work/results-v2/x86_64-fast-census.log",
+    "size": 70975438,
+    "sha256": "0cc0cc24b267e18e9e2fa16e6ab85c8907bba31c5fca1871ce51a9d6969a0e47",
+    "projection": "traces/x86_64-fast-selected.log",
+    "projection_size": 15314739
+  },
+  "x86_64-quality-census.log": {
+    "local_path": "/home/david/Documents/Codex/2026-10-13/sol/work/results-v2/x86_64-quality-census.log",
+    "size": 211096547,
+    "sha256": "242479eebb5e0e08e97f2241e3fb79358b5f8d6239feb01f68f53e75648d9d3f",
+    "projection": "traces/x86_64-quality-selected.log",
+    "projection_size": 14436079
+  }
+}

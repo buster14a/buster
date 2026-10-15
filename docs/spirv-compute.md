@@ -47,8 +47,12 @@ expressions and other source control flow are rejected. Calls, recursion,
 atomics, barriers, floating point, signed arithmetic, division, remainder,
 shifts, comparisons, unary operations, volatile accesses, aggregates, global
 data, local memory requiring addressable storage and additional function
-definitions are outside this slice. Unsupported canonical operations fail
-with a backend diagnostic; they never select an external compiler fallback.
+definitions are outside this slice. Thread-local storage, vectors and variadic
+functions are also rejected. Backend diagnostics name calls (including aggregate
+and function-pointer calls), vectors, variadic functions/arguments and TLS before
+the broad module or row refusal. The no-store kernel receives the explicit
+`requires at least one store to buffer[index]` diagnostic. These checks use
+validated canonical facts; they never select an external compiler fallback.
 
 The complete repository example is
 [`src/buster/tests/compiler/spirv/fixtures/direct_transform.c`](../src/buster/tests/compiler/spirv/fixtures/direct_transform.c). The fixture stays beside its backend component tests, outside the frozen

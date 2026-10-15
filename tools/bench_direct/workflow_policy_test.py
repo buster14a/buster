@@ -226,6 +226,8 @@ COMPILER_AUTHORIZE_IF = "    if: ${{ " + " && ".join(COMPILER_TERMS) + " }}"
 COMPILER_ATTEMPT = "needs.authorize-compiler.outputs.attempt == format('{0}', github.run_attempt)"
 COMPILER_RUN_IF = "    if: ${{ " + " && ".join((*COMPILER_TERMS, COMPILER_ATTEMPT)) + " }}"
 COMPILER_PUBLISH_IF = "    if: ${{ " + " && ".join(("always()", *COMPILER_TERMS)) + " }}"
+COMPILER_UNCHANGED = "needs.authorize-compiler.outputs.unchanged != 'true'"
+COMPILER_COMPARE_IF = "    if: ${{ " + " && ".join((*COMPILER_TERMS, COMPILER_ATTEMPT, COMPILER_UNCHANGED)) + " }}"
 TRUSTED_TOOLS_CHECKOUT = (
     "        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
     "        with:",
@@ -351,9 +353,77 @@ COMPILER_AUTHORIZER_MARKERS = (
     'on_main = fetch(f"{prefix}/compare/{head}...main", token)',
     'failures.append("commit is still on main")',
 )
+# #3923: the only extra authorize steps are the bounded hosted unchanged-input
+# classification; both continue on error, so a failure measures as before.
+UNCHANGED_FETCH_BLOCK = (
+    '      - name: Fetch the measured range as data',
+    '        id: range',
+    "        if: ${{ vars.BENCH_COMPILER_UNCHANGED_SKIP != 'false' && steps.verify.outputs.base_measured == 'true' && steps.verify.outputs.main_owned != 'true' }}",
+    '        continue-on-error: true',
+    '        timeout-minutes: 2',
+    '        shell: bash',
+    '        env:',
+    '          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}',
+    '          SOURCE_TOKEN: ${{ github.token }}',
+    '          BASE_SHA: ${{ steps.verify.outputs.base }}',
+    '          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}',
+    '          POLICY_SHA: ${{ github.sha }}',
+    '        run: |',
+)
+UNCHANGED_FETCH_SCRIPT = (
+    '          set -euo pipefail',
+    '          echo "started_ns=$(date +%s%N)" >> "$GITHUB_OUTPUT"',
+    '          git init --quiet --bare "$RUNNER_TEMP/unchanged-candidate"',
+    '          authorization=$(printf \'x-access-token:%s\' "$SOURCE_TOKEN" | base64 -w0)',
+    '          echo "::add-mask::$authorization"',
+    '          # The classifier searches 128 first-parent commits; a reference',
+    '          # beyond this shallow boundary is never found, which measures.',
+    '          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.$SOURCE_URL/.extraheader" \\',
+    '            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $authorization" \\',
+    '            git -C "$RUNNER_TEMP/unchanged-candidate" fetch --quiet --no-tags --no-write-fetch-head \\',
+    '            --depth=130 --filter=blob:none "$SOURCE_URL" "$HEAD_SHA" "$BASE_SHA" "$POLICY_SHA"',
+)
+UNCHANGED_CLASSIFY_BLOCK = (
+    '      - name: Classify the measured range',
+    '        id: unchanged',
+    "        if: ${{ steps.range.outcome == 'success' }}",
+    '        continue-on-error: true',
+    '        timeout-minutes: 2',
+    '        shell: bash',
+    '        env:',
+    '          BASE_SHA: ${{ steps.verify.outputs.base }}',
+    '          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}',
+    '          POLICY_SHA: ${{ github.sha }}',
+    '          STARTED_NS: ${{ steps.range.outputs.started_ns }}',
+    '          # A missing commit or tree fails the bounded Git capture and measures.',
+    "          GIT_NO_LAZY_FETCH: '1'",
+    '        run: |',
+)
+UNCHANGED_CLASSIFY_SCRIPT = (
+    '          set -euo pipefail',
+    '          [[ "$(git rev-parse HEAD)" == "$POLICY_SHA" ]]',
+    '          clang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/unchanged-driver"',
+    '          env -u GITHUB_OUTPUT "$RUNNER_TEMP/unchanged-driver" ci_no_code --repo "$RUNNER_TEMP/unchanged-candidate" \\',
+    '            --base "$BASE_SHA" --head "$HEAD_SHA" --tested "$HEAD_SHA" --policy "$POLICY_SHA" --event main_push \\',
+    '            > "$RUNNER_TEMP/unchanged-plan.json"',
+    '          receipt=$(cat "$RUNNER_TEMP/unchanged-plan.json")',
+    '          [[ "$receipt" == \'{"schema":"buster-ci-main-unchanged-v1",\'*\'}\' && "$receipt" != *$\'\\n\'* ]]',
+    '          unchanged=false',
+    '          if [[ "$receipt" == *\'"unchanged":true,\'* ]]; then unchanged=true; fi',
+    '          elapsed_ms=$(( ($(date +%s%N) - STARTED_NS) / 1000000 ))',
+    '          {',
+    "            echo '### Unchanged-input classification (#3923)'",
+    '            echo',
+    '            echo "$receipt"',
+    '            echo',
+    '            echo "Observed hosted classification time: ${elapsed_ms} ms."',
+    '          } >> "$GITHUB_STEP_SUMMARY"',
+    '          printf \'receipt=%s\\nclassification_ms=%s\\nunchanged=%s\\n\' "$receipt" "$elapsed_ms" "$unchanged" >> "$GITHUB_OUTPUT"',
+)
+UNCHANGED_OUTPUT = ("      unchanged: ${{ steps.unchanged.outcome == 'success' && steps.unchanged.outputs.unchanged == 'true' && 'true' || 'false' }}",)
 COMPILER_RUN_LINES = (
     "    needs: authorize-compiler",
-    COMPILER_RUN_IF,
+    COMPILER_COMPARE_IF,
     "    runs-on:",
     "      group: buster-9700x-service-dispatch",
     "      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]",
@@ -557,7 +627,7 @@ PULL_PUBLISH_BLOCKS = (
 )
 COMPILER_PUBLISH_BLOCKS = (
     (
-        "    needs: [authorize-compiler, compare]",
+        "    needs: [authorize-compiler, start-compiler, compare]",
         COMPILER_PUBLISH_IF,
         "    runs-on: ubuntu-24.04",
         "    permissions:",
@@ -594,6 +664,14 @@ COMPILER_PUBLISH_BLOCKS = (
         "          BQ_AUTHORIZE_RESULT: ${{ needs.authorize-compiler.result }}",
         "          BQ_AUTHORIZED_ATTEMPT: ${{ needs.authorize-compiler.outputs.attempt }}",
         "          BQ_COMPARE_RESULT: ${{ needs.compare.result }}",
+    ),
+    (
+        "          BQ_UNCHANGED: ${{ needs.authorize-compiler.outputs.unchanged }}",
+        "          BQ_UNCHANGED_RECEIPT: ${{ needs.authorize-compiler.outputs.unchanged_receipt }}",
+        "          BQ_CLASSIFICATION_MS: ${{ needs.authorize-compiler.outputs.classification_ms }}",
+        "          BQ_BASE_MEASURED: ${{ needs.authorize-compiler.outputs.base_measured }}",
+        "          BQ_REFERENCE_CHECK_URL: ${{ needs.authorize-compiler.outputs.reference_check_url }}",
+        "          BQ_REFERENCE_MEASURED_AT: ${{ needs.authorize-compiler.outputs.reference_measured_at }}",
     ),
     (
         "        run: python3 -B tools/bench_direct/compiler_publish.py",
@@ -1241,17 +1319,21 @@ def check_compiler_path(errors: list[str]) -> None:
     jobs = job_blocks(remove_reviewed_machine_steps(DIRECT.read_text(encoding="utf-8")))
     authorize, compare, publish = (jobs.get(name, []) for name in ("authorize-compiler", "compare", "publish-compiler"))
     for name, job, condition in (("authorize-compiler", authorize, COMPILER_AUTHORIZE_IF),
-                                 ("compare", compare, COMPILER_RUN_IF), ("publish-compiler", publish, COMPILER_PUBLISH_IF)):
+                                 ("compare", compare, COMPILER_COMPARE_IF), ("publish-compiler", publish, COMPILER_PUBLISH_IF)):
         if [line for line in job if line.startswith("    if:")] != [condition]:
             errors.append(f"compiler {name} job is missing its exact condition")
     for block in COMPILER_AUTHORIZE_BLOCKS:
         if not contains_block(authorize, block):
             errors.append(f"compiler authorize job is missing exact block starting: {block[0].strip()}")
     if len([line for line in authorize if "uses:" in line]) != 2 or \
-            len([line for line in authorize if "run:" in line]) != 2 or \
-            run_scripts(authorize) != [list(MAIN_TINYCC_SCRIPT)] or \
+            len([line for line in authorize if "run:" in line]) != 4 or \
+            run_scripts(authorize) != [list(MAIN_TINYCC_SCRIPT), list(UNCHANGED_FETCH_SCRIPT),
+                                       list(UNCHANGED_CLASSIFY_SCRIPT)] or \
+            not all(contains_block(authorize, block) for block in
+                    (UNCHANGED_FETCH_BLOCK, UNCHANGED_CLASSIFY_BLOCK, UNCHANGED_OUTPUT)) or \
             any("sparse-checkout:" in line for line in authorize):
-        errors.append("compiler authorize job must use full policy P, pinned TinyCC bootstrap and one fixed authorizer")
+        errors.append("compiler authorize job must use full policy P, pinned TinyCC bootstrap, one fixed authorizer "
+                      "and only the reviewed fail-to-measure unchanged-input classification")
     expected_outputs = [f"      {name}: ${{{{ steps.verify.outputs.{name} }}}}"
                         for name in (*MAIN_ROUTE_FIELDS, *MAIN_ROUTE_DATA_FIELDS)]
     actual_outputs = [line for line in authorize

@@ -1,0 +1,7 @@
+7bc20081848d70f56613d36888d00669aef3d81ca09e39739e2762af84782921  /tmp/claude-0/-home-user-buster/d6088e81-186c-527c-9a7f-3acdc363529f/scratchpad/ide-diag
+ee1a2b9d925a6f471f90caeb6863aa40bfedd78960b7d7ba51a9b9a5dc65ad0a  /tmp/claude-0/-home-user-buster/d6088e81-186c-527c-9a7f-3acdc363529f/scratchpad/ide-v3
+3b6f63eda4efd32d998edb7b856cda5e7358e852bd2162125d9f087b2d5fc31e  /tmp/claude-0/-home-user-buster/d6088e81-186c-527c-9a7f-3acdc363529f/scratchpad/ide-diag2
+ef012d6c08cf2101a3a36acbcf4529d4f61bf05f22f47b02dec85adce757c6d9  /tmp/claude-0/-home-user-buster/d6088e81-186c-527c-9a7f-3acdc363529f/scratchpad/ide-plain
+c1b44d6cd5d1aa3b45c7c84d06c64fe7cf5c95611026f3a6c4d04bc36684e3d9  /tmp/claude-0/-home-user-buster/d6088e81-186c-527c-9a7f-3acdc363529f/scratchpad/ide-diag3
+693054fbc9abad58ba085537b7989d2c578980cb1efdaa180e99ac0f769aafe9  /tmp/claude-0/-home-user-buster/d6088e81-186c-527c-9a7f-3acdc363529f/scratchpad/ide-v3
+ad8dbddb59294d1d9830e7f010b6f9320f531a826d3b126dcb82592f85a8cc21  /tmp/claude-0/-home-user-buster/d6088e81-186c-527c-9a7f-3acdc363529f/scratchpad/ide-diag4

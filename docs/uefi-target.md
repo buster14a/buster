@@ -113,10 +113,26 @@ boot` job installs those exact packages from the snapshot and is required by
 merge groups and manual dispatches, under the existing `GH_ACTIONS_CI_ENABLED`
 switch. Apt retries transient snapshot fetch errors up to three times per
 request, then makes up to three complete attempts per apt command with 30- and
-60-second backoffs. It fails on any incomplete index refresh and never changes
+60-second backoffs. Each source selects only the `Packages` index target;
+APT still fetches and verifies the signed Release metadata and authenticates
+the package indexes and downloads. Command suggestions, translated descriptions
+and desktop application metadata are not needed by the pinned installation and
+are not requested. APT's [source-specific target selection](https://manpages.debian.org/testing/apt/sources.list.5.en.html)
+leaves the snapshot, keyring, package pins and retry budget unchanged.
+It fails on any incomplete required index refresh and never changes
 the signed source, package versions or required boot result. Update the snapshot,
 package versions, firmware hashes and machine configuration together when
 intentionally refreshing the reference lane.
+
+`python3 -B tools/ci_apt_retry_test.py -v` includes local protocol controls when
+APT and GnuPG are available. A temporary signed repository and private APT state
+exercise the workflow's actual source entries: optional metadata HTTP 503 fails
+the former source selection but succeeds with package-only targets; Release or
+package-index HTTP 503, an unrelated keyring and a package-index digest mismatch
+still fail. These controls install no packages and do not use host APT state.
+They establish the request/trust boundary, not availability of the Ubuntu
+snapshot or successful firmware boots. Hosted signed installation and all six
+boot checks remain required.
 
 Each boot gets a deterministic raw disk with a 16 MiB FAT16 EFI System
 Partition (MBR type `0xef`, starting at LBA 2048), containing `EFI/BOOT/BOOTX64.EFI` or

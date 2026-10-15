@@ -542,6 +542,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_scalars(UnitTestArguments* 
                 }
             }
         }
+        c_test_release_preprocess_arenas_from(arguments->arena, mark);
         arena_set_position(arguments->arena, mark);
     }
     codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_scalars"));
@@ -759,6 +760,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_aggregates(UnitTestAr
                     }
                 }
             }
+            c_test_release_preprocess_arenas_from(arguments->arena, mark);
             arena_set_position(arguments->arena, mark);
         }
     }
@@ -780,6 +782,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_aggregates(UnitTestAr
             EbpfArtifact artifact = ebpf_emit_program(arguments->arena, lowered.program);
             BUSTER_TEST(arguments, !artifact.success && artifact.error.message.length != 0 && artifact.bytes.length == 0);
         }
+        c_test_release_preprocess_arenas_from(arguments->arena, mark);
         arena_set_position(arguments->arena, mark);
     }
     codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_local_aggregates"));

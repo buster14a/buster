@@ -30,6 +30,27 @@ destinations are explicitly refused. Write failures name the path and the OS
 error when supplied; native link failures identify the executable or PDB that
 failed. External GPU tools retain their own file-publication behavior.
 
+Before publishing a named output, the driver compares the followed file
+identity of the destination with every positional input and each physical
+source or header file the C preprocessor opened, including forced `-include`
+and `#include_next` files. Virtual builtin resource headers have no filesystem
+identity and are not treated as files read from the working directory; real
+files with the same basename remain protected. System headers stay in the
+collision closure even when `-MMD` omits them from dependency text. A match
+fails with an argument diagnostic before staging or replacing the destination,
+preserving both the input and any existing output bytes. This catches direct,
+symbolic-link, hard-link and case aliases whenever the filesystem reports the
+same identity. Direct Wasm, SPIR-V and eBPF emitters use the same action-aware
+path selector for checking and publication, including their default artifact
+names. Native executable link outputs and `-MF` dependency outputs are checked
+against each unit's physical inputs before publication; multi-input links
+retain each C and preprocessed-assembly unit's physical closure through the
+final output check. For multi-input `-c` and `-emit-llvm`, every derived `.o`
+or `.bc` destination is checked against the full positional input set before
+any unit runs, so an earlier output cannot replace a later input. The check
+does not resolve implicit `-lNAME` library searches or compiler-generated
+secondary evidence outputs.
+
 Publication (`file_publish_checked`, `file_publish_slices_checked` and
 `file_copy_checked` in `src/buster/lib/file.c`) writes a staging file beside
 the destination, closes it and renames it over the destination. It promises
@@ -217,8 +238,64 @@ must call it before starting their own gang, or before calling the driver from
 more than one thread, because the driver cannot release a gang it does not
 own. The lighter `compiler_prewarm()` remains the serial frontend/common-table
 entry. The AArch64 prewarm is an opt-in cost, not a new serial startup floor.
+The x86-64 target prewarm is the existing one: every x86-64 process that
+generates code pays it once, on the first `codegen_prewarm_for_target`. On the
+Ryzen 7 9700X it costs 1.74 ms of the compiler's own time and 6.6 M retired
+instructions above an AArch64 compile of the same one-function unit
+([`2026-10-13T160944Z`](../performance-audits/2026-10-13T160944Z.md), #1125).
 `CompilerDriverResult.compilation_workers` reports the largest active cohort
 (or one); it is not a physical-core or memory measurement.
+
+**Lane gate.** Entering the multi-lane path costs a fixed preparation of the
+cohort's native family per invocation, and each extra worker adds its own
+overhead. Before dispatch, `compiler_driver_unit_worker_limit` therefore
+estimates the work of every eligible native C input of the invocation (#53):
+
+- each input adds `COMPILER_DRIVER_LANE_INPUT_WORK_BYTES`, a fixed charge per
+  translation unit, plus its file size from `os_path_followed_stats`;
+- inputs are stat'ed only until the sum covers both the serial minimum and the
+  per-worker floor at the requested width, so a large population costs a few
+  stats. A missing or unreadable input adds no bytes and still fails in input
+  order.
+
+A population below `COMPILER_DRIVER_LANE_MIN_WORK_BYTES` keeps exactly the
+`-fcompile-jobs=1` path: no prewarm, no gang and the same output. Otherwise the
+worker count is capped at the estimated work divided by
+`COMPILER_DRIVER_LANE_WORK_PER_WORKER_BYTES`, never below two; a capped run is
+the ordinary `-fcompile-jobs=N` path at that smaller N and links the same
+image. `CompilerDriverResult.lane_gate` records the decision:
+
+| Value | Meaning |
+|---|---|
+| `none` | Lanes cannot apply: one worker after clamping, fewer than two eligible inputs, an embedding gang or a source cache. |
+| `lanes` | Lanes were permitted at the requested width; `compilation_workers` still reports the cohorts that actually ran. |
+| `serial` | The population was below the minimum; `compilation_workers` is 1. |
+| `capped` | Fewer workers than requested ran, so each keeps the per-worker floor; `compilation_workers` reports them. |
+
+The three constants in `driver.h` come from the 9700X `scaling-v1` receipt of
+#3943 (check run 115115906751, main `10e44760` with the one-family prewarm and
+the lane-safe on-demand x86 fills):
+
+- **Serial minimum 0.** Two equal TUs (11.7 ms serial) already gain 1.20× at
+  two workers, so no measured population is protected by staying serial.
+- **Per-input charge 513 bytes.** Serial wall time over the `size-n2`…`n64`
+  series is about 5.6 ms + 0.067 µs per byte; `tiny`'s 112 one-function TUs
+  then imply about 0.035 ms per input.
+- **Per-worker floor 32 KiB.** `tiny` (about 76 KB of estimated work) loses at
+  7 workers (10.8 KB per worker, 0.93×). It gains most at 2 workers (37.8 KB
+  per worker: 1.15× and, in the validation run 115276385855, 1.09×), ahead of
+  4 workers (1.11× and 1.04×), so the floor caps it at 2. A 16 KiB floor
+  (4 workers) brought `tiny` at 7 workers to 0.99× and at 13 SMT workers to
+  1.01× in that run. Every `equal`, `count` and `size` row keeps more than
+  48 KB per worker and is unaffected.
+
+The estimate reads file bytes only, so a small file that includes large
+headers is underestimated: that costs a possible gain, never a loss against
+serial. Any change to the lane entry cost moves all three values, so re-derive
+them from a fresh `scaling.request`; the `size`, `tiny` and `count` series are
+the inputs. `compiler_driver_test_set_lane_work` (`driver_internal.h`)
+overrides them for tests; `compiler_driver_test_unit_lane_gate` covers each
+bound and the cap.
 
 This is a bounded feature, **not an accepted throughput improvement**. The
 default stays one pending paired representative measurements. A large input
@@ -268,10 +345,15 @@ the batch.
 
 **Setup stays outside every input.** With metrics requested, before the first
 interval opens the driver runs `compiler_prewarm()` and
-`codegen_prewarm_for_target(target)` (the one-time frontend, ABI and x86
-metadata tables, about 20 ms that used to land in input 0's `codegen` phase),
-and primes first-touch page faults: it commits and touches a pooled TU arena
-(`COMPILER_DRIVER_METRICS_TU_PRIME_BYTES`, which the first unit's arena
+`codegen_prewarm_for_target(target)` (the one-time frontend, ABI and target
+tables that used to land in input 0's `codegen` phase), and primes first-touch
+page faults. On the 9700X this setup put an x86-64 one-function input's
+`start_ns` at 2.4 ms and an AArch64 one's at 0.7 ms
+([`2026-10-13T160944Z`](../performance-audits/2026-10-13T160944Z.md)). It runs
+for every action, so a measured `-fsyntax-only` or `-E` pays a target prewarm
+that the same command without `-fmetrics-out` never runs; compare such runs
+only with each other (#4135). The priming commits and touches a pooled TU
+arena (`COMPILER_DRIVER_METRICS_TU_PRIME_BYTES`, which the first unit's arena
 reuses) and the calling thread's scratch arenas once per thread, plus the
 result arena when a single input compiles in it. No warm-up input is needed.
 `compiler_driver_test_input_metrics` observes the completed setup calls and
@@ -362,7 +444,7 @@ empty). Messages and function names are cut at
 paths and diagnostic codes are written whole. Version 1:
 
 ```text
-CC_METRICS version schema=buster-cc-metrics inputs records ok rejected failed not_run prebuilt error exit_status action target allocator compile_jobs compilation_workers intervals keep_going function_sizes wall_ns peak_rss_bytes
+CC_METRICS version schema=buster-cc-metrics inputs records ok rejected failed not_run prebuilt error exit_status action target allocator compile_jobs compilation_workers intervals keep_going function_sizes wall_ns peak_rss_bytes lane_gate
 CC_METRICS_INPUT version index status error errors warnings measured start_ns end_ns total_ns read_ns preprocess_ns parse_ns analysis_ns ir_ns codegen_ns object_ns emit_ns arena_peak_bytes arena_retained_bytes source_bytes preprocessed_tokens object_file_bytes text_bytes rodata_bytes data_bytes bss_bytes tdata_bytes tbss_bytes initializer_bytes unwind_bytes debug_bytes codegen_functions instructions values code_bytes stack_frame_bytes max_stack_frame_bytes fallback_functions fallback_records function_records function_records_omitted diagnostic_records diagnostic_digest diagnostic_line diagnostic_column path_hex diagnostic_code_hex diagnostic_path_hex message_bytes message_truncated message_hex
 CC_METRICS_FUNCTION version input ordinal code_bytes name_bytes name_truncated name_hex
 ```
@@ -370,7 +452,9 @@ CC_METRICS_FUNCTION version input ordinal code_bytes name_bytes name_truncated n
 The header comes first, then each input followed by its functions. Between
 identical runs only the `*_ns` fields, `peak_rss_bytes` and possibly
 `arena_peak_bytes` (granule-boundary padding) vary, plus
-`compile_jobs`/`compilation_workers`/`intervals` across worker counts.
+`compile_jobs`/`compilation_workers`/`intervals`/`lane_gate` across worker
+counts. `lane_gate` (`none`, `lanes`, `serial` or `capped`; see the lane gate
+above) was appended after `peak_rss_bytes`.
 `peak_rss_bytes` is the process high water (`os_get_peak_resident_memory_size`:
 `ru_maxrss` on Linux and Apple, the peak working set on Windows, 0 when
 unavailable). Process start-up before argument parsing and teardown after the
@@ -605,9 +689,14 @@ The block-local CSE experiment (#3011) is selected only by
 hash-table arm (default `table`; the last one given wins). See
 [opt-in block-local CSE](../canonical-fast-pipeline.md#opt-in-block-local-cse-3011).
 `-fcanonical-intern-constants` / `-fno-canonical-intern-constants` turn on and
-off the construction-time constant interning arm in C lowering (off by
-default, last one wins, independent of `-O` and FAST controls); see
-[opt-in construction-time constant interning](../canonical-fast-pipeline.md#opt-in-construction-time-constant-interning-3011).
+off construction-time constant interning in C lowering (on by default, last
+one wins, independent of `-O` and FAST controls); see
+[construction-time constant interning](../canonical-fast-pipeline.md#construction-time-constant-interning-3011).
+`-fcanonical-construction-fold` / `-fno-canonical-construction-fold` turn on
+and off the experimental construction-time fold of integer-constant
+conversions and truth tests in C lowering (off by default, last one wins,
+independent of `-O` and FAST controls); `-v` prints `C_CONSTRUCTION_FOLD`. See
+[opt-in construction-time folding](../canonical-fast-pipeline.md#opt-in-construction-time-folding-3010).
 
 Canonical inlining is separate from register allocation. Tiny direct-call
 inlining is opt-in at every optimization level: `-fcanonical-inline` enables
@@ -623,11 +712,17 @@ inlining is disabled; an impossible requirement produces a source-mapped
 `-fcanonical-inline-module-growth=N`,
 `-fcanonical-inline-call-sites=N`, and
 `-fcanonical-inline-caller-growth-shift=N`. These flags set budgets but do not enable
-tiny inlining; zero is rejected and zero-valued API options normalize to the
-named defaults. Budgets cap callee instruction count, added instructions per
+tiny inlining; zero is rejected on the command line. Zero-valued API row/site limits
+select the optional defaults while required expansion uses independent per-caller
+work/storage guards (including one relocation of existing caller data); other zero API fields normalize to the named defaults.
+Those guards price block local-value snapshots only for blocks that carry one,
+and canonical C construction attaches none (#4050).
+Explicit budgets cap callee instruction count, added instructions per
 caller, added instructions per module, and accepted call sites, respectively;
-the shift sets the caller relocation bound described below.
-Without an explicit module limit, the module budget is relative: the larger of
+the shift sets the caller relocation bound described below. The callee limit
+defaults to 13 canonical rows (`IR_INLINE_TINY_INSTRUCTIONS`, 16 before
+#3854); the FAST pipeline contract records the per-callee census behind it.
+Without an explicit module limit, the optional module budget is relative: the larger of
 4096 rows and 1/32 of the module's lowered canonical instruction rows
 (`ir_inline_module_growth_limit`). A caller keeps optional splices only when
 their growth is at least 1/32 of its rows (`IR_INLINE_CALLER_GROWTH_SHIFT`);
@@ -648,8 +743,9 @@ disable frontend SSA as well. Verbose compilation reports `IR_FRONTEND_SSA`
 counters beside `IR_LOCAL_PROMOTION`; see the
 [frontend ownership contract](frontend/foundations.md#direct-local-ssa-github-34).
 
-`-fc-ast-pilot[=implicit|hybrid|explicit]` (default off; the bare flag is
-`implicit`) builds the [implicit postorder syntax
+`-fc-ast-pilot[=implicit|hybrid|explicit]` (default `implicit` since the
+[owner decision of 2026-10-13](https://github.com/buster14a/buster/issues/3102#issuecomment-6146782845);
+the bare flag is `implicit`) builds the [implicit postorder syntax
 tree](frontend/ast.md#driver-pilot-hook) of each C input after a successful
 `c_preprocess`, inside the parse phase, so its time lands in `parse_ns`. The
 unit's declaration records then come from the tree
@@ -662,16 +758,25 @@ binder follows each function body's
 [statement plan](frontend/ast.md#statement-plan-from-the-tree), and lowering
 answers its root-conditional splits from it
 ([lowering from the tree](frontend/ast.md#lowering-from-the-tree)); no other
-stage reads it. Only under the flag does analysis share the primitive and
+stage reads it. Only with the tree does analysis share the primitive and
 pointer type rows those queries mint
 ([interned rows](frontend/ast.md#interned-rows)). With the flag the object
-and every diagnostic are byte-identical, and a tree the builder rejects fails
-the unit with the parse error class and a located diagnostic published like
-`c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
+and every diagnostic are byte-identical to the tree-free path's. A builder that
+cannot reserve its storage fails the unit with the parse error class; a unit
+whose tree the builder rejects on syntax compiles without a tree, so it reports what
+`-fno-c-ast-pilot` reports; `-v` counts it in a `C_AST_REJECTED` row. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
-`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS` and
-`C_AST_LOWER` rows beside `C_TYPE_LAYOUT`.
+`C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS`,
+`C_AST_LOWER` and `C_AST_FACTS` rows, among others, beside `C_TYPE_LAYOUT`.
+Except under `-fsyntax-only`, the tree also retains semantic analysis's
+per-node facts for lowering
+([retained facts](frontend/ast.md#retained-facts)). `-fno-c-ast-pilot` selects
+the tree-free path: analysis and lowering answer every question from tokens,
+as they did before the switch, and no facts are retained. It is the reference
+arm for differentials and bisection, and
+[#4058](https://github.com/buster14a/buster/issues/4058) removes it once
+lowering reads only the tree. The last of the two flags wins.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`
@@ -751,6 +856,25 @@ the `CHAR_MIN`/`CHAR_MAX` definitions in `<limits.h>`. Explicit `signed char`
 and `unsigned char` keep their specified behavior. The options apply to C
 frontend paths for native objects, LLVM bitcode, Wasm64, and eBPF. External GPU
 pipelines reject them because their toolchains do not use Buster's C frontend.
+
+## Short wchar_t and x86-64 code models
+
+`-fshort-wchar` (#4052) sets `Target.short_wchar`, which makes
+`target_uses_16_bit_wchar` and `target_uses_unsigned_wchar` true on any
+native target, so `wchar_t` is `unsigned short`. The type layer, wide
+character and `L"..."` literals, `<stddef.h>` `wchar_t`, `__WCHAR_TYPE__`,
+`__SIZEOF_WCHAR_T__`, `__WCHAR_MAX__`, `__WCHAR_WIDTH__` and
+`__WCHAR_UNSIGNED__` all follow it. `wint_t` keeps the ABI's own width, as in
+GCC. External GPU pipelines reject the option.
+
+`-mcmodel=small` is the x86-64 default and a no-op. The backend emits only the
+small model (rip-relative or GOT-relative references; no kernel-model
+sign-extended absolute addressing, no large-model `movabs`), so
+`-mcmodel=kernel`, `medium` and `large` fail with
+`unsupported option: -mcmodel=<model> (the x86-64 backend implements only the
+small code model)` rather than aliasing small. Unknown values report
+`invalid value for -mcmodel`, and non-x86-64 or GPU targets report
+`unsupported option ... for this target`.
 
 ## C input phase selection
 
@@ -2071,6 +2195,21 @@ not split. Empty comma fields and missing operands fail with a diagnostic.
 The driver and native linker share `link_validate_linker_arguments`, and the
 linker checks the actual static/dynamic image before publishing output.
 
+When no link happens (`-c`, `-S`, `-E`, `-fsyntax-only`), `-Wl,...` and
+`-Xlinker` arguments are accepted and ignored, as GCC does and Clang does with
+an unused-argument warning (#4041); build-system probes such as
+`-Wl,--enable-new-dtags -c` therefore succeed. The same arguments are still
+validated on a link, and a leading `--version` stays a linker query that a
+non-link action refuses.
+
+Accepted and ignored options (no effect on output):
+
+- `-fcolor-diagnostics`, `-fno-color-diagnostics`: the driver never colors
+  diagnostics, so both spellings are presentation-only no-ops (#4041).
+- `-fcomment-block-commands=<names>`: a Clang doc-comment option that only
+  feeds `-Wdocumentation`, which is not implemented; an empty list is refused
+  (#4041).
+
 The supported subset is:
 
 - Linux and Android dynamic ELF executables: `-E`, `-export-dynamic`, and
@@ -2155,7 +2294,36 @@ switches, runtime paths, and other `-z` modes are refused.
 `-Wp,` and `-Wa,` are never warning options. Only the exact
 `-Wp,-MD,PATH` and `-Wp,-MMD,PATH` dependency spellings described below are
 supported; other pass-through requests, including macro/include operations,
-are refused. Direct `-D`, `-U`, and `-I` remain available.
+are refused. The one accepted `-Wa,` value is `--noexecstack` (alone or as a
+comma-separated list of it): every Linux and Android ELF object already ends
+in an empty non-allocated `.note.GNU-stack` marking a non-executable stack
+unless an assembly input requests `"x"`, so the option changes nothing, for
+`-c`, `-S` and `-E` alike. Any other `-Wa,` value, including `--execstack`,
+an empty item and `-Wa,` alone, is refused with `unsupported pass-through
+option`.
+
+## C90 dialects, `-P` and `-Qunused-arguments`
+
+`-std=c89`, `-std=c90`, `-std=iso9899:1990` and `-ansi` select a strict ISO C90
+preprocessing dialect (`C_PREPROCESS_DIALECT_C89`), separate from the existing
+`-std=gnu89`/`-std=gnu90`. Like the other strict dialects it defines
+`__STRICT_ANSI__`, leaves out the GNU `linux`/`unix` macros and the GNU
+keywords (`typeof`, `asm`), and replaces trigraphs by default. Like `gnu89` it
+leaves `__STDC_VERSION__` undefined and defines `__GNUC_GNU_INLINE__`, with
+GNU inline semantics for `inline`. `-ansi` is exactly `-std=c90`; the last of
+`-ansi` and `-std=` wins. `-std=iso9899:199409` and `-std=c88` stay refused.
+
+The dialect is a preprocessing and keyword switch only. The frontend has no
+C90 language-rule switches, so `//` comments, mixed declarations and
+statements, and compound literals and other C99 constructs that GCC and Clang
+diagnose or reject under `-std=c90 -pedantic` are accepted. What the dialect
+supplies is the predefined-macro and header-selection behavior real C90
+projects (SDL's tests, parson) depend on, not a conformance check.
+
+`-P` (suppress linemarkers) and `-Qunused-arguments` (suppress Clang's
+unused-argument warning) are accepted for every action. The `-E` serializer
+never writes linemarkers, so `-P` already holds, and no unused-argument
+warning exists to suppress. Direct `-D`, `-U`, and `-I` remain available.
 Standalone `-M`, `-MM`, and `-MG` remain unsupported.
 
 ## Macro filename prefix maps
@@ -2238,8 +2406,9 @@ depfile reports failure even if the artifact has already been published.
 ## Warning options
 
 The warnings the driver publishes today are the preprocessor's (`#warning`,
-extra tokens after a directive such as `#endif junk`) and the GNU obsolete
-`member: value` designator in a strict ISO dialect. Each belongs to a group
+extra tokens after a directive such as `#endif junk`), the GNU obsolete
+`member: value` designator in a strict ISO dialect, and semantic analysis's
+signedness-only pointer conversions (`-Wpointer-sign`, #4051). Each belongs to a group
 (`CompilerDriverWarningGroup`, mapped from the diagnostic kind by
 `compiler_driver_warning_group_of_kind`), and `compiler_driver_publish_c_diagnostics`
 applies one `CompilerDriverWarningPolicy` to them for every input, serial or
@@ -2250,6 +2419,7 @@ batched, including those whose source was replayed from the source cache.
 | `cpp` | `-Wcpp` (GCC), `-W#warnings` (Clang) | `#warning` |
 | `extra-tokens` | `-Wextra-tokens` (Clang), `-Wendif-labels` (GCC, which names only `#else`/`#endif` there) | tokens after a directive |
 | `gnu-designator` | `-Wgnu-designator` (Clang; GCC files it under `-Wpedantic`) | `member:` designator |
+| `pointer-sign` | `-Wpointer-sign` (GCC and Clang) | implicit pointer conversion whose pointees differ only in integer signedness |
 
 Options apply left to right, as in GCC and Clang, and the last one that names
 a group or the global flag wins:
@@ -2272,9 +2442,10 @@ a group or the global flag wins:
   either order (`-Wno-error=cpp -Werror` leaves `#warning` a warning).
 
 A promoted warning is published with error severity and the option that
-promoted it (`... [-Werror=cpp]`, `[-Werror=extra-tokens]` or
-`[-Werror=gnu-designator]`; a warning without a group gets `[-Werror]`). The unit
-fails with the tokenizer error, so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
+promoted it (`... [-Werror=cpp]`, `[-Werror=extra-tokens]`,
+`[-Werror=gnu-designator]` or `[-Werror=pointer-sign]`; a warning without a
+group gets `[-Werror]`). The unit fails with the tokenizer error (the analysis
+error for `pointer-sign`), so `-c`, `-S`, `-E`, `-fsyntax-only`, a link
 and a batch of several inputs all return failure and write no output; the
 failed-unit rules above decide which later results are discarded. Its record
 in `CompilerDriverResult.diagnostics` and the per-input `error_count` are those
@@ -2285,9 +2456,21 @@ before this policy existed; only the promoted ones are subtracted.
 Every other `-W...` spelling is still accepted and ignored: `-Wall`, `-Wextra`,
 and names that are neither a group nor a parent of one (`-Werror=unused-variable`,
 `-Werror=` and `-Wno-` neither enable nor promote anything). Diagnosing unknown or unimplemented names is a
-separate decision (#1574). The parser and lowering still have no warning
-channel, so signed-overflow in constant expressions is not yet a warning that
-`-Werror` can promote.
+separate decision (#1574). Semantic analysis has one warning channel,
+`CParseResult.warnings` (carried to `CIRLowerResult.warnings`), which only
+`-Wpointer-sign` uses: the driver publishes it ahead of the unit's errors for
+`-fsyntax-only` and for every lowering action, counts it in
+`CompilerDriverResult.analysis_warning_count` (less promoted ones, as for
+`tokenizer_warning_count`), and fails the unit with
+`COMPILER_DRIVER_ERROR_ANALYSIS` when `-Werror` promotes one. Other parser and
+lowering findings remain errors, so signed-overflow in constant expressions is
+not yet a warning that `-Werror` can promote.
+
+`-Wpointer-sign` is on by default, as in Clang (GCC enables it only with
+`-Wall` or `-Wpedantic`); `-Wall` is accepted and changes nothing. The driver
+has no `-pedantic-errors` mode, so only `-Werror` and `-Werror=pointer-sign`
+make it an error. The frontend contract (which conversions belong to the class)
+is in [Calls](frontend/calls.md#signedness-only-pointer-conversions--wpointer-sign).
 
 Under a bare `-Werror` the GNU obsolete designator fails the build, as it does
 in Clang (where `-Wgnu-designator` is on by default); GCC accepts the same
@@ -2463,6 +2646,8 @@ allocators; `codegen_test_machine_scratch_plan` checks the plan, the
 replacement and its restoration. Backend time, not memory, is the next limit
 for such functions: 128,000 and 256,000 `sink += x + i;` statements in one
 function take about 10 s and 42 s.
+
+Windows ARM64 stores function length in 18 bits of four-byte instructions. Larger functions therefore use aligned `.pdata`/`.xdata` fragments strictly shorter than 1 MiB; epilogs remain whole, their scopes are relative to each fragment, and continuation records carry the parent's unwind state through `end_c`. A registered large C fixture exercises compilation, linking, and execution across those fragment boundaries on native Windows ARM64.
 
 ## ELF TLS companion lookup
 

@@ -1,0 +1,30 @@
+==1099674== Nulgrind, the minimal Valgrind tool
+==1099674== Copyright (C) 2002-2024, and GNU GPL'd, by Nicholas Nethercote et al.
+==1099674== Using Valgrind-3.25.1 and LibVEX; rerun with -h for copyright info
+==1099674== Command: /usr/bin/true
+==1099674== 
+vex amd64->IR: unhandled instruction bytes: 0x62 0xF1 0x7F 0x48 0x7F 0x84 0x24 0x30 0x0 0x0
+vex amd64->IR:   REX=0 REX.W=0 REX.R=0 REX.X=0 REX.B=0
+vex amd64->IR:   VEX=0 VEX.L=0 VEX.nVVVV=0x0 ESC=NONE
+vex amd64->IR:   PFX.66=0 PFX.F2=0 PFX.F3=0
+==1099674== valgrind: Unrecognised instruction at address 0x4039e8d.
+==1099674==    at 0x4039E8D: _dl_start (rtld.c:563)
+==1099674==    by 0x4038E87: ??? (in /usr/lib/ld-linux-x86-64.so.2)
+==1099674== Your program just tried to execute an instruction that Valgrind
+==1099674== did not recognise.  There are two possible reasons for this.
+==1099674== 1. Your program has a bug and erroneously jumped to a non-code
+==1099674==    location.  If you are running Memcheck and you just saw a
+==1099674==    warning about a bad jump, it's probably your program's fault.
+==1099674== 2. The instruction is legitimate but Valgrind doesn't handle it,
+==1099674==    i.e. it's Valgrind's fault.  If you think this is the case or
+==1099674==    you are not sure, please let us know and we'll try to fix it.
+==1099674== Either way, Valgrind will now raise a SIGILL signal which will
+==1099674== probably kill your program.
+==1099674== 
+==1099674== Process terminating with default action of signal 4 (SIGILL)
+==1099674==  Illegal opcode at address 0x4039E8D
+==1099674==    at 0x4039E8D: _dl_start (rtld.c:563)
+==1099674==    by 0x4038E87: ??? (in /usr/lib/ld-linux-x86-64.so.2)
+==1099674== 
+
+exit=-4

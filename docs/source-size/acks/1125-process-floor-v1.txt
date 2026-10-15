@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 37765
+reason Fixed report-only process-floor-v1 Zen 5 profile (#1125): uarch_lab cell, driver, receipt verdict, plan/publisher validation and its tests.

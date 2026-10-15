@@ -4387,12 +4387,35 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
     object_assembly_append_section_alignment(buffer, section);
     if (object_section_kind_is_zero_fill(section->kind))
     {
-        object_assembly_emit_labels(buffer, object, target, section_index, 0);
-        if (data_length)
+        // Keep each sorted symbol boundary visible; equal-offset aliases share one label position.
+        u64 offset = 0;
+        object_assembly_emit_labels(buffer, object, target, section_index, offset);
+        while (buffer->index.symbol_cursor < range.symbol_end &&
+               object->symbols[buffer->index.symbols[buffer->index.symbol_cursor]].value == offset)
         {
+            buffer->index.symbol_cursor += 1;
+        }
+        while (offset < data_length && !buffer->error)
+        {
+            u64 next_offset = data_length;
+            if (buffer->index.symbol_cursor < range.symbol_end)
+            {
+                u64 symbol_offset = object->symbols[buffer->index.symbols[buffer->index.symbol_cursor]].value;
+                if (symbol_offset > offset && symbol_offset < next_offset)
+                {
+                    next_offset = symbol_offset;
+                }
+            }
             object_assembly_append_string(buffer, S8("\t.zero "));
-            object_assembly_append_u64_decimal(buffer, data_length);
+            object_assembly_append_u64_decimal(buffer, next_offset - offset);
             object_assembly_append_string(buffer, S8("\n"));
+            offset = next_offset;
+            object_assembly_emit_labels(buffer, object, target, section_index, offset);
+            while (buffer->index.symbol_cursor < range.symbol_end &&
+                   object->symbols[buffer->index.symbols[buffer->index.symbol_cursor]].value == offset)
+            {
+                buffer->index.symbol_cursor += 1;
+            }
         }
         object_assembly_emit_sizes(buffer, object, target, section_index);
         return;
@@ -11831,13 +11854,23 @@ BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiRes
     return true;
 }
 
+typedef struct ObjectWindowsArm64Fragment ObjectWindowsArm64Fragment;
+struct ObjectWindowsArm64Fragment
+{
+    u32 function_index;
+    u32 code_offset;
+    u32 xdata_offset;
+};
+
 typedef struct ObjectWindowsUnwindResult ObjectWindowsUnwindResult;
 struct ObjectWindowsUnwindResult
 {
     ByteSlice pdata;
     ByteSlice xdata;
     u32* xdata_offsets;
+    ObjectWindowsArm64Fragment* arm64_fragments;
     u32 function_count;
+    u32 pdata_count;
     bool valid;
     bool aarch64;
     u8 reserved[2];
@@ -11917,6 +11950,7 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
 {
     ObjectWindowsUnwindResult result = {
         .function_count = function_count,
+        .pdata_count = function_count,
     };
     bool valid = arena && (!function_count || functions) && function_count <= UINT32_MAX / 12;
     if (valid)
@@ -12256,11 +12290,13 @@ BUSTER_GLOBAL_LOCAL bool object_windows_arm64_canonical_codes_build(CodegenFunct
 }
 
 BUSTER_GLOBAL_LOCAL bool object_windows_arm64_codes_build(CodegenFunctionDescriptor const* function, ObjectWindowsArm64CodeBuffer* codes,
-                                                          u32* epilog_code_index)
+                                                          u32* epilog_code_index, bool* epilog_codes_shared_with_prolog)
 {
     u32 machine_frame_pointer = UINT32_MAX;
+    bool shared_with_prolog = object_windows_arm64_machine_frame(function, &machine_frame_pointer);
     bool valid;
-    if (object_windows_arm64_machine_frame(function, &machine_frame_pointer))
+    *epilog_codes_shared_with_prolog = shared_with_prolog;
+    if (shared_with_prolog)
     {
         valid = true;
         for (u32 index = function->unwind_action_count; valid && index > 3; index -= 1)
@@ -12282,6 +12318,201 @@ BUSTER_GLOBAL_LOCAL bool object_windows_arm64_codes_build(CodegenFunctionDescrip
     return valid;
 }
 
+#define OBJECT_WINDOWS_ARM64_MAX_FRAGMENT_BYTES UINT32_C(0x000ffffc)
+
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_epilogs_valid(CodegenFunctionDescriptor const* function)
+{
+    bool valid = function && (!function->epilog_count || (function->epilog_offsets && function->epilog_end_offsets));
+    u32 previous_end = 0;
+    for (u32 epilog_index = 0; valid && epilog_index < function->epilog_count; epilog_index += 1)
+    {
+        u32 start = function->epilog_offsets[epilog_index];
+        u32 end = function->epilog_end_offsets[epilog_index];
+        valid = !(start & 3u) && !(end & 3u) && start >= previous_end && end > start && end <= function->code_size &&
+                end - start <= OBJECT_WINDOWS_ARM64_MAX_FRAGMENT_BYTES;
+        previous_end = end;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL u32 object_windows_arm64_epilog_lower_bound(CodegenFunctionDescriptor const* function, u32 code_offset)
+{
+    u32 low = 0;
+    u32 high = function->epilog_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (function->epilog_offsets[middle] < code_offset)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_fragment_next(CodegenFunctionDescriptor const* function, u32 fragment_start, u32* fragment_end)
+{
+    bool valid = function && fragment_end && fragment_start < function->code_size;
+    u32 candidate = fragment_start;
+    if (valid)
+    {
+        u64 limit = (u64)fragment_start + OBJECT_WINDOWS_ARM64_MAX_FRAGMENT_BYTES;
+        candidate = limit < function->code_size ? (u32)limit : function->code_size;
+        u32 first_epilog = object_windows_arm64_epilog_lower_bound(function, fragment_start);
+        if (first_epilog && function->epilog_end_offsets[first_epilog - 1u] > fragment_start)
+        {
+            valid = false;
+        }
+        u32 fragment_epilog_count = 0;
+        for (u32 epilog_index = first_epilog; valid && epilog_index < function->epilog_count; epilog_index += 1)
+        {
+            u32 start = function->epilog_offsets[epilog_index];
+            u32 end = function->epilog_end_offsets[epilog_index];
+            if (start >= candidate)
+            {
+                break;
+            }
+            if (end > candidate)
+            {
+                candidate = start;
+                break;
+            }
+            fragment_epilog_count += 1;
+            if (fragment_epilog_count > UINT16_MAX)
+            {
+                candidate = start;
+                break;
+            }
+        }
+        valid &= candidate > fragment_start && candidate - fragment_start <= OBJECT_WINDOWS_ARM64_MAX_FRAGMENT_BYTES && !(candidate & 3u);
+        if (valid)
+        {
+            *fragment_end = candidate;
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL u32 object_windows_arm64_fragment_epilog_count(CodegenFunctionDescriptor const* function, u32 fragment_start, u32 fragment_end)
+{
+    u32 first_epilog = object_windows_arm64_epilog_lower_bound(function, fragment_start);
+    u32 end_epilog = object_windows_arm64_epilog_lower_bound(function, fragment_end);
+    return end_epilog - first_epilog;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_fragment_record_shape(u32 epilog_code_index, u32 code_count,
+                                                                    bool epilog_codes_shared_with_prolog, bool first_fragment,
+                                                                    u32 fragment_epilog_count, u32* scope_count_out,
+                                                                    u32* unwind_byte_count_out, u32* code_word_count_out,
+                                                                    u32* record_size_out)
+{
+    u32 scope_count = fragment_epilog_count;
+    u32 parent_prolog_code_count = epilog_codes_shared_with_prolog ? code_count : epilog_code_index;
+    u64 unwind_byte_count = first_fragment ? code_count :
+                            fragment_epilog_count ? (u64)code_count + 1u : (u64)parent_prolog_code_count + 1u;
+    u64 code_word_count = (unwind_byte_count + 3) / 4;
+    bool extended = scope_count > 31 || code_word_count > 31;
+    u64 record_size = (extended ? 8u : 4u) + (u64)scope_count * 4 + code_word_count * 4;
+    bool valid = scope_count <= UINT16_MAX && epilog_code_index <= code_count && code_word_count <= UINT8_MAX &&
+                 (!fragment_epilog_count || (u64)epilog_code_index + (first_fragment ? 0u : 1u) <= 1023u) &&
+                 record_size <= UINT32_MAX && scope_count_out && unwind_byte_count_out && code_word_count_out && record_size_out;
+    if (valid)
+    {
+        *scope_count_out = scope_count;
+        *unwind_byte_count_out = (u32)unwind_byte_count;
+        *code_word_count_out = (u32)code_word_count;
+        *record_size_out = (u32)record_size;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_fragment_record_write(u8* record, CodegenFunctionDescriptor const* function,
+                                                                     ObjectWindowsArm64CodeBuffer const* codes,
+                                                                     u32 epilog_code_index, bool epilog_codes_shared_with_prolog,
+                                                                     u32 fragment_start, u32 fragment_end, bool first_fragment)
+{
+    u32 fragment_epilog_count = object_windows_arm64_fragment_epilog_count(function, fragment_start, fragment_end);
+    u32 scope_count = 0;
+    u32 unwind_byte_count = 0;
+    u32 code_word_count = 0;
+    u32 record_size = 0;
+    bool valid = record && function && codes && codes->valid && codes->bytes && codes->count &&
+                 object_windows_arm64_fragment_record_shape(epilog_code_index, codes->count, epilog_codes_shared_with_prolog,
+                                                           first_fragment, fragment_epilog_count, &scope_count,
+                                                           &unwind_byte_count, &code_word_count, &record_size);
+    if (valid)
+    {
+        u32 header_size = scope_count > 31 || code_word_count > 31 ? 8u : 4u;
+        u32 header = (fragment_end - fragment_start) / 4;
+        bool single_epilog = !first_fragment && !fragment_epilog_count;
+        if (single_epilog)
+        {
+            header |= 1u << 21;
+        }
+        if (header_size == 4)
+        {
+            header |= scope_count << 22;
+            header |= code_word_count << 27;
+        }
+        memset(record, 0, record_size);
+        memcpy(record, &header, sizeof(header));
+        if (header_size == 8)
+        {
+            u32 extension = scope_count | (code_word_count << 16);
+            memcpy(record + 4, &extension, sizeof(extension));
+        }
+        u32 local_scope_index = 0;
+        u32 first_epilog = object_windows_arm64_epilog_lower_bound(function, fragment_start);
+        u32 end_epilog = object_windows_arm64_epilog_lower_bound(function, fragment_end);
+        for (u32 epilog_index = first_epilog; valid && epilog_index < end_epilog; epilog_index += 1)
+        {
+            u32 epilog_start = function->epilog_offsets[epilog_index];
+            u32 relative_start = (epilog_start - fragment_start) / 4;
+            u32 code_index = first_fragment ? epilog_code_index : epilog_code_index + 1u;
+            valid = relative_start < (1u << 18) && code_index <= 1023;
+            if (valid)
+            {
+                u32 scope = relative_start | (code_index << 22);
+                u32 scope_offset = header_size + local_scope_index * 4;
+                memcpy(record + scope_offset, &scope, sizeof(scope));
+                local_scope_index += 1;
+            }
+        }
+        u32 unwind_offset = header_size + scope_count * 4;
+        u32 written = 0;
+        if (first_fragment)
+        {
+            memcpy(record + unwind_offset, codes->bytes, codes->count);
+            written = codes->count;
+        }
+        else if (fragment_epilog_count)
+        {
+            valid &= codes->count > epilog_code_index && codes->bytes[codes->count - 1] == 0xe4;
+            if (valid)
+            {
+                record[unwind_offset] = 0xe5;
+                written = 1;
+                memcpy(record + unwind_offset + written, codes->bytes, codes->count);
+                written += codes->count;
+            }
+        }
+        else
+        {
+            u32 parent_prolog_code_count = epilog_codes_shared_with_prolog ? codes->count : epilog_code_index;
+            record[unwind_offset] = 0xe5;
+            written = 1;
+            memcpy(record + unwind_offset + written, codes->bytes, parent_prolog_code_count);
+            written += parent_prolog_code_count;
+        }
+        valid &= written == unwind_byte_count;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_arm64_unwind_build(Arena* arena, CodegenFunctionDescriptor* functions,
                                                                                  u32 function_count)
 {
@@ -12289,103 +12520,158 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_arm64_unwind_build(
         .function_count = function_count,
         .aarch64 = true,
     };
-    if (arena && (!function_count || functions) && function_count <= UINT32_MAX / 8)
+    bool valid = arena && (!function_count || functions);
+    u64 pdata_count = 0;
+    u64 xdata_capacity = 0;
+    for (u32 function_index = 0; valid && function_index < function_count; function_index += 1)
     {
-        result.xdata_offsets = arena_allocate(arena, u32, function_count);
-        u64 xdata_capacity = 0;
-        for (u32 function_index = 0; function_index < function_count; function_index += 1)
+        CodegenFunctionDescriptor const* function = functions + function_index;
+        valid = function->code_size && !(function->code_size & 3u) && object_windows_arm64_epilogs_valid(function) &&
+                function->unwind_action_count <= (UINT32_MAX - 8u) / 8u;
+        u32 code_capacity = valid ? function->unwind_action_count * 8u + 8u : 8u;
+        ObjectWindowsArm64CodeBuffer codes = {
+            .bytes = valid ? arena_allocate(arena, u8, code_capacity) : 0,
+            .capacity = code_capacity,
+            .valid = valid,
+        };
+        u32 epilog_code_index = 0;
+        bool epilog_codes_shared_with_prolog = false;
+        if (valid)
         {
-            CodegenFunctionDescriptor const* function = functions + function_index;
-            if (!function->code_size || function->code_size % 4 || function->code_size / 4 >= (1u << 18) || function->epilog_count > UINT16_MAX)
-            {
-                return result;
-            }
-            u64 record_capacity = 8 + (u64)function->epilog_count * 4 + (u64)function->unwind_action_count * 8 + 8;
-            if (xdata_capacity > UINT32_MAX || record_capacity > UINT32_MAX - xdata_capacity)
-            {
-                return result;
-            }
-            xdata_capacity += record_capacity;
+            valid = object_windows_arm64_codes_build(function, &codes, &epilog_code_index, &epilog_codes_shared_with_prolog) &&
+                    epilog_code_index <= 1023 && epilog_code_index <= codes.count && codes.count && codes.bytes[codes.count - 1] == 0xe4;
         }
+        u32 fragment_start = 0;
+        bool first_fragment = true;
+        while (valid && fragment_start < function->code_size)
+        {
+            u32 fragment_end = 0;
+            valid = object_windows_arm64_fragment_next(function, fragment_start, &fragment_end);
+            if (valid)
+            {
+                u32 fragment_epilog_count =
+                    object_windows_arm64_fragment_epilog_count(function, fragment_start, fragment_end);
+                u32 scope_count = 0;
+                u32 unwind_byte_count = 0;
+                u32 code_word_count = 0;
+                u32 record_size = 0;
+                valid = object_windows_arm64_fragment_record_shape(epilog_code_index, codes.count, epilog_codes_shared_with_prolog,
+                                                                    first_fragment,
+                                                                    fragment_epilog_count, &scope_count,
+                                                                    &unwind_byte_count, &code_word_count, &record_size);
+                if (valid)
+                {
+                    valid = pdata_count < UINT32_MAX / 8u && xdata_capacity <= UINT32_MAX - record_size;
+                    if (valid)
+                    {
+                        pdata_count += 1;
+                        xdata_capacity += record_size;
+                        fragment_start = fragment_end;
+                        first_fragment = false;
+                    }
+                }
+            }
+        }
+    }
+    if (valid)
+    {
+        result.pdata_count = (u32)pdata_count;
+        result.arm64_fragments = pdata_count ? arena_allocate(arena, ObjectWindowsArm64Fragment, pdata_count) : 0;
         result.pdata = (ByteSlice){
-            .pointer = arena_allocate(arena, u8, (u64)function_count * 8),
-            .length = (u64)function_count * 8,
+            .pointer = arena_allocate(arena, u8, pdata_count * 8),
+            .length = pdata_count * 8,
         };
         result.xdata.pointer = arena_allocate(arena, u8, xdata_capacity);
         if (result.pdata.length)
         {
             memset(result.pdata.pointer, 0, result.pdata.length);
         }
+        u32 fragment_index = 0;
         u32 xdata_cursor = 0;
-        for (u32 function_index = 0; function_index < function_count; function_index += 1)
+        for (u32 function_index = 0; valid && function_index < function_count; function_index += 1)
         {
             CodegenFunctionDescriptor const* function = functions + function_index;
-            result.xdata_offsets[function_index] = xdata_cursor;
-            u32 code_capacity = function->unwind_action_count * 8 + 8;
+            u32 code_capacity = function->unwind_action_count * 8u + 8u;
             ObjectWindowsArm64CodeBuffer codes = {
                 .bytes = arena_allocate(arena, u8, code_capacity),
                 .capacity = code_capacity,
                 .valid = true,
             };
             u32 epilog_code_index = 0;
-            if (!object_windows_arm64_codes_build(function, &codes, &epilog_code_index) || epilog_code_index > 1023)
+            bool epilog_codes_shared_with_prolog = false;
+            valid = object_windows_arm64_codes_build(function, &codes, &epilog_code_index, &epilog_codes_shared_with_prolog) &&
+                    epilog_code_index <= 1023 && epilog_code_index <= codes.count && codes.count && codes.bytes[codes.count - 1] == 0xe4;
+            u32 fragment_start = 0;
+            bool first_fragment = true;
+            while (valid && fragment_start < function->code_size)
             {
-                return result;
-            }
-            u32 code_words = (codes.count + 3) / 4;
-            bool extended = function->epilog_count > 31 || code_words > 31;
-            if (code_words > UINT8_MAX)
-            {
-                return result;
-            }
-            u32 header_size = extended ? 8 : 4;
-            u64 record_size = (u64)header_size + (u64)function->epilog_count * 4 + (u64)code_words * 4;
-            if (record_size > xdata_capacity - xdata_cursor)
-            {
-                return result;
-            }
-            u8* record = result.xdata.pointer + xdata_cursor;
-            memset(record, 0, record_size);
-            u32 header = function->code_size / 4;
-            if (!extended)
-            {
-                header |= function->epilog_count << 22;
-                header |= code_words << 27;
-            }
-            memcpy(record, &header, sizeof(header));
-            if (extended)
-            {
-                u32 extension = function->epilog_count | (code_words << 16);
-                memcpy(record + 4, &extension, sizeof(extension));
-            }
-            for (u32 epilog_index = 0; epilog_index < function->epilog_count; epilog_index += 1)
-            {
-                u32 epilog = function->epilog_offsets[epilog_index];
-                if (epilog % 4 || epilog / 4 >= (1u << 18))
+                u32 fragment_end = 0;
+                valid = object_windows_arm64_fragment_next(function, fragment_start, &fragment_end);
+                if (valid)
                 {
-                    return result;
+                    u32 fragment_epilog_count =
+                        object_windows_arm64_fragment_epilog_count(function, fragment_start, fragment_end);
+                    u32 scope_count = 0;
+                    u32 unwind_byte_count = 0;
+                    u32 code_word_count = 0;
+                    u32 record_size = 0;
+                    valid = object_windows_arm64_fragment_record_shape(epilog_code_index, codes.count, epilog_codes_shared_with_prolog,
+                                                                    first_fragment,
+                                                                        fragment_epilog_count, &scope_count,
+                                                                        &unwind_byte_count, &code_word_count, &record_size) &&
+                            fragment_index < result.pdata_count && record_size <= xdata_capacity - xdata_cursor;
+                    if (valid)
+                    {
+                        result.arm64_fragments[fragment_index] = (ObjectWindowsArm64Fragment){
+                            .function_index = function_index,
+                            .code_offset = fragment_start,
+                            .xdata_offset = xdata_cursor,
+                        };
+                        valid = object_windows_arm64_fragment_record_write(result.xdata.pointer + xdata_cursor, function, &codes,
+                                                                           epilog_code_index, epilog_codes_shared_with_prolog,
+                                                                           fragment_start, fragment_end, first_fragment);
+                        if (valid)
+                        {
+                            xdata_cursor += record_size;
+                            fragment_index += 1;
+                            fragment_start = fragment_end;
+                            first_fragment = false;
+                        }
+                    }
                 }
-                u32 scope = epilog / 4 | (epilog_code_index << 22);
-                memcpy(record + header_size + epilog_index * 4, &scope, sizeof(scope));
             }
-            memcpy(record + header_size + function->epilog_count * 4, codes.bytes, codes.count);
-            xdata_cursor += (u32)record_size;
         }
+        valid &= fragment_index == result.pdata_count && xdata_cursor == xdata_capacity;
         result.xdata.length = xdata_cursor;
-        result.valid = true;
+        result.valid = valid;
     }
-
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* object, ObjectWindowsUnwindResult built)
 {
-    bool result;
-    if (!built.valid || built.function_count > object->symbol_count)
+    bool valid = arena && object && built.valid && built.function_count <= object->symbol_count &&
+                 built.pdata_count <= UINT32_MAX / (built.aarch64 ? 8u : 12u) &&
+                 (!built.pdata_count || (built.aarch64 ? built.arm64_fragments != 0 : built.xdata_offsets != 0));
+    if (valid && built.aarch64)
     {
-        result = false;
+        for (u32 fragment_index = 0; valid && fragment_index < built.pdata_count; fragment_index += 1)
+        {
+            ObjectWindowsArm64Fragment const* fragment = built.arm64_fragments + fragment_index;
+            valid = fragment->function_index < built.function_count &&
+                    fragment->function_index < object->symbol_count &&
+                    fragment->code_offset < object->symbols[fragment->function_index].size &&
+                    fragment->xdata_offset < built.xdata.length;
+        }
     }
-    else
+    if (valid && !built.aarch64)
+    {
+        for (u32 function_index = 0; valid && function_index < built.pdata_count; function_index += 1)
+        {
+            valid = built.xdata_offsets[function_index] < built.xdata.length;
+        }
+    }
+    if (valid)
     {
         object->sections[OBJECT_SECTION_WINDOWS_PDATA].data = built.pdata;
         object->sections[OBJECT_SECTION_WINDOWS_PDATA].virtual_size = built.pdata.length;
@@ -12400,10 +12686,14 @@ BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* 
                 .section = OBJECT_SECTION_WINDOWS_XDATA,
                 .kind = OBJECT_SYMBOL_DATA,
             };
-            for (u32 function_index = 0; function_index < built.function_count; function_index += 1)
+            for (u32 record_index = 0; record_index < built.pdata_count; record_index += 1)
             {
-                u64 offset = (u64)function_index * (built.aarch64 ? 8 : 12);
+                u32 function_index = built.aarch64 ? built.arm64_fragments[record_index].function_index : record_index;
+                u32 code_offset = built.aarch64 ? built.arm64_fragments[record_index].code_offset : 0;
+                u32 xdata_offset = built.aarch64 ? built.arm64_fragments[record_index].xdata_offset : built.xdata_offsets[record_index];
+                u64 offset = (u64)record_index * (built.aarch64 ? 8 : 12);
                 object->relocations[object->relocation_count++] = (ObjectRelocation){
+                    .addend = code_offset,
                     .offset = offset,
                     .section = OBJECT_SECTION_WINDOWS_PDATA,
                     .symbol = function_index,
@@ -12420,7 +12710,7 @@ BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* 
                     };
                 }
                 object->relocations[object->relocation_count++] = (ObjectRelocation){
-                    .addend = (s64)built.xdata_offsets[function_index],
+                    .addend = xdata_offset,
                     .offset = offset + (built.aarch64 ? 4 : 8),
                     .section = OBJECT_SECTION_WINDOWS_PDATA,
                     .symbol = xdata_symbol,
@@ -12428,10 +12718,8 @@ BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* 
                 };
             }
         }
-        result = true;
     }
-
-    return result;
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module)
@@ -13081,8 +13369,8 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                        });
         }
     }
-    u32 metadata_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0) + cfi.relocation_count +
-                                    windows_unwind.function_count * (windows_unwind.aarch64 ? 2u : 3u);
+    u64 metadata_relocation_count = (u64)(dwarf.valid ? dwarf.relocation_count : 0) + (u64)(codeview.valid ? codeview.relocation_count : 0) +
+                                    (u64)cfi.relocation_count + (u64)windows_unwind.pdata_count * (windows_unwind.aarch64 ? 2u : 3u);
     bool apple_thread_local = false;
     if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
     {
@@ -13260,7 +13548,13 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .global = true,
         };
     }
-    result.relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + metadata_relocation_count + initializer_count);
+    u64 relocation_capacity = (u64)module->relocation_count + metadata_relocation_count + initializer_count;
+    bool relocation_capacity_valid = relocation_capacity <= UINT32_MAX;
+    if (!relocation_capacity_valid)
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+    }
+    result.relocations = arena_allocate(arena, ObjectRelocation, relocation_capacity_valid ? relocation_capacity : 0);
     Arena* name_conflicts[] = {
         arena,
     };
@@ -13310,7 +13604,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             entry_by_symbol[symbol_value] = defined_owner[module->entry_count + module->global_count + alias_index];
         }
     }
-    for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
+    for (u32 relocation_index = 0; relocation_index < module->relocation_count && result.error == OBJECT_ERROR_NONE; relocation_index += 1)
     {
         CodegenModuleRelocation source = module->relocations[relocation_index];
         ObjectRelocationKind kind = OBJECT_RELOCATION_X86_64_PC32;

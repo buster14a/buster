@@ -124,6 +124,7 @@ option(BUSTER_LINK_LIBC "Link libc" ON)
 option(BUSTER_UNITY_BUILD "Enable unity builds for optimized non-sanitized Clang configurations" ON)
 option(BUSTER_INCLUDE_TESTS "Enable tests" ON)
 option(BUSTER_SANITIZE "Enable sanitizers" OFF)
+option(BUSTER_THREAD_SANITIZE "Build a separate ThreadSanitizer tree for lane-parallel code" OFF)
 option(BUSTER_TIME_TRACE "Enable time tracing" OFF)
 option(BUSTER_BENCH_ALLOCATIONS "Count calling-thread arena requests in diagnostic compiler builds" OFF)
 option(BUSTER_INSTRUMENT "Enable fine-grained timing instrumentation for ide bench" OFF)
@@ -210,8 +211,19 @@ if (BUSTER_PRODUCTION_PROFILE)
     if (BUSTER_DEBUG_INFO)
         message(FATAL_ERROR "BUSTER_PRODUCTION_PROFILE requires BUSTER_DEBUG_INFO=OFF")
     endif()
-    if (BUSTER_SANITIZE OR BUSTER_FUZZ_AVAILABLE OR BUSTER_TIME_TRACE OR BUSTER_INSTRUMENT)
+    if (BUSTER_SANITIZE OR BUSTER_THREAD_SANITIZE OR BUSTER_FUZZ_AVAILABLE OR BUSTER_TIME_TRACE OR BUSTER_INSTRUMENT)
         message(FATAL_ERROR "BUSTER_PRODUCTION_PROFILE cannot be combined with sanitizers, fuzzing, time tracing or fine-grained instrumentation")
+    endif()
+endif()
+
+if (BUSTER_THREAD_SANITIZE)
+    # ThreadSanitizer cannot share a process with ASan, and its runtime is
+    # unavailable to MSVC, Zig and Windows targets (#3949).
+    if (BUSTER_SANITIZE)
+        message(FATAL_ERROR "BUSTER_THREAD_SANITIZE cannot be combined with BUSTER_SANITIZE; generate a separate tree")
+    endif()
+    if (WIN32 OR C_COMPILER_MSVC OR C_COMPILER_ZIG OR C_COMPILER_TCC)
+        message(FATAL_ERROR "BUSTER_THREAD_SANITIZE requires Clang, AppleClang or GCC on a non-Windows target")
     endif()
 endif()
 
@@ -957,6 +969,7 @@ message(STATUS "BUSTER_OPTIMIZE: configuration-derived")
 message(STATUS "BUSTER_UNITY_BUILD: ${BUSTER_UNITY_BUILD}")
 message(STATUS "BUSTER_INCLUDE_TESTS: ${BUSTER_INCLUDE_TESTS}")
 message(STATUS "BUSTER_SANITIZE: ${BUSTER_SANITIZE}")
+message(STATUS "BUSTER_THREAD_SANITIZE: ${BUSTER_THREAD_SANITIZE}")
 message(STATUS "BUSTER_SANITIZER_REDUCED_DEBUG: ${BUSTER_SANITIZER_REDUCED_DEBUG}")
 message(STATUS "BUSTER_DEBUG_INFO: ${BUSTER_DEBUG_INFO}")
 message(STATUS "BUSTER_FRAME_POINTERS: ${BUSTER_FRAME_POINTERS}")
@@ -1162,6 +1175,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/target_test.c
     src/buster/tests/truetype_test.c
     src/buster/tests/image_test.c
+    src/buster/tests/disk_builder_test.c
     src/buster/tests/compiler/metamorphic/metamorphic_test.c
     src/buster/tests/compiler/frontend/c/c_test.c
     src/buster/tests/compiler/frontend/c/c_ast_test.c
@@ -1212,6 +1226,9 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/driver/driver_test.c
     src/buster/tests/compiler/driver/object_path_test.c
 )
+if (BUSTER_INCLUDE_TESTS)
+    list(APPEND BUSTER_TEST_SOURCES src/buster/apps/disk_builder_verification.c)
+endif()
 set(BUSTER_TEST_HEADERS
     src/buster/tests/test.h
     src/buster/tests/byte_writer_test.h
@@ -1228,6 +1245,7 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/target_test.h
     src/buster/tests/truetype_test.h
     src/buster/tests/image_test.h
+    src/buster/tests/disk_builder_test.h
     src/buster/tests/x86_64_test.h
     src/buster/tests/compiler/metamorphic/metamorphic_test.h
     src/buster/tests/compiler/codegen/ebpf_test_vm.h
@@ -1508,6 +1526,24 @@ if (NOT WIN32)
         list(APPEND BUSTER_TEST_ENV "ASAN_OPTIONS=${BUSTER_ASAN_OPTIONS}")
         list(APPEND BUSTER_TEST_ENV "UBSAN_OPTIONS=${BUSTER_UBSAN_OPTIONS}")
         message(STATUS "BUSTER_SANITIZER_POLICY: fatal; ASAN_OPTIONS=${BUSTER_ASAN_OPTIONS}; UBSAN_OPTIONS=${BUSTER_UBSAN_OPTIONS}; LSAN_OPTIONS=${BUSTER_LSAN_OPTIONS}")
+    endif()
+
+    if (BUSTER_THREAD_SANITIZE)
+        # Fixed like the ASan/UBSan policy above: the first race fails the
+        # process with a distinctive status, and spawned cc children inherit it.
+        set(BUSTER_TSAN_OPTIONS "halt_on_error=1:exitcode=66:second_deadlock_stack=1")
+        string(REGEX MATCH "^[0-9]+" BUSTER_TSAN_COMPILER_MAJOR "${CMAKE_C_COMPILER_VERSION}")
+        set(BUSTER_TSAN_SYMBOLIZER_NAMES llvm-symbolizer)
+        if (BUSTER_TSAN_COMPILER_MAJOR AND (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG))
+            set(BUSTER_TSAN_SYMBOLIZER_NAMES "llvm-symbolizer-${BUSTER_TSAN_COMPILER_MAJOR}" ${BUSTER_TSAN_SYMBOLIZER_NAMES})
+        endif()
+        find_program(BUSTER_TSAN_SYMBOLIZER NAMES ${BUSTER_TSAN_SYMBOLIZER_NAMES})
+        if (BUSTER_TSAN_SYMBOLIZER)
+            set(BUSTER_TSAN_OPTIONS "${BUSTER_TSAN_OPTIONS}:external_symbolizer_path=${BUSTER_TSAN_SYMBOLIZER}")
+        endif()
+        list(APPEND BUSTER_TEST_ENV "TSAN_OPTIONS=${BUSTER_TSAN_OPTIONS}")
+        message(STATUS "BUSTER_TSAN_POLICY: TSAN_OPTIONS=${BUSTER_TSAN_OPTIONS}")
+        set(BUSTER_TSAN_TEST_MODULES "os_tests,compiler_driver_tests")
     endif()
 endif()
 list(APPEND BUSTER_TEST_ENV "BUSTER_SANITIZER_POLICY_MODE=${BUSTER_SANITIZER_POLICY_MODE}")
@@ -1983,6 +2019,15 @@ function(executable_add name is_buster_program main_file)
             target_compile_options(${name} PRIVATE -fno-sanitize-recover=all)
             target_link_options(${name} PRIVATE -fno-sanitize-recover=all)
         endif()
+    elseif (${BUSTER_THREAD_SANITIZE})
+        # Configuration already rejected MSVC, Zig and Windows for this tree.
+        target_compile_options(${name} PRIVATE -fsanitize=thread)
+        target_link_options(${name} PRIVATE -fsanitize=thread)
+        if (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG)
+            target_compile_options(${name} PRIVATE -gline-tables-only)
+        else()
+            target_compile_options(${name} PRIVATE -g)
+        endif()
     else()
         if (C_COMPILER_ZIG AND NOT WIN32)
             target_compile_options(${name} PRIVATE -fno-sanitize=all)
@@ -2407,6 +2452,19 @@ else()
         COMMENT "Run unit tests"
         VERBATIM
     )
+    if (BUSTER_THREAD_SANITIZE AND BUSTER_INCLUDE_TESTS)
+        # Focused ThreadSanitizer gate (#3949): the modules that drive lane
+        # gangs, once-claims and multi-TU -fcompile-jobs cohorts. Their cc
+        # children inherit the fatal TSAN_OPTIONS from BUSTER_TEST_ENV.
+        add_custom_target(test_tsan
+            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
+                "$<TARGET_FILE:ide>" ${TEST_ARGUMENTS} "--module=${BUSTER_TSAN_TEST_MODULES}"
+            DEPENDS ide
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Run the lane-parallel modules under ThreadSanitizer"
+            VERBATIM
+        )
+    endif()
     if (BUSTER_CI)
         # The native driver owns child quotas, completion proof and cleanup.
         # These opt-in targets reuse ide and the authoritative sanitizer env.

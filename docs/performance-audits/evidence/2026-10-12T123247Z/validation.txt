@@ -1,0 +1,55 @@
+base-self-host.log: exit=0 sha256=fa09d8e51821e0b068654b76b055e8fd744ecc0d8cedf5e47d752c05cbc0dfcd
+Self-host stage 2 benchmark took 0.101040 seconds (101040000 nanoseconds)
+STEP_INSTRUCTIONS Self-host stage 2 benchmark instructions=722852257
+Self-host machine stage took 15.557273 seconds (15557273000 nanoseconds)
+STEP_INSTRUCTIONS Self-host machine stage instructions=156094971804
+Self-host machine stage link took 0.080757 seconds (80757000 nanoseconds)
+STEP_INSTRUCTIONS Self-host machine stage link instructions=842357824
+Self-host machine stage benchmark took 0.090818 seconds (90818000 nanoseconds)
+STEP_INSTRUCTIONS Self-host machine stage benchmark instructions=720539663
+
+base-c-tests.log: exit=0 sha256=79ac975ef1ded9ccf38d49053fb30cf93a63cb2607ebc2b25d73c70c16c51a7f
+TEST_ARENA_V1 kind=fixture module=c_frontend_tests fixture=c_test_aarch64_float_compare_quiet_signaling index=464 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=99964 peak_bytes=99900 after=64 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=c_frontend_tests fixture=body index=0 arena_slot=0 start=13240 end=13299 retained_bytes=59 high_water=31547248 peak_bytes=31534008 after=13240 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=c_frontend_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=250203849 peak_bytes=250203721 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=c_frontend_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=268418528 peak_bytes=268418464 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=c_frontend_tests fixtures=465 retained_fixture=c_test_frontend_lex_preprocess retained_bytes=31533949 peak_fixture=c_test_frontend_lex_preprocess peak_bytes=31533949
+[1475372/1475372] Unit tests (1 of 63 modules selected)
+[1/1] Module tests
+[0/0] External tests
+
+candidate-c-tests.log: exit=0 sha256=2863e4a0d4a6726b6eb86625bc113c60c8323aa336524039c16627d140a75c32
+TEST_ARENA_V1 kind=fixture module=c_frontend_tests fixture=c_test_aarch64_float_compare_quiet_signaling index=465 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=99964 peak_bytes=99900 after=64 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=c_frontend_tests fixture=body index=0 arena_slot=0 start=13240 end=13299 retained_bytes=59 high_water=31547248 peak_bytes=31534008 after=13240 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=c_frontend_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=250203985 peak_bytes=250203857 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=c_frontend_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=268418528 peak_bytes=268418464 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=c_frontend_tests fixtures=466 retained_fixture=c_test_frontend_lex_preprocess retained_bytes=31533949 peak_fixture=c_test_frontend_lex_preprocess peak_bytes=31533949
+[1475502/1475502] Unit tests (1 of 63 modules selected)
+[1/1] Module tests
+[0/0] External tests
+
+candidate-self-host.log: exit=0 sha256=b6cc89f9cefe2b1e6877864c6ae897b8002d5698d9ed49c00399b1e5077b093b
+Self-host stage 2 benchmark took 0.100876 seconds (100876000 nanoseconds)
+STEP_INSTRUCTIONS Self-host stage 2 benchmark instructions=722106125
+Self-host machine stage took 15.713148 seconds (15713148000 nanoseconds)
+STEP_INSTRUCTIONS Self-host machine stage instructions=155763654524
+Self-host machine stage link took 0.090901 seconds (90901000 nanoseconds)
+STEP_INSTRUCTIONS Self-host machine stage link instructions=842360012
+Self-host machine stage benchmark took 0.142577 seconds (142577000 nanoseconds)
+STEP_INSTRUCTIONS Self-host machine stage benchmark instructions=719789582
+
+candidate-test-all.log: exit=0 sha256=0e227525293e0267f823b795e2c5f07ccdad9cbe5853f633a4e8f5578b77748c
+TEST_ARENA_V1 kind=module module=x86_64_tests fixture=body index=0 arena_slot=0 start=13432 end=13432 retained_bytes=0 high_water=13432 peak_bytes=0 after=13432 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=x86_64_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=x86_64_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=x86_64_tests fixtures=0 retained_fixture=none retained_bytes=0 peak_fixture=none peak_bytes=0
+TEST_MODULE_TIMING index=62 module=x86_64_tests duration_ns=93569 passed=29 failed=0 assertions=29 status=pass
+[6959685/6959685] Unit tests
+[63/63] Module tests
+[0/0] External tests
+
+markdown-links.log: exit=0 sha256=26794f8782727f011869ecfc3a639b7b35bc509ee9b8b3f5b849282ac2646396
+0 unresolved link targets in 833 Markdown files
+
+audit-check.log: exit=0 sha256=26e98de30cc58532cf20a7e8d64c2549af7ef888df5a709fc698af9c866d2924
+0 problems

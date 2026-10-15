@@ -11,3 +11,8 @@
 # request: issue #53 re-request on docs-only head after 8cedbf9b run 38314166940 was cancelled by a push; same compiler source
 # request: issue #53 owner-approved scaling-v1 of lane-safe on-demand x86 fills (no complete x86 prewarm before -fcompile-jobs lanes; candidate 3e752da0 plus this request line), against the 826c2e3b count-w2-n2 0.456x / tiny 0.41-0.46x / W+-1 0.46-0.90x / equal-TU RSS finding
 # request: issue #53 re-request of the owner-approved lane-safe on-demand x86 fills scaling-v1 after 41b7c307 run 38324070767 was cancelled with no receipt by later pushes; candidate b54f0c31 (main 90690088 merged, pool-chunk and name-index claims) plus this request line
+# request: issue #53 lane-gate calibration, gate disabled (MIN_WORK=0), size series
+# request: issue #53 lane-gate calibration re-run on main 50135638 with the one-family prewarm (#3910); gate disabled
+# request: issue #53 lane-gate calibration on main 10e44760 with lane-safe on-demand x86 fills merged; gate disabled, size series
+# request: issue #53 lane-gate worker-cap validation (MIN_WORK=0, INPUT_WORK=513, WORK_PER_WORKER=16 KiB; tiny@7 expected capped at 4)
+# request: issue #53 lane-gate worker-floor refit validation (WORK_PER_WORKER=32 KiB; tiny@7 and @13 expected capped at 2)

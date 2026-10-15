@@ -629,6 +629,8 @@ class QualificationTests(unittest.TestCase):
                 argv = ["fixture-cmake", "--build", f"build/{tree}", "--parallel", "1"]
             elif phase == "self_host":
                 argv = ["fixture-driver", "self_host_from_existing", "--build-directory", f"build/{tree}"]
+            elif phase == "scheduler":
+                argv = ["fixture-cmake", "--build", "build/superbuild", "--parallel", str(plan["outer_jobs"])]
             elif phase == "test":
                 argv = [f"build/{tree}/{config}/ide" + ("" if direct else ".exe"), "test"]
             common = dict(id=name, epoch_us=1, pid=10 + len(plan["tasks"]), start_us=start, argv=argv)

@@ -201,24 +201,9 @@ bool buster_aarch64_system_op0_decode(u32 o0, u32* op0)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool a64_system_target_is_m1_profile(Target target)
-{
-    bool result;
-    if (target.cpu_model == CPU_MODEL_A64_APPLE_M1)
-    {
-        result = true;
-    }
-    else
-    {
-        result = target.cpu_model == CPU_MODEL_NATIVE && target_native.cpu_arch == CPU_ARCH_AARCH64 && target_native.cpu_model == CPU_MODEL_A64_APPLE_M1;
-    }
-
-    return result;
-}
-
 bool buster_aarch64_system_semantic_target_supported(Target target)
 {
-    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_system_target_is_m1_profile(target) && target_cpu_features_are_valid(target);
+    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_target_is_m1_profile(target) && target_cpu_features_are_valid(target);
 }
 
 BUSTER_GLOBAL_LOCAL bool a64_system_hint_allowed(Target target, u32 immediate)

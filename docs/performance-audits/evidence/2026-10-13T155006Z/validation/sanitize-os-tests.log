@@ -1,0 +1,69 @@
+TEST_TEMPORARY_ROOT_PRESERVED status=failed path=/tmp/buster-tests-763222-5-28827558193206
+TEST_FIXTURE_WATCHDOG_V1 status=armed deadline_seconds=1800
+TEST_FIXTURE_START_V1 kind=module module=os_tests fixture=body index=0
+TEST_FIXTURE_START_V1 kind=fixture module=os_tests fixture=os_test_environment_lookup index=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_environment_lookup index=0 arena_slot=0 start=13304 end=13304 retained_bytes=0 high_water=13304 peak_bytes=0 after=13304 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_environment_lookup index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_environment_lookup index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=os_tests fixture=os_test_once_claims index=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_once_claims index=1 arena_slot=0 start=13304 end=13304 retained_bytes=0 high_water=517953 peak_bytes=504649 after=13304 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_once_claims index=1 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=16536 peak_bytes=16408 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_once_claims index=1 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=os_tests fixture=os_test_capture_replay index=2
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_replay index=2 arena_slot=0 start=13304 end=13304 retained_bytes=0 high_water=23232 peak_bytes=9928 after=13304 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_replay index=2 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_replay index=2 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=os_tests fixture=os_test_capture_storage index=3
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_storage index=3 arena_slot=0 start=13304 end=13304 retained_bytes=0 high_water=2110456 peak_bytes=2097152 after=13304 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_storage index=3 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=1050240 peak_bytes=1050112 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_storage index=3 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=os_tests fixture=os_test_capture_limits index=4
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_limits index=4 arena_slot=0 start=13304 end=13304 retained_bytes=0 high_water=50344955 peak_bytes=50331651 after=13304 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_limits index=4 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=33636528 peak_bytes=33636400 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_limits index=4 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=os_tests fixture=os_test_image_retention index=5
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_image_retention index=5 arena_slot=0 start=13304 end=14994 retained_bytes=1690 high_water=14994 peak_bytes=1690 after=13304 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_image_retention index=5 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=284 peak_bytes=156 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_image_retention index=5 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=os_tests fixture=os_test_capture_overflow index=6
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_overflow index=6 arena_slot=0 start=13304 end=13304 retained_bytes=0 high_water=78921 peak_bytes=65617 after=13304 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_overflow index=6 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=32944 peak_bytes=32816 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_overflow index=6 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=os_tests fixture=os_test_capture_sink_admission index=7
+ownedTEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_sink_admission index=7 arena_slot=0 start=13304 end=21761 retained_bytes=8457 high_water=21761 peak_bytes=8457 after=13304 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_sink_admission index=7 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=18366616 peak_bytes=18366488 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_sink_admission index=7 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=os_tests fixture=os_test_capture_sink_spill index=8
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_sink_spill index=8 arena_slot=0 start=13304 end=35474 retained_bytes=22170 high_water=35474 peak_bytes=22170 after=13304 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_sink_spill index=8 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=18383024 peak_bytes=18382896 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_sink_spill index=8 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=os_tests fixture=os_test_capture_native index=9
+Failed to poll process pipes: Cannot allocate memory
+Failed to read from process pipe: Bad file descriptor
+Failed to read from process pipe: Bad file descriptor
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_native index=9 arena_slot=0 start=13304 end=13304 retained_bytes=0 high_water=17405 peak_bytes=4101 after=13304 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_native index=9 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=16591 peak_bytes=16463 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_capture_native index=9 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=os_tests fixture=os_process_spawn_contract_tests index=10
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_process_spawn_contract_tests index=10 arena_slot=0 start=13304 end=13381 retained_bytes=77 high_water=13381 peak_bytes=77 after=13304 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_process_spawn_contract_tests index=10 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=471 peak_bytes=343 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_process_spawn_contract_tests index=10 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=3282 peak_bytes=3218 after=64 live_bytes=0 rewind=0
+PROCESS_TREE_READINESS_V1 phase=negative-control ready=0 polls=2 spawn_handle=1 spawn_group=1 spawn_error=0 result=1 platform_status=9 timed_out=1 termination_requested=1 forcibly_terminated=1 cleanup_failed=0 ready_path=/tmp/buster-tests-763222-6-28827562175792/process-tree-missing-ready-763222.txt release_path= escaped_path= stdout= stderr=
+okTEST_FIXTURE_START_V1 kind=fixture module=os_tests fixture=os_test_process_group_churn index=11
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_process_group_churn index=11 arena_slot=0 start=52641 end=52641 retained_bytes=0 high_water=52641 peak_bytes=0 after=52641 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_process_group_churn index=11 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=18350208 peak_bytes=18350080 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=os_tests fixture=os_test_process_group_churn index=11 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=3490 peak_bytes=3426 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_WATCHDOG_CHILD_V1 duration_ns=1014793584 timed_out=0 platform_status=31744 stdout_bytes=427 stderr_bytes=0
+OS_FATAL_OUTPUT_CHILD_V1 mode=raw-live repetition=0 duration_ns=19294255 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=formatted-live repetition=0 duration_ns=20329216 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=raw-live repetition=1 duration_ns=19741671 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=formatted-live repetition=1 duration_ns=21895936 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=raw-live repetition=2 duration_ns=20148269 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=formatted-live repetition=2 duration_ns=22204767 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+TEST_ARENA_V1 kind=module module=os_tests fixture=body index=0 arena_slot=0 start=13304 end=52641 retained_bytes=39337 high_water=50344955 peak_bytes=50331651 after=13304 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=os_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=33636528 peak_bytes=33636400 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=os_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=4161 peak_bytes=4097 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=os_tests fixtures=12 retained_fixture=os_test_capture_sink_spill retained_bytes=22170 peak_fixture=os_test_capture_limits peak_bytes=50331651
+[2046/2046] Unit tests (1 of 63 modules selected)
+[1/1] Module tests
+[0/0] External tests

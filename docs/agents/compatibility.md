@@ -23,6 +23,7 @@ directory and removes the compiler and in-progress outputs.
 | sbase | [sbase](compatibility/sbase.md) |
 | DoomGeneric | [DoomGeneric](compatibility/doom.md) |
 | QuickJS and Test262 | [QuickJS](compatibility/quickjs.md) |
+| Linux kernel (minimal reference and blocker frontier) | [Linux kernel](compatibility/linux-kernel.md) |
 | Git (Linux x86-64 opt-in build census) | [Git](compatibility/git.md) |
 | musl | [musl](compatibility/musl.md) |
 | musl + BusyBox (Linux diagnostic userspace) | [musl + BusyBox](compatibility/busybox.md) |
@@ -30,7 +31,10 @@ directory and removes the compiler and in-progress outputs.
 | CPython | [CPython](compatibility/cpython.md) |
 | QEMU (opt-in Linux x86-64 TCG census) | [QEMU](compatibility/qemu.md) |
 | RAD Debugger (Linux x86-64 diagnostic campaign) | [RAD Debugger](compatibility/raddebugger.md) |
+| FFmpeg (opt-in portable blocker census) | [FFmpeg](compatibility/ffmpeg.md) |
 | curl/libcurl (Linux x86-64 blocker census) | [curl/libcurl](compatibility/curl.md) |
+| OpenSSL build/test qualification intake | [OpenSSL](compatibility/openssl.md) |
+| SDL3 (Linux x86-64 pending qualification intake) | [SDL3](compatibility/sdl3.md) |
 | Clang test corpus | [Clang suite](compatibility/clang-suite.md) |
 
 ## Compiler selection

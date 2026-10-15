@@ -6934,6 +6934,18 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_function_addresses(UnitTestArgu
 }
 
 
+// The ELF entry stub, loader-finalizer registration and PLT shapes pin the
+// form the generic selector picks (#1125); every pin must still be its choice,
+// with the same bytes, across the sixteen registers and the PUSH indexes.
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_x86_shape_pins(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 query_count = 0;
+    BUSTER_TEST(arguments, link_x86_shape_pins_test(&query_count) == 0);
+    BUSTER_TEST(arguments, query_count == 15 + 16 * 16);
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_elf_stack_contract(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7636,6 +7648,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, link_test_mach_got_loads);
     BUSTER_TEST_FIXTURE(arguments, link_test_mach_import_pointers);
     BUSTER_TEST_FIXTURE(arguments, link_test_elf_stack_contract);
+    BUSTER_TEST_FIXTURE(arguments, link_test_x86_shape_pins);
     UnitTestResult tls_membership = link_test_tls_membership(arguments);
     result.succeeded_test_count += tls_membership.succeeded_test_count;
     result.test_count += tls_membership.test_count;

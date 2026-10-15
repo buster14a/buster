@@ -12,6 +12,13 @@
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_expect_preprocessed(UnitTestArguments* arguments, Arena* arena,
                                                                            CPreprocessResult actual, String8 expected_text)
@@ -1122,20 +1129,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_parameter_scaling_tests(UnitTestArgum
     return result;
 }
 
-UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
+// Trailing tokens after conditional directives, include and macro-definition
+// diagnostics, character-literal types in #if arithmetic, conditionals inside
+// macro arguments against reference preprocessors and as errors, and a
+// compiled program that runs the expansions.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_conditional_directive_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_TEST_FIXTURE(arguments, c_file_table_scaling_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_macro_parameter_scaling_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_macro_rescan_boundary_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_skipped_group_text_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_punctuator_separator_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_trigraph_preprocess_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_dynamic_builtin_macro_tests);
-    BUSTER_TEST_FIXTURE(arguments, c_macro_argument_storage_scaling_tests);
-    UnitTestResult demand = c_macro_argument_demand_tests(arguments);
-    result.test_count += demand.test_count;
-    result.succeeded_test_count += demand.succeeded_test_count;
     struct
     {
         String8 source;
@@ -1562,6 +1562,588 @@ UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
         c_test_scratch_end(temporary);
     }
 #endif
+    return result;
+}
+
+// Macro-produced defined operators keep their operands out of ordinary macro rescanning.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_produced_defined_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 name;
+        String8 source;
+        String8 expected;
+    } cases[] = {
+        {
+            S8("parenthesized-macro-operand"),
+            S8("#define VALUE 0\n"
+               "#define CHECK defined(VALUE)\n"
+               "#if CHECK\n"
+               "parenthesized_defined\n"
+               "#else\n"
+               "wrong_parenthesized\n"
+               "#endif\n"),
+            S8("parenthesized_defined"),
+        },
+        {
+            S8("empty-unparenthesized-operand"),
+            S8("#define EMPTY\n"
+               "#define CHECK defined EMPTY\n"
+               "#if CHECK\n"
+               "empty_name_is_defined\n"
+               "#else\n"
+               "wrong_empty\n"
+               "#endif\n"),
+            S8("empty_name_is_defined"),
+        },
+        {
+            S8("nested-object-producer-in-elif"),
+            S8("#define VALUE 0\n"
+               "#define INNER defined(VALUE)\n"
+               "#define OUTER INNER\n"
+               "#if 0\n"
+               "wrong_if\n"
+               "#elif OUTER\n"
+               "nested_defined_in_elif\n"
+               "#else\n"
+               "wrong_elif\n"
+               "#endif\n"),
+            S8("nested_defined_in_elif"),
+        },
+        {
+            S8("function-like-token-paste-producer"),
+            S8("#define CHECK(name) defined(PREFIX_##name)\n"
+               "#define PREFIX_yes 0\n"
+               "#if CHECK(yes)\n"
+               "pasted_name_is_defined\n"
+               "#else\n"
+               "wrong_pasted_name\n"
+               "#endif\n"),
+            S8("pasted_name_is_defined"),
+        },
+        {
+            S8("undefined-pasted-name-in-elif"),
+            S8("#define CHECK(name) defined(PREFIX_##name)\n"
+               "#if CHECK(missing)\n"
+               "wrong_missing_if\n"
+               "#elif !CHECK(missing)\n"
+               "pasted_name_is_undefined\n"
+               "#else\n"
+               "wrong_missing_elif\n"
+               "#endif\n"),
+            S8("pasted_name_is_undefined"),
+        },
+        {
+            S8("feature-builtin-argument-named-defined"),
+            S8("#define QUERY __has_builtin(defined)\n"
+               "#if QUERY\n"
+               "wrong_builtin_query\n"
+               "#else\n"
+               "feature_query_defined_argument\n"
+               "#endif\n"),
+            S8("feature_query_defined_argument"),
+        },
+        {
+            S8("feature-include-header-named-defined"),
+            S8("#define QUERY __has_include(<defined.h>)\n"
+               "#if QUERY\n"
+               "wrong_include_query\n"
+               "#else\n"
+               "feature_query_defined_header\n"
+               "#endif\n"),
+            S8("feature_query_defined_header"),
+        },
+        {
+            S8("literal-defined-controls"),
+            S8("#define VALUE 0\n"
+               "#if defined(VALUE) && defined VALUE && !defined(MISSING)\n"
+               "literal_defined_unchanged\n"
+               "#else\n"
+               "wrong_literal_defined\n"
+               "#endif\n"),
+            S8("literal_defined_unchanged"),
+        },
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17};
+    String8 dialect_names[] = {S8("c17"), S8("gnu17")};
+    for (u32 dialect_index = 0; dialect_index < BUSTER_ARRAY_LENGTH(dialects); dialect_index += 1)
+    {
+        for (u32 case_index = 0; case_index < BUSTER_ARRAY_LENGTH(cases); case_index += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult actual = c_preprocess(temporary.arena, cases[case_index].source,
+                                                     (CPreprocessOptions){.source_path = S8("macro-produced-defined.c"),
+                                                                          .dialect = dialects[dialect_index]});
+            String8 context = string_format(temporary.arena, S8("macro-produced defined case={S8} dialect={S8}"),
+                                            cases[case_index].name, dialect_names[dialect_index]);
+            BUSTER_TEST_RAW(arguments, actual.error_count == 0, context);
+            BUSTER_TEST_RAW(arguments, actual.warning_count == 0, context);
+            if (BUSTER_REQUIRE(arguments, actual.tokens && actual.spelling_base))
+            {
+                UnitTestResult compared = c_macro_conditional_expect_preprocessed(
+                    arguments, temporary.arena, actual, cases[case_index].expected);
+                result.test_count += compared.test_count;
+                result.succeeded_test_count += compared.succeeded_test_count;
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
+// A failed reservation in either half of the macro arena pair is a
+// preprocessing diagnostic, and a later unit can still expand macros normally.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_expansion_reservation_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 failed_sources[] = {
+        S8("#define F(x) x\nF(7)\n"),
+        S8("#define F(x) x\n#if F(1)\nint value;\n#endif\n"),
+    };
+    String8 follow_up_source = S8("#define F(x) (x+1)\nint value = F(7);\n");
+    String8 follow_up_expected = S8("int value = (7+1);");
+    for (u32 failure_index = 0; failure_index < BUSTER_ARRAY_LENGTH(failed_sources); failure_index += 1)
+    {
+        // c_preprocess first reserves spelling, token, shape and phase arenas;
+        // the next two PREPROCESS reservations are the macro argument and
+        // expansion arenas respectively.
+        u32 reservation_ordinal = 5 + failure_index;
+        String8 failed_storage = failure_index == 0 ? S8("argument") : S8("expansion");
+        TemporalArena failed_scope = scratch_begin(&arguments->arena, 1);
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_PREPROCESS, reservation_ordinal);
+        CPreprocessResult failed = c_preprocess(failed_scope.arena, failed_sources[failure_index],
+                                                 (CPreprocessOptions){.source_path = S8("macro-arena-reservation.c")});
+        bool reservation_pending = c_test_frontend_reservation_pending();
+        c_test_fail_frontend_reservation(C_FRONTEND_RESERVATION_PREPROCESS, 0);
+        BUSTER_TEST(arguments, !reservation_pending);
+        BUSTER_TEST(arguments, failed.error_count > 0);
+        String8 expected_message = string_format(failed_scope.arena, S8("could not reserve {u64} bytes for C macro {S8} arena"),
+                                                 BUSTER_GB(8), failed_storage);
+        bool resource_diagnostic = false;
+        for (u32 diagnostic_index = 0; diagnostic_index < failed.diagnostic_count; diagnostic_index += 1)
+        {
+            CDiagnostic diagnostic = failed.diagnostics[diagnostic_index];
+            resource_diagnostic = resource_diagnostic ||
+                                  (diagnostic.kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                                   string_equal(diagnostic.message, expected_message));
+        }
+        BUSTER_TEST(arguments, resource_diagnostic);
+        c_test_scratch_end(failed_scope);
+
+        TemporalArena follow_up_scope = scratch_begin(&arguments->arena, 1);
+        CPreprocessResult follow_up = c_preprocess(follow_up_scope.arena, follow_up_source,
+                                                    (CPreprocessOptions){.source_path = S8("macro-arena-recovery.c")});
+        BUSTER_TEST(arguments, follow_up.error_count == 0);
+        UnitTestResult compared = c_macro_conditional_expect_preprocessed(arguments, follow_up_scope.arena, follow_up, follow_up_expected);
+        result.test_count += compared.test_count;
+        result.succeeded_test_count += compared.succeeded_test_count;
+        c_test_scratch_end(follow_up_scope);
+    }
+    return result;
+}
+
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL bool c_macro_expansion_rlimit_contains(String8 text, String8 search)
+{
+    bool found = false;
+    if (search.length && search.length <= text.length)
+    {
+        u64 last_offset = text.length - search.length;
+        for (u64 offset = 0; !found && offset <= last_offset; offset += 1)
+        {
+            found = memcmp(text.pointer + offset, search.pointer, search.length) == 0;
+        }
+    }
+    return found;
+}
+
+// Linux statm reports virtual pages; resident-set accounting cannot size RLIMIT_AS.
+BUSTER_GLOBAL_LOCAL bool c_macro_expansion_rlimit_virtual_size(u64* result)
+{
+    bool valid = result != 0;
+    char8 contents[128] = {0};
+    int descriptor = -1;
+    if (valid)
+    {
+        do
+        {
+            descriptor = open("/proc/self/statm", O_RDONLY);
+        } while (descriptor < 0 && errno == EINTR);
+    }
+    valid = valid && descriptor >= 0;
+    ssize_t byte_count = 0;
+    if (valid)
+    {
+        do
+        {
+            byte_count = read(descriptor, contents, sizeof(contents));
+        } while (byte_count < 0 && errno == EINTR);
+    }
+    if (descriptor >= 0)
+    {
+        int close_result = close(descriptor);
+        valid = valid && close_result == 0;
+    }
+    valid = valid && byte_count > 0;
+    u64 length = byte_count > 0 ? (u64)byte_count : 0;
+    u64 pages = 0;
+    bool digit_seen = false;
+    bool field_ended = false;
+    for (u64 index = 0; valid && index < length && !field_ended; index += 1)
+    {
+        char8 byte = contents[index];
+        if (byte >= '0' && byte <= '9')
+        {
+            u64 digit = (u64)(byte - '0');
+            if (pages > (UINT64_MAX - digit) / 10)
+            {
+                valid = false;
+            }
+            else
+            {
+                pages = pages * 10 + digit;
+                digit_seen = true;
+            }
+        }
+        else
+        {
+            field_ended = true;
+        }
+    }
+    valid = valid && digit_seen && field_ended;
+    long page_size = valid ? sysconf(_SC_PAGESIZE) : -1;
+    valid = valid && page_size > 0 && pages <= UINT64_MAX / (u64)page_size;
+    if (valid)
+    {
+        *result = pages * (u64)page_size;
+    }
+    return valid;
+}
+
+// This child uses one in-memory C input through the driver's single-input fast path,
+// which executes the unit in the caller/test arena already present in the statm
+// baseline. Only c_preprocess's three base arenas, phase arena, and macro arenas
+// are new reservations; the bounded cap must reject either the argument or the
+// expansion reservation with its structured resource diagnostic.
+typedef struct CMacroExpansionRlimitBudget CMacroExpansionRlimitBudget;
+struct CMacroExpansionRlimitBudget
+{
+    u64 baseline_virtual_bytes;
+    u64 phase_arena_bytes;
+    u64 base_arenas_bytes;
+    u64 first_macro_arena_bytes;
+    u64 setup_headroom_bytes;
+    u64 planned_limit_bytes;
+    u64 applied_limit_bytes;
+    u64 hard_limit_bytes;
+    bool hard_limit_unlimited;
+    bool applied;
+};
+
+BUSTER_GLOBAL_LOCAL CMacroExpansionRlimitBudget c_macro_expansion_rlimit_apply(void)
+{
+    CMacroExpansionRlimitBudget result = {
+        .phase_arena_bytes = C_PHASE_ARENA_RESERVED_SIZE,
+        .base_arenas_bytes = BUSTER_GB(3),
+        .first_macro_arena_bytes = BUSTER_GB(8),
+        .setup_headroom_bytes = BUSTER_GB(2),
+    };
+    struct rlimit current_limit = {0};
+    bool limit_read = getrlimit(RLIMIT_AS, &current_limit) == 0;
+    u64 current_virtual_size = 0;
+    bool statm_read = c_macro_expansion_rlimit_virtual_size(&current_virtual_size);
+    if (statm_read)
+    {
+        result.baseline_virtual_bytes = current_virtual_size;
+    }
+    result.hard_limit_unlimited = limit_read && current_limit.rlim_max == RLIM_INFINITY;
+    result.hard_limit_bytes = limit_read && !result.hard_limit_unlimited ? (u64)current_limit.rlim_max : 0;
+
+    u64 allowance = 0;
+    bool sums_valid = result.phase_arena_bytes <= UINT64_MAX - result.base_arenas_bytes;
+    if (sums_valid)
+    {
+        allowance = result.phase_arena_bytes + result.base_arenas_bytes;
+        sums_valid = allowance <= UINT64_MAX - result.first_macro_arena_bytes;
+    }
+    if (sums_valid)
+    {
+        allowance += result.first_macro_arena_bytes;
+        sums_valid = allowance <= UINT64_MAX - result.setup_headroom_bytes;
+    }
+    if (sums_valid)
+    {
+        allowance += result.setup_headroom_bytes;
+    }
+    bool valid = limit_read && statm_read && sums_valid &&
+                 current_virtual_size <= UINT64_MAX - allowance;
+    if (valid)
+    {
+        result.planned_limit_bytes = current_virtual_size + allowance;
+    }
+    rlim_t limit_value = (rlim_t)result.planned_limit_bytes;
+    valid = valid && (u64)limit_value == result.planned_limit_bytes &&
+            (result.hard_limit_unlimited || limit_value <= current_limit.rlim_max);
+    if (valid)
+    {
+        current_limit.rlim_cur = limit_value;
+        valid = setrlimit(RLIMIT_AS, &current_limit) == 0;
+        struct rlimit applied_limit = {0};
+        valid = valid && getrlimit(RLIMIT_AS, &applied_limit) == 0 && applied_limit.rlim_cur == limit_value;
+        if (valid)
+        {
+            result.applied_limit_bytes = (u64)applied_limit.rlim_cur;
+        }
+    }
+    result.applied = valid;
+    return result;
+}
+
+typedef struct CMacroExpansionRlimitChild CMacroExpansionRlimitChild;
+struct CMacroExpansionRlimitChild
+{
+    ProcessSpawnResult spawn;
+    ProcessWaitResult wait;
+};
+
+BUSTER_GLOBAL_LOCAL CMacroExpansionRlimitChild c_macro_expansion_rlimit_spawn(Arena* arena, String8 mode, String8 output_path)
+{
+    CMacroExpansionRlimitChild result = {0};
+    String8 child_arguments[] = {
+        program_state->input.arguments.pointer[0],
+        S8("test"),
+        S8("--module=c_macro_conditional_tests"),
+        S8("--ci=1"),
+    };
+    String8 mode_key = S8("BUSTER_C_MACRO_EXPANSION_RLIMIT_MODE");
+    String8 output_key = S8("BUSTER_C_MACRO_EXPANSION_RLIMIT_OUTPUT");
+    SliceString8 inherited_keys = program_state->input.environment_keys;
+    SliceString8 inherited_values = program_state->input.environment_values;
+    String8* keys = arena_allocate(arena, String8, inherited_keys.length + 2);
+    String8* values = arena_allocate(arena, String8, inherited_keys.length + 2);
+    u64 count = 0;
+    keys[count] = mode_key;
+    values[count] = mode;
+    count += 1;
+    keys[count] = output_key;
+    values[count] = output_path;
+    count += 1;
+    for (u64 index = 0; index < inherited_keys.length; index += 1)
+    {
+        String8 key = inherited_keys.pointer[index];
+        if (!string_equal(key, mode_key) && !string_equal(key, output_key))
+        {
+            keys[count] = key;
+            values[count] = inherited_values.pointer[index];
+            count += 1;
+        }
+    }
+    result.spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child_arguments), (SliceString8){keys, count},
+                                    (SliceString8){values, count},
+                                    (ProcessSpawnOptions){
+                                        .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                                        .new_process_group = 1,
+                                    });
+    result.wait = (ProcessWaitResult){.result = PROCESS_RESULT_NOT_EXISTENT};
+    if (result.spawn.handle)
+    {
+        result.wait = os_process_wait_deadline(arena, result.spawn, 30000000);
+    }
+    return result;
+}
+#endif
+
+// The limited child warms tables and prepares arguments before setting RLIMIT_AS,
+// then compiles through the ordinary -E output path in a fresh process.
+void c_macro_expansion_rlimit_child_run(UnitTestArguments* arguments)
+{
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 mode = os_get_environment_variable(S8("BUSTER_C_MACRO_EXPANSION_RLIMIT_MODE"));
+    if (mode.length)
+    {
+        Arena* arena = arguments ? arguments->arena : 0;
+        String8 output_path = os_get_environment_variable(S8("BUSTER_C_MACRO_EXPANSION_RLIMIT_OUTPUT"));
+        bool limited = string_equal(mode, S8("limited"));
+        bool recognized_mode = limited || string_equal(mode, S8("normal"));
+        bool prepared = arena && output_path.length && recognized_mode;
+        u32 exit_code = 125;
+        String8 diagnostic = S8("could not prepare C macro RLIMIT_AS regression child");
+        if (prepared)
+        {
+            compiler_prewarm();
+            String8 command[] = {
+                S8("-E"),
+                S8("-P"),
+                S8("-nostdinc"),
+                S8("-std=c17"),
+                S8("-o"),
+                output_path,
+                S8("macro-reservation-rlimit.c"),
+            };
+            CompilerDriverInvocation invocation = compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+            invocation.input_source = S8("#define F(x) (x+1)\nint value = F(7);\n");
+            prepared = invocation.error == COMPILER_DRIVER_ERROR_NONE;
+            CMacroExpansionRlimitBudget budget = {0};
+            bool limited_ready = prepared;
+            if (prepared && limited)
+            {
+                budget = c_macro_expansion_rlimit_apply();
+                String8 budget_record = string_format(arena,
+                    S8("C_MACRO_RLIMIT_AS_BUDGET baseline_bytes={u64} unit_arena_bytes=0 phase_arena_bytes={u64} base_arenas_bytes={u64} first_macro_arena_bytes={u64} setup_headroom_bytes={u64} planned_limit_bytes={u64} applied_limit_bytes={u64} hard_limit_bytes={u64} hard_limit_unlimited={u32} applied={u32}\n"),
+                    budget.baseline_virtual_bytes, budget.phase_arena_bytes, budget.base_arenas_bytes,
+                    budget.first_macro_arena_bytes, budget.setup_headroom_bytes, budget.planned_limit_bytes,
+                    budget.applied_limit_bytes, budget.hard_limit_bytes, (u32)budget.hard_limit_unlimited, (u32)budget.applied);
+                os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(budget_record));
+                limited_ready = budget.applied;
+            }
+            if (limited_ready)
+            {
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(arena, invocation);
+                FileReadResult output = file_read_checked(arena, output_path, (FileReadOptions){0});
+                if (limited)
+                {
+                    bool argument_reservation_error =
+                        c_macro_expansion_rlimit_contains(
+                            compiled.diagnostic, S8("could not reserve 8589934592 bytes for C macro argument arena"));
+                    bool expansion_reservation_error =
+                        c_macro_expansion_rlimit_contains(
+                            compiled.diagnostic, S8("could not reserve 8589934592 bytes for C macro expansion arena"));
+                    bool macro_reservation_error =
+                        compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                        (argument_reservation_error || expansion_reservation_error) &&
+                        !output.bytes.pointer;
+                    exit_code = macro_reservation_error ? 1 : 125;
+                    diagnostic = compiled.diagnostic.length ? compiled.diagnostic
+                                                            : S8("RLIMIT_AS did not produce a macro reservation diagnostic");
+                }
+                else
+                {
+                    bool normal_output = compiled.error == COMPILER_DRIVER_ERROR_NONE &&
+                                         output.bytes.pointer && output.bytes.length;
+                    exit_code = normal_output ? 0 : 125;
+                    if (!normal_output)
+                    {
+                        diagnostic = compiled.diagnostic.length ? compiled.diagnostic : S8("normal macro output was not published");
+                    }
+                    else
+                    {
+                        diagnostic = (String8){0};
+                    }
+                }
+            }
+            else if (prepared)
+            {
+                diagnostic = S8("could not set RLIMIT_AS above the preprocessing phase and first macro arena");
+            }
+        }
+        if (diagnostic.length)
+        {
+            os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(diagnostic));
+            os_file_write_attempt(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(S8("\n")));
+        }
+        os_exit(exit_code);
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_macro_expansion_rlimit_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if BUSTER_LINUX && BUSTER_CPU_ARCH_X86_64 && !BUSTER_ANDROID && !BUSTER_IOS
+    Arena* arena = arguments->arena;
+    CLexResult normal_expected_tokens = c_lex(arena, S8("int value = (7+1);"));
+    CLexResult unexpanded_normal_tokens = c_lex(arena, S8("int value = F(7);"));
+    CLexResult whitespace_normal_tokens = c_lex(arena, S8(" \nint\tvalue = ( 7 + 1 ) ;\n"));
+    BUSTER_TEST(arguments, c_macro_conditional_semantic_tokens_equal(whitespace_normal_tokens, normal_expected_tokens));
+    BUSTER_TEST(arguments, !c_macro_conditional_semantic_tokens_equal(unexpanded_normal_tokens, normal_expected_tokens));
+    String8 normal_path = buster_test_temporary_path(arena, S8("macro-reservation-rlimit-normal"), S8(".i"));
+    String8 limited_path = buster_test_temporary_path(arena, S8("macro-reservation-rlimit-limited"), S8(".i"));
+    FileReadResult normal_before = file_read_checked(arena, normal_path, (FileReadOptions){0});
+    FileReadResult limited_before = file_read_checked(arena, limited_path, (FileReadOptions){0});
+    BUSTER_TEST(arguments, !normal_before.bytes.pointer && !limited_before.bytes.pointer);
+
+    CMacroExpansionRlimitChild normal = c_macro_expansion_rlimit_spawn(arena, S8("normal"), normal_path);
+    if (BUSTER_REQUIRE(arguments, normal.spawn.handle != 0))
+    {
+        BUSTER_TEST(arguments, !normal.wait.timed_out && normal.wait.result == PROCESS_RESULT_SUCCESS);
+        int normal_status = (int)normal.wait.platform_status;
+        BUSTER_TEST(arguments, WIFEXITED(normal_status) && WEXITSTATUS(normal_status) == 0);
+    }
+    FileReadResult normal_output = file_read_checked(arena, normal_path, (FileReadOptions){0});
+    String8 normal_text = {.pointer = (char8*)normal_output.bytes.pointer, .length = normal_output.bytes.length};
+    CLexResult normal_tokens = c_lex(arena, normal_text);
+    BUSTER_TEST(arguments, normal_output.bytes.pointer && normal_output.bytes.length);
+    BUSTER_TEST(arguments, c_macro_conditional_semantic_tokens_equal(normal_tokens, normal_expected_tokens));
+    if (normal_output.bytes.pointer)
+    {
+        BUSTER_TEST(arguments, os_file_delete(normal_path));
+    }
+
+    CMacroExpansionRlimitChild limited = c_macro_expansion_rlimit_spawn(arena, S8("limited"), limited_path);
+    String8 limited_standard_error = {
+        .pointer = (char8*)limited.wait.streams[STANDARD_STREAM_ERROR].pointer,
+        .length = limited.wait.streams[STANDARD_STREAM_ERROR].length,
+    };
+    string_print(S8("C_MACRO_RLIMIT_AS_CHILD spawn={u32} result={u32} timed_out={u32} platform_status={u32} stderr={S8}\n"),
+                 (u32)(limited.spawn.handle != 0), (u32)limited.wait.result, (u32)limited.wait.timed_out,
+                 limited.wait.platform_status, limited_standard_error);
+    if (BUSTER_REQUIRE(arguments, limited.spawn.handle != 0))
+    {
+        BUSTER_TEST(arguments, !limited.wait.timed_out && limited.wait.result == PROCESS_RESULT_FAILED);
+        int limited_status = (int)limited.wait.platform_status;
+        BUSTER_TEST(arguments, WIFEXITED(limited_status) && WEXITSTATUS(limited_status) == 1);
+        String8 standard_output = {
+            .pointer = (char8*)limited.wait.streams[STANDARD_STREAM_OUTPUT].pointer,
+            .length = limited.wait.streams[STANDARD_STREAM_OUTPUT].length,
+        };
+        bool argument_reservation_error = c_macro_expansion_rlimit_contains(
+            limited_standard_error, S8("could not reserve 8589934592 bytes for C macro argument arena"));
+        bool expansion_reservation_error = c_macro_expansion_rlimit_contains(
+            limited_standard_error, S8("could not reserve 8589934592 bytes for C macro expansion arena"));
+        BUSTER_TEST(arguments, argument_reservation_error || expansion_reservation_error);
+        BUSTER_TEST(arguments, !c_macro_expansion_rlimit_contains(standard_output, S8("int value")));
+    }
+    FileReadResult limited_output = file_read_checked(arena, limited_path, (FileReadOptions){0});
+    BUSTER_TEST(arguments, !limited_output.bytes.pointer);
+    if (limited_output.bytes.pointer)
+    {
+        BUSTER_TEST(arguments, os_file_delete(limited_path));
+    }
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
+// Every fixture ends each scratch that holds a unit with c_test_scratch_end,
+// after the last read of the unit's tokens, and C_TEST_BOUNDED_FIXTURE checks
+// that it returned every reservation it made (GitHub #3431).
+UnitTestResult c_macro_conditional_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // The thread's unit registry reserves its own arena at its first unit;
+    // reserve it before the first fixture's reading.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        c_preprocess(temporary.arena, S8(""), (CPreprocessOptions){0});
+        c_test_scratch_end(temporary);
+    }
+    C_TEST_BOUNDED_FIXTURE(arguments, c_file_table_scaling_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_parameter_scaling_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_rescan_boundary_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_skipped_group_text_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_punctuator_separator_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_trigraph_preprocess_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_dynamic_builtin_macro_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_argument_storage_scaling_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_expansion_reservation_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_expansion_rlimit_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_argument_demand_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_produced_defined_tests);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_macro_conditional_directive_tests);
     return result;
 }
 #endif

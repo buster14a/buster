@@ -10,13 +10,16 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -24,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import compiler_compare as compare
 import compiler_owned_phase as owned
 import compiler_owned_plan as plan_contract
+import compiler_publish as publish
 import compiler_receipt as receipt_contract
 
 NATIVE_DRIVER = None
@@ -139,12 +143,57 @@ def emit(argv: list[str], *, corpus: bool) -> int:
     arguments.output.mkdir(parents=True, exist_ok=False)
     for name, document in documents.items():
         write(arguments.output / (name + ".json"), document)
+    if os.environ.get("BUSTER_ORDINARY_DIAGNOSTIC_RAW") == "1" and documents:
+        write_raw_inventory(arguments.output, corpus, documents)
     (arguments.output / "DIAGNOSTIC-UNQUALIFIED").write_text(
         "Synthetic contract data only. No timed samples or performance qualification.\n", encoding="utf-8")
     complete_data = not corpus or case in ("regression", "bad-exit")
     print("COMPILER_ORDINARY_DIAGNOSTIC_DATA data_complete=" + str(int(complete_data)) +
           " case=" + (case if corpus else "lab") + " qualified=0 activation=0")
     return 1 if corpus else 0
+
+
+def write_raw_inventory(output: Path, corpus: bool, documents: dict) -> None:
+    """Synthetic members of the sealed v1 raw inventory (#2918), so the real seal and verify can run.
+
+    The lab plan is the summary's own; counters are declared on A only and metrics on both, so
+    availability decides which pair streams the native inventory requires.
+    """
+    def put(relative: str, text: str) -> None:
+        path = output / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    if corpus:
+        for name in receipt_contract.EVIDENCE_CORPUS_CORE:
+            if not (output / name).exists():
+                put(name, "diagnostic " + name + "\n")
+        for name in receipt_contract.THROUGHPUT_PROFILE["workloads"]:
+            put(f"inputs/{name}.c", "int main(void) { return 0; }\n")
+        put("artifacts/tiny_startup-fast-0.log", "optional diagnostic log\n")
+        return
+    pairs = documents["summary"]["plan"]["pairs"]
+    put("compare.json", receipt_contract.dumps({"plan": {"pairs": pairs, "order": "ABBA"}}))
+    put("pairs.json", "[]")
+    put("a/env/env.json", "{}")
+    for variant, counters in (("a", True), ("b", False)):
+        put(f"{variant}/lab.json", receipt_contract.dumps({"capabilities": {"perf_stat": {"usable": counters}},
+                                                           "collection": {"metrics_out": True}}))
+        for log in receipt_contract.EVIDENCE_LAB_LOGS:
+            put(f"{variant}/{log}", log + "\n")
+        for pair in range(1, pairs + 1):
+            put(f"pairs/{pair:04d}-{variant}.ccmetrics", "wall_ns 1\n")
+            if counters:
+                put(f"pairs/{pair:04d}-{variant}.csv", "1,,cycles\n")
+
+
+def zipped(evidence: Path) -> bytes:
+    """The evidence as actions/upload-artifact uploads it: hidden entries dropped, nothing executable."""
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(evidence.rglob("*")):
+            if path.is_file() and not any(part.startswith(".") for part in path.relative_to(evidence).parts):
+                archive.writestr(path.relative_to(evidence).as_posix(), path.read_bytes())
+    return stream.getvalue()
 
 
 def prepare_export(requested: Path) -> Path:
@@ -190,7 +239,8 @@ def retain_case(case) -> None:
             errors.append(problem)
     destination = EXPORT_ROOT / case._testMethodName
     destination.mkdir()
-    roots = {"fixture": case.export,
+    roots = {"host-preflight": case.directory / "host-preflight",
+             "fixture": case.export,
              "initialization-evidence": case.directory / "initialize-evidence",
              "ordinary-evidence": case.evidence,
              "raw-lab": case.work / "lab", "raw-throughput": case.work / "throughput",
@@ -271,6 +321,18 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.addCleanup(setattr, compare, "OWNED_PHASE_CONTEXT", self.prior)
         self.addCleanup(retain_case, self)
+        # Retain the actual resolver inputs before any MAIN version probe can
+        # fail. Version output alone cannot identify a crashing executable.
+        self.host_preflight = self.directory / "host-preflight"
+        self.host_preflight.mkdir()
+        command = shutil.which("cmake")
+        resolved = Path(command).resolve(strict=True) if command else None
+        write(self.host_preflight / "cmake-identity.json", dict(DIAGNOSTIC,
+            command=command, resolved=str(resolved) if resolved else None,
+            sha256=digest(resolved) if resolved else None,
+            environment={key: os.environ.get(key) for key in
+                         ("PATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "LC_ALL")},
+            python_path=sys.executable, trusted_root=str(compare.TRUSTED_ROOT)))
         initialization_work = self.directory / "initialize-work"
         initialization_evidence = self.directory / "initialize-evidence"
         initialization_work.mkdir()
@@ -397,6 +459,98 @@ class ActualOrdinaryMeasure(unittest.TestCase):
         print("COMPILER_MAIN_OWNED_DIAGNOSTIC policy=" + policy + " profile=" + profile +
               " core=" + str(len(core)) + " strict_replay=1 regression_report_only=1 qualification=unqualified")
 
+    def test_sealed_pull_snapshot_producer_then_publisher(self):
+        # #2918/#3211: the ordinary non-owned pull snapshot-v1 attempt seals its raw bundle with the real
+        # native driver, and the publisher's own reader verifies it at publication; a tampered or missing
+        # closure or owned-phase member is refused.
+        identity = self.identity()
+        argv = ["--candidate", str(self.candidate), "--lab", str(Path(__file__).resolve()),
+                "--work", str(self.work), "--evidence", str(self.evidence),
+                "--summary", str(self.directory / "sealed-pull-summary.md"), "--request-attempt", "2",
+                "--closure-policy", "snapshot-v1", "--closure-driver", str(NATIVE_DRIVER)]
+        for key, value in identity.items():
+            argv.extend(["--" + key.replace("_", "-"), value])
+        def diagnostic_host(current):
+            current["diagnostic_fixture"] = copy.deepcopy(DIAGNOSTIC)
+            return ""
+        native = (str(NATIVE_DRIVER), "compiler_evidence")
+        prior_cwd = os.getcwd()
+        try:
+            os.chdir(self.directory)
+            with mock.patch.object(compare, "host_problem", side_effect=diagnostic_host), \
+                    mock.patch.object(compare, "queue_head", return_value=identity["head"]), \
+                    mock.patch.object(compare, "throughput_harness_problem", return_value=""), \
+                    mock.patch.object(compare, "EVIDENCE_SEAL_COMMAND", native), \
+                    mock.patch.dict(os.environ, {"BUSTER_ORDINARY_DIAGNOSTIC_RAW": "1"}):
+                status = compare.main(argv)
+        finally:
+            os.chdir(prior_cwd)
+        self.current = json.loads((self.evidence / "receipt.json").read_bytes())
+        self.assertEqual((status, self.current["state"]), (0, "measured"), self.current["reasons"])
+        self.assertEqual(self.current["preparation_policy"], "snapshot-v1")
+        count = self.current["phase_ownership"]["count"]
+        sealed = self.current["evidence_bundle"]
+        self.assertEqual((sealed["state"], sealed["inventory"]), ("sealed", receipt_contract.EVIDENCE_SNAPSHOT_INVENTORY))
+        manifest = (self.evidence / receipt_contract.EVIDENCE_MANIFEST).read_text()
+        self.assertIn(f"preparation_policy\tsnapshot-v1\nowned_phases\t{count}\n", manifest)
+        roles = {line.split("\t")[3]: line.split("\t")[0] for line in manifest.splitlines() if line.count("\t") == 3 and
+                 line.split("\t")[0] in ("required", "optional")}
+        for member in (*receipt_contract.EVIDENCE_CLOSURE_MEMBERS, f"owned-phases/{count:04d}.json.bootstrap.complete",
+                       "owned-phases/0001.json.stdout", "lab/pairs/0012-a.csv", "throughput/inputs/tiny_startup.c"):
+            self.assertEqual(roles.get(member), "required", member)
+        self.assertEqual(roles.get("closure.log"), "optional")
+
+        # Publication: the publisher's own artifact reader, native verify and decision.
+        expected = {key: identity[key] for key in receipt_contract.IDENTITY_KEYS}
+        from compiler_test import FakeApi
+        name = "buster-9700x-compiler-x-1"
+        machine = self.evidence / "machine-specifications"
+        machine.mkdir()
+        (machine / "report.json").write_text("{}")  # the workflow appends it after the seal
+        receipt, summary, problem, _, throughput = publish.read_evidence(FakeApi(zipped(self.evidence)), "1", name)
+        self.assertEqual(problem, "")
+        # This fixture's lab and corpus are diagnostic stand-ins, not the frozen compiler-compare-v1 lab or a native
+        # corpus, so their replay is stubbed; compiler_test.SealedReplayTest replays real ones (#2918).
+        replayed = []
+        with mock.patch.object(publish, "EVIDENCE_VERIFY_COMMAND", native), \
+                mock.patch.object(publish, "sealed_lab_replay", lambda files: replayed.append(files) or 12), \
+                mock.patch.object(publish, "sealed_corpus_replay", lambda files, temporary: 12):
+            verified = publish.verify_evidence_bundle(throughput, expected, receipt_contract.THROUGHPUT_PROFILE, "2", receipt)
+            refusals = {}
+            for label, change in (("tampered closure manifest", {"closure-restore.json.manifest.tsv": b"tampered\n"}),
+                                  ("missing closure record", {"closure-verify.json": None}),
+                                  ("missing owned-phase member", {f"owned-phases/{count:04d}.json.argv": None})):
+                files = dict(throughput["sealed_files"])
+                for member, data in change.items():
+                    self.assertIn(member, files)
+                    if data is None:
+                        files.pop(member)
+                    else:
+                        files[member] = data
+                refusals[label] = publish.verify_evidence_bundle(dict(throughput, sealed_files=files), expected,
+                                                                 receipt_contract.THROUGHPUT_PROFILE, "2", receipt)
+            as_ordinary = publish.verify_evidence_bundle(throughput, expected, receipt_contract.THROUGHPUT_PROFILE, "2")
+        self.assertEqual(verified, {"state": "verified", "inventory": receipt_contract.EVIDENCE_SNAPSHOT_INVENTORY,
+                                    "replay": {"lab_pairs": 12, "corpus_cases": 12},
+                                    **{key: sealed[key] for key in ("members", "payload_bytes", "manifest_sha256")}})
+        self.assertIs(replayed[0], throughput["sealed_files"])
+        self.assertIn("verified natively", publish.evidence_bundle_note(verified))
+        with mock.patch.object(publish, "host_problem", return_value=""):
+            conclusion, _, reasons = publish.decide(expected, True, "success", receipt, summary, "", throughput,
+                                                    evidence_bundle=verified)
+            refused = publish.decide(expected, True, "success", receipt, summary, "", throughput,
+                                     evidence_bundle=refusals["tampered closure manifest"])
+        self.assertEqual(reasons, [])
+        self.assertEqual(conclusion, "success")
+        self.assertEqual(refused[0], "failure")
+        self.assertTrue(any("sealed raw evidence refused" in reason for reason in refused[2]))
+        for label, refusal in refusals.items():
+            self.assertEqual(refusal["state"], "refused", label)
+            self.assertIn("COMPILER_EVIDENCE_REFUSED", refusal["reason"], label)
+        self.assertEqual(as_ordinary["state"], "refused")
+        print("COMPILER_SEALED_PULL_SNAPSHOT_DIAGNOSTIC phases=" + str(count) + " members=" + str(sealed["members"]) +
+              " verified=1 refusals=" + str(len(refusals)) + " qualified=0 activation=0")
+
     def test_supported_main_owned_long_legacy_producer_then_reader(self):
         self.supported_main("legacy-rebuild", "compiler-compare-v1")
 
@@ -465,6 +619,32 @@ class ActualOrdinaryMeasure(unittest.TestCase):
             cwd=self.directory, capture_output=True, text=True, timeout=30, start_new_session=True)
         self.assertNotEqual(refused.returncode, 0)
         self.assertNotEqual(refused.stdout.strip(), str(impostor))
+
+    def test_cmake_version_direct_control_and_native_owner_reach_clean_exit(self):
+        # The direct control uses the same argv/cwd/environment as the owned
+        # probe. Its result is diagnosis only, never a fallback or retry that
+        # can qualify a failed native attempt (#4147).
+        identity_path = self.host_preflight / "cmake-identity.json"
+        identity = json.loads(identity_path.read_bytes())
+        self.assertIsNotNone(identity["resolved"], "CMake is a mandatory preflight tool")
+        argv = [identity["resolved"], "--version"]
+        result = subprocess.run(argv, cwd=compare.TRUSTED_ROOT,
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=30, start_new_session=True)
+        write(self.host_preflight / "cmake-direct.json", dict(DIAGNOSTIC,
+            argv=argv, cwd=str(compare.TRUSTED_ROOT),
+            returncode=result.returncode, stdout=result.stdout.decode(errors="replace"),
+            stderr=result.stderr.decode(errors="replace")))
+        native = self.initialization_context.execute(argv, compare.TRUSTED_ROOT,
+            self.directory / "initialize-evidence" / "cmake.log", 30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(native.returncode, 0, native.stderr)
+        self.assertEqual(native.stdout, result.stdout)
+        self.assertEqual(native.stderr, result.stderr)
+        self.assertEqual(digest(Path(identity["resolved"])), identity["sha256"])
+        lookup = self.initialization_context.execute(["cmake", "--version"], compare.TRUSTED_ROOT,
+            self.directory / "initialize-evidence" / "cmake-lookup.log", 30)
+        self.assertEqual(lookup.stdout, native.stdout)
+        self.assertEqual(lookup.stderr, native.stderr)
 
     def test_normal_main_snapshot_initializes_owned_preflight_before_all_children(self):
         identity = self.identity("main")

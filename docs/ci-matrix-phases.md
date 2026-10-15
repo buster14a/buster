@@ -23,7 +23,8 @@ compiler policy. The live CMake cache and graph remain provenance-bound.
 
 - `plan.json`: exact source commit/tree, build-source/driver hashes, workflow,
   run/attempt/logical job, platform/architecture/shard, detected logical CPUs,
-  effective matrix CPU budget, outer quota, tree identities, authoritative
+  effective matrix CPU budget, host physical memory (`memory_bytes`), outer
+  quota, tree identities, authoritative
   coverage row IDs, compiler path/hash/version/target, configuration and
   sanitizer/fuzz/LTO/linker/generator policy, and expected phase tasks.
 - `<task>.ready.json`: the existing native graph makes a configure/direct
@@ -68,6 +69,24 @@ command may be the tree's `ide test` or the isolated-process runner
 commands for a shared multi-config tree retain one pool-edge identity because
 Ninja holds that slot across them. The self-host consumer is a separate
 competing edge. Its time is retained, not attributed to compiler tests.
+
+Post-test analyzer work normally shares its tree's `validation-<tree>` edge
+and records its inner `--parallel` quota. Where the native policy runs it
+beside the self-host worker (#3912; see
+[the build guide](agents/build.md#build)), it is the separate
+`post-test-<tree>` edge in its own one-slot pool. The self-host task then
+depends on the tree's last validation task instead of its build, and the plan's
+outer quota is the CPU-pool quota plus that slot. The validator re-derives this
+from the plan alone: one pooled tree, scheduled self-host and unity-analysis
+obligations, an analyzer quota of 2 (CPU budget at least 3 and `memory_bytes`
+at least 12 GiB) and a CPU budget of at least 4. It requires the post-test
+pool edge, the self-host dependency and the outer quota to match exactly,
+binds the post-test and outer scheduler `--parallel` arguments to the recorded
+quotas, and limits occupancy separately: CPU-pool edges stay within the
+CPU-pool quota, post-test edges within their slot, and all edges within the
+outer quota. A journal without `memory_bytes` predates this policy: it admits
+no post-test slot and leaves the analyzer quota unchecked. Predictions replay
+the same two pools.
 
 For a direct `test_all` command, pre-test/build time ends at the nested
 observer's recorded `child_start_us` boundary, sampled immediately before
@@ -138,7 +157,9 @@ unchanged.
 
 Run `python3 tools/ci_matrix_phases_test.py -v`. It compiles the actual native
 observer, exercises success/nonzero exit/deadline controls, exports native
-plans for pooled/direct release/checks at three- and four-CPU budgets, verifies
+plans for pooled/direct release/checks at three- and four-CPU budgets and at
+16 and 7 GiB, configures the release superbuild graph with and without the
+post-test slot and queries its real Ninja pools and dependencies, verifies
 exact Git tree identity and canonical Release selection, and validates deterministic concurrent
 fixtures including a fifth tree waiting behind four slots. It also emits five
 `MATRIX_PHASE_OBSERVER_OVERHEAD` samples per hosted release lane. Each upper

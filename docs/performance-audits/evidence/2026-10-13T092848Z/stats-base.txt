@@ -1,0 +1,8 @@
+C_AST_TYPES bodies=7041 initializers=2696 nodes_typed=1345643 nodes_accepted=1213673 answers=830251 declines=13028 misses=5387 gated=0 lookups_settled=133155 lookups_walked=181
+C_AST_SPLIT units=1 records=16399 assertions=77 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_STATEMENTS bodies=7041 segments=104471 segment_tokens=1669919 uses=361174 bails=0 declaration_hints=39053 loop_hints=5206 declines=825 declarator_hints=39174 initializer_hints=38208 auto_skips=39053 declarator_declines=0 braced=10164 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_SPECIFIERS lists=158596 indexed=154828 index_reads=177487 primitive_answers=14488 typedef_answers=69845 fallbacks=2274 input=2252 specifiers=22 storage=0 primitive=0 typedef=0 reason=input fallback_token=4377054
+C_AST_EXTENTS bodies=4820 entries=42314 entry_declines=12 answers=42330 walked_input=0 walked_anchor=0 walked_shape=12 refused_input=0 refused_anchor=0 reason=none fallback_token=4294967295
+C_AST_TYPE_NAMES skips=46756 retries=0 primitive_answers=156 typedef_answers=28798 fallbacks=29 input=29 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_MEMBERS primitive_answers=1261 typedef_answers=8579 fallbacks=121 input=121 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_LOWER bodies=7041 conditionals=11625 steps=44553 answers=52929 negatives=832659 fallbacks=9069

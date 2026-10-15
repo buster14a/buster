@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 51171
+reason Native C alternative-evidence tool (classify, preflight, callgrind/cachegrind/perf stat/wait4 paired compare, SHA-256 identities, receipts) for #4013.

@@ -653,6 +653,40 @@ class MainCIReuseFinishTests(unittest.TestCase):
                 self.assertFalse(any("Publish" in row["name"] for row in jobs))
                 self.sleeps.assert_not_called()
 
+    def test_finish_reverifies_a_truthfully_terminalized_announcement(self):
+        from github_ci_time_test import CompilerBenchmarkInventoryTests
+        for form in ("legacy", "current", "superseded"):
+            with self.subTest(form=form):
+                self.api = FakeAPI()
+                fixture = CompilerBenchmarkInventoryTests()
+                fixture.HEAD = SHA
+                fixture.setUp()
+                fixture.recovered_announcement()
+                queued = dict(fixture.checks[-1], status="queued", conclusion=None, completed_at=None)
+                row = dict(fixture.jobs[-1], status="queued", conclusion=None)
+                fixture.setUp()
+                fixture.recovered_announcement(form)
+                check = fixture.checks[-1]
+                self.api.jobs.append(dict(row, run_id=SOURCE_ID))
+                self.api.main_jobs.append(dict(row, run_id=CURRENT_ID))
+                self.api.checks.append(queued)
+                self.api.benchmark_reads = fixture.benchmark_reads
+                handoff = self.decide()
+                self.api.checks[-1] = check
+                self.api.jobs[-1].update(status="completed", conclusion=check["conclusion"])
+                self.api.main_jobs[-1].update(status="completed", conclusion=check["conclusion"])
+                code, report, _, text = self.invoke("finish", handoff)
+                self.assertEqual(code, 0, text)
+                self.assertEqual(report["status"], "verified")
+                self.assertEqual(len(report["receipt"]["source_jobs"]), 23)
+                self.assertEqual(len(report["receipt"]["main_jobs"]), 17)
+                metadata = report["diagnostics"]["source_reconciled_checks"][-1]
+                self.assertEqual(metadata["check"]["conclusion"], check["conclusion"])
+                self.assertIn("terminal_recovery", metadata["publisher_provenance"])
+                self.sleeps.assert_not_called()
+                self.api.benchmark_reads["actions/runs/38261177183"]["conclusion"] = "failure"
+                self.assert_refused(self.invoke("finish", handoff), "source-jobs")
+
     def assert_refused(self, result, stage=None):
         code, report, outputs, text = result
         self.assertEqual(code, 1)

@@ -1,0 +1,31 @@
+# os.wait4 rusage, interleaved, median of N; subject plain builds (x86-64-v3) base, base2 (byte copy of base), candidate
+empty_aarch64_c base runs=120 wall_median_ms=4.221 cpu_median_ms=3.475 minflt_median=607
+empty_aarch64_c base2 runs=120 wall_median_ms=4.221 cpu_median_ms=3.490 minflt_median=613
+empty_aarch64_c cand runs=120 wall_median_ms=4.118 cpu_median_ms=3.462 minflt_median=606
+empty_x86_64_c base runs=120 wall_median_ms=9.466 cpu_median_ms=8.197 minflt_median=1681
+empty_x86_64_c base2 runs=120 wall_median_ms=9.405 cpu_median_ms=8.229 minflt_median=1674
+empty_x86_64_c cand runs=120 wall_median_ms=9.484 cpu_median_ms=8.297 minflt_median=1678
+empty_x86_64_E base runs=120 wall_median_ms=4.588 cpu_median_ms=3.701 minflt_median=576
+empty_x86_64_E base2 runs=120 wall_median_ms=4.495 cpu_median_ms=3.619 minflt_median=578
+empty_x86_64_E cand runs=120 wall_median_ms=4.622 cpu_median_ms=3.662 minflt_median=573
+observables_compile_link base runs=120 wall_median_ms=13.824 cpu_median_ms=12.527 minflt_median=2068
+observables_compile_link base2 runs=120 wall_median_ms=13.890 cpu_median_ms=12.323 minflt_median=2059
+observables_compile_link cand runs=120 wall_median_ms=13.442 cpu_median_ms=12.239 minflt_median=2065
+# first pass: Release ide-base vs ide-cand (built outside CMake; +18-25 minor faults are layout, absent with matched builds above), 30 runs x 2 rounds
+empty_x86_64_c base runs=30 median_ms=8.881 min_ms=7.656
+empty_x86_64_c cand runs=30 median_ms=9.157 min_ms=7.983
+empty_aarch64_c base runs=30 median_ms=4.544 min_ms=4.068
+empty_aarch64_c cand runs=30 median_ms=5.018 min_ms=4.270
+empty_x86_64_E base runs=30 median_ms=4.519 min_ms=3.738
+empty_x86_64_E cand runs=30 median_ms=4.654 min_ms=4.257
+observables_compile_link base runs=30 median_ms=15.010 min_ms=11.354
+observables_compile_link cand runs=30 median_ms=13.254 min_ms=11.457
+--- round 2
+empty_x86_64_c base runs=30 median_ms=9.256 min_ms=8.075
+empty_x86_64_c cand runs=30 median_ms=9.472 min_ms=8.235
+empty_aarch64_c base runs=30 median_ms=4.931 min_ms=3.945
+empty_aarch64_c cand runs=30 median_ms=5.535 min_ms=4.253
+empty_x86_64_E base runs=30 median_ms=4.710 min_ms=3.938
+empty_x86_64_E cand runs=30 median_ms=5.281 min_ms=3.908
+observables_compile_link base runs=30 median_ms=14.403 min_ms=11.040
+observables_compile_link cand runs=30 median_ms=13.770 min_ms=11.450

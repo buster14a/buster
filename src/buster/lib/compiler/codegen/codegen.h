@@ -115,6 +115,7 @@ struct CodegenFunctionDescriptor
 {
     CodegenUnwindAction* unwind_actions;
     u32* epilog_offsets;
+    u32* epilog_end_offsets;
     IrSymbolId symbol;
     u32 code_offset;
     u32 code_size;

@@ -3,9 +3,10 @@
 // (aarch64-canonical-decoder / aarch64-assembly, included below) and every
 // consumer that wants real 32-bit instruction words: mnemonic and form
 // lookup (buster_aarch64_metadata_*), feature-predicate gating against the
-// Apple M1 profile, the fixed-row spellings, the GPR and scalar-integer
-// recipe encoders (a64_arm_m1_*_encode) with logical-immediate and
-// PC-relative materialization, field-level raw encode/decode
+// Apple M1 profile (a64_target_is_m1_profile, shared with system semantics),
+// the fixed-row spellings, the GPR and scalar-integer recipe encoders
+// (a64_arm_m1_*_encode) with logical-immediate and PC-relative
+// materialization, field-level raw encode/decode
 // (a64_generated_raw_*, buster_aarch64_canonical_field), canonical form
 // lookup by Arm row digest (buster_aarch64_canonical_form_by_digest), and the
 // typed decoders that recover operands from words for the differential tests.
@@ -323,7 +324,7 @@ BUSTER_GLOBAL_LOCAL Target a64_metadata_apple_m1_target(void)
     };
 }
 
-BUSTER_GLOBAL_LOCAL bool a64_metadata_target_is_m1_profile(Target target)
+bool a64_target_is_m1_profile(Target target)
 {
     bool result;
     if (target.cpu_model == CPU_MODEL_A64_APPLE_M1)
@@ -403,7 +404,7 @@ BUSTER_GLOBAL_LOCAL bool a64_metadata_form_predicates_supported(BusterAarch64Gen
         return false;
     }
     TargetCpuFeatures features = target_cpu_features_effective(target);
-    bool m1_profile = a64_metadata_target_is_m1_profile(target);
+    bool m1_profile = a64_target_is_m1_profile(target);
     if (m1_profile && !(form.profile_flags & BUSTER_AARCH64_GENERATED_FORM_FLAG_APPLE_M1_PROFILE_MEMBER))
     {
         // Membership is importer-derived and records parser failures that
@@ -832,7 +833,7 @@ BUSTER_GLOBAL_LOCAL bool a64_gpr_operand_valid(BusterAarch64ArmM1GprGeneratedOpe
 
 BUSTER_GLOBAL_LOCAL bool a64_gpr_target_valid(Target target)
 {
-    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_metadata_target_is_m1_profile(target) && target_cpu_features_are_valid(target);
+    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_target_is_m1_profile(target) && target_cpu_features_are_valid(target);
 }
 
 u32 buster_aarch64_arm_m1_gpr_form_count(void)
@@ -1286,7 +1287,7 @@ BUSTER_GLOBAL_LOCAL bool a64_scalar_recipe_encode(BusterAarch64ArmM1ScalarIntege
 
 BUSTER_GLOBAL_LOCAL bool a64_scalar_target_valid(Target target)
 {
-    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_metadata_target_is_m1_profile(target) && target_cpu_features_are_valid(target);
+    return target.cpu_arch == CPU_ARCH_AARCH64 && a64_target_is_m1_profile(target) && target_cpu_features_are_valid(target);
 }
 
 u32 buster_aarch64_arm_m1_scalar_integer_form_count(void)

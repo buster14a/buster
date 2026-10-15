@@ -132,7 +132,7 @@ BUSTER_GLOBAL_LOCAL u64 ir_validate_test_random(u64* state)
 BUSTER_GLOBAL_LOCAL IrValidateTestBuilder ir_validate_test_builder(Arena* arena)
 {
     IrValidateTestBuilder builder = {.arena = arena};
-    builder.program = ir_program_initialize(arena, 1, 8, 0, 0);
+    builder.program = ir_program_initialize(arena, 1, 8, 8, 0);
     builder.void_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_VOID, .layout = {.alignment = 1, .resolved = true}});
     builder.i32_type = ir_program_add_type(&builder.program, (IrType){.kind = IR_TYPE_INTEGER, .bit_width = 32, .is_signed = true,
         .layout = {.size = 4, .alignment = 4, .abi_class = IR_ABI_CLASS_INTEGER, .resolved = true}});
@@ -1099,9 +1099,253 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_test_agree(UnitTestArguments* arg
     return result;
 }
 
+// Direct malformed-storage controls for the canonical validator. The first
+// variant of each family has a valid instruction/global shape but absent nested
+// storage; the remaining variants pin the empty and nonempty canonical forms.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_test_aggregate_storage_case(UnitTestArguments* arguments, u32 variant)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    IrValidateTestBuilder builder = ir_validate_test_builder(temporary.arena);
+    u32 block = ir_validate_test_block(&builder);
+    bool malformed = variant < 2;
+    bool empty = variant == 2;
+    IrField* fields = 0;
+    u32 field_count = empty ? 0 : 1;
+    if (!malformed && !empty)
+    {
+        fields = arena_allocate(temporary.arena, IrField, 1);
+        fields[0] = (IrField){.type = builder.i32_type};
+    }
+    IrTypeId aggregate_type = ir_program_add_type(&builder.program, (IrType){
+        .kind = IR_TYPE_STRUCT, .fields = fields, .field_count = field_count,
+        .layout = {.size = empty ? 0 : 4, .alignment = empty ? 1 : 4, .resolved = true},
+    });
+    IrValueId value = ir_validate_test_value(&builder, aggregate_type, IR_VALUE_VALUE);
+    IrValueId* operands = 0;
+    u64* immediates = 0;
+    if (!empty)
+    {
+        IrValueId member = ir_validate_test_constant(&builder, block, builder.i32_type, 7);
+        operands = arena_allocate(temporary.arena, IrValueId, 1);
+        operands[0] = member;
+        immediates = arena_allocate(temporary.arena, u64, 1);
+        immediates[0] = 0;
+    }
+    ir_validate_test_row(&builder, block, (IrInstruction){
+        .opcode = IR_OPCODE_AGGREGATE, .canonical_type = aggregate_type, .result = value,
+        .operands = operands, .operand_count = empty ? 0 : 1,
+        .immediates = immediates, .immediate_count = empty ? 0 : 1,
+    });
+    ir_validate_test_unreachable(&builder, block);
+    if (variant == 1)
+    {
+        IrValueLabelMetadata* metadata = ir_value_label_metadata_ensure(temporary.arena, builder.function, value);
+        metadata->has_label_provenance = true;
+    }
+    IrValidationResult validation = ir_validate_canonical_module(&builder.program, builder.program.modules);
+    IrValidationError expected = malformed ? IR_VALIDATION_OPERATION : IR_VALIDATION_NONE;
+    BUSTER_TEST_RAW(arguments, validation.error == expected,
+                    string_format(temporary.arena, S8("aggregate storage variant {u32} returned {u32}"), variant, (u32)validation.error));
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_test_field_storage_case(UnitTestArguments* arguments, bool malformed, bool metadata_enabled)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    IrValidateTestBuilder builder = ir_validate_test_builder(temporary.arena);
+    u32 block = ir_validate_test_block(&builder);
+    IrField* fields = 0;
+    if (!malformed)
+    {
+        fields = arena_allocate(temporary.arena, IrField, 1);
+        fields[0] = (IrField){.type = builder.i32_type};
+    }
+    IrTypeId aggregate_type = ir_program_add_type(&builder.program, (IrType){
+        .kind = IR_TYPE_STRUCT, .fields = fields, .field_count = 1,
+        .layout = {.size = 4, .alignment = 4, .resolved = true},
+    });
+    IrSymbolId symbol = ir_program_add_symbol(&builder.program, (IrSymbol){
+        .name = S8("field_storage"), .kind = IR_SYMBOL_DATA, .type = aggregate_type,
+    });
+    IrValueId base = ir_validate_test_value(&builder, aggregate_type, IR_VALUE_PLACE);
+    ir_validate_test_row(&builder, block, (IrInstruction){
+        .opcode = IR_OPCODE_GLOBAL, .canonical_type = aggregate_type, .result = base, .symbol = symbol,
+    });
+    IrValueId place = ir_validate_test_value(&builder, builder.i32_type, IR_VALUE_PLACE);
+    IrValueId* operands = arena_allocate(temporary.arena, IrValueId, 1);
+    operands[0] = base;
+    u64* immediates = arena_allocate(temporary.arena, u64, 1);
+    immediates[0] = 0;
+    ir_validate_test_row(&builder, block, (IrInstruction){
+        .opcode = IR_OPCODE_FIELD, .canonical_type = builder.i32_type, .result = place,
+        .operands = operands, .operand_count = 1, .immediates = immediates, .immediate_count = 1,
+    });
+    ir_validate_test_unreachable(&builder, block);
+    if (metadata_enabled)
+    {
+        IrValueLabelMetadata* metadata = ir_value_label_metadata_ensure(temporary.arena, builder.function, place);
+        metadata->has_label_provenance = true;
+    }
+    IrValidationResult validation = ir_validate_canonical_module(&builder.program, builder.program.modules);
+    IrValidationError expected = malformed ? IR_VALIDATION_OPERATION : IR_VALIDATION_NONE;
+    BUSTER_TEST_RAW(arguments, validation.error == expected,
+                    string_format(temporary.arena, S8("field storage malformed {u32} metadata {u32} returned {u32}"),
+                                  (u32)malformed, (u32)metadata_enabled, (u32)validation.error));
+    scratch_end(temporary);
+    return result;
+}
+
+// A later FIELD definition can be consulted by an earlier mismatched LOAD.
+// This verifies that its narrow-bit-field probe also refuses missing backing
+// before the canonical walk reaches the FIELD row itself.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_test_field_storage_precheck(UnitTestArguments* arguments, u32 variant)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    IrValidateTestBuilder builder = ir_validate_test_builder(temporary.arena);
+    u32 block = ir_validate_test_block(&builder);
+    IrField* fields = 0;
+    if (variant != 0)
+    {
+        fields = arena_allocate(temporary.arena, IrField, 1);
+        fields[0] = (IrField){.type = builder.i32_type};
+    }
+    IrTypeId aggregate_type = ir_program_add_type(&builder.program, (IrType){
+        .kind = IR_TYPE_STRUCT, .fields = fields, .field_count = 1,
+        .layout = {.size = 4, .alignment = 4, .resolved = true},
+    });
+    IrSymbolId symbol = ir_program_add_symbol(&builder.program, (IrSymbol){
+        .name = S8("field_storage_precheck"), .kind = IR_SYMBOL_DATA, .type = aggregate_type,
+    });
+    IrValueId base = ir_validate_test_value(&builder, aggregate_type, IR_VALUE_PLACE);
+    ir_validate_test_row(&builder, block, (IrInstruction){
+        .opcode = IR_OPCODE_GLOBAL, .canonical_type = aggregate_type, .result = base, .symbol = symbol,
+    });
+    IrValueId field_place = ir_validate_test_value(&builder, builder.i32_type, IR_VALUE_PLACE);
+    IrValueId loaded = ir_validate_test_value(&builder, builder.i64_type, IR_VALUE_VALUE);
+    IrValueId* load_operands = arena_allocate(temporary.arena, IrValueId, 1);
+    load_operands[0] = field_place;
+    ir_validate_test_row(&builder, block, (IrInstruction){
+        .opcode = IR_OPCODE_LOAD, .canonical_type = builder.i64_type, .result = loaded, .operands = load_operands, .operand_count = 1,
+    });
+    IrValueId* field_operands = variant == 1 ? 0 : arena_allocate(temporary.arena, IrValueId, 1);
+    if (field_operands)
+    {
+        field_operands[0] = base;
+    }
+    u64* field_immediates = variant == 2 ? 0 : arena_allocate(temporary.arena, u64, 1);
+    if (field_immediates)
+    {
+        field_immediates[0] = 0;
+    }
+    ir_validate_test_row(&builder, block, (IrInstruction){
+        .opcode = IR_OPCODE_FIELD, .canonical_type = builder.i32_type, .result = field_place,
+        .operands = field_operands, .operand_count = 1, .immediates = field_immediates, .immediate_count = 1,
+    });
+    ir_validate_test_unreachable(&builder, block);
+    IrValidationResult validation = ir_validate_canonical_module(&builder.program, builder.program.modules);
+    BUSTER_TEST_RAW(arguments, validation.error == IR_VALIDATION_OPERAND_TYPE,
+                    string_format(temporary.arena, S8("field storage precheck variant {u32} returned {u32}"),
+                                  variant, (u32)validation.error));
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_test_bytes_storage_case(UnitTestArguments* arguments, u32 variant)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+    IrValidateTestBuilder builder = ir_validate_test_builder(temporary.arena);
+    u32 block = ir_validate_test_block(&builder);
+    IrValueId zero = ir_validate_test_constant(&builder, block, builder.i32_type, 0);
+    ir_validate_test_return(&builder, block, zero);
+    bool empty = variant == 1;
+    IrTypeId global_type = builder.i32_type;
+    if (empty)
+    {
+        global_type = ir_program_add_type(&builder.program, (IrType){
+            .kind = IR_TYPE_STRUCT, .layout = {.size = 0, .alignment = 1, .resolved = true},
+        });
+    }
+    IrSymbolId symbol = ir_program_add_symbol(&builder.program, (IrSymbol){
+        .name = S8("bytes_storage"), .kind = IR_SYMBOL_DATA, .type = global_type, .is_definition = true,
+    });
+    u8* bytes = 0;
+    u64 byte_count = empty ? 0 : 4;
+    if (variant == 2)
+    {
+        bytes = arena_allocate(temporary.arena, u8, 4);
+        for (u32 index = 0; index < 4; index += 1)
+        {
+            bytes[index] = 0;
+        }
+    }
+    ir_module_add_global(temporary.arena, builder.program.modules, (IrGlobal){
+        .bytes = {.pointer = bytes, .length = byte_count},
+        .symbol = symbol, .type = global_type, .initializer_kind = IR_GLOBAL_INITIALIZER_BYTES,
+    });
+    IrValidationResult validation = ir_validate_canonical_module(&builder.program, builder.program.modules);
+    IrValidationError expected = variant == 0 ? IR_VALIDATION_OPERATION : IR_VALIDATION_NONE;
+    BUSTER_TEST_RAW(arguments, validation.error == expected,
+                    string_format(temporary.arena, S8("bytes storage variant {u32} returned {u32}"), variant, (u32)validation.error));
+    scratch_end(temporary);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_test_storage_guard_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    UnitTestResult test = ir_validate_test_aggregate_storage_case(arguments, 0);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_aggregate_storage_case(arguments, 1);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_aggregate_storage_case(arguments, 2);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_aggregate_storage_case(arguments, 3);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_field_storage_case(arguments, true, false);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_field_storage_case(arguments, true, true);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_field_storage_case(arguments, false, false);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_field_storage_precheck(arguments, 0);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_field_storage_precheck(arguments, 1);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_field_storage_precheck(arguments, 2);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_bytes_storage_case(arguments, 0);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_bytes_storage_case(arguments, 1);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    test = ir_validate_test_bytes_storage_case(arguments, 2);
+    result.test_count += test.test_count;
+    result.succeeded_test_count += test.succeeded_test_count;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_equivalence_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    UnitTestResult storage_guards = ir_validate_test_storage_guard_tests(arguments);
+    result.test_count += storage_guards.test_count;
+    result.succeeded_test_count += storage_guards.succeeded_test_count;
     u32 applied_counts[IR_VALIDATE_TEST_MUTATION_COUNT] = {0};
     for (u32 shape = 0; shape < IR_VALIDATE_TEST_SHAPE_COUNT; shape += 1)
     {

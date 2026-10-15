@@ -765,7 +765,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult gpu_test_log_retention(UnitTestArguments* arg
     ready = ready && gpu_test_write_tool(arena, stderr_only, S8("printf 'EEE' >&2\n"), true);
     ready = ready && gpu_test_write_tool(arena, flood, S8("head -c 300000 /dev/zero | tr '\\000' 'X'\n"), true);
     ready = ready && gpu_test_write_tool(arena, failing, S8("printf 'LINK-FAILED-MARKER\\n' >&2\nexit 7\n"), false);
-    ready = ready && gpu_test_write_tool(arena, hanging, S8("printf 'LINK-TIMEOUT-MARKER\\n' >&2\nwhile :; do sleep 1; done\n"), false);
+    // The shell is replaced by the sleeper so no interpreter outlives the group
+    // kill: a shell that reaps its killed child first reports it ("line N: PID
+    // Killed: 9 sleep 1") on the captured stderr after the marker (#3780).
+    ready = ready && gpu_test_write_tool(arena, hanging, S8("printf 'LINK-TIMEOUT-MARKER\\n' >&2\nexec sleep 3600\n"), false);
     BUSTER_TEST(arguments, ready);
     if (ready)
     {

@@ -1,0 +1,14 @@
+# head 98d477e4, Release, clang 18.1.3 bootstrap of build.c
+## build --config Release -t test_all
+TEST_MODULE_TIMING index=12 module=c_frontend_tests duration_ns=44098028206 passed=1483633 failed=0 assertions=1483633 status=pass
+[6982432/6982432] Unit tests
+[63/63] Module tests
+[0/0] External tests
+exit=0
+## test_self_host --config Release
+SELF_HOST fixed_point bytes=42846720 stage1=build/self-host/Release/ide-stage1 stage2=build/self-host/Release/ide-stage2
+exit=0
+## source_size --base 446f742e
+SOURCE_SIZE_RATCHET_V1 category=production growth=+9393 limit=32768 acknowledged=0 verdict=within-limit
+SOURCE_SIZE_RATCHET_V1 category=build growth=0 limit=32768 acknowledged=0 verdict=within-limit
+SOURCE_SIZE_RESULT_V1 revision=98d477e4a202ea4c13b7ec853e0df5dc6ff1e53d base=446f742ed4ae5ed527371b0819f611f7d27a83ba baseline_commit=456043427da8a5779fb9d349b5f89e2937108118 status=pass

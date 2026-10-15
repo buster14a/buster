@@ -640,6 +640,115 @@ UnitTestResult debug_model_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, canonical_model.types[2].kind == DEBUG_TYPE_POINTER && canonical_model.types[2].element_type == 1);
     BUSTER_TEST(arguments, string_equal(canonical_model.types[1].name, S8("Node")));
 
+    // Scope membership arrays are sized by the members that actually append
+    // (#989): every accepted local lands on exactly one scope, merged sibling
+    // blocks share their representative's scope, dropped rows reserve nothing,
+    // and a block with no locals still materializes with an empty membership.
+    IrDebugScope member_scopes[] = {
+        {.parent = 0},   // ordinal 1: child of the function scope
+        {.parent = 1},   // ordinal 2: child of block 1
+        {.parent = 1},   // ordinal 3: sibling of block 2; merges into it
+        {.parent = 2},   // ordinal 4: child of block 2 with no locals of its own
+    };
+    IrDebugLocal member_locals[] = {
+        {.name = S8("top"), .type = {.value = 0}, .id = {.value = 1}, .scope = 0, .is_parameter = true},
+        {.name = S8("plain"), .type = {.value = 0}, .id = {.value = 2}, .scope = 0},
+        {.name = S8("inner"), .type = {.value = 0}, .id = {.value = 3}, .scope = 1},
+        {.name = S8("merged_a"), .type = {.value = 0}, .id = {.value = 4}, .scope = 2},
+        {.name = S8("merged_b"), .type = {.value = 0}, .id = {.value = 5}, .scope = 3},
+        {.name = S8("stray"), .type = {.value = 0}, .id = {.value = 6}, .scope = 9},
+        {.name = S8("ghost"), .type = {.value = 0}, .id = {.value = IR_ID_UNDERLYING_INVALID}, .scope = 2},
+        {.name = {0}, .type = {.value = 0}, .id = {.value = 7}, .scope = 1},
+    };
+    IrFunction member_ir_function = {
+        .name = S8("scoped_function"),
+        .symbol = {.value = 0},
+        .debug_locals = member_locals,
+        .debug_scopes = member_scopes,
+        .debug_local_count = BUSTER_ARRAY_LENGTH(member_locals),
+        .debug_scope_count = BUSTER_ARRAY_LENGTH(member_scopes),
+    };
+    IrModule member_module = {
+        .functions = &member_ir_function,
+        .function_count = 1,
+    };
+    IrType member_type = {.name = S8("int"), .id = {.value = 0}, .unqualified_type = IR_TYPE_ID_INVALID, .kind = IR_TYPE_INTEGER,
+                          .layout = {.size = 4, .alignment = 4}};
+    IrSymbol member_symbol = {
+        .name = S8("scoped_function"), .id = {.value = 0}, .type = {.value = 0}, .source = {.source = {.value = 0}, .offset = 0},
+        .kind = IR_SYMBOL_FUNCTION,
+    };
+    IrSource member_source = {.path = S8("scopes.c"), .text = S8("x"), .id = {.value = 0}};
+    IrProgram member_program = {
+        .types = {.types = &member_type, .count = 1},
+        .symbols = {.symbols = &member_symbol, .count = 1},
+        .sources = {.sources = &member_source, .count = 1},
+    };
+    DebugFunctionSeed member_seed = {.name = S8("scoped_function"), .symbol = {.value = 0}, .code_size = 32};
+    DebugModel member_model = debug_model_build(arguments->arena, (DebugModelInput){
+                                                                     .program = &member_program,
+                                                                     .module = &member_module,
+                                                                     .functions = &member_seed,
+                                                                     .function_count = 1,
+                                                                 });
+    BUSTER_TEST(arguments, member_model.valid && member_model.function_count == 1);
+    BUSTER_TEST(arguments, member_model.scope_count == 5);
+    DebugScopeId member_function_scope = member_model.functions[0].scope;
+    BUSTER_TEST(arguments, member_function_scope < member_model.scope_count);
+    // Ordinal 3 merges into ordinal 2's scope, so only ordinals 1, 2 and 4
+    // own a model scope; the scope after the function scope is block 1's.
+    DebugScope* member_function = member_model.scopes + member_function_scope;
+    DebugScope* member_inner = member_model.scopes + member_function_scope + 1;
+    DebugScope* member_merged = member_model.scopes + member_function_scope + 2;
+    DebugScope* member_empty = member_model.scopes + member_function_scope + 3;
+    BUSTER_TEST(arguments, member_function->kind == DEBUG_SCOPE_FUNCTION && member_function->variable_count == 3);
+    BUSTER_TEST(arguments, member_inner->kind == DEBUG_SCOPE_LEXICAL && member_inner->variable_count == 1);
+    BUSTER_TEST(arguments, member_merged->kind == DEBUG_SCOPE_LEXICAL && member_merged->variable_count == 2);
+    BUSTER_TEST(arguments, member_empty->kind == DEBUG_SCOPE_LEXICAL && member_empty->variable_count == 0);
+    BUSTER_TEST(arguments, member_inner->parent == member_function_scope && member_merged->parent == member_function_scope + 1);
+    BUSTER_TEST(arguments, member_empty->parent == member_function_scope + 2);
+    // Membership preserves local order within each scope and variable order
+    // across the function.
+    BUSTER_TEST(arguments, member_model.variable_count == 6);
+    BUSTER_TEST(arguments, string_equal(member_model.variables[member_function->variables[0]].name, S8("top")));
+    BUSTER_TEST(arguments, member_model.variables[member_function->variables[0]].kind == DEBUG_VARIABLE_PARAMETER);
+    BUSTER_TEST(arguments, string_equal(member_model.variables[member_function->variables[1]].name, S8("plain")));
+    BUSTER_TEST(arguments, string_equal(member_model.variables[member_function->variables[2]].name, S8("stray")));
+    BUSTER_TEST(arguments, string_equal(member_model.variables[member_inner->variables[0]].name, S8("inner")));
+    BUSTER_TEST(arguments, string_equal(member_model.variables[member_merged->variables[0]].name, S8("merged_a")));
+    BUSTER_TEST(arguments, string_equal(member_model.variables[member_merged->variables[1]].name, S8("merged_b")));
+    BUSTER_TEST(arguments, member_model.variables[member_merged->variables[1]].scope == member_function_scope + 2);
+    BUSTER_TEST(arguments, member_model.functions[0].variable_count == 6);
+
+    // A function with no locals still owns an empty function scope, and a
+    // second build of the same input reproduces the first model exactly.
+    IrFunction empty_ir_function = {.name = S8("empty_function"), .symbol = {.value = 1}};
+    IrModule empty_module = {.functions = &empty_ir_function, .function_count = 1};
+    IrSymbol empty_symbols[] = {
+        member_symbol,
+        {.name = S8("empty_function"), .id = {.value = 1}, .type = {.value = 0}, .kind = IR_SYMBOL_FUNCTION},
+    };
+    member_program.symbols.symbols = empty_symbols;
+    member_program.symbols.count = BUSTER_ARRAY_LENGTH(empty_symbols);
+    DebugFunctionSeed empty_seed = {.name = S8("empty_function"), .symbol = {.value = 1}, .code_size = 8};
+    DebugModel empty_model = debug_model_build(arguments->arena, (DebugModelInput){
+                                                                   .program = &member_program,
+                                                                   .module = &empty_module,
+                                                                   .functions = &empty_seed,
+                                                                   .function_count = 1,
+                                                               });
+    BUSTER_TEST(arguments, empty_model.valid && empty_model.scope_count == 2);
+    BUSTER_TEST(arguments, empty_model.variable_count == 0);
+    BUSTER_TEST(arguments, empty_model.functions[0].scope < empty_model.scope_count);
+    BUSTER_TEST(arguments, empty_model.scopes[empty_model.functions[0].scope].variable_count == 0);
+    DebugModel repeated_model = debug_model_build(arguments->arena, (DebugModelInput){
+                                                                      .program = &member_program,
+                                                                      .module = &empty_module,
+                                                                      .functions = &empty_seed,
+                                                                      .function_count = 1,
+                                                                  });
+    BUSTER_TEST(arguments, repeated_model.valid && repeated_model.scope_count == empty_model.scope_count &&
+                           repeated_model.variable_count == empty_model.variable_count);
 
     return result;
 }

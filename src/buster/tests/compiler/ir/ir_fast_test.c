@@ -107,7 +107,8 @@ BUSTER_GLOBAL_LOCAL IrProgram* ir_fast_cse_lower(UnitTestArguments* arguments, S
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
         CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("fast-cse.c"), preprocess, analysis, target_native,
-                                                            (CIRLowerOptions){0});
+                                                            // The cases count CSE's own constant hits, so each constant keeps its row.
+                                                            (CIRLowerOptions){.disable_block_constant_interning = true});
         if (lowered.program && !lowered.diagnostic_count && lowered.program->modules->function_count)
         {
             lowered.program->fast_passes = 0;
@@ -427,7 +428,7 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult ir_fast_intern_lower(UnitTestArguments* argum
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
         CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("intern.c"), preprocess, analysis, target_native,
-                                                            (CIRLowerOptions){.intern_block_constants = intern});
+                                                            (CIRLowerOptions){.disable_block_constant_interning = !intern});
         if (lowered.program && !lowered.diagnostic_count && lowered.program->modules->function_count)
         {
             lowered.program->fast_passes = 0;
@@ -496,12 +497,320 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_intern_tests(UnitTestArguments* argum
     return result;
 }
 
+// Lowers `source` with -fcanonical-construction-fold on or off and prepares
+// it with the FAST passes in `passes` (0 keeps the rows as lowered).
+BUSTER_GLOBAL_LOCAL CIRLowerResult ir_fast_construction_fold_lower(UnitTestArguments* arguments, String8 source, bool fold, u32 passes)
+{
+    CIRLowerResult result = {0};
+    CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
+        (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+    CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+    if (!preprocess.error_count && !analysis.diagnostic_count)
+    {
+        CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("construction-fold.c"), preprocess, analysis, target_native,
+                                                            (CIRLowerOptions){.construction_fold = fold});
+        if (lowered.program && !lowered.diagnostic_count && lowered.program->modules->function_count)
+        {
+            lowered.program->fast_passes = passes;
+            if (ir_prepare_canonical_module(lowered.program, lowered.program->modules, false).error == IR_VALIDATION_NONE) result = lowered;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrFunction* ir_fast_construction_fold_function(IrProgram* program)
+{
+    IrFunction* function = 0;
+    IrModule* module = program->modules;
+    for (u32 index = 0; index < module->function_count; index += 1)
+    {
+        function = string_equal(module->functions[index].name, S8("test")) ? module->functions + index : function;
+    }
+    return function;
+}
+
+// The immediate `test` returns when its returned value is a CONSTANT_INTEGER row.
+BUSTER_GLOBAL_LOCAL bool ir_fast_construction_fold_return(IrFunction const* function, u64* bits)
+{
+    bool result = false;
+    for (u32 index = 0; function && index < function->instruction_count; index += 1)
+    {
+        IrInstruction const* row = function->instructions + index;
+        u32 value = row->opcode == IR_OPCODE_RETURN && row->operand_count == 1 ? row->operands[0].value : UINT32_MAX;
+        u32 definition = value < function->value_count ? function->values[value].definition.value : UINT32_MAX;
+        IrInstruction const* source = definition < function->instruction_count ? function->instructions + definition : 0;
+        if (source && source->opcode == IR_OPCODE_CONSTANT_INTEGER && source->immediate_count == 1)
+        {
+            *bits = source->immediates[0];
+            result = true;
+        }
+    }
+    return result;
+}
+
+// -fcanonical-construction-fold (#3010): c_ir_emit_cast and c_ir_truth_value
+// build the constant FAST's rule gives a committed integer constant instead
+// of its CAST or BINARY row, so the same function returns the same constant
+// with those rows never built. Operands that are not single-limb integer
+// constants keep their rows; off, nothing changes.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_construction_fold_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        u64 casts;
+        u64 truths;
+        // The returned constant's low bits, masked to its width; folded marks
+        // a case whose return is a constant without FAST.
+        u64 value;
+        u32 width;
+        bool folded;
+    } cases[] = {
+        // int -> long long sign-extends; unsigned -> unsigned long long zero-extends.
+        {S8("long long test(void){return 5;}"), 1, 0, 5, 64, true},
+        {S8("unsigned long long test(void){return 0xFFFFFFFFu;}"), 1, 0, 0xFFFFFFFFull, 64, true},
+        // A reinterpreted unsigned literal is then sign-extended from the folded int.
+        {S8("long long test(void){return (int)0xFFFFFFFFu;}"), 2, 0, UINT64_MAX, 64, true},
+        // Truncation wraps, signed or unsigned.
+        {S8("unsigned char test(void){return 300;}"), 1, 0, 44, 8, true},
+        {S8("signed char test(void){return 200;}"), 1, 0, 200, 8, true},
+        {S8("unsigned test(void){return 2147483647;}"), 1, 0, 2147483647, 32, true},
+        // _Bool tests the whole value rather than truncating it.
+        {S8("_Bool test(void){return 7;}"), 0, 1, 1, 1, true},
+        {S8("_Bool test(void){return 0;}"), 0, 1, 0, 1, true},
+        {S8("_Bool test(void){return 256LL;}"), 0, 1, 1, 1, true},
+        {S8("_Bool test(void){return (unsigned char)256;}"), 1, 1, 0, 1, true},
+        {S8("_Bool test(void){_Bool b=0;return b;}"), 0, 1, 0, 1, true},
+        // The call still runs; only the literal's conversion folds.
+        {S8("int effect(void);_Bool test(void){return (effect(),3);}"), 0, 1, 1, 1, true},
+        // Unchanged: non-constant operands, wider than one limb, floating.
+        {S8("long long test(int x){return x;}"), 0, 0, 0, 0, false},
+        {S8("_Bool test(int x){return x;}"), 0, 0, 0, 0, false},
+        {S8("long long test(int x){return -x;}"), 0, 0, 0, 0, false},
+        {S8("__int128 test(void){return 5;}"), 0, 0, 0, 0, false},
+        {S8("double test(void){return 5;}"), 0, 0, 0, 0, false},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+#if BUSTER_BENCH_ALLOCATIONS
+        IrConstructionCounters start = ir_construction_counters();
+#endif
+        CIRLowerResult off = ir_fast_construction_fold_lower(arguments, cases[index].source, false, 0);
+#if BUSTER_BENCH_ALLOCATIONS
+        IrConstructionCounters middle = ir_construction_counters();
+#endif
+        CIRLowerResult on = ir_fast_construction_fold_lower(arguments, cases[index].source, true, 0);
+#if BUSTER_BENCH_ALLOCATIONS
+        IrConstructionCounters end = ir_construction_counters();
+#endif
+        CIRLowerResult off_fast = ir_fast_construction_fold_lower(arguments, cases[index].source, false, IR_FAST_ALL);
+        CIRLowerResult on_fast = ir_fast_construction_fold_lower(arguments, cases[index].source, true, IR_FAST_ALL);
+        if (BUSTER_REQUIRE(arguments, off.program && on.program && off_fast.program && on_fast.program))
+        {
+            CIRConstructionFoldStatistics folds = on.construction_folds;
+            if (folds.casts != cases[index].casts || folds.truths != cases[index].truths)
+            {
+                arguments->show(arguments, S8("construction fold case {u32}: casts={u64} truths={u64}\n"), index, folds.casts, folds.truths);
+            }
+            BUSTER_TEST(arguments, folds.casts == cases[index].casts && folds.truths == cases[index].truths);
+            BUSTER_TEST(arguments, !off.construction_folds.casts && !off.construction_folds.truths);
+            IrFunction* function_off = ir_fast_construction_fold_function(off.program);
+            IrFunction* function_on = ir_fast_construction_fold_function(on.program);
+            if (BUSTER_REQUIRE(arguments, function_off && function_on))
+            {
+                // Each fold is a CAST or BINARY row that was never built. A
+                // truth also never built its zero or the zero's conversion.
+                u32 casts_off = ir_test_opcode_count(function_off, IR_OPCODE_CAST);
+                u32 casts_on = ir_test_opcode_count(function_on, IR_OPCODE_CAST);
+                BUSTER_TEST(arguments, folds.truths ? casts_on + folds.casts <= casts_off : casts_on + folds.casts == casts_off);
+                BUSTER_TEST(arguments, ir_test_opcode_count(function_on, IR_OPCODE_BINARY) + folds.truths == ir_test_opcode_count(function_off, IR_OPCODE_BINARY));
+                BUSTER_TEST(arguments, ir_test_opcode_count(function_on, IR_OPCODE_CALL) == ir_test_opcode_count(function_off, IR_OPCODE_CALL));
+                u64 bits_on = 0;
+                u64 bits_late = 0;
+                u64 bits_both = 0;
+                bool returned_on = ir_fast_construction_fold_return(function_on, &bits_on);
+                bool returned_late = ir_fast_construction_fold_return(ir_fast_construction_fold_function(off_fast.program), &bits_late);
+                bool returned_both = ir_fast_construction_fold_return(ir_fast_construction_fold_function(on_fast.program), &bits_both);
+                BUSTER_TEST(arguments, returned_on == cases[index].folded && returned_late == returned_both);
+                if (cases[index].folded)
+                {
+                    // The construction fold builds exactly what FAST folds to.
+                    u64 mask = cases[index].width == 64 ? UINT64_MAX : (1ull << cases[index].width) - 1;
+                    BUSTER_TEST(arguments, returned_late && bits_on == bits_late && bits_both == bits_late);
+                    BUSTER_TEST(arguments, (bits_on & mask) == cases[index].value);
+                }
+            }
+            BUSTER_TEST(arguments, ir_validate_canonical_module(on.program, on.program->modules).error == IR_VALIDATION_NONE);
+#if BUSTER_BENCH_ALLOCATIONS
+            // The census sees no row it never got: no birth fold or cascade
+            // remains for a folded case, and an unchanged one counts alike.
+            u64 births_off = 0;
+            u64 births_on = 0;
+            for (u32 counter = IR_CONSTRUCTION_FOLD_BIRTH_CAST_IDENTITY; counter <= IR_CONSTRUCTION_FOLD_BIRTH_BINARY_LEFT_IDENTITY; counter += 1)
+            {
+                births_off += middle.values[counter] - start.values[counter];
+                births_on += end.values[counter] - middle.values[counter];
+            }
+            for (u32 counter = IR_CONSTRUCTION_FOLD_BIRTH_CASCADE_CAST_IDENTITY; counter <= IR_CONSTRUCTION_FOLD_BIRTH_CASCADE_BINARY_LEFT_IDENTITY; counter += 1)
+            {
+                births_off += middle.values[counter] - start.values[counter];
+                births_on += end.values[counter] - middle.values[counter];
+            }
+            BUSTER_TEST(arguments, cases[index].folded ? births_on == 0 && births_off >= folds.casts + folds.truths : births_on == births_off);
+#endif
+        }
+        c_test_scratch_end(temporary);
+    }
+    {
+        // The rule authority's own metadata guard: a volatile result type has
+        // no FAST width, so the candidate is left as is.
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        CIRLowerResult lowered = ir_fast_construction_fold_lower(arguments, S8("volatile int g;_Bool h;long long test(void){g=1;h=0;return 5;}"),
+                                                                 false, 0);
+        IrFunction* function = lowered.program ? ir_fast_construction_fold_function(lowered.program) : 0;
+        IrInstruction const* cast = 0;
+        for (u32 index = 0; function && index < function->instruction_count; index += 1)
+        {
+            cast = function->instructions[index].opcode == IR_OPCODE_CAST ? function->instructions + index : cast;
+        }
+        IrTypeId volatile_type = IR_TYPE_ID_INVALID;
+        IrTypeId bool_type = IR_TYPE_ID_INVALID;
+        for (u32 index = 0; lowered.program && index < lowered.program->types.count; index += 1)
+        {
+            IrType* type = ir_type_from_id(&lowered.program->types, (IrTypeId){.value = index});
+            volatile_type = type && type->kind == IR_TYPE_INTEGER && type->is_volatile ? (IrTypeId){.value = index} : volatile_type;
+            bool_type = type && type->kind == IR_TYPE_BOOLEAN && !type->is_volatile && !type->is_atomic ? (IrTypeId){.value = index} : bool_type;
+        }
+        if (BUSTER_REQUIRE(arguments, cast && volatile_type.value != IR_ID_UNDERLYING_INVALID && bool_type.value != IR_ID_UNDERLYING_INVALID))
+        {
+            u64 bits = 0;
+            IrInstruction candidate = *cast;
+            BUSTER_TEST(arguments, ir_fast_fold_candidate(lowered.program, function, &candidate, 0, &bits) && bits == 5);
+            candidate.canonical_type = volatile_type;
+            candidate.conversion_operation = (u8)IR_CONVERSION_INTEGER_REINTERPRET;
+            bits = 0;
+            BUSTER_TEST(arguments, !ir_fast_fold_candidate(lowered.program, function, &candidate, 0, &bits) && bits == 0);
+            // A truth candidate: its second operand supplies only a type,
+            // and the bits given stand for its value.
+            IrValueId operands[] = {cast->operands[0], cast->operands[0]};
+            IrInstruction truth = {.opcode = IR_OPCODE_BINARY, .canonical_type = bool_type, .operands = operands, .operand_count = 2,
+                                   .binary_operation = (u8)IR_BINARY_INTEGER_NOT_EQUAL};
+            u64 right = 0;
+            BUSTER_TEST(arguments, ir_fast_fold_candidate(lowered.program, function, &truth, &right, &bits) && bits == 1);
+            right = 5;
+            BUSTER_TEST(arguments, ir_fast_fold_candidate(lowered.program, function, &truth, &right, &bits) && bits == 0);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_promotion_proof_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    // One invalid body must not discard its neighbors' post-promotion proofs.
+    // Reverse source order and disable promotion as the unproven-path control.
+    for (u32 variant = 0; variant < 4; variant += 1)
+    {
+        TemporalArena temporary = arena_begin_temporal(arguments->arena);
+        String8 source = variant & 1u
+            ? S8("void inspect(int*);int broken(int c){return c+0;}int kept(int c){inspect(&c);return c*3+0;}"
+                 "int promoted(int c){int x=3;if(c)x=7;return x+0;}")
+            : S8("void inspect(int*);int promoted(int c){int x=3;if(c)x=7;return x+0;}"
+                 "int kept(int c){inspect(&c);return c*3+0;}int broken(int c){return c+0;}");
+        CIRLowerResult lowered = ir_promotion_lower(arguments->arena, source, target_native);
+        BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);
+        if (lowered.program && !lowered.diagnostic_count)
+        {
+            IrProgram* program = lowered.program;
+            IrModule* module = program->modules;
+            bool promotion = variant < 2;
+            program->disable_local_promotion = !promotion;
+            program->fast_passes = IR_FAST_ALL;
+            IrFunction* kept = 0;
+            bool corrupted = false;
+            for (u32 index = 0; index < module->function_count; index += 1)
+            {
+                IrFunction* function = module->functions + index;
+                if (string_equal(function->name, S8("kept"))) kept = function;
+                if (string_equal(function->name, S8("broken")))
+                {
+                    for (u32 row = 0; row < function->instruction_count; row += 1)
+                    {
+                        if (function->instructions[row].opcode == IR_OPCODE_BINARY)
+                        {
+                            function->instructions[row].binary_operation = IR_BINARY_COUNT;
+                            corrupted = true;
+                        }
+                    }
+                }
+            }
+            BUSTER_TEST(arguments, corrupted && kept);
+            if (corrupted && kept)
+            {
+#if BUSTER_BENCH_ALLOCATIONS
+                IrConstructionCounters before = ir_construction_counters();
+#endif
+                IrValidationResult prepared = ir_prepare_canonical_module(program, module, true);
+#if BUSTER_BENCH_ALLOCATIONS
+                IrConstructionCounters after = ir_construction_counters();
+                BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+                BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_INPUT_PROOFS_REUSED] -
+                                       before.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_INPUT_PROOFS_REUSED] == (promotion ? 1u : 0u));
+                BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_PROOFS_REUSED] -
+                                       before.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_PROOFS_REUSED] == (promotion ? 2u : 0u));
+#endif
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->fast.functions == 2);
+                BUSTER_TEST(arguments, module->fast.validation_skips == 1 && module->fast.decline_count == 1);
+                BUSTER_TEST(arguments, (module->local_promotion.promoted_locals != 0) == promotion);
+                BUSTER_TEST(arguments, module->fast.passes[IR_FAST_FOLD].changes != 0);
+                if (module->fast.decline_count == 1)
+                {
+                    BUSTER_TEST(arguments, string_equal(module->fast.declines[0].function_name, S8("broken")) &&
+                                           module->fast.declines[0].validation.error == IR_VALIDATION_OPERATION);
+                }
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_OPERATION);
+                // A later preparation cannot inherit the temporary proof: a
+                // formerly valid neighbor now fails and must decline as well.
+                corrupted = false;
+                for (u32 row = 0; row < kept->instruction_count; row += 1)
+                {
+                    if (kept->instructions[row].opcode == IR_OPCODE_BINARY)
+                    {
+                        kept->instructions[row].binary_operation = IR_BINARY_COUNT;
+                        corrupted = true;
+                    }
+                }
+                BUSTER_TEST(arguments, corrupted);
+                module->fast_complete = false;
+#if BUSTER_BENCH_ALLOCATIONS
+                before = ir_construction_counters();
+#endif
+                prepared = ir_prepare_canonical_module(program, module, true);
+#if BUSTER_BENCH_ALLOCATIONS
+                after = ir_construction_counters();
+                BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_PROOFS_REUSED] ==
+                                       before.values[IR_CONSTRUCTION_PREPARATION_PROMOTION_PROOFS_REUSED]);
+#endif
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && module->fast.functions == 1);
+                BUSTER_TEST(arguments, module->fast.validation_skips == 2 && module->fast.decline_count == 2);
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_publication_span_tests(arguments);
     BUSTER_TEST_FIXTURE(arguments, ir_fast_decline_tests);
+    BUSTER_TEST_FIXTURE(arguments, ir_fast_promotion_proof_tests);
     BUSTER_TEST_FIXTURE(arguments, ir_fast_cse_tests);
     BUSTER_TEST_FIXTURE(arguments, ir_fast_intern_tests);
+    BUSTER_TEST_FIXTURE(arguments, ir_fast_construction_fold_tests);
     String8 source = S8("volatile int observed;int effect(int);"
                        "int test(int input,int* p){int x=input+0;int unused=x*9;"
                        "int a=3,b=4;int* q=&*p;observed=effect(x);return x+(a+b)+*q+observed;}");
@@ -867,12 +1176,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
             IrProgram* census_program = census_lowered.program;
             IrFunction* census_function = census_program->modules->functions;
             IrSemanticCounters semantic_before = ir_semantic_counters();
+            ArenaBenchmarkCounters arena_before = arena_benchmark_counters();
             for (u32 index = 0; index < census_function->instruction_count; index += 1)
             {
                 ir_construction_fold_census(census_program, census_function, (IrInstructionId){.value = index});
             }
+            ArenaBenchmarkCounters arena_after = arena_benchmark_counters();
             IrSemanticCounters semantic_after = ir_semantic_counters();
             BUSTER_TEST(arguments, memcmp(&semantic_before, &semantic_after, sizeof(semantic_before)) == 0);
+            // Birth tags live in the row's padding byte and cascade bits in a
+            // static cache, so probing allocates nothing.
+            BUSTER_TEST(arguments, memcmp(&arena_before, &arena_after, sizeof(arena_before)) == 0);
             IrConstructionCounters probed = ir_construction_counters();
             BUSTER_TEST(arguments, probed.values[IR_CONSTRUCTION_FOLD_BIRTH_BINARY_RIGHT_IDENTITY] -
                                        census_lowering.values[IR_CONSTRUCTION_FOLD_BIRTH_BINARY_RIGHT_IDENTITY] == 1);
@@ -891,8 +1205,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
     {
         TemporalArena census_temporary = arena_begin_temporal(arguments->arena);
         IrConstructionCounters before = ir_construction_counters();
-        CIRLowerResult form_lowered = ir_promotion_lower(arguments->arena,
-                                                         S8("unsigned test(unsigned input){return input+1;} _Bool truth(void){return 0;}"), target_native);
+        // Each literal must keep its own row: interning would share truth's two equal zeros.
+        CIRLowerResult form_lowered = ir_promotion_lower_with_options(arguments->arena,
+            S8("unsigned test(unsigned input){return input+1;} _Bool truth(void){return 0;}"), target_native,
+            (CIRLowerOptions){.disable_block_constant_interning = true});
         IrConstructionCounters lowering = ir_construction_counters();
 #define IR_FOLD_CENSUS_DELTA(later, earlier, counter) ((later).values[IR_CONSTRUCTION_##counter] - (earlier).values[IR_CONSTRUCTION_##counter])
         if (BUSTER_REQUIRE(arguments, form_lowered.program && !form_lowered.diagnostic_count))
@@ -948,6 +1264,97 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         }
 #undef IR_FOLD_CENSUS_DELTA
         scratch_end(census_temporary);
+    }
+    // #3010 matched association: each fold ir_fast_fold applies after full
+    // preparation (inlining, promotion, FAST and their compactions) is
+    // classified by the birth tag its row carried from commit. Every late fold
+    // lands in exactly one of DIRECT, CASCADE and POST.
+    {
+        typedef struct IrFoldMatchCase IrFoldMatchCase;
+        struct IrFoldMatchCase
+        {
+            String8 source;
+            u32 passes;
+            IrConstructionCounter counter;
+            u64 counted;
+            u64 direct;
+            u64 cascade;
+            u64 post;
+            u64 unfoldable;
+            // fold_match_clone_* of whichever class, then fold_survival_*.
+            u64 clones;
+            u64 reached;
+            u64 skipped;
+            u64 unfolded;
+        };
+        u32 const fold = IR_FAST_PASS_BIT(IR_FAST_FOLD);
+        IrFoldMatchCase const cases[] = {
+            // Direct: the zero is a committed constant when `+0` commits; the
+            // tag survives promotion of `input` and both compactions.
+            {S8("int test(int input){return input+0;}"), fold, IR_CONSTRUCTION_FOLD_MATCH_DIRECT_BINARY_RIGHT_IDENTITY, 1, 1, 0, 0, 0, 0, 1, 0, 0},
+            // The same birth fold reaches FAST but is not folded when the
+            // fold pass is not selected.
+            {S8("int test(int input){return input+0;}"), IR_FAST_PASS_BIT(IR_FAST_DCE), IR_CONSTRUCTION_FOLD_MATCH_DIRECT_BINARY_RIGHT_IDENTITY, 0, 0, 0, 0, 0, 0, 1, 0, 1},
+            // Cascade: the int zero is converted to unsigned by a birth
+            // cast_constant, and only that fold makes `+0` an identity.
+            {S8("unsigned test(unsigned input){return input+0;}"), fold, IR_CONSTRUCTION_FOLD_MATCH_CASCADE_BINARY_RIGHT_IDENTITY, 1, 1, 1, 0, 0, 0, 2, 0, 0},
+            // Post (promotion): both operands are loads until promotion
+            // forwards the stored constants.
+            {S8("int test(void){int x=2;int y=3;return x+y;}"), fold, IR_CONSTRUCTION_FOLD_MATCH_POST_BINARY_CONSTANT, 1, 0, 0, 1, 1, 0, 0, 0, 0},
+            // Post (inlining): the callee's `x+y` is not foldable at its own
+            // commit; the inlined clone folds only with the caller's arguments.
+            {S8("static inline __attribute__((always_inline)) int add(int x,int y){return x+y;}"
+                "int test(void){return add(2,3);}"), fold, IR_CONSTRUCTION_FOLD_MATCH_POST_BINARY_CONSTANT, 1, 0, 0, 1, 1, 1, 0, 0, 0},
+            // Direct clone: the callee's `x+0` was foldable at its own
+            // commit; the callee and its clone both fold, and only the
+            // callee's own row counts toward survival.
+            {S8("static inline __attribute__((always_inline)) int f(int x){return x+0;}"
+                "int test(int y){return f(y);}"), fold, IR_CONSTRUCTION_FOLD_MATCH_DIRECT_BINARY_RIGHT_IDENTITY, 2, 2, 0, 0, 0, 1, 1, 0, 0},
+            // Skipped: FAST declines a computed-goto function on provenance.
+            {S8("int test(int i){static void* t[]={&&a};goto *t[i];a: return i+0;}"), fold,
+             IR_CONSTRUCTION_FOLD_MATCH_DIRECT_BINARY_RIGHT_IDENTITY, 0, 0, 0, 0, 0, 0, 0, 1, 0},
+        };
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+        {
+            IrFoldMatchCase const* test_case = cases + index;
+            TemporalArena match_temporary = arena_begin_temporal(arguments->arena);
+            IrConstructionCounters before = ir_construction_counters();
+            CIRLowerResult match_lowered = ir_promotion_lower(arguments->arena, test_case->source, target_native);
+            if (BUSTER_REQUIRE(arguments, match_lowered.program && !match_lowered.diagnostic_count))
+            {
+                IrProgram* match_program = match_lowered.program;
+                match_program->fast_passes = test_case->passes;
+                IrValidationResult prepared = ir_prepare_canonical_module(match_program, match_program->modules, true);
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+                IrConstructionCounters after = ir_construction_counters();
+                BUSTER_TEST(arguments, !before.overflowed && !after.overflowed);
+#define IR_FOLD_MATCH_DELTA(counter) (after.values[counter] - before.values[counter])
+                u64 late = 0, direct = 0, cascade = 0, post = 0;
+                for (u32 rule = 0; rule <= (u32)(IR_CONSTRUCTION_FOLD_LATE_BINARY_LEFT_IDENTITY - IR_CONSTRUCTION_FOLD_LATE_CAST_IDENTITY); rule += 1)
+                {
+                    late += IR_FOLD_MATCH_DELTA((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_LATE_CAST_IDENTITY + rule));
+                    direct += IR_FOLD_MATCH_DELTA((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_MATCH_DIRECT_CAST_IDENTITY + rule));
+                    cascade += IR_FOLD_MATCH_DELTA((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_MATCH_CASCADE_CAST_IDENTITY + rule));
+                    post += IR_FOLD_MATCH_DELTA((IrConstructionCounter)(IR_CONSTRUCTION_FOLD_MATCH_POST_CAST_IDENTITY + rule));
+                }
+                BUSTER_TEST(arguments, late == direct + cascade + post);
+                BUSTER_TEST(arguments, IR_FOLD_MATCH_DELTA(test_case->counter) == test_case->counted);
+                BUSTER_TEST(arguments, direct == test_case->direct && cascade == test_case->cascade && post == test_case->post);
+                BUSTER_TEST(arguments, IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_POST_UNPROBED) == 0);
+                BUSTER_TEST(arguments, IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_CLONE_DIRECT) +
+                                           IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_CLONE_CASCADE) +
+                                           IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_CLONE_POST) == test_case->clones);
+                BUSTER_TEST(arguments, IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_SURVIVAL_REACHED) == test_case->reached);
+                BUSTER_TEST(arguments, IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_SURVIVAL_SKIPPED) == test_case->skipped);
+                BUSTER_TEST(arguments, IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_SURVIVAL_UNFOLDED) == test_case->unfolded);
+                BUSTER_TEST(arguments, IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_POST_UNFOLDABLE_AT_BIRTH) == test_case->unfoldable);
+                BUSTER_TEST(arguments, IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_POST_UNPROBED) +
+                                           IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_POST_UNFOLDABLE_AT_BIRTH) +
+                                           IR_FOLD_MATCH_DELTA(IR_CONSTRUCTION_FOLD_MATCH_POST_RULE_CHANGED) == post);
+#undef IR_FOLD_MATCH_DELTA
+            }
+            scratch_end(match_temporary);
+        }
     }
 #endif
     return result;

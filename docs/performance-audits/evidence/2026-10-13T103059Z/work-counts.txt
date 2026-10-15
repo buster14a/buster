@@ -1,0 +1,15 @@
+Breakpoint 1, c_test_direct_ssa_nested_do_while_work (arguments=0x7fffffffb5e0) at /home/david/Documents/Codex/2026-10-13/sol-5/work/buster/src/buster/tests/compiler/frontend/c/c_test.c:57245
+57245	    BUSTER_TEST(arguments, ordinary_steps != UINT64_MAX && ordinary_levels != UINT64_MAX && ordinary_exit_blocks == 0);
+success_ = 86
+result = {succeeded_test_count = 0, test_count = 0}
+shallow_steps = 2301
+shallow_levels = 0
+shallow_exit_blocks = 752
+deep_steps = 8984
+deep_levels = 0
+deep_exit_blocks = 3002
+ordinary_steps = 26
+ordinary_levels = 0
+ordinary_exit_blocks = 0
+SHALLOW = SHALLOW
+DEEP = DEEP

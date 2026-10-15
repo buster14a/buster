@@ -2130,22 +2130,23 @@ u32 machine_builder_edge(MachineFunctionBuilder* builder, MachineEdge edge)
 }
 
 // Wide canonical values retain their frame representation in selected bodies.
-// Only values participating in i128 joins need register pairs. Snapshot each
+// Only values participating in wide joins need register parts. Snapshot each
 // incoming value at its definition so ordinary parallel edge copies also handle
 // backedges and cycles without reading slots overwritten by another assignment.
-typedef struct MachineCanonicalPair MachineCanonicalPair;
-struct MachineCanonicalPair
+typedef struct MachineCanonicalParts MachineCanonicalParts;
+struct MachineCanonicalParts
 {
-    u32 registers[2];
+    u32 first_register;
+    u32 count;
 };
 
-BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_pair_parameter(MachineFunctionBuilder* builder, IrFunction* function,
-                                                                 IrCfgBlock const* block, u32 parameter_index, MachineCanonicalPair** pairs)
+BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_parts_parameter(MachineFunctionBuilder* builder, IrFunction* function,
+                                                                 IrCfgBlock const* block, u32 parameter_index, u32 part_count, MachineCanonicalParts** parts)
 {
-    if (!*pairs)
+    if (!*parts)
     {
-        *pairs = arena_allocate(builder->arena, MachineCanonicalPair, function->value_count);
-        memset(*pairs, 0xff, sizeof(**pairs) * function->value_count);
+        *parts = arena_allocate(builder->arena, MachineCanonicalParts, function->value_count);
+        memset(*parts, 0, sizeof(**parts) * function->value_count);
     }
     bool valid = true;
     IrPublishedCfg const* cfg = function->published_cfg;
@@ -2162,24 +2163,31 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_pair_parameter(MachineFunctio
         {
             valid = false;
         }
-        else if ((*pairs)[value].registers[0] == UINT32_MAX)
+        else if (!(*parts)[value].count)
         {
-            for (u32 part = 0; part < 2; part += 1)
+            // Appending this homogeneous batch assigns consecutive virtual IDs.
+            (*parts)[value].first_register = builder->virtual_registers.total_count;
+            (*parts)[value].count = part_count;
+            for (u32 part = 0; part < part_count; part += 1)
             {
-                (*pairs)[value].registers[part] = machine_builder_virtual_register(builder, (MachineVirtualRegister){
+                machine_builder_virtual_register(builder, (MachineVirtualRegister){
                     .definition_point = MACHINE_POINT_INVALID, .register_class = MACHINE_REGISTER_CLASS_GENERAL,
                     .typed_origin = value});
             }
+        }
+        else if ((*parts)[value].count != part_count)
+        {
+            valid = false;
         }
     }
     return valid;
 }
 
 // Canonical publication owns terminator topology and edge-argument lookup.
-// Selection translates each already ordered argument once; i128 values expand
-// to their two register limbs without changing the canonical CFG.
+// Selection translates each already ordered argument once; frame-backed wide
+// values expand to eightbyte register parts without changing the canonical CFG.
 BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder* builder, IrFunction* function, u32 const* value_registers,
-                                                        MachineCanonicalPair const* pairs)
+                                                        MachineCanonicalParts const* parts)
 {
     IrPublishedCfg const* cfg = function->published_cfg;
     bool valid = cfg != 0;
@@ -2192,16 +2200,16 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder*
         {
             IrCfgParameter const* parameter = cfg->parameters + destination->parameter_offset + parameter_index;
             u32 incoming = cfg->arguments[edge->argument_offset + parameter_index].value;
-            bool wide = pairs && pairs[parameter->value.value].registers[0] != UINT32_MAX;
-            u32 count = wide ? 2u : 1u;
-            u32 const* registers = wide ? pairs[incoming].registers : value_registers + incoming;
+            bool wide = parts && parts[parameter->value.value].count != 0;
+            u32 count = wide ? parts[parameter->value.value].count : 1u;
             for (u32 part = 0; valid && part < count; part += 1)
             {
-                valid = registers[part] != UINT32_MAX;
+                u32 reg = wide ? parts[incoming].first_register + part : value_registers[incoming];
+                valid = reg != UINT32_MAX;
                 if (valid)
                 {
                     IR_CONSTRUCTION_RECORD(CFG_COPY_SOURCES, 1);
-                    machine_builder_edge_copy_source(builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, registers[part]));
+                    machine_builder_edge_copy_source(builder, machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, reg));
                 }
             }
         }
@@ -2630,7 +2638,6 @@ BUSTER_GLOBAL_LOCAL u32 machine_function_compact_virtual_registers(Arena* arena,
 
     TemporalArena scratch = scratch_begin(&arena, 1);
     u8* referenced = arena_allocate(scratch.arena, u8, old_count);
-    u32* remap = arena_allocate(scratch.arena, u32, old_count);
     memset(referenced, 0, old_count);
     for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
     {
@@ -2683,48 +2690,72 @@ BUSTER_GLOBAL_LOCAL u32 machine_function_compact_virtual_registers(Arena* arena,
 
     u32 new_count = 0;
     u32 mutable_count = 0;
-    for (u32 old_index = 0; old_index < old_count; old_index += 1)
+    // A dense referenced prefix already has its final IDs and metadata. If
+    // it covers the whole population, validation above is all that is needed:
+    // no remap allocation, self-copies or second operand walk can change it.
+    while (new_count < old_count && referenced[new_count])
     {
-        if (!referenced[old_index])
-        {
-            remap[old_index] = UINT32_MAX;
-            continue;
-        }
-        remap[old_index] = new_count;
-        function->virtual_registers[new_count] = function->virtual_registers[old_index];
         mutable_count += (function->virtual_registers[new_count].flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) != 0;
         new_count += 1;
     }
-    for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+    if (new_count < old_count)
     {
-        MachineInstruction* instruction = function->instructions + instruction_index;
-        MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
-        for (u32 operand_index = 0; operand_index < info->operand_count; operand_index += 1)
+        u32* remap = arena_allocate(scratch.arena, u32, old_count);
+        u32 unchanged_count = new_count;
+        for (u32 old_index = 0; old_index < unchanged_count; old_index += 1)
         {
-            MachineRef* ref = instruction->operands + operand_index;
-            if (machine_ref_kind(*ref) == MACHINE_REF_VIRTUAL_REGISTER)
+            remap[old_index] = old_index;
+        }
+        for (u32 old_index = unchanged_count; old_index < old_count; old_index += 1)
+        {
+            if (!referenced[old_index])
             {
-                *ref = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, remap[machine_ref_payload(*ref)]);
+                remap[old_index] = UINT32_MAX;
+                continue;
+            }
+            remap[old_index] = new_count;
+            function->virtual_registers[new_count] = function->virtual_registers[old_index];
+            mutable_count += (function->virtual_registers[new_count].flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) != 0;
+            new_count += 1;
+        }
+        for (u32 instruction_index = 0; instruction_index < function->instruction_count; instruction_index += 1)
+        {
+            MachineInstruction* instruction = function->instructions + instruction_index;
+            MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+            for (u32 operand_index = 0; operand_index < info->operand_count; operand_index += 1)
+            {
+                MachineRef* ref = instruction->operands + operand_index;
+                if (machine_ref_kind(*ref) == MACHINE_REF_VIRTUAL_REGISTER)
+                {
+                    *ref = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, remap[machine_ref_payload(*ref)]);
+                }
             }
         }
-    }
-    for (u32 parameter_index = 0; parameter_index < function->block_parameter_count; parameter_index += 1)
-    {
-        MachineBlockParameter* parameter = function->block_parameters + parameter_index;
-        parameter->virtual_register = remap[parameter->virtual_register];
-    }
-    for (u32 source_index = 0; source_index < function->edge_copy_source_count; source_index += 1)
-    {
-        MachineRef* source = function->edge_copy_sources + source_index;
-        if (machine_ref_kind(*source) == MACHINE_REF_VIRTUAL_REGISTER)
+        for (u32 parameter_index = 0; parameter_index < function->block_parameter_count; parameter_index += 1)
         {
-            *source = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, remap[machine_ref_payload(*source)]);
+            MachineBlockParameter* parameter = function->block_parameters + parameter_index;
+            parameter->virtual_register = remap[parameter->virtual_register];
         }
+        for (u32 source_index = 0; source_index < function->edge_copy_source_count; source_index += 1)
+        {
+            MachineRef* source = function->edge_copy_sources + source_index;
+            if (machine_ref_kind(*source) == MACHINE_REF_VIRTUAL_REGISTER)
+            {
+                *source = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, remap[machine_ref_payload(*source)]);
+            }
+        }
+        function->virtual_register_count = new_count;
     }
-    function->virtual_register_count = new_count;
     scratch_end(scratch);
     return mutable_count;
 }
+
+#if BUSTER_INCLUDE_TESTS
+u32 machine_test_compact_virtual_registers(Arena* arena, MachineFunction* function)
+{
+    return machine_function_compact_virtual_registers(arena, function);
+}
+#endif
 
 // Debug-value selection facts. Debug info is on by default, so every native
 // compile builds `MachineDebugValue` tables. The lookups each table entry needs

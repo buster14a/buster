@@ -12,8 +12,12 @@ include("${BUSTER_SUPERBUILD_MATRIX_FILE}")
 
 if (NOT DEFINED BUSTER_SUPERBUILD_SOURCE_DIR OR NOT DEFINED BUSTER_SUPERBUILD_BUILD_DRIVER OR
     NOT DEFINED BUSTER_SUPERBUILD_TREE_COUNT OR NOT DEFINED BUSTER_SUPERBUILD_OUTER_JOBS OR
-    NOT DEFINED BUSTER_SUPERBUILD_SELF_HOST_ENABLED OR BUSTER_SUPERBUILD_OUTER_JOBS LESS 1)
+    NOT DEFINED BUSTER_SUPERBUILD_SELF_HOST_ENABLED OR BUSTER_SUPERBUILD_OUTER_JOBS LESS 1 OR
+    NOT DEFINED BUSTER_SUPERBUILD_POST_TEST_JOBS)
     message(FATAL_ERROR "The superbuild matrix file is incomplete")
+endif()
+if (NOT BUSTER_SUPERBUILD_POST_TEST_JOBS STREQUAL "0" AND NOT BUSTER_SUPERBUILD_POST_TEST_JOBS STREQUAL "1")
+    message(FATAL_ERROR "The superbuild post-test pool must have zero or one slot")
 endif()
 
 if (BUSTER_SUPERBUILD_BUILD_DRIVER STREQUAL "" OR NOT IS_ABSOLUTE "${BUSTER_SUPERBUILD_BUILD_DRIVER}" OR
@@ -29,7 +33,16 @@ if (NOT BUSTER_SUPERBUILD_TEST_ADMISSION STREQUAL "overlap" AND
     message(FATAL_ERROR "Unknown matrix test admission policy")
 endif()
 
-set_property(GLOBAL PROPERTY JOB_POOLS "buster_matrix_cpu=${BUSTER_SUPERBUILD_OUTER_JOBS}")
+# The CPU pool admits compiles, tests and the self-host worker. A tree whose
+# analyzers run beside the self-host worker (build.c
+# matrix_superbuild_post_test_assign) takes the separate one-slot post-test
+# pool instead; build.c raises the outer --parallel by that slot.
+set(BUSTER_SUPERBUILD_JOB_POOLS "buster_matrix_cpu=${BUSTER_SUPERBUILD_OUTER_JOBS}")
+if (BUSTER_SUPERBUILD_POST_TEST_JOBS)
+    list(APPEND BUSTER_SUPERBUILD_JOB_POOLS "buster_matrix_post_test=${BUSTER_SUPERBUILD_POST_TEST_JOBS}")
+endif()
+set_property(GLOBAL PROPERTY JOB_POOLS ${BUSTER_SUPERBUILD_JOB_POOLS})
+set(BUSTER_SUPERBUILD_POST_TEST_TREES 0)
 
 add_custom_target(buster_compile)
 add_custom_target(buster_matrix ALL)
@@ -49,6 +62,8 @@ if (BUSTER_SUPERBUILD_SELF_HOST_ENABLED)
         BUSTER_SUPERBUILD_SELF_HOST_PRODUCER_CLEAN_REQUIRED LESS 1 OR
         (NOT BUSTER_SUPERBUILD_SELF_HOST_FUZZ_AVAILABLE STREQUAL "0" AND NOT BUSTER_SUPERBUILD_SELF_HOST_FUZZ_AVAILABLE STREQUAL "1") OR
         BUSTER_SUPERBUILD_SELF_HOST_POOL_JOBS GREATER 1 OR BUSTER_SUPERBUILD_SELF_HOST_DEPENDS_ON_COMPILE LESS 1 OR
+        (NOT BUSTER_SUPERBUILD_SELF_HOST_DEPENDS_ON_VALIDATION STREQUAL "0" AND
+         NOT BUSTER_SUPERBUILD_SELF_HOST_DEPENDS_ON_VALIDATION STREQUAL "1") OR
         BUSTER_SUPERBUILD_SELF_HOST_USES_INNER_NINJA GREATER 0 OR BUSTER_SUPERBUILD_SELF_HOST_TREE_INDEX LESS 0 OR
         BUSTER_SUPERBUILD_SELF_HOST_TREE_INDEX GREATER_EQUAL BUSTER_SUPERBUILD_TREE_COUNT)
         message(FATAL_ERROR "The superbuild self-host plan is incomplete or unsafe")
@@ -71,6 +86,7 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
     set(BUSTER_TREE_TEST_1_TARGET "${${BUSTER_TREE_PREFIX}_TEST_1_TARGET}")
     set(BUSTER_TREE_ANALYZE_CONFIG "${${BUSTER_TREE_PREFIX}_ANALYZE_CONFIG}")
     set(BUSTER_TREE_ANALYZE_JOBS "${${BUSTER_TREE_PREFIX}_ANALYZE_JOBS}")
+    set(BUSTER_TREE_POST_TEST_OUTER "${${BUSTER_TREE_PREFIX}_POST_TEST_OUTER}")
     set(BUSTER_TREE_TABLE_AUDITS "${${BUSTER_TREE_PREFIX}_TABLE_AUDITS}")
     if (BUSTER_TREE_TABLE_AUDITS STREQUAL "")
         set(BUSTER_TREE_TABLE_AUDITS "0")
@@ -85,8 +101,15 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
         (NOT BUSTER_TREE_TEST_1_CONFIG STREQUAL "" AND BUSTER_TREE_TEST_1_TARGET STREQUAL "") OR
         (BUSTER_TREE_TEST_1_CONFIG STREQUAL "" AND NOT BUSTER_TREE_TEST_1_TARGET STREQUAL "") OR
         (NOT BUSTER_TREE_ANALYZE_CONFIG STREQUAL "" AND NOT BUSTER_TREE_ANALYZE_JOBS STREQUAL "1" AND
-         NOT BUSTER_TREE_ANALYZE_JOBS STREQUAL "2"))
+         NOT BUSTER_TREE_ANALYZE_JOBS STREQUAL "2") OR
+        (NOT BUSTER_TREE_POST_TEST_OUTER STREQUAL "0" AND NOT BUSTER_TREE_POST_TEST_OUTER STREQUAL "1"))
         message(FATAL_ERROR "Compiler tree ${BUSTER_SUPERBUILD_TREE_INDEX} is incomplete")
+    endif()
+    # Only overlapping analyzers after this tree's own tests take the outer slot.
+    if (BUSTER_TREE_POST_TEST_OUTER AND
+        (BUSTER_TREE_ANALYZE_CONFIG STREQUAL "" OR NOT BUSTER_TREE_ANALYZE_JOBS STREQUAL "2" OR
+         BUSTER_TREE_TEST_0_CONFIG STREQUAL "" OR NOT BUSTER_SUPERBUILD_POST_TEST_JOBS STREQUAL "1"))
+        message(FATAL_ERROR "Compiler tree ${BUSTER_SUPERBUILD_TREE_INDEX} has an invalid post-test edge")
     endif()
 
     set(BUSTER_TREE_BUILD_OPTIONS)
@@ -133,14 +156,18 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
                 ${BUSTER_TREE_BUILD_OPTIONS}
         )
     endif()
+    set(BUSTER_TREE_ANALYZE_COMMAND)
     if (NOT BUSTER_TREE_ANALYZE_CONFIG STREQUAL "")
-        list(APPEND BUSTER_TREE_TEST_COMMANDS
+        set(BUSTER_TREE_ANALYZE_COMMAND
             COMMAND ${${BUSTER_TREE_PREFIX}_ANALYZE_OBSERVER} "${CMAKE_COMMAND}" --build "${BUSTER_TREE_BUILD_DIRECTORY}"
                 --config "${BUSTER_TREE_ANALYZE_CONFIG}"
                 --target clang_analyze optnone_audit
                 --parallel "${BUSTER_TREE_ANALYZE_JOBS}"
                 ${BUSTER_TREE_BUILD_OPTIONS}
         )
+    endif()
+    if (NOT BUSTER_TREE_POST_TEST_OUTER)
+        list(APPEND BUSTER_TREE_TEST_COMMANDS ${BUSTER_TREE_ANALYZE_COMMAND})
     endif()
 
     if (BUSTER_TREE_TEST_COMMANDS)
@@ -172,7 +199,29 @@ foreach(BUSTER_SUPERBUILD_TREE_INDEX RANGE 0 ${BUSTER_SUPERBUILD_LAST_TREE})
         # Compile-only portability rows have no post-build command.
         add_dependencies(buster_matrix ${BUSTER_TREE_COMPILE_TARGET})
     endif()
+
+    if (BUSTER_TREE_POST_TEST_OUTER)
+        # The analyzers leave the CPU pool for their own slot after this
+        # tree's tests, so the self-host worker can run beside them.
+        set(BUSTER_TREE_POST_TEST_TARGET "buster_post_test_${BUSTER_SUPERBUILD_TREE_INDEX}")
+        add_custom_target(${BUSTER_TREE_POST_TEST_TARGET}
+            ${BUSTER_TREE_ANALYZE_COMMAND}
+            WORKING_DIRECTORY "${BUSTER_SUPERBUILD_SOURCE_DIR}"
+            JOB_POOL buster_matrix_post_test
+            VERBATIM
+        )
+        add_dependencies(${BUSTER_TREE_POST_TEST_TARGET} ${BUSTER_TREE_TEST_TARGET})
+        add_dependencies(buster_matrix ${BUSTER_TREE_POST_TEST_TARGET})
+        math(EXPR BUSTER_SUPERBUILD_POST_TEST_TREES "${BUSTER_SUPERBUILD_POST_TEST_TREES} + 1")
+    endif()
 endforeach()
+
+# The post-test pool exists only to run the analyzers beside the self-host
+# worker, on the one producer tree checked below.
+if (NOT BUSTER_SUPERBUILD_POST_TEST_TREES EQUAL BUSTER_SUPERBUILD_POST_TEST_JOBS OR
+    (BUSTER_SUPERBUILD_POST_TEST_JOBS AND NOT BUSTER_SUPERBUILD_SELF_HOST_ENABLED))
+    message(FATAL_ERROR "The superbuild post-test pool does not match its trees")
+endif()
 
 if (BUSTER_SUPERBUILD_SELF_HOST_ENABLED)
     set(BUSTER_SELF_HOST_COMPILE_TARGET "buster_compile_${BUSTER_SUPERBUILD_SELF_HOST_TREE_INDEX}")
@@ -184,6 +233,10 @@ if (BUSTER_SUPERBUILD_SELF_HOST_ENABLED)
     if (NOT "${BUSTER_SELF_HOST_TREE_BUILD_DIRECTORY}" STREQUAL "${BUSTER_SUPERBUILD_SELF_HOST_BUILD_DIRECTORY}" OR
         NOT "${BUSTER_SUPERBUILD_SELF_HOST_CONFIG}" STREQUAL "Release")
         message(FATAL_ERROR "The superbuild self-host producer does not match its compile dependency")
+    endif()
+    if (NOT "${${BUSTER_SELF_HOST_TREE_PREFIX}_POST_TEST_OUTER}" STREQUAL "${BUSTER_SUPERBUILD_SELF_HOST_DEPENDS_ON_VALIDATION}" OR
+        NOT "${BUSTER_SUPERBUILD_POST_TEST_JOBS}" STREQUAL "${BUSTER_SUPERBUILD_SELF_HOST_DEPENDS_ON_VALIDATION}")
+        message(FATAL_ERROR "The superbuild self-host worker must wait for test_all exactly when its producer's analyzers take the post-test pool")
     endif()
 
     set(BUSTER_SELF_HOST_COMMAND_OPTIONS
@@ -210,7 +263,12 @@ if (BUSTER_SUPERBUILD_SELF_HOST_ENABLED)
     )
     # The worker consumes one slot from the same pool and runs direct compiler
     # processes; it never starts an inner Ninja process. Waiting only for the
-    # producer compile target lets it overlap the remaining matrix tail.
+    # producer compile target lets it overlap the remaining matrix tail. When
+    # the producer's analyzers take the post-test pool, it also waits for the
+    # producer's tests so it never competes with test_all for the CPUs.
     add_dependencies(buster_self_host ${BUSTER_SELF_HOST_COMPILE_TARGET})
+    if (BUSTER_SUPERBUILD_SELF_HOST_DEPENDS_ON_VALIDATION)
+        add_dependencies(buster_self_host buster_test_${BUSTER_SUPERBUILD_SELF_HOST_TREE_INDEX})
+    endif()
     add_dependencies(buster_matrix buster_self_host)
 endif()

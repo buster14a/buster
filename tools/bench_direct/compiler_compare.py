@@ -34,7 +34,10 @@ run's Release compiler against its PGO+LTO compiler on the corpus. A fresh exact
 FRONTEND_SELECTOR_REQUEST_LINE adds the frontend and selector probes (#2761):
 the base revision's benchmark_frontend_scaling.py and selection_benchmark.py
 run on the same two binaries, then `ide bench` runs in alternating fresh
-processes of both.
+processes of both. A fresh exact FRONTEND_NESTING_REQUEST_LINE adds the
+deep-nesting leg (#2676): the base revision's benchmark_frontend_scaling.py
+--suite nesting times the same two binaries on control statements nested to
+growing depths.
 A fresh exact COMPILER_PROBES_REQUEST_LINE adds the compiler-probes leg (#2761): the
 trusted native compiler_probes.c harness builds the FAST register-allocation and
 scheduler line-mark probes against both revisions in isolated clones and times
@@ -62,8 +65,9 @@ The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
 as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
-With --request-attempt, an ordinary (not owned, analyzer or snapshot) attempt
-also exports the v1 raw inventory as required (#2918), writes
+With --request-attempt, an ordinary (not owned, MAIN-owned or analyzer) attempt,
+legacy-rebuild or pull snapshot-v1 (whose closure records and owned phases join
+the snapshot inventory), also exports the v1 raw inventory as required (#2918), writes
 evidence-omissions.json and, once measured, seals the retained bundle last with
 the trusted `./build.sh compiler_evidence seal`; the receipt's evidence_bundle
 names that seal, and a refused seal fails the attempt.
@@ -76,10 +80,12 @@ prepare_historical_harness (#3714 named historical corpus), measure_throughput (
 scaling_requested and measure_scaling (scaling leg),
 ast_pilot_request_selection and measure_ast_pilot (#3397 opt-in flag pair),
 constant_reuse_request_selection and measure_constant_reuse (#3011 opt-in flag pairs),
+process_floor_request_selection and measure_process_floor (#1125 per-process floor),
 real_source_request_selection and measure_real_source (#2761 real-source leg),
 production_profile_request_selection and measure_production_profile (#2761 PGO/LTO leg),
 compiler_probes_request_selection and measure_compiler_probes (#2761 probe leg),
 frontend_selector_request_selection and measure_frontend_selector (#2761 probes),
+frontend_nesting_request_selection and measure_frontend_nesting (#2676 deep nesting),
 wild_linker_request_selection, host_linker and measure_wild_linker (#2761 linker leg),
 link_tls_request_selection and measure_link_tls (#1915 TLS link leg),
 selfhost_inline_request_selection, build_selfhost_inline_stage1 and measure_selfhost_inline (#58), main. Validity rules live in compiler_receipt.classify.
@@ -109,8 +115,12 @@ from pathlib import Path
 from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
 from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
                               AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_ACCEPTANCE_REQUEST_LINE, validate_ast_pilot_acceptance,
+                              AST_RETIREMENT_PROFILE, AST_RETIREMENT_CELLS, AST_RETIREMENT_CORPUS, AST_RETIREMENT_REQUEST_LINE,
+                              validate_ast_retirement_acceptance,
                               CONSTANT_REUSE_ACCEPTANCE_PROFILE, CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
                               validate_constant_reuse_acceptance,
+                              PROCESS_FLOOR_PROFILE, PROCESS_FLOOR_REQUEST_LINE, PROCESS_FLOOR_CELLS,
+                              validate_process_floor_acceptance,
                               THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                               throughput_real_source_digest, validate_throughput_real_source,
                               PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
@@ -119,6 +129,8 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               compiler_probes_digest, validate_compiler_probes,
                               FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, FRONTEND_SELECTOR_SCHEMA,
                               frontend_selector_digest, validate_frontend_selector,
+                              FRONTEND_NESTING_PROFILE, FRONTEND_NESTING_REQUEST_LINE, frontend_scaling_digest,
+                              validate_frontend_nesting,
                               WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, WILD_LINKER_SCHEMA, WILD_LINKER_COMPARATORS,
                               wild_linker_bundle_files, wild_linker_digest, validate_wild_linker, WILD_IDENTITY,
                               WILD_LINKER_LINKERS,
@@ -136,9 +148,9 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               render, scaling_digest, throughput_digest, validate_inline_acceptance,
                               analyzer_bootstrap_provenance, analyzer_profile_summary)
 from compiler_receipt import observed_cpu_model as cpu_model
-from compiler_receipt import (EVIDENCE_INVENTORY, EVIDENCE_OMISSIONS, EVIDENCE_OMISSIONS_SCHEMA,
+from compiler_receipt import (EVIDENCE_OMISSIONS, EVIDENCE_OMISSIONS_SCHEMA,
                               EVIDENCE_OMISSION_REASONS, EVIDENCE_OMISSION_EXAMPLES, EVIDENCE_SEAL,
-                              evidence_lab_required, evidence_corpus_required, evidence_identity)
+                              evidence_lab_required, evidence_corpus_required, evidence_identity, evidence_inventory)
 import throughput_real_source
 from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 
@@ -148,8 +160,11 @@ THROUGHPUT_TIMEOUT_SECONDS = 1800
 SCALING_TIMEOUT_SECONDS = 1200
 INLINE_ACCEPTANCE_TIMEOUT_SECONDS = 3 * 60 * 60
 AST_PILOT_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
+AST_RETIREMENT_ACCEPTANCE_TIMEOUT_SECONDS = 45 * 60
 # Two -c cells of 20 ABBA pairs each, the size of the ast-pilot object cell.
 CONSTANT_REUSE_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
+# Three cells of tiny compiles, each bounded by process_floor_acceptance.COMPARE_TIMEOUT_SECONDS.
+PROCESS_FLOOR_TIMEOUT_SECONDS = 60 * 60
 # Measured: the whole leg (42 passes over its six cells) took 508 s on a hosted
 # 2.8 GHz Xeon; this bound keeps it inside the unchanged compare-pull budget.
 REAL_SOURCE_TIMEOUT_SECONDS = 1800
@@ -168,6 +183,10 @@ COMPILER_PROBES_TIMEOUT_SECONDS = 20 * 60
 FRONTEND_SCALING_TIMEOUT_SECONDS = 20 * 60
 SELECTION_TIMEOUT_SECONDS = 10 * 60
 IDE_BENCH_TIMEOUT_SECONDS = 30
+# Measured: the whole frontend-nesting leg (68 cells, one warmup and eleven
+# repetitions of each binary) took 190 s on a hosted 4-vCPU 2.1 GHz Xeon and
+# exported 196 KB; this bound keeps it inside the unchanged compare-pull budget.
+FRONTEND_NESTING_TIMEOUT_SECONDS = 20 * 60
 # Measured on a hosted 4-vCPU 2.3 GHz Xeon: the head's three input builds (two
 # generations, Release unity, Debug and Release separate, and the harness compile)
 # took 281 s together and the link-only harness 24 s (GNU ld as comparator, 3.4 MB
@@ -1223,6 +1242,18 @@ def ast_pilot_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
     return True, ""
 
 
+def ast_retirement_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #4058 only on one exact new occurrence against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, AST_RETIREMENT_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the AST retirement selector against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the AST retirement selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
 def constant_reuse_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
     """Select #3011's fixed profile only when its exact line is added once against every head parent."""
     deltas = request_selector_parent_deltas(candidate, head, CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE)
@@ -1232,6 +1263,18 @@ def constant_reuse_request_selection(candidate: Path, head: str) -> tuple[bool, 
         return False, ""
     if any(delta != 1 for delta in deltas):
         return False, "the constant-reuse acceptance selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def process_floor_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #1125's fixed profile only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, PROCESS_FLOOR_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the process-floor selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the process-floor selector must be added exactly once relative to every head parent"
     return True, ""
 
 
@@ -1325,6 +1368,18 @@ def frontend_selector_request_selection(candidate: Path, head: str) -> tuple[boo
         return False, ""
     if any(delta != 1 for delta in deltas):
         return False, "the frontend-selector selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def frontend_nesting_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #2676's deep-nesting leg only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, FRONTEND_NESTING_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the frontend-nesting selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the frontend-nesting selector must be added exactly once relative to every head parent"
     return True, ""
 
 
@@ -1590,6 +1645,16 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
         reasons.append(reuse_problem)
     elif getattr(arguments, "constant_reuse_requested", False):
         reasons.append(f"{selected_profile['name']} cannot be combined with the constant-reuse acceptance selector")
+    floor_problem = getattr(arguments, "process_floor_request_problem", "")
+    if floor_problem:
+        reasons.append(floor_problem)
+    elif getattr(arguments, "process_floor_requested", False):
+        reasons.append(f"{selected_profile['name']} cannot be combined with the process-floor selector")
+    retirement_problem = getattr(arguments, "ast_retirement_request_problem", "")
+    if retirement_problem:
+        reasons.append(retirement_problem)
+    elif getattr(arguments, "ast_retirement_requested", False):
+        reasons.append(f"{selected_profile['name']} cannot be combined with the AST retirement selector")
     if scaling_requested(candidate, arguments.base, arguments.head):
         reasons.append(f"{selected_profile['name']} cannot be combined with a scaling.request profile")
     drivers: dict[str, Path] = {}
@@ -1821,9 +1886,10 @@ def seal_evidence(receipt: dict, evidence: Path, work: Path, request_attempt: st
             problem = f"evidence seal unreadable after sealing: {error}"
     if not problem and not all(seal.get(key, "").isdigit() for key in ("manifest_bytes", "members", "payload_bytes")):
         problem = "evidence seal is malformed after sealing"
-    bundle = {"inventory": EVIDENCE_INVENTORY, "state": "failed", "reason": problem}
+    inventory = evidence_inventory(receipt)
+    bundle = {"inventory": inventory, "state": "failed", "reason": problem}
     if not problem:
-        bundle = {"inventory": EVIDENCE_INVENTORY, "state": "sealed", "manifest_sha256": seal.get("manifest_sha256", ""),
+        bundle = {"inventory": inventory, "state": "sealed", "manifest_sha256": seal.get("manifest_sha256", ""),
                   "manifest_bytes": int(seal["manifest_bytes"]), "members": int(seal["members"]),
                   "payload_bytes": int(seal["payload_bytes"]), "omissions": len(EVIDENCE_OMISSION_LEDGER)}
     receipt["evidence_bundle"] = bundle
@@ -1864,6 +1930,46 @@ def closure_phase(arguments: argparse.Namespace, candidate: Path, work: Path, ev
 AST_PILOT_REQUIRED = ("acceptance.json", "probe/probe.json",
                       *(f"{cell}/{name}" for cell in AST_PILOT_ACCEPTANCE_PROFILE["cells"]
                         for name in ("summary.json", "compare.json", "a/lab.json", "b/lab.json")))
+
+AST_RETIREMENT_REQUIRED = ("acceptance.json", "source.json", "inputs/unity.c",
+                           *(f"inputs/{name}.c" for name in AST_RETIREMENT_CORPUS),
+                           *(f"{cell}/{name}" for cell in AST_RETIREMENT_CELLS
+                             for name in ("summary.json", "compare.json", "pairs.json", "reference.json", "a/lab.json", "b/lab.json",
+                                          "a/env/env.json", "b/env/env.json", "a/reference.diagnostics", "b/reference.diagnostics",
+                                          "reference.000.bin.gz", "reference.001.bin.gz")),
+                           *(f"{cell}/pairs/{pair:04d}-{arm}.csv" for cell in AST_RETIREMENT_CELLS
+                             for pair in range(1, AST_RETIREMENT_PROFILE["pairs"] + 1) for arm in ("a", "b")),
+                           *(f"probe/{cell}/{name}" for cell in AST_RETIREMENT_CELLS for name in ("probe.json", "a.log", "b.log")))
+
+
+def measure_ast_retirement(arguments: argparse.Namespace, candidate: Path, bins: Path, work: Path, evidence: Path,
+                           receipt: dict, harness: Path | None) -> None:
+    """Run the fixed default/default leg after both binaries and the base corpus exist."""
+    mark(receipt, evidence, "ast-retirement-acceptance")
+    output = work / "ast-retirement-acceptance"
+    helper = Path(__file__).with_name("ast_retirement_acceptance.py").resolve()
+    measured = time.monotonic()
+    native = harness if harness is not None else candidate / "build/throughput-tools/throughput"
+    status = run([sys.executable, "-B", str(helper), "--lab", str(arguments.lab.resolve()), "--harness", str(native),
+                  "--baseline-ide", str(bins / "ide-base"), "--candidate-ide", str(bins / "ide-cand"),
+                  "--repo-root", str(candidate), "--base-revision", arguments.base, "--head-revision", arguments.head,
+                  "--cpu", str(AST_RETIREMENT_PROFILE["cpu"]), "--output", str(output)],
+                 candidate, evidence / "ast-retirement-acceptance.log", AST_RETIREMENT_ACCEPTANCE_TIMEOUT_SECONDS)
+    receipt["timings"]["ast_retirement_acceptance_seconds"] = round(time.monotonic() - measured, 3)
+    record = receipt["ast_retirement_acceptance"]
+    record["exit"] = status
+    errors, omissions = export_tree(output, evidence / "ast_retirement_acceptance", evidence, EVIDENCE_IGNORE, AST_RETIREMENT_REQUIRED)
+    record["evidence_omissions"] = omissions
+    summary, problem = read_exported_json(evidence / "ast_retirement_acceptance" / "acceptance.json")
+    if problem:
+        errors.append(f"issue #4058 retirement receipt unreadable: {problem}")
+    else:
+        record["summary"] = summary
+        errors.extend(validate_ast_retirement_acceptance(summary, arguments.base, arguments.head, receipt["binaries"]))
+    if status != 0:
+        errors.append(f"issue #4058 retirement measurement exited {status}; raw unavailable/failed evidence is retained")
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
 
 
 def measure_ast_pilot(arguments: argparse.Namespace, candidate: Path, binary: Path, work: Path, evidence: Path,
@@ -1926,6 +2032,40 @@ def measure_constant_reuse(arguments: argparse.Namespace, candidate: Path, binar
         errors.extend(validate_constant_reuse_acceptance(summary, arguments.head, receipt["binaries"]["candidate"]["sha256"]))
     if status != 0:
         errors.append(f"issue #3011 constant-reuse acceptance exited {status}")
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
+PROCESS_FLOOR_REQUIRED = ("acceptance.json",
+                          *(f"{cell}/{name}" for cell in PROCESS_FLOOR_CELLS
+                            for name in ("summary.json", "compare.json", "a/lab.json", "b/lab.json")))
+
+
+def measure_process_floor(arguments: argparse.Namespace, candidate: Path, binary: Path, work: Path, evidence: Path,
+                          receipt: dict) -> None:
+    """Run #1125's fixed per-process floor profile on the frozen candidate build and record it in the receipt."""
+    mark(receipt, evidence, "process-floor")
+    output = work / "process-floor"
+    helper = Path(__file__).with_name("process_floor_acceptance.py").resolve()
+    measured = time.monotonic()
+    status = run([sys.executable, "-B", str(helper),
+                  "--lab", str(arguments.lab.resolve()), "--candidate-ide", str(binary),
+                  "--repo-root", str(candidate), "--head-revision", arguments.head,
+                  "--cpu", str(PROCESS_FLOOR_PROFILE["cpu"]), "--output", str(output)],
+                 candidate, evidence / "process-floor.log", PROCESS_FLOOR_TIMEOUT_SECONDS)
+    receipt["timings"]["process_floor_seconds"] = round(time.monotonic() - measured, 3)
+    record = receipt["process_floor"]
+    record["exit"] = status
+    errors, omissions = export_tree(output, evidence / "process_floor", evidence, EVIDENCE_IGNORE, PROCESS_FLOOR_REQUIRED)
+    record["evidence_omissions"] = omissions
+    summary, problem = read_exported_json(evidence / "process_floor" / "acceptance.json")
+    if problem:
+        errors.append(f"issue #1125 process-floor receipt unreadable: {problem}")
+    else:
+        record["summary"] = summary
+        errors.extend(validate_process_floor_acceptance(summary, arguments.head, receipt["binaries"]["candidate"]["sha256"]))
+    if status != 0:
+        errors.append(f"issue #1125 process-floor profile exited {status}")
     record["errors"] = errors
     record["status"] = "complete" if not errors else "failed"
 
@@ -2153,6 +2293,37 @@ def measure_frontend_selector(candidate: Path, bins: Path, work: Path, evidence:
                                              receipt["binaries"]))
     record["cells"] = frontend_selector_digest(documents["results"], documents["report"], documents["bench"])
     record["exits"] = {"frontend_scaling": scaling_status, "selection": selection_status}
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
+def measure_frontend_nesting(candidate: Path, bins: Path, work: Path, evidence: Path, receipt: dict) -> None:
+    """Run #2676's deep-nesting families from the base checkout on both binaries and record them."""
+    record = receipt["frontend_nesting"]
+    profile = FRONTEND_NESTING_PROFILE
+    exported = evidence / "frontend_nesting"
+    output = work / "frontend-nesting"
+    errors: list[str] = []
+    measured = time.monotonic()
+    status = run([sys.executable, "-B", "tools/benchmark_frontend_scaling.py", "--baseline", str(bins / "ide-base"),
+                  "--candidate", str(bins / "ide-cand"), "--out", str(output), *profile["frontend_scaling"]["arguments"]],
+                 candidate, evidence / "frontend-nesting.log", FRONTEND_NESTING_TIMEOUT_SECONDS)
+    receipt["timings"]["frontend_nesting_seconds"] = round(time.monotonic() - measured, 3)
+    documents = {"provenance.json": None, "results.json": None}
+    if output.is_dir():
+        problems, record["evidence_omissions"] = export_tree(output, exported, evidence, FRONTEND_SCALING_IGNORE,
+                                                             FRONTEND_SCALING_REQUIRED)
+        errors.extend(problems)
+        for name in documents:
+            documents[name], problem = read_exported_json(exported / name)
+            if problem:
+                errors.append(f"exported evidence frontend_nesting/{name} unreadable: {problem}")
+    else:
+        errors.append("frontend-nesting produced no output")
+    errors.extend(validate_frontend_nesting(status, documents["provenance.json"], documents["results.json"],
+                                            receipt["binaries"]))
+    record["cells"] = frontend_scaling_digest(documents["results.json"])
+    record["exit"] = status
     record["errors"] = errors
     record["status"] = "complete" if not errors else "failed"
 
@@ -2470,9 +2641,10 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if reuse_requested:
         receipt["constant_reuse_acceptance"] = {"requested": True, "request_line": CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
                                                 "profile": CONSTANT_REUSE_ACCEPTANCE_PROFILE, "status": "pending"}
-        # One long opt-in leg per compare-pull job keeps the unchanged compare-pull budget provable.
-        if ast_requested or inline_requested:
-            reasons.append("constant-reuse-acceptance-v1 cannot be combined with the inline or ast-pilot acceptance profile")
+        # One long opt-in leg per compare-pull job keeps the unchanged compare-pull budget provable. The inline
+        # profile is not one: its exact line is in main's request history, so it rides every pull compare.
+        if ast_requested:
+            reasons.append("constant-reuse-acceptance-v1 cannot be combined with the ast-pilot acceptance profile")
     real_requested = arguments.mode == "pull" and getattr(arguments, "real_source_requested", False)
     problem = getattr(arguments, "real_source_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2549,12 +2721,50 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["selfhost_inline"] = {"requested": True, "request_line": SELFHOST_INLINE_REQUEST_LINE,
                                       "profile": SELFHOST_INLINE_PROFILE, "status": "pending"}
         # One opt-in leg per attempt keeps a report from being shared between two profiles; the
-        # scaling leg also runs before this one and would share its budget.
+        # scaling leg also runs before this one and would share its budget. The #48 inline leg is
+        # not an opt-in here: inline_acceptance_requested selects it whenever its line is anywhere in
+        # the request file, which it has been on main since #48, so it runs beside this leg.
         if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
-                linker_requested or link_tls_requested or inline_requested or reuse_requested or \
+                linker_requested or link_tls_requested or reuse_requested or \
                 scaling_requested(candidate, arguments.base, arguments.head):
             reasons.append("self-host-inline-compare-v1 cannot be combined with another opt-in leg, the scaling "
                            "leg included")
+    nesting_requested = arguments.mode == "pull" and getattr(arguments, "frontend_nesting_requested", False)
+    problem = getattr(arguments, "frontend_nesting_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if nesting_requested:
+        receipt["frontend_nesting"] = {"requested": True, "request_line": FRONTEND_NESTING_REQUEST_LINE,
+                                       "profile": FRONTEND_NESTING_PROFILE, "status": "pending"}
+        # One opt-in leg per attempt keeps a report from being shared between two profiles.
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested or link_tls_requested or selfhost_requested or reuse_requested:
+            reasons.append("frontend-nesting-v1 cannot be combined with another opt-in leg")
+    floor_requested = arguments.mode == "pull" and getattr(arguments, "process_floor_requested", False)
+    problem = getattr(arguments, "process_floor_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if floor_requested:
+        receipt["process_floor"] = {"requested": True, "request_line": PROCESS_FLOOR_REQUEST_LINE,
+                                    "profile": PROCESS_FLOOR_PROFILE, "status": "pending"}
+        # One opt-in leg per attempt keeps a report from being shared between two profiles. The #48 inline leg
+        # is not an opt-in here: its line is in main's request history, so it rides every pull compare.
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested or link_tls_requested or selfhost_requested or reuse_requested or nesting_requested:
+            reasons.append("process-floor-v1 cannot be combined with another opt-in leg")
+    retirement_requested = arguments.mode == "pull" and getattr(arguments, "ast_retirement_requested", False)
+    problem = getattr(arguments, "ast_retirement_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if retirement_requested:
+        receipt["ast_retirement_acceptance"] = {"requested": True, "request_line": AST_RETIREMENT_REQUEST_LINE,
+                                                "profile": AST_RETIREMENT_PROFILE, "status": "pending"}
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested or link_tls_requested or selfhost_requested or reuse_requested or nesting_requested or floor_requested or \
+                scaling_requested(candidate, arguments.base, arguments.head) or getattr(arguments, "analyzer_profile_requested", False):
+            reasons.append("ast-retirement-acceptance-v1 cannot be combined with another opt-in leg or scaling")
+        if not getattr(arguments, "evidence_seal", False):
+            reasons.append("ast-retirement-acceptance-v1 requires the ordinary verified evidence-seal route")
     # #3714: the named historical recipe swaps only the corpus harness; every other opt-in leg would
     # still run the base's own pre-floor harness, so none may join it. Its pinned worktree is prepared
     # before any build.
@@ -2562,7 +2772,7 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE:
         others = (real_requested or ast_requested or production_requested or probes_requested or selector_requested
                   or inline_requested or linker_requested or link_tls_requested or reuse_requested
-                  or selfhost_requested
+                  or selfhost_requested or nesting_requested or floor_requested or retirement_requested
                   or (arguments.mode == "pull" and scaling_requested(candidate, arguments.base,
                                                                                            arguments.head)))
         if snapshot_closure:
@@ -2637,6 +2847,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                     measure_ast_pilot(arguments, candidate, binary, work, evidence, receipt)
                 if role == "candidate" and reuse_requested:
                     measure_constant_reuse(arguments, candidate, binary, work, evidence, receipt)
+                if role == "candidate" and floor_requested:
+                    measure_process_floor(arguments, candidate, binary, work, evidence, receipt)
                 if selfhost_requested:
                     mark(receipt, evidence, f"selfhost-inline-stage1-{role}")
                     build_selfhost_inline_stage1(role, binary, candidate, commit, work, evidence, receipt)
@@ -2683,6 +2895,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                                                            sealed=getattr(arguments, "evidence_seal", False))
         receipt["timings"]["throughput_seconds"] = round(time.monotonic() - measured, 3)
         reasons.extend(corpus)
+        if retirement_requested and not reasons:
+            measure_ast_retirement(arguments, candidate, bins, work, evidence, receipt, harness)
         if arguments.mode == "pull" and scaling_requested(candidate, arguments.base, arguments.head):
             mark(receipt, evidence, "scaling")
             measured = time.monotonic()
@@ -2712,6 +2926,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if selfhost_requested:
             mark(receipt, evidence, "selfhost-inline")
             measure_selfhost_inline(arguments, candidate, work, evidence, receipt)
+        if nesting_requested:
+            mark(receipt, evidence, "frontend-nesting")
+            measure_frontend_nesting(candidate, bins, work, evidence, receipt)
         mark(receipt, evidence, "validate")
         raw_closure = {}
         if snapshot_closure:
@@ -2785,6 +3002,22 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("issue #3011 constant-reuse acceptance was requested but did not reach its candidate-build phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if floor_requested:
+        record = receipt["process_floor"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("issue #1125 process-floor profile was requested but did not reach its candidate-build phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
+    if retirement_requested:
+        record = receipt["ast_retirement_acceptance"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("issue #4058 retirement profile was requested but did not reach its two-binary measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
     if real_requested:
         record = receipt["throughput_real_source"]
         reasons.extend(record.get("errors", []))
@@ -2841,6 +3074,14 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("the self-host inline leg was requested but did not reach its measurement phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if nesting_requested:
+        record = receipt["frontend_nesting"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the frontend-nesting leg was requested but did not reach its measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
 
 
 
@@ -2866,8 +3107,12 @@ def main(argv: list[str] | None = None) -> int:
     arguments.analyzer_profile_request_problem = analyzer_request_problem
     arguments.ast_pilot_requested, arguments.ast_pilot_request_problem = (
         ast_pilot_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.ast_retirement_requested, arguments.ast_retirement_request_problem = (
+        ast_retirement_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.constant_reuse_requested, arguments.constant_reuse_request_problem = (
         constant_reuse_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.process_floor_requested, arguments.process_floor_request_problem = (
+        process_floor_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.real_source_requested, arguments.real_source_request_problem = (
         real_source_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.historical_requested, arguments.historical_request_problem = (
@@ -2878,6 +3123,8 @@ def main(argv: list[str] | None = None) -> int:
         compiler_probes_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.frontend_selector_requested, arguments.frontend_selector_request_problem = (
         frontend_selector_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.frontend_nesting_requested, arguments.frontend_nesting_request_problem = (
+        frontend_nesting_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.wild_linker_requested, arguments.wild_linker_request_problem = (
         wild_linker_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.link_tls_requested, arguments.link_tls_request_problem = (
@@ -2889,9 +3136,10 @@ def main(argv: list[str] | None = None) -> int:
     main_owned = getattr(arguments, "main_owned_phases", False)
     selected_profile = named_main_profile(arguments.main_profile) if main_owned else PROFILE
     early_owned = utility or main_owned or (arguments.mode == "main" and arguments.closure_policy == "snapshot-v1")
-    # Contract v1 (#2918) seals the ordinary lab and corpus: not owned, analyzer or snapshot routes.
+    # Contract v1 (#2918) seals the ordinary lab and corpus, on the legacy-rebuild and the pull
+    # snapshot-v1 route alike (#3211); the owned, MAIN-owned and analyzer routes keep their own contracts.
     arguments.evidence_seal = getattr(arguments, "request_attempt", None) is not None and not early_owned and \
-        not analyzer_requested and arguments.closure_policy == "legacy-rebuild"
+        not analyzer_requested and arguments.closure_policy in ("legacy-rebuild", "snapshot-v1")
     EVIDENCE_OMISSION_LEDGER.clear()
     EVIDENCE_DEFERRED_OPTIONAL.clear()
     EVIDENCE_DEFER_ALL = arguments.evidence_seal
@@ -2905,6 +3153,10 @@ def main(argv: list[str] | None = None) -> int:
     reasons = receipt["reasons"]
     if analyzer_request_problem:
         reasons.append(analyzer_request_problem)
+    if arguments.ast_retirement_request_problem:
+        reasons.append(arguments.ast_retirement_request_problem)
+    if analyzer_requested and arguments.ast_retirement_requested:
+        reasons.append("an analyzer profile cannot be combined with AST retirement acceptance")
     if analyzer_requested and arguments.real_source_requested:
         reasons.append("an analyzer profile cannot be combined with real-source throughput")
     log = evidence / "build.log"

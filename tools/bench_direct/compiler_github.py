@@ -279,12 +279,14 @@ def close_orphans(api: Api, commits: list[str], mode: str, fields_for) -> list[i
     return closed
 
 
-def reconcile_main(api: Api, head: str, base: str, reconciler: str, now: str, chain: list[str] | None = None) \
-        -> list[int]:
+def reconcile_main(api: Api, head: str, base: str, reconciler: str, now: str, chain: list[str] | None = None,
+                   unchanged: bool = False) -> list[int]:
     """Reconcile earlier legacy main checks; exact bound attempts belong to native terminal recovery.
 
     A closed commit strictly between base and head is named as covered by
     this attempt's range comparison; it still has no measurement of its own.
+    When authorization classified the range as unchanged (#3923) there is no
+    comparison, and the text says so instead.
     """
     chain = first_parent_chain(api, head) if chain is None else chain
     covered = chain[:chain.index(base)] if base in chain else []
@@ -301,9 +303,11 @@ def reconcile_main(api: Api, head: str, base: str, reconciler: str, now: str, ch
             return None
         cause = ("a legacy open check was displaced by this newer request; its exact execution metadata "
                  "is unavailable, so this cleanup records no measurement")
-        cover = (f" Its change is inside the range comparison of `{head}` against `{base}`, which is now requested; "
-                 "any validated result covers the whole range and does not isolate this commit.") \
-            if row["head_sha"] in covered else ""
+        cover = "" if row["head_sha"] not in covered else \
+            (f" Its change is inside the range from `{base}`, the last actual measurement, to `{head}`, which was "
+             "classified as unchanged compiler/build and benchmark inputs and is not measured.") if unchanged else \
+            (f" Its change is inside the range comparison of `{head}` against `{base}`, which is now requested; "
+             "any validated result covers the whole range and does not isolate this commit.")
         prior = row.get("output", {}).get("summary", "") if isinstance(row.get("output"), dict) else ""
         baseline = "\n".join(line for line in prior.splitlines() if line.startswith("Baseline"))
         return {"status": "completed", "conclusion": "neutral", "completed_at": now,
@@ -365,7 +369,8 @@ def start(api: Api, environment: dict) -> list[dict]:
         if mode == "main":
             chain = first_parent_chain(api, head)
             relation = baseline_label(chain, get("BQ_BASE_COMMIT")) or relation
-            closed = reconcile_main(api, head, get("BQ_BASE_COMMIT"), here, stamp(), chain)
+            closed = reconcile_main(api, head, get("BQ_BASE_COMMIT"), here, stamp(), chain,
+                                    get("BQ_UNCHANGED") == "true")
         else:
             closed = reconcile_pull(api, get("BQ_PULL"), head, here, stamp())
         if closed:

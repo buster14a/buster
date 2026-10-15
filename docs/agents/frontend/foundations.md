@@ -31,8 +31,8 @@ position index. Such a query uses scalar delimiter matching as well.
 
 Lowering's assignment continuation retains the comma-free suffix range that
 its parent scanned. Moving into a group changes the endpoint and requires a
-new scan. `c_ir_root_conditional_scan` stops once an assignment proves that a
-later conditional belongs to its right operand. Assignment completions keep
+new scan. `c_ir_root_conditional` refuses a range whose root assignment comes before
+its first root `?`: that conditional belongs to the assignment's right operand. Assignment completions keep
 their original order, conversions and stores. Counted chain regressions cover
 simple, distinct-local and compound assignments through both frontend SSA
 forms. The native runtime fixture also compiles the three 20,000-link object
@@ -40,6 +40,21 @@ inputs (including distinct compound-assignment array elements) through the real 
 receipt, with optimization/sanitizer flags; elapsed time is not a test gate.
 Executable controls cover narrowing, mixed compound operators, comma
 and conditional operands, aggregate/pointer values and single evaluation.
+
+## Constant-expression cast probes
+
+The constant evaluator uses `c_ir_query_group_type_name` for parenthesized
+cast probes, sharing the expression walk's first-token gate and per-opener
+memo. Literal-, number- and expression-led groups avoid a type-name request;
+`sizeof` is a keyword and is rejected by the gate before scope lookup.
+Real type names still use the existing query and suspension path. The memo
+continues to exclude scope-sensitive `typeof` groups and lone unbound
+identifiers, and groups outside a function body have no memo slot.
+
+`c_test_constant_group_cast_probe` fixes initializer values for nested groups,
+parenthesized `sizeof`, built-in and typedef casts, `typeof`, local typedefs
+and object shadowing in both canonical frontend forms. It covers file and
+local static initializers as well as in-body constant queries.
 
 ## Logical constant eligibility
 
@@ -128,7 +143,13 @@ walk past N nested `do` loops for each of their N variables needed N^2 slots
 read whose only predecessor lies in such a closed loop it leaves, a loop that
 neither writes nor reads the local, passes to the loop's entry in one step when
 the predecessor's forward links climb to that loop's header (preorder intervals
-of the forward-link forest answer this). Otherwise each of N nested `do`
+of the forward-link forest answer this). The read index and forest are built
+once, lazily, after the ordinary walk spends more steps than the function's
+blocks plus SSA events. Activation is checked between reads; one read visits
+at most every block, so work before activation is bounded by events plus twice
+the blocks. Cheap functions retain only the loop-header facts and write index;
+a refused optional carve leaves the general walk and is not retried (#4029).
+Otherwise each of N nested `do`
 conditions climbed through every inner condition and exit block: N^2 steps
 (#3894). Trivial
 parameters and unused parameter cycles are removed; a replaced parameter hands
@@ -151,8 +172,8 @@ path; selected MIR enforces dominance in unreachable code too.
 A GNU statement-expression body retains the complete range of each automatic
 declaration. Its top-level commas separate declarators and reach the existing
 automatic-declaration-list frame; only expression statements use the trailing
-comma split. `declaration_statement` is shared with trailing-value classification
-in the body walker. The embedded driver regression for #1388 checks initialized,
+comma split. The body walker tells the two apart by the statement's node kind
+(#4060). The embedded driver regression for #1388 checks initialized,
 uninitialized, pointer/scalar, discarded and exactly-once call initializers,
 alongside ordinary/nested blocks, typedefs, typeof and comma/loop sequencing,
 under both frontend forms and both native allocators at O0/O2. Syntax/object rows
@@ -515,6 +536,16 @@ without facts for identical bitcode and diagnostics.
   single `#` to precede a parameter, and `defined` cannot be used as a macro
   name in `#define` or `#undef`. Assembly-comment-line mode retains its
   stringification compatibility behavior.
+- Macro expansion may produce `defined NAME` or `defined(NAME)` in a
+  conditional expression. C17 leaves this construct undefined (6.10.1p4), but
+  Buster accepts it as a GCC/Clang compatibility behavior in both C17 and GNU17.
+  Conditional rescanning recognizes the operator before expanding its identifier
+  operand, then tests that name's macro definition status. No
+  `-Wexpansion-to-defined`-equivalent warning is added. The registered
+  `c_macro_produced_defined_tests` covers nested object-like and function-like
+  token-paste producers, both operand spellings, `#if`/`#elif`, defined,
+  empty, undefined and literal-operator controls, plus feature queries whose
+  argument contains the identifier `defined`.
 - `c_conditional_number` admits the complete bounded integer spelling, checks
   overflow before accumulation, and leaves its output unchanged on failure.
   Ordinary constants and the x87 initializer folder share it; do not restore a
@@ -939,6 +970,14 @@ without facts for identical bitcode and diagnostics.
   See [diagnostics](../../diagnostics.md) for the recovery contract and its
   frozen equivalence test.
 
+- A volatile recursive record reserves its qualified canonical identity before
+  its base layout resolves. Pointer fields can then name it without a layout
+  dependency cycle; the existing qualified mapping retry refreshes the view
+  in place once the base resolves. Fields share the base storage, and volatile
+  loads/stores retain their access markers. Atomic construction still waits
+  for the complete layout before promotion. `c_test_volatile_recursive_records`
+  covers self/mutual recursion and unions on x86-64/AArch64 in both frontend
+  forms; the native driver executes the fixture under both allocators.
 - Zero-initialize aggregate tables before publishing a partially resolved type.
   Recursive and mutually dependent declarations can expose an aggregate while
   later members are still unresolved; an uninitialized `IrField` must never be
@@ -1683,6 +1722,13 @@ values and designators once. The type worklist checks every member and rejects
 volatile or atomic storage from this representation shortcut. Existing integer,
 floating, boolean and null-pointer zero representations are retained; no libc
 helper is introduced. Small or qualified aggregates retain typed construction.
+
+The runtime braced-item scan tracks top-level conditional depth as well. The
+middle operand of `?:` is a full expression (C11 6.5.15), so a comma there
+stays in its initializer element; after the matching colon, the next top-level
+comma still begins another element. The registered
+`c_test_conditional_comma_initializer` checks both selected values and call
+effects for this shape on the default and `-fc-ast-pilot` paths (#4088).
 The large-frame fixture checks zeroed nested storage, explicit values, copies
 and odd byte tails under both frontend lowering modes. This prevents initializer
 expansion from exceeding Windows ARM64's unwind function-size limit.
@@ -2128,3 +2174,31 @@ checks that a returned-function call retains the positive reference scan.
 for typeof and qualified-typeof casts plus their interior-conjunction negatives.
 The landed decorated-label runtime controls, original deep lowering and
 runtime-order fixtures remain separate.
+
+## Type identity in array layout constants
+
+The layout bound rewriter consumes retained semantic identity answers as one
+integer leaf, skipping their unevaluated type operands. This lets nested
+`sizeof(char[...__builtin_types_compatible_p(...)...])` retain the same constant
+value as the direct builtin, including Git's ARRAY_SIZE macro. Missing answers
+stay unresolved. `c_test_array_size_identity_layout` covers static initializers,
+member bounds, local initialized arrays, four target layouts and both frontend
+forms; pointer misuse and genuinely variable bounds retain their refusals.
+
+## Git expression compatibility controls
+
+`c_test_git_expression_shapes` keeps inferred-bound compound literals valid
+through parenthesized subscript sizeof queries, preserves chained assignments
+in control operands, and retains static string-address relocations cast to
+pointer-width integers. GNU statement-expression tails skip extension markers
+before deciding whether the tail is a declaration. The alignment collector
+recognizes GNU aligned spellings only inside attribute payloads, retaining existing C23 attribute behavior; ordinary
+identifiers remain names and standard _Alignas retains its checks.
+
+Dead-code label recovery preserves the containing statement when a jump enters
+a nested control body. It starts that statement in a disconnected block so its
+else and loop continuations still exist when the label becomes reachable.
+The regression validates four target layouts and both frontend forms; native
+execution checks exact effects and values under both allocators. Invalid
+alignments, a declaration-only void tail and a narrow symbolic address cast
+retain diagnostics. No frozen retirement fixture input is changed.

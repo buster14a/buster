@@ -5,6 +5,7 @@ import argparse
 import copy
 from datetime import datetime, timezone
 import io
+import json
 from pathlib import Path
 import re
 import sys
@@ -256,12 +257,18 @@ class ReconciledInventoryTests(unittest.TestCase):
 
     def test_missing_unknown_failed_workloads_and_required_steps_remain_failures(self):
         controls = [self.jobs[1:], self.jobs + [dict(self.jobs[0], name="Unknown workload", id=9999)]]
-        for field, value in (("conclusion", "failure"), ("run_attempt", 2), ("steps", [])):
+        # steps=[] alone is stale metadata that #4102 accepts with a warning; a
+        # present required step that did not succeed is never stale.
+        skipped = [{"name": github_ci_time._required_job_steps(self.jobs[0]["name"])[0],
+                    "status": "completed", "conclusion": "skipped"}]
+        for field, value in (("conclusion", "failure"), ("run_attempt", 2), ("steps", skipped)):
             jobs = copy.deepcopy(self.jobs)
             jobs[0][field] = value
             controls.append(jobs)
         for jobs in controls:
-            self.assertFalse(self.gate(jobs=jobs)["success"])
+            result = self.gate(jobs=jobs)
+            self.assertFalse(result["success"])
+            self.assertEqual(result["step_proof_waived"], [])
 
     def test_partial_moving_or_excessive_check_snapshots_are_refused(self):
         first = {"total_count": 2, "check_runs": self.checks[:1]}
@@ -297,6 +304,155 @@ class ReconciledInventoryTests(unittest.TestCase):
         self.assertEqual(result["job_metadata"]["snapshot_attempts"], 4)
         self.assertEqual(result["reconciled_checks"], [])
         self.assertTrue(any("check read unresolved" in error for error in result["errors"]))
+
+
+
+class CompilerSamplingInventoryTests(unittest.TestCase):
+    """#4209: replay sampling metadata attached to #4207's CI inventory."""
+
+    RUN, HEAD = ReconciledInventoryTests.RUN, ReconciledInventoryTests.HEAD
+    gate = ReconciledInventoryTests.gate
+
+    def setUp(self):
+        ReconciledInventoryTests.setUp(self)
+        self.benchmark_reads = {}
+
+    def sampling(self, status="queued"):
+        payload = (ROOT / "tools/fixtures/compiler_sampling_inventory.json").read_text(encoding="utf-8")
+        fixture = json.loads(payload.replace("bc349e26f4c10ecaf298ec1a9a93e2e717dab2bd", self.HEAD))
+        check = fixture["checks"][status]
+        self.jobs.append(dict(fixture["job"], run_id=self.RUN, status=check["status"],
+                              conclusion=check["conclusion"]))
+        self.checks.append(check)
+        self.benchmark_reads = fixture["reads"]
+        batch = self.benchmark_reads["actions/runs/38566978972/attempts/1/jobs?per_page=100"]
+        # Only the writer for this state can prove the report. A queued writer
+        # alone cannot stand in for terminal research publication.
+        wanted = "Validate sampling packet evidence" if status == "completed" else "Queue sampling qualification packet"
+        batch["jobs"] = [job for job in batch["jobs"] if job["name"] == wanted]
+        batch["total_count"] = len(batch["jobs"])
+
+    def test_queued_and_completed_fixture_rows_are_retained_outside_workloads(self):
+        for status in ("queued", "completed"):
+            for conclusion in ((None,) if status == "queued" else ("success", "failure", "cancelled", "neutral")):
+                for details in ("default", "workflow"):
+                    with self.subTest(status=status, conclusion=conclusion, details=details):
+                        self.setUp()
+                        self.sampling(status)
+                        self.jobs[-1]["conclusion"] = self.checks[-1]["conclusion"] = conclusion
+                        if details == "workflow":
+                            self.checks[-1]["details_url"] = "https://github.com/buster14a/buster/actions/runs/38566978972/attempts/1"
+                        result = self.gate()
+                        self.assertTrue(result["success"], result["errors"])
+                        self.assertEqual(len(result["jobs"]), len(github_ci_time.combination_jobs()))
+                        metadata = result["reconciled_checks"][-1]
+                        self.assertEqual(metadata["job"], self.jobs[-1])
+                        self.assertEqual(metadata["raw_check"], self.checks[-1])
+                        self.assertEqual(metadata["publisher_provenance"]["sampling"]["phase"], "pilot")
+                        self.assertEqual(metadata["publisher_provenance"]["sampling"]["packet"], 2)
+                        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 1)
+
+    def test_sampling_contract_matches_the_existing_publisher_and_workflow(self):
+        publisher = (ROOT / "tools/bench_direct/compiler_publish.py").read_text(encoding="utf-8")
+        self.assertIn('SAMPLING_CHECK_NAME = "' + github_ci_time.COMPILER_SAMPLING_CHECK + '"', publisher)
+        self.assertIn('"buster-main-sampling-v1:"', publisher)
+        workflow = (ROOT / github_ci_time.COMPILER_BENCHMARK_WORKFLOW).read_text(encoding="utf-8")
+        for state, (job_key, job_name, step_name) in github_ci_time.COMPILER_SAMPLING_WRITERS.items():
+            with self.subTest(state=state):
+                block = workflow.split("\n  " + job_key + ":\n", 1)[1]
+                boundary = re.search(r"(?m)^  [A-Za-z0-9_-]+:\s*$", block)
+                block = block[:boundary.start()] if boundary else block
+                self.assertIn("    name: " + job_name + "\n", block)
+                self.assertIn("      - name: " + github_ci_time.COMPILER_SAMPLING_CHECKOUT + "\n", block)
+                self.assertIn("      - name: " + step_name + "\n", block)
+                self.assertIn("run: python3 -B tools/bench_direct/compiler_publish.py sampling-" +
+                              ("publish" if state == "completed" else "queue"), block)
+
+    def test_sampling_requires_exact_check_and_marker_proof(self):
+        for field, value in (("id", 1), ("name", "Unknown sampling research"), ("head_sha", "b" * 40),
+                             ("app", {"id": 1}), ("external_id", None), ("status", "waiting"),
+                             ("external_id", "buster-main-sampling-v1:" + "f" * 64 + ":pilot:3:38566941159:38566978972:1"),
+                             ("external_id", "buster-main-sampling-v1:" + "f" * 64 + ":pilot:2:38566941159:38566978972:2"),
+                             ("external_id", "buster-main-sampling-v1:" + "f" * 64 + ":pilot:2:38566941159:1:1")):
+            with self.subTest(field=field, value=value):
+                self.setUp()
+                self.sampling()
+                self.checks[-1][field] = value
+                self.assertFalse(self.gate()["success"])
+        self.setUp()
+        self.sampling()
+        self.assertFalse(self.gate(checks=self.checks[:-1])["success"])
+        self.assertFalse(self.gate(checks=self.checks + [dict(self.checks[-1], id=9999)])["success"])
+        self.assertFalse(self.gate(jobs=self.jobs + [dict(self.jobs[-1], id=9999)])["success"])
+
+    def test_sampling_rejects_untrusted_request_executor_and_writer(self):
+        controls = {
+            "request": (("id", 1), ("head_sha", "b" * 40), ("run_attempt", 2), ("event", "push"),
+                        ("path", ".github/workflows/ci.yml"), ("conclusion", "failure"),
+                        ("head_repository", {"id": 1, "full_name": "foreign/repo"}),
+                        ("actor", {"id": 1, "login": "other"}), ("triggering_actor", None)),
+            "publisher": (("id", 1), ("run_attempt", 2), ("event", "pull_request"), ("head_branch", "feature"),
+                          ("path", ".github/workflows/ci.yml"), ("display_title", "unbound request"),
+                          ("repository", {"id": 1, "full_name": "foreign/repo"}),
+                          ("actor", None), ("triggering_actor", {"id": 1, "login": "other"})),
+            "writer": (("run_id", 1), ("run_attempt", 2), ("head_sha", self.HEAD), ("status", "queued"),
+                       ("name", "Untrusted sampling writer"), ("steps", [])),
+        }
+        for status in ("queued", "completed"):
+            for kind, changes in controls.items():
+                for field, value in changes:
+                    with self.subTest(status=status, kind=kind, field=field):
+                        self.setUp()
+                        self.sampling(status)
+                        reads = self.benchmark_reads
+                        row = (reads["actions/runs/38566941159/attempts/1"] if kind == "request" else
+                               reads["actions/runs/38566978972/attempts/1"] if kind == "publisher" else
+                               reads["actions/runs/38566978972/attempts/1/jobs?per_page=100"]["jobs"][0])
+                        row[field] = value
+                        self.assertFalse(self.gate()["success"])
+
+    def test_sampling_requires_checkout_and_write_execution_with_complete_inventory(self):
+        for status in ("queued", "completed"):
+            for case in ("checkout", "write", "duplicate-writer", "duplicate-step", "incomplete"):
+                with self.subTest(status=status, case=case):
+                    self.setUp()
+                    self.sampling(status)
+                    batch = self.benchmark_reads["actions/runs/38566978972/attempts/1/jobs?per_page=100"]
+                    writer = batch["jobs"][0]
+                    if case in ("checkout", "write"):
+                        writer["steps"][0 if case == "checkout" else 1]["conclusion"] = "skipped"
+                    elif case == "duplicate-writer":
+                        batch["jobs"].append(dict(writer, id=9999))
+                        batch["total_count"] = 2
+                    elif case == "duplicate-step":
+                        writer["steps"].append(copy.deepcopy(writer["steps"][1]))
+                    else:
+                        batch["total_count"] = 2
+                    self.assertFalse(self.gate()["success"])
+
+    def test_sampling_default_url_requires_one_consistent_current_executor_link(self):
+        for case in ("missing", "duplicate", "foreign", "disagree", "wrong-attempt"):
+            with self.subTest(case=case):
+                self.setUp()
+                self.sampling()
+                check = self.checks[-1]
+                summary = check["output"]["summary"]
+                if case == "missing": summary = ""
+                elif case == "duplicate": summary = summary + "\n" + summary
+                elif case == "foreign": summary = summary.replace("buster14a/buster", "foreign/repo")
+                elif case == "disagree": summary = summary.replace("Workflow run 38566978972", "Workflow run 1")
+                else: summary = summary.replace("attempt 1", "attempt 2").replace("/attempts/1", "/attempts/2")
+                check["output"]["summary"] = summary
+                self.assertFalse(self.gate()["success"])
+
+    def test_sampling_never_hides_missing_or_failed_workloads_or_unavailable_provenance(self):
+        self.sampling()
+        self.assertFalse(self.gate(jobs=self.jobs[1:])["success"])
+        jobs = copy.deepcopy(self.jobs)
+        jobs[0]["conclusion"] = "failure"
+        self.assertFalse(self.gate(jobs=jobs)["success"])
+        with mock.patch.object(github_ci_time, "_gate_metadata", side_effect=ValueError("sampling API unavailable")):
+            self.assertFalse(self.gate()["success"])
 
 
 class CompilerBenchmarkInventoryTests(unittest.TestCase):
@@ -339,6 +495,240 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
                              "status": "in_progress", "conclusion": None}]}
         self.benchmark_reads = {"actions/runs/500/attempts/1": request, "actions/runs/600/attempts/1": publisher,
                                 "actions/runs/600/attempts/1/jobs?per_page=100": {"total_count": 1, "jobs": [writer]}}
+
+    def recovered_announcement(self, form="legacy"):
+        """Replay the retained #3785 cancellation through the ordinary inventory."""
+        payload = (ROOT / "tools/fixtures/compiler_terminal_announcement.json").read_text(encoding="utf-8")
+        recorded_head = "47594ab02bb2fd8a23263a6f42b59963edbf2d74"
+        fixture = json.loads(payload.replace(recorded_head, self.HEAD))
+        check = fixture["check"]
+        self.checks.append(check)
+        self.jobs.append({"id": check["id"], "name": check["name"], "run_id": self.RUN, "run_attempt": 1,
+                          "head_sha": self.HEAD, "status": "completed", "conclusion": "cancelled",
+                          "steps": [], "runner_id": None})
+        self.benchmark_reads = fixture["reads"]
+        if form != "legacy":
+            native = json.loads((ROOT / "tools/fixtures/compiler_superseded_report.json").read_text(encoding="utf-8"))["report"]
+            payload = json.dumps(native).replace("a4ea18116d1dd5d03ecf7287234fe61f4fb40267", self.HEAD)
+            payload = payload.replace("38297937496", "38260981679").replace("38297977458", "38261019120")
+            check.update(json.loads(payload))
+            if form == "current":
+                check["conclusion"] = "cancelled"
+                check["output"]["title"] = "Not measured: terminal lifecycle reconciliation"
+                summary = check["output"]["summary"].replace("not measured; superseded before execution.", "not measured.", 1)
+                paragraphs = summary.split("\n\n")
+                paragraphs[1] = ("Cancellation cause is not established as pre-execution supersession; "
+                                 "the native cancellation classification is preserved.")
+                check["output"]["summary"] = "\n\n".join(paragraphs)
+            self.jobs[-1]["conclusion"] = check["conclusion"]
+            for identity in (38260981679, 38261019120):
+                self.benchmark_reads[f"actions/runs/{identity}"] = copy.deepcopy(
+                    self.benchmark_reads[f"actions/runs/{identity}/attempts/1"])
+            self.benchmark_reads["actions/runs/38261019120/attempts/1/jobs?per_page=100"] = {"total_count": 0, "jobs": []}
+
+    def test_native_terminal_first_reports_preserve_recovery_and_workload_proof(self):
+        for form in ("current", "superseded"):
+            for details in ("executor", "default", "workflow"):
+                with self.subTest(form=form, details=details):
+                    self.setUp()
+                    self.recovered_announcement(form)
+                    check = self.checks[-1]
+                    if details == "default": check["details_url"] = f"https://github.com/buster14a/buster/runs/{check['id']}"
+                    elif details == "workflow":
+                        check["details_url"] = "https://github.com/buster14a/buster/actions/workflows/9700x-direct-bench.yml?query=event%3Aworkflow_run"
+                    result = self.gate()
+                    self.assertTrue(result["success"], result["errors"])
+                    self.assertEqual(result["reconciled_checks"][-1]["check"]["conclusion"],
+                                     "neutral" if form == "superseded" else "cancelled")
+                    self.assertIn("terminal_recovery", result["reconciled_checks"][-1]["publisher_provenance"])
+                    self.assertEqual(len(result["jobs"]), 25)
+
+    def test_supersession_rejects_unproved_jobs_attempts_and_report_claims(self):
+        cases = ("jobs-missing", "jobs-null", "jobs-string", "jobs-bool", "jobs-float", "jobs-incomplete", "jobs-recorded",
+                 "request-rerun", "executor-rerun", "request-failed", "executor-failed", "foreign-link", "foreign-details",
+                 "reason-missing", "title", "cancelled", "success", "canonical-request", "canonical-executor", "candidate",
+                 "duplicate-protocol", "unquoted-history", "history-boundary", "baseline", "original-writer", "no-history",
+                 "queued-heading")
+        for case in cases:
+            with self.subTest(case=case):
+                self.setUp()
+                self.recovered_announcement("superseded")
+                check = self.checks[-1]
+                summary = check["output"]["summary"]
+                reads = self.benchmark_reads
+                jobs = reads["actions/runs/38261019120/attempts/1/jobs?per_page=100"]
+                if case == "jobs-missing": jobs.pop("total_count")
+                elif case == "jobs-null": jobs["jobs"] = None
+                elif case == "jobs-string": jobs["total_count"] = "0"
+                elif case == "jobs-bool": jobs["total_count"] = False
+                elif case == "jobs-float": jobs["total_count"] = 0.0
+                elif case == "jobs-incomplete": jobs["total_count"] = 1
+                elif case == "jobs-recorded": jobs["jobs"] = [{"name": "Compare the main commit compiler"}]
+                elif case == "request-rerun": reads["actions/runs/38260981679"]["run_attempt"] = 2
+                elif case == "executor-rerun": reads["actions/runs/38261019120"]["run_attempt"] = 2
+                elif case == "request-failed": reads["actions/runs/38260981679/attempts/1"]["conclusion"] = "failure"
+                elif case == "executor-failed": reads["actions/runs/38261019120/attempts/1"]["conclusion"] = "failure"
+                elif case == "foreign-link": summary = summary.replace("Workflow run 38261019120", "Workflow run 38261019121", 1)
+                elif case == "foreign-details": check["details_url"] += "?foreign=1"
+                elif case == "reason-missing": summary = summary.replace("GitHub's native workflow annotation states:", "Unknown reason:", 1)
+                elif case == "title": check["output"]["title"] = "Not measured: terminal lifecycle reconciliation"
+                elif case in ("cancelled", "success"): check["conclusion"] = case
+                elif case == "canonical-request": summary = summary.replace("\nRequest run 38260981679", "\nRequest run 38260981678", 1)
+                elif case == "canonical-executor": summary = summary.replace("\nWorkflow run 38261019120", "\nWorkflow run 38261019121", 1)
+                elif case == "candidate": summary = summary.replace("\nCandidate " + self.HEAD, "\nCandidate " + "f" * 40, 1)
+                elif case == "duplicate-protocol": summary = summary.replace("\nCandidate ", "\nLifecycle protocol: terminal-native-v1.\nCandidate ", 1)
+                elif case == "unquoted-history": summary = summary.replace("> Executor", "Executor").replace("> **9700X", "**9700X", 1)
+                elif case == "history-boundary": summary += "\n\nPrior report (historical; not current execution state):\n\n> extra"
+                elif case == "baseline": summary = summary.replace("\nBaseline: unavailable.", "\nBaseline `unknown`.", 1)
+                elif case == "original-writer":
+                    reads["actions/runs/38260981679/attempts/1/jobs?per_page=100"]["jobs"][1]["steps"][2]["conclusion"] = "skipped"
+                elif case == "no-history":
+                    # Removing current identity proof cannot be repaired by a quoted historical copy.
+                    summary = summary.replace("\nWorkflow run 38261019120 attempt 1:", "\n> Workflow run 38261019120 attempt 1:", 1)
+                elif case == "queued-heading": summary = "**9700X compiler benchmark: queued**\n\n" + summary
+                check["output"]["summary"] = summary
+                self.jobs[-1]["conclusion"] = check["conclusion"]
+                self.assertFalse(self.gate()["success"], case)
+
+    def test_terminal_first_reports_keep_known_baselines_and_allow_no_prior_report(self):
+        for form in ("current", "superseded"):
+            for history in (False, True):
+                with self.subTest(form=form, history=history):
+                    self.setUp()
+                    self.recovered_announcement(form)
+                    check = self.checks[-1]
+                    summary = check["output"]["summary"].replace("\nBaseline: unavailable.\n",
+                        "\nBaseline `0123456789012345678901234567890123456789` (first parent).\n", 1)
+                    if not history:
+                        summary = summary.split("\n\nPrior report (historical; not current execution state):\n\n")[0] + "\n"
+                    check["output"]["summary"] = summary
+                    result = self.gate()
+                    self.assertTrue(result["success"], result["errors"])
+
+    def test_retained_terminal_announcement_replays_without_measurement_promotion(self):
+        self.HEAD = "47594ab02bb2fd8a23263a6f42b59963edbf2d74"
+        self.setUp()
+        self.recovered_announcement()
+        result = self.gate()
+        self.assertTrue(result["success"], result["errors"])
+        metadata = result["reconciled_checks"][-1]
+        self.assertEqual((metadata["check"]["status"], metadata["check"]["conclusion"]), ("completed", "cancelled"))
+        proof = metadata["publisher_provenance"]["terminal_recovery"]
+        self.assertEqual(proof["executor"]["id"], 38261019120)
+        self.assertEqual(proof["controller"]["id"], 38261177183)
+        self.assertEqual(proof["writer"]["id"], 114851763130)
+        self.assertEqual(proof["artifact"]["id"], 11752441561)
+        self.assertEqual(len(result["jobs"]), 25)
+
+    def test_terminal_announcement_rejects_forged_incomplete_or_moving_provenance(self):
+        cases = ("check-id", "app", "head", "marker-attempt", "measurement-success", "title", "protocol",
+                 "summary-request", "summary-executor", "summary-harness", "request-head", "request-attempt",
+                 "executor-title", "executor-attempt", "executor-repository", "executor-running",
+                 "artifact-expired", "artifact-digest", "artifact-repository", "artifact-head", "artifact-duplicate",
+                 "artifact-incomplete", "artifact-time", "controller-workflow", "controller-event", "controller-repository",
+                 "controller-head", "controller-failure", "controller-attempt", "writer-run", "writer-duplicate",
+                 "checkout-skipped", "compile-failure", "reconcile-skipped", "upload-failure", "write-time",
+                 "write-duplicate", "completion-time", "missing-workload")
+        for form, case in ((form, case) for form in ("legacy", "current", "superseded") for case in cases):
+            with self.subTest(form=form, case=case):
+                self.setUp()
+                self.recovered_announcement(form)
+                check = self.checks[-1]
+                reads = self.benchmark_reads
+                request = reads["actions/runs/38260981679/attempts/1"]
+                executor = reads["actions/runs/38261019120/attempts/1"]
+                artifacts = reads["actions/artifacts?name=9700x-lifecycle-38261019120-1&per_page=100"]
+                artifact = artifacts["artifacts"][0]
+                controller = reads["actions/runs/38261177183"]
+                batch = reads["actions/runs/38261177183/attempts/1/jobs?per_page=100"]
+                writer = batch["jobs"][0]
+                steps = {step["name"]: step for step in writer["steps"]}
+                names = github_ci_time.COMPILER_BENCHMARK_LIFECYCLE_STEPS
+                if case == "check-id": check["id"] += 1
+                elif case == "app": check["app"]["id"] = 1
+                elif case == "head": check["head_sha"] = "f" * 40
+                elif case == "marker-attempt":
+                    check["external_id"] = check["external_id"].replace("38260981679.1", "38260981679.2")
+                    reads["actions/runs/38260981679/attempts/2"] = request
+                elif case == "measurement-success": check["conclusion"] = "success"
+                elif case == "title": check["output"]["title"] = "Successful measurement"
+                elif case == "protocol": check["output"]["summary"] = check["output"]["summary"].replace("terminal-native-v1", "unknown")
+                elif case == "summary-request": check["output"]["summary"] = check["output"]["summary"].replace("request 38260981679 attempt 1.", "request 38260981678 attempt 1.")
+                elif case == "summary-executor":
+                    check["output"]["summary"] = check["output"]["summary"].replace("Executor identity run 38261019120", "Executor identity run 38261019121")
+                    reads["actions/runs/38261019121/attempts/1"] = executor
+                elif case == "summary-harness": check["output"]["summary"] = check["output"]["summary"].replace("Trusted harness `" + self.HEAD, "Trusted harness `" + "f" * 40)
+                elif case == "request-head": request["head_sha"] = "f" * 40
+                elif case == "request-attempt": request["run_attempt"] = 2
+                elif case == "executor-title": executor["display_title"] += " foreign"
+                elif case == "executor-attempt": executor["run_attempt"] = 2
+                elif case == "executor-repository": executor["repository"]["id"] += 1; executor["head_repository"]["id"] += 1
+                elif case == "executor-running": executor["status"] = "in_progress"
+                elif case == "artifact-expired": artifact["expired"] = True
+                elif case == "artifact-digest": artifact["digest"] = "sha256:invalid"
+                elif case == "artifact-repository": artifact["workflow_run"]["repository_id"] += 1
+                elif case == "artifact-head": artifact["workflow_run"]["head_sha"] = "f" * 40
+                elif case == "artifact-duplicate":
+                    artifacts["artifacts"].append(dict(artifact, id=artifact["id"] + 1))
+                    artifacts["total_count"] = 2
+                elif case == "artifact-incomplete": artifacts["total_count"] = 101
+                elif case == "artifact-time": artifact["created_at"] = "2026-10-12T14:20:00Z"
+                elif case == "controller-workflow": controller["path"] = github_ci_time.COMPILER_BENCHMARK_WORKFLOW
+                elif case == "controller-event": controller["event"] = "pull_request"
+                elif case == "controller-repository": controller["repository"]["id"] += 1; controller["head_repository"]["id"] += 1
+                elif case == "controller-head": controller["head_sha"] = "f" * 40
+                elif case == "controller-failure": controller["conclusion"] = "failure"
+                elif case == "controller-attempt":
+                    controller["run_attempt"] = 2
+                    reads["actions/runs/38261177183/attempts/2/jobs?per_page=100"] = batch
+                elif case == "writer-run": writer["run_id"] += 1
+                elif case == "writer-duplicate": batch["jobs"].append(copy.deepcopy(writer)); batch["total_count"] = 2
+                elif case == "checkout-skipped": steps[names[0]]["conclusion"] = "skipped"
+                elif case == "compile-failure": steps[names[1]]["conclusion"] = "failure"
+                elif case == "reconcile-skipped": steps[names[2]]["conclusion"] = "skipped"
+                elif case == "upload-failure": steps[names[3]]["conclusion"] = "failure"
+                elif case == "write-time": steps[names[2]]["started_at"] = "2026-10-12T14:12:28Z"
+                elif case == "write-duplicate": writer["steps"].append(copy.deepcopy(steps[names[2]]))
+                elif case == "completion-time": check["completed_at"] = None
+                elif case == "missing-workload": self.jobs.pop(0)
+                result = self.gate()
+                self.assertFalse(result["success"], case)
+
+    def test_recovered_failure_and_skips_remain_not_measured(self):
+        outcomes = (("failure", "failure"), ("timed_out", "failure"), ("success", "failure"), ("skipped", "skipped"))
+        for form, (outcome, conclusion) in ((form, pair) for form in ("legacy", "current") for pair in outcomes):
+            with self.subTest(form=form, outcome=outcome):
+                self.setUp()
+                self.recovered_announcement(form)
+                self.benchmark_reads["actions/runs/38261019120/attempts/1"]["conclusion"] = outcome
+                self.checks[-1]["conclusion"] = conclusion
+                self.checks[-1]["output"]["summary"] = self.checks[-1]["output"]["summary"].replace("`cancelled`", "`" + outcome + "`")
+                if form == "current":
+                    self.checks[-1]["output"]["summary"] = self.checks[-1]["output"]["summary"].replace(
+                        "\n\nCancellation cause is not established as pre-execution supersession; "
+                        "the native cancellation classification is preserved.", "", 1)
+                self.jobs[-1]["conclusion"] = conclusion
+                result = self.gate()
+                self.assertTrue(result["success"], result["errors"])
+                self.assertEqual(result["reconciled_checks"][-1]["check"]["conclusion"], conclusion)
+                self.assertNotEqual(conclusion, "success")
+
+    def test_later_noop_replay_artifact_cannot_replace_the_actual_write(self):
+        self.recovered_announcement()
+        artifacts = self.benchmark_reads["actions/artifacts?name=9700x-lifecycle-38261019120-1&per_page=100"]
+        artifacts["artifacts"].append(dict(artifacts["artifacts"][0], id=11752441562,
+                                            created_at="2026-10-13T14:12:29Z"))
+        artifacts["total_count"] = 2
+        self.assertTrue(self.gate()["success"])
+        artifacts["artifacts"].pop(0)
+        artifacts["total_count"] = 1
+        self.assertFalse(self.gate()["success"])
+
+    def test_lifecycle_writer_names_match_the_existing_workflow(self):
+        workflow = (ROOT / github_ci_time.COMPILER_BENCHMARK_LIFECYCLE_WORKFLOW).read_text(encoding="utf-8")
+        self.assertIn("    name: Reconcile the exact completed benchmark attempt\n", workflow)
+        for name in github_ci_time.COMPILER_BENCHMARK_LIFECYCLE_STEPS:
+            self.assertEqual(workflow.count("      - name: " + name + "\n"), 1)
 
     def test_names_and_namespaces_match_the_trusted_publisher(self):
         self.assertEqual({name: prefix for name, (prefix, _, _) in github_ci_time.COMPILER_BENCHMARK_CHECKS.items()},
@@ -518,6 +908,7 @@ class CompilerBenchmarkInventoryTests(unittest.TestCase):
         self.assertFalse(self.gate(jobs=self.jobs[1:])["success"])
         jobs = copy.deepcopy(self.jobs)
         jobs[0]["steps"] = []
+        jobs[0]["conclusion"] = "failure"
         self.assertFalse(self.gate(jobs=jobs)["success"])
         with mock.patch.object(github_ci_time, "_gate_metadata", side_effect=ValueError("unavailable")):
             result = self.gate()

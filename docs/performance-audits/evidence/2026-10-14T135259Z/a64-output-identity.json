@@ -1,0 +1,138 @@
+[
+  {
+    "source": "a64-storage-probe.s",
+    "subjects": [
+      {
+        "name": "baseline",
+        "argv": [
+          "/home/david/Documents/Codex/2026-10-14/re/work/table-baseline-ide",
+          "cc",
+          "--target=aarch64-linux",
+          "-c",
+          "a64-storage-probe.s",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-14/re/work/4208-ci-baseline-a64-storage-probe.s.o"
+        ],
+        "sha256": "3a3d6387d24657a70f5487e5414ab72d5871a6b5e08abe9d20bf7d492d9a69d6",
+        "bytes": 16576
+      },
+      {
+        "name": "ci",
+        "argv": [
+          "/home/david/Documents/Codex/2026-10-14/re/work/table-candidate-ci-ide",
+          "cc",
+          "--target=aarch64-linux",
+          "-c",
+          "a64-storage-probe.s",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-14/re/work/4208-ci-ci-a64-storage-probe.s.o"
+        ],
+        "sha256": "3a3d6387d24657a70f5487e5414ab72d5871a6b5e08abe9d20bf7d492d9a69d6",
+        "bytes": 16576
+      }
+    ],
+    "identical": true
+  },
+  {
+    "source": "a64-storage-mixed.s",
+    "subjects": [
+      {
+        "name": "baseline",
+        "argv": [
+          "/home/david/Documents/Codex/2026-10-14/re/work/table-baseline-ide",
+          "cc",
+          "--target=aarch64-linux",
+          "-c",
+          "a64-storage-mixed.s",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-14/re/work/4208-ci-baseline-a64-storage-mixed.s.o"
+        ],
+        "sha256": "60475178861172307fec706c91abd119b100b723f3da9638063ecfcfad66c376",
+        "bytes": 16176
+      },
+      {
+        "name": "ci",
+        "argv": [
+          "/home/david/Documents/Codex/2026-10-14/re/work/table-candidate-ci-ide",
+          "cc",
+          "--target=aarch64-linux",
+          "-c",
+          "a64-storage-mixed.s",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-14/re/work/4208-ci-ci-a64-storage-mixed.s.o"
+        ],
+        "sha256": "60475178861172307fec706c91abd119b100b723f3da9638063ecfcfad66c376",
+        "bytes": 16176
+      }
+    ],
+    "identical": true
+  },
+  {
+    "source": "a64-storage-tiny.s",
+    "subjects": [
+      {
+        "name": "baseline",
+        "argv": [
+          "/home/david/Documents/Codex/2026-10-14/re/work/table-baseline-ide",
+          "cc",
+          "--target=aarch64-linux",
+          "-c",
+          "a64-storage-tiny.s",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-14/re/work/4208-ci-baseline-a64-storage-tiny.s.o"
+        ],
+        "sha256": "b5c3ed3260294c7cff477bba20000cf91ee961bb6df12f22de012d8dc8947680",
+        "bytes": 576
+      },
+      {
+        "name": "ci",
+        "argv": [
+          "/home/david/Documents/Codex/2026-10-14/re/work/table-candidate-ci-ide",
+          "cc",
+          "--target=aarch64-linux",
+          "-c",
+          "a64-storage-tiny.s",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-14/re/work/4208-ci-ci-a64-storage-tiny.s.o"
+        ],
+        "sha256": "b5c3ed3260294c7cff477bba20000cf91ee961bb6df12f22de012d8dc8947680",
+        "bytes": 576
+      }
+    ],
+    "identical": true
+  },
+  {
+    "source": "storage-tiny.c",
+    "subjects": [
+      {
+        "name": "baseline",
+        "argv": [
+          "/home/david/Documents/Codex/2026-10-14/re/work/table-baseline-ide",
+          "cc",
+          "--target=aarch64-linux",
+          "-c",
+          "storage-tiny.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-14/re/work/4208-ci-baseline-storage-tiny.c.o"
+        ],
+        "sha256": "ceebdbdd9681dc43a8053b81cd7699d5ef5ba83ac8fb745c1d599f1704c8aa41",
+        "bytes": 896
+      },
+      {
+        "name": "ci",
+        "argv": [
+          "/home/david/Documents/Codex/2026-10-14/re/work/table-candidate-ci-ide",
+          "cc",
+          "--target=aarch64-linux",
+          "-c",
+          "storage-tiny.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-14/re/work/4208-ci-ci-storage-tiny.c.o"
+        ],
+        "sha256": "ceebdbdd9681dc43a8053b81cd7699d5ef5ba83ac8fb745c1d599f1704c8aa41",
+        "bytes": 896
+      }
+    ],
+    "identical": true
+  }
+]

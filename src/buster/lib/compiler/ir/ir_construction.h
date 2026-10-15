@@ -154,6 +154,8 @@
     X(PREPARATION_CALLS, preparation_calls) \
     X(PREPARATION_INPUT_VALIDATIONS, preparation_input_validations) \
     X(PREPARATION_PROMOTION_OUTPUT_VALIDATIONS, preparation_promotion_output_validations) \
+    X(PREPARATION_PROMOTION_PROOFS_REUSED, preparation_promotion_proofs_reused) \
+    X(PREPARATION_PROMOTION_INPUT_PROOFS_REUSED, preparation_promotion_input_proofs_reused) \
     X(PREPARATION_FAST_INPUT_VALIDATIONS, preparation_fast_input_validations) \
     X(PREPARATION_FAST_OUTPUT_VALIDATIONS, preparation_fast_output_validations) \
     X(PREPARATION_PROMOTION_FUNCTIONS, preparation_promotion_functions) \
@@ -210,7 +212,41 @@
     X(FOLD_NET_ADJACENT_DEAD_LITERALS, fold_net_adjacent_dead_literals) \
     X(FOLD_NET_SSA_USES, fold_net_ssa_uses) \
     IR_FOLD_FORM_COUNTERS(X) \
-    IR_FOLD_SIZE_COUNTERS(X)
+    IR_FOLD_SIZE_COUNTERS(X) \
+    X(FOLD_BIRTH_CASCADE_CAST_IDENTITY, fold_birth_cascade_cast_identity) \
+    X(FOLD_BIRTH_CASCADE_CAST_CONSTANT, fold_birth_cascade_cast_constant) \
+    X(FOLD_BIRTH_CASCADE_UNARY_CONSTANT, fold_birth_cascade_unary_constant) \
+    X(FOLD_BIRTH_CASCADE_BINARY_CONSTANT, fold_birth_cascade_binary_constant) \
+    X(FOLD_BIRTH_CASCADE_BINARY_RIGHT_IDENTITY, fold_birth_cascade_binary_right_identity) \
+    X(FOLD_BIRTH_CASCADE_BINARY_LEFT_IDENTITY, fold_birth_cascade_binary_left_identity) \
+    X(FOLD_BIRTH_CASCADE_UNCACHED, fold_birth_cascade_uncached) \
+    X(FOLD_MATCH_DIRECT_CAST_IDENTITY, fold_match_direct_cast_identity) \
+    X(FOLD_MATCH_DIRECT_CAST_CONSTANT, fold_match_direct_cast_constant) \
+    X(FOLD_MATCH_DIRECT_UNARY_CONSTANT, fold_match_direct_unary_constant) \
+    X(FOLD_MATCH_DIRECT_BINARY_CONSTANT, fold_match_direct_binary_constant) \
+    X(FOLD_MATCH_DIRECT_BINARY_RIGHT_IDENTITY, fold_match_direct_binary_right_identity) \
+    X(FOLD_MATCH_DIRECT_BINARY_LEFT_IDENTITY, fold_match_direct_binary_left_identity) \
+    X(FOLD_MATCH_CASCADE_CAST_IDENTITY, fold_match_cascade_cast_identity) \
+    X(FOLD_MATCH_CASCADE_CAST_CONSTANT, fold_match_cascade_cast_constant) \
+    X(FOLD_MATCH_CASCADE_UNARY_CONSTANT, fold_match_cascade_unary_constant) \
+    X(FOLD_MATCH_CASCADE_BINARY_CONSTANT, fold_match_cascade_binary_constant) \
+    X(FOLD_MATCH_CASCADE_BINARY_RIGHT_IDENTITY, fold_match_cascade_binary_right_identity) \
+    X(FOLD_MATCH_CASCADE_BINARY_LEFT_IDENTITY, fold_match_cascade_binary_left_identity) \
+    X(FOLD_MATCH_POST_CAST_IDENTITY, fold_match_post_cast_identity) \
+    X(FOLD_MATCH_POST_CAST_CONSTANT, fold_match_post_cast_constant) \
+    X(FOLD_MATCH_POST_UNARY_CONSTANT, fold_match_post_unary_constant) \
+    X(FOLD_MATCH_POST_BINARY_CONSTANT, fold_match_post_binary_constant) \
+    X(FOLD_MATCH_POST_BINARY_RIGHT_IDENTITY, fold_match_post_binary_right_identity) \
+    X(FOLD_MATCH_POST_BINARY_LEFT_IDENTITY, fold_match_post_binary_left_identity) \
+    X(FOLD_MATCH_POST_UNPROBED, fold_match_post_unprobed) \
+    X(FOLD_MATCH_POST_UNFOLDABLE_AT_BIRTH, fold_match_post_unfoldable_at_birth) \
+    X(FOLD_MATCH_POST_RULE_CHANGED, fold_match_post_rule_changed) \
+    X(FOLD_MATCH_CLONE_DIRECT, fold_match_clone_direct) \
+    X(FOLD_MATCH_CLONE_CASCADE, fold_match_clone_cascade) \
+    X(FOLD_MATCH_CLONE_POST, fold_match_clone_post) \
+    X(FOLD_SURVIVAL_REACHED, fold_survival_reached) \
+    X(FOLD_SURVIVAL_SKIPPED, fold_survival_skipped) \
+    X(FOLD_SURVIVAL_UNFOLDED, fold_survival_unfolded)
 
 typedef enum IrConstructionCounter
 {

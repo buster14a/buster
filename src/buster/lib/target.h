@@ -231,6 +231,27 @@ struct TargetTypeLayout
     u32 bit_width;
 };
 
+// Layout categories share signed/unsigned storage. Query one category when
+// the consumer needs one scalar rather than constructing the full ABI record.
+typedef enum TargetScalarKind
+{
+    TARGET_SCALAR_BOOL,
+    TARGET_SCALAR_CHAR,
+    TARGET_SCALAR_SHORT,
+    TARGET_SCALAR_INT,
+    TARGET_SCALAR_LONG,
+    TARGET_SCALAR_LONG_LONG,
+    TARGET_SCALAR_INT128,
+    TARGET_SCALAR_FLOAT16,
+    TARGET_SCALAR_BFLOAT16,
+    TARGET_SCALAR_FLOAT,
+    TARGET_SCALAR_DOUBLE,
+    TARGET_SCALAR_LONG_DOUBLE,
+    TARGET_SCALAR_POINTER,
+    TARGET_SCALAR_VA_LIST,
+    TARGET_SCALAR_COUNT,
+} TargetScalarKind;
+
 // The data layout is derived from the target, rather than from the host that
 // happens to run the compiler.  Keep all frontend-facing scalar and ABI
 // properties here so a cross compilation cannot accidentally inherit host C
@@ -510,6 +531,8 @@ struct Target
     u8 x86_register_parameter_count;
     u8 x86_preferred_stack_boundary;
     u16 os_version_major;
+    // -fshort-wchar: wchar_t is 16-bit unsigned whatever the ABI default.
+    bool short_wchar;
     TargetCpuFeatures cpu_features;
     // Command-line plain-char overrides; target default keeps the ABI's
     // implementation-defined signedness.
@@ -595,6 +618,8 @@ BUSTER_F_DECL bool target_uses_llp64_data_model(Target target);
 BUSTER_F_DECL bool target_uses_16_bit_wchar(Target target);
 BUSTER_F_DECL bool target_uses_unsigned_wchar(Target target);
 BUSTER_F_DECL bool target_uses_pe_unwind(Target target);
+BUSTER_F_DECL bool target_plain_char_is_signed(Target target);
+BUSTER_F_DECL TargetTypeLayout target_scalar_type_layout(Target target, TargetScalarKind kind);
 BUSTER_F_DECL TargetDataLayout target_data_layout(Target target);
 BUSTER_F_DECL bool target_data_layout_is_valid(TargetDataLayout layout);
 BUSTER_F_DECL u32 target_vector_register_size(Target target);
