@@ -1357,6 +1357,8 @@ class CompareFlowTests(Fakes, unittest.TestCase):
                     own = lab.load_meta(os.path.join(output, key))
                     self.assertEqual(own["config"]["ast_retirement_cell"], cell)
                     self.assertEqual(own["config"]["extra"], [])
+                    environment = json.loads(lab.read_text(os.path.join(output, key, "env", "env.json")))
+                    self.assertEqual(environment["ide_sha256"], summary[role]["sha256"])
                     self.assertTrue(summary[role]["metrics_out_supported"])
                     self.assertFalse(summary[role]["metrics_out_enabled"])
                     calls = self.compile_arguments(output, key)

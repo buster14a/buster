@@ -73,6 +73,12 @@ def validate_documents(cell: str, summary: dict, meta: dict, labs: dict, binarie
         raise RuntimeError("retirement series command/variants differ from the fixed default/default cell")
     if summary.get("phase_metrics", {}).get("enabled") is not False or meta.get("phase_metrics", {}).get("enabled") is not False:
         raise RuntimeError("retirement timings enabled phase/output metric collection")
+    from sampling_qualification_receipt import _lab
+    observer = meta.get("rss_observer")
+    try:
+        _lab.child_rss_observer_validate(observer)
+    except (ValueError, TypeError) as error:
+        raise RuntimeError("retirement compiler-child RSS method is unavailable: " + str(error)) from error
     model = summary.get("host", {}).get("cpu_model")
     if not isinstance(model, str) or not APPROVED_HOST.search(model) or source_binding.get("revision") != binaries.get("baseline", {}).get("revision"):
         raise RuntimeError("retirement host or baseline source binding is unavailable")
@@ -93,13 +99,16 @@ def validate_documents(cell: str, summary: dict, meta: dict, labs: dict, binarie
                 lab_config.get("fresh_copy") is not True or lab.get("collection", {}).get("metrics_out") is not False or \
                 lab_config.get("repo_root") != config.get("repo_root"):
             raise RuntimeError(f"retirement {role} raw configuration differs from the fixed cell")
+        if lab.get("rss_observer") != {**observer, "compiler_sha256": binary["sha256"]}:
+            raise RuntimeError(f"retirement {role} compiler-child RSS observer identity differs")
     if summary.get("outputs_identical") is not True or summary.get("diagnostics_identical") is not True:
         raise RuntimeError("retirement output or diagnostics differ between the two compilers")
     values = summary.get("metrics") or {}
     for name, fields in (("wall", ("a_median", "b_median", "ratio", "ci_low", "ci_high")),
                          ("instructions", ("a_median", "b_median", "ratio")), ("peak_rss", ("a_median", "b_median"))):
         if not isinstance(values.get(name), dict) or any(not _finite_positive(values[name].get(field)) for field in fields):
-            reason = summary.get("counters", {}).get("reason") or "required native metric was not counted"
+            reason = ("compiler-child RSS unavailable or below the unchanged native attribution floor" if name == "peak_rss" else
+                      summary.get("counters", {}).get("reason") or "required native metric was not counted")
             raise RuntimeError(f"retirement {name} is incomplete: {reason}")
     return summary
 
@@ -235,13 +244,32 @@ def execute(args: argparse.Namespace) -> dict:
               "unity": {"path": unity.relative_to(root).as_posix(), "sha256": sha256(unity), "size_bytes": unity.stat().st_size},
               "corpus": corpus, "generator": {"sha256": sha256(harness), "size_bytes": harness.stat().st_size, "revision": args.base_revision}}
     (output / "source.json").write_text(json.dumps(source, sort_keys=True, indent=2) + "\n")
+    # Build policy and process ownership stay in the native driver. Python
+    # only orchestrates and reads the checked packet after each timed span.
+    trusted = Path(__file__).resolve().parents[2]
+    observer_root = output / "rss-helper"
+    built = subprocess.run([str(trusted / "build.sh"), "retirement_rss_build", str(observer_root)], cwd=trusted,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=PROBE_TIMEOUT_SECONDS)
+    if len(built.stdout) > PROBE_TEXT_LIMIT:
+        raise RuntimeError("native RSS helper build output exceeds its evidence bound")
+    (output / "rss-helper-build.log").write_bytes(built.stdout)
+    if built.returncode != 0:
+        raise RuntimeError("native RSS helper build failed; no retirement observations were started")
+    observer_build = json.loads((observer_root / "build.json").read_text())
+    from sampling_qualification_receipt import _lab
+    _lab.child_rss_observer(str(observer_root / "build.json"))
+    observer_source = Path(observer_build["source"]["path"])
+    if observer_source != trusted / "tools/bench_direct/retirement_rss.c" or sha256(observer_source) != observer_build["source"]["sha256"]:
+        raise RuntimeError("native RSS helper source differs from the trusted tool")
+    shutil.copyfile(observer_source, observer_root / "source.c")
     cells, probes = {}, {}
     for cell in AST_RETIREMENT_CELLS:
         directory = output / cell
         subprocess.run([sys.executable, "-B", str(lab), "compare", "--baseline", binaries["baseline"]["path"],
                         "--candidate", binaries["candidate"]["path"], "--repo-root", str(root), "--cpu", str(CPU),
                         "--output", str(directory), "--pairs", str(PAIRS), "--warmups", str(WARMUPS), "--perf", args.perf,
-                        "--ast-retirement-cell", cell, "--require-identical-output"], check=True, timeout=COMPARE_TIMEOUT_SECONDS)
+                        "--ast-retirement-cell", cell, "--retirement-rss-helper", str(observer_root / "build.json"),
+                        "--require-identical-output"], check=True, timeout=COMPARE_TIMEOUT_SECONDS)
         summary = json.loads((directory / "summary.json").read_text())
         meta = json.loads((directory / "compare.json").read_text())
         labs = {key: json.loads((directory / key / "lab.json").read_text()) for key, _ in ROLES}
@@ -255,11 +283,12 @@ def execute(args: argparse.Namespace) -> dict:
             raise RuntimeError("untimed retained-byte probe differs from its timed reference object")
     if hash_inputs(root) != before or git(root, "rev-parse", "HEAD") != args.base_revision or sha256(harness) != source["generator"]["sha256"] or any(
             sha256(inputs / f"{name}.c") != corpus[name]["sha256"] for name in AST_RETIREMENT_CORPUS) or any(
-            sha256(Path(binary["path"])) != binary["sha256"] for binary in binaries.values()):
+            sha256(Path(binary["path"])) != binary["sha256"] for binary in binaries.values()) or any(
+            sha256(Path(observer_build[key]["path"])) != observer_build[key]["sha256"] for key in ("source", "compiler", "binary")):
         raise RuntimeError("retirement compiler/source/header/generator identities changed during measurement")
     result = {"schema": AST_RETIREMENT_SCHEMA, "status": "complete", "profile": AST_RETIREMENT_PROFILE,
               "base_revision": args.base_revision, "head_revision": args.head_revision, "binaries": binary_binding(binaries),
-              "source": source, "cpu_model": observed, "cells": cells, "probes": probes,
+              "source": source, "cpu_model": observed, "cells": cells, "probes": probes, "rss_observer_build": observer_build,
               "elapsed_seconds": round(time.monotonic() - started, 3)}
     problems = validate_ast_retirement_acceptance(result, args.base_revision, args.head_revision, binaries)
     if problems:

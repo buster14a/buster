@@ -114,6 +114,7 @@ typedef enum BuildCommand
     BUILD_COMMAND_NONE,
     BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER,
     BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST,
+    BUILD_COMMAND_RETIREMENT_RSS_BUILD,
     BUILD_COMMAND_BENCH_THROUGHPUT,
     BUILD_COMMAND_BENCH_THROUGHPUT_CI,
     BUILD_COMMAND_COMPILER_CLOSURE,
@@ -25652,6 +25653,7 @@ BUSTER_GLOBAL_LOCAL bool build_command_owns_arguments(BuildCommand command)
     {
         case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER:
         case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST:
+        case BUILD_COMMAND_RETIREMENT_RSS_BUILD:
         case BUILD_COMMAND_MATRIX_PHASE_RUN:
         case BUILD_COMMAND_TEST_UNITS_PARTITIONED:
         case BUILD_COMMAND_ANDROID_PACKAGES:
@@ -25706,6 +25708,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult build_command_argument_ownership_tests(void)
         {.command = BUILD_COMMAND_CLANG_ANALYZE_BENCHMARK, .owns_arguments = true},
         {.command = BUILD_COMMAND_COMPILER_CLOSURE, .owns_arguments = true},
         {.command = BUILD_COMMAND_COMPILER_EVIDENCE, .owns_arguments = true},
+        {.command = BUILD_COMMAND_RETIREMENT_RSS_BUILD, .owns_arguments = true},
         {.command = BUILD_COMMAND_COMPILER_PROFILE_QUALIFICATION, .owns_arguments = true},
         {.command = BUILD_COMMAND_TEST_QEMU, .owns_arguments = true},
         {.command = BUILD_COMMAND_QEMU_INPUT_SELF_TEST, .owns_arguments = false},
@@ -39847,6 +39850,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult bootstrap_process_owner_main(Arena* arena, Sli
     return result;
 }
 
+#include "tools/retirement_rss_build.c"
+
 // A same-runner CI comparison. A separately checked-out baseline is required;
 // the generated workload and flags are owned by the candidate harness, shared
 // byte-for-byte by both compiler executables. Never restore timing baselines or
@@ -39965,6 +39970,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         [BUILD_COMMAND_NONE] = S8_INITIALIZER("none"),
         [BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER] = S8_INITIALIZER("bootstrap_process_owner"),
         [BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST] = S8_INITIALIZER("bootstrap_process_owner_test"),
+        [BUILD_COMMAND_RETIREMENT_RSS_BUILD] = S8_INITIALIZER("retirement_rss_build"),
         [BUILD_COMMAND_BENCH_THROUGHPUT] = S8_INITIALIZER("bench_throughput"),
         [BUILD_COMMAND_BENCH_THROUGHPUT_CI] = S8_INITIALIZER("bench_throughput_ci"),
         [BUILD_COMMAND_COMPILER_CLOSURE] = S8_INITIALIZER("compiler_closure"),
@@ -40124,6 +40130,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
             case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER:
             case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST:
                 result = bootstrap_process_owner_main(arena, owned_arguments, command == BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST); break;
+            case BUILD_COMMAND_RETIREMENT_RSS_BUILD: result = retirement_rss_build_main(arena, owned_arguments); break;
             case BUILD_COMMAND_MATRIX_PHASE_RUN: result = matrix_phase_run(arena, owned_arguments); break;
             case BUILD_COMMAND_TEST_UNITS_PARTITIONED: result = ci_unit_tests_main(arena, owned_arguments, arguments.pointer[0]); break;
             case BUILD_COMMAND_ANDROID_PACKAGES: result = android_packages_main(arena, owned_arguments); break;
@@ -41162,6 +41169,7 @@ BUSTER_GLOBAL_LOCAL String8 build_command_names[] = {
         case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER:
         case BUILD_COMMAND_BOOTSTRAP_PROCESS_OWNER_TEST:
         case BUILD_COMMAND_COMPILER_CLOSURE:
+        case BUILD_COMMAND_RETIREMENT_RSS_BUILD:
         case BUILD_COMMAND_COMPILER_EVIDENCE:
         case BUILD_COMMAND_PRODUCTION_PROFILE:
         case BUILD_COMMAND_PRODUCTION_PROFILE_SELF_TEST:

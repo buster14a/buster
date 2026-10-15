@@ -90,6 +90,7 @@ import io
 import base64
 import binascii
 import hashlib
+from pathlib import Path
 import json
 import os
 import re
@@ -123,7 +124,7 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               AST_PILOT_ACCEPTANCE_REQUEST_LINE, AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_CELLS,
                               validate_ast_pilot_acceptance,
                               AST_RETIREMENT_REQUEST_LINE, AST_RETIREMENT_PROFILE, AST_RETIREMENT_CELLS,
-                              validate_ast_retirement_acceptance,
+                              validate_ast_retirement_acceptance, ast_retirement_cell_command,
                               CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE, CONSTANT_REUSE_ACCEPTANCE_PROFILE, CONSTANT_REUSE_CELLS,
                               validate_constant_reuse_acceptance,
                               PROCESS_FLOOR_REQUEST_LINE, PROCESS_FLOOR_PROFILE, PROCESS_FLOOR_CELLS,
@@ -297,6 +298,8 @@ def validate_ast_pilot_bundle(receipt_ast: object, bundle: object, head: str, ca
 AST_RETIREMENT_BUNDLE_FILES = {
     "acceptance": "ast_retirement_acceptance/acceptance.json",
     "source": "ast_retirement_acceptance/source.json",
+    "rss_build": "ast_retirement_acceptance/rss-helper/build.json",
+    "owner": "ast_retirement_acceptance/owner/metadata.json",
     **{f"{cell}_{key}": f"ast_retirement_acceptance/{cell}/{member}" for cell in AST_RETIREMENT_CELLS
        for key, member in (("summary", "summary.json"), ("meta", "compare.json"), ("a", "a/lab.json"),
                            ("b", "b/lab.json"), ("reference", "reference.json"))},
@@ -371,6 +374,9 @@ def ast_retirement_raw_cell(cell: str, bundle: dict, source: dict, binaries: dic
     summary, meta = bundle[f"{cell}_summary"], bundle[f"{cell}_meta"]
     labs = {key: bundle[f"{cell}_{key}"] for key in ("a", "b")}
     raw = validate_ast_retirement_documents(cell, summary, meta, labs, binaries, source)
+    observer = meta["rss_observer"]
+    if observer["build"] != bundle["rss_build"]:
+        raise ValueError(f"{cell} observer differs from the retained native build")
     ast_retirement_reference(cell, bundle)
     records = sampling_json(files, prefix + "pairs.json", False)
     if not isinstance(records, list) or len(records) != AST_RETIREMENT_PROFILE["pairs"] * 2:
@@ -405,6 +411,8 @@ def ast_retirement_raw_cell(cell: str, bundle: dict, source: dict, binaries: dic
         if not isinstance(record, dict) or not _number(record.get("maxrss_bytes")) or record["maxrss_bytes"] <= 0:
             raise ValueError(f"{cell} raw pair {index + 1} lacks positive wait4 peak RSS")
         number, key = index // 2 + 1, ("ab" if index // 2 % 2 == 0 else "ba")[index % 2]
+        ast_retirement_rss_record(cell, number, key, record, observer, binaries, meta, files,
+                                  bundle["owner"]["ownership"]["work_root"] + "/ast-retirement-acceptance")
         csv_bytes = files.get(prefix + f"pairs/{number:04d}-{key}.csv")
         if not isinstance(csv_bytes, bytes):
             raise ValueError(f"{cell} raw retired-instruction counter file is missing")
@@ -420,8 +428,103 @@ def ast_retirement_raw_cell(cell: str, bundle: dict, source: dict, binaries: dic
     return raw
 
 
+def ast_retirement_rss_record(cell: str, number: int, key: str, record: dict, observer: dict,
+                              binaries: dict, meta: dict, files: dict, output_root: str | None = None) -> None:
+    """Bind every exact compiler/wrapper argv to its independent raw packet."""
+    from sampling_qualification_receipt import _lab
+    role = "baseline" if key == "a" else "candidate"
+    binding, workload, wrapper = (record.get(name) for name in ("child_rss_binding", "compiler_argv", "wrapper_argv"))
+    if not isinstance(binding, dict) or set(binding) != {"nonce", "binary_sha256", "argv_sha256", "process_group"} or \
+            not isinstance(workload, list) or not workload or not all(isinstance(arg, str) for arg in workload) or \
+            not isinstance(wrapper, list) or not all(isinstance(arg, str) for arg in wrapper):
+        raise ValueError(f"{cell} {number}/{key} native RSS sample command/binding is missing")
+    nonce = hashlib.sha256((observer["run_nonce"] + f":{number}:{key}").encode("ascii")).hexdigest()[:32]
+    if binding["nonce"] != nonce or binding["binary_sha256"] != binaries[role]["sha256"] or \
+            binding["argv_sha256"] != _lab.child_rss_argv_digest(workload):
+        raise ValueError(f"{cell} {number}/{key} native RSS sample identity differs")
+    helper = observer["build"]["binary"]["path"]
+    try:
+        index = wrapper.index(helper)
+        packet_path = wrapper[index + 2]
+    except (ValueError, IndexError) as error:
+        raise ValueError(f"{cell} {number}/{key} native RSS wrapper is malformed") from error
+    packet = Path(packet_path)
+    directory = packet.parent.parent
+    if not packet.is_absolute() or str(packet) != packet_path or any(part in (".", "..") for part in packet.parts) or \
+            packet.name != f"{number:04d}-{key}.rss" or packet.parent.name != "pairs" or directory.name != cell or \
+            (output_root is not None and directory.parent != Path(output_root)):
+        raise ValueError(f"{cell} {number}/{key} native RSS output path differs")
+    binary = Path(workload[0])
+    original = Path(meta["variants"][key]["ide"])
+    if not binary.is_absolute() or len(binary.parents) < 3 or binary.parents[2] != directory / key or \
+            binary.parent.parent.name != "instances" or not re.fullmatch(r"run-[A-Za-z0-9_]+", binary.parent.name) or binary.name != original.name:
+        raise ValueError(f"{cell} {number}/{key} native RSS compiler is not the declared fresh copy")
+    expected_workload = [str(binary), *ast_retirement_cell_command(cell)]
+    if AST_RETIREMENT_CELLS[cell]["operation"] == "object":
+        expected_workload += ["-o", str(directory / key / "out.exe")]
+    csv = str(packet.with_suffix(".csv"))
+    expected_wrapper = ["taskset", "-c", str(AST_RETIREMENT_PROFILE["cpu"]), meta["config"]["perf"], "stat", "-x,",
+                        "-o", csv, "-e", ",".join(_lab.TIMED_EVENTS), "--", helper, "--output", str(packet),
+                        "--nonce", nonce, "--binary-sha256", binding["binary_sha256"], "--argv-sha256", binding["argv_sha256"], "--", *expected_workload]
+    if workload != expected_workload or wrapper != expected_wrapper:
+        raise ValueError(f"{cell} {number}/{key} native RSS compiler/wrapper argv differs from the fixed profile")
+    data = files.get(f"ast_retirement_acceptance/{cell}/pairs/{number:04d}-{key}.rss")
+    observed = _lab.child_rss_packet(data, binding)
+    if record.get("child_rss") != observed or _lab.rss_value(record) is None:
+        raise ValueError(f"{cell} {number}/{key} native RSS raw observation is unavailable or differs from the saved pair")
+
+
+def ast_retirement_owner(bundle: dict, base: str, head: str, trusted_revision: str | None) -> None:
+    """Replay the AST-only native lifecycle proof, not a whole-route population."""
+    import compiler_owned_phase as contract
+    metadata = bundle["owner"]
+    if not isinstance(metadata, dict) or set(metadata) != {"schema", "ownership"} or metadata["schema"] != "buster-ast-retirement-owner-v1":
+        raise ValueError("AST retirement native owner metadata is missing")
+    owner = metadata["ownership"]
+    if not isinstance(owner, dict) or owner.get("schema") != contract.POPULATION_SCHEMA or owner.get("state") != "complete" or \
+            owner.get("owned_preflight") is not False or type(owner.get("count")) is not int or owner.get("count") != 1 or not isinstance(owner.get("phases"), list) or len(owner["phases"]) != 1 or \
+            any(not isinstance(owner.get(key), str) or not re.fullmatch(r"[a-f0-9]{40}", owner[key]) for key in ("trusted_revision", "trusted_tree")) or \
+            (trusted_revision is not None and owner["trusted_revision"] != trusted_revision):
+        raise ValueError("AST retirement scoped native owner population/trusted revision differs")
+    for name in ("trusted_root", "directory", "work_root", "evidence_root", "python_path", "driver_path"):
+        value = owner.get(name)
+        if not isinstance(value, str) or not value.startswith("/") or str(Path(value)) != value or any(part == ".." for part in Path(value).parts):
+            raise ValueError("AST retirement native owner path is malformed")
+    row = owner["phases"][0]
+    if not isinstance(row, dict) or type(row.get("ordinal")) is not int or row.get("ordinal") != 1 or row.get("file") != "0001.json" or row.get("phase") != "ast-retirement-acceptance" or \
+            row.get("kind") != "run" or row.get("allow_exit_failure") is not False or type(row.get("timeout")) is not int or row.get("timeout") != 2700 or \
+            type(row.get("bridge_wall_us")) is not int or row["bridge_wall_us"] <= 0 or row.get("cwd") != bundle["unity-syntax-only_meta"]["config"]["repo_root"]:
+        raise ValueError("AST retirement native owner phase recipe differs")
+    trusted, work, root = owner["trusted_root"], owner["work_root"], row["cwd"]
+    argv = row.get("argv")
+    if not isinstance(argv, list) or len(argv) != 21 or not isinstance(argv[6], str) or not argv[6].startswith("/"):
+        raise ValueError("AST retirement native owner command is malformed")
+    variants = bundle["unity-syntax-only_meta"]["variants"]
+    expected = [owner["python_path"], "-B", trusted + "/tools/bench_direct/ast_retirement_acceptance.py",
+                "--lab", trusted + "/tools/uarch_lab.py", "--harness", argv[6],
+                "--baseline-ide", variants["a"]["ide"], "--candidate-ide", variants["b"]["ide"],
+                "--repo-root", root, "--base-revision", base, "--head-revision", head,
+                "--cpu", "2", "--output", work + "/ast-retirement-acceptance"]
+    if argv != expected or owner["evidence_root"] != work + "/ast-retirement-owner" or owner["directory"] != owner["evidence_root"] + "/owned-phases":
+        raise ValueError("AST retirement native owner exact invocation/paths differ")
+    stem = "ast_retirement_acceptance/owner/owned-phases/0001.json"
+    files = bundle["files"]
+    raw, stdout, stderr, command, marker = (files.get(stem + suffix) for suffix in ("", ".stdout", ".stderr", ".argv", ".bootstrap.complete"))
+    native = contract.read_record(raw)
+    if command != contract.command_bytes(argv) or row.get("receipt_sha256") != contract.sha(raw) or \
+            not isinstance(stdout, bytes) or not isinstance(stderr, bytes) or not isinstance(marker, bytes):
+        raise ValueError("AST retirement native owner raw population differs")
+    problems = contract.validate_record(native, argv, root, 2700, owner["driver_sha256"], stdout, stderr,
+                                        receipt_path=owner["directory"] + "/0001.json")
+    problems += contract.validate_bootstrap(native, marker, owner)
+    if native.get("duration_us", 0) > row["bridge_wall_us"]:
+        problems.append("AST retirement native owner wall omits owned work")
+    if problems:
+        raise ValueError("; ".join(problems))
+
+
 def validate_ast_retirement_bundle(record: object, bundle: object, base: str, head: str,
-                                   binaries: object, cpu_model: str) -> list[str]:
+                                   binaries: object, cpu_model: str, trusted_revision: str | None = None) -> list[str]:
     """Re-derive #4058's two-binary cells and retained components from exact sealed raw bytes."""
     problems: list[str] = []
     if record is not None:
@@ -450,8 +553,24 @@ def validate_ast_retirement_bundle(record: object, bundle: object, base: str, he
                         if sampling_json(bundle["files"], member) != bundle[key]:
                             raise ValueError(f"ast-retirement document differs from retained bytes: {member}")
                     source = acceptance["source"]
+                    if record.get("owner") != bundle["owner"]:
+                        raise ValueError("AST retirement receipt differs from its native owner metadata")
+                    ast_retirement_owner(bundle, base, head, trusted_revision)
                     if source != bundle["source"]:
                         raise ValueError("ast-retirement source binding differs from its raw source document")
+                    observer_build = bundle["rss_build"]
+                    from sampling_qualification_receipt import _lab
+                    _lab.child_rss_build_validate(observer_build)
+                    trusted_source = Path(__file__).with_name("retirement_rss.c").read_bytes()
+                    if observer_build["source"]["sha256"] != hashlib.sha256(trusted_source).hexdigest() or observer_build["source"]["size_bytes"] != len(trusted_source):
+                        raise ValueError("ast-retirement RSS helper source differs from the trusted publisher implementation")
+                    if acceptance.get("rss_observer_build") != observer_build:
+                        raise ValueError("ast-retirement observer differs from its retained native build receipt")
+                    for name, key in (("source.c", "source"), ("retirement-rss", "binary")):
+                        data = bundle["files"].get("ast_retirement_acceptance/rss-helper/" + name)
+                        identity = observer_build[key]
+                        if not isinstance(data, bytes) or len(data) != identity["size_bytes"] or hashlib.sha256(data).hexdigest() != identity["sha256"]:
+                            raise ValueError("ast-retirement native RSS helper/source bytes differ from their identities")
                     for name, identity in (("unity", source["unity"]), *source["corpus"].items()):
                         data = bundle["files"].get(f"ast_retirement_acceptance/inputs/{name}.c")
                         if not isinstance(data, bytes) or len(data) != identity["size_bytes"] or \
@@ -962,7 +1081,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     host = receipt.get("host") if isinstance(receipt.get("host"), dict) else {}
                     reasons.extend(validate_ast_retirement_bundle(receipt["ast_retirement_acceptance"],
                         corpus.get("ast_retirement_bundle"), expected.get("base", ""), expected.get("head", ""),
-                        receipt.get("binaries"), host.get("cpu_model", "")))
+                        receipt.get("binaries"), host.get("cpu_model", ""),
+                        expected_measurement_revision or receipt.get("identity", {}).get("trusted_revision")))
                 if receipt.get("constant_reuse_acceptance") is not None:
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if expected.get("mode") != "pull":
@@ -5865,6 +5985,12 @@ def lab_raw_inference(files: dict[str, bytes], prefix: str, records: list, varia
             if value is not None and (not _number(value) or value < 0):
                 raise ValueError("lab unavailable resource observation is malformed")
         stem = prefix + "pairs/" + f"{number:04d}-{variant}"
+        if "child_rss_binding" in record:
+            if not raw.get("config", {}).get("ast_retirement_cell") or not isinstance(raw.get("rss_observer"), dict):
+                raise ValueError("compiler-child RSS observation escaped its fixed retirement profile")
+            observed = _lab.child_rss_packet(files.get(stem + ".rss"), record["child_rss_binding"])
+            if record.get("child_rss") != observed:
+                raise ValueError("lab saved child-RSS observation differs from its raw native packet")
         counter_raw, metrics_raw = files.get(stem + ".csv"), files.get(stem + ".ccmetrics")
         if record["counters"] and (not isinstance(counter_raw, bytes) or not counter_raw) or \
                 variant_meta[variant]["collection"]["metrics_out"] and (not isinstance(metrics_raw, bytes) or not metrics_raw):
