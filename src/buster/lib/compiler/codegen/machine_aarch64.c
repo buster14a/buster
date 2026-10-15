@@ -241,6 +241,7 @@ struct MachineA64Selector
     u8* fused_dead;
     // Only allocated when a wide divide splits a canonical block. Canonical
     // targets enter its first machine block; outgoing edges leave its last.
+    MachineParameterEdgeLayout parameter_edges;
     u32* block_entries;
     u32* block_exits;
     // First private continuation block for a general asm-goto terminator in
@@ -5605,6 +5606,13 @@ BUSTER_GLOBAL_LOCAL u32 machine_a64_block_entry(MachineA64Selector* selector, u3
     return selector->block_entries ? selector->block_entries[canonical_block] : canonical_block;
 }
 
+BUSTER_GLOBAL_LOCAL u32 machine_a64_block_target(MachineA64Selector* selector, u32 canonical_block)
+{
+    u32 split = selector->parameter_edges.targets ? selector->parameter_edges.targets[canonical_block] : UINT32_MAX;
+    u32 result = split != UINT32_MAX ? split : machine_a64_block_entry(selector, canonical_block);
+    return result;
+}
+
 // Empty/literal-branch assembly transports all inputs before publishing any
 // output, then selects the executable successor. Final edge publication below
 // drops the other canonical asm-goto destinations before allocation.
@@ -5684,7 +5692,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_inline_hint(MachineA64Selector* sele
 BUSTER_GLOBAL_LOCAL bool machine_a64_select_branch(MachineA64Selector* selector, IrInstruction* instruction)
 {
     machine_a64_select_row(selector, (MachineInstruction){
-                                         .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[0].value))},
+                                         .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_target(selector, instruction->targets[0].value))},
                                          .opcode = MACHINE_A64_B,
                                      });
     return true;
@@ -5725,7 +5733,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_indirect_branch(MachineA64Selector* 
                 break;
             }
             MachineSwitchCase* target_row = (MachineSwitchCase*)machine_stream_append(selector->arena, &selector->switch_cases);
-            *target_row = (MachineSwitchCase){.target_block = machine_a64_block_entry(selector, instruction->targets[target_index].value)};
+            *target_row = (MachineSwitchCase){.target_block = machine_a64_block_target(selector, instruction->targets[target_index].value)};
         }
         if (selected)
         {
@@ -5770,8 +5778,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_fused_branch(MachineA64Selector* sel
         if (selected)
         {
             machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[0].value)),
-                                                              machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[1].value))},
+                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_target(selector, instruction->targets[0].value)),
+                                                              machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_target(selector, instruction->targets[1].value))},
                                                  .payload = fusion->condition,
                                                  .opcode = MACHINE_A64_BCC,
                                              });
@@ -5801,8 +5809,8 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_branch_if(MachineA64Selector* select
                                                  .opcode = MACHINE_A64_CMP_ZERO,
                                              });
             machine_a64_select_row(selector, (MachineInstruction){
-                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[0].value)),
-                                                              machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[1].value))},
+                                                 .operands = {machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_target(selector, instruction->targets[0].value)),
+                                                              machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_target(selector, instruction->targets[1].value))},
                                                  .payload = MACHINE_A64_CONDITION_NOT_EQUAL,
                                                  .opcode = MACHINE_A64_BCC,
                                              });
@@ -5853,13 +5861,13 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_switch(MachineA64Selector* selector,
             MachineSwitchCase* case_row = (MachineSwitchCase*)machine_stream_append(selector->arena, &selector->switch_cases);
             *case_row = (MachineSwitchCase){
                 .value = instruction->immediates[case_index] & value_mask,
-                .target_block = machine_a64_block_entry(selector, instruction->targets[case_index].value),
+                .target_block = machine_a64_block_target(selector, instruction->targets[case_index].value),
                 .compare_width = compare_width,
             };
         }
         machine_a64_select_row(selector, (MachineInstruction){
                                              .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, condition_register),
-                                                          machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_entry(selector, instruction->targets[instruction->target_count - 1].value))},
+                                                          machine_ref_make(MACHINE_REF_BLOCK, machine_a64_block_target(selector, instruction->targets[instruction->target_count - 1].value))},
                                              .payload = first_case,
                                              .opcode = MACHINE_A64_SWITCH,
                                              .flags = (u16)instruction->immediate_count,
@@ -6588,6 +6596,12 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             }
             BUSTER_CHECK(next_block == expanded_blocks);
         }
+        selector.parameter_edges = machine_parameter_edge_layout_plan(arena, function, canonical_layout, expanded_blocks,
+                                                                       &selector.block_entries, &selector.block_exits);
+        if (!selector.parameter_edges.valid)
+        {
+            return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+        }
         selector.call_argument_registers = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_shapes = arena_allocate(arena, MachineA64ValueShape, selector.call_argument_capacity);
@@ -7112,6 +7126,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             u32 block_index = machine_a64_canonical_layout_block(canonical_layout, layout_index);
             IrBlock* block = function->blocks + block_index;
             selector.current_block = block_index;
+            machine_parameter_edge_layout_begin(&selector.parameter_edges, function, block_index);
             machine_builder_block_begin(&selector.builder);
             selector.open_block = (MachineBlock){.parameter_offset = selector.builder.block_parameters.total_count};
             IrCfgBlock const* published_block = function->published_cfg->blocks + block_index;
@@ -7478,6 +7493,8 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 }
             }
             machine_builder_block_end(&selector.builder, selector.open_block);
+            machine_parameter_edge_layout_end(&selector.builder, &selector.parameter_edges, function, block_index,
+                                              selector.block_entries, &machine_aarch64_description);
         }
         if (!selector.supported)
         {
@@ -7485,8 +7502,13 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             result.failure_detail = selector.failure_detail;
             return result;
         }
+        if (selector.parameter_edges.split_count && selector.builder.instructions.total_count >= MACHINE_POINT_INSTRUCTION_LIMIT)
+        {
+            return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
+        }
         u32 canonical_edge_offset = selector.builder.edges.total_count;
-        if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers, selector.value_parts))
+        if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers, selector.value_parts,
+                                             &selector.parameter_edges, selector.block_entries))
         {
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
@@ -7544,7 +7566,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             arena_allocate(arena, MachineInlineAssemblyRelocation, selector.inline_assembly_relocations.total_count);
         result.function.inline_assembly_relocation_count = selector.inline_assembly_relocations.total_count;
         machine_stream_flatten(&selector.inline_assembly_relocations, result.function.inline_assembly_relocations);
-        if (!machine_selection_finish_canonical_edges(arena, &result.function, function, canonical_edge_offset,
+        if (!selector.parameter_edges.planned && !machine_selection_finish_canonical_edges(arena, &result.function, function, canonical_edge_offset,
                                                        selector.block_entries, selector.block_exits,
                                                        selector.asm_goto_continuations))
         {
@@ -7563,7 +7585,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         {
             machine_selection_certify_stack_memory(arena, &result.function, function);
         }
-        if (!machine_function_split_parameter_edges_with_canonical_map(arena, &result.function,
+        if (!selector.parameter_edges.planned && !machine_function_split_parameter_edges_with_canonical_map(arena, &result.function,
                                                                       &selector.block_entries, function->block_count))
         {
             return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
