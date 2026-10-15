@@ -1717,6 +1717,32 @@ struct CAstTypeAnswer
     bool nonplace_projection;
 };
 
+// The existing row-free cast/compound type-name authority, split so a private
+// publication probe can observe its written base and final pointer type.
+// Resolving a typedef remains the caller's declaration-point binding job.
+typedef struct CAstTypeNameShape CAstTypeNameShape;
+struct CAstTypeNameShape
+{
+    u32 specifiers;
+    u32 start;
+    u32 stars;
+    u32 end;
+    u32 name;
+    bool valid;
+};
+
+typedef struct CAstExistingTypeName CAstExistingTypeName;
+struct CAstExistingTypeName
+{
+    CTypeId base;
+    CTypeId type;
+};
+
+BUSTER_C_EXTERN CAstTypeNameShape c_ast_types_type_name_shape(CAst const* ast, CPreprocessResult const* preprocess,
+                                                             u32 node, u32 start, u32 end);
+BUSTER_C_EXTERN CAstExistingTypeName c_ast_types_existing_type_name(CParseResult const* result, CPreprocessResult const* preprocess,
+                                                                  CAstTypeNameShape shape, CTypeId named);
+
 BUSTER_C_EXTERN void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CParseResult const* result);
 BUSTER_C_EXTERN void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
                                             CDeclaration const* declaration);

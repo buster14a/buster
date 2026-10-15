@@ -188,6 +188,41 @@ BUSTER_F_DECL CTestAstTypeVerify c_test_ast_type_verify_take(void);
 // Turns the declaration specifier read from the tree (c_parse.c) off and back
 // on, per thread, so a test can analyse the same unit with and without it.
 BUSTER_F_DECL void c_test_ast_specifiers_set(bool enabled);
+
+// Read-only census before the original retained TYPE_NAME completion. The
+// source/base/final candidate never publishes or replaces a semantic query.
+typedef enum CTestTypeNameProbeRefusal
+{
+    C_TEST_TYPE_NAME_PROBE_CONTEXT,
+    C_TEST_TYPE_NAME_PROBE_WINDOW,
+    C_TEST_TYPE_NAME_PROBE_SUSPENDED,
+    C_TEST_TYPE_NAME_PROBE_SHAPE,
+    C_TEST_TYPE_NAME_PROBE_BINDING,
+    C_TEST_TYPE_NAME_PROBE_NON_PRIMITIVE,
+    C_TEST_TYPE_NAME_PROBE_BASE_ROW,
+    C_TEST_TYPE_NAME_PROBE_POINTER_ROW,
+    C_TEST_TYPE_NAME_PROBE_REFUSAL_COUNT,
+} CTestTypeNameProbeRefusal;
+typedef struct CTestAstTypeNamePublicationProbe CTestAstTypeNamePublicationProbe;
+struct CTestAstTypeNamePublicationProbe
+{
+    u64 attempted;
+    u64 eligible;
+    u64 primitive;
+    u64 typedef_names;
+    u64 pointers;
+    u64 body_eligible;
+    u64 nonbody_eligible;
+    u64 refusals[C_TEST_TYPE_NAME_PROBE_REFUSAL_COUNT];
+    u64 readonly_checked;
+    u64 readonly_failed;
+    u64 authority_compared;
+    u64 authority_mismatches;
+    u64 authority_appended;
+};
+BUSTER_F_DECL void c_test_ast_type_name_publication_probe_set(bool enabled);
+BUSTER_F_DECL CTestAstTypeNamePublicationProbe c_test_ast_type_name_publication_probe_take(void);
+
 // Verify mode for the type-name runs skipped as no type name
 // (c_parse_type_name_specifiers under -fc-ast-pilot): the machine's attempt
 // also runs on every skipped run, and the counts record the runs it checked

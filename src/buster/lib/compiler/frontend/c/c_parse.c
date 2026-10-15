@@ -13176,6 +13176,128 @@ BUSTER_C_INTERNAL bool c_parse_typeof_type_name_fact(CAstFacts* facts, CAst cons
     return projected;
 }
 
+BUSTER_C_INTERNAL BUSTER_INLINE CTypeInterning* c_parse_type_interning(CParseResult const* result);
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_parse_type_name_probe_enabled;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestAstTypeNamePublicationProbe c_parse_type_name_probe;
+
+void c_test_ast_type_name_publication_probe_set(bool enabled)
+{
+    c_parse_type_name_probe_enabled = enabled;
+}
+
+CTestAstTypeNamePublicationProbe c_test_ast_type_name_publication_probe_take(void)
+{
+    CTestAstTypeNamePublicationProbe taken = c_parse_type_name_probe;
+    c_parse_type_name_probe = (CTestAstTypeNamePublicationProbe){0};
+    return taken;
+}
+
+typedef struct CParseTypeNameProbe CParseTypeNameProbe;
+struct CParseTypeNameProbe
+{
+    CAstExistingTypeName answer;
+    bool eligible;
+};
+
+// No semantic shortcut is enabled here. Classify a row-free existing answer,
+// then let the original checkpointed producer run and compare its authority.
+BUSTER_C_INTERNAL CParseTypeNameProbe c_parse_type_name_probe_begin(CTypeParseMachine* machine, CParseResult* result,
+                                                                   CPreprocessResult const* preprocess, u32 node, bool body)
+{
+    CParseTypeNameProbe probe = {.answer = {.base = C_TYPE_ID_INVALID, .type = C_TYPE_ID_INVALID}};
+    if (c_parse_type_name_probe_enabled)
+    {
+        CTestAstTypeNamePublicationProbe* counts = &c_parse_type_name_probe;
+        counts->attempted += 1;
+        CParseResult before = *result;
+        u32 mutations = machine->mutation_count;
+        u32 recipes = machine->ast_facts->recipe_count;
+        u64 scratch = machine->scratch_arena->position;
+        CAst const* ast = machine->syntax_tree;
+        CAstFacts const* facts = machine->ast_facts;
+        CTypeInterning const* interning = c_parse_type_interning(result);
+        u32 refusal = C_TEST_TYPE_NAME_PROBE_REFUSAL_COUNT;
+        bool context = ast && facts && facts->spans && facts->node_count == ast->node_count && node < ast->node_count &&
+                       ast->kinds[node] == C_AST_TYPE_NAME && machine->frame_count == 0 && !machine->failed &&
+                       !result->diagnostic_count && facts->spans->first[node] == ast->tokens[node] && facts->spans->end[node] == ast->data[node];
+        CAstTypeNameShape shape = {0};
+        CTypeId named = C_TYPE_ID_INVALID;
+        if (!context)
+            refusal = C_TEST_TYPE_NAME_PROBE_CONTEXT;
+        else if (!interning || !interning->enabled)
+            refusal = C_TEST_TYPE_NAME_PROBE_WINDOW;
+        else if (interning->suspended)
+            refusal = C_TEST_TYPE_NAME_PROBE_SUSPENDED;
+        else
+        {
+            shape = c_ast_types_type_name_shape(ast, preprocess, node, ast->tokens[node], ast->data[node]);
+            if (!shape.valid)
+                refusal = C_TEST_TYPE_NAME_PROBE_SHAPE;
+            else if (shape.name != C_AST_NODE_INVALID)
+            {
+                u32 use = c_parse_identifier_use_index(result, shape.name);
+                CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity : C_ENTITY_ID_INVALID;
+                u32 leaf = c_ast_child_at(ast, shape.specifiers, 0);
+                bool bound = entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF &&
+                             (facts->flags[leaf] & C_AST_FACT_BOUND) && facts->payloads[leaf] == entity.value;
+                named = bound ? result->entities[entity.value].type : C_TYPE_ID_INVALID;
+                if (named.value >= result->type_count)
+                    refusal = C_TEST_TYPE_NAME_PROBE_BINDING;
+                else
+                {
+                    CType const* type = result->types + named.value;
+                    if (type->kind < C_TYPE_VOID || type->kind > C_TYPE_LONG_DOUBLE_COMPLEX || type->vector_byte_size ||
+                        type->is_const || type->is_volatile || type->is_restrict || type->is_atomic)
+                        refusal = C_TEST_TYPE_NAME_PROBE_NON_PRIMITIVE;
+                }
+            }
+            if (refusal == C_TEST_TYPE_NAME_PROBE_REFUSAL_COUNT)
+            {
+                probe.answer = c_ast_types_existing_type_name(result, preprocess, shape, named);
+                if (probe.answer.base.value >= before.type_count)
+                    refusal = C_TEST_TYPE_NAME_PROBE_BASE_ROW;
+                else if (probe.answer.type.value >= before.type_count)
+                    refusal = C_TEST_TYPE_NAME_PROBE_POINTER_ROW;
+            }
+        }
+        bool unchanged = memcmp(&before, result, sizeof(before)) == 0 && machine->mutation_count == mutations &&
+                         machine->ast_facts->recipe_count == recipes && machine->scratch_arena->position == scratch;
+        counts->readonly_checked += 1;
+        counts->readonly_failed += !unchanged;
+        probe.eligible = refusal == C_TEST_TYPE_NAME_PROBE_REFUSAL_COUNT && unchanged;
+        if (probe.eligible)
+        {
+            counts->eligible += 1;
+            counts->primitive += shape.name == C_AST_NODE_INVALID;
+            counts->typedef_names += shape.name != C_AST_NODE_INVALID;
+            counts->pointers += shape.stars < shape.end;
+            counts->body_eligible += body;
+            counts->nonbody_eligible += !body;
+        }
+        else if (refusal < C_TEST_TYPE_NAME_PROBE_REFUSAL_COUNT)
+            counts->refusals[refusal] += 1;
+    }
+    return probe;
+}
+
+BUSTER_C_INTERNAL void c_parse_type_name_probe_end(CParseTypeNameProbe probe, CParseResult const* result, CParseResult const* checkpoint,
+                                                  bool sound, bool variably_modified, CTypeId base, CTypeId type)
+{
+    if (probe.eligible)
+    {
+        c_parse_type_name_probe.authority_compared += 1;
+        c_parse_type_name_probe.authority_mismatches += !sound || variably_modified ||
+            base.value != probe.answer.base.value || type.value != probe.answer.type.value;
+        c_parse_type_name_probe.authority_appended += result->type_count != checkpoint->type_count ||
+            result->parameter_count != checkpoint->parameter_count || result->array_bound_count != checkpoint->array_bound_count ||
+            result->type_alignment_count != checkpoint->type_alignment_count || result->interned_type_count != checkpoint->interned_type_count ||
+            result->interned_qualified_count != checkpoint->interned_qualified_count;
+    }
+}
+#endif
+
 // TYPE_NAME keeps both its specifier base and its final abstract declarator
 // type. The semantic parser remains their producer; the whole completion is
 // undone once its row-free graph and parameter rows have been published.
@@ -13227,6 +13349,9 @@ BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPrep
                 CScopeId node_scope = c_parse_scope_for_token(result, scope, first);
                 CParseResult checkpoint = *result;
                 u32 mutation_mark = machine->mutation_count;
+#if BUSTER_INCLUDE_TESTS
+                CParseTypeNameProbe probe = c_parse_type_name_probe_begin(machine, result, &preprocess, node, body);
+#endif
                 CTypeId* saved_sources = machine->fact_parameter_sources;
                 u32 saved_begin = machine->fact_parameter_begin;
                 u32 saved_capacity = machine->fact_parameter_capacity;
@@ -13258,6 +13383,9 @@ BUSTER_C_INTERNAL void c_parse_type_name_facts(CTypeParseMachine* machine, CPrep
                     sound = machine->mutations[mutation].id.value >= checkpoint.type_count;
                 }
                 bool variably_modified = sound && c_parse_type_is_variably_modified(machine, result, preprocess, node_scope, type);
+#if BUSTER_INCLUDE_TESTS
+                c_parse_type_name_probe_end(probe, result, &checkpoint, sound, variably_modified, base, type);
+#endif
                 u32 recipe_begin = sound && (type.value >= checkpoint.type_count || base.value >= checkpoint.type_count)
                                        ? c_ast_types_facts_snapshot(facts, result, &preprocess, &checkpoint) : C_AST_FACT_NONE;
                 sound = sound && (recipe_begin != C_AST_FACT_NONE ||
@@ -13809,7 +13937,6 @@ BUSTER_C_SHARED bool c_semantic_type_identity_query(Arena* scratch, CPreprocessR
 // nested type query while it is deciding whether __fp16 names a type here.
 BUSTER_C_INTERNAL bool c_parse_storage_half_type_name_group(Arena* scratch, CParseResult* result, CPreprocessResult preprocess,
                                                              u32 token_index, bool* grouped_pointer, u32* group_close_out);
-BUSTER_C_INTERNAL BUSTER_INLINE CTypeInterning* c_parse_type_interning(CParseResult const* result);
 
 // Storage-only __fp16 has no canonical IR type, so lowering cannot size a
 // sizeof/_Alignof operand whose type is __fp16 or is built from __fp16
