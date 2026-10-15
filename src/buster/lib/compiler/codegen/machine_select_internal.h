@@ -16,6 +16,7 @@ BUSTER_F_DECL MachineSelectResult machine_test_select_work(Arena* arena, IrProgr
                                                           MachineSelectionModule* module, u32 legacy, bool preserve_debug_values);
 BUSTER_F_DECL bool machine_x64_test_prepare_signature(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                      MachineSelectionModule* module);
+BUSTER_F_DECL u32* machine_test_canonical_layout_full(Arena* arena, IrFunction const* function);
 #else
 #define MACHINE_SELECT_TEST_LEGACY(module, flag) false
 #endif

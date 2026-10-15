@@ -1679,12 +1679,80 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_incoming_signature_reu
     return result;
 }
 
+// One-block return, self-loop and duplicate self-targets all have identity
+// layout. The full reference must agree while only the shortcut allocates
+// nothing; multiblock layouts retain the existing general traversal.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_single_block_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("_Bool single(void) { return 1; }\n"
+                       "int multiple(int x) { if(x)return x+1; return x-1; }\n");
+    CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u64 mark = c_test_preprocess_unit_mark();
+    for (u32 arch = 0; arch < BUSTER_ARRAY_LENGTH(arches); arch += 1)
+    {
+        c_test_release_preprocess_arenas_since(mark);
+        Target target = {.cpu_arch = arches[arch], .os = OPERATING_SYSTEM_LINUX};
+        IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
+        BUSTER_TEST(arguments, program && program->module_count == 1);
+        if (!program || program->module_count != 1) { continue; }
+        IrValidationResult prepared = ir_prepare_canonical_module(program, program->modules, false);
+        IrFunction* single = machine_selection_test_find(program, S8("single"));
+        IrFunction* multiple = machine_selection_test_find(program, S8("multiple"));
+        BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && single && single->block_count == 1 && multiple && multiple->block_count > 1);
+        if (prepared.error != IR_VALIDATION_NONE || !single || single->block_count != 1 || !multiple) { continue; }
+        IrInstruction* terminator = single->instructions + single->blocks[0].last_instruction.value;
+        IrInstruction saved = *terminator;
+        IrBlockId targets[2] = {{.value = 0}, {.value = 0}};
+        for (u32 variant = 0; variant < 3; variant += 1)
+        {
+            terminator = single->instructions + single->blocks[0].last_instruction.value;
+            *terminator = saved;
+            if (variant)
+            {
+                terminator->opcode = variant == 1 ? IR_OPCODE_BRANCH : IR_OPCODE_BRANCH_IF;
+                terminator->target_count = (u16)variant;
+                terminator->targets = targets;
+                if (variant == 1) { terminator->operand_count = 0; terminator->operands = 0; }
+            }
+            single->opcode_summary = 0;
+            ir_function_invalidate_cfg(single);
+            IrValidationResult published = ir_function_publish_cfg(program->arena, single);
+            IrValidationResult validated = ir_validate_canonical_module(program, program->modules);
+            BUSTER_TEST_RAW(arguments, published.error == IR_VALIDATION_NONE && validated.error == IR_VALIDATION_NONE,
+                           string_format(arguments->arena, S8("arch={u32} variant={u32} publish={u32} validation={u32}"),
+                                         arch, variant, published.error, validated.error));
+            if (published.error != IR_VALIDATION_NONE || validated.error != IR_VALIDATION_NONE) { continue; }
+            // Publication coalesces repeated destinations into one edge.
+            BUSTER_TEST(arguments, single->published_cfg->edge_count == (variant ? 1u : 0u));
+            BUSTER_TEST(arguments, single->instructions[single->blocks[0].last_instruction.value].target_count == variant);
+            u64 before = arguments->arena->position;
+            u32* shortcut = machine_selection_canonical_layout(arguments->arena, single);
+            BUSTER_TEST(arguments, shortcut == 0 && arguments->arena->position == before);
+            u32* full = machine_test_canonical_layout_full(arguments->arena, single);
+            BUSTER_TEST(arguments, full == 0 && arguments->arena->position > before);
+        }
+        terminator = single->instructions + single->blocks[0].last_instruction.value;
+        *terminator = saved;
+        ir_function_invalidate_cfg(single);
+        u32* full = machine_test_canonical_layout_full(arguments->arena, multiple);
+        u32* selected = machine_selection_canonical_layout(arguments->arena, multiple);
+        for (u32 block = 0; block < multiple->block_count; block += 1)
+        {
+            BUSTER_TEST(arguments, (full ? full[block] : block) == (selected ? selected[block] : block));
+        }
+    }
+    c_test_release_preprocess_arenas_since(mark);
+    return result;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     // Each fixture returns every unit it preprocessed; the registry's own
     // arena is reserved once, before the first fixture's reading.
     c_test_unit_registry_prewarm();
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_single_block_layout);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_incoming_signature_reuse);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_deferred_registers);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_alias_fact_guard);

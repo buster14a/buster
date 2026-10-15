@@ -88,8 +88,9 @@ hosts execute its independent expected-value fixture.
   and extra operands on `vzeroupper`, with no partial bytes.
   Matching native hosts execute optional instructions only when supported.
 - Selection emits canonical blocks in reverse postorder from the entry
-  (`machine_selection_canonical_layout`), not in IR creation order. The C
-  frontend creates a `for` step and an `if` join before the nested blocks that
+  (`machine_selection_canonical_layout`), not in IR creation order. A valid
+  single-block function already has identity layout and needs no traversal
+  workspace. The C frontend creates a `for` step and an `if` join before the nested blocks that
   reach them, and FAST/QUALITY read any jump to a lower block as a loop back
   edge. Reverse postorder puts every reachable block after its dominators, so
   only real back edges jump down. A conditional's first target follows its
