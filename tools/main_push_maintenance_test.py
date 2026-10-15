@@ -94,7 +94,7 @@ class OrderingTests(unittest.TestCase):
     def test_waits_for_only_the_older_target_job(self):
         older = workflow_run(101, 1, self.A)
         api = InventoryApi(
-            inventories=[[older], [dict(older, status="completed")]],
+            inventories=[[older], [older], [dict(older, status="completed")]],
             jobs={101: [workflow_job(self.JOB, "in_progress")]},
         )
         waited = M.wait_predecessors(
@@ -245,6 +245,7 @@ class IntegrationTests(unittest.TestCase):
             root = Path(directory)
             api = InventoryApi()
             with mock.patch.object(api, "request", side_effect=OSError("secret response")), \
+                    mock.patch("sys.stderr") as log, \
                     mock.patch.object(M.refresh, "refresh_event") as action:
                 status = M.refresh_push(root, api, {}, self.A, root / "reports",
                     root / "summary.md", M.preflight.STATUS_CONTEXT,
@@ -259,7 +260,11 @@ class IntegrationTests(unittest.TestCase):
             self.assertFalse(report["discovery"]["inventory_complete"])
             self.assertEqual(report["discovery"]["requests"], 1)
             self.assertNotIn("secret response", text)
-            self.assertIn("failed", (root / "summary.md").read_text())
+            summary = (root / "summary.md").read_text()
+            self.assertIn("failed", summary)
+            self.assertIn("discovery transport/adapter failure: OSError", summary)
+            self.assertIn("discovery transport/adapter failure: OSError", str(log.write.call_args_list))
+            self.assertNotIn("secret response", summary + str(log.write.call_args_list))
 
     def test_cli_startup_failure_retains_report_and_summary(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -68,15 +68,43 @@ clear observations remain required before publication; API reads are observation
 not an atomic lifecycle snapshot.
 
 Every filtered inventory must supply an integer `total_count`, exact page
-cardinality and unique run/job IDs within each inventory. A changing count,
-malformed page, missing metadata or an inventory above the API's 1,000-result
-filtered-search ceiling fails closed. Exactly 1,000 relevant rows are complete
-only after ten full pages with that declared count; completed history never enters
-these queries. Requests remain bounded to 200 per discovery pass and ten pages
-per inventory, with the enclosing wait deadline applied to the existing HTTP
-reader. Direct single-pass callers have a 60-second discovery budget. A transport
-without a deadline hook retains its existing per-GET bound and can overrun the
-pass deadline by at most that final read.
+cardinality and unique run/job IDs within each inventory. Exactly 1,000 relevant
+rows are complete only after ten full pages with that declared count; completed
+history never enters these queries.
+
+For #4019, native discovery classifies changed totals and count/list mismatches
+as recoverable observations. It restarts the complete discovery, at most four
+attempts, with 1/2/4-second backoff. Missing/wrong-type fields, malformed JSON or
+parser bounds, invalid rows/identities, duplicate IDs/numbers and exceeded bounds
+are terminal. A rejected page never proves completeness. Valid run identities
+observed even on a count-rejected page remain candidates for direct rechecking.
+The original failed response was not retained: the first-page mismatch fixture
+reproduces one possible predicate, not the incident's proven cause.
+
+Each predecessor discovery performs complete forward and reverse active-bucket
+sweeps and compares their relevant identity sets, rather than only their counts.
+A changed set restarts discovery. The union of observed identities survives
+recovery and subsequent helper invocations in the same ordering wait; an older
+observation cannot replace a newer attempt. Every retained predecessor is checked
+directly even if both later sweeps omit it. An omission therefore cannot erase
+an observed active predecessor, and a completed observation is reread to detect a
+rerun. Page shifts and status movement may cause another bounded attempt or a
+failure, never acceptance of the rejected page. These API observations do not
+claim an atomic snapshot under arbitrary concurrent movement: opposite-order
+coverage, identity reconciliation, direct current-attempt checks and the existing
+two clear observations together form the publication barrier. There is no recent
+history cutoff or inference that equal cardinalities mean equal identities.
+
+Requests are bounded to 200 across all helper invocations and discovery phases
+of an ordered maintenance operation, ten pages per inventory and 5,000 retained
+run identities. A helper restart receives the used request count and retained
+identities; it cannot renew the request allowance. Repeated inconsistency exhausts
+the four-attempt bound, and persistent pending runs can exhaust the request bound
+before the wait deadline. The enclosing wait deadline includes recovery backoff
+and applies to the existing HTTP reader. Direct callers have a 60-second discovery
+budget. Reads are checked before and after transport; a transport without a
+deadline hook can overrun by its final per-GET bound, but the overdue response
+cannot authorize publication.
 
 Target jobs are read for the run's exact attempt and the run is reread afterwards.
 An absent target or inherited job from an earlier attempt remains blocking while
@@ -112,6 +140,15 @@ The helper retains `main-push-maintenance.json`:
 - an obsolete merge-conflict attempt remains under `attempt/`, while only a
   current or genuinely failed attempt is promoted to the artifact root and job
   summary.
+
+Native rejection records include the precise reason/field, safe path/filter/page,
+request and attempt numbers, expected/observed totals, returned row count and
+retryability. Unavailable counts are JSON null. Earlier rejected observations
+remain in successful recovery reports too. Final evidence identifies terminal,
+attempt-bound or request-bound stopping, and adapter deadline failures retain the
+observations already received. The job log and summary print the same bounded
+diagnostics, including failures before any maintenance action. The JSON retains
+the conservative candidate identities; logs/summaries omit that longer list.
 
 Manual `workflow_dispatch` refreshes are not commit-supersession sentinels and
 continue to run the ordinary snapshot tool directly.
@@ -175,3 +212,10 @@ histories of 999, 1,000 and more than 1,000 runs, all five active states, missin
 target metadata, rerun attempts, terminal transitions, exact filtered pagination
 and malformed/incomplete inventories. The hosted workflow also runs the native
 controls under GCC ASan/UBSan. Local agent execution is not required.
+The #4019 native controls additionally cover first-page recovery, persistent
+inconsistency, changed totals and identities across pages, status-bucket movement,
+retention after omission, job-inventory recovery, duplicate/invalid identities,
+inherited/current-attempt jobs, completed-run reruns, exact-successor recovery and
+request exhaustion with retained input from an earlier helper invocation. Existing
+adapter/preflight and invalidation/automation tests retain the main-movement and
+no-publication-on-discovery-failure controls.
