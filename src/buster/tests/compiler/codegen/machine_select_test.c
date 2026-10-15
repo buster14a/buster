@@ -1592,12 +1592,100 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_deferred_registers(Uni
     return result;
 }
 
+// Prime real call plans, including partial SysV variadic-vector plans, then
+// compare definition selection against fresh preparation. Incoming aggregate
+// limits still apply even when the complete call plan accepts its signature.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_incoming_signature_reuse(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "struct Pair { double x; int y; };\n"
+        "struct Limit { char data[524296]; }; struct Half { char data[300000]; };\n"
+        "typedef unsigned char V __attribute__((vector_size(64)));\n"
+        "void empty(void) {}\n"
+        "int narrow(unsigned char x,unsigned y) { return x+y; }\n"
+        "struct Pair aggregate(struct Pair x) { return x; }\n"
+        "long double floating(long double x) { return x; }\n"
+        "__int128 wide(__int128 x) { return x; }\n"
+        "V vector(V x) { return x; }\n"
+        "int variadic_vector(V x,...) { return 1; }\n"
+        "int over(struct Limit x) { return 1; }\n"
+        "int combined(struct Half x,struct Half y) { return 1; }\n");
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS, OPERATING_SYSTEM_ANDROID};
+    u64 mark = c_test_preprocess_unit_mark();
+    u32 reused = 0;
+    u32 partial = 0;
+    u32 cached_rejection = 0;
+    for (u32 direct = 0; direct < 2; direct += 1)
+    {
+        for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+        {
+            c_test_release_preprocess_arenas_since(mark);
+            Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_AMD_ZEN_5, .os = systems[system]};
+            IrProgram* program = machine_selection_test_compile_with_options(arguments->arena, source, target,
+                                                                             (CIRLowerOptions){.disable_direct_ssa = direct == 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (!program || program->module_count != 1) { continue; }
+            IrValidationResult prepared = ir_prepare_canonical_module(program, program->modules, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            if (prepared.error != IR_VALIDATION_NONE) { continue; }
+            MachineSelectionModule* context = machine_select_module_prepare(arguments->arena, program, target);
+            for (u32 index = 0; index < program->modules->function_count; index += 1)
+            {
+                IrFunction* function = program->modules->functions + index;
+                if (!function->block_count) { continue; }
+                bool complete = machine_x64_test_prepare_signature(arguments->arena, program, function, target, context);
+                bool variadic = string_equal(function->name, S8("variadic_vector"));
+                partial += variadic && !complete;
+                bool large = string_equal(function->name, S8("over")) || string_equal(function->name, S8("combined"));
+                bool supported = !large || systems[system] == OPERATING_SYSTEM_WINDOWS;
+                for (u32 debug = 0; debug < 2; debug += 1)
+                {
+                    MachineSelectResult reference = machine_test_select_work(arguments->arena, program, function, target, context,
+                                                                              MACHINE_TEST_SELECT_LEGACY_SIGNATURE, debug != 0);
+                    BUSTER_TEST(arguments, context->test_reused_signatures == 0);
+                    MachineSelectResult selected = machine_test_select_work(arguments->arena, program, function, target, context, 0, debug != 0);
+                    BUSTER_TEST(arguments, context->test_reused_signatures == (complete ? 1u : 0u));
+                    reused += context->test_reused_signatures;
+                    cached_rejection += complete && !selected.supported;
+                    BUSTER_TEST_RAW(arguments, selected.supported == supported && reference.supported == supported,
+                                   string_format(arguments->arena, S8("{S8} system={u32} complete={u32} selected={u32}/{u32} expected={u32}"),
+                                                 function->name, system, (u32)complete, (u32)selected.supported,
+                                                 (u32)reference.supported, (u32)supported));
+                    BUSTER_TEST(arguments, selected.failed_opcode == reference.failed_opcode &&
+                                          selected.signature_rejected == reference.signature_rejected);
+                    if (supported)
+                    {
+                        BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&selected, &reference));
+                        BUSTER_TEST(arguments, machine_selection_test_debug_equal(&selected.function, &reference.function));
+                        BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, selected.signature_rejected && reference.signature_rejected);
+                    }
+                    MachineSelectionModule* lane = machine_select_module_for_lane(arguments->arena, program, context);
+                    BUSTER_TEST(arguments, lane->type_classes == context->type_classes && lane->x64_signature_plans != context->x64_signature_plans);
+                    MachineSelectResult cold = machine_test_select_work(arguments->arena, program, function, target, lane, 0, debug != 0);
+                    BUSTER_TEST(arguments, lane->test_reused_signatures == 0 && cold.supported == selected.supported &&
+                                          cold.signature_rejected == selected.signature_rejected);
+                    if (supported) { BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&selected, &cold)); }
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, reused != 0 && partial != 0 && cached_rejection != 0);
+    c_test_release_preprocess_arenas_since(mark);
+    return result;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     // Each fixture returns every unit it preprocessed; the registry's own
     // arena is reserved once, before the first fixture's reading.
     c_test_unit_registry_prewarm();
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_incoming_signature_reuse);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_deferred_registers);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_alias_fact_guard);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_parameter_edge_layout);

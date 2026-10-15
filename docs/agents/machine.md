@@ -325,7 +325,10 @@ hosts execute its independent expected-value fixture.
   parameters, both frontend forms, FAST/QUALITY, Linux/macOS objects and a
   supported 64 KiB control without executing a large native stack.
 - Native signature and call storage is sized from canonical IR counts. Incoming
-  shapes, placements, argument values and normalization rows use arena arrays;
+  shapes and placements borrow an already-built complete plan from the
+  module/lane call-signature pool when available; partial or call-rejected
+  plans keep fresh preparation. The incoming aggregate bound is checked on
+  either path. Argument values and normalization rows use arena arrays;
   the existing value-fact walk sizes one reusable call workspace per function.
   x86-64's per-type signature pool sums parameter counts in 64 bits. Stack
   placements use 32-bit offsets and check the signed frame-displacement bound

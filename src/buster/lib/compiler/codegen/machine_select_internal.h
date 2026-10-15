@@ -14,6 +14,8 @@ enum
 #define MACHINE_SELECT_TEST_LEGACY(module, flag) ((module) && ((module)->test_work_legacy & (flag)))
 BUSTER_F_DECL MachineSelectResult machine_test_select_work(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                           MachineSelectionModule* module, u32 legacy, bool preserve_debug_values);
+BUSTER_F_DECL bool machine_x64_test_prepare_signature(Arena* arena, IrProgram* program, IrFunction* function, Target target,
+                                                     MachineSelectionModule* module);
 #else
 #define MACHINE_SELECT_TEST_LEGACY(module, flag) false
 #endif

@@ -6456,6 +6456,22 @@ BUSTER_GLOBAL_LOCAL MachineX64SignaturePlan const* machine_x64_signature_plan(Ma
     return plan;
 }
 
+#if BUSTER_INCLUDE_TESTS
+bool machine_x64_test_prepare_signature(Arena* arena, IrProgram* program, IrFunction* function, Target target, MachineSelectionModule* module)
+{
+    IrType* type = ir_type_from_id(&program->types, function->canonical_type);
+    MachineX64Selector selector = {.arena = arena, .program = program, .target = target, .module = module};
+    bool complete = false;
+    if (type && type->kind == IR_TYPE_FUNCTION && function->canonical_type.value < module->type_count &&
+        module->x64_signature_slots[function->canonical_type.value] < module->x64_signature_plan_count)
+    {
+        MachineX64SignaturePlan const* plan = machine_x64_signature_plan(&selector, function->canonical_type, type);
+        complete = plan->return_supported && plan->arguments_supported;
+    }
+    return complete;
+}
+#endif
+
 // Everything CALL selection resolves before it emits a row: who is called,
 // where each argument travels, and how the result comes back. The shapes
 // and placements are the signature plan's rows; a variadic call's tail is
@@ -8368,13 +8384,36 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.signature_rejected = true;
     IrType* return_type = ir_type_from_id(&program->types, function_type->return_type);
     bool returns_value = return_type && return_type->kind != IR_TYPE_VOID;
-    MachineX64ValueShape signature_return_shape = {0};
-    if (returns_value && !machine_x64_value_shape(program, function_type->return_type, IR_ABI_USE_RESULT, target, &signature_return_shape))
+    // A call may already have prepared this exact type in the lane's pool.
+    // Only a complete plan is reusable: call-specific rejection can leave a
+    // built plan's parameter rows partial. Definition-only bounds stay below.
+    MachineX64SignaturePlan const* signature_plan = 0;
+    if (module && module->x64_signature_slots && function->canonical_type.value < module->type_count &&
+        !MACHINE_SELECT_TEST_LEGACY(module, MACHINE_TEST_SELECT_LEGACY_SIGNATURE))
+    {
+        u32 slot = module->x64_signature_slots[function->canonical_type.value];
+        if (slot < module->x64_signature_plan_count)
+        {
+            MachineX64SignaturePlan const* prepared = module->x64_signature_plans + slot;
+            if (prepared->built && prepared->return_supported && prepared->arguments_supported)
+            {
+                signature_plan = prepared;
+#if BUSTER_INCLUDE_TESTS
+                module->test_reused_signatures += 1;
+#endif
+            }
+        }
+    }
+    MachineX64ValueShape signature_return_shape = signature_plan ? signature_plan->return_shape : (MachineX64ValueShape){0};
+    if (returns_value && !signature_plan &&
+        !machine_x64_value_shape(program, function_type->return_type, IR_ABI_USE_RESULT, target, &signature_return_shape))
     {
         return result;
     }
-    MachineX64ValueShape* signature_parameter_shapes = arena_allocate(arena, MachineX64ValueShape, function_type->parameter_count);
-    MachineX64ArgumentPlacement* signature_parameter_placements = arena_allocate(arena, MachineX64ArgumentPlacement, function_type->parameter_count);
+    MachineX64ValueShape* signature_parameter_shapes = signature_plan ? signature_plan->argument_shapes
+        : arena_allocate(arena, MachineX64ValueShape, function_type->parameter_count);
+    MachineX64ArgumentPlacement* signature_parameter_placements = signature_plan ? signature_plan->argument_placements
+        : arena_allocate(arena, MachineX64ArgumentPlacement, function_type->parameter_count);
     bool windows_abi = machine_x64_target_is_windows(target);
     u32 signature_integer_count = signature_return_shape.indirect ? 1 : 0;
     u32 signature_float_count = signature_return_shape.indirect && windows_abi ? 1 : 0;
@@ -8382,15 +8421,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     u64 signature_aggregate_parts = 0;
     for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
     {
-        if (!machine_x64_value_shape(program, function_type->parameter_types[parameter_index], IR_ABI_USE_ARGUMENT, target,
-                                     signature_parameter_shapes + parameter_index) ||
-            !machine_x64_argument_area_fits(signature_parameter_shapes + parameter_index, signature_stack_count) ||
+        if ((!signature_plan &&
+             (!machine_x64_value_shape(program, function_type->parameter_types[parameter_index], IR_ABI_USE_ARGUMENT, target,
+                                      signature_parameter_shapes + parameter_index) ||
+              !machine_x64_argument_area_fits(signature_parameter_shapes + parameter_index, signature_stack_count))) ||
             !machine_x64_incoming_aggregate_fits(signature_parameter_shapes + parameter_index, &signature_aggregate_parts))
         {
             return result;
         }
-        machine_x64_place_argument(signature_parameter_shapes + parameter_index, windows_abi, &signature_integer_count, &signature_float_count,
-                                   &signature_stack_count, signature_parameter_placements + parameter_index);
+        if (!signature_plan)
+        {
+            machine_x64_place_argument(signature_parameter_shapes + parameter_index, windows_abi, &signature_integer_count, &signature_float_count,
+                                       &signature_stack_count, signature_parameter_placements + parameter_index);
+        }
     }
     result.signature_rejected = false;
     if (!module)
