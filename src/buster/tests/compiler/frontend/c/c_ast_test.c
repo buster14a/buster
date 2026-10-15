@@ -8230,6 +8230,112 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_unit_owner_plans(UnitTestArguments
     return result;
 }
 
+// Completed numeric facts skip the discarded descriptor walk. An unanswered
+// 33-row pointer/half descriptor still crosses the same 32-row local buffer,
+// using the real body guard and its existing trace/limit controls.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_storage_half_publication(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        CAstConstantStatus status;
+        u64 cap;
+        bool failed_before;
+        bool exhausted_before;
+    } const cases[] = {
+        {C_AST_CONSTANT_INTEGER, 1, false, false},
+        {C_AST_CONSTANT_UNQUERIED, 1, false, false},
+        {C_AST_CONSTANT_FLOAT, 1, false, false},
+        {C_AST_CONSTANT_NONCONSTANT, 1, false, false},
+        {C_AST_CONSTANT_UNSUPPORTED, 1, false, false},
+        {C_AST_CONSTANT_INVALID, 1, false, false},
+        {C_AST_CONSTANT_INTEGER, 1, true, false},
+        {C_AST_CONSTANT_INTEGER, 1, false, true},
+        {C_AST_CONSTANT_INTEGER, 1, true, true},
+        {C_AST_CONSTANT_UNQUERIED, 0, false, false},
+    };
+    String8 stars = S8("********************************");
+    for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        String8 source = string_format(temporary.arena, S8("int f(void){{return sizeof(__fp16{S8});}"), stars);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+        CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+        u32 parent = C_AST_NODE_INVALID;
+        for (u32 node = 0; node < built.ast.node_count; node += 1)
+            if (built.ast.kinds[node] == C_AST_SIZEOF_TYPE) parent = node;
+        if (BUSTER_REQUIRE(arguments, built.complete && parent != C_AST_NODE_INVALID))
+        {
+            u32 rows = (u32)stars.length + 1;
+            CType* types = arena_allocate_zeroed(temporary.arena, CType, rows);
+            types[0].kind = C_TYPE_FP16_STORAGE;
+            for (u32 row = 1; row < rows; row += 1)
+                types[row] = (CType){.kind = C_TYPE_POINTER, .element_type = {.value = row - 1}};
+            CType* saved = arena_allocate(temporary.arena, CType, rows);
+            memcpy(saved, types, sizeof(*types) * rows);
+            u32 operand = c_ast_child_at(&built.ast, parent, 0);
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+            {
+                CAstFacts facts = {0};
+                if (BUSTER_REQUIRE(arguments, c_ast_facts_create(&facts, &built.ast)))
+                {
+                    facts.flags[operand] = C_AST_FACT_TYPED;
+                    facts.types[operand] = rows - 1;
+                    CAstConstantFact initial = {.low = target_data_layout(target_native).pointer.size, .type = C_TYPE_ID_INVALID,
+                                               .primitive_kind = C_TYPE_UNSIGNED_LONG_LONG, .status = cases[index].status};
+                    bool prepared = initial.status == C_AST_CONSTANT_UNQUERIED || c_ast_facts_store_constant(&facts, parent, initial);
+                    if (BUSTER_REQUIRE(arguments, prepared))
+                    {
+                        CAstConstantFact before = c_ast_facts_constant(&facts, parent);
+                        u32 constants = facts.constant_count;
+                        CParseResult analysis = {.arena = temporary.arena, .types = types, .type_count = rows};
+                        CTestBodyScratchRequest trace[4] = {0};
+                        c_test_body_validation_scratch_limit(cases[index].cap);
+                        c_test_body_validation_scratch_trace(trace, BUSTER_ARRAY_LENGTH(trace));
+                        u64 mark = temporary.arena->position;
+                        CTestAstStorageHalfPublication report = c_test_ast_storage_half_publication(temporary.arena, &analysis,
+                            &built.ast, &facts, target_native, parent, cases[index].failed_before, cases[index].exhausted_before);
+                        u32 traced = c_test_body_validation_scratch_trace_count();
+                        c_test_body_validation_scratch_trace(0, 0);
+                        c_test_body_validation_scratch_limit(0);
+                        bool walked = initial.status != C_AST_CONSTANT_INTEGER && initial.status != C_AST_CONSTANT_INVALID;
+                        bool refused = cases[index].exhausted_before || (walked && cases[index].cap != 0);
+                        BUSTER_TEST(arguments, report.exhausted == refused && report.failed == cases[index].failed_before);
+                        BUSTER_TEST(arguments, traced == (walked ? 2u : 1u) && trace[0].element_size == 0);
+                        if (walked)
+                        {
+                            BUSTER_TEST(arguments, trace[1].count == 64 && (trace[1].end == UINT64_MAX) == refused);
+                        }
+                        BUSTER_TEST(arguments, temporary.arena->position == mark && !facts.recipe_failed);
+                        BUSTER_TEST(arguments, analysis.type_count == rows && !analysis.diagnostic_count &&
+                                               memcmp(saved, types, sizeof(*types) * rows) == 0);
+                        CAstConstantFact answer = c_ast_facts_constant(&facts, parent);
+                        bool published = walked && !cases[index].cap;
+                        if (published)
+                        {
+                            BUSTER_TEST(arguments, answer.status == C_AST_CONSTANT_INTEGER && !answer.high &&
+                                answer.low == target_data_layout(target_native).pointer.size && facts.constant_count == constants + 1);
+                        }
+                        else
+                        {
+                            BUSTER_TEST(arguments, answer.status == before.status && answer.low == before.low && answer.high == before.high &&
+                                answer.floating == before.floating && answer.type.value == before.type.value && answer.primitive_kind == before.primitive_kind &&
+                                answer.float_width == before.float_width && answer.offsetof_plus_one == before.offsetof_plus_one &&
+                                answer.ext80_initializer_plus_one == before.ext80_initializer_plus_one && answer.selected_node_plus_one == before.selected_node_plus_one &&
+                                facts.constant_count == constants);
+                        }
+                        BUSTER_TEST(arguments, facts.flags[operand] == C_AST_FACT_TYPED && facts.types[operand] == rows - 1 && !facts.recipe_count);
+                    }
+                }
+                c_ast_facts_release(&facts);
+            }
+        }
+        c_ast_release(&built.ast);
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // Intrinsic reservation walks evaluated nodes: storage-half values are
 // rejected only when used, and vector expansions keep sufficient capacity.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_vendor_budget_nodes(UnitTestArguments* arguments)
@@ -8871,7 +8977,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_call_builtin_facts(UnitTestArgumen
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena,
             S8("void _mm_pause(void); int ordinary(void); void f(void) { "
-               "void (*p)(void) = _mm_pause; _mm_pause(); __builtin_ia32_pause(); p(); (void)ordinary(); }"),
+               "void (*p)(void) = _mm_pause; _mm_pause(); __builtin_ia32_pause(); p(); (void)ordinary(); "
+               "(_mm_pause)(); ((ordinary))(); (p)(); }"),
             C_PREPROCESS_DIALECT_GNU17);
         CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
         CAstFacts facts = {0};
@@ -8894,9 +9001,20 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_call_builtin_facts(UnitTestArgumen
                         u32 builtin = c_ast_facts_call_builtin(&built.ast, &facts, node);
                         u32 callee = c_ast_child_at(&built.ast, node, 0);
                         String8 name = c_token_spelling(preprocess.spelling_base, preprocess.tokens[built.ast.tokens[callee]]);
-                        bool expected = string_equal(name, S8("_mm_pause")) || string_equal(name, S8("__builtin_ia32_pause"));
+                        bool expected = !c_ast_parentheses(&built.ast, callee).count &&
+                            (string_equal(name, S8("_mm_pause")) || string_equal(name, S8("__builtin_ia32_pause")));
                         builtins += builtin != 0;
                         BUSTER_TEST(arguments, facts.payloads[node] != C_AST_FACT_NONE && (builtin != 0) == expected);
+                        BUSTER_TEST(arguments, c_test_ast_call_builtin_fact(&built.ast, &preprocess, node) == builtin);
+                        CPreprocessResult cold = preprocess;
+                        cold.symbols = 0;
+                        BUSTER_TEST(arguments, c_test_ast_call_builtin_fact(&built.ast, &cold, node) == builtin);
+                        CPreprocessResult bounded = preprocess;
+                        bounded.token_count = 0;
+                        BUSTER_TEST(arguments, c_test_ast_call_builtin_fact(&built.ast, &bounded, node) == 0);
+                        bounded = preprocess;
+                        bounded.tokens = 0;
+                        BUSTER_TEST(arguments, c_test_ast_call_builtin_fact(&built.ast, &bounded, node) == 0);
                         if (builtin)
                         {
                             BUSTER_TEST(arguments, !builtin_family || builtin_family == builtin);
@@ -8914,7 +9032,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_call_builtin_facts(UnitTestArgumen
                         BUSTER_TEST(arguments, c_ast_facts_call_builtin(&built.ast, &facts, node) == C_AST_FACT_NONE);
                     }
                 }
-                BUSTER_TEST(arguments, calls == 4 && builtins == 2 && designators == 2);
+                BUSTER_TEST(arguments, calls == 7 && builtins == 2 && designators == 3);
                 BUSTER_TEST(arguments, c_ast_facts_retain_in_arena(temporary.arena, &facts) != 0 && !facts.arena);
                 u32 sealed = 0;
                 for (u32 node = 0; node < built.ast.node_count; node += 1)
@@ -9337,6 +9455,98 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_entrypoints(UnitTestArgum
 
 // Full type names retain their semantic base and abstract constructor graph,
 // including nested function parameters and VLA bound node identity.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_type_name_publication_probe(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("typedef unsigned long U; U f(U x, int** p) { return (U)(int)x + *(U*)&x + (const int)x + (volatile unsigned long)x + **(int**)p; }"),
+        S8("typedef int T; void f(int n) { (void)sizeof(int (*)[n]); (void)sizeof(int (*)(int, double)); (void)sizeof(const T); (void)sizeof(_Atomic(int)); (void)sizeof(__typeof__(n)); }"),
+        S8("typedef int* P; struct S { int x; }; typedef struct S S; int f(P p) { return ((P)p)[0] + ((S){0}).x; }"),
+        S8("typedef const int Q; Q f(Q q) { return (Q)q; }"),
+        S8("typedef int V __attribute__((vector_size(16))); V f(V v) { return (V)v; }"),
+        S8("int x = (int)1; typedef int T; T y = (T)2;"),
+        S8("enum { A = sizeof(int) }; _Static_assert(sizeof(int) > 0, \"positive size\"); typedef int Array[sizeof(int)]; int array[sizeof(int)]; extern int (*p)[sizeof(int)];"),
+    };
+    for (u32 off = 0; off < 2; off += 1)
+    {
+        for (u32 uncached = 0; uncached < 2; uncached += 1)
+        {
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[index], C_PREPROCESS_DIALECT_GNU17);
+                CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+                CAstFacts original_facts = {0};
+                CAstFacts facts = {0};
+                if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&original_facts, &built.ast) && c_ast_facts_create(&facts, &built.ast)))
+                {
+                    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                    syntax.ast = &built.ast;
+                    syntax.type_interning = true;
+                    c_test_set_type_interning_off(off != 0);
+                    c_test_ast_fact_uncached_set(uncached != 0);
+                    syntax.ast_facts = &original_facts;
+                    (void)c_test_ast_type_name_publication_take();
+                    c_test_ast_type_name_publication_set(true, true);
+                    CAnalysisResult original = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                    CTestAstTypeNamePublication reference = c_test_ast_type_name_publication_take();
+                    syntax.ast_facts = &facts;
+                    c_test_ast_type_name_publication_set(true, false);
+                    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                    CTestAstTypeNamePublication published = c_test_ast_type_name_publication_take();
+                    c_test_ast_type_name_publication_set(false, false);
+                    c_test_ast_fact_uncached_set(false);
+                    c_test_set_type_interning_off(false);
+                    BUSTER_TEST(arguments, original.analysis_complete && !original.diagnostic_count && analysis.analysis_complete && !analysis.diagnostic_count);
+                    String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &original, &analysis);
+                    difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &original, &analysis);
+                    BUSTER_TEST_RAW(arguments, !difference.length, difference);
+                    BUSTER_TEST(arguments, reference.attempted && reference.attempted == reference.queries && !reference.reused);
+                    BUSTER_TEST(arguments, published.attempted == published.reused + published.queries && published.reused == published.eligible);
+                    BUSTER_TEST(arguments, reference.readonly_checked == reference.attempted && !reference.readonly_failed &&
+                                           published.readonly_checked == published.attempted && !published.readonly_failed);
+                    BUSTER_TEST(arguments, reference.authority_compared == reference.eligible && !reference.authority_mismatches && !reference.authority_appended);
+                    BUSTER_TEST(arguments, !published.authority_compared && !published.authority_mismatches && !published.authority_appended);
+                    BUSTER_TEST(arguments, reference.state_checked == reference.eligible && !reference.state_mismatches &&
+                                           published.state_checked == published.reused && !published.state_mismatches);
+                    for (u32 node = 0; node < built.ast.node_count; node += 1)
+                    {
+                        if (built.ast.kinds[node] == C_AST_TYPE_NAME)
+                        {
+                            u32 owners[] = {c_ast_child_at(&built.ast, node, 0), node};
+                            for (u32 owner = 0; owner < BUSTER_ARRAY_LENGTH(owners); owner += 1)
+                            {
+                                u32 at = owners[owner];
+                                BUSTER_TEST(arguments, facts.flags[at] == original_facts.flags[at] && facts.types[at] == original_facts.types[at] &&
+                                                       facts.payloads[at] == original_facts.payloads[at]);
+                            }
+                        }
+                    }
+                    if (off)
+                        BUSTER_TEST(arguments, !published.eligible && !reference.eligible && published.closed && reference.closed);
+                    else if (uncached)
+                        BUSTER_TEST(arguments, !published.eligible && !reference.eligible && published.uncached && reference.uncached);
+                    else if (index == 0)
+                        BUSTER_TEST(arguments, published.reused && reference.authority_compared &&
+                                               published.qualified_primitive && reference.qualified_primitive &&
+                                               published.multiple_pointers && reference.multiple_pointers);
+                    else if (index == 5)
+                        BUSTER_TEST(arguments, published.reused && reference.authority_compared);
+                    else if (index >= 2)
+                        BUSTER_TEST(arguments, !published.reused && published.queries);
+                    if (index == 6)
+                        BUSTER_TEST(arguments, published.closed && reference.closed);
+                }
+                c_ast_facts_release(&facts);
+                c_ast_facts_release(&original_facts);
+                c_ast_release(&built.ast);
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_type_names(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -9608,6 +9818,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_required_fact_intervals(UnitTestAr
     c_ast_facts_release(&facts);
     c_ast_release(&built.ast);
     c_test_scratch_end(temporary);
+    return result;
+}
+
+// The reference keeps the former whole-tree discovery pass and the generic
+// supplied-root expansion. The candidate discovers operators in that reverse
+// expansion. Preseeded roots and completed candidate flags survive both paths.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_unevaluated_fact_intervals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const sources[] = {
+        S8("int f(int n){return sizeof(sizeof(n + 1)) + __alignof__(n);}"),
+        S8("int f(int n){__typeof__(sizeof(n + 1)) a=0; return sizeof(a);}"),
+        S8("int f(int n){return sizeof(int[n + 1]) + sizeof(int (*)[n + 2]);}"),
+        S8("int f(int n){return _Generic((n),int:sizeof(n + 1),default:__alignof__(n)) + (0?sizeof(n + 2):sizeof(n + 3));}"),
+        S8("struct R{int value;}; int f(int n){__typeof__(((struct R){n}).value) a=0; return sizeof(a), n;}"),
+        S8("int f(int n){__typeof__((int (*)[n + 1])0) p=0; return sizeof(*p) + sizeof((n, n + 2));}"),
+        S8("int f(const int n){typeof_unqual(sizeof(n + 1)) a=0; typeof_unqual(long) b=0; return sizeof(a) + (int)b;}"),
+    };
+    for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+    {
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            // The final case covers C23's expression and TYPE_NAME forms;
+            // the original six cases keep their GNU17 parsing contract.
+            CPreprocessDialect dialect = source + 1 == BUSTER_ARRAY_LENGTH(sources) ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17;
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[source], dialect);
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+            CAstFacts reference = {0};
+            CAstFacts fused = {0};
+            if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&reference, &built.ast) && c_ast_facts_create(&fused, &built.ast)))
+            {
+                u64 bytes = ((u64)built.ast.node_count + 7) / 8;
+                u8* expected = arena_allocate_zeroed(temporary.arena, u8, bytes);
+                u8* actual = arena_allocate_zeroed(temporary.arena, u8, bytes);
+                u32 bound_nodes[] = {C_AST_NODE_INVALID, C_AST_NODE_INVALID, C_AST_NODE_INVALID};
+                u32 bounds = 0;
+                for (u32 node = 0; node < built.ast.node_count; node += 1)
+                {
+                    u32 flags = (node % 5 == 0 ? C_AST_FACT_EXPRESSION : 0u) |
+                                (node % 7 == 0 ? C_AST_FACT_TYPED : 0u) | (node % 11 == 0 ? C_AST_FACT_STRING : 0u);
+                    reference.flags[node] = (u8)flags;
+                    fused.flags[node] = (u8)flags;
+                    // Model a committed bound-root column, including an absent
+                    // owner. The production bound-owner lookup stays unchanged.
+                    if (built.ast.kinds[node] == C_AST_ADD && bounds < 2) bound_nodes[bounds++] = node;
+                }
+                for (u32 bound = 0; bound < BUSTER_ARRAY_LENGTH(bound_nodes); bound += 1)
+                {
+                    u32 operand = bound_nodes[bound];
+                    if (operand != C_AST_NODE_INVALID)
+                    {
+                        expected[operand / 8] |= (u8)(1u << (operand % 8));
+                        actual[operand / 8] |= (u8)(1u << (operand % 8));
+                    }
+                }
+                for (u32 node = 0; node < built.ast.node_count; node += 1)
+                {
+                    u32 kind = built.ast.kinds[node];
+                    if (kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_ALIGNOF_EXPRESSION || kind == C_AST_TYPEOF || kind == C_AST_TYPEOF_UNQUAL)
+                    {
+                        u32 operand = c_ast_child_at(&built.ast, node, 0);
+                        if (built.ast.kinds[operand] != C_AST_TYPE_NAME) expected[operand / 8] |= (u8)(1u << (operand % 8));
+                    }
+                }
+                c_test_ast_required_fact_intervals(&reference, &built.ast, expected);
+                c_test_ast_unevaluated_fact_intervals(&fused, &built.ast, actual);
+                BUSTER_TEST(arguments, memcmp(expected, actual, bytes) == 0);
+                for (u32 node = 0; node < built.ast.node_count; node += 1)
+                    BUSTER_TEST(arguments, reference.flags[node] == fused.flags[node]);
+                BUSTER_TEST(arguments, reference.statistics.candidates == fused.statistics.candidates);
+                BUSTER_TEST(arguments, reference.statistics.machine == fused.statistics.machine);
+                BUSTER_TEST(arguments, reference.statistics.strings == fused.statistics.strings);
+            }
+            c_ast_facts_release(&fused);
+            c_ast_facts_release(&reference);
+            c_ast_release(&built.ast);
+            c_test_scratch_end(temporary);
+        }
+    }
+    // An incomplete tree never reaches either production publication pass.
+    c_ast_test_expect_failure(arguments, S8("int f(int n){return sizeof(int[n +"));
+    c_ast_test_expect_failure(arguments, S8("int f(void){__typeof__(sizeof("));
     return result;
 }
 
@@ -10322,6 +10615,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_initializer_refusal_cause);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_static_assert_authority);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unit_owner_plans);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_storage_half_publication);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vendor_budget_nodes);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_sizeof_operand_admission);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_vla_alignment);
@@ -10348,9 +10642,11 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_entrypoints);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_copy_capacity);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_names);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_type_name_publication_probe);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_projection);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unevaluated_operand_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_required_fact_intervals);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unevaluated_fact_intervals);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_cast_prefix_machine_capacity);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_required_conditional_recipe_growth);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_indirection_work);

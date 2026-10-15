@@ -13722,21 +13722,29 @@ BUSTER_C_INTERNAL void c_ir_ext80_store_bytes(u8* bytes, u64 significand, u16 ex
 
 BUSTER_C_INTERNAL bool c_ir_ext80_static_scalar_target(Target target, IrType* type)
 {
-    TargetDataLayout layout = target_data_layout(target);
-    return c_ir_target_supports_f80(target) && type && !type->is_atomic && type->kind == IR_TYPE_FLOAT && type->bit_width == 80 &&
-           type->layout.size == 16 && layout.endianness == TARGET_ENDIAN_LITTLE;
+    bool result = type && !type->is_atomic && type->kind == IR_TYPE_FLOAT && type->bit_width == 80 && type->layout.size == 16;
+    if (result)
+    {
+        TargetDataLayout layout = target_data_layout(target);
+        result = c_ir_target_supports_f80(target) && layout.endianness == TARGET_ENDIAN_LITTLE;
+    }
+    return result;
 }
 
 // Static binary128 storage needs the exact little-endian image, independently
 // of whether this target can transport runtime values through its call ABI.
 BUSTER_C_INTERNAL bool c_ir_binary128_static_target(Target target, IrType* type)
 {
-    TargetDataLayout layout = target_data_layout(target);
-    bool wasm_storage = (target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64) &&
-                        layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 128 &&
-                        layout.long_double_type.size == 16 && layout.long_double_type.alignment == 16;
-    return type && !type->is_atomic && type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && type->layout.size == 16 &&
-           (wasm_storage || c_ir_target_supports_f128_transport(target));
+    bool result = type && !type->is_atomic && type->kind == IR_TYPE_FLOAT && type->bit_width == 128 && type->layout.size == 16;
+    if (result)
+    {
+        TargetDataLayout layout = target_data_layout(target);
+        bool wasm_storage = (target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64) &&
+                            layout.endianness == TARGET_ENDIAN_LITTLE && layout.long_double_type.bit_width == 128 &&
+                            layout.long_double_type.size == 16 && layout.long_double_type.alignment == 16;
+        result = wasm_storage || c_ir_target_supports_f128_transport(target);
+    }
+    return result;
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_f80_constant_bits(CIntegerIrBuilder* builder, IrSourceRange source, String8 literal, u64 significand,
@@ -16176,6 +16184,8 @@ struct CIrLowerBodyState
     CSourceAnchor child_name;
     u32 task_count;
     u32 task_capacity;
+    u32 condition_body_count;
+    u32 condition_instruction_begin;
     u32 switch_case_capacity;
     u32 substatement_case_count;
     u32 label_count;
@@ -32486,13 +32496,36 @@ BUSTER_C_INTERNAL bool c_ir_lower_condition_branch_on_leaf(CIntegerIrBuilder* bu
 {
     CIrLowerMachine* machine = &builder->lower_machine;
     IrValueId condition = machine->child_result.value;
-    condition = machine->child_result.success ? c_ir_truth_value(builder, condition, frame->as.condition.source) : IR_VALUE_ID_INVALID;
-    IrBlockId targets[2] = {
-        frame->as.condition.leaf_true_block,
-        frame->as.condition.leaf_false_block,
-    };
-    bool branched = condition.value != IR_ID_UNDERLYING_INVALID &&
-                    c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, frame->as.condition.source);
+    bool branched = false;
+    if (machine->child_result.success && builder->function->values && condition.value < builder->function->value_count &&
+        (!builder->function->instruction_count || builder->function->instructions))
+    {
+        // The expression has already emitted its effects. A literal result
+        // (for example the final zero in (effect(), 0)) needs one entry target;
+        // retaining both would lower references from an arm that cannot execute.
+        IrValue* value = builder->function->values + condition.value;
+        IrInstruction* definition = value->definition.value < builder->function->instruction_count
+                                        ? builder->function->instructions + value->definition.value
+                                        : 0;
+        u32 width = ir_integer_type_width(ir_type_from_id(&builder->program->types, value->canonical_type));
+        IrInteger constant = {0};
+        if (definition && definition->opcode == IR_OPCODE_CONSTANT_INTEGER && definition->immediate_count == 1 && width &&
+            ir_integer_constant_decode(definition, width, &constant))
+        {
+            IrBlockId target = ir_integer_is_zero(constant) ? frame->as.condition.leaf_false_block : frame->as.condition.leaf_true_block;
+            branched = c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, frame->as.condition.source);
+        }
+        else
+        {
+            condition = c_ir_truth_value(builder, condition, frame->as.condition.source);
+            IrBlockId targets[2] = {
+                frame->as.condition.leaf_true_block,
+                frame->as.condition.leaf_false_block,
+            };
+            branched = condition.value != IR_ID_UNDERLYING_INVALID &&
+                       c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, frame->as.condition.source);
+        }
+    }
     if (branched)
     {
         frame->stage = (u8)C_IR_LOWER_STAGE_FINISH;
@@ -35962,6 +35995,7 @@ struct CIrBodyTask
     u32 ssa_loop_open;
     u32 ssa_loop_close;
     bool allow_trailing_expression;
+    bool unentered_condition;
     bool restore_before_continuation;
     // A loop body: when a variably modified declaration inside it takes a
     // stack checkpoint, that checkpoint is also what `break` and `continue`
@@ -39993,6 +40027,27 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             }
             return false;
         }
+        if (continuation == C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK && state->condition_body_count)
+        {
+            // Only rows produced by this condition can enter these fresh arm
+            // blocks. A folded arm has no target; use the existing terminated-
+            // statement path so labels inside it can still be entered by jumps.
+            for (u32 arm = 0; arm < state->condition_body_count; arm += 1)
+            {
+                CIrBodyTask* body = tasks + task_count - 1u - arm;
+                bool entered = false;
+                for (u32 row = state->condition_instruction_begin; row < builder->function->instruction_count && !entered; row += 1)
+                {
+                    IrInstruction* instruction = builder->function->instructions + row;
+                    for (u32 target = 0; target < instruction->target_count; target += 1)
+                    {
+                        entered |= instruction->targets[target].value == body->block.value;
+                    }
+                }
+                body->unentered_condition = !entered;
+            }
+            state->condition_body_count = 0;
+        }
         if (continuation == C_IR_LOWER_BODY_CONTINUE_TRAILING_EXPRESSION)
         {
             state->result = builder->lower_machine.child_result.value;
@@ -40377,6 +40432,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             {
                 return false;
             }
+            if (task.unentered_condition)
+            {
+                c_ir_end_block_unreachable(builder, declaration_source);
+            }
             c_ir_ssa_loop_open(builder, task.ssa_loop_open);
             c_ir_ssa_loop_close(builder, task.ssa_loop_close);
             if (task.kind == C_IR_BODY_TASK_CONDITION)
@@ -40642,6 +40701,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 c_ir_body_task_inherit_control(&tasks[task_count], task);
                 task_count += 1;
                 state->task_count = task_count;
+                state->condition_body_count = has_else ? 2u : 1u;
+                state->condition_instruction_begin = builder->function->instruction_count;
                 state->continuation = C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK;
                 state->temporary_mark = builder->temporary_arena->position;
                 state->yielded = true;

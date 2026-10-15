@@ -1678,6 +1678,62 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_primitive_word(u32 word)
 // one or, without a use, the spelling's in the initializer's scope, kept on the
 // node at `relative`. *lookup_out says whether a typedef name was read, which
 // the query looks up again (c_ast_types_lookups_agree).
+BUSTER_C_SHARED CAstTypeNameShape c_ast_types_type_name_shape(CAst const* ast, CPreprocessResult const* preprocess,
+                                             u32 node, u32 start, u32 end)
+{
+    CAstTypeNameShape shape = {.specifiers = C_AST_NODE_INVALID, .start = start, .stars = end, .end = end, .name = C_AST_TYPE_NONE};
+    bool bounded = ast && preprocess && node < ast->node_count && ast->kinds[node] == C_AST_TYPE_NAME &&
+                   start < end && end <= preprocess->token_count && ast->tokens[node] == start && ast->data[node] == end;
+    while (bounded && shape.stars > start && c_token_is_punctuator(preprocess->tokens + shape.stars - 1, C_PUNCTUATOR_STAR))
+    {
+        shape.stars -= 1;
+    }
+    shape.specifiers = bounded && shape.stars > start ? c_ast_types_first_child(ast, node) : C_AST_TYPE_NONE;
+    u32 first = shape.specifiers != C_AST_TYPE_NONE ? c_ast_subtree_begin(ast, shape.specifiers) : 0;
+    // Every specifier is a leaf on its own token, so the specifier list's
+    // subtree is its children, one per word before the first `*`.
+    bool words = shape.specifiers != C_AST_TYPE_NONE && ast->kinds[shape.specifiers] == C_AST_DECL_SPECIFIERS &&
+                 shape.specifiers - first == shape.stars - start;
+    for (u32 child = first; words && child < shape.specifiers; child += 1)
+    {
+        u32 kind = ast->kinds[child];
+        words = ast->tokens[child] == start + (child - first) &&
+                ((kind == C_AST_SPECIFIER_WORD && c_ast_types_primitive_word(ast->data[child])) ||
+                 (kind == C_AST_TYPEDEF_NAME && shape.specifiers - first == 1));
+    }
+    shape.valid = words;
+    shape.name = words && ast->kinds[first] == C_AST_TYPEDEF_NAME ? start : C_AST_TYPE_NONE;
+    return shape;
+}
+
+BUSTER_C_SHARED CAstExistingTypeName c_ast_types_existing_type_name(CParseResult const* result, CPreprocessResult const* preprocess,
+                                                   CAstTypeNameShape shape, CTypeId named)
+{
+    CAstExistingTypeName answer = {.base = C_TYPE_ID_INVALID, .type = C_TYPE_ID_INVALID};
+    if (shape.valid && shape.name != C_AST_TYPE_NONE)
+    {
+        answer.base = named;
+    }
+    else if (shape.valid)
+    {
+        CParsePrimitiveSpelling spelling = c_parse_primitive_type_read(*preprocess, shape.start, shape.end);
+        bool plain = spelling.seen_type && spelling.valid_specifiers && spelling.declarator_start == shape.stars &&
+                     spelling.type.kind != C_TYPE_INVALID && spelling.type.kind != C_TYPE_VA_LIST;
+        answer.base = plain ? c_parse_interned_type(result, spelling.type) : C_TYPE_ID_INVALID;
+    }
+    answer.type = answer.base;
+    for (u32 level = shape.stars; answer.type.value < result->type_count && level < shape.end; level += 1)
+    {
+        answer.type = c_parse_interned_type(result, (CType){
+                                                       .element_type = answer.type,
+                                                       .return_type = C_TYPE_ID_INVALID,
+                                                       .array_bound = C_ARRAY_BOUND_INVALID,
+                                                       .kind = C_TYPE_POINTER,
+                                                   });
+    }
+    return answer;
+}
+
 BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreprocessResult const* preprocess, u32 node, u32 relative, bool* lookup_out)
 {
     CAst const* ast = body->ast;
@@ -1685,26 +1741,10 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreproces
     u32 type_name = c_ast_types_first_child(ast, node);
     u32 open = ast->tokens[node];
     u32 close = c_ast_types_match(body, open);
-    u32 star = close;
-    while (close != C_AST_TYPE_NONE && star > open + 1 && c_ast_types_punctuator_at(body, star - 1, C_PUNCTUATOR_STAR))
-    {
-        star -= 1;
-    }
-    u32 specifiers = ast->kinds[type_name] == C_AST_TYPE_NAME && close != C_AST_TYPE_NONE && star > open + 1 ? c_ast_types_first_child(ast, type_name)
-                                                                                                         : C_AST_TYPE_NONE;
-    u32 first = specifiers != C_AST_TYPE_NONE ? c_ast_subtree_begin(ast, specifiers) : 0;
-    // Every specifier is a leaf on its own token, so the specifier list's
-    // subtree is its children, one per word before the first `*`.
-    bool words = specifiers != C_AST_TYPE_NONE && ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS && specifiers - first == star - (open + 1);
-    for (u32 child = first; words && child < specifiers; child += 1)
-    {
-        u32 kind = ast->kinds[child];
-        words = ast->tokens[child] == open + 1 + (child - first) &&
-                ((kind == C_AST_SPECIFIER_WORD && c_ast_types_primitive_word(ast->data[child])) || (kind == C_AST_TYPEDEF_NAME && specifiers - first == 1));
-    }
-    CTypeId type = C_TYPE_ID_INVALID;
+    CAstTypeNameShape shape = c_ast_types_type_name_shape(ast, preprocess, type_name, open + 1, close);
+    CTypeId named = C_TYPE_ID_INVALID;
     bool lookup = false;
-    if (words && ast->kinds[first] == C_AST_TYPEDEF_NAME)
+    if (shape.valid && shape.name != C_AST_TYPE_NONE)
     {
         bool identifier = open + 1 < body->token_total && body->tokens[open + 1].kind == C_TOKEN_IDENTIFIER;
         CEntity const* entity = identifier ? c_ast_types_bound_entity(body->result, open + 1) : 0;
@@ -1716,27 +1756,12 @@ BUSTER_GLOBAL_LOCAL CTypeId c_ast_types_type_name(CAstTypeBody* body, CPreproces
         {
             entity = c_ast_types_looked_up_entity(body, preprocess, relative, open + 1);
         }
-        type = entity && entity->kind == C_ENTITY_TYPEDEF && entity->type.value < result->type_count ? entity->type : C_TYPE_ID_INVALID;
+        named = entity && entity->kind == C_ENTITY_TYPEDEF && entity->type.value < result->type_count ? entity->type : C_TYPE_ID_INVALID;
         lookup = true;
     }
-    else if (words)
-    {
-        CParsePrimitiveSpelling spelling = c_parse_primitive_type_read(*preprocess, open + 1, close);
-        bool plain = spelling.seen_type && spelling.valid_specifiers && spelling.declarator_start == star && spelling.type.kind != C_TYPE_INVALID &&
-                     spelling.type.kind != C_TYPE_VA_LIST;
-        type = plain ? c_ast_types_interned(body, spelling.type) : C_TYPE_ID_INVALID;
-    }
-    for (u32 level = star; type.value < result->type_count && level < close; level += 1)
-    {
-        type = c_ast_types_interned(body, (CType){
-                                              .element_type = type,
-                                              .return_type = C_TYPE_ID_INVALID,
-                                              .array_bound = C_ARRAY_BOUND_INVALID,
-                                              .kind = C_TYPE_POINTER,
-                                          });
-    }
+    CAstExistingTypeName answer = c_ast_types_existing_type_name(result, preprocess, shape, named);
     *lookup_out = lookup;
-    return type.value < result->type_count ? type : C_TYPE_ID_INVALID;
+    return answer.type.value < result->type_count ? answer.type : C_TYPE_ID_INVALID;
 }
 
 // `(T)operand`. Without constraint checks the machine does not type the
@@ -3161,12 +3186,22 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_fact_kind(u32 kind)
 
 // Unevaluated query operands also need F1 outside bodies and initializers.
 // Mark their complete expression subtrees before the final completion pass.
-BUSTER_C_SHARED void c_ast_types_facts_require(CAstFacts* facts, CAst const* ast, u8* required)
+// In unevaluated mode, each operator seeds its direct operand while walking
+// backward: the postorder child is strictly earlier and has not been consumed.
+// The generic mode expands only the roots its caller supplied.
+BUSTER_C_SHARED void c_ast_types_facts_require(CAstFacts* facts, CAst const* ast, u8* required, bool unevaluated_operands)
 {
     u32 floor = C_AST_NODE_INVALID;
     for (u32 position = ast->node_count; position; position -= 1)
     {
         u32 node = position - 1;
+        u32 kind = ast->kinds[node];
+        if (unevaluated_operands && (kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_ALIGNOF_EXPRESSION ||
+                                    kind == C_AST_TYPEOF || kind == C_AST_TYPEOF_UNQUAL))
+        {
+            u32 operand = c_ast_child_at(ast, node, 0);
+            if (ast->kinds[operand] != C_AST_TYPE_NAME) required[operand / 8] |= (u8)(1u << (operand % 8));
+        }
         u8 bit = (u8)(1u << (node % 8));
         if (required[node / 8] & bit)
         {
@@ -3174,7 +3209,7 @@ BUSTER_C_SHARED void c_ast_types_facts_require(CAstFacts* facts, CAst const* ast
             floor = floor == C_AST_NODE_INVALID ? begin : BUSTER_MIN(floor, begin);
         }
         required[node / 8] &= (u8)~bit;
-        if (floor != C_AST_NODE_INVALID && c_ast_types_fact_kind(ast->kinds[node]) && !(facts->flags[node] & C_AST_FACT_EXPRESSION))
+        if (floor != C_AST_NODE_INVALID && c_ast_types_fact_kind(kind) && !(facts->flags[node] & C_AST_FACT_EXPRESSION))
         {
             facts->flags[node] |= C_AST_FACT_EXPRESSION;
             facts->statistics.candidates += 1;
@@ -3887,22 +3922,34 @@ BUSTER_GLOBAL_LOCAL CSymbolBuiltin c_ast_types_call_builtin(CAst const* ast, CPr
     CSymbolBuiltin result = C_SYMBOL_BUILTIN_NONE;
     u32 kind = callee < ast->node_count ? ast->kinds[callee] : C_AST_KIND_COUNT;
     bool named = kind == C_AST_IDENTIFIER;
-    if (named && !c_ast_parentheses(ast, callee).count)
+    if (named)
     {
         u32 anchor = ast->tokens[callee];
-        CToken token = preprocess->tokens[anchor];
-        CSymbolTable* symbols = preprocess->symbols;
-        if (token.symbol && symbols && token.symbol <= symbols->predefined_limit)
+        // Classification now precedes the grouping query, including for a
+        // parenthesized callee. A bounded private view must not read outside
+        // its token column before that grouping can exclude the builtin.
+        if (preprocess->tokens && anchor < preprocess->token_count)
         {
-            result = (CSymbolBuiltin)symbols->builtin_kinds[token.symbol];
-        }
-        else
-        {
-            String8 spelling = c_token_spelling(preprocess->spelling_base, token);
-            if (!token.symbol || !symbols || string_starts_with_sequence(spelling, S8("__builtin_")) || string_equal(spelling, S8("__rdtsc")))
+            CToken token = preprocess->tokens[anchor];
+            CSymbolTable* symbols = preprocess->symbols;
+            if (token.symbol && symbols && token.symbol <= symbols->predefined_limit)
             {
-                result = c_symbol_builtin_from_spelling(spelling);
+                result = (CSymbolBuiltin)symbols->builtin_kinds[token.symbol];
             }
+            else
+            {
+                String8 spelling = c_token_spelling(preprocess->spelling_base, token);
+                if (!token.symbol || !symbols || string_starts_with_sequence(spelling, S8("__builtin_")) || string_equal(spelling, S8("__rdtsc")))
+                {
+                    result = c_symbol_builtin_from_spelling(spelling);
+                }
+            }
+        }
+        // Ordinary names already have the finished NONE identity and need
+        // no binary searches through the unit's delimiter provenance rows.
+        if (result != C_SYMBOL_BUILTIN_NONE && c_ast_parentheses(ast, callee).count)
+        {
+            result = C_SYMBOL_BUILTIN_NONE;
         }
     }
     return result;
@@ -3960,12 +4007,22 @@ BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast,
 // ---- verification and test seams ---------------------------------------------------
 
 #if BUSTER_INCLUDE_TESTS
+u32 c_test_ast_call_builtin_fact(CAst const* ast, CPreprocessResult const* preprocess, u32 node)
+{
+    return (u32)c_ast_types_call_builtin(ast, preprocess, node);
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_verify_enabled;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_facts_uncached_enabled;
 
 void c_test_ast_required_fact_intervals(CAstFacts* facts, CAst const* ast, u8* required)
 {
-    c_ast_types_facts_require(facts, ast, required);
+    c_ast_types_facts_require(facts, ast, required, false);
+}
+
+void c_test_ast_unevaluated_fact_intervals(CAstFacts* facts, CAst const* ast, u8* required)
+{
+    c_ast_types_facts_require(facts, ast, required, true);
 }
 
 void c_test_ast_fact_uncached_set(bool enabled)

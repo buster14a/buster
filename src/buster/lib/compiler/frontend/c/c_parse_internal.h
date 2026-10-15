@@ -41,6 +41,18 @@ BUSTER_F_DECL bool c_test_array_bound_words_agree(Arena* arena, CPreprocessResul
 // and TYPEOF completion membership-node visits.
 BUSTER_F_DECL u64 c_test_assignment_chain_work(void);
 
+// One numeric storage-half publication under the actual body scratch guard.
+// Existing scratch-limit/trace seams control the guard. Report its terminal
+// exhaustion and machine failure separately before restoring the outer guard.
+typedef struct CTestAstStorageHalfPublication CTestAstStorageHalfPublication;
+struct CTestAstStorageHalfPublication
+{
+    bool exhausted;
+    bool failed;
+};
+BUSTER_F_DECL CTestAstStorageHalfPublication c_test_ast_storage_half_publication(Arena* scratch, CParseResult* result, CAst const* ast,
+                                                                                 CAstFacts* facts, Target target, u32 parent, bool failed_before, bool exhausted_before);
+
 // Caps, on the calling thread, the scratch bytes each function body's guarded
 // validation allocations (c_parse_body_scratch_allocate) may claim past the
 // body's starting position, so a small fixture exhausts the same allocation
@@ -188,6 +200,32 @@ BUSTER_F_DECL CTestAstTypeVerify c_test_ast_type_verify_take(void);
 // Turns the declaration specifier read from the tree (c_parse.c) off and back
 // on, per thread, so a test can analyse the same unit with and without it.
 BUSTER_F_DECL void c_test_ast_specifiers_set(bool enabled);
+
+// Private controls for existing-row TYPE_NAME publication. Recorded original
+// mode executes the unchanged semantic producer and compares both type IDs.
+typedef struct CTestAstTypeNamePublication CTestAstTypeNamePublication;
+struct CTestAstTypeNamePublication
+{
+    u64 attempted;
+    u64 eligible;
+    u64 reused;
+    u64 qualified_primitive;
+    u64 multiple_pointers;
+    u64 state_checked;
+    u64 state_mismatches;
+    u64 queries;
+    u64 closed;
+    u64 suspended;
+    u64 uncached;
+    u64 readonly_checked;
+    u64 readonly_failed;
+    u64 authority_compared;
+    u64 authority_mismatches;
+    u64 authority_appended;
+};
+BUSTER_F_DECL void c_test_ast_type_name_publication_set(bool record, bool original);
+BUSTER_F_DECL CTestAstTypeNamePublication c_test_ast_type_name_publication_take(void);
+
 // Verify mode for the type-name runs skipped as no type name
 // (c_parse_type_name_specifiers under -fc-ast-pilot): the machine's attempt
 // also runs on every skipped run, and the counts record the runs it checked
@@ -261,6 +299,8 @@ BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
 // Force fresh completion queries to exercise row-free capture and rollback.
 BUSTER_F_DECL void c_test_ast_fact_uncached_set(bool enabled);
 BUSTER_F_DECL void c_test_ast_required_fact_intervals(CAstFacts* facts, CAst const* ast, u8* required);
+BUSTER_F_DECL void c_test_ast_unevaluated_fact_intervals(CAstFacts* facts, CAst const* ast, u8* required);
+BUSTER_F_DECL u32 c_test_ast_call_builtin_fact(CAst const* ast, CPreprocessResult const* preprocess, u32 node);
 BUSTER_F_DECL void c_test_enum_scope_dirty_set(bool enabled);
 // Keeps the interning window shut (CTypeInterning), so one source can be
 // compiled with and without interned rows and the objects compared.

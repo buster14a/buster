@@ -3114,6 +3114,19 @@ node references for nonconstant bounds. Completion runs use the protected TYPE
 constant-evaluation mode and restore the full semantic checkpoint after
 publication. No new C row or IR type is emitted by this producer.
 
+Plain type names can publish existing rows directly while the interning window
+is enabled and unsuspended. The protected cast/compound reader supplies both
+the written base and final pointer type for primitive specifier words or one
+exactly source-bound, unqualified scalar typedef followed by plain stars. Every
+row must already be live, the token/span identity must agree, no semantic frame
+may be active, and the built position index must prove no identity site. The
+publisher preserves the original scalar root's six result/mutation outputs;
+it neither adds rows nor performs a new semantic rule. Closed windows, pending
+resource failures, qualified or nonprimitive typedefs, constructors and all
+other refusals retain the original checkpointed producer. Private original-mode
+controls compare both type facts, the semantic model and those root outputs;
+uncached fact tests also keep the original producer.
+
 The node type-name consumer now reads this graph with an explicit resumable
 stack and asks the shared node scheduler for bound constants. Source typedef
 identity is retained on TYPEDEF_NAME separately from the completed qualified
