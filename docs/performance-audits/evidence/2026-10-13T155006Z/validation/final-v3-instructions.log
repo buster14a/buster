@@ -1,0 +1,6 @@
+PERFORMANCE_EVIDENCE claim=work-reduction class=work-count tool=perf-stat complete=yes
+| metric | baseline median | candidate median | change | verdict |
+|---|---|---|---|---|
+| instructions (count) | 8.6718e+09 | 7.42309e+09 | -14.400% | improvement |
+Result: work reduction validated (instructions -14.400%); native runtime not measured
+not Zen 5 evidence: never discharges a zen5 inventory row or a Zen 5 claim (#4013)

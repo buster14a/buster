@@ -1089,25 +1089,35 @@ class CompletionGateTests(unittest.TestCase):
         with mock.patch.object(github_ci_time, "api_get", side_effect=[run] + [batch] * 4) as fetch, \
                 mock.patch.object(github_ci_time.time, "sleep") as sleep:
             result = github_ci_time.require_jobs(args)
-        self.assertFalse(result["success"])
+        # After every refresh the shadow's job-level success is accepted with a
+        # recorded waiver (#4102); attempt 1's step records are never used.
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual(result["step_proof_waived"], [target_name])
         self.assertEqual(result["job_metadata"]["snapshot_attempts"], 4)
         self.assertEqual(fetch.call_count, 5)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.0, 2.0, 4.0])
-        self.assertTrue(any("exact run/head proof unresolved after 4 snapshots" in error
-                            for error in result["errors"]))
-        missing = [error for error in result["errors"]
-                   if target_name in error and "lacks unique completion proof" in error]
-        self.assertEqual(len(missing), 4)
         target = next(job for job in result["jobs"] if job["name"] == target_name)
         self.assertEqual(target["run_attempt"], 2)
         self.assertEqual(target["run_id"], 123)
         self.assertEqual(target["head_sha"], "a" * 40)
+        self.assertTrue(target["step_proof_waived"])
         self.assertTrue(all(step["matching_records"] == 0 for step in target["required_steps"]))
+        shadow["steps"] = [{"name": "Desktop result and reproduction", "status": "completed", "conclusion": "skipped"}]
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run, batch]), \
+                mock.patch.object(github_ci_time.time, "sleep"):
+            result = github_ci_time.require_jobs(args)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["step_proof_waived"], [])
+        missing = [error for error in result["errors"]
+                   if target_name in error and "lacks unique completion proof" in error]
+        self.assertEqual(len(missing), 3)
+        self.assertIn(f"{target_name}: required step 'Desktop result and reproduction' concluded 'skipped'; "
+                      "success required", result["errors"])
 
     def test_metadata_refresh_budget_prevents_an_extra_sleep_or_snapshot(self):
         jobs = self.sample()
         pending = copy.deepcopy(jobs)
-        pending[0]["steps"] = []
+        pending[0].update(status="in_progress", conclusion=None)
         run = {"id": 123, "run_attempt": 1, "path": ".github/workflows/ci.yml", "head_sha": "a" * 40, "event": "push"}
         args = SimpleNamespace(repository="buster14a/buster", run_id=123, run_attempt=1)
         batch = {"total_count": len(jobs), "jobs": pending}
@@ -1221,20 +1231,6 @@ class CompletionGateTests(unittest.TestCase):
                 github_ci_time.require_jobs(args)
         self.assertEqual(fetch.call_count, 4)
 
-    def test_successful_job_with_empty_steps_is_a_distinct_unresolved_case(self):
-        jobs = self.sample()
-        target = next(job for job in jobs if job["name"] == "Linux x86-64 sanitized-release")
-        target["steps"] = []
-        run, args = self.gate_inputs()
-        batch = {"total_count": len(jobs), "jobs": jobs}
-        with mock.patch.object(github_ci_time, "api_get", side_effect=[run] + [batch] * 4), \
-                mock.patch.object(github_ci_time.time, "sleep"):
-            result = github_ci_time.require_jobs(args)
-        self.assertFalse(result["success"])
-        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 4)
-        self.assertTrue(any("Linux x86-64 sanitized-release: completed job returned no step records (steps=[])" in error
-                            for error in result["errors"]))
-
     def run_gate_main(self, responses, output, summary):
         stderr = io.StringIO()
         argv = ["github_ci_time.py", "require-jobs", "--repository", "buster14a/buster", "--run-id", "123",
@@ -1269,6 +1265,185 @@ class CompletionGateTests(unittest.TestCase):
             self.assertIn("CI timing failed: HTTP Error 403", log)
             self.assertNotIn("inventory gate unsuccessful", log)
             self.assertFalse((Path(temporary) / "raised.json").exists())
+
+    def test_read_timeout_falls_back_to_smaller_pages_and_keeps_budget_for_more_snapshots(self):
+        # #4102: one 30 s jobs read used the whole 30 s budget. Each read now has
+        # a bounded share and a timeout drops to the 5xx page size, as in #1984.
+        jobs = self.sample()
+        run, args = self.gate_inputs()
+        clock = [1000.0]
+        timeouts = []
+        page = {"total_count": len(jobs), "jobs": jobs[:github_ci_time.JOB_PAGE_FALLBACK_SIZE]}
+        responses = [run, TimeoutError("The read operation timed out"),
+                     urllib.error.URLError(TimeoutError("timed out")), page]
+
+        def read(repository, path, token, timeout):
+            timeouts.append(timeout)
+            response = responses.pop(0)
+            if isinstance(response, OSError):
+                clock[0] += timeout
+                raise response
+            clock[0] += 0.5
+            return response
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        with mock.patch.object(github_ci_time, "api_get", side_effect=read) as fetch, \
+                mock.patch.object(github_ci_time.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(github_ci_time.time, "sleep", side_effect=sleep):
+            result = github_ci_time.require_jobs(args)
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual(result["step_proof_waived"], [])
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 3)
+        self.assertEqual(result["job_metadata"]["final_page_size"], github_ci_time.JOB_PAGE_FALLBACK_SIZE)
+        self.assertEqual(result["job_metadata"]["refresh_budget_seconds"], 30.0)
+        self.assertIn("per_page=100&page=1", fetch.call_args_list[1].args[1])
+        self.assertIn(f"per_page={github_ci_time.JOB_PAGE_FALLBACK_SIZE}&page=1", fetch.call_args_list[2].args[1])
+        self.assertIn(f"per_page={github_ci_time.JOB_PAGE_FALLBACK_SIZE}&page=1", fetch.call_args_list[3].args[1])
+        self.assertEqual([lookup["outcome"] for lookup in result["job_metadata"]["lookups"]],
+                         ["ok", "TimeoutError: The read operation timed out",
+                          "URLError: <urlopen error timed out>", "ok"])
+        self.assertTrue(all(timeout <= github_ci_time.JOB_METADATA_READ_TIMEOUT_SECONDS for timeout in timeouts))
+        self.assertLessEqual(github_ci_time.JOB_METADATA_READ_TIMEOUT_SECONDS,
+                             github_ci_time.JOB_METADATA_REFRESH_BUDGET_SECONDS / 3)
+        self.assertEqual(github_ci_time.API_TIMEOUT_SECONDS, 30.0)
+        self.assertLess(clock[0] - 1000.0, github_ci_time.JOB_METADATA_REFRESH_BUDGET_SECONDS)
+
+    def test_successful_job_with_empty_or_pending_steps_is_accepted_on_job_conclusion_with_warning(self):
+        jobs = self.sample()
+        empty = next(job for job in jobs if job["name"] == "Linux x86-64 sanitized-release")
+        empty["steps"] = []
+        stale = next(job for job in jobs if job["name"] == "macOS AArch64 native")
+        stale["steps"][0].update(status="pending", conclusion=None)
+        stale["steps"][1].update(status="in_progress", conclusion=None)
+        run, _ = self.gate_inputs()
+        batch = {"total_count": len(jobs), "jobs": jobs}
+        with tempfile.TemporaryDirectory() as temporary:
+            output, summary = Path(temporary) / "gate.json", Path(temporary) / "summary.md"
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                status, log = self.run_gate_main([run] + [batch] * 4, output, summary)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            summary_text = summary.read_text(encoding="utf-8")
+        self.assertEqual(status, 0)
+        self.assertTrue(report["success"], report["errors"])
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["step_proof_waived"], ["Linux x86-64 sanitized-release", "macOS AArch64 native"])
+        self.assertEqual(report["job_metadata"]["snapshot_attempts"], 4)
+        self.assertEqual(report["job_metadata"]["step_proof_waiver_snapshot"], 4)
+        for name in report["step_proof_waived"]:
+            line = f"CI complete inventory gate: step proof unavailable, accepted on job conclusion: {name}"
+            self.assertIn(line + "\n", log)
+            self.assertIn(f"::warning title=Step proof unavailable::{line}", stdout.getvalue())
+            self.assertIn(f"- {name}", summary_text)
+        waived = [job for job in report["jobs"] if job.get("step_proof_waived")]
+        self.assertEqual(sorted(job["name"] for job in waived), report["step_proof_waived"])
+        self.assertNotIn("inventory gate unsuccessful", log)
+        # A later snapshot with full proof needs no waiver.
+        with mock.patch.object(github_ci_time, "api_get", side_effect=[run, batch,
+                                                                          {"total_count": len(jobs),
+                                                                           "jobs": self.sample()}]), \
+                mock.patch.object(github_ci_time.time, "sleep"):
+            result = github_ci_time.require_jobs(self.gate_inputs()[1])
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual(result["step_proof_waived"], [])
+
+    def test_stale_step_waiver_never_covers_failed_steps_jobs_or_missing_jobs(self):
+        run, args = self.gate_inputs()
+        target_name = "Windows x86-64 release"
+
+        def gate(jobs):
+            batch = {"total_count": len(jobs), "jobs": jobs}
+            with mock.patch.object(github_ci_time, "api_get", side_effect=[run] + [batch] * 4), \
+                    mock.patch.object(github_ci_time.time, "sleep"):
+                return github_ci_time.require_jobs(args)
+
+        def variant(change):
+            jobs = self.sample()
+            target = next(job for job in jobs if job["name"] == target_name)
+            # Every other required step of the target is stale, so only `change` can block the waiver.
+            for step in target["steps"]:
+                step.update(status="pending", conclusion=None)
+            change(jobs, target)
+            return jobs
+
+        def failed_required(jobs, target):
+            target["steps"][0].update(status="completed", conclusion="failure")
+
+        def skipped_required(jobs, target):
+            target["steps"][0].update(status="completed", conclusion="skipped")
+
+        def failed_other_step(jobs, target):
+            target["steps"].append({"name": "Set up job", "status": "completed", "conclusion": "failure"})
+
+        def missing_required(jobs, target):
+            target["steps"].pop(0)
+
+        def duplicate_required(jobs, target):
+            target["steps"].append(dict(target["steps"][0]))
+
+        def completed_without_conclusion(jobs, target):
+            target["steps"][0].update(status="completed", conclusion=None)
+
+        def failed_job(jobs, target):
+            target.update(conclusion="failure", steps=[])
+
+        def cancelled_job(jobs, target):
+            target.update(conclusion="cancelled", steps=[])
+
+        def running_job(jobs, target):
+            target.update(status="in_progress", conclusion=None, steps=[])
+
+        def missing_job(jobs, target):
+            jobs.remove(target)
+            jobs[0]["steps"] = []
+
+        def unknown_job(jobs, target):
+            jobs.append(dict(copy.deepcopy(target), id=9999, name="Unknown workload", steps=[]))
+
+        def foreign_job(jobs, target):
+            target.update(head_sha="b" * 40, steps=[])
+
+        for change in (failed_required, skipped_required, failed_other_step, missing_required, duplicate_required,
+                       completed_without_conclusion, failed_job, cancelled_job, running_job, missing_job,
+                       unknown_job, foreign_job):
+            with self.subTest(change=change.__name__):
+                result = gate(variant(change))
+                self.assertFalse(result["success"])
+                self.assertEqual(result["step_proof_waived"], [])
+                self.assertIsNone(result["job_metadata"]["step_proof_waiver_snapshot"])
+        # The pure validator and the strict reuse path keep their exact-step proof.
+        stale = variant(lambda jobs, target: None)
+        self.assertTrue(self.check(stale))
+        self.assertEqual(github_ci_time.step_proof_waivers(stale), [target_name])
+        self.assertEqual(github_ci_time.validate_required_jobs(stale, 123, 1, "a" * 40, accept_job_conclusion=True,
+                                                               expected_names=github_ci_time.combination_jobs()), [])
+
+    def test_stale_waiver_judges_only_the_newest_complete_snapshot(self):
+        jobs = self.sample()
+        stale = copy.deepcopy(jobs)
+        next(job for job in stale if job["name"] == "Linux AArch64 release")["steps"] = []
+        run, args = self.gate_inputs()
+        batch = {"total_count": len(jobs), "jobs": stale}
+        with mock.patch.object(github_ci_time, "api_get",
+                               side_effect=[run, batch] + [self.http_error(502)] * 3), \
+                mock.patch.object(github_ci_time.time, "sleep"):
+            result = github_ci_time.require_jobs(args)
+        self.assertTrue(result["success"], result["errors"])
+        self.assertEqual(result["step_proof_waived"], ["Linux AArch64 release"])
+        self.assertEqual(result["job_metadata"]["step_proof_waiver_snapshot"], 1)
+        self.assertEqual(result["job_metadata"]["snapshot_attempts"], 4)
+        self.assertEqual(result["raw_jobs"], stale)
+        running = copy.deepcopy(stale)
+        running[1].update(status="in_progress", conclusion=None)
+        with mock.patch.object(github_ci_time, "api_get",
+                               side_effect=[run, batch, {"total_count": len(jobs), "jobs": running}] +
+                               [self.http_error(502)] * 2), \
+                mock.patch.object(github_ci_time.time, "sleep"):
+            result = github_ci_time.require_jobs(args)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["step_proof_waived"], [])
 
     def lost_runner_job(self, jobs):
         target = next(job for job in jobs if job["name"] == "macOS AArch64 sanitized-release")

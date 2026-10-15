@@ -122,7 +122,10 @@ DXC's archive is SHA-256 pinned;
 NVIDIA's small ptxas wheel is pinned in `tests/gpu/ptxas-requirements.txt` and
 installed with `--require-hashes --no-deps`. Python is only a tool provisioner;
 the build, execution and acceptance logic are native C. The required profiles
-never downgrade failures to skips. Evidence uploads run after failures too.
+never downgrade failures to skips. Ordinary and merge-group workflow lint require
+both SPIR-V profile selectors, so removing the direct Vulkan validation request
+fails lint instead of turning its acceptance evidence into `SKIP_NOT_CONFIGURED`.
+Evidence uploads run after failures too.
 
 The separate optional Metal job uses `GPU_METAL_RUNNER`, an administrator-selected
 runner label with Xcode 16.4 at the documented path. Use an ephemeral eligible

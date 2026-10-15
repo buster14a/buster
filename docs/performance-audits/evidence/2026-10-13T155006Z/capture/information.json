@@ -1,0 +1,5 @@
+{ "Success": true, "Result": {
+    "Type": "Profiler::LLMGetCaptureInformationTool::Response",
+    "CaptureDuration": 134814.82448399813,
+    "ProcessCount": 1
+} }

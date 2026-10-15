@@ -4,6 +4,14 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+Primitive C queries use `c_parse_builtin_layout` to map a C kind to the narrow
+`target_scalar_type_layout` projection. The complete `target_data_layout` API
+uses the same scalar policy and remains the owner of aggregate ABI settings.
+Both take the explicit `Target`; neither adds a cache, initialization phase,
+or dependence on a caller-supplied layout. Complex storage doubles its real
+element's size without changing alignment, GNU `sizeof(void)` remains one,
+and canonical scalar typing continues to refuse complex and storage-half kinds.
+
 - Type-embedded constant producers use the protected TYPE query contract
   described in [foundations](foundations.md). It reads a declaration-point
   model and returns stable integer facts without entering the live declaration
@@ -80,6 +88,16 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   Linux) and `c_test_tagged_member_microsoft_anonymous` (x86-64 and AArch64
   Windows) name their targets, and the Clang corpus pins both answers byte for
   byte on every native target.
+- **Flexible-array validation counts promoted names** (#3237). A complete
+  aggregate publishes one saturated effective named-member count: a direct
+  named member contributes one, while names nested through anonymous
+  structures and unions are promoted into the containing aggregate. A named
+  structure or union member does not promote its own fields. Parser validation,
+  layout classification and IR flexible-array mapping consume that same count;
+  Microsoft-target declarator-less tags retain their existing direct-member
+  rule. The registered frontend fixture checks a C17 promoted lookup and layout
+  in token and AST paths, both direct-SSA and memory-form lowering, plus
+  anonymous-inner-FAM and all-unnamed negatives.
 - File-scope object redeclarations compare each declaration's effective explicit
   alignment in `c_parse_validate_alignment_redeclarations` before canonical IR
   construction (#1561). The strictest request within one declaration is its
@@ -625,8 +643,20 @@ into a row past the solve's table (builtin, pointer and array spellings) is
 answered by `c_parse_layout_alignment_specifiers` itself: a builtin or pointer
 from the target layout, an array from its element, and a table element waits for
 its own layout like any other table type, which is also what keeps
-`_Alignas(_Alignof(struct A[1]))` inside `struct A` a diagnostic. A request that
-is an expression is first offered to `c_parse_layout_alignment_fold` (#3269):
+`_Alignas(_Alignof(struct A[1]))` inside `struct A` a diagnostic. A qualified
+copy of an aligned typedef can also be appended past that column snapshot. Its
+inherited sparse `CTypeAlignment` row points directly to the alias row that
+owns the request, so `_Alignof(const A16)` and `_Alignof(const A16) + 0`
+reuse that row's resolved size and replacement alignment instead of mistaking
+the copy's scalar kind for its natural alignment. The parser takes the newly
+appended row directly, avoiding a scan of the translation unit's type table. A qualified unaligned scalar still uses its natural
+base layout, and a pointer to an aligned typedef still uses the target's
+pointer layout. The fold no longer sends every qualified copy through the
+typed query merely because the unit contains some aligned typedef.
+`c_test_declaration_constraints` pins plain and expression forms, const and
+volatile aliases, two aligned typedefs of the same base with distinct requests,
+pointer and natural-type controls on x86-64 and AArch64. A request that is an expression is first offered to
+`c_parse_layout_alignment_fold` (#3269):
 when its `sizeof`/`_Alignof` terms (at most
 `C_PARSE_LAYOUT_ALIGNMENT_FOLD_TERM_CAPACITY`) name a typedef, tag or primitive
 with only trailing `*` and qualifiers, and the terms are joined by `+`, `*`,

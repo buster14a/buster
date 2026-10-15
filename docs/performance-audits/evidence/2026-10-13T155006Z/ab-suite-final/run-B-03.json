@@ -1,0 +1,24 @@
+{
+  "schema": "buster-native-pair-observation-v1",
+  "pair": 3,
+  "arm": "B",
+  "started_utc": "2026-10-13T16:50:10Z",
+  "argv": [
+    "/home/david/Documents/Codex/2026-10-13/ana/work/frozen/ide-candidate-v3",
+    "test",
+    "--verbose=0"
+  ],
+  "revision": "e1fb941cbe4463050a8e94231ac73717984f8ff7",
+  "binary_sha256": "513dd3b6183c14a4a6e191bddaadf6bbf0b7b7530b1658b308fd30949dfd431b",
+  "exit_code": 0,
+  "timed_out": false,
+  "wall_seconds": 116.04406559999916,
+  "user_seconds": 57.341198,
+  "system_seconds": 23.56362,
+  "max_rss_kib": 1740416,
+  "minor_faults": 7110420,
+  "major_faults": 3,
+  "voluntary_switches": 52409,
+  "involuntary_switches": 13029,
+  "scope": "wait4 for the exact child, including its reaped descendants"
+}

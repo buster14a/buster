@@ -19,8 +19,8 @@
 // little counter running time, an unexpected exit or a missing required metric
 // leaves the comparison incomplete (exit 2) and never becomes a zero value.
 // Map: pe_claims, pe_sha256_file, pe_which, pe_run, pe_parse_profile,
-//      pe_parse_perf, pe_valgrind_problem, pe_perf_problem, pe_verdicts,
-//      pe_write_summary, pe_preflight, pe_compare, pe_classify, pe_self_test, main.
+//      pe_perf_event, pe_perf_events_valid, pe_parse_perf, pe_valgrind_problem, pe_perf_problem, pe_verdicts,
+//      pe_write_summary, pe_finish, pe_path_join, pe_remove_tree, pe_preflight, pe_compare, pe_classify, pe_self_test, main.
 #include "ci_metrics_json.h"
 #include <unistd.h>
 #include <fcntl.h>
@@ -96,7 +96,7 @@ BUSTER_GLOBAL_LOCAL const char *const pe_tool_names[PE_TOOL_COUNT] = {"", "callg
 typedef struct PeMetric PeMetric;
 struct PeMetric
 {
-    char name[48], unit[16], verdict[24], missing[192];
+    char name[48], unit[16], verdict[24], missing[192], scope[16];
     PeKind kind;
     int required, multiplexed;
     unsigned count[2];
@@ -407,21 +407,54 @@ BUSTER_GLOBAL_LOCAL unsigned pe_parse_profile(const char *text, char names[][48]
     return result;
 }
 
+// This receipt supports unqualified event names and the single :u/:k scope
+// modifiers. Other perf syntax needs its own scope/identity contract.
+BUSTER_GLOBAL_LOCAL int pe_perf_event(const char *event, char base[48], char scope[16])
+{
+    const char *modifier = strchr(event, ':');
+    size_t length = modifier ? (size_t)(modifier - event) : strlen(event);
+    int valid = length > 0 && strlen(event) < 48 &&
+        (!modifier || cm_equal(modifier, ":u") || cm_equal(modifier, ":k"));
+    for (size_t i = 0; valid && i < length; ++i)
+        valid = (event[i] >= 'a' && event[i] <= 'z') || (event[i] >= 'A' && event[i] <= 'Z') ||
+            (event[i] >= '0' && event[i] <= '9') || event[i] == '-' || event[i] == '_' || event[i] == '.';
+    snprintf(base, 48, "%.*s", (int)(length < 47 ? length : 47), event);
+    cm_copy(scope, 16, modifier ? modifier + 1 : "unqualified");
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL int pe_perf_events_valid(const char *events)
+{
+    int valid = events[0] != 0;
+    for (const char *at = events; valid && *at; )
+    {
+        const char *end = strchr(at, ',');
+        size_t length = end ? (size_t)(end - at) : strlen(at);
+        char event[48], base[48], scope[16];
+        snprintf(event, sizeof(event), "%.*s", (int)(length < 47 ? length : 47), at);
+        valid = length < sizeof(event) && pe_perf_event(event, base, scope) && (!end || end[1]);
+        at += length + (end != NULL);
+    }
+    return valid;
+}
+
 // Parse `perf stat -x ,` output for the requested events; absent, unsupported,
-// uncounted or under-run events are recorded as missing with the reason.
+// uncounted, conflicting-scope or under-run events stay missing with the reason.
 BUSTER_GLOBAL_LOCAL void pe_parse_perf(PeReport *r, unsigned arm, const char *text, const char *events)
 {
     for (const char *at = events; *at; )
     {
         const char *end = strchr(at, ',');
         size_t length = end ? (size_t)(end - at) : strlen(at);
-        char event[48], line_event[64], reason[192] = "event absent from perf output";
+        char event[48], base[48], requested_scope[16], observed_scope[16] = "";
+        char reason[192] = "event absent from perf output";
         double value = 0;
-        int found = 0, running_ok = 1, multiplexed = 0;
+        int found = 0, multiplexed = 0, conflict = 0;
         snprintf(event, sizeof(event), "%.*s", (int)(length < 47 ? length : 47), at);
-        const char *unit = cm_equal(event, "task-clock") ? "msec" : "count";
+        int requested_valid = pe_perf_event(event, base, requested_scope) && length < sizeof(event);
+        const char *unit = cm_equal(base, "task-clock") ? "msec" : "count";
         PeKind kind = PE_KIND_TIMED;
-        for (const char *line = text; line && *line && !found; )
+        for (const char *line = text; requested_valid && line && *line; )
         {
             const char *stop = strchr(line, '\n');
             size_t n = stop ? (size_t)(stop - line) : strlen(line);
@@ -434,33 +467,49 @@ BUSTER_GLOBAL_LOCAL void pe_parse_perf(PeReport *r, unsigned arm, const char *te
                 cursor = strchr(cursor, ',');
                 if (cursor) *cursor++ = 0;
             }
-            cm_copy(line_event, sizeof(line_event), fields >= 3 ? field[2] : "");
-            char *modifier = strchr(line_event, ':');
-            if (modifier) *modifier = 0;
-            if (fields >= 3 && cm_equal(line_event, event))
+            char line_base[48], line_scope[16];
+            int observed_valid = pe_perf_event(fields >= 3 ? field[2] : "", line_base, line_scope);
+            if (fields >= 3 && cm_equal(line_base, base))
             {
-                found = 1;
-                double percent = fields >= 5 && field[4][0] ? strtod(field[4], NULL) : 100.0;
-                if (field[0][0] == '<') snprintf(reason, sizeof(reason), "perf reported %s", field[0]);
-                else
+                int scope_matches = observed_valid && (cm_equal(requested_scope, "unqualified") ||
+                    cm_equal(requested_scope, line_scope));
+                if (!scope_matches && !found)
+                    cm_copy(reason, sizeof(reason), "perf event scope does not match requested scope or is unsupported");
+                if (scope_matches)
                 {
-                    char *tail = NULL;
-                    value = strtod(field[0], &tail);
-                    running_ok = tail != field[0] && percent >= PE_MIN_RUNNING_PERCENT;
-                    multiplexed = percent < 100.0;
-                    if (!running_ok)
-                        snprintf(reason, sizeof(reason), "insufficient counter running time %.2f%% < %.0f%%", percent,
-                            PE_MIN_RUNNING_PERCENT);
-                    else reason[0] = 0;
+                    conflict |= found;
+                    found = 1;
+                    cm_copy(observed_scope, sizeof(observed_scope), line_scope);
+                    double percent = fields >= 5 && field[4][0] ? strtod(field[4], NULL) : 100.0;
+                    if (field[0][0] == '<') snprintf(reason, sizeof(reason), "perf reported %s", field[0]);
+                    else
+                    {
+                        char *tail = NULL;
+                        value = strtod(field[0], &tail);
+                        int running_ok = tail != field[0] && percent >= PE_MIN_RUNNING_PERCENT;
+                        multiplexed = percent < 100.0;
+                        if (!running_ok)
+                            snprintf(reason, sizeof(reason), "insufficient counter running time %.2f%% < %.0f%%", percent,
+                                PE_MIN_RUNNING_PERCENT);
+                        else reason[0] = 0;
+                    }
                 }
             }
             line = stop ? stop + 1 : NULL;
         }
+        if (!requested_valid) cm_copy(reason, sizeof(reason), "unsupported perf event syntax: use an event name with optional :u or :k");
+        if (conflict) cm_copy(reason, sizeof(reason), "multiple perf counters match the requested event and scope");
+        PeMetric *m = pe_metric(r, event, unit, kind, 1);
+        if (m && found && !reason[0] && m->scope[0] && !cm_equal(m->scope, observed_scope))
+            cm_copy(reason, sizeof(reason), "perf event scope changed between observations");
         if (found && !reason[0])
         {
             pe_record(r, arm, event, unit, kind, 1, value);
-            PeMetric *m = pe_metric(r, event, unit, kind, 1);
-            if (m) m->multiplexed |= multiplexed;
+            if (m)
+            {
+                m->multiplexed |= multiplexed;
+                cm_copy(m->scope, sizeof(m->scope), observed_scope);
+            }
         }
         else pe_missing(r, event, unit, kind, 1, reason);
         at += length + (end != NULL);
@@ -578,7 +627,20 @@ BUSTER_GLOBAL_LOCAL void pe_result(PeReport *r)
     const char *primary = r->tool == PE_TOOL_TIME ? "wall_seconds" :
         r->tool == PE_TOOL_PERF_STAT ? (cm_equal(r->claim->name, "work-reduction") ? "instructions" : "task-clock") : "Ir";
     const PeMetric *m = NULL;
-    for (unsigned i = 0; i < r->metric_count && !m; ++i) if (cm_equal(r->metrics[i].name, primary)) m = &r->metrics[i];
+    unsigned primary_count = 0;
+    for (unsigned i = 0; i < r->metric_count; ++i)
+    {
+        char base[48], scope[16];
+        int scoped_primary = r->tool == PE_TOOL_PERF_STAT && pe_perf_event(r->metrics[i].name, base, scope) && cm_equal(base, primary);
+        if (cm_equal(r->metrics[i].name, primary) || scoped_primary)
+        {
+            ++primary_count;
+            m = &r->metrics[i];
+        }
+    }
+    if (!primary_count) pe_problem(r, "missing required primary metric: ", primary);
+    else if (primary_count > 1) pe_problem(r, "multiple primary perf scopes: select one scope for ", primary);
+    if (m) primary = m->name;
     int work = cm_equal(r->claim->name, "work-reduction");
     const char *verdict = m ? m->verdict : "missing";
     if (!r->complete || !m) snprintf(r->result, sizeof(r->result), "incomplete: %s not established", work ? "work change" : "native change");
@@ -661,6 +723,7 @@ BUSTER_GLOBAL_LOCAL void pe_write_summary(FILE *f, const PeReport *r, const char
         const PeMetric *m = &r->metrics[i];
         fprintf(f, "%s\n    {\"name\": ", i ? "," : ""); cm_quote(f, m->name);
         fputs(", \"unit\": ", f); cm_quote(f, m->unit);
+        if (r->tool == PE_TOOL_PERF_STAT) { fputs(", \"scope\": ", f); cm_quote(f, m->scope); }
         fprintf(f, ", \"kind\": \"%s\", \"required\": %s, \"multiplexed\": %s, \"verdict\": ",
             m->kind == PE_KIND_COUNT ? "instrumented-count" : "paired-observation", m->required ? "true" : "false",
             m->multiplexed ? "true" : "false");
@@ -693,6 +756,17 @@ BUSTER_GLOBAL_LOCAL void pe_print(FILE *f, const PeReport *r)
     }
     fprintf(f, "Result: %s\n%s\n", r->result, PE_NOT_ZEN5);
     if (r->problems[0]) fprintf(f, "Problems: %s\n", r->problems);
+}
+
+// Finalize the same completeness, receipt and exit contract for CLI and offline controls.
+BUSTER_GLOBAL_LOCAL int pe_finish(PeReport *r, FILE *summary, const char *const identity[6], char *const *args, unsigned arg_count)
+{
+    pe_verdicts(r);
+    pe_result(r);
+    if (summary) pe_write_summary(summary, r, identity, args, arg_count);
+    pe_print(stdout, r);
+    int result = r->complete ? 0 : 2;
+    return result;
 }
 
 // Sum every per-process profile `<prefix>.<pid>.<suffix>` for one run.
@@ -769,25 +843,49 @@ BUSTER_GLOBAL_LOCAL int pe_tool_version(PeTool tool, const char *directory, char
     return result;
 }
 
+// Join only complete paths; a refusal clears the output and cannot name another file.
+BUSTER_GLOBAL_LOCAL int pe_path_join(char *out, size_t capacity, const char *parent, const char *name)
+{
+    size_t p = strlen(parent), n = strlen(name);
+    int result = p < capacity && capacity - p > 1 && n < capacity - p - 1;
+    if (result)
+    {
+        memcpy(out, parent, p);
+        out[p] = '/';
+        memcpy(out + p + 1, name, n + 1);
+    }
+    else if (capacity) out[0] = 0;
+    return result;
+}
+
 // Remove a scratch tree at most two levels deep (preflight probes, self-test cases).
-BUSTER_GLOBAL_LOCAL void pe_remove_tree(const char *root)
+BUSTER_GLOBAL_LOCAL int pe_remove_tree(const char *root)
 {
     char path[PE_PATH], file[PE_PATH];
     DIR *top = opendir(root);
+    int result = top != NULL;
     for (struct dirent *entry = top ? readdir(top) : NULL; entry; entry = readdir(top))
     {
-        snprintf(path, sizeof(path), "%s/%s", root, entry->d_name);
-        DIR *inner = entry->d_name[0] != '.' ? opendir(path) : NULL;
-        for (struct dirent *item = inner ? readdir(inner) : NULL; item; item = readdir(inner))
+        if (entry->d_name[0] != '.')
         {
-            snprintf(file, sizeof(file), "%s/%s", path, item->d_name);
-            if (item->d_name[0] != '.') unlink(file);
+            int joined = pe_path_join(path, sizeof(path), root, entry->d_name);
+            result = joined && result;
+            DIR *inner = joined ? opendir(path) : NULL;
+            for (struct dirent *item = inner ? readdir(inner) : NULL; item; item = readdir(inner))
+            {
+                if (item->d_name[0] != '.')
+                {
+                    int file_joined = pe_path_join(file, sizeof(file), path, item->d_name);
+                    if (!file_joined || unlink(file) != 0) result = 0;
+                }
+            }
+            if (inner) { closedir(inner); if (rmdir(path) != 0) result = 0; }
+            else if (joined && unlink(path) != 0) result = 0;
         }
-        if (inner) { closedir(inner); rmdir(path); }
-        else if (entry->d_name[0] != '.') unlink(path);
     }
     if (top) closedir(top);
-    rmdir(root);
+    if (rmdir(root) != 0) result = 0;
+    return result;
 }
 
 BUSTER_GLOBAL_LOCAL int pe_preflight(PeTool tool, char *const *command, unsigned command_count)
@@ -844,7 +942,11 @@ BUSTER_GLOBAL_LOCAL int pe_preflight(PeTool tool, char *const *command, unsigned
         printf("PREFLIGHT tool=%s status=%s version=\"%s\"%s%s%s\n", pe_tool_names[tool], ok ? "available" : "unavailable",
             version, reason[0] ? " reason=\"" : "", reason, reason[0] ? "\"" : "");
     else fputs("usage: performance-evidence preflight --tool callgrind|cachegrind|perf-stat|time [-- COMMAND ...]\n", stderr);
-    pe_remove_tree(directory);
+    if (!pe_remove_tree(directory) && tool != PE_TOOL_NONE)
+    {
+        fputs("PREFLIGHT cleanup=failed: scratch tree could not be completely removed\n", stderr);
+        ok = 0;
+    }
     int result = tool == PE_TOOL_NONE ? 2 : ok ? 0 : 3;
     return result;
 }
@@ -962,6 +1064,8 @@ BUSTER_GLOBAL_LOCAL int pe_compare(int argc, char **argv)
         fputs("PERFORMANCE_EVIDENCE_REFUSED paired observations need at least 6 pairs for the sign test to reach p <= 0.05\n", stderr);
     else if ((r->tool == PE_TOOL_CALLGRIND || r->tool == PE_TOOL_CACHEGRIND) && r->runs < 2)
         fputs("PERFORMANCE_EVIDENCE_REFUSED instrumented counts need at least 2 runs per arm to demonstrate repeatability\n", stderr);
+    else if (r->tool == PE_TOOL_PERF_STAT && !pe_perf_events_valid(events))
+        fputs("PERFORMANCE_EVIDENCE_REFUSED unsupported --events syntax: use event names with optional :u or :k scopes\n", stderr);
     else if (mkdir(out, 0755) != 0)
         fprintf(stderr, "PERFORMANCE_EVIDENCE_REFUSED --out %s must be a new directory so no stale output is mixed in\n", out);
     else
@@ -1018,15 +1122,12 @@ BUSTER_GLOBAL_LOCAL int pe_compare(int argc, char **argv)
                 free(log);
             }
         }
-        pe_verdicts(r);
-        pe_result(r);
         const char *identity[6] = {paths[0], sha[0], revisions[0], paths[1], sha[1], revisions[1]};
         snprintf(summary, sizeof(summary), "%s/summary.json", out);
         FILE *f = fopen(summary, "wb");
-        if (f) { pe_write_summary(f, r, identity, args, arg_count); fclose(f); }
-        else pe_problem(r, "cannot write ", summary);
-        pe_print(stdout, r);
-        result = r->complete ? 0 : 2;
+        if (!f) pe_problem(r, "cannot write ", summary);
+        result = pe_finish(r, f, identity, args, arg_count);
+        if (f) fclose(f);
     }
     free(r);
     return result;

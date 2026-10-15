@@ -9,9 +9,11 @@
 // tree keeps them: one private arena per column (CAstStorage), each reserving
 // C_AST_COLUMN_CAPACITY nodes of address space and committing C_AST_COLUMN_STEP
 // nodes at a time, so a node is written once and never copied. A tree that
-// outgrows its reservations moves once per doubling, the only copy a build can
-// make. The published tree owns the column arenas until c_ast_release; a failed
-// build releases them itself. The storage record and the diagnostics live in
+// outgrows its reservations moves once per doubling. Expression parentheses
+// are sparse rows committed at their closing markers in an independent arena,
+// with the same checked reservation growth. The published tree owns the column
+// and group arenas until c_ast_release; a failed build releases them itself.
+// The storage record and the diagnostics live in
 // the caller's arena. The tree references the preprocessing result's tokens and
 // symbols by index, so that result must outlive it. The only shared state a
 // build writes is the unit's symbol table, and only to intern the spelling of a
@@ -69,6 +71,8 @@
 //   c_ast_build, c_ast_release                   setup, the entry point, ownership
 //   c_ast_finalize_layout                        HYBRID and EXPLICIT slices
 //   c_ast_child_count .. c_ast_walk_next         accessors and traversal
+//   c_ast_span_rule, c_ast_spans_build,
+//   c_ast_spans_locate                           token spans and range lookup
 //   c_ast_validate, c_ast_dump                   checker and S-expression dump
 
 #include "c_internal.h"
@@ -683,6 +687,7 @@ struct CAstOperator
     u32 token;
     u8 kind;
     u8 precedence;
+    u8 flags;
 };
 
 // A `*` of a declarator level awaiting emission after that level's suffixes.
@@ -711,6 +716,7 @@ struct CAstStorage
     // kinds, extents, tokens, data: each column is the only allocation in its
     // arena and starts at the arena's buffer, so it grows in place.
     Arena* columns[C_AST_COLUMN_COUNT];
+    Arena* parentheses;
 };
 
 typedef struct CAstBuilder CAstBuilder;
@@ -738,6 +744,10 @@ struct CAstBuilder
     u32 node_count;
     u32 column_end;
     u32 column_capacity;
+    CAstParenthesis* parentheses;
+    u32 parenthesis_count;
+    u32 parenthesis_end;
+    u32 parenthesis_capacity;
     CAstStorage storage;
     // ---- explicit stacks.
     CAstFrame* frames;
@@ -845,6 +855,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_ast_operator_push(CAstBuilder* builder,
     entry->token = token;
     entry->kind = (u8)kind;
     entry->precedence = (u8)precedence;
+    entry->flags = 0;
 #if C_AST_COUNTERS
     builder->statistics.operator_high_water = BUSTER_MAX(builder->statistics.operator_high_water, (u64)builder->operator_count);
 #endif
@@ -1066,6 +1077,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_columns_move(CAstBuilder* builder, u32 capacity)
         }
         builder->statistics.column_copy_bytes += (u64)builder->column_end * C_AST_NODE_BYTES;
         c_ast_columns_retire(&builder->storage);
+        moved.parentheses = builder->storage.parentheses;
         builder->storage = moved;
         builder->column_capacity = capacity;
         c_ast_columns_bind(builder);
@@ -1074,6 +1086,60 @@ BUSTER_GLOBAL_LOCAL void c_ast_columns_move(CAstBuilder* builder, u32 capacity)
     {
         c_ast_columns_retire(&moved);
         c_ast_fail(builder, builder->position, C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("could not reserve the syntax tree columns"));
+    }
+}
+
+// Keeps sparse group rows in their own reservation, committed in steps and
+// moved only when that reservation is full. A failed move keeps the old rows
+// alive until the failed build releases all its storage.
+BUSTER_GLOBAL_LOCAL void c_ast_parenthesis_append(CAstBuilder* builder, u32 node, u32 open, u32 close, u32 flags)
+{
+    if (!builder->failed && builder->parenthesis_count == builder->parenthesis_end)
+    {
+        u32 capacity = builder->parenthesis_capacity;
+        bool moving = builder->storage.parentheses && builder->parenthesis_end == capacity;
+        u64 grown = moving ? (u64)capacity * 2 : capacity;
+        if (!builder->storage.parentheses || moving)
+        {
+            Arena* arena = grown <= UINT32_MAX && grown <= (UINT64_MAX - C_AST_COLUMN_HEADROOM) / sizeof(CAstParenthesis)
+                               ? c_frontend_arena_create((ArenaCreation){
+                                     .reserved_size = grown * sizeof(CAstParenthesis) + C_AST_COLUMN_HEADROOM,
+                                     .initial_size = C_AST_COLUMN_HEADROOM,
+                                     .flags = {.pool_reuse = 1},
+                                 }, C_FRONTEND_RESERVATION_ANALYSIS)
+                               : 0;
+            if (arena)
+            {
+                if (moving)
+                {
+                    u64 bytes = (u64)builder->parenthesis_count * sizeof(CAstParenthesis);
+                    CAstParenthesis* rows = arena_allocate(arena, CAstParenthesis, builder->parenthesis_count);
+                    memcpy(rows, builder->parentheses, bytes);
+                    builder->statistics.parenthesis_copy_bytes += bytes;
+                    Arena* previous = builder->storage.parentheses;
+                    arena_retire(previous, BUSTER_MIN((u64)C_PHASE_ARENA_RETAINED_SIZE, previous->reserved_size - arena_minimum_position));
+                }
+                builder->storage.parentheses = arena;
+                builder->parentheses = (CAstParenthesis*)arena_buffer_start(arena);
+                builder->parenthesis_capacity = (u32)grown;
+            }
+            else
+            {
+                c_ast_fail(builder, close, C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("could not reserve the syntax tree expression groups"));
+            }
+        }
+        if (!builder->failed)
+        {
+            u32 committed = BUSTER_MIN(C_AST_PARENTHESIS_STEP, builder->parenthesis_capacity - builder->parenthesis_end);
+            arena_allocate(builder->storage.parentheses, CAstParenthesis, committed);
+            builder->parenthesis_end += committed;
+            builder->statistics.parenthesis_committed_bytes = (u64)builder->parenthesis_end * sizeof(CAstParenthesis);
+        }
+    }
+    if (!builder->failed)
+    {
+        builder->parentheses[builder->parenthesis_count] = (CAstParenthesis){.node = node, .open = open, .close = close, .flags = flags};
+        builder->parenthesis_count += 1;
     }
 }
 
@@ -1743,7 +1809,17 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_expr(CAstBuilder* builder, CAstFrame* frame)
                     }
                     else
                     {
+                        bool after_word = false;
+                        if (builder->operator_count)
+                        {
+                            CAstOperator const* previous = builder->operators + builder->operator_count - 1;
+                            after_word = previous->token + 1 == position &&
+                                         (previous->kind == C_AST_SIZEOF_EXPRESSION || previous->kind == C_AST_ALIGNOF_EXPRESSION ||
+                                          previous->kind == C_AST_REAL || previous->kind == C_AST_IMAG || previous->kind == C_AST_EXTENSION);
+                        }
                         c_ast_operator_push(builder, C_AST_OP_PAREN, 0, builder->node_count, position);
+                        builder->operators[builder->operator_count - 1].flags =
+                            (u8)(after_word ? C_AST_PARENTHESIS_AFTER_IDENTIFIER : 0);
                         nest += 1;
                         c_ast_advance(builder);
                     }
@@ -1898,6 +1974,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_expr(CAstBuilder* builder, CAstFrame* frame)
                 CAstOperator marker = builder->operators[builder->operator_count - 1];
                 if (marker.kind == C_AST_OP_PAREN)
                 {
+                    c_ast_parenthesis_append(builder, builder->node_count - 1, marker.token, position, marker.flags);
                     builder->operator_count -= 1;
                     begin = marker.begin;
                     nest -= 1;
@@ -2831,7 +2908,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_type_name(CAstBuilder* builder, CAstFrame* f
         }
         case C_AST_TYPE_NAME_END:
         {
-            c_ast_append(builder, C_AST_TYPE_NAME, frame->begin, frame->a, frame->b);
+            c_ast_append(builder, C_AST_TYPE_NAME, frame->begin, frame->a, builder->position);
             c_ast_pop(builder);
             running = false;
             break;
@@ -3753,6 +3830,11 @@ enum
     C_AST_ATTRIBUTE_GROUP_AFTER_ARGUMENT,
     // F_ATTR_GROUP flag: the current item is `namespace::name`.
     C_AST_ATTRIBUTE_GROUP_SCOPED = 1,
+    // F_ATTR_GROUP flag: the current item's namespace is another vendor's
+    // than GNU's or Clang's, whose attributes take expressions: its argument
+    // clause is a balanced token sequence (C23 6.7.13.2), which has no
+    // expression to commit, so no argument nodes are appended.
+    C_AST_ATTRIBUTE_GROUP_VENDOR = 2,
 };
 
 enum
@@ -4316,7 +4398,10 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_is_attribute_name(CToken token)
 
 // One group: `__attribute__ (( items ))`, `[[ items ]]` or
 // `__declspec ( items )`. An item is a name or `ns::name` with an optional
-// parenthesized argument list of expressions and type-names.
+// parenthesized argument list of expressions and type-names. A standard
+// attribute in a vendor namespace other than gnu or clang takes any balanced
+// token sequence as its arguments, which the item skips and keeps no node
+// for.
 BUSTER_GLOBAL_LOCAL void c_ast_step_attr_group(CAstBuilder* builder, CAstFrame* frame)
 {
     bool running = true;
@@ -4398,13 +4483,23 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_attr_group(CAstBuilder* builder, CAstFrame* 
                 frame->e = builder->node_count;
                 frame->d = builder->position;
                 frame->f = 0;
-                frame->flags = (u16)(frame->flags & ~C_AST_ATTRIBUTE_GROUP_SCOPED);
+                frame->flags = (u16)(frame->flags & ~(C_AST_ATTRIBUTE_GROUP_SCOPED | C_AST_ATTRIBUTE_GROUP_VENDOR));
                 c_ast_advance(builder);
                 bool valid = true;
+                bool opaque = false;
                 if (standard && c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_COLON) &&
                     c_ast_is_punctuator(c_ast_peek(builder, 1), C_PUNCTUATOR_COLON))
                 {
+                    String8 scope = c_token_spelling(builder->preprocess.spelling_base, token);
+                    opaque = !string_equal(scope, S8("gnu")) && !string_equal(scope, S8("__gnu__")) && !string_equal(scope, S8("clang")) &&
+                             !string_equal(scope, S8("_Clang"));
                     c_ast_append(builder, C_AST_ATTRIBUTE_NAMESPACE, builder->node_count, frame->d, 0);
+                    String8 space = c_token_spelling(builder->preprocess.spelling_base, token);
+                    if (!string_equal(space, S8("gnu")) && !string_equal(space, S8("__gnu__")) && !string_equal(space, S8("clang")) &&
+                        !string_equal(space, S8("_Clang")))
+                    {
+                        frame->flags |= C_AST_ATTRIBUTE_GROUP_VENDOR;
+                    }
                     c_ast_advance(builder);
                     c_ast_advance(builder);
                     CToken name = c_ast_peek(builder, 0);
@@ -4420,7 +4515,37 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_attr_group(CAstBuilder* builder, CAstFrame* 
                         c_ast_fail_expected(builder, C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("an attribute name after '::'"));
                     }
                 }
-                if (valid)
+                if (valid && opaque && c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_LEFT_PARENTHESIS))
+                {
+                    // A vendor's standard attribute: its argument clause is
+                    // any balanced token sequence (C23 6.7.13.2), which no
+                    // node describes. The item keeps no argument children.
+                    u32 depth = 0;
+                    bool skipping = true;
+                    while (skipping && !builder->failed)
+                    {
+                        CToken skipped = c_ast_peek(builder, 0);
+                        if (skipped.kind == C_TOKEN_END_OF_FILE)
+                        {
+                            c_ast_fail_expected(builder, C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("')' to close the attribute arguments"));
+                        }
+                        else
+                        {
+                            bool opens = c_ast_is_punctuator(skipped, C_PUNCTUATOR_LEFT_PARENTHESIS) ||
+                                         c_ast_is_punctuator(skipped, C_PUNCTUATOR_LEFT_BRACKET) ||
+                                         c_ast_is_punctuator(skipped, C_PUNCTUATOR_LEFT_BRACE);
+                            bool closes = c_ast_is_punctuator(skipped, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                                          c_ast_is_punctuator(skipped, C_PUNCTUATOR_RIGHT_BRACKET) ||
+                                          c_ast_is_punctuator(skipped, C_PUNCTUATOR_RIGHT_BRACE);
+                            depth += opens ? 1 : 0;
+                            depth -= closes && depth ? 1 : 0;
+                            skipping = !(closes && depth == 0);
+                            c_ast_advance(builder);
+                        }
+                    }
+                    item_done = !builder->failed;
+                }
+                else if (valid)
                 {
                     if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_LEFT_PARENTHESIS))
                     {
@@ -4446,6 +4571,53 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_attr_group(CAstBuilder* builder, CAstFrame* 
             {
                 c_ast_advance(builder);
                 item_done = true;
+            }
+            else if (frame->flags & C_AST_ATTRIBUTE_GROUP_VENDOR)
+            {
+                // Step over the balanced sequence to the `)` that closes it.
+                u32 depth = 0;
+                bool scanning = true;
+                while (scanning)
+                {
+                    CToken current = c_ast_peek(builder, 0);
+                    if (current.kind == C_TOKEN_END_OF_FILE)
+                    {
+                        c_ast_fail_expected(builder, C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("')' to close the attribute arguments"));
+                        scanning = false;
+                    }
+                    else if (c_ast_is_punctuator(current, C_PUNCTUATOR_LEFT_PARENTHESIS) || c_ast_is_punctuator(current, C_PUNCTUATOR_LEFT_BRACKET) ||
+                             c_ast_is_punctuator(current, C_PUNCTUATOR_LEFT_BRACE))
+                    {
+                        depth += 1;
+                        c_ast_advance(builder);
+                    }
+                    else if (c_ast_is_punctuator(current, C_PUNCTUATOR_RIGHT_PARENTHESIS) ||
+                             c_ast_is_punctuator(current, C_PUNCTUATOR_RIGHT_BRACKET) || c_ast_is_punctuator(current, C_PUNCTUATOR_RIGHT_BRACE))
+                    {
+                        if (depth)
+                        {
+                            depth -= 1;
+                            c_ast_advance(builder);
+                        }
+                        else
+                        {
+                            if (c_ast_is_punctuator(current, C_PUNCTUATOR_RIGHT_PARENTHESIS))
+                            {
+                                c_ast_advance(builder);
+                                item_done = true;
+                            }
+                            else
+                            {
+                                c_ast_fail_expected(builder, C_DIAGNOSTIC_UNMATCHED_DELIMITER, S8("')' to close the attribute arguments"));
+                            }
+                            scanning = false;
+                        }
+                    }
+                    else
+                    {
+                        c_ast_advance(builder);
+                    }
+                }
             }
             else
             {
@@ -5211,6 +5383,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_block(CAstBuilder* builder, CAstFrame* frame
                     c_ast_scope_pop(builder, frame->c);
                 }
                 c_ast_append(builder, C_AST_COMPOUND_STATEMENT, frame->begin, frame->a, frame->b);
+                c_ast_parenthesis_append(builder, builder->node_count - 1, frame->a, builder->position - 1, C_AST_DELIMITER_BLOCK);
                 c_ast_pop(builder);
                 running = false;
             }
@@ -5265,6 +5438,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_if(CAstBuilder* builder, CAstFrame* frame)
         {
             if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
+                c_ast_parenthesis_append(builder, builder->node_count - 1, frame->a + 1, builder->position, C_AST_DELIMITER_CONDITION);
                 c_ast_advance(builder);
                 frame->state = C_AST_IF_AFTER_THEN;
                 if (c_ast_start_child_statement(builder, false))
@@ -5341,6 +5515,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_while(CAstBuilder* builder, CAstFrame* frame
         {
             if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
+                c_ast_parenthesis_append(builder, builder->node_count - 1, frame->a + 1, builder->position, C_AST_DELIMITER_CONDITION);
                 c_ast_advance(builder);
                 frame->state = C_AST_WHILE_AFTER_BODY;
                 if (c_ast_start_child_statement(builder, false))
@@ -5393,6 +5568,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_do(CAstBuilder* builder, CAstFrame* frame)
             if (c_ast_is_word(builder, c_ast_peek(builder, 0), C_AST_WORD_WHILE) &&
                 c_ast_is_punctuator(c_ast_peek(builder, 1), C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
+                frame->b = builder->position + 1;
                 c_ast_advance(builder);
                 c_ast_advance(builder);
                 frame->state = C_AST_DO_AFTER_CONDITION;
@@ -5409,6 +5585,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_do(CAstBuilder* builder, CAstFrame* frame)
         {
             if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
+                c_ast_parenthesis_append(builder, builder->node_count - 1, frame->b, builder->position, C_AST_DELIMITER_CONDITION);
                 c_ast_advance(builder);
                 if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_SEMICOLON))
                 {
@@ -5539,6 +5716,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_for(CAstBuilder* builder, CAstFrame* frame)
         {
             if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
+                frame->d = builder->position;
                 c_ast_advance(builder);
                 frame->state = C_AST_FOR_END;
                 if (c_ast_start_child_statement(builder, false))
@@ -5559,6 +5737,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_for(CAstBuilder* builder, CAstFrame* frame)
         {
             if (c_ast_is_punctuator(c_ast_peek(builder, 0), C_PUNCTUATOR_RIGHT_PARENTHESIS))
             {
+                frame->d = builder->position;
                 c_ast_advance(builder);
                 frame->state = C_AST_FOR_END;
                 if (c_ast_start_child_statement(builder, false))
@@ -5576,6 +5755,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_step_for(CAstBuilder* builder, CAstFrame* frame)
         {
             c_ast_scope_pop(builder, frame->c);
             c_ast_append(builder, C_AST_FOR, frame->begin, frame->a, frame->b);
+            c_ast_parenthesis_append(builder, builder->node_count - 1, frame->a + 1, frame->d, C_AST_DELIMITER_FOR_HEADER);
             c_ast_pop(builder);
             running = false;
             break;
@@ -6021,16 +6201,17 @@ BUSTER_GLOBAL_LOCAL void c_ast_builder_init(CAstBuilder* builder, CPreprocessRes
     builder->dialect = preprocess.dialect;
     builder->gnu = c_preprocess_dialect_is_gnu(preprocess.dialect);
     builder->c23 = c_preprocess_dialect_is_c23(preprocess.dialect);
-    builder->symbols = preprocess.symbols;
+    // A hand-built stream carries no symbol table and no interned tokens.
+    // The builder then interns every name into a table of its own in the
+    // phase arena: the tree's symbols are that table's ids, which no
+    // consumer of such a stream compares with another table's.
+    builder->symbols = preprocess.symbols ? preprocess.symbols : c_symbol_table_standalone(builder->phase);
+    preprocess.symbols = builder->symbols;
     builder->eof_token = (CToken){.kind = C_TOKEN_END_OF_FILE};
     builder->ret_name_token = C_AST_NODE_INVALID;
     if (preprocess.token_count >= C_AST_NODE_LIMIT)
     {
         c_ast_fail(builder, 0, C_DIAGNOSTIC_SOURCE_TOO_LARGE, S8("the token stream is too long for a syntax tree"));
-    }
-    else if (!preprocess.symbols)
-    {
-        c_ast_fail(builder, 0, C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS, S8("the syntax tree builder needs the preprocessing symbol table"));
     }
     else
     {
@@ -6082,11 +6263,13 @@ BUSTER_GLOBAL_LOCAL void c_ast_publish(CAstBuilder* builder, Arena* arena, CAst*
     ast->extents = builder->extents;
     ast->tokens = builder->tokens;
     ast->data = builder->data;
+    ast->parentheses = builder->parentheses;
+    ast->parenthesis_count = builder->parenthesis_count;
     ast->storage = storage;
     ast->node_count = count;
     ast->root = count ? count - 1 : C_AST_NODE_INVALID;
     ast->layout = C_AST_LAYOUT_IMPLICIT;
-    builder->statistics.retained_bytes = (u64)count * C_AST_NODE_BYTES;
+    builder->statistics.retained_bytes = (u64)count * C_AST_NODE_BYTES + (u64)builder->parenthesis_count * sizeof(CAstParenthesis);
 }
 
 // Writes the children of `node` in source order into `roots[0..count)`; the
@@ -6219,6 +6402,7 @@ CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess, CAstOptions o
         CAstBuilder builder = {0};
         builder.arena = arena;
         builder.phase = phase;
+        builder.parenthesis_capacity = options.parenthesis_capacity ? options.parenthesis_capacity : C_AST_PARENTHESIS_CAPACITY;
         c_ast_builder_init(&builder, preprocess, options);
         if (!builder.failed)
         {
@@ -6240,6 +6424,11 @@ CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess, CAstOptions o
         else
         {
             c_ast_columns_retire(&builder.storage);
+            if (builder.storage.parentheses)
+            {
+                Arena* groups = builder.storage.parentheses;
+                arena_retire(groups, BUSTER_MIN((u64)C_PHASE_ARENA_RETAINED_SIZE, groups->reserved_size - arena_minimum_position));
+            }
             CDiagnostic diagnostic = {
                 .message = builder.fail_message,
                 .kind = builder.fail_kind,
@@ -6274,8 +6463,70 @@ void c_ast_release(CAst* ast)
     if (ast->storage)
     {
         c_ast_columns_retire(ast->storage);
+        if (ast->storage->parentheses)
+        {
+            Arena* groups = ast->storage->parentheses;
+            arena_retire(groups, BUSTER_MIN((u64)C_PHASE_ARENA_RETAINED_SIZE, groups->reserved_size - arena_minimum_position));
+            ast->storage->parentheses = 0;
+        }
     }
     *ast = (CAst){.root = C_AST_NODE_INVALID};
+}
+
+BUSTER_GLOBAL_LOCAL CAstParentheses c_ast_delimiter_slice(CAst const* ast, u32 node)
+{
+    u32 low = 0;
+    u32 high = ast->parenthesis_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (ast->parentheses[middle].node < node)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    u32 first = low;
+    high = ast->parenthesis_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (ast->parentheses[middle].node <= node)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return (CAstParentheses){.first = first, .count = low - first};
+}
+
+CAstParentheses c_ast_parentheses(CAst const* ast, u32 node)
+{
+    CAstParentheses slice = c_ast_delimiter_slice(ast, node);
+    if (slice.count && (ast->parentheses[slice.first + slice.count - 1].flags & C_AST_DELIMITER_OWNED_MASK))
+    {
+        slice.count -= 1;
+    }
+    return slice;
+}
+
+CAstParenthesis const* c_ast_owned_delimiter(CAst const* ast, u32 node, u32 role)
+{
+    CAstParentheses slice = c_ast_delimiter_slice(ast, node);
+    CAstParenthesis const* owned = slice.count ? ast->parentheses + slice.first + slice.count - 1 : 0;
+    return owned && (owned->flags & role & C_AST_DELIMITER_OWNED_MASK) ? owned : 0;
+}
+
+CAstParenthesis const* c_ast_parenthesis_at(CAst const* ast, u32 node, u32 level)
+{
+    CAstParentheses slice = c_ast_parentheses(ast, node);
+    return level && level <= slice.count ? ast->parentheses + slice.first + level - 1 : 0;
 }
 
 // ---- names, accessors and traversal ---------------------------------------
@@ -6439,6 +6690,230 @@ CAstWalkEvent c_ast_walk_next(CAstWalk* walk, u32* node_out)
     return result;
 }
 
+// ---- token spans ----------------------------------------------------------
+
+// The closer of the delimiter opening at `open`, or C_AST_SPAN_NONE.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 c_ast_span_match(CAstSpanInput const* input, u32 open)
+{
+    u32 close = open < input->token_total ? input->matches_plus_one[open] - 1 : C_AST_SPAN_NONE;
+    return close > open && close != C_AST_SPAN_NONE ? close : C_AST_SPAN_NONE;
+}
+
+// The first child of an interior node: the oldest subtree tiling its interval.
+BUSTER_GLOBAL_LOCAL u32 c_ast_span_first_child(CAst const* ast, u32 node)
+{
+    u32 begin = c_ast_subtree_begin(ast, node);
+    u32 child = node - 1;
+    while (c_ast_subtree_begin(ast, child) > begin)
+    {
+        child = c_ast_subtree_begin(ast, child) - 1;
+    }
+    return child;
+}
+
+void c_ast_span_expand(CAstSpanInput const* input, u32 relative, u32* first_out, u32* end_out)
+{
+    u32 first = input->first[relative];
+    u32 end = input->end[relative];
+    if (first != C_AST_SPAN_NONE)
+    {
+        while (first > 0 && c_token_is_punctuator(&input->tokens[first - 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+               c_ast_span_match(input, first - 1) == end)
+        {
+            first -= 1;
+            end += 1;
+        }
+    }
+    *first_out = first;
+    *end_out = end;
+}
+
+bool c_ast_span_rule(CAstSpanInput const* input, u32 node, u32* first_out, u32* end_out)
+{
+    CAst const* ast = input->ast;
+    u32 kind = ast->kinds[node];
+    u32 token = ast->tokens[node];
+    u32 relative = node - input->base;
+    u32 first = C_AST_SPAN_NONE;
+    u32 end = C_AST_SPAN_NONE;
+    switch (kind)
+    {
+    case C_AST_TYPE_NAME:
+    {
+        first = token;
+        end = ast->data[node];
+    }
+    break;
+    case C_AST_DECLARATOR_NAME:
+    case C_AST_IDENTIFIER:
+    case C_AST_NUMBER:
+    case C_AST_CHARACTER:
+    case C_AST_BOOLEAN_CONSTANT:
+    case C_AST_NULLPTR:
+    {
+        first = token;
+        end = token + 1;
+    }
+    break;
+    case C_AST_STRING:
+    {
+        first = token;
+        end = token + ast->data[node];
+    }
+    break;
+    case C_AST_LABEL_ADDRESS:
+    {
+        first = token ? token - 1 : C_AST_SPAN_NONE;
+        end = token + 1;
+    }
+    break;
+    case C_AST_STATEMENT_EXPRESSION:
+    case C_AST_INITIALIZER_LIST:
+    {
+        u32 close = c_ast_span_match(input, token);
+        first = close != C_AST_SPAN_NONE ? token : C_AST_SPAN_NONE;
+        end = close != C_AST_SPAN_NONE ? close + 1 : C_AST_SPAN_NONE;
+    }
+    break;
+    case C_AST_GENERIC_SELECTION:
+    case C_AST_SIZEOF_TYPE:
+    case C_AST_ALIGNOF_TYPE:
+    {
+        u32 close = c_ast_span_match(input, token + 1);
+        first = close != C_AST_SPAN_NONE ? token : C_AST_SPAN_NONE;
+        end = close != C_AST_SPAN_NONE ? close + 1 : C_AST_SPAN_NONE;
+    }
+    break;
+    case C_AST_CALL:
+    case C_AST_INDEX:
+    {
+        u32 callee = c_ast_span_first_child(ast, node);
+        u32 expanded_first = C_AST_SPAN_NONE;
+        u32 expanded_end = C_AST_SPAN_NONE;
+        c_ast_span_expand(input, callee - input->base, &expanded_first, &expanded_end);
+        u32 close = c_ast_span_match(input, token);
+        if (expanded_first != C_AST_SPAN_NONE && close != C_AST_SPAN_NONE)
+        {
+            first = expanded_first;
+            end = close + 1;
+        }
+    }
+    break;
+    case C_AST_MEMBER:
+    case C_AST_MEMBER_ARROW:
+    case C_AST_POST_INCREMENT:
+    case C_AST_POST_DECREMENT:
+    {
+        u32 expanded_first = C_AST_SPAN_NONE;
+        u32 expanded_end = C_AST_SPAN_NONE;
+        c_ast_span_expand(input, relative - 1, &expanded_first, &expanded_end);
+        if (expanded_first != C_AST_SPAN_NONE)
+        {
+            first = expanded_first;
+            end = token + 1;
+        }
+    }
+    break;
+    case C_AST_COMPOUND_LITERAL:
+    {
+        u32 close = c_ast_span_match(input, ast->tokens[node - 1]);
+        first = close != C_AST_SPAN_NONE ? token : C_AST_SPAN_NONE;
+        end = close != C_AST_SPAN_NONE ? close + 1 : C_AST_SPAN_NONE;
+    }
+    break;
+    default:
+    {
+        if (kind >= C_AST_PRE_INCREMENT && kind <= C_AST_CAST)
+        {
+            u32 expanded_first = C_AST_SPAN_NONE;
+            u32 expanded_end = C_AST_SPAN_NONE;
+            c_ast_span_expand(input, relative - 1, &expanded_first, &expanded_end);
+            if (expanded_first != C_AST_SPAN_NONE)
+            {
+                first = token;
+                end = expanded_end;
+            }
+        }
+        else if (kind >= C_AST_MULTIPLY && kind <= C_AST_COMMA)
+        {
+            u32 leftmost = c_ast_span_first_child(ast, node);
+            u32 left_first = C_AST_SPAN_NONE;
+            u32 left_end = C_AST_SPAN_NONE;
+            u32 right_first = C_AST_SPAN_NONE;
+            u32 right_end = C_AST_SPAN_NONE;
+            c_ast_span_expand(input, leftmost - input->base, &left_first, &left_end);
+            c_ast_span_expand(input, relative - 1, &right_first, &right_end);
+            if (left_first != C_AST_SPAN_NONE && right_end != C_AST_SPAN_NONE)
+            {
+                first = left_first;
+                end = right_end;
+            }
+        }
+    }
+    break;
+    }
+    bool valid = first != C_AST_SPAN_NONE && end != C_AST_SPAN_NONE && first < end && end <= input->token_total;
+    *first_out = valid ? first : C_AST_SPAN_NONE;
+    *end_out = valid ? end : C_AST_SPAN_NONE;
+    return valid;
+}
+
+bool c_ast_spans_build(Arena* arena, CAst const* ast, CToken const* tokens, u32 token_total, u32 const* matches_plus_one, CAstSpans* spans)
+{
+    *spans = (CAstSpans){0};
+    bool built = ast && ast->node_count && tokens && matches_plus_one && arena;
+    if (built)
+    {
+        u32 count = ast->node_count;
+        spans->first = arena_allocate(arena, u32, count);
+        spans->end = arena_allocate(arena, u32, count);
+        spans->link = arena_allocate(arena, u32, count);
+        spans->start_head = arena_allocate_zeroed(arena, u32, (u64)token_total + 1);
+        spans->node_count = count;
+        spans->token_total = token_total;
+        spans->retained_bytes = (u64)count * sizeof(u32) * 3 + ((u64)token_total + 1) * sizeof(u32);
+        CAstSpanInput input = {.ast = ast, .tokens = tokens, .matches_plus_one = matches_plus_one, .first = spans->first, .end = spans->end,
+                               .token_total = token_total};
+        u32 spanned = 0;
+        for (u32 node = 0; node < count; node += 1)
+        {
+            u32 first = C_AST_SPAN_NONE;
+            u32 end = C_AST_SPAN_NONE;
+            bool has = c_ast_span_rule(&input, node, &first, &end);
+            spans->first[node] = first;
+            spans->end[node] = end;
+            if (has)
+            {
+                spans->link[node] = spans->start_head[first];
+                spans->start_head[first] = node + 1;
+                spanned += 1;
+            }
+        }
+        spans->spanned = spanned;
+    }
+    return built;
+}
+
+u32 c_ast_spans_locate(CAstSpans const* spans, CToken const* tokens, u32 const* matches_plus_one, u32 start, u32 end)
+{
+    u32 node = C_AST_NODE_INVALID;
+    bool searching = spans->start_head && start < end && end <= spans->token_total;
+    while (searching)
+    {
+        u32 hit = spans->start_head[start];
+        while (hit && node == C_AST_NODE_INVALID)
+        {
+            node = spans->end[hit - 1] == end ? hit - 1 : C_AST_NODE_INVALID;
+            hit = node == C_AST_NODE_INVALID ? spans->link[hit - 1] : 0;
+        }
+        searching = node == C_AST_NODE_INVALID && end > start + 2 && c_token_is_punctuator(&tokens[start], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    matches_plus_one[start] == end;
+        start += searching ? 1 : 0;
+        end -= searching ? 1 : 0;
+    }
+    return node;
+}
+
 // ---- validation -----------------------------------------------------------
 
 u32 c_ast_validate(CAst const* ast)
@@ -6448,6 +6923,28 @@ u32 c_ast_validate(CAst const* ast)
     if (count && (ast->root != count - 1 || ast->extents[count - 1] != count))
     {
         result = count - 1;
+    }
+    for (u32 index = 0; index < ast->parenthesis_count && result == C_AST_NODE_INVALID; index += 1)
+    {
+        CAstParenthesis group = ast->parentheses[index];
+        bool valid = group.node < count && group.open < group.close;
+        if (valid)
+        {
+            u32 token = ast->tokens[group.node];
+            valid = group.flags & C_AST_DELIMITER_FOR_HEADER ? ast->kinds[group.node] == C_AST_FOR && token + 1 == group.open
+                  : group.flags & C_AST_DELIMITER_BLOCK ? ast->kinds[group.node] == C_AST_COMPOUND_STATEMENT && token == group.open
+                  : group.open < token && token < group.close;
+        }
+        if (index)
+        {
+            CAstParenthesis previous = ast->parentheses[index - 1];
+            valid = valid && (previous.node < group.node ||
+                              (previous.node == group.node && previous.open > group.open && previous.close < group.close));
+        }
+        if (!valid)
+        {
+            result = group.node < count ? group.node : ast->root;
+        }
     }
     for (u32 node = 0; node < count && result == C_AST_NODE_INVALID; node += 1)
     {

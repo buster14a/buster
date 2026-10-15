@@ -1153,13 +1153,13 @@ class CompareStatisticsTests(unittest.TestCase):
 
 @unittest.skipIf(os.name != "posix", "fake executables need a POSIX shebang")
 class CompareFlowTests(Fakes, unittest.TestCase):
-    def compare(self, arguments, candidate=None, baseline=None, perf=None):
+    def compare(self, arguments, candidate=None, baseline=None, perf=None, script=FAKE_IDE):
         root, ide, fake_perf = self.fakes("new")
         perf = perf(root) if perf else fake_perf
-        write_script(ide, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
+        write_script(ide, script, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
                                         "COMPILE_LOG": os.path.join(root, "compile-a.jsonl")}, **(baseline or {})))
         other = os.path.join(root, "ide-b")
-        write_script(other, FAKE_IDE, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
+        write_script(other, script, dict({"SOURCE": SOURCE_METRICS, "METRICS": CC_METRICS, "MODE": "new",
                                           "COMPILE_LOG": os.path.join(root, "compile-b.jsonl")}, **(candidate or {})))
         output = os.path.join(root, "cmp")
         stdout = sys.stdout
@@ -1340,6 +1340,34 @@ class CompareFlowTests(Fakes, unittest.TestCase):
                 self.assertEqual(summary["phases"] is not None, enabled)
                 self.assertIn("phase metrics collection: " + ("enabled" if enabled else "disabled"), report)
 
+    def test_retirement_operations_keep_default_arms_and_disable_timed_metrics(self):
+        syntax_script = FAKE_IDE.replace('out = args[args.index("-o") + 1]',
+                                         'out = args[args.index("-o") + 1] if "-o" in args else sys.argv[0] + ".syntax-probe"')
+        cases = (("unity-object", "-c", None), ("unity-syntax-only", "-fsyntax-only", None),
+                 ("tiny_startup-syntax-only", "-fsyntax-only", None), ("backend_pressure-object-quality", "-c", "quality"))
+        for cell, operation, allocator in cases:
+            with self.subTest(cell=cell):
+                summary, _, output = self.compare(["--pairs", "2", "--warmups", "1", "--ast-retirement-cell", cell], script=syntax_script)
+                self.assertEqual(summary["plan"]["complete_pairs"], 2)
+                self.assertTrue(summary["outputs_identical"])
+                self.assertTrue(summary["diagnostics_identical"])
+                self.assertFalse(summary["phase_metrics"]["enabled"])
+                self.assertIsNone(summary["phases"])
+                for key, role in lab.VARIANTS:
+                    own = lab.load_meta(os.path.join(output, key))
+                    self.assertEqual(own["config"]["ast_retirement_cell"], cell)
+                    self.assertEqual(own["config"]["extra"], [])
+                    self.assertTrue(summary[role]["metrics_out_supported"])
+                    self.assertFalse(summary[role]["metrics_out_enabled"])
+                    calls = self.compile_arguments(output, key)
+                    flagged = [arg for call in calls for arg in call if arg.startswith("-fmetrics-out=")]
+                    self.assertEqual(flagged, ["-fmetrics-out=" + os.path.join(output, key, "probe.ccmetrics")])
+                    for call in calls:
+                        self.assertIn(operation, call)
+                        self.assertEqual("-o" in call, operation == "-c")
+                        self.assertFalse(any("c-ast-pilot" in arg for arg in call))
+                        selected = [arg for arg in call if arg.startswith("-fregister-allocator=")]
+                        self.assertEqual(selected, ["-fregister-allocator=" + allocator] if allocator else [])
     def test_supported_flag_without_phase_records_is_still_enabled(self):
         summary, report, output = self.compare(["--pairs", "2"], {"METRICS": "CC_METRICS wall_ns=1\n"})
         self.assertTrue(summary["phase_metrics"]["enabled"])

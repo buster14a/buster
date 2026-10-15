@@ -49,12 +49,12 @@ def corpus_bundle():
     return {name: encoded(document) for name, document in documents.items()}
 
 
-def population(utility_policy=None, *, main_policy=None, main_profile="compiler-compare-v1"):
+def population(utility_policy=None, *, main_policy=None, main_profile="compiler-compare-v1", retirement=False):
     from compiler_owned_plan_test import fixture, utility_fixture, main_owned_fixture
     if utility_policy is not None and main_policy is not None:
         raise ValueError("fixture routes are mutually exclusive")
     current, ownership, planned = main_owned_fixture(main_policy, main_profile) if main_policy is not None else \
-        fixture("main") if utility_policy is None else utility_fixture(utility_policy)
+        fixture("pull" if retirement else "main", retirement=retirement) if utility_policy is None else utility_fixture(utility_policy)
     ownership.update(schema=contract.MAIN_POPULATION_SCHEMA if main_policy is not None else contract.POPULATION_SCHEMA if utility_policy is None else contract.UTILITY_POPULATION_SCHEMA, state="complete",
                      trusted_revision="e" * 40, trusted_tree="f" * 40,
                      driver_sha256="d" * 64, bootstrap_marker_sha256=contract.sha(marker()),
@@ -113,6 +113,33 @@ def population(utility_policy=None, *, main_policy=None, main_profile="compiler-
 
 
 class DataContract(unittest.TestCase):
+    def test_retirement_snapshot_keeps_its_exact_owned_after_corpus_phase(self):
+        current, raw = population(retirement=True)
+        self.assertEqual(contract.validate_population(current, raw, throughput_bundle=corpus_bundle()), [])
+        rows = current["phase_ownership"]["phases"]
+        helper = next(row for row in rows if row["phase"] == "ast-retirement-acceptance")
+        self.assertEqual([row["phase"] for row in rows][-3:], ["throughput", "ast-retirement-acceptance", "validate"])
+        self.assertEqual(helper["timeout"], 2700)
+        for case in ("missing-native-proof", "failed-helper", "renamed-phase", "forged-helper-command"):
+            changed, members = copy.deepcopy(current), copy.deepcopy(raw)
+            row = next(row for row in changed["phase_ownership"]["phases"] if row["phase"] == "ast-retirement-acceptance")
+            native = json.loads(members[row["file"]]["receipt"])
+            if case == "missing-native-proof":
+                members.pop(row["file"])
+            elif case == "failed-helper":
+                native.update(state="failed", exit_status=256)
+            elif case == "renamed-phase":
+                row["phase"] = "throughput"
+            else:
+                row["argv"][2] = "/other/ast_retirement_acceptance.py"
+                members[row["file"]]["command"] = contract.command_bytes(row["argv"])
+                native["command_sha256"] = contract.sha(members[row["file"]]["command"])
+            if case != "missing-native-proof":
+                members[row["file"]]["receipt"] = encoded(native)
+                row["receipt_sha256"] = contract.sha(members[row["file"]]["receipt"])
+            with self.subTest(case=case):
+                self.assertTrue(contract.validate_population(changed, members, throughput_bundle=corpus_bundle()))
+
     def test_main_context_refuses_nonmain_before_file_or_child_observation(self):
         for mode in (None, "pull", "utility"):
             with self.subTest(mode=mode), mock.patch.object(compare, "sha256") as digest, \

@@ -861,13 +861,33 @@ incomplete or refused; `preflight` exits 3 when the tool cannot run here.
   `tools/work_ledger/build_subject.sh` (`-march=x86-64-v3`). Keep those
   results separate from native-build identities. Never transfer a
   scalar-fallback result to a production SIMD path.
+  The ISA envelope also includes the loader, libc, and link startup objects.
+  First try `valgrind --tool=none /usr/bin/true`: a loader SIGILL already
+  rules out the application as its cause. On a distribution built for AVX-512,
+  compiling Buster for v2/v3 alone may still link a v4 requirement from
+  `Scrt1.o`. Inspect `readelf -n` on the executable. Use a compatible generic
+  runtime and its startup objects for both profiling arms, retaining their
+  identities separately from native builds; do not patch the ELF ISA
+  declaration to conceal an unsupported requirement.
 - **`time` and `perf-stat` (`native-host`)** default to one warmup and ten
   pairs, with at least six. Each metric uses an exact two-sided sign test over
   paired differences (p ≤ 0.05) plus the minimum effect. A significant change
   below the effect is `within-effect`, and anything else is `inconclusive`.
   `time` records wall, user and system time, peak RSS, faults and context
   switches through `wait4`, which includes reaped descendants. `perf-stat`
-  records each event's scope, and refuses an event that is unsupported, not
+  accepts event names with optional `:u` (user) or `:k` (kernel) scope.
+  An explicit scope matches only that scope; an unqualified request accepts
+  a single observed scope, which must remain the same across every run and
+  both arms. The receipt retains the requested spelling in the metric name
+  and the observed scope in its `scope` field (`unqualified`, `u`, or `k`).
+  Other modifier combinations or event syntax are refused before any run;
+  ambiguous matching counters are missing. A comparison must select one
+  primary scope (`instructions` for work reduction, `task-clock` for native
+  runtime); an absent required primary records an explicit problem, writes
+  `complete: false` and exits 2. Multiple primary scopes leave the result
+  incomplete. A scoped
+  result establishes only the selected scope. `perf-stat` refuses an event
+  that is unsupported, not
   counted, or ran less than 50% of the time. A multiplexed event is marked.
   Denied counters are reported as denied; do not weaken host security to
   get them.
@@ -1124,7 +1144,54 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    Since `-fc-ast-pilot` became the default (2026-10-13, #3102), variant A
    builds a tree on a head after the switch, so the profile fails closed at
    its tree probe there. The tree's acceptance follows #4058 through the
-   ordinary two-binary comparison.
+   ordinary two-binary comparison and the separate final profile below.
+
+   **Issue #4058 AST retirement profile.** The existing owner-authorized
+   pull-compare route accepts one fresh exact
+   `profile: ast-retirement-acceptance-v1` line, added exactly once against
+   every parent. Its trusted-main harness must land before the candidate
+   request. It keeps `compiler-compare-v1`, `throughput-corpus-v2` and the
+   historical AST flag-pair profile unchanged. It cannot share an attempt
+   with an analyzer, scaling or another long opt-in leg; the historical
+   inline companion keeps its existing behavior.
+
+   After both tests-off Clang Release binaries and the ordinary corpus are
+   prepared, `ast_retirement_acceptance.py` compares baseline and candidate
+   in their defaults on one frozen baseline/current-main source tree and
+   that tree's generated headers. The existing native throughput generator
+   produces its six unchanged `ci` sources. The twenty cells are the unity
+   self-host source at `-g0 -fsyntax-only` and `-g0 -c`, six corpus sources
+   at `-g0 -O0 -fsyntax-only`, and those six at `-g0 -O0 -c` under both FAST
+   and QUALITY. Syntax-only has one cell per source because it invokes no
+   allocator. No retired AST flag, link operation, source override or
+   request-provided count enters these cells.
+
+   Every cell uses twenty ABBA pairs after one warmup on CPU 2 with fresh
+   binary copies. It reuses the lab's wall-time 95% interval, `instructions:u`
+   and `wait4` peak RSS. Timed phase/output metrics stay disabled; each arm
+   has an untimed `-v` probe recording `C_AST.retained_bytes` and
+   `C_AST_FACTS.retained_bytes`. These are distinct published tree and node
+   fact components, not a whole-frontend arena total or RSS. A syntax-only
+   arm may report zero fact bytes. Separate `C_SYMBOL_BINDINGS` bytes are
+   recorded where available; a compiler without that counter reports it
+   unavailable, not zero. `C_AST_RETAINED` alias fields are never added again.
+
+   The publisher recomputes each cell's metrics from all forty raw timed
+   rows, checks the exact commands/host/binaries/source population, compares
+   reference diagnostics and object bytes, and re-reads the retained-byte
+   probe logs. Identical arm objects share one raw reference stored as two
+   deterministic gzip chunks. Both arm manifests bind its raw size/hash;
+   stored and decompressed chunks retain the existing 32-MiB member bound.
+   The publisher bounds decompression and verifies each stored/raw chunk and
+   whole object. Exceeding 64 MiB raw or the unchanged whole-bundle byte/file
+   budget fails the leg; compression raises no resource limit.
+   Source/header/generator/binary hashes must remain unchanged. Sealed raw
+   evidence and the observed approved 9700X machine record remain required.
+   Failed or unavailable counters retain their reason and raw attempt;
+   absent positive instruction counts cannot produce complete acceptance.
+   The profile is report-only, sets no new adoption threshold, and does not
+   release #4058's correctness or owner acceptance holds. Record the exact
+   authorized baseline/head and measured cells with `tools/new_audit.py`.
 
    **Issue #3011 opt-in constant-reuse profile.** The same route accepts one
    fresh exact line `profile: constant-reuse-acceptance-v1`, selected by the
@@ -2058,6 +2125,57 @@ work, literal decoding, interning, target-table preparation, machine records,
 output bytes) and per-phase minor-fault and arena rows. Use them to rank and
 prove removed work, never as timing evidence; see [the work ledger](../work-ledger.md)
 for the key contract and the frozen-corpus runner under `tools/work_ledger/`.
+
+## Parameter-edge splitting populations
+
+`tools/machine_edge_split_scaling.c` drives the production pre-allocation
+parameter-edge splitter with reversed-edge chain/fanout populations, mixed
+duplicates (one non-copy edge followed by two splitting edges), and a no-split
+control. It checks complete transformed block, instruction, edge and switch
+records against closed-form expectations, including copy offsets and the first
+splitting duplicate. Its empty/tiny controls and geometric populations cover
+both native MIR targets. These are structural fixtures with synthetic copy
+slices, not independently executable programs or allocator-validation inputs;
+the registered `machine_tests` supply broader label/debug/definition coverage.
+
+Build the probe from the repository root with the existing Clang/LLVM tools:
+
+```sh
+mkdir -p work/edge-split
+clang -O2 -g -fprofile-instr-generate -fcoverage-mapping \
+  -ffunction-sections -fdata-sections -Wall -Werror \
+  -Wno-unused-function -Wno-unused-variable \
+  -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 \
+  -DBUSTER_SINGLE_THREADED=1 -Isrc -fwrapv -fno-strict-aliasing -funsigned-char \
+  tools/machine_edge_split_scaling.c \
+  src/buster/lib/compiler/codegen/machine.c src/buster/lib/compiler/codegen/codegen.c \
+  src/buster/lib/arena.c src/buster/lib/os.c src/buster/lib/integer.c \
+  src/buster/lib/string.c src/buster/lib/float.c src/buster/lib/time.c \
+  -Wl,--gc-sections -lpthread -ldl -lm -o work/edge-split/probe
+python3 tools/machine_edge_split_scaling_coverage.py \
+  --binary work/edge-split/probe --output work/edge-split/attempt-1
+```
+
+The collector requires a fresh output directory and checks 56 cells: both
+targets, four shapes and 0/1/2/17/257/4097/16384 blocks. It locates source
+statements within the splitter and reads their actual LLVM execution regions,
+then checks the expected linear counts. Missing profiles/regions or mismatches
+fail; the expected formula never substitutes for an observed count. Preserve
+the raw `.profraw`/`.profdata` files beside `counts.json` for replay. Source,
+probe, collector and binary hashes bind the diagnostic to its inputs; rebuild
+the probe after any source change. This uses LLVM tooling outside the compiler
+and adds no production counters, rows or permanent indexes.
+
+Each invocation also checks retained allocation and scoped arena high water.
+For a splitting function the temporary maps use
+`4 * (I + 2E + 3B + 1)` bytes plus alignment; the arena cursor must retain only
+the published arrays after the call. A no-split function must preserve its
+entire function record with zero allocation/high-water growth and no indexing
+walks. Timings include the complete splitter call but exclude fixture creation
+and checking. Coverage instrumentation perturbs code and timing; these tools
+are diagnostic only. They are not yet a frozen `compiler-probes-v1` leg or a
+9700X request route and cannot establish a speedup or close #296's physical
+Zen 5, separate Zen 4, whole-compiler or text-budget acceptance cells.
 
 ## Object assembly-printer scaling
 

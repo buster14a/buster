@@ -29,6 +29,7 @@ through lowering, code generation, object construction and emission.
 | Unit arena (the caller's `arena`, or a pooled per-input arena) | driver; the whole unit, then the invocation for the single-input path | sealed preprocessing result, syntax, semantic model, canonical IR, codegen module, object |
 | Phase arena (`C_PHASE_ARENA_RESERVED_SIZE`) | the caller of `c_preprocess` (`CPreprocessOptions.phase_arena`, carried to later phases as `CSourceMapRecovery.phase_arena`), or each phase itself when the caller has none; one frontend phase at a time | what a phase reads only while it runs (below) |
 | Spelling, token and shape arenas | the preprocessor result (`CSourceMapRecovery`); the whole unit | every spelling, the final token stream and its shape sidecar |
+| Macro argument and expansion arenas | lazily owned by each preprocessing expansion state or conditional-expression evaluation; released when that owner finishes | raw argument tokens, expansion contexts and replacement runs; 8 GiB reservation each |
 | Semantic machine buffer | `c_analyze_semantics_core`; semantics | type-parse frames, expression tasks |
 | Lowering arena | `c_lower_to_ir_with_options`; one function body at a time | per-function lowering state |
 | Thread scratch | the thread; one call | temporaries under `scratch_begin`/`scratch_end` |
@@ -51,6 +52,10 @@ is left alone. The phase arena is then released back to its entry position.
 `CSourceMapRecovery` fail 64-bit builds when either changes shape.
 The lexer's diagnostic rows and messages leave its temporary diagnostic arena
 together for the same reason.
+
+**Macro expansion reservations.** `c_macro_expansion_storage_ensure` creates the argument and expansion arenas lazily as a pair. If either 8 GiB reservation fails, it releases any partial reservation and adds a preprocessing error diagnostic that names the failed arena. That storage state stops later expansion attempts for the same owner; destroying the owner clears the failure state so a later preprocessing call starts clean.
+
+The registered Linux x86-64 regression also runs the ordinary `-E -o` path in a fresh process. After prewarming and parsing, the child measures its virtual size and applies a checked `RLIMIT_AS` allowance for the 31 GiB preprocessing phase arena, three 1 GiB preprocessing base arenas, an 8 GiB macro arena, and 2 GiB of setup headroom. Its one in-memory input uses the driver's single-input fast path, which executes in the already measured caller/test arena; it does not reserve a new 32 GiB compiler unit arena. The bound must leave the phase and preprocessing base reservations available while a macro arena reservation fails; the diagnostic identifies whether the failed request was the 8 GiB argument arena or the 8 GiB expansion arena. The child records the measured baseline, each reservation allowance, the planned limit, and the applied `RLIMIT_AS` in the captured diagnostic stream. The parent requires that exact macro-reservation diagnostic and exit status 1 without a signal, and verifies that preprocessing published no output file; an unlimited child control must publish exactly the token sequence `int value = (7+1);` (whitespace ignored), so the original `F(7)` invocation cannot satisfy the control.
 
 **Semantic layout queries.** `c_parse_type_layout_core` allocates its
 query-local state (the arrays sized to the whole type table, bound token copies,

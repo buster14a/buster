@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+production 79920
+reason Retained node spans, delimiter provenance, row-free type recipes, sparse constant facts and initializer plans for the owner-directed lowering migration (#3102, #4061, #4062); follow-up consumers retire their token walkers.

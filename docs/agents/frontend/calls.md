@@ -4,6 +4,26 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Array parameter expression types
+
+An identifier denoting a parameter with an unqualified outer array row has its adjusted pointer type in
+expression queries, including under address-of. `char *argv[]` therefore
+permits `char ***p = &argv`, while the address of a local `char *a[3]` retains
+pointer-to-array type. `c_parse_expression_entity_type` supplies this rule to
+both the token query and tree expression typer; declaration/entity rows keep
+the array bounds for signature and VLA ownership. The tree only reads existing
+interned pointer rows and declines to the query when a row is unavailable.
+Element qualifiers and the
+parameter's bracket `const` are retained. The registered
+`c_test_array_parameter_expression_type` checks accepted and rejected pointer
+conversions in semantic-only analysis and both canonical frontend forms;
+`c_test_array_parameter_address_runtime` checks pointer-object mutation and
+multidimensional parameters with both allocators and tree/query routes (#4173).
+Qualifiers applied to an array typedef remain on the existing path pending
+[#4183](https://github.com/buster14a/buster/issues/4183); they cannot be moved to
+the pointer to disguise lost element qualifiers. Wrong-target const/volatile
+alias conversions remain rejected.
+
 ## Transparent-union pointer arguments
 
 A pointer argument matches a GNU transparent-union member through the ordinary
@@ -150,12 +170,26 @@ in both frontend forms.
   `__builtin_complex`, GNU vector arithmetic, C23 `true`/`false`/`nullptr`,
   `__func__` and `*` on a function designator. A storage-only `__fp16` type
   has no IR type, so when the IR mapping is missing for a `sizeof`/`_Alignof`
-  operand whose type is `__fp16` or an array or GNU vector of it,
-  `c_semantic_storage_half_operand_layout` answers from the C type layout
-  (Clang's 2, and the vector's own size); the scan once folded 4. Only these
-  unevaluated operands are answered; an evaluated `__fp16` value keeps its
-  canonical-lowering refusal. `c_test_untyped_operand_diagnostics` runs the
-  leaves and the `__fp16` sizes natively and requires the evaluated refusals.
+  operand whose type is `__fp16` or is derived through array, pointer or
+  GNU vector layers, `c_semantic_storage_half_operand_layout` answers from
+  the C type layout (including 2-byte scalar and 8-byte vector cases); the scan
+  once folded 4. The earlier declaration check traverses the type graph rooted
+  at declarations, validates every reachable edge, and ignores unrelated
+  provisional expression rows because function-body sizeof operands are
+  typed afterward. The token-only exception admits a grouped pointer-to-array
+  form such as `sizeof(__fp16 (*)[5])`; its layout probe uses the full
+  abstract-declarator reader outside binding and rolls back the speculative
+  model. Late type-name bounds receive the same syntax check as declaration
+  bounds. Only unevaluated operands are answered; an evaluated `__fp16` value
+  keeps its canonical-lowering refusal.
+  `c_test_untyped_operand_diagnostics` runs the leaves and sizes natively,
+  checks pointer, array, qualified and grouped pointer-to-array declarators,
+  call, initializer and cast contexts through syntax-only and object modes in
+  both frontend forms, and rejects malformed/undeclared bounds, negative
+  grouped bounds and non-integer grouped bounds, as well as malformed type
+  names (GitHub #3900, #3918). Function abstract
+  declarators remain outside this exception: target Clang behavior for a
+  storage-only `__fp16` function return type has not been verified.
 - **The parser's expression typer gives builtins the same results.**
   `c_parse_expression_leaf_without_cast` answers `__builtin_expect` as `long`,
   `object_size`, `strlen` and `__builtin_offsetof` as `size_t`,
@@ -694,7 +728,11 @@ inline definition, which supplies no external definition. Calls and address
 expressions share the external function identity; a referenced body must not
 become a second strong definition. A compatible extern or non-inline
 declaration in the same unit supplies the external definition. Static inline
-and GNU inline semantics retain their separate rules.
+and GNU inline semantics retain their separate rules. Under GNU inline semantics
+(`-std=gnu89` or `gnu_inline`), an `extern inline` definition is inline-only only
+for an externally linked entity. When a visible earlier `static` declaration
+gives the entity internal linkage, the `extern inline` body is its internal
+definition; a referenced body is lowered and an unused body remains omitted.
 
 The registered c_test_c99_inline_linkage checks symbol linkage, definition
 status and canonical function state in both frontend forms across six native
@@ -703,7 +741,10 @@ non-inline prototype and both GNU attribute directions. Its two-unit program
 checks the literal result 14, distinct private static helpers and equal
 function pointers. All four native allocator modes compile the units together
 and separately; Linux x86-64 also links the Buster objects with GCC and Clang
-and runs independent host-built versions of the same source recipe.
+and runs independent host-built versions of the same source recipe. Its
+neighboring `c_test_static_declaration_inline_definition` checks the prior
+static-prototype case under GNU89 and `gnu_inline`, including a referenced
+internal definition and an unused body.
 
 The existing per-entity declaration scan decides whether a body supplies an
 external definition. A referenced C99 inline-only body retains a canonical
@@ -711,7 +752,7 @@ external declaration and emits no body; calls and addresses bind to the
 external definition from another unit. Pre-created function symbols take the
 same definition decision, preserving real alias definitions; GNU inline-only
 bodies do not mark those symbols defined. Unused bodies retain their existing
-dropped state. No inline optimizer, dependency walk or GNU policy is added.
+dropped state. No inline optimizer or body dependency walk is added.
 
 Needed Windows `__inline`/`__forceinline` bodies retain callable definitions
 and their shared function identity. The Windows predefines preserve `__inline`

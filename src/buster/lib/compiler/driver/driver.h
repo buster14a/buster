@@ -597,6 +597,8 @@ struct CompilerDriverCAstPilotResult
     u64 retained_bytes;
     u64 transient_high_water;
     u64 column_copy_bytes;
+    u64 parenthesis_copy_bytes;
+    u64 parenthesis_committed_bytes;
     u64 finalize_child_entries;
     u64 walk_nanoseconds;
     u64 walk_steps;
@@ -618,12 +620,9 @@ struct CompilerDriverCAstPilotResult
     // answered, and runs left to the type machine and why. Zero when the
     // analysis had no tree to use.
     CAstSpecifierStatistics specifiers;
-    // The extent table lowering read controlled body ranges from
-    // (c_gen.c): bodies, entries and answers, and the queries the token
-    // walker answered and why. Zero when lowering had no tree to use.
-    CAstExtentStatistics extents;
-    // What lowering read from the tree (CAstLowerStatistics). Zero for
-    // -fsyntax-only and when lowering had no tree.
+    // What lowering read from the tree (CAstLowerStatistics), on every
+    // compile that lowers: lowering builds the unit's tree itself when the
+    // pilot did not (GitHub #3102 step 1). Zero for -fsyntax-only.
     CAstLowerStatistics lower;
     // The facts analysis retained for lowering (CAstFactStatistics, GitHub
     // #4062). Zero for -fsyntax-only, which does not lower.
@@ -705,6 +704,11 @@ struct CompilerDriverResult
     bool has_llvm_bitcode;
     bool has_ebpf;
     bool has_spirv;
+    // Physical C source/header files kept alive for the enclosing native-link
+    // output guard. Virtual builtin headers are absent; the system bit only
+    // classifies depfile text and never filters this safety closure.
+    CPreprocessDependency* physical_inputs;
+    u32 physical_input_count;
 };
 
 // Prepare the target-independent frontend, ABI and opcode tables. Serial

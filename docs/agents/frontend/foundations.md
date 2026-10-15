@@ -31,8 +31,8 @@ position index. Such a query uses scalar delimiter matching as well.
 
 Lowering's assignment continuation retains the comma-free suffix range that
 its parent scanned. Moving into a group changes the endpoint and requires a
-new scan. `c_ir_root_conditional_scan` stops once an assignment proves that a
-later conditional belongs to its right operand. Assignment completions keep
+new scan. `c_ir_root_conditional` refuses a range whose root assignment comes before
+its first root `?`: that conditional belongs to the assignment's right operand. Assignment completions keep
 their original order, conversions and stores. Counted chain regressions cover
 simple, distinct-local and compound assignments through both frontend SSA
 forms. The native runtime fixture also compiles the three 20,000-link object
@@ -172,8 +172,8 @@ path; selected MIR enforces dominance in unreachable code too.
 A GNU statement-expression body retains the complete range of each automatic
 declaration. Its top-level commas separate declarators and reach the existing
 automatic-declaration-list frame; only expression statements use the trailing
-comma split. `declaration_statement` is shared with trailing-value classification
-in the body walker. The embedded driver regression for #1388 checks initialized,
+comma split. The body walker tells the two apart by the statement's node kind
+(#4060). The embedded driver regression for #1388 checks initialized,
 uninitialized, pointer/scalar, discarded and exactly-once call initializers,
 alongside ordinary/nested blocks, typedefs, typeof and comma/loop sequencing,
 under both frontend forms and both native allocators at O0/O2. Syntax/object rows
@@ -536,6 +536,16 @@ without facts for identical bitcode and diagnostics.
   single `#` to precede a parameter, and `defined` cannot be used as a macro
   name in `#define` or `#undef`. Assembly-comment-line mode retains its
   stringification compatibility behavior.
+- Macro expansion may produce `defined NAME` or `defined(NAME)` in a
+  conditional expression. C17 leaves this construct undefined (6.10.1p4), but
+  Buster accepts it as a GCC/Clang compatibility behavior in both C17 and GNU17.
+  Conditional rescanning recognizes the operator before expanding its identifier
+  operand, then tests that name's macro definition status. No
+  `-Wexpansion-to-defined`-equivalent warning is added. The registered
+  `c_macro_produced_defined_tests` covers nested object-like and function-like
+  token-paste producers, both operand spellings, `#if`/`#elif`, defined,
+  empty, undefined and literal-operator controls, plus feature queries whose
+  argument contains the identifier `defined`.
 - `c_conditional_number` admits the complete bounded integer spelling, checks
   overflow before accumulation, and leaves its output unchanged on failure.
   Ordinary constants and the x87 initializer folder share it; do not restore a

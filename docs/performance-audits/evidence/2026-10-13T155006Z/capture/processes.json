@@ -1,0 +1,16 @@
+{ "Success": true, "Result": {
+    "Type": "Profiler::LLMGetProcessesTool::Response",
+    "TotalProcessCount": 1,
+    "Truncated": false,
+    "Processes": [
+        {
+            "Name": "main_thread",
+            "Path": "/home/david/dev/buster/build/Release/ide",
+            "ProcessKey": -2147483648,
+            "ProcessID": 694391,
+            "CaptureCpuUtilizationPct": 2.0,
+            "StartTimeMs": 16.665109999477865,
+            "EndTimeMs": 134779.5878240019
+        }
+    ]
+} }

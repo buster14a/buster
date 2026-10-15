@@ -20,6 +20,8 @@ struct FfmpegCommand
     bool recorded;
 };
 
+BUSTER_GLOBAL_LOCAL String8 ffmpeg_resource_status_name(ProcessResourceStatus status);
+
 BUSTER_GLOBAL_LOCAL FfmpegCommand ffmpeg_run(Arena* arena, String8 directory, String8 prefix, SliceString8 arguments, u64 seconds)
 {
     String8List command = {0};
@@ -34,6 +36,7 @@ BUSTER_GLOBAL_LOCAL FfmpegCommand ffmpeg_run(Arena* arena, String8 directory, St
         .working_directory = directory,
         .spawn_options = {
             .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR),
+            .observe_resources = 1,
             .use_process_environment = 1,
             .new_process_group = 1,
             .search_path = 1,
@@ -54,12 +57,18 @@ BUSTER_GLOBAL_LOCAL FfmpegCommand ffmpeg_run(Arena* arena, String8 directory, St
     result.error = (String8){.pointer = (char8*)result.wait.streams[STANDARD_STREAM_ERROR].pointer, .length = result.wait.streams[STANDARD_STREAM_ERROR].length};
     String8 status = string_format(arena, S8("result={u32}\nplatform_status={u32}\nlaunch_failed={u32}\n"
                                             "timed_out={u32}\noutput_truncated={u32}\ncapture_failed={u32}\n"
-                                            "cleanup_failed={u32}\nelapsed_us={u64}\nperformance_qualified=0\n"),
+                                            "cleanup_failed={u32}\nelapsed_us={u64}\n"
+                                            "user_cpu_us={u64}\nsystem_cpu_us={u64}\ncpu_status={S8}\ncpu_error={u32}\n"
+                                            "peak_memory_bytes={u64}\nmemory_status={S8}\nmemory_error={u32}\n"
+                                            "performance_qualified=0\n"),
                                    (u32)result.wait.result, result.wait.platform_status, (u32)!run.spawn.handle,
                                    result.wait.timed_out, result.wait.output_truncated,
                                    (u32)(result.wait.capture_failed || result.wait.capture_limit_exceeded),
                                    (u32)(result.wait.process_tree_cleanup_failed || result.wait.process_group_reservation_retained || result.wait.process_group_ownership_lost),
-                                   os_now_microseconds() - start);
+                                   os_now_microseconds() - start, result.wait.resources.user_cpu_us, result.wait.resources.system_cpu_us,
+                                   ffmpeg_resource_status_name(result.wait.resources.cpu_status), result.wait.resources.cpu_error.v,
+                                   result.wait.resources.peak_memory_bytes,
+                                   ffmpeg_resource_status_name(result.wait.resources.memory_status), result.wait.resources.memory_error.v);
     result.recorded = clang_suite_write(arena, string_format(arena, S8("{S8}.stdout"), prefix), result.output) &&
                       clang_suite_write(arena, string_format(arena, S8("{S8}.stderr"), prefix), result.error) &&
                       clang_suite_write(arena, string_format(arena, S8("{S8}.status"), prefix), status) && recorded;
@@ -69,6 +78,383 @@ BUSTER_GLOBAL_LOCAL FfmpegCommand ffmpeg_run(Arena* arena, String8 directory, St
                      string_slice(result.output, result.output.length > 8192 ? result.output.length - 8192 : 0, result.output.length),
                      string_slice(result.error, result.error.length > 8192 ? result.error.length - 8192 : 0, result.error.length));
     }
+    return result;
+}
+
+
+BUSTER_GLOBAL_LOCAL String8 ffmpeg_resource_status_name(ProcessResourceStatus status)
+{
+    String8 result = S8("unknown");
+    if (status == PROCESS_RESOURCE_OBSERVED) { result = S8("observed"); }
+    else if (status == PROCESS_RESOURCE_ERROR) { result = S8("error"); }
+    else if (status == PROCESS_RESOURCE_UNSUPPORTED) { result = S8("unsupported"); }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_string_ends_with(String8 value, String8 suffix)
+{
+    bool result = value.length >= suffix.length &&
+                  string_equal(string_slice(value, value.length - suffix.length, value.length), suffix);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_status_number(Arena* arena, String8 text, String8 key, u64* value)
+{
+    String8 prefix = string_format(arena, S8("{S8}="), key);
+    u64 parsed = 0;
+    u32 found = 0;
+    bool valid = true;
+    for (u64 start = 0; start < text.length;)
+    {
+        u64 end = start;
+        while (end < text.length && text.pointer[end] != '\n') { end += 1; }
+        String8 line = string_slice(text, start, end);
+        if (line.length && line.pointer[line.length - 1] == '\r') { line.length -= 1; }
+        if (string_starts_with_sequence(line, prefix))
+        {
+            found += 1;
+            String8 digits = string_slice(line, prefix.length, line.length);
+            bool row_valid = digits.length != 0;
+            u64 row_value = 0;
+            for (u64 i = 0; i < digits.length; i += 1)
+            {
+                u8 c = (u8)digits.pointer[i];
+                bool digit_valid = c >= '0' && c <= '9';
+                u64 digit = digit_valid ? (u64)(c - '0') : 0;
+                bool safe = digit_valid && row_value <= (((u64)-1 - digit) / 10);
+                row_valid = safe && row_valid;
+                if (safe) { row_value = row_value * 10 + digit; }
+            }
+            parsed = row_value;
+            valid = row_valid && valid;
+        }
+        start = end < text.length ? end + 1 : end;
+    }
+    *value = parsed;
+    bool result = found == 1 && valid;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_status_value(Arena* arena, String8 text, String8 key, String8* value)
+{
+    String8 prefix = string_format(arena, S8("{S8}="), key);
+    String8 parsed = {0};
+    u32 found = 0;
+    for (u64 start = 0; start < text.length;)
+    {
+        u64 end = start;
+        while (end < text.length && text.pointer[end] != '\n') { end += 1; }
+        String8 line = string_slice(text, start, end);
+        if (line.length && line.pointer[line.length - 1] == '\r') { line.length -= 1; }
+        if (string_starts_with_sequence(line, prefix))
+        {
+            found += 1;
+            parsed = string_slice(line, prefix.length, line.length);
+        }
+        start = end < text.length ? end + 1 : end;
+    }
+    *value = parsed;
+    bool result = found == 1 && parsed.length != 0;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_resource_status_parse(String8 text, ProcessResourceStatus* status)
+{
+    bool valid = true;
+    ProcessResourceStatus result = PROCESS_RESOURCE_UNKNOWN;
+    if (string_equal(text, S8("observed"))) { result = PROCESS_RESOURCE_OBSERVED; }
+    else if (string_equal(text, S8("error"))) { result = PROCESS_RESOURCE_ERROR; }
+    else if (string_equal(text, S8("unsupported"))) { result = PROCESS_RESOURCE_UNSUPPORTED; }
+    else if (!string_equal(text, S8("unknown"))) { valid = false; }
+    *status = result;
+    return valid;
+}
+
+typedef struct FfmpegTargetActionArguments FfmpegTargetActionArguments;
+struct FfmpegTargetActionArguments
+{
+    String8 cwd;
+    String8 source;
+    String8 output;
+    u32 target;
+    u32 source_count;
+    u32 compile_count;
+    u32 output_count;
+    bool syntax_valid;
+    bool command_valid;
+    bool valid;
+};
+
+BUSTER_GLOBAL_LOCAL u32 ffmpeg_target_source_kind(String8 path)
+{
+    String8 suffixes[] = {S8("libavcodec/h264_cabac.c"), S8("libavcodec/h264_loopfilter.c")};
+    u32 result = 0;
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(suffixes); i += 1)
+    {
+        bool suffix = ffmpeg_string_ends_with(path, suffixes[i]);
+        u64 offset = suffix ? path.length - suffixes[i].length : 0;
+        bool boundary = offset == 0 || (offset < path.length && path.pointer[offset - 1] == '/');
+        if (suffix && boundary) { result = i + 1; }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_target_output_name(String8 output, String8 expected)
+{
+    u64 basename = 0;
+    for (u64 i = 0; i < output.length; i += 1)
+    {
+        if (output.pointer[i] == '/') { basename = i + 1; }
+    }
+    bool result = string_equal(string_slice(output, basename, output.length), expected);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL FfmpegTargetActionArguments ffmpeg_target_action_arguments(
+    String8 record, String8 expected_cwd, String8 ide)
+{
+    FfmpegTargetActionArguments result = {0};
+    u64 head_end = 0;
+    while (head_end < record.length && record.pointer[head_end] != '\n') { head_end += 1; }
+    String8 head = string_slice(record, 0, head_end);
+    bool head_valid = head_end < record.length && string_starts_with_sequence(head, S8("cwd="));
+    if (head_valid) { result.cwd = string_slice(head, 4, head.length); }
+    bool valid = head_valid;
+    bool compiler_valid = false;
+    bool needs_output = false;
+    u64 cursor = head_end < record.length ? head_end + 1 : record.length;
+    u64 index = 0;
+    while (valid && cursor < record.length)
+    {
+        u64 colon = cursor;
+        while (colon < record.length && record.pointer[colon] >= '0' && record.pointer[colon] <= '9') { colon += 1; }
+        bool digits_valid = colon > cursor && colon < record.length && record.pointer[colon] == ':';
+        u64 length = 0;
+        for (u64 i = cursor; digits_valid && i < colon; i += 1)
+        {
+            u64 digit = (u64)(record.pointer[i] - '0');
+            bool safe = length <= (((u64)-1 - digit) / 10);
+            digits_valid = safe;
+            if (safe) { length = length * 10 + digit; }
+        }
+        u64 argument_start = colon < record.length ? colon + 1 : record.length;
+        bool range_valid = digits_valid && length <= record.length - argument_start;
+        valid = range_valid;
+        if (valid)
+        {
+            String8 argument = string_slice(record, argument_start, argument_start + length);
+            if (index == 0) { compiler_valid = string_equal(argument, ide); }
+            else if (index == 1) { compiler_valid = compiler_valid && string_equal(argument, S8("cc")); }
+            if (needs_output)
+            {
+                result.output = argument;
+                needs_output = false;
+            }
+            else if (string_equal(argument, S8("-o")))
+            {
+                result.output_count += 1;
+                needs_output = true;
+            }
+            if (string_equal(argument, S8("-c"))) { result.compile_count += 1; }
+            u32 kind = ffmpeg_target_source_kind(argument);
+            if (kind)
+            {
+                if (!result.target) { result.target = kind; }
+                else if (result.target != kind) { result.target = 3; }
+                result.source_count += 1;
+                result.source = argument;
+            }
+            cursor = argument_start + length;
+            valid = cursor < record.length && record.pointer[cursor] == '\n';
+            if (valid) { cursor += 1; }
+            index += 1;
+        }
+    }
+    result.syntax_valid = head_valid && valid && index >= 2 && string_equal(result.cwd, expected_cwd);
+    result.command_valid = compiler_valid;
+    String8 expected_object = result.target == 1 ? S8("h264_cabac.o") : S8("h264_loopfilter.o");
+    result.valid = result.syntax_valid && result.command_valid && result.target <= 2 && result.target != 0 &&
+                   result.source_count == 1 && result.compile_count == 1 && result.output_count == 1 &&
+                   !needs_output && ffmpeg_target_output_name(result.output, expected_object);
+    return result;
+}
+
+typedef struct FfmpegTargetActionStatus FfmpegTargetActionStatus;
+struct FfmpegTargetActionStatus
+{
+    u64 result;
+    u64 platform_status;
+    u64 launch_failed;
+    u64 timed_out;
+    u64 output_truncated;
+    u64 capture_failed;
+    u64 cleanup_failed;
+    u64 elapsed_us;
+    u64 user_cpu_us;
+    u64 system_cpu_us;
+    u64 peak_memory_bytes;
+    u64 cpu_error;
+    u64 memory_error;
+    ProcessResourceStatus cpu_status;
+    ProcessResourceStatus memory_status;
+    bool parsed;
+};
+
+BUSTER_GLOBAL_LOCAL FfmpegTargetActionStatus ffmpeg_target_action_status(Arena* arena, String8 text)
+{
+    FfmpegTargetActionStatus result = {0};
+    String8 cpu_status = {0};
+    String8 memory_status = {0};
+    bool valid = ffmpeg_status_number(arena, text, S8("result"), &result.result) &&
+                 ffmpeg_status_number(arena, text, S8("platform_status"), &result.platform_status) &&
+                 ffmpeg_status_number(arena, text, S8("launch_failed"), &result.launch_failed) &&
+                 ffmpeg_status_number(arena, text, S8("timed_out"), &result.timed_out) &&
+                 ffmpeg_status_number(arena, text, S8("output_truncated"), &result.output_truncated) &&
+                 ffmpeg_status_number(arena, text, S8("capture_failed"), &result.capture_failed) &&
+                 ffmpeg_status_number(arena, text, S8("cleanup_failed"), &result.cleanup_failed) &&
+                 ffmpeg_status_number(arena, text, S8("elapsed_us"), &result.elapsed_us) &&
+                 ffmpeg_status_number(arena, text, S8("user_cpu_us"), &result.user_cpu_us) &&
+                 ffmpeg_status_number(arena, text, S8("system_cpu_us"), &result.system_cpu_us) &&
+                 ffmpeg_status_number(arena, text, S8("peak_memory_bytes"), &result.peak_memory_bytes) &&
+                 ffmpeg_status_number(arena, text, S8("cpu_error"), &result.cpu_error) &&
+                 ffmpeg_status_number(arena, text, S8("memory_error"), &result.memory_error) &&
+                 ffmpeg_status_value(arena, text, S8("cpu_status"), &cpu_status) &&
+                 ffmpeg_status_value(arena, text, S8("memory_status"), &memory_status) &&
+                 ffmpeg_resource_status_parse(cpu_status, &result.cpu_status) &&
+                 ffmpeg_resource_status_parse(memory_status, &result.memory_status);
+    result.parsed = valid;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_target_action_status_complete(FfmpegTargetActionStatus status)
+{
+    bool result = status.parsed && status.result == (u64)PROCESS_RESULT_SUCCESS && status.platform_status == 0 &&
+                  !status.launch_failed && !status.timed_out && !status.output_truncated &&
+                  !status.capture_failed && !status.cleanup_failed && status.elapsed_us != 0 &&
+                  status.cpu_status == PROCESS_RESOURCE_OBSERVED && status.memory_status == PROCESS_RESOURCE_OBSERVED &&
+                  status.peak_memory_bytes != 0 && !status.cpu_error && !status.memory_error;
+    return result;
+}
+
+typedef struct FfmpegTargetActionSummary FfmpegTargetActionSummary;
+struct FfmpegTargetActionSummary
+{
+    u32 action_count;
+    String8 action;
+    String8 source;
+    String8 object;
+    FfmpegTargetActionStatus status;
+    u64 object_bytes;
+    bool first_action_complete;
+    bool duplicate;
+};
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_target_action_logs_complete(Arena* arena, String8 prefix)
+{
+    String8 extensions[] = {S8(".argv"), S8(".stdout"), S8(".stderr"), S8(".status")};
+    bool result = true;
+    for (u32 i = 0; i < BUSTER_ARRAY_LENGTH(extensions); i += 1)
+    {
+        FileStats stats = os_path_followed_stats(string_format(arena, S8("{S8}{S8}"), prefix, extensions[i]));
+        result = stats.valid && stats.kind == OS_FILE_KIND_REGULAR && result;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_target_action_object(
+    Arena* arena, String8 directory, String8 output, u32 target, String8* absolute, u64* bytes)
+{
+    String8 expected = target == 1 ? S8("h264_cabac.o") : S8("h264_loopfilter.o");
+    String8 joined = output.length && output.pointer[0] == '/' ? output : path_join(arena, directory, output);
+    String8 path = os_path_absolute(arena, joined, true);
+    String8 directory_prefix = string_format(arena, S8("{S8}/"), directory);
+    FileStats stats = os_path_followed_stats(path);
+    bool inside = string_starts_with_sequence(path, directory_prefix);
+    bool result = ffmpeg_target_output_name(output, expected) && inside && stats.valid &&
+                  stats.kind == OS_FILE_KIND_REGULAR && stats.size != 0;
+    *absolute = path;
+    *bytes = result ? stats.size : 0;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_h264_target_action_census(
+    Arena* arena, String8 output, String8 directory, String8 ide, FfmpegTargetActionSummary summaries[2])
+{
+    String8 ledger = path_join(arena, directory, S8("compiler-actions"));
+    u32 entry_count = 0;
+    String8* entries = os_directory_entry_names(arena, ledger, &entry_count);
+    String8List rows = {0};
+    string8_list_push(arena, &rows, S8("target\tstatus\tactions\taction\tsource\tobject\tobject_bytes\telapsed_us\tuser_cpu_us\tsystem_cpu_us\tcpu_status\tcpu_error\tmemory_status\tmemory_error\tpeak_memory_bytes\n"));
+    bool scan_valid = true;
+    for (u32 i = 0; i < entry_count; i += 1)
+    {
+        String8 name = entries[i];
+        bool action_log = string_starts_with_sequence(name, S8("cc-")) && ffmpeg_string_ends_with(name, S8(".argv"));
+        if (action_log)
+        {
+            String8 action = string_slice(name, 0, name.length - 5);
+            String8 prefix = path_join(arena, ledger, action);
+            String8 argv_path = string_format(arena, S8("{S8}.argv"), prefix);
+            String8 record = clang_suite_read(arena, argv_path);
+            FfmpegTargetActionArguments parsed = ffmpeg_target_action_arguments(record, directory, ide);
+            scan_valid = parsed.syntax_valid && scan_valid;
+            if (parsed.target == 3) { scan_valid = false; }
+            if (parsed.target >= 1 && parsed.target <= 2)
+            {
+                FfmpegTargetActionStatus status = ffmpeg_target_action_status(
+                    arena, clang_suite_read(arena, string_format(arena, S8("{S8}.status"), prefix)));
+                String8 object = {0};
+                u64 object_bytes = 0;
+                bool logs_complete = ffmpeg_target_action_logs_complete(arena, prefix);
+                bool object_complete = ffmpeg_target_action_object(arena, directory, parsed.output, parsed.target, &object, &object_bytes);
+                bool action_complete = parsed.valid && logs_complete && object_complete && ffmpeg_target_action_status_complete(status);
+                FfmpegTargetActionSummary* summary = &summaries[parsed.target - 1];
+                summary->action_count += 1;
+                if (summary->action_count == 1)
+                {
+                    summary->action = action;
+                    summary->source = parsed.source;
+                    summary->object = object;
+                    summary->object_bytes = object_bytes;
+                    summary->status = status;
+                    summary->first_action_complete = action_complete;
+                }
+                else
+                {
+                    summary->duplicate = true;
+                }
+                String8 target_name = parsed.target == 1 ? S8("h264_cabac") : S8("h264_loopfilter");
+                string8_list_push(arena, &rows, string_format(arena,
+                    S8("{S8}\t{S8}\t1\t{S8}\t{S8}\t{S8}\t{u64}\t{u64}\t{u64}\t{u64}\t{S8}\t{u32}\t{S8}\t{u32}\t{u64}\n"),
+                    target_name, action_complete ? S8("action-pass") : S8("action-fail"), action, parsed.source, object,
+                    object_bytes, status.elapsed_us, status.user_cpu_us, status.system_cpu_us,
+                    ffmpeg_resource_status_name(status.cpu_status), (u32)status.cpu_error,
+                    ffmpeg_resource_status_name(status.memory_status), (u32)status.memory_error, status.peak_memory_bytes));
+            }
+        }
+    }
+    bool result = scan_valid;
+    for (u32 i = 0; i < 2; i += 1)
+    {
+        FfmpegTargetActionSummary summary = summaries[i];
+        bool target_pass = summary.action_count == 1 && summary.first_action_complete && !summary.duplicate;
+        String8 target_name = i == 0 ? S8("h264_cabac") : S8("h264_loopfilter");
+        String8 action_status = target_pass ? S8("pass") : summary.action_count ? S8("fail") : S8("not-run");
+        string8_list_push(arena, &rows, string_format(arena,
+            S8("{S8}\t{S8}\t{u32}\t{S8}\t{S8}\t{S8}\t{u64}\t{u64}\t{u64}\t{u64}\t{S8}\t{u32}\t{S8}\t{u32}\t{u64}\n"),
+            target_name, action_status, summary.action_count, summary.action, summary.source, summary.object, summary.object_bytes,
+            summary.status.elapsed_us, summary.status.user_cpu_us, summary.status.system_cpu_us,
+            ffmpeg_resource_status_name(summary.status.cpu_status), (u32)summary.status.cpu_error,
+            ffmpeg_resource_status_name(summary.status.memory_status), (u32)summary.status.memory_error, summary.status.peak_memory_bytes));
+        result = target_pass && result;
+    }
+    String8 report = string_join_arena(arena, string8_list_to_slice(arena, rows), false);
+    bool written = clang_suite_write(arena, path_join(arena, output, S8("h264-target-actions.tsv")), report);
+    result = written && result;
+    string_print(S8("FFMPEG_H264_TARGETS status={S8} cabac={u32} loopfilter={u32} evidence={S8}\n"),
+                 result ? S8("pass") : S8("fail"), (u32)(summaries[0].action_count == 1 && summaries[0].first_action_complete && !summaries[0].duplicate),
+                 (u32)(summaries[1].action_count == 1 && summaries[1].first_action_complete && !summaries[1].duplicate),
+                 path_join(arena, output, S8("h264-target-actions.tsv")));
     return result;
 }
 
@@ -478,6 +864,116 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_config_controls_self_test(Arena* arena)
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool ffmpeg_target_control_action_write(
+    Arena* arena, String8 directory, String8 ledger, String8 ide, u32 target, String8 name,
+    u64 cleanup_failed, bool include_stderr, bool nonempty_object)
+{
+    String8 sources[] = {S8("libavcodec/h264_cabac.c"), S8("libavcodec/h264_loopfilter.c")};
+    String8 objects[] = {S8("libavcodec/h264_cabac.o"), S8("libavcodec/h264_loopfilter.o")};
+    String8 source = sources[target - 1];
+    String8 object = objects[target - 1];
+    String8 record = string_format(arena, S8("cwd={S8}\n{u64}:{S8}\n2:cc\n2:-c\n{u64}:{S8}\n2:-o\n{u64}:{S8}\n"),
+                                   directory, ide.length, ide, source.length, source, object.length, object);
+    String8 prefix = path_join(arena, ledger, name);
+    String8 status = string_format(arena, S8("result={u32}\nplatform_status=0\nlaunch_failed=0\ntimed_out=0\n"
+                                             "output_truncated=0\ncapture_failed=0\ncleanup_failed={u64}\nelapsed_us=17\n"
+                                             "user_cpu_us=11\nsystem_cpu_us=3\ncpu_status=observed\ncpu_error=0\n"
+                                             "peak_memory_bytes=42\nmemory_status=observed\nmemory_error=0\nperformance_qualified=0\n"),
+                                   (u32)PROCESS_RESULT_SUCCESS, cleanup_failed);
+    String8 object_path = path_join(arena, directory, object);
+    bool object_written = clang_suite_write(arena, object_path, nonempty_object ? S8("object\n") : (String8){0});
+    bool result = clang_suite_write(arena, string_format(arena, S8("{S8}.argv"), prefix), record) &&
+                  clang_suite_write(arena, string_format(arena, S8("{S8}.stdout"), prefix), S8("")) &&
+                  (!include_stderr || clang_suite_write(arena, string_format(arena, S8("{S8}.stderr"), prefix), S8(""))) &&
+                  clang_suite_write(arena, string_format(arena, S8("{S8}.status"), prefix), status) &&
+                  object_written;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_h264_target_controls_self_test(Arena* arena)
+{
+    String8 requested_root = string_format(arena, S8("build/ffmpeg-h264-target-controls-{u64}-{u64}"),
+                                           os_get_current_process_id(), os_now_microseconds());
+    bool root_created = os_make_directory_exclusive(requested_root).created;
+    String8 root = os_path_absolute(arena, requested_root, true);
+    String8 output = path_join(arena, root, S8("output"));
+    String8 directory = path_join(arena, root, S8("candidate"));
+    String8 ledger = path_join(arena, directory, S8("compiler-actions"));
+    String8 object_directory = path_join(arena, directory, S8("libavcodec"));
+    String8 ide = S8("/usr/bin/ide");
+    bool ready = root_created && root.length != 0;
+    ready = os_make_directory_exclusive(output).created && ready;
+    ready = os_make_directory_exclusive(directory).created && ready;
+    ready = os_make_directory_exclusive(ledger).created && ready;
+    ready = os_make_directory_exclusive(object_directory).created && ready;
+    bool written = ready &&
+                   ffmpeg_target_control_action_write(arena, directory, ledger, ide, 1, S8("cc-control-cabac"), 0, true, true) &&
+                   ffmpeg_target_control_action_write(arena, directory, ledger, ide, 2, S8("cc-control-loopfilter"), 0, true, true);
+    FfmpegTargetActionSummary summaries[2] = {0};
+    bool positive = written && ffmpeg_h264_target_action_census(arena, output, directory, ide, summaries);
+
+    String8 cabac_object = path_join(arena, directory, S8("libavcodec/h264_cabac.o"));
+    bool emptied = clang_suite_write(arena, cabac_object, (String8){0});
+    FfmpegTargetActionSummary empty_summaries[2] = {0};
+    bool empty_rejected = emptied && !ffmpeg_h264_target_action_census(arena, output, directory, ide, empty_summaries);
+    bool restored_object = clang_suite_write(arena, cabac_object, S8("object\n"));
+    String8 loopfilter_object = path_join(arena, directory, S8("libavcodec/h264_loopfilter.o"));
+    bool loopfilter_emptied = clang_suite_write(arena, loopfilter_object, (String8){0});
+    FfmpegTargetActionSummary loopfilter_empty_summaries[2] = {0};
+    bool loopfilter_empty_rejected = loopfilter_emptied &&
+        !ffmpeg_h264_target_action_census(arena, output, directory, ide, loopfilter_empty_summaries);
+    bool loopfilter_restored = clang_suite_write(arena, loopfilter_object, S8("object\n"));
+
+    String8 cabac_status = path_join(arena, ledger, S8("cc-control-cabac.status"));
+    String8 unavailable_record = string_format(arena, S8("result={u32}\nplatform_status=0\nlaunch_failed=0\ntimed_out=0\n"
+                                                          "output_truncated=0\ncapture_failed=0\ncleanup_failed=0\nelapsed_us=17\n"
+                                                          "user_cpu_us=11\nsystem_cpu_us=3\ncpu_status=observed\ncpu_error=0\n"
+                                                          "peak_memory_bytes=42\nmemory_status=unsupported\nmemory_error=0\nperformance_qualified=0\n"),
+                                                 (u32)PROCESS_RESULT_SUCCESS);
+    bool unavailable_recorded = clang_suite_write(arena, cabac_status, unavailable_record);
+    FfmpegTargetActionSummary unavailable_summaries[2] = {0};
+    bool unavailable_rejected = unavailable_recorded &&
+        !ffmpeg_h264_target_action_census(arena, output, directory, ide, unavailable_summaries);
+    String8 zero_memory_record = string_format(arena, S8("result={u32}\nplatform_status=0\nlaunch_failed=0\ntimed_out=0\n"
+                                                          "output_truncated=0\ncapture_failed=0\ncleanup_failed=0\nelapsed_us=17\n"
+                                                          "user_cpu_us=11\nsystem_cpu_us=3\ncpu_status=observed\ncpu_error=0\n"
+                                                          "peak_memory_bytes=0\nmemory_status=observed\nmemory_error=0\nperformance_qualified=0\n"),
+                                                 (u32)PROCESS_RESULT_SUCCESS);
+    bool zero_memory_recorded = clang_suite_write(arena, cabac_status, zero_memory_record);
+    FfmpegTargetActionSummary zero_memory_summaries[2] = {0};
+    bool zero_memory_rejected = zero_memory_recorded &&
+        !ffmpeg_h264_target_action_census(arena, output, directory, ide, zero_memory_summaries);
+    bool resource_restored = ffmpeg_target_control_action_write(
+        arena, directory, ledger, ide, 1, S8("cc-control-cabac"), 0, true, true);
+    String8 cleanup_record = string_format(arena, S8("result={u32}\nplatform_status=0\nlaunch_failed=0\ntimed_out=0\n"
+                                                    "output_truncated=0\ncapture_failed=0\ncleanup_failed=1\nelapsed_us=17\n"
+                                                    "user_cpu_us=11\nsystem_cpu_us=3\ncpu_status=observed\ncpu_error=0\n"
+                                                    "peak_memory_bytes=42\nmemory_status=observed\nmemory_error=0\nperformance_qualified=0\n"),
+                                           (u32)PROCESS_RESULT_SUCCESS);
+    bool cleanup_recorded = clang_suite_write(arena, cabac_status, cleanup_record);
+    FfmpegTargetActionSummary cleanup_summaries[2] = {0};
+    bool cleanup_rejected = cleanup_recorded && !ffmpeg_h264_target_action_census(arena, output, directory, ide, cleanup_summaries);
+    bool cleanup_restored = ffmpeg_target_control_action_write(
+        arena, directory, ledger, ide, 1, S8("cc-control-cabac"), 0, true, true);
+
+    String8 stderr_path = path_join(arena, ledger, S8("cc-control-loopfilter.stderr"));
+    bool stderr_removed = remove_path_recursive(arena, stderr_path);
+    FfmpegTargetActionSummary capture_summaries[2] = {0};
+    bool capture_rejected = stderr_removed && !ffmpeg_h264_target_action_census(arena, output, directory, ide, capture_summaries);
+    bool stderr_restored = clang_suite_write(arena, stderr_path, S8(""));
+
+    bool duplicate_written = ffmpeg_target_control_action_write(
+        arena, directory, ledger, ide, 1, S8("cc-control-cabac-duplicate"), 0, true, true);
+    FfmpegTargetActionSummary duplicate_summaries[2] = {0};
+    bool duplicate_rejected = duplicate_written && !ffmpeg_h264_target_action_census(arena, output, directory, ide, duplicate_summaries);
+
+    bool result = positive && empty_rejected && restored_object && loopfilter_empty_rejected && loopfilter_restored && unavailable_rejected && zero_memory_rejected && resource_restored && cleanup_rejected && cleanup_restored &&
+                  capture_rejected && stderr_restored && duplicate_rejected;
+    bool cleaned = remove_path_recursive(arena, root);
+    result = cleaned && result;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool ffmpeg_profile_self_test(Arena* arena)
 {
     String8 config_h = ffmpeg_profile_test_header(arena, (String8){0});
@@ -512,13 +1008,15 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_profile_self_test(Arena* arena)
     bool dependency_mismatch_rejected = !control_valid;
     bool configs = ffmpeg_config_controls_self_test(arena);
     bool checkasm = ffmpeg_checkasm_controls_self_test();
+    bool target_actions = ffmpeg_h264_target_controls_self_test(arena);
     bool feature_floor = positive && missing_inline_rejected && missing_x86asm_rejected && missing_sse2_rejected &&
                          missing_runtime_rejected && missing_external_tier_rejected && missing_inline_tier_rejected;
-    bool result = feature_floor && tool_mismatch_rejected && dependency_mismatch_rejected && configs && checkasm;
-    string_print(S8("FFMPEG_HARNESS_CONTROLS status={S8} config_profiles={S8} feature_manifest={S8} nasm_identity={S8} checkasm_controls={S8}\n"),
+    bool result = feature_floor && tool_mismatch_rejected && dependency_mismatch_rejected && configs && checkasm && target_actions;
+    string_print(S8("FFMPEG_HARNESS_CONTROLS status={S8} config_profiles={S8} feature_manifest={S8} nasm_identity={S8} checkasm_controls={S8} h264_target_actions={S8}\n"),
                  result ? S8("pass") : S8("fail"), configs ? S8("pass") : S8("fail"),
                  feature_floor ? S8("pass") : S8("fail"),
-                 (positive && tool_mismatch_rejected && dependency_mismatch_rejected) ? S8("pass") : S8("fail"), checkasm ? S8("pass") : S8("fail"));
+                 (positive && tool_mismatch_rejected && dependency_mismatch_rejected) ? S8("pass") : S8("fail"),
+                 checkasm ? S8("pass") : S8("fail"), target_actions ? S8("pass") : S8("fail"));
     return result;
 }
 
@@ -820,6 +1318,15 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
                          compiler_names[i], (u32)configured[i], (u32)profile_valid[i], (u32)built[i], (u32)checkasm_attempted[i], (u32)checkasm[i],
                          checkasm_functions[i], (u32)media[i], (u32)fate[i]);
         }
+        FfmpegTargetActionSummary h264_target_summaries[2] = {0};
+        bool h264_target_actions = false;
+        String8 h264_target_actions_status = portable ? S8("not-run") : S8("not-applicable");
+        if (claimed && portable)
+        {
+            h264_target_actions = ffmpeg_h264_target_action_census(
+                arena, output, directories[1], ide, h264_target_summaries);
+            h264_target_actions_status = h264_target_actions ? S8("pass") : S8("fail");
+        }
         String8 checkasm_count_comparison = S8("not-run");
         if (optimized && checkasm_attempted[0] && checkasm_attempted[1])
         {
@@ -841,12 +1348,13 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
         if (claimed)
         {
             bool pristine = ffmpeg_pristine(arena, checkout);
-            String8 receipt = string_format(arena, S8("BUSTER_FFMPEG_CENSUS_V1\nupstream={S8}\nconfiguration={S8}\n"
+            String8 receipt = string_format(arena, S8("BUSTER_FFMPEG_CENSUS_V2\nupstream={S8}\nconfiguration={S8}\n"
                                                      "nasm_path={S8}\nreference_configure={u32}\nreference_profile_manifest={S8}\nreference_build={u32}\n"
                                                      "reference_checkasm_status={S8}\nreference_checkasm_attempted={u32}\nreference_checkasm_function_pointers={u64}\nreference_media={u32}\nreference_no_sample_fate={u32}\n"
                                                      "buster_configure={u32}\nbuster_profile_manifest={S8}\nbuster_build={u32}\n"
                                                      "buster_checkasm_status={S8}\nbuster_checkasm_attempted={u32}\nbuster_checkasm_function_pointers={u64}\nbuster_media={u32}\nbuster_no_sample_fate={u32}\n"
-                                                     "cross_compiler_checkasm_count_comparison={S8}\nmatching_configurations={u32}\npristine_after={u32}\n"
+                                                     "candidate_h264_target_actions={S8}\n"
+                                                     "cross_compiler_checkasm_count_comparison={S8}\nmatching_configurations={u32}\npristine_before=pass\npristine_after={u32}\n"
                                                      "sample_fate=not-run\nproduction_dispatch=not-run\nper_function_denominator=unknown\n"
                                                      "video_media=not-run\nperformance_qualified=0\nwhole_issue_qualified=0\n"),
                                             S8(BUSTER_FFMPEG_COMMIT), optimized ? S8("assembly-enabled-software") : S8("portable-software"), nasm,
@@ -860,16 +1368,17 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
                                             (u32)built[1],
                                             (checkasm_attempted[1] ? (checkasm[1] ? S8("pass") : S8("fail")) : S8("not-run")),
                                             (u32)checkasm_attempted[1], checkasm_functions[1],
-                                            (u32)media[1], (u32)fate[1], checkasm_count_comparison, (u32)matching, (u32)pristine);
+                                            (u32)media[1], (u32)fate[1], h264_target_actions_status, checkasm_count_comparison, (u32)matching, (u32)pristine);
             bool written = clang_suite_write(arena, path_join(arena, output, S8("receipt.txt")), receipt);
             bool checkasm_counts_match = !optimized || (checkasm_attempted[0] && checkasm_attempted[1] &&
                                                          ffmpeg_checkasm_counts_match(checkasm_functions[0], checkasm_functions[1]));
             bool checkasm_valid = !optimized || (checkasm[0] && checkasm[1] && checkasm_counts_match);
             valid = written && pristine && configured[0] && configured[1] && profile_valid[0] && profile_valid[1] &&
-                    built[0] && built[1] && checkasm_valid && media[0] && media[1] && fate[0] && fate[1] && matching && valid;
-            string_print(S8("FFMPEG_RESULT profile={S8} census={S8} checkasm_count_comparison={S8} production_dispatch=not-run full_qualification=pending artifacts={S8}\n"),
+                    built[0] && built[1] && checkasm_valid && media[0] && media[1] && fate[0] && fate[1] && matching &&
+                    (!portable || h264_target_actions) && valid;
+            string_print(S8("FFMPEG_RESULT profile={S8} census={S8} h264_target_actions={S8} checkasm_count_comparison={S8} production_dispatch=not-run full_qualification=pending artifacts={S8}\n"),
                          optimized ? S8("assembly-enabled") : S8("portable"), valid ? S8("pass") : S8("fail"),
-                         checkasm_count_comparison, output);
+                         h264_target_actions_status, checkasm_count_comparison, output);
         }
         result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 #else

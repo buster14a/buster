@@ -70,12 +70,14 @@
 // Ownership: the four node columns are written once, in place, where the
 // published tree keeps them: each grows in its own private arena (CAstStorage)
 // that reserves address space and commits it as the builder appends, so no
-// node is staged and copied. The tree owns those arenas until c_ast_release;
+// node is staged and copied. Sparse expression groups use an independent
+// retained arena, append-built in node order at each grammar commitment.
+// The tree owns those arenas until c_ast_release;
 // the storage record, the diagnostics and the HYBRID/EXPLICIT slices live in
 // the caller's arena. Builder frames, stacks and bindings live in the phase
 // arena (CAstOptions.phase_arena, else a private one created and retired by
 // the build) and are released before return. A failed build releases its
-// columns itself. The tree references the preprocessing result's tokens and
+// columns and groups itself. The tree references the preprocessing result's tokens and
 // symbols by index and requires that result to stay alive.
 //
 // Scope: the builder resolves the names that change the parse at their
@@ -86,7 +88,8 @@
 //
 // Entry points: c_ast_build, c_ast_release, c_ast_validate, c_ast_dump,
 // c_ast_child_count, c_ast_list_count, c_ast_child_at, c_ast_children,
-// c_ast_walk_begin / c_ast_walk_next, c_ast_kind_name, c_ast_word_name.
+// c_ast_walk_begin / c_ast_walk_next, c_ast_kind_name, c_ast_word_name,
+// c_ast_span_rule, c_ast_spans_build, c_ast_spans_locate.
 
 #include <buster/lib/compiler/frontend/c/c.h>
 
@@ -109,6 +112,11 @@
 // Nodes every column commits at a time; the one predictable branch per append
 // is reaching the committed end. C_AST_NODE_LIMIT is a multiple of it.
 #define C_AST_COLUMN_STEP (1u << 16)
+
+// Sparse expression groups reserve and commit independently of the node
+// columns. Tests can force reservation moves through parenthesis_capacity.
+#define C_AST_PARENTHESIS_CAPACITY (1u << 20)
+#define C_AST_PARENTHESIS_STEP 4096u
 
 #define C_AST_PRESENCE_MASK 0xffu
 
@@ -163,14 +171,15 @@
     X(PARAMETER_LIST_VARIADIC, LIST, 0, 0) /* PARAMETER* followed by `...`; token: `(` */                                                   \
     X(IDENTIFIER_LIST, LIST, 0, 0)         /* K&R DECLARATOR_NAME*; token: `(` */                                                           \
     X(PARAMETER, PRESENCE, 1, 0)           /* DECL_SPECIFIERS, bits 0 declarator, 1 trailing ATTRIBUTE_LIST; token: first token */          \
-    X(TYPE_NAME, PRESENCE, 1, 0)           /* DECL_SPECIFIERS, bit 0 abstract declarator; token: first token */                             \
+    X(TYPE_NAME, RANGE, 1, 2)              /* DECL_SPECIFIERS, [abstract declarator]; token: first token; data: end token */                             \
     /* ---- attributes ---- */                                                                                                              \
     X(ATTRIBUTE_LIST, LIST, 0, 0)          /* consecutive ATTRIBUTE_GNU/_STANDARD/_DECLSPEC groups; token: first group's first token */  \
     X(ATTRIBUTE_GNU, LIST, 0, 0)           /* `__attribute__ (( ... ))`: ATTRIBUTE*; token: keyword */                                      \
     X(ATTRIBUTE_STANDARD, LIST, 0, 0)      /* `[[ ... ]]`: ATTRIBUTE*; token: first `[` */                                                  \
     X(ATTRIBUTE_DECLSPEC, LIST, 0, 0)      /* `__declspec ( ... )`: ATTRIBUTE*; token: keyword */                                           \
     X(ATTRIBUTE, LIST, 0, 0)               /* arguments (expressions or TYPE_NAME); token: name */                                          \
-    X(ATTRIBUTE_SCOPED, LIST, 1, 0)        /* `ns::name`: ATTRIBUTE_NAMESPACE, arguments; token: name */                                    \
+    X(ATTRIBUTE_SCOPED, LIST, 1, 0)        /* `ns::name`: ATTRIBUTE_NAMESPACE, arguments (none outside `gnu`/`clang`: a balanced token      \
+                                              sequence); token: name */                                                                     \
     X(ATTRIBUTE_NAMESPACE, LEAF, 0, 0)     /* token: the namespace word */                                                                  \
     /* ---- statements ---- */                                                                                                              \
     X(COMPOUND_STATEMENT, LIST, 0, 0)      /* block items; token: `{` */                                                                    \
@@ -377,6 +386,7 @@ struct CAstOptions
     // C_AST_COLUMN_CAPACITY; tests set a small value so ordinary trees outgrow
     // it and move.
     u32 column_capacity;
+    u32 parenthesis_capacity;
 };
 
 // Work counts. Counters are live only when C_AST_COUNTERS is nonzero (test
@@ -387,9 +397,11 @@ struct CAstStatistics
 {
     // Always reported.
     u64 node_count;
-    u64 retained_bytes;      // the columns (13 bytes per node), plus children/slices in HYBRID and EXPLICIT
+    u64 retained_bytes;      // logical node/group rows, plus children/slices in HYBRID and EXPLICIT
     u64 transient_high_water; // peak builder bytes in the phase arena: frames, stacks, bindings, refill ring
     u64 column_copy_bytes;   // bytes copied moving the columns to larger reservations; 0 below C_AST_COLUMN_CAPACITY
+    u64 parenthesis_copy_bytes; // sparse group rows copied when their reservation grows
+    u64 parenthesis_committed_bytes; // committed sparse row capacity, including unused rows
     u64 finalize_child_entries; // slice entries written by HYBRID/EXPLICIT finalization
     // Counted only under C_AST_COUNTERS.
     u64 tokens_consumed;
@@ -407,6 +419,32 @@ struct CAstStatistics
 // points at it, so c_ast_release through any copy retires them once.
 typedef struct CAstStorage CAstStorage;
 
+// A redundant expression group, or syntax-owned delimiter provenance.
+// Groups commit at their closing `)`; condition roles commit at their
+// closer, and blocks/for headers publish their saved closer with the owner.
+// Rows are ordered by node, true groups inner to outer followed by an owned
+// role when present. They add no punctuation nodes or second syntax tree.
+typedef struct CAstParenthesis CAstParenthesis;
+#define C_AST_PARENTHESIS_AFTER_IDENTIFIER 1u
+#define C_AST_DELIMITER_CONDITION (1u << 1)
+#define C_AST_DELIMITER_FOR_HEADER (1u << 2)
+#define C_AST_DELIMITER_BLOCK (1u << 3)
+#define C_AST_DELIMITER_OWNED_MASK (C_AST_DELIMITER_CONDITION | C_AST_DELIMITER_FOR_HEADER | C_AST_DELIMITER_BLOCK)
+struct CAstParenthesis
+{
+    u32 node;
+    u32 open;
+    u32 close;
+    u32 flags; // parser-known opening context or C_AST_DELIMITER_* role
+};
+
+typedef struct CAstParentheses CAstParentheses;
+struct CAstParentheses
+{
+    u32 first;
+    u32 count;
+};
+
 struct CAst
 {
     // In the arenas of `storage`, not in the caller's arena.
@@ -414,6 +452,8 @@ struct CAst
     u32* extents;
     u32* tokens;
     u32* data;
+    CAstParenthesis* parentheses;
+    u32 parenthesis_count;
     // HYBRID and EXPLICIT: slice storage. EXPLICIT also fills `slices`.
     u32* children;
     u32* slices;
@@ -447,6 +487,13 @@ BUSTER_F_DECL CAstResult c_ast_build(Arena* arena, CPreprocessResult preprocess,
 // record and any HYBRID/EXPLICIT slices. Idempotent through any copy, and a
 // no-op for an empty tree.
 BUSTER_F_DECL void c_ast_release(CAst* ast);
+
+// The sparse slice belonging to a node, and a level in that slice (1 is the
+// innermost group). An absent level returns null. No tokens are inspected.
+BUSTER_F_DECL CAstParentheses c_ast_parentheses(CAst const* ast, u32 node);
+BUSTER_F_DECL CAstParenthesis const* c_ast_parenthesis_at(CAst const* ast, u32 node, u32 level);
+// Syntax-owned delimiter provenance is separate from true wrapping levels.
+BUSTER_F_DECL CAstParenthesis const* c_ast_owned_delimiter(CAst const* ast, u32 node, u32 role);
 
 // Checks every node's contract, extent tiling and containment, layout slices
 // against the implicit topology, and that the root spans the tree. Returns
@@ -520,3 +567,68 @@ struct CAstWalk
 
 BUSTER_F_DECL CAstWalk c_ast_walk_begin(Arena* arena, CAst const* ast, u32 node);
 BUSTER_F_DECL CAstWalkEvent c_ast_walk_next(CAstWalk* walk, u32* node_out);
+
+// Token spans (GitHub #3102 step 1, lowering's retained facts). A node's span
+// is [first, end) in the final token stream: it starts at the node's leftmost
+// operand or operator and ends after its last token. An operand's span is
+// widened over every balanced pair of parentheses that wraps it exactly,
+// because the tree has no parenthesis node, so an operator's span begins or
+// ends outside its operand's. c_ast_span_rule is the one statement of these
+// rules; the tree expression typer (c_ast_types.c) and CAstSpans both apply it.
+// Kinds outside the rule (declarations, statements, type names, designators,
+// _Generic associations) and nodes over an unmatched delimiter have no span.
+#define C_AST_SPAN_NONE UINT32_MAX
+
+// The operands c_ast_span_rule reads: the token stream, its matching-delimiter
+// index (closer + 1 at each opener, as CPositionIndex publishes it) and the
+// spans already computed for the node's operands, at `first[n - base]` and
+// `end[n - base]`.
+typedef struct CAstSpanInput CAstSpanInput;
+struct CAstSpanInput
+{
+    CAst const* ast;
+    CToken const* tokens;
+    u32 const* matches_plus_one;
+    u32 const* first;
+    u32 const* end;
+    u32 token_total;
+    u32 base;
+};
+
+// The span of `node` from its operands' spans; false, with both outputs
+// C_AST_SPAN_NONE, when none can be established.
+BUSTER_F_DECL bool c_ast_span_rule(CAstSpanInput const* input, u32 node, u32* first_out, u32* end_out);
+// The span at `relative` (n - base), widened over every balanced pair of
+// parentheses that wraps it exactly.
+BUSTER_F_DECL void c_ast_span_expand(CAstSpanInput const* input, u32 relative, u32* first_out, u32* end_out);
+
+// The span of every node of one tree, computed once in index order (children
+// precede parents, so each operand's span is known when its parent is
+// reached), with a per-start-token chain that maps a token range back to its
+// node. Lowering builds it once per unit and keeps it for the whole call; it
+// holds token and node indices only, and no node id leaves the frontend.
+typedef struct CAstSpans CAstSpans;
+struct CAstSpans
+{
+    u32* first;
+    u32* end;
+    // The previous node (index + 1) that starts at the same token, 0 for
+    // none; start_head[token] holds the newest, which is the outermost.
+    u32* link;
+    u32* start_head;
+    u32 node_count;
+    u32 token_total;
+    // Nodes that received a span.
+    u32 spanned;
+    // The bytes of the four columns.
+    u64 retained_bytes;
+};
+
+// Fills `spans` in `arena`. Returns false, leaving `spans` empty, when the
+// tree is empty or the delimiter index is missing.
+BUSTER_F_DECL bool c_ast_spans_build(Arena* arena, CAst const* ast, CToken const* tokens, u32 token_total, u32 const* matches_plus_one,
+                                     CAstSpans* spans);
+// The node whose span is exactly [start, end), after stripping balanced outer
+// parentheses one pair at a time; the outermost such node when several share
+// the span. C_AST_NODE_INVALID when none does.
+BUSTER_F_DECL u32 c_ast_spans_locate(CAstSpans const* spans, CToken const* tokens, u32 const* matches_plus_one, u32 start, u32 end);

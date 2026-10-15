@@ -1,0 +1,27 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 28K of event 'cycles:u'
+# Event count (approx.): 187172208163
+#
+# Overhead  Command          Shared Object                                    
+# ........  ...............  .................................................
+#
+    52.91%  main_thread      ide-candidate-v3                                 
+    11.94%  main_thread      [JIT] tid 1067915                                
+     6.36%  lane_worker      ide-candidate-v3                                 
+     6.16%  main_thread      libc.so.6                                        
+     4.45%  clang            ld-linux-x86-64.so.2                             
+     3.08%  ld               libbfd-2.47.so                                   
+     2.12%  main_thread      [vdso]                                           
+     2.00%  cc1              cc1                                              
+     1.72%  clang-23         ld-linux-x86-64.so.2                             
+     1.48%  clang-23         libLLVM.so.23.1                                  
+     1.08%  clang            libLLVM.so.23.1                                  
+
+
+#
+# (Tip: To browse sample contexts use perf report --sample 10 and select in context menu)
+#

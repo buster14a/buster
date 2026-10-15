@@ -4387,12 +4387,35 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
     object_assembly_append_section_alignment(buffer, section);
     if (object_section_kind_is_zero_fill(section->kind))
     {
-        object_assembly_emit_labels(buffer, object, target, section_index, 0);
-        if (data_length)
+        // Keep each sorted symbol boundary visible; equal-offset aliases share one label position.
+        u64 offset = 0;
+        object_assembly_emit_labels(buffer, object, target, section_index, offset);
+        while (buffer->index.symbol_cursor < range.symbol_end &&
+               object->symbols[buffer->index.symbols[buffer->index.symbol_cursor]].value == offset)
         {
+            buffer->index.symbol_cursor += 1;
+        }
+        while (offset < data_length && !buffer->error)
+        {
+            u64 next_offset = data_length;
+            if (buffer->index.symbol_cursor < range.symbol_end)
+            {
+                u64 symbol_offset = object->symbols[buffer->index.symbols[buffer->index.symbol_cursor]].value;
+                if (symbol_offset > offset && symbol_offset < next_offset)
+                {
+                    next_offset = symbol_offset;
+                }
+            }
             object_assembly_append_string(buffer, S8("\t.zero "));
-            object_assembly_append_u64_decimal(buffer, data_length);
+            object_assembly_append_u64_decimal(buffer, next_offset - offset);
             object_assembly_append_string(buffer, S8("\n"));
+            offset = next_offset;
+            object_assembly_emit_labels(buffer, object, target, section_index, offset);
+            while (buffer->index.symbol_cursor < range.symbol_end &&
+                   object->symbols[buffer->index.symbols[buffer->index.symbol_cursor]].value == offset)
+            {
+                buffer->index.symbol_cursor += 1;
+            }
         }
         object_assembly_emit_sizes(buffer, object, target, section_index);
         return;
