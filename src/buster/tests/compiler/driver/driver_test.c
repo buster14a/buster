@@ -88,6 +88,7 @@
 #include <buster/tests/compiler/driver/driver_test.h>
 #include <buster/lib/os_internal.h>
 #if BUSTER_INCLUDE_TESTS
+#include <buster/tests/compiler/driver/driver_test_internal.h>
 #include <buster/tests/compiler/driver/fixtures/wasi_test_data.h>
 #include <buster/tests/compiler/codegen/codegen_test.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
@@ -1935,7 +1936,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lane_first_fills(UnitTes
 
 #if !BUSTER_ANDROID && !BUSTER_IOS
 // Runs `ide cc <arguments>` and captures both streams; true when it exited 0.
-BUSTER_GLOBAL_LOCAL bool compiler_driver_test_run_cc(UnitTestArguments* arguments, SliceString8 cc_arguments, String8* output, String8* error)
+bool compiler_driver_test_run_cc(UnitTestArguments* arguments, SliceString8 cc_arguments, String8* output, String8* error)
 {
     String8 command[16];
     u32 count = 0;

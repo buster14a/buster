@@ -461,6 +461,8 @@ BUSTER_F_DECL bool c_test_type_layout_offset_queries(Arena* arena, CPreprocessRe
 
 // Bytes one type-machine frame row copies on every push.
 BUSTER_F_DECL u64 c_test_type_parse_frame_bytes(void);
+// Override production's derived frame limit for a structured refusal/recovery test.
+BUSTER_F_DECL void c_test_type_parse_frame_capacity_limit_set(u32 limit);
 
 // Whether nested frames' rollback snapshots stay independent; see c_parse.c.
 BUSTER_F_DECL bool c_test_type_parse_snapshot_rows_restore(Arena* arena, u32 depth);

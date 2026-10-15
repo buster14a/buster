@@ -1216,6 +1216,7 @@ struct CIrDecodedString
 };
 
 typedef struct CTypeParseFrame CTypeParseFrame;
+typedef struct CTypeParseFrameBlock CTypeParseFrameBlock;
 typedef struct CAstTypeBodyIndex CAstTypeBodyIndex;
 typedef struct CAstTypeBody CAstTypeBody;
 typedef struct CTypeMutation CTypeMutation;
@@ -1299,12 +1300,16 @@ struct CParseExpressionTypeTask
 struct CTypeParseFrame
 {
     CParseResult* result;
+    // Stable previous-frame link for the production block stack. Fixed-array
+    // query/test machines instead use their array index.
+    CTypeParseFrame* previous;
+    // Allocated lazily only for a frame that owns a rollback snapshot. The
+    // slot is returned when this frame completes or is discarded.
+    CParseResult* checkpoint;
+    u32 checkpoint_slot;
     // The token stream of the root query that pushed this frame, shared by
     // every frame of one machine run: the root outlives the run, which pops
-    // its frames before returning or failing, so no frame holds a copy. A
-    // frame that saves a rollback snapshot keeps it in the machine's
-    // frame_checkpoints row of the same slot, not in the frame, because few
-    // frames ever take one and every push copies the whole row.
+    // its frames before returning or failing, so no frame holds a copy.
     CPreprocessResult const* preprocess;
     Arena* arena;
     CParseExpressionTypeTask* expression_tasks;
@@ -1661,12 +1666,23 @@ struct CTypeParseMachine
     CToken const* expression_query_tokens;
     u32 expression_query_start;
     u32 expression_query_end;
+    // Fixed-array storage is kept for private fixed-capacity query/test
+    // machines. Production analysis uses stable blocks from frame_storage_arena.
     CTypeParseFrame* frames;
-    // One rollback snapshot per frame slot, written only by the frame kinds
-    // that can abandon a partial parse (aggregate segments and typeof/_Atomic
-    // operands) and read back only by that frame; see
-    // c_type_parse_frame_checkpoint.
+    CTypeParseFrame* frame_top;
+    CTypeParseFrameBlock* frame_block_active;
+    CTypeParseFrameBlock* frame_block_free;
+    u32 frame_block_capacity;
+    u32 frame_block_allocation_count;
+    Arena* frame_storage_arena;
+    // Snapshot slots are separate from frame rows. Production allocates them
+    // lazily from this delimiter-bounded pool; fixed-array test machines keep
+    // the parallel row behavior.
     CParseResult* frame_checkpoints;
+    u32* frame_checkpoint_free_next;
+    u32 frame_checkpoint_capacity;
+    u32 frame_checkpoint_count;
+    u32 frame_checkpoint_free_head;
     CTypeMutation* mutations;
     CParseExpressionTypeTask* expression_tasks;
     CTypeId* incomplete_array_chain;
