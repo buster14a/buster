@@ -9810,7 +9810,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_typeof_arithmetic_authority(UnitTe
     UnitTestResult result = {0};
     String8 const accepted[] = {
         S8("int f(int i){const volatile unsigned short u=1;__typeof__(u+i) t=0;_Static_assert(__builtin_types_compatible_p(__typeof__(t),int),\"qualified\");return t;}"),
-        S8("enum E{A=1};int f(enum E e){_Atomic(int) a=1;__typeof__(e+a) t=0;_Static_assert(__builtin_types_compatible_p(__typeof__(t),unsigned int),\"enum atomic\");return t;}"),
+        // A negative enumerator keeps this signed promotion assertion portable;
+        // ordinary nonnegative enums use the target ABI's compatible type.
+        S8("enum E{A=-1};int f(enum E e){_Atomic(int) a=1;__typeof__(e+a) t=0;_Static_assert(__builtin_types_compatible_p(__typeof__(t),int),\"enum atomic\");return t;}"),
+        S8("enum E{A=1};int f(enum E e){_Atomic(int) a=1;__typeof__(e+a) t=0;return t;}"),
         S8("int f(int i){struct B{unsigned int a:3;unsigned long long b:40;} b={0};__typeof__(b.a+i) t=0;__typeof__(b.b+i) u=0;_Static_assert(sizeof(t)==sizeof(int),\"narrow\");_Static_assert(sizeof(u)==8,\"wide\");return t+(int)u;}"),
         S8("int f(int i,float x,double y,long double z){__typeof__(x+i) a=0;__typeof__(y-x) b=0;__typeof__(z*y) c=0;_Static_assert(__builtin_types_compatible_p(__typeof__(a),float),\"float\");_Static_assert(__builtin_types_compatible_p(__typeof__(b),double),\"double\");_Static_assert(__builtin_types_compatible_p(__typeof__(c),long double),\"long double\");return 0;}"),
         S8("int f(int i,double _Complex z){__typeof__(z+i) a=0;__typeof__(z/i) b=0;_Static_assert(__builtin_types_compatible_p(__typeof__(a),double _Complex),\"complex\");return 0;}"),
@@ -9836,12 +9839,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_typeof_arithmetic_authority(UnitTe
         S8("int f(void){struct S{int x;} s;__typeof__(s+1) a;return 0;}"),
         S8("int f(int* p){__typeof__(p+1.0) a;return 0;}"),
     };
-    for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(accepted) + BUSTER_ARRAY_LENGTH(rejected); sample += 1)
+    Target const enum_targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_WINDOWS},
+    };
+    u32 cases = BUSTER_ARRAY_LENGTH(accepted) + BUSTER_ARRAY_LENGTH(rejected);
+    u32 extra_targets = BUSTER_ARRAY_LENGTH(enum_targets) - 1;
+    for (u32 run = 0; run < cases + 2 * extra_targets; run += 1)
     {
+        // The two ordinary enum cases run once per ABI even on a Linux host.
+        u32 extra = run >= cases ? run - cases : 0;
+        u32 sample = run < cases ? run : 1 + extra / extra_targets;
+        u32 enum_target = run < cases ? 0 : 1 + extra % extra_targets;
+        bool enumeration = sample == 1 || sample == 2;
+        Target target = enumeration ? enum_targets[enum_target] : target_native;
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
         bool valid = sample < BUSTER_ARRAY_LENGTH(accepted);
         String8 source = valid ? accepted[sample] : rejected[sample - BUSTER_ARRAY_LENGTH(accepted)];
-        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU23);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, source,
+            (CPreprocessOptions){.source_path = S8("ast-test.c"), .target = target, .data_layout = target_data_layout(target),
+                .dialect = C_PREPROCESS_DIALECT_GNU23});
         CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
         CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
         syntax.type_interning = true;
@@ -9854,6 +9873,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_typeof_arithmetic_authority(UnitTe
         String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
         difference = difference.length || !valid ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &analysis);
         BUSTER_TEST_RAW(arguments, !difference.length, difference);
+        if (enumeration)
+        {
+            string_print(S8("TYPEOF_ENUM_AUTHORITY sample={u32} target={u32} retained_diagnostics={u32} reference_diagnostics={u32} model_equal={u32}\n"),
+                sample, enum_target, analysis.diagnostic_count, plain.diagnostic_count, (u32)!difference.length);
+        }
         if (valid && analysis.ast && analysis.ast_facts)
         {
             CAstFacts const* facts = analysis.ast_facts;
@@ -9904,7 +9928,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_typeof_arithmetic_authority(UnitTe
                     }
                 }
             }
-            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("typeof-arithmetic.c"), preprocess, analysis, target_native);
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("typeof-arithmetic.c"), preprocess, analysis, target);
             BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified,
                 lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("missing canonical typeof arithmetic program"));
         }
