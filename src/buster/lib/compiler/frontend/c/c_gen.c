@@ -8717,7 +8717,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
     }
     IrBlockParameter** parameter_by_value = active_block_count ? arena_allocate(builder->scratch_arena, IrBlockParameter*, count) : 0;
     IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, active_block_count ? sizeof(*parameter_by_value) * (u64)count : 0);
-    u32 parameter_count = c_ir_ssa_simplify_parameters(builder, memory, replacements, pending_by_value, parameter_by_value, cursor, active_block_count);
+    u32 parameter_count = active_block_count ? c_ir_ssa_simplify_parameters(builder, memory, replacements, pending_by_value, parameter_by_value, cursor, active_block_count) : 0;
     // The simplifier leaves exactly its surviving parameters in the index.
     // Mark liveness only when there is a parameter (possibly a dead cycle).
     memset(value_map, 0xff, sizeof(*value_map) * count);
@@ -8794,7 +8794,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
         // edges. Publish every predecessor, including parameter-free
         // successors, so dominance never sees a partial graph.
         {
-            for (u32 index = offsets[block]; predecessors_fit && index < offsets[block + 1]; index += 1)
+            for (u32 index = offsets[block]; published_predecessors && index < offsets[block + 1]; index += 1)
             {
                 IrPredecessor* predecessor = published_predecessors + index;
                 *predecessor = (IrPredecessor){.block = {.value = predecessors[index]}};
