@@ -90,7 +90,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_pool_tests(UnitTestArguments* argument
     }
 
     // Shapes: adjacent, ascending with a gap, overlapping, descending. Only
-    // the last two may alias, so only they are copied into fresh slices.
+    // overlapping slices require a copy; descending disjoint slices stay.
     u32 first_offsets[] = {0, 0, 0, 3};
     u32 second_offsets[] = {2, 3, 1, 0};
     for (u32 kind = 0; kind < 3; kind += 1)
@@ -124,7 +124,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_pool_tests(UnitTestArguments* argument
             IrPublishedCfg const* cfg = function.published_cfg;
             if (BUSTER_REQUIRE(arguments, cfg != 0))
             {
-                bool copied = shape >= 2;
+                bool copied = shape == 2;
                 u64 copied_bytes = kind == 0 ? 4 * sizeof(IrValueId) : kind == 1 ? 4 * sizeof(IrBlockId) : 4 * sizeof(u64);
                 BUSTER_TEST(arguments, cfg->allocated_bytes == base_allocated_bytes + (copied ? copied_bytes : 0));
                 BUSTER_TEST(arguments, (rows[0].operands == operands + first[0]) == (kind != 0 || !copied));
@@ -282,9 +282,194 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_instruction_span_tests(UnitTestArgumen
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_permutation_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 order[5] = {0, 1, 2, 3, 4};
+    u32 cases = 0;
+    bool more = true;
+    while (more)
+    {
+        for (u32 mask = 0; mask < 32; mask += 1)
+        {
+            TemporalArena temporary = arena_begin_temporal(arguments->arena);
+            IrInstruction rows[5] = {0};
+            IrValue values[5] = {0};
+            IrSourceRange sources[5] = {0};
+            IrBlock blocks[5] = {0};
+            IrInstructionExtra extras[5] = {0};
+            IrInstructionId ids[5] = {0};
+            u32 extra_count = 0;
+            for (u32 index = 0; index < 5; index += 1)
+            {
+                rows[index] = (IrInstruction){.next = IR_INSTRUCTION_ID_INVALID, .opcode = IR_OPCODE_UNREACHABLE,
+                    .result = {.value = index}};
+                values[index].definition.value = index;
+                sources[index].offset = 100 + index;
+                blocks[index] = (IrBlock){.id = {.value = index}, .first_instruction = {.value = order[index]},
+                    .last_instruction = {.value = order[index]}, .terminated = true};
+                if (mask & (1u << index))
+                {
+                    ids[extra_count].value = index;
+                    extras[extra_count++].reserved = index;
+                }
+            }
+            IrFunction function = {.instructions = rows, .instruction_count = 5, .blocks = blocks, .block_count = 5,
+                .values = values, .value_count = 5, .instruction_canonical_sources = sources,
+                .extras = extras, .extra_instructions = ids, .extra_count = extra_count};
+            BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, &function).error == IR_VALIDATION_NONE);
+            if (BUSTER_REQUIRE(arguments, function.published_cfg != 0))
+            {
+                // Enumerating the original row order is an independent oracle
+                // for both permutation directions and every sparse-extra set.
+                u32 extra = 0;
+                for (u32 index = 0; index < 5; index += 1)
+                {
+                    u32 old = order[index];
+                    BUSTER_TEST(arguments, rows[index].result.value == old && rows[index].next.value == IR_ID_UNDERLYING_INVALID);
+                    BUSTER_TEST(arguments, values[old].definition.value == index && sources[index].offset == 100 + old);
+                    BUSTER_TEST(arguments, function.published_cfg->blocks[index].first_instruction == index);
+                    BUSTER_TEST(arguments, function.published_cfg->blocks[index].instruction_count == 1);
+                    if (mask & (1u << old))
+                    {
+                        BUSTER_TEST(arguments, ids[extra].value == index && extras[extra].reserved == old);
+                        extra += 1;
+                    }
+                }
+                BUSTER_TEST(arguments, extra == extra_count);
+                ir_function_invalidate_cfg(&function);
+                BUSTER_TEST(arguments, !function.published_cfg);
+                BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, &function).error == IR_VALIDATION_NONE);
+                for (u32 index = 0; index < 5; index += 1)
+                {
+                    BUSTER_TEST(arguments, values[order[index]].definition.value == index && rows[index].result.value == order[index]);
+                }
+            }
+            cases += 1;
+            scratch_end(temporary);
+        }
+        u32 pivot = 4;
+        while (pivot && order[pivot - 1] >= order[pivot]) pivot -= 1;
+        more = pivot != 0;
+        if (more)
+        {
+            u32 next = 4;
+            while (order[next] <= order[pivot - 1]) next -= 1;
+            u32 swap = order[pivot - 1];
+            order[pivot - 1] = order[next];
+            order[next] = swap;
+            u32 end = 4;
+            while (pivot < end)
+            {
+                swap = order[pivot];
+                order[pivot++] = order[end];
+                order[end--] = swap;
+            }
+        }
+    }
+    BUSTER_TEST(arguments, cases == 120 * 32);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_slice_range_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 offsets[] = {0, 1, 2, 3, 5, 8};
+    u32 lengths[] = {2, 2, 1};
+    for (u32 kind = 0; kind < 3; kind += 1)
+    {
+        for (u32 a = 0; a < BUSTER_ARRAY_LENGTH(offsets); a += 1)
+        {
+            for (u32 b = 0; b < BUSTER_ARRAY_LENGTH(offsets); b += 1)
+            {
+                for (u32 c = 0; c < BUSTER_ARRAY_LENGTH(offsets); c += 1)
+                {
+                    TemporalArena temporary = arena_begin_temporal(arguments->arena);
+                    u32 starts[] = {offsets[a], offsets[b], offsets[c]};
+                    IrValueId operands[10];
+                    IrBlockId targets[10];
+                    u64 immediates[10];
+                    for (u32 index = 0; index < 10; index += 1)
+                    {
+                        operands[index].value = 100 + index;
+                        targets[index].value = 100 + index;
+                        immediates[index] = 100 + index;
+                    }
+                    IrInstruction rows[4] = {0};
+                    IrBlock block = {0};
+                    IrFunction function = ir_cfg_pool_test_function(rows, BUSTER_ARRAY_LENGTH(rows), &block);
+                    bool disjoint = true;
+                    for (u32 row = 0; row < 3; row += 1)
+                    {
+                        if (kind == 0)
+                        {
+                            rows[row].operands = operands + starts[row];
+                            rows[row].operand_count = lengths[row];
+                        }
+                        else if (kind == 1)
+                        {
+                            rows[row].targets = targets + starts[row];
+                            rows[row].target_count = (u16)lengths[row];
+                        }
+                        else
+                        {
+                            rows[row].immediates = immediates + starts[row];
+                            rows[row].immediate_count = (u16)lengths[row];
+                        }
+                        for (u32 earlier = 0; earlier < row; earlier += 1)
+                        {
+                            disjoint &= starts[row] >= starts[earlier] + lengths[earlier] || starts[earlier] >= starts[row] + lengths[row];
+                        }
+                    }
+                    BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, &function).error == IR_VALIDATION_NONE);
+                    if (BUSTER_REQUIRE(arguments, function.published_cfg != 0))
+                    {
+                        u64 copied = disjoint ? 0 : 5 * (kind == 2 ? sizeof(u64) : sizeof(IrValueId));
+                        BUSTER_TEST(arguments, function.published_cfg->allocated_bytes == sizeof(IrPublishedCfg) + sizeof(IrCfgBlock) + copied);
+                        for (u32 row = 0; row < 3; row += 1)
+                        {
+                            bool reused = kind == 0 ? rows[row].operands == operands + starts[row] : kind == 1 ? rows[row].targets == targets + starts[row] : rows[row].immediates == immediates + starts[row];
+                            BUSTER_TEST(arguments, reused == disjoint);
+                            for (u32 index = 0; index < lengths[row]; index += 1)
+                            {
+                                u64 value = kind == 0 ? rows[row].operands[index].value : kind == 1 ? rows[row].targets[index].value : rows[row].immediates[index];
+                                BUSTER_TEST(arguments, value == 100 + starts[row] + index);
+                            }
+                        }
+                        ir_function_invalidate_cfg(&function);
+                        // A direct edit after reopen invalidates any historical
+                        // disjointness fact: publication must prove it again.
+                        if (kind == 0) rows[1].operands = rows[0].operands;
+                        else if (kind == 1) rows[1].targets = rows[0].targets;
+                        else rows[1].immediates = rows[0].immediates;
+                        BUSTER_TEST(arguments, ir_function_publish_cfg(arguments->arena, &function).error == IR_VALIDATION_NONE);
+                        if (BUSTER_REQUIRE(arguments, function.published_cfg != 0))
+                        {
+                            BUSTER_TEST(arguments, function.published_cfg->allocated_bytes == sizeof(IrPublishedCfg) + sizeof(IrCfgBlock) + 5 * (kind == 2 ? sizeof(u64) : sizeof(IrValueId)));
+                            if (kind == 0) rows[0].operands[0].value = 999;
+                            else if (kind == 1) rows[0].targets[0].value = 999;
+                            else rows[0].immediates[0] = 999;
+                            u64 other = kind == 0 ? rows[1].operands[0].value : kind == 1 ? rows[1].targets[0].value : rows[1].immediates[0];
+                            BUSTER_TEST(arguments, other == 100 + starts[0]);
+                        }
+                    }
+                    scratch_end(temporary);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult ir_cfg_publication_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = ir_cfg_pool_tests(arguments);
+    UnitTestResult permutations = ir_cfg_permutation_tests(arguments);
+    result.test_count += permutations.test_count;
+    result.succeeded_test_count += permutations.succeeded_test_count;
+    UnitTestResult ranges = ir_cfg_slice_range_tests(arguments);
+    result.test_count += ranges.test_count;
+    result.succeeded_test_count += ranges.succeeded_test_count;
     UnitTestResult spans = ir_cfg_instruction_span_tests(arguments);
     result.test_count += spans.test_count;
     result.succeeded_test_count += spans.succeeded_test_count;
