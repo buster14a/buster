@@ -1,0 +1,3934 @@
+{
+  "all20_checks_and_warnings": [
+    {
+      "cell": "backend_pressure-object-fast",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.1034642526195737,
+              "ci_low": 1.0871033685894587,
+              "label": "first half",
+              "median": 1.0998942412614774,
+              "n": 10
+            },
+            {
+              "ci_high": 1.1190639187144196,
+              "ci_low": 1.0982593543983186,
+              "label": "second half",
+              "median": 1.1022669067411763,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.0556615,
+            0.055902,
+            0.0561995,
+            0.056157,
+            0.0560635,
+            0.0555885,
+            0.055610999999999994,
+            0.0559515,
+            0.055682499999999996,
+            0.0556645
+          ],
+          "tenth_medians_ratio": [
+            1.1009224460929925,
+            1.0991050216926417,
+            1.0974741798605927,
+            1.0930531024434655,
+            1.4168888847522456,
+            1.108661636556369,
+            1.1023095337308577,
+            1.0990154675173418,
+            1.1022669067411763,
+            1.3975449757406033
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 1.0010660458563807,
+          "subsets": [
+            {
+              "ci_high": 1.694061877143524,
+              "ci_low": 1.0914841071016115,
+              "label": "AB (A ran first)",
+              "median": 1.1022405666371395,
+              "n": 10
+            },
+            {
+              "ci_high": 1.1026643367981122,
+              "ci_low": 1.0921291840444871,
+              "label": "BA (B ran first)",
+              "median": 1.0998942412614774,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes"
+      ]
+    },
+    {
+      "cell": "backend_pressure-object-quality",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0975432811211872,
+              "ci_low": 1.0812763592375845,
+              "label": "first half",
+              "median": 1.08738430841641,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0999029269978116,
+              "ci_low": 1.0788121073672186,
+              "label": "second half",
+              "median": 1.094611101518858,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.074087,
+            0.0609015,
+            0.060896000000000006,
+            0.060825000000000004,
+            0.0608895,
+            0.060881500000000005,
+            0.061032,
+            0.060662999999999995,
+            0.0714255,
+            0.060611
+          ],
+          "tenth_medians_ratio": [
+            0.9195289842164934,
+            1.089634499364414,
+            1.3195328032851479,
+            1.0928199482050402,
+            1.0904539844562895,
+            1.0939614388737824,
+            1.0893575171825152,
+            1.0965903061261624,
+            0.9490490118306005,
+            1.0992421474688285
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 1.0051300711290492,
+          "subsets": [
+            {
+              "ci_high": 1.1047688219078589,
+              "ci_low": 1.0849116938062675,
+              "label": "AB (A ran first)",
+              "median": 1.0976085816827972,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0955067300079178,
+              "ci_low": 1.0788121073672186,
+              "label": "BA (B ran first)",
+              "median": 1.0864330318794928,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes"
+      ]
+    },
+    {
+      "cell": "backend_pressure-syntax-only",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0377626636889654,
+              "ci_low": 0.9997011207970112,
+              "label": "first half",
+              "median": 1.0108104617330456,
+              "n": 10
+            },
+            {
+              "ci_high": 1.025880442504821,
+              "ci_low": 1.0008450984291113,
+              "label": "second half",
+              "median": 1.0107522109953464,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.0196805,
+            0.019947,
+            0.0197325,
+            0.0269775,
+            0.019785,
+            0.0198295,
+            0.019706500000000002,
+            0.019910999999999998,
+            0.019735500000000003,
+            0.0200095
+          ],
+          "tenth_medians_ratio": [
+            1.0158488318819021,
+            1.0049214519672023,
+            1.0260415262342408,
+            0.8132205138139452,
+            1.014456725446625,
+            1.0070665264994776,
+            1.6195424404386187,
+            1.013362770466966,
+            1.0139699532601214,
+            1.0006191528412143
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 1.0013361425118994,
+          "subsets": [
+            {
+              "ci_high": 1.0237447065940712,
+              "ci_low": 1.0008450984291113,
+              "label": "AB (A ran first)",
+              "median": 1.0110202714214749,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0377626636889654,
+              "ci_low": 0.9997011207970112,
+              "label": "BA (B ran first)",
+              "median": 1.0083239423139383,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "wall: the bootstrap CI of the geometric mean (no detectable difference) disagrees with the sign-test verdict (below-floor); the effect is at the edge of detectability"
+      ]
+    },
+    {
+      "cell": "control_flow-object-fast",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.067435611770103,
+              "ci_low": 1.0498562791158688,
+              "label": "first half",
+              "median": 1.0624154518903377,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0715945300053107,
+              "ci_low": 1.0529801324503312,
+              "label": "second half",
+              "median": 1.0574871862804645,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.030363,
+            0.029995,
+            0.040914,
+            0.0300915,
+            0.03013,
+            0.030650499999999997,
+            0.0303125,
+            0.030165499999999998,
+            0.030413000000000003,
+            0.030315
+          ],
+          "tenth_medians_ratio": [
+            1.0659609202918312,
+            1.0670225790062458,
+            0.8419309275388058,
+            1.0576029623952121,
+            1.0611037810955564,
+            1.0551255461876319,
+            1.6755920376030677,
+            1.0588586702944411,
+            1.0582235069502808,
+            1.062287331227821
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 1.0008117398873555,
+          "subsets": [
+            {
+              "ci_high": 1.067435611770103,
+              "ci_low": 1.0529801324503312,
+              "label": "AB (A ran first)",
+              "median": 1.060778998640826,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0715945300053107,
+              "ci_low": 1.05169785619304,
+              "label": "BA (B ran first)",
+              "median": 1.0590589400345944,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "wall: the bootstrap CI of the geometric mean (no detectable difference) disagrees with the sign-test verdict (slower); the effect is at the edge of detectability"
+      ]
+    },
+    {
+      "cell": "control_flow-object-quality",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0714569931693083,
+              "ci_low": 1.0434287573194534,
+              "label": "first half",
+              "median": 1.053642176770129,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0713958959613121,
+              "ci_low": 1.045782817554982,
+              "label": "second half",
+              "median": 1.0629603273466601,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.03064,
+            0.030583,
+            0.044228,
+            0.030455000000000003,
+            0.0304935,
+            0.030594,
+            0.030522,
+            0.0308625,
+            0.0304275,
+            0.0305835
+          ],
+          "tenth_medians_ratio": [
+            1.0485644114036692,
+            1.055829248808,
+            0.823850326991449,
+            1.0621332832651953,
+            1.058993221743291,
+            1.0549148174151475,
+            1.5257603658518781,
+            1.0530880029378178,
+            1.0599695091161554,
+            1.0576048731931853
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 0.9990709923771616,
+          "subsets": [
+            {
+              "ci_high": 1.0713958959613121,
+              "ci_low": 1.0476082226480046,
+              "label": "AB (A ran first)",
+              "median": 1.055887137525756,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0714569931693083,
+              "ci_low": 1.0434287573194534,
+              "label": "BA (B ran first)",
+              "median": 1.0578517291818446,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "wall: the bootstrap CI of the geometric mean (no detectable difference) disagrees with the sign-test verdict (slower); the effect is at the edge of detectability"
+      ]
+    },
+    {
+      "cell": "control_flow-syntax-only",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0361785434612374,
+              "ci_low": 0.98374931964855,
+              "label": "first half",
+              "median": 1.0191775157440186,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0523889021384847,
+              "ci_low": 1.000078125,
+              "label": "second half",
+              "median": 1.0096041057319503,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.0127695,
+            0.012588499999999999,
+            0.0127145,
+            0.0129935,
+            0.012587,
+            0.0126715,
+            0.0128635,
+            0.01268,
+            0.012763,
+            0.012702
+          ],
+          "tenth_medians_ratio": [
+            1.0243936025317777,
+            1.0261009407765438,
+            2.0904185808936577,
+            0.9897159543704824,
+            1.0207089458796168,
+            1.0265026790505678,
+            2.604108188901942,
+            1.0328449479004762,
+            1.0036537096790035,
+            1.001964037012956
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 0.9882306798678308,
+          "subsets": [
+            {
+              "ci_high": 1.020790350737978,
+              "ci_low": 0.9839513867248364,
+              "label": "AB (A ran first)",
+              "median": 1.0096041057319503,
+              "n": 10
+            },
+            {
+              "ci_high": 3.1970878421387656,
+              "ci_low": 1.000078125,
+              "label": "BA (B ran first)",
+              "median": 1.0337950371381734,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "wall: the bootstrap CI of the geometric mean (slower) disagrees with the sign-test verdict (below-floor); the effect is at the edge of detectability",
+        "instructions changed +0.42% but wall time shows only a below-floor change: a proxy is not a win"
+      ]
+    },
+    {
+      "cell": "large_function-object-fast",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0750812653611352,
+              "ci_low": 1.0167904673475705,
+              "label": "first half",
+              "median": 1.022631994405917,
+              "n": 10
+            },
+            {
+              "ci_high": 1.040527005162185,
+              "ci_low": 1.0154918667699457,
+              "label": "second half",
+              "median": 1.0259954680469774,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.012914,
+            0.0127405,
+            0.012858999999999999,
+            0.0129335,
+            0.0127565,
+            0.012987,
+            0.0128975,
+            0.0129445,
+            0.012945,
+            0.012943
+          ],
+          "tenth_medians_ratio": [
+            1.0202132745913302,
+            1.0422654633813881,
+            1.976807625414125,
+            1.0171441290284906,
+            1.0483545861689398,
+            1.0332677263405672,
+            1.801051099279242,
+            1.0280094359660654,
+            1.0205656571710997,
+            1.0235619077318194
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 0.996267586207176,
+          "subsets": [
+            {
+              "ci_high": 1.0430149651335892,
+              "ci_low": 1.0154918667699457,
+              "label": "AB (A ran first)",
+              "median": 1.0183508818276679,
+              "n": 10
+            },
+            {
+              "ci_high": 2.58429758484119,
+              "ci_low": 1.0214302352667133,
+              "label": "BA (B ran first)",
+              "median": 1.0259954680469774,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes"
+      ]
+    },
+    {
+      "cell": "large_function-object-quality",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0495731850575614,
+              "ci_low": 0.9993213693258935,
+              "label": "first half",
+              "median": 1.0299774456797823,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0455968838310548,
+              "ci_low": 0.999170687575392,
+              "label": "second half",
+              "median": 1.0350203090672392,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.013080499999999998,
+            0.012896500000000002,
+            0.013146,
+            0.0131615,
+            0.012948999999999999,
+            0.013103,
+            0.012969999999999999,
+            0.0295275,
+            0.013018,
+            0.013054
+          ],
+          "tenth_medians_ratio": [
+            1.017085748357774,
+            1.0424846883518764,
+            1.0124772617926474,
+            1.9514190828934845,
+            1.030229077183392,
+            1.0207567237907866,
+            1.0261189330391731,
+            0.6665476260241389,
+            1.0445836331206968,
+            1.0367616224252834
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 0.9981152924443564,
+          "subsets": [
+            {
+              "ci_high": 1.0455968838310548,
+              "ci_low": 0.9993213693258935,
+              "label": "AB (A ran first)",
+              "median": 1.0296436656390764,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0518765508684864,
+              "ci_low": 0.999170687575392,
+              "label": "BA (B ran first)",
+              "median": 1.0335358199308673,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "wall: the bootstrap CI of the geometric mean (no detectable difference) disagrees with the sign-test verdict (slower); the effect is at the edge of detectability"
+      ]
+    },
+    {
+      "cell": "large_function-syntax-only",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0348614480909208,
+              "ci_low": 0.9850234801370731,
+              "label": "first half",
+              "median": 1.013205487454365,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0271481623767449,
+              "ci_low": 0.9453924914675769,
+              "label": "second half",
+              "median": 0.9776599178081524,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.0080095,
+            0.0077859999999999995,
+            0.007804,
+            0.007855000000000001,
+            0.0079915,
+            0.01869,
+            0.008219,
+            0.0079305,
+            0.0080595,
+            0.0079965
+          ],
+          "tenth_medians_ratio": [
+            1.0023443550312827,
+            1.01194314502302,
+            1.0279310770621182,
+            1.009942464113997,
+            1.0033811402677832,
+            0.6386941520564645,
+            0.9573331172421684,
+            1.0102208770154961,
+            0.9631954471508665,
+            1.0044542889745924
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 1.0023101501190106,
+          "subsets": [
+            {
+              "ci_high": 1.0277742059920278,
+              "ci_low": 0.9453924914675769,
+              "label": "AB (A ran first)",
+              "median": 1.0026770103758098,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0348614480909208,
+              "ci_low": 0.9692737430167598,
+              "label": "BA (B ran first)",
+              "median": 0.9980603454819834,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "instructions changed +0.11% but wall time shows no detectable difference: a proxy is not a win"
+      ]
+    },
+    {
+      "cell": "many_functions-object-fast",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.019534184823441,
+              "ci_low": 0.9866633938798888,
+              "label": "first half",
+              "median": 1.0120885871372503,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0271308122547793,
+              "ci_low": 0.9792320695484182,
+              "label": "second half",
+              "median": 1.0008168198467744,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.012073,
+            0.012073500000000001,
+            0.012198,
+            0.0121035,
+            0.0120665,
+            0.012337,
+            0.0195095,
+            0.0122005,
+            0.0120955,
+            0.012199000000000002
+          ],
+          "tenth_medians_ratio": [
+            1.0120273044607053,
+            0.9976084264996928,
+            0.99827012003815,
+            1.0196830181287222,
+            1.0099024886054586,
+            0.9892895308153486,
+            0.7372710274291647,
+            1.0052463770106062,
+            1.0219668524917263,
+            0.99377888704105
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 0.9960492010020995,
+          "subsets": [
+            {
+              "ci_high": 1.0176499834272457,
+              "ci_low": 0.9792320695484182,
+              "label": "AB (A ran first)",
+              "median": 0.9985994021748372,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0271308122547793,
+              "ci_low": 0.9993469920822791,
+              "label": "BA (B ran first)",
+              "median": 1.0065369416087333,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "instructions changed +3.65% but wall time shows no detectable difference: a proxy is not a win",
+        "cycles changed +3.36% but wall time shows no detectable difference: a proxy is not a win"
+      ]
+    },
+    {
+      "cell": "many_functions-object-quality",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0301273677335074,
+              "ci_low": 0.9860491992735678,
+              "label": "first half",
+              "median": 1.006995750338101,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0307514259733817,
+              "ci_low": 0.9888942931258107,
+              "label": "second half",
+              "median": 1.0110024241867195,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.012036,
+            0.0120815,
+            0.0120915,
+            0.0121735,
+            0.012206999999999999,
+            0.012095999999999999,
+            0.011942,
+            0.012001000000000001,
+            0.012103,
+            0.0295405
+          ],
+          "tenth_medians_ratio": [
+            0.9964114536257452,
+            0.9963015808690614,
+            1.0152501621591452,
+            1.0127432373189866,
+            1.9468407675425716,
+            1.0103040966303816,
+            1.0143640816289439,
+            1.0243215340702692,
+            1.0059836541175338,
+            0.632971531272892
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 0.9982270170472768,
+          "subsets": [
+            {
+              "ci_high": 1.0189650944167417,
+              "ci_low": 0.9888942931258107,
+              "label": "AB (A ran first)",
+              "median": 1.0079543792955206,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0317139001349527,
+              "ci_low": 0.9860491992735678,
+              "label": "BA (B ran first)",
+              "median": 1.0115380790979231,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "wall: the bootstrap CI of the geometric mean (no detectable difference) disagrees with the sign-test verdict (below-floor); the effect is at the edge of detectability",
+        "instructions changed +3.60% but wall time shows only a below-floor change: a proxy is not a win",
+        "cycles changed +3.02% but wall time shows only a below-floor change: a proxy is not a win"
+      ]
+    },
+    {
+      "cell": "many_functions-syntax-only",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": true,
+          "subsets": [
+            {
+              "ci_high": 0.99709852403179,
+              "ci_low": 0.963681284743669,
+              "label": "first half",
+              "median": 0.9823599023997359,
+              "n": 10
+            },
+            {
+              "ci_high": 1.031800766283525,
+              "ci_low": 0.9983397190293741,
+              "label": "second half",
+              "median": 1.0065514405699174,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.0081045,
+            0.008032000000000001,
+            0.0082225,
+            0.008078,
+            0.007975,
+            0.020384,
+            0.007855500000000001,
+            0.007879500000000001,
+            0.007834,
+            0.007834
+          ],
+          "tenth_medians_ratio": [
+            0.9745454759272763,
+            0.9978733372278896,
+            0.964099466212833,
+            0.9844336262680008,
+            0.9749023864838651,
+            0.6241728298978669,
+            1.0045147822111935,
+            1.0310665583131393,
+            1.0052300789584228,
+            1.0307000769412011
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 0.9946544259420296,
+          "subsets": [
+            {
+              "ci_high": 1.0121204388874714,
+              "ci_low": 0.9320096269554754,
+              "label": "AB (A ran first)",
+              "median": 0.9878474203036003,
+              "n": 10
+            },
+            {
+              "ci_high": 1.031800766283525,
+              "ci_low": 0.9861234882240613,
+              "label": "BA (B ran first)",
+              "median": 0.9984939347266817,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "instructions changed +4.03% but wall time shows no detectable difference: a proxy is not a win",
+        "cycles changed +3.03% but wall time shows no detectable difference: a proxy is not a win",
+        "drift: first half median B/A 0.9824 [0.9637, 0.9971] and second half 1.0066 [0.9983, 1.0318] do not overlap"
+      ]
+    },
+    {
+      "cell": "symbol_table-object-fast",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0265499124343258,
+              "ci_low": 0.9834597771854282,
+              "label": "first half",
+              "median": 1.0023105749782042,
+              "n": 10
+            },
+            {
+              "ci_high": 1.045045045045045,
+              "ci_low": 1.0044855427506727,
+              "label": "second half",
+              "median": 1.019682343541895,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.014594,
+            0.014395,
+            0.022376,
+            0.0144635,
+            0.014452,
+            0.014249000000000001,
+            0.014453500000000001,
+            0.0144275,
+            0.0143955,
+            0.014329
+          ],
+          "tenth_medians_ratio": [
+            1.0012732530899244,
+            1.0223323704684577,
+            0.733654127495805,
+            1.014230457172664,
+            1.0076885571834355,
+            1.0321270819112969,
+            2.2217211287560246,
+            1.0238984168538379,
+            1.0113247127347815,
+            1.021365641814334
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 1.0022237324361332,
+          "subsets": [
+            {
+              "ci_high": 1.0369359916054564,
+              "ci_low": 1.0001363698349925,
+              "label": "AB (A ran first)",
+              "median": 1.0118845056791146,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0348715075975072,
+              "ci_low": 1.001911001911002,
+              "label": "BA (B ran first)",
+              "median": 1.0073991517646417,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "wall: the bootstrap CI of the geometric mean (no detectable difference) disagrees with the sign-test verdict (below-floor); the effect is at the edge of detectability",
+        "instructions changed +3.88% but wall time shows only a below-floor change: a proxy is not a win",
+        "cycles changed +3.30% but wall time shows only a below-floor change: a proxy is not a win"
+      ]
+    },
+    {
+      "cell": "symbol_table-object-quality",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0347826086956522,
+              "ci_low": 0.9958401527550463,
+              "label": "first half",
+              "median": 1.0106928282829655,
+              "n": 10
+            },
+            {
+              "ci_high": 1.038888888888889,
+              "ci_low": 0.9965914513600109,
+              "label": "second half",
+              "median": 1.0065529469487535,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.014408500000000001,
+            0.014339999999999999,
+            0.014537,
+            0.0144135,
+            0.014459,
+            0.0144365,
+            0.014483,
+            0.014649,
+            0.0146135,
+            0.0145335
+          ],
+          "tenth_medians_ratio": [
+            1.0132008804967578,
+            1.0410194119623528,
+            1.0097868355725266,
+            1.008694710824824,
+            1.001973538943831,
+            1.0206881396009426,
+            1.0056748961353459,
+            1.3978440557999876,
+            0.9982736288093292,
+            1.0184150574908104
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 1.007170760916482,
+          "subsets": [
+            {
+              "ci_high": 1.0347826086956522,
+              "ci_low": 1.0024873903129965,
+              "label": "AB (A ran first)",
+              "median": 1.014381190938863,
+              "n": 10
+            },
+            {
+              "ci_high": 1.038888888888889,
+              "ci_low": 0.9916191522978636,
+              "label": "BA (B ran first)",
+              "median": 0.9999884160213071,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "wall: the bootstrap CI of the geometric mean (slower) disagrees with the sign-test verdict (below-floor); the effect is at the edge of detectability",
+        "instructions changed +3.86% but wall time shows only a below-floor change: a proxy is not a win",
+        "cycles changed +2.88% but wall time shows only a below-floor change: a proxy is not a win"
+      ]
+    },
+    {
+      "cell": "symbol_table-syntax-only",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0233333333333334,
+              "ci_low": 0.9813417190775682,
+              "label": "first half",
+              "median": 0.9998414490975581,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0299445865302643,
+              "ci_low": 0.28895677409500536,
+              "label": "second half",
+              "median": 1.0114681829924315,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.009365499999999999,
+            0.00963,
+            0.009291,
+            0.009524500000000002,
+            0.009423,
+            0.025208500000000002,
+            0.009396999999999999,
+            0.0093915,
+            0.0095845,
+            0.021305499999999998
+          ],
+          "tenth_medians_ratio": [
+            1.0091218675997597,
+            0.9998414490975581,
+            1.008982061942055,
+            0.9956693484462285,
+            0.9933572983954357,
+            0.6291243172458306,
+            1.0331437874246545,
+            1.0118486317173008,
+            1.0058581955387642,
+            0.6422507645282641
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 0.9892011530919815,
+          "subsets": [
+            {
+              "ci_high": 1.0196670135275754,
+              "ci_low": 0.970082351714792,
+              "label": "AB (A ran first)",
+              "median": 0.9989133379620394,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0299445865302643,
+              "ci_low": 0.9813417190775682,
+              "label": "BA (B ran first)",
+              "median": 1.0208421280774895,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "instructions changed +3.91% but wall time shows no detectable difference: a proxy is not a win"
+      ]
+    },
+    {
+      "cell": "tiny_startup-object-fast",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0196978175713485,
+              "ci_low": 0.9534154777345439,
+              "label": "first half",
+              "median": 0.990700437416272,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0200111794298492,
+              "ci_low": 1.0032909170688897,
+              "label": "second half",
+              "median": 1.0155554789602923,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.009173,
+            0.0091165,
+            0.009188499999999999,
+            0.009412,
+            0.0092135,
+            0.0090895,
+            0.009057,
+            0.009153,
+            0.0090755,
+            0.009124
+          ],
+          "tenth_medians_ratio": [
+            0.9711179550816813,
+            1.0046327332640566,
+            1.0039939710846015,
+            0.950537659469027,
+            2.8815102978408604,
+            1.0161207582551612,
+            1.0049795327731645,
+            1.0228976690964644,
+            0.9997948575837058,
+            1.0177705384875986
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 0.9939036404414247,
+          "subsets": [
+            {
+              "ci_high": 1.0196663352115787,
+              "ci_low": 0.9742132867132867,
+              "label": "AB (A ran first)",
+              "median": 1.0013124372591546,
+              "n": 10
+            },
+            {
+              "ci_high": 1.032487761459724,
+              "ci_low": 0.9680226234500761,
+              "label": "BA (B ran first)",
+              "median": 1.0136337161426494,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes"
+      ]
+    },
+    {
+      "cell": "tiny_startup-object-quality",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0099159301573615,
+              "ci_low": 0.9858102253032928,
+              "label": "first half",
+              "median": 0.9971367312790785,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0413454017208625,
+              "ci_low": 0.27762180499502837,
+              "label": "second half",
+              "median": 0.9915227953248856,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.0091695,
+            0.009053499999999999,
+            0.009217,
+            0.0091605,
+            0.0091855,
+            0.0216175,
+            0.009163999999999999,
+            0.008938999999999999,
+            0.009194500000000001,
+            0.021665
+          ],
+          "tenth_medians_ratio": [
+            0.9992578933470362,
+            0.9951438408352868,
+            1.0051517335455817,
+            0.9867438187799333,
+            1.0040781674321395,
+            0.641133654405489,
+            0.9734940125166427,
+            1.0458154940063602,
+            1.028851385705089,
+            0.6220077345972608
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 0.9971236486229859,
+          "subsets": [
+            {
+              "ci_high": 1.0256466462078035,
+              "ci_low": 0.9774592406171354,
+              "label": "AB (A ran first)",
+              "median": 0.9932709158586295,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0320561252023743,
+              "ci_low": 0.9695287844161499,
+              "label": "BA (B ran first)",
+              "median": 0.9990096562557359,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes"
+      ]
+    },
+    {
+      "cell": "tiny_startup-syntax-only",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.027891355140187,
+              "ci_low": 0.9376485390745143,
+              "label": "first half",
+              "median": 0.9969174438552727,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0275254995109684,
+              "ci_low": 0.9713498622589531,
+              "label": "second half",
+              "median": 0.9925602710299486,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.0068835,
+            0.006862,
+            0.0068520000000000005,
+            0.007188,
+            0.0193075,
+            0.0070175,
+            0.007015,
+            0.0068945,
+            0.0072085,
+            0.0068445
+          ],
+          "tenth_medians_ratio": [
+            0.9821293799091955,
+            1.0149112654751153,
+            1.0077467277451226,
+            0.9689460415588071,
+            0.6299256004788721,
+            0.9776550496983427,
+            0.9726483785087052,
+            1.0047614491906152,
+            0.9994376808849608,
+            1.0295321865690026
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 1.0163151522605014,
+          "subsets": [
+            {
+              "ci_high": 1.027891355140187,
+              "ci_low": 0.9742080179422483,
+              "label": "AB (A ran first)",
+              "median": 1.0071353401421352,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0235897435897436,
+              "ci_low": 0.9376485390745143,
+              "label": "BA (B ran first)",
+              "median": 0.9750593124735881,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes",
+        "instructions changed +0.13% but wall time shows no detectable difference: a proxy is not a win"
+      ]
+    },
+    {
+      "cell": "unity-object",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0938095977111881,
+              "ci_low": 1.08142938828088,
+              "label": "first half",
+              "median": 1.0894257510507033,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0912593599676197,
+              "ci_low": 1.0824070192308315,
+              "label": "second half",
+              "median": 1.0871915739440503,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            1.5614875000000001,
+            1.540909,
+            1.546997,
+            1.5425464999999998,
+            1.543015,
+            1.541779,
+            1.5406635,
+            1.5417725,
+            1.5455420000000002,
+            1.5442505
+          ],
+          "tenth_medians_ratio": [
+            1.0766212418276933,
+            1.093703404803347,
+            1.0839444421740978,
+            1.091317805063613,
+            1.087566226774384,
+            1.0860029097147499,
+            1.0914756649609638,
+            1.0869241847206923,
+            1.0842555659085336,
+            1.0870348927103737
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 0.9993326172661828,
+          "subsets": [
+            {
+              "ci_high": 1.0912593599676197,
+              "ci_low": 1.08142938828088,
+              "label": "AB (A ran first)",
+              "median": 1.0871915739440503,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0938095977111881,
+              "ci_low": 1.0864594960673155,
+              "label": "BA (B ran first)",
+              "median": 1.0886441737118593,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes"
+      ]
+    },
+    {
+      "cell": "unity-syntax-only",
+      "checks": {
+        "drift": {
+          "check": "drift",
+          "checked": true,
+          "flag": false,
+          "subsets": [
+            {
+              "ci_high": 1.0650463069319278,
+              "ci_low": 1.0599210956850973,
+              "label": "first half",
+              "median": 1.0625193931671069,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0657579208105434,
+              "ci_low": 1.0542933529609144,
+              "label": "second half",
+              "median": 1.060838124391506,
+              "n": 10
+            }
+          ],
+          "tenth_medians_a_wall": [
+            0.4752005,
+            0.457681,
+            0.45781649999999996,
+            0.457596,
+            0.456631,
+            0.458864,
+            0.462051,
+            0.4566945,
+            0.4572835,
+            0.45934200000000003
+          ],
+          "tenth_medians_ratio": [
+            1.0236148391053037,
+            1.081502574312537,
+            1.061236555516729,
+            1.0615200866150074,
+            1.0632802944755584,
+            1.060025636885729,
+            1.0541578635395554,
+            1.0648826597048386,
+            1.062944755559775,
+            1.0559420871612994
+          ]
+        },
+        "order_effect": {
+          "check": "order_effect",
+          "checked": true,
+          "flag": false,
+          "second_position_factor": 0.9996490556866876,
+          "subsets": [
+            {
+              "ci_high": 1.0650463069319278,
+              "ci_low": 1.0542933529609144,
+              "label": "AB (A ran first)",
+              "median": 1.061552708796261,
+              "n": 10
+            },
+            {
+              "ci_high": 1.0657579208105434,
+              "ci_low": 1.056591674936477,
+              "label": "BA (B ran first)",
+              "median": 1.062298192981323,
+              "n": 10
+            }
+          ]
+        }
+      },
+      "warnings": [
+        "phase metrics collection disabled for both variants: retirement profile uses untimed retained-byte probes"
+      ]
+    }
+  ],
+  "audit_id": "2026-10-15T122052Z",
+  "disposition": "Completed valid experiment; adverse throughput; adoption deferred by parent writer handoff. No new numerical acceptance threshold.",
+  "drift_flagged_cells": [
+    "many_functions-syntax-only"
+  ],
+  "historical_H2": {
+    "ast_retirement": {
+      "attempted_cells": 3,
+      "first_two_unity_references_and_retained_probes": "independently replayed; partial diagnostic only",
+      "independent_contract_failure": "AST required inventory and raw validator require b/env/env.json, but unchanged uarch compare collects environment only for variant A",
+      "missing_required_members": 945,
+      "positive_instructions_rows": 120,
+      "primitive_failure": "tiny_startup-syntax-only has no compiler-attributable peak RSS: all 40 positive raw wait4 values are <=1.5 times measured harness/perf floor; helper rejects null peak_rss medians",
+      "raw_error": "ast_retirement_acceptance: retirement peak_rss is incomplete: perf stat counts task-clock",
+      "required_cells": 20,
+      "required_raw_rows": 800,
+      "retained_raw_rows": 120,
+      "status": "failed-incomplete",
+      "unrun_cells": 17
+    },
+    "baseline_and_trusted_revision": "35fee905e39941acafb26db6d6ff3f41eb7d8dc7",
+    "execution_attempt": 1,
+    "execution_conclusion": "failure",
+    "execution_run": 38705469806,
+    "head": "c90fb4ea69471639b945343b08b38ef62e936444",
+    "legacy_cleanup": {
+      "all_retained_paired_rows_exit0": 520,
+      "cleanup_uncertainty_diagnostics_or_sentinels": false,
+      "conclusion": "Normal handled terminal failure with own-group cleanup supported by the actual legacy contract. No pending native compare job remains.",
+      "contract": "Trusted run() always reap_group()+wait before writing status; failed own-group cleanup changes result to125. All retained phase logs ended0 except handled AST validation1.",
+      "limits": "No snapshot native phase certificate, escaped-session ownership proof or global-host-empty claim is inferred.",
+      "outer_ast_helper_exit": 1,
+      "post_job_orphan_cleanup_observed_at": "2026-10-15T08:54:33.5914074Z",
+      "timeout124_or_cleanup_uncertainty125": false
+    },
+    "ordinary_statistics": {
+      "clean_exit_rows": 352,
+      "instructions_ratio": 1.0614357449328322,
+      "pairs": 176,
+      "pure_raw_replay": "pass",
+      "raw_rows": 352,
+      "scope": "Complete ordinary data independently replays as H2 diagnostic statistical evidence. Native sealed-bundle validation and overall benchmark acceptance remain refused.",
+      "wall_ci": [
+        1.0717831671178095,
+        1.0729276478761487
+      ],
+      "wall_ratio": 1.0725189440886118
+    },
+    "request_attempt": 1,
+    "request_run": 38705435010,
+    "seal_and_native_acceptance": {
+      "global_manifest_present": false,
+      "global_seal_present": false,
+      "native_phase_ownership_certificate_present": false,
+      "preparation_policy": "legacy-rebuild",
+      "producer_state": "failed",
+      "publisher_inventory_rows_discharged": 0,
+      "result": "No accepted sealed benchmark bundle or twenty-cell retirement acceptance"
+    }
+  },
+  "identity": {
+    "base": "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+    "base_tree": "d514dc9782fed3bb6db07adc75e91bf0b79039a2",
+    "head": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+    "head_tree": "da8b6ce77ccdfe1e42a31b7dd8034e6b462e6ee0",
+    "mode": "pull",
+    "pull": "4239",
+    "pull_head": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+    "ref": "refs/pull/4239/head",
+    "repository": "buster14a/buster",
+    "request_run_id": "38728597243",
+    "run_attempt": "1",
+    "run_id": "38728622802",
+    "trusted_revision": "e51b8f63685c19d3ef51c848801c689132f5a1c4"
+  },
+  "inputs": [
+    {
+      "bytes": 55724,
+      "origin": "work/4239-final-gates/d824c25a82-closed-local-checkpoint.json",
+      "sha256": "f79aa03d2cc8c7dfce3006abca7b9a4dffe7f0df2dd753211bf41a32a201b6a0"
+    },
+    {
+      "bytes": 17036,
+      "origin": "work/4239-d824-hosted-audit/source-ci-terminal-receipt.json",
+      "sha256": "412dcef2f92f31eb793fe96658ac5f7fa931d7640c8e5598812236a4d6b984a0"
+    },
+    {
+      "bytes": 40284,
+      "origin": "work/4239-d824-private-qualification/d824-private-qualification-receipt.json",
+      "sha256": "f3c75896588e8cf111adfe6ea88a72fc0494a446ae5485996878509e1da1c080"
+    },
+    {
+      "bytes": 9428,
+      "origin": "work/4239-d824-bounded-issue-recheck/d824-six-issue-receipt.json",
+      "sha256": "c69d464697ba71dc1c54f8afadd416aec74ed0c0b8d9c1f27952acfcac6a9c18"
+    },
+    {
+      "bytes": 8251,
+      "origin": "work/4239-c90-benchmark-audit/terminal-failure-receipt.json",
+      "sha256": "e02bfbe749190cd1f7829e10656c59353e2f1e5359dd67f07233203ca8f81f05"
+    },
+    {
+      "bytes": 38768,
+      "origin": "work/4239-d824-acceptance-review/interpretation-receipt.json",
+      "sha256": "bf936b2fafc957c3dfd484777e59e39da3500fbc7a1fec57804b3a7df0baf1a6"
+    },
+    {
+      "bytes": 122501,
+      "origin": "work/4239-d824-acceptance-review/all20-cells.json",
+      "sha256": "8d96b7190cca0b98d2ba5adcae093b836b07871906cb9f9f3a03d4b4d7563a4a"
+    },
+    {
+      "bytes": 112328,
+      "origin": "work/4239-d824-acceptance-review/ordinary-data.json",
+      "sha256": "54e97d87f8880361e5e8e6b11766e91b0586b066feb2237a2abcd53772f508b3"
+    },
+    {
+      "bytes": 8075,
+      "origin": "work/4239-d824-physical-audit/docs-capsule-review.json",
+      "sha256": "e6bb8e89698c544e3984b3826dbe897a2105b3e4133b61648d156d4dd9a17228"
+    }
+  ],
+  "limits": [
+    "Authored context joins named sealed receipts; it is not a new run or a replacement for their full logs.",
+    "Source-QA receipt origins are historical relative workspace locations, not portable replay dependencies.",
+    "Exact physical inputs/binaries differ from the tests-on local qualification and old2c2 compatibility corpus.",
+    "No current source/performance fix is described or qualified by this immutable measured-d824 audit."
+  ],
+  "ordinary_corpus": {
+    "descriptive_rows": [
+      {
+        "decision": "no substantial regression detected",
+        "descriptive_rss_ratio_of_medians": 0.9971852708694814,
+        "descriptive_wall_ratio_of_medians": 1.0115190241458853,
+        "medians": {
+          "arena_bytes": [
+            null,
+            null
+          ],
+          "arena_calls": [
+            null,
+            null
+          ],
+          "branch_misses": [
+            null,
+            null
+          ],
+          "branches": [
+            null,
+            null
+          ],
+          "bytes_per_second": [
+            38826.14108585596,
+            38383.26879747832
+          ],
+          "cache_misses": [
+            null,
+            null
+          ],
+          "cache_references": [
+            null,
+            null
+          ],
+          "cpu_seconds": [
+            0.0033629999999999997,
+            0.0033975
+          ],
+          "cycles": [
+            null,
+            null
+          ],
+          "functions_per_second": [
+            291.9258728259847,
+            288.59600599607757
+          ],
+          "instructions": [
+            null,
+            null
+          ],
+          "involuntary_context_switches": [
+            1,
+            1
+          ],
+          "lines_per_second": [
+            1459.6293641299235,
+            1442.9800299803878
+          ],
+          "major_faults": [
+            0,
+            0
+          ],
+          "minor_faults": [
+            542.5,
+            572
+          ],
+          "output_bytes": [
+            840,
+            840
+          ],
+          "peak_rss_bytes": [
+            53114880,
+            52965376
+          ],
+          "voluntary_context_switches": [
+            1,
+            1
+          ],
+          "wall_seconds": [
+            0.003425594,
+            0.0034650535000000002
+          ]
+        },
+        "name": "tiny_startup/fast",
+        "tests": [
+          {
+            "baseline_relative_mad": 0.041219421244040585,
+            "candidate_relative_mad": 0.041465778972287946,
+            "ci_high": 1.0630565176219575,
+            "ci_low": 0.9369338589551901,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0038684603825607,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.03834376916937302,
+            "candidate_relative_mad": 0.030244535956914315,
+            "ci_high": 1.059848158535079,
+            "ci_low": 0.9214950168893005,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0280937097537475,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          },
+          {
+            "baseline_relative_mad": 0.0062422934648582,
+            "candidate_relative_mad": 0.012559901066625445,
+            "ci_high": 1.0298979672546074,
+            "ci_low": 0.9700966109492409,
+            "margin_exceedances": 0,
+            "median_ratio": 0.9979821497865735,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.010462512547293645,
+            "candidate_relative_mad": 0.009860026293403448,
+            "ci_high": 1.029031240138845,
+            "ci_low": 0.966515975787296,
+            "margin_exceedances": 0,
+            "median_ratio": 0.9967369828469999,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          }
+        ]
+      },
+      {
+        "decision": "no substantial regression detected",
+        "descriptive_rss_ratio_of_medians": 1.003135038897705,
+        "descriptive_wall_ratio_of_medians": 1.005222612268717,
+        "medians": {
+          "arena_bytes": [
+            null,
+            null
+          ],
+          "arena_calls": [
+            null,
+            null
+          ],
+          "branch_misses": [
+            null,
+            null
+          ],
+          "branches": [
+            null,
+            null
+          ],
+          "bytes_per_second": [
+            40007.417597394335,
+            39799.514417087485
+          ],
+          "cache_misses": [
+            null,
+            null
+          ],
+          "cache_references": [
+            null,
+            null
+          ],
+          "cpu_seconds": [
+            0.003253,
+            0.0032715
+          ],
+          "cycles": [
+            null,
+            null
+          ],
+          "functions_per_second": [
+            300.80765110822813,
+            299.2444693014096
+          ],
+          "instructions": [
+            null,
+            null
+          ],
+          "involuntary_context_switches": [
+            1,
+            1
+          ],
+          "lines_per_second": [
+            1504.0382555411406,
+            1496.2223465070483
+          ],
+          "major_faults": [
+            0,
+            0
+          ],
+          "minor_faults": [
+            546.5,
+            529.5
+          ],
+          "output_bytes": [
+            840,
+            840
+          ],
+          "peak_rss_bytes": [
+            52914176,
+            53080064
+          ],
+          "voluntary_context_switches": [
+            1,
+            1
+          ],
+          "wall_seconds": [
+            0.00332439,
+            0.003341752
+          ]
+        },
+        "name": "tiny_startup/quality",
+        "tests": [
+          {
+            "baseline_relative_mad": 0.037308694523559956,
+            "candidate_relative_mad": 0.04098637597875192,
+            "ci_high": 1.058146813771402,
+            "ci_low": 0.9494607528941522,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0363735221629076,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.0452811460294568,
+            "candidate_relative_mad": 0.044769890100359935,
+            "ci_high": 1.0781642210469913,
+            "ci_low": 0.9517450335390724,
+            "margin_exceedances": 0,
+            "median_ratio": 0.9841506195553692,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          },
+          {
+            "baseline_relative_mad": 0.010348035036043717,
+            "candidate_relative_mad": 0.0058274158690954,
+            "ci_high": 1.026413602214314,
+            "ci_low": 0.9750579150579151,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0016229465747237,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.008768202711576346,
+            "candidate_relative_mad": 0.004938652673817425,
+            "ci_high": 1.0260931446192774,
+            "ci_low": 0.9851897091381021,
+            "margin_exceedances": 0,
+            "median_ratio": 1.000306177017114,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          }
+        ]
+      },
+      {
+        "decision": "no substantial regression detected",
+        "descriptive_rss_ratio_of_medians": 0.9986412274245599,
+        "descriptive_wall_ratio_of_medians": 1.0493627780667043,
+        "medians": {
+          "arena_bytes": [
+            null,
+            null
+          ],
+          "arena_calls": [
+            null,
+            null
+          ],
+          "branch_misses": [
+            null,
+            null
+          ],
+          "branches": [
+            null,
+            null
+          ],
+          "bytes_per_second": [
+            7193089.286181194,
+            6854720.637631275
+          ],
+          "cache_misses": [
+            null,
+            null
+          ],
+          "cache_references": [
+            null,
+            null
+          ],
+          "cpu_seconds": [
+            0.0070055,
+            0.0073725
+          ],
+          "cycles": [
+            null,
+            null
+          ],
+          "functions_per_second": [
+            140.80628924696475,
+            134.18264926360524
+          ],
+          "instructions": [
+            null,
+            null
+          ],
+          "involuntary_context_switches": [
+            1,
+            1
+          ],
+          "lines_per_second": [
+            144889.6716351267,
+            138073.94609224983
+          ],
+          "major_faults": [
+            0,
+            0
+          ],
+          "minor_faults": [
+            717,
+            718.5
+          ],
+          "output_bytes": [
+            68448,
+            68448
+          ],
+          "peak_rss_bytes": [
+            72347648,
+            72249344
+          ],
+          "voluntary_context_switches": [
+            1,
+            1
+          ],
+          "wall_seconds": [
+            0.007101960500000001,
+            0.007452533000000001
+          ]
+        },
+        "name": "large_function/fast",
+        "tests": [
+          {
+            "baseline_relative_mad": 0.016819766274841694,
+            "candidate_relative_mad": 0.012384979007844733,
+            "ci_high": 1.09926657549244,
+            "ci_low": 1.001617976029738,
+            "margin_exceedances": 0,
+            "median_ratio": 1.052507290443696,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.017957155442081804,
+            "candidate_relative_mad": 0.017397038655213526,
+            "ci_high": 1.0826392231667719,
+            "ci_low": 1.0060262451010613,
+            "margin_exceedances": 0,
+            "median_ratio": 1.025280006324355,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          },
+          {
+            "baseline_relative_mad": 0.00786911231884058,
+            "candidate_relative_mad": 0.0073433512900481996,
+            "ci_high": 1.0217491369390104,
+            "ci_low": 0.9798744982757646,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0004851450968308,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.004869900053795407,
+            "candidate_relative_mad": 0.006150096360956808,
+            "ci_high": 1.018333813779187,
+            "ci_low": 0.980052966698597,
+            "margin_exceedances": 0,
+            "median_ratio": 0.9996616037613126,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          }
+        ]
+      },
+      {
+        "decision": "no substantial regression detected",
+        "descriptive_rss_ratio_of_medians": 1.0081163727815725,
+        "descriptive_wall_ratio_of_medians": 1.0459997876957505,
+        "medians": {
+          "arena_bytes": [
+            null,
+            null
+          ],
+          "arena_calls": [
+            null,
+            null
+          ],
+          "branch_misses": [
+            null,
+            null
+          ],
+          "branches": [
+            null,
+            null
+          ],
+          "bytes_per_second": [
+            7111844.765671213,
+            6799119.077947054
+          ],
+          "cache_misses": [
+            null,
+            null
+          ],
+          "cache_references": [
+            null,
+            null
+          ],
+          "cpu_seconds": [
+            0.0070764999999999995,
+            0.0074135
+          ],
+          "cycles": [
+            null,
+            null
+          ],
+          "functions_per_second": [
+            139.21591006501347,
+            133.09423662419604
+          ],
+          "instructions": [
+            null,
+            null
+          ],
+          "involuntary_context_switches": [
+            1,
+            1
+          ],
+          "lines_per_second": [
+            143253.17145689885,
+            136953.96948629772
+          ],
+          "major_faults": [
+            0,
+            0
+          ],
+          "minor_faults": [
+            785,
+            713.5
+          ],
+          "output_bytes": [
+            68448,
+            68448
+          ],
+          "peak_rss_bytes": [
+            71661568,
+            72243200
+          ],
+          "voluntary_context_switches": [
+            1,
+            1
+          ],
+          "wall_seconds": [
+            0.007183087500000001,
+            0.007513508
+          ]
+        },
+        "name": "large_function/quality",
+        "tests": [
+          {
+            "baseline_relative_mad": 0.019112459629433663,
+            "candidate_relative_mad": 0.014905368363387095,
+            "ci_high": 1.07583725761932,
+            "ci_low": 1.0087529592388642,
+            "margin_exceedances": 0,
+            "median_ratio": 1.048656955196871,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.010155108859269749,
+            "candidate_relative_mad": 0.016703807817119446,
+            "ci_high": 1.1038273200730064,
+            "ci_low": 1.0067620904994752,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0373365331195739,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          },
+          {
+            "baseline_relative_mad": 0.007635754633966335,
+            "candidate_relative_mad": 0.004614557087450104,
+            "ci_high": 1.0148849016327237,
+            "ci_low": 0.9861456684008143,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0037643786534558,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.003017935157507473,
+            "candidate_relative_mad": 0.004027454762039821,
+            "ci_high": 1.024367816091954,
+            "ci_low": 0.9877918424753868,
+            "margin_exceedances": 0,
+            "median_ratio": 1.007778325439046,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          }
+        ]
+      },
+      {
+        "decision": "no substantial regression detected",
+        "descriptive_rss_ratio_of_medians": 1.0003208007185935,
+        "descriptive_wall_ratio_of_medians": 1.0243393792804802,
+        "medians": {
+          "arena_bytes": [
+            null,
+            null
+          ],
+          "arena_calls": [
+            null,
+            null
+          ],
+          "branch_misses": [
+            null,
+            null
+          ],
+          "branches": [
+            null,
+            null
+          ],
+          "bytes_per_second": [
+            6394268.079392887,
+            6242328.170963915
+          ],
+          "cache_misses": [
+            null,
+            null
+          ],
+          "cache_references": [
+            null,
+            null
+          ],
+          "cpu_seconds": [
+            0.0061565,
+            0.0062805
+          ],
+          "cycles": [
+            null,
+            null
+          ],
+          "functions_per_second": [
+            82055.87389466033,
+            80106.07106956551
+          ],
+          "instructions": [
+            null,
+            null
+          ],
+          "involuntary_context_switches": [
+            1,
+            1
+          ],
+          "lines_per_second": [
+            328383.7609573418,
+            320580.74144831975
+          ],
+          "major_faults": [
+            0,
+            0
+          ],
+          "minor_faults": [
+            647.5,
+            647.5
+          ],
+          "output_bytes": [
+            72416,
+            72416
+          ],
+          "peak_rss_bytes": [
+            63840256,
+            63860736
+          ],
+          "voluntary_context_switches": [
+            1,
+            1
+          ],
+          "wall_seconds": [
+            0.006239662,
+            0.0063915315
+          ]
+        },
+        "name": "many_functions/fast",
+        "tests": [
+          {
+            "baseline_relative_mad": 0.014515012506576358,
+            "candidate_relative_mad": 0.020492772546581505,
+            "ci_high": 1.0471090672535215,
+            "ci_low": 0.9851358607649825,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0156739827595023,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.022021464852476667,
+            "candidate_relative_mad": 0.018519974039274193,
+            "ci_high": 1.063667846266383,
+            "ci_low": 1.0008238986550677,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0240619459846045,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          },
+          {
+            "baseline_relative_mad": 0.00445013606531135,
+            "candidate_relative_mad": 0.0054427867067938784,
+            "ci_high": 1.0273238331808079,
+            "ci_low": 0.9801134552871439,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0016658787682315,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.007080785323463148,
+            "candidate_relative_mad": 0.00790038364002861,
+            "ci_high": 1.0170487948265725,
+            "ci_low": 0.9831137264935397,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0007688364941056,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          }
+        ]
+      },
+      {
+        "decision": "no substantial regression detected",
+        "descriptive_rss_ratio_of_medians": 1.0016712733817574,
+        "descriptive_wall_ratio_of_medians": 1.026202674437452,
+        "medians": {
+          "arena_bytes": [
+            null,
+            null
+          ],
+          "arena_calls": [
+            null,
+            null
+          ],
+          "branch_misses": [
+            null,
+            null
+          ],
+          "branches": [
+            null,
+            null
+          ],
+          "bytes_per_second": [
+            6374502.416435849,
+            6211740.948719606
+          ],
+          "cache_misses": [
+            null,
+            null
+          ],
+          "cache_references": [
+            null,
+            null
+          ],
+          "cpu_seconds": [
+            0.006174499999999999,
+            0.0063314999999999995
+          ],
+          "cycles": [
+            null,
+            null
+          ],
+          "functions_per_second": [
+            81802.22660822986,
+            79713.55370556013
+          ],
+          "instructions": [
+            null,
+            null
+          ],
+          "involuntary_context_switches": [
+            1,
+            1
+          ],
+          "lines_per_second": [
+            327368.67640676367,
+            319009.9053568217
+          ],
+          "major_faults": [
+            0,
+            0
+          ],
+          "minor_faults": [
+            691,
+            645.5
+          ],
+          "output_bytes": [
+            72416,
+            72416
+          ],
+          "peak_rss_bytes": [
+            63721472,
+            63827968
+          ],
+          "voluntary_context_switches": [
+            1,
+            1
+          ],
+          "wall_seconds": [
+            0.006258998500000001,
+            0.006423001000000001
+          ]
+        },
+        "name": "many_functions/quality",
+        "tests": [
+          {
+            "baseline_relative_mad": 0.020420352105985026,
+            "candidate_relative_mad": 0.01463702216550356,
+            "ci_high": 1.0556033305375851,
+            "ci_low": 0.9778763856664089,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0152605910797028,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.015426669298610644,
+            "candidate_relative_mad": 0.015848227246203564,
+            "ci_high": 1.0338498214504632,
+            "ci_low": 0.965490892591106,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0090828413706514,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          },
+          {
+            "baseline_relative_mad": 0.007368043556222084,
+            "candidate_relative_mad": 0.006270701353828343,
+            "ci_high": 1.0220232649326886,
+            "ci_low": 0.9752418533604889,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0042247809089235,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.009533592270407345,
+            "candidate_relative_mad": 0.0057699705090396205,
+            "ci_high": 1.0257674357457438,
+            "ci_low": 0.9756407810214336,
+            "margin_exceedances": 0,
+            "median_ratio": 1.001765093123835,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          }
+        ]
+      },
+      {
+        "decision": "no substantial regression detected",
+        "descriptive_rss_ratio_of_medians": 1.0038319170011991,
+        "descriptive_wall_ratio_of_medians": 1.0204503871854305,
+        "medians": {
+          "arena_bytes": [
+            null,
+            null
+          ],
+          "arena_calls": [
+            null,
+            null
+          ],
+          "branch_misses": [
+            null,
+            null
+          ],
+          "branches": [
+            null,
+            null
+          ],
+          "bytes_per_second": [
+            32348652.386945613,
+            31700323.654462464
+          ],
+          "cache_misses": [
+            null,
+            null
+          ],
+          "cache_references": [
+            null,
+            null
+          ],
+          "cpu_seconds": [
+            0.008570499999999998,
+            0.0087345
+          ],
+          "cycles": [
+            null,
+            null
+          ],
+          "functions_per_second": [
+            115.45297062677555,
+            113.13907274897467
+          ],
+          "instructions": [
+            null,
+            null
+          ],
+          "involuntary_context_switches": [
+            1,
+            1
+          ],
+          "lines_per_second": [
+            473472.63254040654,
+            463983.3373435451
+          ],
+          "major_faults": [
+            0,
+            0
+          ],
+          "minor_faults": [
+            920.5,
+            895.5
+          ],
+          "output_bytes": [
+            232424,
+            232424
+          ],
+          "peak_rss_bytes": [
+            78565376,
+            78866432
+          ],
+          "voluntary_context_switches": [
+            1,
+            1
+          ],
+          "wall_seconds": [
+            0.008661547500000002,
+            0.0088386795
+          ]
+        },
+        "name": "symbol_table/fast",
+        "tests": [
+          {
+            "baseline_relative_mad": 0.012622057250543344,
+            "candidate_relative_mad": 0.025548920390682257,
+            "ci_high": 1.0531287027131266,
+            "ci_low": 0.9915226879185772,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0237233156553809,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.00904799073515629,
+            "candidate_relative_mad": 0.005380211077632192,
+            "ci_high": 1.059967438072803,
+            "ci_low": 1.0023013797196045,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0228518911104723,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          },
+          {
+            "baseline_relative_mad": 0.00597421653914684,
+            "candidate_relative_mad": 0.0055533930193330736,
+            "ci_high": 1.0186227576411173,
+            "ci_low": 0.9798387096774194,
+            "margin_exceedances": 0,
+            "median_ratio": 0.9995551500151711,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.0065337447172599756,
+            "candidate_relative_mad": 0.008951573030784043,
+            "ci_high": 1.015580587430256,
+            "ci_low": 0.9798428778168287,
+            "margin_exceedances": 0,
+            "median_ratio": 0.9997105309318073,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          }
+        ]
+      },
+      {
+        "decision": "no substantial regression detected",
+        "descriptive_rss_ratio_of_medians": 0.993810535039105,
+        "descriptive_wall_ratio_of_medians": 1.0214591450703447,
+        "medians": {
+          "arena_bytes": [
+            null,
+            null
+          ],
+          "arena_calls": [
+            null,
+            null
+          ],
+          "branch_misses": [
+            null,
+            null
+          ],
+          "branches": [
+            null,
+            null
+          ],
+          "bytes_per_second": [
+            32307746.013326965,
+            31629131.2200539
+          ],
+          "cache_misses": [
+            null,
+            null
+          ],
+          "cache_references": [
+            null,
+            null
+          ],
+          "cpu_seconds": [
+            0.008584999999999999,
+            0.008754999999999999
+          ],
+          "cycles": [
+            null,
+            null
+          ],
+          "functions_per_second": [
+            115.30697498234036,
+            112.88498556350856
+          ],
+          "instructions": [
+            null,
+            null
+          ],
+          "involuntary_context_switches": [
+            1,
+            1
+          ],
+          "lines_per_second": [
+            472873.9044025779,
+            462941.3257959486
+          ],
+          "major_faults": [
+            0,
+            0
+          ],
+          "minor_faults": [
+            891,
+            898.5
+          ],
+          "output_bytes": [
+            232424,
+            232424
+          ],
+          "peak_rss_bytes": [
+            79081472,
+            78592000
+          ],
+          "voluntary_context_switches": [
+            1,
+            1
+          ],
+          "wall_seconds": [
+            0.008672503000000002,
+            0.0088586075
+          ]
+        },
+        "name": "symbol_table/quality",
+        "tests": [
+          {
+            "baseline_relative_mad": 0.017242941854098703,
+            "candidate_relative_mad": 0.0176180686643777,
+            "ci_high": 1.0489813050496284,
+            "ci_low": 0.9914117181488757,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0360304266800564,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.015721870214774364,
+            "candidate_relative_mad": 0.009040359898550614,
+            "ci_high": 1.0577997473102743,
+            "ci_low": 0.9917033289183734,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0349722971854995,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          },
+          {
+            "baseline_relative_mad": 0.006209412434348399,
+            "candidate_relative_mad": 0.009381107491856678,
+            "ci_high": 1.0186822439743184,
+            "ci_low": 0.9782822785466231,
+            "margin_exceedances": 0,
+            "median_ratio": 0.9938136568572923,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.007098997331398813,
+            "candidate_relative_mad": 0.01017798423717313,
+            "ci_high": 1.018240117746005,
+            "ci_low": 0.9817607129903104,
+            "margin_exceedances": 0,
+            "median_ratio": 0.9967941488923369,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          }
+        ]
+      },
+      {
+        "decision": "no substantial regression detected",
+        "descriptive_rss_ratio_of_medians": 1.0616674788823912,
+        "descriptive_wall_ratio_of_medians": 1.0759163034559645,
+        "medians": {
+          "arena_bytes": [
+            null,
+            null
+          ],
+          "arena_calls": [
+            null,
+            null
+          ],
+          "branch_misses": [
+            null,
+            null
+          ],
+          "branches": [
+            null,
+            null
+          ],
+          "bytes_per_second": [
+            9545903.091188367,
+            8872348.069016058
+          ],
+          "cache_misses": [
+            null,
+            null
+          ],
+          "cache_references": [
+            null,
+            null
+          ],
+          "cpu_seconds": [
+            0.024533999999999997,
+            0.0263795
+          ],
+          "cycles": [
+            null,
+            null
+          ],
+          "functions_per_second": [
+            2595.339798282294,
+            2412.2136824315744
+          ],
+          "instructions": [
+            null,
+            null
+          ],
+          "involuntary_context_switches": [
+            2,
+            2
+          ],
+          "lines_per_second": [
+            134998.22169502743,
+            125472.80232522986
+          ],
+          "major_faults": [
+            0,
+            0
+          ],
+          "minor_faults": [
+            1498.5,
+            1494
+          ],
+          "output_bytes": [
+            276000,
+            276000
+          ],
+          "peak_rss_bytes": [
+            100859904,
+            107079680
+          ],
+          "voluntary_context_switches": [
+            1,
+            1
+          ],
+          "wall_seconds": [
+            0.0246595845,
+            0.026531649
+          ]
+        },
+        "name": "control_flow/fast",
+        "tests": [
+          {
+            "baseline_relative_mad": 0.004230402740517764,
+            "candidate_relative_mad": 0.002437705891298348,
+            "ci_high": 1.0892016693000186,
+            "ci_low": 1.0667656763825801,
+            "margin_exceedances": 0,
+            "median_ratio": 1.078713571215159,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.0033823391401737184,
+            "candidate_relative_mad": 0.0030494564360844857,
+            "ci_high": 1.0869102469546126,
+            "ci_low": 1.0648440426133012,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0745059553276377,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          },
+          {
+            "baseline_relative_mad": 0.007425389118949022,
+            "candidate_relative_mad": 0.003628377733218753,
+            "ci_high": 1.0805993496068826,
+            "ci_low": 1.0523194410593875,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0638339456540773,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.001501806226407436,
+            "candidate_relative_mad": 0.0059601630392986235,
+            "ci_high": 1.0674426149728282,
+            "ci_low": 1.0498621696124535,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0621213099414952,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          }
+        ]
+      },
+      {
+        "decision": "no substantial regression detected",
+        "descriptive_rss_ratio_of_medians": 1.065227106524742,
+        "descriptive_wall_ratio_of_medians": 1.0746659762762945,
+        "medians": {
+          "arena_bytes": [
+            null,
+            null
+          ],
+          "arena_calls": [
+            null,
+            null
+          ],
+          "branch_misses": [
+            null,
+            null
+          ],
+          "branches": [
+            null,
+            null
+          ],
+          "bytes_per_second": [
+            9472131.844040908,
+            8814023.585760912
+          ],
+          "cache_misses": [
+            null,
+            null
+          ],
+          "cache_references": [
+            null,
+            null
+          ],
+          "cpu_seconds": [
+            0.0247165,
+            0.0265805
+          ],
+          "cycles": [
+            null,
+            null
+          ],
+          "functions_per_second": [
+            2575.282874190172,
+            2396.356423965787
+          ],
+          "instructions": [
+            null,
+            null
+          ],
+          "involuntary_context_switches": [
+            2,
+            2
+          ],
+          "lines_per_second": [
+            133954.94825279817,
+            124647.97711534539
+          ],
+          "major_faults": [
+            0,
+            0
+          ],
+          "minor_faults": [
+            1504.5,
+            1470
+          ],
+          "output_bytes": [
+            276000,
+            276000
+          ],
+          "peak_rss_bytes": [
+            100818944,
+            107395072
+          ],
+          "voluntary_context_switches": [
+            1,
+            1
+          ],
+          "wall_seconds": [
+            0.0248516405,
+            0.0267072125
+          ]
+        },
+        "name": "control_flow/quality",
+        "tests": [
+          {
+            "baseline_relative_mad": 0.006540785074774188,
+            "candidate_relative_mad": 0.004078835479916546,
+            "ci_high": 1.089270405627326,
+            "ci_low": 1.0638333765797927,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0777430471893696,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.0029798636432069136,
+            "candidate_relative_mad": 0.00256444988848227,
+            "ci_high": 1.086167916864381,
+            "ci_low": 1.0659742494656204,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0742480081052461,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          },
+          {
+            "baseline_relative_mad": 0.0047081743648023375,
+            "candidate_relative_mad": 0.002404213097237063,
+            "ci_high": 1.0776152518695046,
+            "ci_low": 1.050284321689683,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0631692033044762,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.00750671332085605,
+            "candidate_relative_mad": 0.0024583603308305064,
+            "ci_high": 1.0793109119315847,
+            "ci_low": 1.0469779664443097,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0623860217683885,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          }
+        ]
+      },
+      {
+        "decision": "no substantial regression detected",
+        "descriptive_rss_ratio_of_medians": 1.018269600923906,
+        "descriptive_wall_ratio_of_medians": 1.1117485641844653,
+        "medians": {
+          "arena_bytes": [
+            null,
+            null
+          ],
+          "arena_calls": [
+            null,
+            null
+          ],
+          "branch_misses": [
+            null,
+            null
+          ],
+          "branches": [
+            null,
+            null
+          ],
+          "bytes_per_second": [
+            14149349.91305152,
+            12727113.06194088
+          ],
+          "cache_misses": [
+            null,
+            null
+          ],
+          "cache_references": [
+            null,
+            null
+          ],
+          "cpu_seconds": [
+            0.0501345,
+            0.0557345
+          ],
+          "cycles": [
+            null,
+            null
+          ],
+          "functions_per_second": [
+            1272.6900084961826,
+            1144.7642280718849
+          ],
+          "instructions": [
+            null,
+            null
+          ],
+          "involuntary_context_switches": [
+            2,
+            2
+          ],
+          "lines_per_second": [
+            381846.7741116203,
+            343465.0423036927
+          ],
+          "major_faults": [
+            0,
+            0
+          ],
+          "minor_faults": [
+            1931.5,
+            1926
+          ],
+          "output_bytes": [
+            1044104,
+            1044104
+          ],
+          "peak_rss_bytes": [
+            127680512,
+            130013184
+          ],
+          "voluntary_context_switches": [
+            1,
+            1
+          ],
+          "wall_seconds": [
+            0.050287187500000004,
+            0.0559067085
+          ]
+        },
+        "name": "backend_pressure/fast",
+        "tests": [
+          {
+            "baseline_relative_mad": 0.00203005249989471,
+            "candidate_relative_mad": 0.002633713270812471,
+            "ci_high": 1.1278461152700634,
+            "ci_low": 1.1036195495648988,
+            "margin_exceedances": 0,
+            "median_ratio": 1.111291426184112,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.0030772933876217715,
+            "candidate_relative_mad": 0.0015005292551258423,
+            "ci_high": 1.1269466518116382,
+            "ci_low": 1.1051727902251944,
+            "margin_exceedances": 0,
+            "median_ratio": 1.113554768657366,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          },
+          {
+            "baseline_relative_mad": 0.005501291119344336,
+            "candidate_relative_mad": 0.005359648154862304,
+            "ci_high": 1.0268243811001228,
+            "ci_low": 1.0083780053285398,
+            "margin_exceedances": 0,
+            "median_ratio": 1.01685003804571,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.005070196550340955,
+            "candidate_relative_mad": 0.0026760275158593983,
+            "ci_high": 1.027931335466977,
+            "ci_low": 1.0070683809889336,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0172010970701826,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          }
+        ]
+      },
+      {
+        "decision": "no substantial regression detected",
+        "descriptive_rss_ratio_of_medians": 1.015394226764489,
+        "descriptive_wall_ratio_of_medians": 1.099843308433759,
+        "medians": {
+          "arena_bytes": [
+            null,
+            null
+          ],
+          "arena_calls": [
+            null,
+            null
+          ],
+          "branch_misses": [
+            null,
+            null
+          ],
+          "branches": [
+            null,
+            null
+          ],
+          "bytes_per_second": [
+            12889271.186699566,
+            11719188.648790576
+          ],
+          "cache_misses": [
+            null,
+            null
+          ],
+          "cache_references": [
+            null,
+            null
+          ],
+          "cpu_seconds": [
+            0.055023999999999997,
+            0.0605165
+          ],
+          "cycles": [
+            null,
+            null
+          ],
+          "functions_per_second": [
+            1159.3498469480207,
+            1054.1045625877114
+          ],
+          "instructions": [
+            null,
+            null
+          ],
+          "involuntary_context_switches": [
+            2,
+            2
+          ],
+          "lines_per_second": [
+            347841.1837671233,
+            316264.30954389425
+          ],
+          "major_faults": [
+            0,
+            0
+          ],
+          "minor_faults": [
+            1964,
+            1913
+          ],
+          "output_bytes": [
+            1044104,
+            1044104
+          ],
+          "peak_rss_bytes": [
+            127848448,
+            129816576
+          ],
+          "voluntary_context_switches": [
+            1,
+            1
+          ],
+          "wall_seconds": [
+            0.055203354,
+            0.0607150395
+          ]
+        },
+        "name": "backend_pressure/quality",
+        "tests": [
+          {
+            "baseline_relative_mad": 0.001886840178279793,
+            "candidate_relative_mad": 0.0020657696010725124,
+            "ci_high": 1.1063182257991209,
+            "ci_low": 1.0921354840436688,
+            "margin_exceedances": 0,
+            "median_ratio": 1.1012183041745032,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.002698633197199463,
+            "candidate_relative_mad": 0.0027885234575368567,
+            "ci_high": 1.1071565298148416,
+            "ci_low": 1.087933221826997,
+            "margin_exceedances": 0,
+            "median_ratio": 1.0993935828052361,
+            "metric": "wall_seconds",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          },
+          {
+            "baseline_relative_mad": 0.0029277189389818577,
+            "candidate_relative_mad": 0.005853027482409364,
+            "ci_high": 1.0256733191242007,
+            "ci_low": 1.0073112073112074,
+            "margin_exceedances": 0,
+            "median_ratio": 1.017026989374073,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 0
+          },
+          {
+            "baseline_relative_mad": 0.004858961817861095,
+            "candidate_relative_mad": 0.0032656538406928867,
+            "ci_high": 1.025754540166742,
+            "ci_low": 1.009210821913412,
+            "margin_exceedances": 0,
+            "median_ratio": 1.015762001286205,
+            "metric": "peak_rss_bytes",
+            "p_value": 1,
+            "pairs": 20,
+            "regression": false,
+            "round": 1
+          }
+        ]
+      }
+    ],
+    "guard": {
+      "confirmed_regressions": 0,
+      "family_alpha": 0.01,
+      "guard_enabled": true,
+      "inconclusive_cases": 0,
+      "per_test_alpha": 0.0004166666666666667,
+      "valid": true
+    },
+    "interpretation": "All twelve descriptive wall ratios of medians exceed one. No substantial regression detected by that separate existing classifier does not establish absence of compiler cost. Instructions are null in this corpus report; instruction claims use the lab and fixed AST cells."
+  },
+  "ordinary_unity_checks": {
+    "drift": {
+      "check": "drift",
+      "checked": true,
+      "flag": false,
+      "subsets": [
+        {
+          "ci_high": 1.0841337146483965,
+          "ci_low": 1.0827259352643006,
+          "label": "first half",
+          "median": 1.0834047797125401,
+          "n": 88
+        },
+        {
+          "ci_high": 1.083956130492099,
+          "ci_low": 1.0825270102928637,
+          "label": "second half",
+          "median": 1.0832537084230358,
+          "n": 88
+        }
+      ],
+      "tenth_medians_a_wall": [
+        1.606301,
+        1.606587,
+        1.605827,
+        1.6055454999999998,
+        1.606677,
+        1.60539,
+        1.6059800000000002,
+        1.60545,
+        1.60637,
+        1.606401
+      ],
+      "tenth_medians_ratio": [
+        1.082229996345002,
+        1.0835732481535894,
+        1.0847658849953508,
+        1.0838678704701215,
+        1.0827316418563728,
+        1.08214429263581,
+        1.0841351714652343,
+        1.083956130492099,
+        1.0832698418290367,
+        1.0830512776974885
+      ]
+    },
+    "order_effect": {
+      "check": "order_effect",
+      "checked": true,
+      "flag": false,
+      "second_position_factor": 1.0000690859180383,
+      "subsets": [
+        {
+          "ci_high": 1.0839819481306971,
+          "ci_low": 1.082592500311449,
+          "label": "AB (A ran first)",
+          "median": 1.0834033887470882,
+          "n": 88
+        },
+        {
+          "ci_high": 1.0841506385079784,
+          "ci_low": 1.0826780605128852,
+          "label": "BA (B ran first)",
+          "median": 1.0832537084230358,
+          "n": 88
+        }
+      ]
+    }
+  },
+  "ordinary_unity_phases_diagnostic_only": {
+    "analysis": {
+      "a_mad": 1.2541084999999725,
+      "a_median": 893.8500195,
+      "a_min": 889.454158,
+      "b_mad": 1.7938400000000456,
+      "b_median": 1025.8335915,
+      "b_min": 1019.969587,
+      "bootstrap_ci_high": 1.1486434028126835,
+      "bootstrap_ci_low": 1.1472639234145419,
+      "change_percent": 14.80719295632531,
+      "ci_coverage": 0.9584750723654009,
+      "ci_high": 1.1488826183504217,
+      "ci_low": 1.146838092775385,
+      "delta": 131.98357199999998,
+      "direction": "lower",
+      "geomean_ratio": 1.1479629120208026,
+      "min_ratio": 1.1467365437848682,
+      "n": 176,
+      "note": null,
+      "outcome": "slower",
+      "ratio": 1.148071929563253,
+      "ratio_of_medians": 1.1476574023837116,
+      "unit": "ms"
+    },
+    "codegen": {
+      "a_mad": 0.5002844999999922,
+      "a_median": 354.985246,
+      "a_min": 353.507599,
+      "b_mad": 0.4596544999999992,
+      "b_median": 355.80939,
+      "b_min": 353.800405,
+      "bootstrap_ci_high": 1.0027108958839885,
+      "bootstrap_ci_low": 1.0018118140780836,
+      "change_percent": 0.23569171567872083,
+      "ci_coverage": 0.9584750723654009,
+      "ci_high": 1.0028567864481093,
+      "ci_low": 1.0019543246101816,
+      "delta": 0.8241439999999898,
+      "direction": "lower",
+      "geomean_ratio": 1.0022866189273603,
+      "min_ratio": 1.000828287711009,
+      "n": 176,
+      "note": null,
+      "outcome": "below-floor",
+      "ratio": 1.0023569171567872,
+      "ratio_of_medians": 1.0023216288825705,
+      "unit": "ms"
+    },
+    "emit": {
+      "a_mad": 0.0041220000000000145,
+      "a_median": 0.440347,
+      "a_min": 0.426781,
+      "b_mad": 0.0037274999999999947,
+      "b_median": 0.43411449999999996,
+      "b_min": 0.424457,
+      "bootstrap_ci_high": 0.9930663796805149,
+      "bootstrap_ci_low": 0.9877107435127525,
+      "change_percent": -1.0325185687593885,
+      "ci_coverage": 0.9584750723654009,
+      "ci_high": 0.993334959701362,
+      "ci_low": 0.985116247280349,
+      "delta": -0.00623250000000003,
+      "direction": "lower",
+      "geomean_ratio": 0.9902288293089642,
+      "min_ratio": 0.9945545842012647,
+      "n": 176,
+      "note": null,
+      "outcome": "faster",
+      "ratio": 0.9896748143124061,
+      "ratio_of_medians": 0.9858463893247824,
+      "unit": "ms"
+    },
+    "ir": {
+      "a_mad": 0.23679599999998402,
+      "a_median": 147.801877,
+      "a_min": 147.092069,
+      "b_mad": 0.19646649999999966,
+      "b_median": 148.0050705,
+      "b_min": 147.43205,
+      "bootstrap_ci_high": 1.0031364334208472,
+      "bootstrap_ci_low": 0.999168557735163,
+      "change_percent": 0.13354550585911173,
+      "ci_coverage": 0.9584750723654009,
+      "ci_high": 1.0021220141875795,
+      "ci_low": 1.0009764551654428,
+      "delta": 0.20319349999999758,
+      "direction": "lower",
+      "geomean_ratio": 1.0012233877215304,
+      "min_ratio": 1.0023113482753445,
+      "n": 176,
+      "note": null,
+      "outcome": "below-floor",
+      "ratio": 1.0013354550585911,
+      "ratio_of_medians": 1.0013747694151407,
+      "unit": "ms"
+    },
+    "object": {
+      "a_mad": 0.0754815000000022,
+      "a_median": 35.54665,
+      "a_min": 34.988083,
+      "b_mad": 0.10522049999999439,
+      "b_median": 35.251572499999995,
+      "b_min": 34.930691,
+      "bootstrap_ci_high": 0.9939992878540544,
+      "bootstrap_ci_low": 0.9916677457894171,
+      "change_percent": -0.7838348445345256,
+      "ci_coverage": 0.9584750723654009,
+      "ci_high": 0.9927052859485302,
+      "ci_low": 0.9911777817133537,
+      "delta": -0.295077500000005,
+      "direction": "lower",
+      "geomean_ratio": 0.9927995798981636,
+      "min_ratio": 0.9983596700625181,
+      "n": 176,
+      "note": null,
+      "outcome": "faster",
+      "ratio": 0.9921616515546547,
+      "ratio_of_medians": 0.9916988661378778,
+      "unit": "ms"
+    },
+    "parse": {
+      "a_mad": 0.10328499999999607,
+      "a_median": 46.872007999999994,
+      "a_min": 46.452182,
+      "b_mad": 0.10420650000000009,
+      "b_median": 47.1564165,
+      "b_min": 46.749175,
+      "bootstrap_ci_high": 1.0065304929083154,
+      "bootstrap_ci_low": 1.0048433047932963,
+      "change_percent": 0.5985005505463992,
+      "ci_coverage": 0.9584750723654009,
+      "ci_high": 1.0070480196050677,
+      "ci_low": 1.0047058914273925,
+      "delta": 0.28440850000000495,
+      "direction": "lower",
+      "geomean_ratio": 1.0056781214765875,
+      "min_ratio": 1.0063935209760437,
+      "n": 176,
+      "note": null,
+      "outcome": "below-floor",
+      "ratio": 1.005985005505464,
+      "ratio_of_medians": 1.0060677686349602,
+      "unit": "ms"
+    },
+    "preprocess": {
+      "a_mad": 0.220578500000002,
+      "a_median": 99.25335100000001,
+      "a_min": 98.603728,
+      "b_mad": 0.21388749999999845,
+      "b_median": 99.877951,
+      "b_min": 99.185466,
+      "bootstrap_ci_high": 1.0084875325230147,
+      "bootstrap_ci_low": 1.0051051049021797,
+      "change_percent": 0.5827920674204012,
+      "ci_coverage": 0.9584750723654009,
+      "ci_high": 1.0069597262657892,
+      "ci_low": 1.005117338137339,
+      "delta": 0.6245999999999867,
+      "direction": "lower",
+      "geomean_ratio": 1.0067172918640412,
+      "min_ratio": 1.0058997566501746,
+      "n": 176,
+      "note": null,
+      "outcome": "slower",
+      "ratio": 1.005827920674204,
+      "ratio_of_medians": 1.0062929865209285,
+      "unit": "ms"
+    },
+    "read": {
+      "a_mad": 0.00015500000000000062,
+      "a_median": 0.004814000000000001,
+      "a_min": 0.004108,
+      "b_mad": 0.00015500000000000062,
+      "b_median": 0.004814000000000001,
+      "b_min": 0.004058,
+      "bootstrap_ci_high": 1.0107013514429166,
+      "bootstrap_ci_low": 0.9769038932303044,
+      "change_percent": -0.3059947151518916,
+      "ci_coverage": 0.9584750723654009,
+      "ci_high": 1.0082321465322084,
+      "ci_low": 0.9806979918112693,
+      "delta": 0.0,
+      "direction": "lower",
+      "geomean_ratio": 0.9932634286902496,
+      "min_ratio": 0.9878286270691334,
+      "n": 176,
+      "note": null,
+      "outcome": "no detectable difference",
+      "ratio": 0.9969400528484811,
+      "ratio_of_medians": 1.0,
+      "unit": "ms"
+    },
+    "total": {
+      "a_mad": 1.5521529999999757,
+      "a_median": 1579.0651435,
+      "a_min": 1574.238471,
+      "b_mad": 2.2474599999999327,
+      "b_median": 1712.8543205,
+      "b_min": 1707.178922,
+      "bootstrap_ci_high": 1.0852330059169608,
+      "bootstrap_ci_low": 1.0843688791296966,
+      "change_percent": 8.478984650075372,
+      "ci_coverage": 0.9584750723654009,
+      "ci_high": 1.0853322972808077,
+      "ci_low": 1.0842335336606987,
+      "delta": 133.7891770000001,
+      "direction": "lower",
+      "geomean_ratio": 1.084802606319905,
+      "min_ratio": 1.0844474667904367,
+      "n": 176,
+      "note": null,
+      "outcome": "slower",
+      "ratio": 1.0847898465007537,
+      "ratio_of_medians": 1.084726825584571,
+      "unit": "ms"
+    }
+  },
+  "ordinary_unity_warnings": [],
+  "qualification": {
+    "hosted": {
+      "actual_rows": {
+        "analyzer_database_rows": 236,
+        "analyzer_release_rows": 118,
+        "desktop_artifacts": 14,
+        "desktop_assertions": 64011588,
+        "desktop_modules": 537,
+        "desktop_processes": 133,
+        "native_configurations": 13176,
+        "native_intentional_rejections": 1728,
+        "native_mode_legs": 60,
+        "native_platforms": 5,
+        "native_positive_configurations": 11448,
+        "uefi_boot_controls": 6
+      },
+      "direct_ssa": {
+        "assertions": 7578079,
+        "diagnostic_only": true,
+        "modules": 61
+      },
+      "maintained_scope": "Headless graph after protected4256/4270. No mobile or historical191-row analyzer results borrowed.",
+      "receipt_sha256": "412dcef2f92f31eb793fe96658ac5f7fa931d7640c8e5598812236a4d6b984a0",
+      "required_checks": [
+        {
+          "app_id": 15368,
+          "completed_at": "2026-10-15T11:56:29Z",
+          "conclusion": "success",
+          "details_url": "https://github.com/buster14a/buster/actions/runs/38728597521/job/116408113337",
+          "external_id": "64360168-f412-51bf-aee9-648102ab2910",
+          "head_sha": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+          "id": 116408113337,
+          "name": "CI complete",
+          "status": "completed"
+        },
+        {
+          "app_id": 15368,
+          "completed_at": "2026-10-15T11:44:55Z",
+          "conclusion": "success",
+          "details_url": "https://github.com/buster14a/buster/actions/runs/38728597408/job/116403450466",
+          "external_id": "cb331d78-8dd0-5875-9a1a-58eb12f600ec",
+          "head_sha": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+          "id": 116403450466,
+          "name": "Canonical TCC bootstrap",
+          "status": "completed"
+        },
+        {
+          "app_id": 15368,
+          "completed_at": "2026-10-15T11:39:01Z",
+          "conclusion": "success",
+          "details_url": "https://github.com/buster14a/buster/actions/runs/38728597477/job/116400688457",
+          "external_id": "158922dc-0c33-552e-b8d4-2d27310d9b85",
+          "head_sha": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+          "id": 116400688457,
+          "name": "GPU Linux consumers",
+          "status": "completed"
+        },
+        {
+          "app_id": 15368,
+          "completed_at": "2026-10-15T11:40:23Z",
+          "conclusion": "success",
+          "details_url": "https://github.com/buster14a/buster/actions/runs/38728597644/job/116400662721",
+          "external_id": "9f5ed907-21df-5fa1-b7fa-ef373c888b13",
+          "head_sha": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+          "id": 116400662721,
+          "name": "Benchmark service workflow policy",
+          "status": "completed"
+        },
+        {
+          "app_id": 15368,
+          "completed_at": "2026-10-15T11:37:58Z",
+          "conclusion": "success",
+          "details_url": "https://github.com/buster14a/buster/actions/runs/38728597801/job/116400642742",
+          "external_id": "19ce3211-c2f8-57e9-8ff9-013ca8b5c63b",
+          "head_sha": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+          "id": 116400642742,
+          "name": "API migration policy",
+          "status": "completed"
+        },
+        {
+          "app_id": 15368,
+          "completed_at": "2026-10-15T11:38:51Z",
+          "conclusion": "success",
+          "details_url": "https://github.com/buster14a/buster/actions/runs/38728597298/job/116400683788",
+          "external_id": "bf2578b0-9a78-5f6d-82ec-d07285e38c7b",
+          "head_sha": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+          "id": 116400683788,
+          "name": "Native retirement merge admission",
+          "status": "completed"
+        },
+        {
+          "app_id": 15368,
+          "completed_at": "2026-10-15T11:38:14Z",
+          "conclusion": "success",
+          "details_url": "https://github.com/buster14a/buster/actions/runs/38728597504/job/116400632833",
+          "external_id": "aa507264-b1e0-53fc-91cc-bc97697b221a",
+          "head_sha": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+          "id": 116400632833,
+          "name": "Main integration admission",
+          "status": "completed"
+        }
+      ],
+      "run": {
+        "conclusion": "success",
+        "event": "pull_request",
+        "head_sha": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+        "id": 38728597521,
+        "path": ".github/workflows/ci.yml",
+        "run_attempt": 1,
+        "status": "completed"
+      },
+      "snapshot": "20261015T115747Z",
+      "tested_merge": "2955f440ba2caf4fe8b3a5db3c7192d1bd606ae5",
+      "tested_merge_parents": [
+        "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+        "d824c25a829a307d39534d43fa14d9e2ed2f5407"
+      ],
+      "tested_merge_tree": "da8b6ce77ccdfe1e42a31b7dd8034e6b462e6ee0"
+    },
+    "local": {
+      "analyzer": {
+        "all_118_logs_present_empty_and_hash_replayed": true,
+        "all_results_status_zero": true,
+        "checked": 118,
+        "eligible": 118,
+        "excluded": 118,
+        "independent_receipt": {
+          "bytes": 561061,
+          "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final-gates/d824c25a82-analyzer-local-independent-receipt.json",
+          "sha256": "61c70f81f17dfe40e01cf0348872bbd664e50bdbfa1d95c242477046ed5a1f9f"
+        },
+        "jobs": 4,
+        "manifest_reconstructed_byte_for_byte": true,
+        "native_run": {
+          "elapsed_us": "557938883",
+          "jobs": "4",
+          "peak_live_processes": "9",
+          "peak_pending_workers": "4",
+          "process_tree_reason": "none",
+          "process_tree_status": "complete",
+          "results": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final-gates/d824c25a82-analyzer-local-results",
+          "sampled_peak_tree_rss_bytes": "1494671360",
+          "samples": "21999",
+          "status": "pass"
+        },
+        "per_unit_budget_seconds": 600,
+        "shards": 8
+      },
+      "head": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+      "receipt_sha256": "f79aa03d2cc8c7dfce3006abca7b9a4dffe7f0df2dd753211bf41a32a201b6a0",
+      "static": {
+        "api_registry_active_migrations": 0,
+        "build_growth_bytes": 13194,
+        "history_merges": 14,
+        "markdown_files": 936,
+        "production_growth_bytes": -273223,
+        "provenance_files": 6,
+        "provenance_negative_control_tests": 8,
+        "provenance_violations": 0,
+        "source_size_ratchet_limit": 32768,
+        "unresolved_markdown_targets": 0
+      },
+      "suites": {
+        "debug-all": {
+          "assertions_passed": 7230061,
+          "assertions_total": 7230061,
+          "modules_passed": 61,
+          "modules_total": 61
+        },
+        "release-all": {
+          "assertions_passed": 7230040,
+          "assertions_total": 7230040,
+          "modules_passed": 61,
+          "modules_total": 61
+        },
+        "sanitize-all": {
+          "assertions_passed": 7182227,
+          "assertions_total": 7182227,
+          "modules_passed": 61,
+          "modules_total": 61
+        }
+      },
+      "tree": "da8b6ce77ccdfe1e42a31b7dd8034e6b462e6ee0"
+    },
+    "narrow": {
+      "boundaries": [
+        "This is localCLI behavior evidence at frozenfinald824, not hostedCI, protectedcontainment or physicalhardware acceptance.",
+        "The original4235syntax/object rows omit sourcehash; currentretained84byte source is pinned for this replay rather than inventing a historicalhash.",
+        "No new cases, source variants, flags or acceptance oracles were added. Current-main controls cover only the four changedhistorical g0 cells."
+      ],
+      "receipt_sha256": "c69d464697ba71dc1c54f8afadd416aec74ed0c0b8d9c1f27952acfcac6a9c18",
+      "summary": {
+        "4235_object_endpoints": 8,
+        "4235_syntax_endpoint": 1,
+        "compiler_endpoints": 37,
+        "e51_known_4235_refusals": 4,
+        "e51_objects_produced": 0,
+        "g0_changes_exactly_one_verified_local_text_symbol_info_byte": 4,
+        "historical_g0_object_hash_changes": 4,
+        "historical_output_hash_matches": 32,
+        "indexed_variant": "4194-index",
+        "invalid_historical_4235_native_setups_replayed": 0,
+        "issues": [
+          "4194",
+          "4195",
+          "4210",
+          "4206",
+          "4227",
+          "4235"
+        ],
+        "raw_status_stdout_stderr_and_native_behavior_differences": 0,
+        "recorded_e51_controls": 4,
+        "successful_output_files_verified": 36,
+        "valid_native_compile_run_pairs": 28
+      }
+    },
+    "private": {
+      "corpus": {
+        "candidate_objects": 776,
+        "debug_flags": [
+          "-g0",
+          "-g"
+        ],
+        "input_head": "2c2c46fc92b2e7308cce4265dfbc3758365b374a",
+        "input_tree": "c3c3545e6fb14118aceee3bf5472675791119979",
+        "march": "znver3",
+        "original_cases": 848,
+        "raw_row_differences": 0,
+        "shared_status1_rejections": 72,
+        "source_files": 424,
+        "status": "pass"
+      },
+      "fixed_point_images": {
+        "candidate": {
+          "self_stage1": {
+            "bytes": 42104680,
+            "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-final-candidate-d824-self-stage1",
+            "sha256": "7696e7bd2f92add98c3fa2b9bdc3966fedd1aa9685a9c182b3df87377d2afdce"
+          },
+          "self_stage2": {
+            "bytes": 42104680,
+            "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-final-candidate-d824-self-stage2",
+            "sha256": "7696e7bd2f92add98c3fa2b9bdc3966fedd1aa9685a9c182b3df87377d2afdce"
+          }
+        },
+        "main": {
+          "self_stage1": {
+            "bytes": 42295576,
+            "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-final-main-e51b8f-self-stage1",
+            "sha256": "6f0ca3f199d5fd6981bf96ec4e1db6cb38b21f2b2762f87b017dd18ac9704f55"
+          },
+          "self_stage2": {
+            "bytes": 42295576,
+            "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-final-main-e51b8f-self-stage2",
+            "sha256": "6f0ca3f199d5fd6981bf96ec4e1db6cb38b21f2b2762f87b017dd18ac9704f55"
+          }
+        }
+      },
+      "fixed_points": {
+        "candidate": 42104680,
+        "main": 42295576
+      },
+      "mode_result": {
+        "controls": "pass",
+        "elapsed_us": "1990013",
+        "executed": "4",
+        "expected_failures": "0",
+        "failures": "0",
+        "legs": "12",
+        "oracle_checked": "8",
+        "oracle_controls": "2",
+        "status": "pass"
+      },
+      "receipt_sha256": "f3c75896588e8cf111adfe6ea88a72fc0494a446ae5485996878509e1da1c080",
+      "source": {
+        "baseline": {
+          "ancestor_of_candidate": true,
+          "head": "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+          "tree": "d514dc9782fed3bb6db07adc75e91bf0b79039a2"
+        },
+        "candidate": {
+          "clean_at_seal": true,
+          "head": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+          "path": "/home/david/Documents/Codex/2026-10-14/deis/work/constant-prefix-scan",
+          "tree": "da8b6ce77ccdfe1e42a31b7dd8034e6b462e6ee0"
+        },
+        "preserved_refs": {
+          "refs/heads/codex/1313-array-bound-word-index": "88981475936d65b3e268d2d06d20f6b1a55642c9",
+          "refs/heads/codex/4239-private-frozen-770": "770fb388ff8f7d54416b8acafe63c54cef9fac80",
+          "refs/heads/codex/4239-private-frozen-b84": "b84d1e7cb0ec2cc237a11878efdd0e8db14b06c1",
+          "refs/heads/codex/4239-private-frozen-h5": "96fe219c4e34a3f38cc85e1b80c6e4bea30f542f"
+        },
+        "request_head_and_code_parent": {
+          "changed_paths": [
+            "benchmarks/9700x/compiler-compare.request"
+          ],
+          "code_parent": "0422f28b52e0cf81dbcdd30a14ed92a5d42b94fb",
+          "code_parent_tree": "1973bedf70f7e77095c801b41e6d3cfbbde3a3e9",
+          "compiler_src_tree": "ed7e654165e39f1919ec2fed46588f4b2da05da7",
+          "local_git_show": "d824c25a829a307d39534d43fa14d9e2ed2f5407\n0422f28b52e0cf81dbcdd30a14ed92a5d42b94fb\nda8b6ce77ccdfe1e42a31b7dd8034e6b462e6ee0\nRequest complete retained-AST retirement acceptance on current main\n\nbenchmarks/9700x/compiler-compare.request",
+          "local_git_show_sha256": "9ccc91bf6cfc30770ad555d221bbe460ad43b6fac613ef8119fbafa90fbebe75",
+          "published_head": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+          "published_tree": "da8b6ce77ccdfe1e42a31b7dd8034e6b462e6ee0",
+          "request_only": true,
+          "scope": "Local commit/tree/diff evidence separates the published request-only head from its code parent. Request authority and live publication are coordinator-owned."
+        },
+        "source_observation_scope": "Live source is observed at seal; historical build provenance is bound through supplied logs, configuration snapshots and frozen images.",
+        "source_writes_by_sealer": false
+      }
+    }
+  },
+  "schema": "buster-d824-audit-authored-context-v1",
+  "wall_bootstrap_sign_test_disagreements": [
+    "backend_pressure-syntax-only",
+    "control_flow-object-fast",
+    "control_flow-object-quality",
+    "control_flow-syntax-only",
+    "large_function-object-quality",
+    "many_functions-object-quality",
+    "symbol_table-object-fast",
+    "symbol_table-object-quality"
+  ]
+}

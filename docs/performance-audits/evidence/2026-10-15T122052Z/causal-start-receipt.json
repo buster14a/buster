@@ -1,0 +1,114 @@
+{
+  "authorize_job_id": 116400565131,
+  "authorize_result": "success",
+  "baseline": "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+  "baseline_tree": "d514dc9782fed3bb6db07adc75e91bf0b79039a2",
+  "custom_check_external_id": "buster-9700x-compiler-pr-v1:d824c25a829a307d39534d43fa14d9e2ed2f5407:38728597243.1:1",
+  "custom_check_id": 116400829143,
+  "custom_check_state_at_snapshot": "queued",
+  "evidence": [
+    {
+      "bytes": 34214,
+      "file": "authorize.raw.log",
+      "sha256": "182b7b88f7cf36450d6ebca86b4d2300e6bcca84d615a0f36863bda9310e5c04"
+    },
+    {
+      "bytes": 4362,
+      "file": "check-1143.json",
+      "sha256": "1f767031412f5560823d27f46bc96cb8afbebc3561bdea8c86044c5db604806d"
+    },
+    {
+      "bytes": 12034,
+      "file": "executor-attempt-initial.json",
+      "sha256": "7ad0f18d0f825bd873d0abc9eaad32ae97ba37635109098a98b3c7a858903e74"
+    },
+    {
+      "bytes": 22306,
+      "file": "executor-jobs-1143.json",
+      "sha256": "ec42e87de9799ec3f6fce2fc37354f1d7799d255eb9ebe77d65402905d044481"
+    },
+    {
+      "bytes": 22306,
+      "file": "executor-jobs-1146.json",
+      "sha256": "ec42e87de9799ec3f6fce2fc37354f1d7799d255eb9ebe77d65402905d044481"
+    },
+    {
+      "bytes": 22306,
+      "file": "executor-jobs-initial.json",
+      "sha256": "ec42e87de9799ec3f6fce2fc37354f1d7799d255eb9ebe77d65402905d044481"
+    },
+    {
+      "bytes": 253295,
+      "file": "head-checks-initial.json",
+      "sha256": "dc049264dccfeb5df6ca54c59a6b19f2a226b9fecfff510bbbdd084eb3f5b0bb"
+    },
+    {
+      "bytes": 324405,
+      "file": "head-runs-initial.json",
+      "sha256": "c5c9a6766a5556cba4d7e5f594cacefa9c76ccce61762ca7fbd00023a2a33e57"
+    },
+    {
+      "bytes": 4027,
+      "file": "owner-authorization.json",
+      "sha256": "042f1ed6c8d93642be6f86c16ab9e4a3865cad1444162d714d8188aa6759da23"
+    },
+    {
+      "bytes": 21061,
+      "file": "pr-initial.json",
+      "sha256": "5ef66bd0db83d73b86537849e9c9e83f7e8b0c16ba87e2e5356c44243dc921ec"
+    },
+    {
+      "bytes": 13471,
+      "file": "publication-transaction.copy.json",
+      "sha256": "0c1764d80ca2e86f8d830c1114ef3d8d7c3541059b03f2a99a242ccf948bcf5d"
+    },
+    {
+      "bytes": 12408,
+      "file": "request-attempt.json",
+      "sha256": "810ab1a780da4d52946f998632be920853b1711977484f44f856d68d92ad1cae"
+    },
+    {
+      "bytes": 30019,
+      "file": "request-file.raw",
+      "sha256": "acd3081ec4dcd9401843442280e10cae945b90a4c81978ce09bdfc9c032882bb"
+    },
+    {
+      "bytes": 1233613,
+      "file": "service-runs-initial.json",
+      "sha256": "c73d2341907990c2ffbd7f30ccc4cc2667810b8eac9d0a58b696876c8a5d00de"
+    },
+    {
+      "bytes": 38599,
+      "file": "show-check.raw.log",
+      "sha256": "1bae232e6f0dd0a4b9bf22b90b2bbccb8c6dc3cf5e78dc28152e8660fa15fdcc"
+    }
+  ],
+  "executor_attempt": 1,
+  "executor_run_id": 38728622802,
+  "head": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+  "head_tree": "da8b6ce77ccdfe1e42a31b7dd8034e6b462e6ee0",
+  "limits": [
+    "Native API runner assignment is not yet physical CPU evidence",
+    "No terminal raw artifact, native seal or publisher verification yet",
+    "Root owns exact-composition correctness gates, protected integration and disposition",
+    "Wall/instructions declared compiler plus RSS observer; no subtraction or compiler-only small-effect inference",
+    "Buster license unselected/NOASSERTION per immutable trusted LICENSES/README.md and issue621"
+  ],
+  "merge_base": "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+  "native_api_runner_id": 2831,
+  "native_api_runner_name": "buster-zen5-9700x",
+  "native_job_id": 116400682536,
+  "native_started_at": "2026-10-15T11:37:33Z",
+  "native_status_at_snapshot": "in_progress",
+  "parent": "0422f28b52e0cf81dbcdd30a14ed92a5d42b94fb",
+  "publication_transaction_sha256": "0c1764d80ca2e86f8d830c1114ef3d8d7c3541059b03f2a99a242ccf948bcf5d",
+  "recorded_at": "2026-10-15T11:45:49.591729+00:00",
+  "request_attempt": 1,
+  "request_file_sha256": "acd3081ec4dcd9401843442280e10cae945b90a4c81978ce09bdfc9c032882bb",
+  "request_run_id": 38728597243,
+  "schema": "buster-4239-final-physical-causal-start-v1",
+  "single_parent_request_only_numstat": [
+    "3\t0\tbenchmarks/9700x/compiler-compare.request"
+  ],
+  "trusted_revision": "e51b8f63685c19d3ef51c848801c689132f5a1c4"
+}

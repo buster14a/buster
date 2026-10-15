@@ -1,0 +1,20 @@
+{
+  "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11971210532/zip",
+  "created_at": "2026-10-15T12:00:01Z",
+  "digest": "sha256:bd11314316002784e87e2a6bbfc7d5b1957e9885613eb58f868fd559a3b8c7ec",
+  "expired": false,
+  "expires_at": "2027-01-13T11:37:13Z",
+  "id": 11971210532,
+  "name": "buster-9700x-compiler-d824c25a829a307d39534d43fa14d9e2ed2f5407-1",
+  "node_id": "MDg6QXJ0aWZhY3QxMTk3MTIxMDUzMg==",
+  "size_in_bytes": 10394067,
+  "updated_at": "2026-10-15T12:00:01Z",
+  "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11971210532",
+  "workflow_run": {
+    "head_branch": "main",
+    "head_repository_id": 1071732997,
+    "head_sha": "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+    "id": 38728622802,
+    "repository_id": 1071732997
+  }
+}

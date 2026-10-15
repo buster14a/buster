@@ -1,0 +1,229 @@
+{
+  "schema": "buster-4239-final-current-main-publication-transaction-v1",
+  "started": "2026-10-15T11:36:51.181934+00:00",
+  "source_commit": "0422f28b52e0cf81dbcdd30a14ed92a5d42b94fb",
+  "source_tree": "1973bedf70f7e77095c801b41e6d3cfbbde3a3e9",
+  "request_head": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+  "request_tree": "da8b6ce77ccdfe1e42a31b7dd8034e6b462e6ee0",
+  "baseline": "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+  "trusted": "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+  "main_before": {
+    "name": "main",
+    "commit": {
+      "sha": "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+      "node_id": "C_kwDOP-FZBdoAKGU1MWI4ZjYzNjg1YzE5ZDNlZjUxYzg0ODgwMWM2ODkxMzJmNWExYzQ",
+      "commit": {
+        "author": {
+          "name": "David",
+          "email": "davidgmbb@gmail.com",
+          "date": "2026-10-15T11:09:19Z"
+        },
+        "committer": {
+          "name": "GitHub",
+          "email": "noreply@github.com",
+          "date": "2026-10-15T11:09:19Z"
+        },
+        "message": "Merge pull request #4266 from buster14a/codex/4009-compact-prepass-liveness\n\nperf(codegen): share large liveness sets and remove redundant prepass work",
+        "tree": {
+          "sha": "d514dc9782fed3bb6db07adc75e91bf0b79039a2",
+          "url": "https://api.github.com/repos/buster14a/buster/git/trees/d514dc9782fed3bb6db07adc75e91bf0b79039a2"
+        },
+        "url": "https://api.github.com/repos/buster14a/buster/git/commits/e51b8f63685c19d3ef51c848801c689132f5a1c4",
+        "comment_count": 0,
+        "verification": {
+          "verified": true,
+          "reason": "valid",
+          "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJq0LRfCRC1aQ7uu5UhlAAAPoMQAI+Xgi8tuXqH5m1F96afVfbo\nj4JvCiaLrccqK0Ua7JLs7zGNQuM4OSm283I1nFJdl+mn7ebZnqOAtGT+xv3PtAkj\nZjiq4bsx4TvZTm4xz5/QjeQHr2MmWhMy12PWpx8a+9RHfjdoa9XIJ0L3r+JmEdOj\nB/AaVTst+XKH0+shHMn6f+npEPBlNGYu4+PPjdQgUCqp8N3xUDMoO3513EL0t5xQ\n8oNrEeb/zldli3DwHiYgKLmyG5v7JiejWPZrDPzN9yebEXlW/nDQ/j0leaDXf79h\nObGha7kUnbgmlCjZr2gsSl3hYRuNe3Pk1JfaGxKFXEsJfo9mshNHoz1E9Ae2r4a+\n4iAqtUdWnUPzq16DwawMk8RsnbUzB/EhSXKxv6W/cp537Yj1RIaKQftSY1J0Pgy3\nffkkr+NcF9TnaBLpPYwONE/PS1qK1gCQoKVgZ2KzTRRrFWhl8608Oia8xwUVn8eY\nYqAcF7n3NymmH8ciJ7SvifUuEi+2smBDysV7a5J+4ulZP3G3L/trzBiXxRh1JXZ4\nKgPqDOKvvQzCQuS65RhpVQP6S/CCyrI54fBbMbGVrm+RAO9UnGnxfe6gzU/n91XH\nKRqJMnqsuVS/ufseN63lP3cDFHrlgKV5z3f64SSxYRiL04vOaZz6PqCZBfxhI7An\nbgedSVsHytygV789acxq\n=DE/p\n-----END PGP SIGNATURE-----\n",
+          "payload": "tree d514dc9782fed3bb6db07adc75e91bf0b79039a2\nparent ef8e826c5687f0589240e9c4dbc521beda964eb0\nparent 68eeb3a8f6514438b07c2dc38d92f90f3e09f8c9\nauthor David <davidgmbb@gmail.com> 1792062559 +0000\ncommitter GitHub <noreply@github.com> 1792062559 +0000\n\nMerge pull request #4266 from buster14a/codex/4009-compact-prepass-liveness\n\nperf(codegen): share large liveness sets and remove redundant prepass work\n",
+          "verified_at": "2026-10-15T11:12:48Z"
+        }
+      },
+      "url": "https://api.github.com/repos/buster14a/buster/commits/e51b8f63685c19d3ef51c848801c689132f5a1c4",
+      "html_url": "https://github.com/buster14a/buster/commit/e51b8f63685c19d3ef51c848801c689132f5a1c4",
+      "comments_url": "https://api.github.com/repos/buster14a/buster/commits/e51b8f63685c19d3ef51c848801c689132f5a1c4/comments",
+      "author": {
+        "login": "davidgmbb",
+        "id": 39247043,
+        "node_id": "MDQ6VXNlcjM5MjQ3MDQz",
+        "avatar_url": "https://avatars.githubusercontent.com/u/39247043?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/davidgmbb",
+        "html_url": "https://github.com/davidgmbb",
+        "followers_url": "https://api.github.com/users/davidgmbb/followers",
+        "following_url": "https://api.github.com/users/davidgmbb/following{/other_user}",
+        "gists_url": "https://api.github.com/users/davidgmbb/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/davidgmbb/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/davidgmbb/subscriptions",
+        "organizations_url": "https://api.github.com/users/davidgmbb/orgs",
+        "repos_url": "https://api.github.com/users/davidgmbb/repos",
+        "events_url": "https://api.github.com/users/davidgmbb/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/davidgmbb/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "committer": {
+        "login": "web-flow",
+        "id": 19864447,
+        "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+        "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/web-flow",
+        "html_url": "https://github.com/web-flow",
+        "followers_url": "https://api.github.com/users/web-flow/followers",
+        "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+        "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+        "organizations_url": "https://api.github.com/users/web-flow/orgs",
+        "repos_url": "https://api.github.com/users/web-flow/repos",
+        "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/web-flow/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "parents": [
+        {
+          "sha": "ef8e826c5687f0589240e9c4dbc521beda964eb0",
+          "url": "https://api.github.com/repos/buster14a/buster/commits/ef8e826c5687f0589240e9c4dbc521beda964eb0",
+          "html_url": "https://github.com/buster14a/buster/commit/ef8e826c5687f0589240e9c4dbc521beda964eb0"
+        },
+        {
+          "sha": "68eeb3a8f6514438b07c2dc38d92f90f3e09f8c9",
+          "url": "https://api.github.com/repos/buster14a/buster/commits/68eeb3a8f6514438b07c2dc38d92f90f3e09f8c9",
+          "html_url": "https://github.com/buster14a/buster/commit/68eeb3a8f6514438b07c2dc38d92f90f3e09f8c9"
+        }
+      ]
+    },
+    "_links": {
+      "self": "https://api.github.com/repos/buster14a/buster/branches/main",
+      "html": "https://github.com/buster14a/buster/tree/main"
+    },
+    "protected": true,
+    "protection": {
+      "enabled": false,
+      "required_status_checks": {
+        "enforcement_level": "off",
+        "contexts": [],
+        "checks": []
+      }
+    },
+    "protection_url": "https://api.github.com/repos/buster14a/buster/branches/main/protection"
+  },
+  "request_sha256": "acd3081ec4dcd9401843442280e10cae945b90a4c81978ce09bdfc9c032882bb",
+  "ast_selectors_before": 2,
+  "ast_selectors_after": 3,
+  "frontend_nesting_selectors_unchanged": 1,
+  "only_request_changed": true,
+  "push_exit": 0,
+  "main_after": {
+    "name": "main",
+    "commit": {
+      "sha": "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+      "node_id": "C_kwDOP-FZBdoAKGU1MWI4ZjYzNjg1YzE5ZDNlZjUxYzg0ODgwMWM2ODkxMzJmNWExYzQ",
+      "commit": {
+        "author": {
+          "name": "David",
+          "email": "davidgmbb@gmail.com",
+          "date": "2026-10-15T11:09:19Z"
+        },
+        "committer": {
+          "name": "GitHub",
+          "email": "noreply@github.com",
+          "date": "2026-10-15T11:09:19Z"
+        },
+        "message": "Merge pull request #4266 from buster14a/codex/4009-compact-prepass-liveness\n\nperf(codegen): share large liveness sets and remove redundant prepass work",
+        "tree": {
+          "sha": "d514dc9782fed3bb6db07adc75e91bf0b79039a2",
+          "url": "https://api.github.com/repos/buster14a/buster/git/trees/d514dc9782fed3bb6db07adc75e91bf0b79039a2"
+        },
+        "url": "https://api.github.com/repos/buster14a/buster/git/commits/e51b8f63685c19d3ef51c848801c689132f5a1c4",
+        "comment_count": 0,
+        "verification": {
+          "verified": true,
+          "reason": "valid",
+          "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJq0LRfCRC1aQ7uu5UhlAAAPoMQAI+Xgi8tuXqH5m1F96afVfbo\nj4JvCiaLrccqK0Ua7JLs7zGNQuM4OSm283I1nFJdl+mn7ebZnqOAtGT+xv3PtAkj\nZjiq4bsx4TvZTm4xz5/QjeQHr2MmWhMy12PWpx8a+9RHfjdoa9XIJ0L3r+JmEdOj\nB/AaVTst+XKH0+shHMn6f+npEPBlNGYu4+PPjdQgUCqp8N3xUDMoO3513EL0t5xQ\n8oNrEeb/zldli3DwHiYgKLmyG5v7JiejWPZrDPzN9yebEXlW/nDQ/j0leaDXf79h\nObGha7kUnbgmlCjZr2gsSl3hYRuNe3Pk1JfaGxKFXEsJfo9mshNHoz1E9Ae2r4a+\n4iAqtUdWnUPzq16DwawMk8RsnbUzB/EhSXKxv6W/cp537Yj1RIaKQftSY1J0Pgy3\nffkkr+NcF9TnaBLpPYwONE/PS1qK1gCQoKVgZ2KzTRRrFWhl8608Oia8xwUVn8eY\nYqAcF7n3NymmH8ciJ7SvifUuEi+2smBDysV7a5J+4ulZP3G3L/trzBiXxRh1JXZ4\nKgPqDOKvvQzCQuS65RhpVQP6S/CCyrI54fBbMbGVrm+RAO9UnGnxfe6gzU/n91XH\nKRqJMnqsuVS/ufseN63lP3cDFHrlgKV5z3f64SSxYRiL04vOaZz6PqCZBfxhI7An\nbgedSVsHytygV789acxq\n=DE/p\n-----END PGP SIGNATURE-----\n",
+          "payload": "tree d514dc9782fed3bb6db07adc75e91bf0b79039a2\nparent ef8e826c5687f0589240e9c4dbc521beda964eb0\nparent 68eeb3a8f6514438b07c2dc38d92f90f3e09f8c9\nauthor David <davidgmbb@gmail.com> 1792062559 +0000\ncommitter GitHub <noreply@github.com> 1792062559 +0000\n\nMerge pull request #4266 from buster14a/codex/4009-compact-prepass-liveness\n\nperf(codegen): share large liveness sets and remove redundant prepass work\n",
+          "verified_at": "2026-10-15T11:12:48Z"
+        }
+      },
+      "url": "https://api.github.com/repos/buster14a/buster/commits/e51b8f63685c19d3ef51c848801c689132f5a1c4",
+      "html_url": "https://github.com/buster14a/buster/commit/e51b8f63685c19d3ef51c848801c689132f5a1c4",
+      "comments_url": "https://api.github.com/repos/buster14a/buster/commits/e51b8f63685c19d3ef51c848801c689132f5a1c4/comments",
+      "author": {
+        "login": "davidgmbb",
+        "id": 39247043,
+        "node_id": "MDQ6VXNlcjM5MjQ3MDQz",
+        "avatar_url": "https://avatars.githubusercontent.com/u/39247043?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/davidgmbb",
+        "html_url": "https://github.com/davidgmbb",
+        "followers_url": "https://api.github.com/users/davidgmbb/followers",
+        "following_url": "https://api.github.com/users/davidgmbb/following{/other_user}",
+        "gists_url": "https://api.github.com/users/davidgmbb/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/davidgmbb/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/davidgmbb/subscriptions",
+        "organizations_url": "https://api.github.com/users/davidgmbb/orgs",
+        "repos_url": "https://api.github.com/users/davidgmbb/repos",
+        "events_url": "https://api.github.com/users/davidgmbb/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/davidgmbb/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "committer": {
+        "login": "web-flow",
+        "id": 19864447,
+        "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+        "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/web-flow",
+        "html_url": "https://github.com/web-flow",
+        "followers_url": "https://api.github.com/users/web-flow/followers",
+        "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+        "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+        "organizations_url": "https://api.github.com/users/web-flow/orgs",
+        "repos_url": "https://api.github.com/users/web-flow/repos",
+        "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/web-flow/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "parents": [
+        {
+          "sha": "ef8e826c5687f0589240e9c4dbc521beda964eb0",
+          "url": "https://api.github.com/repos/buster14a/buster/commits/ef8e826c5687f0589240e9c4dbc521beda964eb0",
+          "html_url": "https://github.com/buster14a/buster/commit/ef8e826c5687f0589240e9c4dbc521beda964eb0"
+        },
+        {
+          "sha": "68eeb3a8f6514438b07c2dc38d92f90f3e09f8c9",
+          "url": "https://api.github.com/repos/buster14a/buster/commits/68eeb3a8f6514438b07c2dc38d92f90f3e09f8c9",
+          "html_url": "https://github.com/buster14a/buster/commit/68eeb3a8f6514438b07c2dc38d92f90f3e09f8c9"
+        }
+      ]
+    },
+    "_links": {
+      "self": "https://api.github.com/repos/buster14a/buster/branches/main",
+      "html": "https://github.com/buster14a/buster/tree/main"
+    },
+    "protected": true,
+    "protection": {
+      "enabled": false,
+      "required_status_checks": {
+        "enforcement_level": "off",
+        "contexts": [],
+        "checks": []
+      }
+    },
+    "protection_url": "https://api.github.com/repos/buster14a/buster/branches/main/protection"
+  },
+  "measurement_or_acceptance_claimed": false,
+  "push_stdout": "",
+  "push_stderr": "To https://github.com/buster14a/buster.git\n   96fe219c4e..d824c25a82  HEAD -> codex/3102-complete-lowering\n",
+  "completed": "2026-10-15T11:36:53.838721+00:00",
+  "baseline_was_actual_main_through_publication": true
+}

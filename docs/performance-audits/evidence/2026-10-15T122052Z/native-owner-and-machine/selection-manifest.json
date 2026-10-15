@@ -1,0 +1,54 @@
+{
+  "members": [
+    {
+      "bytes": 2843,
+      "in_payload_manifest": true,
+      "path": "ast_retirement_acceptance/owner/metadata.json",
+      "sha256": "55ceb032bc4325a90c61b9a277961b4938ab4ffd7e4d6a5d46edb277442a0bec"
+    },
+    {
+      "bytes": 1444,
+      "in_payload_manifest": true,
+      "path": "ast_retirement_acceptance/owner/owned-phases/0001.json",
+      "sha256": "f6f5809abed2e0e7f6680976b66fa81435d3f7aabf00e7cddc2969ca93f5a440"
+    },
+    {
+      "bytes": 950,
+      "in_payload_manifest": true,
+      "path": "ast_retirement_acceptance/owner/owned-phases/0001.json.argv",
+      "sha256": "228789f73672f7eeba80cac32ace22c753e8d7b2b44b5388fddc814d006e61e6"
+    },
+    {
+      "bytes": 34459,
+      "in_payload_manifest": true,
+      "path": "ast_retirement_acceptance/owner/owned-phases/0001.json.bootstrap.complete",
+      "sha256": "ab9751427f46e1a5d8c5a2cdc76649291bfb2d817bc64f760133fff9ec625c27"
+    },
+    {
+      "bytes": 0,
+      "in_payload_manifest": true,
+      "path": "ast_retirement_acceptance/owner/owned-phases/0001.json.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 47463,
+      "in_payload_manifest": true,
+      "path": "ast_retirement_acceptance/owner/owned-phases/0001.json.stdout",
+      "sha256": "e1ba4cf1a8be99a3d1fa02414c7c0885a0148eb376b4181c42f8722012062da5"
+    },
+    {
+      "bytes": 4349,
+      "in_payload_manifest": false,
+      "path": "machine-specifications/report.json",
+      "sha256": "45921611b31b126c726ce659e8e2a36ae4f84e38a9d1e3e20a4e64e80208fe29"
+    },
+    {
+      "bytes": 10584,
+      "in_payload_manifest": false,
+      "path": "machine-specifications/sources.jsonl",
+      "sha256": "f64313137684957202acb328f755934a176aaa73a837d78408f4087f091b9e81"
+    }
+  ],
+  "source_artifact_id": 11971210532,
+  "source_artifact_sha256": "bd11314316002784e87e2a6bbfc7d5b1957e9885613eb58f868fd559a3b8c7ec"
+}
