@@ -8480,6 +8480,24 @@ BUSTER_C_INTERNAL bool c_parse_expression_next_conditional(CParseResult* result,
 
 BUSTER_C_INTERNAL u32 c_parse_identity_separator(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CPunctuator separator);
 
+// A failed expression leaf can still bind a typedef. Type-name operands are
+// consumed by their own frames before reaching this value-only fallback.
+BUSTER_C_INTERNAL void c_parse_expression_leaf_name_constraint(CTypeParseMachine* machine, CParseResult* result,
+    CPreprocessResult preprocess, CScopeId scope, u32 start)
+{
+    u32 use = c_parse_identifier_use_index(result, start);
+    CScopeId lookup_scope = scope.value == C_ID_UNDERLYING_INVALID && result->scope_count
+        ? (CScopeId){.value = 0} : scope;
+    CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
+        : c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[start]);
+    if (entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF)
+    {
+        machine->expression_constraint = c_parse_message(result->arena, S8("typedef name '{S8}' is not an expression"),
+            c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]));
+        machine->expression_constraint_token = start;
+    }
+}
+
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
@@ -8690,19 +8708,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 if (machine->validate_expression_constraints && !machine->expression_constraint.length &&
                     last.value >= result->type_count && first.kind == C_TOKEN_IDENTIFIER)
                 {
-                    // A typedef may be bound in a cast or a type operand, but
-                    // this task is an expression leaf and must name a value.
-                    u32 use = c_parse_identifier_use_index(result, task->start);
-                    CScopeId lookup_scope = scope.value == C_ID_UNDERLYING_INVALID && result->scope_count
-                        ? (CScopeId){.value = 0} : scope;
-                    CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
-                        : c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[task->start]);
-                    if (entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF)
-                    {
-                        machine->expression_constraint = c_parse_message(result->arena, S8("typedef name '{S8}' is not an expression"),
-                            c_token_spelling(preprocess.spelling_base, first));
-                        machine->expression_constraint_token = task->start;
-                    }
+                    c_parse_expression_leaf_name_constraint(machine, result, preprocess, scope, task->start);
                 }
                 task_count -= 1;
                 continue;
@@ -18434,6 +18440,13 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
         return;
     }
     CTypeId type = c_parse_expression_leaf_without_cast(frame->arena, *frame->preprocess, frame->result, frame->scope, frame->start, frame->end);
+    if (type.value >= frame->result->type_count && machine->validate_expression_constraints && !machine->expression_constraint.length &&
+        frame->start + 1 < frame->end && frame->preprocess->tokens[frame->start].kind == C_TOKEN_IDENTIFIER &&
+        c_token_is_punctuator(&frame->preprocess->tokens[frame->start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        c_parse_matching_delimiter_indexed(frame->result, *frame->preprocess, frame->start + 1) + 1 == frame->end)
+    {
+        c_parse_expression_leaf_name_constraint(machine, frame->result, *frame->preprocess, frame->scope, frame->start);
+    }
     c_type_parse_frame_complete(machine, type, frame->end, type.value != C_ID_UNDERLYING_INVALID);
 }
 

@@ -440,6 +440,20 @@ reach a layout per item. Each row reaches its pass through an inferred-array
 A new pass over every type, member or declaration needs a row in that fixture,
 or its own scaling fixture, in addition to single-item correctness cases.
 
+## Typedef names in expressions
+
+Checked expression leaves reject a typedef binding as a value, including a
+name followed by a call argument list. An unsuccessful complete named-call leaf must
+publish the same constraint as a lone identifier rather than returning an
+unknown type without a diagnostic. Type-name operands in casts and sizeof
+remain owned by their type frames; successful value and builtin leaves keep
+their existing path. The registered `compiler_driver_test_typedef_expressions`
+fixture checks syntax-only/object diagnostic identity and absent failed output
+for direct and nested callees, conditions, casts and ordinary typedef-name
+values in C17/GNU17/C23/GNU23, both SSA forms and AST/query/explicit-layout routes.
+Grouped declarations, type operands, indirect calls and values shadowing typedefs
+remain accepted (#4299).
+
 ## Lowering diagnostic inventory
 
 The inventory covers source-dependent rejection sites in `c_gen.c`, including
