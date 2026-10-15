@@ -1557,6 +1557,16 @@ jobs:
           BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
           BUSTER_CI_RUNNER: ubuntu-26.04
         run: python3 -B tools/ci_job_environment.py --output "$RUNNER_TEMP/buster-analyzer/job-environment.json"
+      - name: Install latest stable LLVM for analysis
+        id: analyzer_llvm
+        if: ${{ needs.reuse.outputs.reuse != 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 tools/ci_llvm.py --target x86_64-linux --work-directory "$RUNNER_TEMP/llvm" \
+            --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV"
       - name: Bootstrap and identify candidate build driver
         if: ${{ needs.reuse.outputs.reuse != 'true' }}
         shell: bash

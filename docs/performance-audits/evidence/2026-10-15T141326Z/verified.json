@@ -1,0 +1,2742 @@
+[
+  {
+    "source": "cf42f39d27eba71b8ed81edf0cab12fd4d6565aa",
+    "tree": "a4a5cc5f8e3199fc79821b732b58114607de6a21",
+    "order": [
+      "image",
+      "stable"
+    ],
+    "host_before": {
+      "logical_cpus": 4,
+      "affinity_cpus": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "meminfo": "MemTotal:       16366704 kB\nMemFree:        10954272 kB\nMemAvailable:   14967464 kB\nBuffers:           77536 kB\nCached:          4179248 kB\nSwapCached:            0 kB\nActive:           903284 kB\nInactive:        3678076 kB\nActive(anon):     418816 kB\nInactive(anon):        0 kB\nActive(file):     484468 kB\nInactive(file):  3678076 kB\nUnevictable:       12444 kB\nMlocked:            9372 kB\nSwapTotal:       3145724 kB\nSwapFree:        3145724 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:            455572 kB\nWriteback:             0 kB\nAnonPages:        337280 kB\nMapped:           341152 kB\nShmem:             87052 kB\nKReclaimable:     196576 kB\nSlab:             287520 kB\nSReclaimable:     196576 kB\nSUnreclaim:        90944 kB\nKernelStack:        4320 kB\nPageTables:         6716 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    11329076 kB\nCommitted_AS:    2150436 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       42764 kB\nVmallocChunk:          0 kB\nPercpu:             2304 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:         0 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:         1476608 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      134272 kB\nDirectMap2M:     4055040 kB\nDirectMap1G:    14680064 kB\n",
+      "cgroup": "0::/system.slice/hosted-compute-agent.service\n",
+      "cgroup_limits": {
+        "/sys/fs/cgroup/system.slice/hosted-compute-agent.service": {
+          "cpu.max": "max 100000\n",
+          "cpuset.cpus.effective": "0-3\n",
+          "cpu.stat": "usage_usec 17890667\nuser_usec 13992734\nsystem_usec 3897932\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "memory.max": "max\n",
+          "memory.current": "1331048448\n",
+          "memory.peak": "1558581248\n",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+          "memory.swap.current": "0\n",
+          "memory.swap.max": "max\n"
+        },
+        "/sys/fs/cgroup/system.slice": {
+          "cpu.max": "max 100000\n",
+          "cpuset.cpus.effective": "0-3\n",
+          "cpu.stat": "usage_usec 46082460\nuser_usec 27976208\nsystem_usec 18106251\nnice_usec 83000\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "memory.max": "max\n",
+          "memory.current": "4829143040\n",
+          "memory.peak": "5056675840\n",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+          "memory.swap.current": "0\n",
+          "memory.swap.max": "max\n"
+        },
+        "/sys/fs/cgroup": {
+          "cpu.max": null,
+          "cpuset.cpus.effective": "0-3\n",
+          "cpu.stat": "usage_usec 54330000\nuser_usec 30176000\nsystem_usec 24154000\nnice_usec 83000\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "memory.max": null,
+          "memory.current": null,
+          "memory.peak": null,
+          "memory.events": null,
+          "memory.swap.current": null,
+          "memory.swap.max": null
+        }
+      },
+      "cpu_pressure": "some avg10=0.03 avg60=0.50 avg300=0.44 total=2196372\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "memory_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=810\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=2\n",
+      "lscpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           48 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  4\nOn-line CPU(s) list:                     0-3\nVendor ID:                               AuthenticAMD\nModel name:                              AMD EPYC 7763 64-Core Processor\nCPU family:                              25\nModel:                                   1\nThread(s) per core:                      2\nCore(s) per socket:                      2\nSocket(s):                               1\nStepping:                                1\nBogoMIPS:                                4890.86\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves user_shstk clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload umip vaes vpclmulqdq rdpid fsrm\nVirtualization:                          AMD-V\nHypervisor vendor:                       Microsoft\nVirtualization type:                     full\nL1d cache:                               64 KiB (2 instances)\nL1i cache:                               64 KiB (2 instances)\nL2 cache:                                1 MiB (2 instances)\nL3 cache:                                32 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-3\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Vulnerable: Safe RET, no microcode\nVulnerability Spec store bypass:         Vulnerable\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Vulnerable: No microcode\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n",
+      "uname": [
+        "Linux",
+        "runnervmb40mh",
+        "7.0.0-1012-azure",
+        "#12-Ubuntu SMP PREEMPT Thu Aug  6 19:23:26 UTC 2026",
+        "x86_64"
+      ]
+    },
+    "host_after": {
+      "logical_cpus": 4,
+      "affinity_cpus": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "meminfo": "MemTotal:       16366704 kB\nMemFree:        10292324 kB\nMemAvailable:   15262240 kB\nBuffers:           83648 kB\nCached:          5104416 kB\nSwapCached:            0 kB\nActive:           940092 kB\nInactive:        4584164 kB\nActive(anon):     436592 kB\nInactive(anon):        0 kB\nActive(file):     503500 kB\nInactive(file):  4584164 kB\nUnevictable:       12444 kB\nMlocked:            9372 kB\nSwapTotal:       3145724 kB\nSwapFree:        3145724 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:               116 kB\nWriteback:            16 kB\nAnonPages:        348508 kB\nMapped:           350556 kB\nShmem:             93224 kB\nKReclaimable:     228180 kB\nSlab:             323536 kB\nSReclaimable:     228180 kB\nSUnreclaim:        95356 kB\nKernelStack:        4240 kB\nPageTables:         6972 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    11329076 kB\nCommitted_AS:    2183844 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       42652 kB\nVmallocChunk:          0 kB\nPercpu:             2352 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:         0 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:         1476608 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      134272 kB\nDirectMap2M:     4055040 kB\nDirectMap1G:    14680064 kB\n",
+      "cgroup": "0::/system.slice/hosted-compute-agent.service\n",
+      "cgroup_limits": {
+        "/sys/fs/cgroup/system.slice/hosted-compute-agent.service": {
+          "cpu.max": "max 100000\n",
+          "cpuset.cpus.effective": "0-3\n",
+          "cpu.stat": "usage_usec 4449419757\nuser_usec 4351173858\nsystem_usec 98245898\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "memory.max": "max\n",
+          "memory.current": "2330255360\n",
+          "memory.peak": "4570906624\n",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+          "memory.swap.current": "0\n",
+          "memory.swap.max": "max\n"
+        },
+        "/sys/fs/cgroup/system.slice": {
+          "cpu.max": "max 100000\n",
+          "cpuset.cpus.effective": "0-3\n",
+          "cpu.stat": "usage_usec 4526884663\nuser_usec 4369169240\nsystem_usec 157715423\nnice_usec 102000\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "memory.max": "max\n",
+          "memory.current": "5822918656\n",
+          "memory.peak": "8066293760\n",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+          "memory.swap.current": "0\n",
+          "memory.swap.max": "max\n"
+        },
+        "/sys/fs/cgroup": {
+          "cpu.max": null,
+          "cpuset.cpus.effective": "0-3\n",
+          "cpu.stat": "usage_usec 4532963000\nuser_usec 4365616000\nsystem_usec 167347000\nnice_usec 102000\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "memory.max": null,
+          "memory.current": null,
+          "memory.peak": null,
+          "memory.events": null,
+          "memory.swap.current": null,
+          "memory.swap.max": null
+        }
+      },
+      "cpu_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=7550689\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "memory_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=810\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=2\n",
+      "lscpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           48 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  4\nOn-line CPU(s) list:                     0-3\nVendor ID:                               AuthenticAMD\nModel name:                              AMD EPYC 7763 64-Core Processor\nCPU family:                              25\nModel:                                   1\nThread(s) per core:                      2\nCore(s) per socket:                      2\nSocket(s):                               1\nStepping:                                1\nBogoMIPS:                                4890.86\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves user_shstk clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload umip vaes vpclmulqdq rdpid fsrm\nVirtualization:                          AMD-V\nHypervisor vendor:                       Microsoft\nVirtualization type:                     full\nL1d cache:                               64 KiB (2 instances)\nL1i cache:                               64 KiB (2 instances)\nL2 cache:                                1 MiB (2 instances)\nL3 cache:                                32 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-3\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Vulnerable: Safe RET, no microcode\nVulnerability Spec store bypass:         Vulnerable\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Vulnerable: No microcode\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n",
+      "uname": [
+        "Linux",
+        "runnervmb40mh",
+        "7.0.0-1012-azure",
+        "#12-Ubuntu SMP PREEMPT Thu Aug  6 19:23:26 UTC 2026",
+        "x86_64"
+      ]
+    },
+    "roles": {
+      "image": {
+        "elapsed_seconds": 1155.897069,
+        "cpu_seconds": 2326.41,
+        "max_rss_kib": 580084,
+        "sampled_tree_rss_bytes": 881971200,
+        "version": "Ubuntu clang version 21.1.8 (6ubuntu1)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-21/bin",
+        "compiler_hash": "78e9dd2ccc9e88859b3a29109a44bfab00e3d6cb70f00f3daae063eed3d05251",
+        "default_checkers": "Ubuntu clang version 21.1.8 (6ubuntu1)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-21/bin\n (in-process)\n \"/usr/lib/llvm-21/bin/clang\" \"-cc1\" \"-triple\" \"x86_64-pc-linux-gnu\" \"-analyze\" \"-disable-free\" \"-clear-ast-before-backend\" \"-disable-llvm-verifier\" \"-discard-value-names\" \"-main-file-name\" \"null\" \"-analyzer-checker=core\" \"-analyzer-checker=apiModeling\" \"-analyzer-checker=unix\" \"-analyzer-checker=deadcode\" \"-analyzer-checker=security.insecureAPI.UncheckedReturn\" \"-analyzer-checker=security.insecureAPI.getpw\" \"-analyzer-checker=security.insecureAPI.gets\" \"-analyzer-checker=security.insecureAPI.mktemp\" \"-analyzer-checker=security.insecureAPI.mkstemp\" \"-analyzer-checker=security.insecureAPI.vfork\" \"-analyzer-checker=nullability.NullPassedToNonnull\" \"-analyzer-checker=nullability.NullReturnedFromNonnull\" \"-analyzer-output\" \"plist\" \"-w\" \"-setup-static-analyzer\" \"-mrelocation-model\" \"pic\" \"-pic-level\" \"2\" \"-pic-is-pie\" \"-mframe-pointer=all\" \"-fmath-errno\" \"-ffp-contract=on\" \"-fno-rounding-math\" \"-mconstructor-aliases\" \"-funwind-tables=2\" \"-target-cpu\" \"x86-64\" \"-tune-cpu\" \"generic\" \"-debugger-tuning=gdb\" \"-fdebug-compilation-dir=/home/runner/work/buster/buster\" \"-fcoverage-compilation-dir=/home/runner/work/buster/buster\" \"-resource-dir\" \"/usr/lib/llvm-21/lib/clang/21\" \"-internal-isystem\" \"/usr/lib/llvm-21/lib/clang/21/include\" \"-internal-isystem\" \"/usr/local/include\" \"-internal-isystem\" \"/usr/lib/gcc/x86_64-linux-gnu/15/../../../../x86_64-linux-gnu/include\" \"-internal-externc-isystem\" \"/usr/include/x86_64-linux-gnu\" \"-internal-externc-isystem\" \"/include\" \"-internal-externc-isystem\" \"/usr/include\" \"-ferror-limit\" \"19\" \"-fgnuc-version=4.2.1\" \"-fskip-odr-check-in-gmf\" \"-faddrsig\" \"-D__GCC_HAVE_DWARF2_CFI_ASM=1\" \"-o\" \"null.plist\" \"-x\" \"c\" \"/dev/null\"\n",
+        "optional_warnings": [
+          "-Wexperimental-lifetime-safety",
+          "-Whigher-precision-for-complex-division",
+          "-Wimplicit-void-ptr-cast",
+          "-Wshift-bool",
+          "-Wthread-safety",
+          "-Wunique-object-duplication"
+        ],
+        "control_checks": 93,
+        "units": [
+          {
+            "unit": 0,
+            "elapsed_us": 9805419,
+            "source": "/home/runner/work/buster/buster/src/buster/apps/ide/ide.c"
+          },
+          {
+            "unit": 1,
+            "elapsed_us": 719745,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/byte_writer_test.c"
+          },
+          {
+            "unit": 2,
+            "elapsed_us": 3485926,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/arena_test.c"
+          },
+          {
+            "unit": 3,
+            "elapsed_us": 2353885,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/integer_test.c"
+          },
+          {
+            "unit": 4,
+            "elapsed_us": 77381,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/sanitizer_test.c"
+          },
+          {
+            "unit": 5,
+            "elapsed_us": 77487,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/hash_test.c"
+          },
+          {
+            "unit": 6,
+            "elapsed_us": 130820,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/simd_test.c"
+          },
+          {
+            "unit": 7,
+            "elapsed_us": 1217669,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/string_test.c"
+          },
+          {
+            "unit": 8,
+            "elapsed_us": 13376064,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/os_test.c"
+          },
+          {
+            "unit": 9,
+            "elapsed_us": 8194120,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/file_test.c"
+          },
+          {
+            "unit": 10,
+            "elapsed_us": 2410498,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/target_test.c"
+          },
+          {
+            "unit": 11,
+            "elapsed_us": 6286956,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/metamorphic/metamorphic_test.c"
+          },
+          {
+            "unit": 12,
+            "elapsed_us": 416731442,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/c_test.c"
+          },
+          {
+            "unit": 13,
+            "elapsed_us": 55150787,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/c_ast_test.c"
+          },
+          {
+            "unit": 14,
+            "elapsed_us": 5915675,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/once_test.c"
+          },
+          {
+            "unit": 15,
+            "elapsed_us": 15736965,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/type_layout_test.c"
+          },
+          {
+            "unit": 16,
+            "elapsed_us": 13372512,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/macro_conditional_test.c"
+          },
+          {
+            "unit": 17,
+            "elapsed_us": 2172990,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/record_layout_test.c"
+          },
+          {
+            "unit": 18,
+            "elapsed_us": 2704564,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_encoding_test.c"
+          },
+          {
+            "unit": 19,
+            "elapsed_us": 1247277,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c"
+          },
+          {
+            "unit": 20,
+            "elapsed_us": 1478437,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_base_assembly_test.c"
+          },
+          {
+            "unit": 21,
+            "elapsed_us": 1534142,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c"
+          },
+          {
+            "unit": 22,
+            "elapsed_us": 1455758,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_system_registers_test.c"
+          },
+          {
+            "unit": 23,
+            "elapsed_us": 1615843,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_semantics_test.c"
+          },
+          {
+            "unit": 24,
+            "elapsed_us": 1590353,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_system_semantics_test.c"
+          },
+          {
+            "unit": 25,
+            "elapsed_us": 1547818,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_syntax_test.c"
+          },
+          {
+            "unit": 26,
+            "elapsed_us": 2064501,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.c"
+          },
+          {
+            "unit": 27,
+            "elapsed_us": 1336426,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c"
+          },
+          {
+            "unit": 28,
+            "elapsed_us": 1342420,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_complex_simd_test.c"
+          },
+          {
+            "unit": 29,
+            "elapsed_us": 2070257,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_memory_semantics_test.c"
+          },
+          {
+            "unit": 30,
+            "elapsed_us": 1525074,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_alias_projection_test.c"
+          },
+          {
+            "unit": 31,
+            "elapsed_us": 22853701,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/assembly_test.c"
+          },
+          {
+            "unit": 32,
+            "elapsed_us": 361518,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_forwarding_test.c"
+          },
+          {
+            "unit": 33,
+            "elapsed_us": 38163760,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_metadata_test.c"
+          },
+          {
+            "unit": 34,
+            "elapsed_us": 402623,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_tls_test.c"
+          },
+          {
+            "unit": 35,
+            "elapsed_us": 1557466,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/padding_test.c"
+          },
+          {
+            "unit": 36,
+            "elapsed_us": 275586,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_got_test.c"
+          },
+          {
+            "unit": 37,
+            "elapsed_us": 4012219,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c"
+          },
+          {
+            "unit": 38,
+            "elapsed_us": 4463730,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/diagnostic_test.c"
+          },
+          {
+            "unit": 39,
+            "elapsed_us": 19305791,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/ir/ir_test.c"
+          },
+          {
+            "unit": 40,
+            "elapsed_us": 3189610,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/ir/ir_oracle_test.c"
+          },
+          {
+            "unit": 41,
+            "elapsed_us": 2651497,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/ir/vector_contract_test.c"
+          },
+          {
+            "unit": 42,
+            "elapsed_us": 28369612,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/llvm/bitcode_test.c"
+          },
+          {
+            "unit": 43,
+            "elapsed_us": 16674219,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/machine_select_test.c"
+          },
+          {
+            "unit": 44,
+            "elapsed_us": 77719038,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/machine_test.c"
+          },
+          {
+            "unit": 45,
+            "elapsed_us": 28895804,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/codegen_test.c"
+          },
+          {
+            "unit": 46,
+            "elapsed_us": 4978020,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/investigation_test.c"
+          },
+          {
+            "unit": 47,
+            "elapsed_us": 1619547,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/aarch64_stride_test.c"
+          },
+          {
+            "unit": 48,
+            "elapsed_us": 3207742,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/debug/debug_test.c"
+          },
+          {
+            "unit": 49,
+            "elapsed_us": 2181733,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/dwarf/dwarf_test.c"
+          },
+          {
+            "unit": 50,
+            "elapsed_us": 5989322,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codeview/codeview_test.c"
+          },
+          {
+            "unit": 51,
+            "elapsed_us": 9063035,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/pdb/pdb_test.c"
+          },
+          {
+            "unit": 52,
+            "elapsed_us": 34860057,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/object/object_test.c"
+          },
+          {
+            "unit": 53,
+            "elapsed_us": 3327993,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/jit/jit_test.c"
+          },
+          {
+            "unit": 54,
+            "elapsed_us": 4472921,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/embed/embed_test.c"
+          },
+          {
+            "unit": 55,
+            "elapsed_us": 41683988,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/link/link_test.c"
+          },
+          {
+            "unit": 56,
+            "elapsed_us": 5726366,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/gpu/gpu_test.c"
+          },
+          {
+            "unit": 57,
+            "elapsed_us": 10202502,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/spirv/spirv_test.c"
+          },
+          {
+            "unit": 58,
+            "elapsed_us": 186022944,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c"
+          },
+          {
+            "unit": 59,
+            "elapsed_us": 25695873,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/driver/object_path_test.c"
+          },
+          {
+            "unit": 60,
+            "elapsed_us": 133697,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/x86_64_test.c"
+          },
+          {
+            "unit": 61,
+            "elapsed_us": 15518072,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/test.c"
+          },
+          {
+            "unit": 62,
+            "elapsed_us": 25252332,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/os.c"
+          },
+          {
+            "unit": 63,
+            "elapsed_us": 144180,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/entry_point.c"
+          },
+          {
+            "unit": 64,
+            "elapsed_us": 4118816,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/arena.c"
+          },
+          {
+            "unit": 65,
+            "elapsed_us": 49641,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/integer.c"
+          },
+          {
+            "unit": 66,
+            "elapsed_us": 4397512,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/string.c"
+          },
+          {
+            "unit": 67,
+            "elapsed_us": 39445,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/float.c"
+          },
+          {
+            "unit": 68,
+            "elapsed_us": 10805718,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_syntax.c"
+          },
+          {
+            "unit": 69,
+            "elapsed_us": 35950666,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_source.c"
+          },
+          {
+            "unit": 70,
+            "elapsed_us": 221577383,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_parse.c"
+          },
+          {
+            "unit": 71,
+            "elapsed_us": 16598034,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_ast_types.c"
+          },
+          {
+            "unit": 72,
+            "elapsed_us": 17017529,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_ast.c"
+          },
+          {
+            "unit": 73,
+            "elapsed_us": 204193531,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_gen.c"
+          },
+          {
+            "unit": 74,
+            "elapsed_us": 39077319,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_encoding.c"
+          },
+          {
+            "unit": 75,
+            "elapsed_us": 65538,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_exact_bridge.c"
+          },
+          {
+            "unit": 76,
+            "elapsed_us": 2283232,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_control_semantics.c"
+          },
+          {
+            "unit": 77,
+            "elapsed_us": 8449603,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_system_registers.c"
+          },
+          {
+            "unit": 78,
+            "elapsed_us": 20454389,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_semantics.c"
+          },
+          {
+            "unit": 79,
+            "elapsed_us": 5059910,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_system_semantics.c"
+          },
+          {
+            "unit": 80,
+            "elapsed_us": 3368908,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_semantic_vm.c"
+          },
+          {
+            "unit": 81,
+            "elapsed_us": 2226940,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_simd_semantics.c"
+          },
+          {
+            "unit": 82,
+            "elapsed_us": 4056895,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c"
+          },
+          {
+            "unit": 83,
+            "elapsed_us": 5726241,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c"
+          },
+          {
+            "unit": 84,
+            "elapsed_us": 4701022,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_memory_semantics.c"
+          },
+          {
+            "unit": 85,
+            "elapsed_us": 5669668,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_alias_projection.c"
+          },
+          {
+            "unit": 86,
+            "elapsed_us": 6502555,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_base_assembly.c"
+          },
+          {
+            "unit": 87,
+            "elapsed_us": 33107704,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/assembly.c"
+          },
+          {
+            "unit": 88,
+            "elapsed_us": 16599392,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/assembly_unit.c"
+          },
+          {
+            "unit": 89,
+            "elapsed_us": 69421451,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/x86_64_metadata.c"
+          },
+          {
+            "unit": 90,
+            "elapsed_us": 6352629,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/x86_64_completion_census.c"
+          },
+          {
+            "unit": 91,
+            "elapsed_us": 29261426,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c"
+          },
+          {
+            "unit": 92,
+            "elapsed_us": 249277,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/diagnostic.c"
+          },
+          {
+            "unit": 93,
+            "elapsed_us": 4728199,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/debug/debug.c"
+          },
+          {
+            "unit": 94,
+            "elapsed_us": 34446411,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/machine.c"
+          },
+          {
+            "unit": 95,
+            "elapsed_us": 3833381,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/bootstrap_trace.c"
+          },
+          {
+            "unit": 96,
+            "elapsed_us": 37397054,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/codegen.c"
+          },
+          {
+            "unit": 97,
+            "elapsed_us": 4864079,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/investigation.c"
+          },
+          {
+            "unit": 98,
+            "elapsed_us": 8578666,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/dwarf/dwarf.c"
+          },
+          {
+            "unit": 99,
+            "elapsed_us": 55225,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/byte_writer.c"
+          },
+          {
+            "unit": 100,
+            "elapsed_us": 8257643,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codeview/codeview.c"
+          },
+          {
+            "unit": 101,
+            "elapsed_us": 8255479,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/pdb/pdb.c"
+          },
+          {
+            "unit": 102,
+            "elapsed_us": 44443698,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/object/object.c"
+          },
+          {
+            "unit": 103,
+            "elapsed_us": 6014214,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/jit/jit.c"
+          },
+          {
+            "unit": 104,
+            "elapsed_us": 56070772,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/link/link.c"
+          },
+          {
+            "unit": 105,
+            "elapsed_us": 12935957,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/wasm/wasm.c"
+          },
+          {
+            "unit": 106,
+            "elapsed_us": 12718391,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/gpu/gpu.c"
+          },
+          {
+            "unit": 107,
+            "elapsed_us": 14774767,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/llvm/bitcode.c"
+          },
+          {
+            "unit": 108,
+            "elapsed_us": 20204019,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/ebpf/ebpf.c"
+          },
+          {
+            "unit": 109,
+            "elapsed_us": 1493159,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/spirv/spirv.c"
+          },
+          {
+            "unit": 110,
+            "elapsed_us": 31351012,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/driver/driver.c"
+          },
+          {
+            "unit": 111,
+            "elapsed_us": 2594533,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/embed/embed.c"
+          },
+          {
+            "unit": 112,
+            "elapsed_us": 41675,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/simd.c"
+          },
+          {
+            "unit": 113,
+            "elapsed_us": 1364405,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/file.c"
+          },
+          {
+            "unit": 114,
+            "elapsed_us": 7339596,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/target.c"
+          },
+          {
+            "unit": 115,
+            "elapsed_us": 56513,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/time.c"
+          },
+          {
+            "unit": 116,
+            "elapsed_us": 120926,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/hash.c"
+          },
+          {
+            "unit": 117,
+            "elapsed_us": 1908891,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/x86_64.c"
+          }
+        ],
+        "checker_groups": [
+          "-analyzer-checker=core",
+          "-analyzer-checker=apiModeling",
+          "-analyzer-checker=unix",
+          "-analyzer-checker=deadcode",
+          "-analyzer-checker=security.insecureAPI.UncheckedReturn",
+          "-analyzer-checker=security.insecureAPI.getpw",
+          "-analyzer-checker=security.insecureAPI.gets",
+          "-analyzer-checker=security.insecureAPI.mktemp",
+          "-analyzer-checker=security.insecureAPI.mkstemp",
+          "-analyzer-checker=security.insecureAPI.vfork",
+          "-analyzer-checker=nullability.NullPassedToNonnull",
+          "-analyzer-checker=nullability.NullReturnedFromNonnull"
+        ]
+      },
+      "stable": {
+        "elapsed_seconds": 1020.954842,
+        "cpu_seconds": 2045.67,
+        "max_rss_kib": 528200,
+        "sampled_tree_rss_bytes": 952061952,
+        "version": "clang version 23.1.3 (https://github.com/llvm/llvm-project 0d261d1ca552c95a8f007e061c787ac7132fbcbc)\nTarget: x86_64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /home/runner/work/_temp/llvm/llvm-23.1.3/bin",
+        "compiler_hash": "913453afb492abab17025139852413ba7fd7a52b4fb75fcce58ff3fe399d0a9e",
+        "default_checkers": "clang version 23.1.3 (https://github.com/llvm/llvm-project 0d261d1ca552c95a8f007e061c787ac7132fbcbc)\nTarget: x86_64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /home/runner/work/_temp/llvm/llvm-23.1.3/bin\n (in-process)\n \"/home/runner/work/_temp/llvm/llvm-23.1.3/bin/clang-23\" \"-cc1\" \"-triple\" \"x86_64-unknown-linux-gnu\" \"-analyze\" \"-disable-free\" \"-clear-ast-before-backend\" \"-disable-llvm-verifier\" \"-discard-value-names\" \"-main-file-name\" \"null\" \"-analyzer-checker=core\" \"-analyzer-checker=apiModeling\" \"-analyzer-checker=unix\" \"-analyzer-checker=deadcode\" \"-analyzer-checker=security.insecureAPI.UncheckedReturn\" \"-analyzer-checker=security.insecureAPI.getpw\" \"-analyzer-checker=security.insecureAPI.gets\" \"-analyzer-checker=security.insecureAPI.mktemp\" \"-analyzer-checker=security.insecureAPI.mkstemp\" \"-analyzer-checker=security.insecureAPI.vfork\" \"-analyzer-checker=nullability.NullPassedToNonnull\" \"-analyzer-checker=nullability.NullReturnedFromNonnull\" \"-analyzer-output\" \"plist\" \"-w\" \"-setup-static-analyzer\" \"-mrelocation-model\" \"pic\" \"-pic-level\" \"2\" \"-pic-is-pie\" \"-mframe-pointer=all\" \"-fmath-errno\" \"-ffp-contract=on\" \"-fno-rounding-math\" \"-mconstructor-aliases\" \"-funwind-tables=2\" \"-target-cpu\" \"x86-64\" \"-tune-cpu\" \"generic\" \"-debugger-tuning=gdb\" \"-fdebug-compilation-dir=/home/runner/work/buster/buster\" \"-fcoverage-compilation-dir=/home/runner/work/buster/buster\" \"-resource-dir\" \"/home/runner/work/_temp/llvm/llvm-23.1.3/lib/clang/23\" \"-internal-isystem\" \"/home/runner/work/_temp/llvm/llvm-23.1.3/lib/clang/23/include\" \"-internal-isystem\" \"/usr/local/include\" \"-internal-isystem\" \"/usr/lib/gcc/x86_64-linux-gnu/15/../../../../x86_64-linux-gnu/include\" \"-internal-externc-isystem\" \"/usr/include/x86_64-linux-gnu\" \"-internal-externc-isystem\" \"/include\" \"-internal-externc-isystem\" \"/usr/include\" \"-ferror-limit\" \"19\" \"-fgnuc-version=4.2.1\" \"-fskip-odr-check-in-gmf\" \"-faddrsig\" \"-fdwarf2-cfi-asm\" \"-o\" \"null.plist\" \"-x\" \"c\" \"/dev/null\"\n",
+        "optional_warnings": [
+          "-Whigher-precision-for-complex-division",
+          "-Wimplicit-void-ptr-cast",
+          "-Wshift-bool",
+          "-Wthread-safety",
+          "-Wunique-object-duplication"
+        ],
+        "control_checks": 93,
+        "units": [
+          {
+            "unit": 0,
+            "elapsed_us": 9518987,
+            "source": "/home/runner/work/buster/buster/src/buster/apps/ide/ide.c"
+          },
+          {
+            "unit": 1,
+            "elapsed_us": 1521510,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/byte_writer_test.c"
+          },
+          {
+            "unit": 2,
+            "elapsed_us": 3162029,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/arena_test.c"
+          },
+          {
+            "unit": 3,
+            "elapsed_us": 2110107,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/integer_test.c"
+          },
+          {
+            "unit": 4,
+            "elapsed_us": 46056,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/sanitizer_test.c"
+          },
+          {
+            "unit": 5,
+            "elapsed_us": 49178,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/hash_test.c"
+          },
+          {
+            "unit": 6,
+            "elapsed_us": 85435,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/simd_test.c"
+          },
+          {
+            "unit": 7,
+            "elapsed_us": 1531799,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/string_test.c"
+          },
+          {
+            "unit": 8,
+            "elapsed_us": 14929754,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/os_test.c"
+          },
+          {
+            "unit": 9,
+            "elapsed_us": 6641354,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/file_test.c"
+          },
+          {
+            "unit": 10,
+            "elapsed_us": 1928677,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/target_test.c"
+          },
+          {
+            "unit": 11,
+            "elapsed_us": 5951001,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/metamorphic/metamorphic_test.c"
+          },
+          {
+            "unit": 12,
+            "elapsed_us": 371639805,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/c_test.c"
+          },
+          {
+            "unit": 13,
+            "elapsed_us": 49554330,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/c_ast_test.c"
+          },
+          {
+            "unit": 14,
+            "elapsed_us": 5566853,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/once_test.c"
+          },
+          {
+            "unit": 15,
+            "elapsed_us": 16081044,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/type_layout_test.c"
+          },
+          {
+            "unit": 16,
+            "elapsed_us": 11897191,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/macro_conditional_test.c"
+          },
+          {
+            "unit": 17,
+            "elapsed_us": 1914619,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/record_layout_test.c"
+          },
+          {
+            "unit": 18,
+            "elapsed_us": 1717406,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_encoding_test.c"
+          },
+          {
+            "unit": 19,
+            "elapsed_us": 1170603,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c"
+          },
+          {
+            "unit": 20,
+            "elapsed_us": 1608015,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_base_assembly_test.c"
+          },
+          {
+            "unit": 21,
+            "elapsed_us": 1363288,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c"
+          },
+          {
+            "unit": 22,
+            "elapsed_us": 1112636,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_system_registers_test.c"
+          },
+          {
+            "unit": 23,
+            "elapsed_us": 1390979,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_semantics_test.c"
+          },
+          {
+            "unit": 24,
+            "elapsed_us": 1448129,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_system_semantics_test.c"
+          },
+          {
+            "unit": 25,
+            "elapsed_us": 1404964,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_syntax_test.c"
+          },
+          {
+            "unit": 26,
+            "elapsed_us": 1648895,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.c"
+          },
+          {
+            "unit": 27,
+            "elapsed_us": 1366289,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c"
+          },
+          {
+            "unit": 28,
+            "elapsed_us": 1277283,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_complex_simd_test.c"
+          },
+          {
+            "unit": 29,
+            "elapsed_us": 1769772,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_memory_semantics_test.c"
+          },
+          {
+            "unit": 30,
+            "elapsed_us": 1137080,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_alias_projection_test.c"
+          },
+          {
+            "unit": 31,
+            "elapsed_us": 12074872,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/assembly_test.c"
+          },
+          {
+            "unit": 32,
+            "elapsed_us": 321568,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_forwarding_test.c"
+          },
+          {
+            "unit": 33,
+            "elapsed_us": 19527521,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_metadata_test.c"
+          },
+          {
+            "unit": 34,
+            "elapsed_us": 325545,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_tls_test.c"
+          },
+          {
+            "unit": 35,
+            "elapsed_us": 1480857,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/padding_test.c"
+          },
+          {
+            "unit": 36,
+            "elapsed_us": 150172,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_got_test.c"
+          },
+          {
+            "unit": 37,
+            "elapsed_us": 2335591,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c"
+          },
+          {
+            "unit": 38,
+            "elapsed_us": 4342644,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/diagnostic_test.c"
+          },
+          {
+            "unit": 39,
+            "elapsed_us": 14995604,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/ir/ir_test.c"
+          },
+          {
+            "unit": 40,
+            "elapsed_us": 2651952,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/ir/ir_oracle_test.c"
+          },
+          {
+            "unit": 41,
+            "elapsed_us": 2276929,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/ir/vector_contract_test.c"
+          },
+          {
+            "unit": 42,
+            "elapsed_us": 24423598,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/llvm/bitcode_test.c"
+          },
+          {
+            "unit": 43,
+            "elapsed_us": 14100435,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/machine_select_test.c"
+          },
+          {
+            "unit": 44,
+            "elapsed_us": 69846701,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/machine_test.c"
+          },
+          {
+            "unit": 45,
+            "elapsed_us": 24451719,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/codegen_test.c"
+          },
+          {
+            "unit": 46,
+            "elapsed_us": 4394741,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/investigation_test.c"
+          },
+          {
+            "unit": 47,
+            "elapsed_us": 1295312,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/aarch64_stride_test.c"
+          },
+          {
+            "unit": 48,
+            "elapsed_us": 2852174,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/debug/debug_test.c"
+          },
+          {
+            "unit": 49,
+            "elapsed_us": 1702561,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/dwarf/dwarf_test.c"
+          },
+          {
+            "unit": 50,
+            "elapsed_us": 5526995,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codeview/codeview_test.c"
+          },
+          {
+            "unit": 51,
+            "elapsed_us": 6486893,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/pdb/pdb_test.c"
+          },
+          {
+            "unit": 52,
+            "elapsed_us": 29081818,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/object/object_test.c"
+          },
+          {
+            "unit": 53,
+            "elapsed_us": 2729720,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/jit/jit_test.c"
+          },
+          {
+            "unit": 54,
+            "elapsed_us": 3642272,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/embed/embed_test.c"
+          },
+          {
+            "unit": 55,
+            "elapsed_us": 37439818,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/link/link_test.c"
+          },
+          {
+            "unit": 56,
+            "elapsed_us": 5060849,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/gpu/gpu_test.c"
+          },
+          {
+            "unit": 57,
+            "elapsed_us": 9292227,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/spirv/spirv_test.c"
+          },
+          {
+            "unit": 58,
+            "elapsed_us": 167793391,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c"
+          },
+          {
+            "unit": 59,
+            "elapsed_us": 22847480,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/driver/object_path_test.c"
+          },
+          {
+            "unit": 60,
+            "elapsed_us": 97517,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/x86_64_test.c"
+          },
+          {
+            "unit": 61,
+            "elapsed_us": 13485007,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/test.c"
+          },
+          {
+            "unit": 62,
+            "elapsed_us": 21682494,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/os.c"
+          },
+          {
+            "unit": 63,
+            "elapsed_us": 100299,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/entry_point.c"
+          },
+          {
+            "unit": 64,
+            "elapsed_us": 3642401,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/arena.c"
+          },
+          {
+            "unit": 65,
+            "elapsed_us": 28881,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/integer.c"
+          },
+          {
+            "unit": 66,
+            "elapsed_us": 3721594,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/string.c"
+          },
+          {
+            "unit": 67,
+            "elapsed_us": 21376,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/float.c"
+          },
+          {
+            "unit": 68,
+            "elapsed_us": 9701076,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_syntax.c"
+          },
+          {
+            "unit": 69,
+            "elapsed_us": 32361468,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_source.c"
+          },
+          {
+            "unit": 70,
+            "elapsed_us": 202100306,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_parse.c"
+          },
+          {
+            "unit": 71,
+            "elapsed_us": 14893958,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_ast_types.c"
+          },
+          {
+            "unit": 72,
+            "elapsed_us": 12400202,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_ast.c"
+          },
+          {
+            "unit": 73,
+            "elapsed_us": 176790184,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_gen.c"
+          },
+          {
+            "unit": 74,
+            "elapsed_us": 35548044,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_encoding.c"
+          },
+          {
+            "unit": 75,
+            "elapsed_us": 35946,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_exact_bridge.c"
+          },
+          {
+            "unit": 76,
+            "elapsed_us": 1941177,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_control_semantics.c"
+          },
+          {
+            "unit": 77,
+            "elapsed_us": 3677017,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_system_registers.c"
+          },
+          {
+            "unit": 78,
+            "elapsed_us": 17596707,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_semantics.c"
+          },
+          {
+            "unit": 79,
+            "elapsed_us": 2512689,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_system_semantics.c"
+          },
+          {
+            "unit": 80,
+            "elapsed_us": 2666340,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_semantic_vm.c"
+          },
+          {
+            "unit": 81,
+            "elapsed_us": 2101765,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_simd_semantics.c"
+          },
+          {
+            "unit": 82,
+            "elapsed_us": 3221962,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c"
+          },
+          {
+            "unit": 83,
+            "elapsed_us": 4937344,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c"
+          },
+          {
+            "unit": 84,
+            "elapsed_us": 4184145,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_memory_semantics.c"
+          },
+          {
+            "unit": 85,
+            "elapsed_us": 4304421,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_alias_projection.c"
+          },
+          {
+            "unit": 86,
+            "elapsed_us": 5951231,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_base_assembly.c"
+          },
+          {
+            "unit": 87,
+            "elapsed_us": 27252886,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/assembly.c"
+          },
+          {
+            "unit": 88,
+            "elapsed_us": 17038150,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/assembly_unit.c"
+          },
+          {
+            "unit": 89,
+            "elapsed_us": 60199706,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/x86_64_metadata.c"
+          },
+          {
+            "unit": 90,
+            "elapsed_us": 5536893,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/x86_64_completion_census.c"
+          },
+          {
+            "unit": 91,
+            "elapsed_us": 26717544,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c"
+          },
+          {
+            "unit": 92,
+            "elapsed_us": 194842,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/diagnostic.c"
+          },
+          {
+            "unit": 93,
+            "elapsed_us": 4627891,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/debug/debug.c"
+          },
+          {
+            "unit": 94,
+            "elapsed_us": 27780009,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/machine.c"
+          },
+          {
+            "unit": 95,
+            "elapsed_us": 3316507,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/bootstrap_trace.c"
+          },
+          {
+            "unit": 96,
+            "elapsed_us": 32119219,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/codegen.c"
+          },
+          {
+            "unit": 97,
+            "elapsed_us": 4524932,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/investigation.c"
+          },
+          {
+            "unit": 98,
+            "elapsed_us": 8229141,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/dwarf/dwarf.c"
+          },
+          {
+            "unit": 99,
+            "elapsed_us": 34190,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/byte_writer.c"
+          },
+          {
+            "unit": 100,
+            "elapsed_us": 7357248,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codeview/codeview.c"
+          },
+          {
+            "unit": 101,
+            "elapsed_us": 8359698,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/pdb/pdb.c"
+          },
+          {
+            "unit": 102,
+            "elapsed_us": 41382630,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/object/object.c"
+          },
+          {
+            "unit": 103,
+            "elapsed_us": 5398575,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/jit/jit.c"
+          },
+          {
+            "unit": 104,
+            "elapsed_us": 56326080,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/link/link.c"
+          },
+          {
+            "unit": 105,
+            "elapsed_us": 13293310,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/wasm/wasm.c"
+          },
+          {
+            "unit": 106,
+            "elapsed_us": 12710448,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/gpu/gpu.c"
+          },
+          {
+            "unit": 107,
+            "elapsed_us": 13469183,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/llvm/bitcode.c"
+          },
+          {
+            "unit": 108,
+            "elapsed_us": 19201955,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/ebpf/ebpf.c"
+          },
+          {
+            "unit": 109,
+            "elapsed_us": 1377190,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/spirv/spirv.c"
+          },
+          {
+            "unit": 110,
+            "elapsed_us": 27398360,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/driver/driver.c"
+          },
+          {
+            "unit": 111,
+            "elapsed_us": 2222425,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/embed/embed.c"
+          },
+          {
+            "unit": 112,
+            "elapsed_us": 22072,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/simd.c"
+          },
+          {
+            "unit": 113,
+            "elapsed_us": 1192472,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/file.c"
+          },
+          {
+            "unit": 114,
+            "elapsed_us": 5027403,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/target.c"
+          },
+          {
+            "unit": 115,
+            "elapsed_us": 39279,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/time.c"
+          },
+          {
+            "unit": 116,
+            "elapsed_us": 112999,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/hash.c"
+          },
+          {
+            "unit": 117,
+            "elapsed_us": 1721235,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/x86_64.c"
+          }
+        ],
+        "checker_groups": [
+          "-analyzer-checker=core",
+          "-analyzer-checker=apiModeling",
+          "-analyzer-checker=unix",
+          "-analyzer-checker=deadcode",
+          "-analyzer-checker=security.insecureAPI.UncheckedReturn",
+          "-analyzer-checker=security.insecureAPI.getpw",
+          "-analyzer-checker=security.insecureAPI.gets",
+          "-analyzer-checker=security.insecureAPI.mktemp",
+          "-analyzer-checker=security.insecureAPI.mkstemp",
+          "-analyzer-checker=security.insecureAPI.vfork",
+          "-analyzer-checker=nullability.NullPassedToNonnull",
+          "-analyzer-checker=nullability.NullReturnedFromNonnull"
+        ]
+      }
+    },
+    "analysis_improvement_percent": 11.67424250990986
+  },
+  {
+    "source": "cf42f39d27eba71b8ed81edf0cab12fd4d6565aa",
+    "tree": "a4a5cc5f8e3199fc79821b732b58114607de6a21",
+    "order": [
+      "stable",
+      "image"
+    ],
+    "host_before": {
+      "logical_cpus": 4,
+      "affinity_cpus": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "meminfo": "MemTotal:       16366696 kB\nMemFree:        10901100 kB\nMemAvailable:   14917864 kB\nBuffers:           81132 kB\nCached:          4179612 kB\nSwapCached:            0 kB\nActive:           907248 kB\nInactive:        3681856 kB\nActive(anon):     423520 kB\nInactive(anon):        0 kB\nActive(file):     483728 kB\nInactive(file):  3681856 kB\nUnevictable:       12404 kB\nMlocked:            9332 kB\nSwapTotal:       3145724 kB\nSwapFree:        3145724 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:            751012 kB\nWriteback:             0 kB\nAnonPages:        340840 kB\nMapped:           340028 kB\nShmem:             87988 kB\nKReclaimable:     197312 kB\nSlab:             289100 kB\nSReclaimable:     197312 kB\nSUnreclaim:        91788 kB\nKernelStack:        4464 kB\nPageTables:         6752 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    11329072 kB\nCommitted_AS:    2233972 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       42940 kB\nVmallocChunk:          0 kB\nPercpu:             2320 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:         0 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:         1476608 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      128128 kB\nDirectMap2M:     3012608 kB\nDirectMap1G:    15728640 kB\n",
+      "cgroup": "0::/system.slice/hosted-compute-agent.service\n",
+      "cgroup_limits": {
+        "/sys/fs/cgroup/system.slice/hosted-compute-agent.service": {
+          "cpu.max": "max 100000\n",
+          "cpuset.cpus.effective": "0-3\n",
+          "cpu.stat": "usage_usec 14077673\nuser_usec 10672227\nsystem_usec 3405446\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "memory.max": "max\n",
+          "memory.current": "1339441152\n",
+          "memory.peak": "1566957568\n",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+          "memory.swap.current": "0\n",
+          "memory.swap.max": "max\n"
+        },
+        "/sys/fs/cgroup/system.slice": {
+          "cpu.max": "max 100000\n",
+          "cpuset.cpus.effective": "0-3\n",
+          "cpu.stat": "usage_usec 34788006\nuser_usec 21709939\nsystem_usec 13078067\nnice_usec 46000\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "memory.max": "max\n",
+          "memory.current": "4835106816\n",
+          "memory.peak": "5062623232\n",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+          "memory.swap.current": "0\n",
+          "memory.swap.max": "max\n"
+        },
+        "/sys/fs/cgroup": {
+          "cpu.max": null,
+          "cpuset.cpus.effective": "0-3\n",
+          "cpu.stat": "usage_usec 41813000\nuser_usec 23406000\nsystem_usec 18407000\nnice_usec 46000\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "memory.max": null,
+          "memory.current": null,
+          "memory.peak": null,
+          "memory.events": null,
+          "memory.swap.current": null,
+          "memory.swap.max": null
+        }
+      },
+      "cpu_pressure": "some avg10=0.15 avg60=1.16 avg300=0.44 total=1745609\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "memory_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "lscpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           48 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  4\nOn-line CPU(s) list:                     0-3\nVendor ID:                               AuthenticAMD\nModel name:                              AMD EPYC 9V74 80-Core Processor\nCPU family:                              25\nModel:                                   17\nThread(s) per core:                      2\nCore(s) per socket:                      2\nSocket(s):                               1\nStepping:                                1\nBogoMIPS:                                5192.28\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves user_shstk avx512_bf16 clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload avx512vbmi umip avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm\nVirtualization:                          AMD-V\nHypervisor vendor:                       Microsoft\nVirtualization type:                     full\nL1d cache:                               64 KiB (2 instances)\nL1i cache:                               64 KiB (2 instances)\nL2 cache:                                2 MiB (2 instances)\nL3 cache:                                32 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-3\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Vulnerable: Safe RET, no microcode\nVulnerability Spec store bypass:         Vulnerable\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Vulnerable: No microcode\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n",
+      "uname": [
+        "Linux",
+        "runnervmb40mh",
+        "7.0.0-1012-azure",
+        "#12-Ubuntu SMP PREEMPT Thu Aug  6 19:23:26 UTC 2026",
+        "x86_64"
+      ]
+    },
+    "host_after": {
+      "logical_cpus": 4,
+      "affinity_cpus": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "meminfo": "MemTotal:       16366696 kB\nMemFree:        10287220 kB\nMemAvailable:   15259652 kB\nBuffers:           86896 kB\nCached:          5103324 kB\nSwapCached:            0 kB\nActive:           932628 kB\nInactive:        4587456 kB\nActive(anon):     429860 kB\nInactive(anon):        0 kB\nActive(file):     502768 kB\nInactive(file):  4587456 kB\nUnevictable:       12404 kB\nMlocked:            9332 kB\nSwapTotal:       3145724 kB\nSwapFree:        3145724 kB\nZswap:                 0 kB\nZswapped:              0 kB\nDirty:               116 kB\nWriteback:             0 kB\nAnonPages:        342356 kB\nMapped:           351416 kB\nShmem:             92820 kB\nKReclaimable:     228340 kB\nSlab:             324660 kB\nSReclaimable:     228340 kB\nSUnreclaim:        96320 kB\nKernelStack:        4192 kB\nPageTables:         6576 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    11329072 kB\nCommitted_AS:    2218800 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:       42700 kB\nVmallocChunk:          0 kB\nPercpu:             2320 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:         0 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:         0 kB\nFilePmdMapped:         0 kB\nCmaTotal:              0 kB\nCmaFree:         1476608 kB\nUnaccepted:            0 kB\nBalloon:               0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:      128128 kB\nDirectMap2M:     3012608 kB\nDirectMap1G:    15728640 kB\n",
+      "cgroup": "0::/system.slice/hosted-compute-agent.service\n",
+      "cgroup_limits": {
+        "/sys/fs/cgroup/system.slice/hosted-compute-agent.service": {
+          "cpu.max": "max 100000\n",
+          "cpuset.cpus.effective": "0-3\n",
+          "cpu.stat": "usage_usec 3204279937\nuser_usec 3132227983\nsystem_usec 72051954\nnice_usec 0\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "memory.max": "max\n",
+          "memory.current": "2325311488\n",
+          "memory.peak": "4580790272\n",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+          "memory.swap.current": "0\n",
+          "memory.swap.max": "max\n"
+        },
+        "/sys/fs/cgroup/system.slice": {
+          "cpu.max": "max 100000\n",
+          "cpuset.cpus.effective": "0-3\n",
+          "cpu.stat": "usage_usec 3231605022\nuser_usec 3145470553\nsystem_usec 86134468\nnice_usec 46000\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "memory.max": "max\n",
+          "memory.current": "5819719680\n",
+          "memory.peak": "8078774272\n",
+          "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\nsock_throttled 0\n",
+          "memory.swap.current": "0\n",
+          "memory.swap.max": "max\n"
+        },
+        "/sys/fs/cgroup": {
+          "cpu.max": null,
+          "cpuset.cpus.effective": "0-3\n",
+          "cpu.stat": "usage_usec 3239606000\nuser_usec 3145234000\nsystem_usec 94372000\nnice_usec 46000\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+          "memory.max": null,
+          "memory.current": null,
+          "memory.peak": null,
+          "memory.events": null,
+          "memory.swap.current": null,
+          "memory.swap.max": null
+        }
+      },
+      "cpu_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=5951894\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "memory_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+      "lscpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           48 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  4\nOn-line CPU(s) list:                     0-3\nVendor ID:                               AuthenticAMD\nModel name:                              AMD EPYC 9V74 80-Core Processor\nCPU family:                              25\nModel:                                   17\nThread(s) per core:                      2\nCore(s) per socket:                      2\nSocket(s):                               1\nStepping:                                1\nBogoMIPS:                                5192.28\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves user_shstk avx512_bf16 clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload avx512vbmi umip avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm\nVirtualization:                          AMD-V\nHypervisor vendor:                       Microsoft\nVirtualization type:                     full\nL1d cache:                               64 KiB (2 instances)\nL1i cache:                               64 KiB (2 instances)\nL2 cache:                                2 MiB (2 instances)\nL3 cache:                                32 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-3\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Vulnerable: Safe RET, no microcode\nVulnerability Spec store bypass:         Vulnerable\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Vulnerable: No microcode\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n",
+      "uname": [
+        "Linux",
+        "runnervmb40mh",
+        "7.0.0-1012-azure",
+        "#12-Ubuntu SMP PREEMPT Thu Aug  6 19:23:26 UTC 2026",
+        "x86_64"
+      ]
+    },
+    "roles": {
+      "image": {
+        "elapsed_seconds": 839.728066,
+        "cpu_seconds": 1676.9,
+        "max_rss_kib": 580084,
+        "sampled_tree_rss_bytes": 883621888,
+        "version": "Ubuntu clang version 21.1.8 (6ubuntu1)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-21/bin",
+        "compiler_hash": "78e9dd2ccc9e88859b3a29109a44bfab00e3d6cb70f00f3daae063eed3d05251",
+        "default_checkers": "Ubuntu clang version 21.1.8 (6ubuntu1)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-21/bin\n (in-process)\n \"/usr/lib/llvm-21/bin/clang\" \"-cc1\" \"-triple\" \"x86_64-pc-linux-gnu\" \"-analyze\" \"-disable-free\" \"-clear-ast-before-backend\" \"-disable-llvm-verifier\" \"-discard-value-names\" \"-main-file-name\" \"null\" \"-analyzer-checker=core\" \"-analyzer-checker=apiModeling\" \"-analyzer-checker=unix\" \"-analyzer-checker=deadcode\" \"-analyzer-checker=security.insecureAPI.UncheckedReturn\" \"-analyzer-checker=security.insecureAPI.getpw\" \"-analyzer-checker=security.insecureAPI.gets\" \"-analyzer-checker=security.insecureAPI.mktemp\" \"-analyzer-checker=security.insecureAPI.mkstemp\" \"-analyzer-checker=security.insecureAPI.vfork\" \"-analyzer-checker=nullability.NullPassedToNonnull\" \"-analyzer-checker=nullability.NullReturnedFromNonnull\" \"-analyzer-output\" \"plist\" \"-w\" \"-setup-static-analyzer\" \"-mrelocation-model\" \"pic\" \"-pic-level\" \"2\" \"-pic-is-pie\" \"-mframe-pointer=all\" \"-fmath-errno\" \"-ffp-contract=on\" \"-fno-rounding-math\" \"-mconstructor-aliases\" \"-funwind-tables=2\" \"-target-cpu\" \"x86-64\" \"-tune-cpu\" \"generic\" \"-debugger-tuning=gdb\" \"-fdebug-compilation-dir=/home/runner/work/buster/buster\" \"-fcoverage-compilation-dir=/home/runner/work/buster/buster\" \"-resource-dir\" \"/usr/lib/llvm-21/lib/clang/21\" \"-internal-isystem\" \"/usr/lib/llvm-21/lib/clang/21/include\" \"-internal-isystem\" \"/usr/local/include\" \"-internal-isystem\" \"/usr/lib/gcc/x86_64-linux-gnu/15/../../../../x86_64-linux-gnu/include\" \"-internal-externc-isystem\" \"/usr/include/x86_64-linux-gnu\" \"-internal-externc-isystem\" \"/include\" \"-internal-externc-isystem\" \"/usr/include\" \"-ferror-limit\" \"19\" \"-fgnuc-version=4.2.1\" \"-fskip-odr-check-in-gmf\" \"-faddrsig\" \"-D__GCC_HAVE_DWARF2_CFI_ASM=1\" \"-o\" \"null.plist\" \"-x\" \"c\" \"/dev/null\"\n",
+        "optional_warnings": [
+          "-Wexperimental-lifetime-safety",
+          "-Whigher-precision-for-complex-division",
+          "-Wimplicit-void-ptr-cast",
+          "-Wshift-bool",
+          "-Wthread-safety",
+          "-Wunique-object-duplication"
+        ],
+        "control_checks": 93,
+        "units": [
+          {
+            "unit": 0,
+            "elapsed_us": 7256955,
+            "source": "/home/runner/work/buster/buster/src/buster/apps/ide/ide.c"
+          },
+          {
+            "unit": 1,
+            "elapsed_us": 549798,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/byte_writer_test.c"
+          },
+          {
+            "unit": 2,
+            "elapsed_us": 2536014,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/arena_test.c"
+          },
+          {
+            "unit": 3,
+            "elapsed_us": 1597442,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/integer_test.c"
+          },
+          {
+            "unit": 4,
+            "elapsed_us": 56530,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/sanitizer_test.c"
+          },
+          {
+            "unit": 5,
+            "elapsed_us": 60160,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/hash_test.c"
+          },
+          {
+            "unit": 6,
+            "elapsed_us": 295469,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/simd_test.c"
+          },
+          {
+            "unit": 7,
+            "elapsed_us": 908539,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/string_test.c"
+          },
+          {
+            "unit": 8,
+            "elapsed_us": 10039966,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/os_test.c"
+          },
+          {
+            "unit": 9,
+            "elapsed_us": 5495046,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/file_test.c"
+          },
+          {
+            "unit": 10,
+            "elapsed_us": 1895994,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/target_test.c"
+          },
+          {
+            "unit": 11,
+            "elapsed_us": 4643266,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/metamorphic/metamorphic_test.c"
+          },
+          {
+            "unit": 12,
+            "elapsed_us": 305576070,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/c_test.c"
+          },
+          {
+            "unit": 13,
+            "elapsed_us": 37628495,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/c_ast_test.c"
+          },
+          {
+            "unit": 14,
+            "elapsed_us": 4024786,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/once_test.c"
+          },
+          {
+            "unit": 15,
+            "elapsed_us": 11466587,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/type_layout_test.c"
+          },
+          {
+            "unit": 16,
+            "elapsed_us": 9063112,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/macro_conditional_test.c"
+          },
+          {
+            "unit": 17,
+            "elapsed_us": 1519744,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/record_layout_test.c"
+          },
+          {
+            "unit": 18,
+            "elapsed_us": 1951992,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_encoding_test.c"
+          },
+          {
+            "unit": 19,
+            "elapsed_us": 918376,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c"
+          },
+          {
+            "unit": 20,
+            "elapsed_us": 1101239,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_base_assembly_test.c"
+          },
+          {
+            "unit": 21,
+            "elapsed_us": 1041951,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c"
+          },
+          {
+            "unit": 22,
+            "elapsed_us": 951490,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_system_registers_test.c"
+          },
+          {
+            "unit": 23,
+            "elapsed_us": 1190333,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_semantics_test.c"
+          },
+          {
+            "unit": 24,
+            "elapsed_us": 1200919,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_system_semantics_test.c"
+          },
+          {
+            "unit": 25,
+            "elapsed_us": 1188588,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_syntax_test.c"
+          },
+          {
+            "unit": 26,
+            "elapsed_us": 1562999,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.c"
+          },
+          {
+            "unit": 27,
+            "elapsed_us": 1086986,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c"
+          },
+          {
+            "unit": 28,
+            "elapsed_us": 1036364,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_complex_simd_test.c"
+          },
+          {
+            "unit": 29,
+            "elapsed_us": 1348910,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_memory_semantics_test.c"
+          },
+          {
+            "unit": 30,
+            "elapsed_us": 1028198,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_alias_projection_test.c"
+          },
+          {
+            "unit": 31,
+            "elapsed_us": 16631876,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/assembly_test.c"
+          },
+          {
+            "unit": 32,
+            "elapsed_us": 272486,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_forwarding_test.c"
+          },
+          {
+            "unit": 33,
+            "elapsed_us": 29925916,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_metadata_test.c"
+          },
+          {
+            "unit": 34,
+            "elapsed_us": 267836,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_tls_test.c"
+          },
+          {
+            "unit": 35,
+            "elapsed_us": 1175542,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/padding_test.c"
+          },
+          {
+            "unit": 36,
+            "elapsed_us": 136440,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_got_test.c"
+          },
+          {
+            "unit": 37,
+            "elapsed_us": 3285378,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c"
+          },
+          {
+            "unit": 38,
+            "elapsed_us": 3268448,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/diagnostic_test.c"
+          },
+          {
+            "unit": 39,
+            "elapsed_us": 12578462,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/ir/ir_test.c"
+          },
+          {
+            "unit": 40,
+            "elapsed_us": 2001255,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/ir/ir_oracle_test.c"
+          },
+          {
+            "unit": 41,
+            "elapsed_us": 1884512,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/ir/vector_contract_test.c"
+          },
+          {
+            "unit": 42,
+            "elapsed_us": 18449156,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/llvm/bitcode_test.c"
+          },
+          {
+            "unit": 43,
+            "elapsed_us": 11618512,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/machine_select_test.c"
+          },
+          {
+            "unit": 44,
+            "elapsed_us": 56461923,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/machine_test.c"
+          },
+          {
+            "unit": 45,
+            "elapsed_us": 20108813,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/codegen_test.c"
+          },
+          {
+            "unit": 46,
+            "elapsed_us": 3533054,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/investigation_test.c"
+          },
+          {
+            "unit": 47,
+            "elapsed_us": 1066953,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/aarch64_stride_test.c"
+          },
+          {
+            "unit": 48,
+            "elapsed_us": 2212104,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/debug/debug_test.c"
+          },
+          {
+            "unit": 49,
+            "elapsed_us": 1573074,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/dwarf/dwarf_test.c"
+          },
+          {
+            "unit": 50,
+            "elapsed_us": 3967208,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codeview/codeview_test.c"
+          },
+          {
+            "unit": 51,
+            "elapsed_us": 6699328,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/pdb/pdb_test.c"
+          },
+          {
+            "unit": 52,
+            "elapsed_us": 23508442,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/object/object_test.c"
+          },
+          {
+            "unit": 53,
+            "elapsed_us": 2204606,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/jit/jit_test.c"
+          },
+          {
+            "unit": 54,
+            "elapsed_us": 2862203,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/embed/embed_test.c"
+          },
+          {
+            "unit": 55,
+            "elapsed_us": 30324885,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/link/link_test.c"
+          },
+          {
+            "unit": 56,
+            "elapsed_us": 3734219,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/gpu/gpu_test.c"
+          },
+          {
+            "unit": 57,
+            "elapsed_us": 7247761,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/spirv/spirv_test.c"
+          },
+          {
+            "unit": 58,
+            "elapsed_us": 139646384,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c"
+          },
+          {
+            "unit": 59,
+            "elapsed_us": 17750988,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/driver/object_path_test.c"
+          },
+          {
+            "unit": 60,
+            "elapsed_us": 95699,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/x86_64_test.c"
+          },
+          {
+            "unit": 61,
+            "elapsed_us": 10706805,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/test.c"
+          },
+          {
+            "unit": 62,
+            "elapsed_us": 18904344,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/os.c"
+          },
+          {
+            "unit": 63,
+            "elapsed_us": 98081,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/entry_point.c"
+          },
+          {
+            "unit": 64,
+            "elapsed_us": 2860392,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/arena.c"
+          },
+          {
+            "unit": 65,
+            "elapsed_us": 38351,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/integer.c"
+          },
+          {
+            "unit": 66,
+            "elapsed_us": 3016577,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/string.c"
+          },
+          {
+            "unit": 67,
+            "elapsed_us": 30816,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/float.c"
+          },
+          {
+            "unit": 68,
+            "elapsed_us": 7909932,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_syntax.c"
+          },
+          {
+            "unit": 69,
+            "elapsed_us": 27225425,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_source.c"
+          },
+          {
+            "unit": 70,
+            "elapsed_us": 157595863,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_parse.c"
+          },
+          {
+            "unit": 71,
+            "elapsed_us": 12439013,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_ast_types.c"
+          },
+          {
+            "unit": 72,
+            "elapsed_us": 11783431,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_ast.c"
+          },
+          {
+            "unit": 73,
+            "elapsed_us": 144505124,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_gen.c"
+          },
+          {
+            "unit": 74,
+            "elapsed_us": 27068831,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_encoding.c"
+          },
+          {
+            "unit": 75,
+            "elapsed_us": 49216,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_exact_bridge.c"
+          },
+          {
+            "unit": 76,
+            "elapsed_us": 1600270,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_control_semantics.c"
+          },
+          {
+            "unit": 77,
+            "elapsed_us": 6389093,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_system_registers.c"
+          },
+          {
+            "unit": 78,
+            "elapsed_us": 14173387,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_semantics.c"
+          },
+          {
+            "unit": 79,
+            "elapsed_us": 3835476,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_system_semantics.c"
+          },
+          {
+            "unit": 80,
+            "elapsed_us": 2410054,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_semantic_vm.c"
+          },
+          {
+            "unit": 81,
+            "elapsed_us": 1768866,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_simd_semantics.c"
+          },
+          {
+            "unit": 82,
+            "elapsed_us": 2799966,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c"
+          },
+          {
+            "unit": 83,
+            "elapsed_us": 3986102,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c"
+          },
+          {
+            "unit": 84,
+            "elapsed_us": 3455291,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_memory_semantics.c"
+          },
+          {
+            "unit": 85,
+            "elapsed_us": 4036408,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_alias_projection.c"
+          },
+          {
+            "unit": 86,
+            "elapsed_us": 4696856,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_base_assembly.c"
+          },
+          {
+            "unit": 87,
+            "elapsed_us": 24049556,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/assembly.c"
+          },
+          {
+            "unit": 88,
+            "elapsed_us": 11929861,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/assembly_unit.c"
+          },
+          {
+            "unit": 89,
+            "elapsed_us": 50505940,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/x86_64_metadata.c"
+          },
+          {
+            "unit": 90,
+            "elapsed_us": 4586669,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/x86_64_completion_census.c"
+          },
+          {
+            "unit": 91,
+            "elapsed_us": 21332090,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c"
+          },
+          {
+            "unit": 92,
+            "elapsed_us": 166352,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/diagnostic.c"
+          },
+          {
+            "unit": 93,
+            "elapsed_us": 3368099,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/debug/debug.c"
+          },
+          {
+            "unit": 94,
+            "elapsed_us": 24020047,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/machine.c"
+          },
+          {
+            "unit": 95,
+            "elapsed_us": 2713982,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/bootstrap_trace.c"
+          },
+          {
+            "unit": 96,
+            "elapsed_us": 26455188,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/codegen.c"
+          },
+          {
+            "unit": 97,
+            "elapsed_us": 3621081,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/investigation.c"
+          },
+          {
+            "unit": 98,
+            "elapsed_us": 6339783,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/dwarf/dwarf.c"
+          },
+          {
+            "unit": 99,
+            "elapsed_us": 41739,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/byte_writer.c"
+          },
+          {
+            "unit": 100,
+            "elapsed_us": 5672788,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codeview/codeview.c"
+          },
+          {
+            "unit": 101,
+            "elapsed_us": 5986338,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/pdb/pdb.c"
+          },
+          {
+            "unit": 102,
+            "elapsed_us": 32806703,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/object/object.c"
+          },
+          {
+            "unit": 103,
+            "elapsed_us": 4287345,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/jit/jit.c"
+          },
+          {
+            "unit": 104,
+            "elapsed_us": 42387030,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/link/link.c"
+          },
+          {
+            "unit": 105,
+            "elapsed_us": 9663652,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/wasm/wasm.c"
+          },
+          {
+            "unit": 106,
+            "elapsed_us": 9475310,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/gpu/gpu.c"
+          },
+          {
+            "unit": 107,
+            "elapsed_us": 10757521,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/llvm/bitcode.c"
+          },
+          {
+            "unit": 108,
+            "elapsed_us": 15200953,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/ebpf/ebpf.c"
+          },
+          {
+            "unit": 109,
+            "elapsed_us": 1130508,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/spirv/spirv.c"
+          },
+          {
+            "unit": 110,
+            "elapsed_us": 22131190,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/driver/driver.c"
+          },
+          {
+            "unit": 111,
+            "elapsed_us": 1924225,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/embed/embed.c"
+          },
+          {
+            "unit": 112,
+            "elapsed_us": 221659,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/simd.c"
+          },
+          {
+            "unit": 113,
+            "elapsed_us": 1007735,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/file.c"
+          },
+          {
+            "unit": 114,
+            "elapsed_us": 5273840,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/target.c"
+          },
+          {
+            "unit": 115,
+            "elapsed_us": 45521,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/time.c"
+          },
+          {
+            "unit": 116,
+            "elapsed_us": 103726,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/hash.c"
+          },
+          {
+            "unit": 117,
+            "elapsed_us": 1363221,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/x86_64.c"
+          }
+        ],
+        "checker_groups": [
+          "-analyzer-checker=core",
+          "-analyzer-checker=apiModeling",
+          "-analyzer-checker=unix",
+          "-analyzer-checker=deadcode",
+          "-analyzer-checker=security.insecureAPI.UncheckedReturn",
+          "-analyzer-checker=security.insecureAPI.getpw",
+          "-analyzer-checker=security.insecureAPI.gets",
+          "-analyzer-checker=security.insecureAPI.mktemp",
+          "-analyzer-checker=security.insecureAPI.mkstemp",
+          "-analyzer-checker=security.insecureAPI.vfork",
+          "-analyzer-checker=nullability.NullPassedToNonnull",
+          "-analyzer-checker=nullability.NullReturnedFromNonnull"
+        ]
+      },
+      "stable": {
+        "elapsed_seconds": 734.323893,
+        "cpu_seconds": 1469.4299999999998,
+        "max_rss_kib": 528120,
+        "sampled_tree_rss_bytes": 955863040,
+        "version": "clang version 23.1.3 (https://github.com/llvm/llvm-project 0d261d1ca552c95a8f007e061c787ac7132fbcbc)\nTarget: x86_64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /home/runner/work/_temp/llvm/llvm-23.1.3/bin",
+        "compiler_hash": "913453afb492abab17025139852413ba7fd7a52b4fb75fcce58ff3fe399d0a9e",
+        "default_checkers": "clang version 23.1.3 (https://github.com/llvm/llvm-project 0d261d1ca552c95a8f007e061c787ac7132fbcbc)\nTarget: x86_64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /home/runner/work/_temp/llvm/llvm-23.1.3/bin\n (in-process)\n \"/home/runner/work/_temp/llvm/llvm-23.1.3/bin/clang-23\" \"-cc1\" \"-triple\" \"x86_64-unknown-linux-gnu\" \"-analyze\" \"-disable-free\" \"-clear-ast-before-backend\" \"-disable-llvm-verifier\" \"-discard-value-names\" \"-main-file-name\" \"null\" \"-analyzer-checker=core\" \"-analyzer-checker=apiModeling\" \"-analyzer-checker=unix\" \"-analyzer-checker=deadcode\" \"-analyzer-checker=security.insecureAPI.UncheckedReturn\" \"-analyzer-checker=security.insecureAPI.getpw\" \"-analyzer-checker=security.insecureAPI.gets\" \"-analyzer-checker=security.insecureAPI.mktemp\" \"-analyzer-checker=security.insecureAPI.mkstemp\" \"-analyzer-checker=security.insecureAPI.vfork\" \"-analyzer-checker=nullability.NullPassedToNonnull\" \"-analyzer-checker=nullability.NullReturnedFromNonnull\" \"-analyzer-output\" \"plist\" \"-w\" \"-setup-static-analyzer\" \"-mrelocation-model\" \"pic\" \"-pic-level\" \"2\" \"-pic-is-pie\" \"-mframe-pointer=all\" \"-fmath-errno\" \"-ffp-contract=on\" \"-fno-rounding-math\" \"-mconstructor-aliases\" \"-funwind-tables=2\" \"-target-cpu\" \"x86-64\" \"-tune-cpu\" \"generic\" \"-debugger-tuning=gdb\" \"-fdebug-compilation-dir=/home/runner/work/buster/buster\" \"-fcoverage-compilation-dir=/home/runner/work/buster/buster\" \"-resource-dir\" \"/home/runner/work/_temp/llvm/llvm-23.1.3/lib/clang/23\" \"-internal-isystem\" \"/home/runner/work/_temp/llvm/llvm-23.1.3/lib/clang/23/include\" \"-internal-isystem\" \"/usr/local/include\" \"-internal-isystem\" \"/usr/lib/gcc/x86_64-linux-gnu/15/../../../../x86_64-linux-gnu/include\" \"-internal-externc-isystem\" \"/usr/include/x86_64-linux-gnu\" \"-internal-externc-isystem\" \"/include\" \"-internal-externc-isystem\" \"/usr/include\" \"-ferror-limit\" \"19\" \"-fgnuc-version=4.2.1\" \"-fskip-odr-check-in-gmf\" \"-faddrsig\" \"-fdwarf2-cfi-asm\" \"-o\" \"null.plist\" \"-x\" \"c\" \"/dev/null\"\n",
+        "optional_warnings": [
+          "-Whigher-precision-for-complex-division",
+          "-Wimplicit-void-ptr-cast",
+          "-Wshift-bool",
+          "-Wthread-safety",
+          "-Wunique-object-duplication"
+        ],
+        "control_checks": 93,
+        "units": [
+          {
+            "unit": 0,
+            "elapsed_us": 6471764,
+            "source": "/home/runner/work/buster/buster/src/buster/apps/ide/ide.c"
+          },
+          {
+            "unit": 1,
+            "elapsed_us": 858833,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/byte_writer_test.c"
+          },
+          {
+            "unit": 2,
+            "elapsed_us": 2159340,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/arena_test.c"
+          },
+          {
+            "unit": 3,
+            "elapsed_us": 1572372,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/integer_test.c"
+          },
+          {
+            "unit": 4,
+            "elapsed_us": 35408,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/sanitizer_test.c"
+          },
+          {
+            "unit": 5,
+            "elapsed_us": 39184,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/hash_test.c"
+          },
+          {
+            "unit": 6,
+            "elapsed_us": 161945,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/simd_test.c"
+          },
+          {
+            "unit": 7,
+            "elapsed_us": 1032570,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/string_test.c"
+          },
+          {
+            "unit": 8,
+            "elapsed_us": 8690345,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/os_test.c"
+          },
+          {
+            "unit": 9,
+            "elapsed_us": 5519815,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/file_test.c"
+          },
+          {
+            "unit": 10,
+            "elapsed_us": 1201927,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/target_test.c"
+          },
+          {
+            "unit": 11,
+            "elapsed_us": 3936803,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/metamorphic/metamorphic_test.c"
+          },
+          {
+            "unit": 12,
+            "elapsed_us": 285785338,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/c_test.c"
+          },
+          {
+            "unit": 13,
+            "elapsed_us": 37104612,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/c_ast_test.c"
+          },
+          {
+            "unit": 14,
+            "elapsed_us": 3397949,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/once_test.c"
+          },
+          {
+            "unit": 15,
+            "elapsed_us": 10698473,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/type_layout_test.c"
+          },
+          {
+            "unit": 16,
+            "elapsed_us": 7407444,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/macro_conditional_test.c"
+          },
+          {
+            "unit": 17,
+            "elapsed_us": 1610785,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/frontend/c/record_layout_test.c"
+          },
+          {
+            "unit": 18,
+            "elapsed_us": 1377256,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_encoding_test.c"
+          },
+          {
+            "unit": 19,
+            "elapsed_us": 755402,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c"
+          },
+          {
+            "unit": 20,
+            "elapsed_us": 870110,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_base_assembly_test.c"
+          },
+          {
+            "unit": 21,
+            "elapsed_us": 1083825,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c"
+          },
+          {
+            "unit": 22,
+            "elapsed_us": 929806,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_system_registers_test.c"
+          },
+          {
+            "unit": 23,
+            "elapsed_us": 849732,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_semantics_test.c"
+          },
+          {
+            "unit": 24,
+            "elapsed_us": 841849,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_system_semantics_test.c"
+          },
+          {
+            "unit": 25,
+            "elapsed_us": 884669,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_syntax_test.c"
+          },
+          {
+            "unit": 26,
+            "elapsed_us": 1248557,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.c"
+          },
+          {
+            "unit": 27,
+            "elapsed_us": 897072,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c"
+          },
+          {
+            "unit": 28,
+            "elapsed_us": 845294,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_complex_simd_test.c"
+          },
+          {
+            "unit": 29,
+            "elapsed_us": 1365881,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_memory_semantics_test.c"
+          },
+          {
+            "unit": 30,
+            "elapsed_us": 971698,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/aarch64_alias_projection_test.c"
+          },
+          {
+            "unit": 31,
+            "elapsed_us": 8993390,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/assembly_test.c"
+          },
+          {
+            "unit": 32,
+            "elapsed_us": 216849,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_forwarding_test.c"
+          },
+          {
+            "unit": 33,
+            "elapsed_us": 13846357,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_metadata_test.c"
+          },
+          {
+            "unit": 34,
+            "elapsed_us": 237887,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_tls_test.c"
+          },
+          {
+            "unit": 35,
+            "elapsed_us": 942606,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/padding_test.c"
+          },
+          {
+            "unit": 36,
+            "elapsed_us": 103402,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_got_test.c"
+          },
+          {
+            "unit": 37,
+            "elapsed_us": 1778276,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c"
+          },
+          {
+            "unit": 38,
+            "elapsed_us": 2902719,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/diagnostic_test.c"
+          },
+          {
+            "unit": 39,
+            "elapsed_us": 12088322,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/ir/ir_test.c"
+          },
+          {
+            "unit": 40,
+            "elapsed_us": 1828537,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/ir/ir_oracle_test.c"
+          },
+          {
+            "unit": 41,
+            "elapsed_us": 1650205,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/ir/vector_contract_test.c"
+          },
+          {
+            "unit": 42,
+            "elapsed_us": 17090425,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/llvm/bitcode_test.c"
+          },
+          {
+            "unit": 43,
+            "elapsed_us": 11683998,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/machine_select_test.c"
+          },
+          {
+            "unit": 44,
+            "elapsed_us": 48426747,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/machine_test.c"
+          },
+          {
+            "unit": 45,
+            "elapsed_us": 17857896,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/codegen_test.c"
+          },
+          {
+            "unit": 46,
+            "elapsed_us": 3056079,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/investigation_test.c"
+          },
+          {
+            "unit": 47,
+            "elapsed_us": 1145974,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codegen/aarch64_stride_test.c"
+          },
+          {
+            "unit": 48,
+            "elapsed_us": 2039651,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/debug/debug_test.c"
+          },
+          {
+            "unit": 49,
+            "elapsed_us": 1578637,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/dwarf/dwarf_test.c"
+          },
+          {
+            "unit": 50,
+            "elapsed_us": 4050871,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/codeview/codeview_test.c"
+          },
+          {
+            "unit": 51,
+            "elapsed_us": 4616158,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/pdb/pdb_test.c"
+          },
+          {
+            "unit": 52,
+            "elapsed_us": 20039603,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/object/object_test.c"
+          },
+          {
+            "unit": 53,
+            "elapsed_us": 2062147,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/jit/jit_test.c"
+          },
+          {
+            "unit": 54,
+            "elapsed_us": 2661164,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/embed/embed_test.c"
+          },
+          {
+            "unit": 55,
+            "elapsed_us": 24352644,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/link/link_test.c"
+          },
+          {
+            "unit": 56,
+            "elapsed_us": 3789759,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/gpu/gpu_test.c"
+          },
+          {
+            "unit": 57,
+            "elapsed_us": 6605003,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/spirv/spirv_test.c"
+          },
+          {
+            "unit": 58,
+            "elapsed_us": 124503708,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/driver/driver_test.c"
+          },
+          {
+            "unit": 59,
+            "elapsed_us": 15345744,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/compiler/driver/object_path_test.c"
+          },
+          {
+            "unit": 60,
+            "elapsed_us": 65902,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/x86_64_test.c"
+          },
+          {
+            "unit": 61,
+            "elapsed_us": 9556677,
+            "source": "/home/runner/work/buster/buster/src/buster/tests/test.c"
+          },
+          {
+            "unit": 62,
+            "elapsed_us": 17820825,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/os.c"
+          },
+          {
+            "unit": 63,
+            "elapsed_us": 69412,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/entry_point.c"
+          },
+          {
+            "unit": 64,
+            "elapsed_us": 2391667,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/arena.c"
+          },
+          {
+            "unit": 65,
+            "elapsed_us": 22085,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/integer.c"
+          },
+          {
+            "unit": 66,
+            "elapsed_us": 2438717,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/string.c"
+          },
+          {
+            "unit": 67,
+            "elapsed_us": 15956,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/float.c"
+          },
+          {
+            "unit": 68,
+            "elapsed_us": 6575537,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_syntax.c"
+          },
+          {
+            "unit": 69,
+            "elapsed_us": 23561919,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_source.c"
+          },
+          {
+            "unit": 70,
+            "elapsed_us": 136738243,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_parse.c"
+          },
+          {
+            "unit": 71,
+            "elapsed_us": 12250591,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_ast_types.c"
+          },
+          {
+            "unit": 72,
+            "elapsed_us": 8378912,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_ast.c"
+          },
+          {
+            "unit": 73,
+            "elapsed_us": 132130157,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/frontend/c/c_gen.c"
+          },
+          {
+            "unit": 74,
+            "elapsed_us": 23365977,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_encoding.c"
+          },
+          {
+            "unit": 75,
+            "elapsed_us": 28115,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_exact_bridge.c"
+          },
+          {
+            "unit": 76,
+            "elapsed_us": 1294367,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_control_semantics.c"
+          },
+          {
+            "unit": 77,
+            "elapsed_us": 2668352,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_system_registers.c"
+          },
+          {
+            "unit": 78,
+            "elapsed_us": 11987535,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_semantics.c"
+          },
+          {
+            "unit": 79,
+            "elapsed_us": 1638681,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_system_semantics.c"
+          },
+          {
+            "unit": 80,
+            "elapsed_us": 1988950,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_semantic_vm.c"
+          },
+          {
+            "unit": 81,
+            "elapsed_us": 1440825,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_simd_semantics.c"
+          },
+          {
+            "unit": 82,
+            "elapsed_us": 2129818,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c"
+          },
+          {
+            "unit": 83,
+            "elapsed_us": 3323382,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c"
+          },
+          {
+            "unit": 84,
+            "elapsed_us": 2900634,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_memory_semantics.c"
+          },
+          {
+            "unit": 85,
+            "elapsed_us": 3104698,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_alias_projection.c"
+          },
+          {
+            "unit": 86,
+            "elapsed_us": 4796916,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/aarch64_base_assembly.c"
+          },
+          {
+            "unit": 87,
+            "elapsed_us": 17775899,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/assembly.c"
+          },
+          {
+            "unit": 88,
+            "elapsed_us": 11419521,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/assembly_unit.c"
+          },
+          {
+            "unit": 89,
+            "elapsed_us": 39741902,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/x86_64_metadata.c"
+          },
+          {
+            "unit": 90,
+            "elapsed_us": 4341183,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/assembly/x86_64_completion_census.c"
+          },
+          {
+            "unit": 91,
+            "elapsed_us": 19041900,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/ir/ir.c"
+          },
+          {
+            "unit": 92,
+            "elapsed_us": 133918,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/diagnostic.c"
+          },
+          {
+            "unit": 93,
+            "elapsed_us": 3142533,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/debug/debug.c"
+          },
+          {
+            "unit": 94,
+            "elapsed_us": 21031388,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/machine.c"
+          },
+          {
+            "unit": 95,
+            "elapsed_us": 2551208,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/bootstrap_trace.c"
+          },
+          {
+            "unit": 96,
+            "elapsed_us": 23282372,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/codegen.c"
+          },
+          {
+            "unit": 97,
+            "elapsed_us": 3011196,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codegen/investigation.c"
+          },
+          {
+            "unit": 98,
+            "elapsed_us": 5860604,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/dwarf/dwarf.c"
+          },
+          {
+            "unit": 99,
+            "elapsed_us": 27392,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/byte_writer.c"
+          },
+          {
+            "unit": 100,
+            "elapsed_us": 5019380,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/codeview/codeview.c"
+          },
+          {
+            "unit": 101,
+            "elapsed_us": 5823460,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/pdb/pdb.c"
+          },
+          {
+            "unit": 102,
+            "elapsed_us": 28889916,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/object/object.c"
+          },
+          {
+            "unit": 103,
+            "elapsed_us": 3660979,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/jit/jit.c"
+          },
+          {
+            "unit": 104,
+            "elapsed_us": 37917398,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/link/link.c"
+          },
+          {
+            "unit": 105,
+            "elapsed_us": 9161205,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/wasm/wasm.c"
+          },
+          {
+            "unit": 106,
+            "elapsed_us": 8454159,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/gpu/gpu.c"
+          },
+          {
+            "unit": 107,
+            "elapsed_us": 8960278,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/llvm/bitcode.c"
+          },
+          {
+            "unit": 108,
+            "elapsed_us": 12219756,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/ebpf/ebpf.c"
+          },
+          {
+            "unit": 109,
+            "elapsed_us": 924499,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/spirv/spirv.c"
+          },
+          {
+            "unit": 110,
+            "elapsed_us": 21725954,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/driver/driver.c"
+          },
+          {
+            "unit": 111,
+            "elapsed_us": 1592127,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/compiler/embed/embed.c"
+          },
+          {
+            "unit": 112,
+            "elapsed_us": 111611,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/simd.c"
+          },
+          {
+            "unit": 113,
+            "elapsed_us": 796990,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/file.c"
+          },
+          {
+            "unit": 114,
+            "elapsed_us": 3376918,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/target.c"
+          },
+          {
+            "unit": 115,
+            "elapsed_us": 25605,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/time.c"
+          },
+          {
+            "unit": 116,
+            "elapsed_us": 80729,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/hash.c"
+          },
+          {
+            "unit": 117,
+            "elapsed_us": 1188566,
+            "source": "/home/runner/work/buster/buster/src/buster/lib/x86_64.c"
+          }
+        ],
+        "checker_groups": [
+          "-analyzer-checker=core",
+          "-analyzer-checker=apiModeling",
+          "-analyzer-checker=unix",
+          "-analyzer-checker=deadcode",
+          "-analyzer-checker=security.insecureAPI.UncheckedReturn",
+          "-analyzer-checker=security.insecureAPI.getpw",
+          "-analyzer-checker=security.insecureAPI.gets",
+          "-analyzer-checker=security.insecureAPI.mktemp",
+          "-analyzer-checker=security.insecureAPI.mkstemp",
+          "-analyzer-checker=security.insecureAPI.vfork",
+          "-analyzer-checker=nullability.NullPassedToNonnull",
+          "-analyzer-checker=nullability.NullReturnedFromNonnull"
+        ]
+      }
+    },
+    "analysis_improvement_percent": 12.552179362312755
+  }
+]
