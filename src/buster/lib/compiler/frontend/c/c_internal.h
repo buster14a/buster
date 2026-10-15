@@ -1385,6 +1385,8 @@ struct CTypeParseFrame
     bool is_packed;
     // Query-local category fact for a GNU imaginary projection of a real value.
     bool expression_nonplace_projection;
+    // PARAMETER frames retain declaration storage across declarator children.
+    bool parameter_is_register;
 };
 
 typedef struct CTypeLayoutCache CTypeLayoutCache;

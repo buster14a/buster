@@ -1236,6 +1236,8 @@ struct CParameter
     CEntityId entity;
     // Interned id of `name`, as CEnumMember.symbol.
     u32 symbol;
+    // Declaration storage belongs to the parameter entity, not function type identity.
+    bool is_register;
 };
 BUSTER_CT_CHECK(sizeof(CParameter) == 40);
 
@@ -1289,8 +1291,8 @@ struct CEntity
     bool constant_is_negative;
     bool has_cleanup;
     bool cleanup_attribute_checked;
-    // Register storage on a local. Only the local declarator path records it,
-    // and only one reader needs it: an assembler label on a `register` local
+    // Register storage on a local or parameter. Address constraints preserve
+    // this declaration property; an assembler label on a register local also
     // binds a machine register instead of renaming a symbol.
     bool is_register;
     // Block-scope extern declarations are C_ENTITY_LOCAL for lexical lookup,

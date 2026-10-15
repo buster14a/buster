@@ -71,7 +71,9 @@ range. Under [WG14 DR 017.06](https://open-std.org/JTC1/SC22/WG14/issues/c90/iss
 member access and array subscripting retain the register root, so `&(v.i)`
 and an array member's element remain non-addressable. Arrow access, pointer
 subscripts and unary dereference reach another object and retain their valid
-pointee behavior. Parenthesized selections and a surrounding `(void)` cast
+pointee behavior. Prototype-style parameter records retain their register
+storage on the parameter entity through array adjustment; prior compatible
+prototypes do not supply storage for a later definition. Parenthesized selections and a surrounding `(void)` cast
 stay under the register-address constraint without misclassifying binary `&`.
 `c_parse_validate_bit_field_addresses` checks unary address operands against
 semantic member widths before constant folding, including parenthesized,

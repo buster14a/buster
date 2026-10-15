@@ -19675,7 +19675,7 @@ BUSTER_C_INTERNAL u32 c_type_parse_specifier_suffix_end(CPreprocessResult prepro
 // with every class except typedef, constexpr with register/static, and TLS
 // with static/extern. Typed auto with a second class still violates 6.7.1p4.
 BUSTER_C_INTERNAL bool c_parse_storage_classes_valid(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 start, u32 end,
-                                                          bool parameter, bool function)
+                                                          bool parameter, bool function, bool* register_out)
 {
     enum {TYPEDEF = 1, EXTERN = 2, STATIC = 4, AUTO = 8, REGISTER = 16, THREAD = 32, CONSTEXPR = 64};
     u32 seen = 0;
@@ -19756,6 +19756,7 @@ BUSTER_C_INTERNAL bool c_parse_storage_classes_valid(CParseResult* result, CPrep
             }
         }
     }
+    if (register_out) *register_out = (seen & REGISTER) != 0;
     u32 ordinary = seen;
     bool constexpr_conflict = false;
     if (c23 && (ordinary & AUTO) && !(ordinary & TYPEDEF)) ordinary &= ~(u32)AUTO;
@@ -19798,7 +19799,7 @@ BUSTER_C_INTERNAL void c_type_parse_scalar_step(CTypeParseMachine* machine, CTyp
             return;
         }
         u32 start = c_parse_skip_attributes(preprocess, frame->start, frame->end);
-        if (!c_parse_storage_classes_valid(result, preprocess, frame->scope, start, frame->end, false, false))
+        if (!c_parse_storage_classes_valid(result, preprocess, frame->scope, start, frame->end, false, false, 0))
         {
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, start, false);
             return;
@@ -20351,7 +20352,8 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
             c_type_parse_frame_complete(machine, C_TYPE_ID_INVALID, frame->start, false);
             return;
         }
-        c_parse_storage_classes_valid(result, preprocess, (CScopeId){.value = 0}, frame->start, machine->result_index, true, false);
+        c_parse_storage_classes_valid(result, preprocess, (CScopeId){.value = 0}, frame->start, machine->result_index, true, false,
+                                      &frame->parameter_is_register);
         frame->type = machine->result_type;
         frame->declarator_start = machine->result_index;
         frame->type = c_parse_pointer_chain(result, preprocess, frame->type, &frame->declarator_start, frame->end);
@@ -20440,6 +20442,7 @@ BUSTER_C_INTERNAL void c_type_parse_parameter_step(CTypeParseMachine* machine, C
         .type = frame->type,
         .entity = C_ENTITY_ID_INVALID,
         .symbol = frame->name.symbol,
+        .is_register = frame->parameter_is_register,
     };
     c_type_parse_frame_complete(machine, frame->type, frame->end, true);
 }
@@ -23683,7 +23686,8 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
         }
         return false;
     }
-    c_parse_storage_classes_valid(result, preprocess, (CScopeId){.value = 0}, start, declarator_start, true, false);
+    bool parameter_is_register = false;
+    c_parse_storage_classes_valid(result, preprocess, (CScopeId){.value = 0}, start, declarator_start, true, false, &parameter_is_register);
     type = c_parse_pointer_chain(result, preprocess, type, &declarator_start, end);
     type = c_parse_apply_vector_attribute(result, preprocess, declaration.scope, type, start, end);
     CToken name = {0};
@@ -23767,6 +23771,7 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
         .type = type,
         .entity = C_ENTITY_ID_INVALID,
         .symbol = name.symbol,
+        .is_register = parameter_is_register,
     };
     return true;
 }
@@ -28036,7 +28041,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
 {
     CAutoDeclarationInfo auto_info = {0};
     bool is_auto_type = hints && hints->no_auto ? false : c_parse_auto_declaration_info(result, preprocess, scope, start, end, &auto_info);
-    if (is_auto_type && !c_parse_storage_classes_valid(result, preprocess, scope, start, end, false, false))
+    if (is_auto_type && !c_parse_storage_classes_valid(result, preprocess, scope, start, end, false, false, 0))
     {
         return false;
     }
@@ -28559,7 +28564,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
         u8 local_inline_hints = 0;
         if (declares_function)
         {
-            if (is_thread_local) c_parse_storage_classes_valid(result, preprocess, scope, start, end, false, true);
+            if (is_thread_local) c_parse_storage_classes_valid(result, preprocess, scope, start, end, false, true, 0);
             CDeclaration inline_hint_declaration = {
                 .token_start = start,
                 .token_count = end - start,
@@ -46601,7 +46606,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             c_parse_token_bitmap_any(declaration_range_words, declaration->token_start, declaration->token_start + declaration->token_count))
         {
             c_parse_storage_classes_valid(&result, preprocess, (CScopeId){.value = 0}, declaration->token_start,
-                                            declaration->token_start + declaration->token_count, false, true);
+                                            declaration->token_start + declaration->token_count, false, true, 0);
         }
         if (!static_assertion && !declaration->name.length && c_preprocess_dialect_is_c23(preprocess.dialect))
         {
@@ -47136,6 +47141,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                 .declaration_index = declaration_index,
                 .kind = C_ENTITY_PARAMETER,
                 .is_definition = true,
+                .is_register = parameter->is_register,
             };
             c_parse_scope_add_entity(&result, scope, entity, parameter->symbol);
         }
