@@ -289,8 +289,11 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(
 {
     BUSTER_RT_CHECK(size <= ARENA_MAX_RESERVATION);
     BUSTER_RT_CHECK(arena->position >= arena_minimum_position && arena->position <= arena->reserved_size);
-    u64 aligned_offset;
-    BUSTER_RT_CHECK(arena_align_position_checked(arena, arena->position, alignment, &aligned_offset));
+    BUSTER_RT_CHECK(BUSTER_IS_POWER_OF_TWO(alignment));
+    BUSTER_RT_CHECK((u64)arena <= UINT64_MAX - arena->position);
+    u64 address = (u64)arena + arena->position;
+    BUSTER_RT_CHECK(address <= UINT64_MAX - (alignment - 1));
+    u64 aligned_offset = align_forward_unchecked(address, alignment) - (u64)arena;
     BUSTER_RT_CHECK(aligned_offset <= arena->reserved_size);
     BUSTER_RT_CHECK(size <= arena->reserved_size - aligned_offset);
     u64 aligned_size_after = aligned_offset + size;

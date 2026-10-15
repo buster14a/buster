@@ -271,8 +271,11 @@ u64 arena_dirty_position(Arena* arena)
 u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment)
 {
     BUSTER_RT_CHECK(arena && position <= arena->reserved_size);
-    u64 aligned_position;
-    BUSTER_RT_CHECK(arena_align_position_checked(arena, position, alignment, &aligned_position));
+    BUSTER_RT_CHECK(BUSTER_IS_POWER_OF_TWO(alignment));
+    BUSTER_RT_CHECK((u64)arena <= UINT64_MAX - position);
+    u64 address = (u64)arena + position;
+    BUSTER_RT_CHECK(address <= UINT64_MAX - (alignment - 1));
+    u64 aligned_position = align_forward_unchecked(address, alignment) - (u64)arena;
     BUSTER_RT_CHECK(aligned_position <= arena->reserved_size);
     u8* result = arena_get_byte_pointer_at_position(arena, aligned_position);
     return result;
