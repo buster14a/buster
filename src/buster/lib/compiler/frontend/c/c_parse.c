@@ -12350,21 +12350,12 @@ BUSTER_C_INTERNAL void c_parse_unevaluated_operand_facts(CTypeParseMachine* mach
     }
     if (required)
     {
-        for (u32 node = 0; node < ast->node_count; node += 1)
-        {
-            u32 kind = ast->kinds[node];
-            if (kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_ALIGNOF_EXPRESSION || kind == C_AST_TYPEOF || kind == C_AST_TYPEOF_UNQUAL)
-            {
-                u32 operand = c_ast_child_at(ast, node, 0);
-                if (ast->kinds[operand] != C_AST_TYPE_NAME) required[operand / 8] |= (u8)(1u << (operand % 8));
-            }
-        }
         for (u32 bound = 0; bound < facts->bound_count; bound += 1)
         {
             u32 operand = c_ast_facts_bound_node(facts, bound);
             if (operand != C_AST_NODE_INVALID) required[operand / 8] |= (u8)(1u << (operand % 8));
         }
-        c_ast_types_facts_require(facts, ast, required);
+        c_ast_types_facts_require(facts, ast, required, true);
         CAstTypeBody* saved_region = machine->ast_types;
         CParseExpressionQuery* saved_queries = machine->expression_queries;
         CConstantEvaluationMode mode = machine->constant_evaluation_mode;

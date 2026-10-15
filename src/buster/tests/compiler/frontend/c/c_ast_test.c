@@ -9623,6 +9623,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_required_fact_intervals(UnitTestAr
     return result;
 }
 
+// The reference keeps the former whole-tree discovery pass and the generic
+// supplied-root expansion. The candidate discovers operators in that reverse
+// expansion. Preseeded roots and completed candidate flags survive both paths.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_unevaluated_fact_intervals(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const sources[] = {
+        S8("int f(int n){return sizeof(sizeof(n + 1)) + __alignof__(n);}"),
+        S8("int f(int n){__typeof__(sizeof(n + 1)) a=0; return sizeof(a);}"),
+        S8("int f(int n){return sizeof(int[n + 1]) + sizeof(int (*)[n + 2]);}"),
+        S8("int f(int n){return _Generic((n),int:sizeof(n + 1),default:__alignof__(n)) + (0?sizeof(n + 2):sizeof(n + 3));}"),
+        S8("struct R{int value;}; int f(int n){__typeof__(((struct R){n}).value) a=0; return sizeof(a), n;}"),
+        S8("int f(int n){__typeof__((int (*)[n + 1])0) p=0; return sizeof(*p) + sizeof((n, n + 2));}"),
+        S8("int f(const int n){typeof_unqual(sizeof(n + 1)) a=0; typeof_unqual(long) b=0; return sizeof(a) + (int)b;}"),
+    };
+    for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+    {
+        for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(c_ast_test_layouts); layout += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            // The final case covers C23's expression and TYPE_NAME forms;
+            // the original six cases keep their GNU17 parsing contract.
+            CPreprocessDialect dialect = source + 1 == BUSTER_ARRAY_LENGTH(sources) ? C_PREPROCESS_DIALECT_GNU23 : C_PREPROCESS_DIALECT_GNU17;
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[source], dialect);
+            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){.layout = c_ast_test_layouts[layout]});
+            CAstFacts reference = {0};
+            CAstFacts fused = {0};
+            if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&reference, &built.ast) && c_ast_facts_create(&fused, &built.ast)))
+            {
+                u64 bytes = ((u64)built.ast.node_count + 7) / 8;
+                u8* expected = arena_allocate_zeroed(temporary.arena, u8, bytes);
+                u8* actual = arena_allocate_zeroed(temporary.arena, u8, bytes);
+                u32 bound_nodes[] = {C_AST_NODE_INVALID, C_AST_NODE_INVALID, C_AST_NODE_INVALID};
+                u32 bounds = 0;
+                for (u32 node = 0; node < built.ast.node_count; node += 1)
+                {
+                    u32 flags = (node % 5 == 0 ? C_AST_FACT_EXPRESSION : 0u) |
+                                (node % 7 == 0 ? C_AST_FACT_TYPED : 0u) | (node % 11 == 0 ? C_AST_FACT_STRING : 0u);
+                    reference.flags[node] = (u8)flags;
+                    fused.flags[node] = (u8)flags;
+                    // Model a committed bound-root column, including an absent
+                    // owner. The production bound-owner lookup stays unchanged.
+                    if (built.ast.kinds[node] == C_AST_ADD && bounds < 2) bound_nodes[bounds++] = node;
+                }
+                for (u32 bound = 0; bound < BUSTER_ARRAY_LENGTH(bound_nodes); bound += 1)
+                {
+                    u32 operand = bound_nodes[bound];
+                    if (operand != C_AST_NODE_INVALID)
+                    {
+                        expected[operand / 8] |= (u8)(1u << (operand % 8));
+                        actual[operand / 8] |= (u8)(1u << (operand % 8));
+                    }
+                }
+                for (u32 node = 0; node < built.ast.node_count; node += 1)
+                {
+                    u32 kind = built.ast.kinds[node];
+                    if (kind == C_AST_SIZEOF_EXPRESSION || kind == C_AST_ALIGNOF_EXPRESSION || kind == C_AST_TYPEOF || kind == C_AST_TYPEOF_UNQUAL)
+                    {
+                        u32 operand = c_ast_child_at(&built.ast, node, 0);
+                        if (built.ast.kinds[operand] != C_AST_TYPE_NAME) expected[operand / 8] |= (u8)(1u << (operand % 8));
+                    }
+                }
+                c_test_ast_required_fact_intervals(&reference, &built.ast, expected);
+                c_test_ast_unevaluated_fact_intervals(&fused, &built.ast, actual);
+                BUSTER_TEST(arguments, memcmp(expected, actual, bytes) == 0);
+                for (u32 node = 0; node < built.ast.node_count; node += 1)
+                    BUSTER_TEST(arguments, reference.flags[node] == fused.flags[node]);
+                BUSTER_TEST(arguments, reference.statistics.candidates == fused.statistics.candidates);
+                BUSTER_TEST(arguments, reference.statistics.machine == fused.statistics.machine);
+                BUSTER_TEST(arguments, reference.statistics.strings == fused.statistics.strings);
+            }
+            c_ast_facts_release(&fused);
+            c_ast_facts_release(&reference);
+            c_ast_release(&built.ast);
+            c_test_scratch_end(temporary);
+        }
+    }
+    // An incomplete tree never reaches either production publication pass.
+    c_ast_test_expect_failure(arguments, S8("int f(int n){return sizeof(int[n +"));
+    c_ast_test_expect_failure(arguments, S8("int f(void){__typeof__(sizeof("));
+    return result;
+}
+
 // Consecutive casts retain semantic frames after each type-name delimiter
 // closes. Their workspace and operator work follow input prefixes rather than
 // delimiter depth, with the same model in tree and model-only entrypoints.
@@ -10363,6 +10446,7 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_type_projection);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unevaluated_operand_facts);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_required_fact_intervals);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_unevaluated_fact_intervals);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_cast_prefix_machine_capacity);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_required_conditional_recipe_growth);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_indirection_work);

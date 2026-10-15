@@ -261,6 +261,7 @@ BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
 // Force fresh completion queries to exercise row-free capture and rollback.
 BUSTER_F_DECL void c_test_ast_fact_uncached_set(bool enabled);
 BUSTER_F_DECL void c_test_ast_required_fact_intervals(CAstFacts* facts, CAst const* ast, u8* required);
+BUSTER_F_DECL void c_test_ast_unevaluated_fact_intervals(CAstFacts* facts, CAst const* ast, u8* required);
 BUSTER_F_DECL u32 c_test_ast_call_builtin_fact(CAst const* ast, CPreprocessResult const* preprocess, u32 node);
 BUSTER_F_DECL void c_test_enum_scope_dirty_set(bool enabled);
 // Keeps the interning window shut (CTypeInterning), so one source can be
