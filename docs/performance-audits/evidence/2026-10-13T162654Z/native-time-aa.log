@@ -1,0 +1,13 @@
+PERFORMANCE_EVIDENCE claim=native-runtime class=native-host tool=time complete=yes
+| metric | baseline median | candidate median | change | verdict |
+|---|---|---|---|---|
+| wall_seconds (s) | 2.26691 | 2.28237 | +0.682% | within-effect |
+| user_seconds (s) | 2.15972 | 2.16994 | +0.473% | inconclusive |
+| system_seconds (s) | 0.068212 | 0.0677185 | -0.723% | inconclusive |
+| max_rss_kib (KiB) | 1.07639e+06 | 1.07638e+06 | -0.001% | inconclusive |
+| minor_faults (count) | 5101.5 | 5111.5 | +0.196% | inconclusive |
+| major_faults (count) | 0 | 0 | +0.000% | within-effect |
+| voluntary_switches (count) | 112 | 105.5 | -5.804% | inconclusive |
+| involuntary_switches (count) | 2147 | 2168.5 | +1.001% | inconclusive |
+Result: A/A noise control on wall_seconds: within-effect (+0.682%)
+not Zen 5 evidence: never discharges a zen5 inventory row or a Zen 5 claim (#4013)

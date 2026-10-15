@@ -7,7 +7,10 @@
 // families (stable region, chain, fan-out, diamond, cycle), the backward
 // chains the ordered passes retry (c_type_layout_test_backward_chains), the
 // fallback cases, the seeded random programs (c_type_layout_test_program), and the
-// validation scaling fixtures (c_type_layout_test_scales).
+// validation scaling fixtures (c_type_layout_test_scales). Every test ends its
+// scratch with c_test_scratch_end once nothing reads the unit, and
+// C_TEST_BOUNDED_FIXTURE checks that each fixture returned every reservation
+// it made (GitHub #3431).
 #include <buster/tests/compiler/frontend/c/type_layout_test.h>
 
 #include <buster/lib/compiler/frontend/c/c.h>
@@ -978,6 +981,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_validation_scaling(UnitTes
     CTypeLayoutTestScaleRow rows[] = {
         {S8("c_parse_validate_array_object_sizes, c_parse_validate_array_bound_values, variably modified objects"),
          S8("static const char s@[] = \"text @\";\nchar b@[sizeof s@];\nchar (*p@)[sizeof s@];\n")},
+        {S8("c_parse_validate_array_object_sizes, unqueried complete records"),
+         S8("struct S@ { char bytes[$]; };\n")},
         {S8("c_parse_validate_deferred_assertions"), S8("static const char s@[] = \"text @\";\n_Static_assert(sizeof s@ > 6, \"\");\n")},
         {S8("c_parse_validate_static_initializers"),
          S8("static const char s@[] = \"text @\";\nunsigned long n@ = sizeof s@;\nconst char* e@ = s@ + sizeof s@ - 1;\n")},
@@ -1069,22 +1074,29 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_type_layout_test_backward_chains(UnitTestAr
 UnitTestResult c_type_layout_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_aliases);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_layouts);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_validation);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_queries);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_offset_search_work);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_stable_region);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_chain);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_backward_chains);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_fan_out);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_diamond);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_cycles);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_order_dependent_reads);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_enumerator_folds);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_random_programs);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_array_validation_solves);
-    BUSTER_TEST_FIXTURE(arguments, c_type_layout_test_validation_scaling);
+    // The thread's unit registry reserves its own arena at its first unit;
+    // reserve it before the first fixture's reading.
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        c_type_layout_test_parse(temporary.arena, S8(""));
+        c_test_scratch_end(temporary);
+    }
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_offset_aliases);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_offset_layouts);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_offset_validation);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_offset_queries);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_offset_search_work);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_stable_region);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_chain);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_backward_chains);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_fan_out);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_diamond);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_cycles);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_order_dependent_reads);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_enumerator_folds);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_random_programs);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_array_validation_solves);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_type_layout_test_validation_scaling);
     return result;
 }
 

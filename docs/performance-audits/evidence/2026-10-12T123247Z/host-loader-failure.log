@@ -1,0 +1,53 @@
+==1002944== Callgrind, a call-graph generating cache profiler
+==1002944== Copyright (C) 2002-2017, and GNU GPL'd, by Josef Weidendorfer et al.
+==1002944== Using Valgrind-3.25.1 and LibVEX; rerun with -h for copyright info
+==1002944== Command: /home/david/Documents/Codex/2026-10-12/s/work/subjects/base cc -Isrc -Igenerated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -target x86_64-unknown-linux -march=znver5 -c -g0 src/buster/apps/ide/ide.c -o /home/david/Documents/Codex/2026-10-12/s/work/profiles/base-default-profile.o
+==1002944== 
+==1002944== For interactive control, run 'callgrind_control -h'.
+vex amd64->IR: unhandled instruction bytes: 0x62 0xF1 0x7F 0x48 0x7F 0x84 0x24 0x30 0x0 0x0
+vex amd64->IR:   REX=0 REX.W=0 REX.R=0 REX.X=0 REX.B=0
+vex amd64->IR:   VEX=0 VEX.L=0 VEX.nVVVV=0x0 ESC=NONE
+vex amd64->IR:   PFX.66=0 PFX.F2=0 PFX.F3=0
+==1002944== valgrind: Unrecognised instruction at address 0x6125e8d.
+==1002944==    at 0x6125E8D: _dl_start (rtld.c:563)
+==1002944==    by 0x6124E87: ??? (in /usr/lib/ld-linux-x86-64.so.2)
+==1002944==    by 0xD: ???
+==1002944==    by 0x1FFEFFF1E6: ???
+==1002944==    by 0x1FFEFFF222: ???
+==1002944==    by 0x1FFEFFF225: ???
+==1002944==    by 0x1FFEFFF22B: ???
+==1002944==    by 0x1FFEFFF237: ???
+==1002944==    by 0x1FFEFFF24E: ???
+==1002944==    by 0x1FFEFFF267: ???
+==1002944==    by 0x1FFEFFF26F: ???
+==1002944==    by 0x1FFEFFF284: ???
+==1002944== Your program just tried to execute an instruction that Valgrind
+==1002944== did not recognise.  There are two possible reasons for this.
+==1002944== 1. Your program has a bug and erroneously jumped to a non-code
+==1002944==    location.  If you are running Memcheck and you just saw a
+==1002944==    warning about a bad jump, it's probably your program's fault.
+==1002944== 2. The instruction is legitimate but Valgrind doesn't handle it,
+==1002944==    i.e. it's Valgrind's fault.  If you think this is the case or
+==1002944==    you are not sure, please let us know and we'll try to fix it.
+==1002944== Either way, Valgrind will now raise a SIGILL signal which will
+==1002944== probably kill your program.
+==1002944== 
+==1002944== Process terminating with default action of signal 4 (SIGILL): dumping core
+==1002944==  Illegal opcode at address 0x6125E8D
+==1002944==    at 0x6125E8D: _dl_start (rtld.c:563)
+==1002944==    by 0x6124E87: ??? (in /usr/lib/ld-linux-x86-64.so.2)
+==1002944==    by 0xD: ???
+==1002944==    by 0x1FFEFFF1E6: ???
+==1002944==    by 0x1FFEFFF222: ???
+==1002944==    by 0x1FFEFFF225: ???
+==1002944==    by 0x1FFEFFF22B: ???
+==1002944==    by 0x1FFEFFF237: ???
+==1002944==    by 0x1FFEFFF24E: ???
+==1002944==    by 0x1FFEFFF267: ???
+==1002944==    by 0x1FFEFFF26F: ???
+==1002944==    by 0x1FFEFFF284: ???
+==1002944== 
+==1002944== Events    : Ir
+==1002944== Collected : 683
+==1002944== 
+==1002944== I   refs:      683

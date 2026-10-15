@@ -38,7 +38,9 @@ static int test_scale_compiler(int argc, char** argv)
     if (!strcmp(fault, "wrong-workers") && jobs > 1) workers = 1;
     /* Gate faults emit lane_gate: "gate" gates populations below eight inputs
      * truthfully; "gate-wrong" claims serial but keeps its workers;
-     * "gate-unknown" names no gate; "gate-unstable" gates only the warmups. */
+     * "gate-unknown" names no gate; "gate-unstable" gates only the warmups;
+     * "gate-capped" caps eight or more inputs one worker below the request
+     * and "gate-capped-wrong" claims a cap but keeps every worker. */
     char const* gate = NULL;
     if (!strncmp(fault, "gate", 4)) gate = jobs > 1 ? "lanes" : "none";
     int gated = jobs > 1 && ((!strcmp(fault, "gate") && inputs < 8) || !strcmp(fault, "gate-wrong") ||
@@ -46,6 +48,11 @@ static int test_scale_compiler(int argc, char** argv)
     if (gated) gate = "serial";
     if (gated && strcmp(fault, "gate-wrong")) workers = 1;
     if (!strcmp(fault, "gate-unknown")) gate = "maybe";
+    if (!strncmp(fault, "gate-capped", 11) && jobs > 1 && inputs >= 8)
+    {
+        gate = "capped";
+        if (!strcmp(fault, "gate-capped")) workers -= 1;
+    }
     if (!result && !strcmp(fault, "sleep")) test_delay(5000);
     if (!result && !strcmp(fault, "memory"))
     {
@@ -460,6 +467,16 @@ static void test_scale(char const* executable, char const* root)
         test_scale_fault(gate, root, "scale-gate-unknown", "unknown lane gate");
         gate.fault = "gate-unstable";
         test_scale_fault(gate, root, "scale-gate-unstable", "lane gate lanes after serial");
+        /* A truthful cap reports the workers that ran; claiming a cap while
+         * keeping every requested worker is refused. */
+        gate.fault = "gate-capped";
+        CHECK(tp_path(output, root, "scale-gate-capped"));
+        result = test_scale_run(gate, output, log);
+        CHECK_CHILD_EXIT(result, 0, log);
+        CHECK(test_file_contains(output, "scaling.json", "\"workers\":2,\"placement\":\"core\",\"observed_workers\":1,\"lane_gate\":\"capped\"") &&
+              test_file_contains(output, "scaling.md", "| capped |"));
+        gate.fault = "gate-capped-wrong";
+        test_scale_fault(gate, root, "scale-gate-capped-wrong", "capped workers, expected fewer than 2");
         /* Two SMT siblings of one core cannot host two workers. */
         TestScaleRun refused = valid;
         refused.topology = siblings;

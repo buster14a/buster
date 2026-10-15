@@ -3,6 +3,24 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/compiler/assembly/aarch64_semantics.h>
+#include <buster/lib/compiler/assembly/aarch64_semantics_internal.h>
+#include <buster/lib/os.h>
+#include <buster/lib/string.h>
+
+enum { A64_SEMANTIC_STORAGE_TEST_LANES = 4 };
+typedef struct A64SemanticStorageLaneTest A64SemanticStorageLaneTest;
+struct A64SemanticStorageLaneTest
+{
+    Arena* arena;
+    BusterA64SemanticStorageTestResult results[A64_SEMANTIC_STORAGE_TEST_LANES];
+};
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType a64_semantic_storage_lane_test(void* argument)
+{
+    A64SemanticStorageLaneTest* state = (A64SemanticStorageLaneTest*)argument;
+    lane_sync();
+    state->results[lane_index()] = buster_aarch64_semantics_test_storage(state->arena);
+}
 
 static bool a64_semantic_string_is(BusterA64SemanticString actual, String8 expected)
 {
@@ -66,7 +84,34 @@ static bool a64_semantic_value_equal(BusterA64SemanticValue left, BusterA64Seman
 UnitTestResult aarch64_semantics_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_UNUSED(arguments);
+    // This serial module precedes global semantic prewarm. Race the cold
+    // block fills, then join its temporary gang before later serial setup.
+    ThreadContext* main_context = thread_context_selected();
+    ThreadContext* lane_context = thread_context_allocate();
+    thread_context_select(lane_context);
+    u64 lanes = 1;
+#if !BUSTER_SINGLE_THREADED
+    lanes = BUSTER_MIN((u64)A64_SEMANTIC_STORAGE_TEST_LANES, (u64)os_get_logical_thread_count());
+    String8 jobs_text = os_get_environment_variable(S8("BUSTER_TEST_JOBS"));
+    if (jobs_text.length)
+    {
+        IntegerParsingU64 parsed = string8_parse_u64_decimal(jobs_text);
+        if (parsed.status == INTEGER_PARSING_SUCCESS && parsed.length == jobs_text.length && parsed.value)
+        {
+            lanes = BUSTER_MIN(lanes, parsed.value);
+        }
+    }
+    lanes = BUSTER_MAX(lanes, (u64)1);
+#endif
+    A64SemanticStorageLaneTest storage = {.arena = arguments->arena};
+    lane_run(lanes, &a64_semantic_storage_lane_test, &storage);
+    thread_context_release(lane_context);
+    thread_context_select(main_context);
+    for (u64 lane = 0; lane < lanes; lane += 1)
+    {
+        BUSTER_TEST(arguments, storage.results[lane].checks > 50000);
+        BUSTER_TEST(arguments, storage.results[lane].failures == 0);
+    }
     BUSTER_TEST(arguments, buster_a64_semantic_validate());
     BUSTER_TEST(arguments, buster_a64_semantic_schema_version() == 2);
     BUSTER_TEST(arguments, buster_a64_semantic_form_count() == 1695);

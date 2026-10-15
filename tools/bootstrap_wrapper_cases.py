@@ -28,10 +28,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 import bootstrap_wrapper_test as bootstrap
 
 EXCLUSIVE_TEST = "test_concurrent_cold_publication_uses_immutable_outputs"
-# Hosted Windows Release runners have four logical CPUs. On AArch64 every
-# PowerShell wrapper launch costs about 22.6 s, and six concurrent launches
-# take 35 s each (six launches over four CPUs), so four lanes use the whole
-# budget without oversubscribing it (#3912).
+# Hosted Windows Release runners have four logical CPUs; four lanes use them
+# without oversubscribing (#3912). Until build.ps1 imported its modules by name
+# (#3979), each AArch64 launch spent ~22.6 s CPU scanning PSModulePath.
 MAX_JOBS = 4
 
 

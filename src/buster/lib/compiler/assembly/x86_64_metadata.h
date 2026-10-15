@@ -1481,4 +1481,8 @@ bool buster_x86_metadata_test_fixed_base64_vbmi(void);
 bool buster_x86_metadata_test_flat_decode_matches_generated(bool test_vbmi);
 bool buster_x86_metadata_test_nul_distances_match_reference(void);
 u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void);
+// Runs the generic selector over every query the forwarding and padding
+// recipes pin a form for; returns how many chose another form, or other
+// bytes or another relocation, than the pinned emission.
+u32 buster_x86_metadata_test_recipe_pins(u32* query_count);
 #endif

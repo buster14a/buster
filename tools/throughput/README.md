@@ -482,9 +482,13 @@ run in the series directory. After every sample, `scale` checks:
 - `compilation_workers` equals `min(W, inputs)`, or 1 for the default and
   one-worker points. It must be 1 when the header reports `lane_gate=serial`
   (the compiler kept one worker for a population too small to repay the
-  multi-lane entry cost). A compiler without the gate omits the field and gets
-  the same check as before; an unknown value is invalid;
-- every sample of one point reports the same `lane_gate`;
+  multi-lane entry cost). With `lane_gate=capped` the compiler ran fewer
+  workers than requested so each keeps a minimum of work: the count must be
+  below `min(W, inputs)` and is reported, with efficiency, as observed. A
+  compiler without the gate omits the field and gets the same check as before;
+  an unknown value is invalid;
+- every sample of one point reports the same `lane_gate`, and a capped point
+  the same worker count;
 - the executable is byte-identical across every worker count and repeat;
 - peak RSS stays under `--max-rss-mib`, when given.
 

@@ -147,7 +147,101 @@ Registered `os_tests` cover load/store/set-if-zero in both modes, plus serial
 negative-value loads with independent numeric expectations. Serial builds use
 the same lane path as a one-lane gang, as described in [parallelism](parallelism.md).
 
+## Windows failed-finalization ownership (#3838)
+
+Every admitted Windows spawn reserves a process-global owner before acquiring
+child resources. The record outlives its caller's arena and thread; it holds
+exact leader/job handles and a monotonic consuming identity. A copied consumed
+`ProcessSpawnResult` cannot wait, close pipes or terminate a reused handle.
+Registry claims and publication use an SRW lock; native launch, observation,
+termination and closing run outside the lock. Allocation failure rejects launch,
+and IDs refuse wrap. The registry has no fixed active-process cap.
+
+A finite timeout, native wait failure or failed launch unwind makes bounded
+termination attempts and spends at most five seconds observing leader exit and
+job emptiness. Both facts must be proven before handles close. A refused
+termination remains a sticky native error even when later cleanup succeeds.
+Failed finalization returns `pending_windows_owner_id`; the module retains the
+handles even if a caller discards the result. The original launch error remains
+`ProcessSpawnResult.error`; `cleanup_error` separately retains its unwind error.
+`os_process_cleanup_snapshot` associates its reported error with `error_owner_id`. No successful asynchronous termination
+or kill-on-close handle close is accepted as proof of job emptiness.
+
+Admission rejects new reservations while any pending owner exists, including a
+pending owner currently being retried. Work reserved before the failure may
+finish launching and remains visible. `os_process_cleanup_snapshot` inventories
+all active records (reserved, running, waiting and pending); pending is a subset.
+`os_process_cleanup_pending` claims at most one pending owner, rotates among IDs
+and applies a shared observation budget clamped to five seconds. Zero performs
+polls with no native wait or sleep. A permanently failed owner cannot starve other
+records. The first native failure remains available through retries.
+
+`os_process_shutdown` permanently closes admission before inventory, claims
+unconsumed running and pending records within one clamped five-second budget,
+and reports reserved/waiting owners still exclusive to another caller. A
+nonzero `active_owners` refuses finalization. A native failure remains associated
+with its exact owner ID even if that round later proves cleanup.
+
+The authorized executable policy keeps the program alive with an explicit
+cleanup failure. `os_process_shutdown_keep_alive` repeats bounded cleanup rounds
+with a short pause and keeps all host contexts/storage intact until active
+ownership reaches zero. This shutdown boundary deliberately has no total exit
+deadline; ordinary finite wait/resume still return bounded failure. The compact
+allocation-free `WINDOWS_PROCESS_SHUTDOWN_REFUSED_V1` receipt records active and
+pending counts, exact owner ID, native error and state (0 reserved, 1 running,
+2 waiting, 3 pending). It prints once per changed observation outside the lock.
+A completed-cleanup native failure uses `WINDOWS_PROCESS_SHUTDOWN_FAILURE_V1`
+with `keep_alive=0`. Native pipe I/O and scheduling can delay receipt delivery;
+no hard wall-clock claim is made for reporting.
+
+The normal Windows entry point releases its persistent lane gang, calls this
+hook before destroying program/thread/OS storage, and latches a failed exit code
+even if a later retry succeeds. Raw `os_exit` also uses the hook; its noreturn
+boundary transfers current-thread reserved/waiting claims to pending ownership
+before retrying. Another thread's exclusive claim is never stolen. Parent pipe
+handles remain mirrored until each consuming close clears its owner copy, so
+fatal capture cleanup can close remaining readers without stale-handle reuse.
+Running publication occurs only after spawn's native temporary/pipe unwind.
+
+Raw application workers must be joined before returning from `entry_point`.
+After process cleanup, an unjoined tracked worker makes the normal return take
+`os_exit` while global storage is still intact, rather than free it under the
+worker's wait/callback/context tail. The freestanding Windows CRT also routes
+through `os_exit`. The standalone build-cwd fixture and throughput-test CRT
+mains call the same hook before returning/releasing their thread context;
+normal CRT return still flushes their buffered output. A cleanup refusal cannot be hidden by a successful custom
+application exit-code override. No second launcher or surviving helper is added;
+#2986's broader caller-driven lifecycle remains separate.
+
+Registered Windows controls script refusal, persistent nonsignaled observation,
+wait failure and nonempty jobs at the actual native boundaries under an
+independent call ceiling. They verify bounded return, retained identity,
+admission refusal, stale-copy rejection and subsequent native finalization.
+A worker destroys its result arena and exits before another thread resumes its
+pending owner. Multiple pre-admitted owners exercise admission refusal, retry
+rotation past a persistent failure and concurrent resume callers with distinct consuming identities.
+Separate native controls cover ordinary timeout cleanup with and without a job,
+healthy captured exit, empty-job proof and isolated shutdown inventory/refusal.
+Event-gated exit children cover pending, running, noreturn current waiting and
+reserved claims, another thread's gated exclusive wait, and normal return through
+the selected integer-test module. The parent observes a refusal receipt, a live
+host and live native descendant before releasing recovery. It independently
+proves host exit and an empty outer job before its consuming wait can rescue
+containment. Linux builds establish shared-source compatibility only; hosted
+Windows controls qualify native behavior at the exact tested revision.
+
 ## Linux process-group census reads
+
+When `self/status` proves that procfs and the caller use the same PID namespace
+coordinate, the census queries `getpgid` before opening each task's stat file.
+A successful different group (including kernel tasks in group zero) needs no
+stat read. Matching groups and failed queries retain the complete stat/status
+path; ancestor-mounted procfs retains that path for every task. The filter does
+not cache membership across snapshots. Two matching complete censuses, zombie
+state, namespace identity and the final exact-child reservation check remain
+required. `os_linux_process_group_filter_self_test` uses a valid non-directory
+descriptor to prove which cases must still read stat, alongside the existing
+live-child, zombie, ownership-loss, descendant and churn controls.
 
 A procfs task can disappear after its stat/status descriptor opens. Both the
 ordinary read and the capacity probe classify native ESRCH as disappearance;
@@ -248,6 +342,17 @@ regular spill controls cover partial writes, real read-only-descriptor write
 failure, caller reuse, platform deadline cleanup and POSIX flag cancellation.
 Mobile retains production compilation and existing collector coverage; these
 desktop process fixtures do not claim mobile process execution.
+
+On Windows, each ordinary captured-pipe pass reads at most one available
+16 KiB block per stream, polls the leader, and checks a finite deadline even
+when bytes keep arriving. On the first signaled poll, the waiter freezes the
+remaining available byte count for each open stream. It drains only those
+snapshotted bytes, at most 16 KiB per stream per pass, decrementing by successful
+read counts and closing each reader as soon as its count reaches zero. Later
+descendant writes cannot replenish the snapshot or prolong capture. Since the
+leader has exited, successful draining of this finite snapshot completes before
+deadline expiry is considered. Zero timeout still means wait forever. The
+storage-I/O and scheduling caveat above remains in force.
 
 For retained stream lengths `R_s`, the collector allocates exactly
 `N = sum(ceil(R_s / 16384))` chunk headers and payload blocks. With `R` total

@@ -1,13 +1,221 @@
 #!/usr/bin/env python3
 """Offline failure and recovery controls for pinned apt snapshot transport."""
+import datetime
+import getpass
+import hashlib
+import http.server
 import json
+import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
 import ci_apt
+
+
+class AptMetadataHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        self.server.requests.append(self.path)
+        release = self.path.endswith(("/InRelease", "/Release", "/Release.gpg"))
+        packages = "/binary-" in self.path
+        blocked = (self.server.failure == "release" and release or
+                   self.server.failure == "packages" and packages or
+                   self.server.failure == "optional" and not release and not packages)
+        if blocked:
+            self.send_error(503, "Injected metadata failure")
+        elif self.server.failure == "digest" and packages:
+            original = Path(self.translate_path(self.path)).read_bytes()
+            content = b"X" + original[1:]
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        else:
+            super().do_GET()
+
+    def log_message(self, format, *args):
+        pass
+
+
+@unittest.skipUnless(shutil.which("apt-get") and shutil.which("gpg"),
+                     "actual APT protocol controls require APT and GnuPG")
+class UefiPackageIndexProtocolTests(unittest.TestCase):
+    """Use real APT against a signed loopback repository; never host apt state."""
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory(prefix="buster-uefi-apt-")
+        cls.root = Path(cls.temporary.name)
+        cls.key_home = cls.root / "keys"
+        cls.key_home.mkdir(mode=0o700)
+        cls.gpg = ["gpg", "--homedir", str(cls.key_home), "--batch",
+                   "--pinentry-mode", "loopback", "--passphrase", ""]
+        subprocess.run(cls.gpg + ["--quick-generate-key", "APT protocol fixture",
+                                 "ed25519", "sign", "0"], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        cls.keyring = cls.root / "fixture.gpg"
+        with cls.keyring.open("wb") as output:
+            subprocess.run(cls.gpg + ["--export"], stdout=output,
+                           stderr=subprocess.PIPE, check=True, timeout=20)
+        cls.archive = cls.root / "archive"
+        date = datetime.datetime.now(datetime.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
+        workflow = (ci_apt.ROOT / ".github/workflows/ci.yml").read_text()
+        uefi = workflow.split("\n  uefi:\n", 1)[1].split("\n  analyzer:\n", 1)[0]
+        cls.sources = re.findall(r"^\s*(deb \[[^\]]+\] https://snapshot\.ubuntu\.com/ubuntu/20260828T000000Z noble(?:-updates|-security)? main universe)$",
+                                 uefi, re.MULTILINE)
+        if len(cls.sources) != 3:
+            raise AssertionError("expected all three signed UEFI snapshot sources")
+        for source in cls.sources:
+            suite = source.split("] ", 1)[1].split()[1]
+            entries = []
+            for component in ("main", "universe"):
+                files = {
+                    "binary-amd64/Packages": b"Package: buster-protocol-fixture\nVersion: 1\nArchitecture: amd64\nMaintainer: Fixture <fixture@example.invalid>\nDescription: protocol fixture\n\n",
+                    "i18n/Translation-en": b"Package: buster-protocol-fixture\nDescription-en: protocol fixture\n\n",
+                    "cnf/Commands-amd64": b"fixture metadata\n",
+                    "dep11/Components-amd64.yml": b"fixture metadata\n",
+                }
+                for relative, content in files.items():
+                    path = cls.archive / "dists" / suite / component / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(content)
+                    entries.append(f" {hashlib.sha256(content).hexdigest()} {len(content)} {component}/{relative}\n")
+            release = cls.archive / "dists" / suite / "Release"
+            release.write_text(f"Origin: Buster protocol fixture\nSuite: {suite}\nCodename: {suite}\nDate: {date}\nArchitectures: amd64\nComponents: main universe\nSHA256:\n" + "".join(entries))
+            subprocess.run(cls.gpg + ["--yes", "--clearsign", "--output",
+                                     str(release.with_name("InRelease")), str(release)],
+                           check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        subprocess.run(cls.gpg + ["--quick-generate-key", "APT unrelated fixture",
+                                 "ed25519", "sign", "0"], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        cls.unrelated_keyring = cls.root / "unrelated.gpg"
+        with cls.unrelated_keyring.open("wb") as output:
+            subprocess.run(cls.gpg + ["--export", "APT unrelated fixture"], stdout=output,
+                           stderr=subprocess.PIPE, check=True, timeout=20)
+
+    @classmethod
+    def tearDownClass(cls):
+        subprocess.run(["gpgconf", "--homedir", str(cls.key_home), "--kill", "all"],
+                       check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        cls.temporary.cleanup()
+
+    def run_apt(self, failure, baseline=False, bad_keyring=False):
+        # Override only the test repository, keyring and private state. The
+        # source target selection itself comes from the production workflow.
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
+            lambda *args, **kwargs: AptMetadataHandler(*args, directory=str(self.archive), **kwargs))
+        server.failure = failure
+        server.requests = []
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with tempfile.TemporaryDirectory(dir=self.root) as directory:
+            private = Path(directory)
+            keyring = self.keyring
+            if bad_keyring:
+                keyring = self.unrelated_keyring
+            source_lines = []
+            for source in self.sources:
+                if baseline:
+                    source = source.replace(" target=Packages", "")
+                source = source.replace("https://snapshot.ubuntu.com/ubuntu/20260828T000000Z",
+                                        f"http://127.0.0.1:{server.server_port}")
+                source_lines.append(source.replace("/usr/share/keyrings/ubuntu-archive-keyring.gpg", str(keyring)))
+            sources = private / "sources.list"
+            sources.write_text("\n".join(source_lines) + "\n")
+            config = private / "apt.conf"
+            # APT_CONFIG is read before the host configuration directories.
+            # Exclude their post-update hooks as well as their metadata/cache.
+            config.write_text('''Dir::Etc::parts "-";
+Dir::Etc::main "-";
+Acquire::Languages "en";
+Acquire::IndexTargets::deb::CNF {
+    MetaKey "$(COMPONENT)/cnf/Commands-$(NATIVE_ARCHITECTURE)";
+    Description "$(RELEASE)/$(COMPONENT) $(NATIVE_ARCHITECTURE) c-n-f Metadata";
+};
+Acquire::IndexTargets::deb::DEP-11 {
+    MetaKey "$(COMPONENT)/dep11/Components-$(NATIVE_ARCHITECTURE).yml";
+    Description "$(RELEASE)/$(COMPONENT) $(NATIVE_ARCHITECTURE) Components";
+};
+''')
+            (private / "lists/partial").mkdir(parents=True)
+            (private / "archives/partial").mkdir(parents=True)
+            (private / "status").write_text("")
+            options = ["-o", f"Dir::Etc::sourcelist={sources}",
+                       "-o", "Dir::Etc::sourceparts=-", "-o", f"Dir::State::lists={private}/lists",
+                       "-o", f"Dir::State::status={private}/status",
+                       "-o", f"Dir::Cache::archives={private}/archives", "-o", "Dir::Cache::pkgcache=",
+                       "-o", "Dir::Cache::srcpkgcache=", "-o", "APT::Update::Error-Mode=any",
+                       "-o", "Acquire::Retries=0", "-o", "Acquire::http::Timeout=5",
+                       "-o", f"APT::Sandbox::User={getpass.getuser()}"]
+            environment = dict(os.environ, LC_ALL="C", APT_CONFIG=str(config))
+            targets = subprocess.run(["apt-get"] + options + ["indextargets", "--no-release-info",
+                                     "--format", "$(CREATED_BY)"], capture_output=True, text=True,
+                                     env=environment, timeout=20)
+            self.assertEqual(targets.returncode, 0, targets.stderr)
+            result = subprocess.run(["apt-get"] + options + ["update"], capture_output=True,
+                                    text=True, env=environment, timeout=20)
+            if result.returncode == 0:
+                package = subprocess.run(["apt-cache"] + options + ["show", "buster-protocol-fixture"],
+                                         capture_output=True, text=True, env=environment, timeout=20)
+                self.assertEqual(package.returncode, 0, package.stderr)
+                self.assertIn("Version: 1\n", package.stdout)
+            requests = list(server.requests)
+            evidence = os.environ.get("BUSTER_APT_PROTOCOL_EVIDENCE")
+            if evidence:
+                output = Path(evidence)
+                output.mkdir(parents=True, exist_ok=True)
+                name = failure + ("-baseline" if baseline else "-candidate") + ("-bad-keyring" if bad_keyring else "")
+                (output / (name + ".json")).write_text(json.dumps({
+                    "argv": result.args, "status": result.returncode,
+                    "targets": targets.stdout.splitlines(), "requests": requests,
+                    "sources": source_lines, "keyring_sha256": hashlib.sha256(keyring.read_bytes()).hexdigest(),
+                }, indent=2) + "\n")
+                (output / (name + ".stdout")).write_text(result.stdout)
+                (output / (name + ".stderr")).write_text(result.stderr)
+        return result, set(targets.stdout.splitlines()), requests
+
+    def test_optional_metadata_503_is_excluded_before_fetch(self):
+        healthy, _, _ = self.run_apt("none", baseline=True)
+        self.assertEqual(healthy.returncode, 0, healthy.stdout + healthy.stderr)
+        baseline, old_targets, old_requests = self.run_apt("optional", baseline=True)
+        candidate, targets, requests = self.run_apt("optional")
+        self.assertNotEqual(baseline.returncode, 0, baseline.stdout + baseline.stderr)
+        self.assertIn("503", baseline.stdout + baseline.stderr)
+        self.assertTrue({"CNF", "Translations", "DEP-11"}.issubset(old_targets), old_targets)
+        self.assertTrue(any("/cnf/" in path for path in old_requests), old_requests)
+        self.assertEqual(candidate.returncode, 0, candidate.stdout + candidate.stderr)
+        self.assertEqual(targets, {"Packages"})
+        self.assertEqual(sum(path.endswith("/InRelease") for path in requests), 3)
+        self.assertEqual(sum("/binary-amd64/Packages" in path for path in requests), 6)
+        self.assertFalse(any("/cnf/" in path or "/i18n/" in path or "/dep11/" in path for path in requests), requests)
+
+    def test_required_release_503_still_fails(self):
+        result, _, requests = self.run_apt("release")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("503", result.stdout + result.stderr)
+        self.assertTrue(any(path.endswith("/InRelease") for path in requests), requests)
+
+    def test_required_package_index_503_still_fails(self):
+        result, _, requests = self.run_apt("packages")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("503", result.stdout + result.stderr)
+        self.assertTrue(any("/binary-amd64/Packages" in path for path in requests), requests)
+
+    def test_unrelated_keyring_still_fails(self):
+        result, _, _ = self.run_apt("none", bad_keyring=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("signature", result.stderr.lower())
+
+    def test_package_index_digest_mismatch_still_fails(self):
+        result, _, _ = self.run_apt("digest")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Hash Sum mismatch", result.stdout + result.stderr)
 
 
 class SnapshotRetryTests(unittest.TestCase):

@@ -2056,6 +2056,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_first_scratch_storage(Unit
 {
     UnitTestResult result = {0};
     enum { REPETITIONS = 300 };
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     Arena* source_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(8), .flags.no_pool = true});
     if (BUSTER_REQUIRE(arguments, source_arena != 0))
     {
@@ -2118,6 +2119,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_debug_first_scratch_storage(Unit
                 c_test_scratch_end(generation);
             }
         }
+        // Every lowered-program, codegen and object reader is done.
+        c_test_release_preprocess_arenas_since(preprocess_mark);
         BUSTER_TEST(arguments, arena_destroy(source_arena, 1));
     }
     return result;
@@ -2898,8 +2901,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_locations(UnitTest
         {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_LINUX},
         {.cpu_arch = CPU_ARCH_AARCH64, .cpu_model = CPU_MODEL_BASELINE, .os = OPERATING_SYSTEM_WINDOWS},
     };
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
     {
+        // Release the previous target's unit; nothing reads it any more.
+        c_test_release_preprocess_arenas_since(preprocess_mark);
         Target target = targets[target_index];
         CPreprocessResult tokens = c_preprocess(arguments->arena, source, (CPreprocessOptions){0});
         CParseResult parsed = c_parse(arguments->arena, tokens);
@@ -3032,6 +3038,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_machine_debug_locations(UnitTest
             BUSTER_TEST(arguments, (consumer_mask & required_consumer_mask) == required_consumer_mask);
         }
     }
+    c_test_release_preprocess_arenas_since(preprocess_mark);
     return result;
 }
 
@@ -3050,8 +3057,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_native_failure_publication(UnitT
         "\"r\"(value), \"r\"(value)); return value; }");
     Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
                         {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
     {
+        // Release the previous target's unit; nothing reads it any more.
+        c_test_release_preprocess_arenas_since(preprocess_mark);
         CPreprocessResult tokens = c_preprocess(arguments->arena, source, (CPreprocessOptions){0});
         CParseResult parsed = c_parse(arguments->arena, tokens);
         CIRLowerResult lowered = c_lower_to_ir(arguments->arena, S8("native-failure.c"), tokens, parsed, targets[target_index]);
@@ -3077,6 +3087,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_native_failure_publication(UnitT
             }
         }
     }
+    c_test_release_preprocess_arenas_since(preprocess_mark);
     return result;
 }
 
@@ -3173,8 +3184,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_verify_invariants(UnitTestArgume
     UnitTestResult result = {0};
     Target targets[] = {{.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
                         {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX}};
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(targets); target_index += 1)
     {
+        // Release the previous target's unit; nothing reads it any more.
+        c_test_release_preprocess_arenas_since(preprocess_mark);
         String8 source = S8("int verified_add(int a, int b) { return a + b; }");
         CPreprocessResult tokens = c_preprocess(arguments->arena, source, (CPreprocessOptions){0});
         CParseResult parsed = c_parse(arguments->arena, tokens);
@@ -3222,6 +3236,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_verify_invariants(UnitTestArgume
             }
         }
     }
+    c_test_release_preprocess_arenas_since(preprocess_mark);
     return result;
 }
 
@@ -3916,7 +3931,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_switch_key_images(Unit
 
 UnitTestResult codegen_tests(UnitTestArguments* arguments)
 {
-    UnitTestResult result = codegen_test_ebpf_symbols(arguments);
+    UnitTestResult result = {0};
     TargetParseResult i386_target = target_parse_triple(S8("i386-unknown-linux-gnu"));
     BUSTER_TEST(arguments, i386_target.error == TARGET_PARSE_ERROR_NONE);
     CPreprocessResult i386_tokens = c_preprocess(arguments->arena, S8("int i386_codegen_probe(void) { return 1; }\n"),
@@ -3936,86 +3951,43 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, i386_refusal.error == CODEGEN_ERROR_UNSUPPORTED_TARGET &&
                                    string_equal(i386_refusal.failure_reason, S8("i386 code generation is not implemented")));
     }
-    UnitTestResult arm64_tls = codegen_test_arm64_windows_tls_offsets(arguments);
-    result.succeeded_test_count += arm64_tls.succeeded_test_count;
-    result.test_count += arm64_tls.test_count;
-    BUSTER_TEST_FIXTURE(arguments, codegen_test_ebpf_local_calls);
-    UnitTestResult switch_key_images = codegen_test_canonical_switch_key_images(arguments);
-    result.succeeded_test_count += switch_key_images.succeeded_test_count;
-    result.test_count += switch_key_images.test_count;
-    UnitTestResult machine_debug = codegen_test_machine_debug_locations(arguments);
-    result.succeeded_test_count += machine_debug.succeeded_test_count;
-    result.test_count += machine_debug.test_count;
-    UnitTestResult local_seed_coverage = codegen_test_debug_local_seed_coverage(arguments);
-    result.succeeded_test_count += local_seed_coverage.succeeded_test_count;
-    result.test_count += local_seed_coverage.test_count;
-    UnitTestResult reused_home_debug = codegen_test_machine_debug_reused_home_boundary(arguments);
-    result.succeeded_test_count += reused_home_debug.succeeded_test_count;
-    result.test_count += reused_home_debug.test_count;
-    UnitTestResult destructive_debug = codegen_test_machine_debug_destructive_source(arguments);
-    result.succeeded_test_count += destructive_debug.succeeded_test_count;
-    result.test_count += destructive_debug.test_count;
-    BUSTER_TEST_FIXTURE(arguments, codegen_test_machine_debug_call_clobber);
-    BUSTER_TEST_FIXTURE(arguments, codegen_test_machine_debug_call_clobber_late);
-    UnitTestResult homeless_debug = codegen_test_machine_debug_homeless_register(arguments);
-    result.succeeded_test_count += homeless_debug.succeeded_test_count;
-    result.test_count += homeless_debug.test_count;
-    UnitTestResult layout_run = codegen_test_machine_debug_layout_run_span(arguments);
-    result.succeeded_test_count += layout_run.succeeded_test_count;
-    result.test_count += layout_run.test_count;
-    UnitTestResult machine_debug_differential = codegen_test_machine_debug_differential(arguments);
-    result.succeeded_test_count += machine_debug_differential.succeeded_test_count;
-    result.test_count += machine_debug_differential.test_count;
-    UnitTestResult machine_debug_sizing = codegen_test_machine_debug_seed_sizing(arguments);
-    result.succeeded_test_count += machine_debug_sizing.succeeded_test_count;
-    result.test_count += machine_debug_sizing.test_count;
-    BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_seed_capacity);
-    BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_block_local_storage);
-    BUSTER_TEST_FIXTURE(arguments, codegen_test_debug_first_scratch_storage);
-    BUSTER_TEST_FIXTURE(arguments, codegen_test_machine_scratch_plan);
-    UnitTestResult ebpf_scalars = codegen_test_ebpf_scalars(arguments);
-    result.succeeded_test_count += ebpf_scalars.succeeded_test_count;
-    result.test_count += ebpf_scalars.test_count;
-    UnitTestResult ebpf_argument_images = codegen_test_ebpf_argument_images(arguments);
-    result.succeeded_test_count += ebpf_argument_images.succeeded_test_count;
-    result.test_count += ebpf_argument_images.test_count;
-    UnitTestResult ebpf_integer_images = codegen_test_ebpf_integer_images(arguments);
-    result.succeeded_test_count += ebpf_integer_images.succeeded_test_count;
-    result.test_count += ebpf_integer_images.test_count;
-    UnitTestResult stack_liveness = codegen_test_ebpf_stack_liveness(arguments);
-    result.succeeded_test_count += stack_liveness.succeeded_test_count;
-    result.test_count += stack_liveness.test_count;
-    UnitTestResult local_aggregates = codegen_test_ebpf_local_aggregates(arguments);
-    result.succeeded_test_count += local_aggregates.succeeded_test_count;
-    result.test_count += local_aggregates.test_count;
-    UnitTestResult failure_publication = codegen_test_native_failure_publication(arguments);
-    result.succeeded_test_count += failure_publication.succeeded_test_count;
-    result.test_count += failure_publication.test_count;
-    UnitTestResult expanded_labels = codegen_test_expanded_label_initializers(arguments);
-    result.succeeded_test_count += expanded_labels.succeeded_test_count;
-    result.test_count += expanded_labels.test_count;
-    UnitTestResult kernel_regressions = codegen_test_ebpf_kernel_regressions(arguments);
-    result.succeeded_test_count += kernel_regressions.succeeded_test_count;
-    result.test_count += kernel_regressions.test_count;
-    BUSTER_TEST_FIXTURE(arguments, codegen_test_ebpf_rejections);
-    UnitTestResult verification = codegen_test_verify_invariants(arguments);
-    result.succeeded_test_count += verification.succeeded_test_count;
-    result.test_count += verification.test_count;
-    UnitTestResult machine_relocations = codegen_test_machine_relocation_publication(arguments);
-    result.succeeded_test_count += machine_relocations.succeeded_test_count;
-    result.test_count += machine_relocations.test_count;
-    UnitTestResult publication_c = codegen_test_machine_publication_c(arguments);
-    result.succeeded_test_count += publication_c.succeeded_test_count;
-    result.test_count += publication_c.test_count;
-    UnitTestResult symbol_addresses = codegen_test_aarch64_symbol_addresses(arguments);
-    result.succeeded_test_count += symbol_addresses.succeeded_test_count;
-    result.test_count += symbol_addresses.test_count;
-    UnitTestResult executable_data = codegen_test_executable_data_copy(arguments);
-    result.succeeded_test_count += executable_data.succeeded_test_count;
-    result.test_count += executable_data.test_count;
-    UnitTestResult entry_result = codegen_test_canonical_entry(arguments);
-    result.test_count += entry_result.test_count;
-    result.succeeded_test_count += entry_result.succeeded_test_count;
+    c_preprocess_release(&i386_tokens);
+    // Each fixture returns every unit it preprocessed; the registry's own
+    // arena is reserved once, before the first fixture's reading.
+    c_test_unit_registry_prewarm();
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_ebpf_symbols);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_arm64_windows_tls_offsets);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_ebpf_local_calls);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_canonical_switch_key_images);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_debug_locations);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_debug_local_seed_coverage);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_debug_reused_home_boundary);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_debug_destructive_source);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_debug_call_clobber);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_debug_call_clobber_late);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_debug_homeless_register);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_debug_layout_run_span);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_debug_differential);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_debug_seed_sizing);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_debug_seed_capacity);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_debug_block_local_storage);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_debug_first_scratch_storage);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_scratch_plan);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_ebpf_scalars);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_ebpf_argument_images);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_ebpf_integer_images);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_ebpf_stack_liveness);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_ebpf_local_aggregates);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_native_failure_publication);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_expanded_label_initializers);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_ebpf_kernel_regressions);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_ebpf_rejections);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_verify_invariants);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_relocation_publication);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_machine_publication_c);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_aarch64_symbol_addresses);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_executable_data_copy);
+    C_TEST_BOUNDED_FIXTURE(arguments, codegen_test_canonical_entry);
     u8 negative_rsp_store_bytes[] = {0x48, 0x89, 0x44, 0x24, 0xf8, 0x5d, 0xc3};
     CodegenTestX64BodyScan negative_rsp_store_scan =
         codegen_test_x64_scan_body((ByteSlice){.pointer = negative_rsp_store_bytes, .length = sizeof(negative_rsp_store_bytes)}, 0,
@@ -4315,7 +4287,9 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
     CPreprocessResult exact_encoder_stats_tokens = c_preprocess(arguments->arena, exact_encoder_stats_source, (CPreprocessOptions){0});
     CParseResult exact_encoder_stats_parse = c_parse(arguments->arena, exact_encoder_stats_tokens);
     CIRLowerResult exact_encoder_stats_ir =
-        c_lower_to_ir(arguments->arena, S8("exact-encoder-stats.c"), exact_encoder_stats_tokens, exact_encoder_stats_parse, exact_encoder_stats_target);
+        // The count includes per-row constant rematerializations; keep each constant row.
+        c_lower_to_ir_with_options(arguments->arena, S8("exact-encoder-stats.c"), exact_encoder_stats_tokens, exact_encoder_stats_parse,
+                                   exact_encoder_stats_target, (CIRLowerOptions){.disable_block_constant_interning = true});
     BUSTER_TEST(arguments, exact_encoder_stats_tokens.error_count == 0);
     BUSTER_TEST(arguments, exact_encoder_stats_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, exact_encoder_stats_ir.diagnostic_count == 0);
@@ -4333,6 +4307,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_successes == 4);
         BUSTER_TEST(arguments, exact_encoder_stats_module.statistics.exact_failures == 0);
     }
+    c_preprocess_release(&exact_encoder_stats_tokens);
     // An i128 argument to the GNU clzll/ctzll spellings converts to unsigned
     // long long before the count. Check the canonical operand width on AArch64
     // as well as the native-target frontend tests.
@@ -4405,6 +4380,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, rejected.statistics.exact_attempts == 0 && arguments->arena->position == allocation_before);
         }
     }
+    c_preprocess_release(&i128_count_tokens);
     String8 canonical_windows_c_source = S8(
         "typedef __builtin_va_list va_list;\n"
         "struct Pair { int left; int right; };\n"
@@ -4451,8 +4427,10 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         "}\n");
     CPreprocessResult canonical_windows_tokens = c_preprocess(arguments->arena, canonical_windows_c_source, (CPreprocessOptions){0});
     CParseResult canonical_windows_parse = c_parse(arguments->arena, canonical_windows_tokens);
-    CIRLowerResult canonical_windows_ir = c_lower_to_ir(arguments->arena, S8("canonical-windows-call-layout.c"), canonical_windows_tokens,
-                                                         canonical_windows_parse, canonical_windows_target);
+    // codegen_test_x64_scan_body accepts only an `add rsp; pop rbp; ret` epilogue. An interned constant
+    // live across a call takes a callee-saved register and adds its own pop, so keep each constant row.
+    CIRLowerResult canonical_windows_ir = c_lower_to_ir_with_options(arguments->arena, S8("canonical-windows-call-layout.c"), canonical_windows_tokens,
+        canonical_windows_parse, canonical_windows_target, (CIRLowerOptions){.disable_block_constant_interning = true});
     BUSTER_TEST(arguments, canonical_windows_tokens.error_count == 0);
     BUSTER_TEST(arguments, canonical_windows_parse.diagnostic_count == 0);
     BUSTER_TEST(arguments, canonical_windows_ir.diagnostic_count == 0);
@@ -4949,6 +4927,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, dynamic_outgoing_cleanup_valid);
         }
     }
+    c_preprocess_release(&canonical_windows_tokens);
     // Windows ARM64 is the one AArch64 ABI whose va_list is a single cursor
     // and whose variadic calls carry floating-point bits in the X register
     // file. Compile register and overflow reads together so neither path can
@@ -4995,6 +4974,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             aarch64_windows_target, (CodegenModuleOptions){.register_allocator = CODEGEN_REGISTER_ALLOCATOR_FAST});
         BUSTER_TEST(arguments, aarch64_windows_variadic_module.error == CODEGEN_ERROR_NONE);
     }
+    c_preprocess_release(&aarch64_windows_variadic_tokens);
 
     // A System V stack argument is placed at an address respecting its own
     // alignment rather than immediately after the argument before it, and the
@@ -5066,6 +5046,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 stack_alignment_descriptor->code_offset + stack_alignment_descriptor->code_size, 64);
         BUSTER_TEST(arguments, found_stack_realignment);
     }
+    c_preprocess_release(&stack_alignment_tokens);
     // Vector operands must be reached through the same frame rebase as every
     // other canonical value. A Win64 function whose scope emits a stack restore
     // -- one holding a variably modified declaration -- keeps rbp at the bottom of its frame and
@@ -5148,6 +5129,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, vector_frame_scan.valid);
             BUSTER_TEST(arguments, vector_frame_scan.local_reference_count >= 3);
         }
+        c_preprocess_release(&vector_frame_tokens);
     }
     // A 1-, 2- or 4-byte vector rides a general-purpose register on System V:
     // GCC deviates from a literal psABI reading for vectors smaller than an
@@ -5242,6 +5224,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, wrap_abi.parts[0].abi_class == IR_ABI_CLASS_INTEGER && wrap_abi.parts[0].size == 2);
         }
     }
+    c_preprocess_release(&tiny_vector_tokens);
     String8 static_aggregate_c_source = S8(
         "typedef struct LargeAggregate { char padding[1024 * 1024]; int first; int second; } LargeAggregate;\n"
         "static LargeAggregate global_aggregate;\n"
@@ -5302,6 +5285,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, read_fields_descriptor != 0);
         u32 actual_frame_size = codegen_test_canonical_descriptor_stack_size(read_fields_descriptor);
         BUSTER_TEST(arguments, actual_frame_size < BUSTER_KB(64));
+        c_preprocess_release(&static_aggregate_tokens);
     }
     // Zero-fill layout: offsets are planned small-first rather than in
     // declaration order, because a global declared after a ~2GiB array would
@@ -5361,6 +5345,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, zero_fill_layout_codegen.zero_fill_size >= (u64)second_large->offset + second_large->size);
         }
     }
+    c_preprocess_release(&zero_fill_layout_tokens);
     String8 aggregate_copy_c_source = S8(
         "struct AggregatePair { int first; int second; };\n"
         "int copy_pair(void) {\n"
@@ -5407,6 +5392,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                                                                                     target, (CodegenModuleOptions){0});
         BUSTER_TEST(arguments, aggregate_copy_codegen.error == CODEGEN_ERROR_NONE);
     }
+    c_preprocess_release(&aggregate_copy_tokens);
     // A `.p2align` in global assembly can demand far more padding than the
     // directive's own source bytes, which is what the module code buffer's
     // reserve is otherwise sized from. Two page-sized alignments over a dozen
@@ -5471,6 +5457,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             }
         }
     }
+    c_preprocess_release(&alignment_assembly_tokens);
     String8 deterministic_merge_source = S8(
         "extern int deterministic_asm_value(void);\n"
         "#if defined(__x86_64__) || defined(_M_X64)\n"
@@ -5533,6 +5520,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
             }
         }
     }
+    c_preprocess_release(&deterministic_merge_tokens);
 #if BUSTER_CPU_ARCH_X86_64 && !BUSTER_SANITIZE
     // Promote a C frontend module whose source uses ordinary double values.
     // The frontend deliberately rejects wide-float signatures, so this keeps
@@ -5740,6 +5728,7 @@ UnitTestResult codegen_tests(UnitTestArguments* arguments)
                 }
             }
         }
+        c_preprocess_release(&f80_native_tokens);
     }
 #endif
     return result;

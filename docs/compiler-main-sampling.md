@@ -31,8 +31,9 @@ These are three alternatives; keep exactly one active selector, replacing an
 earlier selector when advancing the request. An inherited selector alone does
 not suppress a fresh ordinary comparison request. This PR adds no request line.
 The committed [admission configuration](compiler-main-sampling-admission-v1.tsv)
-admits only the phase and freeze it names (currently `acquire`, bound to the
-[acquisition plan](compiler-main-sampling-freeze-v1.tsv) by commit and digest);
+admits only the phase and freeze it names (currently `pilot`, bound to the
+[pilot freeze](compiler-main-sampling-freeze-v1.tsv) by commit and digest, with
+its parent acquisition plan named by revision);
 arbitrary selectors, other freezes or changed owner/actor/source facts cannot
 assign the physical job.
 

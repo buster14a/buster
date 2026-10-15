@@ -3,6 +3,8 @@
 // Admission bytes are authenticated by the existing trusted GitHub adapter;
 // this controller replays them, binds the runtime and claims before any fetch.
 // No process success activates snapshot preparation or qualifies statistics.
+// compiler_preparation_controller_worker and compiler_preparation_controller_qualify_fixture
+// share the qualify argv from compiler_preparation_controller_qualify_arguments.
 #ifndef BUSTER_COMPILER_PREPARATION_CONTROLLER_INCLUDED
 #define BUSTER_COMPILER_PREPARATION_CONTROLLER_INCLUDED
 
@@ -519,6 +521,20 @@ BUSTER_GLOBAL_LOCAL String8 compiler_preparation_controller_tree(CompilerSamplin
     return result;
 }
 
+// The single qualify argv shared by the worker and its hosted control. PYTHON
+// is the plan's verified absolute interpreter path.
+BUSTER_GLOBAL_LOCAL SliceString8 compiler_preparation_controller_qualify_arguments(Arena* arena,
+    CompilerPreparationControllerResolved resolved)
+{
+    String8 qualify[] = {resolved.driver, S8("compiler_closure"), S8("qualify"),
+        resolved.admitted.plan.source_root, resolved.admitted.plan.output_root,
+        resolved.admitted.plan.baseline_revision, resolved.admitted.plan.baseline_tree,
+        resolved.admitted.plan.candidate_revision, resolved.admitted.plan.candidate_tree, resolved.lab, resolved.python};
+    String8* pointer = arena_allocate(arena, String8, BUSTER_ARRAY_LENGTH(qualify));
+    for (u64 i = 0; i < BUSTER_ARRAY_LENGTH(qualify); i += 1) pointer[i] = qualify[i];
+    return (SliceString8){.pointer = pointer, .length = BUSTER_ARRAY_LENGTH(qualify)};
+}
+
 BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_worker(Arena* arena,
     CompilerPreparationControllerResolved resolved)
 {
@@ -564,12 +580,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_preparation_controller_worker(Arena* 
         bool tools_before_attempted = controller.success;
         bool tools_before = controller.success && compiler_preparation_controller_tools(arena, resolved);
         controller.success = controller.success && tools_before;
-        String8 qualify[] = {resolved.driver, S8("compiler_closure"), S8("qualify"),
-            resolved.admitted.plan.source_root, resolved.admitted.plan.output_root,
-            resolved.admitted.plan.baseline_revision, resolved.admitted.plan.baseline_tree,
-            resolved.admitted.plan.candidate_revision, resolved.admitted.plan.candidate_tree, resolved.lab, resolved.python};
         compiler_preparation_controller_phase(&controller, S8("legacy-snapshot-five-long-controls"),
-            (SliceString8)BUSTER_ARRAY_TO_SLICE(qualify), BUSTER_PREPARATION_WORKER_SECONDS * 1000000ull);
+            compiler_preparation_controller_qualify_arguments(arena, resolved), BUSTER_PREPARATION_WORKER_SECONDS * 1000000ull);
         bool tools_after = compiler_preparation_controller_tools(arena, resolved);
         controller.success = controller.success && tools_after;
         // Export partial proof only after the owned manager lease and all adopted
@@ -816,6 +828,67 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_worker_once_fixture(Are
 }
 #endif
 
+#if BUSTER_LINUX && !BUSTER_ANDROID
+// #3966: run the worker's exact qualify argv through the real driver. qualify
+// creates its output root only after its precondition gate admits every path,
+// so the root distinguishes admission from refusal; off the 9700X the later
+// host check fails the phase either way and no measurement starts.
+BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_qualify_fixture(Arena* arena, String8 directory)
+{
+    String8 root = os_path_absolute(arena, directory, true);
+    String8 trusted = path_join(arena, root, S8("qualify-trusted"));
+    String8 tools = path_join(arena, trusted, S8("tools"));
+    String8 source = path_join(arena, root, S8("qualify-source"));
+    String8 python = os_path_absolute(arena, executable_resolve_in_path(arena, S8("python3")), true);
+    String8 link = path_join(arena, root, S8("qualify-python-link"));
+    String8 lab = path_join(arena, tools, S8("uarch_lab.py"));
+    String8 driver = program_state->input.arguments.length ?
+        os_path_absolute(arena, program_state->input.arguments.pointer[0], true) : (String8){0};
+    String8 made[] = {trusted, tools, source};
+    bool result = root.length && python.length && driver.length;
+    for (u64 i = 0; result && i < BUSTER_ARRAY_LENGTH(made); i += 1)
+    {
+        OsDirectoryCreateResult directory_result = os_make_directory_exclusive(made[i]);
+        result = directory_result.created && !directory_result.error.v;
+    }
+    result = result && file_write(lab, BUSTER_SLICE_TO_BYTE_SLICE(S8("# qualify fixture lab\n"))) &&
+        symlink((char*)python.pointer, (char*)link.pointer) == 0;
+    // The controller's absolute interpreter and a bare name are admitted; a
+    // non-canonical link, a missing absolute path and a relative path are not.
+    String8 pythons[] = {python, S8("python3"), link, path_join(arena, root, S8("missing-python")), S8("./python3")};
+    bool admitted[] = {true, true, false, false, false};
+    for (u64 i = 0; result && i < BUSTER_ARRAY_LENGTH(pythons); i += 1)
+    {
+        String8 evidence = path_join(arena, root, string_format(arena, S8("qualify-evidence-{u64}"), i));
+        OsDirectoryCreateResult evidence_result = os_make_directory_exclusive(evidence);
+        CompilerPreparationControllerResolved resolved = {0};
+        resolved.driver = driver;
+        resolved.lab = lab;
+        resolved.python = pythons[i];
+        resolved.admitted.plan.source_root = source;
+        resolved.admitted.plan.output_root = path_join(arena, root, string_format(arena, S8("qualify-output-{u64}"), i));
+        resolved.admitted.plan.baseline_revision = S8("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        resolved.admitted.plan.baseline_tree = S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        resolved.admitted.plan.candidate_revision = S8("cccccccccccccccccccccccccccccccccccccccc");
+        resolved.admitted.plan.candidate_tree = S8("dddddddddddddddddddddddddddddddddddddddd");
+        CompilerSamplingController phase = {.arena = arena, .evidence = evidence,
+            .started = os_now_microseconds(), .deadline = os_now_microseconds() + 120000000ull, .success = true};
+        string8_list_push(arena, &phase.phases, S8("stage\tphase\twall_us\texit_status\ttimed_out\tcleanup_failed\tcancelled\tstate\n"));
+        result = evidence_result.created && !evidence_result.error.v;
+        bool phase_complete = result && compiler_preparation_controller_phase(&phase, S8("legacy-snapshot-five-long-controls"),
+            compiler_preparation_controller_qualify_arguments(arena, resolved), 60000000ull);
+        bool receipt = generate_path_kind(arena,
+            path_join(arena, resolved.admitted.plan.output_root, S8("qualification.json"))) != GENERATE_PATH_MISSING;
+        bool output = generate_path_kind(arena, resolved.admitted.plan.output_root) != GENERATE_PATH_MISSING;
+        result = result && !phase.cleanup_failed && output == admitted[i] && receipt == admitted[i] &&
+            (admitted[i] || !phase_complete);
+        if (!result) string_print(S8("error: qualify fixture python case {u64} ({S8}) admitted={u64} expected={u64}\n"),
+            i, pythons[i], (u64)output, (u64)admitted[i]);
+    }
+    return result;
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena)
 {
     String8 exact[] = {S8("--execute-preparation"), S8("--trusted-root"), S8("/trusted"),
@@ -926,10 +999,14 @@ BUSTER_GLOBAL_LOCAL bool compiler_preparation_controller_self_test(Arena* arena)
         files = 0; bytes = 0;
         bool rejected = raw && !compiler_preparation_controller_copy_directory(arena, source,
             path_join(arena, directory, S8("reject-export")), 0, &files, &bytes);
-        result = result && once && worker_once && exported && products_excluded && rejected && os_directory_delete(directory);
+        bool absolute_python = compiler_preparation_controller_qualify_fixture(arena, directory);
+        result = result && once && worker_once && exported && products_excluded && rejected && absolute_python &&
+            os_directory_delete(directory);
         string_print(S8("COMPILER_PREPARATION_CONTROLLER_SELF_TEST claim_once={u64} worker_once_serial_concurrent={u64} full_raw_export={u64} "
-            "empty_log={u64} executable_excluded={u64} unexpected_raw_rejected={u64} no_next_phase={u64} failed_phase_named={u64}\n"),
-            (u64)once, (u64)worker_once, (u64)exported, (u64)exported, (u64)products_excluded, (u64)rejected, (u64)stopped, (u64)named);
+            "empty_log={u64} executable_excluded={u64} unexpected_raw_rejected={u64} no_next_phase={u64} failed_phase_named={u64} "
+            "absolute_python_qualify={u64}\n"),
+            (u64)once, (u64)worker_once, (u64)exported, (u64)exported, (u64)products_excluded, (u64)rejected, (u64)stopped, (u64)named,
+            (u64)absolute_python);
     }
 #endif
     return result;

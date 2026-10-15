@@ -82,6 +82,12 @@ struct CTestAstTypeProbe
 };
 BUSTER_F_DECL CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CAst const* ast, String8 function,
                                                       u32 start, u32 end, bool checked);
+
+// Flexible-array promoted-member count replay checks and bounded traversal control.
+BUSTER_F_DECL bool c_test_ast_type_replay_effective_member_count(void);
+BUSTER_F_DECL bool c_test_flexible_array_postorder_work(Arena* arena);
+BUSTER_F_DECL bool c_test_parse_type_replay_effective_member_count(void);
+
 // Verify mode (c_test_ast_type_verify_set): every tree answer is also computed
 // by the type machine and compared; the tree answer is still what the caller
 // gets. The mode and its counts are per thread. A mismatch is a tree answer the
@@ -204,6 +210,8 @@ BUSTER_F_DECL CTestExpressionQuery c_test_expression_type_query(Arena* scratch, 
                                                                 u32 end, bool checked, bool nested, CTypeId cached, bool scalars,
                                                                 bool machine_only);
 BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
+// Force fresh completion queries to exercise row-free capture and rollback.
+BUSTER_F_DECL void c_test_ast_fact_uncached_set(bool enabled);
 // Keeps the interning window shut (CTypeInterning), so one source can be
 // compiled with and without interned rows and the objects compared.
 BUSTER_F_DECL void c_test_set_type_interning_off(bool off);
@@ -312,7 +320,7 @@ enum
 };
 BUSTER_F_DECL u64 c_test_parse_tag_scan_count(u32 slot);
 
-// Observable answers of the five production specifier-word token queries,
+// Observable answers of the production specifier and size/alignment token queries,
 // including their qualifier writes. No counters or state enter production.
 enum
 {
@@ -326,6 +334,8 @@ enum
     C_TEST_WORD_CLASS_RESTRICT = 1 << 7,
     C_TEST_WORD_CLASS_ATOMIC = 1 << 8,
     C_TEST_WORD_CLASS_QUALIFIERS_AGREE = 1 << 9,
+    C_TEST_WORD_CLASS_ALIGNOF = 1 << 10,
+    C_TEST_WORD_CLASS_SIZEOF_ALIGNOF = 1 << 11,
 };
 BUSTER_F_DECL u32 c_test_parse_word_classes(CPreprocessResult preprocess, CToken token);
 

@@ -964,8 +964,14 @@ struct IrFastStatistics
 // shifted right by IR_INLINE_MODULE_GROWTH_SHIFT (1/32 growth). A fixed
 // module cap starves optional sites in large translation units, because
 // callers are visited in module order rather than by profit (#48).
-#define IR_INLINE_TINY_INSTRUCTIONS 16u
-#define IR_INLINE_FUNCTION_GROWTH (2u * IR_INLINE_TINY_INSTRUCTIONS * IR_INLINE_CALL_SITES)
+// The 13-row callee limit keeps the one-line field predicates that carry the
+// measured self-host benefit (an 11-row token-punctuator test and a 13-row
+// shape test) and drops the 14-16-row band, whose sites added growth and
+// compile work for almost no executed calls (#3854). The optional per-caller
+// growth stays 2048 rows, twice the 64-site times 16-row budget it was sized
+// from, rather than following the callee limit.
+#define IR_INLINE_TINY_INSTRUCTIONS 13u
+#define IR_INLINE_FUNCTION_GROWTH 2048u
 #define IR_INLINE_MODULE_GROWTH 4096u
 #define IR_INLINE_MODULE_GROWTH_SHIFT 5u
 // Optional splices into a caller are kept only when their planned row growth,
@@ -1018,6 +1024,12 @@ struct IrInlineStatistics
     u64 visits;
     // Bytes of relocated caller tables handed back to the OS (os_discard).
     u64 released_bytes;
+    // Spliced callers proven by ir_validate_canonical_splice, and those whose
+    // splice proof refused so the full validator decided instead.
+    u64 splice_proofs;
+    u64 splice_fallbacks;
+    // Functions whose inliner proof the FAST input guard reused.
+    u64 reused_proofs;
     IrInlineBudgetReason required_budget_reason;
     u64 required_budget_demand;
     u64 required_budget_limit;
@@ -1067,11 +1079,12 @@ struct IrModule
     IrLocalPromotionStatistics local_promotion;
     bool inline_complete;
     IrInlineStatistics inlining;
-    // Callers whose splices were all optional and whose strict output check
-    // ir_inline_module deferred to preparation's next module-wide scan. Cleared
-    // once that scan proves them; see ir_prepare_canonical_module.
-    u32* inline_unchecked_callers;
-    u32 inline_unchecked_count;
+    // One byte per function, nonzero when ir_inline_module proved it strictly
+    // valid in its current state (as a callee, a caller or a splice output).
+    // The FAST input guard reuses the proof instead of validating again;
+    // promotion clears the byte of a function it rewrites, and preparation
+    // drops the table before returning. See ir_prepare_canonical_module.
+    u8* inline_proven;
     bool fast_complete;
     IrFastStatistics fast;
 };
@@ -1408,6 +1421,15 @@ BUSTER_F_DECL bool ir_local_promotion_call_barrier(IrProgram* program, IrInstruc
 // floating exceptions and unknown/exact effects remain observable.
 BUSTER_F_DECL bool ir_instruction_is_pure(IrProgram* program, IrFunction* function, IrInstruction const* row);
 BUSTER_F_DECL String8 ir_fast_pass_name(IrFastPass pass);
+// Construction-time fold experiment (#3010, -fcanonical-construction-fold):
+// the immediate ir_fast_fold would write for `candidate`, a CAST or BINARY row
+// a builder has described but not committed, whose operands are committed
+// values. A non-null `right_bits` is the constant the second operand would
+// hold once its own rows were built; that operand then supplies only its type.
+// True only for a constant rule (ir_fast_fold_rule); an identity, an
+// unfoldable row or one with no single-limb integer result is left as is.
+BUSTER_F_DECL bool ir_fast_fold_candidate(IrProgram* program, IrFunction* function, IrInstruction const* candidate, u64 const* right_bits,
+                                          u64* bits);
 BUSTER_F_DECL IrValidationResult ir_prepare_canonical_module(IrProgram* program, IrModule* module, bool input_certified);
 
 // Fixed-width two's-complement integer semantics (ir_integer.c): the one

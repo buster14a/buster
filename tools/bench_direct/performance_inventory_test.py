@@ -54,7 +54,19 @@ discharged rows (covered_inventory_rows) can neither silently lose a row when
 a leg or row is renamed or deleted nor discharge a row the inventory does not
 cover there.
 
-Map: discover, check_rows, check_native_row, check_profile_rows, check_leg_rows, main.
+Evidence is chosen by mechanism and claim (#4013). `evidence_classes` names
+the physical `zen5-native` class (whose routes are 9700X jobs) and the
+alternative `work-count` and `native-host` classes, each with the consumer
+that produces and checks it; `claims` maps each claim to its class and tools
+and must equal the `pe_claims` table of that consumer, so the policy and the
+tool cannot drift. A row may carry an `alternative` block naming the
+non-Zen-5 classes it supports through that consumer; it is counted
+separately and never as covered. An alternative consumer must state that it
+is not Zen 5 evidence, never check the approved host, and never be the
+consumer of a covered Zen 5 row, so a hosted or counted result can never be
+written as `zen5: covered`.
+
+Map: discover, check_rows, check_native_row, check_classes, check_profile_rows, check_leg_rows, main.
 """
 
 from __future__ import annotations
@@ -72,6 +84,11 @@ INVENTORY = ROOT / "docs" / "performance-validation-v1.json"
 BENCH_WORKFLOW = ROOT / ".github" / "workflows" / "9700x-direct-bench.yml"
 ROUTE_JOBS = {"main-compare": "  compare:", "pull-compare": "  compare-pull:", "direct-workload": "  bench:"}
 VALIDATIONS = ("performance", "diagnostic", "policy")
+PHYSICAL_CLASS = "zen5-native"
+ALTERNATIVE_CLASSES = ("work-count", "native-host")
+ALTERNATIVE_MARKER = "not Zen 5 evidence"
+# One pe_claims row: {"name", "class", "tool,tool", ...
+CLAIM_TABLE = re.compile(r'^\s*\{"([a-z0-9-]+)", "([a-z0-9-]+)", "([a-z,-]*)"', re.MULTILINE)
 BUILD_COMMAND = re.compile(r"bench|throughput|^production_profile$|^compiler_profile_qualification$")
 TOOL = re.compile(r"bench|benchmark|scaling|survey|performance|^compiler_profile_qualification\.c$")
 BUSTER_INCLUDE = re.compile(r"^\s*#\s*include\s*<buster/", re.MULTILINE)
@@ -86,12 +103,15 @@ NATIVE_ALERT_GATE = ("github.repository == 'buster14a/buster'", "github.ref == '
 PROFILE_ROWS = {
     "uarch_lab:compare@canonical-inline-self-host": "INLINE_ACCEPTANCE_PROFILE",
     "uarch_lab:compare@ast-pilot-acceptance": "AST_PILOT_ACCEPTANCE_PROFILE",
+    "uarch_lab:compare@ast-retirement-acceptance": "AST_RETIREMENT_PROFILE",
     "uarch_lab:compare@constant-reuse-acceptance": "CONSTANT_REUSE_ACCEPTANCE_PROFILE",
+    "uarch_lab:compare@process-floor": "PROCESS_FLOOR_PROFILE",
     "build:bench_throughput@throughput-real-source": "THROUGHPUT_REAL_SOURCE_PROFILE",
     "build:production_profile": "PRODUCTION_PROFILE_PROFILE",
     "tool:fast_ra_scaling.c": "COMPILER_PROBES_PROFILE",
     "tool:machine_line_mark_scaling.c": "COMPILER_PROBES_PROFILE",
     "tool:benchmark_frontend_scaling.py": "FRONTEND_SELECTOR_PROFILE",
+    "tool:benchmark_frontend_scaling.py@frontend-nesting": "FRONTEND_NESTING_PROFILE",
     "tool:selection_benchmark.py": "FRONTEND_SELECTOR_PROFILE",
     "ide:bench": "FRONTEND_SELECTOR_PROFILE",
     "tool:wild_linker_bench.c": "WILD_LINKER_PROFILE",
@@ -232,13 +252,30 @@ def check_rows(data: object, discovered: set[str], bench_workflow: str, read=rea
         errors.append(f"unregistered performance entry point: {missing}")
     for stale in sorted(bases - discovered):
         errors.append(f"inventory row names no current entry point: {stale}")
-    counts = {"covered": 0, "not_validated": 0, "no_route": 0, "native_informative": 0, "not_applicable": 0}
+    counts = {"covered": 0, "not_validated": 0, "no_route": 0, "native_informative": 0, "not_applicable": 0, "alternative": 0}
+    classes = data.get("evidence_classes") if isinstance(data.get("evidence_classes"), dict) else {}
+    alternative_consumers = {spec.get("consumer") for key, spec in classes.items()
+                             if key in ALTERNATIVE_CLASSES and isinstance(spec, dict)}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         name = entry.get("id")
         zen5 = entry.get("zen5") if isinstance(entry.get("zen5"), dict) else {}
         route, status = zen5.get("route"), zen5.get("status")
+        if "alternative" in entry:
+            alternative = entry["alternative"] if isinstance(entry["alternative"], dict) else {}
+            named = alternative.get("classes")
+            if entry.get("validation") != "performance" or alternative.get("status") != "supported" or \
+                    not isinstance(named, list) or not named or len(set(named)) != len(named) or \
+                    not set(named) <= set(ALTERNATIVE_CLASSES) or \
+                    any(not isinstance(classes.get(key), dict) or alternative.get("consumer") != classes[key].get("consumer")
+                        for key in named):
+                errors.append(f"{name}: an alternative block is a supported performance row naming only "
+                              f"{ALTERNATIVE_CLASSES} classes through their declared consumer")
+            else:
+                counts["alternative"] += 1
+        if status == "covered" and zen5.get("consumer") in alternative_consumers:
+            errors.append(f"{name}: alternative consumer {zen5.get('consumer')} can never discharge a zen5 row")
         if entry.get("validation") not in VALIDATIONS or not entry.get("measures"):
             errors.append(f"{name}: validation must be one of {VALIDATIONS} with a measures description")
         elif entry["validation"] != "performance":
@@ -268,6 +305,46 @@ def check_rows(data: object, discovered: set[str], bench_workflow: str, read=rea
         else:
             counts["covered"] += 1
     return errors, counts
+
+
+def check_classes(data: object, read=read_root) -> list[str]:
+    """The evidence classes, the claim map, and their agreement with the alternative consumer's pe_claims table."""
+    errors: list[str] = []
+    classes = data.get("evidence_classes") if isinstance(data, dict) else None
+    claims = data.get("claims") if isinstance(data, dict) else None
+    if not isinstance(classes, dict) or set(classes) != {PHYSICAL_CLASS, *ALTERNATIVE_CLASSES} or \
+            not all(isinstance(spec, dict) and spec.get("establishes") and spec.get("does_not_establish") for spec in classes.values()):
+        return [f"evidence_classes must define {PHYSICAL_CLASS} and {ALTERNATIVE_CLASSES}, each with what it establishes and does not"]
+    routes = classes[PHYSICAL_CLASS].get("routes")
+    if "consumer" in classes[PHYSICAL_CLASS] or not isinstance(routes, list) or not routes or \
+            not set(routes) <= set(ROUTE_JOBS):
+        errors.append(f"{PHYSICAL_CLASS} names only 9700X workflow routes {sorted(ROUTE_JOBS)} and no alternative consumer")
+    consumers = set()
+    for key in ALTERNATIVE_CLASSES:
+        consumer, tools = classes[key].get("consumer"), classes[key].get("tools")
+        source = read(consumer) if isinstance(consumer, str) else ""
+        consumers.add(consumer)
+        if "routes" in classes[key] or not source or not isinstance(tools, list) or not tools:
+            errors.append(f"{key}: an alternative class names an existing consumer and its tools, and no 9700X route")
+        elif ALTERNATIVE_MARKER not in source or HOST_CHECK.search(source):
+            errors.append(f"{key}: consumer {consumer} must state it is {ALTERNATIVE_MARKER!r} and never check the approved host")
+    table = {}
+    for consumer in sorted(c for c in consumers if isinstance(c, str)):
+        for claim, kind, tools in CLAIM_TABLE.findall(read(consumer)):
+            table[claim] = {"class": kind, "tools": [tool for tool in tools.split(",") if tool]}
+    if not isinstance(claims, dict) or not claims:
+        errors.append("claims must map each claim to its evidence class and tools")
+    else:
+        for claim, spec in claims.items():
+            kind = spec.get("class") if isinstance(spec, dict) else None
+            tools = spec.get("tools") if isinstance(spec, dict) else None
+            allowed = classes.get(kind, {}).get("tools", []) if isinstance(classes.get(kind), dict) else []
+            if kind not in classes or not isinstance(tools, list) or (kind == PHYSICAL_CLASS) != (not tools) or \
+                    not set(tools) <= set(allowed):
+                errors.append(f"claim {claim}: names an evidence class and only that class's tools; a {PHYSICAL_CLASS} claim has none")
+        if claims != table:
+            errors.append(f"claims {sorted(claims)} disagree with the consumer's pe_claims table {sorted(table)}")
+    return errors
 
 
 def check_profile_rows(data: object, receipt: str, read_consumer) -> list[str]:
@@ -323,6 +400,7 @@ def main() -> int:
     if data is not None:
         problems, counts = check_rows(data, discover(ROOT), BENCH_WORKFLOW.read_text(encoding="utf-8"))
         errors.extend(problems)
+        errors.extend(check_classes(data))
         errors.extend(check_profile_rows(data, RECEIPT.read_text(encoding="utf-8"),
                                          lambda path: (ROOT / path).read_text(encoding="utf-8") if (ROOT / path).is_file() else ""))
         errors.extend(check_leg_rows(data, INVENTORY_LEGS, INVENTORY_ROUTES))
@@ -444,12 +522,62 @@ def main() -> int:
         inventory = {"schema": "buster-performance-validation-v1", "entries": rows}
         if (not check_leg_rows(inventory, mapping, routes)) != expected:
             errors.append("self-check failed: " + label)
+    consumer = "tools/x_evidence.c"
+    source = ('"not Zen 5 evidence"\n{"work-reduction", "work-count", "callgrind", "hosted",\n'
+              '{"native-runtime", "native-host", "time", "hosted",\n{"uarch", "zen5-native", "", "pull-compare",\n')
+    classes = {PHYSICAL_CLASS: {"routes": ["pull-compare"], "establishes": "e", "does_not_establish": "d"},
+               "work-count": {"consumer": consumer, "tools": ["callgrind"], "establishes": "e", "does_not_establish": "d"},
+               "native-host": {"consumer": consumer, "tools": ["time"], "establishes": "e", "does_not_establish": "d"}}
+    claims = {"work-reduction": {"class": "work-count", "tools": ["callgrind"]},
+              "native-runtime": {"class": "native-host", "tools": ["time"]}, "uarch": {"class": PHYSICAL_CLASS, "tools": []}}
+    policy = {"evidence_classes": classes, "claims": claims}
+    for label, inventory, text, expected in (
+        ("matching classes and claims pass", policy, source, True),
+        ("a claim table drift fails", policy, source.replace('"time"', '"perf-stat"'), False),
+        ("a uarch claim cannot name a hosted tool",
+         dict(policy, claims=dict(claims, uarch={"class": PHYSICAL_CLASS, "tools": ["time"]})),
+         source.replace('"zen5-native", ""', '"zen5-native", "time"'), False),
+        ("a claim cannot borrow another class's tool",
+         dict(policy, claims=dict(claims, **{"native-runtime": {"class": "native-host", "tools": ["callgrind"]}})),
+         source.replace('"native-host", "time"', '"native-host", "callgrind"'), False),
+        ("an alternative consumer that checks the approved host fails", policy, source + "APPROVED_HOST\n", False),
+        ("an alternative consumer must disclaim Zen 5", policy, source.replace("not Zen 5 evidence", ""), False),
+        ("the physical class cannot use a hosted route",
+         dict(policy, evidence_classes=dict(classes, **{PHYSICAL_CLASS: dict(classes[PHYSICAL_CLASS], routes=["hosted"])})),
+         source, False),
+        ("the physical class cannot name an alternative consumer",
+         dict(policy, evidence_classes=dict(classes, **{PHYSICAL_CLASS: dict(classes[PHYSICAL_CLASS], consumer=consumer)})),
+         source, False),
+        ("a missing alternative class fails",
+         dict(policy, evidence_classes={k: v for k, v in classes.items() if k != "native-host"}), source, False),
+    ):
+        if (not check_classes(inventory, lambda path, text=text: text if path == consumer else "")) != expected:
+            errors.append("self-check failed: " + label)
+    alternative = {"status": "supported", "classes": ["work-count"], "consumer": consumer}
+    for label, entry, expected in (
+        ("a supported alternative row passes", dict(row, zen5=gap, alternative=alternative), True),
+        ("an alternative cannot name the physical class",
+         dict(row, zen5=gap, alternative=dict(alternative, classes=[PHYSICAL_CLASS])), False),
+        ("an alternative must use its class's consumer",
+         dict(row, zen5=gap, alternative=dict(alternative, consumer="tools/other.c")), False),
+        ("an alternative needs a class", dict(row, zen5=gap, alternative=dict(alternative, classes=[])), False),
+        ("a diagnostic row cannot carry an alternative",
+         dict(row, validation="diagnostic", zen5={"route": "none", "status": "not applicable", "reason": "r"},
+              alternative=alternative), False),
+        ("an alternative consumer cannot discharge a covered zen5 row",
+         dict(row, zen5=dict(row["zen5"], consumer=consumer)), False),
+    ):
+        inventory = {"schema": "buster-performance-validation-v1", "evidence_classes": classes, "entries": [entry]}
+        problems, tallies = check_rows(inventory, {"tool:x.py"}, bench)
+        if (not problems) != expected or (expected and tallies["alternative"] != 1):
+            errors.append("self-check failed: " + label)
     for error in errors:
         print("PERFORMANCE_INVENTORY_FAIL " + error, file=sys.stderr)
     if not errors:
         print("PERFORMANCE_INVENTORY_PASS covered={covered} not_validated={not_validated} no_route={no_route} "
-              "native_informative={native_informative} not_applicable={not_applicable}; performance validation is "
-              "complete only for covered entries, and native-informative timing is never Zen 5 evidence".format(**counts))
+              "native_informative={native_informative} not_applicable={not_applicable} alternative={alternative}; Zen 5 "
+              "validation is complete only for covered entries; native-informative timing and alternative evidence "
+              "are never Zen 5 evidence".format(**counts))
     return 1 if errors else 0
 
 

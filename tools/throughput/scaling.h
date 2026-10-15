@@ -50,17 +50,19 @@ static char const* const tp_scale_shape_names[TP_SCALE_SHAPES + 1] = {"equal", "
 /* The optional lane_gate field of the CC_METRICS header. A compiler without the
  * gate omits it; "serial" means the compiler kept one worker because the
  * population could not repay the multi-lane entry cost, so one worker is then
- * the truthful report (docs/agents/driver.md). */
+ * the truthful report; "capped" means it ran fewer workers than requested so
+ * each keeps a minimum of work, and reports those (docs/agents/driver.md). */
 typedef enum TpScaleGate
 {
     TP_SCALE_GATE_ABSENT,
     TP_SCALE_GATE_NONE,
     TP_SCALE_GATE_LANES,
     TP_SCALE_GATE_SERIAL,
+    TP_SCALE_GATE_CAPPED,
     TP_SCALE_GATE_UNKNOWN,
 } TpScaleGate;
 
-static char const* const tp_scale_gate_names[TP_SCALE_GATE_UNKNOWN + 1] = {"absent", "none", "lanes", "serial", "unknown"};
+static char const* const tp_scale_gate_names[TP_SCALE_GATE_UNKNOWN + 1] = {"absent", "none", "lanes", "serial", "capped", "unknown"};
 
 typedef struct TpScalePoint
 {
@@ -453,7 +455,18 @@ static int tp_scale_sample(TpScaleRun* run, TpScalePoint* point, unsigned iterat
                              tp_scale_gate_names[metrics.gate], tp_scale_gate_names[point->gate]);
             ok = 0;
         }
-        unsigned expected_workers = metrics.gate == TP_SCALE_GATE_SERIAL ? 1u : point->expected_workers;
+        /* A capped point runs fewer workers than requested; the cap is a
+         * function of the inputs, so every sample reports the same count. */
+        if (ok && metrics.gate == TP_SCALE_GATE_CAPPED &&
+            (!metrics.workers || metrics.workers >= point->expected_workers ||
+             (point->gate_seen && metrics.workers != point->observed_workers)))
+        {
+            tp_scale_invalid(run, "%s: compiler reported %u capped workers, expected fewer than %u and the same at every sample",
+                             label, metrics.workers, point->expected_workers);
+            ok = 0;
+        }
+        unsigned expected_workers = metrics.gate == TP_SCALE_GATE_SERIAL ? 1u :
+                                    metrics.gate == TP_SCALE_GATE_CAPPED ? metrics.workers : point->expected_workers;
         if (ok && metrics.workers != expected_workers)
         {
             tp_scale_invalid(run, "%s: compiler reported %u participating workers, expected %u (link-cohort path not exercised as requested)",
@@ -655,7 +668,9 @@ static int tp_scale_summary(TpScaleRun* run, int valid)
                 double speedup_low = reference_low / high, speedup_high = reference_high / low;
                 /* A gated point ran one worker; efficiency divides by the
                  * workers that actually participated. */
-                double efficiency = speedup / (double)(point->gate == TP_SCALE_GATE_SERIAL ? 1u : point->expected_workers);
+                double efficiency = speedup / (double)(point->gate == TP_SCALE_GATE_SERIAL ? 1u :
+                                                       point->gate == TP_SCALE_GATE_CAPPED ? point->observed_workers :
+                                                                                             point->expected_workers);
                 fprintf(json, "%s{\"workers\":%u,\"placement\":\"%s\",\"observed_workers\":%u,\"lane_gate\":",
                         i ? "," : "", point->workers, point->smt ? "smt" : "core", point->observed_workers);
                 if (point->gate == TP_SCALE_GATE_ABSENT) fputs("null", json);

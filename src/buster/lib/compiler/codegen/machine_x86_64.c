@@ -1534,7 +1534,9 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_place_address_offset(MachineX64Selec
     // not an address — an INDEX into one, reachable now that vector-ABI
     // calls and signatures select, snapshots the immutable SSA value into a
     // dedicated 64-byte slot and hands out that slot's address instead.
-    if (value_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER)
+    // FIELD/INDEX/DEREFERENCE places carry general-class addresses even
+    // when their object type is a 512-bit vector. Only rvalues need a snapshot.
+    if (value->category == IR_VALUE_VALUE && (value_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER))
     {
         u32 vector_register;
         if (!machine_x64_operand_register(selector, base, &vector_register))
@@ -10067,17 +10069,15 @@ BUSTER_GLOBAL_LOCAL String8 const machine_x64_avx512_features[] = {S8_INITIALIZE
 BUSTER_GLOBAL_LOCAL String8 const machine_x64_cx16_features[] = {S8_INITIALIZER("cx16")};
 
 // Expansion/prologue instructions use a small, closed set of physical
-// shapes.  Each shape resolves through the metadata selector once, on the
-// first thread that looks it up, and only the resulting opaque machine token
-// is published, under the entry's once-claim.  The signature deliberately describes physical shape/value
+// shapes.  Each shape resolves once, on the first thread that looks it up,
+// and only the resulting opaque machine token is published, under the entry's
+// once-claim.  The signature deliberately describes physical shape/value
 // classes, not register numbers or byte templates; dynamic registers,
 // displacements, and immediates are still validated by the metadata transform
 // on every emission.
 //
-// The serial prewarm registers the closed set rather than resolving it.  Its
-// 336 queries each run a generic selector search -- about 45 M instructions
-// in total, more than a one-function compile spends on everything else --
-// while an ordinary compile reaches a few dozen of the 267 distinct shapes.
+// The serial prewarm registers the closed set rather than resolving it: an
+// ordinary compile reaches a few dozen of its 275 distinct shapes.
 // Registration hashes each query and keeps its parameters; the first lookup
 // of a registered shape, serial or on a lane, resolves the same query the
 // eager walk would have resolved first, and a shape outside the closed set
@@ -10085,14 +10085,15 @@ BUSTER_GLOBAL_LOCAL String8 const machine_x64_cx16_features[] = {S8_INITIALIZER(
 // every registration, including the duplicate-signature agreement checks,
 // for the audits.
 //
-// Every x86-64 compile reaches the prologue, epilogue and zero-idiom shapes,
-// and the selector search for them alone (mostly XOR's) cost about 3.4 M
-// instructions of a one-function compile (#1125).  Those registrations pin
-// the durable form key the selector picks, as the exact recipe rows do, and
-// their first lookup prepares that key directly; a stale key fails closed in
+// Resolving a shape through the generic selector normalizes every candidate
+// form of its mnemonic, which cost about a fifth of a `basic_c_operations.c`
+// compile (#1125).  Every shape therefore pins the durable form key the selector
+// picks, as the exact recipe rows do (machine_x64_metadata_shape_pins), and
+// its first lookup prepares that key directly; a stale key fails closed in
 // the key lookup.  machine_x64_metadata_shape_cache_resolve_all still runs
-// the selector for every pinned registration and refuses the cache when it
-// disagrees, so the selector stays the authority the audits check.
+// the selector for every registration and refuses the cache when it
+// disagrees with the pin, so the selector stays the authority the audits
+// check.
 #define MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY 288u
 #define MACHINE_X64_METADATA_SHAPE_CACHE_SLOT_CAPACITY 512u
 #define MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY 384u
@@ -10125,7 +10126,7 @@ struct MachineX64MetadataShapeRegistration
     BusterX86MetadataFeatureInput features;
     BusterX86MetadataPhysicalAttributes attributes;
     BusterX86MetadataPhysicalOperand operands[MACHINE_X64_METADATA_SHAPE_QUERY_OPERAND_CAPACITY];
-    // The selector's form for this query, pinned; zero selects on resolve.
+    // The selector's form for this query, pinned; zero refuses the query.
     BusterX86MetadataFormKey key;
     u32 operand_count;
     u32 entry;
@@ -13437,25 +13438,322 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_select(MachineX64MetadataSha
     return result;
 }
 
-// Resolves one registered query as the eager walk resolved it: its form --
-// the pinned key, else the generic selector's -- then the plan
-// preparation and its machine token.
+// Resolves one registered query as the eager walk resolved it: its pinned
+// form, then the plan preparation and its machine token.
 BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_resolve(MachineX64MetadataShapeRegistration const* registration,
                                                             BusterX86MetadataMachineExactToken* token)
 {
-    BusterX86MetadataFormKey key = registration->key;
     BusterX86MetadataExactPlan plan = {0};
     *token = (BusterX86MetadataMachineExactToken){0};
-    bool result = (key.stable_hash || machine_x64_metadata_shape_select(registration, &key)) &&
-                  buster_x86_metadata_exact_plan_prepare(key, &plan) &&
+    bool result = registration->key.stable_hash && buster_x86_metadata_exact_plan_prepare(registration->key, &plan) &&
                   buster_x86_metadata_machine_exact_token_for_plan(plan, registration->features, token);
 
     return result;
 }
 
+// One pin per distinct shape, in the order the prewarm walk first registers
+// each signature: the signature folded to 32 bits, which ties the row to its
+// shape, and the form key the selector picks for that first query.  A
+// registration that meets a row with another signature, or no row, is
+// refused and the whole cache with it, so an edited walk cannot pin a shape
+// to its neighbour's form.  Adding, removing or reordering a shape means
+// editing this table to match; the machine test prints the rows the selector
+// picks (machine_x86_64_metadata_shape_pin_row) when any row is stale.
+typedef struct MachineX64MetadataShapePin MachineX64MetadataShapePin;
+struct MachineX64MetadataShapePin
+{
+    u32 signature;
+    u32 form_id;
+    u64 stable_hash;
+};
+BUSTER_GLOBAL_LOCAL MachineX64MetadataShapePin const machine_x64_metadata_shape_pins[] = {
+    {0x67f80c30u, 9871u, UINT64_C(0x9bdbc9f3b7084856)}, // CDQ
+    {0x67f80c36u, 9868u, UINT64_C(0xf74414378182b9c3)}, // CQO
+    {0x67f80c23u, 10020u, UINT64_C(0x3b8bf68c76094aa5)}, // RET
+    {0x67f80c61u, 10024u, UINT64_C(0x0e061e3ec5a0a740)}, // LEAVE
+    {0x67f80c20u, 10417u, UINT64_C(0x3fb0ee3f0042debc)}, // UD2
+    {0x67f80c05u, 10274u, UINT64_C(0xf524bc61e05b9360)}, // CPUID
+    {0x67f80c07u, 9852u, UINT64_C(0x6ec378240ea40a5e)}, // NOP
+    {0x67790c06u, 9853u, UINT64_C(0xac06d35919dde983)}, // PAUSE
+    {0x67790c04u, 10970u, UINT64_C(0x3e9fa6150563ddfc)}, // XGETBV
+    {0x67fb0c18u, 3203u, UINT64_C(0xca45be9dfde7d0ad)}, // VZEROUPPER
+    {0x2f1ede0au, 6884u, UINT64_C(0xfbe3234c89211a47)}, // KMOVB
+    {0x9c4c52c6u, 6885u, UINT64_C(0x3900f126e8907f53)}, // KMOVB
+    {0x701a0abcu, 6881u, UINT64_C(0x241457da5c14c8ad)}, // KMOVB
+    {0x01d1931eu, 7863u, UINT64_C(0xd9732958ed2b5db1)}, // KMOVW
+    {0x917c9279u, 7864u, UINT64_C(0x4a6860a83371b0d9)}, // KMOVW
+    {0x1124abeau, 7860u, UINT64_C(0x842c880fcc448659)}, // KMOVW
+    {0x938ccb59u, 6889u, UINT64_C(0xc5b48c00c055164e)}, // KMOVD
+    {0x830ff60eu, 6891u, UINT64_C(0x3c94bfaa3546fd07)}, // KMOVD
+    {0x0141905fu, 6886u, UINT64_C(0xcd2f33176794a8d7)}, // KMOVD
+    {0x31f4ce5bu, 6896u, UINT64_C(0x105806391b8c13c8)}, // KMOVQ
+    {0x485f4a59u, 6897u, UINT64_C(0x12ab4073f19fd9ef)}, // KMOVQ
+    {0x17b74eedu, 6893u, UINT64_C(0x9df323fd9c3f13b5)}, // KMOVQ
+    {0xa9d83a8cu, 6880u, UINT64_C(0xe4912b71d5b9d100)}, // KANDQ
+    {0xe77dd4f0u, 6903u, UINT64_C(0x8347c31d6bac0b9a)}, // KORQ
+    {0x872b2426u, 6924u, UINT64_C(0x3c8e53f705214008)}, // KXORQ
+    {0x2076b618u, 6921u, UINT64_C(0x760e4c2489e9a9a8)}, // KXNORQ
+    {0xc25fc4abu, 6894u, UINT64_C(0x5a85b17e7f39dde0)}, // KMOVQ
+    {0x3229adb8u, 6895u, UINT64_C(0x387e3755e595e689)}, // KMOVQ
+    {0xc6bc3cabu, 6894u, UINT64_C(0x5a85b17e7f39dde0)}, // KMOVQ
+    {0x29c3cfb8u, 6895u, UINT64_C(0x387e3755e595e689)}, // KMOVQ
+    {0x00ab55f7u, 9722u, UINT64_C(0x849cc7557c589605)}, // PUSH
+    {0x7a6fff6eu, 9724u, UINT64_C(0x688b3c3e7157d7f6)}, // POP
+    {0x103a8387u, 9484u, UINT64_C(0xb549bbb40e687ece)}, // CALL
+    {0xc184685fu, 9468u, UINT64_C(0x74ed831fc2c1cfa4)}, // DIV
+    {0xa1960de8u, 9470u, UINT64_C(0x5b3943a02ab7078c)}, // IDIV
+    {0x2028e1a0u, 9468u, UINT64_C(0x74ed831fc2c1cfa4)}, // DIV
+    {0x81c6ea0bu, 9470u, UINT64_C(0x5b3943a02ab7078c)}, // IDIV
+    {0x5b957cfdu, 9464u, UINT64_C(0x180de728cb51bad7)}, // MUL
+    {0xe1211658u, 9441u, UINT64_C(0x669e22edb26b1b3c)}, // NOT
+    {0xff397db7u, 9459u, UINT64_C(0xbd007ad8742aadfc)}, // NOT
+    {0xe95bdca9u, 9459u, UINT64_C(0xbd007ad8742aadfc)}, // NOT
+    {0x8901230au, 9459u, UINT64_C(0xbd007ad8742aadfc)}, // NOT
+    {0x6f07f6b9u, 9488u, UINT64_C(0x2491ccd5ae88bfdd)}, // JMP
+    {0x69065300u, 9839u, UINT64_C(0x9753ca7543626223)}, // MOV
+    {0xd5099d1fu, 9842u, UINT64_C(0x3ab69ab9d0d06329)}, // MOV
+    {0xe35e117eu, 9842u, UINT64_C(0x3ab69ab9d0d06329)}, // MOV
+    {0xa3cd75ecu, 9842u, UINT64_C(0x3ab69ab9d0d06329)}, // MOV
+    {0xbd106627u, 9698u, UINT64_C(0xccf38d7b6e2f28dc)}, // XOR
+    {0x97e66758u, 9701u, UINT64_C(0x915fb23b51f8b7d1)}, // XOR
+    {0xfbc251a3u, 9701u, UINT64_C(0x915fb23b51f8b7d1)}, // XOR
+    {0xe0b59c4fu, 9701u, UINT64_C(0x915fb23b51f8b7d1)}, // XOR
+    {0xdbded607u, 9617u, UINT64_C(0x69a26f2c5f3586cd)}, // ADD
+    {0x9ccf44e9u, 9620u, UINT64_C(0xf0743d28f1fbad54)}, // ADD
+    {0x37e538f8u, 9620u, UINT64_C(0xf0743d28f1fbad54)}, // ADD
+    {0x866869afu, 9620u, UINT64_C(0xf0743d28f1fbad54)}, // ADD
+    {0xf0a3fb3bu, 9644u, UINT64_C(0xed732968c021945d)}, // ADC
+    {0xf83e0d62u, 9647u, UINT64_C(0xfaceeeffb6154042)}, // ADC
+    {0x8e209f6bu, 9647u, UINT64_C(0xfaceeeffb6154042)}, // ADC
+    {0xf4086ce2u, 9647u, UINT64_C(0xfaceeeffb6154042)}, // ADC
+    {0xce360ec9u, 9685u, UINT64_C(0xc17f227b1683a7d3)}, // SUB
+    {0xbf41109du, 9688u, UINT64_C(0x240ef104bd0b9756)}, // SUB
+    {0x18630c1au, 9688u, UINT64_C(0x240ef104bd0b9756)}, // SUB
+    {0x4dd72cdbu, 9688u, UINT64_C(0x240ef104bd0b9756)}, // SUB
+    {0x8c4624c9u, 9658u, UINT64_C(0x2ffe3bade8c6128f)}, // SBB
+    {0xc74defebu, 9661u, UINT64_C(0x0516ae718ef6cac4)}, // SBB
+    {0x7c5aa1c0u, 9661u, UINT64_C(0x0516ae718ef6cac4)}, // SBB
+    {0x2ad951dcu, 9661u, UINT64_C(0x0516ae718ef6cac4)}, // SBB
+    {0xd323a41eu, 9672u, UINT64_C(0xcbdfecbe7e216f54)}, // AND
+    {0x6dbc08d4u, 9675u, UINT64_C(0x65889d347cd743a9)}, // AND
+    {0x580bfbc5u, 9675u, UINT64_C(0x65889d347cd743a9)}, // AND
+    {0x30662b53u, 9675u, UINT64_C(0x65889d347cd743a9)}, // AND
+    {0x57944352u, 9631u, UINT64_C(0x89a3abb502bbc55a)}, // OR
+    {0x49d6103bu, 9634u, UINT64_C(0x7f76bb71727dbfaa)}, // OR
+    {0xf7d080eau, 9634u, UINT64_C(0x7f76bb71727dbfaa)}, // OR
+    {0xf2427a86u, 9634u, UINT64_C(0x7f76bb71727dbfaa)}, // OR
+    {0x684be6eeu, 9712u, UINT64_C(0xa381563e623950cd)}, // CMP
+    {0x0f39c4a7u, 9832u, UINT64_C(0x29ceea139128c1a6)}, // TEST
+    {0x91a9667bu, 9712u, UINT64_C(0xa381563e623950cd)}, // CMP
+    {0x111dfcc1u, 9832u, UINT64_C(0x29ceea139128c1a6)}, // TEST
+    {0xa5a22651u, 10018u, UINT64_C(0x2a2535c90ada7adc)}, // MOV
+    {0x91d78b2du, 10018u, UINT64_C(0x2a2535c90ada7adc)}, // MOV
+    {0x1f3c4b90u, 10018u, UINT64_C(0x2a2535c90ada7adc)}, // MOV
+    {0x57186b1fu, 10018u, UINT64_C(0x2a2535c90ada7adc)}, // MOV
+    {0x54e12a08u, 10018u, UINT64_C(0x2a2535c90ada7adc)}, // MOV
+    {0x50d12920u, 9331u, UINT64_C(0xfb2791abf6574a42)}, // SUB
+    {0xee03d2b2u, 9285u, UINT64_C(0xb9527cc38accf111)}, // SUB
+    {0xe8f01219u, 9331u, UINT64_C(0xfb2791abf6574a42)}, // SUB
+    {0x6b6732efu, 9331u, UINT64_C(0xfb2791abf6574a42)}, // SUB
+    {0x6eaf7281u, 9285u, UINT64_C(0xb9527cc38accf111)}, // SUB
+    {0xd2a289dbu, 9331u, UINT64_C(0xfb2791abf6574a42)}, // SUB
+    {0x4adbc3bdu, 9285u, UINT64_C(0xb9527cc38accf111)}, // SUB
+    {0x4f3b0218u, 9331u, UINT64_C(0xfb2791abf6574a42)}, // SUB
+    {0x8a4e23efu, 9331u, UINT64_C(0xfb2791abf6574a42)}, // SUB
+    {0xf7606380u, 9285u, UINT64_C(0xb9527cc38accf111)}, // SUB
+    {0xd4832d90u, 9380u, UINT64_C(0x0a17471e29dc56c1)}, // SHL
+    {0x74e5f8c6u, 9382u, UINT64_C(0x5f94bfcc9a0bd9f1)}, // SHR
+    {0x2b258674u, 9328u, UINT64_C(0x75fae752db698667)}, // AND
+    {0x258b6e7eu, 9282u, UINT64_C(0xf8cff8616e3eb9e7)}, // AND
+    {0x63acac34u, 9328u, UINT64_C(0x75fae752db698667)}, // AND
+    {0x9b1fce8cu, 9328u, UINT64_C(0x75fae752db698667)}, // AND
+    {0x26200e29u, 9282u, UINT64_C(0xf8cff8616e3eb9e7)}, // AND
+    {0xe20e4e88u, 9328u, UINT64_C(0x75fae752db698667)}, // AND
+    {0xb0835b1fu, 9282u, UINT64_C(0xf8cff8616e3eb9e7)}, // AND
+    {0x37d49b42u, 9328u, UINT64_C(0x75fae752db698667)}, // AND
+    {0x303ffbcau, 9328u, UINT64_C(0x75fae752db698667)}, // AND
+    {0xbf713afau, 9282u, UINT64_C(0xf8cff8616e3eb9e7)}, // AND
+    {0x42347bd1u, 9336u, UINT64_C(0xe4ec217b899dab3c)}, // CMP
+    {0xb3067ebeu, 9290u, UINT64_C(0xc56880405dc82392)}, // CMP
+    {0xe1503110u, 9336u, UINT64_C(0xe4ec217b899dab3c)}, // CMP
+    {0x63c6d13fu, 9336u, UINT64_C(0xe4ec217b899dab3c)}, // CMP
+    {0x366b9eecu, 9290u, UINT64_C(0xc56880405dc82392)}, // CMP
+    {0xf784ce05u, 9336u, UINT64_C(0xe4ec217b899dab3c)}, // CMP
+    {0xbfe9b6eau, 9290u, UINT64_C(0xc56880405dc82392)}, // CMP
+    {0x38f97944u, 9336u, UINT64_C(0xe4ec217b899dab3c)}, // CMP
+    {0x39719919u, 9336u, UINT64_C(0xe4ec217b899dab3c)}, // CMP
+    {0xba5d56bcu, 9290u, UINT64_C(0xc56880405dc82392)}, // CMP
+    {0x15285463u, 9316u, UINT64_C(0xc4d75f09ceeb4f69)}, // ADD
+    {0x5c540270u, 9270u, UINT64_C(0xcebed63a599832c0)}, // ADD
+    {0xade6d9a1u, 9316u, UINT64_C(0xc4d75f09ceeb4f69)}, // ADD
+    {0x93cde285u, 9316u, UINT64_C(0xc4d75f09ceeb4f69)}, // ADD
+    {0x1688a2f8u, 9270u, UINT64_C(0xcebed63a599832c0)}, // ADD
+    {0xe53d473du, 9316u, UINT64_C(0xc4d75f09ceeb4f69)}, // ADD
+    {0xbfa1eed0u, 9270u, UINT64_C(0xcebed63a599832c0)}, // ADD
+    {0x24b4b17du, 9316u, UINT64_C(0xc4d75f09ceeb4f69)}, // ADD
+    {0xbc358e82u, 9316u, UINT64_C(0xc4d75f09ceeb4f69)}, // ADD
+    {0x3d584ee5u, 9270u, UINT64_C(0xcebed63a599832c0)}, // ADD
+    {0xb510c1eau, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0x224429fbu, 10289u, UINT64_C(0x6d04093431c32330)}, // MOVZX
+    {0x856d139fu, 9840u, UINT64_C(0xe7a77cae08617d2d)}, // MOV
+    {0xe13029eau, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0x8e2481fbu, 10289u, UINT64_C(0x6d04093431c32330)}, // MOVZX
+    {0x505a619fu, 9840u, UINT64_C(0xe7a77cae08617d2d)}, // MOV
+    {0xba54d1eau, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0x8a8579fbu, 10289u, UINT64_C(0x6d04093431c32330)}, // MOVZX
+    {0xcd485f9fu, 9840u, UINT64_C(0xe7a77cae08617d2d)}, // MOV
+    {0x449612abu, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0x9b45ac3bu, 10291u, UINT64_C(0xa910655fd16f6729)}, // MOVZX
+    {0xe0a65aa7u, 9841u, UINT64_C(0xa4ef94df2e338694)}, // MOV
+    {0x28b14aabu, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0xe8a5543bu, 10291u, UINT64_C(0xa910655fd16f6729)}, // MOVZX
+    {0x30aba8a7u, 9841u, UINT64_C(0xa4ef94df2e338694)}, // MOV
+    {0x7c55e2abu, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0xf3035c3bu, 10291u, UINT64_C(0xa910655fd16f6729)}, // MOVZX
+    {0x382beea7u, 9841u, UINT64_C(0xa4ef94df2e338694)}, // MOV
+    {0xb4ffbffdu, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0xf09fbb2bu, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0xfb1312c4u, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0x4c25d706u, 9841u, UINT64_C(0xa4ef94df2e338694)}, // MOV
+    {0xb021a7fdu, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0x0cbc632bu, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0xffb1eac4u, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0xb27a0506u, 9841u, UINT64_C(0xa4ef94df2e338694)}, // MOV
+    {0x1cc10ffdu, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0xf95bcb2bu, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0x935042c4u, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0xd922f306u, 9841u, UINT64_C(0xa4ef94df2e338694)}, // MOV
+    {0xbe8b1af3u, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0xfe8b0029u, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0x449cf095u, 9841u, UINT64_C(0xa4ef94df2e338694)}, // MOV
+    {0xba6d12f3u, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0x22abf829u, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0x2946f295u, 9841u, UINT64_C(0xa4ef94df2e338694)}, // MOV
+    {0x164a4af3u, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0xf5471029u, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0x54c52c95u, 9841u, UINT64_C(0xa4ef94df2e338694)}, // MOV
+    {0x768fd80fu, 9435u, UINT64_C(0xdaf1061527ddb0b6)}, // TEST
+    {0x0b93e357u, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0xb2c07692u, 9849u, UINT64_C(0x0b357f27b62f3409)}, // LEA
+    {0x16c14e03u, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0x5cc26713u, 9623u, UINT64_C(0xeb2905b1019367c1)}, // ADD
+    {0x7a863ae1u, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0x0679d33bu, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0xca22d5e0u, 9845u, UINT64_C(0xca30e68cfa1406bc)}, // MOV
+    {0x5058255bu, 9483u, UINT64_C(0xe1130d6a5f43f9bf)}, // CALL
+    {0xd3bb81d0u, 9486u, UINT64_C(0x96622bbd299ae0ce)}, // CALL
+    {0xda11ce13u, 10063u, UINT64_C(0xd16c369d7adb0de7)}, // JMP
+    {0xaf8030d7u, 10060u, UINT64_C(0xab9c4b53fce14f6e)}, // JMP
+    {0x842d24cdu, 9815u, UINT64_C(0x153dbeec47f92bf5)}, // JNS
+    {0x9bad3668u, 9801u, UINT64_C(0xcffe6700865fccc7)}, // JB
+    {0xa5ab7e94u, 10255u, UINT64_C(0x0da05f55f9ead40a)}, // JNBE
+    {0x57fefc29u, 10251u, UINT64_C(0x4d8e220c403f8696)}, // JNZ
+    {0xa5ff1536u, 10249u, UINT64_C(0x5b6e3cd6eb63b76c)}, // JZ
+    {0xc2cd79dbu, 10574u, UINT64_C(0x7bd465046ab10c4f)}, // MOVQ
+    {0xacb1881au, 10574u, UINT64_C(0x7bd465046ab10c4f)}, // MOVQ
+    {0x6b585ac6u, 10436u, UINT64_C(0x8632f672b995b8ef)}, // CVTSI2SS
+    {0x198bbb4du, 10463u, UINT64_C(0x6b1b449f0ed1e10e)}, // CVTSI2SD
+    {0xb6aede6du, 10575u, UINT64_C(0x3698d9bff62c4360)}, // MOVQ
+    {0x3f03d4a0u, 10440u, UINT64_C(0x443fee16922dd4d2)}, // CVTTSS2SI
+    {0x563d35a7u, 10467u, UINT64_C(0xdb7e2aa7c56853cf)}, // CVTTSD2SI
+    {0xc5a34355u, 10440u, UINT64_C(0x443fee16922dd4d2)}, // CVTTSS2SI
+    {0xd287392eu, 10467u, UINT64_C(0xdb7e2aa7c56853cf)}, // CVTTSD2SI
+    {0x9071fa02u, 10505u, UINT64_C(0xb7548ac43adc345e)}, // ADDSS
+    {0x11f57424u, 10537u, UINT64_C(0x64c1f66df6f45674)}, // ADDSD
+    {0x18715d4bu, 10513u, UINT64_C(0x9444e608b81120dc)}, // SUBSS
+    {0xf542815bu, 10543u, UINT64_C(0x1b16db007692b16b)}, // SUBSD
+    {0xc297015au, 10430u, UINT64_C(0x758a837bb57fa186)}, // UCOMISS
+    {0x7f778e29u, 10457u, UINT64_C(0xf0a4b9d9331f46de)}, // UCOMISD
+    {0x8e4a5267u, 10115u, UINT64_C(0xc1d09809729f02cb)}, // MOVSD
+    {0xdf09c771u, 10116u, UINT64_C(0xe883b23a096e675b)}, // MOVSD
+    {0x9e3f4ee4u, 10602u, UINT64_C(0x74cbe7a7b51b05a1)}, // MOVDQU
+    {0x000fedf0u, 10085u, UINT64_C(0xa188a812b928c5a8)}, // MOVUPS
+    {0xfd0653c7u, 10604u, UINT64_C(0xeb12d80c85c54a91)}, // MOVDQU
+    {0x78c24bb2u, 10087u, UINT64_C(0x0fd91e57af10e912)}, // MOVUPS
+    {0x857017ffu, 3338u, UINT64_C(0xed1af43df61ec2d0)}, // VMOVDQU
+    {0x8796a3fau, 3342u, UINT64_C(0x06c3b15612d61199)}, // VMOVDQU
+    {0xf3bc5e69u, 5636u, UINT64_C(0x62bba0430900201e)}, // VMOVDQU8
+    {0x59ae2edfu, 5638u, UINT64_C(0xa3f8bbb35dcafc20)}, // VMOVDQU8
+    {0x5a690a67u, 10115u, UINT64_C(0xc1d09809729f02cb)}, // MOVSD
+    {0x3b21fd71u, 10116u, UINT64_C(0xe883b23a096e675b)}, // MOVSD
+    {0x720026e4u, 10602u, UINT64_C(0x74cbe7a7b51b05a1)}, // MOVDQU
+    {0x8d65a5f0u, 10085u, UINT64_C(0xa188a812b928c5a8)}, // MOVUPS
+    {0x856551c7u, 10604u, UINT64_C(0xeb12d80c85c54a91)}, // MOVDQU
+    {0x5f6f99b2u, 10087u, UINT64_C(0x0fd91e57af10e912)}, // MOVUPS
+    {0xd150cfffu, 3338u, UINT64_C(0xed1af43df61ec2d0)}, // VMOVDQU
+    {0xbec9a1fau, 3342u, UINT64_C(0x06c3b15612d61199)}, // VMOVDQU
+    {0xaf9cf669u, 5636u, UINT64_C(0x62bba0430900201e)}, // VMOVDQU8
+    {0x89e9d8dfu, 5638u, UINT64_C(0xa3f8bbb35dcafc20)}, // VMOVDQU8
+    {0x568b0267u, 10115u, UINT64_C(0xc1d09809729f02cb)}, // MOVSD
+    {0xc37bfb71u, 10116u, UINT64_C(0xe883b23a096e675b)}, // MOVSD
+    {0xc6e19ee4u, 10602u, UINT64_C(0x74cbe7a7b51b05a1)}, // MOVDQU
+    {0xd9465df0u, 10085u, UINT64_C(0xa188a812b928c5a8)}, // MOVUPS
+    {0xc73c97c7u, 10604u, UINT64_C(0xeb12d80c85c54a91)}, // MOVDQU
+    {0xb04b9fb2u, 10087u, UINT64_C(0x0fd91e57af10e912)}, // MOVUPS
+    {0x7db3a7ffu, 3338u, UINT64_C(0xed1af43df61ec2d0)}, // VMOVDQU
+    {0xbac0b7fau, 3342u, UINT64_C(0x06c3b15612d61199)}, // VMOVDQU
+    {0x5b7b2e69u, 5636u, UINT64_C(0x62bba0430900201e)}, // VMOVDQU8
+    {0x121812dfu, 5638u, UINT64_C(0xa3f8bbb35dcafc20)}, // VMOVDQU8
+    {0x43f7a5a5u, 5635u, UINT64_C(0xea537c4b94111b09)}, // VMOVDQU8
+    {0x95520272u, 10277u, UINT64_C(0x491257d8d770411f)}, // CMPXCHG
+    {0xe022e7b6u, 10280u, UINT64_C(0x46a888e2c049f87a)}, // CMPXCHG
+    {0xd229cca5u, 10280u, UINT64_C(0x46a888e2c049f87a)}, // CMPXCHG
+    {0xdd80de23u, 10280u, UINT64_C(0x46a888e2c049f87a)}, // CMPXCHG
+    {0x99f03c94u, 9529u, UINT64_C(0x2138fdd916d1a9f2)}, // CMPXCHG16B
+    {0x4994cf40u, 9097u, UINT64_C(0x2ca15680a04de6e5)}, // FLD
+    {0x6c708247u, 9196u, UINT64_C(0x709af98e04218f3a)}, // FLD
+    {0xf3a774c3u, 9171u, UINT64_C(0x3adee50255c10081)}, // FLD
+    {0x795d0b07u, 9099u, UINT64_C(0x0393e479ad9befb6)}, // FSTP
+    {0x8141c404u, 9101u, UINT64_C(0x6bff6140d200bb2c)}, // FSTP
+    {0xe03e1f98u, 9100u, UINT64_C(0x47ec227e8c7b7206)}, // FSTP
+    {0xe76d6d38u, 9238u, UINT64_C(0x85be493378b035e4)}, // FILD
+    {0xe67cb60cu, 9240u, UINT64_C(0x1fbf5a25d30dea1f)}, // FISTP
+    {0x1d6fb92bu, 9121u, UINT64_C(0x075710d1c5fc8f86)}, // FNSTCW
+    {0xe4675263u, 9113u, UINT64_C(0xddf4d59743325f83)}, // FLDCW
+    {0x671aa183u, 9534u, UINT64_C(0x9e7d961557ea6f0f)}, // MOV
+    {0x45a5cf42u, 9534u, UINT64_C(0x9e7d961557ea6f0f)}, // MOV
+    {0x1d756740u, 9097u, UINT64_C(0x2ca15680a04de6e5)}, // FLD
+    {0x18902a47u, 9196u, UINT64_C(0x709af98e04218f3a)}, // FLD
+    {0x47840cc3u, 9171u, UINT64_C(0x3adee50255c10081)}, // FLD
+    {0x057ca307u, 9099u, UINT64_C(0x0393e479ad9befb6)}, // FSTP
+    {0xdd612c04u, 9101u, UINT64_C(0x6bff6140d200bb2c)}, // FSTP
+    {0x4c5db798u, 9100u, UINT64_C(0x47ec227e8c7b7206)}, // FSTP
+    {0x534db538u, 9238u, UINT64_C(0x85be493378b035e4)}, // FILD
+    {0x9a1b6e0cu, 9240u, UINT64_C(0x1fbf5a25d30dea1f)}, // FISTP
+    {0xa98f112bu, 9121u, UINT64_C(0x075710d1c5fc8f86)}, // FNSTCW
+    {0x1046aa63u, 9113u, UINT64_C(0xddf4d59743325f83)}, // FLDCW
+    {0x6f9a6783u, 9534u, UINT64_C(0x9e7d961557ea6f0f)}, // MOV
+    {0x2b6d4542u, 9534u, UINT64_C(0x9e7d961557ea6f0f)}, // MOV
+    {0xf78abb09u, 9226u, UINT64_C(0x2143a332a2fb86cf)}, // FADDP
+    {0x83cb15c6u, 9230u, UINT64_C(0x6c18eba25a53e963)}, // FSUBP
+    {0x79ebbc07u, 9227u, UINT64_C(0x9a3ec97abafb63f4)}, // FMULP
+    {0x61f0874au, 9232u, UINT64_C(0x029e75c443611679)}, // FDIVP
+    {0x045456e6u, 9243u, UINT64_C(0x34f0162936b38f3c)}, // FUCOMIP
+    {0xe41b76deu, 9244u, UINT64_C(0x84a2345f3851e5c1)}, // FCOMIP
+    {0x9b63d166u, 9102u, UINT64_C(0x747225e87ff7ee12)}, // FSTP
+    {0x67fa0c72u, 9127u, UINT64_C(0x00a199b9f7f1fcda)}, // FCHS
+    {0xa15c546eu, 10265u, UINT64_C(0x261b81212af08017)}, // SETZ
+    {0x5f4f7663u, 10267u, UINT64_C(0x99647caf50cf7fff)}, // SETNZ
+    {0xd94ad090u, 10261u, UINT64_C(0x0bc47fa18ee6a6de)}, // SETB
+    {0x5b8da43cu, 10269u, UINT64_C(0x73419bd793371f04)}, // SETBE
+    {0xec01398cu, 10271u, UINT64_C(0x04c681fe5d1e14b1)}, // SETNBE
+    {0x61feac5fu, 10263u, UINT64_C(0x7022443cd4a81cf5)}, // SETNB
+    {0x9ffdc501u, 10647u, UINT64_C(0x65dc8e342334f3cb)}, // SETP
+    {0x5df2223au, 10649u, UINT64_C(0xd15c6a2ed2b79fc2)}, // SETNP
+    {0x0902621eu, 9273u, UINT64_C(0xf44d00c8f2c9ea29)}, // OR
+    {0xfa705e80u, 10294u, UINT64_C(0xa9d675ab86fb1641)}, // MOVZX
+};
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(machine_x64_metadata_shape_pins) <= MACHINE_X64_METADATA_SHAPE_CACHE_CAPACITY);
+
+BUSTER_GLOBAL_LOCAL u32 machine_x64_metadata_shape_pin_signature(u64 signature)
+{
+    return (u32)(signature ^ (signature >> 32));
+}
+
 // Registers one closed-set query.  Nothing is selected here: a new signature
-// gets a pending entry that remembers this first query, and a repeated
-// signature only has its guard checked; its token agreement is checked by
+// gets a pending entry that remembers this first query and its pin, and a
+// repeated signature only has its guard checked and shares the entry's pin;
+// that its query selects the same form is checked by
 // machine_x64_metadata_shape_cache_resolve_all.
 BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
                                                                BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
@@ -13469,6 +13767,17 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
         entry_index += 1;
     }
     bool existing = entry_index < machine_x64_metadata_shape_cache_count;
+    BusterX86MetadataFormKey key = {0};
+    if (existing)
+    {
+        key = machine_x64_metadata_shape_registrations[machine_x64_metadata_shape_cache[entry_index].registration].key;
+    }
+    else if (entry_index < BUSTER_ARRAY_LENGTH(machine_x64_metadata_shape_pins) &&
+             machine_x64_metadata_shape_pins[entry_index].signature == machine_x64_metadata_shape_pin_signature(hashes.signature))
+    {
+        key = (BusterX86MetadataFormKey){machine_x64_metadata_shape_pins[entry_index].form_id,
+                                         machine_x64_metadata_shape_pins[entry_index].stable_hash};
+    }
     bool result = machine_x64_metadata_shape_mnemonic_id(mnemonic) != 0 &&
                   operand_count <= MACHINE_X64_METADATA_SHAPE_QUERY_OPERAND_CAPACITY &&
                   machine_x64_metadata_shape_registration_count < MACHINE_X64_METADATA_SHAPE_REGISTRATION_CAPACITY &&
@@ -13482,6 +13791,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
             .mnemonic = mnemonic,
             .features = features,
             .attributes = attributes,
+            .key = key,
             .operand_count = operand_count,
             .entry = entry_index,
         };
@@ -13501,25 +13811,15 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_metadata_shape_cache_add(String8 mnemonic,
             machine_x64_metadata_shape_cache_count += 1;
         }
     }
-    else
+    // A shape without its pin is still registered, so the shapes after it
+    // keep their rows, but it refuses the cache.
+    result = result && key.stable_hash;
+    if (!result)
     {
         machine_x64_metadata_shape_cache_invalid_count += 1;
     }
 
     return result;
-}
-
-// Registers one closed-set query with the form the selector picks for it
-// pinned; see the shape-cache notes above.
-BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_add_keyed(BusterX86MetadataFormKey key, String8 mnemonic,
-                                                                     BusterX86MetadataPhysicalOperand const* operands, u32 operand_count,
-                                                                     BusterX86MetadataFeatureInput features,
-                                                                     BusterX86MetadataPhysicalAttributes attributes)
-{
-    if (machine_x64_metadata_shape_cache_add(mnemonic, operands, operand_count, features, attributes))
-    {
-        machine_x64_metadata_shape_registrations[machine_x64_metadata_shape_registration_count - 1u].key = key;
-    }
 }
 
 // Resolves a pending entry under its once-claim, from any thread; a thread
@@ -13544,8 +13844,9 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_entry(MachineX
 
 // Resolves every registration in registration order -- the order of the
 // eager walk -- and repeats its check that queries sharing a signature select
-// the same token, so no gang can reach a pending entry.  A pinned key must
-// also be the selector's choice, whether or not a lookup already resolved it.
+// the same token, so no gang can reach a pending entry.  Every registration's
+// pin must also be the selector's choice for its own query, whether or not a
+// lookup already resolved it.
 BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_all(void)
 {
     if (!machine_x64_metadata_shape_cache_complete)
@@ -13574,17 +13875,14 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_resolve_all(void)
                     machine_x64_metadata_shape_cache_ready = false;
                 }
             }
-            if (registration->key.stable_hash)
+            BusterX86MetadataFormKey selected = {0};
+            bool selector_agrees = machine_x64_metadata_shape_select(registration, &selected) &&
+                                   selected.form_id == registration->key.form_id &&
+                                   selected.stable_hash == registration->key.stable_hash;
+            if (!selector_agrees)
             {
-                BusterX86MetadataFormKey selected = {0};
-                bool agrees = machine_x64_metadata_shape_select(registration, &selected) &&
-                              selected.form_id == registration->key.form_id &&
-                              selected.stable_hash == registration->key.stable_hash;
-                if (!agrees)
-                {
-                    machine_x64_metadata_shape_cache_invalid_count += 1;
-                    machine_x64_metadata_shape_cache_ready = false;
-                }
+                machine_x64_metadata_shape_cache_invalid_count += 1;
+                machine_x64_metadata_shape_cache_ready = false;
             }
         }
         machine_x64_metadata_shape_cache_complete = true;
@@ -13748,10 +14046,8 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_zero(void)
     BusterX86MetadataPhysicalAttributes attributes = {0};
     (void)machine_x64_metadata_shape_cache_add(S8("CDQ"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("CQO"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
-    machine_x64_metadata_shape_cache_add_keyed((BusterX86MetadataFormKey){MACHINE_X64_RET_EXACT_FORM_ID, UINT64_C(0x3b8bf68c76094aa5)},
-                                               S8("RET"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
-    machine_x64_metadata_shape_cache_add_keyed((BusterX86MetadataFormKey){MACHINE_X64_LEAVE_EXACT_FORM_ID, UINT64_C(0x0e061e3ec5a0a740)},
-                                               S8("LEAVE"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("RET"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("LEAVE"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("UD2"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("CPUID"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("NOP"), 0, 0, (BusterX86MetadataFeatureInput){0}, attributes);
@@ -13773,10 +14069,8 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_unary(void)
 {
     BusterX86MetadataPhysicalAttributes attributes = {0};
     BusterX86MetadataPhysicalOperand operand = machine_x64_exact_gpr_operand(0, 64);
-    machine_x64_metadata_shape_cache_add_keyed((BusterX86MetadataFormKey){MACHINE_X64_PUSH_REGISTER_EXACT_FORM_ID, UINT64_C(0x849cc7557c589605)},
-                                               S8("PUSH"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
-    machine_x64_metadata_shape_cache_add_keyed((BusterX86MetadataFormKey){MACHINE_X64_POP_REGISTER_EXACT_FORM_ID, UINT64_C(0x688b3c3e7157d7f6)},
-                                               S8("POP"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("PUSH"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
+    (void)machine_x64_metadata_shape_cache_add(S8("POP"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
     (void)machine_x64_metadata_shape_cache_add(S8("CALL"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
     operand.width = operand.reg.width = 32;
     (void)machine_x64_metadata_shape_cache_add(S8("DIV"), &operand, 1, (BusterX86MetadataFeatureInput){0}, attributes);
@@ -13810,11 +14104,6 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_registers(void
     BusterX86MetadataPhysicalAttributes attributes = {0};
     String8 binary_names[] = {S8("MOV"), S8("XOR"), S8("ADD"), S8("ADC"), S8("SUB"), S8("SBB"), S8("AND"), S8("OR")};
     u16 binary_widths[] = {8, 16, 32, 64};
-    // The frame-pointer copy and the zero idiom are in every compile.
-    BusterX86MetadataFormKey binary_keys[BUSTER_ARRAY_LENGTH(binary_names)][BUSTER_ARRAY_LENGTH(binary_widths)] = {
-        [0][3] = {MACHINE_X64_MOV_RR_EXACT_FORM_ID, UINT64_C(0x3ab69ab9d0d06329)},
-        [1][2] = {MACHINE_X64_XOR_RR_EXACT_FORM_ID, UINT64_C(0x915fb23b51f8b7d1)},
-    };
     for (u32 name_index = 0; name_index < BUSTER_ARRAY_LENGTH(binary_names); name_index += 1)
     {
         for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(binary_widths); width_index += 1)
@@ -13823,8 +14112,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prepare_registers(void
             BusterX86MetadataPhysicalOperand operands[2] = {
                 machine_x64_exact_gpr_operand(0, width), machine_x64_exact_gpr_operand(1, width),
             };
-            machine_x64_metadata_shape_cache_add_keyed(binary_keys[name_index][width_index], binary_names[name_index], operands, 2,
-                                                       (BusterX86MetadataFeatureInput){0}, attributes);
+            (void)machine_x64_metadata_shape_cache_add(binary_names[name_index], operands, 2, (BusterX86MetadataFeatureInput){0}, attributes);
         }
     }
     u16 compare_widths[] = {32, 64};
@@ -14119,6 +14407,11 @@ BUSTER_GLOBAL_LOCAL void machine_x64_metadata_shape_cache_prewarm(void)
         machine_x64_metadata_shape_cache_prepare_relative();
         machine_x64_metadata_shape_cache_prepare_float_vector_atomic();
         machine_x64_metadata_shape_cache_prepare_x87();
+        // A pin row left over by a removed shape is as stale as a missing one.
+        if (machine_x64_metadata_shape_cache_count != BUSTER_ARRAY_LENGTH(machine_x64_metadata_shape_pins))
+        {
+            machine_x64_metadata_shape_cache_invalid_count += 1;
+        }
         machine_x64_metadata_shape_cache_publish_slots();
         machine_x64_metadata_shape_cache_ready = machine_x64_metadata_shape_cache_invalid_count == 0;
     }
@@ -14148,6 +14441,36 @@ MachineX64MetadataShapeCacheAudit machine_x86_64_metadata_shape_cache_audit(void
         .valid = machine_x64_metadata_shape_cache_ready && machine_x64_metadata_shape_cache_count != 0 &&
                  machine_x64_metadata_shape_cache_invalid_count == 0,
     };
+}
+
+bool machine_x86_64_metadata_shape_pin_row(u32 row, MachineX64MetadataShapePinRow* pin)
+{
+    machine_x86_64_exact_prewarm_all();
+    *pin = (MachineX64MetadataShapePinRow){0};
+    bool result = row < machine_x64_metadata_shape_cache_count;
+    if (result)
+    {
+        MachineX64MetadataShapeCacheEntry const* entry = machine_x64_metadata_shape_cache + row;
+        MachineX64MetadataShapeRegistration const* registration = machine_x64_metadata_shape_registrations + entry->registration;
+        BusterX86MetadataFormKey key = {0};
+        result = machine_x64_metadata_shape_select(registration, &key);
+        u32 signature = machine_x64_metadata_shape_pin_signature(entry->signature);
+        bool current = result && row < BUSTER_ARRAY_LENGTH(machine_x64_metadata_shape_pins);
+        if (current)
+        {
+            MachineX64MetadataShapePin const* table = machine_x64_metadata_shape_pins + row;
+            current = table->signature == signature && table->form_id == key.form_id && table->stable_hash == key.stable_hash;
+        }
+        *pin = (MachineX64MetadataShapePinRow){
+            .mnemonic = registration->mnemonic,
+            .stable_hash = key.stable_hash,
+            .signature = signature,
+            .form_id = key.form_id,
+            .current = current,
+        };
+    }
+
+    return result;
 }
 #endif
 

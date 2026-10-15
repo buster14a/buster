@@ -8,7 +8,7 @@
 #include <dirent.h>
 
 #define EXTERNAL_POLICY_FILE_LIMIT (256u * 1024u)
-static const char* projects[] = {"cjson", "zlib", "stb", "lua", "quickjs", "sqlite", "git", "rad"};
+static const char* projects[] = {"cjson", "zlib", "stb", "lua", "quickjs", "sqlite", "git", "rad", "ffmpeg"};
 static const char* legacy[] = {"raddebugger-compatibility.yml", "capability-portfolio.yml", "throughput-real-source.yml", "git-qualification.yml"};
 static unsigned count(const char* text, const char* needle)
 {
@@ -21,6 +21,81 @@ static unsigned count(const char* text, const char* needle)
         cursor += length;
     }
     return result;
+}
+
+static int ffmpeg_owner_valid(const char* text)
+{
+    const char* rad_artifact = strstr(text, "- name: Retain rad evidence immediately\n");
+    const char* checkout = strstr(text, "- name: Checkout pinned FFmpeg 7.1.3 source after existing Linux stages\n");
+    const char* identity = strstr(text, "- name: Record pristine FFmpeg source identity\n");
+    const char* route = strstr(text, "- name: ffmpeg independent project result\n");
+    const char* artifact = strstr(text, "- name: Retain FFmpeg portable evidence immediately\n");
+    const char* publish = strstr(text, "- name: Publish Linux OS outcomes\n");
+    const char* artifact_paths =
+        "          path: |\n"
+        "            evidence/ffmpeg.status\n"
+        "            evidence/ffmpeg.commit\n"
+        "            evidence/ffmpeg.tree\n"
+        "            evidence/ffmpeg.worktree-status\n"
+        "            evidence/ffmpeg.files\n"
+        "            evidence/ffmpeg-LICENSE.md\n"
+        "            evidence/projects/ffmpeg.tsv\n"
+        "            evidence/ffmpeg.log\n"
+        "            build/ffmpeg-portable/receipt.txt\n"
+        "            build/ffmpeg-portable/h264-target-actions.tsv\n"
+        "            build/ffmpeg-portable/*.argv\n"
+        "            build/ffmpeg-portable/*.stdout\n"
+        "            build/ffmpeg-portable/*.stderr\n"
+        "            build/ffmpeg-portable/*.status\n"
+        "            build/ffmpeg-portable/reference/config.h\n"
+        "            build/ffmpeg-portable/reference/config_components.h\n"
+        "            build/ffmpeg-portable/reference/ffbuild/config.mak\n"
+        "            build/ffmpeg-portable/reference/ffbuild/config.log\n"
+        "            build/ffmpeg-portable/reference/fate-counts.tsv\n"
+        "            build/ffmpeg-portable/reference/*.argv\n"
+        "            build/ffmpeg-portable/reference/*.stdout\n"
+        "            build/ffmpeg-portable/reference/*.stderr\n"
+        "            build/ffmpeg-portable/reference/*.status\n"
+        "            build/ffmpeg-portable/buster/config.h\n"
+        "            build/ffmpeg-portable/buster/config_components.h\n"
+        "            build/ffmpeg-portable/buster/ffbuild/config.mak\n"
+        "            build/ffmpeg-portable/buster/ffbuild/config.log\n"
+        "            build/ffmpeg-portable/buster/fate-counts.tsv\n"
+        "            build/ffmpeg-portable/buster/*.argv\n"
+        "            build/ffmpeg-portable/buster/*.stdout\n"
+        "            build/ffmpeg-portable/buster/*.stderr\n"
+        "            build/ffmpeg-portable/buster/*.status\n"
+        "            build/ffmpeg-portable/buster/compiler-actions/*.argv\n"
+        "            build/ffmpeg-portable/buster/compiler-actions/*.stdout\n"
+        "            build/ffmpeg-portable/buster/compiler-actions/*.stderr\n"
+        "            build/ffmpeg-portable/buster/compiler-actions/*.status\n";
+    const char* path_begin = artifact ? strstr(artifact, "          path: |\n") : NULL;
+    const char* path_end = path_begin ? strstr(path_begin, "          include-hidden-files: true\n") : NULL;
+    size_t allowlist_length = strlen(artifact_paths);
+    int allowlist_exact = path_begin && path_end &&
+        (size_t)(path_end - path_begin) == allowlist_length &&
+        !memcmp(path_begin, artifact_paths, allowlist_length);
+    int ordered = rad_artifact && checkout && identity && route && artifact && publish &&
+                  rad_artifact < checkout && checkout < identity && identity < route && route < artifact && artifact < publish;
+    int valid = ordered && allowlist_exact &&
+        count(text, "          repository: FFmpeg/FFmpeg\n") == 1 &&
+        count(text, "ref: f46e514491172d15bd74b4abb1814cd2f05a763e\n") == 1 &&
+        count(text, "path: external/ffmpeg\n") == 1 &&
+        count(text, "external/ffmpeg\n") == 2 &&
+        count(text, "external/ffmpeg/") == 1 &&
+        count(text, "source-repository: FFmpeg/FFmpeg\n") == 1 &&
+        strstr(text, "git -C external/ffmpeg rev-parse HEAD") &&
+        strstr(text, "external_projects ffmpeg 2>&1 | tee evidence/ffmpeg.log") &&
+        strstr(text, "steps.ffmpeg_input.outcome == 'success'") &&
+        strstr(text, "steps.ffmpeg_source_identity.outcome == 'success'") &&
+        strstr(text, "steps.ffmpeg_source_verified.outcome == 'success'") &&
+        count(text, "- name: Retain FFmpeg portable evidence immediately\n") == 1 &&
+        count(text, "build/ffmpeg-portable/") == count(artifact_paths, "build/ffmpeg-portable/") &&
+        !strstr(text, "            external/ffmpeg/") &&
+        !strstr(text, "build/ffmpeg-portable/**") &&
+        !strstr(text, "build/ffmpeg-portable/**/*.o") &&
+        !strstr(text, "external/ffmpeg/**") && !strstr(text, "external/**");
+    return valid;
 }
 
 static int owner_valid(const char* text)
@@ -40,7 +115,7 @@ static int owner_valid(const char* text)
         count(text, "ref: ${{ github.sha }}\n") == 3 &&
         strstr(text, "Build distinct RAD compiler configuration") && strstr(text, "build/rad-compiler") &&
         strstr(text, "Admit exact passing functional combinations") && strstr(text, "sha=%s") &&
-        strstr(text, "qualification pending") && strstr(text, "pending/unqualified");
+        strstr(text, "qualification pending") && strstr(text, "pending/unqualified") && ffmpeg_owner_valid(text);
     for (unsigned i = 0; i < sizeof(projects) / sizeof(projects[0]); i += 1)
     {
         char command[96], artifact[96];
@@ -68,17 +143,55 @@ static int owner_valid(const char* text)
     return valid;
 }
 
+// In non-owner workflow files, allow only the exact no-input first-party
+// FFmpeg harness self-test in the existing lint blocks; full-build routes stay banned.
+static int ffmpeg_self_test_routes_valid(const char* text)
+{
+    const char* command = "\"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test";
+    const char* token = "test_ffmpeg";
+    const char* cursor = text;
+    unsigned routes = 0;
+    int valid = 1;
+    while ((cursor = strstr(cursor, token)) != NULL)
+    {
+        const char* begin = cursor;
+        const char* end = cursor;
+        while (begin > text && begin[-1] != '\n')
+        {
+            begin -= 1;
+        }
+        while (*end && *end != '\n')
+        {
+            end += 1;
+        }
+        if (end > begin && end[-1] == '\r')
+        {
+            end -= 1;
+        }
+        while (begin < end && (*begin == ' ' || *begin == '\t'))
+        {
+            begin += 1;
+        }
+        size_t command_length = strlen(command);
+        valid = valid && (size_t)(end - begin) == command_length && !memcmp(begin, command, command_length);
+        routes += 1;
+        cursor += strlen(token);
+    }
+    return valid && (routes == 0 || routes == 2);
+}
+
 static int other_valid(const char* text)
 {
     static const char* commands[] = {
         " test_cjson ", " test_zlib ", " test_stb ", " test_lua ", " test_quickjs ", " test_sqlite ",
         " test_yyjson ", " test_lz4 ", " test_sbase ", " test_doom ", " test_musl ", " test_cpython ",
-        " test_ffmpeg ", " test_curl ", " test_openssl ", " test_qemu ", " test_linux ", " test_sdl3 ",
-        " test_userspace ", " test_postgresql ", " test_mupdf ",
+        " test_curl ", " test_openssl ", " test_qemu ", " test_linux ", " test_sdl3 ",
+        " test_userspace ", " test_postgresql ", " test_mupdf ", " external_projects ffmpeg",
         " test_raddebugger --config", "git-qualification-cc\" --run", "git_qualification --run",
+        "repository: FFmpeg/FFmpeg", "ref: f46e514491172d15bd74b4abb1814cd2f05a763e", "path: external/ffmpeg",
         "uses: ./.github/workflows/external-projects.yml", "uses: ./.github/workflows/throughput-real-source.yml",
     };
-    int valid = 1;
+    int valid = ffmpeg_self_test_routes_valid(text);
     for (unsigned i = 0; i < sizeof(commands) / sizeof(commands[0]); i += 1)
     {
         valid = valid && !strstr(text, commands[i]);
@@ -90,6 +203,41 @@ static int other_valid(const char* text)
         valid = valid && length > 0 && (size_t)length < sizeof(command) && !strstr(text, command);
     }
     return valid;
+}
+
+static int ffmpeg_self_test_route_controls(void)
+{
+    const char* valid =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* wrong_driver =
+        "      \"$RUNNER_TEMP/other-driver\" test_ffmpeg --harness-self-test\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* extra_argument =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test /tmp/checkout\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* portable =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --portable /tmp/checkout /tmp/results /tmp/ide\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* optimized =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --optimized /tmp/checkout /tmp/results /tmp/ide /usr/bin/nasm\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* checkout_self_test =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --self-test /tmp/checkout\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* chained =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test; \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --optimized\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* mixed =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --portable /tmp/checkout /tmp/results /tmp/ide\n";
+    const char* duplicate_full_route =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --optimized /tmp/checkout /tmp/results /tmp/ide /usr/bin/nasm\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --optimized /tmp/checkout /tmp/results /tmp/ide /usr/bin/nasm\n";
+    int passed = other_valid(valid) && !other_valid(wrong_driver) && !other_valid(extra_argument) &&
+                 !other_valid(portable) && !other_valid(optimized) && !other_valid(checkout_self_test) &&
+                 !other_valid(chained) && !other_valid(mixed) && !other_valid(duplicate_full_route);
+    return passed;
 }
 
 static char* read_text(const char* path)
@@ -166,7 +314,12 @@ static int self_test(const char* text)
         other_valid("run: build external_projects --self-test\n") &&
         !other_valid("uses: ./.github/workflows/external-projects.yml\n") &&
         !other_valid("run: build test_cjson external/cjson\n") &&
-        !other_valid("run: build external_projects cjson\n");
+        !other_valid("run: build external_projects cjson\n") &&
+        ffmpeg_self_test_route_controls() &&
+        !other_valid("run: build external_projects ffmpeg\n") &&
+        replace_control(text, "ref: f46e514491172d15bd74b4abb1814cd2f05a763e", "ref: main") &&
+        replace_control(text, "repository: FFmpeg/FFmpeg", "repository: FFmpeg/fork") &&
+        replace_control(text, "build/ffmpeg-portable/buster/compiler-actions/*.argv", "build/ffmpeg-portable/**");
     return passed;
 }
 

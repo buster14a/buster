@@ -3582,17 +3582,15 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_plan_call(MachineA64Selector* selector, IrI
     if (planned)
     {
         IrValue* callee = function->values + instruction->operands[0].value;
-        planned = callee->definition.value < function->instruction_count;
-        if (planned)
+        // An indirect callee may be a block parameter with no defining row.
+        plan->direct_call = callee->definition.value < function->instruction_count &&
+                            function->instructions[callee->definition.value].opcode == IR_OPCODE_FUNCTION &&
+                            instruction->symbol.value != IR_ID_UNDERLYING_INVALID;
+        planned = plan->direct_call || machine_a64_operand_register(selector, instruction->operands[0], &plan->callee_register);
+        callee_type = ir_type_from_id(&program->types, callee->canonical_type);
+        if (callee_type && callee_type->kind == IR_TYPE_POINTER)
         {
-            plan->direct_call = function->instructions[callee->definition.value].opcode == IR_OPCODE_FUNCTION &&
-                                instruction->symbol.value != IR_ID_UNDERLYING_INVALID;
-            planned = plan->direct_call || machine_a64_operand_register(selector, instruction->operands[0], &plan->callee_register);
-            callee_type = ir_type_from_id(&program->types, callee->canonical_type);
-            if (callee_type && callee_type->kind == IR_TYPE_POINTER)
-            {
-                callee_type = ir_type_from_id(&program->types, callee_type->element_type);
-            }
+            callee_type = ir_type_from_id(&program->types, callee_type->element_type);
         }
     }
     if (planned)
@@ -8271,7 +8269,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_store(MachineA64Encoder* encoder
 
 BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(Arena* arena, MachineA64Encoder* encoder, u32* block_offsets, u32 block_count,
                                                     u32* row_offsets, u32 row_count, MachineBuilderStream* fixups, MachineBuilderStream* call_sites,
-                                                    MachineBuilderStream* epilogs, MachineBuilderStream* inline_relocations,
+                                                    MachineBuilderStream* epilogs, MachineBuilderStream* epilog_ends, MachineBuilderStream* inline_relocations,
                                                     MachineBuilderStream* inline_landings);
 
 #if BUSTER_INCLUDE_TESTS
@@ -8444,7 +8442,7 @@ bool machine_a64_test_relax_sparse_stats(Arena* arena, u32 code_size, MachineA64
         .sparse = true,
         .relax_stats = stats,
     };
-    bool valid = machine_a64_relax_branches(arena, &encoder, block_offsets, fixup_count, row_offsets, fixup_count, &fixups, &call_sites, &epilogs, 0, 0);
+    bool valid = machine_a64_relax_branches(arena, &encoder, block_offsets, fixup_count, row_offsets, fixup_count, &fixups, &call_sites, &epilogs, 0, 0, 0);
     if (!valid)
     {
         return false;
@@ -8498,7 +8496,7 @@ bool machine_a64_test_relax_dense_compare_chain(Arena* arena, u32 target_distanc
         u32 block_offset = target_distance;
         u32 row_offset = 0;
         MachineA64Encoder encoder = {.bytes = bytes, .count = old_size, .capacity = capacity};
-        valid = machine_a64_relax_branches(arena, &encoder, &block_offset, 1, &row_offset, 1, &fixups, &call_sites, &epilogs, 0, 0);
+        valid = machine_a64_relax_branches(arena, &encoder, &block_offset, 1, &row_offset, 1, &fixups, &call_sites, &epilogs, 0, 0, 0);
         if (valid)
         {
             for (u32 index = 0; index < 4; index += 1)
@@ -8973,7 +8971,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_remap_array(MachineA64Encoder* encode
 // transfer so the intermediate layout stays decodable.
 BUSTER_GLOBAL_LOCAL bool machine_a64_relax_apply_pass(MachineA64Encoder* encoder, MachineA64RelaxState* state, u32 insertion_count, u32* block_offsets,
                                                       u32 block_count, u32* row_offsets, u32 row_count, MachineBuilderStream* fixups,
-                                                      MachineBuilderStream* call_sites, MachineBuilderStream* epilogs,
+                                                      MachineBuilderStream* call_sites, MachineBuilderStream* epilogs, MachineBuilderStream* epilog_ends,
                                                       MachineBuilderStream* inline_relocations, MachineBuilderStream* inline_landings)
 {
     machine_a64_relax_sort_insertions(state, insertion_count);
@@ -9024,6 +9022,10 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_apply_pass(MachineA64Encoder* encoder
         MACHINE_A64_RELAX_STAT(encoder, metadata_visits, chunk->count);
     }
     for (MachineBuilderChunk* chunk = valid && epilogs ? epilogs->first : 0; valid && chunk; chunk = chunk->next)
+    {
+        valid = machine_a64_relax_remap_array(encoder, insertions, insertion_count, (u32*)(chunk + 1), chunk->count);
+    }
+    for (MachineBuilderChunk* chunk = valid && epilog_ends ? epilog_ends->first : 0; valid && chunk; chunk = chunk->next)
     {
         valid = machine_a64_relax_remap_array(encoder, insertions, insertion_count, (u32*)(chunk + 1), chunk->count);
     }
@@ -9084,7 +9086,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_apply_pass(MachineA64Encoder* encoder
 // Repeat plan/apply passes until a scan decides nothing.
 BUSTER_GLOBAL_LOCAL bool machine_a64_relax_converge(Arena* arena, MachineA64Encoder* encoder, u32* block_offsets, u32 block_count, u32* row_offsets,
                                                     u32 row_count, MachineBuilderStream* fixups, MachineBuilderStream* call_sites,
-                                                    MachineBuilderStream* epilogs, MachineBuilderStream* inline_relocations,
+                                                    MachineBuilderStream* epilogs, MachineBuilderStream* epilog_ends, MachineBuilderStream* inline_relocations,
                                                     MachineBuilderStream* inline_landings)
 {
     MachineA64RelaxState state = {.arena = arena, .limit = (u64)fixups->total_count * 2u + 1u};
@@ -9101,7 +9103,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_converge(Arena* arena, MachineA64Enco
         {
             MACHINE_A64_RELAX_STAT(encoder, expansions, insertion_count);
             valid = machine_a64_relax_apply_pass(encoder, &state, insertion_count, block_offsets, block_count, row_offsets, row_count, fixups, call_sites,
-                                                 epilogs, inline_relocations, inline_landings);
+                                                 epilogs, epilog_ends, inline_relocations, inline_landings);
         }
     }
     if (state.insertions)
@@ -9117,14 +9119,14 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_relax_converge(Arena* arena, MachineA64Enco
 // convergence bound, and metadata update callback.
 BUSTER_GLOBAL_LOCAL bool machine_a64_relax_branches(Arena* arena, MachineA64Encoder* encoder, u32* block_offsets, u32 block_count,
                                                     u32* row_offsets, u32 row_count, MachineBuilderStream* fixups, MachineBuilderStream* call_sites,
-                                                    MachineBuilderStream* epilogs, MachineBuilderStream* inline_relocations,
+                                                    MachineBuilderStream* epilogs, MachineBuilderStream* epilog_ends, MachineBuilderStream* inline_relocations,
                                                     MachineBuilderStream* inline_landings)
 {
     if (!arena || !encoder || !fixups || (block_count && !block_offsets) || (row_count && !row_offsets))
     {
         return false;
     }
-    if (!machine_a64_relax_converge(arena, encoder, block_offsets, block_count, row_offsets, row_count, fixups, call_sites, epilogs,
+    if (!machine_a64_relax_converge(arena, encoder, block_offsets, block_count, row_offsets, row_count, fixups, call_sites, epilogs, epilog_ends,
                                     inline_relocations, inline_landings))
     {
         return false;
@@ -9481,6 +9483,8 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
     machine_stream_initialize(&call_sites, sizeof(MachineCallSite));
     MachineBuilderStream epilogs;
     machine_stream_initialize(&epilogs, sizeof(u32));
+    MachineBuilderStream epilog_ends;
+    machine_stream_initialize(&epilog_ends, sizeof(u32));
     MachineBuilderStream inline_assembly_relocations;
     machine_stream_initialize(&inline_assembly_relocations, sizeof(MachineInlineAssemblyRelocation));
     MachineBuilderStream inline_assembly_landings;
@@ -10680,6 +10684,7 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
                 // epilogue start is recorded for the Windows unwind data.
                 u32* epilog = (u32*)machine_stream_append(arena, &epilogs);
                 *epilog = encoder.count;
+                u32* epilog_end = (u32*)machine_stream_append(arena, &epilog_ends);
                 if (windows_frame)
                 {
                     u32 frame_fields[] = {MACHINE_A64_SP, MACHINE_A64_X29, 0};
@@ -10736,6 +10741,7 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
                 }
                 machine_a64_emit_generated_opcode(&encoder, instruction->opcode, operand_registers[0], operand_registers[1], operand_registers[2],
                                                   instruction->payload);
+                *epilog_end = encoder.count;
             }
             break;
             case MACHINE_A64_BRK:
@@ -10974,7 +10980,7 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
     if (!encoder.overflow && !encoder.error)
     {
         if (!machine_a64_relax_branches(arena, &encoder, result.block_offsets, function->block_count, result.row_offsets, function->instruction_count, &fixups,
-                                        &call_sites, &epilogs, &inline_assembly_relocations, &inline_assembly_landings))
+                                        &call_sites, &epilogs, &epilog_ends, &inline_assembly_relocations, &inline_assembly_landings))
         {
             return result;
         }
@@ -10988,6 +10994,8 @@ MachineEncodeResult machine_encode_aarch64_into(Arena* arena, MachineFunction* f
         result.epilog_offsets = arena_allocate(arena, u32, epilogs.total_count ? epilogs.total_count : 1);
         result.epilog_count = epilogs.total_count;
         machine_stream_flatten(&epilogs, result.epilog_offsets);
+        result.epilog_end_offsets = arena_allocate(arena, u32, epilog_ends.total_count ? epilog_ends.total_count : 1);
+        machine_stream_flatten(&epilog_ends, result.epilog_end_offsets);
         result.frame_events = frame.unwind_actions;
         result.frame_event_count = frame.unwind_action_count;
         result.prologue_size = prologue_size;

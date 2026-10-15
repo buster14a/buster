@@ -1,0 +1,11 @@
+# c_frontend_tests, BUSTER_TEST_JOBS=1, Release (-O3 -march=native, tests on), interleaved, wall seconds
+# base=ide-base (446f742e, CMake) cand=ide-cand2 (98d477e4, CMake) prod=ide-prod (b9e347e8 production code without the two new fixtures, same flags, built outside CMake)
+base r1 rc=0 wall=46.003643187 [1483458/1483458] Unit tests
+cand2 r1 rc=0 wall=46.378808212 [1483633/1483633] Unit tests
+prod r1 rc=0 wall=45.204015655 [1483458/1483458] Unit tests
+base r2 rc=0 wall=46.798073403 [1483458/1483458] Unit tests
+cand2 r2 rc=0 wall=45.956134311 [1483633/1483633] Unit tests
+prod r2 rc=0 wall=45.973702840 [1483458/1483458] Unit tests
+base r3 rc=0 wall=47.452263571 [1483458/1483458] Unit tests
+cand2 r3 rc=0 wall=46.099655867 [1483633/1483633] Unit tests
+prod r3 rc=0 wall=46.683327258 [1483458/1483458] Unit tests

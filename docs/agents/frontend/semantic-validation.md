@@ -10,9 +10,36 @@ syntax-only and ordinary compilation share diagnostic ownership. The older
 `c_parse` / `c_analyze_semantics` entry points retain their model-building contract
 for callers that explicitly pair them with `c_lower_to_ir`.
 
+At the end of lowering-constraint validation, file-scope tentative object
+definitions are checked against their final translation-unit types. An object
+whose type is still incomplete is rejected before semantic-only success. An
+external-linkage tentative array with a complete element type is completed to
+one element on a per-object type copy under C17 6.9.2p2; a later tag or array
+completion and an extern-only declaration remain valid. C17 6.9.2p3 also
+requires every internal-linkage tentative definition to have a complete type
+at that declaration, using the compatible composite type visible at that
+point. A prior known array bound, or a bound inferred from an earlier initialized
+unsized array, can therefore complete a later `[]` tentative declaration, but a
+later bound cannot rescue an earlier `[]` declaration; raw declaration and
+typedef types retain their source-spelled bounds.
+End-of-unit completion does not make an earlier `sizeof` of an incomplete
+array valid. The registered
+compiler_driver_test_tentative_object_completeness fixture checks
+syntax-only/object diagnostic parity, declaration completion, exact final
+array symbol sizes, the internal-linkage declaration-point constraint, and
+point-of-use refusals in C17, GNU17, C23 and GNU23 across both canonical
+frontend forms and the AST pilot.
+
+
 The semantic model remains `CAnalysisResult` (`CParseResult` is its compatibility
 name). Validation uses its types, entities, declaration ranges, identifier
 bindings, delimiter index and scope index. It does not construct a second IR.
+Size and alignment operator recognition in semantic analysis and lowering uses
+the existing well-known symbol IDs. `C_ALIGNOF_WORDS` preserves `_Alignof`,
+`__alignof` and `__alignof__`; `C_SIZEOF_ALIGNOF_WORDS` additionally accepts
+`sizeof`. Readers that accept plain C23 `alignof` retain their separate rule.
+Uninterned tokens retain spelling lookup. `c_test_word_class_token_kinds`
+checks the spelling and ID paths, including tokens with no accessible spelling.
 Expression/type queries and initializer walks use explicit work stacks. Constant
 values contain scalar bits and a C type, including the target's integer width
 and floating representation; they are not canonical values or instructions.
@@ -37,6 +64,19 @@ retain this constraint; binary `&` remains a value operation. The registered
 `compiler_driver_test_bit_field_addresses` matrix requires matching structured
 syntax-only/object diagnostics and no object for rejected source in four C
 dialects, three frontend routes and three target layouts (#3743).
+
+## Block-scope static initializers
+
+In GNU dialects, a block-scope scalar static initializer whose complete
+expression is a statement expression with one expression statement can be
+folded when the existing typed scalar evaluator proves that tail constant.
+Aggregate destinations and tails that read mutable globals, update values or
+call functions retain the statement-expression refusal. The parser and folder
+use the same bounded tail range. Bodies with declarations, multiple statements
+or an evaluated nested statement expression remain nonconstant. File-scope
+statement expressions remain rejected by the separate file-scope constraint.
+The registered driver regression checks the constant-only runtime result
+alongside aggregate and nonconstant-tail refusals.
 
 ## Declaration constraints
 
@@ -155,6 +195,17 @@ separate array-only duration check still permits a static pointer to a VLA while
 rejecting a VLA object with static duration. Function prototype parameter types
 retain their existing rules; the VM walk stops at function types.
 
+Array declarators record function and incomplete element types at construction,
+including typedef, parameter and abstract declarators. Aggregate definition
+extents distinguish a completed nested definition from the enclosing record or
+a tag completed later. The bound-constraint walk reports each invalid source
+bracket once before canonical lowering; later tag completion cannot erase the
+refusal. Incomplete outer bounds, flexible members, GNU zero-length arrays,
+VLAs and pointers to incomplete types retain their separate rules.
+`c_test_array_element_constraints` covers rejected and accepted neighbors on
+three target layouts, four dialects and both canonical frontend forms; the
+driver equivalence fixture pins syntax-only/object parity (#3744).
+
 Constant negative array bounds are rejected at the original bound expression
 by `c_parse_validate_array_bound_values`, after expression/type-name validation
 has populated the bound table. A temporary source-token bitset also admits
@@ -183,6 +234,17 @@ rejected file/block/type-name/nested/typedef forms, exact member locations and
 valid neighbors through semantic-only analysis and both canonical frontend
 forms. This enforces C11/C17 6.7.6.2p2 and 6.7.2.1p9; see
 [WG14 N1570](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
+
+The typed-constant precedence scan keeps `sizeof` and the alignment operators
+as unary prefixes while it finds binary splits. A parenthesized type operand
+belongs to that operator, rather than being mistaken for a cast, and GNU
+`__extension__` remains a prefix through the full unary operand. The existing
+expression-type and layout queries still validate the complete inner operand
+before folding, so an incomplete type inside nested `sizeof` remains an error.
+The registered `compiler_driver_test_local_sizeof_static_asserts` fixture checks
+nested unary, dereference, alignment, extension, parenthesized and type-name
+forms, GNU statement-expression neighbors, incomplete-inner refusal, syntax-only
+and object parity, and execution in both canonical frontend forms (#3566).
 
 The bound check uses the semantic typed constant folder. NORMAL-mode sizeof
 type operands use the complete abstract-declarator reader, so parenthesized
@@ -239,8 +301,12 @@ casts, zero bounds, VLAs and flexible arrays across six native layouts plus
 Wasm32/Wasm64 and both frontend forms. Types at the accepted limit have no
 backing object in the regression. GNU arrays of zero-sized elements retain
 zero-byte products; existing static range-designator tests pin that extension.
-Record member sums and final alignment rounding remain the separate #1479
-follow-up; this bounded repair does not certify those operations.
+Record member sums and final alignment rounding use the shared saturating
+record cursor (#3278). Semantic-only validation also covers complete records
+whose layout no expression has queried: one uncached array or complete record
+triggers a complete-pending ordered solve, and the existing cache scan reports
+oversized records at their definition. The solve commits every settled pending
+row once; validation does not add a solve per record.
 
 A static assertion that measured an oversized type folds a value from its
 saturated size, so the size error stands for it. The decision is local to the
@@ -256,15 +322,18 @@ deferred (enumerator, `_Generic`) forms, and
 `c_test_static_assert_object_size_scaling` bounds layout queries for 2,000
 failing assertions over 2,000 array types.
 
-The validation must not add whole-table layout solves per array. A pass solve
-copies and seeds the whole type table and stops once its own request resolves,
-and an inferred bound's layout was provisional, so it was never cached. Asking
-each array in table order therefore cost one solve per array: self-hosting
-`ide.c` went from about 160 to about 34,000 solves (#2406's merge). An
-inferred bound is checked from its element layout and known count, which
-gives the same verdict. A single query for the call's last array then warms
-the cache for the explicit bounds. `c_type_layout_test_array_validation_solves`
-requires the solve count to stay constant as the number of arrays grows.
+The validator must not add one whole-table solve per array or record. A
+pass solve copies and seeds the whole type table; inferred bounds are checked
+from their element layout and known count, while one uncached array or complete
+record triggers the ordered complete-pending solve that warms every settled
+layout for the existing cache scan. This keeps the new record coverage to
+one solve per validation call rather than one per record; special unresolved
+bounds retain the per-item exception documented below. Asking each array in
+table order previously cost one solve per array: self-hosting `ide.c` went from
+about 160 to about 34,000 solves (#2406's merge).
+`c_type_layout_test_array_validation_solves` and the unqueried record row in
+`c_type_layout_test_validation_scaling` require pass solves to stay constant
+and layout work to grow linearly as their item counts increase.
 
 ## Whole-unit pass scaling
 
@@ -303,7 +372,7 @@ whole-table solve at each use (#3096).
 | `c_parse_validate_array_bound_syntax` | constant-expression syntax walk per bound | none; token walk |
 | `c_parse_infer_file_array_bounds`, local inference loop | initializer walk per unsized array | layouts and typed constants per element; run before `inferred_bounds_final` |
 | type-alignment entries, declaration alignment, `c_parse_validate_alignment_redeclarations` | `c_parse_validate_alignment_range` per specifier | a layout miss; a protected query for `_Alignof(x.m)` operands |
-| `c_parse_validate_array_object_sizes` | one layout per bound, one warm-up per call | a bound the layout pass cannot fold (`offsetof`, `_Alignof(x.m)`, `sizeof ident`) never commits, so each such array misses (#3113) |
+| `c_parse_validate_array_object_sizes` | one layout per bound, one complete-pending warm-up per call for arrays and unqueried complete records | a bound the layout pass cannot fold (`offsetof`, `_Alignof(x.m)`, `sizeof ident`) never commits, so each such array misses (#3113) |
 | `c_parse_validate_members`, `c_parse_validate_member_types` | alignment range per member; bound and unresolved width typed constants | a layout miss; uncommitted `offsetof` in a member bound (#1297) |
 | `c_parse_validate_deferred_assertions` | typed constant per deferred assertion | uncommitted `offsetof` (#1297); a protected query for `_Alignof(x.m)` |
 | `c_parse_validate_static_initializers` | expression queries and typed constants per initializer element | uncommitted `offsetof` (#1297); a protected query for `_Alignof(x.m)` |

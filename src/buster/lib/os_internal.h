@@ -82,6 +82,51 @@ struct OsProcessCaptureTestResult
 BUSTER_F_DECL OsProcessCaptureTestResult os_process_capture_test_collect(Arena* arena, ProcessSpawnResult spawn,
     OsProcessCaptureTestInput const* inputs, u64 input_count);
 
+#if BUSTER_WINDOWS
+// Calling-thread injection at actual Windows wait, termination and job-query
+// boundaries. An independent 64-call ceiling rejects infinite waits safely.
+enum
+{
+    OS_PROCESS_CLEANUP_TEST_REFUSE_TERMINATION = 1,
+    OS_PROCESS_CLEANUP_TEST_UNSIGNALED = 2,
+    OS_PROCESS_CLEANUP_TEST_WAIT_FAILED = 4,
+    OS_PROCESS_CLEANUP_TEST_JOB_NONEMPTY = 8,
+    OS_PROCESS_CLEANUP_TEST_RELEASE_AFTER_RECEIPT = 16,
+    OS_PROCESS_CLEANUP_TEST_EXIT_IN_CLAIM = 32,
+    OS_PROCESS_CLEANUP_TEST_EXIT_AFTER_RESERVE = 64,
+};
+typedef struct OsProcessCleanupWindowsTestStats OsProcessCleanupWindowsTestStats;
+struct OsProcessCleanupWindowsTestStats
+{
+    u64 calls;
+    u64 infinite_waits;
+    u64 termination_calls;
+    u64 job_queries;
+    bool ceiling_reached;
+};
+BUSTER_F_DECL void os_process_cleanup_windows_test_begin(ProcessSpawnResult spawn, u32 flags);
+BUSTER_F_DECL OsProcessCleanupWindowsTestStats os_process_cleanup_windows_test_end(void);
+BUSTER_F_DECL void os_process_shutdown_windows_test_release_event(OsProcessHandle* event);
+BUSTER_F_DECL void os_process_shutdown_windows_test_claim_gate(OsProcessHandle* release, OsProcessHandle* ready);
+
+// Calling-thread observation of the Windows captured-pipe deadline loop. The
+// scan limit is a test-only independent guard against a regression hanging a
+// native child; deadline progression is controlled without callbacks.
+typedef struct OsProcessWaitWindowsTestStats OsProcessWaitWindowsTestStats;
+struct OsProcessWaitWindowsTestStats
+{
+    u64 clock_calls;
+    u64 scans;
+    u64 progress_scans;
+    u64 child_polls;
+    u64 leader_exit_observations;
+    bool scan_limit_reached;
+};
+
+BUSTER_F_DECL void os_process_wait_windows_test_begin(u64 start_microseconds, u64 step_microseconds, u64 scan_limit);
+BUSTER_F_DECL OsProcessWaitWindowsTestStats os_process_wait_windows_test_end(void);
+#endif
+
 #if BUSTER_LINUX || BUSTER_MACOS
 // One failure on this thread in an ordinary (non-group) wait. WAIT/READ skip
 // the syscall and report ENOMEM/EBADF; CLOSE releases the real descriptor,
@@ -145,6 +190,7 @@ BUSTER_F_DECL bool os_linux_proc_context_select_self_test(String8 status, s32 pr
                                                            u32* namespace_index, u32* namespace_depth);
 BUSTER_F_DECL bool os_linux_proc_context_live_self_test(void);
 BUSTER_F_DECL bool os_linux_process_stat_parse_self_test(void);
+BUSTER_F_DECL bool os_linux_process_group_filter_self_test(void);
 BUSTER_F_DECL bool os_linux_proc_read_self_test(void);
 BUSTER_F_DECL bool os_linux_process_group_churn_self_test(Arena* arena);
 #endif
@@ -216,6 +262,9 @@ typedef enum OsProcessSpawnTestOperation
     OS_PROCESS_SPAWN_TEST_HANDLE_DUPLICATION,
     OS_PROCESS_SPAWN_TEST_HANDLE_LIST,
     OS_PROCESS_SPAWN_TEST_SPAWN,
+    OS_PROCESS_SPAWN_TEST_OWNER_ALLOCATION,
+    OS_PROCESS_SPAWN_TEST_JOB_ASSIGNMENT,
+    OS_PROCESS_SPAWN_TEST_RESUME,
     OS_PROCESS_SPAWN_TEST_OPERATION_COUNT,
 } OsProcessSpawnTestOperation;
 

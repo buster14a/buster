@@ -122,6 +122,15 @@ unique executable names and complete markers, so no process replaces a driver
 another process is constructing or executing. Failed or interrupted entries
 lack a valid marker and are ignored.
 
+`build.ps1` imports `Microsoft.PowerShell.Management` and
+`Microsoft.PowerShell.Utility` by name before its first cmdlet. Without that,
+Windows PowerShell 5.1 resolves the first cmdlet from an unloaded module by
+analyzing every module on `PSModulePath`: about 23 s per process with a cold
+module analysis cache, as on hosted Windows ARM64
+([#3979](../ci-bootstrap-wrapper.md#windows-powershell-command-discovery-3979)).
+Keep PowerShell glue to Core and those two modules, or import any other module
+it needs by name.
+
 A cached driver whose recorded dependency was deleted is a normal cache miss:
 the wrapper quietly rejects it and selects another valid entry or rebuilds.
 The warm snapshot also stays quiet if an input disappears after the manifest scan.
@@ -254,7 +263,9 @@ target takes the console pool: `matrix_superbuild_analyze_jobs` passes
 `--parallel 2` to that step on hosts with at least three logical CPUs and
 `MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY` (12 GiB), so the audit runs while
 the analyzer's longest shard leaves a worker idle; smaller hosts, including
-the 7 GiB macOS runners, keep `--parallel 1` (#3912). A production
+the 7 GiB macOS runners, keep `--parallel 1` (#3912). On a single-tree release
+shard with at least four CPUs, that step also runs beside the self-host worker
+in its own outer slot (see the superbuild self-host worker below). A production
 header that defines functions must be included before the test region, as
 `simd.h` is.
 
@@ -466,6 +477,20 @@ consumes the producer's one-shot integrity-checked compiler/tool/cache/graph/
 environment provenance record before validating and snapshotting the artifact,
 runs the existing direct fixed-point workflow without starting an inner Ninja
 process, and remains disabled for the direct scheduler and unsupported platforms.
+A single-tree superbuild (every release shard) has one slot in that pool, so the
+one-CPU worker used to wait for the producer's `test_all` and then for its
+analyzers, while the analyzer's longest shard left most CPUs idle (hosted
+x86-64: 59-66 s of analyzers, then 65-96 s of self-host). Where
+`matrix_superbuild_post_test_assign` admits it, the analyzers instead become
+their own `buster_post_test_N` target in the one-slot `buster_matrix_post_test`
+pool after the tree's tests, the worker also waits for the tree's tests so it
+never competes with `test_all`, and the outer `--parallel` is the unchanged CPU
+pool depth plus that slot; the worker and the analyzers then run side by side.
+Admission needs one tree, the analyzers at `--parallel 2` (so at least 12 GiB)
+and at least `MATRIX_SUPERBUILD_POST_TEST_OVERLAP_THREADS` (four) CPUs, for the
+two analyzer workers, the optnone frontend and the worker. The 7 GiB macOS
+release runners, three-CPU hosts and every multi-tree matrix keep the previous
+graph, and `BUSTER_SUPERBUILD_PARALLELISM` reports `post_test_jobs`.
 The worker deletes its private bootstrap executable after stage-one linking.
 Only Windows sharing/access deletion errors get a bounded cleanup retry (at most
 500 ms and 51 attempts, matching generated-test executable cleanup); permanent

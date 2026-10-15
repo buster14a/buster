@@ -1,5 +1,6 @@
 // Direct SPIR-V compute emitter. spirv_emit owns canonical validation and the
-// deliberately narrow kernel ABI; spirv_check_rows proves buffer/index origin;
+// deliberately narrow kernel ABI; spirv_reject_module names cold feature refusals;
+// spirv_check_rows names row features and proves buffer/index origin;
 // spirv_write_module emits the binary and its runtime array-length guard.
 // The numeric contracts are SPIR-V 1.5 under Vulkan 1.2; see
 // docs/spirv-compute.md for pinned specification/tool provenance and limits.
@@ -96,12 +97,88 @@ BUSTER_GLOBAL_LOCAL u32 spirv_binary_opcode(u8 operation)
     return opcode;
 }
 
+// Follow only pointer/array wrappers, never recurse through aggregate members.
+BUSTER_GLOBAL_LOCAL bool spirv_type_has_vector(SpirvEmitter* emitter, IrType* type)
+{
+    for (u32 depth = 0; type && depth < emitter->program->types.count &&
+         (type->kind == IR_TYPE_POINTER || type->kind == IR_TYPE_ARRAY); depth += 1)
+    {
+        type = ir_type_from_id(&emitter->program->types, type->element_type);
+    }
+    return type && type->kind == IR_TYPE_VECTOR;
+}
+
+BUSTER_GLOBAL_LOCAL bool spirv_check_row_feature(SpirvEmitter* emitter, IrInstruction* row, IrInstructionId instruction)
+{
+    String8 diagnostic = {0};
+    if (row->opcode == IR_OPCODE_CALL)
+    {
+        diagnostic = S8("SPIR-V compute does not support calls");
+    }
+    else if (row->opcode == IR_OPCODE_SIMD || spirv_type_has_vector(emitter, ir_type_from_id(&emitter->program->types, row->canonical_type)))
+    {
+        diagnostic = S8("SPIR-V compute does not support vectors");
+    }
+    else if (row->opcode == IR_OPCODE_VA_START || row->opcode == IR_OPCODE_VA_COPY || row->opcode == IR_OPCODE_VA_END || row->opcode == IR_OPCODE_VA_ARG)
+    {
+        diagnostic = S8("SPIR-V compute does not support variadic functions or arguments");
+    }
+    bool valid = !diagnostic.length;
+    if (!valid) spirv_fail(emitter, diagnostic, instruction);
+    return valid;
+}
+
+// Called only for a module already outside the admitted one-kernel subset.
+BUSTER_GLOBAL_LOCAL void spirv_reject_module(SpirvEmitter* emitter, IrModule* module)
+{
+    for (u32 index = 0; !emitter->artifact.diagnostic.length && index < module->global_count; index += 1)
+    {
+        IrGlobal* global = module->globals + index;
+        IrSymbol* symbol = ir_symbol_from_id(&emitter->program->symbols, global->symbol);
+        if (global->is_thread_local || (symbol && symbol->is_thread_local))
+        {
+            spirv_fail(emitter, S8("SPIR-V compute does not support thread-local storage (TLS)"), IR_INSTRUCTION_ID_INVALID);
+        }
+    }
+    for (u32 index = 0; !emitter->artifact.diagnostic.length && index < module->function_count; index += 1)
+    {
+        IrFunction* function = module->functions + index;
+        if (function->state == IR_FUNCTION_LOWERED)
+        {
+            emitter->artifact.function = function->id;
+            for (u32 row_index = 0; !emitter->artifact.diagnostic.length && row_index < function->instruction_count; row_index += 1)
+            {
+                spirv_check_row_feature(emitter, function->instructions + row_index, (IrInstructionId){.value = row_index});
+            }
+        }
+    }
+    if (!emitter->artifact.diagnostic.length)
+    {
+        emitter->artifact.function = IR_FUNCTION_ID_INVALID;
+        spirv_fail(emitter, S8("SPIR-V compute requires one defined kernel, no globals/assembly/aliases/initializers and the 32-bit compute data layout"),
+                   IR_INSTRUCTION_ID_INVALID);
+    }
+}
+
 BUSTER_GLOBAL_LOCAL bool spirv_check_signature(SpirvEmitter* emitter)
 {
     IrFunction* function = emitter->function;
     IrType* signature = ir_type_from_id(&emitter->program->types, function->canonical_type);
     IrType* result = signature ? ir_type_from_id(&emitter->program->types, signature->return_type) : 0;
-    bool valid = signature && signature->kind == IR_TYPE_FUNCTION && signature->calling_convention == IR_CALLING_CONVENTION_C &&
+    if (signature && signature->kind == IR_TYPE_FUNCTION)
+    {
+        if (signature->is_variadic)
+        {
+            spirv_fail(emitter, S8("SPIR-V compute does not support variadic functions or arguments"), IR_INSTRUCTION_ID_INVALID);
+        }
+        bool vector = spirv_type_has_vector(emitter, result);
+        for (u32 index = 0; !vector && index < signature->parameter_count; index += 1)
+        {
+            vector = spirv_type_has_vector(emitter, ir_type_from_id(&emitter->program->types, signature->parameter_types[index]));
+        }
+        if (vector) spirv_fail(emitter, S8("SPIR-V compute does not support vectors"), IR_INSTRUCTION_ID_INVALID);
+    }
+    bool valid = !emitter->artifact.diagnostic.length && signature && signature->kind == IR_TYPE_FUNCTION && signature->calling_convention == IR_CALLING_CONVENTION_C &&
                  signature->parameter_count == 2 && !signature->is_variadic && !signature->is_noreturn &&
                  !signature->is_unprototyped && result && result->kind == IR_TYPE_VOID && function->name.length == 6 &&
                  memcmp(function->name.pointer, "kernel", 6) == 0;
@@ -117,7 +194,7 @@ BUSTER_GLOBAL_LOCAL bool spirv_check_signature(SpirvEmitter* emitter)
     if (valid && !plain_symbol)
     {
         valid = false;
-        spirv_fail(emitter, S8("SPIR-V compute does not support kernel section, linkage attributes, TLS or symbol-name remapping"),
+        spirv_fail(emitter, S8("SPIR-V compute does not support kernel section, linkage attributes or symbol-name remapping"),
                    IR_INSTRUCTION_ID_INVALID);
     }
     if (!valid)
@@ -144,10 +221,13 @@ BUSTER_GLOBAL_LOCAL bool spirv_check_rows(SpirvEmitter* emitter)
         emitter->origins = arena_allocate_zeroed(emitter->arena, u8, function->value_count);
         emitter->ids = arena_allocate_zeroed(emitter->arena, u32, function->value_count);
         u32 argument_counts[2] = {0};
+        u32 stores = 0;
         for (u32 index = 0; valid && index < function->instruction_count; index += 1)
         {
             IrInstruction* row = function->instructions + index;
-            if (row->opcode == IR_OPCODE_ARGUMENT)
+            valid = spirv_check_row_feature(emitter, row, (IrInstructionId){.value = index});
+            stores += row->opcode == IR_OPCODE_STORE ? 1 : 0;
+            if (valid && row->opcode == IR_OPCODE_ARGUMENT)
             {
                 valid = row->immediate_count == 1 && row->immediates && row->immediates[0] < BUSTER_ARRAY_LENGTH(argument_counts) &&
                         row->result.value < function->value_count && function->values[row->result.value].category == IR_VALUE_VALUE;
@@ -169,7 +249,11 @@ BUSTER_GLOBAL_LOCAL bool spirv_check_rows(SpirvEmitter* emitter)
         {
             spirv_fail(emitter, S8("SPIR-V compute requires exactly one canonical ARGUMENT for each kernel parameter"), IR_INSTRUCTION_ID_INVALID);
         }
-        u32 stores = 0;
+        if (valid && !stores)
+        {
+            valid = false;
+            spirv_fail(emitter, S8("SPIR-V compute requires at least one store to buffer[index]"), IR_INSTRUCTION_ID_INVALID);
+        }
         for (u32 index = 0; valid && index < function->instruction_count; index += 1)
         {
             IrInstruction* row = function->instructions + index;
@@ -205,7 +289,6 @@ BUSTER_GLOBAL_LOCAL bool spirv_check_rows(SpirvEmitter* emitter)
                     break;
                 case IR_OPCODE_STORE:
                     valid = first == SPIRV_ORIGIN_ELEMENT && second_uint;
-                    if (valid) stores += 1;
                     break;
                 case IR_OPCODE_BINARY:
                     valid = first_uint && second_uint && spirv_uint_type(type) && spirv_binary_opcode(row->binary_operation) &&
@@ -232,11 +315,6 @@ BUSTER_GLOBAL_LOCAL bool spirv_check_rows(SpirvEmitter* emitter)
                     spirv_fail(emitter, S8("SPIR-V compute rejects this instruction/type or buffer/index provenance; calls, source control flow, arbitrary pointers, locals, atomics, barriers and floating point are unsupported"), instruction);
                 }
             }
-        }
-        if (valid && !stores)
-        {
-            valid = false;
-            spirv_fail(emitter, S8("SPIR-V compute requires at least one store to buffer[index]"), IR_INSTRUCTION_ID_INVALID);
         }
     }
     return valid;
@@ -383,8 +461,7 @@ SpirvArtifact spirv_emit(Arena* arena, IrProgram* program, IrModule* module)
         else if (module->function_count != 1 || module->functions[0].state != IR_FUNCTION_LOWERED || module->rejected_function_count || module->global_count ||
                  module->assembly_count || module->alias_count || module->initializer_count || program->data_layout.pointer.bit_width != 32)
         {
-            spirv_fail(&emitter, S8("SPIR-V compute requires one defined kernel, no globals/assembly/aliases/initializers and the 32-bit compute data layout"),
-                       IR_INSTRUCTION_ID_INVALID);
+            spirv_reject_module(&emitter, module);
         }
         else
         {

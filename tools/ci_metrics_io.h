@@ -41,6 +41,29 @@ BUSTER_GLOBAL_LOCAL double cm_clock(void)
     double result = (double)t.tv_sec + t.tv_nsec * 1e-9;
     return result;
 }
+// gh decorates GitHub API errors with "(HTTP NNN)", but redirected blob
+// errors use a standalone "gh: HTTP NNN" line. Both report the HTTP status;
+// parsing only the former turns expired logs into a retried transport outage.
+BUSTER_GLOBAL_LOCAL int cm_http_status(const char *message)
+{
+    int result = 0;
+    const char *decorated = strstr(message, "(HTTP ");
+    const char *digits = decorated ? decorated + 6 : NULL;
+    if (!digits)
+    {
+        const char *plain = strstr(message, "gh: HTTP ");
+        if (plain && (plain == message || plain[-1] == '\n')) digits = plain + 9;
+    }
+    if (digits && strlen(digits) >= 3 &&
+        digits[0] >= '0' && digits[0] <= '9' && digits[1] >= '0' && digits[1] <= '9' &&
+        digits[2] >= '0' && digits[2] <= '9' &&
+        (!digits[3] || digits[3] == ')' || digits[3] == '\r' || digits[3] == '\n' || digits[3] == ':'))
+    {
+        int code = (digits[0] - '0') * 100 + (digits[1] - '0') * 10 + digits[2] - '0';
+        if (code >= 100 && code <= 599) result = code;
+    }
+    return result;
+}
 BUSTER_GLOBAL_LOCAL int cm_process(char *const *args, char **output, size_t limit, int *not_found)
 {
     FILE *out = tmpfile(), *err = tmpfile();
@@ -99,11 +122,10 @@ BUSTER_GLOBAL_LOCAL int cm_process(char *const *args, char **output, size_t limi
         {
             char message[2048];
             rewind(err); size_t n = fread(message, 1, sizeof(message) - 1, err); message[n] = 0;
-            if (not_found) *not_found = !result && strstr(message, "(HTTP 404)") != NULL;
+            int code = cm_http_status(message);
+            if (not_found) *not_found = !result && code == 404;
             if (!result)
             {
-                const char *http = strstr(message, "(HTTP ");
-                int code = http && strlen(http) >= 9 ? atoi(http + 6) : 0;
                 const char *reason = strstr(message, "Resource not accessible") ? "resource-inaccessible" :
                     strstr(message, "admin rights") ? "admin-rights-required" :
                     strstr(message, "authentication") ? "authentication-failed" :
