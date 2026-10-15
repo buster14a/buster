@@ -4136,6 +4136,178 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_test_aarch64_tls_ie_link(Are
     return linked;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_android_tls_alignment(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 text_words[] = {UINT32_C(0x90000000), UINT32_C(0xf9400000), UINT32_C(0x90000001), UINT32_C(0xf9400021), UINT32_C(0xd65f03c0)};
+    u8 thread_local_data_bytes[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    OperatingSystem systems[] = {OPERATING_SYSTEM_ANDROID, OPERATING_SYSTEM_LINUX};
+    for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        ObjectSymbol symbols[] = {
+            {.name = S8("main"), .size = sizeof(text_words), .section = OBJECT_SECTION_TEXT,
+             .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
+            {.name = S8("initialized_tls"), .value = 4, .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_DATA,
+             .kind = OBJECT_SYMBOL_DATA, .global = true},
+            {.name = S8("zero_fill_tls"), .value = 16, .size = 4, .section = OBJECT_SECTION_THREAD_LOCAL_ZERO,
+             .kind = OBJECT_SYMBOL_DATA, .global = true},
+        };
+        ObjectRelocation relocations[] = {
+            {.offset = 0, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = link_test_tls_kinds[LINK_TEST_TLS_IE_HIGH]},
+            {.offset = 4, .section = OBJECT_SECTION_TEXT, .symbol = 1, .kind = link_test_tls_kinds[LINK_TEST_TLS_IE_LOW]},
+            {.offset = 8, .section = OBJECT_SECTION_TEXT, .symbol = 2, .kind = link_test_tls_kinds[LINK_TEST_TLS_IE_HIGH]},
+            {.offset = 12, .section = OBJECT_SECTION_TEXT, .symbol = 2, .kind = link_test_tls_kinds[LINK_TEST_TLS_IE_LOW]},
+        };
+        ObjectFile object = link_test_object_make(
+            arena, (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = systems[system]},
+            (ByteSlice){.pointer = (u8*)text_words, .length = sizeof(text_words)},
+            symbols, BUSTER_ARRAY_LENGTH(symbols), relocations, BUSTER_ARRAY_LENGTH(relocations));
+        ObjectSection* tdata = object.sections + OBJECT_SECTION_THREAD_LOCAL_DATA;
+        tdata->data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(thread_local_data_bytes);
+        tdata->virtual_size = sizeof(thread_local_data_bytes);
+        tdata->alignment = 8;
+        ObjectSection* tbss = object.sections + OBJECT_SECTION_THREAD_LOCAL_ZERO;
+        tbss->virtual_size = 32;
+        tbss->alignment = 16;
+        bool android = systems[system] == OPERATING_SYSTEM_ANDROID;
+        u64 expected_alignment = android ? UINT64_C(64) : UINT64_C(16);
+        u64 expected_data_tprel = android ? UINT64_C(68) : UINT64_C(20);
+        u64 expected_bss_tprel = android ? UINT64_C(96) : UINT64_C(48);
+        NativeExecutableLinkResult linked = link_native_executable(arena, &object, (NativeExecutableLinkOptions){
+            .entry_symbol = S8("main"),
+            .image_kind = (u8)(android ? NATIVE_IMAGE_PIE : NATIVE_IMAGE_EXECUTABLE),
+        });
+        u64 text_header = 0;
+        u64 tdata_header = 0;
+        u64 tbss_header = 0;
+        bool sections_found = linked.error == LINK_ERROR_NONE && linked.executable.length >= 64 &&
+                              link_test_elf_section_find(linked.executable, S8(".text"), 0, &text_header) &&
+                              link_test_elf_section_find(linked.executable, S8(".tdata"), 0, &tdata_header) &&
+                              link_test_elf_section_find(linked.executable, S8(".tbss"), 0, &tbss_header);
+        if (BUSTER_REQUIRE(arguments, sections_found))
+        {
+            u8* image = linked.executable.pointer;
+            u64 text_offset = link_read_u64(image, text_header + 24);
+            u64 text_size = link_read_u64(image, text_header + 32);
+            bool text_range = text_offset <= linked.executable.length &&
+                              text_size >= sizeof(text_words) &&
+                              sizeof(text_words) <= linked.executable.length - text_offset;
+            BUSTER_TEST(arguments, text_range);
+            if (BUSTER_REQUIRE(arguments, text_range))
+            {
+                u32 expected_text[] = {
+                    UINT32_C(0xd2a00000),
+                    UINT32_C(0xf2800000) | ((u32)expected_data_tprel << 5),
+                    UINT32_C(0xd2a00001),
+                    UINT32_C(0xf2800000) | ((u32)expected_bss_tprel << 5) | 1u,
+                    UINT32_C(0xd65f03c0),
+                };
+                for (u32 word = 0; word < BUSTER_ARRAY_LENGTH(expected_text); word += 1)
+                {
+                    BUSTER_TEST(arguments, link_read_u32(image, text_offset + word * sizeof(u32)) == expected_text[word]);
+                }
+            }
+
+            u64 tdata_address = link_read_u64(image, tdata_header + 16);
+            u64 tdata_offset = link_read_u64(image, tdata_header + 24);
+            u64 tdata_size = link_read_u64(image, tdata_header + 32);
+            u64 tdata_alignment = link_read_u64(image, tdata_header + 48);
+            u64 tbss_address = link_read_u64(image, tbss_header + 16);
+            u64 tbss_offset = link_read_u64(image, tbss_header + 24);
+            u64 tbss_size = link_read_u64(image, tbss_header + 32);
+            u64 tbss_alignment = link_read_u64(image, tbss_header + 48);
+            BUSTER_TEST(arguments, tdata_alignment == 8 && tdata_size == sizeof(thread_local_data_bytes) &&
+                                   tdata_address % 8 == 0);
+            BUSTER_TEST(arguments, tbss_alignment == 16 && tbss_size == 32 &&
+                                   tdata_address <= UINT64_MAX - 16 && tbss_address == tdata_address + 16 &&
+                                   tbss_address % 16 == 0);
+            BUSTER_TEST(arguments, tdata_offset <= UINT64_MAX - sizeof(thread_local_data_bytes) &&
+                                   tbss_offset % 16 == 0 &&
+                                   tbss_offset >= tdata_offset + sizeof(thread_local_data_bytes));
+
+            u64 program_header_offset = link_read_u64(image, 32);
+            u16 program_header_size = 0;
+            u16 program_header_count = 0;
+            memcpy(&program_header_size, image + 54, sizeof(program_header_size));
+            memcpy(&program_header_count, image + 56, sizeof(program_header_count));
+            bool program_headers_valid = program_header_size == 56 &&
+                                         program_header_offset <= linked.executable.length &&
+                                         (u64)program_header_count <=
+                                             (linked.executable.length - program_header_offset) / program_header_size;
+            BUSTER_TEST(arguments, program_headers_valid);
+            u32 tls_header_count = 0;
+            u64 tls_header = 0;
+            for (u32 index = 0; program_headers_valid && index < program_header_count; index += 1)
+            {
+                u64 header = program_header_offset + (u64)index * program_header_size;
+                if (link_read_u32(image, header) == 7)
+                {
+                    tls_header_count += 1;
+                    tls_header = header;
+                }
+            }
+            BUSTER_TEST(arguments, tls_header_count == 1);
+            if (program_headers_valid && tls_header_count == 1)
+            {
+                u64 tls_offset = link_read_u64(image, tls_header + 8);
+                u64 tls_address = link_read_u64(image, tls_header + 16);
+                u64 tls_file_size = link_read_u64(image, tls_header + 32);
+                u64 tls_memory_size = link_read_u64(image, tls_header + 40);
+                u64 tls_alignment = link_read_u64(image, tls_header + 48);
+                bool tls_file_range = tls_offset <= linked.executable.length &&
+                                      tls_file_size <= linked.executable.length - tls_offset;
+                BUSTER_TEST(arguments, tls_alignment == expected_alignment && tls_file_range &&
+                                       tls_file_size == sizeof(thread_local_data_bytes) && tls_memory_size == 48);
+                BUSTER_TEST(arguments, tls_alignment != 0 && tls_offset % tls_alignment == tls_address % tls_alignment &&
+                                       tls_offset % tls_alignment == 0 && tls_address % tls_alignment == 0);
+                BUSTER_TEST(arguments, tls_offset == tdata_offset && tls_address == tdata_address);
+            }
+        }
+        scratch_end(temporary);
+    }
+
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 empty_text_words[] = {UINT32_C(0xd65f03c0)};
+        ObjectSymbol symbol = {.name = S8("main"), .size = sizeof(empty_text_words), .section = OBJECT_SECTION_TEXT,
+                               .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
+        ObjectFile object = link_test_object_make(
+            temporary.arena, (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID},
+            (ByteSlice){.pointer = (u8*)empty_text_words, .length = sizeof(empty_text_words)}, &symbol, 1, 0, 0);
+        NativeExecutableLinkResult linked = link_native_executable(temporary.arena, &object, (NativeExecutableLinkOptions){
+            .entry_symbol = S8("main"),
+            .image_kind = (u8)NATIVE_IMAGE_PIE,
+        });
+        bool linked_ok = linked.error == LINK_ERROR_NONE && linked.executable.length >= 64;
+        BUSTER_TEST(arguments, linked_ok);
+        if (BUSTER_REQUIRE(arguments, linked_ok))
+        {
+            u8* image = linked.executable.pointer;
+            u64 program_header_offset = link_read_u64(image, 32);
+            u16 program_header_size = 0;
+            u16 program_header_count = 0;
+            memcpy(&program_header_size, image + 54, sizeof(program_header_size));
+            memcpy(&program_header_count, image + 56, sizeof(program_header_count));
+            bool program_headers_valid = program_header_size == 56 &&
+                                         program_header_offset <= linked.executable.length &&
+                                         (u64)program_header_count <=
+                                             (linked.executable.length - program_header_offset) / program_header_size;
+            BUSTER_TEST(arguments, program_headers_valid);
+            u32 tls_header_count = 0;
+            for (u32 index = 0; program_headers_valid && index < program_header_count; index += 1)
+            {
+                u64 header = program_header_offset + (u64)index * program_header_size;
+                tls_header_count += link_read_u32(image, header) == 7;
+            }
+            BUSTER_TEST(arguments, tls_header_count == 0);
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_tls_initial_exec_relaxation(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -7733,6 +7905,7 @@ UnitTestResult link_tests(UnitTestArguments* arguments)
     UnitTestResult hardened_layout = link_test_elf_hardened_layout(arguments);
     result.succeeded_test_count += hardened_layout.succeeded_test_count;
     result.test_count += hardened_layout.test_count;
+    BUSTER_TEST_FIXTURE(arguments, link_test_aarch64_android_tls_alignment);
     BUSTER_TEST_FIXTURE(arguments, link_test_aarch64_tls_initial_exec_relaxation);
     BUSTER_TEST_FIXTURE(arguments, link_test_aarch64_tls_descriptor_relaxation);
     BUSTER_TEST_FIXTURE(arguments, link_test_pe_x64_tls_index_object);
