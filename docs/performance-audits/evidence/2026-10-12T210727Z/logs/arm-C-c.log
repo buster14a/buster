@@ -1,0 +1,12 @@
+==3853== Callgrind, a call-graph generating cache profiler
+==3853== Copyright (C) 2002-2017, and GNU GPL'd, by Josef Weidendorfer et al.
+==3853== Using Valgrind-3.22.0 and LibVEX; rerun with -h for copyright info
+==3853== Command: /tmp/claude-0/-home-user-buster/da6de460-0b83-5c94-a74c-ffa150b86945/scratchpad/cg/ide-cand cc -Isrc -Ibuild/v3/generated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -target x86_64-unknown-linux -march=znver5 -g0 -c -o /tmp/claude-0/-home-user-buster/da6de460-0b83-5c94-a74c-ffa150b86945/scratchpad/cg/arm-C.o -fc-ast-pilot src/buster/apps/ide/ide.c
+==3853== 
+==3853== For interactive control, run 'callgrind_control -h'.
+==3853== 
+==3853== Events    : Ir
+==3853== Collected : 23206519206
+==3853== 
+==3853== I   refs:      23,206,519,206
+exit=0

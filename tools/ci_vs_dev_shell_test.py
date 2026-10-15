@@ -21,6 +21,9 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "tools/ci_vs_dev_shell.ps1"
 INVOCATION = "& .\\tools\\ci_vs_dev_shell.ps1 "
+# Every Windows PowerShell step loads the modules it uses by name before its
+# first cmdlet, so Windows PowerShell 5.1 never scans PSModulePath (#3979).
+MODULE_IMPORT = "Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility"
 # Launch-relative deadline for one helper step process, as before #2021.
 PROBE_TIMEOUT_SECONDS = 120
 # Seven simultaneous Windows PowerShell starts exceeded that per-owner deadline
@@ -68,6 +71,8 @@ class WorkflowWiringTests(unittest.TestCase):
                 self.assertEqual(step.count(INVOCATION), 1)
                 self.assertEqual(helper_call(step), arguments)
                 self.assertLess(step.index("$ErrorActionPreference = 'Stop'"), step.index(INVOCATION))
+                self.assertLess(step.index("$ErrorActionPreference = 'Stop'"), step.index(MODULE_IMPORT))
+                self.assertLess(step.index(MODULE_IMPORT), step.index("Join-Path"))
                 self.assertEqual("CLANG_ARCH: ${{ matrix.clang_arch }}" in step, "-ClangArch" in arguments)
 
     def test_workflow_keeps_no_inline_copy_of_the_shell_setup(self):
@@ -109,6 +114,7 @@ class Probe:
             f"    $null = Test-Path -LiteralPath '{vswhere}'\n"
             "    Write-FixtureStage filesystem-command-exit\n"
             "}\n"
+            + MODULE_IMPORT + "\n"
             "Write-FixtureStage helper-entry\n"
             f"& '{HELPER}' -VsWhere '{vswhere}' -Arch amd64 -Component fixture.component "
             + arguments.replace("<github_env>", str(self.github_env)) + "\n"
@@ -190,9 +196,10 @@ def probe_plan_run(shell, root, llvm_bin, plan, environment, probes):
 @unittest.skipUnless(os.name == "nt", "The Visual Studio shell exists only on Windows runners")
 class HelperBehaviorTests(unittest.TestCase):
     # Each step remains a separate PowerShell process with private outputs.
-    # Preserve two-owner admission and launch-relative deadlines. Stage receipts
-    # attributed the old ~23s prefix to work before any vswhere child ran; the
-    # optional cold Test-Path prefix isolates that command without resetting time.
+    # Preserve two-owner admission and launch-relative deadlines. The old ~23 s
+    # was Windows PowerShell 5.1 scanning PSModulePath for the first unloaded
+    # cmdlet (#3979); the fixture imports by name like the CI steps, and the
+    # optional cold Test-Path prefix still reproduces that scan before it.
     EXTRA_CASES = ("vswhere directory", "vswhere provider", "relative filesystem")
     FAILURES = {
         "wrong clang target": ({"FAKE_CLANG_TARGET": "aarch64-pc-windows-msvc"},
@@ -239,22 +246,26 @@ class HelperBehaviorTests(unittest.TestCase):
             FAKE_VSWHERE_STATUS="0",
             FAKE_CLANG_TARGET="x86_64-pc-windows-msvc",
         )
+        # Probes that reach the vendor shell run longest; batches end with their
+        # slower member, so those are admitted together first (#3912). Before
+        # #3979 their first Write-Output took 24-39 s on hosted AArch64.
         plan = {
             "combination": (vswhere, {}, (
                 "-LlvmBin '<llvm_bin>' -GithubEnv '<github_env>' "
                 "-Require cl, clang, gcc, zig -ClangArch x86_64")),
             "msvc": (vswhere, {"FAKE_CLANG_TARGET": "wrong-target"}, ""),
+            "wrong clang target": (vswhere, *cls.FAILURES["wrong clang target"]),
+            "relative filesystem": (Path(vswhere.name), {
+                "FAKE_PS_LOCATION": str(cls.root),
+                "FAKE_OS_CURRENT_DIRECTORY": str(ROOT),
+                "PATH": environment["PATH"] + ";caf\u00e9-fixture",
+            }, "-GithubEnv 'relative-env'"),
             "missing vswhere": (cls.root / "missing-vswhere.cmd", {}, ""),
         }
         for name, (overrides, arguments) in cls.FAILURES.items():
-            plan[name] = (vswhere, overrides, arguments)
+            plan.setdefault(name, (vswhere, overrides, arguments))
         plan["vswhere directory"] = (cls.root / "vs", {}, "")
         plan["vswhere provider"] = ("Env:FAKE_VS_PATH", {}, "")
-        plan["relative filesystem"] = (Path(vswhere.name), {
-            "FAKE_PS_LOCATION": str(cls.root),
-            "FAKE_OS_CURRENT_DIRECTORY": str(ROOT),
-            "PATH": environment["PATH"] + ";caf\u00e9-fixture",
-        }, "-GithubEnv 'relative-env'")
         cls.probes = {}
         # Registered before the first launch and run before the fixture
         # directory is removed, so an early failure never leaks a child.

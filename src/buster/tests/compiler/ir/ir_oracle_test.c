@@ -3,9 +3,11 @@
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/codegen/codegen.h>
+#include <buster/lib/compiler/jit/jit.h>
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/string.h>
 #include <buster/tests/compiler/ir/ir_oracle_internal.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 // ir_oracle_fixture builds canonical rows without the C frontend. The C
 // companion exercises lowering separately. ir_oracle_native_tests is a private
@@ -254,14 +256,15 @@ UnitTestResult ir_oracle_native_tests(UnitTestArguments* arguments)
                 if (BUSTER_REQUIRE(arguments, code.error == CODEGEN_ERROR_NONE))
                 {
                     ObjectFile object = object_from_canonical_codegen_module(arguments->arena, program, &code, target_native);
-                    ObjectExecutable executable = object_link_executable(&object);
-                    if (BUSTER_REQUIRE(arguments, object.error == OBJECT_ERROR_NONE && executable.error == OBJECT_ERROR_NONE && executable.address))
+                    JitProgram executable = jit_link_object(&object, (JitOptions){0});
+                    u8* text = (u8*)executable.section_addresses[OBJECT_SECTION_TEXT];
+                    if (BUSTER_REQUIRE(arguments, object.error == OBJECT_ERROR_NONE && executable.error == JIT_ERROR_NONE && text))
                     {
                         IrOracleNative2* native = 0;
                         IrOracleNative0* observer = 0;
                         for (u32 i = 0; i < code.function_count; i += 1)
                         {
-                            void* entry = (u8*)executable.address + code.functions[i].code_offset;
+                            void* entry = text + code.functions[i].code_offset;
                             if (code.functions[i].symbol.value == probe->symbol.value) memcpy(&native, &entry, sizeof(native));
                             if (code.functions[i].symbol.value == observe->symbol.value) memcpy(&observer, &entry, sizeof(observer));
                         }
@@ -277,7 +280,7 @@ UnitTestResult ir_oracle_native_tests(UnitTestArguments* arguments)
                             arguments->show(arguments, S8("IR_ORACLE_END_V1\n"));
                         }
                     }
-                    object_release_executable(executable);
+                    jit_program_release(&executable);
                 }
             }
         }
@@ -637,7 +640,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_oracle_comparison(UnitTestArguments* argum
             arguments->show(arguments, S8("IR_ORACLE_REPORT_V1 fixture={u32} status=native-unavailable\n"), fixture);
 #endif
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }

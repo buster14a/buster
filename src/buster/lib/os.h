@@ -11,7 +11,10 @@
 // written against it must degrade to serial — a one-lane gang and
 // BUSTER_SINGLE_THREADED builds run the identical path. Lazily built
 // globals state BUSTER_CHECK_SERIAL_INITIALIZATION() and are filled by
-// their module's prewarm entry point before lanes run.
+// their module's prewarm entry point before lanes run, unless each entry is
+// filled through a once-claim (once_claim_u8, over the plain-object
+// atomic_u8_load_acquire family), which any thread may take; lane_release
+// joins a parked gang when a later serial prewarm is still needed.
 
 #include <buster/lib/base.h>
 
@@ -241,6 +244,8 @@ typedef enum ProcessSpawnFailure
     PROCESS_SPAWN_FAILURE_UNSUPPORTED,
     PROCESS_SPAWN_FAILURE_WORKING_DIRECTORY,
     PROCESS_SPAWN_FAILURE_CAPTURE_SINK,
+    PROCESS_SPAWN_FAILURE_PENDING_CLEANUP,
+    PROCESS_SPAWN_FAILURE_OWNER_ALLOCATION,
 } ProcessSpawnFailure;
 
 typedef struct ProcessSpawnResult ProcessSpawnResult;
@@ -250,12 +255,18 @@ struct ProcessSpawnResult
     // Windows Job Object used for kill-on-close tree containment. Null on
     // POSIX, where process_group reserves the exact group-leader identity.
     OsProcessHandle* process_tree;
+    // Windows consuming identity. Copies cannot consume an owner twice.
+    u64 windows_owner_id;
+    // Launch unwind can fail with a still-owned child despite handle == null.
+    u64 pending_windows_owner_id;
     OsFileDescriptor* pipes[STANDARD_STREAM_COUNT][2];
     ProcessCaptureLimits capture_limits;
     OsFileDescriptor* capture_overflow_files[(size_t)STANDARD_STREAM_COUNT];
     // The first failed validation or platform setup stage. Native error zero is
     // reserved for success; callers never need to scrape a diagnostic string.
     OsError error;
+    // Failed Windows launch unwind retains its independent first native error.
+    OsError cleanup_error;
     ProcessSpawnFailure failure;
     // Optional shared flag state. The wait lane remains the sole owner of the
     // process-group identity and performs every signal, query, and reap.
@@ -331,6 +342,11 @@ struct ProcessWaitResult
     u64 streamed_total;
     u64 dropped_total;
     ProcessResult result;
+    // First Windows wait/termination/query failure, captured before cleanup.
+    OsError cleanup_error;
+    // Nonzero means the module retains exact handles, independently of this
+    // result and its arena/thread. New Windows spawn admission is then closed.
+    u64 pending_windows_owner_id;
     // Native child status retained for diagnostics. On Windows this is the
     // DWORD returned by GetExitCodeProcess; on POSIX it is the status word
     // returned by waitpid. `result` remains the portable contract.
@@ -393,9 +409,46 @@ BUSTER_F_DECL String8 string8_from_os_error(Arena* arena, OsError error, bool nu
 BUSTER_F_DECL ProcessSpawnResult os_process_spawn(SliceString8 argv, SliceString8 environment_keys, SliceString8 environment_values,
                                                   ProcessSpawnOptions options);
 BUSTER_F_DECL ProcessWaitResult os_process_wait_sync(Arena* arena, ProcessSpawnResult spawn);
+
+typedef struct ProcessCleanupResult ProcessCleanupResult;
+struct ProcessCleanupResult
+{
+    u64 active_owners;
+    u64 pending_owners;
+    u64 resumed_owner_id;
+    u64 error_owner_id;
+    // Windows receipt state: 0 reserved, 1 running, 2 waiting, 3 pending.
+    u32 error_owner_state;
+    OsError error;
+};
+// Windows: resume at most one pending owner under a shared <=5-second native
+// observation budget. Zero polls without waiting. No new process is launched;
+// exact handles remain retained until leader exit AND job emptiness are proven.
+// Other platforms return an empty result and retain their current contracts.
+BUSTER_F_DECL ProcessCleanupResult os_process_cleanup_pending(u64 timeout_microseconds);
+BUSTER_F_DECL ProcessCleanupResult os_process_cleanup_snapshot(void);
+// Permanently close admission, claim unconsumed running/pending ownership within
+// <=5 seconds and report every active owner, including an exclusive caller still
+// waiting or launching. A nonzero active_owners refuses finalization: the host
+// must remain alive. Closing a kill-on-close job never proves tree cleanup.
+BUSTER_F_DECL ProcessCleanupResult os_process_shutdown(u64 timeout_microseconds);
+// Executable exit contract: close admission, keep the host alive while exact
+// process/job ownership remains, emit an allocation-free failure receipt and
+// repeat bounded cleanup. False means a refusal was observed even if a later
+// retry finalized everything. This intentionally has no total shutdown deadline.
+BUSTER_F_DECL bool os_process_shutdown_keep_alive(void);
+
 // The same wait, given up on after `timeout_microseconds`: the child is killed,
 // whatever it had already written is still returned, and `timed_out` says the
 // deadline is why. Zero waits forever, which is what os_process_wait_sync does.
+// Windows failed finalization returns a retained pending_windows_owner_id; the
+// module owns those handles until os_process_cleanup_pending proves cleanup.
+// On Windows, each ordinary captured-pipe scan polls the leader and checks
+// a finite deadline even while bytes keep arriving. On the first signaled poll,
+// it freezes the remaining available byte count per stream, drains only that
+// bounded snapshot in at-most-16-KiB reads, and closes each reader at zero.
+// Later descendant writes cannot extend the snapshot. Zero timeout waits
+// forever.
 // Synchronous regular-file spill and metadata I/O can delay deadline servicing;
 // this is not a hard wall-clock bound on storage or operating-system scheduling.
 BUSTER_F_DECL ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spawn, u64 timeout_microseconds);
@@ -455,7 +508,7 @@ BUSTER_F_DECL FileStats os_file_replacement_target_stats(String8 path);
 // Metadata-only identity probe that follows every link, including a final one.
 // It opens no file data (a FIFO cannot block; read-only files are fine) and
 // needs no write access. A missing target is valid with OS_FILE_KIND_MISSING;
-// otherwise the result carries device/index identity and the followed kind.
+// otherwise the result carries device/index identity, size and the followed kind.
 BUSTER_F_DECL FileStats os_path_followed_stats(String8 path);
 
 typedef struct OsFileStagingResult OsFileStagingResult;
@@ -604,12 +657,73 @@ BUSTER_F_DECL bool process_control_atomic_set_if_zero(ProcessControlAtomic* addr
 // is only atomic where the type is _Atomic; MSVC and single-threaded builds use
 // a plain u64, so cross-thread readers go through this instead.
 BUSTER_F_DECL u64 atomic_u64_load(AtomicU64* address);
+// A sequentially consistent store with the same compiler/serial portability.
+BUSTER_F_DECL void atomic_u64_store(AtomicU64* address, u64 value);
 
 // All three return the value the address held before the addition. In
 // single-threaded builds they compile to plain arithmetic.
 BUSTER_F_DECL u64 atomic_u64_increment(AtomicU64* address);
 BUSTER_F_DECL u64 atomic_u64_decrement(AtomicU64* address);
 BUSTER_F_DECL u64 atomic_u64_add(AtomicU64* address, u64 addend);
+
+// Atomic access to plain, unqualified objects, for state that a lane may
+// publish into an existing table without changing its element type: the
+// once-claim bytes below and the x86 caches they guard. An acquire load and a
+// release store are ordinary moves on x86-64, and the unity build inlines
+// them (BUSTER_SHARED_INLINE), so a published-entry test costs what the plain
+// load it replaces did. Every accessor of such an object goes
+// through these, because a plain access racing an atomic one is still a data
+// race. Single-threaded builds compile them to plain accesses.
+BUSTER_F_DECL u8 atomic_u8_load_acquire(u8 const* address);
+BUSTER_F_DECL void atomic_u8_store_release(u8* address, u8 value);
+// Stores `desired` and answers true when the byte held `expected`; acquire
+// and release either way, so a winner sees what earlier publishers wrote.
+BUSTER_F_DECL bool atomic_u8_compare_exchange(u8* address, u8 expected, u8 desired);
+BUSTER_F_DECL u16 atomic_u16_load_acquire(u16 const* address);
+BUSTER_F_DECL void atomic_u16_store_release(u16* address, u16 value);
+// Relaxed: for a value whose every writer stores the same bits and whose
+// visibility a separate acquire/release pair already orders.
+BUSTER_F_DECL u16 atomic_u16_load_relaxed(u16 const* address);
+BUSTER_F_DECL void atomic_u16_store_relaxed(u16* address, u16 value);
+BUSTER_F_DECL bool atomic_u16_compare_exchange(u16* address, u16 expected, u16 desired);
+// Returns the value held before the addition, which wraps.
+BUSTER_F_DECL u16 atomic_u16_add(u16* address, u16 addend);
+BUSTER_F_DECL u32 atomic_u32_add(u32* address, u32 addend);
+BUSTER_F_DECL u32 atomic_u32_load_acquire(u32 const* address);
+BUSTER_F_DECL u64 atomic_u64_load_acquire_plain(u64 const* address);
+// Sets `bits` with release ordering and returns the previous word.
+BUSTER_F_DECL u64 atomic_u64_or_release_plain(u64* address, u64 bits);
+
+// Once-claims: filling one entry of a lazily built table from any thread.
+//
+// The entry's state is a byte (or a u16 that already doubles as the entry's
+// value) holding a pending code, a busy code, or any final code. Readers test
+// the state with an acquire load and use the entry only once it is final.
+// A filler calls once_claim_*: the thread whose compare-exchange moves the
+// state from pending to busy gets true, fills only that entry's storage, and
+// ends the claim with once_publish_*, a release store of the final code
+// (or of the pending code, which abandons the claim for a later retry). Every
+// other caller waits for the state to stop being busy and gets false, so it
+// reads whatever the winner published. There is no lock on the read path and
+// no callback; a claim is a byte.
+//
+// A filler may claim further entries while it holds one -- a form's facts
+// read its operand views -- so claims carry a level, and a thread may only
+// claim strictly below the innermost claim it holds. Every waiter therefore
+// waits on a claim whose holder can only wait on lower levels, and no cycle
+// exists. The check is always compiled in, beside the one that catches a
+// thread waiting on a claim it holds itself: either would otherwise hang
+// instead of failing.
+BUSTER_F_DECL bool once_claim_u8(u8* state, u8 pending, u8 busy, u32 level);
+BUSTER_F_DECL void once_publish_u8(u8* state, u8 value);
+BUSTER_F_DECL void once_wait_u8(u8 const* state, u8 busy);
+BUSTER_F_DECL bool once_claim_u16(u16* state, u16 pending, u16 busy, u32 level);
+BUSTER_F_DECL void once_publish_u16(u16* state, u16 value);
+BUSTER_F_DECL void once_wait_u16(u16 const* state, u16 busy);
+#if BUSTER_INCLUDE_TESTS
+// Claims the calling thread holds, so a test can prove a fill left none open.
+BUSTER_F_DECL u32 once_claim_depth(void);
+#endif
 
 typedef enum ProgramFlag
 {
@@ -834,6 +948,11 @@ BUSTER_F_DECL LaneRange lane_range(u64 item_count);
 // context is saved and restored. Nested gangs retain the old independent-gang
 // behavior so an outer lane can safely narrow and invoke another lane region.
 BUSTER_F_DECL void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument);
+// Joins the calling context's parked resident workers, if any; the next
+// lane_run recreates them. Parked workers are live threads, so a caller must
+// release them before serial initialization (BUSTER_CHECK_SERIAL_INITIALIZATION).
+// Only outside an active lane region. A no-op in single-threaded builds.
+BUSTER_F_DECL void lane_release(void);
 
 BUSTER_F_DECL void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_value);
 BUSTER_F_DECL bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index);

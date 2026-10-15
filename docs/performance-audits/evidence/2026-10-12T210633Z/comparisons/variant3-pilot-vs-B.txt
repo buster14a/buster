@@ -1,0 +1,26 @@
+-2536660	PROGRAM TOTALS
+-1262351	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_skip_attributes
+-1096794	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_type_parse_machine_run
+-901954	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_ir_primitive_type_kind
+-545596	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_skip_alignment_specifiers
+-348314	/home/user/buster/src/buster/lib/string.c:string_equal
+-340955	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_qualified_typedef_type
+-318777	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_storage_classes_valid
+-295847	./string/../sysdeps/x86_64/multiarch/memcmp-avx2-movbe.S:__memcmp_avx2_movbe
+-227662	/home/user/buster/src/buster/lib/compiler/frontend/c/c_internal.h:c_parse_skip_attributes
+-202722	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_primitive_specifiers_valid
+-157836	/home/user/buster/src/buster/lib/compiler/frontend/c/c_ast.h:c_parse_specifier_index_prepare
+-149744	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_scalar_type_in_scope_attempt
+-138949	/home/user/buster/src/buster/lib/compiler/ir/ir.c:ir_source_region_position
+-118885	./string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms
+-116955	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_type_specifier_token
+-102544	/home/user/buster/src/buster/lib/string.c:c_parse_storage_classes_valid
+106792	/home/user/buster/src/buster/lib/compiler/frontend/c/c.h:c_parse_tree_specifiers_type
+106792	/home/user/buster/src/buster/lib/compiler/frontend/c/c_source.c:c_parse_tree_specifiers_type
+133244	/home/user/buster/src/buster/lib/compiler/frontend/c/c_ast.h:c_parse_tree_specifiers_type
+153585	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_tree_tag_type
+182587	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_parameter_segment
+249195	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_type_name_specifiers
+528517	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_declaration_specifiers_type
+872468	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_specifier_index_prepare
+2059495	/home/user/buster/src/buster/lib/compiler/frontend/c/c_parse.c:c_parse_tree_specifiers_type

@@ -555,16 +555,6 @@ struct ObjectArchive
     u32 reserved;
 };
 
-typedef struct ObjectExecutable ObjectExecutable;
-struct ObjectExecutable
-{
-    void* address;
-    // The reservation may begin before the aligned text entry.
-    void* allocation_address;
-    u64 allocation_size;
-    ObjectError error;
-};
-
 BUSTER_F_DECL ObjectFormat object_format_for_target(Target target);
 BUSTER_F_DECL String8 object_format_name(ObjectFormat format);
 BUSTER_F_DECL void object_write_statistics_add(ObjectWriteStatistics* total, ObjectWriteStatistics const* unit);
@@ -578,9 +568,7 @@ BUSTER_F_DECL ObjectArchive object_archive_read(Arena* arena, ByteSlice bytes, T
 // Unlike the eager public reader above, this borrows bytes until extraction
 // finishes and postpones indexed member payload/target validation.
 BUSTER_F_DECL ObjectArchive object_archive_read_link(Arena* arena, ByteSlice bytes, Target target);
-BUSTER_F_DECL ObjectExecutable object_link_executable(ObjectFile* object);
 BUSTER_F_DECL bool object_aarch64_elf_page_relocate(ObjectRelocationKind kind, u32 word, u64 place, u64 target, s64 addend, u32* patched);
-BUSTER_F_DECL void object_release_executable(ObjectExecutable executable);
 
 #if BUSTER_FUZZ_AVAILABLE
 BUSTER_F_DECL s32 object_fuzz_test_input(const u8* pointer, size_t size);

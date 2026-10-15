@@ -108,3 +108,36 @@ u8 leading_zeroes_u64(u64 n)
 
     return result;
 }
+
+bool u64_add_s64_checked(u64 address, s64 addend, u64* result)
+{
+    u64 magnitude = addend < 0 ? (u64)(-(addend + 1)) + 1 : (u64)addend;
+    bool valid = result && (addend < 0 ? magnitude <= address : magnitude <= UINT64_MAX - address);
+    if (valid)
+    {
+        *result = addend < 0 ? address - magnitude : address + magnitude;
+    }
+
+    return valid;
+}
+
+bool s32_from_u64_add_s64_checked(u64 address, s64 addend, s32* result)
+{
+    bool valid = result && address <= (u64)INT64_MAX;
+    s64 value = valid ? (s64)address : 0;
+    if (valid && ((addend > 0 && value > INT64_MAX - addend) || (addend < 0 && value < INT64_MIN - addend)))
+    {
+        valid = false;
+    }
+    if (valid)
+    {
+        value += addend;
+        valid = value >= INT32_MIN && value <= INT32_MAX;
+    }
+    if (valid)
+    {
+        *result = (s32)value;
+    }
+
+    return valid;
+}

@@ -36,6 +36,23 @@ static int test_scale_compiler(int argc, char** argv)
     if (!result && (pinned < workers || (getenv("TP_TEST_SCALE_PINNED") && pinned != (jobs > 1 ? jobs : 1)))) result = 6;
 #endif
     if (!strcmp(fault, "wrong-workers") && jobs > 1) workers = 1;
+    /* Gate faults emit lane_gate: "gate" gates populations below eight inputs
+     * truthfully; "gate-wrong" claims serial but keeps its workers;
+     * "gate-unknown" names no gate; "gate-unstable" gates only the warmups;
+     * "gate-capped" caps eight or more inputs one worker below the request
+     * and "gate-capped-wrong" claims a cap but keeps every worker. */
+    char const* gate = NULL;
+    if (!strncmp(fault, "gate", 4)) gate = jobs > 1 ? "lanes" : "none";
+    int gated = jobs > 1 && ((!strcmp(fault, "gate") && inputs < 8) || !strcmp(fault, "gate-wrong") ||
+                             (!strcmp(fault, "gate-unstable") && metrics && strstr(metrics, "-warmup")));
+    if (gated) gate = "serial";
+    if (gated && strcmp(fault, "gate-wrong")) workers = 1;
+    if (!strcmp(fault, "gate-unknown")) gate = "maybe";
+    if (!strncmp(fault, "gate-capped", 11) && jobs > 1 && inputs >= 8)
+    {
+        gate = "capped";
+        if (!strcmp(fault, "gate-capped")) workers -= 1;
+    }
     if (!result && !strcmp(fault, "sleep")) test_delay(5000);
     if (!result && !strcmp(fault, "memory"))
     {
@@ -70,8 +87,9 @@ static int test_scale_compiler(int argc, char** argv)
         FILE* report = fopen(metrics, "wb");
         int ok = report && fprintf(report, "CC_METRICS version=1 schema=buster-cc-metrics inputs=%u records=%u ok=%u rejected=0 failed=0 "
                                    "not_run=0 prebuilt=0 error=- exit_status=0 action=link target=- allocator=- compile_jobs=%u "
-                                   "compilation_workers=%u intervals=%s keep_going=0\n",
-                                   inputs, inputs, inputs, jobs ? jobs : 1, workers, workers > 1 ? "concurrent" : "serial") > 0;
+                                   "%s%s%scompilation_workers=%u intervals=%s keep_going=0\n",
+                                   inputs, inputs, inputs, jobs ? jobs : 1, gate ? "lane_gate=" : "", gate ? gate : "", gate ? " " : "",
+                                   workers, workers > 1 ? "concurrent" : "serial") > 0;
         if (report && fclose(report) != 0) ok = 0;
         FILE* artifact = ok ? fopen(output, "wb") : NULL;
         ok = artifact && fprintf(artifact, "linked inputs=%u", inputs) > 0;
@@ -251,12 +269,15 @@ static void test_scale_options(void)
 {
     TpConfig config;
     char* valid[] = {"throughput", "scale", "--compiler", "ide", "--output", "out", "--cpu-set", "auto", "--workers", "1,2,4,7", NULL};
-    CHECK(tp_options(10, valid, &config) && config.scale_workers.count == 4 && config.scale_shape_mask == 15u &&
+    CHECK(tp_options(10, valid, &config) && config.scale_workers.count == 4 && config.scale_shape_mask == 31u &&
           config.scale_repeats == TP_SCALE_DEFAULT_REPEATS);
     char* shapes[] = {"throughput", "scale", "--compiler", "ide", "--output", "out", "--cpu-set", "0", "--workers", "1",
                       "--shape", "tiny", "--shape", "count", "--allow-smt", "--max-rss-mib", "512", NULL};
     CHECK(tp_options(17, shapes, &config) && config.scale_shape_mask == ((1u << TP_SCALE_TINY) | (1u << TP_SCALE_COUNT)) &&
           config.scale_allow_smt && config.scale_max_rss_mib == 512);
+    char* size[] = {"throughput", "scale", "--compiler", "ide", "--output", "out", "--cpu-set", "0", "--workers", "1",
+                    "--shape", "size", NULL};
+    CHECK(tp_options(12, size, &config) && config.scale_shape_mask == (1u << TP_SCALE_SIZE));
     char* missing_set[] = {"throughput", "scale", "--compiler", "ide", "--output", "out", "--workers", "1", NULL};
     CHECK(!tp_options(8, missing_set, &config));
     char* missing_workers[] = {"throughput", "scale", "--compiler", "ide", "--output", "out", "--cpu-set", "0", NULL};
@@ -397,6 +418,18 @@ static void test_scale(char const* executable, char const* root)
               test_file_contains(output, "scaling-metadata.json", "\"name\":\"count-w2-n3\"") &&
               test_file_contains(output, "scaling.csv", "equal,8,2,core,") &&
               test_file_contains(output, "scaling.csv", ",2,concurrent,"));
+        /* The size sweep doubles from two to 64 equal TUs at one and two
+         * workers. A compiler without the gate reports none. */
+        CHECK(test_file_contains(output, "scaling-metadata.json", "\"name\":\"size-n2\",\"shape\":\"size\",\"inputs\":2,") &&
+              test_file_contains(output, "scaling-metadata.json", "\"name\":\"size-n64\",\"shape\":\"size\",\"inputs\":64,") &&
+              !test_file_contains(output, "scaling-metadata.json", "\"name\":\"size-n128\"") &&
+              test_file_contains(output, "scaling.csv", "size-n64,64,2,core,") &&
+              test_file_contains(output, "scaling.json", "\"lane_gate\":null") &&
+              !test_file_contains(output, "scaling.json", "\"lane_gate\":\""));
+    }
+    else
+    {
+        CHECK(!test_file_contains(output, "scaling-metadata.json", "\"name\":\"size-n2\""));
     }
     /* A result directory is never reused. */
     result = test_scale_run(valid, output, log);
@@ -413,6 +446,37 @@ static void test_scale(char const* executable, char const* root)
         test_scale_fault(fault, root, "scale-nondeterministic", "differs from");
         fault.fault = "diagnostic-order";
         test_scale_fault(fault, root, "scale-diagnostic-order", "diagnostics at 2 workers");
+        /* A truthful gate keeps one worker below eight inputs: the size-n2
+         * and size-n4 points expect one worker, size-n8 and larger two. */
+        TestScaleRun gate = valid;
+        gate.fault = "gate";
+        gate.shape = "size";
+        gate.pinned = 0;
+        CHECK(tp_path(output, root, "scale-gate"));
+        result = test_scale_run(gate, output, log);
+        CHECK_CHILD_EXIT(result, 0, log);
+        CHECK(test_file_contains(output, "scaling.csv", "size-n4,4,2,core,") &&
+              test_file_contains(output, "scaling.csv", ",1,serial,") &&
+              test_file_contains(output, "scaling.json", "\"workers\":2,\"placement\":\"core\",\"observed_workers\":1,\"lane_gate\":\"serial\"") &&
+              test_file_contains(output, "scaling.json", "\"workers\":2,\"placement\":\"core\",\"observed_workers\":2,\"lane_gate\":\"lanes\"") &&
+              test_file_contains(output, "scaling.json", "\"workers\":1,\"placement\":\"core\",\"observed_workers\":1,\"lane_gate\":\"none\"") &&
+              test_file_contains(output, "scaling.md", "| lanes |") && test_file_contains(output, "scaling.md", "| serial |"));
+        gate.fault = "gate-wrong";
+        test_scale_fault(gate, root, "scale-gate-wrong", "participating workers, expected 1");
+        gate.fault = "gate-unknown";
+        test_scale_fault(gate, root, "scale-gate-unknown", "unknown lane gate");
+        gate.fault = "gate-unstable";
+        test_scale_fault(gate, root, "scale-gate-unstable", "lane gate lanes after serial");
+        /* A truthful cap reports the workers that ran; claiming a cap while
+         * keeping every requested worker is refused. */
+        gate.fault = "gate-capped";
+        CHECK(tp_path(output, root, "scale-gate-capped"));
+        result = test_scale_run(gate, output, log);
+        CHECK_CHILD_EXIT(result, 0, log);
+        CHECK(test_file_contains(output, "scaling.json", "\"workers\":2,\"placement\":\"core\",\"observed_workers\":1,\"lane_gate\":\"capped\"") &&
+              test_file_contains(output, "scaling.md", "| capped |"));
+        gate.fault = "gate-capped-wrong";
+        test_scale_fault(gate, root, "scale-gate-capped-wrong", "capped workers, expected fewer than 2");
         /* Two SMT siblings of one core cannot host two workers. */
         TestScaleRun refused = valid;
         refused.topology = siblings;

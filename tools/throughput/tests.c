@@ -469,8 +469,8 @@ static int test_admission_descriptor(char const* directory, char const* tree_has
 }
 
 #ifdef __linux__
-/* Preserve the equality oracle. Only its mismatch emits raw counter facts;
- * wait4 owns one child while RUSAGE_CHILDREN is a separate OS snapshot. */
+/* Cumulative disagreement is telemetry, not a collector failure: Linux may
+ * account the final child context switch between its two rusage snapshots. */
 static int test_child_counter_diagnostics(FILE* file, TpProcess const* process,
     struct rusage const* before, struct rusage const* after, TpProcessTestObservation const* observed)
 {
@@ -529,7 +529,46 @@ static void test_child_counter_diagnostic_control(void)
         CHECK(length > 0 && (size_t)length < sizeof(cleanup) && strstr(text, cleanup) != NULL);
         CHECK(process.diagnostics[TP_VOLUNTARY_SWITCHES] == 2 && observed.usage.ru_nvcsw == 2 &&
               before.ru_nvcsw == 17 && after.ru_nvcsw == 20);
+        /* Retained hosted recurrence: wait4=2, cumulative 87->88. This
+         * disagreement must remain observable without invalidating wait4. */
+        before.ru_nvcsw = 87;
+        after.ru_nvcsw = 88;
+        CHECK(test_child_counter_diagnostics(file, &process, &before, &after, &observed));
+        CHECK(process.diagnostics[TP_VOLUNTARY_SWITCHES] == 2 && observed.usage.ru_nvcsw == 2);
         CHECK(fclose(file) == 0);
+    }
+}
+
+static void test_child_counter_mapping(void)
+{
+    typedef struct TestChildCounterCase
+    {
+        long minor, major, voluntary, involuntary;
+        unsigned available;
+        uint64_t expected[TP_DIAGNOSTICS];
+    } TestChildCounterCase;
+    TestChildCounterCase const cases[] = {
+        {11, 23, 37, 53, 15, {11, 23, 37, 53}},
+        {0, 0, 0, 0, 15, {0, 0, 0, 0}},
+        {-1, -2, -3, -4, 0, {0, 0, 0, 0}},
+        {-1, 23, 37, 53, 14, {0, 23, 37, 53}},
+        {11, -1, 37, 53, 13, {11, 0, 37, 53}},
+        {11, 23, -1, 53, 11, {11, 23, 0, 53}},
+        {11, 23, 37, -1, 7, {11, 23, 37, 0}},
+        {LONG_MAX, 0, LONG_MAX, 0, 15, {LONG_MAX, 0, LONG_MAX, 0}},
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+    {
+        struct rusage usage = {0};
+        usage.ru_minflt = cases[i].minor;
+        usage.ru_majflt = cases[i].major;
+        usage.ru_nvcsw = cases[i].voluntary;
+        usage.ru_nivcsw = cases[i].involuntary;
+        TpProcess process = {0};
+        tp_process_diagnostics(&process, &usage);
+        CHECK(process.diagnostics_available == cases[i].available);
+        for (unsigned j = 0; j < TP_DIAGNOSTICS; ++j)
+            CHECK(process.diagnostics[j] == cases[i].expected[j]);
     }
 }
 #endif
@@ -568,17 +607,18 @@ static void test_processes(char const* executable, char const* root)
     TpProcess large = tp_process(memory, NULL, log, 3, -1, 0);
 #ifdef __linux__
     CHECK(getrusage(RUSAGE_CHILDREN, &after) == 0);
-    /* No other child runs between these snapshots. The independent cumulative
-     * OS delta must match this invocation's wait4 result, not lifetime totals. */
+    /* Validate the collector against the raw exact-PID wait4 result. The
+     * cumulative counters are separately sampled and remain diagnostic only. */
+    TpProcessTestObservation const* observed = &tp_process_test_observation;
+    CHECK(observed->child > 0 && observed->waited == observed->child && observed->wait_error == 0);
     CHECK(large.diagnostics_available == (1u << TP_DIAGNOSTICS) - 1u);
-    CHECK(large.diagnostics[TP_MINOR_FAULTS] == (uint64_t)(after.ru_minflt - before.ru_minflt));
-    CHECK(large.diagnostics[TP_MAJOR_FAULTS] == (uint64_t)(after.ru_majflt - before.ru_majflt));
+    CHECK(observed->usage.ru_minflt >= 0 && large.diagnostics[TP_MINOR_FAULTS] == (uint64_t)observed->usage.ru_minflt);
+    CHECK(observed->usage.ru_majflt >= 0 && large.diagnostics[TP_MAJOR_FAULTS] == (uint64_t)observed->usage.ru_majflt);
     (void)test_child_counter_diagnostics(stderr, &large, &before, &after, &tp_process_test_observation);
-    CHECK(large.diagnostics[TP_VOLUNTARY_SWITCHES] == (uint64_t)(after.ru_nvcsw - before.ru_nvcsw));
-    CHECK(tp_process_test_observation.child > 0 && tp_process_test_observation.waited == tp_process_test_observation.child &&
-          tp_process_test_observation.usage.ru_nvcsw == (long)large.diagnostics[TP_VOLUNTARY_SWITCHES] &&
-          tp_process_test_observation.cleanup_attempted && !tp_process_test_observation.descriptor_cleanup);
-    CHECK(large.diagnostics[TP_INVOLUNTARY_SWITCHES] == (uint64_t)(after.ru_nivcsw - before.ru_nivcsw));
+    CHECK(observed->usage.ru_nvcsw >= 0 && large.diagnostics[TP_VOLUNTARY_SWITCHES] == (uint64_t)observed->usage.ru_nvcsw);
+    CHECK(observed->cleanup_attempted && !observed->descriptor_cleanup);
+    CHECK(observed->usage.ru_nivcsw >= 0 && large.diagnostics[TP_INVOLUNTARY_SWITCHES] == (uint64_t)observed->usage.ru_nivcsw);
+    CHECK(large.exit_code == 0 && large.signal_number == 0 && !large.timed_out && !large.launch_error);
     CHECK(large.diagnostics[TP_MINOR_FAULTS] > 0 && large.diagnostics[TP_VOLUNTARY_SWITCHES] > 0);
     printf("PROCESS_DIAGNOSTICS minor=%" PRIu64 " major=%" PRIu64 " voluntary=%" PRIu64 " involuntary=%" PRIu64 "\n",
            large.diagnostics[TP_MINOR_FAULTS], large.diagnostics[TP_MAJOR_FAULTS],
@@ -2345,6 +2385,7 @@ int main(int argc, char** argv)
         test_maximum_jobs(root);
 #ifdef __linux__
         test_child_counter_diagnostic_control();
+        test_child_counter_mapping();
 #endif
         test_processes(executable, root);
 #ifndef _WIN32
@@ -2361,6 +2402,9 @@ int main(int argc, char** argv)
         result = test_failures ? 1 : 0;
     }
     else fprintf(stderr, "usage: throughput-tests OUTPUT_DIRECTORY\n");
+#if BUSTER_WINDOWS
+    if (!os_process_shutdown_keep_alive()) result = 1;
+#endif
     thread_context_release(context);
     arena_pool_release_thread();
     return result;

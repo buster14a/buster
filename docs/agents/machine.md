@@ -7,6 +7,23 @@ The retained native allocator modes are FAST and QUALITY; both select and
 encode MIR. NONE and MIR-stack are retired modes referenced only in archived
 evidence.
 
+The five numeric A64 semantic blobs use private storage version 1, independent
+of semantic schema version 2. The generator transposes each block of up to 32
+fixed-width records by byte column, packs literal/repeated-byte packets, then
+base64-encodes each block with explicit offsets. Record bytes, IDs and Arm
+source identities do not change. `buster_aarch64_semantics_prewarm` restores
+the original row bytes serially and publishes readiness last; packets decode
+directly into row storage without a temporary block or a second copy. Warmed
+readers retain direct byte access. Before prewarm, each block fills its disjoint
+part of those same buffers under a leaf-level once-claim, with acquire/release
+publication and no other claims or callbacks during decoding. The descriptor
+slot is checked against generated identity before using shared storage;
+temporary descriptors use pure bounded reads. Serial prewarm follows the
+same block path and never overwrites a published block.
+`buster_aarch64_semantics_test_storage` checks malformed packets, partial
+blocks, concurrent cold fills and prewarmed bytes against hashes of the
+preceding uncompressed payloads.
+
 The typed AArch64 ADD/SUB extended-register recipe chooses Rm width from both
 the instruction width and the extension option. Every 32-bit form uses Wm,
 including UXTX and SXTX; a 64-bit form uses Xm only for UXTX/SXTX. Shifts 0–4
@@ -165,6 +182,11 @@ hosts execute its independent expected-value fixture.
   switch-case target, even an unused row, because FAST consumes the whole table.
   Keep these checks at the existing verification boundary; selector-certified
   fresh functions continue directly to placement without another verifier pass.
+- Virtual-register compaction preserves opcode and virtual-reference validation
+  for rows, parameters and edge copies before recognizing an already dense
+  register population. That identity case keeps IDs and metadata without
+  allocating or applying a remap; a population with holes retains stable
+  original-ID order and rewrites every virtual-reference family.
 - Debug-enabled production selection publishes canonical-local identity in the
   cold `MachineDebugValue` side table after virtual-register compaction. Its
   source spans remain canonical instruction IDs and its references name final
@@ -557,10 +579,14 @@ hosts execute its independent expected-value fixture.
   close their touched rows through a block-level liveness fixed point over
   covering writes and upward-exposed reads. That solve
   (`machine_fast_solve_liveness`, shared with the prepass value liveness)
-  always visits the lowest-ranked pending block in reverse postorder of the
-  reversed CFG, so a value carried through a deep loop nest reaches every inner
-  block in one pass instead of one pass per nesting level (#3771); the order
-  changes only the work, never the least fixed point. Allocator-created spill homes use
+  starts on a layout-order stack, which settles ordinary functions without
+  setup. Once that stack spends `MACHINE_FAST_LIVENESS_STACK_BUDGET` word
+  updates per word of every block and edge, it re-pends every block and always
+  visits the lowest-ranked pending one in reverse postorder of the reversed
+  CFG, so a value carried through a deep loop nest reaches every inner block in
+  one pass instead of one pass per nesting level (#3771). Building that order
+  for every function cost the self-host more than it saved. The order changes
+  only the work, never the least fixed point. Allocator-created spill homes use
   the same closure on a direct acyclic block chain: a spill covers the previous
   contents of a home, while a reload before that spill reads the value arriving
   from a predecessor. Retroactive edge repairs at one machine point have no
@@ -698,8 +724,13 @@ hosts execute its independent expected-value fixture.
   stores and ABI transport. One-, two-, four-, eight- and sixteen-byte
   signatures follow the shared classifier on SysV and Win64; incoming and
   outgoing XMM transfers preserve the complete sixteen-byte part. Canonical
-  joins use the existing pair mapping, allocated only when a vector participates
-  in an edge. Baseline wider local vector images can also use frame copies;
+  joins through 64 bytes use eightbyte register parts, allocated only when a
+  frame-backed vector participates in an edge. Incoming definitions snapshot
+  every part and parallel edge copies preserve cycles before destination frame
+  stores restore the whole image. Native ZMM values retain vector-register edges.
+  `compiler_driver_test_wide_vector_joins` executes integer and double vectors
+  through branches, ternaries, loops and three-way rotations with calls in both
+  allocators and frontend forms. Baseline wider local vector images use frame copies;
   this does not admit missing vector arithmetic or split wide signatures.
   `compiler_driver_test_native_frame_vectors` preserves four whole original
   fixtures and a new conditional/loop/cross-compiler fixture over all six x86
@@ -714,6 +745,15 @@ hosts execute its independent expected-value fixture.
   valid canonical-only inline-assembly transaction. Current unsupported assembly
   controls require structured refusal and preserve existing output artifacts;
   ABI retirement no longer doubles as a negative test.
+- X86 vector places retain their general-register subobject address when an
+  address is taken or a vector array decays. Only canonical vector rvalues
+  take the ZMM-to-frame snapshot path in `machine_x64_select_place_address_offset`;
+  the canonical type alone does not distinguish a place from its stored value.
+  `compiler_driver_test_wide_vector_place_address` checks member addresses,
+  vector-array decay and indexed addresses, pointer identity, scalar writes,
+  guard storage and immutable rvalue lane snapshots on Linux/macOS/Windows
+  objects, both allocators/frontend forms, O0/O2 and baseline/Haswell/Zen 5.
+  Matching desktop hosts execute every supported CPU profile.
 - X86 vector arithmetic keeps native EVEX rows for their encodable operations
   and expands the remaining integer/floating operations into ordinary scalar
   MIR lanes. Exact-width reads and writes preserve short-vector boundaries;
@@ -922,10 +962,12 @@ hosts execute its independent expected-value fixture.
   the scalar arithmetic rules. Keep the entire vector fixture strict in
   FAST and QUALITY; scalar expansion must remain visible to MIR
   validation and register allocation.
-- AArch64 vectors through sixteen bytes use the existing two-general-register
-  canonical edge mapping at joins. Every incoming value is snapshotted at its
-  definition; destination stores restore its frame image. Short images that
-  enter a pair receive sixteen bytes of owned storage for both limb reads.
+- AArch64 vectors through sixty-four bytes use eightbyte general-register
+  parts at canonical joins. Every incoming value is snapshotted at its
+  definition; parallel edge copies precede destination frame stores. Short
+  images receive sixteen bytes of owned storage for the minimum two-part form.
+  `compiler_driver_test_wide_vector_joins` checks all lanes of 32/64-byte integer
+  and double vectors across branches, loop backedges, calls and rotation cycles.
   One-, two- and four-byte arguments use W registers. Results use the vector
   file; two- and four-byte multi-lane integer vectors expand their elements
   across D0's ABI lanes and compact again on receipt, matching Clang on ELF,

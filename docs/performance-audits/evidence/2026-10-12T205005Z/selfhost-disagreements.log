@@ -1,0 +1,48 @@
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=1098 end=1105 DISAGREE: struct __locale_data * __locales [ 13 ]
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=5275 end=5279 DISAGREE: struct __pthread_internal_list * __prev
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=5280 end=5284 DISAGREE: struct __pthread_internal_list * __next
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=5292 end=5296 DISAGREE: struct __pthread_internal_slist * __next
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=5514 end=5517 DISAGREE: struct __pthread_mutex_s __data
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=5534 end=5537 DISAGREE: struct __pthread_cond_s __data
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=5556 end=5559 DISAGREE: struct __pthread_rwlock_arch_t __data
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=15583 end=15587 DISAGREE: struct link_map * dlfo_link_map
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=15698 end=15701 DISAGREE: enum __pid_type type
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=15946 end=15949 DISAGREE: struct timespec st_atim
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=15950 end=15953 DISAGREE: struct timespec st_mtim
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=15954 end=15957 DISAGREE: struct timespec st_ctim
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=16002 end=16005 DISAGREE: struct timespec st_atim
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=16006 end=16009 DISAGREE: struct timespec st_mtim
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=16010 end=16013 DISAGREE: struct timespec st_ctim
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=17616 end=17622 DISAGREE: struct _fpxreg _st [ 8 ]
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=17623 end=17629 DISAGREE: struct _xmmreg _xmm [ 16 ]
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=17726 end=17730 DISAGREE: struct _fpstate * fpstate
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=17778 end=17781 DISAGREE: struct _fpstate fpstate
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=17782 end=17785 DISAGREE: struct _xsave_hdr xstate_hdr
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=17786 end=17789 DISAGREE: struct _ymmh_state ymmh
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=17953 end=17959 DISAGREE: struct _libc_fpxreg _st [ 8 ]
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=17960 end=17966 DISAGREE: struct _libc_xmmreg _xmm [ 16 ]
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=18011 end=18015 DISAGREE: struct ucontext_t * uc_link
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=18025 end=18028 DISAGREE: struct _libc_fpstate __fpregs_mem
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=22046 end=22049 DISAGREE: struct sched_param __sp
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=22074 end=22078 DISAGREE: struct __spawn_action * __actions
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=24549 end=24552 DISAGREE: struct statx_timestamp stx_atime
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=24553 end=24556 DISAGREE: struct statx_timestamp stx_btime
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=24557 end=24560 DISAGREE: struct statx_timestamp stx_ctime
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=24561 end=24564 DISAGREE: struct statx_timestamp stx_mtime
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=24875 end=24878 DISAGREE: struct timeval ru_utime
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=24879 end=24882 DISAGREE: struct timeval ru_stime
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=25343 end=25346 DISAGREE: struct timeval time
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=25495 end=25498 DISAGREE: struct timespec it_interval
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=25499 end=25502 DISAGREE: struct timespec it_value
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=26435 end=26439 DISAGREE: struct _pthread_cleanup_buffer * __prev
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=27789 end=27795 DISAGREE: struct __cancel_jmp_buf_tag __cancel_jmp_buf [ 1 ]
+PLAINCENSUS tree=1 token=0 why=0 kind=- start=61646 end=61653 DISAGREE: u32 fallback_opcode_counts [ IR_OPCODE_COUNT + 1 ] TREE: (member_declaration (decl_specifiers (typedef_name u32)) (member_declarator (declarator_array (declarator_name fallback_opcode_counts) (add (identifier IR_OPCODE_COUNT) (number 1)))))
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=65736 end=65740 DISAGREE: struct CPreprocessorOperation * macro_operations
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=68770 end=68774 DISAGREE: struct _IO_marker * _markers
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=68775 end=68779 DISAGREE: struct _IO_FILE * _chain
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=68810 end=68814 DISAGREE: struct _IO_codecvt * _codecvt
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=68815 end=68819 DISAGREE: struct _IO_wide_data * _wide_data
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=68820 end=68824 DISAGREE: struct _IO_FILE * _freeres_list
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=97688 end=97691 DISAGREE: struct stat mount_identity
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=97692 end=97695 DISAGREE: struct stat pid_namespace_identity
+PLAINCENSUS tree=0 token=1 why=1 kind=- start=308874 end=308878 DISAGREE: struct CPreprocessSourceFrame * builtin_frame

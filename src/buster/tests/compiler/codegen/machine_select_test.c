@@ -8,6 +8,7 @@
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/string.h>
 
 BUSTER_GLOBAL_LOCAL IrProgram* machine_selection_test_compile(Arena* arena, String8 source, Target target)
@@ -378,6 +379,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_direct_call_facts(Unit
                        "int fact_nullary(void) { return fact_zero(); }\n");
     String8 names[] = {S8("fact_direct"), S8("fact_escape_after"), S8("fact_escape_before"), S8("fact_indirect"), S8("fact_no_calls"), S8("fact_nullary")};
     Target target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX};
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
     BUSTER_TEST(arguments, program != 0);
     u32 direct_values = 0;
@@ -453,6 +455,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_direct_call_facts(Unit
         }
     }
     BUSTER_TEST(arguments, direct_values && escaped_values && unused_values && repeated_values);
+    c_test_release_preprocess_arenas_since(preprocess_mark);
     return result;
 }
 
@@ -588,8 +591,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_address_targets(UnitTe
                          "int address_atomic(int **p) { int *v = __atomic_load_n(p, 0); return __atomic_add_fetch(v, 1, 5); }\n"
                          "int address_label(int n) { void *p = n ? &&a : &&b; goto *p; a: n += 2; b: return n; }\n");
     CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     for (u32 arch_index = 0; arch_index < BUSTER_ARRAY_LENGTH(arches); arch_index += 1)
     {
+        // Release the previous iteration's unit; nothing reads it any more.
+        c_test_release_preprocess_arenas_since(preprocess_mark);
         Target target = {.cpu_arch = arches[arch_index], .os = OPERATING_SYSTEM_LINUX};
         IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
         BUSTER_TEST(arguments, program && program->module_count == 1);
@@ -618,6 +624,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_address_targets(UnitTe
             }
         }
     }
+    c_test_release_preprocess_arenas_since(preprocess_mark);
     return result;
 }
 
@@ -650,6 +657,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_aggregate_load_sources
         {S8_INITIALIZER("aggregate_f80"), MACHINE_X64_COPY_FRAME_FROM_PTR, MACHINE_REF_VIRTUAL_REGISTER, 10},
     };
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
     BUSTER_TEST(arguments, program != 0);
     for (u32 fixture = 0; program && fixture < BUSTER_ARRAY_LENGTH(expected); fixture += 1)
@@ -750,6 +758,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_aggregate_load_sources
             BUSTER_TEST(arguments, restored.supported);
         }
     }
+    c_test_release_preprocess_arenas_since(preprocess_mark);
 
     return result;
 }
@@ -769,8 +778,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_classification_layout_
                        "second: y *= w.c; if (y > 10) goto first; y -= p[1];\n"
                        "done: return y + copy.a; }\n");
     CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     for (u32 arch_index = 0; arch_index < BUSTER_ARRAY_LENGTH(arches); arch_index += 1)
     {
+        // Release the previous iteration's unit; nothing reads it any more.
+        c_test_release_preprocess_arenas_since(preprocess_mark);
         Target target = {.cpu_arch = arches[arch_index], .os = OPERATING_SYSTEM_LINUX};
         IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
         IrFunction* function = program ? machine_selection_test_find(program, S8("order_layout")) : 0;
@@ -813,6 +825,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_classification_layout_
         }
         BUSTER_TEST(arguments, ordered && classified > 4);
     }
+    c_test_release_preprocess_arenas_since(preprocess_mark);
     return result;
 }
 
@@ -866,8 +879,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_copy_casts(Un
     // AArch64 (`machine_a64_cast_copies_constant`) follows the same rule with
     // its own MOV_RI and MOV_RR rows.
     CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     for (u32 arch_index = 0; arch_index < BUSTER_ARRAY_LENGTH(arches); arch_index += 1)
     {
+        // Release the previous iteration's unit; nothing reads it any more.
+        c_test_release_preprocess_arenas_since(preprocess_mark);
         Target target = {.cpu_arch = arches[arch_index], .os = OPERATING_SYSTEM_LINUX};
         bool x86_64 = target.cpu_arch == CPU_ARCH_X86_64;
         u16 mov_ri = x86_64 ? MACHINE_X64_MOV_RI : MACHINE_A64_MOV_RI;
@@ -958,6 +974,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_copy_casts(Un
         BUSTER_TEST_RAW(arguments, materialized_casts >= 4 && plain_casts >= 1, counts);
 
     }
+    c_test_release_preprocess_arenas_since(preprocess_mark);
 
     return result;
 }
@@ -1012,6 +1029,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_index_fold(Un
                         "    q[5UL] = (unsigned char)f();\n"
                         "    return p[2L];\n"
                         "}\n");
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     String8 names[] = {S8("frame_constant"), S8("field_constant"), S8("pointer_constant")};
     // AArch64 (`machine_a64_index_constant_offset`) follows the same rule with
     // its own LEA_FRAME, LEA_OFFSET and MOV_RR rows.
@@ -1019,6 +1037,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_index_fold(Un
     for (u32 arch_index = 0; arch_index < BUSTER_ARRAY_LENGTH(arches); arch_index += 1)
     {
         Target target = {.cpu_arch = arches[arch_index], .os = OPERATING_SYSTEM_LINUX};
+        c_test_release_preprocess_arenas_since(preprocess_mark);
         bool x86_64 = target.cpu_arch == CPU_ARCH_X86_64;
         u16 lea_frame = x86_64 ? MACHINE_X64_LEA_FRAME : MACHINE_A64_LEA_FRAME;
         u16 lea_offset = x86_64 ? MACHINE_X64_LEA_OFFSET : MACHINE_A64_LEA_OFFSET;
@@ -1086,7 +1105,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_index_fold(Un
                     continue;
                 }
                 bool defined = virtual_register->definition_point != MACHINE_POINT_INVALID;
-                MachineInstruction* definition = defined ? selected.function.instructions + machine_point_instruction(virtual_register->definition_point) : 0;
+                // A definition point implies selected rows; the explicit test
+                // lets the analyzer see that (#3952).
+                MachineInstruction* definition = defined && selected.function.instructions ? selected.function.instructions + machine_point_instruction(virtual_register->definition_point) : 0;
                 u16 opcode = definition ? definition->opcode : 0;
                 if (machine_selection_test_folded_index(function, row))
                 {
@@ -1156,6 +1177,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_index_fold(Un
         BUSTER_TEST_RAW(arguments, frame_folds >= 3 && pointer_folds >= 2 && zero_copies >= 1 && computed >= 2 && dead_constants >= 1 && frame_spills == 0,
                         counts);
     }
+    c_test_release_preprocess_arenas_since(preprocess_mark);
 
     return result;
 }
@@ -1163,33 +1185,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_constant_index_fold(Un
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    UnitTestResult constant_index_result = machine_selection_test_constant_index_fold(arguments);
-    result.test_count += constant_index_result.test_count;
-    result.succeeded_test_count += constant_index_result.succeeded_test_count;
-    UnitTestResult constant_cast_result = machine_selection_test_constant_copy_casts(arguments);
-    result.test_count += constant_cast_result.test_count;
-    result.succeeded_test_count += constant_cast_result.succeeded_test_count;
-    UnitTestResult direct_call_result = machine_selection_test_direct_call_facts(arguments);
-    result.test_count += direct_call_result.test_count;
-    result.succeeded_test_count += direct_call_result.succeeded_test_count;
-    UnitTestResult address_result = machine_selection_test_address_facts(arguments);
-    result.test_count += address_result.test_count;
-    result.succeeded_test_count += address_result.succeeded_test_count;
-    UnitTestResult target_address_result = machine_selection_test_address_targets(arguments);
-    result.test_count += target_address_result.test_count;
-    result.succeeded_test_count += target_address_result.succeeded_test_count;
-    UnitTestResult aggregate_load_result = machine_selection_test_aggregate_load_sources(arguments);
-    result.test_count += aggregate_load_result.test_count;
-    result.succeeded_test_count += aggregate_load_result.succeeded_test_count;
-    UnitTestResult classification_order_result = machine_selection_test_classification_layout_order(arguments);
-    result.test_count += classification_order_result.test_count;
-    result.succeeded_test_count += classification_order_result.succeeded_test_count;
+    // Each fixture returns every unit it preprocessed; the registry's own
+    // arena is reserved once, before the first fixture's reading.
+    c_test_unit_registry_prewarm();
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_constant_index_fold);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_constant_copy_casts);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_direct_call_facts);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_address_facts);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_address_targets);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_aggregate_load_sources);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_classification_layout_order);
     String8 source = S8("int selection_add(int a, int b) { int local = 7; return a + local + b; }\n"
                          "int selection_memory(int *p) { *p += 1; return *p; }\n"
                          "int selection_order(void) { return 1 + 2; }\n");
     CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     for (u32 arch_index = 0; arch_index < BUSTER_ARRAY_LENGTH(arches); arch_index += 1)
     {
+        // Release the previous iteration's unit; nothing reads it any more.
+        c_test_release_preprocess_arenas_since(preprocess_mark);
         Target target = {.cpu_arch = arches[arch_index], .os = OPERATING_SYSTEM_LINUX};
         IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
         IrFunction* add = machine_selection_test_find(program, S8("selection_add"));
@@ -1289,6 +1303,7 @@ UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, machine_selection_validate_function(arguments->arena, program, 0) == MACHINE_SELECTION_VALIDATION_INVALID_ARGUMENT);
         }
     }
+    c_test_release_preprocess_arenas_since(preprocess_mark);
     return result;
 }
 

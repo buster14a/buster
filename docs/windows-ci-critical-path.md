@@ -1,7 +1,7 @@
 # Windows CI critical-path attribution (#2787, #2788)
 
-The native build driver owns this bounded change. Sanitized Clang CI trees and
-Windows AArch64 Release use the existing isolated unit-process runner.
+The native build driver owns this bounded change. Every Clang CI tree, including
+both Windows Release trees since #3912, uses the existing isolated unit-process runner.
 `compiler_driver_tests` remains primary only on Windows AArch64; the other
 partitioned trees use `c_frontend_tests`. Runtime configuration rows, tests,
 independent references, sanitizer/check/fuzz policy and required CI job

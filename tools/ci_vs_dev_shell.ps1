@@ -8,7 +8,10 @@
 # dot-sourcing. Failures throw; this script never calls `exit`, which would end
 # only this script and let the calling step continue.
 #
-# Physical file operations deliberately avoid cold Management-cmdlet loading.
+# Callers import Microsoft.PowerShell.Management and Microsoft.PowerShell.Utility
+# by name first: Windows PowerShell 5.1 otherwise analyzes every module on
+# PSModulePath to resolve the first unqualified cmdlet, ~23 s per process on
+# hosted ARM64 (#3979). Physical file operations use .NET file APIs.
 # Resolve through PowerShell session paths (not the .NET process cwd), reject
 # non-filesystem providers, and append GITHUB_ENV as UTF8 with host newlines.
 # Map:

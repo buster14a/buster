@@ -16,10 +16,14 @@ Answer three independent questions in the issue/PR handoff:
 1. **Correctness CI:** which required correctness and policy checks passed on
    the submitted revision? `Benchmark service workflow policy` validates
    access/routing policy; it is not physical benchmark execution.
-2. **Performance claim:** is there complete actual Ryzen 7 9700X evidence for
-   the candidate, baseline, workload and configuration being claimed?
-   Without it, report performance validation as **incomplete/unvalidated**
-   (#2761). Hosted timing, static analysis and green policy checks are diagnostic.
+2. **Performance claim:** which claim is it (`work-reduction`,
+   `native-runtime`, `uarch` or `zen5`), and is there complete evidence of the
+   class it requires for the candidate, baseline, workload and configuration?
+   A `uarch` or `zen5` claim needs actual Ryzen 7 9700X evidence; the other two
+   may complete through the [alternative evidence routes](#alternative-evidence-routes)
+   (#4013). Without the required evidence, report that claim as
+   **incomplete/unvalidated**. Static analysis, simulated caches and green
+   policy checks are never performance evidence.
 3. **Task acceptance:** does the owner's request or owning issue explicitly
    require applicable measurements before acceptance or merge? Record that
    reference and the outstanding cells. A real hold remains in force even
@@ -513,13 +517,15 @@ captures (#2741).
   escape for method testing. `--skip-build` reuses the existing Release binary
   and therefore belongs only in a controlled workflow that already established
   that binary's provenance.
-- **Performance validation needs Zen 5 execution evidence (#2761).** Every
-  performance-validation test requires actual execution of its relevant
-  workload on the approved Zen 5 benchmark host. Without complete evidence
-  matching the candidate, workload and configuration, report performance
-  validation as incomplete. Cloud-only and static evidence is diagnostic, not
-  a substitute: hosted timing, static instruction counts, a `znver5` target, a
-  request or policy check, or an unrelated self-host benchmark. Correctness and
+- **Zen 5 and microarchitecture claims need Zen 5 execution evidence (#2761,
+  narrowed by #4013).** A `uarch` or `zen5` claim requires actual execution of
+  its relevant workload on the approved Zen 5 benchmark host. Without complete
+  evidence matching the candidate, workload and configuration, report that
+  claim as incomplete. Nothing measured elsewhere substitutes for it: hosted
+  timing, instrumented counts, static instruction counts, a `znver5` target, a
+  request or policy check, or an unrelated self-host benchmark. Work-reduction
+  and native-runtime claims use the
+  [alternative evidence routes](#alternative-evidence-routes) instead. Correctness and
   native-platform CI stay on their current infrastructure. The comparison
   routes below cover the stage-1 self-host compile and, as profile
   `throughput-corpus-v2`, the default `bench_throughput` corpus under both
@@ -563,8 +569,12 @@ captures (#2741).
   architecture than the 9700X's x86-64, when its model differs from the
   receipt's observed CPU, or when its run, attempt or job is not the attempt
   being published. Sealed raw evidence for this route (#2918) follows
-  [compiler-evidence-v1.md](../compiler-evidence-v1.md); until its producer
-  lands, artifacts are `legacy-unsealed` and their raw bytes unverified.
+  [compiler-evidence-v1.md](../compiler-evidence-v1.md): an ordinary attempt
+  seals its lab and corpus last, and the publisher verifies the seal natively.
+  A pull `snapshot-v1` attempt also seals its closure records and owned-phase
+  population.
+  An artifact without a seal is `legacy-unsealed`, and its raw bytes are
+  reported unverified.
   Optional facts keep the collector's own `unknown` or
   `unavailable` status in the published check and are never filled in. Only
   publication-only recovery may lack it, and only when the bench workflow at
@@ -616,9 +626,14 @@ captures (#2741).
   plus one maintained report comment on the commit (#2804). The linked
   Actions `compare` job supplies live preparation/measurement state; a queued
   custom check does not prove that the physical job has not started. During merge bursts only
-  the newest pending commit is measured; the others' checks read
-  **Not measured** and name the range comparison that covers their change.
-  A range result does not isolate one commit. See the
+  the newest pending commit is measured; displaced commits remain
+  **Not measured**. Native recovery reports verified pre-execution pending
+  replacement as neutral, retaining the native cancellation and its exact
+  attempt. It claims no successor result or range coverage from a request
+  alone. A validated range result does not isolate one commit. A range since the last actual
+  measurement that changes only reviewed prose is completed as neutral
+  **Not measured** without allocating the 9700X
+  ([unchanged-input skip](../compiler-main-unchanged-skip.md), #3923). See the
   [admission guide](../../benchmarks/9700x/ADMISSION.md#main-compiler-comparison).
   An explicitly requested owner experiment can compare a pull request head
   with its merge base before merging by adding a fresh request line to
@@ -628,7 +643,12 @@ captures (#2741).
   These ordinary compiler A/B paths run no profile steps and no A/A. The
   separately versioned [sampling qualification](../compiler-main-sampling.md)
   route (#3212) is staged disabled; its explicitly admitted, predeclared research
-  controls do not change either immutable ordinary profile. `native-retirement-performance-v1` remains blocked,
+  controls do not change either immutable ordinary profile. The single
+  [MAIN routing switch](../compiler-main-profile-routing-v1.md) stays
+  `disabled` until a reviewed certificate qualifies `compiler-main-40pairs-v1`;
+  it can route only the authenticated automatic post-merge comparison, keeps
+  the full FAST/QUALITY corpus, and rolls back to `compiler-compare-v1`.
+  Explicit pull-request and acceptance requests keep their requested profiles. `native-retirement-performance-v1` remains blocked,
   and the `zen5-calibration-v1` producer and its `zen5_*` analysis tools are
   removed (#2741; tag `bench-service-final` retains them). Use the local
   trusted capture methods above for ad-hoc profiling. Historical audit notes retain
@@ -772,6 +792,141 @@ captures (#2741).
   same process. Confirm the extracted return addresses too — each one must
   disassemble to the instruction immediately after a `call` to the callee the
   callchain names (`objdump -d --start-address=... --stop-address=...`).
+
+## Alternative evidence routes
+
+Issue #4013 replaces #2761's universal Zen 5 requirement for claims whose
+benefit does not depend on the 9700X's microarchitecture, and keeps the
+scarce physical host for the questions only it can answer. Classify the
+claim by mechanism, not by the files a change touches.
+`docs/performance-validation-v1.json` records the classes (`evidence_classes`)
+and the claim map (`claims`), and `performance_inventory_test.py` keeps that
+map equal to the `pe_claims` table of `tools/performance_evidence.c`.
+
+| Claim | Class | Sufficient evidence | Does not establish |
+|---|---|---|---|
+| `work-reduction`: removed traversals, queries, initialization, copies or allocations; better asymptotic work; fewer processes or operations | `work-count` | Repeatable Callgrind or Cachegrind counts (or perf `instructions`) of both arms in one environment, at relevant input sizes, plus existing work counters and correctness checks | Lower elapsed time; hardware constants; Zen 5 behavior |
+| `native-runtime`: end-to-end compiler, build, test, memory or I/O change that no particular CPU mechanism decides | `native-host` | Paired uninstrumented wall/CPU/resource observations (`time`, or `perf-stat` where counting is permitted) on an appropriate non-9700X host | Transfer to Zen 5 or another CPU, OS, filesystem or concurrency level |
+| `uarch`: SIMD width or intrinsics, branched versus branchless, scheduling, latency or ports, store forwarding, alignment, prefetch, cache or TLB tuning | `zen5-native` | The existing 9700X routes (`pull-compare`, `direct-workload`) | Anything about another CPU |
+| `zen5`: an explicit Zen 5 speed claim | `zen5-native` | The existing 9700X routes | Anything about another CPU |
+
+A change with mixed mechanisms is split into separate claims, each measured
+by its own route; record why any part escalates to the physical host.
+Neither "all scalar code is portable" nor "every change affects a CPU" is a
+valid classifier. Reducing allocated bytes and tuning their cache-line
+placement are two claims even in one patch. A counter-only result is
+reported as exactly what it proves, for example **work reduction validated;
+native runtime not measured**. It is not rejected for lacking Zen 5 data
+when the agreed criterion is work or scaling. Valid native A/B evidence on a
+non-9700X host completes a `native-runtime` claim for that host and workload
+and does not stay "diagnostic only".
+
+### Running a comparison
+
+Build the tool once, then check capabilities before an expensive session:
+
+```sh
+clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char \
+    tools/performance_evidence.c -lm -o build/performance-evidence
+build/performance-evidence classify work-reduction
+build/performance-evidence preflight --tool callgrind -- BASELINE_IDE cc -w -c input.c -o /dev/null
+build/performance-evidence compare --claim work-reduction --tool callgrind \
+    --baseline BASELINE_IDE --candidate CANDIDATE_IDE --out NEW_DIR -- cc -w -c input.c -o /dev/null
+```
+
+`compare` runs both arms on the same host, alternating which goes first. It
+retains each run's stdout, stderr and per-process profiles under the new
+directory, and writes `summary.json` (schema `buster-performance-evidence-v1`).
+The summary binds the binary paths and SHA-256 hashes, optional
+`--baseline-revision`/`--candidate-revision`, the arguments, the tool version,
+the observed CPU, OS and kernel, the selected events, the cache model lines
+and every raw observation. Its `zen5` field always says it is not Zen 5
+evidence. Exit 0 is a complete comparison whatever its verdict; exit 2 is
+incomplete or refused; `preflight` exits 3 when the tool cannot run here.
+
+- **Callgrind and Cachegrind (`work-count`)** default to two runs per arm. An
+  arm whose counts vary by more than 0.1% is `nonrepeatable`. A verdict needs
+  separated arms and at least the minimum effect (`--min-effect-percent`,
+  default 1). Children run with `--trace-children=yes`, one profile per
+  process; the process counts per run are recorded. A child that forks
+  without `exec` inherits its parent's counters, so check the counts before
+  summing such a workload. `Ir` is an instrumented executed-instruction count,
+  not the PMU retired-instruction count. `--cache-sim` and `--branch-sim`
+  enable Valgrind's simplified models, record the model lines and make those
+  events required; they are not a model of any real CPU, the 9700X included.
+- **Valgrind and `-march=native`.** Valgrind cannot execute EVEX (AVX-512)
+  instructions. A binary built for a host that has them fails with an explicit
+  ISA reason, never with a zero count (#4009). Build *both* arms with a
+  declared profiling-compatible ISA, for example
+  `tools/work_ledger/build_subject.sh` (`-march=x86-64-v3`). Keep those
+  results separate from native-build identities. Never transfer a
+  scalar-fallback result to a production SIMD path.
+  The ISA envelope also includes the loader, libc, and link startup objects.
+  First try `valgrind --tool=none /usr/bin/true`: a loader SIGILL already
+  rules out the application as its cause. On a distribution built for AVX-512,
+  compiling Buster for v2/v3 alone may still link a v4 requirement from
+  `Scrt1.o`. Inspect `readelf -n` on the executable. Use a compatible generic
+  runtime and its startup objects for both profiling arms, retaining their
+  identities separately from native builds; do not patch the ELF ISA
+  declaration to conceal an unsupported requirement.
+- **`time` and `perf-stat` (`native-host`)** default to one warmup and ten
+  pairs, with at least six. Each metric uses an exact two-sided sign test over
+  paired differences (p ≤ 0.05) plus the minimum effect. A significant change
+  below the effect is `within-effect`, and anything else is `inconclusive`.
+  `time` records wall, user and system time, peak RSS, faults and context
+  switches through `wait4`, which includes reaped descendants. `perf-stat`
+  accepts event names with optional `:u` (user) or `:k` (kernel) scope.
+  An explicit scope matches only that scope; an unqualified request accepts
+  a single observed scope, which must remain the same across every run and
+  both arms. The receipt retains the requested spelling in the metric name
+  and the observed scope in its `scope` field (`unqualified`, `u`, or `k`).
+  Other modifier combinations or event syntax are refused before any run;
+  ambiguous matching counters are missing. A comparison must select one
+  primary scope (`instructions` for work reduction, `task-clock` for native
+  runtime); an absent required primary records an explicit problem, writes
+  `complete: false` and exits 2. Multiple primary scopes leave the result
+  incomplete. A scoped
+  result establishes only the selected scope. `perf-stat` refuses an event
+  that is unsupported, not
+  counted, or ran less than 50% of the time. A multiplexed event is marked.
+  Denied counters are reported as denied; do not weaken host security to
+  get them.
+- **A/A control.** Passing the same binary as both arms is reported as an A/A
+  noise control. Run one on a new host before trusting a small native effect.
+- **Scope.** Valgrind results say nothing about native parallel scaling.
+  A multithreaded change needs native measurements at its declared worker
+  budget. Report compile time, generated-program runtime, code size,
+  allocation bytes and RSS separately. A noisy hosted result stays
+  `inconclusive`: do not rerun until it turns green.
+
+### Rollout state
+
+This first slice (#4013) supplies the policy, the classes, the inventory
+contract and the tool. The trusted planners do not consume these receipts
+yet. The routine `main-compare` route still measures every compiler commit
+after it lands, as report-only. Until request planning can classify
+before allocating, an eligible `work-reduction` or `native-runtime` claim
+completes through this route without a `compiler-compare.request` line. Do
+not add a 9700X request line just to validate it. A `uarch` or `zen5` claim,
+an explicitly requested Zen 5 experiment, and physical-host qualification
+keep their existing contracts.
+
+### Optional tools by question
+
+These are optional and purpose-specific. None of them is a dependency or a
+CI job.
+
+| Question | Tools | Limit |
+|---|---|---|
+| Allocation churn, lifetime, unused memory | Valgrind DHAT and Massif, heaptrack, Buster's arena and work counters | A malloc-level profiler does not see arena suballocations; profiler heap is not native RSS |
+| System calls, startup, I/O, off-CPU time | strace, perf sched/lock, ftrace, approved bpftrace probes | Tracing changes elapsed time; it is never the timing baseline |
+| Cost of building Buster | Clang `-ftime-trace` (`generate --time-trace`), CMake/Ninja/build-driver timing | Keep the host compiler building Buster separate from Buster compiling inputs |
+| Native Windows or macOS | ETW with WPR/WPA, Apple Instruments | Validate an OS-specific change on that OS; see [Native hosted timing](#native-hosted-timing) |
+| Deeper hardware attribution | AMD uProf (IBS), Intel VTune, `tools/cache_miss_survey.py`, `tools/branch_miss_survey.py` | Complements native execution on the target; never makes a target claim portable |
+| Instruction-model hypotheses | llvm-mca, disassembly and code size, FlameGraph | Predictions and visualizations explain evidence; they are not measurements |
+
+The licenses and installed provenance of these external executables have not
+been audited here. Record them when admitting any one as a backend.
 
 ## Native hosted timing
 
@@ -986,6 +1141,121 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    not accepted; a different flag pair needs its own versioned profile.
    `compiler_publish.py` re-validates every raw cell document, the tree probe
    and the recomputed verdict on the 9700X evidence.
+   Since `-fc-ast-pilot` became the default (2026-10-13, #3102), variant A
+   builds a tree on a head after the switch, so the profile fails closed at
+   its tree probe there. The tree's acceptance follows #4058 through the
+   ordinary two-binary comparison and the separate final profile below.
+
+   **Issue #4058 AST retirement profile.** The existing owner-authorized
+   pull-compare route accepts one fresh exact
+   `profile: ast-retirement-acceptance-v1` line, added exactly once against
+   every parent. Its trusted-main harness must land before the candidate
+   request. It keeps `compiler-compare-v1`, `throughput-corpus-v2` and the
+   historical AST flag-pair profile unchanged. It cannot share an attempt
+   with an analyzer, scaling or another long opt-in leg; the historical
+   inline companion keeps its existing behavior.
+
+   After both tests-off Clang Release binaries and the ordinary corpus are
+   prepared, `ast_retirement_acceptance.py` compares baseline and candidate
+   in their defaults on one frozen baseline/current-main source tree and
+   that tree's generated headers. The existing native throughput generator
+   produces its six unchanged `ci` sources. The twenty cells are the unity
+   self-host source at `-g0 -fsyntax-only` and `-g0 -c`, six corpus sources
+   at `-g0 -O0 -fsyntax-only`, and those six at `-g0 -O0 -c` under both FAST
+   and QUALITY. Syntax-only has one cell per source because it invokes no
+   allocator. No retired AST flag, link operation, source override or
+   request-provided count enters these cells.
+
+   Every cell uses twenty ABBA pairs after one warmup on CPU 2 with fresh
+   binary copies. It reuses the lab's wall-time 95% interval, `instructions:u`
+   and `wait4` peak RSS. Timed phase/output metrics stay disabled; each arm
+   has an untimed `-v` probe recording `C_AST.retained_bytes` and
+   `C_AST_FACTS.retained_bytes`. These are distinct published tree and node
+   fact components, not a whole-frontend arena total or RSS. A syntax-only
+   arm may report zero fact bytes. Separate `C_SYMBOL_BINDINGS` bytes are
+   recorded where available; a compiler without that counter reports it
+   unavailable, not zero. `C_AST_RETAINED` alias fields are never added again.
+
+   The publisher recomputes each cell's metrics from all forty raw timed
+   rows, checks the exact commands/host/binaries/source population, compares
+   reference diagnostics and object bytes, and re-reads the retained-byte
+   probe logs. Identical arm objects share one raw reference stored as two
+   deterministic gzip chunks. Both arm manifests bind its raw size/hash;
+   stored and decompressed chunks retain the existing 32-MiB member bound.
+   The publisher bounds decompression and verifies each stored/raw chunk and
+   whole object. Exceeding 64 MiB raw or the unchanged whole-bundle byte/file
+   budget fails the leg; compression raises no resource limit.
+   Source/header/generator/binary hashes must remain unchanged. Sealed raw
+   evidence and the observed approved 9700X machine record remain required.
+   Failed or unavailable counters retain their reason and raw attempt;
+   absent positive instruction counts cannot produce complete acceptance.
+   The profile is report-only, sets no new adoption threshold, and does not
+   release #4058's correctness or owner acceptance holds. Record the exact
+   authorized baseline/head and measured cells with `tools/new_audit.py`.
+
+   **Issue #3011 opt-in constant-reuse profile.** The same route accepts one
+   fresh exact line `profile: constant-reuse-acceptance-v1`, selected by the
+   same every-parent freshness rule. It cannot be combined with an analyzer
+   profile, the ast-pilot profile, or the other opt-in legs it excludes in
+   `compiler_compare.py`. It runs beside issue #48's inline profile, whose
+   exact line in the request history selects it in every pull compare.
+   `constant_reuse_acceptance.py` runs
+   it after the tests-off candidate build, on the same frozen candidate-HEAD
+   tree. It times the one candidate binary as both A (default) and B with
+   `uarch_lab.py compare --constant-reuse-pair CELL` on the `-g0` unity
+   `-c` compile. The `intern` cell passes `-fcanonical-intern-constants` to B
+   and the `cse` cell passes `-fcanonical-fast-cse`. Interning has been on by
+   default since its measurement, so the `intern` cell now compares two
+   interning compiles; its recorded result is the 9700X run in
+   `docs/canonical-fast-pipeline.md`. Each cell is 20 ABBA
+   pairs after one warmup on CPU 2 with fresh copies. It records:
+   - wall time with its 95% CI;
+   - retired instructions when perf can count them (NA needs a recorded
+     reason);
+   - peak RSS;
+   - executable-section code bytes of each object.
+
+   A's and B's diagnostics must be identical. Their objects differ by design.
+   The profile is report-only and has no verdict, and it accepts no request
+   flags, pair counts or compiler arguments. `compiler_publish.py`
+   re-validates every raw cell document on the 9700X evidence. The flags and
+   their hosted census are described in
+   [the canonical FAST pipeline guide](../canonical-fast-pipeline.md).
+
+   **Issue #1125 opt-in per-process floor profile.** The same route accepts
+   one fresh exact line `profile: process-floor-v1`, selected by the same
+   every-parent freshness rule. It cannot be combined with an analyzer profile
+   or another opt-in leg; like the constant-reuse profile, it runs beside
+   issue #48's inline profile. `process_floor_acceptance.py` runs it after the
+   tests-off candidate build. It writes `int main(void){return 0;}` as
+   `tiny.c` into an otherwise empty directory and runs
+   `uarch_lab.py compare --process-floor-pair CELL` there, with the one
+   candidate binary as both A and B. A is always `cc -g0 -c tiny.c -o OUT`,
+   the native x86-64 object compile. B depends on the cell:
+   - `aa`: the same command, the A/A calibration;
+   - `aarch64`: `cc -g0 -target aarch64-unknown-linux -c tiny.c -o OUT`;
+   - `syntax-only`: `cc -g0 -fsyntax-only tiny.c`.
+
+   Each cell is 100 ABBA pairs after two warmups on CPU 2, with fresh copies
+   of the binary. It records:
+   - wall time with its 95% CI (the harness span, which includes the pinned
+     `perf stat` wrapper);
+   - task-clock, the compiler process's own CPU time;
+   - the compiler's own `wall_ns` when `-fmetrics-out` works for both
+     commands;
+   - retired instructions when perf can count them (NA needs a recorded
+     reason);
+   - peak RSS, which is NA when the compiler stays near the wrapper's own
+     footprint.
+
+   Diagnostics must be identical in every cell, and the A/A objects must be
+   byte-identical. The report applies the issue's stop rule
+   (`process_floor_verdict`): a control resolves the floor only when its wall
+   ratio's 95% CI lies wholly outside the A/A cell's. Each control also
+   reports A's median minus its own, in wall time and in task-clock. The
+   profile is report-only and accepts no request flags, sources, pair counts
+   or compiler arguments. `compiler_publish.py` re-validates every raw cell
+   document and the recomputed verdict on the 9700X evidence.
 
    **Issue #2761 opt-in real-source throughput profile.** The same route
    accepts one fresh exact line `profile: throughput-real-source-v1`, selected
@@ -1224,6 +1494,37 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    `compare-pull` job next to the roughly 14-minute ordinary comparison. No
    job timeout changed.
 
+   **Issue #2676 opt-in deep-nesting leg.** The same route accepts one fresh
+   exact line `profile: frontend-nesting-v1`, selected by the same
+   every-parent freshness rule. It is the Zen 5 route for
+   `tool:benchmark_frontend_scaling.py@frontend-nesting`. It cannot be
+   combined with any other opt-in profile; both the harness and the
+   publisher refuse the combination. After the corpus leg,
+   `measure_frontend_nesting` runs the merge base's
+   `tools/benchmark_frontend_scaling.py --suite nesting --warmups 1
+   --repetitions 11 --cpu 2` from the base checkout on `ide-base` and
+   `ide-cand`. Each of the eleven families in `NESTING_FAMILIES` is one
+   function whose statements nest 2,000, 8,000 and 32,000 levels deep, timed
+   with `-fsyntax-only` and `-c`. Each depth is four times the last, so a
+   term growing with the square of the depth shows as a sixteenfold step.
+   The 68 cells alternate the order of the binaries, and any `-c` object
+   that differs between them fails the run.
+
+   `compiler_publish.py` re-validates the receipt's `frontend_nesting`
+   record against `frontend_nesting/provenance.json` and `results.json`
+   (`validate_frontend_nesting`, sharing `frontend_scaling_problems` with
+   the frontend-selector leg). It refuses a tool exit other than 0, binary
+   hashes that are not the measured binaries, an observed CPU other than the
+   Ryzen 7 9700X, affinity other than CPU 2, a population that is not exactly
+   the 68 profile cells with eleven samples per binary, a reported median its
+   samples do not give, an object cell without its identical-object hash, and
+   a frozen profile or cell digest that changed. Every timing is report-only.
+
+   Cost: on a hosted 4-vCPU 2.1 GHz Xeon (diagnostic, not Zen 5), the whole
+   leg took 190 s and exported 196 KB. Its 20-minute timeout keeps it inside
+   the unchanged 90-minute `compare-pull` job next to the roughly 14-minute
+   ordinary comparison. No job timeout changed.
+
    **Issue #2761 opt-in host Wild linker leg.** The same route accepts one
    fresh exact line `profile: wild-linker-v1`, selected by the same
    every-parent freshness rule. It is the Zen 5 route for
@@ -1409,6 +1710,72 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    evidence was 68 KB. Its 20-minute timeout keeps it inside the unchanged
    90-minute `compare-pull` job next to the roughly 14-minute ordinary
    comparison. No job timeout changed.
+
+   **Issue #58 opt-in self-built inline-mode leg.** The same route accepts
+   one fresh exact line `profile: self-host-inline-compare-v1`, selected by
+   the same every-parent freshness rule. It is the Zen 5 route for
+   `uarch_lab:compare@self-host-inline-compare`, the compilers each side
+   would self-build with `-fcanonical-inline`. The #48 profile above times
+   one head against itself, inliner off against on; this one times base
+   against head, both with the inliner on. It cannot be combined with any
+   other opt-in profile, the scaling leg included; both the harness and the
+   publisher refuse the combination. The #48 `canonical-inline-self-host-v1`
+   leg is the exception: `inline_acceptance_requested` selects it whenever its
+   line is anywhere in the request file, as it has been on main since #48, so
+   it runs beside this leg (its 12-pair stages add a few minutes). The
+   trusted revision's `tools/bench_direct/selfhost_inline_compare.py` runs in
+   two parts:
+   - **Stage 1, untimed.** Right after each role's Clang Release build, with
+     that revision and its `build/generated` still checked out,
+     `build_selfhost_inline_stage1` runs the role's `ide` once with the
+     profile's `stage1_command`: the unity source with `-fcanonical-inline`.
+     It refuses a checkout that is not the role's revision, and inputs or a
+     compiler that change during the build. Each `stage1.json` records the
+     building compiler's SHA-256 and the stage-1 compiler's.
+   - **Timed comparison.** After the corpus leg, on the ordinary comparison's
+     frozen merge-base tree, `measure_selfhost_inline` runs
+     `uarch_lab.py compare` on the two stage-1 compilers with fixed
+     arguments: `--pairs 30 --warmups 1 --cpu 2 --profile-steps
+     topdown,sampling --require-identical-output --min-effect 0.5 --
+     -fcanonical-inline`. The outputs must be byte-identical before anything
+     is timed. Topdown runs each Zen 5 metric group (PipelineL1 and L2,
+     branch, decoder and op-cache, cache and TLB) for both compilers, and
+     the report lists the front-end rows. Sampling adds per-symbol movers.
+
+   `compiler_publish.py` re-validates the receipt's `selfhost_inline` record
+   against the seven exported documents under `selfhost_inline/`
+   (`validate_selfhost_inline` and
+   `selfhost_inline_compare.validate_compare_documents`). It refuses:
+   - a stage-1 record not built from its role's revision by the receipt's
+     binary with the frozen command;
+   - a result that did not time those stage-1 compilers on the merge-base
+     tree;
+   - a run that is not 30 complete deterministic fresh-copy ABBA pairs with
+     the fixed flags, CPU, floor and profile steps;
+   - outputs that differ, or a prepare, timed, topdown or sampling step that
+     did not complete;
+   - missing wall-time intervals, unavailable hardware counters, or missing
+     instruction, cycle or branch-miss counts;
+   - front-end evidence that is not usable (`selfhost_inline_frontend_problems`):
+     a malformed topdown row, no level-1 `frontend_bound` metric with finite
+     values for both compilers, or a front-end row measured for only one.
+     The topdown step is marked ok even when a group fails or is
+     unavailable, so cache or backend rows never stand in for it;
+   - a receipt digest that the exported summary does not give.
+
+   Every value is report-only. On a pull request the merge base is the
+   baseline; for #58 a draft head carries one selector variant against the
+   production selector.
+
+   Cost is an estimate (no hosted host has perf, and no Zen 5 group count is
+   on record). Each stage-1 build took 4.7 s with the Clang-built compiler on
+   a hosted Xeon, and one self-built compile took about 19 s there; the 9700X
+   compiles the same source with a Clang-built compiler in about 1.5 s. That
+   puts a self-built compile near 5 s, and 30 pairs, both profiles and their
+   multiplexed metric re-runs near 220 compiles, about 25 to 30 minutes. Its
+   45-minute leg timeout keeps it inside the unchanged 90-minute
+   `compare-pull` job. No job timeout changed; record the first receipt's
+   `selfhost_inline_seconds` before relying on the estimate.
 
    **Without perf (#2768).** Before the first timed run the lab runs
    `perf stat -- true` once (`probe_counters`). If perf is missing, exits
@@ -1758,6 +2125,57 @@ work, literal decoding, interning, target-table preparation, machine records,
 output bytes) and per-phase minor-fault and arena rows. Use them to rank and
 prove removed work, never as timing evidence; see [the work ledger](../work-ledger.md)
 for the key contract and the frozen-corpus runner under `tools/work_ledger/`.
+
+## Parameter-edge splitting populations
+
+`tools/machine_edge_split_scaling.c` drives the production pre-allocation
+parameter-edge splitter with reversed-edge chain/fanout populations, mixed
+duplicates (one non-copy edge followed by two splitting edges), and a no-split
+control. It checks complete transformed block, instruction, edge and switch
+records against closed-form expectations, including copy offsets and the first
+splitting duplicate. Its empty/tiny controls and geometric populations cover
+both native MIR targets. These are structural fixtures with synthetic copy
+slices, not independently executable programs or allocator-validation inputs;
+the registered `machine_tests` supply broader label/debug/definition coverage.
+
+Build the probe from the repository root with the existing Clang/LLVM tools:
+
+```sh
+mkdir -p work/edge-split
+clang -O2 -g -fprofile-instr-generate -fcoverage-mapping \
+  -ffunction-sections -fdata-sections -Wall -Werror \
+  -Wno-unused-function -Wno-unused-variable \
+  -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 \
+  -DBUSTER_SINGLE_THREADED=1 -Isrc -fwrapv -fno-strict-aliasing -funsigned-char \
+  tools/machine_edge_split_scaling.c \
+  src/buster/lib/compiler/codegen/machine.c src/buster/lib/compiler/codegen/codegen.c \
+  src/buster/lib/arena.c src/buster/lib/os.c src/buster/lib/integer.c \
+  src/buster/lib/string.c src/buster/lib/float.c src/buster/lib/time.c \
+  -Wl,--gc-sections -lpthread -ldl -lm -o work/edge-split/probe
+python3 tools/machine_edge_split_scaling_coverage.py \
+  --binary work/edge-split/probe --output work/edge-split/attempt-1
+```
+
+The collector requires a fresh output directory and checks 56 cells: both
+targets, four shapes and 0/1/2/17/257/4097/16384 blocks. It locates source
+statements within the splitter and reads their actual LLVM execution regions,
+then checks the expected linear counts. Missing profiles/regions or mismatches
+fail; the expected formula never substitutes for an observed count. Preserve
+the raw `.profraw`/`.profdata` files beside `counts.json` for replay. Source,
+probe, collector and binary hashes bind the diagnostic to its inputs; rebuild
+the probe after any source change. This uses LLVM tooling outside the compiler
+and adds no production counters, rows or permanent indexes.
+
+Each invocation also checks retained allocation and scoped arena high water.
+For a splitting function the temporary maps use
+`4 * (I + 2E + 3B + 1)` bytes plus alignment; the arena cursor must retain only
+the published arrays after the call. A no-split function must preserve its
+entire function record with zero allocation/high-water growth and no indexing
+walks. Timings include the complete splitter call but exclude fixture creation
+and checking. Coverage instrumentation perturbs code and timing; these tools
+are diagnostic only. They are not yet a frozen `compiler-probes-v1` leg or a
+9700X request route and cannot establish a speedup or close #296's physical
+Zen 5, separate Zen 4, whole-compiler or text-budget acceptance cells.
 
 ## Object assembly-printer scaling
 

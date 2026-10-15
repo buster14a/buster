@@ -8,13 +8,17 @@
 // checked file IO (os_file_write_checked,
 // os_file_close_checked, os_file_flush), replacement publication
 // (os_file_replacement_target_stats, os_file_staging_create, os_file_replace),
-// process spawn/wait with deadlines, executable lookup, dynamic libraries, and
+// process spawn/wait with deadlines (os_windows_owner_* retains failed cleanup;
+// os_process_cleanup_pending resumes it; os_process_shutdown closes admission),
+// executable lookup, dynamic libraries, and
 // the crash/failure printers. Replacement publication follows os_file_close;
 // The opt-in fork-to-exit-early protocol (os_early_exit_arm/
 // os_early_exit_release, #3686) follows the spawn pipe helpers it reuses
 // (os_process_spawn_pipe_create), just before os_process_spawn.
 // Opt-in child resource witnesses in os_process_wait_deadline retain native
 // accounting scope; they do not alter process ownership or cleanup.
+// Linux group cleanup filters unrelated tasks in os_linux_process_group_stat_at
+// before its complete procfs member-state and namespace checks.
 // os_process_capture_step separates ordinary POSIX pipe drain transitions
 // from native observations in os_process_wait_deadline; its private replay
 // contract lives in os_internal.h, without process-group identity changes.
@@ -23,7 +27,8 @@
 // The lane model's implementation lives at the bottom — lane_run dispatches through a
 // persistent LaneGang of workers that survives across phases
 // (lane_persistent_worker_entry_point); creating threads per phase is the
-// shape it exists to avoid.
+// shape it exists to avoid. lane_release joins a parked gang so its caller
+// can run serial initialization again.
 
 #include <buster/lib/os.h>
 #include <buster/lib/os_internal.h>
@@ -375,8 +380,16 @@ BUSTER_NORETURN BUSTER_COLD void os_fail_raw(u32 line, String8 function, String8
     os_exit(1);
 }
 
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL void os_windows_exit_abandon_current_claims(void);
+#endif
+
 BUSTER_NORETURN BUSTER_COLD void os_exit(u32 code)
 {
+#if BUSTER_WINDOWS
+    os_windows_exit_abandon_current_claims();
+    if (!os_process_shutdown_keep_alive()) code = PROCESS_RESULT_FAILED;
+#endif
 #if BUSTER_LINK_LIBC
     exit((int)code);
 #else
@@ -1264,6 +1277,19 @@ u64 atomic_u64_load(AtomicU64* address)
     return result;
 }
 
+void atomic_u64_store(AtomicU64* address, u64 value)
+{
+#if BUSTER_SINGLE_THREADED
+    *address = value;
+#elif BUSTER_COMPILER_MSVC
+    _InterlockedExchange64((volatile long long*)address, (long long)value);
+#elif defined(__clang__)
+    __c11_atomic_store(address, value, __ATOMIC_SEQ_CST);
+#else
+    __atomic_store_n(address, value, __ATOMIC_SEQ_CST);
+#endif
+}
+
 u64 atomic_u64_add(AtomicU64* address, u64 addend)
 {
     // Builtins rather than <stdatomic.h>: that header lives in the host
@@ -1297,6 +1323,372 @@ u64 atomic_u64_decrement(AtomicU64* address)
     u64 result = atomic_u64_add(address, ~(u64)0);
     return result;
 }
+
+#if BUSTER_COMPILER_MSVC && !BUSTER_SINGLE_THREADED
+#include <intrin.h>
+#endif
+
+BUSTER_SHARED_INLINE u8 atomic_u8_load_acquire(u8 const* address)
+{
+    u8 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC && BUSTER_CPU_ARCH_AARCH64
+    result = __ldar8((unsigned __int8 volatile*)address);
+#elif BUSTER_COMPILER_MSVC
+    result = (u8)__iso_volatile_load8((__int8 const volatile*)address);
+    _ReadWriteBarrier();
+#else
+    result = __atomic_load_n(address, __ATOMIC_ACQUIRE);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE void atomic_u8_store_release(u8* address, u8 value)
+{
+#if BUSTER_SINGLE_THREADED
+    *address = value;
+#elif BUSTER_COMPILER_MSVC && BUSTER_CPU_ARCH_AARCH64
+    __stlr8((unsigned __int8 volatile*)address, value);
+#elif BUSTER_COMPILER_MSVC
+    _ReadWriteBarrier();
+    __iso_volatile_store8((__int8 volatile*)address, (__int8)value);
+#else
+    __atomic_store_n(address, value, __ATOMIC_RELEASE);
+#endif
+}
+
+BUSTER_SHARED_INLINE bool atomic_u8_compare_exchange(u8* address, u8 expected, u8 desired)
+{
+    bool result;
+#if BUSTER_SINGLE_THREADED
+    result = *address == expected;
+    if (result)
+    {
+        *address = desired;
+    }
+#elif BUSTER_COMPILER_MSVC
+    result = (u8)_InterlockedCompareExchange8((char volatile*)address, (char)desired, (char)expected) == expected;
+#else
+    result = __atomic_compare_exchange_n(address, &expected, desired, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE u16 atomic_u16_load_acquire(u16 const* address)
+{
+    u16 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC && BUSTER_CPU_ARCH_AARCH64
+    result = __ldar16((unsigned __int16 volatile*)address);
+#elif BUSTER_COMPILER_MSVC
+    result = (u16)__iso_volatile_load16((__int16 const volatile*)address);
+    _ReadWriteBarrier();
+#else
+    result = __atomic_load_n(address, __ATOMIC_ACQUIRE);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE void atomic_u16_store_release(u16* address, u16 value)
+{
+#if BUSTER_SINGLE_THREADED
+    *address = value;
+#elif BUSTER_COMPILER_MSVC && BUSTER_CPU_ARCH_AARCH64
+    __stlr16((unsigned __int16 volatile*)address, value);
+#elif BUSTER_COMPILER_MSVC
+    _ReadWriteBarrier();
+    __iso_volatile_store16((__int16 volatile*)address, (__int16)value);
+#else
+    __atomic_store_n(address, value, __ATOMIC_RELEASE);
+#endif
+}
+
+BUSTER_SHARED_INLINE u16 atomic_u16_load_relaxed(u16 const* address)
+{
+    u16 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC
+    result = (u16)__iso_volatile_load16((__int16 const volatile*)address);
+#else
+    result = __atomic_load_n(address, __ATOMIC_RELAXED);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE void atomic_u16_store_relaxed(u16* address, u16 value)
+{
+#if BUSTER_SINGLE_THREADED
+    *address = value;
+#elif BUSTER_COMPILER_MSVC
+    __iso_volatile_store16((__int16 volatile*)address, (__int16)value);
+#else
+    __atomic_store_n(address, value, __ATOMIC_RELAXED);
+#endif
+}
+
+BUSTER_SHARED_INLINE bool atomic_u16_compare_exchange(u16* address, u16 expected, u16 desired)
+{
+    bool result;
+#if BUSTER_SINGLE_THREADED
+    result = *address == expected;
+    if (result)
+    {
+        *address = desired;
+    }
+#elif BUSTER_COMPILER_MSVC
+    result = (u16)_InterlockedCompareExchange16((short volatile*)address, (short)desired, (short)expected) == expected;
+#else
+    result = __atomic_compare_exchange_n(address, &expected, desired, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE u16 atomic_u16_add(u16* address, u16 addend)
+{
+    u16 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+    *address = (u16)(result + addend);
+#elif BUSTER_COMPILER_MSVC
+    result = (u16)_InterlockedExchangeAdd16((short volatile*)address, (short)addend);
+#else
+    result = __atomic_fetch_add(address, addend, __ATOMIC_ACQ_REL);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE u32 atomic_u32_add(u32* address, u32 addend)
+{
+    u32 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+    *address = result + addend;
+#elif BUSTER_COMPILER_MSVC
+    result = (u32)_InterlockedExchangeAdd((long volatile*)address, (long)addend);
+#else
+    result = __atomic_fetch_add(address, addend, __ATOMIC_ACQ_REL);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE u32 atomic_u32_load_acquire(u32 const* address)
+{
+    u32 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC && BUSTER_CPU_ARCH_AARCH64
+    result = __ldar32((unsigned __int32 volatile*)address);
+#elif BUSTER_COMPILER_MSVC
+    result = (u32)__iso_volatile_load32((__int32 const volatile*)address);
+    _ReadWriteBarrier();
+#else
+    result = __atomic_load_n(address, __ATOMIC_ACQUIRE);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE u64 atomic_u64_load_acquire_plain(u64 const* address)
+{
+    u64 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+#elif BUSTER_COMPILER_MSVC && BUSTER_CPU_ARCH_AARCH64
+    result = __ldar64((unsigned __int64 volatile*)address);
+#elif BUSTER_COMPILER_MSVC
+    result = (u64)__iso_volatile_load64((__int64 const volatile*)address);
+    _ReadWriteBarrier();
+#else
+    result = __atomic_load_n(address, __ATOMIC_ACQUIRE);
+#endif
+    return result;
+}
+
+BUSTER_SHARED_INLINE u64 atomic_u64_or_release_plain(u64* address, u64 bits)
+{
+    u64 result;
+#if BUSTER_SINGLE_THREADED
+    result = *address;
+    *address = result | bits;
+#elif BUSTER_COMPILER_MSVC
+    result = (u64)_InterlockedOr64((__int64 volatile*)address, (__int64)bits);
+#else
+    result = __atomic_fetch_or(address, bits, __ATOMIC_RELEASE);
+#endif
+    return result;
+}
+
+// A waiter spins this many rounds before it starts yielding: a claim is held
+// for one entry's fill, which is usually shorter than a reschedule.
+#define ONCE_CLAIM_SPIN_ROUNDS 64u
+// The deepest chain of nested fills: a template row, a shape, a plan, facts,
+// a pattern, a row, a record and a memo slot take eight.
+#define ONCE_CLAIM_STACK_CAPACITY 16u
+
+// The once-claims this thread holds, innermost last.
+typedef struct OnceClaimStack OnceClaimStack;
+struct OnceClaimStack
+{
+    void const* states[ONCE_CLAIM_STACK_CAPACITY];
+    u32 levels[ONCE_CLAIM_STACK_CAPACITY];
+    u32 depth;
+};
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OnceClaimStack once_claim_stack;
+
+// Pushes a won claim. Claims nest only to strictly lower levels, which is
+// what makes waiting deadlock-free.
+BUSTER_GLOBAL_LOCAL void once_claim_push(void const* state, u32 level)
+{
+    OnceClaimStack* claims = &once_claim_stack;
+    if (claims->depth != 0 && level >= claims->levels[claims->depth - 1])
+    {
+        os_fail_message(S8("once-claim taken at a level not below the claim it is nested in"));
+    }
+    if (claims->depth >= ONCE_CLAIM_STACK_CAPACITY)
+    {
+        os_fail_message(S8("once-claims nested too deeply"));
+    }
+    claims->states[claims->depth] = state;
+    claims->levels[claims->depth] = level;
+    claims->depth += 1;
+}
+
+BUSTER_GLOBAL_LOCAL void once_claim_pop(void const* state)
+{
+    OnceClaimStack* claims = &once_claim_stack;
+    if (claims->depth == 0 || claims->states[claims->depth - 1] != state)
+    {
+        os_fail_message(S8("once-claim published out of order or without a claim"));
+    }
+    claims->depth -= 1;
+}
+
+// A thread waiting on a claim it holds would wait forever.
+BUSTER_GLOBAL_LOCAL void once_claim_check_not_held(void const* state)
+{
+    OnceClaimStack* claims = &once_claim_stack;
+    for (u32 index = 0; index < claims->depth; index += 1)
+    {
+        if (claims->states[index] == state)
+        {
+            os_fail_message(S8("once-claim waited on by the thread that holds it"));
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void once_claim_backoff(u32 round)
+{
+#if BUSTER_SINGLE_THREADED
+    // Nobody else can finish a busy claim in a build without threads.
+    BUSTER_UNUSED(round);
+    os_fail_message(S8("once-claim busy in a single-threaded build"));
+#else
+    if (round >= ONCE_CLAIM_SPIN_ROUNDS)
+    {
+#if BUSTER_WINDOWS
+        SwitchToThread();
+#else
+        sched_yield();
+#endif
+    }
+#endif
+}
+
+void once_wait_u8(u8 const* state, u8 busy)
+{
+    once_claim_check_not_held(state);
+    for (u32 round = 0; atomic_u8_load_acquire(state) == busy; round += 1)
+    {
+        once_claim_backoff(round);
+    }
+}
+
+bool once_claim_u8(u8* state, u8 pending, u8 busy, u32 level)
+{
+    bool claimed = false;
+    bool deciding = true;
+    while (deciding)
+    {
+        u8 value = atomic_u8_load_acquire(state);
+        if (value == pending)
+        {
+            claimed = atomic_u8_compare_exchange(state, pending, busy);
+            deciding = !claimed;
+        }
+        else if (value == busy)
+        {
+            once_wait_u8(state, busy);
+        }
+        else
+        {
+            deciding = false;
+        }
+    }
+    if (claimed)
+    {
+        once_claim_push(state, level);
+    }
+    return claimed;
+}
+
+void once_publish_u8(u8* state, u8 value)
+{
+    once_claim_pop(state);
+    atomic_u8_store_release(state, value);
+}
+
+void once_wait_u16(u16 const* state, u16 busy)
+{
+    once_claim_check_not_held(state);
+    for (u32 round = 0; atomic_u16_load_acquire(state) == busy; round += 1)
+    {
+        once_claim_backoff(round);
+    }
+}
+
+bool once_claim_u16(u16* state, u16 pending, u16 busy, u32 level)
+{
+    bool claimed = false;
+    bool deciding = true;
+    while (deciding)
+    {
+        u16 value = atomic_u16_load_acquire(state);
+        if (value == pending)
+        {
+            claimed = atomic_u16_compare_exchange(state, pending, busy);
+            deciding = !claimed;
+        }
+        else if (value == busy)
+        {
+            once_wait_u16(state, busy);
+        }
+        else
+        {
+            deciding = false;
+        }
+    }
+    if (claimed)
+    {
+        once_claim_push(state, level);
+    }
+    return claimed;
+}
+
+void once_publish_u16(u16* state, u16 value)
+{
+    once_claim_pop(state);
+    atomic_u16_store_release(state, value);
+}
+
+#if BUSTER_INCLUDE_TESTS
+u32 once_claim_depth(void)
+{
+    u32 result = once_claim_stack.depth;
+    return result;
+}
+#endif
 
 String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_terminate)
 {
@@ -3365,6 +3757,7 @@ FileStats os_path_followed_stats(String8 path)
             if (status == 0)
             {
                 result.valid = true;
+                result.size = (u64)information.st_size;
                 result.device = (u64)information.st_dev;
                 result.index = (u64)information.st_ino;
                 result.permissions = (u32)(information.st_mode & 0777);
@@ -3401,7 +3794,7 @@ FileStats os_path_followed_stats(String8 path)
             if (handle != INVALID_HANDLE_VALUE)
             {
                 OsFileDescriptor* file = (OsFileDescriptor*)handle;
-                result = os_file_get_stats(file, (FileStatsOptions){.identity = 1});
+                result = os_file_get_stats(file, (FileStatsOptions){.size = 1, .identity = 1});
                 OsError close_error = os_file_close_checked(file);
                 if (result.valid && close_error.v)
                 {
@@ -3682,24 +4075,549 @@ bool os_windows_pipe_disable_inheritance(OsFileDescriptor* pipe)
     return SetHandleInformation((HANDLE)pipe, HANDLE_FLAG_INHERIT, 0) != 0;
 }
 
-BUSTER_GLOBAL_LOCAL bool os_windows_job_wait_empty(HANDLE job, u64 timeout_microseconds)
+enum { OS_WINDOWS_CLEANUP_OBSERVATION_US = 5000000 };
+
+typedef enum OsWindowsProcessOwnerState
 {
-    bool result = false;
-    u64 deadline = os_now_microseconds() + timeout_microseconds;
-    bool query_valid = true;
-    while (query_valid && !result && os_now_microseconds() < deadline)
+    OS_WINDOWS_OWNER_RESERVED,
+    OS_WINDOWS_OWNER_RUNNING,
+    OS_WINDOWS_OWNER_WAITING,
+    OS_WINDOWS_OWNER_PENDING,
+} OsWindowsProcessOwnerState;
+
+typedef struct OsWindowsProcessOwner OsWindowsProcessOwner;
+struct OsWindowsProcessOwner
+{
+    OsWindowsProcessOwner* next;
+    u64 id;
+    HANDLE process;
+    HANDLE job;
+    OsError error;
+    OsWindowsProcessOwnerState state;
+    bool pending;
+    bool leader_in_job;
+    DWORD claiming_thread_id;
+    HANDLE pipes[STANDARD_STREAM_COUNT];
+};
+
+// Process-global storage has no dependency on an arena, lane or thread context.
+// Reserve before acquiring child resources. Every native operation runs outside
+// the lock; WAITING gives exactly one caller authority to use a node's handles.
+BUSTER_GLOBAL_LOCAL SRWLOCK os_windows_owner_lock = SRWLOCK_INIT;
+BUSTER_GLOBAL_LOCAL OsWindowsProcessOwner* os_windows_owners;
+BUSTER_GLOBAL_LOCAL u64 os_windows_owner_next_id;
+BUSTER_GLOBAL_LOCAL u64 os_windows_pending_count;
+BUSTER_GLOBAL_LOCAL bool os_windows_shutdown_requested;
+BUSTER_GLOBAL_LOCAL u64 os_windows_resume_before_id = (u64)-1;
+
+#if BUSTER_INCLUDE_TESTS
+typedef struct OsWindowsCleanupTest OsWindowsCleanupTest;
+struct OsWindowsCleanupTest
+{
+    HANDLE process;
+    HANDLE job;
+    HANDLE release_event;
+    HANDLE claim_ready_event;
+    HANDLE claim_release_event;
+    u32 flags;
+    u64 clock;
+    bool active;
+    OsProcessCleanupWindowsTestStats stats;
+};
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsWindowsCleanupTest os_windows_cleanup_test;
+
+void os_process_cleanup_windows_test_begin(ProcessSpawnResult spawn, u32 flags)
+{
+    os_windows_cleanup_test = (OsWindowsCleanupTest){.process = (HANDLE)spawn.handle,
+        .job = (HANDLE)spawn.process_tree, .flags = flags, .active = true};
+}
+
+void os_process_shutdown_windows_test_release_event(OsProcessHandle* event)
+{
+    os_windows_cleanup_test.release_event = (HANDLE)event;
+}
+
+void os_process_shutdown_windows_test_claim_gate(OsProcessHandle* release, OsProcessHandle* ready)
+{
+    os_windows_cleanup_test.claim_release_event = (HANDLE)release;
+    os_windows_cleanup_test.claim_ready_event = (HANDLE)ready;
+}
+
+OsProcessCleanupWindowsTestStats os_process_cleanup_windows_test_end(void)
+{
+    OsProcessCleanupWindowsTestStats result = os_windows_cleanup_test.stats;
+    os_windows_cleanup_test = (OsWindowsCleanupTest){0};
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_windows_cleanup_test_call(HANDLE handle)
+{
+    if (os_windows_cleanup_test.active && os_windows_cleanup_test.release_event &&
+        WaitForSingleObject(os_windows_cleanup_test.release_event, 0) == WAIT_OBJECT_0)
     {
-        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION information = {0};
-        query_valid = QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &information, sizeof(information), 0) != 0;
-        result = query_valid && information.ActiveProcesses == 0;
-        if (query_valid && !result)
+        os_windows_cleanup_test.flags = 0;
+        os_windows_cleanup_test.active = false;
+    }
+    bool injected = os_windows_cleanup_test.active &&
+        (handle == os_windows_cleanup_test.process || handle == os_windows_cleanup_test.job ||
+         (!os_windows_cleanup_test.process && !os_windows_cleanup_test.job));
+    if (injected)
+    {
+        os_windows_cleanup_test.stats.calls += 1;
+        os_windows_cleanup_test.stats.ceiling_reached |= os_windows_cleanup_test.stats.calls > 64;
+    }
+    return injected;
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL u64 os_windows_cleanup_clock(void)
+{
+    u64 result;
+#if BUSTER_INCLUDE_TESTS
+    if (os_windows_cleanup_test.active)
+    {
+        os_windows_cleanup_test.clock += 1000000;
+        result = os_windows_cleanup_test.clock;
+    }
+    else
+#endif
+    {
+        result = GetTickCount64() * 1000;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL DWORD os_windows_process_wait(HANDLE process, DWORD milliseconds)
+{
+    DWORD result;
+#if BUSTER_INCLUDE_TESTS
+    bool injected = os_windows_cleanup_test_call(process);
+    if (injected && milliseconds == INFINITE) os_windows_cleanup_test.stats.infinite_waits += 1;
+    if (injected && (os_windows_cleanup_test.stats.ceiling_reached ||
+        (os_windows_cleanup_test.flags & OS_PROCESS_CLEANUP_TEST_WAIT_FAILED)))
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        result = WAIT_FAILED;
+    }
+    else if (injected && (os_windows_cleanup_test.flags & OS_PROCESS_CLEANUP_TEST_UNSIGNALED))
+    {
+        result = WAIT_TIMEOUT;
+    }
+    else
+#endif
+    {
+        result = WaitForSingleObject(process, milliseconds);
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_windows_process_terminate(HANDLE handle, bool job)
+{
+    bool result;
+#if BUSTER_INCLUDE_TESTS
+    bool injected = os_windows_cleanup_test_call(handle);
+    if (injected) os_windows_cleanup_test.stats.termination_calls += 1;
+    if (injected && (os_windows_cleanup_test.stats.ceiling_reached ||
+        (os_windows_cleanup_test.flags & OS_PROCESS_CLEANUP_TEST_REFUSE_TERMINATION)))
+    {
+        SetLastError(ERROR_ACCESS_DENIED);
+        result = false;
+    }
+    else
+#endif
+    {
+        result = (job ? TerminateJobObject(handle, 1) : TerminateProcess(handle, 1)) != 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_windows_job_query(HANDLE job, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION* information)
+{
+    bool result;
+#if BUSTER_INCLUDE_TESTS
+    bool injected = os_windows_cleanup_test_call(job);
+    if (injected) os_windows_cleanup_test.stats.job_queries += 1;
+    if (injected && os_windows_cleanup_test.stats.ceiling_reached)
+    {
+        SetLastError(ERROR_GEN_FAILURE);
+        result = false;
+    }
+    else if (injected && (os_windows_cleanup_test.flags & OS_PROCESS_CLEANUP_TEST_JOB_NONEMPTY))
+    {
+        information->ActiveProcesses = 1;
+        result = true;
+    }
+    else
+#endif
+    {
+        result = QueryInformationJobObject(job, JobObjectBasicAccountingInformation, information, sizeof(*information), 0) != 0;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_windows_cleanup_error(OsError* error)
+{
+    if (!error->v)
+    {
+        *error = os_get_last_error();
+        if (!error->v) error->v = ERROR_GEN_FAILURE;
+    }
+}
+
+BUSTER_GLOBAL_LOCAL OsWindowsProcessOwner* os_windows_owner_reserve(OsError* error)
+{
+    OsWindowsProcessOwner* result = (OsWindowsProcessOwner*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*result));
+    if (!result)
+    {
+        error->v = ERROR_NOT_ENOUGH_MEMORY;
+    }
+    else
+    {
+        AcquireSRWLockExclusive(&os_windows_owner_lock);
+        bool admitted = !os_windows_pending_count && !os_windows_shutdown_requested && os_windows_owner_next_id < (u64)-2;
+        if (admitted)
         {
-            Sleep(1);
+            result->id = ++os_windows_owner_next_id;
+            result->claiming_thread_id = GetCurrentThreadId();
+            result->next = os_windows_owners;
+            os_windows_owners = result;
+        }
+        ReleaseSRWLockExclusive(&os_windows_owner_lock);
+        if (!admitted)
+        {
+            HeapFree(GetProcessHeap(), 0, result);
+            result = 0;
+            error->v = ERROR_BUSY;
         }
     }
     return result;
 }
+
+BUSTER_GLOBAL_LOCAL void os_windows_owner_publish(OsWindowsProcessOwner* owner, HANDLE process, HANDLE job)
+{
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    owner->process = process;
+    owner->job = job;
+    owner->leader_in_job = job != 0;
+    owner->state = OS_WINDOWS_OWNER_RUNNING;
+    owner->claiming_thread_id = 0;
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+}
+
+BUSTER_GLOBAL_LOCAL OsWindowsProcessOwner* os_windows_owner_claim(ProcessSpawnResult spawn, bool pending, bool shutdown, u64 before_id)
+{
+    OsWindowsProcessOwner* result = 0;
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    for (OsWindowsProcessOwner* owner = os_windows_owners; owner && !result; owner = owner->next)
+    {
+        bool resumable = owner->state == OS_WINDOWS_OWNER_PENDING || (shutdown && owner->state == OS_WINDOWS_OWNER_RUNNING);
+        bool matches = pending ? resumable && owner->id < before_id :
+            owner->state == OS_WINDOWS_OWNER_RUNNING && owner->id == spawn.windows_owner_id &&
+            owner->process == (HANDLE)spawn.handle && owner->job == (HANDLE)spawn.process_tree;
+        if (matches)
+        {
+            owner->state = OS_WINDOWS_OWNER_WAITING;
+            owner->claiming_thread_id = GetCurrentThreadId();
+            result = owner;
+        }
+    }
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+#if BUSTER_INCLUDE_TESTS
+    if (result && os_windows_cleanup_test.active && os_windows_cleanup_test.claim_release_event)
+    {
+        SetEvent(os_windows_cleanup_test.claim_ready_event);
+        (void)WaitForSingleObject(os_windows_cleanup_test.claim_release_event, 30000);
+        os_windows_cleanup_test.claim_release_event = 0;
+    }
+    if (result && os_windows_cleanup_test.active && (os_windows_cleanup_test.flags & OS_PROCESS_CLEANUP_TEST_EXIT_IN_CLAIM))
+    {
+        os_windows_cleanup_test.flags &= ~(u32)OS_PROCESS_CLEANUP_TEST_EXIT_IN_CLAIM;
+        os_exit(PROCESS_RESULT_FAILED);
+    }
 #endif
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_windows_owner_finish(OsWindowsProcessOwner* owner, bool finalized, OsError error)
+{
+    // WAITING/RESERVED keeps shutdown aware while handles close outside the lock.
+    if (finalized)
+    {
+        for (u32 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+        {
+            if (owner->pipes[stream]) CloseHandle(owner->pipes[stream]);
+        }
+        if (owner->job) CloseHandle(owner->job);
+        if (owner->process) CloseHandle(owner->process);
+    }
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    if (finalized)
+    {
+        OsWindowsProcessOwner** link = &os_windows_owners;
+        while (*link != owner) link = &(*link)->next;
+        *link = owner->next;
+        if (owner->pending) os_windows_pending_count -= 1;
+    }
+    else
+    {
+        if (!owner->error.v) owner->error = error;
+        owner->state = OS_WINDOWS_OWNER_PENDING;
+        owner->claiming_thread_id = 0;
+        if (!owner->pending) os_windows_pending_count += 1;
+        owner->pending = true;
+    }
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+    if (finalized) HeapFree(GetProcessHeap(), 0, owner);
+}
+
+BUSTER_GLOBAL_LOCAL bool os_windows_owner_cleanup(OsWindowsProcessOwner* owner, bool terminate, u64 timeout_microseconds,
+                                                 DWORD* leader_wait, OsError* error)
+{
+    u64 budget = timeout_microseconds < OS_WINDOWS_CLEANUP_OBSERVATION_US ? timeout_microseconds : OS_WINDOWS_CLEANUP_OBSERVATION_US;
+    u64 deadline = os_windows_cleanup_clock() + budget;
+    if (terminate && owner->process)
+    {
+        bool job_terminated = owner->job && os_windows_process_terminate(owner->job, true);
+        if (owner->job && !job_terminated) os_windows_cleanup_error(error);
+        // Exact owned leader fallback, including containment-assignment failure.
+        DWORD before = os_windows_process_wait(owner->process, 0);
+        if (before == WAIT_FAILED) os_windows_cleanup_error(error);
+        if (before != WAIT_OBJECT_0 && (!job_terminated || !owner->leader_in_job) && !os_windows_process_terminate(owner->process, false)) os_windows_cleanup_error(error);
+    }
+    u64 now = os_windows_cleanup_clock();
+    DWORD milliseconds = now < deadline ? (DWORD)((deadline - now + 999) / 1000) : 0;
+    *leader_wait = owner->process ? os_windows_process_wait(owner->process, milliseconds) : WAIT_OBJECT_0;
+    if (*leader_wait == WAIT_FAILED) os_windows_cleanup_error(error);
+    bool job_empty = !owner->job;
+    bool query_valid = true;
+    bool first_query = true;
+    while (owner->job && query_valid && !job_empty && (first_query || os_windows_cleanup_clock() < deadline))
+    {
+        first_query = false;
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION information = {0};
+        query_valid = os_windows_job_query(owner->job, &information);
+        if (!query_valid) os_windows_cleanup_error(error);
+        job_empty = query_valid && information.ActiveProcesses == 0;
+        if (query_valid && !job_empty && budget && os_windows_cleanup_clock() < deadline) Sleep(1);
+    }
+    bool result = *leader_wait == WAIT_OBJECT_0 && job_empty;
+    if (!result && !error->v) error->v = WAIT_TIMEOUT;
+    return result;
+}
+
+#endif
+
+ProcessCleanupResult os_process_cleanup_snapshot(void)
+{
+    ProcessCleanupResult result = {0};
+#if BUSTER_WINDOWS
+    AcquireSRWLockShared(&os_windows_owner_lock);
+    result.pending_owners = os_windows_pending_count;
+    for (OsWindowsProcessOwner* owner = os_windows_owners; owner; owner = owner->next)
+    {
+        result.active_owners += 1;
+        if (!result.error.v && owner->error.v)
+        {
+            result.error = owner->error;
+            result.error_owner_id = owner->id;
+            result.error_owner_state = (u32)owner->state;
+        }
+    }
+    if (result.active_owners && !result.error.v)
+    {
+        result.error.v = ERROR_BUSY;
+        result.error_owner_id = os_windows_owners->id;
+        result.error_owner_state = (u32)os_windows_owners->state;
+    }
+    ReleaseSRWLockShared(&os_windows_owner_lock);
+#endif
+    return result;
+}
+
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL ProcessCleanupResult os_windows_cleanup_pending_before(u64 timeout_microseconds, u64 before_id, bool shutdown)
+{
+    OsWindowsProcessOwner* owner = os_windows_owner_claim((ProcessSpawnResult){0}, true, shutdown, before_id);
+    u64 resumed_id = 0;
+    u32 resumed_state = 0;
+    OsError error = {0};
+    if (owner)
+    {
+        resumed_id = owner->id;
+        resumed_state = (u32)owner->state;
+        error = owner->error;
+        DWORD leader_wait;
+        bool finalized = os_windows_owner_cleanup(owner, true, timeout_microseconds, &leader_wait, &error);
+        os_windows_owner_finish(owner, finalized, error);
+    }
+    ProcessCleanupResult result = os_process_cleanup_snapshot();
+    result.resumed_owner_id = resumed_id;
+    if (error.v)
+    {
+        result.error = error;
+        result.error_owner_id = resumed_id;
+        result.error_owner_state = resumed_state;
+    }
+    return result;
+}
+#endif
+
+ProcessCleanupResult os_process_cleanup_pending(u64 timeout_microseconds)
+{
+    ProcessCleanupResult result = {0};
+#if BUSTER_WINDOWS
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    u64 before_id = os_windows_resume_before_id;
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+    result = os_windows_cleanup_pending_before(timeout_microseconds, before_id, false);
+    if (!result.resumed_owner_id && before_id != (u64)-1)
+    {
+        result = os_windows_cleanup_pending_before(timeout_microseconds, (u64)-1, false);
+    }
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    os_windows_resume_before_id = result.resumed_owner_id ? result.resumed_owner_id : (u64)-1;
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+#else
+    BUSTER_UNUSED(timeout_microseconds);
+#endif
+    return result;
+}
+
+ProcessCleanupResult os_process_shutdown(u64 timeout_microseconds)
+{
+    ProcessCleanupResult result = {0};
+#if BUSTER_WINDOWS
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    os_windows_shutdown_requested = true;
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+    u64 budget = timeout_microseconds < OS_WINDOWS_CLEANUP_OBSERVATION_US ? timeout_microseconds : OS_WINDOWS_CLEANUP_OBSERVATION_US;
+    u64 started = os_windows_cleanup_clock();
+    u64 before_id = (u64)-1;
+    bool first = true;
+    bool keep_trying = true;
+    ProcessCleanupResult first_failure = {0};
+    while (keep_trying)
+    {
+        u64 elapsed = os_windows_cleanup_clock() - started;
+        keep_trying = first || elapsed < budget;
+        if (keep_trying)
+        {
+            first = false;
+            result = os_windows_cleanup_pending_before(elapsed < budget ? budget - elapsed : 0, before_id, true);
+            before_id = result.resumed_owner_id;
+            if (!first_failure.error.v && before_id && result.error.v && result.error_owner_id == before_id) first_failure = result;
+            keep_trying = before_id != 0;
+        }
+    }
+    result = os_process_cleanup_snapshot();
+    if (first_failure.error.v && (!result.error.v || result.error.v == ERROR_BUSY))
+    {
+        result.error = first_failure.error;
+        result.error_owner_id = first_failure.error_owner_id;
+        result.error_owner_state = first_failure.error_owner_state;
+    }
+#else
+    BUSTER_UNUSED(timeout_microseconds);
+#endif
+    return result;
+}
+
+#if BUSTER_WINDOWS
+BUSTER_GLOBAL_LOCAL void os_windows_exit_abandon_current_claims(void)
+{
+    DWORD current_thread = GetCurrentThreadId();
+    AcquireSRWLockExclusive(&os_windows_owner_lock);
+    for (OsWindowsProcessOwner* owner = os_windows_owners; owner; owner = owner->next)
+    {
+        if (owner->claiming_thread_id == current_thread &&
+            (owner->state == OS_WINDOWS_OWNER_RESERVED || owner->state == OS_WINDOWS_OWNER_WAITING))
+        {
+            // This hook is an executable exit boundary: the suspended caller
+            // cannot return and reuse its native handles after this transfer.
+            owner->state = OS_WINDOWS_OWNER_PENDING;
+            owner->claiming_thread_id = 0;
+            if (!owner->error.v) owner->error.v = ERROR_GEN_FAILURE;
+            if (!owner->pending) os_windows_pending_count += 1;
+            owner->pending = true;
+        }
+    }
+    ReleaseSRWLockExclusive(&os_windows_owner_lock);
+}
+
+BUSTER_GLOBAL_LOCAL void os_windows_shutdown_receipt_number(char8* buffer, u64* length, u64 number)
+{
+    char8 digits[20];
+    u64 count = 0;
+    do
+    {
+        digits[count++] = (char8)('0' + number % 10);
+        number /= 10;
+    } while (number);
+    while (count) buffer[(*length)++] = digits[--count];
+}
+
+BUSTER_GLOBAL_LOCAL void os_windows_shutdown_receipt(ProcessCleanupResult cleanup)
+{
+    // Fixed stack storage and native I/O work even when no arena/context exists.
+    // One compact receipt per changed observation avoids flooding captured stderr.
+    char8 buffer[256];
+    u64 length = 0;
+    String8 literals[] = {cleanup.active_owners ? S8("WINDOWS_PROCESS_SHUTDOWN_REFUSED_V1 active=") :
+        S8("WINDOWS_PROCESS_SHUTDOWN_FAILURE_V1 active="), S8(" pending="), S8(" owner_id="),
+        S8(" owner_state="), S8(" native_error="), S8(" keep_alive="), S8("\n")};
+    u64 numbers[] = {cleanup.active_owners, cleanup.pending_owners, cleanup.error_owner_id, cleanup.error_owner_state,
+        cleanup.error.v, cleanup.active_owners != 0};
+    for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(literals); index += 1)
+    {
+        memcpy(buffer + length, literals[index].pointer, (size_t)literals[index].length);
+        length += literals[index].length;
+        if (index < BUSTER_ARRAY_LENGTH(numbers)) os_windows_shutdown_receipt_number(buffer, &length, numbers[index]);
+    }
+    DWORD written;
+    (void)WriteFile(GetStdHandle(STD_ERROR_HANDLE), buffer, (DWORD)length, &written, 0);
+#if BUSTER_INCLUDE_TESTS
+    if (os_windows_cleanup_test.active && (os_windows_cleanup_test.flags & OS_PROCESS_CLEANUP_TEST_RELEASE_AFTER_RECEIPT))
+    {
+        os_windows_cleanup_test.flags = 0;
+    }
+#endif
+}
+#endif
+
+bool os_process_shutdown_keep_alive(void)
+{
+    bool result = true;
+#if BUSTER_WINDOWS
+    ProcessCleanupResult cleanup = os_process_cleanup_snapshot();
+    ProcessCleanupResult reported = {0};
+    if (cleanup.pending_owners)
+    {
+        result = false;
+        os_windows_shutdown_receipt(cleanup);
+        reported = cleanup;
+    }
+    cleanup = os_process_shutdown(OS_WINDOWS_CLEANUP_OBSERVATION_US);
+    if (cleanup.error.v && cleanup.error.v != ERROR_BUSY)
+    {
+        result = false;
+        if (!cleanup.active_owners && !reported.active_owners) os_windows_shutdown_receipt(cleanup);
+    }
+    while (cleanup.active_owners)
+    {
+        result = false;
+        if (cleanup.active_owners != reported.active_owners || cleanup.pending_owners != reported.pending_owners ||
+            cleanup.error_owner_id != reported.error_owner_id || cleanup.error_owner_state != reported.error_owner_state ||
+            cleanup.error.v != reported.error.v)
+        {
+            os_windows_shutdown_receipt(cleanup);
+            reported = cleanup;
+        }
+        Sleep(10);
+        cleanup = os_process_shutdown(OS_WINDOWS_CLEANUP_OBSERVATION_US);
+    }
+#endif
+    return result;
+}
 
 #if BUSTER_INCLUDE_TESTS
 typedef struct OsProcessSpawnTestState OsProcessSpawnTestState;
@@ -4322,6 +5240,25 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
 #endif
 
 #if defined(_WIN32)
+    OsWindowsProcessOwner* windows_owner = 0;
+    if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
+    {
+        OsError owner_error = {0};
+        if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_OWNER_ALLOCATION)) owner_error = os_process_spawn_injected_error();
+        else windows_owner = os_windows_owner_reserve(&owner_error);
+        if (!windows_owner)
+        {
+            os_process_spawn_fail(&result, owner_error.v == ERROR_BUSY ? PROCESS_SPAWN_FAILURE_PENDING_CLEANUP :
+                PROCESS_SPAWN_FAILURE_OWNER_ALLOCATION, owner_error);
+        }
+    }
+#if BUSTER_INCLUDE_TESTS
+    if (windows_owner && os_windows_cleanup_test.active && (os_windows_cleanup_test.flags & OS_PROCESS_CLEANUP_TEST_EXIT_AFTER_RESERVE))
+    {
+        os_windows_cleanup_test.flags &= ~(u32)OS_PROCESS_CLEANUP_TEST_EXIT_AFTER_RESERVE;
+        os_exit(PROCESS_RESULT_FAILED);
+    }
+#endif
     HANDLE duplicated_standard[STANDARD_STREAM_COUNT] = {0};
     HANDLE inherited_handles[STANDARD_STREAM_COUNT] = {0};
     u32 inherited_handle_count = 0;
@@ -4351,6 +5288,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
                 {
                     pipe_created[stream] = true;
                     u32 parent_side = stream == STANDARD_STREAM_INPUT ? 1 : 0;
+                    windows_owner->pipes[stream] = (HANDLE)result.pipes[stream][parent_side];
                     if (OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_PIPE_CONFIGURATION))
                     {
                         os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_PIPE_CONFIGURATION, os_process_spawn_injected_error());
@@ -4427,6 +5365,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
             else
             {
                 result.process_tree = (OsProcessHandle*)job;
+                windows_owner->job = job;
             }
         }
     }
@@ -4500,33 +5439,49 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
         }
         if (created)
         {
+            windows_owner->process = process_information.hProcess;
             bool child_ready = true;
             if (result.process_tree)
             {
-                if (!AssignProcessToJobObject((HANDLE)result.process_tree, process_information.hProcess))
+                bool assignment_injected = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_JOB_ASSIGNMENT);
+                if (assignment_injected || !AssignProcessToJobObject((HANDLE)result.process_tree, process_information.hProcess))
                 {
-                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, os_get_last_error());
+                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, assignment_injected ? os_process_spawn_injected_error() : os_get_last_error());
                     child_ready = false;
                 }
-                else if (ResumeThread(process_information.hThread) == (DWORD)-1)
+                else
                 {
-                    os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, os_get_last_error());
-                    child_ready = false;
+                    windows_owner->leader_in_job = true;
+                    bool resume_injected = OS_PROCESS_SPAWN_TEST_FAIL(OS_PROCESS_SPAWN_TEST_RESUME);
+                    if (resume_injected || ResumeThread(process_information.hThread) == (DWORD)-1)
+                    {
+                        os_process_spawn_fail(&result, PROCESS_SPAWN_FAILURE_SPAWN, resume_injected ? os_process_spawn_injected_error() : os_get_last_error());
+                        child_ready = false;
+                    }
                 }
             }
             if (child_ready)
             {
                 result.handle = (OsProcessHandle*)process_information.hProcess;
+                result.windows_owner_id = windows_owner->id;
             }
             else
             {
-                if (result.process_tree)
+                windows_owner->process = process_information.hProcess;
+                windows_owner->job = (HANDLE)result.process_tree;
+                DWORD leader_wait;
+                OsError cleanup_error = {0};
+                bool finalized = os_windows_owner_cleanup(windows_owner, true, OS_WINDOWS_CLEANUP_OBSERVATION_US, &leader_wait, &cleanup_error);
+                if (!finalized) result.pending_windows_owner_id = windows_owner->id;
+                result.cleanup_error = cleanup_error;
+                if (finalized)
                 {
-                    (void)TerminateJobObject((HANDLE)result.process_tree, 1);
+                    windows_owner->process = 0;
+                    CloseHandle(process_information.hProcess);
+                    if (windows_owner->job) CloseHandle(windows_owner->job);
+                    windows_owner->job = 0;
                 }
-                (void)TerminateProcess(process_information.hProcess, 1);
-                (void)WaitForSingleObject(process_information.hProcess, INFINITE);
-                CloseHandle(process_information.hProcess);
+                result.process_tree = 0;
             }
             CloseHandle(process_information.hThread);
         }
@@ -4551,6 +5506,7 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
             {
                 CloseHandle(result.pipes[stream][parent_side]);
                 result.pipes[stream][parent_side] = 0;
+                if (windows_owner) windows_owner->pipes[stream] = 0;
             }
         }
     }
@@ -4558,8 +5514,11 @@ ProcessSpawnResult os_process_spawn(SliceString8 arguments, SliceString8 environ
     {
         CloseHandle((HANDLE)result.process_tree);
         result.process_tree = 0;
+        if (windows_owner) windows_owner->job = 0;
     }
     result.process_group = result.handle != 0 && result.process_tree != 0;
+    if (result.handle) os_windows_owner_publish(windows_owner, (HANDLE)result.handle, (HANDLE)result.process_tree);
+    else if (windows_owner) os_windows_owner_finish(windows_owner, !result.pending_windows_owner_id, result.cleanup_error);
 #elif BUSTER_ANDROID
     if (result.failure == PROCESS_SPAWN_FAILURE_NONE)
     {
@@ -5103,6 +6062,100 @@ OsProcessCaptureTestResult os_process_capture_test_collect(Arena* arena, Process
 }
 #endif
 
+#if BUSTER_WINDOWS && BUSTER_INCLUDE_TESTS
+typedef struct OsProcessWaitWindowsTestState OsProcessWaitWindowsTestState;
+struct OsProcessWaitWindowsTestState
+{
+    OsProcessWaitWindowsTestStats stats;
+    u64 next_clock_microseconds;
+    u64 clock_step_microseconds;
+    u64 scan_limit;
+    bool active;
+};
+
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsProcessWaitWindowsTestState os_process_wait_windows_test_state;
+
+void os_process_wait_windows_test_begin(u64 start_microseconds, u64 step_microseconds, u64 scan_limit)
+{
+    os_process_wait_windows_test_state = (OsProcessWaitWindowsTestState){
+        .next_clock_microseconds = start_microseconds,
+        .clock_step_microseconds = step_microseconds,
+        .scan_limit = scan_limit,
+        .active = true,
+    };
+}
+
+OsProcessWaitWindowsTestStats os_process_wait_windows_test_end(void)
+{
+    OsProcessWaitWindowsTestStats result = os_process_wait_windows_test_state.stats;
+    os_process_wait_windows_test_state.active = false;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool os_process_wait_windows_test_scan_begin(void)
+{
+    bool result = true;
+    if (os_process_wait_windows_test_state.active)
+    {
+        if (os_process_wait_windows_test_state.scan_limit &&
+            os_process_wait_windows_test_state.stats.scans >= os_process_wait_windows_test_state.scan_limit)
+        {
+            os_process_wait_windows_test_state.stats.scan_limit_reached = true;
+            result = false;
+        }
+        else
+        {
+            os_process_wait_windows_test_state.stats.scans += 1;
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void os_process_wait_windows_test_scan_end(bool made_progress)
+{
+    if (os_process_wait_windows_test_state.active)
+    {
+        if (made_progress) { os_process_wait_windows_test_state.stats.progress_scans += 1; }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void os_process_wait_windows_test_child_poll(bool child_exited)
+{
+    if (os_process_wait_windows_test_state.active)
+    {
+        os_process_wait_windows_test_state.stats.child_polls += 1;
+        if (child_exited) { os_process_wait_windows_test_state.stats.leader_exit_observations += 1; }
+    }
+}
+#endif
+
+BUSTER_GLOBAL_LOCAL u64 os_process_deadline_clock_microseconds(void)
+{
+    u64 result;
+#if BUSTER_WINDOWS && BUSTER_INCLUDE_TESTS
+    if (os_process_wait_windows_test_state.active)
+    {
+        result = os_process_wait_windows_test_state.next_clock_microseconds;
+        if (os_process_wait_windows_test_state.clock_step_microseconds <= ~(u64)0 - result)
+        {
+            os_process_wait_windows_test_state.next_clock_microseconds += os_process_wait_windows_test_state.clock_step_microseconds;
+        }
+        else
+        {
+            os_process_wait_windows_test_state.next_clock_microseconds = ~(u64)0;
+        }
+        os_process_wait_windows_test_state.stats.clock_calls += 1;
+    }
+    else
+    {
+        result = os_now_microseconds();
+    }
+#else
+    result = os_now_microseconds();
+#endif
+    return result;
+}
+
 // Milliseconds left until `deadline`, clamped into a poll/wait argument. Zero
 // when the deadline has passed, and `no_deadline` when there is none.
 BUSTER_GLOBAL_LOCAL u64 os_process_deadline_milliseconds(u64 deadline_microseconds, u64 no_deadline)
@@ -5114,7 +6167,7 @@ BUSTER_GLOBAL_LOCAL u64 os_process_deadline_milliseconds(u64 deadline_microsecon
     }
     else
     {
-        u64 now = os_now_microseconds();
+        u64 now = os_process_deadline_clock_microseconds();
         if (now >= deadline_microseconds)
         {
             result = 0;
@@ -5528,6 +6581,34 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_status_at(int proc_descriptor, pid_t p
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool os_linux_process_group_stat_at(OsLinuxProcContext* context, pid_t process_id, pid_t proc_leader,
+                                                         pid_t* process_group, char* state, bool* vanished)
+{
+    // NSpid has one coordinate only when procfs uses the caller's active PID
+    // namespace. Ancestor-mounted procfs must keep using its own numeric IDs.
+    pid_t observed_group = -1;
+    if (context->current_namespace_depth == 1 && context->current_namespace_index == 0)
+    {
+        observed_group = getpgid(process_id);
+    }
+    bool unrelated = observed_group >= 0 && observed_group != proc_leader;
+    bool result;
+    if (unrelated)
+    {
+        // This includes kernel tasks in group zero. Group members still need
+        // their full stat/status checks; a failed query is never absence proof.
+        *process_group = observed_group;
+        *state = 0;
+        *vanished = false;
+        result = true;
+    }
+    else
+    {
+        result = os_linux_process_stat_at(context->descriptor, process_id, process_group, state, vanished);
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool os_linux_process_pid_namespace_at(int proc_descriptor, pid_t process_id, struct stat* identity,
                                                             bool* vanished)
 {
@@ -5721,7 +6802,7 @@ BUSTER_GLOBAL_LOCAL OsLinuxProcessGroupCensus os_linux_process_group_census(Aren
             bool vanished = false;
             OsLinuxProcessStatus status = {0};
             bool include_member = false;
-            bool stat_valid = os_linux_process_stat_at(context->descriptor, process_id, &process_group, &state, &vanished);
+            bool stat_valid = os_linux_process_group_stat_at(context, process_id, proc_leader, &process_group, &state, &vanished);
 #if BUSTER_INCLUDE_TESTS
             bool vanish_unrelated = os_linux_process_group_test_vanish_unrelated && process_id != proc_leader;
             if (process_id == os_linux_process_group_test_vanishing_process || vanish_unrelated)
@@ -5878,6 +6959,52 @@ BUSTER_GLOBAL_LOCAL bool os_linux_process_group_is_quiescent(Arena* arena, const
 }
 
 #if BUSTER_INCLUDE_TESTS
+bool os_linux_process_group_filter_self_test(void)
+{
+    pid_t process_id = getpid();
+    pid_t own_group = getpgrp();
+    pid_t other_group = own_group == 1 ? 2 : 1;
+    // A valid non-directory descriptor makes a relative stat open fail.
+    // Only a known unrelated group in the same PID coordinate can skip it.
+    int descriptor = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    u32 coordinates[][2] = {{1, 0}, {2, 1}, {2, 0}, {0, 0}, {1, 1}};
+    // A new PID namespace can inherit a group outside its visible namespace,
+    // so getpgrp legitimately returns zero until it creates a local group.
+    bool result = descriptor >= 0 && process_id > 0 && own_group >= 0;
+    if (descriptor >= 0)
+    {
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(coordinates); index += 1)
+        {
+            OsLinuxProcContext context = {
+                .descriptor = descriptor,
+                .current_namespace_depth = coordinates[index][0],
+                .current_namespace_index = coordinates[index][1],
+            };
+            pid_t group = -1;
+            char state = '?';
+            bool vanished = true;
+            bool accepted = os_linux_process_group_stat_at(&context, process_id, other_group, &group, &state, &vanished);
+            bool expected = index == 0;
+            bool observed = expected ? accepted && group == own_group && state == 0 && !vanished :
+                !accepted && group == -1 && state == '?' && !vanished && errno == ENOTDIR;
+            result = observed && result;
+        }
+        OsLinuxProcContext context = {.descriptor = descriptor, .current_namespace_depth = 1};
+        pid_t group = -1;
+        char state = '?';
+        bool vanished = true;
+        bool member = !os_linux_process_group_stat_at(&context, process_id, own_group, &group, &state, &vanished) &&
+            !vanished && errno == ENOTDIR;
+        // getpgid(-1) fails; the stat fallback must still run, not report success
+        // or disappearance based on the failed membership query.
+        bool failed_query = !os_linux_process_group_stat_at(&context, -1, other_group, &group, &state, &vanished) &&
+            !vanished && errno == ENOTDIR;
+        bool closed = close(descriptor) == 0;
+        result = member && failed_query && closed && result;
+    }
+    return result;
+}
+
 bool os_linux_proc_read_self_test(void)
 {
     char bytes[4096];
@@ -6493,9 +7620,20 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
     os_process_wait_test_expire_deadline_after_ready = false;
 #endif
 
-    if (spawn.handle)
+#if BUSTER_WINDOWS
+    OsWindowsProcessOwner* windows_owner = spawn.handle ? os_windows_owner_claim(spawn, false, false, 0) : 0;
+    if (spawn.handle && !windows_owner)
     {
-        u64 deadline = timeout_microseconds ? os_now_microseconds() + timeout_microseconds : 0;
+        result.result = PROCESS_RESULT_FAILED;
+        result.cleanup_error.v = ERROR_INVALID_HANDLE;
+    }
+    bool can_wait = windows_owner != 0;
+#else
+    bool can_wait = spawn.handle != 0;
+#endif
+    if (can_wait)
+    {
+        u64 deadline = timeout_microseconds ? os_process_deadline_clock_microseconds() + timeout_microseconds : 0;
         bool timed_out = false;
         // The captured streams must be drained together: reading one pipe to
         // EOF while the child blocks writing a full second pipe deadlocks both
@@ -6508,6 +7646,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         // front so a child reading stdin sees EOF instead of blocking forever.
         if (spawn.pipes[STANDARD_STREAM_INPUT][1])
         {
+            windows_owner->pipes[STANDARD_STREAM_INPUT] = 0;
             CloseHandle((HANDLE)spawn.pipes[STANDARD_STREAM_INPUT][1]);
             spawn.pipes[STANDARD_STREAM_INPUT][1] = 0;
         }
@@ -6522,9 +7661,19 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         }
 
         bool child_exit_observed = false;
+        bool wait_failed = false;
+        DWORD final_snapshot_remaining[(u64)STANDARD_STREAM_COUNT] = {0};
         while (open_pipe_count)
         {
+#if BUSTER_INCLUDE_TESTS
+            if (!os_process_wait_windows_test_scan_begin())
+            {
+                timed_out = true;
+                break;
+            }
+#endif
             bool made_progress = false;
+            bool read_error = false;
 
             for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
             {
@@ -6533,9 +7682,22 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 {
                     continue;
                 }
+                bool draining_final_snapshot = child_exit_observed;
+                DWORD snapshot_remaining = final_snapshot_remaining[stream];
+                if (draining_final_snapshot && !snapshot_remaining)
+                {
+                    windows_owner->pipes[stream] = 0;
+                    CloseHandle(read_pipe);
+                    read_pipes[stream] = 0;
+                    open_pipe_count -= 1;
+                    made_progress = true;
+                    continue;
+                }
 
                 // ReadFile on an anonymous pipe blocks, so only read bytes
-                // PeekNamedPipe reports as available.
+                // PeekNamedPipe reports as available. Once the leader exits,
+                // reads are additionally capped by the one-time per-stream
+                // snapshot so descendant writes cannot extend the drain.
                 DWORD available_byte_count = 0;
                 if (!PeekNamedPipe(read_pipe, 0, 0, 0, &available_byte_count, 0))
                 {
@@ -6543,7 +7705,9 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                     if (os_error.v != ERROR_BROKEN_PIPE)
                     {
                         string_print(S8("Failed to read from process pipe: {EOs}\n"), os_error);
+                        read_error = true;
                     }
+                    windows_owner->pipes[stream] = 0;
                     CloseHandle(read_pipe);
                     read_pipes[stream] = 0;
                     open_pipe_count -= 1;
@@ -6554,51 +7718,110 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                     u8 buffer[16 * 1024];
                     DWORD read_byte_count = 0;
                     DWORD requested_byte_count = available_byte_count < sizeof(buffer) ? available_byte_count : (DWORD)sizeof(buffer);
+                    if (draining_final_snapshot && snapshot_remaining < requested_byte_count)
+                    {
+                        requested_byte_count = snapshot_remaining;
+                    }
                     if (ReadFile(read_pipe, buffer, requested_byte_count, &read_byte_count, 0) && read_byte_count)
                     {
                         pipe_capture_append(scratch.arena, &captures[stream], spawn, &result, (StandardStream)stream, buffer, read_byte_count);
                         made_progress = true;
-                    }
-                }
-            }
-
-            if (!made_progress)
-            {
-                DWORD process_wait = WaitForSingleObject(spawn.handle, 0);
-                if (process_wait == WAIT_OBJECT_0)
-                {
-                    if (child_exit_observed)
-                    {
-                        // The child was already known to have exited before
-                        // this complete empty scan. A descendant may retain an
-                        // inherited writer, but its lifetime must not turn the
-                        // completed child's wait into a false timeout.
-                        for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+                        if (draining_final_snapshot)
                         {
-                            if (read_pipes[stream])
+                            final_snapshot_remaining[stream] -= read_byte_count;
+                            if (!final_snapshot_remaining[stream])
                             {
-                                CloseHandle(read_pipes[stream]);
+                                windows_owner->pipes[stream] = 0;
+                                CloseHandle(read_pipe);
                                 read_pipes[stream] = 0;
                                 open_pipe_count -= 1;
                             }
                         }
-                        break;
                     }
-                    // The child may have written between the scan above and
-                    // this observation. Perform one final complete scan before
-                    // closing any writer kept alive outside the child.
-                    child_exit_observed = true;
-                    continue;
+                    else
+                    {
+                        // Leave the snapshot count unchanged on a failed or
+                        // unexpected zero-byte read; it is not terminal EOF.
+                        read_error = true;
+                    }
                 }
-                if (deadline && !os_process_deadline_milliseconds(deadline, 1))
+                else if (draining_final_snapshot)
                 {
-                    timed_out = true;
-                    break;
+                    // The fixed snapshot still has bytes, so an empty peek
+                    // cannot complete it successfully.
+                    read_error = true;
                 }
+            }
+
+            // Every ordinary nonterminal pass observes a finite deadline,
+            // even when output was readable. After the first signaled poll,
+            // freeze the unread bytes once and finish that bounded snapshot.
+            DWORD process_wait = os_windows_process_wait((HANDLE)spawn.handle, 0);
+#if BUSTER_INCLUDE_TESTS
+            os_process_wait_windows_test_scan_end(made_progress);
+            os_process_wait_windows_test_child_poll(process_wait == WAIT_OBJECT_0);
+#endif
+            if (process_wait == WAIT_FAILED)
+            {
+                os_windows_cleanup_error(&result.cleanup_error);
+                wait_failed = true;
+                break;
+            }
+            if (process_wait == WAIT_OBJECT_0 && !child_exit_observed)
+            {
+                child_exit_observed = true;
+                for (u64 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+                {
+                    HANDLE read_pipe = read_pipes[stream];
+                    if (!read_pipe)
+                    {
+                        continue;
+                    }
+                    DWORD available_byte_count = 0;
+                    if (!PeekNamedPipe(read_pipe, 0, 0, 0, &available_byte_count, 0))
+                    {
+                        OsError os_error = os_get_last_error();
+                        if (os_error.v != ERROR_BROKEN_PIPE)
+                        {
+                            string_print(S8("Failed to read from process pipe: {EOs}\n"), os_error);
+                            read_error = true;
+                        }
+                        windows_owner->pipes[stream] = 0;
+                        CloseHandle(read_pipe);
+                        read_pipes[stream] = 0;
+                        open_pipe_count -= 1;
+                        made_progress = true;
+                    }
+                    else
+                    {
+                        final_snapshot_remaining[stream] = available_byte_count;
+                        if (!available_byte_count)
+                        {
+                            windows_owner->pipes[stream] = 0;
+                            CloseHandle(read_pipe);
+                            read_pipes[stream] = 0;
+                            open_pipe_count -= 1;
+                            made_progress = true;
+                        }
+                    }
+                }
+            }
+
+            if (child_exit_observed && !open_pipe_count && !read_error)
+            {
+                break;
+            }
+            if (deadline && (!child_exit_observed || read_error) && !os_process_deadline_milliseconds(deadline, 1))
+            {
+                timed_out = true;
+                break;
+            }
+            if (!made_progress && process_wait != WAIT_OBJECT_0)
+            {
                 // Nothing readable right now: sleep briefly instead of
                 // spinning. The pipes report ERROR_BROKEN_PIPE once the child
                 // exits and the buffered data has been drained.
-                WaitForSingleObject(spawn.handle, 10);
+                os_windows_process_wait((HANDLE)spawn.handle, 10);
             }
         }
 
@@ -6610,6 +7833,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             }
             if (read_pipes[stream])
             {
+                windows_owner->pipes[stream] = 0;
                 CloseHandle(read_pipes[stream]);
                 read_pipes[stream] = 0;
             }
@@ -6619,25 +7843,24 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
         // is where its deadline is enforced. The helper clamps its answer, so
         // one WAIT_TIMEOUT only means this slice elapsed; the deadline itself
         // decides whether to give up.
-        while (!timed_out && WaitForSingleObject(spawn.handle, (DWORD)os_process_deadline_milliseconds(deadline, INFINITE)) == WAIT_TIMEOUT)
+        DWORD wait_result = WAIT_FAILED;
+        while (!timed_out && !wait_failed)
         {
+            wait_result = os_windows_process_wait((HANDLE)spawn.handle, (DWORD)os_process_deadline_milliseconds(deadline, INFINITE));
+            if (wait_result == WAIT_FAILED)
+            {
+                os_windows_cleanup_error(&result.cleanup_error);
+                wait_failed = true;
+            }
+            if (wait_result != WAIT_TIMEOUT) break;
             timed_out = !os_process_deadline_milliseconds(deadline, 1);
         }
-        if (timed_out)
-        {
-            // The exit code below then describes this kill rather than the
-            // child's own progress, which is why `timed_out` is reported
-            // separately.
-            result.termination_requested = 1;
-            result.forcibly_terminated = 1;
-            BOOL terminated = spawn.process_tree ? TerminateJobObject((HANDLE)spawn.process_tree, 1) : TerminateProcess((HANDLE)spawn.handle, 1);
-            if (!terminated)
-            {
-                result.process_tree_cleanup_failed = 1;
-            }
-        }
-
-        DWORD wait_result = WaitForSingleObject(spawn.handle, INFINITE);
+        result.termination_requested = timed_out || wait_failed;
+        if (timed_out) result.forcibly_terminated = 1;
+        bool finalized = os_windows_owner_cleanup(windows_owner, result.termination_requested != 0 || spawn.process_tree != 0,
+            OS_WINDOWS_CLEANUP_OBSERVATION_US, &wait_result, &result.cleanup_error);
+        if (!finalized) result.pending_windows_owner_id = windows_owner->id;
+        result.process_tree_cleanup_failed = !finalized || result.cleanup_error.v != 0;
         if (wait_result == WAIT_OBJECT_0)
         {
             DWORD exit_code;
@@ -6658,18 +7881,6 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 }
             }
         }
-        if (spawn.process_tree)
-        {
-            if (!TerminateJobObject((HANDLE)spawn.process_tree, 1))
-            {
-                result.process_tree_cleanup_failed = 1;
-            }
-            if (!os_windows_job_wait_empty((HANDLE)spawn.process_tree, 5000000))
-            {
-                result.process_tree_cleanup_failed = 1;
-            }
-            CloseHandle((HANDLE)spawn.process_tree);
-        }
         if (spawn.observe_resources && wait_result == WAIT_OBJECT_0)
         {
             FILETIME created, exited, kernel, user;
@@ -6689,7 +7900,6 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             result.resources.memory_status = os_windows_process_memory_counters((HANDLE)spawn.handle, &counters, &result.resources.memory_error);
             if (result.resources.memory_status == PROCESS_RESOURCE_OBSERVED) { result.resources.peak_memory_bytes = (u64)counters.peak_working_set_size; }
         }
-        CloseHandle(spawn.handle);
         if (result.process_tree_cleanup_failed)
         {
             result.result = PROCESS_RESULT_FAILED;
@@ -7118,6 +8328,9 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
             result.result = PROCESS_RESULT_FAILED;
         }
         scratch_end(scratch);
+#if BUSTER_WINDOWS
+        os_windows_owner_finish(windows_owner, finalized, result.cleanup_error);
+#endif
     }
 
     return result;
@@ -8366,6 +9579,19 @@ void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument
         }
         lane_gang_dispatch(thread_context, thread_context->lane_gang, count, callback, argument);
     }
+#endif
+}
+
+void lane_release(void)
+{
+#if !BUSTER_SINGLE_THREADED
+    ThreadContext* thread_context = thread_context_selected();
+    BUSTER_CHECK(thread_context != 0);
+    // Releasing from inside a region would join workers that are still
+    // running this caller's callback.
+    BUSTER_CHECK(thread_context->lane_context.lane_count == 1);
+    BUSTER_CHECK(!thread_context->lane_gang || !thread_context->lane_gang->running);
+    lane_gang_release(thread_context);
 #endif
 }
 

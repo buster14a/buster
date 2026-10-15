@@ -49,34 +49,32 @@ class SchedulerTests(unittest.TestCase):
                 self.assertIn(marker, output)
         self.assertEqual(rows[0], rows[1])
 
-    def test_two_independent_cases_overlap_and_publication_is_exclusive(self):
-        active = []
-        peak = []
-        lock = threading.Lock()
-        barrier = threading.Barrier(2, timeout=5)
+    def test_independent_cases_fill_every_lane_and_publication_is_exclusive(self):
+        for jobs in (2, scheduler.MAX_JOBS):
+            active = []
+            peak = []
+            lock = threading.Lock()
+            barrier = threading.Barrier(jobs, timeout=5)
 
-        class Controls(unittest.TestCase):
-            def exercise(self):
+            def exercise(case):
                 with lock:
-                    active.append(self.id())
+                    active.append(case.id())
                     peak.append(len(active))
                 barrier.wait()
                 with lock:
-                    active.remove(self.id())
+                    active.remove(case.id())
 
-            def test_first(self):
-                self.exercise()
+            def publication(case):
+                case.assertEqual(active, [])
 
-            def test_second(self):
-                self.exercise()
-
-            def test_concurrent_cold_publication_uses_immutable_outputs(self):
-                self.assertEqual(active, [])
-
-        cases = list(unittest.defaultTestLoader.loadTestsFromTestCase(Controls))
-        summary, _ = self.run_control(cases)
-        self.assertTrue(summary["success"], summary)
-        self.assertEqual(max(peak), 2)
+            methods = {"test_case_%d" % index: exercise for index in range(jobs)}
+            methods["test_concurrent_cold_publication_uses_immutable_outputs"] = publication
+            Controls = type("Controls", (unittest.TestCase,), methods)
+            cases = list(unittest.defaultTestLoader.loadTestsFromTestCase(Controls))
+            with self.subTest(jobs=jobs):
+                summary, _ = self.run_control(cases, jobs)
+                self.assertTrue(summary["success"], summary)
+                self.assertEqual(max(peak), jobs)
 
     def test_existing_deadline_capture_and_early_cleanup_controls(self):
         cases = list(unittest.defaultTestLoader.loadTestsFromTestCase(scheduler.bootstrap.BootstrapProcessTests))
@@ -535,7 +533,7 @@ sys.exit(0 if summary['success'] else 1)
 
     def test_empty_duplicate_and_unbounded_admission_fail(self):
         cases = scheduler.behavior_cases()
-        for selected, jobs in (([], 1), ([cases[0], cases[0]], 2), (cases, 3)):
+        for selected, jobs in (([], 1), ([cases[0], cases[0]], 2), (cases, 0), (cases, scheduler.MAX_JOBS + 1)):
             with self.assertRaises(ValueError):
                 self.run_control(selected, jobs)
 
@@ -548,7 +546,7 @@ sys.exit(0 if summary['success'] else 1)
         self.assertIn("tools/bootstrap_wrapper_cases_test.py=bootstrap-case-controls.log", policy)
         self.assertIn('if [[ "$BUSTER_MATRIX_SHARD" != release ]]', wrappers)
         self.assertIn('if [[ "$RUNNER_OS" == Windows ]]', wrappers)
-        self.assertIn("tools/bootstrap_wrapper_cases.py --jobs 2", wrappers)
+        self.assertIn("tools/bootstrap_wrapper_cases.py --jobs %d" % scheduler.MAX_JOBS, wrappers)
         self.assertIn("tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v", wrappers)
         self.assertIn("set -euo pipefail", wrappers)
         self.assertIn("timeout-minutes: ${{ matrix.platform == 'windows' && 20 || 2 }}", wrappers)

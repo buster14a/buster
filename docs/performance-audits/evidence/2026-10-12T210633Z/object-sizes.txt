@@ -1,0 +1,12 @@
+49933408 obj_base_default_g.o
+31524144 obj_base_default_g0.o
+49933408 obj_base_pilot_g.o
+31524144 obj_base_pilot_g0.o
+49933408 obj_cand3_pilot_g.o
+31524144 obj_cand3_pilot_g0.o
+49933408 obj_cand6_pilot_g.o
+31524144 obj_cand6_pilot_g0.o
+49933408 obj_cand_default_g.o
+31524144 obj_cand_default_g0.o
+49933408 obj_cand_pilot_g.o
+31524144 obj_cand_pilot_g0.o

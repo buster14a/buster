@@ -1,0 +1,27 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index 0032312b..92edb4ce 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -19553,8 +19553,14 @@ BUSTER_C_INTERNAL void c_ir_lower_machine_unwind(CIntegerIrBuilder* builder)
+ 
+ BUSTER_C_INTERNAL CIrLowerFrameResult c_ir_lower_dispatch(CIntegerIrBuilder* builder, CIrLowerFrame root);
+ 
++#include <stdio.h>
++#include <stdlib.h>
++static unsigned long long census_se_frames, census_se_bodies, census_se_body_tokens, census_bodies_all;
++static void census_print(void){fprintf(stderr,"CENSUS se_frames=%llu se_bodies=%llu se_body_tokens=%llu bodies_all=%llu\n",census_se_frames,census_se_bodies,census_se_body_tokens,census_bodies_all);}
++static void census_reg(void){static int r; if(!r){r=1; atexit(census_print);}}
+ BUSTER_C_INTERNAL bool c_ir_lower_body_frame_push(CIntegerIrBuilder* builder, CDeclaration declaration, bool statement_expression_mode)
+ {
++    census_reg(); __atomic_fetch_add(&census_bodies_all,1,__ATOMIC_RELAXED); if (statement_expression_mode) { __atomic_fetch_add(&census_se_bodies,1,__ATOMIC_RELAXED); __atomic_fetch_add(&census_se_body_tokens,declaration.body_token_count,__ATOMIC_RELAXED); }
+     CIrLowerBodyState* state = arena_allocate(builder->temporary_arena, CIrLowerBodyState, 1);
+     *state = (CIrLowerBodyState){
+         .declaration = declaration,
+@@ -19636,6 +19642,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_conditional_value_frame_push(CIntegerIrBuilder
+ 
+ BUSTER_C_INTERNAL bool c_ir_lower_statement_expression_frame_push(CIntegerIrBuilder* builder, u32 open, u32 close)
+ {
++    census_reg(); __atomic_fetch_add(&census_se_frames,1,__ATOMIC_RELAXED);
+     return c_ir_lower_frame_push(builder, (CIrLowerFrame){
+                                               .kind = C_IR_LOWER_FRAME_STATEMENT_EXPRESSION,
+                                               .as.statement_expression =

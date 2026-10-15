@@ -101,6 +101,7 @@ jobs:
           "$RUNNER_TEMP/external-project-policy"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/external-project-driver"
           "$RUNNER_TEMP/external-project-driver" external_projects --self-test
+          "$RUNNER_TEMP/external-project-driver" test_ffmpeg --harness-self-test
           python3 -B tools/ci_apt_retry_test.py -v
           python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
@@ -134,6 +135,7 @@ jobs:
           grep --fixed-strings --quiet 'if (DEFINED ENV{VULKAN_SDK})' CMakeLists.txt
           grep --fixed-strings --quiet 'test_gpu_toolchains --self-test' .github/workflows/gpu-toolchains.yml
           grep --fixed-strings --quiet -- '--profile spirv-dxc-2025.07' .github/workflows/gpu-toolchains.yml
+          grep --fixed-strings --quiet -- '--profile spirv-direct-vulkan1.2' .github/workflows/gpu-toolchains.yml
       - name: Validate the performance audit index
         shell: bash
         run: |
@@ -166,6 +168,19 @@ jobs:
           gcc --version
           gcc -O2 -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
             -fwrapv -fno-strict-aliasing -funsigned-char -c build.c -o /dev/null
+      - name: Build and self-test Linux assembly census
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This first-party control exercises only the Linux harness fixtures;
+          # it reads no upstream tree and starts no external project workload.
+          for compiler in clang gcc; do
+            "$compiler" --version
+            "$compiler" -O2 -std=c11 -Isrc -Wall -Wextra -Wpedantic -Werror \
+              -fwrapv -fno-strict-aliasing -funsigned-char \
+              tools/linux-kernel/frontier.c -o "$RUNNER_TEMP/linux-frontier-$compiler"
+            "$RUNNER_TEMP/linux-frontier-$compiler" self-test
+          done
       - name: Validate every GitHub workflow
         id: lint
         shell: bash
@@ -260,6 +275,7 @@ jobs:
           "$RUNNER_TEMP/external-project-policy"
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char build.c -o "$RUNNER_TEMP/external-project-driver"
           "$RUNNER_TEMP/external-project-driver" external_projects --self-test
+          "$RUNNER_TEMP/external-project-driver" test_ffmpeg --harness-self-test
           python3 -B tools/ci_apt_retry_test.py -v
           python3 -B tools/native_retirement_performance_declaration_test.py -v
           python3 -B tools/ci_unit_tests_measure_test.py -v
@@ -293,6 +309,7 @@ jobs:
           grep --fixed-strings --quiet 'if (DEFINED ENV{VULKAN_SDK})' CMakeLists.txt
           grep --fixed-strings --quiet 'test_gpu_toolchains --self-test' .github/workflows/gpu-toolchains.yml
           grep --fixed-strings --quiet -- '--profile spirv-dxc-2025.07' .github/workflows/gpu-toolchains.yml
+          grep --fixed-strings --quiet -- '--profile spirv-direct-vulkan1.2' .github/workflows/gpu-toolchains.yml
       - name: Validate the performance audit index
         shell: bash
         run: |
@@ -325,6 +342,19 @@ jobs:
           gcc --version
           gcc -O2 -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable \
             -fwrapv -fno-strict-aliasing -funsigned-char -c build.c -o /dev/null
+      - name: Build and self-test Linux assembly census
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This first-party control exercises only the Linux harness fixtures;
+          # it reads no upstream tree and starts no external project workload.
+          for compiler in clang gcc; do
+            "$compiler" --version
+            "$compiler" -O2 -std=c11 -Isrc -Wall -Wextra -Wpedantic -Werror \
+              -fwrapv -fno-strict-aliasing -funsigned-char \
+              tools/linux-kernel/frontier.c -o "$RUNNER_TEMP/linux-frontier-$compiler"
+            "$RUNNER_TEMP/linux-frontier-$compiler" self-test
+          done
       - name: Validate every GitHub workflow
         id: lint
         shell: bash
@@ -432,9 +462,10 @@ jobs:
           retention-days: 7
 
   test:
-    # Ordinary desktop work has no full-lint ancestor. Queue work waits for
-    # the event-specific lint preflight; main still waits for exact-SHA reuse.
-    needs: [queue_lint, reuse, no_code_plan]
+    # Desktop work has no lint ancestor in any event: merge-group lint runs
+    # beside it and CI complete still requires it (#3912). Main still waits
+    # for exact-SHA reuse.
+    needs: [reuse, no_code_plan]
     env:
       BUSTER_MATRIX_SHARD: ${{ matrix.shard }}
       BUSTER_CI_PYTHON: ${{ matrix.os == 'windows' && 'python' || 'python3' }}
@@ -443,7 +474,7 @@ jobs:
       # captured in the event payload, so delayed and retried jobs use one value.
       # Every non-dispatch event and the default manual run stay uninstrumented.
       BUSTER_CMAKE_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.cmake_profile && '1' || '0' }}
-    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && (github.event_name != 'merge_group' || needs.queue_lint.result == 'success')) }}
+    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true') }}
     # The first attempt of a draft pull-request run defers scarce macOS
     # runners: the lane reports itself as a named Linux no-op. Merge groups,
     # main, tags, ready pull requests and "Re-run all jobs" run it in full.
@@ -681,7 +712,7 @@ jobs:
             esac
           done < "$RUNNER_TEMP/buster-ci/bootstrap-wrapper-process-owner.log"
           if [[ "$RUNNER_OS" == Windows ]]; then
-            "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 2 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
+            "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 4 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
           else
             "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"
           fi
@@ -884,6 +915,8 @@ jobs:
           CLANG_ARCH: ${{ matrix.clang_arch }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # Load by name: an unloaded cmdlet scans PSModulePath (#3979).
+          Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
           # Export the shell's PATH and target for the result step's re-probe.
@@ -923,10 +956,13 @@ jobs:
 
       - name: Upload backend capability evidence report (Linux, macOS)
         if: ${{ always() && steps.backend_capability_report_unix.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/native-artifact-upload
         with:
+          label: backend-capability
+          label_title: Backend capability
           name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md
+          compression-level: 6
           if-no-files-found: error
           retention-days: 7
 
@@ -942,10 +978,13 @@ jobs:
 
       - name: Upload backend capability evidence report (Windows)
         if: ${{ always() && steps.backend_capability_report_windows.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: ./.github/actions/native-artifact-upload
         with:
+          label: backend-capability
+          label_title: Backend capability
           name: backend-capability-evidence-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/buster-ci/backend-capabilities-report.md
+          compression-level: 6
           if-no-files-found: error
           retention-days: 7
 
@@ -1164,9 +1203,15 @@ jobs:
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase producer_build --sequence 30 --             "$driver" build --config Release -t ide
           "$BUSTER_CI_PYTHON" tools/ci_native_observation.py run             --root "$BUSTER_CI_OBSERVATION_ROOT" --phase mode_payload --sequence 40 --             "$driver" test_mode_matrix --config Release
 
+      # #2067: step bounds below the 300-minute job limit. On a responsive
+      # runner, expiry ends the step and makes the pack/retain steps eligible;
+      # evidence still needs the runner to survive and packing and upload to
+      # succeed, and phase records may be partial. Passing runs, 2026-09-28
+      # to 2026-10-12: mode matrix max 299 s (AArch64), MSVC reference 137 s.
       - name: Execution-mode matrix (Windows)
         id: modes_windows
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.native_observation.outcome == 'success' && matrix.platform == 'windows' && (matrix.os == 'macos' || steps.llvm.outcome == 'success') }}
+        timeout-minutes: 15
         shell: powershell
         env:
           VS_ARCH: ${{ matrix.vs_arch }}
@@ -1174,6 +1219,8 @@ jobs:
           CLANG_ARCH: ${{ matrix.clang_arch }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # Load by name: an unloaded cmdlet scans PSModulePath (#3979).
+          Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility
           $Logs = Join-Path $env:RUNNER_TEMP 'buster-ci'
           New-Item -ItemType Directory -Force -Path $Logs | Out-Null
           & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT `
@@ -1207,12 +1254,15 @@ jobs:
       - name: Native MSVC reference differential
         id: msvc_reference
         if: ${{ !cancelled() && steps.modes_windows.outcome == 'success' && matrix.platform == 'windows' }}
+        timeout-minutes: 10
         shell: powershell
         env:
           VS_ARCH: ${{ matrix.vs_arch }}
           VS_COMPONENT: ${{ matrix.vs_component }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # Load by name: an unloaded cmdlet scans PSModulePath (#3979).
+          Import-Module Microsoft.PowerShell.Management, Microsoft.PowerShell.Utility
           # cl.exe only: no installed LLVM and no clang probe in this step.
           & .\tools\ci_vs_dev_shell.ps1 -Arch $env:VS_ARCH -Component $env:VS_COMPONENT
           $Driver = Join-Path $env:RUNNER_TEMP 'buster-build.exe'
@@ -1482,16 +1532,18 @@ jobs:
             --package "$BUSTER_ANDROID_SYSTEM_IMAGE"
           printf '%s\n' "$ANDROID_HOME/emulator" "$ANDROID_HOME/platform-tools" >>"$GITHUB_PATH"
 
-      - name: Bootstrap the build driver (Android runtime order)
+      - name: Bootstrap the build driver (Android packages and runtime order)
         if: ${{ matrix.os == 'android' }}
         shell: bash
         run: |
           set -euo pipefail
           # Hosted jobs build build.c only with Clang (the documented CI
-          # bootstrap exception); android/runtime_order.sh uses this driver to
+          # bootstrap exception). android/test_ci.sh uses this driver to build
+          # both ABIs' packages concurrently, and android/runtime_order.sh to
           # generate and build its host ide.
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
             build.c -o "$RUNNER_TEMP/buster-android-build-driver"
+          "$RUNNER_TEMP/buster-android-build-driver" android_packages --self-test "$RUNNER_TEMP/buster-android-packages-self-test"
 
       - name: Test (Android)
         id: android
@@ -1626,9 +1678,9 @@ jobs:
           set -euo pipefail
           # The immutable snapshot keeps the exact packages available after updates.
           cat > "$RUNNER_TEMP/uefi-sources.list" <<'SOURCES'
-          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble main universe
-          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-updates main universe
-          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-security main universe
+          deb [arch=amd64 target=Packages signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble main universe
+          deb [arch=amd64 target=Packages signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-updates main universe
+          deb [arch=amd64 target=Packages signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-security main universe
           SOURCES
           # Retry transient snapshot transport failures without changing the signed source or package pins.
           apt_options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/uefi-sources.list" -o 'Dir::Etc::sourceparts=-' \

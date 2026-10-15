@@ -42,6 +42,10 @@ struct CIrExt80Big
 #if BUSTER_INCLUDE_TESTS
 // Calling-thread root-conditional, comma and assignment operator visits.
 BUSTER_F_DECL u64 c_test_assignment_lower_work(void);
+// Token-free structural groups, replayed row reuse and restored node heads.
+BUSTER_F_DECL bool c_test_prepared_control_identity_replay(void);
+// Wrapper levels and hoist facts with no token stream or delimiter index.
+BUSTER_F_DECL bool c_test_retained_parenthesis_navigation(void);
 // Calling-thread reference lookups plus scanned rows, and scanned rows alone.
 BUSTER_F_DECL u64 c_test_logical_call_reference_work(void);
 BUSTER_F_DECL u64 c_test_logical_call_reference_rows(void);
@@ -52,51 +56,16 @@ BUSTER_F_DECL bool c_test_ir_initializer_context_buffer_budget(void);
 BUSTER_F_DECL CIRLowerResult c_test_lower_to_ir_with_scratch_limits(Arena* arena, String8 source_path, CPreprocessResult preprocess,
                                                                     CAnalysisResult parse, Target target, CIRLowerOptions options,
                                                                     u64 query_reservation_limit, u64 function_reservation_limit);
-// Verify mode for lowering's extent table (c_ir_statement_extents in
-// c_gen.c, GitHub #3102): every controlled body range the table answers is
-// also answered by the token walker, whose answer lowering then uses, and the
-// two are compared field by field. The mode and its counts are per thread;
-// the first few mismatches are kept in full.
-enum
-{
-    C_TEST_IR_EXTENT_MISMATCH_KEPT = 8,
-};
-typedef struct CTestIrExtentMismatch CTestIrExtentMismatch;
-struct CTestIrExtentMismatch
-{
-    u32 start;
-    u32 end;
-    bool walker_result;
-    // content_start, content_end, after.
-    u32 table[3];
-    u32 walker[3];
-};
-typedef struct CTestIrExtentVerify CTestIrExtentVerify;
-struct CTestIrExtentVerify
-{
-    u64 compared;
-    u64 mismatches;
-    CTestIrExtentMismatch first[C_TEST_IR_EXTENT_MISMATCH_KEPT];
-    u32 first_count;
-};
-BUSTER_F_DECL void c_test_ir_extent_verify_set(bool enabled);
-// The counts since the last take, which resets them.
-BUSTER_F_DECL CTestIrExtentVerify c_test_ir_extent_verify_take(void);
-// Mutations of the table, so the differential is shown to see them: an end
-// one token short for a `do` statement, and an `if ... else` measured as if
-// it had no `else`.
-typedef enum CTestIrExtentMutation
-{
-    C_TEST_IR_EXTENT_MUTATION_NONE,
-    C_TEST_IR_EXTENT_MUTATION_DO_TAIL,
-    C_TEST_IR_EXTENT_MUTATION_DROPPED_ELSE,
-} CTestIrExtentMutation;
-BUSTER_F_DECL void c_test_ir_extent_mutation_set(CTestIrExtentMutation mutation);
 // Rows and slots c_ir_label_find has visited since process start.
 BUSTER_F_DECL u64 c_test_ir_label_find_probes(void);
-// Typedef lookups c_ir_lower_body_advance has made for statements' first
-// tokens on this thread.
-BUSTER_F_DECL u64 c_test_ir_first_token_typedef_probes(void);
+// Blocks the direct SSA finish-time read walk has stepped to on this thread.
+BUSTER_F_DECL u64 c_test_ir_ssa_forward_steps(void);
+// Block rows indexed by the optional loop-exit shortcut on this thread.
+BUSTER_F_DECL u64 c_test_ir_ssa_loop_exit_blocks(void);
+BUSTER_F_DECL bool c_test_ir_ssa_loop_exits_refusal(void);
+// Loops c_ir_ssa_finish_loops has visited on its edge walks on this thread
+// (#2676): a nest of labels or gotos must cost a bounded number per edge.
+BUSTER_F_DECL u64 c_test_ir_ssa_loop_edge_steps(void);
 BUSTER_F_DECL bool c_test_ir_scratch_reservation_size(u64 required_size, u64 current_size, u64* size_out);
 BUSTER_F_DECL bool c_test_ir_function_scratch_size(u32 body_capacity, u32 lowering_capacity, bool direct_ssa, u64* size_out);
 BUSTER_F_DECL bool c_test_ir_arena_reservation_advance(u64 reserved_size, u64* position, u64 element_size, u64 count, u64 alignment);

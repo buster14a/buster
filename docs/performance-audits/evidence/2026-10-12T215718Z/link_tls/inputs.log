@@ -1,0 +1,7 @@
+$ clang -O0 -g0 -c main.c -o main.o
+$ clang -O0 -fPIC -g0 -c m1024.c -o m1024.o
+$ clang -O0 -fPIC -g0 -c m4096.c -o m4096.o
+$ clang -O0 -fPIC -g0 -c m16384.c -o m16384.o
+$ clang -fno-plt -O0 -fPIC -g0 -c n16384.c -o n16384.o
+$ ar rcs m16384.a m16384.o
+$ clang -O0 -fPIC -g0 -c plain.c -o plain.o

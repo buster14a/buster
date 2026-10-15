@@ -1,0 +1,50 @@
+resident pages in binary+bss: 4800
+  map ('r--p', 'ide-trusted') 2702
+  map ('r-xp', 'ide-trusted') 832
+  map ('rw-p', 'ide-trusted') 41
+  map ('rw-p', '[bss/anon]') 1225
+    1170.0  r--p:ide-trusted <unattributed>
+     421.0  rw-p:anon buster_x86_metadata_pool_bytes
+     147.0  rw-p:anon buster_x86_metadata_pool_nul_distances
+      67.5  rw-p:anon buster_x86_metadata_normalized_forms
+      64.7  rw-p:anon machine_x64_gpr_encoding_tables
+      57.7  rw-p:anon buster_x86_metadata_form_records
+      55.0  rw-p:anon buster_x86_metadata_pattern_semantics_cache
+      43.5  rw-p:anon buster_x86_metadata_blob_scratch
+      42.7  rw-p:anon buster_x86_metadata_form_hash_ranges
+      38.0  rw-p:anon buster_x86_metadata_operand_views
+      35.7  rw-p:anon machine_x64_metadata_shape_registrations
+      34.0  rw-p:anon buster_x86_metadata_pool_nul_known
+      33.3  rw-p:ide-trusted machine_x64_exact_opcode_map
+      32.8  rw-p:anon buster_x86_metadata_operand_records
+      28.0  r-xp:ide-trusted c_parse_validate_lowering_constraints
+      26.8  r-xp:ide-trusted c_lower_to_ir_reserved_run
+      25.8  rw-p:anon machine_x64_variable_memory_encoding_tables
+      22.4  r-xp:ide-trusted c_preprocess_run
+      17.0  rw-p:anon buster_x86_metadata_iform_ranges
+      15.5  r--p:ide-trusted string_tests.cases
+      13.8  rw-p:anon buster_x86_metadata_form_facts
+      12.0  r--p:ide-trusted c_vendor_builtin_definitions
+      11.0  rw-p:anon buster_x86_metadata_mnemonic_candidates
+      10.6  rw-p:anon buster_x86_metadata_form_hash_candidates
+      10.0  rw-p:anon buster_x86_metadata_iclass_candidates
+       9.6  r-xp:ide-trusted compiler_driver_parse_arguments
+       9.5  rw-p:anon buster_x86_metadata_operand_view_owner_plus_one
+       9.2  r-xp:ide-trusted c_ir_query_execute
+       8.7  rw-p:anon buster_x86_metadata_form_operand_facts
+       8.5  r-xp:ide-trusted llvm_bitcode_emit_with_options
+       8.4  rw-p:anon buster_x86_metadata_exact_plan_records
+       8.0  r-xp:ide-trusted machine_x64_metadata_shape_cache_prewarm
+       8.0  rw-p:anon buster_x86_metadata_iform_candidates
+       7.7  rw-p:anon machine_x64_fixed_templates
+       7.6  r-xp:ide-trusted ir_inline_module
+       7.4  r-xp:ide-trusted bootstrap_trace_ir
+       6.7  r--p:ide-trusted assembly_aarch64_direct_simd_spellings
+       6.6  r-xp:ide-trusted compiler_driver_execute_invocation
+       6.5  r-xp:ide-trusted c_analyze_semantics_core
+       6.5  r-xp:ide-trusted run_completion_census
+       6.3  r--p:ide-trusted machine_opcode_infos
+       6.2  r-xp:ide-trusted compiler_driver_metrics_test_batches
+       6.0  r-xp:ide-trusted compiler_driver_elf_cpu_runtime_tests
+       6.0  rw-p:anon buster_x86_metadata_iclass_ranges
+       5.8  rw-p:anon buster_x86_metadata_physical_view_slots

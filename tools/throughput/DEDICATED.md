@@ -238,7 +238,9 @@ candidate compiler, and the series do not depend on CPU numbering:
 
 In `cores`, CPU 0's physical core is left to the runner and other
 housekeeping. Each W runs on one logical CPU of each of the first W remaining
-cores; the siblings stay idle except at the SMT point. Report the two series
+cores; the siblings stay idle except at the SMT point. `cores` runs every
+shape, so its `size-nN` series (2–64 equal TUs at 1, 2 and 7 cores) bracket the
+population at which lanes repay their entry cost. Report the two series
 separately: `machine` shares core 0 with housekeeping.
 
 To run one by hand on the host, build the tool while the host is idle, then:

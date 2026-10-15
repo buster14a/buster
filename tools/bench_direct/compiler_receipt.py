@@ -43,10 +43,16 @@ Map (searchable symbols):
     THROUGHPUT_PROFILE, classify_throughput, throughput_digest   corpus (#2761)
     THROUGHPUT_HARNESS_FLOOR, HARNESS_ADMISSIONS           base-harness admission (#3714)
     THROUGHPUT_HISTORICAL_PROFILE, THROUGHPUT_HISTORICAL_REQUEST_LINE   named historical corpus (#3714)
+    EVIDENCE_INVENTORY, evidence_lab_required, evidence_corpus_required,
+        evidence_identity                                  sealed raw evidence v1 (#2918)
     SCALING_REQUEST, SCALING_PROFILE, classify_scaling, scaling_digest   multi-TU scaling (#424)
     INLINE_ACCEPTANCE_PROFILE, validate_inline_acceptance  issue #48 same-candidate inliner pair
     AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_BUDGET, ast_pilot_budget_verdict,
         validate_ast_pilot_acceptance                      issue #3397 -fc-ast-pilot pair
+    CONSTANT_REUSE_ACCEPTANCE_PROFILE,
+        validate_constant_reuse_acceptance                 issue #3011 constant-reuse flag pairs
+    PROCESS_FLOOR_PROFILE, process_floor_verdict,
+        validate_process_floor_acceptance                  issue #1125 per-process floor and its controls
     THROUGHPUT_REAL_SOURCE_PROFILE, validate_throughput_real_source,
         throughput_real_source_digest                      real-source throughput (#2761)
     PRODUCTION_PROFILE_PROFILE, validate_production_profile,
@@ -57,9 +63,14 @@ Map (searchable symbols):
         render_inventory_coverage                          inventory rows each validated leg discharged (#2761)
     FRONTEND_SELECTOR_PROFILE, validate_frontend_selector, selection_medians,
         frontend_selector_digest                           frontend and selector probes (#2761)
+    frontend_scaling_population, frontend_scaling_problems,
+        frontend_scaling_digest                            shared benchmark_frontend_scaling.py checks
+    FRONTEND_NESTING_PROFILE, validate_frontend_nesting    deep-nesting families (#2676)
     WILD_LINKER_PROFILE, validate_wild_linker, wild_linker_population,
         wild_linker_digest                                 host Wild against its comparator (#2761)
     LINK_TLS_PROFILE, validate_link_tls, link_tls_digest   whole-link TLS companion cells (#1915)
+    SELFHOST_INLINE_PROFILE, validate_selfhost_inline,
+        selfhost_inline_digest                             self-built inline-mode base/head pair (#58)
     REGRESSION_POLICIES, regression_policy                 report-only switch
     range_label                                            main baseline relation
     render                                                 readable report
@@ -171,6 +182,93 @@ THROUGHPUT_HISTORICAL_PROFILE = dict(
             "revision's ./build.sh bench_throughput in a detached worktree under the work directory",
     harness_revision=THROUGHPUT_HISTORICAL_HARNESS_REVISION,
     admission=f"pull request merge base predates {THROUGHPUT_HARNESS_FLOOR}")
+# Sealed raw evidence v1 (#2918, docs/compiler-evidence-v1.md). The producer
+# exports these members as required, writes EVIDENCE_OMISSIONS, and seals the
+# bundle last with the trusted `./build.sh compiler_evidence seal`; the
+# publisher re-derives the same inventory natively with `verify`. The native
+# tables in tools/compiler_evidence.c must stay equal (compiler_test checks).
+EVIDENCE_INVENTORY = "buster-compiler-ordinary-raw-v1"
+# The ordinary pull snapshot-v1 route (#3211) adds its closure records and its exact
+# owned-phase population; the identity's EVIDENCE_ROUTE_KEYS lines select it.
+EVIDENCE_SNAPSHOT_INVENTORY = "buster-compiler-snapshot-raw-v1"
+EVIDENCE_CLOSURE_MEMBERS = tuple(f"closure-{operation}.json{suffix}" for operation in ("snapshot", "restore", "verify")
+                                 for suffix in ("", ".manifest.tsv"))
+EVIDENCE_PHASE_SUFFIXES = ("", ".argv", ".stdout", ".stderr", ".bootstrap.complete")
+EVIDENCE_MANIFEST = "evidence-manifest.tsv"
+EVIDENCE_SEAL = "evidence-seal.txt"
+EVIDENCE_OMISSIONS = "evidence-omissions.json"
+EVIDENCE_OMISSIONS_SCHEMA = "buster-compiler-evidence-omissions-v1"
+EVIDENCE_OMISSION_REASONS = ("excluded-type", "member-limit", "byte-budget", "file-budget", "changed-during-copy",
+                             "read-error")
+EVIDENCE_OMISSION_EXAMPLES = 50
+EVIDENCE_LAB_FIXED = ("compare.json", "summary.json", "pairs.json", "a/lab.json", "b/lab.json", "a/env/env.json")
+EVIDENCE_LAB_LOGS = ("commands.log", "wrapper-rss.log", "source-run.log", "metrics-probe.log", "warmup-0.log")
+EVIDENCE_CORPUS_CORE = ("samples.csv", "telemetry.csv", "metadata.json", "jobs.tsv", "commands.jsonl",
+                        "capabilities.jsonl", "complete.txt", "summary.json", "cpuinfo.txt")
+# Identity lines after schema and inventory, in manifest order.
+EVIDENCE_IDENTITY_KEYS = ("repository", "request_run", "request_attempt", "executor_run", "executor_attempt",
+                          "trusted_revision", "baseline_revision", "candidate_revision", "baseline_tree",
+                          "candidate_tree", "lab_profile", "corpus_profile", "corpus_harness_revision")
+# Trailing identity lines of a snapshot-v1 attempt only; a legacy-rebuild identity has none.
+EVIDENCE_ROUTE_KEYS = ("preparation_policy", "owned_phases")
+
+
+def evidence_lab_required(pairs: int, counters: tuple[bool, bool], metrics: tuple[bool, bool]) -> tuple[str, ...]:
+    """Lab-relative required members for a plan of `pairs` and each variant's declared streams."""
+    required = [*EVIDENCE_LAB_FIXED, *(f"{variant}/{log}" for variant in "ab" for log in EVIDENCE_LAB_LOGS)]
+    for index, variant in enumerate("ab"):
+        for pair in range(1, pairs + 1):
+            required.extend(f"pairs/{pair:04d}-{variant}{suffix}" for suffix, declared in
+                            ((".csv", counters[index]), (".ccmetrics", metrics[index])) if declared)
+    return tuple(required)
+
+
+def evidence_corpus_required(profile: dict) -> tuple[str, ...]:
+    """Corpus-relative required members of an admitted corpus profile."""
+    return (*EVIDENCE_CORPUS_CORE, *(f"inputs/{name}.c" for name in profile["workloads"]))
+
+
+def evidence_preparation(receipt: dict) -> str:
+    """The receipt's declared preparation policy, as validate_closure reads it, or '' when unsupported."""
+    declared = receipt.get("preparation_policy", "legacy-rebuild" if receipt.get("closure") is None else "snapshot-v1") \
+        if isinstance(receipt, dict) else None
+    return declared if declared in ("legacy-rebuild", "snapshot-v1") else ""
+
+
+def evidence_inventory(receipt: dict) -> str:
+    """The sealed inventory a receipt's route selects (#2918, #3211)."""
+    return EVIDENCE_SNAPSHOT_INVENTORY if evidence_preparation(receipt) == "snapshot-v1" else EVIDENCE_INVENTORY
+
+
+def evidence_identity(receipt: dict, request_attempt: str) -> str:
+    """The trusted identity lines of a receipt's ordinary attempt, or '' when it has none.
+
+    A snapshot-v1 attempt appends its route and its owned-phase count, which select the snapshot
+    inventory and its exact phase population; validate_closure binds that declared policy to the
+    receipt's closure records and the retained closure manifests.
+    """
+    identity = receipt.get("identity") if isinstance(receipt, dict) else None
+    profile, corpus = (receipt.get("profile"), receipt.get("throughput_profile")) if isinstance(receipt, dict) else (None, None)
+    text = ""
+    if isinstance(identity, dict) and isinstance(profile, dict) and isinstance(corpus, dict):
+        harness = corpus.get("harness_revision") if corpus.get("name") == THROUGHPUT_HISTORICAL_PROFILE["name"] \
+            else identity.get("base")
+        values = (identity.get("repository"), identity.get("request_run_id"), request_attempt, identity.get("run_id"),
+                  identity.get("run_attempt"), identity.get("trusted_revision"), identity.get("base"),
+                  identity.get("head"), identity.get("base_tree"), identity.get("head_tree"), profile.get("name"),
+                  corpus.get("name"), harness)
+        if all(isinstance(value, str) and value and "\t" not in value and "\n" not in value for value in values):
+            text = "".join(f"{key}\t{value}\n" for key, value in zip(EVIDENCE_IDENTITY_KEYS, values))
+        policy = evidence_preparation(receipt)
+        population = receipt.get("phase_ownership")
+        count = population.get("count") if isinstance(population, dict) else None
+        if policy == "snapshot-v1" and type(count) is int and 1 <= count <= 256:
+            text += f"preparation_policy\tsnapshot-v1\nowned_phases\t{count}\n" if text else ""
+        elif policy != "legacy-rebuild":
+            text = ""
+    return text
+
+
 # The multi-TU scaling leg (#424), frozen per name like PROFILE. Each series
 # is one `bench_throughput scale` bundle on the candidate binary, with the
 # --compiler/--output that compiler_compare supplies. "cores" leaves CPU 0's
@@ -223,6 +321,111 @@ AST_PILOT_ACCEPTANCE_PROFILE = {
 # every cell: B's median peak RSS above A's by at most retained bytes times
 # (1 + rss_slack).
 AST_PILOT_BUDGET = {"syntax_only_min_gain": 0.01, "rss_slack": 0.05}
+
+# #4058 final default/default migration evidence. The ordinary lab/corpus and
+# historical flag-pair profiles remain immutable. This fixed extra leg compares
+# both prepared binaries on the same current-main source/header population.
+AST_RETIREMENT_REQUEST_LINE = "profile: ast-retirement-acceptance-v1"
+AST_RETIREMENT_SCHEMA = "buster-ast-retirement-acceptance-v1"
+AST_RETIREMENT_CORPUS = tuple(THROUGHPUT_PROFILE["workloads"])
+AST_RETIREMENT_INPUT_DIRECTORY = "work/ast-retirement-inputs"
+AST_RETIREMENT_CELLS = {
+    "unity-syntax-only": {"workload": "unity", "operation": "syntax-only", "allocator": None},
+    "unity-object": {"workload": "unity", "operation": "object", "allocator": None},
+    **{f"{name}-syntax-only": {"workload": name, "operation": "syntax-only", "allocator": None}
+       for name in AST_RETIREMENT_CORPUS},
+    **{f"{name}-object-{mode}": {"workload": name, "operation": "object", "allocator": mode}
+       for name in AST_RETIREMENT_CORPUS for mode in THROUGHPUT_PROFILE["modes"]},
+}
+AST_RETIREMENT_PROFILE = {
+    "name": "ast-retirement-acceptance-v1",
+    "source": "the baseline/current-main tree and generated headers plus its six unchanged throughput CI sources",
+    "compilers": "prepared tests-off Clang Release baseline and candidate ide binaries, default/default",
+    "cells": AST_RETIREMENT_CELLS,
+    "pairs": 20,
+    "warmups": 1,
+    "pairing": "ABBA",
+    "fresh_copy": True,
+    "cpu": 2,
+    "phase_metrics": False,
+    "measurements": ["wall with 95% CI", "instructions:u", "wait4 peak RSS",
+                     "untimed C_AST and C_AST_FACTS retained bytes; separate symbol-binding bytes when reported"],
+    "correctness": "byte-identical object references and diagnostics; deterministic output in every timed run",
+    "report_only": True,
+}
+
+
+def ast_retirement_cell_command(cell: str) -> list[str]:
+    """One fixed command, without the binary or its output path."""
+    record = AST_RETIREMENT_CELLS[cell]
+    if record["workload"] == "unity":
+        command = list(AST_PILOT_COMPILE)
+    else:
+        command = ["cc", "-g0", "-O0", f"{AST_RETIREMENT_INPUT_DIRECTORY}/{record['workload']}.c"]
+    command.append("-fsyntax-only" if record["operation"] == "syntax-only" else "-c")
+    if record["allocator"] is not None:
+        command.append(f"-fregister-allocator={record['allocator']}")
+    return command
+# Issue #3011: the opt-in constant-reuse arms on the pull-compare route. One
+# fresh exact line in ANALYZER_REQUEST_PATH selects it. Each cell times the one
+# frozen candidate binary on the same -g0 unity object compile, A default and
+# B passing that cell's flag; the flags, cells, pair and warm-up counts are
+# frozen here and nothing in the request can change them. B's object differs
+# from A's by design; diagnostics must not. It is report-only.
+CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE = "profile: constant-reuse-acceptance-v1"
+CONSTANT_REUSE_ACCEPTANCE_SCHEMA = "buster-constant-reuse-acceptance-v1"
+CONSTANT_REUSE_COMPILE = AST_PILOT_COMPILE + ["-c"]
+CONSTANT_REUSE_CELLS = {"intern": "-fcanonical-intern-constants", "cse": "-fcanonical-fast-cse"}
+CONSTANT_REUSE_ACCEPTANCE_PROFILE = {
+    "name": "constant-reuse-acceptance-v1",
+    "source": "candidate-HEAD src/buster/apps/ide/ide.c with that build's generated headers, -g0, -c, no link",
+    "compiler": "the one frozen candidate-HEAD tests-off Clang Release ide for both variants",
+    "compiler_modes": {"a": "default; the cell's flag omitted", "b": "the cell's one opt-in flag"},
+    "cells": dict(CONSTANT_REUSE_CELLS),
+    "pairs": 20,
+    "warmups": 1,
+    "pairing": "ABBA",
+    "fresh_copy": True,
+    "cpu": 2,
+    "measurements": ["wall", "instructions:u", "peak RSS", "executable-section code bytes"],
+    "correctness": "identical stdout/stderr in every run of both cells; B's object differs from A's by design",
+    "report_only": True,
+}
+# Issue #1125: the per-process floor of `ide cc` on the pull-compare route. One
+# fresh exact line in ANALYZER_REQUEST_PATH selects it. Each cell times the one
+# frozen candidate binary in fresh processes on PROCESS_FLOOR_SOURCE, alone in
+# its directory: A is the native x86-64 object compile and B is the cell's
+# control, the same command (A/A calibration), the AArch64 object compile or
+# -fsyntax-only. The source, commands, pair and warm-up counts are frozen here
+# and nothing in the request can change them. It is report-only.
+PROCESS_FLOOR_REQUEST_LINE = "profile: process-floor-v1"
+PROCESS_FLOOR_SCHEMA = "buster-process-floor-v1"
+PROCESS_FLOOR_SOURCE = "int main(void){return 0;}\n"
+PROCESS_FLOOR_SOURCE_NAME = "tiny.c"
+PROCESS_FLOOR_OBJECT = ["cc", "-g0", "-c", PROCESS_FLOOR_SOURCE_NAME]
+# B's compile per cell; A is always PROCESS_FLOOR_OBJECT. An object compile
+# also passes `-o OUT`.
+PROCESS_FLOOR_CELLS = {
+    "aa": list(PROCESS_FLOOR_OBJECT),
+    "aarch64": ["cc", "-g0", "-target", "aarch64-unknown-linux", "-c", PROCESS_FLOOR_SOURCE_NAME],
+    "syntax-only": ["cc", "-g0", "-fsyntax-only", PROCESS_FLOOR_SOURCE_NAME],
+}
+PROCESS_FLOOR_PROFILE = {
+    "name": "process-floor-v1",
+    "source": "int main(void){return 0;} as tiny.c, alone in the working directory",
+    "source_sha256": hashlib.sha256(PROCESS_FLOOR_SOURCE.encode("utf-8")).hexdigest(),
+    "compiler": "the one frozen candidate-HEAD tests-off Clang Release ide for both variants",
+    "compiler_modes": {"a": " ".join(PROCESS_FLOOR_OBJECT + ["-o", "OUT"]), "b": "the cell's command"},
+    "cells": {cell: " ".join(argv + (["-o", "OUT"] if "-c" in argv else [])) for cell, argv in PROCESS_FLOOR_CELLS.items()},
+    "pairs": 100,
+    "warmups": 2,
+    "pairing": "ABBA",
+    "fresh_copy": True,
+    "cpu": 2,
+    "measurements": ["wall", "task-clock", "compiler wall_ns", "instructions:u", "peak RSS"],
+    "correctness": "byte-identical A/A objects, and identical stdout/stderr in every run of every cell",
+    "report_only": True,
+}
 # Issue #2761: the Zen 5 route for real-source throughput. One fresh exact line
 # in ANALYZER_REQUEST_PATH selects it on the pull-compare route. After the
 # corpus leg, the base revision's `bench_throughput run --real-source` times
@@ -475,6 +678,39 @@ FRONTEND_SELECTOR_PROFILE = {
     "decision": "report-only: medians are reported and never gate",
     "report_only": True,
 }
+# Issue #2676: the Zen 5 route for deep-nesting claims. One fresh exact line in
+# ANALYZER_REQUEST_PATH selects it on the pull-compare route. After the corpus
+# leg, the base revision's tools/benchmark_frontend_scaling.py --suite nesting
+# runs on the matched baseline/candidate binaries: one function per family whose
+# control statements nest 2,000, 8,000 and 32,000 levels deep, so each step is
+# four times the last and a term growing with the square of the depth shows as
+# a sixteenfold step. Families, depths, populations and the pinned CPU are
+# frozen here; changing any value needs a new name. It is report-only, but the
+# tool's own check (byte-identical -c objects) must hold.
+FRONTEND_NESTING_REQUEST_LINE = "profile: frontend-nesting-v1"
+FRONTEND_NESTING_FAMILIES = ("braced-while", "braced-for", "braced-if", "braced-switch", "braceless-while",
+                             "braceless-for", "braceless-do", "braceless-switch", "declaration", "label", "goto")
+FRONTEND_NESTING_DEPTHS = (2000, 8000, 32000)
+# benchmark_frontend_scaling.py --suite nesting: (kind, counts, modes) in run order.
+FRONTEND_NESTING_CASES = (
+    ("small", (1,), ("syntax", "object")),
+    *((family, FRONTEND_NESTING_DEPTHS, ("syntax", "object")) for family in FRONTEND_NESTING_FAMILIES),
+)
+FRONTEND_NESTING_PROFILE = {
+    "name": "frontend-nesting-v1",
+    "harness": "tools/benchmark_frontend_scaling.py at the base revision",
+    "cpu": 2,
+    "frontend_scaling": {
+        "workload": "--suite nesting: per family one function whose control statements nest each depth deep; "
+                    "-fsyntax-only and -c cells, fresh process per sample",
+        "arguments": ["--suite", "nesting", "--warmups", "1", "--repetitions", "11", "--cpu", "2"],
+        "suite": "nesting", "warmups": 1, "repetitions": 11,
+        "families": list(FRONTEND_NESTING_FAMILIES), "depths": list(FRONTEND_NESTING_DEPTHS),
+        "correctness": "byte-identical -c objects from both binaries; unchanged sources and binaries",
+    },
+    "decision": "report-only: medians are reported and never gate",
+    "report_only": True,
+}
 # Issue #2761: the Zen 5 route for tool:wild_linker_bench.c (#2645). One fresh
 # exact line in ANALYZER_REQUEST_PATH selects it on the pull-compare route. The
 # head's own ide objects are built by clang without LTO in an isolated clone of
@@ -618,6 +854,45 @@ LINK_TLS_PROFILE = {
     "decision": "report-only: ratios and intervals are reported and never gate",
     "report_only": True,
 }
+# Issue #58: the Zen 5 route for comparing the compilers each side would
+# self-build with -fcanonical-inline. One fresh exact line in
+# ANALYZER_REQUEST_PATH selects it on the pull-compare route. After each role's
+# Clang Release build, the trusted tools/bench_direct/selfhost_inline_compare.py
+# compiles that role's own unity source once with stage1_command; after the
+# ordinary comparison it times the two stage-1 compilers compiling the frozen
+# merge-base tree with compile_flags, requiring byte-identical outputs, then
+# runs the topdown (Zen 5 metric groups, including the front-end ones) and
+# sampling profile steps for both. Everything is frozen here; changing any
+# value needs a new name. It is report-only.
+SELFHOST_INLINE_REQUEST_LINE = "profile: self-host-inline-compare-v1"
+SELFHOST_INLINE_SCHEMA = "buster-selfhost-inline-compare-v1"
+SELFHOST_INLINE_STAGE1_SCHEMA = "buster-selfhost-inline-stage1-v1"
+SELFHOST_INLINE_HARNESS = "selfhost_inline_compare.py"
+SELFHOST_INLINE_PROFILE = {
+    "name": "self-host-inline-compare-v1",
+    "issue": "#58",
+    "harness": "tools/bench_direct/selfhost_inline_compare.py at the trusted revision, run by compiler_compare",
+    "stage1": "after each role's Clang Release build, with that revision and its build/generated checked out, its ide "
+              "runs stage1_command once (untimed) on the role's own unity source",
+    "stage1_command": ["cc", "-march=native", "-Isrc", "-Ibuild/generated", "-DBUSTER_UNITY_BUILD=1",
+                       "-DBUSTER_INCLUDE_TESTS=0", "-g", "src/buster/apps/ide/ide.c", "-lm", "-fcanonical-inline"],
+    "workload": "uarch_lab compare of the baseline (A) and candidate (B) stage-1 compilers compiling the ordinary "
+                "comparison's frozen merge-base tree with uarch_lab's default compile plus compile_flags",
+    "compile_flags": ["-fcanonical-inline"],
+    "pairs": 30,
+    "warmups": 1,
+    "cpu": 2,
+    "order": "ABBA",
+    "min_effect_percent": 0.5,
+    "profile_steps": ["topdown", "sampling"],
+    "correctness": "both stage-1 compilers must produce byte-identical outputs before timing "
+                   "(--require-identical-output), and every timed run must reproduce its reference",
+    "decision": "report-only: paired ratios, PMU counters and profiles are reported and never gate",
+    "report_only": True,
+}
+# The topdown metrics the report lists: Zen 5 front-end groups and the level-1 split.
+SELFHOST_INLINE_FRONTEND = re.compile(r"(?i)frontend|fetch|decod|op_?cache|icache|itlb|dispatch|pipelinel1")
+SELFHOST_INLINE_TOPDOWN_ROWS = 12
 SCALING_SCHEMA = "buster-throughput-scaling-v1"
 SCALING_PROFILE = {
     "name": "scaling-v1",
@@ -1148,9 +1423,9 @@ def validate_compiler_probes(status: object, summary: object, base: str, head: s
     return problems
 
 
-def frontend_scaling_population() -> list[tuple[str, int, str]]:
-    """(kind, count, mode) of every FRONTEND_SELECTOR_PROFILE frontend-scaling record, in run order."""
-    return [(kind, count, mode) for kind, counts, modes in FRONTEND_SCALING_CASES for count in counts for mode in modes]
+def frontend_scaling_population(cases: tuple = FRONTEND_SCALING_CASES) -> list[tuple[str, int, str]]:
+    """(kind, count, mode) of every frontend-scaling record of `cases`, in run order; FRONTEND_SELECTOR_PROFILE's by default."""
+    return [(kind, count, mode) for kind, counts, modes in cases for count in counts for mode in modes]
 
 
 def ide_bench_fields(line: object) -> dict | None:
@@ -1200,6 +1475,50 @@ def selection_medians(samples: object, allocators: list) -> dict | None:
                                   for allocator in allocators}} if usable else None
 
 
+def frontend_scaling_problems(scaling: dict, cpu: int, population: list, scaling_status: object, provenance: object,
+                              results: object, hashes: dict) -> list[str]:
+    """Reasons a benchmark_frontend_scaling.py run is not exactly `scaling`'s suite and `population` on `hashes`.
+
+    scaling is a profile's frontend_scaling section, scaling_status the tool's exit and provenance/results
+    its provenance.json and results.json; every cell needs its full samples and object cells their hash.
+    """
+    problems: list[str] = []
+    label = "frontend scaling"
+    if type(scaling_status) is not int or scaling_status != 0:
+        problems.append(f"{label} exited {scaling_status!r}, not 0")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    for key, wanted in (("suite", scaling["suite"]), ("warmups", scaling["warmups"]),
+                        ("repetitions", scaling["repetitions"]), ("cpu", cpu), ("affinity", [cpu]), ("complete", True),
+                        ("binary_sha256", hashes)):
+        if type(provenance.get(key)) is not type(wanted) or provenance.get(key) != wanted:
+            problems.append(f"{label} provenance {key} {provenance.get(key)!r} is not {wanted!r}")
+    if not (isinstance(provenance.get("cpu_model"), str) and APPROVED_HOST.search(provenance["cpu_model"])):
+        problems.append(f"{label} observed CPU {provenance.get('cpu_model')!r} is not the approved Zen 5 host "
+                        "(AMD Ryzen 7 9700X)")
+    records = results if isinstance(results, list) else []
+    # A boolean count equals 1 in Python, so the type is part of the cell's identity.
+    observed = [(row.get("kind"), row.get("count") if type(row.get("count")) is int else None, row.get("mode"))
+                if isinstance(row, dict) else None for row in records]
+    if observed != population:
+        problems.append(f"{label} records are not exactly the {len(population)} profile cells")
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        name = f"{row.get('kind')}-{row.get('count')}/{row.get('mode')}"
+        compilers = row.get("compilers") if isinstance(row.get("compilers"), dict) else {}
+        if sorted(compilers) != ["baseline", "candidate"] or not all(
+                isinstance(item, dict) and _samples(item.get("wall_seconds"), scaling["repetitions"], True) and
+                _samples(item.get("cpu_seconds"), scaling["repetitions"], False) for item in compilers.values()):
+            problems.append(f"{label} cell {name} does not have {scaling['repetitions']} complete samples per binary")
+        elif any(item.get(f"{metric}_median") != _median(item[f"{metric}_seconds"])
+                 for item in compilers.values() for metric in ("wall", "cpu")):
+            problems.append(f"{label} cell {name} reports medians its samples do not give")
+        if row.get("mode") == "object" and not (isinstance(row.get("object_sha256"), str) and
+                                                SHA256.fullmatch(row["object_sha256"])):
+            problems.append(f"{label} cell {name} has no identical-object hash")
+    return problems
+
+
 def validate_frontend_selector(scaling_status: object, provenance: object, results: object, selection_status: object,
                                report: object, bench: object, binaries: object) -> list[str]:
     """Reasons the evidence is not one complete FRONTEND_SELECTOR_PROFILE run on these binaries and host.
@@ -1216,39 +1535,8 @@ def validate_frontend_selector(scaling_status: object, provenance: object, resul
     problems: list[str] = []
     if not all(isinstance(value, str) and SHA256.fullmatch(value) for value in hashes.values()):
         problems.append("frontend-selector measured binaries are not both recorded")
-    # Frontend scaling.
-    label = "frontend scaling"
-    scaling = profile["frontend_scaling"]
-    if type(scaling_status) is not int or scaling_status != 0:
-        problems.append(f"{label} exited {scaling_status!r}, not 0")
-    provenance = provenance if isinstance(provenance, dict) else {}
-    for key, wanted in (("suite", scaling["suite"]), ("warmups", scaling["warmups"]),
-                        ("repetitions", scaling["repetitions"]), ("cpu", cpu), ("affinity", [cpu]), ("complete", True),
-                        ("binary_sha256", hashes)):
-        if type(provenance.get(key)) is not type(wanted) or provenance.get(key) != wanted:
-            problems.append(f"{label} provenance {key} {provenance.get(key)!r} is not {wanted!r}")
-    if not (isinstance(provenance.get("cpu_model"), str) and APPROVED_HOST.search(provenance["cpu_model"])):
-        problems.append(f"{label} observed CPU {provenance.get('cpu_model')!r} is not the approved Zen 5 host "
-                        "(AMD Ryzen 7 9700X)")
-    records = results if isinstance(results, list) else []
-    population = [(row.get("kind"), row.get("count"), row.get("mode")) if isinstance(row, dict) else None for row in records]
-    if population != frontend_scaling_population():
-        problems.append(f"{label} records are not exactly the {len(frontend_scaling_population())} profile cells")
-    for row in records:
-        if not isinstance(row, dict):
-            continue
-        name = f"{row.get('kind')}-{row.get('count')}/{row.get('mode')}"
-        compilers = row.get("compilers") if isinstance(row.get("compilers"), dict) else {}
-        if sorted(compilers) != ["baseline", "candidate"] or not all(
-                isinstance(item, dict) and _samples(item.get("wall_seconds"), scaling["repetitions"], True) and
-                _samples(item.get("cpu_seconds"), scaling["repetitions"], False) for item in compilers.values()):
-            problems.append(f"{label} cell {name} does not have {scaling['repetitions']} complete samples per binary")
-        elif any(item.get(f"{metric}_median") != _median(item[f"{metric}_seconds"])
-                 for item in compilers.values() for metric in ("wall", "cpu")):
-            problems.append(f"{label} cell {name} reports medians its samples do not give")
-        if row.get("mode") == "object" and not (isinstance(row.get("object_sha256"), str) and
-                                                SHA256.fullmatch(row["object_sha256"])):
-            problems.append(f"{label} cell {name} has no identical-object hash")
+    problems.extend(frontend_scaling_problems(profile["frontend_scaling"], cpu, frontend_scaling_population(),
+                                              scaling_status, provenance, results, hashes))
     # Selection.
     label = "selection benchmark"
     selection = profile["selection"]
@@ -1328,14 +1616,7 @@ def validate_frontend_selector(scaling_status: object, provenance: object, resul
 def frontend_selector_digest(results: object, report: object, bench: object) -> list[dict]:
     """The report's view: baseline/candidate medians re-derived from the raw samples of every cell, never
     taken from a tool's own summary fields."""
-    digest = []
-    for row in results if isinstance(results, list) else []:
-        compilers = row.get("compilers") if isinstance(row, dict) and isinstance(row.get("compilers"), dict) else {}
-        values = [_median(compilers[role].get("wall_seconds")) if isinstance(compilers.get(role), dict) else None
-                  for role in ("baseline", "candidate")]
-        if isinstance(row, dict):
-            digest.append({"name": f"frontend {row.get('kind')}-{row.get('count')}/{row.get('mode')}",
-                           "unit": "s", "values": values})
+    digest = frontend_scaling_digest(results)
     for row in report.get("workloads", []) if isinstance(report, dict) and isinstance(report.get("workloads"), list) else []:
         samples = row.get("samples") if isinstance(row, dict) and isinstance(row.get("samples"), dict) else {}
         name = Path(str(row.get("path"))).name if isinstance(row, dict) else "NA"
@@ -1356,6 +1637,38 @@ def frontend_selector_digest(results: object, report: object, bench: object) -> 
         digest.append({"name": "ide bench", "unit": "ns",
                        "values": [statistics.median(medians[role]) if medians[role] else None
                                   for role in ("baseline", "candidate")]})
+    return digest
+
+
+def validate_frontend_nesting(scaling_status: object, provenance: object, results: object, binaries: object) -> list[str]:
+    """Reasons the evidence is not one complete FRONTEND_NESTING_PROFILE run on these binaries and host.
+
+    scaling_status is the tool's exit, provenance/results its provenance.json and results.json and
+    binaries the measured baseline/candidate records.
+    """
+    profile = FRONTEND_NESTING_PROFILE
+    binaries = binaries if isinstance(binaries, dict) else {}
+    hashes = {role: (binaries.get(role) or {}).get("sha256") if isinstance(binaries.get(role), dict) else None
+              for role in ("baseline", "candidate")}
+    problems: list[str] = []
+    if not all(isinstance(value, str) and SHA256.fullmatch(value) for value in hashes.values()):
+        problems.append("frontend-nesting measured binaries are not both recorded")
+    problems.extend(frontend_scaling_problems(profile["frontend_scaling"], profile["cpu"],
+                                              frontend_scaling_population(FRONTEND_NESTING_CASES), scaling_status,
+                                              provenance, results, hashes))
+    return problems
+
+
+def frontend_scaling_digest(results: object) -> list[dict]:
+    """Baseline/candidate wall medians of every frontend-scaling cell, re-derived from its raw samples."""
+    digest = []
+    for row in results if isinstance(results, list) else []:
+        compilers = row.get("compilers") if isinstance(row, dict) and isinstance(row.get("compilers"), dict) else {}
+        values = [_median(compilers[role].get("wall_seconds")) if isinstance(compilers.get(role), dict) else None
+                  for role in ("baseline", "candidate")]
+        if isinstance(row, dict):
+            digest.append({"name": f"frontend {row.get('kind')}-{row.get('count')}/{row.get('mode')}",
+                           "unit": "s", "values": values})
     return digest
 
 
@@ -1774,6 +2087,106 @@ def validate_link_tls(status: object, summary: object, binaries: object) -> list
     return problems
 
 
+def validate_selfhost_inline(stage1: object, result: object, binaries: object) -> list[str]:
+    """Reasons the stage-1 and result documents are not one complete SELFHOST_INLINE_PROFILE run.
+
+    stage1 maps baseline/candidate to selfhost_inline_compare.py's stage1.json; result is its result.json;
+    binaries is the receipt's role -> {"sha256", "revision", ...} record, hashed by compiler_compare itself.
+    The timed uarch_lab documents are checked by selfhost_inline_compare.validate_compare_documents.
+    """
+    label = "self-host inline"
+    profile = SELFHOST_INLINE_PROFILE
+    problems: list[str] = []
+    roles = ("baseline", "candidate")
+    if not isinstance(stage1, dict) or set(stage1) != set(roles):
+        return [f"{label} stage-1 records are missing"]
+    shas: dict = {}
+    for role in roles:
+        record = stage1[role]
+        expected = binaries.get(role) if isinstance(binaries, dict) and isinstance(binaries.get(role), dict) else {}
+        if not isinstance(record, dict) or record.get("schema") != SELFHOST_INLINE_STAGE1_SCHEMA or \
+                record.get("status") != "complete":
+            problems.append(f"{label} {role} stage-1 record is malformed or incomplete")
+            continue
+        if record.get("revision") != expected.get("revision") or not isinstance(expected.get("revision"), str):
+            problems.append(f"{label} {role} stage-1 compiler was not built from the {role} revision")
+        compiler = record.get("compiler") if isinstance(record.get("compiler"), dict) else {}
+        if compiler.get("sha256") != expected.get("sha256") or not isinstance(expected.get("sha256"), str):
+            problems.append(f"{label} {role} stage-1 compiler was not built by the recorded {role} binary")
+        if record.get("command") != profile["stage1_command"]:
+            problems.append(f"{label} {role} stage-1 command is not the frozen command")
+        built = record.get("stage1") if isinstance(record.get("stage1"), dict) else {}
+        if not re.fullmatch("[0-9a-f]{64}", str(built.get("sha256", ""))) or type(built.get("size_bytes")) is not int or \
+                built["size_bytes"] <= 0:
+            problems.append(f"{label} {role} stage-1 compiler identity is malformed")
+        else:
+            shas[role] = built["sha256"]
+    if not isinstance(result, dict):
+        return [*problems, f"{label} result is missing or malformed"]
+    for key, wanted in (("schema", SELFHOST_INLINE_SCHEMA), ("status", "complete"), ("profile", profile["name"])):
+        if result.get(key) != wanted:
+            problems.append(f"{label} result {key} is {result.get(key)!r}, not {wanted!r}")
+    baseline = binaries.get("baseline") if isinstance(binaries, dict) and isinstance(binaries.get("baseline"), dict) else {}
+    if result.get("base_revision") != baseline.get("revision"):
+        problems.append(f"{label} did not time the frozen merge-base tree")
+    if len(shas) == len(roles) and result.get("stage1_compilers") != {role: {"sha256": shas[role]} for role in roles}:
+        problems.append(f"{label} timed compilers are not the recorded stage-1 compilers")
+    return problems
+
+
+def _finite_number(value: object) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def selfhost_inline_frontend_problems(summary: object) -> list[str]:
+    """Reasons a self-host inline summary lacks usable paired front-end topdown evidence.
+
+    Every topdown row must be well formed; the level-1 front-end-bound metric (a name ending in
+    frontend_bound, as uarch_lab's dominant_category reads it) must be present with finite values for
+    both compilers; and no front-end row may carry a value for only one of them. Other groups (cache,
+    backend) are reported but never stand in for it, because step_topdown marks the step ok even when a
+    group fails or is unavailable."""
+    label = "self-host inline"
+    profile = summary.get("profile") if isinstance(summary, dict) and isinstance(summary.get("profile"), dict) else {}
+    topdown = profile.get("topdown") if isinstance(profile.get("topdown"), dict) else {}
+    rows = topdown.get("metrics")
+    if topdown.get("status") != "ok" or not isinstance(rows, list) or not rows:
+        return [f"{label} topdown metrics are missing"]
+    problems: list[str] = []
+    if any(not isinstance(row, dict) or not isinstance(row.get("group"), str) or not isinstance(row.get("metric"), str)
+           for row in rows):
+        problems.append(f"{label} topdown has a malformed metric row")
+        rows = [row for row in rows if isinstance(row, dict)]
+    frontend = [row for row in rows if SELFHOST_INLINE_FRONTEND.search(f"{row.get('group', '')} {row.get('metric', '')}")]
+    if not any(str(row.get("metric", "")).lower().endswith("frontend_bound") and _finite_number(row.get("a")) and
+               _finite_number(row.get("b")) for row in frontend):
+        problems.append(f"{label} topdown lacks a paired level-1 frontend_bound metric")
+    if any(_finite_number(row.get("a")) != _finite_number(row.get("b")) for row in frontend):
+        problems.append(f"{label} topdown has a front-end metric measured for only one compiler")
+    return problems
+
+
+def selfhost_inline_digest(summary: object) -> dict | None:
+    """The reported rows of a self-host inline uarch summary: paired metrics, code bytes, front-end topdown."""
+    if not isinstance(summary, dict) or not isinstance(summary.get("metrics"), dict):
+        return None
+    metrics = {}
+    for key in ("wall", "task_clock", "instructions", "cycles", "ipc", "branch_misses", "peak_rss"):
+        row = summary["metrics"].get(key) if isinstance(summary["metrics"].get(key), dict) else {}
+        metrics[key] = {name: row.get(name) for name in ("a_median", "b_median", "ratio", "ci_low", "ci_high", "outcome")}
+    code = summary.get("code_bytes") if isinstance(summary.get("code_bytes"), dict) else {}
+    profile = summary.get("profile") if isinstance(summary.get("profile"), dict) else {}
+    topdown = profile.get("topdown") if isinstance(profile.get("topdown"), dict) else {}
+    rows = [row for row in topdown.get("metrics") or [] if isinstance(row, dict) and
+            SELFHOST_INLINE_FRONTEND.search(f"{row.get('group', '')} {row.get('metric', '')}")]
+    verdict = summary.get("verdict") if isinstance(summary.get("verdict"), dict) else {}
+    return {"metrics": metrics, "code_bytes": {name: code.get(name) for name in ("a_value", "b_value", "ratio")},
+            "frontend": [{name: row.get(name) for name in ("group", "metric", "unit", "a", "b", "relative_change_percent")}
+                         for row in rows[:SELFHOST_INLINE_TOPDOWN_ROWS]],
+            "outputs_identical": summary.get("outputs_identical"), "verdict": verdict.get("text"),
+            "warnings": [item for item in summary.get("warnings") or [] if isinstance(item, str)]}
+
+
 def _shell_quote(text: str) -> str:
     """The harness's quote(): one single-quoted shell word."""
     return "'" + text.replace("'", "'\\''") + "'"
@@ -1889,6 +2302,78 @@ def wild_linker_cell_commands(cell: str, argv: str, manifest: str, root: str, li
     return commands, problems
 
 
+def validate_ast_retirement_acceptance(summary: object, base: str, head: str, binaries: dict) -> list[str]:
+    """Validate #4058's fixed two-binary population; the publisher replays raw cells."""
+    label = "issue #4058 AST retirement receipt"
+    if not isinstance(summary, dict) or summary.get("schema") != AST_RETIREMENT_SCHEMA or summary.get("status") != "complete":
+        return [f"{label} is missing or incomplete"]
+    if not isinstance(binaries, dict) or any(not isinstance(binaries.get(role), dict) for role in ("baseline", "candidate")):
+        return [f"{label} prepared compiler identities are missing"]
+    problems = []
+    if summary.get("profile") != AST_RETIREMENT_PROFILE or summary.get("base_revision") != base or summary.get("head_revision") != head:
+        problems.append(f"{label} profile or source revisions differ from the authorized comparison")
+    expected = {role: {key: binaries.get(role, {}).get(key) for key in ("sha256", "size_bytes", "revision")}
+                for role in ("baseline", "candidate")}
+    if any(not SHA256.fullmatch(str(row["sha256"])) or type(row["size_bytes"]) is not int or row["size_bytes"] <= 0 or
+           not isinstance(row["revision"], str) or not SHA.fullmatch(row["revision"]) for row in expected.values()):
+        problems.append(f"{label} prepared binary hash/size/revision is malformed")
+    if summary.get("binaries") != expected or expected["baseline"]["revision"] != base or expected["candidate"]["revision"] != head:
+        problems.append(f"{label} compiler identities differ from the prepared binaries")
+    if not isinstance(summary.get("cpu_model"), str) or not APPROVED_HOST.search(summary["cpu_model"]):
+        problems.append(f"{label} was not measured on the approved Ryzen 7 9700X")
+    source = summary.get("source")
+    if not isinstance(source, dict) or source.get("revision") != base:
+        problems.append(f"{label} source is not the frozen baseline/current-main revision")
+    else:
+        trees = source.get("frozen_input_tree")
+        if not isinstance(trees, dict) or set(trees) != {"src", "build/generated"} or any(
+                not isinstance(row, dict) or not SHA256.fullmatch(str(row.get("sha256", ""))) or
+                type(row.get("files")) is not int or row["files"] <= 0 or type(row.get("bytes")) is not int or row["bytes"] <= 0
+                for row in trees.values()):
+            problems.append(f"{label} frozen source/header tree identities are incomplete")
+        corpus = source.get("corpus")
+        if not isinstance(corpus, dict) or set(corpus) != set(AST_RETIREMENT_CORPUS):
+            problems.append(f"{label} corpus is not the six unchanged CI sources")
+        else:
+            for name, row in corpus.items():
+                if not isinstance(row, dict) or row.get("path") != f"{AST_RETIREMENT_INPUT_DIRECTORY}/{name}.c" or \
+                        not SHA256.fullmatch(str(row.get("sha256", ""))) or type(row.get("size_bytes")) is not int or row["size_bytes"] <= 0:
+                    problems.append(f"{label} corpus identity is malformed for {name}")
+        unity = source.get("unity")
+        if not isinstance(unity, dict) or unity.get("path") != "src/buster/apps/ide/ide.c" or \
+                not SHA256.fullmatch(str(unity.get("sha256", ""))) or type(unity.get("size_bytes")) is not int or unity["size_bytes"] <= 0:
+            problems.append(f"{label} unity source identity is missing")
+        generator = source.get("generator")
+        if not isinstance(generator, dict) or generator.get("revision") != base or \
+                not SHA256.fullmatch(str(generator.get("sha256", ""))) or type(generator.get("size_bytes")) is not int or generator["size_bytes"] <= 0:
+            problems.append(f"{label} baseline generator identity is missing")
+    cells, probes = summary.get("cells"), summary.get("probes")
+    if not isinstance(cells, dict) or set(cells) != set(AST_RETIREMENT_CELLS) or \
+            not isinstance(probes, dict) or set(probes) != set(AST_RETIREMENT_CELLS):
+        problems.append(f"{label} does not contain all twenty cells and retained-byte probes")
+    else:
+        for cell, row in cells.items():
+            metrics = row.get("metrics") if isinstance(row, dict) else None
+            if not isinstance(metrics, dict) or any(not isinstance(metrics.get(name), dict) for name in ("wall", "instructions", "peak_rss")):
+                problems.append(f"{label} has missing metrics for {cell}")
+                continue
+            if any(not _finite_positive(metrics["wall"].get(name)) for name in ("a_median", "b_median", "ratio", "ci_low", "ci_high")) or \
+                    any(not _finite_positive(metrics["instructions"].get(name)) for name in ("a_median", "b_median", "ratio")) or \
+                    any(not _finite_positive(metrics["peak_rss"].get(name)) for name in ("a_median", "b_median")):
+                problems.append(f"{label} required native metrics are unavailable or invalid for {cell}")
+            if row.get("outputs_identical") is not True or row.get("diagnostics_identical") is not True:
+                problems.append(f"{label} object/diagnostic identity failed for {cell}")
+            probe = probes[cell]
+            if not isinstance(probe, dict) or set(probe) != {"baseline", "candidate"}:
+                problems.append(f"{label} retained-byte probe is incomplete for {cell}")
+                continue
+            for role, retained in probe.items():
+                if not isinstance(retained, dict) or type(retained.get("tree_retained_bytes")) is not int or retained["tree_retained_bytes"] <= 0 or \
+                        type(retained.get("fact_retained_bytes")) is not int or retained["fact_retained_bytes"] < 0:
+                    problems.append(f"{label} retained tree/fact measurements are missing for {cell}/{role}")
+    return problems
+
+
 def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:
     """Validate opt-in #3397 evidence shape and re-derive its budget verdict."""
     label = "issue #3397 ast-pilot receipt"
@@ -1947,6 +2432,138 @@ def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expec
                    "diagnostics_identical": all(cells[cell]["diagnostics_identical"] for cell in AST_PILOT_CELLS)}
     if summary.get("verdict") != ast_pilot_budget_verdict(metrics, retained, correctness):
         problems.append(f"{label} verdict differs from the budget recomputed from its metrics")
+    return problems
+
+
+def validate_constant_reuse_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:
+    """Validate opt-in #3011 evidence shape: both cells complete, measured and diagnostics-identical."""
+    label = "issue #3011 constant-reuse receipt"
+    if not isinstance(summary, dict) or summary.get("schema") != CONSTANT_REUSE_ACCEPTANCE_SCHEMA or summary.get("status") != "complete":
+        return [f"{label} has an unexpected or incomplete schema"]
+    problems = []
+    if summary.get("source_revision") != expected_revision:
+        problems.append(f"{label} source revision does not match candidate HEAD")
+    profile = summary.get("profile")
+    if not isinstance(profile, dict) or set(profile) != set(CONSTANT_REUSE_ACCEPTANCE_PROFILE) | {"source_sha256"} or \
+            any(profile.get(key) != value for key, value in CONSTANT_REUSE_ACCEPTANCE_PROFILE.items()) or \
+            not SHA256.fullmatch(str(profile.get("source_sha256", ""))):
+        problems.append(f"{label} profile does not match the fixed acceptance profile")
+    candidate = summary.get("candidate_compiler")
+    if not isinstance(candidate, dict) or not SHA256.fullmatch(str(candidate.get("sha256", ""))):
+        problems.append(f"{label} candidate compiler identity is missing")
+    elif expected_candidate_sha and candidate.get("sha256") != expected_candidate_sha:
+        problems.append(f"{label} timed compiler differs from the frozen candidate-HEAD binary")
+    cells = summary.get("cells")
+    if not isinstance(cells, dict) or set(cells) != set(CONSTANT_REUSE_CELLS):
+        return [*problems, f"{label} does not hold exactly the intern and cse cells"]
+    for cell in CONSTANT_REUSE_CELLS:
+        row = cells[cell] if isinstance(cells[cell], dict) else {}
+        values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+        rss = values.get("peak_rss") if isinstance(values.get("peak_rss"), dict) else {}
+        code = values.get("code_bytes") if isinstance(values.get("code_bytes"), dict) else {}
+        instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else None
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
+            problems.append(f"{label} {cell} wall-time measurements are missing")
+        if not all(_finite_positive(rss.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} peak-RSS measurements are missing")
+        if not all(_finite_positive(code.get(key)) for key in ("a_value", "b_value")):
+            problems.append(f"{label} {cell} executable-section code bytes are missing")
+        if instructions is None:
+            problems.append(f"{label} {cell} retired-instruction metric is missing")
+        elif instructions.get("ratio") is None:
+            counters = values.get("counter_availability")
+            if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
+                problems.append(f"{label} {cell} retired-instruction NA has no unavailable-counter reason")
+        elif not _finite_positive(instructions.get("ratio")) or \
+                not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} retired-instruction counts are invalid")
+        if row.get("diagnostics_identical") is not True:
+            problems.append(f"{label} {cell} diagnostics differ between the default and flagged compiles")
+    return problems
+
+
+def process_floor_verdict(cells: object) -> dict:
+    """Issue #1125's stop rule over the cells' paired wall ratios (B/A).
+
+    A control resolves the floor only when its ratio's 95% CI lies wholly
+    outside the A/A cell's. Each `*_ms` value is A's median minus the
+    control's, so a positive value is what the x86-64 object compile costs
+    above that control; it is None when either median is missing.
+    """
+    def metric(cell: str, key: str) -> dict:
+        row = cells.get(cell) if isinstance(cells, dict) and isinstance(cells.get(cell), dict) else {}
+        values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        return values.get(key) if isinstance(values.get(key), dict) else {}
+
+    def above(values: dict) -> float | None:
+        a, b = values.get("a_median"), values.get("b_median")
+        return round((a - b) * 1000.0, 6) if _finite_positive(a) and _finite_positive(b) else None
+
+    aa = metric("aa", "wall")
+    aa_low, aa_high = aa.get("ci_low"), aa.get("ci_high")
+    result: dict = {"aa_interval": [aa_low, aa_high]}
+    for cell in ("aarch64", "syntax-only"):
+        wall = metric(cell, "wall")
+        low, high = wall.get("ci_low"), wall.get("ci_high")
+        bounded = all(_finite_positive(value) for value in (low, high, aa_low, aa_high))
+        result[cell] = {"ci": [low, high], "outside_aa": bool(bounded and (high < aa_low or low > aa_high)),
+                        "wall_ms": above(wall), "task_clock_ms": above(metric(cell, "task_clock"))}
+    return result
+
+
+def validate_process_floor_acceptance(summary: object, expected_revision: str,
+                                      expected_candidate_sha: str | None = None) -> list[str]:
+    """Validate #1125 floor evidence: every cell complete and measured, A/A objects identical, verdict re-derived."""
+    label = "issue #1125 process-floor receipt"
+    if not isinstance(summary, dict) or summary.get("schema") != PROCESS_FLOOR_SCHEMA or summary.get("status") != "complete":
+        return [f"{label} has an unexpected or incomplete schema"]
+    problems = []
+    if summary.get("source_revision") != expected_revision:
+        problems.append(f"{label} source revision does not match candidate HEAD")
+    if summary.get("profile") != PROCESS_FLOOR_PROFILE:
+        problems.append(f"{label} profile does not match the fixed profile")
+    candidate = summary.get("candidate_compiler")
+    if not isinstance(candidate, dict) or not SHA256.fullmatch(str(candidate.get("sha256", ""))):
+        problems.append(f"{label} candidate compiler identity is missing")
+    elif expected_candidate_sha and candidate.get("sha256") != expected_candidate_sha:
+        problems.append(f"{label} timed compiler differs from the frozen candidate-HEAD binary")
+    cells = summary.get("cells")
+    if not isinstance(cells, dict) or set(cells) != set(PROCESS_FLOOR_CELLS):
+        return [*problems, f"{label} does not hold exactly the aa, aarch64 and syntax-only cells"]
+    for cell in PROCESS_FLOOR_CELLS:
+        row = cells[cell] if isinstance(cells[cell], dict) else {}
+        values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+        task = values.get("task_clock") if isinstance(values.get("task_clock"), dict) else {}
+        instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else None
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
+            problems.append(f"{label} {cell} wall-time measurements are missing")
+        if not all(_finite_positive(task.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} task-clock measurements are missing")
+        # Peak RSS is NA when the compiler stays near the perf wrapper's own footprint; the compiler's own wall_ns
+        # is NA when -fmetrics-out is unavailable for either command. A value that is present must be valid.
+        for key in ("peak_rss", "compiler_wall"):
+            optional = values.get(key)
+            if not isinstance(optional, dict) or \
+                    any(optional.get(field) is not None and not _finite_positive(optional.get(field))
+                        for field in ("a_median", "b_median")):
+                problems.append(f"{label} {cell} {key} record is missing or invalid")
+        if instructions is None:
+            problems.append(f"{label} {cell} retired-instruction metric is missing")
+        elif instructions.get("ratio") is None:
+            counters = values.get("counter_availability")
+            if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
+                problems.append(f"{label} {cell} retired-instruction NA has no unavailable-counter reason")
+        elif not _finite_positive(instructions.get("ratio")) or \
+                not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} retired-instruction counts are invalid")
+        if row.get("diagnostics_identical") is not True:
+            problems.append(f"{label} {cell} diagnostics differ between the two commands")
+        if cell == "aa" and row.get("outputs_identical") is not True:
+            problems.append(f"{label} aa objects differ between two runs of the same command")
+    if summary.get("verdict") != process_floor_verdict(cells):
+        problems.append(f"{label} verdict does not follow from its cells")
     return problems
 
 
@@ -4405,20 +5022,28 @@ INVENTORY_LEGS = {
         "analyzer": ("build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"),
         "inline": ("uarch_lab:compare@canonical-inline-self-host",),
         "ast-pilot": ("uarch_lab:compare@ast-pilot-acceptance",),
+        "ast-retirement": ("uarch_lab:compare@ast-retirement-acceptance",),
+        "constant-reuse": ("uarch_lab:compare@constant-reuse-acceptance",),
+        "process-floor": ("uarch_lab:compare@process-floor",),
         "real-source": ("build:bench_throughput@throughput-real-source",),
         "production-profile": ("build:production_profile",),
         "compiler-probes": ("tool:fast_ra_scaling.c", "tool:machine_line_mark_scaling.c"),
         "frontend-selector": ("tool:benchmark_frontend_scaling.py", "tool:selection_benchmark.py", "ide:bench"),
+        "frontend-nesting": ("tool:benchmark_frontend_scaling.py@frontend-nesting",),
         "wild-linker": ("tool:wild_linker_bench.c",),
         "link-tls": ("tool:link_tls_bench.py",),
+        "self-host-inline": ("uarch_lab:compare@self-host-inline-compare",),
         "historical-corpus": ("build:bench_throughput@throughput-corpus-historical",),
     },
 }
 # Opt-in legs whose receipt record carries its own requested/status fields.
-INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pilot_acceptance",
+INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pilot_acceptance", "ast-retirement": "ast_retirement_acceptance",
+                            "constant-reuse": "constant_reuse_acceptance", "process-floor": "process_floor",
                             "real-source": "throughput_real_source", "production-profile": "production_profile",
                             "compiler-probes": "compiler_probes", "frontend-selector": "frontend_selector",
-                            "wild-linker": "wild_linker", "link-tls": "link_tls"}
+                            "frontend-nesting": "frontend_nesting",
+                            "wild-linker": "wild_linker", "link-tls": "link_tls",
+                            "self-host-inline": "selfhost_inline"}
 
 
 def inventory_leg_record(receipt: dict, leg: str) -> tuple[bool | None, str]:
@@ -4680,6 +5305,89 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                   for name, check in checks.items()]
         if ast.get("exit") not in (None, 0):
             lines.append(f"Issue #3397 profile exit: {ast.get('exit')}.")
+    retirement = receipt.get("ast_retirement_acceptance") if isinstance(receipt, dict) else None
+    if isinstance(retirement, dict) and retirement.get("requested"):
+        shown = retirement.get("summary") if isinstance(retirement.get("summary"), dict) else {}
+        cells = shown.get("cells") if isinstance(shown.get("cells"), dict) else {}
+        probes = shown.get("probes") if isinstance(shown.get("probes"), dict) else {}
+        lines += ["", f"Issue #4058 AST retirement: {retirement.get('status', 'NA')} "
+                  "(20 fixed default/default cells, 20 ABBA pairs each; report-only).",
+                  "Retained bytes below are the published AST tree and semantic node-fact components, "
+                  "measured in separate untimed probes. They are not peak RSS or a whole-frontend arena total. "
+                  "Separate symbol-binding bytes are retained in the raw report when the compiler exposes that counter. "
+                  "Missing instruction measurements leave acceptance incomplete.", "",
+                  "| Cell | Wall B/A [95% CI] | Instructions B/A | Peak RSS A / B | Tree bytes A / B | Fact bytes A / B |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for cell in AST_RETIREMENT_CELLS:
+            row = cells.get(cell) or {}
+            values = row.get("metrics") or {}
+            wall, instructions, rss = (values.get(name) or {} for name in ("wall", "instructions", "peak_rss"))
+            retained = probes.get(cell) or {}
+            a, b = retained.get("baseline") or {}, retained.get("candidate") or {}
+            lines.append("| %s | %s [%s, %s] | %s | %s / %s | %s / %s | %s / %s |" % (
+                cell, number(wall.get("ratio"), "%.4f"), number(wall.get("ci_low"), "%.4f"), number(wall.get("ci_high"), "%.4f"),
+                number(instructions.get("ratio"), "%.4f"), number(rss.get("a_median"), "%.0f"), number(rss.get("b_median"), "%.0f"),
+                number(a.get("tree_retained_bytes"), "%.0f"), number(b.get("tree_retained_bytes"), "%.0f"),
+                number(a.get("fact_retained_bytes"), "%.0f"), number(b.get("fact_retained_bytes"), "%.0f")))
+        if retirement.get("exit") not in (None, 0):
+            lines.append(f"Issue #4058 profile exit: {retirement.get('exit')}; required measurement remains incomplete.")
+    reuse = receipt.get("constant_reuse_acceptance") if isinstance(receipt, dict) else None
+    if isinstance(reuse, dict) and reuse.get("requested"):
+        reuse_summary = reuse.get("summary") if isinstance(reuse.get("summary"), dict) else {}
+        lines += ["", f"Issue #3011 constant-reuse arms: {reuse.get('status', 'NA')} "
+                  f"({CONSTANT_REUSE_ACCEPTANCE_PROFILE['pairs']} ABBA pairs per cell; report-only).",
+                  "One candidate binary on the -g0 unity object compile: A = default, B passes the cell's flag. "
+                  "Ratios below 1 mean B is lower. Counters may be NA when the host cannot schedule them.", "",
+                  "| Cell (B flag) | Wall B/A [95% CI] | Retired instructions B/A | Peak RSS A / B | Code bytes A / B | Diagnostics identical |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        cells = reuse_summary.get("cells") if isinstance(reuse_summary.get("cells"), dict) else {}
+        for cell, flag in CONSTANT_REUSE_CELLS.items():
+            row = cells.get(cell) if isinstance(cells.get(cell), dict) else {}
+            values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+            rss = values.get("peak_rss") if isinstance(values.get("peak_rss"), dict) else {}
+            code = values.get("code_bytes") if isinstance(values.get("code_bytes"), dict) else {}
+            lines.append("| %s (%s) | %s [%s, %s] | %s | %s / %s | %s / %s | %s |" % (
+                cell, flag, number(wall.get("ratio"), "%.4f"), number(wall.get("ci_low"), "%.4f"),
+                number(wall.get("ci_high"), "%.4f"), number((values.get("instructions") or {}).get("ratio"), "%.4f"),
+                number(rss.get("a_median"), "%.0f"), number(rss.get("b_median"), "%.0f"),
+                number(code.get("a_value"), "%.0f"), number(code.get("b_value"), "%.0f"),
+                row.get("diagnostics_identical", "NA")))
+        if reuse.get("exit") not in (None, 0):
+            lines.append(f"Issue #3011 profile exit: {reuse.get('exit')}.")
+    floor = receipt.get("process_floor") if isinstance(receipt, dict) else None
+    if isinstance(floor, dict) and floor.get("requested"):
+        floor_summary = floor.get("summary") if isinstance(floor.get("summary"), dict) else {}
+        lines += ["", f"Issue #1125 per-process floor: {floor.get('status', 'NA')} "
+                  f"({PROCESS_FLOOR_PROFILE['pairs']} ABBA pairs per cell; report-only).",
+                  f"One candidate binary in fresh processes on `{PROCESS_FLOOR_SOURCE.strip()}`: A = "
+                  f"`{PROCESS_FLOOR_PROFILE['compiler_modes']['a']}`, B = the cell's command. Wall is the harness span "
+                  "around the pinned perf wrapper; task-clock is the compiler process alone. A - B is what the "
+                  "x86-64 object compile costs above B. Counters may be NA when the host cannot schedule them.", "",
+                  "| Cell (B) | Wall A / B ms | Wall A - B ms | Wall B/A [95% CI] | Task-clock A / B ms "
+                  "| Instructions A / B | Outside A/A |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
+        cells = floor_summary.get("cells") if isinstance(floor_summary.get("cells"), dict) else {}
+        verdict = floor_summary.get("verdict") if isinstance(floor_summary.get("verdict"), dict) else {}
+        for cell, command in PROCESS_FLOOR_PROFILE["cells"].items():
+            row = cells.get(cell) if isinstance(cells.get(cell), dict) else {}
+            values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+            task = values.get("task_clock") if isinstance(values.get("task_clock"), dict) else {}
+            instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else {}
+            control = verdict.get(cell) if isinstance(verdict.get(cell), dict) else {}
+            milliseconds = [value * 1000.0 if _number(value) else None
+                            for value in (wall.get("a_median"), wall.get("b_median"), task.get("a_median"),
+                                          task.get("b_median"))]
+            lines.append("| %s (`%s`) | %s / %s | %s | %s [%s, %s] | %s / %s | %s / %s | %s |" % (
+                cell, command, number(milliseconds[0], "%.3f"), number(milliseconds[1], "%.3f"),
+                number(control.get("wall_ms") if cell != "aa" else None, "%.3f"),
+                number(wall.get("ratio"), "%.4f"), number(wall.get("ci_low"), "%.4f"),
+                number(wall.get("ci_high"), "%.4f"), number(milliseconds[2], "%.3f"), number(milliseconds[3], "%.3f"),
+                number(instructions.get("a_median"), "%.0f"), number(instructions.get("b_median"), "%.0f"),
+                "A/A" if cell == "aa" else control.get("outside_aa", "NA")))
+        if floor.get("exit") not in (None, 0):
+            lines.append(f"Issue #1125 profile exit: {floor.get('exit')}.")
     real = receipt.get("throughput_real_source") if isinstance(receipt, dict) else None
     if isinstance(real, dict) and real.get("requested"):
         profile = THROUGHPUT_REAL_SOURCE_PROFILE
@@ -4759,6 +5467,22 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
         for key, value in exits.items():
             if value not in (None, 0):
                 lines.append(f"Frontend-selector {key} exit: {value}.")
+    nesting = receipt.get("frontend_nesting") if isinstance(receipt, dict) else None
+    if isinstance(nesting, dict) and nesting.get("requested"):
+        profile = FRONTEND_NESTING_PROFILE["frontend_scaling"]
+        lines += ["", f"Deep-nesting families ({FRONTEND_NESTING_PROFILE['name']}): {nesting.get('status', 'NA')} "
+                  f"(benchmark_frontend_scaling.py --suite nesting on both binaries, depths "
+                  f"{', '.join(str(depth) for depth in profile['depths'])}; wall medians; report-only).", "",
+                  "| Cell | Base | Head | Head / base |", "| --- | ---: | ---: | ---: |"]
+        for row in nesting.get("cells") if isinstance(nesting.get("cells"), list) else []:
+            values = row.get("values") if isinstance(row, dict) and isinstance(row.get("values"), list) else []
+            ok = len(values) == 2 and all(_finite_positive(value) for value in values)
+            lines.append("| %s | %s | %s | %s |" % (
+                row.get("name") if isinstance(row, dict) else "NA",
+                "%.1f ms" % (values[0] * 1000.0) if ok else "NA", "%.1f ms" % (values[1] * 1000.0) if ok else "NA",
+                "%.4f" % (values[1] / values[0]) if ok else "NA"))
+        if nesting.get("exit") not in (None, 0):
+            lines.append(f"Frontend-nesting exit: {nesting.get('exit')}.")
     linker = receipt.get("wild_linker") if isinstance(receipt, dict) else None
     if isinstance(linker, dict) and linker.get("requested"):
         linkers = linker.get("linkers") if isinstance(linker.get("linkers"), dict) else {}
@@ -4806,6 +5530,39 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                 profile["pairs"]))
         if link_tls.get("exit") not in (None, 0):
             lines.append(f"TLS companion link harness exit: {link_tls.get('exit')}.")
+    selfhost = receipt.get("selfhost_inline") if isinstance(receipt, dict) else None
+    if isinstance(selfhost, dict) and selfhost.get("requested"):
+        profile = SELFHOST_INLINE_PROFILE
+        digest = selfhost.get("digest") if isinstance(selfhost.get("digest"), dict) else {}
+        lines += ["", f"Self-built inline-mode compilers ({profile['name']}): {selfhost.get('status', 'NA')} (each "
+                  "side's stage-1 compiler built with `-fcanonical-inline`, both compiling the merge-base tree with it, "
+                  f"byte-identical outputs required, {profile['pairs']} ABBA pairs on CPU {profile['cpu']} plus "
+                  "topdown and sampling; report-only).", "",
+                  "| Metric | Base | Head | Head / base [95% CI] |", "| --- | ---: | ---: | ---: |"]
+        metrics = digest.get("metrics") if isinstance(digest.get("metrics"), dict) else {}
+        for key in ("wall", "task_clock", "instructions", "cycles", "ipc", "branch_misses", "peak_rss"):
+            row = metrics.get(key) if isinstance(metrics.get(key), dict) else {}
+            values = [row.get(name) for name in ("a_median", "b_median", "ratio")]
+            interval = [row.get(name) for name in ("ci_low", "ci_high")]
+            lines.append("| %s | %s | %s | %s |" % (
+                key, *("%.6g" % value if _finite_positive(value) else "NA" for value in values[:2]),
+                ("%.4f" % values[2] if _finite_positive(values[2]) else "NA") +
+                (" [%.4f, %.4f]" % tuple(interval) if all(_finite_positive(value) for value in interval) else "")))
+        code = digest.get("code_bytes") if isinstance(digest.get("code_bytes"), dict) else {}
+        if all(_finite_positive(code.get(name)) for name in ("a_value", "b_value", "ratio")):
+            lines.append("| code bytes | %d | %d | %.4f |" % (code["a_value"], code["b_value"], code["ratio"]))
+        frontend = digest.get("frontend") if isinstance(digest.get("frontend"), list) else []
+        if frontend:
+            lines += ["", "| Front-end topdown metric | Base | Head | Change |", "| --- | ---: | ---: | ---: |"]
+            for row in frontend:
+                row = row if isinstance(row, dict) else {}
+                change = row.get("relative_change_percent")
+                lines.append("| %s %s | %s | %s | %s |" % (
+                    row.get("group", "NA"), row.get("metric", "NA"),
+                    *("%.6g" % row[key] if isinstance(row.get(key), (int, float)) else "NA" for key in ("a", "b")),
+                    "%+.2f%%" % change if isinstance(change, (int, float)) else "NA"))
+        if selfhost.get("exit") not in (None, 0):
+            lines.append(f"Self-built inline-mode harness exit: {selfhost.get('exit')}.")
     reasons = receipt.get("reasons") if isinstance(receipt, dict) else None
     warnings = summary.get("warnings")
     for item in (*notes, *(reasons if isinstance(reasons, list) else ()),

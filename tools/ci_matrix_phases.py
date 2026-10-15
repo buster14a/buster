@@ -21,6 +21,15 @@ PHASES = {"configure", "build", "validation", "test", "post_test", "self_host", 
 ID = re.compile(r"[A-Za-z0-9_-]+\Z")
 MAX_BYTES = 4 * 1024 * 1024
 RESOURCE_SCHEMA = "buster-process-resources-v1"
+# build.c MATRIX_SUPERBUILD_ANALYZE_OVERLAP_MEMORY: the analyzers overlap each
+# other (inner --parallel 2) only on a host with this much memory.
+ANALYZE_OVERLAP_MEMORY = 12 * 1024 ** 3
+# build.c MATRIX_SUPERBUILD_POST_TEST_OVERLAP_THREADS: two analyzer workers,
+# the optnone frontend and the self-host worker.
+POST_TEST_OVERLAP_THREADS = 4
+# Pool-edge prefix of analyzers that run beside the self-host worker in their
+# own outer slot (build.c matrix_superbuild_post_test_assign).
+POST_TEST_POOL = "post-test-"
 
 
 def require(condition, message):
@@ -76,6 +85,11 @@ def capability_index(items, expected_ids):
 
 def task_id(tree, phase, config=""):
     return f"{tree}-{phase}-{config or 'all'}"
+
+
+def option_value(argv, option):
+    at = argv.index(option) if option in argv else len(argv)
+    return argv[at + 1] if at + 1 < len(argv) else None
 
 
 def validate_resources(resources, platform):
@@ -144,6 +158,10 @@ def validate_plan(plan, coverage, environment):
                 "all-builds admission is only valid for pooled Windows x86-64 checks")
     for key in ("outer_jobs", "logical_cpus", "cpu_budget"):
         require(integer(plan.get(key)) and plan[key] > 0, f"invalid quota: {key}")
+    # Journals before the post-test edge (#3912) carry no host memory; they
+    # predate both the recorded analyzer quota and the extra outer slot.
+    memory = plan.get("memory_bytes")
+    require("memory_bytes" not in plan or integer(memory) and memory > 0, "invalid quota: memory_bytes")
     require(plan.get("cpu_time") == plan.get("peak_rss") == "unknown", "unmeasured resources must be unknown")
     require(coverage.get("phase") == "complete", "coverage is incomplete")
     trees = index(plan.get("trees"), "tree")
@@ -200,8 +218,15 @@ def validate_plan(plan, coverage, environment):
         expected_tasks.add(task_id("matrix", "scheduler"))
     require(set(tasks) == expected_tasks, f"missing/unknown task identities: {sorted(set(tasks) ^ expected_tasks)}")
     budget = plan["cpu_budget"]
+    # build.c matrix_superbuild_analyze_jobs and matrix_superbuild_post_test_assign:
+    # a single pooled tree's overlapping analyzers take their own outer slot
+    # beside the self-host worker, which then waits for the tree's tests.
+    analyze_jobs = None if memory is None else 2 if budget >= 3 and memory >= ANALYZE_OVERLAP_MEMORY else 1
+    scheduled = {key for key in ("self_host", "unity_analysis") if obligations.get(key, {}).get("state") in ("scheduled", "success")}
+    post_test_slot = int(plan["scheduler"] == "pooled" and len(trees) == 1 and scheduled == {"self_host", "unity_analysis"} and
+                         analyze_jobs == 2 and budget >= POST_TEST_OVERLAP_THREADS)
     expected_outer = 1 if plan["scheduler"] == "direct" else min(len(trees), budget if budget <= 4 else max(1, budget // 2))
-    require(plan["outer_jobs"] == expected_outer, "outer quota differs from native policy")
+    require(plan["outer_jobs"] == expected_outer + post_test_slot, "outer quota differs from native policy")
     for name, task in tasks.items():
         require(task.get("phase") in PHASES, f"unknown phase: {name}")
         require(name == task_id(task.get("tree"), task["phase"], task.get("configuration", "")), f"mismatched task identity: {name}")
@@ -222,9 +247,13 @@ def validate_plan(plan, coverage, environment):
                 expected_pool = f"validation-{tree_id}"
                 expected_dep = task_id(tree_id, "validation", configs[at - 1]) if at else task_id(tree_id, "build")
             elif task["phase"] == "post_test":
-                expected_pool, expected_dep = f"validation-{tree_id}", task_id(tree_id, "validation", "Release")
+                expected_pool = f"{POST_TEST_POOL}{tree_id}" if post_test_slot else f"validation-{tree_id}"
+                expected_dep = task_id(tree_id, "validation", "Release")
+                require(analyze_jobs is None or task["inner_jobs"] == analyze_jobs, f"analyzer quota differs from native policy: {name}")
             elif task["phase"] == "self_host":
-                expected_pool, expected_dep = "self-host", task_id(tree_id, "build")
+                last_config = trees[tree_id]["configurations"].split(";")[-1]
+                expected_pool = "self-host"
+                expected_dep = task_id(tree_id, "validation", last_config) if post_test_slot else task_id(tree_id, "build")
         require(task["pool_edge"] == expected_pool and dep == expected_dep, f"admission/dependency identity mismatch: {name}")
         # Serialized test phases (build.c matrix_superbuild_allocate_jobs): a
         # tree's first test command also waits for another tree's last one.
@@ -316,8 +345,10 @@ def analyze(root, coverage, environment=None):
                     require(at + 1 < len(argv) and same_path(argv[at + 1], tree["build_directory"]), f"child build/tree mismatch: {name}")
                 else:
                     require(task["phase"] == "post_test" and len(argv) > 2 and argv[1] == "clang_analyze" and same_path(argv[2], tree["build_directory"]), f"missing tree command: {name}")
-                if task["phase"] == "build" and plan["scheduler"] == "pooled":
-                    require("--parallel" in argv and argv.index("--parallel") + 1 < len(argv) and argv[argv.index("--parallel") + 1] == str(task["inner_jobs"]), f"Ninja quota mismatch: {name}")
+                if plan["scheduler"] == "pooled" and (task["phase"] == "build" or task["phase"] == "post_test" and integer(task["inner_jobs"])):
+                    require(option_value(argv, "--parallel") == str(task["inner_jobs"]), f"Ninja quota mismatch: {name}")
+        if task["phase"] == "scheduler":
+            require(option_value(end["argv"], "--parallel") == str(plan["outer_jobs"]), "outer Ninja quota mismatch")
         records[name] = end
     build_barrier_us = max((records[name]["end_us"] for name, task in tasks.items() if task["phase"] == "build"), default=0)
     for name, task in tasks.items():
@@ -367,17 +398,7 @@ def analyze(root, coverage, environment=None):
             require(records[before]["end_us"] <= records[after]["start_us"], f"overlap inside one pool edge: {key}")
         edges.append({"id": key, "tree": tasks[names[0]]["tree"], "phase": tasks[names[0]]["phase"],
                       "start_us": min(records[n]["start_us"] for n in names), "end_us": max(records[n]["end_us"] for n in names)})
-    active, maximum, events, idle = 0, 0, [], []
-    for edge in edges:
-        events.extend(((edge["start_us"], 1), (edge["end_us"], -1)))
-    previous = None
-    for timestamp, delta in sorted(events):
-        if previous is not None and timestamp > previous and active == 0:
-            idle.append([previous, timestamp])
-        active += delta
-        require(0 <= active <= plan["outer_jobs"], "impossible pool overlap/quota")
-        maximum = max(maximum, active)
-        previous = timestamp
+    maximum, idle = pool_occupancy(edges, plan["outer_jobs"])
     ranking = rank(plan, trees, tasks, records)
     return {"schema": SCHEMA, "complete": True, "identity": plan["identity"], "scheduler": plan["scheduler"],
             "test_admission": plan.get("test_admission", "overlap"),
@@ -389,6 +410,36 @@ def analyze(root, coverage, environment=None):
                                key=lambda e: (e["time_us"], e["order"], e["task"])),
             "events": sorted([dict(record, phase=tasks[name]["phase"], tree=tasks[name]["tree"]) for name, record in records.items()], key=lambda r: (r["start_us"], r["id"])),
             "predictions": predict(plan, edges), "errors": []}
+
+
+def pool_class(edge):
+    return "post_test" if edge["id"].startswith(POST_TEST_POOL) else "cpu"
+
+
+def pool_slots(edges, outer_jobs):
+    """The outer quota is the CPU pool plus one slot per post-test edge."""
+    post_test = sum(pool_class(edge) == "post_test" for edge in edges)
+    require(post_test <= 1 and outer_jobs > post_test, "impossible pool overlap/quota")
+    return {"cpu": outer_jobs - post_test, "post_test": post_test}
+
+
+def pool_occupancy(edges, outer_jobs):
+    """Each pool and the whole outer scheduler stay within their admitted slots."""
+    limits = pool_slots(edges, outer_jobs)
+    active, maximum, events, idle = dict.fromkeys(limits, 0), 0, [], []
+    for edge in edges:
+        events.extend(((edge["start_us"], 1, pool_class(edge)), (edge["end_us"], -1, pool_class(edge))))
+    previous = None
+    for timestamp, delta, kind in sorted(events):
+        total = sum(active.values())
+        if previous is not None and timestamp > previous and total == 0:
+            idle.append([previous, timestamp])
+        active[kind] += delta
+        total += delta
+        require(0 <= active[kind] <= limits[kind] and total <= outer_jobs, "impossible pool overlap/quota")
+        maximum = max(maximum, total)
+        previous = timestamp
+    return maximum, idle
 
 
 def rank(plan, trees, tasks, records):
@@ -439,15 +490,17 @@ def predict(plan, edges):
                     predecessors[edge].add(tasks[predecessor]["pool_edge"])
             if plan.get("test_admission", "overlap") == "all-builds" and task["phase"] == "validation":
                 predecessors[edge].update(build_edges)
+    limits = pool_slots(edges, plan["outer_jobs"])
     def replay(order):
         priorities = {tree: i for i, tree in enumerate(order)}
         waiting = sorted(edges, key=lambda e: (priorities[e["tree"]], e["phase"] != "build", e["id"]))
         running, completed, now = [], set(), 0
         while waiting or running:
             ready = [edge for edge in waiting if predecessors[edge["id"]] <= completed]
-            for edge in ready[:max(0, plan["outer_jobs"] - len(running))]:
-                waiting.remove(edge)
-                running.append((now + edge["end_us"] - edge["start_us"], edge))
+            for edge in ready:
+                if sum(pool_class(other) == pool_class(edge) for _, other in running) < limits[pool_class(edge)]:
+                    waiting.remove(edge)
+                    running.append((now + edge["end_us"] - edge["start_us"], edge))
             require(bool(running), "prediction dependency deadlock")
             now = min(end for end, _ in running)
             finished = [edge for end, edge in running if end == now]

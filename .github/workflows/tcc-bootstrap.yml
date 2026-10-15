@@ -119,6 +119,7 @@ jobs:
           rm -rf .cache/bootstrap-driver
           ./build.sh time_trace_summary_self_test
           ./build.sh time_trace_summary_self_test
+          ./build.sh test_openssl_controls
           ./build.sh qemu_input_self_test
           ./build.sh compiler_profile_qualification --self-test
           ./build.sh compiler_profile_qualification --self-test-main-route
@@ -133,6 +134,10 @@ jobs:
           ./build.sh compiler_profile_qualification --self-test-utility-controller
           ./build.sh compiler_profile_qualification --plan
           ./build.sh compiler_profile_qualification --self-test-preparation-controller
+          ./build.sh compiler_profile_qualification --self-test-preparation-failed-phase "$RUNNER_TEMP/compiler-preparation-failed-phase" |
+            tee "$RUNNER_TEMP/compiler-preparation-failed-phase.log"
+          PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_sampling_publication_test.py --preparation-failed-phase \
+            "$RUNNER_TEMP/compiler-preparation-failed-phase" "$RUNNER_TEMP/compiler-preparation-failed-phase.log"
           python3 -B tools/tests/compiler_sampling_packet_export_test.py "$PWD/build.sh" "$RUNNER_TEMP/compiler-sampling-packet-proof"
 
       - name: Exercise native external-project refusal controls

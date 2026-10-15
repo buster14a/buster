@@ -13,6 +13,7 @@
 #include <buster/lib/arena.h>
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
 #include <buster/lib/compiler/assembly/x86_64_metadata.h>
+#include <buster/lib/integer.h>
 #include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
@@ -120,134 +121,10 @@ BUSTER_GLOBAL_LOCAL bool jit_address_difference(u64 target, u64 place, s64 adden
     return jit_add_s64(difference, addend, result);
 }
 
-BUSTER_GLOBAL_LOCAL bool jit_address_addend(u64 address, s64 addend, u64* result)
-{
-    if (addend < 0)
-    {
-        u64 magnitude = (u64)(-(addend + 1)) + 1;
-        if (magnitude > address)
-        {
-            return false;
-        }
-        *result = address - magnitude;
-    }
-    else
-    {
-        u64 magnitude = (u64)addend;
-        if (magnitude > UINT64_MAX - address)
-        {
-            return false;
-        }
-        *result = address + magnitude;
-    }
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool jit_aarch64_page21_instruction_valid(u32 instruction)
-{
-    return (instruction & UINT32_C(0xffffffe0)) == UINT32_C(0x90000000);
-}
-
-BUSTER_GLOBAL_LOCAL bool jit_aarch64_pageoff12_shift(u32 instruction, u32* shift)
-{
-    if (shift)
-    {
-        u32 base = instruction & UINT32_C(0xffc00000);
-        bool valid_ldst = false;
-        switch (base)
-        {
-        case UINT32_C(0x39000000):
-        case UINT32_C(0x39400000):
-        case UINT32_C(0x39800000):
-        case UINT32_C(0x39c00000):
-        case UINT32_C(0x79000000):
-        case UINT32_C(0x79400000):
-        case UINT32_C(0x79800000):
-        case UINT32_C(0x79c00000):
-        case UINT32_C(0xb9000000):
-        case UINT32_C(0xb9400000):
-        case UINT32_C(0xb9800000):
-        case UINT32_C(0xf9000000):
-        case UINT32_C(0xf9400000):
-        case UINT32_C(0xf9800000):
-        case UINT32_C(0x3d000000):
-        case UINT32_C(0x3d400000):
-        case UINT32_C(0x3d800000):
-        case UINT32_C(0x3dc00000):
-        case UINT32_C(0x7d000000):
-        case UINT32_C(0x7d400000):
-        case UINT32_C(0xbd000000):
-        case UINT32_C(0xbd400000):
-        case UINT32_C(0xfd000000):
-        case UINT32_C(0xfd400000):
-            valid_ldst = true;
-            break;
-        default:
-            break;
-        }
-        if (valid_ldst)
-        {
-            u32 implicit_shift = instruction >> 30;
-            if (!implicit_shift && (instruction & UINT32_C(0x04800000)) == UINT32_C(0x04800000))
-            {
-                implicit_shift = 4;
-            }
-            if (instruction & (UINT32_C(0xfff) << 10))
-            {
-                return false;
-            }
-            *shift = implicit_shift;
-            return true;
-        }
-        if ((instruction & UINT32_C(0xffc00000)) == UINT32_C(0x91000000) &&
-            !(instruction & (UINT32_C(0xfff) << 10)))
-        {
-            *shift = 0;
-            return true;
-        }
-    }
-
-    return false;
-}
-
 bool jit_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch, u64 place, u64 target, s64 addend)
 {
-    if (patch && !(place & 3))
-    {
-        u64 address = 0;
-        if (jit_address_addend(target, addend, &address))
-        {
-            u32 instruction = 0;
-            memcpy(&instruction, patch, sizeof(instruction));
-            if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
-            {
-                if (!jit_aarch64_page21_instruction_valid(instruction))
-                {
-                    return false;
-                }
-                u32 patched = 0;
-                if (!a64_adrp_encode(instruction & 31, place, address, &patched))
-                {
-                    return false;
-                }
-                memcpy(patch, &patched, sizeof(patched));
-                return true;
-            }
-            if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
-            {
-                u32 shift = 0;
-                if (jit_aarch64_pageoff12_shift(instruction, &shift) && !((address & 0xfff) & ((1u << shift) - 1)))
-                {
-                    instruction &= ~(UINT32_C(0xfff) << 10);
-                    instruction |= (u32)((address & 0xfff) >> shift) << 10;
-                    memcpy(patch, &instruction, sizeof(instruction));
-                    return true;
-                }
-            }
-        }
-    }
-
-    return false;
+    return (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12) &&
+           a64_page_relocation_apply(kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21, patch, place, target, addend);
 }
 
 
@@ -492,7 +369,7 @@ BUSTER_GLOBAL_LOCAL bool jit_external_data_image_range(ObjectFile const* object,
             *failing_symbol = symbol->name;
             u64 target = (u64)(uintptr_t)options.bindings[binding_indices[relocation->symbol]].address;
             u64 place_offset = 0;
-            valid = jit_address_addend(target, relocation->addend, &target) &&
+            valid = u64_add_s64_checked(target, relocation->addend, &target) &&
                     jit_add_u64(class_offsets[protection], section_offsets[relocation->section], &place_offset) &&
                     jit_add_u64(place_offset, relocation->offset, &place_offset);
             if (valid)
@@ -883,7 +760,7 @@ BUSTER_GLOBAL_LOCAL bool jit_apply_relocations(JitProgram* program, JitOptions o
         else
         {
             u64 value = 0;
-            if (!jit_address_addend(target, relocation->addend, &value))
+            if (!u64_add_s64_checked(target, relocation->addend, &value))
             {
                 program->error = JIT_ERROR_CAPACITY;
                 program->failing_symbol = symbol->name;
@@ -919,6 +796,11 @@ JitProgram jit_link_object(ObjectFile const* object, JitOptions options)
         (object->relocation_count && !object->relocations) || (options.binding_count && !options.bindings))
     {
         result.error = JIT_ERROR_INVALID_INPUT;
+        return result;
+    }
+    if (object->requires_executable_stack)
+    {
+        result.error = JIT_ERROR_EXECUTABLE_STACK;
         return result;
     }
     if (object->target.cpu_arch != target_native.cpu_arch || object->target.os != target_native.os ||
@@ -1419,6 +1301,9 @@ String8 jit_error_string(JitError error)
             break;
         case JIT_ERROR_INIT_FINI_UNSUPPORTED:
             result = S8("runtime initializer/finalizer arrays are not supported by the JIT");
+            break;
+        case JIT_ERROR_EXECUTABLE_STACK:
+            result = S8("objects requiring an executable stack are not supported by the JIT");
             break;
         default:
             result = S8("unknown JIT error");

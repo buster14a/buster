@@ -61,7 +61,8 @@
 //                                                  and relocation rendering)
 //   object_elf_*_relocation_name                   unsupported ELF type names
 //   object_elf_unsupported_relocation              architecture/type diagnostics
-//   object_read_u16 .. object_read_string_checked  checked reading primitives
+//   object_read_string_checked                     checked string-table read
+//                                                  (fields: byte_slice_read_*)
 //   object_coff_comdat_is_replaceable              COFF COMDAT selection
 //   object_read_elf, object_read_coff,           the three format readers;
 //                                                  COFF joins repeated C13
@@ -116,9 +117,8 @@
 #include <buster/lib/compiler/object/object_internal.h>
 
 #include <buster/lib/compiler/assembly/aarch64_encoding.h>
-#include <buster/lib/compiler/assembly/x86_64_metadata.h>
+#include <buster/lib/byte_writer.h>
 #include <buster/lib/integer.h>
-#include <buster/lib/os.h>
 #include <buster/lib/string.h>
 
 BUSTER_GLOBAL_LOCAL void object_debug_module_set(Arena* arena, ObjectFile* object, String8 name, u64 code_size);
@@ -356,132 +356,6 @@ BUSTER_GLOBAL_LOCAL bool object_writer_capacity_aligned(ObjectFile* object, Obje
     return result;
 }
 
-// Mach-O's PAGE relocations are emitted against instructions whose immediate
-// field is zero.  Keep the instruction predicates here in lockstep with
-// LLVM's AArch64 PAGEOFF12 fixup rules: ADD (immediate) uses byte granularity,
-// while unsigned LD/ST (immediate) scales the low-page offset by access size.
-BUSTER_GLOBAL_LOCAL bool object_mach_page21_instruction_valid(u32 instruction)
-{
-    return (instruction & UINT32_C(0xffffffe0)) == UINT32_C(0x90000000);
-}
-
-BUSTER_GLOBAL_LOCAL bool object_mach_pageoff12_shift(u32 instruction, u32* shift)
-{
-    if (shift)
-    {
-        u32 base = instruction & UINT32_C(0xffc00000);
-        bool valid_ldst = false;
-        switch (base)
-        {
-        case UINT32_C(0x39000000):
-        case UINT32_C(0x39400000):
-        case UINT32_C(0x39800000):
-        case UINT32_C(0x39c00000):
-        case UINT32_C(0x79000000):
-        case UINT32_C(0x79400000):
-        case UINT32_C(0x79800000):
-        case UINT32_C(0x79c00000):
-        case UINT32_C(0xb9000000):
-        case UINT32_C(0xb9400000):
-        case UINT32_C(0xb9800000):
-        case UINT32_C(0xf9000000):
-        case UINT32_C(0xf9400000):
-        case UINT32_C(0xf9800000):
-        case UINT32_C(0x3d000000):
-        case UINT32_C(0x3d400000):
-        case UINT32_C(0x3d800000):
-        case UINT32_C(0x3dc00000):
-        case UINT32_C(0x7d000000):
-        case UINT32_C(0x7d400000):
-        case UINT32_C(0xbd000000):
-        case UINT32_C(0xbd400000):
-        case UINT32_C(0xfd000000):
-        case UINT32_C(0xfd400000):
-            valid_ldst = true;
-            break;
-        default:
-            break;
-        }
-        if (valid_ldst)
-        {
-            u32 implicit_shift = instruction >> 30;
-            if (!implicit_shift && (instruction & UINT32_C(0x04800000)) == UINT32_C(0x04800000))
-            {
-                implicit_shift = 4;
-            }
-            if (instruction & (UINT32_C(0xfff) << 10))
-            {
-                return false;
-            }
-            *shift = implicit_shift;
-            return true;
-        }
-        // The direct PAGEOFF form used by codegen is a 64-bit, non-setting ADD
-        // with no LSL #12.  Registers are intentionally unconstrained: a PAGE
-        // relocation does not imply that this instruction consumes a PAGE21's
-        // destination register.
-        if ((instruction & UINT32_C(0xffc00000)) == UINT32_C(0x91000000) &&
-            !(instruction & (UINT32_C(0xfff) << 10)))
-        {
-            *shift = 0;
-            return true;
-        }
-    }
-
-    return false;
-}
-
-// Checked target+addend arithmetic shared by the in-memory object linker.
-// Relocation addends are signed even when the resulting address is unsigned;
-// never rely on unsigned wraparound here because malformed objects must fail
-// before a patch is committed.
-BUSTER_GLOBAL_LOCAL bool object_address_addend(u64 address, s64 addend, u64* result)
-{
-    if (!result)
-    {
-        return false;
-    }
-    if (addend < 0)
-    {
-        u64 magnitude = (u64)(-(addend + 1)) + 1;
-        if (magnitude > address)
-        {
-            return false;
-        }
-        *result = address - magnitude;
-    }
-    else
-    {
-        u64 magnitude = (u64)addend;
-        if (magnitude > UINT64_MAX - address)
-        {
-            return false;
-        }
-        *result = address + magnitude;
-    }
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool object_absolute32s_value(u64 address, s64 addend, s32* result)
-{
-    bool valid = result && address <= (u64)INT64_MAX;
-    s64 value = valid ? (s64)address : 0;
-    if (valid && ((addend > 0 && value > INT64_MAX - addend) || (addend < 0 && value < INT64_MIN - addend)))
-    {
-        valid = false;
-    }
-    if (valid)
-    {
-        value += addend;
-        valid = value >= INT32_MIN && value <= INT32_MAX;
-    }
-    if (valid)
-    {
-        *result = (s32)value;
-    }
-    return valid;
-}
-
 #define OBJECT_AARCH64_LDR_X_UNSIGNED_MASK UINT32_C(0xffc00000)
 #define OBJECT_AARCH64_LDR_X_UNSIGNED UINT32_C(0xf9400000)
 #define OBJECT_AARCH64_ADD_X_IMMEDIATE UINT32_C(0x91000000)
@@ -502,7 +376,7 @@ BUSTER_GLOBAL_LOCAL bool object_aarch64_elf_ldst_scale(ObjectRelocationKind kind
     u32 canonical = word & ~(A64_IMM12_MAX << 10);
     bool valid = scale && object_relocation_kind_is_aarch64_elf_ldst(kind) &&
                  (word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000) &&
-                 object_mach_pageoff12_shift(canonical, &instruction_scale) &&
+                 a64_pageoff12_shift(canonical, &instruction_scale) &&
                  instruction_scale == (u32)(kind - OBJECT_RELOCATION_AARCH64_ELF_LDST8_LO12);
     if (valid)
     {
@@ -638,7 +512,7 @@ bool object_aarch64_elf_page_relocate(ObjectRelocationKind kind, u32 word, u64 p
 {
     u64 address = 0;
     bool valid = patched && !(place & 3) && object_aarch64_elf_got_addend_valid(kind, addend) &&
-                 object_address_addend(target, addend, &address);
+                 u64_add_s64_checked(target, addend, &address);
     if (valid && kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12)
     {
         valid = object_aarch64_got_load_read(word, 0);
@@ -692,7 +566,7 @@ bool object_aarch64_elf_page_relocate(ObjectRelocationKind kind, u32 word, u64 p
 BUSTER_GLOBAL_LOCAL bool object_aarch64_pe_pageoffset_12l_scale(u32 word, u32* scale)
 {
     u32 canonical = word & ~(A64_IMM12_MAX << 10);
-    bool valid = scale && (word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000) && object_mach_pageoff12_shift(canonical, scale);
+    bool valid = scale && (word & UINT32_C(0x3b000000)) == UINT32_C(0x39000000) && a64_pageoff12_shift(canonical, scale);
     return valid;
 }
 
@@ -780,7 +654,7 @@ bool object_aarch64_pe_page_relocate(ObjectRelocationKind kind, u32 word, u64 pl
     u64 address = 0;
     u32 represented = 0;
     bool valid = patched && !(place & 3) && object_aarch64_pe_page_addend_decode(kind, word, &inline_addend, &canonical) && inline_addend == 0 &&
-                 object_aarch64_pe_page_addend_encode(kind, canonical, addend, &represented) && object_address_addend(target, addend, &address);
+                 object_aarch64_pe_page_addend_encode(kind, canonical, addend, &represented) && u64_add_s64_checked(target, addend, &address);
     if (valid && kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21)
     {
         s64 displacement = 0;
@@ -874,7 +748,7 @@ bool object_aarch64_pe_tls_offset_relocate(ObjectRelocationKind kind, u32 word, 
     u32 scale = 0;
     bool valid = patched && object_aarch64_pe_tls_offset_addend_decode(kind, word, &inline_addend, &canonical) && inline_addend == 0 &&
                  addend >= 0 && addend <= object_aarch64_pe_tls_offset_addend_limit(kind, canonical, &scale) &&
-                 object_address_addend(offset, addend, &value) && value <= UINT32_C(0xffffff) && !(value & (((u64)1 << scale) - 1));
+                 u64_add_s64_checked(offset, addend, &value) && value <= UINT32_C(0xffffff) && !(value & (((u64)1 << scale) - 1));
     if (valid)
     {
         u32 immediate = kind == OBJECT_RELOCATION_AARCH64_PE_TLS_OFFSET_HI12 ? (u32)(value >> 12) : (u32)((value & A64_IMM12_MAX) >> scale);
@@ -918,52 +792,12 @@ bool object_aarch64_pe_tls_index_lo12_relocate(u32 word, u64 target, s64 addend,
     u32 represented = 0;
     bool valid = patched && object_aarch64_pe_tls_index_lo12_addend_decode(word, &inline_addend, &canonical) && inline_addend == 0 &&
                  object_aarch64_pe_tls_index_lo12_addend_encode(canonical, addend, &represented) &&
-                 object_address_addend(target, addend, &address) && !(address & 3);
+                 u64_add_s64_checked(target, addend, &address) && !(address & 3);
     if (valid)
     {
         *patched = canonical | ((u32)((address & A64_IMM12_MAX) / 4) << 10);
     }
     return valid;
-}
-
-BUSTER_GLOBAL_LOCAL bool object_apply_aarch64_mach_page_relocation(ObjectRelocationKind kind, u8* patch, u64 place, u64 target, s64 addend)
-{
-    if (patch && !(place & 3))
-    {
-        u64 address = 0;
-        if (object_address_addend(target, addend, &address))
-        {
-            u32 instruction = 0;
-            memcpy(&instruction, patch, sizeof(instruction));
-            if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21)
-            {
-                if (!object_mach_page21_instruction_valid(instruction))
-                {
-                    return false;
-                }
-                u32 patched = 0;
-                if (!a64_adrp_encode(instruction & 31, place, address, &patched))
-                {
-                    return false;
-                }
-                memcpy(patch, &patched, sizeof(patched));
-                return true;
-            }
-            if (kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
-            {
-                u32 shift = 0;
-                if (object_mach_pageoff12_shift(instruction, &shift) && !((address & 0xfff) & ((1u << shift) - 1)))
-                {
-                    instruction &= ~(UINT32_C(0xfff) << 10);
-                    instruction |= (u32)((address & 0xfff) >> shift) << 10;
-                    memcpy(patch, &instruction, sizeof(instruction));
-                    return true;
-                }
-            }
-        }
-    }
-
-    return false;
 }
 
 String8 object_format_name(ObjectFormat format)
@@ -1973,7 +1807,7 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_aarch64_immediate_relocation(Objec
     if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
     {
         u32 shift = 0;
-        if (!object_mach_pageoff12_shift(word, &shift))
+        if (!a64_pageoff12_shift(word, &shift))
         {
             return false;
         }
@@ -2165,7 +1999,7 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             if (((elf_adrp || pe_adrp) &&
                  !a64_pc_relative_patch(A64_OPCODE_ADRP, word, 0, &canonical)) ||
                 ((relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21) &&
-                 !object_mach_page21_instruction_valid(word)))
+                 !a64_page21_instruction_valid(word)))
             {
                 return false;
             }
@@ -4553,12 +4387,35 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_section(ObjectAssemblyBuffer* buff
     object_assembly_append_section_alignment(buffer, section);
     if (object_section_kind_is_zero_fill(section->kind))
     {
-        object_assembly_emit_labels(buffer, object, target, section_index, 0);
-        if (data_length)
+        // Keep each sorted symbol boundary visible; equal-offset aliases share one label position.
+        u64 offset = 0;
+        object_assembly_emit_labels(buffer, object, target, section_index, offset);
+        while (buffer->index.symbol_cursor < range.symbol_end &&
+               object->symbols[buffer->index.symbols[buffer->index.symbol_cursor]].value == offset)
         {
+            buffer->index.symbol_cursor += 1;
+        }
+        while (offset < data_length && !buffer->error)
+        {
+            u64 next_offset = data_length;
+            if (buffer->index.symbol_cursor < range.symbol_end)
+            {
+                u64 symbol_offset = object->symbols[buffer->index.symbols[buffer->index.symbol_cursor]].value;
+                if (symbol_offset > offset && symbol_offset < next_offset)
+                {
+                    next_offset = symbol_offset;
+                }
+            }
             object_assembly_append_string(buffer, S8("\t.zero "));
-            object_assembly_append_u64_decimal(buffer, data_length);
+            object_assembly_append_u64_decimal(buffer, next_offset - offset);
             object_assembly_append_string(buffer, S8("\n"));
+            offset = next_offset;
+            object_assembly_emit_labels(buffer, object, target, section_index, offset);
+            while (buffer->index.symbol_cursor < range.symbol_end &&
+                   object->symbols[buffer->index.symbols[buffer->index.symbol_cursor]].value == offset)
+            {
+                buffer->index.symbol_cursor += 1;
+            }
         }
         object_assembly_emit_sizes(buffer, object, target, section_index);
         return;
@@ -4753,70 +4610,6 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
             valid = false;
         }
     }
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool object_read_u16(ByteSlice bytes, u64 offset, u16* value)
-{
-    bool result;
-    if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
-    {
-        result = false;
-    }
-    else
-    {
-        memcpy(value, bytes.pointer + offset, sizeof(*value));
-        result = true;
-    }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool object_read_u32(ByteSlice bytes, u64 offset, u32* value)
-{
-    bool result;
-    if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
-    {
-        result = false;
-    }
-    else
-    {
-        memcpy(value, bytes.pointer + offset, sizeof(*value));
-        result = true;
-    }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool object_read_u64(ByteSlice bytes, u64 offset, u64* value)
-{
-    bool result;
-    if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
-    {
-        result = false;
-    }
-    else
-    {
-        memcpy(value, bytes.pointer + offset, sizeof(*value));
-        result = true;
-    }
-
-    return result;
-}
-
-BUSTER_GLOBAL_LOCAL bool object_read_s64(ByteSlice bytes, u64 offset, s64* value)
-{
-    bool result;
-    if (offset > bytes.length || sizeof(*value) > bytes.length - offset)
-    {
-        result = false;
-    }
-    else
-    {
-        memcpy(value, bytes.pointer + offset, sizeof(*value));
-        result = true;
-    }
-
     return result;
 }
 
@@ -5501,8 +5294,8 @@ BUSTER_GLOBAL_LOCAL bool object_read_elf_property_descriptor(ByteSlice bytes, u6
         u32 property_type = 0;
         u32 property_size = 0;
         u64 padded_size = 0;
-        accepted = descriptor_size - position >= ELF_PROPERTY_HEADER_SIZE && object_read_u32(bytes, offset + position, &property_type) &&
-                   object_read_u32(bytes, offset + position + 4, &property_size);
+        accepted = descriptor_size - position >= ELF_PROPERTY_HEADER_SIZE && byte_slice_read_u32(bytes, offset + position, &property_type) &&
+                   byte_slice_read_u32(bytes, offset + position + 4, &property_size);
         if (accepted)
         {
             position += ELF_PROPERTY_HEADER_SIZE;
@@ -5517,7 +5310,7 @@ BUSTER_GLOBAL_LOCAL bool object_read_elf_property_descriptor(ByteSlice bytes, u6
             // Buster object never does. NEEDED records, other x86 and
             // processor-specific types, and unknown types stay refused.
             bool used_record = cpu_arch_is_x86(architecture) && (property_type == ELF_PROPERTY_X86_ISA_1_USED || property_type == ELF_PROPERTY_X86_FEATURE_2_USED);
-            accepted = property_size == 4 && (used_record || (property_type == feature_type && object_read_u32(bytes, offset + position, &feature_bits) && !(feature_bits & ~feature_mask)));
+            accepted = property_size == 4 && (used_record || (property_type == feature_type && byte_slice_read_u32(bytes, offset + position, &feature_bits) && !(feature_bits & ~feature_mask)));
             position += padded_size;
         }
     }
@@ -5544,8 +5337,8 @@ BUSTER_GLOBAL_LOCAL ObjectError object_read_elf_optional_property(ByteSlice byte
             u32 descriptor_size = 0;
             u32 note_type = 0;
             u64 padded_size = 0;
-            accepted = size - position >= ELF_NOTE_HEADER_SIZE && object_read_u32(bytes, offset + position, &name_size) &&
-                       object_read_u32(bytes, offset + position + 4, &descriptor_size) && object_read_u32(bytes, offset + position + 8, &note_type) &&
+            accepted = size - position >= ELF_NOTE_HEADER_SIZE && byte_slice_read_u32(bytes, offset + position, &name_size) &&
+                       byte_slice_read_u32(bytes, offset + position + 4, &descriptor_size) && byte_slice_read_u32(bytes, offset + position + 8, &note_type) &&
                        name_size == 4 && note_type == ELF_NOTE_GNU_PROPERTY_TYPE_0 && memcmp(bytes.pointer + offset + position + 12, "GNU\0", 4) == 0;
             if (accepted)
             {
@@ -5587,7 +5380,7 @@ enum
 BUSTER_GLOBAL_LOCAL bool object_read_elf_word(ByteSlice bytes, u64 offset, bool elf32, u64* value)
 {
     u32 narrow = 0;
-    bool result = elf32 ? object_read_u32(bytes, offset, &narrow) : object_read_u64(bytes, offset, value);
+    bool result = elf32 ? byte_slice_read_u32(bytes, offset, &narrow) : byte_slice_read_u64(bytes, offset, value);
     if (result && elf32)
     {
         *value = narrow;
@@ -5638,9 +5431,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
                "\x7f"
                "ELF",
                4) != 0 ||
-        (elf32 ? bytes.pointer[4] != 1 : bytes.pointer[4] != 2) || bytes.pointer[5] != 1 || !object_read_u16(bytes, 16, &type) || type != 1 || !object_read_u16(bytes, 18, &machine) ||
-        !object_read_elf_word(bytes, elf32 ? 32 : 40, elf32, &section_table) || !object_read_u16(bytes, (elf32 ? 46 : 58), &section_entry_size) || !object_read_u16(bytes, (elf32 ? 48 : 60), &section_count) ||
-        !object_read_u16(bytes, (elf32 ? 50 : 62), &section_string_index) || section_entry_size != section_header_size || !section_count ||
+        (elf32 ? bytes.pointer[4] != 1 : bytes.pointer[4] != 2) || bytes.pointer[5] != 1 || !byte_slice_read_u16(bytes, 16, &type) || type != 1 || !byte_slice_read_u16(bytes, 18, &machine) ||
+        !object_read_elf_word(bytes, elf32 ? 32 : 40, elf32, &section_table) || !byte_slice_read_u16(bytes, (elf32 ? 46 : 58), &section_entry_size) || !byte_slice_read_u16(bytes, (elf32 ? 48 : 60), &section_count) ||
+        !byte_slice_read_u16(bytes, (elf32 ? 50 : 62), &section_string_index) || section_entry_size != section_header_size || !section_count ||
         section_string_index >= section_count || section_table < header_size || section_table > bytes.length ||
         (u64)section_count * section_header_size > bytes.length - section_table ||
         (elf32 ? machine != 3 || target.cpu_arch != CPU_ARCH_I386
@@ -5679,7 +5472,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
         {
             u64 section = section_table + (u64)section_string_index * section_header_size;
             u32 section_type = 0;
-            if (!object_read_u32(bytes, section + 4, &section_type) || section_type != 3 || !object_read_elf_word(bytes, section + sh_offset, elf32, &section_string_offset) ||
+            if (!byte_slice_read_u32(bytes, section + 4, &section_type) || section_type != 3 || !object_read_elf_word(bytes, section + sh_offset, elf32, &section_string_offset) ||
                 !object_read_elf_word(bytes, section + sh_size, elf32, &section_string_size) || section_string_offset > bytes.length ||
                 !section_string_size || section_string_size > bytes.length - section_string_offset ||
                 bytes.pointer[section_string_offset] != 0)
@@ -5749,8 +5542,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
             u64 size = 0;
             u64 entry_size = 0;
             u32 link = 0;
-            if (!object_read_u32(bytes, section + 4, &section_type) || !object_read_elf_word(bytes, section + sh_offset, elf32, &offset) ||
-                !object_read_elf_word(bytes, section + sh_size, elf32, &size) || !object_read_u32(bytes, section + sh_link, &link) || !object_read_elf_word(bytes, section + sh_entry_size, elf32, &entry_size))
+            if (!byte_slice_read_u32(bytes, section + 4, &section_type) || !object_read_elf_word(bytes, section + sh_offset, elf32, &offset) ||
+                !object_read_elf_word(bytes, section + sh_size, elf32, &size) || !byte_slice_read_u32(bytes, section + sh_link, &link) || !object_read_elf_word(bytes, section + sh_entry_size, elf32, &entry_size))
             {
                 read_ok = false;
             }
@@ -5777,7 +5570,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
     for (u32 symbol = 1; read_ok && symbol < symbol_count; symbol += 1)
     {
         u16 section_index = 0;
-        read_ok = object_read_u16(bytes, symbol_offset + (u64)symbol * symbol_size + st_section, &section_index);
+        read_ok = byte_slice_read_u16(bytes, symbol_offset + (u64)symbol * symbol_size + st_section, &section_index);
         if (read_ok && section_index && section_index < ELF_SHN_LORESERVE && section_index < section_count)
         {
             section_bases[section_index] = 1;
@@ -5844,7 +5637,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
             u64 offset = 0;
             u64 size = 0;
             u64 alignment = 0;
-            if (!object_read_u32(bytes, section, &name_offset) || !object_read_u32(bytes, section + 4, &section_type) ||
+            if (!byte_slice_read_u32(bytes, section, &name_offset) || !byte_slice_read_u32(bytes, section + 4, &section_type) ||
                 !object_read_elf_word(bytes, section + 8, elf32, &flags) || !object_read_elf_word(bytes, section + sh_offset, elf32, &offset) || !object_read_elf_word(bytes, section + sh_size, elf32, &size) ||
                 !object_read_elf_word(bytes, section + sh_alignment, elf32, &alignment))
             {
@@ -6110,7 +5903,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
                 u32 section_type = 0;
                 u64 offset = 0;
                 u64 size = 0;
-                read_ok = object_read_u32(bytes, section + 4, &section_type) && object_read_elf_word(bytes, section + sh_offset, elf32, &offset) &&
+                read_ok = byte_slice_read_u32(bytes, section + 4, &section_type) && object_read_elf_word(bytes, section + sh_offset, elf32, &offset) &&
                           object_read_elf_word(bytes, section + sh_size, elf32, &size);
                 if (read_ok && section_type != 8 && size)
                 {
@@ -6132,7 +5925,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
         {
             u64 section = section_table + (u64)string_section * section_header_size;
             u32 section_type = 0;
-            if (!object_read_u32(bytes, section + 4, &section_type) || section_type != 3 || !object_read_elf_word(bytes, section + sh_offset, elf32, &string_offset) ||
+            if (!byte_slice_read_u32(bytes, section + 4, &section_type) || section_type != 3 || !object_read_elf_word(bytes, section + sh_offset, elf32, &string_offset) ||
                 !object_read_elf_word(bytes, section + sh_size, elf32, &string_size) || !string_size || string_offset > bytes.length ||
                 string_size > bytes.length - string_offset || bytes.pointer[string_offset] != 0)
             {
@@ -6173,7 +5966,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
             u16 section_index = 0;
             u64 value = 0;
             u64 size = 0;
-            if (!object_read_u32(bytes, source, &name_offset) || !object_read_u16(bytes, source + st_section, &section_index) ||
+            if (!byte_slice_read_u32(bytes, source, &name_offset) || !byte_slice_read_u16(bytes, source + st_section, &section_index) ||
                 !object_read_elf_word(bytes, source + st_value, elf32, &value) || !object_read_elf_word(bytes, source + st_size, elf32, &size))
             {
                 read_ok = false;
@@ -6373,9 +6166,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
             u64 size = 0;
             u64 entry_size = 0;
             u32 target_section = 0;
-            if (!object_read_u32(bytes, section + 4, &section_type) || !object_read_elf_word(bytes, section + sh_offset, elf32, &offset) ||
+            if (!byte_slice_read_u32(bytes, section + 4, &section_type) || !object_read_elf_word(bytes, section + sh_offset, elf32, &offset) ||
                 !object_read_elf_word(bytes, section + sh_size, elf32, &size) ||
-                !object_read_u32(bytes, section + sh_info, &target_section) || !object_read_elf_word(bytes, section + sh_entry_size, elf32, &entry_size))
+                !byte_slice_read_u32(bytes, section + sh_info, &target_section) || !object_read_elf_word(bytes, section + sh_entry_size, elf32, &entry_size))
             {
                 read_ok = false;
             }
@@ -6431,9 +6224,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
             u64 size = 0;
             u32 linked_symbols = 0;
             u32 target_section = 0;
-            if (!object_read_u32(bytes, section + 4, &section_type) || !object_read_elf_word(bytes, section + sh_offset, elf32, &offset) ||
-                !object_read_elf_word(bytes, section + sh_size, elf32, &size) || !object_read_u32(bytes, section + sh_link, &linked_symbols) ||
-                !object_read_u32(bytes, section + sh_info, &target_section))
+            if (!byte_slice_read_u32(bytes, section + 4, &section_type) || !object_read_elf_word(bytes, section + sh_offset, elf32, &offset) ||
+                !object_read_elf_word(bytes, section + sh_size, elf32, &size) || !byte_slice_read_u32(bytes, section + sh_link, &linked_symbols) ||
+                !byte_slice_read_u32(bytes, section + sh_info, &target_section))
             {
                 read_ok = false;
             }
@@ -6471,7 +6264,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
                     u64 explicit_addend = 0;
                     if (!object_read_elf_word(bytes, relocation, elf32, &source_offset) || !object_read_elf_word(bytes, relocation + word_size, elf32, &information) ||
                         (section_type == 4 && !(elf32 ? object_read_elf_word(bytes, relocation + 8, true, &explicit_addend)
-                                                   : object_read_s64(bytes, relocation + 16, &addend))))
+                                                   : byte_slice_read_s64(bytes, relocation + 16, &addend))))
                     {
                         read_ok = false;
                     }
@@ -6496,9 +6289,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
                                 u16 symbol_section_index = 0;
                                 u32 section_name_offset = 0;
                                 String8 section_name = {0};
-                                if (object_read_u16(bytes, symbol_offset + (u64)source_symbol * symbol_size + st_section, &symbol_section_index) &&
+                                if (byte_slice_read_u16(bytes, symbol_offset + (u64)source_symbol * symbol_size + st_section, &symbol_section_index) &&
                                     symbol_section_index && symbol_section_index < section_count &&
-                                    object_read_u32(bytes, section_table + (u64)symbol_section_index * section_header_size, &section_name_offset) &&
+                                    byte_slice_read_u32(bytes, section_table + (u64)symbol_section_index * section_header_size, &section_name_offset) &&
                                     object_read_string_checked(bytes, section_string_offset, section_string_size, section_name_offset, &section_name) &&
                                     object_reader_arena_can_allocate_bytes(arena, section_name.length + 128, BUSTER_ALIGN_OF(char8)))
                                 {
@@ -6631,7 +6424,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
                             bool page = kind == OBJECT_RELOCATION_AARCH64_ELF_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21;
                             bool adr = kind == OBJECT_RELOCATION_AARCH64_ELF_ADR_PREL_LO21;
                             read_ok = !(instruction_offset & 3) && target_section_data->alignment >= 4 &&
-                                      object_read_u32(target_section_data->data, instruction_offset, &instruction);
+                                      byte_slice_read_u32(target_section_data->data, instruction_offset, &instruction);
                             if (read_ok && kind == OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12)
                             {
                                 read_ok = object_aarch64_got_load_read(instruction, &immediate);
@@ -6692,7 +6485,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
                             bool adrp = kind == OBJECT_RELOCATION_AARCH64_ELF_TLSIE_ADR_GOTTPREL_PAGE21 || kind == OBJECT_RELOCATION_AARCH64_ELF_TLSDESC_ADR_PAGE21;
                             bool descriptor = object_relocation_kind_is_aarch64_elf_tls_desc(kind);
                             read_ok = section_type != 9 && !(instruction_offset & 3) && target_section_data->alignment >= 4 &&
-                                      object_read_u32(target_section_data->data, instruction_offset, &instruction);
+                                      byte_slice_read_u32(target_section_data->data, instruction_offset, &instruction);
                             if (read_ok)
                             {
                                 read_ok = adrp ? a64_mc_decode(instruction, &decoded) && decoded.opcode == A64_OPCODE_ADRP &&
@@ -6722,7 +6515,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
                             A64Opcode opcode = kind == OBJECT_RELOCATION_AARCH64_CALL26 ? A64_OPCODE_BL : A64_OPCODE_B;
                             if ((instruction_offset & 3) || target_section_data->alignment < 4 || instruction_offset > target_section_data->data.length ||
                                 sizeof(instruction) > target_section_data->data.length - instruction_offset ||
-                                !object_read_u32(target_section_data->data, instruction_offset, &instruction) || !a64_mc_decode(instruction, &decoded) ||
+                                !byte_slice_read_u32(target_section_data->data, instruction_offset, &instruction) || !a64_mc_decode(instruction, &decoded) ||
                                 decoded.opcode != opcode || !a64_pc_relative_patch(opcode, instruction, 0, &canonical))
                             {
                                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
@@ -6744,8 +6537,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
                             {
                                 u32 stored = 0;
                                 u16 narrow = 0;
-                                read_ok = relocation_width == 2 ? object_read_u16(target_section_data->data, value_offset, &narrow)
-                                                               : object_read_u32(target_section_data->data, value_offset, &stored);
+                                read_ok = relocation_width == 2 ? byte_slice_read_u16(target_section_data->data, value_offset, &narrow)
+                                                               : byte_slice_read_u32(target_section_data->data, value_offset, &stored);
                                 addend = kind == OBJECT_RELOCATION_I386_16 ? (s64)narrow
                                        : kind == OBJECT_RELOCATION_I386_PC16 ? (s64)(s16)narrow
                                        : kind == OBJECT_RELOCATION_ABSOLUTE32 ? (s64)(u64)stored
@@ -6755,7 +6548,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
                                 kind == OBJECT_RELOCATION_X86_64_PC64 || kind == OBJECT_RELOCATION_AARCH64_PREL64)
                             {
                                 u64 stored = 0;
-                                if (!object_read_u64(target_section_data->data, value_offset, &stored))
+                                if (!byte_slice_read_u64(target_section_data->data, value_offset, &stored))
                                 {
                                     read_ok = false;
                                 }
@@ -6764,7 +6557,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
                             else if (kind == OBJECT_RELOCATION_ABSOLUTE32)
                             {
                                 u32 stored = 0;
-                                if (!object_read_u32(target_section_data->data, value_offset, &stored))
+                                if (!byte_slice_read_u32(target_section_data->data, value_offset, &stored))
                                 {
                                     read_ok = false;
                                 }
@@ -6773,7 +6566,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
                             else if (kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S)
                             {
                                 u32 stored = 0;
-                                if (!object_read_u32(target_section_data->data, value_offset, &stored))
+                                if (!byte_slice_read_u32(target_section_data->data, value_offset, &stored))
                                 {
                                     read_ok = false;
                                 }
@@ -6786,7 +6579,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_elf(Arena* arena, ByteSlice bytes, Ta
                                      kind == OBJECT_RELOCATION_AARCH64_PREL32)
                             {
                                 u32 stored = 0;
-                                if (!object_read_u32(target_section_data->data, value_offset, &stored) ||
+                                if (!byte_slice_read_u32(target_section_data->data, value_offset, &stored) ||
                                     !a64_signed_scaled_immediate_decode(stored, 32, 0, &addend))
                                 {
                                     read_ok = false;
@@ -6930,8 +6723,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
     u32 symbol_offset = 0;
     u32 symbol_count = 0;
     u16 optional_size = 0;
-    if (!arena || !bytes.pointer || bytes.length < COFF_HEADER_SIZE || !object_read_u16(bytes, 0, &machine) || !object_read_u16(bytes, 2, &section_count) ||
-        !object_read_u32(bytes, 8, &symbol_offset) || !object_read_u32(bytes, 12, &symbol_count) || !object_read_u16(bytes, 16, &optional_size) ||
+    if (!arena || !bytes.pointer || bytes.length < COFF_HEADER_SIZE || !byte_slice_read_u16(bytes, 0, &machine) || !byte_slice_read_u16(bytes, 2, &section_count) ||
+        !byte_slice_read_u32(bytes, 8, &symbol_offset) || !byte_slice_read_u32(bytes, 12, &symbol_count) || !byte_slice_read_u16(bytes, 16, &optional_size) ||
         optional_size || !section_count || (machine == 0x8664 && target.cpu_arch != CPU_ARCH_X86_64) ||
         (machine == 0xaa64 && target.cpu_arch != CPU_ARCH_AARCH64) || (machine != 0x8664 && machine != 0xaa64) ||
         (u64)COFF_HEADER_SIZE + (u64)section_count * COFF_SECTION_SIZE > bytes.length || symbol_offset > bytes.length ||
@@ -6948,7 +6741,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
     if (read_ok)
     {
         string_size_u32 = 0;
-        if (!object_read_u32(bytes, string_offset, &string_size_u32) || string_size_u32 < 4 || string_size_u32 > bytes.length - string_offset)
+        if (!byte_slice_read_u32(bytes, string_offset, &string_size_u32) || string_size_u32 < 4 || string_size_u32 > bytes.length - string_offset)
         {
             read_ok = false;
         }
@@ -7060,9 +6853,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             u32 relocation_offset = 0;
             u16 relocation_count = 0;
             u32 characteristics = 0;
-            if (!object_read_u32(bytes, section + 16, &raw_size) || !object_read_u32(bytes, section + 20, &raw_offset) ||
-                !object_read_u32(bytes, section + 24, &relocation_offset) || !object_read_u16(bytes, section + 32, &relocation_count) ||
-                !object_read_u32(bytes, section + 36, &characteristics) ||
+            if (!byte_slice_read_u32(bytes, section + 16, &raw_size) || !byte_slice_read_u32(bytes, section + 20, &raw_offset) ||
+                !byte_slice_read_u32(bytes, section + 24, &relocation_offset) || !byte_slice_read_u16(bytes, section + 32, &relocation_count) ||
+                !byte_slice_read_u32(bytes, section + 36, &characteristics) ||
                 ((characteristics & 0x80) != 0 && raw_offset && raw_size) ||
                 (raw_offset && (raw_offset > bytes.length || raw_size > bytes.length - raw_offset)))
             {
@@ -7076,9 +6869,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 u32 overflow_count = 0;
                 u32 overflow_symbol = 0;
                 u16 overflow_type = 0;
-                if (!object_read_u32(bytes, relocation_offset, &overflow_count) ||
-                    !object_read_u32(bytes, (u64)relocation_offset + 4, &overflow_symbol) ||
-                    !object_read_u16(bytes, (u64)relocation_offset + 8, &overflow_type) ||
+                if (!byte_slice_read_u32(bytes, relocation_offset, &overflow_count) ||
+                    !byte_slice_read_u32(bytes, (u64)relocation_offset + 4, &overflow_symbol) ||
+                    !byte_slice_read_u16(bytes, (u64)relocation_offset + 8, &overflow_type) ||
                     overflow_count < OBJECT_COFF_RELOCATION_OVERFLOW_MINIMUM_MARKER_COUNT || overflow_symbol || overflow_type)
                 {
                     read_ok = false;
@@ -7185,7 +6978,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 if (codeview_contribution && raw_size)
                 {
                     u32 signature = 0;
-                    if (!raw_offset || raw_size < sizeof(signature) || !object_read_u32(bytes, raw_offset, &signature) || signature != 4)
+                    if (!raw_offset || raw_size < sizeof(signature) || !byte_slice_read_u32(bytes, raw_offset, &signature) || signature != 4)
                     {
                         read_ok = false;
                     }
@@ -7315,8 +7108,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             u64 section = COFF_HEADER_SIZE + (u64)section_index * COFF_SECTION_SIZE;
             u32 raw_size = 0;
             u32 raw_offset = 0;
-            object_read_u32(bytes, section + 16, &raw_size);
-            object_read_u32(bytes, section + 20, &raw_offset);
+            byte_slice_read_u32(bytes, section + 16, &raw_size);
+            byte_slice_read_u32(bytes, section + 20, &raw_offset);
             if (section_kinds[section_index] == UINT32_MAX)
             {
                 continue;
@@ -7358,8 +7151,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             u32 value = 0;
             u16 section_number_u16 = 0;
             u16 symbol_type = 0;
-            if (!object_read_u32(bytes, source + 8, &value) || !object_read_u16(bytes, source + 12, &section_number_u16) ||
-                !object_read_u16(bytes, source + 14, &symbol_type))
+            if (!byte_slice_read_u32(bytes, source + 8, &value) || !byte_slice_read_u16(bytes, source + 12, &section_number_u16) ||
+                !byte_slice_read_u16(bytes, source + 14, &symbol_type))
             {
                 read_ok = false;
             }
@@ -7417,7 +7210,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         {
                             result.comdats[comdat_index].selection = (ObjectComdatSelection)selection;
                             if (selection == OBJECT_COMDAT_SELECTION_ASSOCIATIVE &&
-                                !object_read_u16(bytes, source + COFF_SYMBOL_SIZE + 12, &section_comdat_associations[section_index]))
+                                !byte_slice_read_u16(bytes, source + COFF_SYMBOL_SIZE + 12, &section_comdat_associations[section_index]))
                             {
                                 read_ok = false;
                             }
@@ -7596,11 +7389,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
             u32 relocation_offset = 0;
             u16 relocation_count = 0;
             u32 characteristics = 0;
-            object_read_u32(bytes, section + 16, &raw_size);
-            object_read_u32(bytes, section + 20, &raw_offset);
-            object_read_u32(bytes, section + 24, &relocation_offset);
-            object_read_u16(bytes, section + 32, &relocation_count);
-            object_read_u32(bytes, section + 36, &characteristics);
+            byte_slice_read_u32(bytes, section + 16, &raw_size);
+            byte_slice_read_u32(bytes, section + 20, &raw_offset);
+            byte_slice_read_u32(bytes, section + 24, &relocation_offset);
+            byte_slice_read_u16(bytes, section + 32, &relocation_count);
+            byte_slice_read_u32(bytes, section + 36, &characteristics);
             u32 actual_relocation_count = relocation_count;
             u64 relocation_data_offset = relocation_offset;
             bool relocation_overflow = relocation_count == UINT16_MAX &&
@@ -7610,9 +7403,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 u32 overflow_count = 0;
                 u32 overflow_symbol = 0;
                 u16 overflow_type = 0;
-                if (!object_read_u32(bytes, relocation_offset, &overflow_count) ||
-                    !object_read_u32(bytes, (u64)relocation_offset + 4, &overflow_symbol) ||
-                    !object_read_u16(bytes, (u64)relocation_offset + 8, &overflow_type) ||
+                if (!byte_slice_read_u32(bytes, relocation_offset, &overflow_count) ||
+                    !byte_slice_read_u32(bytes, (u64)relocation_offset + 4, &overflow_symbol) ||
+                    !byte_slice_read_u16(bytes, (u64)relocation_offset + 8, &overflow_type) ||
                     overflow_count < OBJECT_COFF_RELOCATION_OVERFLOW_MINIMUM_MARKER_COUNT || overflow_symbol || overflow_type)
                 {
                     read_ok = false;
@@ -7638,8 +7431,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                 u32 source_offset = 0;
                 u32 source_symbol = 0;
                 u16 relocation_type = 0;
-                if (!object_read_u32(bytes, relocation, &source_offset) || !object_read_u32(bytes, relocation + 4, &source_symbol) ||
-                    !object_read_u16(bytes, relocation + 8, &relocation_type) || source_symbol >= symbol_count || symbol_map[source_symbol] == UINT32_MAX ||
+                if (!byte_slice_read_u32(bytes, relocation, &source_offset) || !byte_slice_read_u32(bytes, relocation + 4, &source_symbol) ||
+                    !byte_slice_read_u16(bytes, relocation + 8, &relocation_type) || source_symbol >= symbol_count || symbol_map[source_symbol] == UINT32_MAX ||
                     source_offset > raw_size)
                 {
                     read_ok = false;
@@ -7716,13 +7509,13 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         if (read_ok && kind == OBJECT_RELOCATION_COFF_SECREL32)
                         {
                             u32 stored = 0;
-                            read_ok = object_read_u32(bytes, (u64)raw_offset + source_offset, &stored);
+                            read_ok = byte_slice_read_u32(bytes, (u64)raw_offset + source_offset, &stored);
                             addend = (s32)stored;
                         }
                         else if (read_ok)
                         {
                             u16 stored = 0;
-                            read_ok = object_read_u16(bytes, (u64)raw_offset + source_offset, &stored);
+                            read_ok = byte_slice_read_u16(bytes, (u64)raw_offset + source_offset, &stored);
                             addend = stored;
                         }
                         if (read_ok)
@@ -7746,7 +7539,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         {
                             kind = OBJECT_RELOCATION_ABSOLUTE64;
                             u64 stored = 0;
-                            if (!object_read_u64(bytes, (u64)raw_offset + source_offset, &stored))
+                            if (!byte_slice_read_u64(bytes, (u64)raw_offset + source_offset, &stored))
                             {
                                 read_ok = false;
                             }
@@ -7755,7 +7548,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         else if (relocation_type == 3)
                         {
                             u32 stored = 0;
-                            if (!object_read_u32(bytes, (u64)raw_offset + source_offset, &stored))
+                            if (!byte_slice_read_u32(bytes, (u64)raw_offset + source_offset, &stored))
                             {
                                 read_ok = false;
                             }
@@ -7765,7 +7558,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         else if (relocation_type >= 4 && relocation_type <= 9)
                         {
                             u32 stored = 0;
-                            if (!object_read_u32(bytes, (u64)raw_offset + source_offset, &stored))
+                            if (!byte_slice_read_u32(bytes, (u64)raw_offset + source_offset, &stored))
                             {
                                 read_ok = false;
                             }
@@ -7787,7 +7580,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         else if (relocation_type == 0xb)
                         {
                             u32 stored = 0;
-                            if (!object_read_u32(bytes, (u64)raw_offset + source_offset, &stored))
+                            if (!byte_slice_read_u32(bytes, (u64)raw_offset + source_offset, &stored))
                             {
                                 read_ok = false;
                             }
@@ -7822,7 +7615,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         if (relocation_type == 0xe)
                         {
                             u64 stored = 0;
-                            if (!object_read_u64(bytes, (u64)raw_offset + source_offset, &stored))
+                            if (!byte_slice_read_u64(bytes, (u64)raw_offset + source_offset, &stored))
                             {
                                 read_ok = false;
                             }
@@ -7831,7 +7624,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                         else if (relocation_type == 2)
                         {
                             u32 stored = 0;
-                            if (!object_read_u32(bytes, (u64)raw_offset + source_offset, &stored))
+                            if (!byte_slice_read_u32(bytes, (u64)raw_offset + source_offset, &stored))
                             {
                                 read_ok = false;
                             }
@@ -7842,7 +7635,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             u32 stored = 0;
                             A64MCInst decoded = {0};
                             if (((section_bases[section_index] + source_offset) & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
-                                !object_read_u32(bytes, (u64)raw_offset + source_offset, &stored) || !a64_mc_decode(stored, &decoded) ||
+                                !byte_slice_read_u32(bytes, (u64)raw_offset + source_offset, &stored) || !a64_mc_decode(stored, &decoded) ||
                                 (decoded.opcode != A64_OPCODE_B && decoded.opcode != A64_OPCODE_BL) || decoded.operands[0].value != 0)
                             {
                                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
@@ -7860,7 +7653,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             u32 canonical = 0;
                             if (((section_bases[section_index] + source_offset) & 3) ||
                                 result.sections[section_kinds[section_index]].alignment < 4 ||
-                                !object_read_u32(bytes, (u64)raw_offset + source_offset, &stored) ||
+                                !byte_slice_read_u32(bytes, (u64)raw_offset + source_offset, &stored) ||
                                 (relocation_type == 9 || relocation_type == 10 || relocation_type == 0xb
                                      ? !object_aarch64_pe_tls_offset_addend_decode(kind, stored, &addend, &canonical)
                                      : !object_aarch64_pe_page_addend_decode(page_kind, stored, &addend, &canonical)))
@@ -7885,7 +7678,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_coff(Arena* arena, ByteSlice bytes, T
                             u32 canonical = 0;
                             if (((section_bases[section_index] + source_offset) & 3) ||
                                 result.sections[section_kinds[section_index]].alignment < 4 ||
-                                !object_read_u32(bytes, (u64)raw_offset + source_offset, &stored) ||
+                                !byte_slice_read_u32(bytes, (u64)raw_offset + source_offset, &stored) ||
                                 (kind == OBJECT_RELOCATION_AARCH64_PE_TLS_INDEX_LO12
                                      ? !object_aarch64_pe_tls_index_lo12_addend_decode(stored, &addend, &canonical)
                                      : !object_aarch64_pe_page_addend_decode(kind, stored, &addend, &canonical)))
@@ -8320,10 +8113,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
     u32 file_type = 0;
     u32 command_count = 0;
     u32 commands_size = 0;
-    if (!arena || !bytes.pointer || bytes.length < MACH_HEADER_SIZE || !object_read_u32(bytes, 0, &magic) || magic != 0xfeedfacf ||
-        !object_read_u32(bytes, 4, &cpu_type) ||
-        !object_read_u32(bytes, 12, &file_type) || file_type != 1 || !object_read_u32(bytes, 16, &command_count) ||
-        !object_read_u32(bytes, 20, &commands_size) || commands_size > bytes.length - MACH_HEADER_SIZE ||
+    if (!arena || !bytes.pointer || bytes.length < MACH_HEADER_SIZE || !byte_slice_read_u32(bytes, 0, &magic) || magic != 0xfeedfacf ||
+        !byte_slice_read_u32(bytes, 4, &cpu_type) ||
+        !byte_slice_read_u32(bytes, 12, &file_type) || file_type != 1 || !byte_slice_read_u32(bytes, 16, &command_count) ||
+        !byte_slice_read_u32(bytes, 20, &commands_size) || commands_size > bytes.length - MACH_HEADER_SIZE ||
         (cpu_type == 0x01000007 && target.cpu_arch != CPU_ARCH_X86_64) || (cpu_type == 0x0100000c && target.cpu_arch != CPU_ARCH_AARCH64) ||
         (cpu_type != 0x01000007 && cpu_type != 0x0100000c))
     {
@@ -8372,7 +8165,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         {
             u32 kind = 0;
             u32 size = 0;
-            if (!object_read_u32(bytes, command, &kind) || !object_read_u32(bytes, command + 4, &size) || size < 8 || command > command_table_end ||
+            if (!byte_slice_read_u32(bytes, command, &kind) || !byte_slice_read_u32(bytes, command + 4, &size) || size < 8 || command > command_table_end ||
                 size > command_table_end - command || command > bytes.length || size > bytes.length - command)
             {
                 read_ok = false;
@@ -8382,7 +8175,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 if (kind == MACH_SEGMENT_COMMAND)
                 {
                     u32 section_count = 0;
-                    if (size < 72 || !object_read_u32(bytes, command + 64, &section_count) || (u64)section_count * MACH_SECTION_SIZE > size - 72 ||
+                    if (size < 72 || !byte_slice_read_u32(bytes, command + 64, &section_count) || (u64)section_count * MACH_SECTION_SIZE > size - 72 ||
                         section_count > UINT32_MAX - mach_section_count)
                     {
                         read_ok = false;
@@ -8394,8 +8187,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 }
                 else if (kind == MACH_SYMTAB_COMMAND)
                 {
-                    if (size < 24 || symbol_command_seen || !object_read_u32(bytes, command + 8, &symbol_offset) || !object_read_u32(bytes, command + 12, &symbol_count) ||
-                        !object_read_u32(bytes, command + 16, &string_offset) || !object_read_u32(bytes, command + 20, &string_size))
+                    if (size < 24 || symbol_command_seen || !byte_slice_read_u32(bytes, command + 8, &symbol_offset) || !byte_slice_read_u32(bytes, command + 12, &symbol_count) ||
+                        !byte_slice_read_u32(bytes, command + 16, &string_offset) || !byte_slice_read_u32(bytes, command + 20, &string_size))
                     {
                         read_ok = false;
                     }
@@ -8531,12 +8324,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
         {
             u32 kind = 0;
             u32 size = 0;
-            object_read_u32(bytes, command, &kind);
-            object_read_u32(bytes, command + 4, &size);
+            byte_slice_read_u32(bytes, command, &kind);
+            byte_slice_read_u32(bytes, command + 4, &size);
             if (kind == MACH_SEGMENT_COMMAND)
             {
                 u32 section_count = 0;
-                object_read_u32(bytes, command + 64, &section_count);
+                byte_slice_read_u32(bytes, command + 64, &section_count);
                 for (u32 section_index = 0; section_index < section_count && read_ok; section_index += 1)
                 {
                     u64 section = command + 72 + (u64)section_index * MACH_SECTION_SIZE;
@@ -8547,10 +8340,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     u32 relocation_offset = 0;
                     u32 relocation_count = 0;
                     u32 flags = 0;
-                    if (!object_read_u64(bytes, section + 32, &address) || !object_read_u64(bytes, section + 40, &section_size) ||
-                        !object_read_u32(bytes, section + 48, &offset) || !object_read_u32(bytes, section + 52, &alignment_power) ||
-                        !object_read_u32(bytes, section + 56, &relocation_offset) || !object_read_u32(bytes, section + 60, &relocation_count) ||
-                        !object_read_u32(bytes, section + 64, &flags) || alignment_power > 31 ||
+                    if (!byte_slice_read_u64(bytes, section + 32, &address) || !byte_slice_read_u64(bytes, section + 40, &section_size) ||
+                        !byte_slice_read_u32(bytes, section + 48, &offset) || !byte_slice_read_u32(bytes, section + 52, &alignment_power) ||
+                        !byte_slice_read_u32(bytes, section + 56, &relocation_offset) || !byte_slice_read_u32(bytes, section + 60, &relocation_count) ||
+                        !byte_slice_read_u32(bytes, section + 64, &flags) || alignment_power > 31 ||
                         (relocation_count &&
                          (relocation_offset > bytes.length || (u64)relocation_count * MACH_RELOCATION_SIZE > bytes.length - relocation_offset)) ||
                         relocation_count > UINT32_MAX - relocation_capacity)
@@ -8780,9 +8573,9 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             u64 size = 0;
             u32 offset = 0;
             u32 flags = 0;
-            object_read_u64(bytes, section + 40, &size);
-            object_read_u32(bytes, section + 48, &offset);
-            object_read_u32(bytes, section + 64, &flags);
+            byte_slice_read_u64(bytes, section + 40, &size);
+            byte_slice_read_u32(bytes, section + 48, &offset);
+            byte_slice_read_u32(bytes, section + 64, &flags);
             u32 section_type = flags & 0xff;
             ObjectSectionKind kind = (ObjectSectionKind)section_kinds[section_index];
             // Gate on the resolved kind (the allocation decision), not the raw type
@@ -8847,8 +8640,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             u32 name_offset = 0;
             u16 description = 0;
             u64 value = 0;
-            if (!object_read_u32(bytes, source, &name_offset) || !object_read_u16(bytes, source + 6, &description) ||
-                !object_read_u64(bytes, source + 8, &value))
+            if (!byte_slice_read_u32(bytes, source, &name_offset) || !byte_slice_read_u16(bytes, source + 6, &description) ||
+                !byte_slice_read_u64(bytes, source + 8, &value))
             {
                 read_ok = false;
             }
@@ -8986,7 +8779,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     if (descriptor_first != UINT32_MAX)
                     {
                         u64 descriptor_size = 0;
-                        object_read_u64(bytes, mach_sections[section_index] + 40, &descriptor_size);
+                        byte_slice_read_u64(bytes, mach_sections[section_index] + 40, &descriptor_size);
                         u64 entry = relative_value / OBJECT_MACH_THREAD_VARIABLE_SIZE;
                         if (relative_value % OBJECT_MACH_THREAD_VARIABLE_SIZE || relative_value >= descriptor_size)
                         {
@@ -9086,10 +8879,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
             u32 raw_offset = 0;
             u32 relocation_offset = 0;
             u32 relocation_count = 0;
-            object_read_u64(bytes, section + 40, &section_size);
-            object_read_u32(bytes, section + 48, &raw_offset);
-            object_read_u32(bytes, section + 56, &relocation_offset);
-            object_read_u32(bytes, section + 60, &relocation_count);
+            byte_slice_read_u64(bytes, section + 40, &section_size);
+            byte_slice_read_u32(bytes, section + 48, &raw_offset);
+            byte_slice_read_u32(bytes, section + 56, &relocation_offset);
+            byte_slice_read_u32(bytes, section + 60, &relocation_count);
             // Each descriptor carries exactly two UNSIGNED 64-bit extern
             // relocations: _tlv_bootstrap at +0 and its storage at +16. The
             // canonical model keeps neither; the storage names the variable.
@@ -9099,8 +8892,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 u64 relocation = relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE;
                 u32 address = 0;
                 u32 information = 0;
-                object_read_u32(bytes, relocation, &address);
-                object_read_u32(bytes, relocation + 4, &information);
+                byte_slice_read_u32(bytes, relocation, &address);
+                byte_slice_read_u32(bytes, relocation + 4, &information);
                 u32 source_symbol = information & 0x00ffffff;
                 u32 field = address % OBJECT_MACH_THREAD_VARIABLE_SIZE;
                 u64 entry = (u64)descriptor_first + address / OBJECT_MACH_THREAD_VARIABLE_SIZE;
@@ -9116,7 +8909,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 {
                     // The variable is the storage symbol itself, never an offset into it.
                     u64 inline_addend = 1;
-                    read_ok = thread_variable_inits[entry] == UINT32_MAX && object_read_u64(bytes, (u64)raw_offset + address, &inline_addend) &&
+                    read_ok = thread_variable_inits[entry] == UINT32_MAX && byte_slice_read_u64(bytes, (u64)raw_offset + address, &inline_addend) &&
                               inline_addend == 0;
                     thread_variable_inits[entry] = source_symbol;
                 }
@@ -9137,8 +8930,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                 u64 relocation = relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE;
                 u32 source_offset_u32 = 0;
                 u32 information = 0;
-                object_read_u32(bytes, relocation, &source_offset_u32);
-                object_read_u32(bytes, relocation + 4, &information);
+                byte_slice_read_u32(bytes, relocation, &source_offset_u32);
+                byte_slice_read_u32(bytes, relocation + 4, &information);
                 s32 source_offset = (s32)source_offset_u32;
                 u32 source_symbol = information & 0x00ffffff;
                 bool pc_relative = (information & (1u << 24)) != 0;
@@ -9175,8 +8968,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             section_bases[section_index] > UINT64_MAX - source_offset_u32 ||
                             (arm64_difference && ((source_offset_u32 & 3) || ((section_bases[section_index] + source_offset_u32) & 3) ||
                                                   result.sections[section_kinds[section_index]].alignment < 4)) ||
-                            !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) ||
-                            !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) || next_source_offset != source_offset_u32 ||
+                            !byte_slice_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) ||
+                            !byte_slice_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) || next_source_offset != source_offset_u32 ||
                             (next_information >> 28) != 0 || ((next_information >> 25) & 0x3) != 2 || !(next_information & (1u << 27)) ||
                             (next_information & (1u << 24)))
                         {
@@ -9242,7 +9035,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                         if (read_ok)
                         {
                             stored = 0;
-                            if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                            if (!byte_slice_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
                             {
                                 read_ok = false;
                             }
@@ -9283,8 +9076,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                         u32 next_information = 0;
                         if (pending_addend || pc_relative || external || length != 2 || relocation_index + 1 >= relocation_count ||
                             !a64_signed_scaled_immediate_decode(source_symbol, 24, 0, &pending_addend_value) ||
-                            !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) ||
-                            !object_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) || next_source_offset != source_offset_u32 ||
+                            !byte_slice_read_u32(bytes, relocation + MACH_RELOCATION_SIZE, &next_source_offset) ||
+                            !byte_slice_read_u32(bytes, relocation + MACH_RELOCATION_SIZE + 4, &next_information) || next_source_offset != source_offset_u32 ||
                             ((next_information >> 28) != 2 && (next_information >> 28) != 3 && (next_information >> 28) != 4 &&
                              (next_information >> 28) != 8 && (next_information >> 28) != 9))
                         {
@@ -9376,7 +9169,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                         if (relocation_type == 0 && length == 3)
                         {
                             u64 stored = 0;
-                            if (!object_read_u64(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                            if (!byte_slice_read_u64(bytes, (u64)raw_offset + (u32)source_offset, &stored))
                             {
                                 read_ok = false;
                             }
@@ -9386,7 +9179,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                         else if (relocation_type == 0 && length == 2)
                         {
                             u32 stored = 0;
-                            if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                            if (!byte_slice_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
                             {
                                 read_ok = false;
                             }
@@ -9407,7 +9200,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             // evidence that an undefined symbol is a function.
                             bool got = relocation_type == 3 || relocation_type == 4;
                             u32 stored = 0;
-                            if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                            if (!byte_slice_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
                             {
                                 read_ok = false;
                             }
@@ -9449,7 +9242,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                         if (relocation_type == 0 && length == 3)
                         {
                             u64 stored = 0;
-                            if (!object_read_u64(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                            if (!byte_slice_read_u64(bytes, (u64)raw_offset + (u32)source_offset, &stored))
                             {
                                 read_ok = false;
                             }
@@ -9460,7 +9253,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             if (relocation_type == 0 && length == 2 && object_section_kind_is_debug(current_section_kind))
                             {
                                 u32 stored = 0;
-                                if (!object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
+                                if (!byte_slice_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored))
                                 {
                                     read_ok = false;
                                 }
@@ -9475,7 +9268,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                                 A64MCInst decoded = {0};
                                 if (!pc_relative || !external || ((section_bases[section_index] + source_offset_u32) & 3) ||
                                     result.sections[section_kinds[section_index]].alignment < 4 ||
-                                    !object_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored) ||
+                                    !byte_slice_read_u32(bytes, (u64)raw_offset + (u32)source_offset, &stored) ||
                                     !a64_mc_decode(stored, &decoded) || (decoded.opcode != A64_OPCODE_B && decoded.opcode != A64_OPCODE_BL) ||
                                     decoded.operands[0].value != 0)
                                 {
@@ -9494,7 +9287,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             {
                                 u32 stored = 0;
                                 if (!pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
-                                    !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !object_mach_page21_instruction_valid(stored))
+                                    !byte_slice_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !a64_page21_instruction_valid(stored))
                                 {
                                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                                     read_ok = false;
@@ -9510,8 +9303,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                                 u32 stored = 0;
                                 u32 shift = 0;
                                 if (pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
-                                    !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) ||
-                                    !object_mach_pageoff12_shift(stored, &shift))
+                                    !byte_slice_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) ||
+                                    !a64_pageoff12_shift(stored, &shift))
                                 {
                                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                                     read_ok = false;
@@ -9526,7 +9319,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             {
                                 u32 stored = 0;
                                 if (!pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
-                                    !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !object_mach_page21_instruction_valid(stored))
+                                    !byte_slice_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !a64_page21_instruction_valid(stored))
                                 {
                                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                                     read_ok = false;
@@ -9542,7 +9335,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                                 u32 stored = 0;
                                 u32 shift = 0;
                                 if (pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
-                                    !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !object_mach_pageoff12_shift(stored, &shift) || shift != 3 ||
+                                    !byte_slice_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) || !a64_pageoff12_shift(stored, &shift) || shift != 3 ||
                                     (stored & UINT32_C(0xffc00000)) != UINT32_C(0xf9400000))
                                 {
                                     result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
@@ -9563,8 +9356,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     u32 slot_offset = 0;
                     bool page = relocation_type == 5;
                     if (page != pc_relative || !external || (source_offset_u32 & 3) || result.sections[section_kinds[section_index]].alignment < 4 ||
-                        !object_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) ||
-                        (page ? !object_mach_page21_instruction_valid(stored) : !object_aarch64_got_load_read(stored, &slot_offset) || slot_offset))
+                        !byte_slice_read_u32(bytes, (u64)raw_offset + source_offset_u32, &stored) ||
+                        (page ? !a64_page21_instruction_valid(stored) : !object_aarch64_got_load_read(stored, &slot_offset) || slot_offset))
                     {
                         result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                         read_ok = false;
@@ -9696,10 +9489,10 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                     u32 raw_offset = 0;
                     u32 relocation_offset = 0;
                     u32 relocation_count = 0;
-                    object_read_u64(bytes, section + 40, &section_size);
-                    object_read_u32(bytes, section + 48, &raw_offset);
-                    object_read_u32(bytes, section + 56, &relocation_offset);
-                    object_read_u32(bytes, section + 60, &relocation_count);
+                    byte_slice_read_u64(bytes, section + 40, &section_size);
+                    byte_slice_read_u32(bytes, section + 48, &raw_offset);
+                    byte_slice_read_u32(bytes, section + 56, &relocation_offset);
+                    byte_slice_read_u32(bytes, section + 60, &relocation_count);
                     u32 entry_count = (u32)(section_size / 32);
                     if (relocation_count != entry_count)
                     {
@@ -9725,7 +9518,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                         {
                             u64 relocation = relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE;
                             u32 source_offset = 0;
-                            if (!object_read_u32(bytes, relocation, &source_offset) || source_offset % 32 != 0 || source_offset / 32 >= entry_count)
+                            if (!byte_slice_read_u32(bytes, relocation, &source_offset) || source_offset % 32 != 0 || source_offset / 32 >= entry_count)
                             {
                                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                                 read_ok = false;
@@ -9749,8 +9542,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             u32 encoding = 0;
                             u64 personality = 0;
                             u64 lsda = 0;
-                            if (!object_read_u32(bytes, entry + 8, &function_size) || !object_read_u32(bytes, entry + 12, &encoding) ||
-                                !object_read_u64(bytes, entry + 16, &personality) || !object_read_u64(bytes, entry + 24, &lsda) || personality || lsda)
+                            if (!byte_slice_read_u32(bytes, entry + 8, &function_size) || !byte_slice_read_u32(bytes, entry + 12, &encoding) ||
+                                !byte_slice_read_u64(bytes, entry + 16, &personality) || !byte_slice_read_u64(bytes, entry + 24, &lsda) || personality || lsda)
                             {
                                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
                                 read_ok = false;
@@ -9758,7 +9551,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             u32 relocation_index = compact_relocation_map[entry_index];
                             u32 information = 0;
                             if (relocation_index == UINT32_MAX ||
-                                !object_read_u32(bytes, relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE + 4, &information) ||
+                                !byte_slice_read_u32(bytes, relocation_offset + (u64)relocation_index * MACH_RELOCATION_SIZE + 4, &information) ||
                                 (information >> 28) != 0 || ((information >> 25) & 0x3) != 3 || (information & (1u << 24)))
                             {
                                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
@@ -9767,7 +9560,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_read_mach_o64(Arena* arena, ByteSlice byte
                             u32 source_symbol = information & 0x00ffffff;
                             bool external = (information & (1u << 27)) != 0;
                             u64 stored = 0;
-                            object_read_u64(bytes, entry, &stored);
+                            byte_slice_read_u64(bytes, entry, &stored);
                             u64 function_offset = 0;
                             // A rejected reference must never be used as an index:
                             // r_symbolnum is attacker-controlled (zero underflows the
@@ -10064,24 +9857,24 @@ BUSTER_GLOBAL_LOCAL Target object_archive_member_target(ByteSlice bytes, Target 
     Target result = requested;
     u32 magic = 0;
     u16 machine = 0;
-    if (object_read_u32(bytes, 0, &magic))
+    if (byte_slice_read_u32(bytes, 0, &magic))
     {
         if (magic == UINT32_C(0x464c457f))
         {
-            (void)object_read_u16(bytes, 18, &machine);
+            (void)byte_slice_read_u16(bytes, 18, &machine);
             result.cpu_arch = machine == 3 ? CPU_ARCH_I386 : machine == 62 ? CPU_ARCH_X86_64 : machine == 183 ? CPU_ARCH_AARCH64 : CPU_ARCH_COUNT;
             if (object_format_for_target(requested) != OBJECT_FORMAT_ELF64 && object_format_for_target(requested) != OBJECT_FORMAT_ELF32) result.os = OPERATING_SYSTEM_LINUX;
         }
         else if (magic == UINT32_C(0xfeedfacf))
         {
             u32 cpu = 0;
-            (void)object_read_u32(bytes, 4, &cpu);
+            (void)byte_slice_read_u32(bytes, 4, &cpu);
             result.cpu_arch = cpu == UINT32_C(0x01000007) ? CPU_ARCH_X86_64 : cpu == UINT32_C(0x0100000c) ? CPU_ARCH_AARCH64 : CPU_ARCH_COUNT;
             if (object_format_for_target(requested) != OBJECT_FORMAT_MACH_O64) result.os = OPERATING_SYSTEM_MACOS;
         }
         else
         {
-            (void)object_read_u16(bytes, 0, &machine);
+            (void)byte_slice_read_u16(bytes, 0, &machine);
             result.cpu_arch = machine == 0x8664 ? CPU_ARCH_X86_64 : machine == 0xaa64 ? CPU_ARCH_AARCH64 : CPU_ARCH_COUNT;
             if (object_format_for_target(requested) != OBJECT_FORMAT_COFF) result.os = OPERATING_SYSTEM_WINDOWS;
         }
@@ -10208,9 +10001,11 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
     u64 string_offset = 0;
     u64 string_size = 0;
     u32 stride = 0;
-    bool valid = object_read_u32(bytes, 0, &magic);
+    // The bounded reader lives in byte_writer.c; testing the pointer here keeps
+    // the direct header-byte loads below visibly guarded by a successful read.
+    bool valid = bytes.pointer && byte_slice_read_u32(bytes, 0, &magic);
     ObjectFormat format = OBJECT_FORMAT_COUNT;
-    bool elf32 = bytes.pointer && bytes.length >= 16 && bytes.pointer[4] == 1;
+    bool elf32 = valid && bytes.length >= 16 && bytes.pointer[4] == 1;
     if (valid && magic == UINT32_C(0x464c457f))
     {
         format = elf32 ? OBJECT_FORMAT_ELF32 : OBJECT_FORMAT_ELF64;
@@ -10218,15 +10013,15 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
         u16 section_size = 0;
         u16 section_count = 0;
         valid = bytes.length >= (elf32 ? 52u : 64u) && bytes.pointer[4] == (elf32 ? 1 : 2) && bytes.pointer[5] == 1 &&
-                object_read_elf_word(bytes, elf32 ? 32 : 40, elf32, &section_table) && object_read_u16(bytes, elf32 ? 46 : 58, &section_size) && section_size == (elf32 ? 40 : 64) &&
-                object_read_u16(bytes, elf32 ? 48 : 60, &section_count) && section_table <= bytes.length &&
+                object_read_elf_word(bytes, elf32 ? 32 : 40, elf32, &section_table) && byte_slice_read_u16(bytes, elf32 ? 46 : 58, &section_size) && section_size == (elf32 ? 40 : 64) &&
+                byte_slice_read_u16(bytes, elf32 ? 48 : 60, &section_count) && section_table <= bytes.length &&
                 (u64)section_count * section_size <= bytes.length - section_table;
         bool found = false;
         for (u32 section = 0; section < section_count && valid; section += 1)
         {
             u64 header = section_table + (u64)section * section_size;
             u32 type = 0;
-            valid = object_read_u32(bytes, header + 4, &type);
+            valid = byte_slice_read_u32(bytes, header + 4, &type);
             if (valid && type == 2)
             {
                 u64 size = 0;
@@ -10234,12 +10029,12 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
                 u32 strings = 0;
                 valid = !found && object_read_elf_word(bytes, header + (elf32 ? 16 : 24), elf32, &symbol_offset) && object_read_elf_word(bytes, header + (elf32 ? 20 : 32), elf32, &size) &&
                         object_read_elf_word(bytes, header + (elf32 ? 36 : 56), elf32, &entry_size) && entry_size == (elf32 ? 16u : 24u) && !(size % entry_size) &&
-                        object_read_u32(bytes, header + (elf32 ? 24 : 40), &strings) && strings < section_count;
+                        byte_slice_read_u32(bytes, header + (elf32 ? 24 : 40), &strings) && strings < section_count;
                 if (valid)
                 {
                     u64 string_header = section_table + (u64)strings * section_size;
                     u32 string_type = 0;
-                    valid = object_read_u32(bytes, string_header + 4, &string_type) && string_type == 3 &&
+                    valid = byte_slice_read_u32(bytes, string_header + 4, &string_type) && string_type == 3 &&
                             object_read_elf_word(bytes, string_header + (elf32 ? 16 : 24), elf32, &string_offset) && object_read_elf_word(bytes, string_header + (elf32 ? 20 : 32), elf32, &string_size);
                     symbol_count = size / entry_size;
                     found = true;
@@ -10253,8 +10048,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
         format = OBJECT_FORMAT_MACH_O64;
         u32 command_count = 0;
         u32 commands_size = 0;
-        valid = bytes.length >= 32 && object_read_u32(bytes, 16, &command_count) &&
-                object_read_u32(bytes, 20, &commands_size) && commands_size <= bytes.length - 32;
+        valid = bytes.length >= 32 && byte_slice_read_u32(bytes, 16, &command_count) &&
+                byte_slice_read_u32(bytes, 20, &commands_size) && commands_size <= bytes.length - 32;
         u64 cursor = 32;
         u64 end = 32 + (u64)commands_size;
         bool found = false;
@@ -10262,17 +10057,17 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
         {
             u32 kind = 0;
             u32 size = 0;
-            valid = cursor <= end && 8 <= end - cursor && object_read_u32(bytes, cursor, &kind) &&
-                    object_read_u32(bytes, cursor + 4, &size) && size >= 8 && size <= end - cursor;
+            valid = cursor <= end && 8 <= end - cursor && byte_slice_read_u32(bytes, cursor, &kind) &&
+                    byte_slice_read_u32(bytes, cursor + 4, &size) && size >= 8 && size <= end - cursor;
             if (valid && kind == 2)
             {
                 u32 offset = 0;
                 u32 count = 0;
                 u32 strings = 0;
                 u32 string_bytes = 0;
-                valid = !found && size >= 24 && object_read_u32(bytes, cursor + 8, &offset) &&
-                        object_read_u32(bytes, cursor + 12, &count) && object_read_u32(bytes, cursor + 16, &strings) &&
-                        object_read_u32(bytes, cursor + 20, &string_bytes);
+                valid = !found && size >= 24 && byte_slice_read_u32(bytes, cursor + 8, &offset) &&
+                        byte_slice_read_u32(bytes, cursor + 12, &count) && byte_slice_read_u32(bytes, cursor + 16, &strings) &&
+                        byte_slice_read_u32(bytes, cursor + 20, &string_bytes);
                 if (valid)
                 {
                     symbol_offset = offset;
@@ -10292,7 +10087,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
         format = OBJECT_FORMAT_COFF;
         u32 offset = 0;
         u32 count = 0;
-        valid = bytes.length >= 20 && object_read_u32(bytes, 8, &offset) && object_read_u32(bytes, 12, &count);
+        valid = bytes.length >= 20 && byte_slice_read_u32(bytes, 8, &offset) && byte_slice_read_u32(bytes, 12, &count);
         symbol_offset = offset;
         symbol_count = count;
         stride = 18;
@@ -10305,7 +10100,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
         {
             string_offset = symbol_offset + symbol_count * stride;
             u32 size = 0;
-            valid = object_read_u32(bytes, string_offset, &size) && size >= 4;
+            valid = byte_slice_read_u32(bytes, string_offset, &size) && size >= 4;
             string_size = size;
         }
         else valid = false;
@@ -10333,7 +10128,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
             if (format == OBJECT_FORMAT_ELF64 || format == OBJECT_FORMAT_ELF32)
             {
                 u16 section = 0;
-                valid = object_read_u32(bytes, source, &name_offset) && object_read_u16(bytes, source + (elf32 ? 14 : 6), &section);
+                valid = byte_slice_read_u32(bytes, source, &name_offset) && byte_slice_read_u16(bytes, source + (elf32 ? 14 : 6), &section);
                 u8 binding = bytes.pointer[source + (elf32 ? 12 : 4)] >> 4;
                 global = binding != 0 && (bytes.pointer[source + (elf32 ? 12 : 4)] & 0xf) != 4;
                 weak = binding == 2;
@@ -10343,8 +10138,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
             {
                 u16 description = 0;
                 u64 value = 0;
-                valid = object_read_u32(bytes, source, &name_offset) && object_read_u16(bytes, source + 6, &description) &&
-                        object_read_u64(bytes, source + 8, &value);
+                valid = byte_slice_read_u32(bytes, source, &name_offset) && byte_slice_read_u16(bytes, source + 6, &description) &&
+                        byte_slice_read_u64(bytes, source + 8, &value);
                 u8 type = bytes.pointer[source + (elf32 ? 12 : 4)];
                 u8 kind = type & 0x0e;
                 global = (type & 1) && !(type & 0xe0) && (kind == 0 || kind == 0x0e || kind == 0x02 || kind == 0x0a);
@@ -10356,8 +10151,8 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
                 u32 prefix = 0;
                 u16 section = 0;
                 u32 value = 0;
-                valid = object_read_u32(bytes, source, &prefix) && object_read_u16(bytes, source + 12, &section) &&
-                        object_read_u32(bytes, source + 8, &value);
+                valid = byte_slice_read_u32(bytes, source, &prefix) && byte_slice_read_u16(bytes, source + 12, &section) &&
+                        byte_slice_read_u32(bytes, source + 8, &value);
                 u8 storage = bytes.pointer[source + 16];
                 u8 auxiliaries = bytes.pointer[source + 17];
                 valid = valid && auxiliaries < symbol_count - index;
@@ -10369,7 +10164,7 @@ BUSTER_GLOBAL_LOCAL ObjectFile object_archive_member_symbols(Arena* arena, ByteS
                     name = (String8){.pointer = (char8*)bytes.pointer + source, .length = 0};
                     while (name.length < 8 && name.pointer[name.length]) name.length += 1;
                 }
-                else valid = valid && object_read_u32(bytes, source + 4, &name_offset);
+                else valid = valid && byte_slice_read_u32(bytes, source + 4, &name_offset);
                 index += auxiliaries;
             }
             if (valid && global)
@@ -10808,7 +10603,7 @@ BUSTER_GLOBAL_LOCAL bool object_fuzz_elf_find_section(ByteSlice bytes, u32 type,
     {
         u64 section_table = 0;
         u16 section_count = 0;
-        if (!object_read_u64(bytes, 40, &section_table) || !object_read_u16(bytes, 60, &section_count) || section_table > bytes.length ||
+        if (!byte_slice_read_u64(bytes, 40, &section_table) || !byte_slice_read_u16(bytes, 60, &section_count) || section_table > bytes.length ||
             (u64)section_count * 64 > bytes.length - section_table)
         {
             return false;
@@ -10819,8 +10614,8 @@ BUSTER_GLOBAL_LOCAL bool object_fuzz_elf_find_section(ByteSlice bytes, u32 type,
             u32 section_type = 0;
             u64 section_offset = 0;
             u64 section_size = 0;
-            if (!object_read_u32(bytes, section + 4, &section_type) || !object_read_u64(bytes, section + 24, &section_offset) ||
-                !object_read_u64(bytes, section + 32, &section_size))
+            if (!byte_slice_read_u32(bytes, section + 4, &section_type) || !byte_slice_read_u64(bytes, section + 24, &section_offset) ||
+                !byte_slice_read_u64(bytes, section + 32, &section_size))
             {
                 return false;
             }
@@ -10855,15 +10650,15 @@ BUSTER_GLOBAL_LOCAL bool object_fuzz_mach_find_command(ByteSlice bytes, u32 kind
     if (bytes.pointer && bytes.length >= 32)
     {
         u32 command_count = 0;
-        if (object_read_u32(bytes, 16, &command_count))
+        if (byte_slice_read_u32(bytes, 16, &command_count))
         {
             u64 command = 32;
             for (u32 command_index = 0; command_index < command_count; command_index += 1)
             {
                 u32 command_kind = 0;
                 u32 command_size = 0;
-                if (command > bytes.length || 8 > bytes.length - command || !object_read_u32(bytes, command, &command_kind) ||
-                    !object_read_u32(bytes, command + 4, &command_size) || command_size < 8 || command_size > bytes.length - command)
+                if (command > bytes.length || 8 > bytes.length - command || !byte_slice_read_u32(bytes, command, &command_kind) ||
+                    !byte_slice_read_u32(bytes, command + 4, &command_size) || command_size < 8 || command_size > bytes.length - command)
                 {
                     return false;
                 }
@@ -11166,7 +10961,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
                 {
                     u32 symbol_offset = 0;
                     u32 symbol_count = 0;
-                    if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) && symbol_count > 1)
+                    if (byte_slice_read_u32(seed, 8, &symbol_offset) && byte_slice_read_u32(seed, 12, &symbol_count) && symbol_count > 1)
                     {
                         object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + 18 + 4, UINT32_MAX);
                     }
@@ -11185,7 +10980,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
                 {
                     u32 symbol_offset = 0;
                     u32 symbol_count = 0;
-                    if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) &&
+                    if (byte_slice_read_u32(seed, 8, &symbol_offset) && byte_slice_read_u32(seed, 12, &symbol_count) &&
                         (u64)symbol_offset + (u64)symbol_count * 18 < seed.length)
                     {
                         object_fuzz_write_u8(bytes, seed.length, (u64)symbol_offset + (u64)symbol_count * 18 + 3, 'x');
@@ -11195,7 +10990,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
                 {
                     u32 relocation_offset = 0;
                     u16 relocation_count = 0;
-                    if (object_read_u32(seed, 20 + 24, &relocation_offset) && object_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
+                    if (byte_slice_read_u32(seed, 20 + 24, &relocation_offset) && byte_slice_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
                     {
                         object_fuzz_write_u32(bytes, seed.length, (u64)relocation_offset + 4, UINT32_MAX);
                     }
@@ -11219,7 +11014,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
                 else if (mutation_index == 16)
                 {
                     u32 symbol_offset = 0;
-                    if (object_read_u32(seed, 8, &symbol_offset))
+                    if (byte_slice_read_u32(seed, 8, &symbol_offset))
                     {
                         object_fuzz_write_u16(bytes, seed.length, (u64)symbol_offset + 18 + 12, UINT16_MAX);
                     }
@@ -11227,7 +11022,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
                 else if (mutation_index == 17)
                 {
                     u32 symbol_offset = 0;
-                    if (object_read_u32(seed, 8, &symbol_offset))
+                    if (byte_slice_read_u32(seed, 8, &symbol_offset))
                     {
                         object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + 18 + 8, UINT32_MAX);
                     }
@@ -11236,7 +11031,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
                 {
                     u32 relocation_offset = 0;
                     u16 relocation_count = 0;
-                    if (object_read_u32(seed, 20 + 24, &relocation_offset) && object_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
+                    if (byte_slice_read_u32(seed, 20 + 24, &relocation_offset) && byte_slice_read_u16(seed, 20 + 32, &relocation_count) && relocation_count)
                     {
                         object_fuzz_write_u16(bytes, seed.length, (u64)relocation_offset + 8, UINT16_MAX);
                     }
@@ -11245,7 +11040,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
                 {
                     u32 symbol_offset = 0;
                     u32 symbol_count = 0;
-                    if (object_read_u32(seed, 8, &symbol_offset) && object_read_u32(seed, 12, &symbol_count) &&
+                    if (byte_slice_read_u32(seed, 8, &symbol_offset) && byte_slice_read_u32(seed, 12, &symbol_count) &&
                         (u64)symbol_offset + (u64)symbol_count * 18 + 4 <= seed.length)
                     {
                         object_fuzz_write_u32(bytes, seed.length, (u64)symbol_offset + (u64)symbol_count * 18, UINT32_MAX);
@@ -11258,7 +11053,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
                 else if (mutation_index == 21)
                 {
                     u32 symbol_offset = 0;
-                    if (object_read_u32(seed, 8, &symbol_offset))
+                    if (byte_slice_read_u32(seed, 8, &symbol_offset))
                     {
                         object_fuzz_write_u8(bytes, seed.length, (u64)symbol_offset + 18 + 17, UINT8_MAX);
                     }
@@ -11306,8 +11101,8 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
                     u64 command = 0;
                     u32 string_offset = 0;
                     u32 string_size = 0;
-                    if (object_fuzz_mach_find_command(seed, 2, &command) && object_read_u32(seed, command + 16, &string_offset) &&
-                        object_read_u32(seed, command + 20, &string_size) && string_size && (u64)string_offset + string_size <= seed.length)
+                    if (object_fuzz_mach_find_command(seed, 2, &command) && byte_slice_read_u32(seed, command + 16, &string_offset) &&
+                        byte_slice_read_u32(seed, command + 20, &string_size) && string_size && (u64)string_offset + string_size <= seed.length)
                     {
                         object_fuzz_write_u8(bytes, seed.length, (u64)string_offset + string_size - 1, 'x');
                     }
@@ -11317,8 +11112,8 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
                     u64 command = 0;
                     u32 symbol_offset = 0;
                     u32 symbol_count = 0;
-                    if (object_fuzz_mach_find_command(seed, 2, &command) && object_read_u32(seed, command + 8, &symbol_offset) &&
-                        object_read_u32(seed, command + 12, &symbol_count) && symbol_count)
+                    if (object_fuzz_mach_find_command(seed, 2, &command) && byte_slice_read_u32(seed, command + 8, &symbol_offset) &&
+                        byte_slice_read_u32(seed, command + 12, &symbol_count) && symbol_count)
                     {
                         object_fuzz_write_u32(bytes, seed.length, symbol_offset, UINT32_MAX);
                     }
@@ -11328,7 +11123,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_fuzz_mutate(Arena* arena, ByteSlice seed, c
                     u64 section = 32 + 72;
                     u32 relocation_offset = 0;
                     u32 relocation_count = 0;
-                    if (object_read_u32(seed, section + 56, &relocation_offset) && object_read_u32(seed, section + 60, &relocation_count) && relocation_count)
+                    if (byte_slice_read_u32(seed, section + 56, &relocation_offset) && byte_slice_read_u32(seed, section + 60, &relocation_count) && relocation_count)
                     {
                         object_fuzz_write_u32(bytes, seed.length, (u64)relocation_offset + 4, UINT32_MAX);
                     }
@@ -12059,13 +11854,23 @@ BUSTER_GLOBAL_LOCAL bool object_append_dwarf_cfi(ObjectFile* object, DwarfCfiRes
     return true;
 }
 
+typedef struct ObjectWindowsArm64Fragment ObjectWindowsArm64Fragment;
+struct ObjectWindowsArm64Fragment
+{
+    u32 function_index;
+    u32 code_offset;
+    u32 xdata_offset;
+};
+
 typedef struct ObjectWindowsUnwindResult ObjectWindowsUnwindResult;
 struct ObjectWindowsUnwindResult
 {
     ByteSlice pdata;
     ByteSlice xdata;
     u32* xdata_offsets;
+    ObjectWindowsArm64Fragment* arm64_fragments;
     u32 function_count;
+    u32 pdata_count;
     bool valid;
     bool aarch64;
     u8 reserved[2];
@@ -12145,6 +11950,7 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_x64_unwind_build(Ar
 {
     ObjectWindowsUnwindResult result = {
         .function_count = function_count,
+        .pdata_count = function_count,
     };
     bool valid = arena && (!function_count || functions) && function_count <= UINT32_MAX / 12;
     if (valid)
@@ -12484,11 +12290,13 @@ BUSTER_GLOBAL_LOCAL bool object_windows_arm64_canonical_codes_build(CodegenFunct
 }
 
 BUSTER_GLOBAL_LOCAL bool object_windows_arm64_codes_build(CodegenFunctionDescriptor const* function, ObjectWindowsArm64CodeBuffer* codes,
-                                                          u32* epilog_code_index)
+                                                          u32* epilog_code_index, bool* epilog_codes_shared_with_prolog)
 {
     u32 machine_frame_pointer = UINT32_MAX;
+    bool shared_with_prolog = object_windows_arm64_machine_frame(function, &machine_frame_pointer);
     bool valid;
-    if (object_windows_arm64_machine_frame(function, &machine_frame_pointer))
+    *epilog_codes_shared_with_prolog = shared_with_prolog;
+    if (shared_with_prolog)
     {
         valid = true;
         for (u32 index = function->unwind_action_count; valid && index > 3; index -= 1)
@@ -12510,6 +12318,201 @@ BUSTER_GLOBAL_LOCAL bool object_windows_arm64_codes_build(CodegenFunctionDescrip
     return valid;
 }
 
+#define OBJECT_WINDOWS_ARM64_MAX_FRAGMENT_BYTES UINT32_C(0x000ffffc)
+
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_epilogs_valid(CodegenFunctionDescriptor const* function)
+{
+    bool valid = function && (!function->epilog_count || (function->epilog_offsets && function->epilog_end_offsets));
+    u32 previous_end = 0;
+    for (u32 epilog_index = 0; valid && epilog_index < function->epilog_count; epilog_index += 1)
+    {
+        u32 start = function->epilog_offsets[epilog_index];
+        u32 end = function->epilog_end_offsets[epilog_index];
+        valid = !(start & 3u) && !(end & 3u) && start >= previous_end && end > start && end <= function->code_size &&
+                end - start <= OBJECT_WINDOWS_ARM64_MAX_FRAGMENT_BYTES;
+        previous_end = end;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL u32 object_windows_arm64_epilog_lower_bound(CodegenFunctionDescriptor const* function, u32 code_offset)
+{
+    u32 low = 0;
+    u32 high = function->epilog_count;
+    while (low < high)
+    {
+        u32 middle = low + (high - low) / 2;
+        if (function->epilog_offsets[middle] < code_offset)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_fragment_next(CodegenFunctionDescriptor const* function, u32 fragment_start, u32* fragment_end)
+{
+    bool valid = function && fragment_end && fragment_start < function->code_size;
+    u32 candidate = fragment_start;
+    if (valid)
+    {
+        u64 limit = (u64)fragment_start + OBJECT_WINDOWS_ARM64_MAX_FRAGMENT_BYTES;
+        candidate = limit < function->code_size ? (u32)limit : function->code_size;
+        u32 first_epilog = object_windows_arm64_epilog_lower_bound(function, fragment_start);
+        if (first_epilog && function->epilog_end_offsets[first_epilog - 1u] > fragment_start)
+        {
+            valid = false;
+        }
+        u32 fragment_epilog_count = 0;
+        for (u32 epilog_index = first_epilog; valid && epilog_index < function->epilog_count; epilog_index += 1)
+        {
+            u32 start = function->epilog_offsets[epilog_index];
+            u32 end = function->epilog_end_offsets[epilog_index];
+            if (start >= candidate)
+            {
+                break;
+            }
+            if (end > candidate)
+            {
+                candidate = start;
+                break;
+            }
+            fragment_epilog_count += 1;
+            if (fragment_epilog_count > UINT16_MAX)
+            {
+                candidate = start;
+                break;
+            }
+        }
+        valid &= candidate > fragment_start && candidate - fragment_start <= OBJECT_WINDOWS_ARM64_MAX_FRAGMENT_BYTES && !(candidate & 3u);
+        if (valid)
+        {
+            *fragment_end = candidate;
+        }
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL u32 object_windows_arm64_fragment_epilog_count(CodegenFunctionDescriptor const* function, u32 fragment_start, u32 fragment_end)
+{
+    u32 first_epilog = object_windows_arm64_epilog_lower_bound(function, fragment_start);
+    u32 end_epilog = object_windows_arm64_epilog_lower_bound(function, fragment_end);
+    return end_epilog - first_epilog;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_fragment_record_shape(u32 epilog_code_index, u32 code_count,
+                                                                    bool epilog_codes_shared_with_prolog, bool first_fragment,
+                                                                    u32 fragment_epilog_count, u32* scope_count_out,
+                                                                    u32* unwind_byte_count_out, u32* code_word_count_out,
+                                                                    u32* record_size_out)
+{
+    u32 scope_count = fragment_epilog_count;
+    u32 parent_prolog_code_count = epilog_codes_shared_with_prolog ? code_count : epilog_code_index;
+    u64 unwind_byte_count = first_fragment ? code_count :
+                            fragment_epilog_count ? (u64)code_count + 1u : (u64)parent_prolog_code_count + 1u;
+    u64 code_word_count = (unwind_byte_count + 3) / 4;
+    bool extended = scope_count > 31 || code_word_count > 31;
+    u64 record_size = (extended ? 8u : 4u) + (u64)scope_count * 4 + code_word_count * 4;
+    bool valid = scope_count <= UINT16_MAX && epilog_code_index <= code_count && code_word_count <= UINT8_MAX &&
+                 (!fragment_epilog_count || (u64)epilog_code_index + (first_fragment ? 0u : 1u) <= 1023u) &&
+                 record_size <= UINT32_MAX && scope_count_out && unwind_byte_count_out && code_word_count_out && record_size_out;
+    if (valid)
+    {
+        *scope_count_out = scope_count;
+        *unwind_byte_count_out = (u32)unwind_byte_count;
+        *code_word_count_out = (u32)code_word_count;
+        *record_size_out = (u32)record_size;
+    }
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool object_windows_arm64_fragment_record_write(u8* record, CodegenFunctionDescriptor const* function,
+                                                                     ObjectWindowsArm64CodeBuffer const* codes,
+                                                                     u32 epilog_code_index, bool epilog_codes_shared_with_prolog,
+                                                                     u32 fragment_start, u32 fragment_end, bool first_fragment)
+{
+    u32 fragment_epilog_count = object_windows_arm64_fragment_epilog_count(function, fragment_start, fragment_end);
+    u32 scope_count = 0;
+    u32 unwind_byte_count = 0;
+    u32 code_word_count = 0;
+    u32 record_size = 0;
+    bool valid = record && function && codes && codes->valid && codes->bytes && codes->count &&
+                 object_windows_arm64_fragment_record_shape(epilog_code_index, codes->count, epilog_codes_shared_with_prolog,
+                                                           first_fragment, fragment_epilog_count, &scope_count,
+                                                           &unwind_byte_count, &code_word_count, &record_size);
+    if (valid)
+    {
+        u32 header_size = scope_count > 31 || code_word_count > 31 ? 8u : 4u;
+        u32 header = (fragment_end - fragment_start) / 4;
+        bool single_epilog = !first_fragment && !fragment_epilog_count;
+        if (single_epilog)
+        {
+            header |= 1u << 21;
+        }
+        if (header_size == 4)
+        {
+            header |= scope_count << 22;
+            header |= code_word_count << 27;
+        }
+        memset(record, 0, record_size);
+        memcpy(record, &header, sizeof(header));
+        if (header_size == 8)
+        {
+            u32 extension = scope_count | (code_word_count << 16);
+            memcpy(record + 4, &extension, sizeof(extension));
+        }
+        u32 local_scope_index = 0;
+        u32 first_epilog = object_windows_arm64_epilog_lower_bound(function, fragment_start);
+        u32 end_epilog = object_windows_arm64_epilog_lower_bound(function, fragment_end);
+        for (u32 epilog_index = first_epilog; valid && epilog_index < end_epilog; epilog_index += 1)
+        {
+            u32 epilog_start = function->epilog_offsets[epilog_index];
+            u32 relative_start = (epilog_start - fragment_start) / 4;
+            u32 code_index = first_fragment ? epilog_code_index : epilog_code_index + 1u;
+            valid = relative_start < (1u << 18) && code_index <= 1023;
+            if (valid)
+            {
+                u32 scope = relative_start | (code_index << 22);
+                u32 scope_offset = header_size + local_scope_index * 4;
+                memcpy(record + scope_offset, &scope, sizeof(scope));
+                local_scope_index += 1;
+            }
+        }
+        u32 unwind_offset = header_size + scope_count * 4;
+        u32 written = 0;
+        if (first_fragment)
+        {
+            memcpy(record + unwind_offset, codes->bytes, codes->count);
+            written = codes->count;
+        }
+        else if (fragment_epilog_count)
+        {
+            valid &= codes->count > epilog_code_index && codes->bytes[codes->count - 1] == 0xe4;
+            if (valid)
+            {
+                record[unwind_offset] = 0xe5;
+                written = 1;
+                memcpy(record + unwind_offset + written, codes->bytes, codes->count);
+                written += codes->count;
+            }
+        }
+        else
+        {
+            u32 parent_prolog_code_count = epilog_codes_shared_with_prolog ? codes->count : epilog_code_index;
+            record[unwind_offset] = 0xe5;
+            written = 1;
+            memcpy(record + unwind_offset + written, codes->bytes, parent_prolog_code_count);
+            written += parent_prolog_code_count;
+        }
+        valid &= written == unwind_byte_count;
+    }
+    return valid;
+}
+
 BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_arm64_unwind_build(Arena* arena, CodegenFunctionDescriptor* functions,
                                                                                  u32 function_count)
 {
@@ -12517,103 +12520,158 @@ BUSTER_GLOBAL_LOCAL ObjectWindowsUnwindResult object_windows_arm64_unwind_build(
         .function_count = function_count,
         .aarch64 = true,
     };
-    if (arena && (!function_count || functions) && function_count <= UINT32_MAX / 8)
+    bool valid = arena && (!function_count || functions);
+    u64 pdata_count = 0;
+    u64 xdata_capacity = 0;
+    for (u32 function_index = 0; valid && function_index < function_count; function_index += 1)
     {
-        result.xdata_offsets = arena_allocate(arena, u32, function_count);
-        u64 xdata_capacity = 0;
-        for (u32 function_index = 0; function_index < function_count; function_index += 1)
+        CodegenFunctionDescriptor const* function = functions + function_index;
+        valid = function->code_size && !(function->code_size & 3u) && object_windows_arm64_epilogs_valid(function) &&
+                function->unwind_action_count <= (UINT32_MAX - 8u) / 8u;
+        u32 code_capacity = valid ? function->unwind_action_count * 8u + 8u : 8u;
+        ObjectWindowsArm64CodeBuffer codes = {
+            .bytes = valid ? arena_allocate(arena, u8, code_capacity) : 0,
+            .capacity = code_capacity,
+            .valid = valid,
+        };
+        u32 epilog_code_index = 0;
+        bool epilog_codes_shared_with_prolog = false;
+        if (valid)
         {
-            CodegenFunctionDescriptor const* function = functions + function_index;
-            if (!function->code_size || function->code_size % 4 || function->code_size / 4 >= (1u << 18) || function->epilog_count > UINT16_MAX)
-            {
-                return result;
-            }
-            u64 record_capacity = 8 + (u64)function->epilog_count * 4 + (u64)function->unwind_action_count * 8 + 8;
-            if (xdata_capacity > UINT32_MAX || record_capacity > UINT32_MAX - xdata_capacity)
-            {
-                return result;
-            }
-            xdata_capacity += record_capacity;
+            valid = object_windows_arm64_codes_build(function, &codes, &epilog_code_index, &epilog_codes_shared_with_prolog) &&
+                    epilog_code_index <= 1023 && epilog_code_index <= codes.count && codes.count && codes.bytes[codes.count - 1] == 0xe4;
         }
+        u32 fragment_start = 0;
+        bool first_fragment = true;
+        while (valid && fragment_start < function->code_size)
+        {
+            u32 fragment_end = 0;
+            valid = object_windows_arm64_fragment_next(function, fragment_start, &fragment_end);
+            if (valid)
+            {
+                u32 fragment_epilog_count =
+                    object_windows_arm64_fragment_epilog_count(function, fragment_start, fragment_end);
+                u32 scope_count = 0;
+                u32 unwind_byte_count = 0;
+                u32 code_word_count = 0;
+                u32 record_size = 0;
+                valid = object_windows_arm64_fragment_record_shape(epilog_code_index, codes.count, epilog_codes_shared_with_prolog,
+                                                                    first_fragment,
+                                                                    fragment_epilog_count, &scope_count,
+                                                                    &unwind_byte_count, &code_word_count, &record_size);
+                if (valid)
+                {
+                    valid = pdata_count < UINT32_MAX / 8u && xdata_capacity <= UINT32_MAX - record_size;
+                    if (valid)
+                    {
+                        pdata_count += 1;
+                        xdata_capacity += record_size;
+                        fragment_start = fragment_end;
+                        first_fragment = false;
+                    }
+                }
+            }
+        }
+    }
+    if (valid)
+    {
+        result.pdata_count = (u32)pdata_count;
+        result.arm64_fragments = pdata_count ? arena_allocate(arena, ObjectWindowsArm64Fragment, pdata_count) : 0;
         result.pdata = (ByteSlice){
-            .pointer = arena_allocate(arena, u8, (u64)function_count * 8),
-            .length = (u64)function_count * 8,
+            .pointer = arena_allocate(arena, u8, pdata_count * 8),
+            .length = pdata_count * 8,
         };
         result.xdata.pointer = arena_allocate(arena, u8, xdata_capacity);
         if (result.pdata.length)
         {
             memset(result.pdata.pointer, 0, result.pdata.length);
         }
+        u32 fragment_index = 0;
         u32 xdata_cursor = 0;
-        for (u32 function_index = 0; function_index < function_count; function_index += 1)
+        for (u32 function_index = 0; valid && function_index < function_count; function_index += 1)
         {
             CodegenFunctionDescriptor const* function = functions + function_index;
-            result.xdata_offsets[function_index] = xdata_cursor;
-            u32 code_capacity = function->unwind_action_count * 8 + 8;
+            u32 code_capacity = function->unwind_action_count * 8u + 8u;
             ObjectWindowsArm64CodeBuffer codes = {
                 .bytes = arena_allocate(arena, u8, code_capacity),
                 .capacity = code_capacity,
                 .valid = true,
             };
             u32 epilog_code_index = 0;
-            if (!object_windows_arm64_codes_build(function, &codes, &epilog_code_index) || epilog_code_index > 1023)
+            bool epilog_codes_shared_with_prolog = false;
+            valid = object_windows_arm64_codes_build(function, &codes, &epilog_code_index, &epilog_codes_shared_with_prolog) &&
+                    epilog_code_index <= 1023 && epilog_code_index <= codes.count && codes.count && codes.bytes[codes.count - 1] == 0xe4;
+            u32 fragment_start = 0;
+            bool first_fragment = true;
+            while (valid && fragment_start < function->code_size)
             {
-                return result;
-            }
-            u32 code_words = (codes.count + 3) / 4;
-            bool extended = function->epilog_count > 31 || code_words > 31;
-            if (code_words > UINT8_MAX)
-            {
-                return result;
-            }
-            u32 header_size = extended ? 8 : 4;
-            u64 record_size = (u64)header_size + (u64)function->epilog_count * 4 + (u64)code_words * 4;
-            if (record_size > xdata_capacity - xdata_cursor)
-            {
-                return result;
-            }
-            u8* record = result.xdata.pointer + xdata_cursor;
-            memset(record, 0, record_size);
-            u32 header = function->code_size / 4;
-            if (!extended)
-            {
-                header |= function->epilog_count << 22;
-                header |= code_words << 27;
-            }
-            memcpy(record, &header, sizeof(header));
-            if (extended)
-            {
-                u32 extension = function->epilog_count | (code_words << 16);
-                memcpy(record + 4, &extension, sizeof(extension));
-            }
-            for (u32 epilog_index = 0; epilog_index < function->epilog_count; epilog_index += 1)
-            {
-                u32 epilog = function->epilog_offsets[epilog_index];
-                if (epilog % 4 || epilog / 4 >= (1u << 18))
+                u32 fragment_end = 0;
+                valid = object_windows_arm64_fragment_next(function, fragment_start, &fragment_end);
+                if (valid)
                 {
-                    return result;
+                    u32 fragment_epilog_count =
+                        object_windows_arm64_fragment_epilog_count(function, fragment_start, fragment_end);
+                    u32 scope_count = 0;
+                    u32 unwind_byte_count = 0;
+                    u32 code_word_count = 0;
+                    u32 record_size = 0;
+                    valid = object_windows_arm64_fragment_record_shape(epilog_code_index, codes.count, epilog_codes_shared_with_prolog,
+                                                                    first_fragment,
+                                                                        fragment_epilog_count, &scope_count,
+                                                                        &unwind_byte_count, &code_word_count, &record_size) &&
+                            fragment_index < result.pdata_count && record_size <= xdata_capacity - xdata_cursor;
+                    if (valid)
+                    {
+                        result.arm64_fragments[fragment_index] = (ObjectWindowsArm64Fragment){
+                            .function_index = function_index,
+                            .code_offset = fragment_start,
+                            .xdata_offset = xdata_cursor,
+                        };
+                        valid = object_windows_arm64_fragment_record_write(result.xdata.pointer + xdata_cursor, function, &codes,
+                                                                           epilog_code_index, epilog_codes_shared_with_prolog,
+                                                                           fragment_start, fragment_end, first_fragment);
+                        if (valid)
+                        {
+                            xdata_cursor += record_size;
+                            fragment_index += 1;
+                            fragment_start = fragment_end;
+                            first_fragment = false;
+                        }
+                    }
                 }
-                u32 scope = epilog / 4 | (epilog_code_index << 22);
-                memcpy(record + header_size + epilog_index * 4, &scope, sizeof(scope));
             }
-            memcpy(record + header_size + function->epilog_count * 4, codes.bytes, codes.count);
-            xdata_cursor += (u32)record_size;
         }
+        valid &= fragment_index == result.pdata_count && xdata_cursor == xdata_capacity;
         result.xdata.length = xdata_cursor;
-        result.valid = true;
+        result.valid = valid;
     }
-
     return result;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* object, ObjectWindowsUnwindResult built)
 {
-    bool result;
-    if (!built.valid || built.function_count > object->symbol_count)
+    bool valid = arena && object && built.valid && built.function_count <= object->symbol_count &&
+                 built.pdata_count <= UINT32_MAX / (built.aarch64 ? 8u : 12u) &&
+                 (!built.pdata_count || (built.aarch64 ? built.arm64_fragments != 0 : built.xdata_offsets != 0));
+    if (valid && built.aarch64)
     {
-        result = false;
+        for (u32 fragment_index = 0; valid && fragment_index < built.pdata_count; fragment_index += 1)
+        {
+            ObjectWindowsArm64Fragment const* fragment = built.arm64_fragments + fragment_index;
+            valid = fragment->function_index < built.function_count &&
+                    fragment->function_index < object->symbol_count &&
+                    fragment->code_offset < object->symbols[fragment->function_index].size &&
+                    fragment->xdata_offset < built.xdata.length;
+        }
     }
-    else
+    if (valid && !built.aarch64)
+    {
+        for (u32 function_index = 0; valid && function_index < built.pdata_count; function_index += 1)
+        {
+            valid = built.xdata_offsets[function_index] < built.xdata.length;
+        }
+    }
+    if (valid)
     {
         object->sections[OBJECT_SECTION_WINDOWS_PDATA].data = built.pdata;
         object->sections[OBJECT_SECTION_WINDOWS_PDATA].virtual_size = built.pdata.length;
@@ -12628,10 +12686,14 @@ BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* 
                 .section = OBJECT_SECTION_WINDOWS_XDATA,
                 .kind = OBJECT_SYMBOL_DATA,
             };
-            for (u32 function_index = 0; function_index < built.function_count; function_index += 1)
+            for (u32 record_index = 0; record_index < built.pdata_count; record_index += 1)
             {
-                u64 offset = (u64)function_index * (built.aarch64 ? 8 : 12);
+                u32 function_index = built.aarch64 ? built.arm64_fragments[record_index].function_index : record_index;
+                u32 code_offset = built.aarch64 ? built.arm64_fragments[record_index].code_offset : 0;
+                u32 xdata_offset = built.aarch64 ? built.arm64_fragments[record_index].xdata_offset : built.xdata_offsets[record_index];
+                u64 offset = (u64)record_index * (built.aarch64 ? 8 : 12);
                 object->relocations[object->relocation_count++] = (ObjectRelocation){
+                    .addend = code_offset,
                     .offset = offset,
                     .section = OBJECT_SECTION_WINDOWS_PDATA,
                     .symbol = function_index,
@@ -12648,7 +12710,7 @@ BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* 
                     };
                 }
                 object->relocations[object->relocation_count++] = (ObjectRelocation){
-                    .addend = (s64)built.xdata_offsets[function_index],
+                    .addend = xdata_offset,
                     .offset = offset + (built.aarch64 ? 4 : 8),
                     .section = OBJECT_SECTION_WINDOWS_PDATA,
                     .symbol = xdata_symbol,
@@ -12656,10 +12718,8 @@ BUSTER_GLOBAL_LOCAL bool object_append_windows_unwind(Arena* arena, ObjectFile* 
                 };
             }
         }
-        result = true;
     }
-
-    return result;
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL bool object_codegen_functions_valid(CodegenModule* module)
@@ -13309,8 +13369,8 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                                        });
         }
     }
-    u32 metadata_relocation_count = (dwarf.valid ? dwarf.relocation_count : 0) + (codeview.valid ? codeview.relocation_count : 0) + cfi.relocation_count +
-                                    windows_unwind.function_count * (windows_unwind.aarch64 ? 2u : 3u);
+    u64 metadata_relocation_count = (u64)(dwarf.valid ? dwarf.relocation_count : 0) + (u64)(codeview.valid ? codeview.relocation_count : 0) +
+                                    (u64)cfi.relocation_count + (u64)windows_unwind.pdata_count * (windows_unwind.aarch64 ? 2u : 3u);
     bool apple_thread_local = false;
     if (target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS)
     {
@@ -13488,7 +13548,13 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             .global = true,
         };
     }
-    result.relocations = arena_allocate(arena, ObjectRelocation, module->relocation_count + metadata_relocation_count + initializer_count);
+    u64 relocation_capacity = (u64)module->relocation_count + metadata_relocation_count + initializer_count;
+    bool relocation_capacity_valid = relocation_capacity <= UINT32_MAX;
+    if (!relocation_capacity_valid)
+    {
+        result.error = OBJECT_ERROR_INVALID_INPUT;
+    }
+    result.relocations = arena_allocate(arena, ObjectRelocation, relocation_capacity_valid ? relocation_capacity : 0);
     Arena* name_conflicts[] = {
         arena,
     };
@@ -13538,7 +13604,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
             entry_by_symbol[symbol_value] = defined_owner[module->entry_count + module->global_count + alias_index];
         }
     }
-    for (u32 relocation_index = 0; relocation_index < module->relocation_count; relocation_index += 1)
+    for (u32 relocation_index = 0; relocation_index < module->relocation_count && result.error == OBJECT_ERROR_NONE; relocation_index += 1)
     {
         CodegenModuleRelocation source = module->relocations[relocation_index];
         ObjectRelocationKind kind = OBJECT_RELOCATION_X86_64_PC32;
@@ -16238,8 +16304,8 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
             memcpy(&instruction, object->sections[source->section].data.pointer + source->offset, sizeof(instruction));
             if ((source->offset & 3) || object->sections[source->section].alignment < 4 ||
                 ((source->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || source->kind == OBJECT_RELOCATION_AARCH64_MACH_TLVP_PAGE21)
-                     ? !object_mach_page21_instruction_valid(instruction)
-                     : !object_mach_pageoff12_shift(instruction, &shift)))
+                     ? !a64_page21_instruction_valid(instruction)
+                     : !a64_pageoff12_shift(instruction, &shift)))
             {
                 return result;
             }
@@ -16267,7 +16333,7 @@ BUSTER_GLOBAL_LOCAL ObjectArtifact object_write_core(Arena* arena, ObjectFile* o
             memcpy(&instruction, object->sections[source->section].data.pointer + source->offset, sizeof(instruction));
             if (format != OBJECT_FORMAT_MACH_O64 || object->target.cpu_arch != CPU_ARCH_AARCH64 || source->addend ||
                 (source->offset & 3) || object->sections[source->section].alignment < 4 ||
-                (source->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ? !object_mach_page21_instruction_valid(instruction)
+                (source->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ? !a64_page21_instruction_valid(instruction)
                                                                                 : !object_aarch64_got_load_read(instruction, 0)))
             {
                 result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
@@ -16374,378 +16440,3 @@ ObjectError object_test_32_capacity(ObjectFile* object, ObjectFormat format, u64
 }
 
 #endif
-
-BUSTER_GLOBAL_LOCAL bool object_address_difference(u64 target, u64 place, s64 addend, s64* result)
-{
-    return a64_pc_relative_displacement(target, place, addend, result);
-}
-
-ObjectExecutable object_link_executable(ObjectFile* object)
-{
-    ObjectExecutable result = {0};
-    do
-    {
-        if (!object || object->error != OBJECT_ERROR_NONE || object->section_count <= OBJECT_SECTION_TEXT || object->section_count > OBJECT_SECTION_COUNT ||
-            !object->sections || (object->symbol_count && !object->symbols) || (object->relocation_count && !object->relocations))
-        {
-            result.error = OBJECT_ERROR_INVALID_INPUT;
-            break;
-        }
-        u64 page_size = os_get_page_size();
-        if (object->requires_executable_stack || object->target.cpu_arch == CPU_ARCH_I386)
-        {
-            result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-            break;
-        }
-        if (!page_size || (page_size & (page_size - 1)))
-        {
-            result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
-            break;
-        }
-        u64 section_offsets[OBJECT_SECTION_COUNT] = {0};
-        u64 section_spans[OBJECT_SECTION_COUNT] = {0};
-        u64 maximum_alignment = page_size;
-        u32 text_section = UINT32_MAX;
-        u64 image_size = 0;
-        for (u32 section = 0; section < object->section_count; section += 1)
-        {
-            ObjectSection* source = object->sections + section;
-            if ((u32)source->kind >= (u32)OBJECT_SECTION_COUNT || (source->data.length && !source->data.pointer) ||
-                (object_section_kind_is_zero_fill(source->kind) && source->data.length) ||
-                (source->alignment && (source->alignment & (source->alignment - 1))))
-            {
-                result.error = OBJECT_ERROR_INVALID_INPUT;
-                break;
-            }
-            if (source->kind == OBJECT_SECTION_TEXT && (source->data.length || source->virtual_size) && text_section == UINT32_MAX) text_section = section;
-            u64 alignment = object->sections[section].alignment;
-            alignment = BUSTER_MAX(alignment, page_size);
-            maximum_alignment = BUSTER_MAX(maximum_alignment, alignment);
-            if (image_size > UINT64_MAX - (alignment - 1))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            image_size = (image_size + alignment - 1) & ~(alignment - 1);
-            section_offsets[section] = image_size;
-            u64 section_size = BUSTER_MAX(source->data.length, source->virtual_size);
-            if (section_size > UINT64_MAX - image_size)
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            if (section_size > UINT64_MAX - (page_size - 1))
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            section_spans[section] = (section_size + page_size - 1) & ~(page_size - 1);
-            if (section_spans[section] > UINT64_MAX - image_size)
-            {
-                result.error = OBJECT_ERROR_CAPACITY;
-                break;
-            }
-            image_size += section_spans[section];
-        }
-        if (text_section == UINT32_MAX) result.error = OBJECT_ERROR_INVALID_INPUT;
-        if (result.error != OBJECT_ERROR_NONE)
-        {
-            break;
-        }
-        if (image_size > UINT64_MAX - (maximum_alignment - page_size))
-        {
-            result.error = OBJECT_ERROR_CAPACITY;
-            break;
-        }
-        u64 allocation_size = image_size + maximum_alignment - page_size;
-        if (!allocation_size)
-        {
-            allocation_size = page_size;
-        }
-        if (allocation_size > SIZE_MAX)
-        {
-            result.error = OBJECT_ERROR_CAPACITY;
-            break;
-        }
-        void* allocation = os_reserve(0, allocation_size, (ProtectionFlags){.read = 1, .write = 1}, (MapFlags){.priv = 1, .anonymous = 1});
-        if (!allocation)
-        {
-            result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
-            break;
-        }
-        u64 allocation_value = (u64)(uintptr_t)allocation;
-        u8* address = (u8*)(uintptr_t)((allocation_value + maximum_alignment - 1) & ~(maximum_alignment - 1));
-        for (u32 section = 0; section < object->section_count; section += 1)
-        {
-            if (object->sections[section].data.length)
-            {
-                memcpy((u8*)address + section_offsets[section], object->sections[section].data.pointer, object->sections[section].data.length);
-            }
-        }
-        for (u32 index = 0; index < object->relocation_count; index += 1)
-        {
-            ObjectRelocation* relocation = object->relocations + index;
-            if (relocation->section < object->section_count && object_section_kind_is_debug(object->sections[relocation->section].kind))
-            {
-                continue;
-            }
-            if (relocation->section >= object->section_count || relocation->symbol >= object->symbol_count)
-            {
-                result.error = OBJECT_ERROR_INVALID_INPUT;
-                break;
-            }
-            if ((u32)relocation->kind >= (u32)OBJECT_RELOCATION_COUNT)
-            {
-                result.error = OBJECT_ERROR_INVALID_INPUT;
-                break;
-            }
-            u64 relocation_size = object_relocation_kind_width(relocation->kind);
-            ObjectSection* source_section = object->sections + relocation->section;
-            if (relocation->offset > source_section->data.length || relocation_size > source_section->data.length - relocation->offset)
-            {
-                result.error = OBJECT_ERROR_INVALID_INPUT;
-                break;
-            }
-            if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32 &&
-                ((relocation->offset & 3) || source_section->alignment < 4))
-            {
-                result.error = OBJECT_ERROR_INVALID_INPUT;
-                break;
-            }
-            ObjectSymbol* symbol = object->symbols + relocation->symbol;
-            if (symbol->section == OBJECT_SECTION_UNDEFINED)
-            {
-                result.error = OBJECT_ERROR_UNRESOLVED_SYMBOL;
-                break;
-            }
-            u8* patch = (u8*)address + section_offsets[relocation->section] + relocation->offset;
-            if (symbol->section >= object->section_count)
-            {
-                result.error = OBJECT_ERROR_INVALID_INPUT;
-                break;
-            }
-            ObjectSection* target_section = object->sections + symbol->section;
-            u64 target_section_size = BUSTER_MAX(target_section->data.length, target_section->virtual_size);
-            if (symbol->value > target_section_size || symbol->size > target_section_size - symbol->value)
-            {
-                result.error = OBJECT_ERROR_INVALID_INPUT;
-                break;
-            }
-            u8* target = (u8*)address + section_offsets[symbol->section] + symbol->value;
-            // Every symbol here is defined in this image, so a Mach-O GOT load
-            // is relaxed to the address of its target instead of a slot.
-            bool mach_got_load = relocation->kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX &&
-                                 object_format_for_target(object->target) == OBJECT_FORMAT_MACH_O64;
-            if (relocation->kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX && !mach_got_load)
-            {
-                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                break;
-            }
-            if (mach_got_load &&
-                buster_x86_metadata_relax_got_reference(BUSTER_X86_METADATA_GOT_SITE_REX_GOTPCRELX, (u8*)address + section_offsets[relocation->section],
-                                                        relocation->offset, source_section->data.length,
-                                                        relocation->addend) != BUSTER_X86_METADATA_GOT_PATCH_PC32)
-            {
-                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                break;
-            }
-            if (relocation->kind == OBJECT_RELOCATION_X86_64_PC32 || relocation->kind == OBJECT_RELOCATION_X86_64_PLT32 || mach_got_load)
-            {
-                s64 displacement = 0;
-                if (!object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
-                    displacement < INT32_MIN || displacement > INT32_MAX)
-                {
-                    result.error = OBJECT_ERROR_CAPACITY;
-                    break;
-                }
-                s32 value = (s32)displacement;
-                memcpy(patch, &value, sizeof(value));
-            }
-            else if (relocation->kind == OBJECT_RELOCATION_X86_64_ABSOLUTE32S)
-            {
-                s32 value = 0;
-                if (!object_absolute32s_value((u64)(uintptr_t)target, relocation->addend, &value))
-                {
-                    result.error = OBJECT_ERROR_CAPACITY;
-                    break;
-                }
-                memcpy(patch, &value, sizeof(value));
-            }
-            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 || relocation->kind == OBJECT_RELOCATION_AARCH64_JUMP26)
-            {
-                s64 displacement = 0;
-                u32 instruction = 0;
-                u32 patched = 0;
-                memcpy(&instruction, patch, sizeof(instruction));
-                A64Opcode opcode = relocation->kind == OBJECT_RELOCATION_AARCH64_CALL26 ? A64_OPCODE_BL : A64_OPCODE_B;
-                if (symbol->kind != OBJECT_SYMBOL_FUNCTION || ((u64)(uintptr_t)patch & 3) ||
-                    !object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
-                    !a64_pc_relative_patch(opcode, instruction, displacement, &patched))
-                {
-                    result.error = OBJECT_ERROR_CAPACITY;
-                    break;
-                }
-                memcpy(patch, &patched, sizeof(patched));
-            }
-            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PREL32)
-            {
-                s64 displacement = 0;
-                if (((u64)(uintptr_t)patch & 3) ||
-                    !object_address_difference((u64)(uintptr_t)target, (u64)(uintptr_t)patch, relocation->addend, &displacement) ||
-                    displacement < INT32_MIN || displacement > INT32_MAX)
-                {
-                    result.error = OBJECT_ERROR_CAPACITY;
-                    break;
-                }
-                s32 value = (s32)displacement;
-                memcpy(patch, &value, sizeof(value));
-            }
-            else if (relocation->kind == OBJECT_RELOCATION_ABSOLUTE64)
-            {
-                u64 value = 0;
-                if (!object_address_addend((u64)(uintptr_t)target, relocation->addend, &value))
-                {
-                    result.error = OBJECT_ERROR_CAPACITY;
-                    break;
-                }
-                memcpy(patch, &value, sizeof(value));
-            }
-            else if (object_relocation_kind_is_aarch64_elf_page(relocation->kind))
-            {
-                u32 word = 0;
-                u32 patched = 0;
-                memcpy(&word, patch, sizeof(word));
-                if (!object_aarch64_elf_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
-                                                    relocation->addend, &patched))
-                {
-                    result.error = OBJECT_ERROR_CAPACITY;
-                    break;
-                }
-                memcpy(patch, &patched, sizeof(patched));
-            }
-            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEBASE_REL21 ||
-                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12A ||
-                     relocation->kind == OBJECT_RELOCATION_AARCH64_PE_PAGEOFFSET_12L)
-            {
-                u32 word = 0;
-                u32 patched = 0;
-                memcpy(&word, patch, sizeof(word));
-                if (!object_aarch64_pe_page_relocate(relocation->kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
-                                                      relocation->addend, &patched))
-                {
-                    result.error = OBJECT_ERROR_CAPACITY;
-                    break;
-                }
-                memcpy(patch, &patched, sizeof(patched));
-            }
-            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ||
-                     relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGEOFF12)
-            {
-                u32 word = 0;
-                u32 patched = 0;
-                memcpy(&word, patch, sizeof(word));
-                ObjectRelocationKind elf_kind = relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_GOT_LOAD_PAGE21 ? OBJECT_RELOCATION_AARCH64_ELF_GOT_PAGE21
-                                                                                                                 : OBJECT_RELOCATION_AARCH64_ELF_GOT_LD64_LO12;
-                if (!object_aarch64_elf_page_relocate(elf_kind, word, (u64)(uintptr_t)patch, (u64)(uintptr_t)target, relocation->addend, &patched))
-                {
-                    result.error = OBJECT_ERROR_CAPACITY;
-                    break;
-                }
-                memcpy(patch, &patched, sizeof(patched));
-            }
-            else if (relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGE21 || relocation->kind == OBJECT_RELOCATION_AARCH64_MACH_PAGEOFF12)
-            {
-                if (!object_apply_aarch64_mach_page_relocation(relocation->kind, patch, (u64)(uintptr_t)patch, (u64)(uintptr_t)target,
-                                                               relocation->addend))
-                {
-                    result.error = OBJECT_ERROR_CAPACITY;
-                    break;
-                }
-            }
-            else if (object_relocation_kind_is_tls(relocation->kind))
-            {
-                // A standalone executable image has no thread-pointer or Darwin
-                // TLVP resolver.  Keep these relocations fail-closed rather than
-                // encoding an address that would only work by accident on one
-                // host's TLS layout.
-                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                break;
-            }
-            else if (relocation->kind == OBJECT_RELOCATION_COFF_ADDR32NB)
-            {
-                u64 value = section_offsets[symbol->section] + symbol->value;
-                if (relocation->addend < 0)
-                {
-                    u64 magnitude = (u64)(-(relocation->addend + 1)) + 1;
-                    if (magnitude > value)
-                    {
-                        result.error = OBJECT_ERROR_CAPACITY;
-                        break;
-                    }
-                    value -= magnitude;
-                }
-                else
-                {
-                    u64 addend = (u64)relocation->addend;
-                    if (addend > UINT32_MAX || value > UINT32_MAX - addend)
-                    {
-                        result.error = OBJECT_ERROR_CAPACITY;
-                        break;
-                    }
-                    value += addend;
-                }
-                if (value > UINT32_MAX)
-                {
-                    result.error = OBJECT_ERROR_CAPACITY;
-                    break;
-                }
-                u32 image_relative = (u32)value;
-                memcpy(patch, &image_relative, sizeof(image_relative));
-            }
-            else
-            {
-                result.error = OBJECT_ERROR_UNSUPPORTED_TARGET;
-                break;
-            }
-        }
-        if (result.error == OBJECT_ERROR_NONE && !os_protect(allocation, allocation_size, (ProtectionFlags){.read = 1}))
-        {
-            result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
-        }
-        for (u32 section = 0; section < object->section_count && result.error == OBJECT_ERROR_NONE; section += 1)
-        {
-            ObjectSectionKind kind = object->sections[section].kind;
-            ProtectionFlags protection = {
-                .read = 1,
-                .write = kind == OBJECT_SECTION_DATA || kind == OBJECT_SECTION_ZERO ||
-                         kind == OBJECT_SECTION_THREAD_LOCAL_DATA || kind == OBJECT_SECTION_THREAD_LOCAL_ZERO,
-                .execute = kind == OBJECT_SECTION_TEXT,
-            };
-            if (section_spans[section] &&
-                (!os_protect(address + section_offsets[section], section_spans[section], protection) ||
-                 (protection.execute && !os_flush_instruction_cache(address + section_offsets[section], section_spans[section]))))
-            {
-                result.error = OBJECT_ERROR_EXECUTABLE_MEMORY;
-            }
-        }
-        if (result.error == OBJECT_ERROR_NONE)
-        {
-            result.address = address + section_offsets[text_section];
-            result.allocation_address = allocation;
-            result.allocation_size = allocation_size;
-        }
-        else
-        {
-            os_unreserve(allocation, allocation_size);
-        }
-    } while (false);
-    return result;
-}
-
-void object_release_executable(ObjectExecutable executable)
-{
-    if (executable.address && executable.allocation_size)
-    {
-        os_unreserve(executable.allocation_address, executable.allocation_size);
-    }
-}

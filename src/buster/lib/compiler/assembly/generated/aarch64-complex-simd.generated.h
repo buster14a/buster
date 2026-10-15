@@ -2,13 +2,12 @@
 #ifndef BUSTER_AARCH64_COMPLEX_SIMD_GENERATED_H
 #define BUSTER_AARCH64_COMPLEX_SIMD_GENERATED_H
 
-#include <buster/lib/base.h>
+#include <buster/lib/compiler/assembly/aarch64_simd_semantics_internal.h>
 
 #define BUSTER_A64_COMPLEX_SIMD_SCHEMA_VERSION 1u
 #define BUSTER_A64_COMPLEX_SIMD_ROW_COUNT 345u
 #define BUSTER_A64_COMPLEX_SIMD_TRANSFORM_ROW_COUNT 206u
 #define BUSTER_A64_COMPLEX_SIMD_MAX_OPERANDS 8u
-#define BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_BINDING_NONE 255u
 #define BUSTER_A64_COMPLEX_SIMD_ARRANGEMENT_BINDING_COUNT 352u
 #define BUSTER_A64_COMPLEX_SIMD_EXECUTABLE_ROW_COUNT 345u
 #define BUSTER_A64_COMPLEX_SIMD_FEATURE_GATED_ROW_COUNT 345u
@@ -17,29 +16,6 @@
 #define BUSTER_A64_COMPLEX_SIMD_DENOMINATOR_SHA256 "b186dfa380b7067e23f007df9d5b78d0a21130e89886e6c1ede4379885fed0c5"
 #define BUSTER_A64_COMPLEX_SIMD_CANONICAL_SHA256 "8485c5c61835d5394d325757ab2964890e8bdfea304c6faa8fd4c23e4c7aabec"
 #define BUSTER_A64_COMPLEX_SIMD_STRING_POOL_SIZE 21079u
-
-typedef struct BusterA64ComplexSIMDGeneratedRow BusterA64ComplexSIMDGeneratedRow;
-struct BusterA64ComplexSIMDGeneratedRow
-{
-    u32 row_index;
-    u32 semantic_form_id;
-    u64 source_digest;
-    u32 id_offset;
-    u16 id_length;
-    u32 assembly_offset;
-    u16 assembly_length;
-    u8 operand_count;
-    u8 executable;
-};
-BUSTER_CT_CHECK(sizeof(BusterA64ComplexSIMDGeneratedRow) == 32);
-
-typedef struct BusterA64ComplexSIMDGeneratedArrangementBinding BusterA64ComplexSIMDGeneratedArrangementBinding;
-struct BusterA64ComplexSIMDGeneratedArrangementBinding
-{
-    u8 selector_index;
-    s8 direction;
-};
-BUSTER_CT_CHECK(sizeof(BusterA64ComplexSIMDGeneratedArrangementBinding) == 2);
 
 static const char8 buster_a64_complex_simd_generated_string_pool[] = {
 0x61, 0x72, 0x6d, 0x2d, 0x61, 0x36, 0x34, 0x40, 0x32, 0x30, 0x32, 0x36, 0x2d, 0x30, 0x36, 0x3a, 0x41, 0x44, 0x44, 0x48, 0x4e, 0x5f, 0x61, 0x73, 0x69, 0x6d, 0x64, 0x64, 0x69, 0x66, 0x66, 0x5f,
@@ -703,7 +679,7 @@ static const char8 buster_a64_complex_simd_generated_string_pool[] = {
 0x32, 0x7d, 0x20, 0x3c, 0x56, 0x64, 0x3e, 0x2e, 0x3c, 0x54, 0x62, 0x3e, 0x2c, 0x20, 0x3c, 0x56, 0x6e, 0x3e, 0x2e, 0x3c, 0x54, 0x61, 0x3e
 };
 
-static const BusterA64ComplexSIMDGeneratedRow buster_a64_complex_simd_generated_rows[] = {
+static const BusterA64SIMDGeneratedRow buster_a64_complex_simd_generated_rows[] = {
     { 0u, 6u, UINT64_C(0xf1c196811ac76f6a), 0u, 33u, 33u, 40u, 7u, 1u },
     { 1u, 72u, UINT64_C(0xa056525b222e5510), 73u, 33u, 106u, 38u, 4u, 1u },
     { 2u, 73u, UINT64_C(0x697ab80c6ad90af2), 144u, 33u, 106u, 38u, 4u, 1u },
@@ -1051,7 +1027,7 @@ static const BusterA64ComplexSIMDGeneratedRow buster_a64_complex_simd_generated_
     { 344u, 1691u, UINT64_C(0xc8284fde945c2067), 21021u, 31u, 21052u, 27u, 5u, 1u },
 };
 
-static const BusterA64ComplexSIMDGeneratedArrangementBinding
+static const BusterA64SIMDGeneratedArrangementBinding
     buster_a64_complex_simd_generated_arrangement_bindings[BUSTER_A64_COMPLEX_SIMD_ROW_COUNT][BUSTER_A64_COMPLEX_SIMD_MAX_OPERANDS] = {
     { { 255u, 0 }, { 2u, 1 }, { 255u, 0 }, { 4u, 1 }, { 255u, 0 }, { 6u, 1 }, { 255u, 0 }, { 255u, 0 } },
     { { 1u, 1 }, { 255u, 0 }, { 255u, 0 }, { 255u, 0 }, { 255u, 0 }, { 255u, 0 }, { 255u, 0 }, { 255u, 0 } },

@@ -1,8 +1,63 @@
 {
   "schema": "buster-performance-validation-v1",
-  "rule": "Every performance-validation test requires actual execution of its relevant workload on the approved Zen 5 benchmark host (AMD Ryzen 7 9700X). Without complete evidence matching the candidate, workload and configuration, performance validation is incomplete; hosted, simulated and static evidence is diagnostic.",
+  "rule": "Choose evidence by mechanism and claim (#4013, replacing #2761's universal Zen 5 requirement for eligible claims). A Zen 5 or microarchitecture-sensitive claim (SIMD width or intrinsics, branched versus branchless selection, instruction scheduling, latency or ports, store forwarding, alignment, prefetch, cache or TLB tuning, or an explicit Zen 5 speed claim) requires actual execution of its relevant workload on the approved Zen 5 benchmark host (AMD Ryzen 7 9700X); simulated, static and non-target evidence never satisfies it. A work-reduction or scaling claim may complete with work-count evidence, and an end-to-end native runtime or resource claim that does not depend on a particular CPU mechanism may complete with paired uninstrumented native-host evidence, each only for what that class establishes. Without complete evidence of the required class matching the candidate, workload and configuration, that claim's validation is incomplete. A non-Zen-5 class never records zen5: covered.",
+  "evidence_classes": {
+    "zen5-native": {
+      "routes": [
+        "main-compare",
+        "pull-compare",
+        "direct-workload"
+      ],
+      "establishes": "the claimed behavior on the approved physical Ryzen 7 9700X for the measured workload and configuration",
+      "does_not_establish": "other CPUs or operating systems"
+    },
+    "work-count": {
+      "consumer": "tools/performance_evidence.c",
+      "tools": [
+        "callgrind",
+        "cachegrind",
+        "perf-stat"
+      ],
+      "establishes": "less executed work (instructions, references, operations) for the measured workload and inputs, from repeatable instrumented or counted runs of both arms in one environment",
+      "does_not_establish": "lower elapsed time; hardware-independent constants; Zen 5 behavior"
+    },
+    "native-host": {
+      "consumer": "tools/performance_evidence.c",
+      "tools": [
+        "time",
+        "perf-stat"
+      ],
+      "establishes": "an uninstrumented paired wall, CPU or resource change for the stated workload on the observed host and OS",
+      "does_not_establish": "transfer to Zen 5 or to another CPU, OS, filesystem or concurrency level"
+    }
+  },
+  "claims": {
+    "work-reduction": {
+      "class": "work-count",
+      "tools": [
+        "callgrind",
+        "cachegrind",
+        "perf-stat"
+      ]
+    },
+    "native-runtime": {
+      "class": "native-host",
+      "tools": [
+        "time",
+        "perf-stat"
+      ]
+    },
+    "uarch": {
+      "class": "zen5-native",
+      "tools": []
+    },
+    "zen5": {
+      "class": "zen5-native",
+      "tools": []
+    }
+  },
   "routes": {
-    "main-compare": "9700x-direct-bench.yml job compare (every commit that lands on main, against its first parent or the nearest measured first-parent ancestor, #2752)",
+    "main-compare": "9700x-direct-bench.yml job compare (every commit that lands on main, against its first parent or the nearest measured first-parent ancestor, #2752; compiler-compare-v1 plus the full throughput-corpus-v2 FAST/QUALITY corpus; the disabled docs/compiler-main-profile-routing-v1.tsv switch may select compiler-main-40pairs-v1 for this authenticated automatic route only after a reviewed #3212 certificate, with rollback to compiler-compare-v1)",
     "pull-compare": "9700x-direct-bench.yml job compare-pull (benchmarks/9700x/compiler-compare.request; compiler-compare-v1, throughput-corpus-v2 (or throughput-corpus-historical-v1 for a pre-floor merge base, #3714), scaling-v1 or exact clang-analyze-full-v1/v2 opt-in, #2769)",
     "direct-workload": "9700x-direct-bench.yml job bench (benchmarks/9700x/*.c and *.data, #2704)",
     "sampling-qualification": "9700x-direct-bench.yml job sampling (disabled staged owner-fresh predeclared acquisition/pilot/confirm route; separate unqualified research check, #3212)"
@@ -149,6 +204,41 @@
       }
     },
     {
+      "id": "uarch_lab:compare@ast-retirement-acceptance",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "#4058 fixed ast-retirement-acceptance-v1 on an owner request line: two prepared tests-off Clang Release compilers, default/default, on one frozen baseline/current-main tree and its six unchanged throughput CI sources; two unity syntax/object, six corpus syntax and twelve FAST/QUALITY corpus object cells, each with 20 ABBA pairs after one warmup on CPU 2 with fresh copies and disabled timed phase metrics; wall time with 95% CI, positive retired instructions:u and wait4 peak RSS, untimed AST tree/node-fact retained bytes and separately reported symbol-binding bytes, byte-identical reference objects and diagnostics; independently replayed sealed raw evidence, report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "ast-retirement-acceptance-v1",
+        "request": "one exact fresh line, profile: ast-retirement-acceptance-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
+      "id": "uarch_lab:compare@constant-reuse-acceptance",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "issue #3011 fixed constant-reuse-acceptance-v1: one candidate-HEAD ide on the -g0 unity self-host -c compile, A default and B with -fcanonical-intern-constants (intern cell) or -fcanonical-fast-cse (cse cell), 20 ABBA pairs per cell, wall time with 95% CI, available retired instructions, peak RSS, executable-section code bytes and identical diagnostics; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "uarch_lab:compare@process-floor",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "issue #1125 fixed process-floor-v1: one candidate-HEAD ide in fresh processes on int main(void){return 0;}, A the x86-64 -g0 -c compile and B the same command (A/A), -target aarch64-unknown-linux -c, or -fsyntax-only, 100 ABBA pairs per cell, wall time with 95% CI, task-clock, compiler wall_ns, available retired instructions and peak RSS, byte-identical A/A objects, identical diagnostics and the issue's A/A stop rule; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
       "id": "uarch_lab:retirement",
       "kind": "lab-mode",
       "validation": "performance",
@@ -210,6 +300,19 @@
       }
     },
     {
+      "id": "tool:benchmark_frontend_scaling.py@frontend-nesting",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "#2676 fixed frontend-nesting-v1 on an owner request line: the base revision's tool compares the baseline and candidate binaries on --suite nesting (eleven families of control statements nested 2000, 8000 and 32000 levels deep, 68 syntax/object cells), one warmup and eleven pinned repetitions each, with byte-identical objects required; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "frontend-nesting-v1",
+        "request": "one exact fresh line, profile: frontend-nesting-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
       "id": "tool:selection_benchmark.py",
       "kind": "tool",
       "validation": "performance",
@@ -262,6 +365,28 @@
       }
     },
     {
+      "id": "tool:machine_edge_split_scaling.c",
+      "kind": "tool",
+      "validation": "diagnostic",
+      "measures": "production parameter-edge splitter output records, geometric chain/fanout/duplicate/no-split populations and scoped arena retained/peak bytes; per-call latency is diagnostic only",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "diagnostic only: not a frozen compiler-probes-v1 leg; a performance claim needs an approved Zen 5 route row and matching execution evidence"
+      }
+    },
+    {
+      "id": "tool:machine_edge_split_scaling_coverage.py",
+      "kind": "tool",
+      "validation": "diagnostic",
+      "measures": "actual Clang source-coverage traversal counts for 56 production parameter-edge splitting cells, with source/binary identities and raw LLVM profiles",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "operation-count diagnostics only; source coverage cannot establish wall-time speedup or physical performance acceptance"
+      }
+    },
+    {
       "id": "tool:link_tls_bench.py",
       "kind": "tool",
       "validation": "performance",
@@ -272,6 +397,19 @@
         "consumer": "tools/bench_direct/compiler_publish.py",
         "profile": "link-tls-v1",
         "request": "one exact fresh line, profile: link-tls-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
+      "id": "uarch_lab:compare@self-host-inline-compare",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "#58 fixed self-host-inline-compare-v1 on an owner request line: each side's Clang Release ide builds its own revision's stage-1 compiler with -fcanonical-inline, then the trusted selfhost_inline_compare.py times the two stage-1 compilers compiling the frozen merge-base tree with -fcanonical-inline, byte-identical outputs required, 30 ABBA pairs on CPU 2 with wall time, PMU counters, executable-section code bytes, topdown metric groups and sampling; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "self-host-inline-compare-v1",
+        "request": "one exact fresh line, profile: self-host-inline-compare-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
       }
     },
     {
@@ -490,6 +628,26 @@
         "consumer": "",
         "resolution": "The separately versioned owner-fresh sampling route is staged disabled. Hosted parser, containment and receipt fixtures are diagnostic. Complete real 9700X acquisition, independent pilot/calibration and the frozen confirmatory campaign are required before a separate reviewed activation; failed pilot may conclude no shorter profile qualifies.",
         "claim_route": "none"
+      }
+    },
+    {
+      "id": "tool:performance_evidence.c",
+      "kind": "tool",
+      "validation": "performance",
+      "measures": "#4013 alternative evidence: capability preflight and paired baseline/candidate callgrind, cachegrind, perf stat or uninstrumented wall/rusage comparison of one workload in one environment, retaining raw outputs and DIR/summary.json (buster-performance-evidence-v1) for a work-reduction (work-count) or native-runtime (native-host) claim",
+      "zen5": {
+        "route": "none",
+        "status": "NOT VALIDATED",
+        "resolution": "never Zen 5 evidence by construction; a uarch or Zen 5 claim about the measured change uses the 9700X route",
+        "claim_route": "pull-compare"
+      },
+      "alternative": {
+        "status": "supported",
+        "classes": [
+          "work-count",
+          "native-host"
+        ],
+        "consumer": "tools/performance_evidence.c"
       }
     }
   ]

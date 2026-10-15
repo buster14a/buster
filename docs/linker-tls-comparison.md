@@ -185,5 +185,14 @@ of [audit 2026-10-12T143339Z](performance-audits/2026-10-12T143339Z.md) replay
 the real relocation tables through both link phases' membership questions: at
 32,768 sites the baseline scan took a median 615.3 ms and the #2247 index
 3.6 ms, with identical classifications. That run measured the mechanism only,
-not an end-to-end link. Results and actionable findings belong on #1915
-/ its PR.
+not an end-to-end link. The end-to-end 9700X measurement is
+[audit 2026-10-12T215718Z](performance-audits/2026-10-12T215718Z.md). It
+used the trusted `link-tls-v1` leg of `compare-pull` and timed fresh `ide cc`
+links. The scan arm keeps #2247's index setup and publication guards, but it
+answers membership with a reconstructed pre-#2247 relocation scan instead of
+the index query. All 7
+cells produced byte-identical images. At 32,768 sites the median link took
+10.0 ms with the index and 2,392 ms with the scan; the median paired ratio was
+239x. The no-TLS control showed no difference. Cold-cache, many-small-object,
+large-archive and phase-breakdown cohorts remain pending. Results and
+actionable findings belong on #1915 / its PR.

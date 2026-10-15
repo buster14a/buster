@@ -22,6 +22,7 @@ if (BUSTER_COMPILER_SDK)
         compiler_aarch64_semantics
         compiler_aarch64_system_semantics
         compiler_aarch64_semantic_vm
+        compiler_aarch64_simd_semantics
         compiler_aarch64_direct_simd
         compiler_aarch64_complex_simd
         compiler_aarch64_memory_semantics
@@ -118,6 +119,8 @@ if (BUSTER_COMPILER_SDK)
     endif()
     if (BUSTER_SANITIZE)
         target_compile_options(buster_compiler PRIVATE -fsanitize=address,undefined,bounds -fno-sanitize-recover=all)
+    elseif (BUSTER_THREAD_SANITIZE)
+        target_compile_options(buster_compiler PRIVATE -fsanitize=thread)
     endif()
     buster_apply_module_options(buster_compiler ${BUSTER_SDK_MODULE_NAMES})
 

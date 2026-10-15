@@ -11,7 +11,7 @@ substitute for inspecting the current implementation and fixtures.
 |---|---|
 | Pipeline, ownership, diagnostics, canonical IR, expression places and qualifiers | [Foundations](frontend/foundations.md) |
 | Semantic-only validation, lowering constraint inventory, diagnostic and allocation regression contract | [Semantic validation](frontend/semantic-validation.md) |
-| Implicit postorder syntax tree (pilot): node contract, forward construction, layouts, tree expression typer, statement plan, consumer map | [Syntax tree](frontend/ast.md) |
+| Implicit postorder syntax tree (default since 2026-10-13; `-fno-c-ast-pilot` opts out): node contract, forward construction, layouts, tree expression typer, statement plan, consumer map | [Syntax tree](frontend/ast.md) |
 | Phase arenas, the preprocessing seal and semantic layout queries | [Compiler phase lifetimes](../compiler-lifetime.md) |
 | Relocations, weak/alias/ifunc symbols, constructors/destructors, object formats and linker | [Linkage](frontend/linkage.md) |
 | Packed/aligned types, bit-fields, layout engines | [Layout](frontend/layout.md) |
@@ -24,6 +24,16 @@ Changes to places or calls also need the foundations guide. Native selection and
 allocation invariants live in [the machine guide](machine.md); command-line
 options and action dispatch live in [the driver guide](driver.md).
 The cross-frontend/backend ownership map is in [compiler phase and state](compiler-phase-state.md).
+
+## Local declaration nodes
+
+Lowering dispatches block declarations through their `DECLARATION` and
+`INIT_DECLARATOR` topology. Semantic analysis retains each declaration-name
+node's entity binding; storage flags and the initializer assignment source
+anchor come from the entity. Declarator parameter names cannot replace the
+declared name, and initializer storage words cannot change its storage.
+Initializer-layout and VLA type-query owners retain their documented temporary
+adapters; see [the syntax-tree contract](frontend/ast.md#declarations).
 
 ## Macro argument rescan boundaries
 
@@ -39,11 +49,14 @@ controls. The external Clang `macro_disable.c` assertion remains unchanged.
 ## Macro filename prefix maps
 
 `CPreprocessOptions.macro_prefix_maps` supplies ordered
-`CMacroPrefixMap` entries; the last byte-prefix match is substituted once by
-`c_macro_builtin_token`. Only synthesized filename literals change.
-`CMacro` retains the immutable mapping view for the preprocess call and its
-directive-context bit; no final result retains this view. `__FILE__` reads
-the current logical filename, `__BASE_FILE__` the root, and
+`CMacroPrefixMap` entries; the last byte-prefix match is substituted once.
+For macro spellings, `c_macro_builtin_token` applies it only to synthesized
+filename literals. `CMacro` retains the immutable mapping view for the
+preprocess call and its directive-context bit. The result's arena-owned
+`CPreprocessDetail` retains a copy for parser-stage `__builtin_FILE()`, so it
+uses the same mapping as `__FILE__` without enlarging the frequently copied
+`CPreprocessResult`.
+`__FILE__` reads the current logical filename, `__BASE_FILE__` the root, and
 `__FILE_NAME__` the original basename before substitution. GCC-style
 directive expansions bypass mapping. Escaping happens after substitution
 through the existing literal renderer. Include identity/probes, dependencies,
@@ -274,6 +287,28 @@ rather than given a guessed class: `nullptr_t` (Clang answers -1), `va_list`
 frontend does not model. `c_test_builtin_classify_type` covers every class,
 the static contexts, arity and unevaluated operands at run time.
 
+`__builtin_LINE()`, `__builtin_FILE()` and `__builtin_FUNCTION()` (#3897) take
+no argument and need no entity (`c_semantic_source_location_builtin`). LINE is
+an `int` integer constant: the parser records it as a type-identity answer
+(`c_parse_source_line_builtin`), like `__builtin_classify_type`, so
+`_Static_assert`, array bounds, `case` labels and static initializers fold it.
+FILE and FUNCTION are `const char *` (`c_semantic_source_name_type`) and point
+to a string literal: the presumed file name of the call, or the enclosing
+function's shared `__func__` object, which is `""` at file scope
+(`c_ir_source_name_object`). That literal is also an address constant for
+static initializers. Positions come from the token's source map
+(`c_semantic_source_line`, `c_semantic_source_file`), so a macro-produced call
+reports its invocation and `#line` renumbers and renames it. In a macro
+invocation spanning lines, the reported line is the line of `__LINE__` there,
+which matches GCC; Clang reports the closing line. `__builtin_FILE()` applies
+the current logical filename's prefix map before building its literal, matching
+`__FILE__`; source maps and diagnostics keep their original names. The
+result types follow GCC; Clang 18 answers `unsigned int` and `char *`.
+Every use with an argument is diagnosed. `c_test_source_location_builtins` checks types, constant contexts and invalid
+arity on three targets in both SSA forms, with absolute and relative mapped
+and unmapped `#line` controls. It also runs the original program in every
+allocator and form, with GCC and Clang as oracles.
+
 `__builtin_parity`/`l`/`ll` share the popcount operand policy and lower to
 `popcount(x) & 1`. `__builtin_bswap16/32/64` take and return `unsigned short`,
 `unsigned int` and `unsigned long long` (`c_semantic_byte_swap_kind`) and lower
@@ -339,6 +374,14 @@ AArch64, binary128 on Linux/Android AArch64). Availability, also the
 certified, validated canonical IR, the expected import symbols with the target's
 long double and `long` types, successful object writing, and the two refusals.
 `c_test_generic_float_builtins_runtime` runs the values on x86-64 Linux only.
+
+Explicit long-double math builtins—including the inline `fabsl`, `fmaxl`,
+`fminl`, `copysignl`, `powil` and `signbitl` spellings, special values,
+and the `l` libm forms—are available only on x86-64 and AArch64. The shared
+`c_semantic_math_long_double_builtin_supported_on_target` predicate drives
+both `__has_builtin` and parser validation. Wasm32, Wasm64, eBPF and other
+unsupported routes answer 0 and reject a call with a builtin- and target-specific
+diagnostic before its arguments reach IR lowering.
 
 ## Target ABI predefined macros
 
@@ -448,6 +491,24 @@ keywords are unsupported, and `__PRAGMA_REDEFINE_EXTNAME` because that pragma
 is unimplemented. `c_test_gnu_common_predefined_macros` pins the reference
 spellings for thirteen target triples in GNU17 and C23, plus type/limit
 consistency, GNU89 inline, and PIC/PIE behavior.
+
+The prelude does not lex most of its replacement texts. Texts made only of
+identifiers, preprocessing numbers, single spaces and `(`, `)` or `-` go
+through `c_predefined_text_tokens`, which builds the tokens the lexer would
+emit. It writes the same spelling bytes, the text plus its terminator, and
+interns the identifiers in the same order. Any other text goes through
+`c_lex_space`, as do string literals such as `__DATE__`. Two tests hold the
+paths equal:
+- `c_test_predefined_text_direct_tokens` checks every string of up to four
+  bytes over an alphabet that includes the bytes that must fall back to the
+  lexer.
+- `c_test_predefined_text_prelude_identity` checks each prelude text, and then
+  a whole preprocessed unit with the lexer forced, across targets, dialects
+  and PIC modes.
+
+A new predefined text that falls back to the lexer and is not a string
+literal fails the second test. Widen the direct alphabet, or exempt the text
+there.
 
 `__float128`, `_Float128`, `_Float64x` and `_Float128x` are recognized as builtin
 type words but have no lowering. A declaration that would define something with
@@ -626,7 +687,8 @@ and eager equal-lane `__builtin_convertvector` validation in unused wrappers.
 Ordinary storage-half objects, members, parameters and function results receive
 a named semantic refusal; reached scalar casts, bit-casts and vector
 conversions receive a named canonical-lowering refusal. The lowering budget
-skips known `sizeof`, `_Alignof` and `typeof` operands; its `_Generic`
+skips known `sizeof`, `_Alignof` and `typeof` operands, and lowering sizes
+such an operand from the C type layout (see [calls](frontend/calls.md)); its `_Generic`
 evaluation-context handling is not complete. No scalar arithmetic, promotion,
 or ABI support is implied. `c_test_vendor_storage_half_admission` covers this bounded
 slice in both frontend forms.
@@ -827,3 +889,12 @@ results, before fresh symbol interning and preprocessing. It imports owned
 copies into the current phase/spelling arenas; no cache pointer reaches a sealed
 result or canonical IR. Read [bounded raw source reuse](../source-lex-reuse.md)
 for the input model, limits, ownership, replay contract and pending cost gates.
+
+A parameter named inside a prototype that a type name spells -- `(void (*)(void *ctx, int n))fp`,
+`sizeof(int (*)(int R, int a[R]))`, `_Alignof`, a compound literal, a `_Generic`
+association -- is declared in that prototype's scope only (C17 6.2.1p4). The
+binder (`c_parse_type_name_parameter_name`) recognises the list by the abstract
+group before it (`(*)`, `(^)`) and leaves its names unbound; lowering's
+`c_ir_type_name_parameter` skips the declarator name; the subscript constraint
+walk exempts `a[...]` there. An object of the same name outside is unaffected
+(#3324). `sizeof(__typeof__(<function-pointer type name>))` is a separate gap.

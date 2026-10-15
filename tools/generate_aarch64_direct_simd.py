@@ -178,13 +178,12 @@ def emit_header(rows: list[dict], gaps: list[dict], output: Path) -> None:
 #ifndef BUSTER_AARCH64_DIRECT_SIMD_GENERATED_H
 #define BUSTER_AARCH64_DIRECT_SIMD_GENERATED_H
 
-#include <buster/lib/base.h>
+#include <buster/lib/compiler/assembly/aarch64_simd_semantics_internal.h>
 
 #define BUSTER_A64_DIRECT_SIMD_SCHEMA_VERSION 1u
 #define BUSTER_A64_DIRECT_SIMD_ROW_COUNT 390u
 #define BUSTER_A64_DIRECT_SIMD_TRANSFORM_ROW_COUNT 263u
 #define BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS 8u
-#define BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_BINDING_NONE 255u
 #define BUSTER_A64_DIRECT_SIMD_ARRANGEMENT_BINDING_COUNT %du
 #define BUSTER_A64_DIRECT_SIMD_EXECUTABLE_ROW_COUNT 390u
 #define BUSTER_A64_DIRECT_SIMD_CROSS_OWNER_GAP_COUNT %du
@@ -192,38 +191,15 @@ def emit_header(rows: list[dict], gaps: list[dict], output: Path) -> None:
 #define BUSTER_A64_DIRECT_SIMD_CANONICAL_SHA256 "8485c5c61835d5394d325757ab2964890e8bdfea304c6faa8fd4c23e4c7aabec"
 #define BUSTER_A64_DIRECT_SIMD_STRING_POOL_SIZE %du
 
-typedef struct BusterA64DirectSIMDGeneratedRow BusterA64DirectSIMDGeneratedRow;
-struct BusterA64DirectSIMDGeneratedRow
-{
-    u32 row_index;
-    u32 semantic_form_id;
-    u64 source_digest;
-    u32 id_offset;
-    u16 id_length;
-    u32 assembly_offset;
-    u16 assembly_length;
-    u8 operand_count;
-    u8 executable;
-};
-BUSTER_CT_CHECK(sizeof(BusterA64DirectSIMDGeneratedRow) == 32);
-
-typedef struct BusterA64DirectSIMDGeneratedArrangementBinding BusterA64DirectSIMDGeneratedArrangementBinding;
-struct BusterA64DirectSIMDGeneratedArrangementBinding
-{
-    u8 selector_index;
-    s8 direction;
-};
-BUSTER_CT_CHECK(sizeof(BusterA64DirectSIMDGeneratedArrangementBinding) == 2);
-
 static const char8 buster_a64_direct_simd_generated_string_pool[] = {
 """ % (arrangement_binding_count, len(gaps), len(strings)) + pool + """
 };
 
-static const BusterA64DirectSIMDGeneratedRow buster_a64_direct_simd_generated_rows[] = {
+static const BusterA64SIMDGeneratedRow buster_a64_direct_simd_generated_rows[] = {
 """ + "\n".join(row_lines) + """
 };
 
-static const BusterA64DirectSIMDGeneratedArrangementBinding
+static const BusterA64SIMDGeneratedArrangementBinding
     buster_a64_direct_simd_generated_arrangement_bindings[BUSTER_A64_DIRECT_SIMD_ROW_COUNT][BUSTER_A64_DIRECT_SIMD_MAX_OPERANDS] = {
 """ + "\n".join(arrangement_binding_rows) + """
 };

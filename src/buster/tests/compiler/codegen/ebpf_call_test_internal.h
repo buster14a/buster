@@ -6,6 +6,7 @@
 #include <buster/tests/compiler/codegen/ebpf_test_vm.h>
 #include <buster/lib/compiler/ebpf/ebpf.h>
 #include <buster/lib/compiler/frontend/c/c.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 #if BUSTER_INCLUDE_TESTS
 
@@ -202,7 +203,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_kernel_loader_controls(Unit
     trailing[(CODEGEN_TEST_EBPF_MAX_INSTRUCTIONS - 1) * 8] = 0x18;
     trailing[(CODEGEN_TEST_EBPF_MAX_INSTRUCTIONS - 1) * 8 + 1] = 0;
     BUSTER_TEST(arguments, !codegen_test_ebpf_verify_structure((ByteSlice){trailing, CODEGEN_TEST_EBPF_MAX_INSTRUCTIONS * 8}));
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -268,7 +269,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_calls(UnitTestArgumen
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     if (oracle.kernel_available)

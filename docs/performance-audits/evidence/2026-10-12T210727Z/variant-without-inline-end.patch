@@ -1,0 +1,13 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
+index 2daf7514..4a0c3b5c 100644
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -12351,7 +12351,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
+         u32 single_end = designator.value_start + 1;
+         bool single = !c_punctuator_in_set(preprocess.tokens[designator.value_start].punctuator, C_PARSE_INITIALIZER_VALUE_STOPS) &&
+                       (single_end == frame->limit || c_token_is_punctuator(&preprocess.tokens[single_end], C_PUNCTUATOR_COMMA));
+-        u32 value_end = single ? single_end : c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit);
++        u32 value_end = (single && 0) ? single_end : c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit);
+ #if BUSTER_REFERENCE_CHECKS
+         BUSTER_CHECK(value_end == c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit));
+ #endif

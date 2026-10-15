@@ -1,0 +1,158 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
+index 62d8a59e..483dfc76 100644
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -10927,6 +10927,19 @@ BUSTER_C_INTERNAL bool c_parse_initializer_fail(CParseInitializerDiagnostic* dia
+     return false;
+ }
+ 
++#include <stdio.h>
++static unsigned long long census_c[64];
++static unsigned char census_bound_flags[1u<<22];
++static unsigned census_walk_flags;
++static int census_mode; // 1 inference, 2 validation over inferred list
++static unsigned census_current_bound = 0xffffffffu;
++__attribute__((destructor)) static void census_dump(void)
++{
++    static const char* names[] = {"inf_loop_walks","inf_loop_tokens","val_inferred_walks","val_inferred_tokens","val_inferred_constraints",
++        "val_inferred_pure_walks","val_inferred_pure_tokens","val_inferred_pure_constraints","flag_designator","flag_aggregate_expr","flag_bound_const","flag_vector","flag_string_branch",
++        "scalar_end_calls","scalar_end_tokens","scalar_single_fast","val_other_walks","val_other_tokens","inf_file_loop","inf_local_loop","val_inferred_no_log","flag_elided","val_inferred_elements","flag_bound_literal","pure_literal_walks","pure_literal_tokens","pure_literal_constraints","inf_semantic_true"};
++    for (unsigned i = 0; i < sizeof(names)/sizeof(names[0]); i += 1) fprintf(stderr, "CENSUS %s %llu\n", names[i], census_c[i]);
++}
+ typedef struct CParseInitializerInferenceFrame CParseInitializerInferenceFrame;
+ struct CParseInitializerInferenceFrame
+ {
+@@ -11482,6 +11495,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_type_slots(CTypeParseMachine* machine
+             {
+                 return false;
+             }
++            census_walk_flags |= 8;
+             *slots_out = type->vector_byte_size / element_size;
+             return true;
+         }
+@@ -11495,6 +11509,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_type_slots(CTypeParseMachine* machine
+             u64 count = bound.inferred_count;
+             if (!bound.has_inferred_count)
+             {
++                census_walk_flags |= (bound.token_count == 1 && preprocess.tokens[bound.token_start].kind == C_TOKEN_PREPROCESSING_NUMBER) ? 0x20 : 4;
+                 bool valid = false;
+                 if (bound.token_count && machine && machine->semantic_constant_queries)
+                 {
+@@ -11960,6 +11975,7 @@ BUSTER_C_INTERNAL bool c_parse_initializer_value_is_aggregate_expression(CTypePa
+                                                                            CParseResult* result, CScopeId scope, u32 start, u32 end,
+                                                                            CTypeId object_type)
+ {
++    census_walk_flags |= 2;
+     CTypeId expression_type = C_TYPE_ID_INVALID;
+     bool consumes_whole = false;
+     if (c_parse_expression_type_query(machine, arena, preprocess, result, scope, start, end, &expression_type) &&
+@@ -12093,6 +12109,11 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
+         return true;
+     }
+     u64 span = (u64)end - start;
++    int census_local_mode = census_mode;
++    census_mode = 0;
++    if (census_local_mode == 0 && census_current_bound != 0xffffffffu) { census_c[0]++; census_c[1] += end - start; }
++    if (census_local_mode == 0 && census_current_bound != 0xffffffffu) census_c[27] += machine->semantic_constant_queries;
++    census_walk_flags = 0;
+     if (span > UINT32_MAX - 2 || span + 2 > UINT32_MAX / sizeof(CParseInitializerInferenceFrame) ||
+         span + 1 > UINT32_MAX / sizeof(CParseInitializerContinuation))
+     {
+@@ -12193,6 +12214,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
+                 c_parse_initializer_string_element_compatible(preprocess, result, string_element, decoded);
+             if (string_contents)
+             {
++                census_walk_flags |= 16;
+                 if (decoded.element_count == UINT64_MAX || decoded.element_count > slots)
+                 {
+                     // Reuse the ordinary excess-element diagnostic below.
+@@ -12237,6 +12259,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
+         {
+             return false;
+         }
++        if (designator.has_designator) census_walk_flags |= 1;
+         if (frame->root)
+         {
+             count = BUSTER_MAX(count, designator.selected_end + 1);
+@@ -12288,12 +12311,14 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
+         {
+             return false;
+         }
++        if (!aggregate) { census_c[13]++; census_c[14] += value_end - designator.value_start; census_c[15] += value_end == designator.value_start + 1; }
+         // Only an aggregate subobject asks whether its value is a string.
+         bool string_value = aggregate && c_ir_tokens_are_string_literals(preprocess, designator.value_start, value_end);
+         if (aggregate && !(string_value && c_parse_initializer_type_takes_string(result, value_type)) &&
+             (string_value || !c_parse_initializer_value_is_aggregate_expression(machine, result_arena, preprocess, result, scope, designator.value_start, value_end,
+                                                                                 designator.value_type)))
+         {
++            census_walk_flags |= 0x40;
+             if (frame_count + designator.continuation_count >= capacity)
+             {
+                 return false;
+@@ -12318,6 +12343,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
+             };
+             continue;
+         }
++        if (census_local_mode == 2) census_c[4]++;
+         if (diagnostic && machine->semantic_constant_queries &&
+             !c_parse_initializer_expression_constraint(machine, result, preprocess, scope, designator.value_type, designator.value_start, value_end, diagnostic))
+         {
+@@ -12341,6 +12367,8 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
+         }
+     }
+     *count_out = count;
++    if (census_local_mode == 0 && census_current_bound < (1u<<22) && workspace && (count != 0 || aggregate_type.value < result->type_count))
++        census_bound_flags[census_current_bound] = (unsigned char)(census_walk_flags | 0x80);
+     return workspace && (count != 0 || aggregate_type.value < result->type_count);
+ }
+ 
+@@ -12411,7 +12439,11 @@ BUSTER_C_SHARED void c_parse_infer_file_array_bounds(CTypeParseMachine* machine,
+             end -= 1;
+         }
+         u64 count = 0;
+-        if (c_parse_infer_initializer_array_count(machine, arena, preprocess, result, (CScopeId){.value = 0}, type.element_type, initializer, end, &count) &&
++        census_current_bound = bound_index;
++        census_c[18]++;
++        bool census_ok = c_parse_infer_initializer_array_count(machine, arena, preprocess, result, (CScopeId){.value = 0}, type.element_type, initializer, end, &count);
++        census_current_bound = 0xffffffffu;
++        if (census_ok &&
+             bound_index < result->array_bound_count)
+         {
+             result->array_bounds[bound_index].inferred_count = count;
+@@ -36534,8 +36566,23 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_initializer_shape
+                     aggregate = C_TYPE_ID_INVALID;
+                 }
+             }
++            unsigned census_flags = 0;
++            bool census_inferred = value.kind == C_TYPE_ARRAY && value.array_bound < result->array_bound_count && result->array_bounds[value.array_bound].has_inferred_count;
++            if (census_inferred)
++            {
++                census_flags = value.array_bound < (1u<<22) ? census_bound_flags[value.array_bound] : 0;
++                census_c[2]++; census_c[3] += end - start;
++                census_c[20] += !(census_flags & 0x80);
++                census_c[8] += !!(census_flags & 1); census_c[9] += !!(census_flags & 2); census_c[10] += !!(census_flags & 4); census_c[11] += !!(census_flags & 8); census_c[12] += !!(census_flags & 16); census_c[21] += !!(census_flags & 0x40); census_c[23] += !!(census_flags & 0x20);
++                census_mode = 2;
++            }
++            else { census_c[16]++; census_c[17] += end - start; }
++            unsigned long long census_before = census_c[4];
+             c_parse_infer_initializer_array_count_core(machine, result->arena, machine->scratch_arena, preprocess, result, scope,
+                                                        value.element_type, start, end, &count, aggregate, &diagnostic);
++            census_mode = 0;
++            if (census_inferred && (census_flags & 0x80) && !(census_flags & (1|2|4|8|16|0x40)))
++            { census_c[5]++; census_c[6] += end - start; census_c[7] += census_c[4] - census_before; if (census_flags & 0x20) { census_c[24]++; census_c[25] += end - start; census_c[26] += census_c[4] - census_before; } }
+             machine->semantic_constant_queries = previous;
+             arena_set_position(machine->scratch_arena, mark);
+         }
+@@ -41645,7 +41692,11 @@ BUSTER_C_INTERNAL void c_parse_validate_lowering_constraints(CTypeParseMachine*
+                     c_ir_declaration_initializer_range(preprocess, declaration, &start, &end))
+                 {
+                     u64 count = 0;
+-                    if (c_parse_infer_initializer_array_count(machine, arena, preprocess, result, entity.scope, type.element_type, start, end, &count))
++                    census_current_bound = type.array_bound;
++                    census_c[19]++;
++                    bool census_ok = c_parse_infer_initializer_array_count(machine, arena, preprocess, result, entity.scope, type.element_type, start, end, &count);
++                    census_current_bound = 0xffffffffu;
++                    if (census_ok)
+                     {
+                         result->array_bounds[type.array_bound].has_inferred_count = true;
+                         result->array_bounds[type.array_bound].inferred_count = count;

@@ -122,3 +122,131 @@ jobs:
           grep -Fq '"no_code":false' "$RUNNER_TEMP/partial-tree-plan.json"
           grep -Fq '"reason":"invalid-source-identity-or-incomplete-diff"' "$RUNNER_TEMP/partial-tree-plan.json"
           cat "$RUNNER_TEMP/"*-plan.json
+      - name: Exercise the MAIN unchanged-input exemption (#3923)
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/main-fixture"
+          rm -rf "$out"; mkdir -p "$out/repo"; cd "$out/repo"
+          git init -q -b main
+          git config user.email fixture@example.invalid
+          git config user.name Fixture
+          plan() { "$RUNNER_TEMP/buster-build" ci_no_code --repo . --base "$1" --head "$2" --tested "$2" --policy "$3" --event main_push > "$out/$4-main-plan.json"; }
+          expect() { grep -Fq "$2" "$out/$1-main-plan.json" || { echo "FAIL $1: wanted $2"; cat "$out/$1-main-plan.json"; exit 1; }; }
+          printf 'prose\n' > README.md
+          printf 'int a;\n' > compiler.c
+          git add README.md compiler.c
+          git commit -qm A
+          a=$(git rev-parse HEAD)
+          printf 'int b;\n' >> compiler.c
+          git commit -qam B
+          b=$(git rev-parse HEAD)
+          printf 'more prose\n' >> README.md
+          git commit -qam C
+          c=$(git rev-parse HEAD)
+          # A measured, B measured: C's prose-only range is unchanged.
+          plan "$b" "$c" "$c" measured-b
+          expect measured-b '"unchanged":true'
+          expect measured-b '"reason":"reviewed-prose-only"'
+          # A measured, B pending/failed/cancelled: C cannot erase B's demand.
+          plan "$a" "$c" "$c" pending-b
+          expect pending-b '"unchanged":false'
+          expect pending-b '"reason":"execution-affecting-or-unknown-input"'
+          # Several skipped prose commits after the measured B stay unchanged.
+          printf 'even more prose\n' >> README.md
+          git commit -qam C2
+          c2=$(git rev-parse HEAD)
+          plan "$b" "$c2" "$c2" skipped-chain
+          expect skipped-chain '"unchanged":true'
+          # A newer trusted policy with execution-affecting drift measures.
+          printf 'int d;\n' >> compiler.c
+          git commit -qam D
+          d=$(git rev-parse HEAD)
+          plan "$b" "$c2" "$d" policy-drift
+          expect policy-drift '"unchanged":false'
+          expect policy-drift '"reason":"measurement-policy-drift"'
+          # A policy that does not descend from head measures.
+          git switch -qc side "$b"
+          printf 'int side;\n' > side.c
+          git add side.c
+          git commit -qm side
+          side=$(git rev-parse HEAD)
+          git switch -q main
+          plan "$b" "$c2" "$side" foreign-policy
+          expect foreign-policy '"unchanged":false'
+          expect foreign-policy '"reason":"invalid-source-identity-or-ancestry"'
+          # The classifier cannot authorize a change to itself.
+          mkdir -p tools
+          printf 'policy\n' > tools/ci_no_code.c
+          git add tools/ci_no_code.c
+          git commit -qm classifier
+          classifier=$(git rev-parse HEAD)
+          plan "$d" "$classifier" "$classifier" classifier
+          expect classifier '"unchanged":false'
+          # Unknown Markdown, mode changes and renames out of the allowlist measure.
+          printf 'note\n' > docs-unknown.md
+          git add docs-unknown.md
+          git commit -qm unknown-md
+          unknown=$(git rev-parse HEAD)
+          plan "$classifier" "$unknown" "$unknown" unknown
+          expect unknown '"unchanged":false'
+          chmod +x README.md
+          git commit -qam mode
+          mode=$(git rev-parse HEAD)
+          plan "$unknown" "$mode" "$mode" mode
+          expect mode '"unchanged":false'
+          git mv README.md moved.md
+          git commit -qm rename
+          rename=$(git rev-parse HEAD)
+          plan "$mode" "$rename" "$rename" rename
+          expect rename '"unchanged":false'
+          # Identity refusals: equal, non-ancestor, second-parent-only and missing bases.
+          plan "$rename" "$rename" "$rename" equal
+          expect equal '"unchanged":false'
+          plan "$side" "$rename" "$rename" non-ancestor
+          expect non-ancestor '"reason":"invalid-source-identity-or-ancestry"'
+          git switch -qc prose-branch "$rename"
+          printf 'branch prose\n' > moved.md
+          git commit -qam branch-prose
+          branch=$(git rev-parse HEAD)
+          git switch -q main
+          git merge -q --no-ff --no-edit prose-branch
+          merged=$(git rev-parse HEAD)
+          plan "$rename" "$merged" "$merged" first-parent
+          expect first-parent '"unchanged":false'
+          plan "$branch" "$merged" "$merged" second-parent
+          expect second-parent '"reason":"invalid-source-identity-or-ancestry"'
+          plan 1111111111111111111111111111111111111111 "$merged" "$merged" missing
+          expect missing '"unchanged":false'
+          # Beyond the bounded first-parent search the reference is not trusted.
+          deep=$merged
+          for i in $(seq 1 130); do git commit -q --allow-empty -m "empty $i"; done
+          deep_head=$(git rev-parse HEAD)
+          plan "$deep" "$deep_head" "$deep_head" depth
+          expect depth '"reason":"invalid-source-identity-or-ancestry"'
+          plan "$(git rev-parse HEAD~5)" "$deep_head" "$deep_head" shallow
+          expect shallow '"unchanged":true'
+          # tested must equal head.
+          if "$RUNNER_TEMP/buster-build" ci_no_code --repo . --base "$a" --head "$c" --tested "$b" --policy "$c" --event main_push > "$out/usage.txt"; then
+            echo 'FAIL tested differs from head was accepted'; exit 1
+          fi
+          # Blobless commits and trees suffice; a treeless candidate fails closed.
+          git config uploadpack.allowFilter true
+          git config uploadpack.allowAnySHA1InWant true
+          for filter in blob:none tree:0; do
+            candidate="$out/main-candidate-${filter%%:*}"
+            git init -q --bare "$candidate"
+            git -C "$candidate" fetch -q --no-tags --no-write-fetch-head --filter="$filter" "file://$PWD" "$c" "$b"
+            GIT_NO_LAZY_FETCH=1 "$RUNNER_TEMP/buster-build" ci_no_code --repo "$candidate" --base "$b" --head "$c" --tested "$c" --policy "$c" --event main_push > "$out/partial-${filter%%:*}-main-plan.json"
+          done
+          expect partial-blob '"unchanged":true'
+          expect partial-tree '"unchanged":false'
+          # Mirror the authorization fetch: shallow and blobless.
+          candidate="$out/main-candidate-shallow"
+          git init -q --bare "$candidate"
+          git -C "$candidate" fetch -q --no-tags --no-write-fetch-head --depth=130 --filter=blob:none "file://$PWD" "$c" "$b" "$deep_head" "$deep"
+          GIT_NO_LAZY_FETCH=1 "$RUNNER_TEMP/buster-build" ci_no_code --repo "$candidate" --base "$b" --head "$c" --tested "$c" --policy "$c" --event main_push > "$out/shallow-main-plan.json"
+          expect shallow '"unchanged":true'
+          GIT_NO_LAZY_FETCH=1 "$RUNNER_TEMP/buster-build" ci_no_code --repo "$candidate" --base "$deep" --head "$deep_head" --tested "$deep_head" --policy "$deep_head" --event main_push > "$out/shallow-depth-main-plan.json"
+          expect shallow-depth '"reason":"invalid-source-identity-or-ancestry"'
+          echo MAIN_FIXTURE_PASSED

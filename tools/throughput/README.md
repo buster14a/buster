@@ -461,13 +461,17 @@ set:
 | `skewed` | 4 × max W | One TU eight times larger than the others |
 | `tiny` | 16 × max W | One small function per TU |
 | `count-wW-nN` | W−1, W or W+1 | Equal TUs, measured at 1 and W workers |
+| `size-nN` | 2, 4, 8, 16, 32, 64 | Equal TUs, measured at 1, 2 and max W workers |
 | `diagnostic` | max(3, max W + 1) | Two TUs reference undeclared identifiers |
 
 - `equal`, `skewed` and `tiny` keep the same inputs at every W, so they are
   strong-scaling series. Their points are: the compiler default with no
   `-fcompile-jobs`, the explicit one-worker reference, then each listed W.
-- `--shape equal|skewed|tiny|count|all` selects series (repeatable; default
-  all). The diagnostic series always runs.
+- `size` brackets the population at which a multi-lane compile repays its
+  fixed entry cost (#53). Each series records its total `input_bytes`. It needs
+  a maximum W of at least 2 and always adds a two-worker point.
+- `--shape equal|skewed|tiny|count|size|all` selects series (repeatable;
+  default all). The diagnostic series always runs.
 - `--profile` and `--scale` size the functions as in `generate`.
 
 **Each sample** is a fresh process:
@@ -476,7 +480,15 @@ run in the series directory. After every sample, `scale` checks:
 - exit status 0 and a nonempty executable;
 - the `CC_METRICS` header reports every input `ok`;
 - `compilation_workers` equals `min(W, inputs)`, or 1 for the default and
-  one-worker points;
+  one-worker points. It must be 1 when the header reports `lane_gate=serial`
+  (the compiler kept one worker for a population too small to repay the
+  multi-lane entry cost). With `lane_gate=capped` the compiler ran fewer
+  workers than requested so each keeps a minimum of work: the count must be
+  below `min(W, inputs)` and is reported, with efficiency, as observed. A
+  compiler without the gate omits the field and gets the same check as before;
+  an unknown value is invalid;
+- every sample of one point reports the same `lane_gate`, and a capped point
+  the same worker count;
 - the executable is byte-identical across every worker count and repeat;
 - peak RSS stays under `--max-rss-mib`, when given.
 
@@ -497,7 +509,7 @@ excess makes the run invalid: exit 2 and a `scaling.json` with
 | `scaling-metadata.json` | Compiler path and SHA-256, requested set, per-CPU package/core/sibling topology, placements, input hashes per series |
 | `scaling.csv` | One row per timed sample: wall, user and system time, peak RSS, observed workers, interval kind, artifact hash |
 | `commands.jsonl` | Exact argv, working directory and CPU set of every launch |
-| `scaling.json`, `scaling.md` | Per point: median wall, its distribution-free median interval, speedup against the one-worker reference with a conservative interval, efficiency, CPU-work (user+system) inflation and peak-RSS inflation |
+| `scaling.json`, `scaling.md` | Per series: inputs and input bytes. Per point: observed workers and `lane_gate` (`null`/`-` when absent), median wall, its distribution-free median interval, speedup against the one-worker reference with a conservative interval, efficiency over the participating workers, CPU-work (user+system) inflation and peak-RSS inflation |
 
 Peak RSS is the compiler process's own high-water mark. It is not a sum over a
 process tree.
@@ -1027,20 +1039,33 @@ an old completion manifest to claim compatibility.
 
 The native regression suite checks exact zero/UINT64_MAX/unavailable replay,
 invalid counters, legacy rejection, optional probe completeness, and unchanged
-corpus hashing. On Linux it compares one allocation-and-sleep child's `wait4`
-counts with an independently obtained `getrusage(RUSAGE_CHILDREN)` delta,
-without another child between snapshots. Other platforms check unavailability.
-If the voluntary-switch equality fails, the test emits
+corpus hashing. On Linux it checks all four exported allocation-and-sleep child
+counters exactly against the raw `wait4` result for the successfully waited PID,
+including availability, exit status and cleanup. The collector's unchanged
+mapping also has distinct-value, zero, negative/unavailable and `LONG_MAX`
+controls. Other platforms check unavailability.
+
+`RUSAGE_CHILDREN` is a separate snapshot, not an atomic oracle for `wait4`.
+In [Linux v7.0 `wait_task_zombie`](https://github.com/torvalds/linux/blob/028ef9c96e96197026887c0f092424679298aae8/kernel/exit.c),
+the parent accumulates child counters before separately collecting the returned
+rusage. Exit notification precedes `do_task_dead`; the final
+[`__schedule`](https://github.com/torvalds/linux/blob/028ef9c96e96197026887c0f092424679298aae8/kernel/sched/core.c)
+can still increment the child's context-switch count. This permits different
+snapshots even without another child. It explains why strict cumulative equality
+is unsupported; it does not prove the interleaving of any historical failure or
+authenticate a hosted runner's downstream kernel patchset (#2335/#3149).
+
+If the cumulative voluntary-switch delta differs, the test emits
 `THROUGHPUT_CHILD_COUNTER_MISMATCH_V1` with the actual child and waited PID,
 the original per-child `wait4` counters, both cumulative `RUSAGE_CHILDREN`
 snapshots, and the existing group-cleanup signal's result/errno. A Linux-only
 test snapshot copies these already observed facts after the timed interval;
 it adds no wait, signal, process discovery, result field or production wire
-schema. The original equality, workload and deadlines remain unchanged.
-Deterministic controls require silence for equal counters and verify the
-failure-only diagnostic using an injected mismatch. These facts can distinguish
-collector disagreement from cumulative accounting differences; they do not
-establish either explanation for the older #2335/#3149 failures.
+schema. Cumulative disagreement remains telemetry while the per-child oracle
+stays strict. The workload and deadlines are unchanged. Deterministic controls
+require silence for equal counters, preserve an injected larger cumulative
+delta, and replay the retained `wait4=2`, cumulative `87->88` recurrence without
+changing the collected value. There is no tolerance, delay or retry.
 
 The existing Linux harness job additionally runs the suite under ASan/UBSan:
 

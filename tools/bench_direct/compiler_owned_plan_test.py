@@ -7,10 +7,13 @@ import unittest
 
 import compiler_owned_plan as contract
 from compiler_receipt import (PROFILE, THROUGHPUT_PROFILE, SCALING_PROFILE, INLINE_ACCEPTANCE_PROFILE,
-                              AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_ACCEPTANCE_REQUEST_LINE)
+                              AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_ACCEPTANCE_REQUEST_LINE,
+                              AST_RETIREMENT_PROFILE, AST_RETIREMENT_REQUEST_LINE,
+                              CONSTANT_REUSE_ACCEPTANCE_PROFILE, CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
+                              PROCESS_FLOOR_PROFILE, PROCESS_FLOOR_REQUEST_LINE)
 
 
-def fixture(mode="pull", inline=False, scaling=False, *, spaces=False, ast=False):
+def fixture(mode="pull", inline=False, scaling=False, *, spaces=False, ast=False, reuse=False, floor=False, retirement=False):
     trusted, root, work, evidence = (("/trusted main", "/candidate tree", "/work space", "/evidence space")
                                     if spaces else ("/trusted", "/checkout", "/work", "/evidence"))
     python, lab = "/usr/bin/python3", trusted + "/tools/uarch_lab.py"
@@ -32,6 +35,15 @@ def fixture(mode="pull", inline=False, scaling=False, *, spaces=False, ast=False
     if ast:
         receipt["ast_pilot_acceptance"] = {"requested": True, "request_line": AST_PILOT_ACCEPTANCE_REQUEST_LINE,
                                            "profile": copy.deepcopy(AST_PILOT_ACCEPTANCE_PROFILE)}
+    if reuse:
+        receipt["constant_reuse_acceptance"] = {"requested": True, "request_line": CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
+                                                "profile": copy.deepcopy(CONSTANT_REUSE_ACCEPTANCE_PROFILE)}
+    if floor:
+        receipt["process_floor"] = {"requested": True, "request_line": PROCESS_FLOOR_REQUEST_LINE,
+                                    "profile": copy.deepcopy(PROCESS_FLOOR_PROFILE)}
+    if retirement:
+        receipt["ast_retirement_acceptance"] = {"requested": True, "request_line": AST_RETIREMENT_REQUEST_LINE,
+                                                "profile": copy.deepcopy(AST_RETIREMENT_PROFILE)}
     git = ["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null", "-C", root]
     rows = []
 
@@ -57,6 +69,14 @@ def fixture(mode="pull", inline=False, scaling=False, *, spaces=False, ast=False
         row("ast-pilot-acceptance", [python, "-B", trusted + "/tools/bench_direct/ast_pilot_acceptance.py",
             "--lab", lab, "--candidate-ide", bins + "/ide-cand", "--repo-root", root,
             "--head-revision", identity["head"], "--cpu", "2", "--output", work + "/ast-pilot-acceptance"], 7200)
+    if reuse:
+        row("constant-reuse-acceptance", [python, "-B", trusted + "/tools/bench_direct/constant_reuse_acceptance.py",
+            "--lab", lab, "--candidate-ide", bins + "/ide-cand", "--repo-root", root,
+            "--head-revision", identity["head"], "--cpu", "2", "--output", work + "/constant-reuse-acceptance"], 7200)
+    if floor:
+        row("process-floor", [python, "-B", trusted + "/tools/bench_direct/process_floor_acceptance.py",
+            "--lab", lab, "--candidate-ide", bins + "/ide-cand", "--repo-root", root,
+            "--head-revision", identity["head"], "--cpu", "2", "--output", work + "/process-floor"], 3600)
     row("build-closure", [*git, "checkout", "--quiet", "--detach", identity["base"]], 120)
     row("build-closure", [driver, "compiler_closure", "restore", root, work + "/frozen-baseline",
         identity["base"], identity["base_tree"], evidence + "/closure-restore.json", manifest], 1800, trusted)
@@ -67,6 +87,11 @@ def fixture(mode="pull", inline=False, scaling=False, *, spaces=False, ast=False
         "--output", work + "/throughput", "--baseline-id", identity["base"], "--candidate-id", identity["head"],
         "--profile", "ci", "--mode", "all", "--pairs", "20", "--warmups", "2", "--timeout", "120", "--cpu", "2"], 1800)
     rows[-1]["exit_policy"] = "corpus-report-only-v1"
+    if retirement:
+        row("ast-retirement-acceptance", [python, "-B", trusted + "/tools/bench_direct/ast_retirement_acceptance.py",
+            "--lab", lab, "--harness", harness, "--baseline-ide", bins + "/ide-base", "--candidate-ide", bins + "/ide-cand",
+            "--repo-root", root, "--base-revision", identity["base"], "--head-revision", identity["head"],
+            "--cpu", "2", "--output", work + "/ast-retirement-acceptance"], 2700)
     if scaling:
         row("scaling", [harness, "scale", "--compiler", bins + "/ide-cand", "--output", work + "/scaling/cores",
             "--cpu-set", "auto", "--exclude-core", "0", "--workers", "1,2,4,7", "--allow-smt",
@@ -217,6 +242,123 @@ class OwnedPlanTest(unittest.TestCase):
                 commands[index]["argv"][6] = ownership["binaries_root"] + "/ide-base"
             elif case == "output":
                 commands[index]["argv"][-1] = "/other/ast-output"
+            else:
+                commands[index]["argv"][-3] = "3"
+            with self.subTest(case=case):
+                self.assertTrue(contract.validate_plan(changed, ownership, commands))
+
+    def test_ast_retirement_extension_has_one_exact_after_throughput_phase(self):
+        for inline in (False, True):
+            for spaces in (False, True):
+                current, ownership, rows = fixture(inline=inline, spaces=spaces, retirement=True)
+                with self.subTest(inline=inline, spaces=spaces):
+                    self.assertEqual(contract.validate_plan(current, ownership, rows), [])
+                    self.assertEqual(len(rows), 13 + int(inline))
+                    self.assertEqual([row["phase"] for row in rows][-3:],
+                                     ["throughput", "ast-retirement-acceptance", "validate"])
+        current, ownership, rows = fixture(retirement=True)
+        index = next(index for index, row in enumerate(rows) if row["phase"] == "ast-retirement-acceptance")
+        for flag, value in (("--lab", "/other/lab.py"), ("--harness", "/other/generator"),
+                            ("--baseline-ide", ownership["binaries_root"] + "/ide-cand"),
+                            ("--candidate-ide", ownership["binaries_root"] + "/ide-base"),
+                            ("--repo-root", "/other/source"), ("--base-revision", "d" * 40),
+                            ("--head-revision", "e" * 40), ("--cpu", "3"), ("--output", "/other/output")):
+            changed = copy.deepcopy(rows)
+            changed[index]["argv"][changed[index]["argv"].index(flag) + 1] = value
+            with self.subTest(flag=flag):
+                self.assertTrue(contract.validate_plan(current, ownership, changed))
+        for case in ("program", "timeout", "extra-flags", "before-corpus", "missing-phase", "undeclared-phase"):
+            changed, commands = copy.deepcopy(current), copy.deepcopy(rows)
+            if case == "program":
+                commands[index]["argv"][2] = ownership["candidate_root"] + "/tools/bench_direct/ast_retirement_acceptance.py"
+            elif case == "timeout":
+                commands[index]["timeout"] = 2701
+            elif case == "extra-flags":
+                commands[index]["argv"].append("--no-fresh-copy")
+            elif case == "before-corpus":
+                commands[index], commands[index - 1] = commands[index - 1], commands[index]
+            elif case == "missing-phase":
+                commands.pop(index)
+            else:
+                changed.pop("ast_retirement_acceptance")
+            with self.subTest(case=case):
+                self.assertTrue(contract.validate_plan(changed, ownership, commands))
+
+    def test_ast_retirement_extension_rejects_other_modes_selectors_and_profiles(self):
+        current, ownership, rows = fixture(retirement=True)
+        for field, value in (("request_line", "profile: other"), ("requested", 1)):
+            changed = copy.deepcopy(current)
+            changed["ast_retirement_acceptance"][field] = value
+            self.assertTrue(contract.validate_plan(changed, ownership, rows))
+        changed = copy.deepcopy(current)
+        changed["ast_retirement_acceptance"]["profile"]["pairs"] = 2
+        self.assertTrue(contract.validate_plan(changed, ownership, rows))
+        changed = copy.deepcopy(current)
+        changed["mode"] = "main"
+        self.assertTrue(contract.validate_plan(changed, ownership, rows))
+        for extension in ("ast_pilot_acceptance", "constant_reuse_acceptance", "process_floor", "throughput_real_source",
+                          "production_profile", "compiler_probes", "frontend_selector", "frontend_nesting", "wild_linker",
+                          "link_tls", "selfhost_inline", "analyzer_profile", "scaling_profile"):
+            changed = copy.deepcopy(current)
+            changed[extension] = {}
+            with self.subTest(extension=extension):
+                self.assertTrue(contract.validate_plan(changed, ownership, rows))
+
+    def test_constant_reuse_extension_is_pull_only_frozen_and_exact(self):
+        receipt, ownership, rows = fixture(reuse=True)
+        self.assertEqual(contract.validate_plan(receipt, ownership, rows), [])
+        plain_receipt, unused_ownership, plain_rows = fixture()
+        for case in ("main-mode", "profile", "requested", "undeclared-row", "missing-row", "program", "binary",
+                     "output", "cpu"):
+            changed, commands = copy.deepcopy(receipt), copy.deepcopy(rows)
+            index = next(index for index, row in enumerate(commands) if row["phase"] == "constant-reuse-acceptance")
+            if case == "main-mode":
+                changed["mode"] = "main"
+            elif case == "profile":
+                changed["constant_reuse_acceptance"]["profile"]["pairs"] = 2
+            elif case == "requested":
+                changed["constant_reuse_acceptance"]["requested"] = 1
+            elif case == "undeclared-row":
+                changed = copy.deepcopy(plain_receipt)
+            elif case == "missing-row":
+                commands = copy.deepcopy(plain_rows)
+            elif case == "program":
+                commands[index]["argv"][2] = ownership["trusted_root"] + "/tools/bench_direct/ast_pilot_acceptance.py"
+            elif case == "binary":
+                commands[index]["argv"][6] = ownership["binaries_root"] + "/ide-base"
+            elif case == "output":
+                commands[index]["argv"][-1] = "/other/reuse-output"
+            else:
+                commands[index]["argv"][-3] = "3"
+            with self.subTest(case=case):
+                self.assertTrue(contract.validate_plan(changed, ownership, commands))
+
+    def test_process_floor_extension_is_pull_only_frozen_and_exact(self):
+        receipt, ownership, rows = fixture(floor=True)
+        self.assertEqual(contract.validate_plan(receipt, ownership, rows), [])
+        plain_receipt, unused_ownership, plain_rows = fixture()
+        for case in ("main-mode", "profile", "requested", "undeclared-row", "missing-row", "program", "binary",
+                     "output", "cpu", "timeout"):
+            changed, commands = copy.deepcopy(receipt), copy.deepcopy(rows)
+            index = next(index for index, row in enumerate(commands) if row["phase"] == "process-floor")
+            if case == "main-mode":
+                changed["mode"] = "main"
+            elif case == "profile":
+                changed["process_floor"]["profile"]["pairs"] = 2
+            elif case == "requested":
+                changed["process_floor"]["requested"] = 1
+            elif case == "undeclared-row":
+                changed = copy.deepcopy(plain_receipt)
+            elif case == "missing-row":
+                commands = copy.deepcopy(plain_rows)
+            elif case == "program":
+                commands[index]["argv"][2] = ownership["trusted_root"] + "/tools/bench_direct/constant_reuse_acceptance.py"
+            elif case == "binary":
+                commands[index]["argv"][6] = ownership["binaries_root"] + "/ide-base"
+            elif case == "output":
+                commands[index]["argv"][-1] = "/other/floor-output"
+            elif case == "timeout":
+                commands[index]["timeout"] = 7200
             else:
                 commands[index]["argv"][-3] = "3"
             with self.subTest(case=case):

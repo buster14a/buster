@@ -104,6 +104,7 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_metrics_test_mask(Arena* arena, Stri
         bool volatile_field = (key.length > 3 && string_equal(string_slice(key, key.length - 3, key.length), S8("_ns"))) ||
                               string_equal(key, S8("peak_rss_bytes")) || string_equal(key, S8("compile_jobs")) ||
                               string_equal(key, S8("compilation_workers")) || string_equal(key, S8("intervals")) ||
+                              string_equal(key, S8("lane_gate")) ||
                               string_equal(key, S8("arena_peak_bytes"));
         if (!volatile_field && token.length)
         {
@@ -591,6 +592,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics_lanes(Unit
                    file_write(bad_path, BUSTER_SLICE_TO_BYTE_SLICE(S8("int lane_bad(void) { return lane_missing; }\n")));
     u32 workers = (u32)buster_test_worker_count(BUSTER_MIN((u64)2, (u64)BUSTER_MAX(os_get_logical_thread_count(), (u32)1)));
     workers = BUSTER_MAX(workers, (u32)1);
+    // These one-line inputs sit below the minimum-work gate; force lanes so
+    // the concurrent record path is what is measured.
+    compiler_driver_test_set_lane_work(0, 0, 0);
     if (BUSTER_REQUIRE(arguments, written))
     {
         String8 command[] = {S8("-target"), S8("x86_64-unknown-linux"), S8("-nostdinc"), S8("-fmetrics-out=unused.txt"), S8("-fmetrics-functions"),
@@ -605,6 +609,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics_lanes(Unit
         CompilerDriverResult parallel = compiler_driver_execute_invocation(arena, invocation);
         BUSTER_TEST_RAW(arguments, parallel.error == COMPILER_DRIVER_ERROR_NONE, parallel.diagnostic);
         BUSTER_TEST(arguments, parallel.compilation_workers == workers);
+        BUSTER_TEST(arguments, serial.lane_gate == COMPILER_DRIVER_LANE_GATE_NONE &&
+                                   parallel.lane_gate == (workers > 1 ? COMPILER_DRIVER_LANE_GATE_LANES : COMPILER_DRIVER_LANE_GATE_NONE));
         BUSTER_TEST(arguments, compiler_driver_metrics_test_same_bytes(file_read(arena, output, (FileReadOptions){0}), serial_image));
         String8 expected[] = {main_path, helper_path, data_path};
         if (BUSTER_REQUIRE(arguments, parallel.input_result_count == 3 && serial.input_result_count == 3))
@@ -623,6 +629,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics_lanes(Unit
             String8 serial_records = compiler_driver_metrics_format(arena, &invocation, &serial, (CompilerDriverProcessMetrics){0});
             String8 parallel_records = compiler_driver_metrics_format(arena, &invocation, &parallel, (CompilerDriverProcessMetrics){0});
             BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(parallel_records, workers > 1 ? S8(" intervals=concurrent ") : S8(" intervals=serial ")));
+            BUSTER_TEST(arguments, compiler_driver_metrics_test_contains(parallel_records, workers > 1 ? S8(" lane_gate=lanes\n") : S8(" lane_gate=none\n")) &&
+                                       compiler_driver_metrics_test_contains(serial_records, S8(" lane_gate=none\n")));
             BUSTER_TEST(arguments, string_equal(compiler_driver_metrics_test_mask(arena, serial_records),
                                                 compiler_driver_metrics_test_mask(arena, parallel_records)));
         }
@@ -710,6 +718,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_input_metrics_lanes(Unit
     (void)os_file_delete(data_path);
     (void)os_file_delete(bad_path);
     (void)os_file_delete(output);
+    compiler_driver_test_restore_lane_work();
     scratch_end(temporary);
     return result;
 }
@@ -757,7 +766,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_affinity_worker_clamp(Un
         BUSTER_TEST(arguments, sched_setaffinity(0, sizeof(original), &original) == 0);
         BUSTER_TEST(arguments, permitted == 1);
         BUSTER_TEST_RAW(arguments, confined.error == COMPILER_DRIVER_ERROR_NONE, confined.diagnostic);
-        BUSTER_TEST(arguments, confined.compilation_workers == 1);
+        BUSTER_TEST(arguments, confined.compilation_workers == 1 && confined.lane_gate == COMPILER_DRIVER_LANE_GATE_NONE);
         BUSTER_TEST(arguments, os_get_logical_thread_count() == (u32)CPU_COUNT(&original));
     }
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(paths); index += 1)

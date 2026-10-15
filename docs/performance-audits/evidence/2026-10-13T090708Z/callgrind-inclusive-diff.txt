@@ -1,0 +1,10 @@
+function                                                                                  dIr   Ir B/A       dD1m  dLLd(r+w)  LLd B/A
+ster/lib/compiler/codegen/codegen.c:codegen_generate_canonical_module_with_trace   89,171,911   1.0148    899,724     83,726   1.0128
+src/buster/lib/compiler/ir/ir_fast.c:ir_prepare_canonical_module                  281,473,468   1.1470  6,275,372  3,408,104   1.2794
+src/buster/lib/compiler/ir/ir_inline.c:ir_inline_module                           225,524,428   5.1737  4,635,019  3,179,576   2.4352
+src/buster/lib/compiler/object/object.c:object_from_canonical_codegen_module       12,798,496   1.0314    176,961    113,420   1.0251
+src/buster/lib/compiler/ir/ir.c:ir_validate_canonical_function                    113,053,764   1.1679    601,430    209,262   1.0639
+src/buster/lib/compiler/ir/ir_promote.c:ir_promote_function                        22,525,148   1.1370    717,884     92,340   1.0357
+src/buster/lib/compiler/ir/ir_cfg.c:ir_function_publish_cfg                         8,216,838   1.0230    351,557     60,072   1.0174
+src/buster/lib/compiler/ir/ir_inline_cfg.c:ir_inline_cfg_call                      18,435,749  16.7356    179,962     72,046  14.0282
+src/buster/lib/compiler/ir/ir_inline_cfg.c:ir_inline_cfg_supported                  9,296,521  25.8899     61,520      3,712  60.8710

@@ -38,7 +38,10 @@
 // ownership, each row, the value the row defines) plus a sweep over the values
 // nothing defined; the historical three-pass form survives under
 // BUSTER_INCLUDE_TESTS as ir_test_validate_canonical_module_reference, the
-// oracle its traversal is compared against.
+// oracle its traversal is compared against. ir_validate_canonical_splice
+// re-proves a function after inlining splices by walking only what they
+// rewrote (IrValidationSplice), through the same walk
+// (ir_validate_function_walk).
 
 #include <buster/lib/compiler/ir/ir.h>
 #include <buster/lib/compiler/ir/ir_internal.h>
@@ -264,7 +267,9 @@ String8 ir_diagnostic_census_counter_name(IrDiagnosticCensusCounter counter)
 IrType* ir_type_from_id(IrTypeTable* table, IrTypeId id)
 {
     IrType* result;
-    if (!table || id.value >= table->count)
+    // A populated table always has rows; testing them lets the analyzer see
+    // that too (#3952).
+    if (!table || !table->types || id.value >= table->count)
     {
         result = 0;
     }
@@ -2380,7 +2385,8 @@ BUSTER_GLOBAL_LOCAL bool ir_label_metadata_aggregate_transfer_valid(IrProgram* p
     {
         IrType* aggregate = ir_type_from_id(&program->types, definition->canonical_type);
         valid = aggregate && (definition->opcode != IR_OPCODE_ARRAY || aggregate->kind == IR_TYPE_ARRAY || aggregate->kind == IR_TYPE_VECTOR) &&
-                (definition->opcode != IR_OPCODE_AGGREGATE || aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION);
+                (definition->opcode != IR_OPCODE_AGGREGATE || ((aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) &&
+                                                                     (!aggregate->field_count || aggregate->fields)));
         TemporalArena temporary = scratch_begin(0, 0);
         u32 operand_count = definition->operand_count;
         IrValueLabelMetadata* sources = arena_allocate(temporary.arena, IrValueLabelMetadata, operand_count ? operand_count : 1);
@@ -2640,7 +2646,8 @@ BUSTER_GLOBAL_LOCAL bool ir_label_transfer_valid_field(IrProgram* program, IrIns
     {
         IrType* aggregate = ir_type_from_id(&program->types, first_slot->canonical_type);
         u64 field_index = definition->immediate_count == 1 && definition->immediates ? definition->immediates[0] : UINT64_MAX;
-        bool addressable = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) && field_index < aggregate->field_count;
+        bool addressable = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) && aggregate->fields &&
+                           field_index < aggregate->field_count;
         IrField* field = addressable ? aggregate->fields + field_index : 0;
         IrType* field_type = field ? ir_type_from_id(&program->types, field->type) : 0;
         if (!field_type || !field_type->layout.resolved)
@@ -5768,7 +5775,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_global(IrProgram* program, IrM
             break;
             case IR_GLOBAL_INITIALIZER_BYTES:
             {
-                initializer_valid = global->bytes.length == type->layout.size;
+                initializer_valid = global->bytes.length == type->layout.size && (!global->bytes.length || global->bytes.pointer);
             }
             break;
             case IR_GLOBAL_INITIALIZER_SYMBOL_ADDRESS:
@@ -6103,11 +6110,11 @@ BUSTER_GLOBAL_LOCAL bool ir_place_narrow_bit_field_access(IrProgram* program, Ir
     IrInstruction* field_instruction = definition.value < function->instruction_count ? function->instructions + definition.value : 0;
     if (access_type && access_type->kind == IR_TYPE_INTEGER && access_type->layout.resolved && field_instruction &&
         field_instruction->opcode == IR_OPCODE_FIELD && field_instruction->operand_count == 1 && field_instruction->immediate_count == 1 &&
-        field_instruction->operands[0].value < function->value_count)
+        field_instruction->operands && field_instruction->immediates && field_instruction->operands[0].value < function->value_count)
     {
         IrType* aggregate = ir_type_from_id(&program->types, function->values[field_instruction->operands[0].value].canonical_type);
         u64 field_index = field_instruction->immediates[0];
-        IrField* field = aggregate && field_index < aggregate->field_count ? aggregate->fields + field_index : 0;
+        IrField* field = aggregate && aggregate->fields && field_index < aggregate->field_count ? aggregate->fields + field_index : 0;
         IrType* field_type = field ? ir_type_from_id(&program->types, field->type) : 0;
         // Boolean bit-fields use a raw unsigned integer unit even when the
         // layout did not narrow it. Truth conversion belongs to the field value.
@@ -6438,6 +6445,9 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrType* callee_type = callee ? ir_type_from_id(&program->types, callee->canonical_type) : 0;
         bool indirect = callee_type && callee_type->kind == IR_TYPE_POINTER;
         IrType* signature_type = indirect ? ir_type_from_id(&program->types, callee_type->element_type) : callee_type;
+        // A direct callee must be its FUNCTION row. An indirect callee is an
+        // ordinary pointer value and may be a block parameter, which has no
+        // defining row (inlining turns a call result into one, #3988).
         IrInstruction* reference =
             callee && callee->definition.value < function->instruction_count ? function->instructions + callee->definition.value : 0;
         IrType* return_type = signature_type ? ir_type_from_id(&program->types, signature_type->return_type) : 0;
@@ -6448,8 +6458,8 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
             (signature_type->parameter_count && !signature_type->parameter_types) ||
             (!signature_type->is_variadic && argument_count != signature_type->parameter_count) ||
             (signature_type->is_variadic && argument_count < signature_type->parameter_count) ||
-            signature_type->return_type.value != instruction->canonical_type.value || !reference ||
-            (!indirect && (reference->opcode != IR_OPCODE_FUNCTION || reference->symbol.value != instruction->symbol.value)) ||
+            signature_type->return_type.value != instruction->canonical_type.value ||
+            (!indirect && (!reference || reference->opcode != IR_OPCODE_FUNCTION || reference->symbol.value != instruction->symbol.value)) ||
             (indirect && instruction->symbol.value != IR_ID_UNDERLYING_INVALID) ||
             ((return_type->kind == IR_TYPE_VOID) != (instruction->result.value == IR_ID_UNDERLYING_INVALID)))
         {
@@ -6655,7 +6665,8 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         complete |= aggregate && (aggregate->kind == IR_TYPE_UNION ? instruction->operand_count <= 1
                                                                     : instruction->operand_count == aggregate->field_count);
         bool valid = aggregate && (aggregate->kind == IR_TYPE_STRUCT || aggregate->kind == IR_TYPE_UNION) &&
-                     instruction->operand_count == instruction->immediate_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
+                     (!aggregate->field_count || aggregate->fields) && instruction->operand_count == instruction->immediate_count &&
+                     instruction->result.value != IR_ID_UNDERLYING_INVALID &&
                      function->values[instruction->result.value].category == IR_VALUE_VALUE && complete;
         for (u32 operand_index = 0; valid && operand_index < instruction->operand_count; operand_index += 1)
         {
@@ -6678,7 +6689,7 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_operation(IrProgra
         IrValue* base = instruction->operand_count == 1 ? function->values + instruction->operands[0].value : 0;
         IrType* base_type = base ? ir_type_from_id(&program->types, base->canonical_type) : 0;
         u64 field_index = instruction->immediate_count == 1 ? instruction->immediates[0] : UINT64_MAX;
-        bool valid_field = base_type && (base_type->kind == IR_TYPE_STRUCT || base_type->kind == IR_TYPE_UNION) &&
+        bool valid_field = base_type && (base_type->kind == IR_TYPE_STRUCT || base_type->kind == IR_TYPE_UNION) && base_type->fields &&
                            field_index < base_type->field_count && instruction->result.value != IR_ID_UNDERLYING_INVALID &&
                            function->values[instruction->result.value].category == IR_VALUE_PLACE &&
                            instruction->canonical_type.value == base_type->fields[field_index].type.value;
@@ -7132,17 +7143,39 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_scope(IrProgram* pr
     return result;
 }
 
-// The function-scope half: one lowered function's storage, signature, blocks,
-// parameters, rows and values, self-contained. One walk over the block chains
-// proves ownership (every row in exactly one chain, each chain ending at its
-// recorded tail) while it checks each row and the value that row defines;
-// parameters are checked with their block; the sweep that follows reaches
-// only the values nothing defined. Scratch is one byte per row and per value.
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram* program, IrFunction* function)
+// What one batch of splices into a function may have rewritten
+// (ir_inline_splice_region): the original blocks holding its calls, the rows
+// those blocks held and the values those rows and the blocks' parameters
+// defined, all before the batch; everything at or past the base counts is new.
+typedef struct IrValidationSplice IrValidationSplice;
+struct IrValidationSplice
+{
+    u32* blocks;
+    u32* rows;
+    u32* values;
+    u32 block_count;
+    u32 row_count;
+    u32 value_count;
+    u32 base_blocks;
+    u32 base_instructions;
+    u32 base_values;
+};
+
+// The function-scope walk behind both checks below. One walk over the block
+// chains proves ownership (every row in exactly one chain, each chain ending
+// at its recorded tail) while it checks each row and the value that row
+// defines; parameters are checked with their block; the sweep that follows
+// reaches only the values nothing defined. Scratch is one byte per row and
+// per value. With `splice`, it is the splice proof described above
+// ir_validate_canonical_splice. Both checks share this one walk so each leaf
+// validator keeps a single caller and stays inlined into it: split into two
+// walks over shared helpers, the default stage-1 compile retired 11.6 M to
+// 16.8 M more instructions (#3854).
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_walk(IrProgram* program, IrFunction* function, IrValidationSplice const* splice)
 {
     IrValidationResult result = ir_validation_ok();
     IR_CONSTRUCTION_RECORD(VALIDATION_FUNCTIONS, 1);
-    IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTION_SCANS, 1);
+    IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTION_SCANS, splice ? 0u : 1u);
     IrType* signature = program->types.types ? ir_type_from_id(&program->types, function->canonical_type) : 0;
     if ((function->block_count && !function->blocks) || (function->instruction_count && !function->instructions) ||
         (function->value_count && !function->values) ||
@@ -7162,21 +7195,48 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram*
     {
         result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
     }
+    if (result.error == IR_VALIDATION_NONE && splice &&
+        (function->published_cfg || function->label_metadata_count || splice->base_blocks > function->block_count ||
+         splice->base_instructions > function->instruction_count || splice->base_values > function->value_count))
+    {
+        result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+    }
     if (result.error == IR_VALIDATION_NONE)
     {
         TemporalArena temporary = scratch_begin(&program->arena, 1);
         u8* visited = arena_allocate(temporary.arena, u8, function->instruction_count);
         u8* defined = arena_allocate(temporary.arena, u8, function->value_count);
-        memset(visited, 0, function->instruction_count);
-        memset(defined, IR_VALIDATION_DEFINED_NONE, function->value_count);
-        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTIONS, 1);
-        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BLOCKS, function->block_count);
-        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_INSTRUCTIONS, function->instruction_count);
+        // The splice proof starts with every row outside its region owned
+        // and every old value outside it defined (as a parameter, so a second
+        // definition is refused); the full check starts with none.
+        u32 owned_rows = splice ? splice->base_instructions : 0;
+        u32 defined_values = splice ? splice->base_values : 0;
+        memset(visited, 1, owned_rows);
+        memset(visited + owned_rows, 0, function->instruction_count - owned_rows);
+        memset(defined, IR_VALIDATION_DEFINED_PARAMETER, defined_values);
+        memset(defined + defined_values, IR_VALIDATION_DEFINED_NONE, function->value_count - defined_values);
+        for (u32 index = 0; splice && index < splice->row_count; index += 1)
+        {
+            visited[splice->rows[index]] = 0;
+        }
+        for (u32 index = 0; splice && index < splice->value_count; index += 1)
+        {
+            defined[splice->values[index]] = IR_VALIDATION_DEFINED_NONE;
+        }
+        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTIONS, splice ? 0u : 1u);
+        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BLOCKS, splice ? 0u : function->block_count);
+        IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_INSTRUCTIONS, splice ? 0u : function->instruction_count);
         IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BYTES_CLEARED, (u64)function->instruction_count + function->value_count);
         bool validate_label_provenance = function->label_metadata_count != 0;
         u32 visited_count = 0;
-        for (u32 block_index = 0; block_index < function->block_count && result.error == IR_VALIDATION_NONE; block_index += 1)
+        // The splice proof walks the region's original blocks, then every
+        // block the splices added; the full check walks every block.
+        u32 walked_blocks = splice ? splice->block_count + (function->block_count - splice->base_blocks) : function->block_count;
+        for (u32 index = 0; index < walked_blocks && result.error == IR_VALIDATION_NONE; index += 1)
         {
+            u32 block_index = !splice ? index
+                              : index < splice->block_count ? splice->blocks[index]
+                                                            : splice->base_blocks + (index - splice->block_count);
             IR_CONSTRUCTION_RECORD(VALIDATION_BLOCKS, 1);
             IrBlock* block = function->blocks + block_index;
             if (!block->terminated || !block->sealed)
@@ -7197,16 +7257,37 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram*
                 }
             }
         }
-        // A row no chain reaches is still read out of the dense array by
-        // every later pass; name the first one.
-        for (u32 instruction_index = 0; visited_count != function->instruction_count && instruction_index < function->instruction_count &&
-                                        result.error == IR_VALIDATION_NONE;
-             instruction_index += 1)
+        if (splice)
         {
-            if (!visited[instruction_index])
+            // The region's chains must reach exactly its original rows and
+            // every new row; the rest stayed in their untouched chains.
+            if (result.error == IR_VALIDATION_NONE &&
+                visited_count != splice->row_count + (function->instruction_count - splice->base_instructions))
             {
-                result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, IR_BLOCK_ID_INVALID,
-                                             (IrInstructionId){.value = instruction_index});
+                result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+            }
+            // Every block's predecessor list was rebuilt.
+            for (u32 block = 0; block < splice->base_blocks && result.error == IR_VALIDATION_NONE; block += 1)
+            {
+                if (function->blocks[block].first_parameter)
+                {
+                    result = ir_validate_block_parameters(function, function->blocks + block, false);
+                }
+            }
+        }
+        else
+        {
+            // A row no chain reaches is still read out of the dense array by
+            // every later pass; name the first one.
+            for (u32 instruction_index = 0; visited_count != function->instruction_count && instruction_index < function->instruction_count &&
+                                            result.error == IR_VALIDATION_NONE;
+                 instruction_index += 1)
+            {
+                if (!visited[instruction_index])
+                {
+                    result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, IR_BLOCK_ID_INVALID,
+                                                 (IrInstructionId){.value = instruction_index});
+                }
             }
         }
         for (u32 value_index = 0; value_index < function->value_count && result.error == IR_VALIDATION_NONE; value_index += 1)
@@ -7216,8 +7297,65 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram*
                 result = ir_validate_value(program, function, (IrValueId){.value = value_index}, false);
             }
         }
+        // A spliced call result left without a defining row loses the
+        // indirect-call reference an outside row may read (#3988).
+        for (u32 index = 0; splice && index < splice->value_count && result.error == IR_VALIDATION_NONE; index += 1)
+        {
+            IrValueId value = {.value = splice->values[index]};
+            IrType* type = defined[value.value] != IR_VALIDATION_DEFINED_INSTRUCTION
+                               ? ir_type_from_id(&program->types, function->values[value.value].canonical_type) : 0;
+            IrType* element = type && type->kind == IR_TYPE_POINTER ? ir_type_from_id(&program->types, type->element_type) : 0;
+            if (element && element->kind == IR_TYPE_FUNCTION)
+            {
+                result = ir_validation_error(IR_VALIDATION_CALL_SIGNATURE, function, IR_BLOCK_ID_INVALID, IR_INSTRUCTION_ID_INVALID);
+            }
+        }
         scratch_end(temporary);
     }
+    return result;
+}
+
+// The function-scope half: one lowered function's storage, signature, blocks,
+// parameters, rows and values, self-contained (ir_validate_function_walk).
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_function(IrProgram* program, IrFunction* function)
+{
+    IrValidationResult result = ir_validate_function_walk(program, function, 0);
+    return result;
+}
+
+// The splice proof (#3854): ir_validate_canonical_function's verdict on a
+// function that passed it immediately before a batch of ir_inline_cfg_call
+// splices, without re-walking what the batch did not touch. It may refuse a
+// valid function (the caller then runs the full check for the verdict and the
+// reported location) but never accepts one the full check refuses, PROVIDED
+// the batch wrote only what IrValidationSplice names. That write set is
+// trusted, not proven: BUSTER_IR_TRANSFORM_CHECKS builds also run the full
+// check (ir_inline_module).
+//
+// Why the full check's remaining clauses still hold:
+// - Blocks outside the region keep their chains, rows and seals, and their
+//   row results keep their values. A row check reads only the row, the
+//   records of its operand values, counts that only grew (blocks, values,
+//   locals) and, through an operand's defining row, three facts: a CALL's
+//   operand-0 reference (FUNCTION row, or any row when indirect), a narrow
+//   bit-field's FIELD row and a CONSTANT_INTEGER index. The only old values
+//   whose definition a splice rewrites are the spliced CALL results, which
+//   are none of those opcodes before or after; a result that becomes a block
+//   parameter or nothing loses the indirect-call reference, so such a value
+//   of pointer-to-function type refuses the proof. A new read of a defining
+//   row in the row checks must be added to this argument.
+// - Predecessor lists are rebuilt for every block, so every block with
+//   parameters has them rechecked against its incoming lists.
+// - Ownership: every row outside the region's original rows is pre-marked
+//   visited, so a region chain that reaches one is refused; the region's
+//   chains must then reach exactly its original rows plus every new row.
+// - Definitions: old values defined outside the region are pre-marked as
+//   parameter-defined, so a region row or parameter defining one is refused
+//   as a second definition; the sweep reaches region and new values only.
+// - Label metadata and a published CFG make the proof refuse outright.
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_canonical_splice(IrProgram* program, IrFunction* function, IrValidationSplice const* splice)
+{
+    IrValidationResult result = ir_validate_function_walk(program, function, splice);
     return result;
 }
 

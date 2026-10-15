@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 33854
+reason Fixed report-only constant-reuse-acceptance-v1 Zen 5 profile (#3011): uarch_lab cell, driver, receipt/plan/publisher validation and its tests.

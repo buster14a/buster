@@ -4,6 +4,26 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Array parameter expression types
+
+An identifier denoting a parameter with an unqualified outer array row has its adjusted pointer type in
+expression queries, including under address-of. `char *argv[]` therefore
+permits `char ***p = &argv`, while the address of a local `char *a[3]` retains
+pointer-to-array type. `c_parse_expression_entity_type` supplies this rule to
+both the token query and tree expression typer; declaration/entity rows keep
+the array bounds for signature and VLA ownership. The tree only reads existing
+interned pointer rows and declines to the query when a row is unavailable.
+Element qualifiers and the
+parameter's bracket `const` are retained. The registered
+`c_test_array_parameter_expression_type` checks accepted and rejected pointer
+conversions in semantic-only analysis and both canonical frontend forms;
+`c_test_array_parameter_address_runtime` checks pointer-object mutation and
+multidimensional parameters with both allocators and tree/query routes (#4173).
+Qualifiers applied to an array typedef remain on the existing path pending
+[#4183](https://github.com/buster14a/buster/issues/4183); they cannot be moved to
+the pointer to disguise lost element qualifiers. Wrong-target const/volatile
+alias conversions remain rejected.
+
 ## Transparent-union pointer arguments
 
 A pointer argument matches a GNU transparent-union member through the ordinary
@@ -136,8 +156,12 @@ in both frontend forms.
   gone (GitHub #2531). A caller that needs the type -- the `sizeof`/`_Alignof`
   lowering, the conditional selection worklist, the arithmetic-plus nested
   conditional and the comma controlling-expression check -- reports it through
-  `c_ir_report_untyped_expression`; probes such as overload ranking or the
-  aggregate-initializer test treat it as "not this shape". A braced list is
+  `c_ir_report_untyped_expression`. So do the callers that read the type only
+  to choose a form: overload ranking between several `__overloadable__`
+  candidates (a sole arity-matching candidate is taken without ranking), the
+  `(*q)(...)` dereference strip, and the Windows `__builtin_va_end` cursor
+  test (`c_test_prediction_caller_checks`). The aggregate-initializer test
+  alone treats it as "not this shape". A braced list is
   not an expression, so the initializer test no longer predicts one. The walk
   has leaves for the shapes the scan still answered: atomic builtins (void,
   `_Bool`, or the pointed-to object's unqualified type), `va_arg`,
@@ -145,9 +169,50 @@ in both frontend forms.
   `strlen`, `assume_aligned`, `frame_address`/`return_address`,
   `__builtin_complex`, GNU vector arithmetic, C23 `true`/`false`/`nullptr`,
   `__func__` and `*` on a function designator. A storage-only `__fp16` type
-  has no IR type, so `sizeof(__fp16)` is diagnosed where the scan folded 4.
-  `c_test_untyped_operand_diagnostics` runs the leaves natively and requires
-  the diagnostics.
+  has no IR type, so when the IR mapping is missing for a `sizeof`/`_Alignof`
+  operand whose type is `__fp16` or is derived through array, pointer or
+  GNU vector layers, `c_semantic_storage_half_operand_layout` answers from
+  the C type layout (including 2-byte scalar and 8-byte vector cases); the scan
+  once folded 4. The earlier declaration check traverses the type graph rooted
+  at declarations, validates every reachable edge, and ignores unrelated
+  provisional expression rows because function-body sizeof operands are
+  typed afterward. The token-only exception admits a grouped pointer-to-array
+  form such as `sizeof(__fp16 (*)[5])`; its layout probe uses the full
+  abstract-declarator reader outside binding and rolls back the speculative
+  model. Late type-name bounds receive the same syntax check as declaration
+  bounds. Only unevaluated operands are answered; an evaluated `__fp16` value
+  keeps its canonical-lowering refusal.
+  `c_test_untyped_operand_diagnostics` runs the leaves and sizes natively,
+  checks pointer, array, qualified and grouped pointer-to-array declarators,
+  call, initializer and cast contexts through syntax-only and object modes in
+  both frontend forms, and rejects malformed/undeclared bounds, negative
+  grouped bounds and non-integer grouped bounds, as well as malformed type
+  names (GitHub #3900, #3918). Function abstract
+  declarators remain outside this exception: target Clang behavior for a
+  storage-only `__fp16` function return type has not been verified.
+- **The parser's expression typer gives builtins the same results.**
+  `c_parse_expression_leaf_without_cast` answers `__builtin_expect` as `long`,
+  `object_size`, `strlen` and `__builtin_offsetof` as `size_t`,
+  `assume_aligned`, `frame_address`/`return_address` and `alloca` as
+  `void *`, and the `__builtin_mem*`/`__builtin_str*` forms from lowering's
+  prototype table (`c_semantic_memory_builtin_result`). An atomic builtin's
+  leaf frame types the first argument in a child frame
+  (`C_TYPE_PARSE_STAGE_ATOMIC_OBJECT`) and answers what
+  `c_semantic_atomic_builtin_result` classifies, the same rule lowering's
+  `C_IR_SIZEOF_OP_ATOMIC_OBJECT` frame reads. Without these, `__typeof__` of
+  such a call declared nothing and a `_Static_assert` over its `sizeof` was
+  rejected in both `-fsyntax-only` and `-c` (GitHub #2531).
+  `c_test_builtin_result_types` checks every form through semantic-only
+  analysis and both lowering forms on three target layouts.
+- **Array operands decay before `->` member lookup.** The strict lowering
+  operand walk selects the element of either a pointer or an array before
+  resolving the member. This also applies to arrays reached through a postfix
+  chain; a bare array keeps its array type for `sizeof`. Missing members,
+  non-aggregate elements, multidimensional arrays and `.` on an array remain
+  invalid. `c_test_array_arrow_conditional_types` covers both conditional arms,
+  wide values, narrow promotions, qualified and union elements, nested array
+  members and single evaluation on six target layouts and both frontend forms,
+  with native execution in both allocators (GitHub #3915).
 - **Every conditional converts to its own common type before its consumer.**
   The selection worklist types immediate children in postorder, retaining only
   the type at each question token. Flattened control flow shares a result place
@@ -549,6 +614,16 @@ groups such as `int ((T))` carry that classification down the explicit type
 machine. Pointer-led named groups, `int T`, `const T T`, member names and
 ordinary block-scope shadowing keep their existing rules.
 
+GNU attributes may also follow a complete function-pointer parameter
+declarator, after its callback function suffix. The trailing form
+`void f(void (*routine)(void) __attribute__((noreturn)))` keeps `routine`
+visible in the body and retains the marker on the callback function type. The
+prefix spelling remains supported. `c_test_function_pointer_parameter_attribute_runtime`
+parses both placements, checks parameter visibility and the callback
+function-type marker, then separately compiles and runs returning `unused`
+controls through Buster and Clang. It leaves the separate outer-function
+callback-effect rule to #4087.
+
 A typedef remains a type in the function body. Checked expression leaf queries
 reject its use as a value, including within parentheses or operator operands;
 casts and type operands keep their type-name binding. The statement-expression
@@ -598,6 +673,54 @@ for a target are distinct from executing that target.
 See the [pinned portfolio evidence](../../capability-portfolios/callback-storage.md)
 for exercised configurations and remaining external-harness blockers.
 
+## Signedness-only pointer conversions (-Wpointer-sign)
+
+C17 6.5.16.1p1 makes every implicit conversion between pointers to
+incompatible types a constraint violation, and since #1094 the frontend
+refuses them. GCC and Clang file one subset under a separate warning,
+`-Wpointer-sign`, which pristine FFmpeg silences with `-Wno-pointer-sign`.
+Buster honors it (#4051): an assignment, initializer (local or static),
+call argument or return whose source and destination pointers have immediate
+pointees that are integer types of one rank class differing only in
+signedness — plain, `signed` and `unsigned char` count as one class, then each
+signed/unsigned pair of `short`, `int`, `long`, `long long` and `__int128` —
+compiles with a `C_DIAGNOSTIC_POINTER_SIGN` warning ("pointer targets in
+conversion from 'char *' to 'unsigned char *' differ in signedness") instead
+of an error. The driver applies the [`pointer-sign` warning
+group](../driver.md#warning-options): on by default, dropped by
+`-Wno-pointer-sign`, re-enabled by `-Wpointer-sign`, and an error under
+`-Werror` or `-Werror=pointer-sign`.
+
+The class stays bounded to what both reference compilers (Clang 18, GCC 13
+with `-Wall`) report as `-Wpointer-sign`; each of these remains the
+incompatible-pointer error it was:
+
+- deeper levels (`char **` to `unsigned char **`, `char (*)[3]` to
+  `unsigned char (*)[3]`, `char *const *` to `const unsigned char *const *`);
+- a rank change (`long *` to `unsigned long long *`, even where both are 64
+  bits), `_Bool` and non-integer pointees;
+- enumerations: an `enum` pointee is outside the class, so `enum E *` converts
+  only to a pointer to the enumeration's target-dependent compatible integer
+  type, as before;
+- a lost qualifier (`const char *` to `unsigned char *`) and `_Atomic`
+  pointees;
+- pointer/integer conversions and every other #1039 refusal.
+
+`c_parse_assignment_conversion_classify` decides admission and reports the
+signedness-only case to its caller; `c_parse_assignment_conversion_message`,
+which every value-conversion check calls, turns it into the warning through
+`c_parse_pointer_sign_warning`. That records one row per source start token in
+`CParseResult.warnings`, so the repeated checks of one conversion (reference
+rechecks, retyped initializers) report it once, and a body that exhausts its
+validation scratch drops its warnings with its errors. The transparent-union
+member trial uses the classifier directly and does not select a member through
+a signedness-only match. Lowering needs nothing new: the admitted conversion is
+the existing canonical pointer copy, so canonical IR is unchanged.
+`compiler_driver_test_pointer_sign` compiles, links and runs a program that
+reads through each converted pointer under every option ordering, and checks
+the incompatible controls in each context; the syntax-diagnostic corpus checks
+`-fsyntax-only` and object actions agree on the warnings and the errors.
+
 ## C99 inline function identity
 
 A body whose file-scope declarations all specify inline without extern is an
@@ -605,7 +728,11 @@ inline definition, which supplies no external definition. Calls and address
 expressions share the external function identity; a referenced body must not
 become a second strong definition. A compatible extern or non-inline
 declaration in the same unit supplies the external definition. Static inline
-and GNU inline semantics retain their separate rules.
+and GNU inline semantics retain their separate rules. Under GNU inline semantics
+(`-std=gnu89` or `gnu_inline`), an `extern inline` definition is inline-only only
+for an externally linked entity. When a visible earlier `static` declaration
+gives the entity internal linkage, the `extern inline` body is its internal
+definition; a referenced body is lowered and an unused body remains omitted.
 
 The registered c_test_c99_inline_linkage checks symbol linkage, definition
 status and canonical function state in both frontend forms across six native
@@ -614,7 +741,10 @@ non-inline prototype and both GNU attribute directions. Its two-unit program
 checks the literal result 14, distinct private static helpers and equal
 function pointers. All four native allocator modes compile the units together
 and separately; Linux x86-64 also links the Buster objects with GCC and Clang
-and runs independent host-built versions of the same source recipe.
+and runs independent host-built versions of the same source recipe. Its
+neighboring `c_test_static_declaration_inline_definition` checks the prior
+static-prototype case under GNU89 and `gnu_inline`, including a referenced
+internal definition and an unused body.
 
 The existing per-entity declaration scan decides whether a body supplies an
 external definition. A referenced C99 inline-only body retains a canonical
@@ -622,7 +752,7 @@ external declaration and emits no body; calls and addresses bind to the
 external definition from another unit. Pre-created function symbols take the
 same definition decision, preserving real alias definitions; GNU inline-only
 bodies do not mark those symbols defined. Unused bodies retain their existing
-dropped state. No inline optimizer, dependency walk or GNU policy is added.
+dropped state. No inline optimizer or body dependency walk is added.
 
 Needed Windows `__inline`/`__forceinline` bodies retain callable definitions
 and their shared function identity. The Windows predefines preserve `__inline`
@@ -797,3 +927,16 @@ also supports unevaluated `sizeof` queries without evaluating the size operand.
 `c_test_conditional_alloca` covers both operand orders with `char *` and
 `void *`, both frontend forms, canonical validation, FAST/QUALITY execution,
 selected-arm effects and rejected pointer/floating controls.
+
+## Declaration attribute ownership
+
+A marker on a function's callback parameter belongs to that parameter's
+function type, not to the function accepting it. Declaration marker queries
+first retain their usual negative fast path, then exclude the outer parameter
+list only when a found marker lies there. Shared and trailing outer markers
+remain visible, including true noreturn declarations.
+
+`c_test_noreturn_callback_scope` checks typedef, inline pointer and grouped-name
+setters on x86-64/AArch64 in both frontend forms, preserving reachable calls
+and returns alongside true prefix/trailing noreturn controls. The native
+fixture executes all three setters under both allocators.

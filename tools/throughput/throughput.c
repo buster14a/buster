@@ -230,7 +230,7 @@ static int tp_options(int argc, char** argv, TpConfig* config)
     config->cpu = -1;
     config->lease_fd = -1;
     config->guard = 1;
-    config->scale_shape_mask = (1u << 4) - 1u;
+    config->scale_shape_mask = (1u << TP_SCALE_SHAPES) - 1u;
     config->scale_repeats = 10;
     config->scale_exclude_core = -1;
     int ok = 1, selected_workloads = 0, selected_shapes = 0;

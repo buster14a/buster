@@ -82,6 +82,12 @@ struct CTestAstTypeProbe
 };
 BUSTER_F_DECL CTestAstTypeProbe c_test_ast_type_probe(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CAst const* ast, String8 function,
                                                       u32 start, u32 end, bool checked);
+
+// Flexible-array promoted-member count replay checks and bounded traversal control.
+BUSTER_F_DECL bool c_test_ast_type_replay_effective_member_count(void);
+BUSTER_F_DECL bool c_test_flexible_array_postorder_work(Arena* arena);
+BUSTER_F_DECL bool c_test_parse_type_replay_effective_member_count(void);
+
 // Verify mode (c_test_ast_type_verify_set): every tree answer is also computed
 // by the type machine and compared; the tree answer is still what the caller
 // gets. The mode and its counts are per thread. A mismatch is a tree answer the
@@ -204,6 +210,8 @@ BUSTER_F_DECL CTestExpressionQuery c_test_expression_type_query(Arena* scratch, 
                                                                 u32 end, bool checked, bool nested, CTypeId cached, bool scalars,
                                                                 bool machine_only);
 BUSTER_F_DECL void c_test_set_literal_query_machine_only(bool machine_only);
+// Force fresh completion queries to exercise row-free capture and rollback.
+BUSTER_F_DECL void c_test_ast_fact_uncached_set(bool enabled);
 // Keeps the interning window shut (CTypeInterning), so one source can be
 // compiled with and without interned rows and the objects compared.
 BUSTER_F_DECL void c_test_set_type_interning_off(bool off);
@@ -312,7 +320,7 @@ enum
 };
 BUSTER_F_DECL u64 c_test_parse_tag_scan_count(u32 slot);
 
-// Observable answers of the five production specifier-word token queries,
+// Observable answers of the production specifier and size/alignment token queries,
 // including their qualifier writes. No counters or state enter production.
 enum
 {
@@ -326,6 +334,8 @@ enum
     C_TEST_WORD_CLASS_RESTRICT = 1 << 7,
     C_TEST_WORD_CLASS_ATOMIC = 1 << 8,
     C_TEST_WORD_CLASS_QUALIFIERS_AGREE = 1 << 9,
+    C_TEST_WORD_CLASS_ALIGNOF = 1 << 10,
+    C_TEST_WORD_CLASS_SIZEOF_ALIGNOF = 1 << 11,
 };
 BUSTER_F_DECL u32 c_test_parse_word_classes(CPreprocessResult preprocess, CToken token);
 
@@ -345,6 +355,81 @@ struct CTestPromotedMemberWorkspace
     bool released;
 };
 BUSTER_F_DECL CTestPromotedMemberWorkspace c_test_promoted_member_workspace(CParseResult* result, CTypeId root, String8 name);
+
+// The default-off comparison of semantic and lowering answers for
+// scalar-integer `sizeof` expression operands (GitHub #2531, slice 2). While
+// set on the calling thread, semantic analysis keeps a CSizeofOperandType row
+// per answered operand (CParseResult.sizeof_operand_types) and lowering
+// compares every `sizeof` size it settles against the rows for the same
+// keyword: its size always, and its signedness where lowering's answer
+// carries an integer type. Rows of different producers for one keyword are
+// compared with each other too. Output is unchanged: nothing reads the rows
+// but the comparison. Paths: the C_IR_QUERY_FRAME_SIZEOF resolver and the
+// body's prediction fallback after it.
+enum
+{
+    C_TEST_SIZEOF_HANDOFF_PATH_RESOLVER,
+    C_TEST_SIZEOF_HANDOFF_PATH_PREDICTION,
+    C_TEST_SIZEOF_HANDOFF_PATHS,
+    C_TEST_SIZEOF_HANDOFF_AGREE = 0,
+    C_TEST_SIZEOF_HANDOFF_SIZE_MISMATCH,
+    // The sizes agree but lowering's integer type has the other signedness.
+    C_TEST_SIZEOF_HANDOFF_SIGNEDNESS_MISMATCH,
+    // The resolver gave no answer for an operand with a row; the body may
+    // still settle it through the prediction path.
+    C_TEST_SIZEOF_HANDOFF_DECLINED,
+    // A lowering answer for a `sizeof` keyword with no row in its scope.
+    C_TEST_SIZEOF_HANDOFF_UNMATCHED,
+    C_TEST_SIZEOF_HANDOFF_OUTCOMES,
+    C_TEST_SIZEOF_HANDOFF_MISMATCH_KEPT = 16,
+};
+typedef struct CTestSizeofHandoffMismatch CTestSizeofHandoffMismatch;
+struct CTestSizeofHandoffMismatch
+{
+    u32 keyword;
+    u32 operand_end;
+    u64 lowering_size;
+    u8 semantic_size;
+    u8 kind;
+    u8 producer;
+    u8 path;
+    bool semantic_signed;
+    bool lowering_signed;
+};
+typedef struct CTestSizeofHandoff CTestSizeofHandoff;
+struct CTestSizeofHandoff
+{
+    // Rows kept per CSizeofOperandProducer, and their bytes.
+    u64 rows[C_SIZEOF_OPERAND_PRODUCER_COUNT];
+    u64 row_bytes;
+    // An answer for a key its producer already kept: the same answer, or a
+    // different one. A row whose kind or size differs from another
+    // producer's row for the same keyword counts once in conflicts too.
+    u64 repeats;
+    u64 conflicts;
+    // Operand type queries the validation producer made for this comparison
+    // alone, and typed operands outside the scalar-integer population.
+    u64 extra_queries;
+    u64 outside_population;
+    // Compared rows whose producer's scope is not the keyword's innermost
+    // scope (counted per row compared, whatever the outcome).
+    u64 scope_differs;
+    // Agreeing sizes whose signedness was also compared, because lowering's
+    // answer carried an integer type.
+    u64 signedness_compared;
+    // Lowering answers compared, per path and outcome; one per matching row.
+    u64 outcomes[C_TEST_SIZEOF_HANDOFF_PATHS][C_TEST_SIZEOF_HANDOFF_OUTCOMES];
+    CTestSizeofHandoffMismatch first[C_TEST_SIZEOF_HANDOFF_MISMATCH_KEPT];
+    u32 first_count;
+};
+BUSTER_F_DECL void c_test_sizeof_handoff_set(bool enabled);
+// A negative control for the comparison: while set, every row a producer in
+// `producer_mask` (bits of CSizeofOperandProducer) keeps has its integer
+// kind's signedness flipped (int becomes unsigned int, unsigned long becomes
+// long), so the sizes still agree and only the kind is wrong.
+BUSTER_F_DECL void c_test_sizeof_handoff_perturb_set(u32 producer_mask);
+// The counts since the last take, which resets them.
+BUSTER_F_DECL CTestSizeofHandoff c_test_sizeof_handoff_take(void);
 
 typedef struct CTestTypeConstantQuery CTestTypeConstantQuery;
 struct CTestTypeConstantQuery

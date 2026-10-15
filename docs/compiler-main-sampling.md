@@ -39,6 +39,11 @@ assign the physical job.
 
 The hosted authorizer reads exact GitHub source/request/attempt records and
 all prior campaign attempts, then the native admission policy validates them.
+A prior request's owning pull may be open, merged, or closed unmerged (#3955).
+GitHub hides a closed-unmerged pull from the commit's associated pulls. The
+authorizer then looks it up by the request's head ref, then requires exactly
+one closed-unmerged owner pull whose commit list contains the request commit.
+The owner, head and base provenance checks apply unchanged.
 Seven bounded data records reach the tokenless physical job. Measurement code
 is checked out at the reviewed frozen harness revision; current trusted
 workflow policy and its allowlist are separate identities. The native worker

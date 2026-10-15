@@ -60,6 +60,7 @@ static bool tree_test_number(char const* record, char const* name, u64* output)
 
 static void tree_test_deadline(char const* mode, bool tick_clock)
 {
+    unsigned failures_before = tree_test_failures;
     tree_test_case = mode;
     WCHAR directory[MAX_PATH] = {0}, marker[MAX_PATH] = {0}, status[MAX_PATH] = {0}, staging[MAX_PATH] = {0};
     WCHAR cancel_path[MAX_PATH] = {0};
@@ -107,47 +108,28 @@ static void tree_test_deadline(char const* mode, bool tick_clock)
             TREE_TEST(request);
             if (request) TREE_TEST(fclose(request) == 0);
         }
-        else if (cancel_startup || cancel_runtime)
+        else if (cancel_runtime)
         {
             WCHAR writer_command[TREE_COMMAND_CAPACITY];
             count = swprintf(writer_command, TREE_COMMAND_CAPACITY, L"\"%ls\" cancel \"%ls\" %u", executable,
-                             cancel_path, cancel_runtime ? 750u : 250u);
+                             cancel_path, 750u);
             TREE_TEST(count > 0 && count < TREE_COMMAND_CAPACITY);
             STARTUPINFOW startup_info = {.cb = sizeof(startup_info)};
             TREE_TEST(CreateProcessW(0, writer_command, 0, 0, FALSE, 0, 0, 0, &startup_info, &writer));
         }
-        tree_test_startup_delay_ms = startup ? 2000 : (cancel_startup ? 1000 : 0);
+        tree_test_startup_cancel_path = cancel_startup ? cancel_path : 0;
+        tree_test_startup_delay_ms = startup ? 2000 : 0;
         tree_test_cleanup_delay_ms = cleanup ? 2000 : (late_cleanup ? 3500 : 0);
         tree_test_status_delay_ms = late_status ? 3500 : 0;
+        // Publication shares the cleanup budget. The separate-allowance case
+        // spends 2 s of simulated cleanup, and loaded hosted Windows runners
+        // have published for over 1 s (#3816), so it gets headroom past 3 s.
+        // The late cases keep 3 s so their 3.5 s delays still exceed it.
+        unsigned cleanup_budget_ms = cleanup ? 5000u : 3000u;
         if (!paths) tree_test_launch_context = (TreeTestLaunchContext){0};
-        int code = paths ? tree_launch(job, 3000, command, deadline, tick_clock, status) : TREE_EXIT_DRAIN_FAILED;
+        int code = paths ? tree_launch(job, cleanup_budget_ms, command, deadline, tick_clock, status) : TREE_EXIT_DRAIN_FAILED;
         int expected = late_cleanup || late_status ? TREE_EXIT_DRAIN_FAILED : (normal || cancel ? 0 : TREE_EXIT_RUNTIME_TIMEOUT);
-        if (code != expected)
-        {
-            TreeTestLaunchContext const* context = &tree_test_launch_context;
-            TreeLaunchStatus const* observed = &context->status;
-            fprintf(stderr,
-                "WINDOWS_PROCESS_TREE_TEST_CONTEXT case=%s clock=%s code=%d expected=%d paths=%u "
-                "startup_delay_ms=%u cleanup_delay_ms=%u status_delay_ms=%u cleanup_budget_ms=3000 "
-                "complete=%u clock_valid=%u cancelled=%u runtime_timed_out=%u root_status_known=%u root_returncode=%lu "
-                "runtime_deadline_ns=%llu root_finished_ns=%llu cleanup_started_ns=%llu cleanup_finished_ns=%llu "
-                "cleanup_limit_ns=%llu publication_started_ns=%llu publication_finished_ns=%llu "
-                "publication_clock_valid=%u publication_ok=%u publication_stage=%s win32_error_valid=%u win32_error=%lu\n",
-                mode, tick_clock ? "tick" : "qpc", code, expected, (unsigned)paths,
-                tree_test_startup_delay_ms, tree_test_cleanup_delay_ms, tree_test_status_delay_ms,
-                (unsigned)observed->complete, (unsigned)observed->clock_valid, (unsigned)observed->cancelled,
-                (unsigned)observed->runtime_timed_out, (unsigned)observed->root_status_known,
-                (unsigned long)observed->root_returncode, (unsigned long long)observed->runtime_deadline_ns,
-                (unsigned long long)observed->root_finished_ns, (unsigned long long)observed->cleanup_started_ns,
-                (unsigned long long)observed->cleanup_finished_ns, (unsigned long long)context->cleanup_limit_ns,
-                (unsigned long long)context->publication_started_ns, (unsigned long long)context->publication_finished_ns,
-                (unsigned)context->publication_clock_valid, (unsigned)context->publication_ok,
-                context->publication_stage ? context->publication_stage : (context->publication_ok ? "published" : "not-attempted"),
-                (unsigned)context->publication_error_valid, (unsigned long)context->publication_error);
-        }
-        tree_test_startup_delay_ms = 0;
-        tree_test_cleanup_delay_ms = 0;
-        tree_test_status_delay_ms = 0;
+        TREE_TEST(tree_test_launch_context.startup_cancel_created == cancel_startup);
         TREE_TEST(code == (late_cleanup || late_status ? TREE_EXIT_DRAIN_FAILED :
                           (normal || cancel ? 0 : TREE_EXIT_RUNTIME_TIMEOUT)));
         if (writer.hProcess)
@@ -189,7 +171,12 @@ static void tree_test_deadline(char const* mode, bool tick_clock)
                 TREE_TEST(late_cleanup ? cleanup_finished - cleanup_started > UINT64_C(3000000000) :
                                         cleanup_finished - cleanup_started < UINT64_C(3000000000));
             }
-            if (cancel) TREE_TEST(finished == 0);
+            if (cancel)
+            {
+                TREE_TEST(finished == 0);
+                TREE_TEST(tree_test_launch_context.cancel_observed_ns > 0 &&
+                          tree_test_launch_context.cancel_observed_ns <= cleanup_started);
+            }
             if (expired || startup || cancel_before || cancel_startup) TREE_TEST(root_pid == 0);
             else TREE_TEST(root_pid != 0);
         }
@@ -199,6 +186,46 @@ static void tree_test_deadline(char const* mode, bool tick_clock)
         if (GetFileAttributesW(status) != INVALID_FILE_ATTRIBUTES) TREE_TEST(DeleteFileW(status));
         TREE_TEST(GetFileAttributesW(staging) == INVALID_FILE_ATTRIBUTES);
         if (cancel) TREE_TEST(DeleteFileW(cancel_path));
+        if (code != expected || tree_test_failures != failures_before)
+        {
+            TreeTestLaunchContext const* context = &tree_test_launch_context;
+            TreeLaunchStatus const* observed = &context->status;
+            fprintf(stderr,
+                "WINDOWS_PROCESS_TREE_TEST_CONTEXT case=%s clock=%s code=%d expected=%d paths=%u "
+                "startup_delay_ms=%u cleanup_delay_ms=%u status_delay_ms=%u cleanup_budget_ms=%u "
+                "complete=%u clock_valid=%u cancelled=%u runtime_timed_out=%u root_status_known=%u root_returncode=%lu "
+                "root_pid=%lu startup_cancel_created=%u cancel_observed_ns=%llu "
+                "runtime_deadline_ns=%llu root_finished_ns=%llu cleanup_started_ns=%llu cleanup_finished_ns=%llu "
+                "cleanup_limit_ns=%llu publication_started_ns=%llu publication_finished_ns=%llu "
+                "publication_clock_valid=%u publication_ok=%u publication_stage=%s win32_error_valid=%u win32_error=%lu "
+                "publication_marks_clock_valid=%u publication_attributes_ns=%llu publication_create_ns=%llu "
+                "publication_write_ns=%llu publication_flush_ns=%llu publication_close_ns=%llu publication_rename_ns=%llu\n",
+                mode, tick_clock ? "tick" : "qpc", code, expected, (unsigned)paths,
+                tree_test_startup_delay_ms, tree_test_cleanup_delay_ms, tree_test_status_delay_ms, cleanup_budget_ms,
+                (unsigned)observed->complete, (unsigned)observed->clock_valid, (unsigned)observed->cancelled,
+                (unsigned)observed->runtime_timed_out, (unsigned)observed->root_status_known,
+                (unsigned long)observed->root_returncode, (unsigned long)observed->root_pid,
+                (unsigned)context->startup_cancel_created, (unsigned long long)context->cancel_observed_ns,
+                (unsigned long long)observed->runtime_deadline_ns,
+                (unsigned long long)observed->root_finished_ns, (unsigned long long)observed->cleanup_started_ns,
+                (unsigned long long)observed->cleanup_finished_ns, (unsigned long long)context->cleanup_limit_ns,
+                (unsigned long long)context->publication_started_ns, (unsigned long long)context->publication_finished_ns,
+                (unsigned)context->publication_clock_valid, (unsigned)context->publication_ok,
+                context->publication_stage ? context->publication_stage : (context->publication_ok ? "published" : "not-attempted"),
+                (unsigned)context->publication_error_valid, (unsigned long)context->publication_error,
+                (unsigned)context->publication_marks_clock_valid,
+                (unsigned long long)context->publication_mark_ns[TREE_TEST_PUBLICATION_MARK_ATTRIBUTES],
+                (unsigned long long)context->publication_mark_ns[TREE_TEST_PUBLICATION_MARK_CREATE],
+                (unsigned long long)context->publication_mark_ns[TREE_TEST_PUBLICATION_MARK_WRITE],
+                (unsigned long long)context->publication_mark_ns[TREE_TEST_PUBLICATION_MARK_FLUSH],
+                (unsigned long long)context->publication_mark_ns[TREE_TEST_PUBLICATION_MARK_CLOSE],
+                (unsigned long long)context->publication_mark_ns[TREE_TEST_PUBLICATION_MARK_RENAME]);
+            fprintf(stderr, "WINDOWS_PROCESS_TREE_TEST_STATUS case=%s record=%s\n", mode, record[0] ? record : "<missing>");
+        }
+        tree_test_startup_cancel_path = 0;
+        tree_test_startup_delay_ms = 0;
+        tree_test_cleanup_delay_ms = 0;
+        tree_test_status_delay_ms = 0;
     }
 }
 #endif
@@ -252,6 +279,7 @@ int main(int argc, char** argv)
         tree_test_deadline("payload-125", false);
         tree_test_deadline("cancel-before-launch", false);
         tree_test_deadline("cancel-during-startup", false);
+        tree_test_deadline("cancel-during-startup", true);
         tree_test_deadline("cancel-during-runtime", false);
 #endif
         printf("WINDOWS_PROCESS_TREE_TESTS checks=%u failures=%u platform=%s\n", tree_test_checks,

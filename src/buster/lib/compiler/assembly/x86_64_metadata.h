@@ -6,8 +6,8 @@
 // classification, and the emitter that encodes a selected form into bytes.
 // The implementation decodes the tables once into flat caches and
 // prevalidates every record — see the notes at the top of
-// x86_64_metadata.c, and call buster_x86_metadata_prewarm before reading
-// from parallel lanes.
+// x86_64_metadata.c, and call buster_x86_metadata_prewarm_for_lanes before
+// reading from parallel lanes.
 
 #include <buster/lib/base.h>
 
@@ -291,7 +291,7 @@ typedef struct BusterX86MetadataString BusterX86MetadataString;
 struct BusterX86MetadataString
 {
     // Logical offset into the generated string pool. The pool is chunked in
-    // the generated ABI, but the one-time decode flattens it into a
+    // the generated ABI, but its chunks are copied on first use into one
     // contiguous host array, so prefer buster_x86_metadata_string_span() and
     // scan the bytes directly; buster_x86_metadata_string_byte() remains for
     // one-off reads and costs a call per byte.
@@ -1052,17 +1052,45 @@ struct BusterX86MetadataCoverageAuditResult
 };
 
 // Decodes and validates the generated tables on the calling thread.  The
-// per-form caches over them -- normalized row, pattern semantics, operand
-// views, derived facts -- fill on the first use of each form, and every such
-// fill checks BUSTER_CHECK_SERIAL_INITIALIZATION: a serial compile prepares
-// only the few hundred forms it reaches. The opt-in parallel driver or a
-// caller about to run a gang whose lanes may query any form prepares them all
-// with buster_x86_metadata_prewarm_all_forms first; a gang that reaches an
-// unprepared form is reported by that check rather than left to race.  Later
-// calls are idempotent no-ops, so a program that never queries x86 metadata
-// should not call either.
+// per-form caches over them -- record, validity, normalized row, pattern
+// semantics, operand views, derived facts, exact plans -- fill on the first
+// use of each form from whichever thread reaches it, each entry through a
+// once-claim (see once_claim_u8 in os.h), so a compile prepares only the few
+// hundred forms it reaches, serial or on lanes.
+// buster_x86_metadata_prewarm_for_lanes adds the small fixed-envelope tables
+// that are still built only serially; a caller about to run a gang that may
+// emit x86 code calls it first.  buster_x86_metadata_prewarm_all_forms
+// prepares every form, for the audits and the test harness that read them
+// all.  Later calls are idempotent no-ops, so a program that never queries
+// x86 metadata should call none of them.
 BUSTER_F_DECL void buster_x86_metadata_prewarm(void);
+BUSTER_F_DECL void buster_x86_metadata_prewarm_for_lanes(void);
 BUSTER_F_DECL void buster_x86_metadata_prewarm_all_forms(void);
+
+// Once-claim levels of the lazily filled x86 caches, here and in the machine
+// encoder.  A fill holding a claim only claims strictly lower levels (see
+// once_claim_u8), which is what keeps concurrent first fills deadlock-free:
+// a fixed-template row reaches shapes and dense tables, a shape reaches the
+// selector's forms and an exact plan, a TLS or GOT recipe group reaches the
+// encoder's forms, a plan reaches its form's facts, the facts reach the parsed
+// pattern, operand views and records, and nearly everything reaches the
+// string pool's chunks.
+typedef enum BusterX86OnceLevel
+{
+    BUSTER_X86_ONCE_LEVEL_POOL_CHUNK = 1,
+    BUSTER_X86_ONCE_LEVEL_NAME_INDEXES,
+    BUSTER_X86_ONCE_LEVEL_MEMO,
+    BUSTER_X86_ONCE_LEVEL_RECORD,
+    BUSTER_X86_ONCE_LEVEL_OPERAND_VIEW,
+    BUSTER_X86_ONCE_LEVEL_ROW,
+    BUSTER_X86_ONCE_LEVEL_PATTERN,
+    BUSTER_X86_ONCE_LEVEL_FACTS,
+    BUSTER_X86_ONCE_LEVEL_PLAN,
+    BUSTER_X86_ONCE_LEVEL_ENVELOPE,
+    BUSTER_X86_ONCE_LEVEL_SHAPE,
+    BUSTER_X86_ONCE_LEVEL_MACHINE_TABLE,
+    BUSTER_X86_ONCE_LEVEL_TEMPLATE,
+} BusterX86OnceLevel;
 BUSTER_F_DECL u32 buster_x86_metadata_schema_version(void);
 BUSTER_F_DECL u32 buster_x86_metadata_form_count(void);
 BUSTER_F_DECL u32 buster_x86_metadata_normalized_form_count(void);
@@ -1300,10 +1328,12 @@ BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact(BusterX
 // source-level operand projection is performed, and the durable key appears
 // exactly once in the input object.
 BUSTER_F_DECL BusterX86MetadataEmitResult buster_x86_metadata_emit_exact_query(BusterX86MetadataExactQuery query);
-// Prepare one durable key into immutable exact state. New keys require the
-// serial prewarm phase after buster_x86_metadata_prewarm(). Repeating an
-// already prepared key is an immutable lookup, safe on active lanes or while
-// the persistent gang is parked. No heap or callback is used.
+// Prepare one durable key into immutable exact state, after
+// buster_x86_metadata_prewarm().  A new key claims its form's plan slot and
+// may be prepared from any thread; repeating an already prepared key is an
+// immutable lookup.  Plan slots are taken in first-preparation order, which
+// differs between runs on lanes, and never reach emitted bytes.  No heap or
+// callback is used.
 BUSTER_F_DECL bool buster_x86_metadata_exact_plan_prepare(BusterX86MetadataFormKey key,
                                                            BusterX86MetadataExactPlan* result);
 // Resolve a durable key to an immutable exact plan prepared during the
@@ -1451,4 +1481,8 @@ bool buster_x86_metadata_test_fixed_base64_vbmi(void);
 bool buster_x86_metadata_test_flat_decode_matches_generated(bool test_vbmi);
 bool buster_x86_metadata_test_nul_distances_match_reference(void);
 u64 buster_x86_metadata_test_unprepared_after_prewarm_all(void);
+// Runs the generic selector over every query the forwarding and padding
+// recipes pin a form for; returns how many chose another form, or other
+// bytes or another relocation, than the pinned emission.
+u32 buster_x86_metadata_test_recipe_pins(u32* query_count);
 #endif

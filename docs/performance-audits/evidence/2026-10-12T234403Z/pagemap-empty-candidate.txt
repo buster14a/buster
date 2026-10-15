@@ -1,0 +1,50 @@
+resident pages in binary+bss: 4701
+  map ('r--p', 'ide-cand4') 2741
+  map ('r-xp', 'ide-cand4') 1001
+  map ('rw-p', 'ide-cand4') 41
+  map ('rw-p', '[bss/anon]') 918
+    1255.0  r--p:ide-cand4 <unattributed>
+     155.0  rw-p:anon buster_x86_metadata_pool_bytes
+     147.0  rw-p:anon buster_x86_metadata_pool_nul_distances
+      67.5  rw-p:anon buster_x86_metadata_normalized_forms
+      64.7  rw-p:anon machine_x64_gpr_encoding_tables
+      56.7  rw-p:anon buster_x86_metadata_form_records
+      55.0  rw-p:anon buster_x86_metadata_pattern_semantics_cache
+      43.5  rw-p:anon buster_x86_metadata_blob_scratch
+      42.7  rw-p:anon buster_x86_metadata_form_hash_ranges
+      38.0  rw-p:anon buster_x86_metadata_operand_views
+      35.7  rw-p:anon machine_x64_metadata_shape_registrations
+      34.0  rw-p:anon buster_x86_metadata_pool_nul_known
+      33.3  rw-p:ide-cand4 machine_x64_exact_opcode_map
+      31.8  rw-p:anon buster_x86_metadata_operand_records
+      28.0  r-xp:ide-cand4 c_parse_validate_lowering_constraints
+      26.8  r-xp:ide-cand4 c_lower_to_ir_reserved_run
+      25.8  rw-p:anon machine_x64_variable_memory_encoding_tables
+      22.4  r-xp:ide-cand4 c_preprocess_run
+      18.8  r-xp:ide-cand4 c_type_parse_machine_run
+      15.5  r--p:ide-cand4 string_tests.cases
+      13.8  rw-p:anon buster_x86_metadata_form_facts
+      13.5  r--p:ide-cand4 buster_aarch64_syntax_generated_child_indices_blob
+      12.4  r-xp:ide-cand4 c_ir_query_execute
+      12.0  r--p:ide-cand4 c_vendor_builtin_definitions
+      11.0  rw-p:anon buster_x86_metadata_mnemonic_candidates
+      10.6  rw-p:anon buster_x86_metadata_form_hash_candidates
+       9.8  r-xp:ide-cand4 wasm64_fe_emit_function
+       9.6  r-xp:ide-cand4 compiler_driver_parse_arguments
+       9.5  rw-p:anon buster_x86_metadata_operand_view_owner_plus_one
+       8.7  rw-p:anon buster_x86_metadata_form_operand_facts
+       8.4  rw-p:anon buster_x86_metadata_exact_plan_records
+       8.4  r-xp:ide-cand4 bootstrap_trace_ir
+       8.0  r-xp:ide-cand4 machine_x64_metadata_shape_cache_prewarm
+       7.7  rw-p:anon machine_x64_fixed_templates
+       7.5  r-xp:ide-cand4 arena_tests
+       6.8  r-xp:ide-cand4 ir_inline_module
+       6.8  r-xp:ide-cand4 run_completion_census
+       6.6  r-xp:ide-cand4 compiler_driver_execute_invocation
+       6.2  r--p:ide-cand4 machine_opcode_infos
+       6.0  r-xp:ide-cand4 compiler_driver_elf_cpu_runtime_tests
+       5.8  r-xp:ide-cand4 c_analyze_semantics_core
+       5.8  r--p:ide-cand4 assembly_aarch64_direct_simd_spellings
+       5.8  rw-p:anon buster_x86_metadata_mnemonic_ranges
+       5.8  r-xp:ide-cand4 compiler_driver_execute_c_single
+       5.8  rw-p:anon buster_x86_metadata_physical_view_slots

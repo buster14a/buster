@@ -4,6 +4,7 @@
  * runs fresh compiler processes, and reports speedup next to CPU-work and
  * memory inflation. It is report-only: no threshold or CI guard.
  * Map: tp_scale_generate (shapes), tp_scale_place (CPU selection),
+ * tp_scale_metrics (CC_METRICS header, including the optional lane_gate),
  * tp_scale_sample (one process + -fmetrics-out worker check),
  * tp_scale_diagnostics (ordered-failure determinism), tp_scale_summary
  * (scaling.json/scaling.md), tp_scale (orchestration, exit 0 valid/2 invalid).
@@ -23,6 +24,12 @@
 #define TP_SCALE_TINY_INPUTS_PER_WORKER 16
 #define TP_SCALE_EQUAL_UNITS 4
 #define TP_SCALE_SKEWED_LARGE_UNITS 8
+/* The size sweep: equal TUs in populations of 2, 4, ... 64 inputs, each run at
+ * one worker, two workers and the largest listed W. It brackets the population
+ * at which the multi-lane entry cost is repaid (#53). */
+#define TP_SCALE_SIZE_SERIES 6u
+#define TP_SCALE_SIZE_FIRST_INPUTS 2u
+#define TP_SCALE_SIZE_WORKERS 2u
 #define TP_SCALE_ALPHA 0.05
 #define TP_SCALE_RSS_SCOPE "compiler process high-water mark (wait4 ru_maxrss / PeakWorkingSetSize); not a process-tree sum"
 #define TP_SCALE_CSV_HEADER "series,inputs,workers,placement,cpus,iteration,order,wall_seconds,user_seconds,system_seconds,peak_rss_bytes,compilation_workers,intervals,artifact_bytes,artifact_sha256\n"
@@ -33,17 +40,35 @@ typedef enum TpScaleShape
     TP_SCALE_SKEWED,
     TP_SCALE_TINY,
     TP_SCALE_COUNT,
+    TP_SCALE_SIZE,
     TP_SCALE_SHAPES,
     TP_SCALE_DIAGNOSTIC = TP_SCALE_SHAPES
 } TpScaleShape;
 
-static char const* const tp_scale_shape_names[TP_SCALE_SHAPES + 1] = {"equal", "skewed", "tiny", "count", "diagnostic"};
+static char const* const tp_scale_shape_names[TP_SCALE_SHAPES + 1] = {"equal", "skewed", "tiny", "count", "size", "diagnostic"};
+
+/* The optional lane_gate field of the CC_METRICS header. A compiler without the
+ * gate omits it; "serial" means the compiler kept one worker because the
+ * population could not repay the multi-lane entry cost, so one worker is then
+ * the truthful report; "capped" means it ran fewer workers than requested so
+ * each keeps a minimum of work, and reports those (docs/agents/driver.md). */
+typedef enum TpScaleGate
+{
+    TP_SCALE_GATE_ABSENT,
+    TP_SCALE_GATE_NONE,
+    TP_SCALE_GATE_LANES,
+    TP_SCALE_GATE_SERIAL,
+    TP_SCALE_GATE_CAPPED,
+    TP_SCALE_GATE_UNKNOWN,
+} TpScaleGate;
+
+static char const* const tp_scale_gate_names[TP_SCALE_GATE_UNKNOWN + 1] = {"absent", "none", "lanes", "serial", "capped", "unknown"};
 
 typedef struct TpScalePoint
 {
     TpCpuSet cpus;
-    unsigned series, workers, expected_workers, observed_workers, samples;
-    int smt;
+    unsigned series, workers, expected_workers, observed_workers, samples, gate;
+    int smt, gate_seen;
     double wall[TP_SCALE_MAX_REPEATS], cpu[TP_SCALE_MAX_REPEATS], rss[TP_SCALE_MAX_REPEATS];
     char log_hash[65];
     int exit_code;
@@ -61,7 +86,7 @@ typedef struct TpScaleSeries
 
 typedef struct TpScaleMetrics
 {
-    unsigned inputs, ok, workers;
+    unsigned inputs, ok, workers, gate;
     char intervals[16];
 } TpScaleMetrics;
 
@@ -205,15 +230,17 @@ static int tp_scale_generate(TpScaleRun* run, Arena* arena)
 {
     TpConfig const* config = run->config;
     unsigned listed = run->config->scale_workers.count;
-    unsigned capacity_series = TP_SCALE_SHAPES + 3 * listed + 1;
-    unsigned capacity_points = 3 * (listed + 3) + 3 * 2 * listed + listed + 3;
+    unsigned capacity_series = TP_SCALE_SHAPES + 3 * listed + TP_SCALE_SIZE_SERIES + 1;
+    unsigned capacity_points = 3 * (listed + 3) + 3 * 2 * listed + 3 * TP_SCALE_SIZE_SERIES + listed + 3;
     run->series = arena_allocate_zeroed(arena, TpScaleSeries, capacity_series);
     run->points = arena_allocate_zeroed(arena, TpScalePoint, capacity_points);
     int ok = run->series && run->points;
     for (unsigned shape = 0; shape <= TP_SCALE_DIAGNOSTIC && ok; ++shape)
     {
         if (shape < TP_SCALE_SHAPES && !(config->scale_shape_mask & (1u << shape))) continue;
-        unsigned count_variants = shape == TP_SCALE_COUNT ? 3u : 1u;
+        /* The size sweep needs a second worker to compare against. */
+        if (shape == TP_SCALE_SIZE && run->max_workers < TP_SCALE_SIZE_WORKERS) continue;
+        unsigned count_variants = shape == TP_SCALE_COUNT ? 3u : shape == TP_SCALE_SIZE ? TP_SCALE_SIZE_SERIES : 1u;
         for (unsigned w = 0; w < TP_MAX_CPUS && ok; ++w)
         {
             int listed_worker = tp_cpu_set_has(&config->scale_workers, w);
@@ -227,9 +254,11 @@ static int tp_scale_generate(TpScaleRun* run, Arena* arena)
                 series->first_point = run->point_count;
                 series->inputs = shape == TP_SCALE_TINY ? TP_SCALE_TINY_INPUTS_PER_WORKER * run->max_workers :
                                  shape == TP_SCALE_COUNT ? w - 1 + variant :
+                                 shape == TP_SCALE_SIZE ? TP_SCALE_SIZE_FIRST_INPUTS << variant :
                                  shape == TP_SCALE_DIAGNOSTIC ? (run->max_workers + 1 > 3 ? run->max_workers + 1 : 3) :
                                  TP_SCALE_INPUTS_PER_WORKER * run->max_workers;
                 if (shape == TP_SCALE_COUNT) snprintf(series->name, sizeof(series->name), "count-w%u-n%u", w, series->inputs);
+                else if (shape == TP_SCALE_SIZE) snprintf(series->name, sizeof(series->name), "size-n%u", series->inputs);
                 else snprintf(series->name, sizeof(series->name), "%s", tp_scale_shape_names[shape]);
                 char leaf[96];
                 snprintf(leaf, sizeof(leaf), "inputs/%s", series->name);
@@ -238,6 +267,11 @@ static int tp_scale_generate(TpScaleRun* run, Arena* arena)
                 if (ok && shape == TP_SCALE_COUNT)
                 {
                     ok = tp_scale_add_point(run, index, 1, 0) && tp_scale_add_point(run, index, w, 0);
+                }
+                else if (ok && shape == TP_SCALE_SIZE)
+                {
+                    ok = tp_scale_add_point(run, index, 1, 0) && tp_scale_add_point(run, index, TP_SCALE_SIZE_WORKERS, 0);
+                    if (ok && run->max_workers > TP_SCALE_SIZE_WORKERS) ok = tp_scale_add_point(run, index, run->max_workers, 0);
                 }
                 else if (ok)
                 {
@@ -276,6 +310,12 @@ static int tp_scale_metrics(char const* path, TpScaleMetrics* metrics)
             {
                 strcpy(metrics->intervals, equal + 1);
                 seen |= 8;
+            }
+            else if (!strcmp(token, "lane_gate"))
+            {
+                metrics->gate = TP_SCALE_GATE_UNKNOWN;
+                for (unsigned gate = TP_SCALE_GATE_NONE; gate < TP_SCALE_GATE_UNKNOWN; ++gate)
+                    if (!strcmp(equal + 1, tp_scale_gate_names[gate])) metrics->gate = gate;
             }
         }
     }
@@ -402,11 +442,41 @@ static int tp_scale_sample(TpScaleRun* run, TpScalePoint* point, unsigned iterat
             tp_scale_invalid(run, "%s: compiler reported %u/%u ok inputs, expected %u", label, metrics.ok, metrics.inputs, series->inputs);
             ok = 0;
         }
-        if (ok && metrics.workers != point->expected_workers)
+        if (ok && metrics.gate == TP_SCALE_GATE_UNKNOWN)
         {
-            tp_scale_invalid(run, "%s: compiler reported %u participating workers, expected %u (link-cohort path not exercised as requested)",
+            tp_scale_invalid(run, "%s: compiler reported an unknown lane gate in %s", label, metrics_path);
+            ok = 0;
+        }
+        /* The gate is a function of the inputs and the request, so every
+         * sample of one point must take the same path. */
+        if (ok && point->gate_seen && metrics.gate != point->gate)
+        {
+            tp_scale_invalid(run, "%s: compiler reported lane gate %s after %s for the same inputs", label,
+                             tp_scale_gate_names[metrics.gate], tp_scale_gate_names[point->gate]);
+            ok = 0;
+        }
+        /* A capped point runs fewer workers than requested; the cap is a
+         * function of the inputs, so every sample reports the same count. */
+        if (ok && metrics.gate == TP_SCALE_GATE_CAPPED &&
+            (!metrics.workers || metrics.workers >= point->expected_workers ||
+             (point->gate_seen && metrics.workers != point->observed_workers)))
+        {
+            tp_scale_invalid(run, "%s: compiler reported %u capped workers, expected fewer than %u and the same at every sample",
                              label, metrics.workers, point->expected_workers);
             ok = 0;
+        }
+        unsigned expected_workers = metrics.gate == TP_SCALE_GATE_SERIAL ? 1u :
+                                    metrics.gate == TP_SCALE_GATE_CAPPED ? metrics.workers : point->expected_workers;
+        if (ok && metrics.workers != expected_workers)
+        {
+            tp_scale_invalid(run, "%s: compiler reported %u participating workers, expected %u (link-cohort path not exercised as requested)",
+                             label, metrics.workers, expected_workers);
+            ok = 0;
+        }
+        if (ok)
+        {
+            point->gate = metrics.gate;
+            point->gate_seen = 1;
         }
         if (ok && !series->artifact_hash[0])
         {
@@ -582,12 +652,12 @@ static int tp_scale_summary(TpScaleRun* run, int valid)
                 if (run->points[series->first_point + i].workers == 1) reference = run->points + series->first_point + i;
             double reference_wall = NAN, reference_low = NAN, reference_high = NAN, reference_cpu = NAN, reference_rss = NAN;
             if (reference) tp_scale_point_stats(reference, &reference_wall, &reference_low, &reference_high, &reference_cpu, &reference_rss);
-            fprintf(json, "%s{\"name\":\"%s\",\"inputs\":%u,\"artifact_sha256\":\"%s\",\"artifact_identical\":true,\"points\":[",
-                    s ? "," : "", series->name, series->inputs, series->artifact_hash);
+            fprintf(json, "%s{\"name\":\"%s\",\"inputs\":%u,\"input_bytes\":%" PRIu64 ",\"artifact_sha256\":\"%s\",\"artifact_identical\":true,\"points\":[",
+                    s ? "," : "", series->name, series->inputs, series->bytes, series->artifact_hash);
             if (markdown)
             {
-                fprintf(markdown, "\n## %s (%u inputs)\n\n| workers | placement | observed workers | wall s | interval | speedup | efficiency | CPU s | CPU inflation | RSS MiB | RSS inflation |\n"
-                        "|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|\n", series->name, series->inputs);
+                fprintf(markdown, "\n## %s (%u inputs, %" PRIu64 " bytes)\n\n| workers | placement | observed workers | wall s | interval | speedup | efficiency | CPU s | CPU inflation | RSS MiB | RSS inflation | lane gate |\n"
+                        "|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---|\n", series->name, series->inputs, series->bytes);
             }
             for (unsigned i = 0; i < series->point_count; ++i)
             {
@@ -596,9 +666,16 @@ static int tp_scale_summary(TpScaleRun* run, int valid)
                 tp_scale_point_stats(point, &wall, &low, &high, &cpu, &rss);
                 double speedup = reference_wall / wall;
                 double speedup_low = reference_low / high, speedup_high = reference_high / low;
-                double efficiency = speedup / (double)point->expected_workers;
-                fprintf(json, "%s{\"workers\":%u,\"placement\":\"%s\",\"observed_workers\":%u,\"samples\":%u,\"wall_median\":",
-                        i ? "," : "", point->workers, point->smt ? "smt" : "core", point->observed_workers, point->samples);
+                /* A gated point ran one worker; efficiency divides by the
+                 * workers that actually participated. */
+                double efficiency = speedup / (double)(point->gate == TP_SCALE_GATE_SERIAL ? 1u :
+                                                       point->gate == TP_SCALE_GATE_CAPPED ? point->observed_workers :
+                                                                                             point->expected_workers);
+                fprintf(json, "%s{\"workers\":%u,\"placement\":\"%s\",\"observed_workers\":%u,\"lane_gate\":",
+                        i ? "," : "", point->workers, point->smt ? "smt" : "core", point->observed_workers);
+                if (point->gate == TP_SCALE_GATE_ABSENT) fputs("null", json);
+                else tp_json_string(json, tp_scale_gate_names[point->gate]);
+                fprintf(json, ",\"samples\":%u,\"wall_median\":", point->samples);
                 tp_json_number(json, wall);
                 fputs(",\"wall_interval\":[", json); tp_json_number(json, low); fputc(',', json); tp_json_number(json, high);
                 fputs("],\"speedup\":", json); tp_json_number(json, speedup);
@@ -614,9 +691,10 @@ static int tp_scale_summary(TpScaleRun* run, int valid)
                     char workers[32];
                     if (point->workers) snprintf(workers, sizeof(workers), "%u", point->workers);
                     else snprintf(workers, sizeof(workers), "default");
-                    fprintf(markdown, "| %s | %s | %u | %.6f | [%.6f, %.6f] | %.3f [%.3f, %.3f] | %.3f | %.6f | %.3f | %.1f | %.3f |\n",
+                    fprintf(markdown, "| %s | %s | %u | %.6f | [%.6f, %.6f] | %.3f [%.3f, %.3f] | %.3f | %.6f | %.3f | %.1f | %.3f | %s |\n",
                             workers, point->smt ? "smt" : "core", point->observed_workers, wall, low, high, speedup, speedup_low,
-                            speedup_high, efficiency, cpu, cpu / reference_cpu, rss / 1048576.0, rss / reference_rss);
+                            speedup_high, efficiency, cpu, cpu / reference_cpu, rss / 1048576.0, rss / reference_rss,
+                            point->gate == TP_SCALE_GATE_ABSENT ? "-" : tp_scale_gate_names[point->gate]);
                 }
             }
             fputs("]}", json);

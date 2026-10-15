@@ -259,13 +259,13 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_integer_semantics_agreement(UnitTestAr
                                 }
                             }
                         }
-                        scratch_end(case_temporary);
+                        c_test_scratch_end(case_temporary);
                     }
                 }
             }
         }
     }
 
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }

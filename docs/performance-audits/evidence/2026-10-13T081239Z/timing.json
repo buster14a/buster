@@ -1,0 +1,1694 @@
+{
+  "x86_64-fast": {
+    "samples": {
+      "base": [
+        {
+          "cpu": 1.8858110000000006,
+          "wall": 1.8937060809998911,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.0443840000000004,
+          "wall": 2.0524922150002567,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.9064720000000013,
+          "wall": 1.9143209300000308,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.852165000000002,
+          "wall": 1.8598049399997763,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8479199999999985,
+          "wall": 1.8557296979997773,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8450219999999988,
+          "wall": 1.8529266010000356,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8541369999999975,
+          "wall": 1.861898063999888,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.9431980000000022,
+          "wall": 1.952091829999972,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.872240000000001,
+          "wall": 1.8797385439997925,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8427690000000023,
+          "wall": 1.849645842999962,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        }
+      ],
+      "candidate": [
+        {
+          "cpu": 1.9307399999999995,
+          "wall": 1.9388356790000216,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.9543629999999987,
+          "wall": 1.9629085169999598,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.9133909999999994,
+          "wall": 1.9212302129999443,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8571529999999983,
+          "wall": 1.864580204000049,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8487290000000023,
+          "wall": 1.855756693999865,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8676359999999974,
+          "wall": 1.8753860430001623,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8738049999999995,
+          "wall": 1.8821651250000286,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8912989999999996,
+          "wall": 1.8993680700000368,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8653190000000048,
+          "wall": 1.8727874290002546,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.865157,
+          "wall": 1.8723677440002575,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        }
+      ]
+    },
+    "ratio": 0.9989303936394631,
+    "ci95": [
+      0.9844632559485446,
+      1.013610132533833
+    ]
+  },
+  "x86_64-quality": {
+    "samples": {
+      "base": [
+        {
+          "cpu": 2.285584999999995,
+          "wall": 2.2937299170002916,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.310007,
+          "wall": 2.3190571130003264,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.322661000000002,
+          "wall": 2.3315301779998663,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.315320999999995,
+          "wall": 2.3248236599997654,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.2950929999999907,
+          "wall": 2.3038163999999597,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.384652999999993,
+          "wall": 2.394713813999715,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.334243999999998,
+          "wall": 2.3439009720000286,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.2897410000000002,
+          "wall": 2.2987654399998974,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.3030920000000017,
+          "wall": 2.312606837000203,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.2609549999999903,
+          "wall": 2.2690721459998713,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        }
+      ],
+      "candidate": [
+        {
+          "cpu": 2.297107000000001,
+          "wall": 2.3052838489998067,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.3095340000000015,
+          "wall": 2.318169522000062,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.2950249999999977,
+          "wall": 2.3034305870000935,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.309020000000002,
+          "wall": 2.318031300000257,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.303095000000008,
+          "wall": 2.3120953500001633,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.334321000000007,
+          "wall": 2.3436564359999466,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.311878000000004,
+          "wall": 2.3208774780000567,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.327103999999996,
+          "wall": 2.3362219780001396,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.3628580000000095,
+          "wall": 2.373528508999698,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.274470999999995,
+          "wall": 2.283380233999651,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-march=skylake-avx512",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        }
+      ]
+    },
+    "ratio": 1.001041967719009,
+    "ci95": [
+      0.9913095656823855,
+      1.0108699197762128
+    ]
+  },
+  "aarch64-fast": {
+    "samples": {
+      "base": [
+        {
+          "cpu": 2.0667670000000076,
+          "wall": 2.0792195479998554,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.783331999999989,
+          "wall": 1.7905360919999112,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.7801420000000077,
+          "wall": 1.7870597629998883,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.806216000000009,
+          "wall": 1.813769639000384,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8012390000000007,
+          "wall": 1.808654678000039,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.7753870000000012,
+          "wall": 1.7826878250002665,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.7753080000000026,
+          "wall": 1.7823461680000037,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.7890829999999962,
+          "wall": 1.7964561980002145,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.7598600000000153,
+          "wall": 1.7661788860000343,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.766442999999978,
+          "wall": 1.7736164640000425,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        }
+      ],
+      "candidate": [
+        {
+          "cpu": 2.0020329999999866,
+          "wall": 2.0103448209997623,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.9647140000000078,
+          "wall": 1.972845758999938,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.7945129999999905,
+          "wall": 1.8014925219999895,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.7915219999999952,
+          "wall": 1.7988380299998425,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.788247000000014,
+          "wall": 1.7950341840000874,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.7890350000000041,
+          "wall": 1.796192794000035,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8465870000000044,
+          "wall": 1.8551337069998226,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.7788290000000067,
+          "wall": 1.7856655019995742,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.7960569999999971,
+          "wall": 1.803053410999837,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 1.8010280000000072,
+          "wall": 1.8085336139997708,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=fast",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        }
+      ]
+    },
+    "ratio": 1.0139664481305355,
+    "ci95": [
+      0.9888267024719055,
+      1.0397453419940033
+    ]
+  },
+  "aarch64-quality": {
+    "samples": {
+      "base": [
+        {
+          "cpu": 2.153309999999999,
+          "wall": 2.161549206000018,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.150778000000006,
+          "wall": 2.1587382809998417,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.153478000000011,
+          "wall": 2.161530927000058,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.159971999999997,
+          "wall": 2.168466859000091,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.1539499999999965,
+          "wall": 2.1621517000003223,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.1902309999999963,
+          "wall": 2.199564513000041,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.1963130000000333,
+          "wall": 2.205796830000054,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.184553999999996,
+          "wall": 2.1936879119998594,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.15361400000001,
+          "wall": 2.1620707329998368,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.152692999999994,
+          "wall": 2.161163020999993,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-base",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        }
+      ],
+      "candidate": [
+        {
+          "cpu": 2.1578409999999852,
+          "wall": 2.166140243999962,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.197757000000022,
+          "wall": 2.2065852440000526,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.1858729999999964,
+          "wall": 2.1945294199999807,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.1477279999999697,
+          "wall": 2.155719955999757,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.1789170000000144,
+          "wall": 2.186824830000205,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.192634000000007,
+          "wall": 2.200845323000067,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.1548869999999836,
+          "wall": 2.1635633649998454,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.205125000000004,
+          "wall": 2.214195382000071,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.154496000000024,
+          "wall": 2.1630123150002873,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        },
+        {
+          "cpu": 2.1642339999999782,
+          "wall": 2.1730004819996793,
+          "command": [
+            "/home/david/Documents/Codex/2026-10-13/sol/work/ide-candidate",
+            "cc",
+            "-Isrc",
+            "-Igenerated",
+            "-DBUSTER_UNITY_BUILD=1",
+            "-DBUSTER_INCLUDE_TESTS=0",
+            "-g0",
+            "-target",
+            "aarch64-linux",
+            "-isystem",
+            "/home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include",
+            "-fregister-allocator=quality",
+            "-c",
+            "src/buster/apps/ide/ide.c",
+            "-o",
+            "/dev/null"
+          ]
+        }
+      ]
+    },
+    "ratio": 1.0041751149738152,
+    "ci95": [
+      0.996031886570259,
+      1.0123849197287178
+    ]
+  }
+}

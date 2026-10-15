@@ -11,7 +11,7 @@ host binutils, glibc development headers/runtime and zlib development files.
 Unmodified upstream shell/Perl generators and test infrastructure remain
 external prerequisites. They are not Buster language frontends.
 
-The declared first configuration uses upstream `make all`, `-O0 -g -Wall`,
+The declared first configuration uses upstream `make all`, `-O0 -g -Wall -fPIE` and `LDFLAGS=-pie`,
 two workers, computed header dependencies, and the platform defaults from
 `config.mak.uname`. It explicitly selects:
 
@@ -25,8 +25,11 @@ Local file transport, the normal Linux threading/platform paths, reftable,
 SHA-1 collision detection, builtin SHA-256 and host zlib remain enabled.
 HTTP(S), XML HTTP push, OpenSSL integration, Tcl/Tk GUIs, translations and
 installed Perl/Python helper functionality are outside this configuration.
-Those exclusions are frozen before either build, rather than changed in
-response to a compiler failure. Test scripts can still need host Perl.
+The PIE mode and those exclusions are declared before either independent build.
+The explicit PIE flags align both compilers with the host executable link mode;
+Buster non-PIE objects cannot be fed to a platform-default PIE link when they
+take imported function addresses. Earlier non-PIE build-census receipts retain
+their original configuration and do not become PIE qualification evidence. Test scripts can still need host Perl.
 
 This is a first build/blocker census. It is not whole-project qualification.
 The [retained first census](../../compatibility-evidence/git-v2.51.0/README.md)
@@ -126,9 +129,9 @@ only after a full build succeeds. Their implementation is not execution
 evidence.
 
 The hosted workflow records machine specifications and actual checkout
-identity and retains diagnostics even when the census fails. The shipped
-workflow is intended to be manually opted into; no ordinary PR, merge-group
-or main-push qualification is authorized by this guide.
+identity and retains diagnostics even when the census fails. The main-only external-project workflow runs this bounded configuration after
+main pushes. Ordinary PR and merge-group checks do not run whole Git
+qualification; the standalone Git workflow remains an opt-in diagnostic route.
 
 ## Remaining milestone gates
 

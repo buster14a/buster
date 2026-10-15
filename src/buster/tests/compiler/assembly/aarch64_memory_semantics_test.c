@@ -3,6 +3,7 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/compiler/assembly/aarch64_memory_semantics.h>
+#include <buster/lib/compiler/assembly/aarch64_semantics_internal.h>
 
 static bool
 a64_memory_test_find_canonical(u64 digest, BusterAarch64CanonicalFormInfo* result)
@@ -178,6 +179,11 @@ UnitTestResult
 aarch64_memory_semantics_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    // This module runs after serial prewarm; the semantic module also checks
+    // the same storage before prewarm, including concurrent block fills.
+    BusterA64SemanticStorageTestResult storage = buster_aarch64_semantics_test_storage(arguments->arena);
+    BUSTER_TEST(arguments, storage.checks > 50000);
+    BUSTER_TEST(arguments, storage.failures == 0);
     BUSTER_TEST(arguments, buster_a64_memory_schema_version() == 1u);
     BUSTER_TEST(arguments, buster_a64_memory_row_count() == 559u);
     BUSTER_TEST(arguments, buster_a64_memory_transform_row_count() == 234u);

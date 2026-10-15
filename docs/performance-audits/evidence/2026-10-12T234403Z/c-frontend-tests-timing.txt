@@ -1,0 +1,9 @@
+# c_frontend_tests, BUSTER_TEST_JOBS=1, Release, interleaved; A=ide-trusted (base), B=ide-cand4 (candidate); seconds
+trusted-1 [1481971/1481971] Unit tests (1 of 63 modules selected)
+cand4-1 [1481971/1481971] Unit tests (1 of 63 modules selected)
+trusted-2 [1481971/1481971] Unit tests (1 of 63 modules selected)
+cand4-2 [1481971/1481971] Unit tests (1 of 63 modules selected)
+trusted r1 wall=44.819688623
+cand4   r1 wall=42.833922792
+trusted r2 wall=45.065871420
+cand4   r2 wall=42.960053205

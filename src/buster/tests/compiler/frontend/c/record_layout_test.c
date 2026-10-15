@@ -23,7 +23,9 @@
 // the canonical object, record_layout_test_clang_corpus compiles the corpus
 // for every target through the real driver and compares every probe, and
 // record_layout_test_rule_selection checks which rule each target selects,
-// including targets Buster writes no object for.
+// including targets Buster writes no object for. Both end every scratch that
+// holds a unit with c_test_scratch_end, and C_TEST_BOUNDED_FIXTURE checks that
+// each returned every reservation it made (GitHub #3431).
 //
 // Regenerate the expectations with `tools/record_layout_oracle.py generate`
 // and a Clang that knows every target triple; never from Buster's output.
@@ -52,6 +54,7 @@ struct RecordLayoutTarget
 };
 
 #include <buster/tests/compiler/frontend/c/record_layout_corpus.generated.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 BUSTER_GLOBAL_LOCAL ObjectSymbol* record_layout_test_symbol(ObjectFile* object, String8 name)
 {
@@ -133,11 +136,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_clang_corpus(UnitTestArgum
                 arguments->show(arguments, S8("record layout: {S8} did not compile the corpus: {S8}\n"), target.target, compiled.diagnostic);
             }
             os_file_delete(object_path);
-            scratch_end(compile_temporary);
+            c_test_scratch_end(compile_temporary);
         }
         os_file_delete(source_path);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -207,7 +210,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_rule_selection(UnitTestArg
                                 cases[index].witness_size);
             }
             BUSTER_TEST(arguments, holds && !control_holds);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -216,8 +219,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_rule_selection(UnitTestArg
 UnitTestResult record_layout_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
-    BUSTER_TEST_FIXTURE(arguments, record_layout_test_clang_corpus);
-    BUSTER_TEST_FIXTURE(arguments, record_layout_test_rule_selection);
+    // The thread's unit registry reserves its own arena at its first unit;
+    // reserve it before the first fixture's reading.
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        c_preprocess(temporary.arena, S8(""), (CPreprocessOptions){0});
+        c_test_scratch_end(temporary);
+    }
+    C_TEST_BOUNDED_FIXTURE(arguments, record_layout_test_clang_corpus);
+    C_TEST_BOUNDED_FIXTURE(arguments, record_layout_test_rule_selection);
     return result;
 }
 #endif

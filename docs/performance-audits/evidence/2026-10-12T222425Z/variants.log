@@ -1,0 +1,8 @@
+plain wall=252.80s user=242.25s maxrss=2103528KB exit=0
+a5d71c0195f0d47cc0f3e21cf4bfde0dfbea883376a160371fe146e1ae019a46  /tmp/claude-0/-home-user-buster/a3dc31b4-28dd-5d63-82a3-c75f1df526c9/scratchpad/plain.text
+noat wall=240.03s user=230.90s maxrss=1942320KB exit=0
+a5d71c0195f0d47cc0f3e21cf4bfde0dfbea883376a160371fe146e1ae019a46  /tmp/claude-0/-home-user-buster/a3dc31b4-28dd-5d63-82a3-c75f1df526c9/scratchpad/noat.text
+nog wall=180.96s user=176.42s maxrss=761696KB exit=0
+e4d8cc4a130e812eb5b92d8b8002c16c175ed29e56e5dffd6ce58144abb46863  /tmp/claude-0/-home-user-buster/a3dc31b4-28dd-5d63-82a3-c75f1df526c9/scratchpad/nog.text
+
+[exited with code 0]

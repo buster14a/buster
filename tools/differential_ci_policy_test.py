@@ -4,6 +4,7 @@
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 import io
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -67,6 +68,21 @@ class DifferentialCIPolicyTests(unittest.TestCase):
         self.assertIn("$env:VS_ARCH -eq 'arm64'", step)
         self.assertIn("test_differential --self-test --reference-timeout 1", step)
         self.assertIn("DIFFERENTIAL_TIMEOUT_CONTROL reference_timeout_seconds=1 result=timeout", step)
+
+    def test_windows_native_steps_are_bounded_below_the_job_and_still_pack_logs(self):
+        # #2067: a hung step must fail on its own bound so packing still runs.
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        native = workflow.split("\n  native:\n", 1)[1].split("\n  mobile:\n", 1)[0]
+        self.assertRegex(native, r"(?m)^    timeout-minutes: 300$")
+        for name, minutes in (("Execution-mode matrix (Windows)", 15),
+                              ("Native MSVC reference differential", 10)):
+            with self.subTest(step=name):
+                step = native.split(f"      - name: {name}\n", 1)[1].split("\n      - name:", 1)[0]
+                self.assertEqual(re.findall(r"(?m)^        timeout-minutes: (\d+)$", step), [str(minutes)])
+        for name in ("Pack native logs", "Retain native logs"):
+            with self.subTest(step=name):
+                step = native.split(f"      - name: {name}\n", 1)[1].split("\n      - name:", 1)[0]
+                self.assertIn("if: ${{ !cancelled() && ", step)
 
 
 class DifferentialOracleTests(unittest.TestCase):

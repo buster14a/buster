@@ -1,0 +1,8 @@
+!tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program failed at base-src/src/buster/tests/compiler/frontend/c/c_test.c:c_test_generic_work_and_scratch:63941
+!tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count && lowered.program failed at base-src/src/buster/tests/compiler/frontend/c/c_test.c:c_test_generic_work_and_scratch:63941
+!tokens.diagnostic_count && !lowered.program failed at base-src/src/buster/tests/compiler/frontend/c/c_test.c:c_test_generic_work_and_scratch:63953
+parsed.diagnostics[0].kind == C_DIAGNOSTIC_UNDECLARED_IDENTIFIER failed at base-src/src/buster/tests/compiler/frontend/c/c_test.c:c_test_generic_work_and_scratch:63958
+!tokens.diagnostic_count && !lowered.program failed at base-src/src/buster/tests/compiler/frontend/c/c_test.c:c_test_generic_work_and_scratch:63953
+parsed.diagnostics[0].kind == C_DIAGNOSTIC_UNDECLARED_IDENTIFIER failed at base-src/src/buster/tests/compiler/frontend/c/c_test.c:c_test_generic_work_and_scratch:63958
+!tokens.diagnostic_count && !parsed.diagnostic_count && !lowered.diagnostic_count failed at base-src/src/buster/tests/compiler/frontend/c/c_test.c:c_test_generic_large_function:64012
+lowered.program && lowered.program->module_count failed at base-src/src/buster/tests/compiler/frontend/c/c_test.c:c_test_generic_large_function:64013

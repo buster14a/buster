@@ -1,0 +1,59 @@
+TARGET cpu=baseline features=fp-armv8,neon
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                379                      418
+bytes on disk                 34.125.987               34.199.917
+physical lines                   471.345                  473.324
+
+bytes scanned                 34.122.619               34.196.541
+  code                        25.946.222   76.0 %      25.989.195   76.0 %
+  comment                      2.618.480    7.7 %       2.644.059    7.7 %
+  whitespace                   5.557.917   16.3 %       5.563.287   16.3 %
+  literals, within code       11.933.283   35.0 %      11.935.388   34.9 %
+
+lines scanned                    469.661                  471.636
+  code, the sLOC                 414.648   88.3 %         416.052   88.2 %
+  comment                         42.235    9.0 %          42.755    9.1 %
+  blank                           14.546    3.1 %          14.612    3.1 %
+  both, counted twice              1.768    0.4 %           1.783    0.4 %
+
+comments                          36.933                   37.025
+tokens                         3.632.066                3.640.317
+spliced-away lines                 1.684    0.4 %           1.688    0.4 %
+
+preprocessed output                      of lexed
+  tokens to the parser         4.154.215  114.1 %
+  their spelling bytes        26.640.441  102.5 %
+  bytes retained              38.123.537  111.5 %
+  macro expansions               163.887
+  #define directives               3.959
+
+files lexed more than once
+         lexes re-read bytes  path
+            17        33.072  stddef.h
+             5        17.136  /home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include/bits/libc-header-start.h
+            11        10.370  /home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include/bits/wordsize.h
+             5         8.200  src/buster/lib/compiler/assembly/x86_64_conditions.inc
+             2         2.231  /home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include/bits/stat.h
+             3         1.942  /home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include/bits/long-double.h
+             2           939  /home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include/bits/timesize.h
+             2            32  /home/david/Documents/Codex/2026-10-13/sol/work/cross-headers/usr/aarch64-linux-gnu/include/asm/ioctls.h
+                      73.922  re-read in total
+IR_FRONTEND_SSA functions=5686 locals=52516 reads=201257 writes=84122 parameters_created=271295 parameters_removed=236269 temporaries=11832 fallback_locals=2646
+C_TYPE_LAYOUT solves=221 pass_solves=171 pass_state_types=10934259 pass_attempts=402914 agenda_solves=50 agenda_types=52 agenda_attempts=52 agenda_edges=2 agenda_notifications=2 agenda_pushes=54 agenda_fallbacks=0
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1664630 changes=136230
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1664630 changes=10369
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=3372277 changes=186123
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=112895 changes=61
+IR_FAST_PASS name=cse enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST functions=5878 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=617504 retained_bound=19726696 compact_ns=0 instructions_before=1664630 instructions_after=1467933
+IR_INLINE tiny=0 candidates=64 inlined=64 always_inlined=64 copied_instructions=2009 growth=2009 budget_skips=0 shape_skips=0 linkage_skips=0 recursion_skips=0 visits=3232657 released_bytes=2920448
+IR_LOCAL_PROMOTION candidates=36650 promoted=247 loads_removed=954 stores_removed=443 parameters_inserted=1688 parameters_removed=1503 uninitialized=0 barriers=6 instructions_before=1666274 instructions_after=1664630 values_before=1432314 values_after=1431298
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=32 block_visits=7210 parameter_visits=3576 incoming_visits=8197
+CODEGEN cpu=baseline vector_bits=128 functions=5878 instructions=1467933 values=1234540 stack_value_bytes=4473976 stack_frame_bytes=4473976 max_stack_frame_bytes=90744 code_bytes=12627416 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=0 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=0 exact_successes=0 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=38332
+CODEGEN_EMIT machine_code_in_place=12627416 machine_code_copied=0
+OBJECT_WRITE format=elf64 section_visits=150 symbol_visits=95862 relocation_visits=222642 image_reserved=29394568 image_stored=3182799 image_zeroed=123 image_patched=0 payload_copied=0 payload_borrowed=26211769 scratch=129720 retained=29394664 output=29394568
+CODEGEN_ALLOCATOR reloads=89033 spills=49584 boundary_spills=30137 boundary_reloads=21144 boundary_copies=410 copies=86869 rematerializations=44125 pins=0 splits=0 scheduled=0 schedule_kept=0

@@ -14,8 +14,8 @@ re-derives validity from the lab's own summary.json and the throughput
 corpus's own summary.json and metadata.json (#2761), and, when the receipt
 names the scaling profile (#424), each scaling bundle's own scaling.json and
 scaling-metadata.json, and, when the receipt holds an opt-in same-candidate
-flag-pair profile (#48 inline, #3397 ast-pilot), that profile's raw lab
-documents, and completes the
+flag-pair profile (#48 inline, #3397 ast-pilot, #3011 constant-reuse) or the #1125
+per-process floor, that profile's raw lab documents, and completes the
 attempt's check run named check_name(mode) with external ID attempt_marker(...)
 on the head. The checks are report-only; nothing gates merging on them.
 
@@ -52,11 +52,32 @@ Only an attempt whose authenticated workflow revision has no record retention
 step may lack the machine record (machine_record_required); a record that is
 present is still checked.
 
-Map: validate_inline_bundle and validate_ast_pilot_bundle (opt-in flag pairs),
+Sealed raw evidence v1 (#2918, docs/compiler-evidence-v1.md): an ordinary
+artifact that carries evidence-manifest.tsv or evidence-seal.txt is extracted
+with the strict sampling_archive reader and verified by the trusted native
+`./build.sh compiler_evidence verify` under the identity this publisher
+authorized (verify_evidence_bundle); a pull snapshot-v1 receipt's route selects
+the snapshot inventory (#3211). The verified bytes are then replayed: the
+lab's raw pairs through the trusted uarch_lab statistics (sealed_lab_replay,
+lab_raw_inference) and the corpus through this checkout's `bench_throughput
+compare` in a disposable copy (sealed_corpus_replay); the saved summaries must
+follow. The receipt's evidence_bundle must name the verified inventory and
+manifest (evidence_bundle_problems). A measured ordinary attempt must be sealed;
+only publication-only recovery of a run whose producer predates sealing
+(sealing_required) may be legacy-unsealed, its outcome standing with its raw
+bytes reported unverified. Anything else fails closed.
+
+Map: validate_inline_bundle, validate_ast_pilot_bundle and validate_constant_reuse_bundle (opt-in flag pairs),
+validate_process_floor_bundle (#1125 per-process floor),
 validate_real_source_bundle, validate_production_profile_bundle,
-validate_compiler_probes_bundle, validate_frontend_selector_bundle and
+validate_compiler_probes_bundle, validate_frontend_selector_bundle,
+validate_frontend_nesting_bundle (#2676 deep nesting) and
 validate_wild_linker_bundle (#2761 opt-in legs), validate_link_tls_bundle (#1915),
-decide (pure decision), inventory_rows (discharged inventory rows),
+validate_selfhost_inline_bundle (#58),
+validate_ast_retirement_bundle (#4058 two-binary retirement cells and raw replay),
+decide (pure decision), sealed_lab_replay, sealed_corpus_replay,
+verify_evidence_bundle, evidence_bundle_problems and sealing_required (sealed raw
+evidence), lab_raw_inference (shared lab replay), inventory_rows (discharged inventory rows),
 machine_record and machine_record_required (#2758 host facts), read_evidence,
 verify_analyzer_request_freshness (fresh request selectors), queue_delay, links,
 commit_report, recovered_identity, bind_request, report_check_url, main.
@@ -78,19 +99,35 @@ import sys
 import urllib.error
 import urllib.parse
 import zipfile
+import zlib
 from datetime import datetime
 
 from authorize_compiler import verify as verify_main
 from compiler_github import (ARTIFACT_LIMIT, BENCH_WORKFLOW, COMPARE_JOBS, SERVER, TEXT_LIMIT, Api, complete_check,
-                             owned_checks, parse_chain, run_url)
+                             measured, owned_checks, parse_chain, run_url, stamp)
 from inline_acceptance import metrics as inline_metrics, validate_documents as validate_inline_documents
+from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate_documents as validate_ast_pilot_documents,
                                   validate_probe as validate_ast_pilot_probe)
+from ast_retirement_acceptance import (cell_record as ast_retirement_cell_record,
+                                      validate_documents as validate_ast_retirement_documents,
+                                      validate_probe as validate_ast_retirement_probe)
+from compiler_receipt import EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity, evidence_inventory
+from constant_reuse_acceptance import (cell_record as constant_reuse_cell_record,
+                                       validate_documents as validate_constant_reuse_documents)
+from process_floor_acceptance import (cell_record as process_floor_cell_record,
+                                      validate_documents as validate_process_floor_documents)
 from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
                               ANALYZER_REQUEST_LINES, ANALYZER_REQUEST_PATH, DECIMAL, IDENTITY_KEYS,
                               INLINE_ACCEPTANCE_REQUEST_LINE, INLINE_ACCEPTANCE_PROFILE,
                               AST_PILOT_ACCEPTANCE_REQUEST_LINE, AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_CELLS,
                               validate_ast_pilot_acceptance,
+                              AST_RETIREMENT_REQUEST_LINE, AST_RETIREMENT_PROFILE, AST_RETIREMENT_CELLS,
+                              validate_ast_retirement_acceptance,
+                              CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE, CONSTANT_REUSE_ACCEPTANCE_PROFILE, CONSTANT_REUSE_CELLS,
+                              validate_constant_reuse_acceptance,
+                              PROCESS_FLOOR_REQUEST_LINE, PROCESS_FLOOR_PROFILE, PROCESS_FLOOR_CELLS,
+                              validate_process_floor_acceptance,
                               THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                               throughput_real_source_digest, validate_throughput_real_source,
                               PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
@@ -98,18 +135,28 @@ from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE,
                               validate_compiler_probes,
                               FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, frontend_selector_digest,
                               validate_frontend_selector,
+                              FRONTEND_NESTING_PROFILE, FRONTEND_NESTING_REQUEST_LINE, frontend_scaling_digest,
+                              validate_frontend_nesting,
                               WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, validate_wild_linker, wild_linker_bundle_files,
                               LINK_TLS_PROFILE, LINK_TLS_REQUEST_LINE, link_tls_digest, validate_link_tls,
+                              SELFHOST_INLINE_PROFILE, SELFHOST_INLINE_REQUEST_LINE, selfhost_inline_digest,
+                              validate_selfhost_inline,
                               wild_linker_digest,
                               MODES, PROFILE, RECEIPT_SCHEMA, SHA, attempt_marker, check_marker,
                               check_name, classify, classify_scaling, classify_throughput, host_problem, number, _number,
                               range_label, regression_policy, render, SCALING_PROFILE, scaling_digest, validate_inline_acceptance,
                               THROUGHPUT_PROFILE, throughput_digest, validate_analyzer_bundle, covered_inventory_rows,
+                              render_inventory_coverage,
                               HARNESS_ADMISSIONS, THROUGHPUT_HARNESS_FLOOR, THROUGHPUT_HISTORICAL_HARNESS_REVISION,
                               THROUGHPUT_HISTORICAL_PROFILE, THROUGHPUT_HISTORICAL_REQUEST_LINE)
 
 ARTIFACT_PREFIX = "buster-9700x-compiler-"
 MEMBER_LIMIT = 8 * 1024 * 1024
+# Sealed raw evidence (#2918): the bundle's 4096 entries plus the receipt and machine record.
+EVIDENCE_ARCHIVE_MEMBERS = 8192
+EVIDENCE_VERIFY_TIMEOUT_SECONDS = 600
+EVIDENCE_VERIFY_COMMAND = (os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                        "build.sh"), "compiler_evidence")
 ANALYZER_MEMBER_LIMIT = 32 * 1024 * 1024
 ANALYZER_BUNDLE_LIMIT = ARTIFACT_LIMIT * 3 // 4
 AUTHORIZE_JOBS = {"main": "Authorize the main commit comparison"}
@@ -247,6 +294,270 @@ def validate_ast_pilot_bundle(receipt_ast: object, bundle: object, head: str, ca
     return problems
 
 
+AST_RETIREMENT_BUNDLE_FILES = {
+    "acceptance": "ast_retirement_acceptance/acceptance.json",
+    "source": "ast_retirement_acceptance/source.json",
+    **{f"{cell}_{key}": f"ast_retirement_acceptance/{cell}/{member}" for cell in AST_RETIREMENT_CELLS
+       for key, member in (("summary", "summary.json"), ("meta", "compare.json"), ("a", "a/lab.json"),
+                           ("b", "b/lab.json"), ("reference", "reference.json"))},
+    **{f"{cell}_probe": f"ast_retirement_acceptance/probe/{cell}/probe.json" for cell in AST_RETIREMENT_CELLS},
+}
+
+
+def ast_retirement_reference(cell: str, bundle: dict) -> dict:
+    """Verify the fixed bounded transport of each reference image and its raw diagnostics."""
+    prefix = f"ast_retirement_acceptance/{cell}/"
+    files, manifest = bundle["files"], bundle[f"{cell}_reference"]
+    summary = bundle[f"{cell}_summary"]
+    if not isinstance(manifest, dict) or set(manifest) != {"a", "b"}:
+        raise ValueError(f"{cell} reference image manifest is malformed")
+    if manifest["a"] != manifest["b"]:
+        raise ValueError(f"{cell} compiler arms do not bind one identical shared raw reference")
+    images, diagnostics, decoded_chunks = {}, {}, {}
+    for key in ("a", "b"):
+        image = manifest[key]
+        if not isinstance(image, dict) or set(image) != {"size_bytes", "sha256", "chunks"} or \
+                type(image.get("size_bytes")) is not int or not 0 <= image["size_bytes"] <= ANALYZER_MEMBER_LIMIT * 2 or \
+                not re.fullmatch(r"[0-9a-f]{64}", str(image.get("sha256", ""))) or \
+                not isinstance(image.get("chunks"), list) or len(image["chunks"]) != 2:
+            raise ValueError(f"{cell} {key} reference image identity is malformed")
+        parts = []
+        for index, chunk in enumerate(image["chunks"]):
+            wanted = f"reference.{index:03d}.bin.gz"
+            raw = files.get(prefix + wanted)
+            if not isinstance(chunk, dict) or set(chunk) != {"path", "compression", "size_bytes", "sha256",
+                                                           "stored_size_bytes", "stored_sha256"} or \
+                    chunk.get("path") != wanted or not isinstance(raw, bytes) or \
+                    chunk.get("compression") != "gzip-v1" or type(chunk.get("size_bytes")) is not int or \
+                    chunk["size_bytes"] != min(max(0, image["size_bytes"] - index * ANALYZER_MEMBER_LIMIT), ANALYZER_MEMBER_LIMIT) or \
+                    type(chunk.get("stored_size_bytes")) is not int or chunk["stored_size_bytes"] != len(raw) or \
+                    len(raw) > ANALYZER_MEMBER_LIMIT or chunk.get("stored_sha256") != hashlib.sha256(raw).hexdigest() or \
+                    raw[:10] != b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff":
+                raise ValueError(f"{cell} {key} reference chunk differs from its bounded stored bytes")
+            decoded = decoded_chunks.get(wanted)
+            if decoded is None:
+                try:
+                    decoder = zlib.decompressobj(31)
+                    decoded = decoder.decompress(raw, chunk["size_bytes"] + 1)
+                except zlib.error as error:
+                    raise ValueError(f"{cell} {key} reference gzip is invalid: {error}") from error
+                if len(decoded) != chunk["size_bytes"] or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail or \
+                        chunk.get("sha256") != hashlib.sha256(decoded).hexdigest():
+                    raise ValueError(f"{cell} {key} reference gzip differs from its bounded raw identity")
+                decoded_chunks[wanted] = decoded
+            parts.append(decoded)
+        images[key] = b"".join(parts)
+        if image["size_bytes"] != len(images[key]) or image["sha256"] != hashlib.sha256(images[key]).hexdigest() or \
+                AST_RETIREMENT_CELLS[cell]["operation"] == "object" and not images[key]:
+            raise ValueError(f"{cell} {key} reference image hash or size differs from retained chunks")
+        diagnostics[key] = files.get(prefix + key + "/reference.diagnostics")
+        if not isinstance(diagnostics[key], bytes):
+            raise ValueError(f"{cell} {key} reference diagnostics are missing")
+    if summary.get("outputs_identical") is not (images["a"] == images["b"]):
+        raise ValueError(f"{cell} output identity result differs from the raw reference images")
+    if summary.get("diagnostics_identical") is not (diagnostics["a"] == diagnostics["b"]):
+        raise ValueError(f"{cell} diagnostics identity result differs from the raw transcripts")
+    if summary.get("outputs_identical") is not True or summary.get("diagnostics_identical") is not True:
+        raise ValueError(f"{cell} reference images or diagnostics differ between the two binaries")
+    return manifest
+
+
+def ast_retirement_raw_cell(cell: str, bundle: dict, source: dict, binaries: dict,
+                            cpu_model: str) -> dict:
+    """Replay one fixed cell from the retained pairs, counters and observed variant host records."""
+    from sampling_qualification_receipt import _lab
+    prefix = f"ast_retirement_acceptance/{cell}/"
+    files = bundle["files"]
+    summary, meta = bundle[f"{cell}_summary"], bundle[f"{cell}_meta"]
+    labs = {key: bundle[f"{cell}_{key}"] for key in ("a", "b")}
+    raw = validate_ast_retirement_documents(cell, summary, meta, labs, binaries, source)
+    ast_retirement_reference(cell, bundle)
+    records = sampling_json(files, prefix + "pairs.json", False)
+    if not isinstance(records, list) or len(records) != AST_RETIREMENT_PROFILE["pairs"] * 2:
+        raise ValueError(f"{cell} complete raw pair population is missing")
+    config, plan = meta.get("config"), meta.get("plan")
+    if meta.get("version") != 1 or meta.get("mode") != "compare" or not isinstance(plan, dict) or \
+            not isinstance(config, dict) or summary.get("method") != _lab.COMPARE_METHOD or \
+            summary.get("plan") != dict(plan, seed=config.get("seed"), confidence=_lab.CONFIDENCE,
+                bootstrap_resamples=_lab.BOOTSTRAP_RESAMPLES, complete_pairs=AST_RETIREMENT_PROFILE["pairs"], fresh_copy=True):
+        raise ValueError(f"{cell} saved inference method or complete plan differs from its raw configuration")
+    if summary.get("host", {}).get("cpu_model") != cpu_model or not APPROVED_HOST.search(cpu_model):
+        raise ValueError(f"{cell} raw summary host differs from the approved receipt host")
+    for key, role in (("a", "baseline"), ("b", "candidate")):
+        variant = (meta.get("variants") or {}).get(key)
+        observed, lab_config = summary[role], labs[key]["config"]
+        if not isinstance(variant, dict) or variant.get("role") != role or \
+                variant.get("ide") != lab_config.get("ide") or observed.get("path") != variant.get("ide") or \
+                any(variant.get(field) != binaries[role][field] for field in ("sha256", "size_bytes")) or \
+                observed.get("identical_runs") != AST_RETIREMENT_PROFILE["pairs"]:
+            raise ValueError(f"{cell} {key} raw variant identity or population differs from the prepared binary")
+        environment = sampling_json(files, prefix + key + "/env/env.json")
+        if environment.get("cpu_model") != cpu_model or environment.get("cpu") != AST_RETIREMENT_PROFILE["cpu"] or \
+                environment.get("ide_sha256") != binaries[role]["sha256"] or \
+                environment.get("git_revision") != source["revision"]:
+            raise ValueError(f"{cell} {key} raw observed host, compiler or source differs from the receipt")
+        perf = (labs[key].get("capabilities") or {}).get("perf_stat")
+        collection = labs[key].get("collection")
+        if not isinstance(perf, dict) or perf.get("usable") is not True or not isinstance(perf.get("reason"), str) or \
+                not isinstance(collection, dict) or collection.get("metrics_out") is not False:
+            raise ValueError(f"{cell} {key} has unavailable counters or instrumented timed collection")
+    for index, record in enumerate(records):
+        if not isinstance(record, dict) or not _number(record.get("maxrss_bytes")) or record["maxrss_bytes"] <= 0:
+            raise ValueError(f"{cell} raw pair {index + 1} lacks positive wait4 peak RSS")
+        number, key = index // 2 + 1, ("ab" if index // 2 % 2 == 0 else "ba")[index % 2]
+        csv_bytes = files.get(prefix + f"pairs/{number:04d}-{key}.csv")
+        if not isinstance(csv_bytes, bytes):
+            raise ValueError(f"{cell} raw retired-instruction counter file is missing")
+        counters = [row for row in _lab.parse_stat(csv_bytes.decode("utf-8"))
+                    if _lab.normalize_event(row.get("event", "")) == "instructions"]
+        if len(counters) != 1 or counters[0].get("event") != "instructions:u" or \
+                not _number(counters[0].get("value")) or counters[0]["value"] <= 0:
+            raise ValueError(f"{cell} raw pair {number} {key} lacks positive retired instructions:u")
+    if type(config.get("seed")) is not int or not _number(config.get("min_effect_percent")) or \
+            not 0 <= config["min_effect_percent"] < 100:
+        raise ValueError(f"{cell} raw statistical configuration is malformed")
+    lab_raw_inference(files, prefix, records, labs, summary, meta, config["seed"], config["min_effect_percent"])
+    return raw
+
+
+def validate_ast_retirement_bundle(record: object, bundle: object, base: str, head: str,
+                                   binaries: object, cpu_model: str) -> list[str]:
+    """Re-derive #4058's two-binary cells and retained components from exact sealed raw bytes."""
+    problems: list[str] = []
+    if record is not None:
+        if not isinstance(record, dict) or record.get("requested") is not True:
+            problems.append("receipt ast-retirement record is present but not a request")
+        else:
+            if record.get("status") != "complete" or record.get("exit") != 0:
+                problems.append("receipt issue #4058 ast-retirement run did not complete successfully")
+            if record.get("request_line") != AST_RETIREMENT_REQUEST_LINE:
+                problems.append("receipt ast-retirement request selector is not the exact supported line")
+            if record.get("profile") != AST_RETIREMENT_PROFILE:
+                problems.append("receipt ast-retirement profile is not the frozen profile")
+            if not isinstance(bundle, dict) or set(bundle) != {*AST_RETIREMENT_BUNDLE_FILES, "files"}:
+                problems.append("requested issue #4058 raw evidence bundle is incomplete")
+            elif not isinstance(bundle.get("acceptance"), dict) or not isinstance(bundle.get("files"), dict):
+                problems.append("raw issue #4058 acceptance document or sealed files are missing")
+            else:
+                acceptance = bundle["acceptance"]
+                if record.get("summary") != acceptance:
+                    problems.append("receipt and raw ast-retirement acceptance documents differ")
+                if acceptance.get("cpu_model") != cpu_model:
+                    problems.append("ast-retirement observed CPU differs from the receipt host")
+                problems.extend(validate_ast_retirement_acceptance(acceptance, base, head, binaries))
+                try:
+                    for key, member in AST_RETIREMENT_BUNDLE_FILES.items():
+                        if sampling_json(bundle["files"], member) != bundle[key]:
+                            raise ValueError(f"ast-retirement document differs from retained bytes: {member}")
+                    source = acceptance["source"]
+                    if source != bundle["source"]:
+                        raise ValueError("ast-retirement source binding differs from its raw source document")
+                    for name, identity in (("unity", source["unity"]), *source["corpus"].items()):
+                        data = bundle["files"].get(f"ast_retirement_acceptance/inputs/{name}.c")
+                        if not isinstance(data, bytes) or len(data) != identity["size_bytes"] or \
+                                hashlib.sha256(data).hexdigest() != identity["sha256"]:
+                            raise ValueError(f"ast-retirement {name} source identity differs from retained bytes")
+                    for cell in AST_RETIREMENT_CELLS:
+                        raw = ast_retirement_raw_cell(cell, bundle, source, binaries, cpu_model)
+                        if acceptance["cells"].get(cell) != ast_retirement_cell_record(raw):
+                            raise ValueError(f"{cell} acceptance metrics differ from its raw paired inference")
+                        logs = {key: bundle["files"].get(f"ast_retirement_acceptance/probe/{cell}/{key}.log")
+                                for key in ("a", "b")}
+                        probe = validate_ast_retirement_probe(cell, bundle[f"{cell}_probe"], binaries, source, logs)
+                        for key in ("a", "b"):
+                            row, reference = bundle[f"{cell}_probe"][key], bundle[f"{cell}_reference"][key]
+                            if AST_RETIREMENT_CELLS[cell]["operation"] == "object":
+                                if row.get("output_sha256") != reference["sha256"] or row.get("output_size_bytes") != reference["size_bytes"]:
+                                    raise ValueError(f"{cell} {key} retained-byte probe object differs from the timed reference")
+                            elif row.get("output_sha256") is not None or row.get("output_size_bytes") is not None:
+                                raise ValueError(f"{cell} {key} syntax-only probe unexpectedly produced an object")
+                        if acceptance["probes"].get(cell) != probe:
+                            raise ValueError(f"{cell} retained component record differs from its raw verbose probe")
+                except (RuntimeError, ValueError, UnicodeDecodeError, AttributeError, TypeError, KeyError, ArithmeticError) as error:
+                    problems.append(f"raw issue #4058 profile is incomplete or mismatched: {error}")
+    return problems
+
+
+CONSTANT_REUSE_BUNDLE_FILES = {
+    "acceptance": "constant_reuse_acceptance/acceptance.json",
+    **{f"{cell}_{key}": f"constant_reuse_acceptance/{cell}/{member}" for cell in CONSTANT_REUSE_CELLS
+       for key, member in (("summary", "summary.json"), ("meta", "compare.json"), ("a", "a/lab.json"), ("b", "b/lab.json"))},
+}
+
+
+def validate_constant_reuse_bundle(receipt_reuse: object, bundle: object, head: str, candidate_sha: str) -> list[str]:
+    """Re-derive the requested #3011 result from its raw cell summaries and configs."""
+    if receipt_reuse is None:
+        return []
+    problems: list[str] = []
+    if not isinstance(receipt_reuse, dict) or receipt_reuse.get("requested") is not True:
+        return ["receipt constant-reuse record is present but not a request"]
+    if receipt_reuse.get("status") != "complete" or receipt_reuse.get("exit") != 0:
+        problems.append("receipt issue #3011 constant-reuse run did not complete successfully")
+    if receipt_reuse.get("request_line") != CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE:
+        problems.append("receipt constant-reuse request selector is not the exact supported line")
+    if receipt_reuse.get("profile") != CONSTANT_REUSE_ACCEPTANCE_PROFILE:
+        problems.append("receipt constant-reuse profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(CONSTANT_REUSE_BUNDLE_FILES):
+        return [*problems, "requested issue #3011 raw evidence bundle is incomplete"]
+    acceptance = bundle.get("acceptance")
+    if not isinstance(acceptance, dict):
+        return [*problems, "raw issue #3011 acceptance document is missing"]
+    if receipt_reuse.get("summary") != acceptance:
+        problems.append("receipt and raw constant-reuse acceptance documents differ")
+    problems.extend(validate_constant_reuse_acceptance(acceptance, head, candidate_sha))
+    try:
+        cells = acceptance.get("cells") if isinstance(acceptance.get("cells"), dict) else {}
+        for cell in CONSTANT_REUSE_CELLS:
+            raw = validate_constant_reuse_documents(cell, bundle[f"{cell}_summary"], bundle[f"{cell}_meta"],
+                                                    {"a": bundle[f"{cell}_a"], "b": bundle[f"{cell}_b"]}, candidate_sha)
+            if cells.get(cell) != constant_reuse_cell_record(raw):
+                problems.append(f"constant-reuse {cell} acceptance metrics or identity results do not match its raw summary")
+    except (RuntimeError, AttributeError, TypeError, KeyError) as error:
+        problems.append(f"raw issue #3011 profile is incomplete or mismatched: {error}")
+    return problems
+
+
+PROCESS_FLOOR_BUNDLE_FILES = {
+    "acceptance": "process_floor/acceptance.json",
+    **{f"{cell}_{key}": f"process_floor/{cell}/{member}" for cell in PROCESS_FLOOR_CELLS
+       for key, member in (("summary", "summary.json"), ("meta", "compare.json"), ("a", "a/lab.json"), ("b", "b/lab.json"))},
+}
+
+
+def validate_process_floor_bundle(receipt_floor: object, bundle: object, head: str, candidate_sha: str) -> list[str]:
+    """Re-derive the requested #1125 result from its raw cell summaries and configs."""
+    if receipt_floor is None:
+        return []
+    problems: list[str] = []
+    if not isinstance(receipt_floor, dict) or receipt_floor.get("requested") is not True:
+        return ["receipt process-floor record is present but not a request"]
+    if receipt_floor.get("status") != "complete" or receipt_floor.get("exit") != 0:
+        problems.append("receipt issue #1125 process-floor run did not complete successfully")
+    if receipt_floor.get("request_line") != PROCESS_FLOOR_REQUEST_LINE:
+        problems.append("receipt process-floor request selector is not the exact supported line")
+    if receipt_floor.get("profile") != PROCESS_FLOOR_PROFILE:
+        problems.append("receipt process-floor profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(PROCESS_FLOOR_BUNDLE_FILES):
+        return [*problems, "requested issue #1125 raw evidence bundle is incomplete"]
+    acceptance = bundle.get("acceptance")
+    if not isinstance(acceptance, dict):
+        return [*problems, "raw issue #1125 acceptance document is missing"]
+    if receipt_floor.get("summary") != acceptance:
+        problems.append("receipt and raw process-floor acceptance documents differ")
+    problems.extend(validate_process_floor_acceptance(acceptance, head, candidate_sha))
+    try:
+        cells = acceptance.get("cells") if isinstance(acceptance.get("cells"), dict) else {}
+        for cell in PROCESS_FLOOR_CELLS:
+            raw = validate_process_floor_documents(cell, bundle[f"{cell}_summary"], bundle[f"{cell}_meta"],
+                                                   {"a": bundle[f"{cell}_a"], "b": bundle[f"{cell}_b"]}, candidate_sha)
+            if cells.get(cell) != process_floor_cell_record(raw):
+                problems.append(f"process-floor {cell} metrics or identity results do not match its raw summary")
+    except (RuntimeError, AttributeError, TypeError, KeyError) as error:
+        problems.append(f"raw issue #1125 profile is incomplete or mismatched: {error}")
+    return problems
+
+
 REAL_SOURCE_BUNDLE_FILES = {
     "summary": "throughput_real_source/summary.json",
     "metadata": "throughput_real_source/metadata.json",
@@ -364,6 +675,33 @@ def validate_frontend_selector_bundle(record: object, bundle: object, binaries: 
     return problems
 
 
+FRONTEND_NESTING_BUNDLE_FILES = {
+    "provenance": "frontend_nesting/provenance.json",
+    "results": "frontend_nesting/results.json",
+}
+
+
+def validate_frontend_nesting_bundle(record: object, bundle: object, binaries: object) -> list[str]:
+    """Re-derive the requested #2676 deep-nesting families from their exported records."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt frontend-nesting record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("exit") != 0:
+        problems.append("receipt frontend-nesting run did not complete successfully")
+    if record.get("request_line") != FRONTEND_NESTING_REQUEST_LINE:
+        problems.append("receipt frontend-nesting request selector is not the exact supported line")
+    if record.get("profile") != FRONTEND_NESTING_PROFILE:
+        problems.append("receipt frontend-nesting profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(FRONTEND_NESTING_BUNDLE_FILES):
+        return [*problems, "requested frontend-nesting evidence bundle is incomplete"]
+    problems.extend(validate_frontend_nesting(record.get("exit"), bundle["provenance"], bundle["results"], binaries))
+    if record.get("cells") != frontend_scaling_digest(bundle["results"]):
+        problems.append("receipt frontend-nesting cells do not match the exported evidence")
+    return problems
+
+
 WILD_LINKER_BUNDLE_FILES = {key: f"wild_linker/{name}" for key, name in wild_linker_bundle_files().items()}
 
 
@@ -415,6 +753,38 @@ def validate_link_tls_bundle(record: object, bundle: object, binaries: object) -
     return problems
 
 
+SELFHOST_INLINE_BUNDLE_FILES = {name: f"selfhost_inline/{name}" for name in (
+    "stage1-baseline/stage1.json", "stage1-candidate/stage1.json", "compare/result.json", "compare/lab/summary.json",
+    "compare/lab/compare.json", "compare/lab/a/lab.json", "compare/lab/b/lab.json")}
+
+
+def validate_selfhost_inline_bundle(record: object, bundle: object, binaries: object) -> list[str]:
+    """Re-validate the requested #58 self-built inline-mode result from its exported raw documents."""
+    if record is None:
+        return []
+    if not isinstance(record, dict) or record.get("requested") is not True:
+        return ["receipt self-host inline record is present but not a request"]
+    problems: list[str] = []
+    if record.get("status") != "complete" or record.get("exit") != 0:
+        problems.append("receipt self-host inline run did not complete successfully")
+    if record.get("request_line") != SELFHOST_INLINE_REQUEST_LINE:
+        problems.append("receipt self-host inline request selector is not the exact supported line")
+    if record.get("profile") != SELFHOST_INLINE_PROFILE:
+        problems.append("receipt self-host inline profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(SELFHOST_INLINE_BUNDLE_FILES):
+        return [*problems, "requested self-host inline evidence bundle is incomplete"]
+    stage1 = {role: bundle[f"stage1-{role}/stage1.json"] for role in ("baseline", "candidate")}
+    problems.extend(validate_selfhost_inline(stage1, bundle["compare/result.json"], binaries))
+    expected = {role: (stage1[role].get("stage1") or {}).get("sha256") if isinstance(stage1[role], dict) else None
+                for role in stage1}
+    problems.extend(validate_selfhost_inline_documents(
+        bundle["compare/lab/summary.json"], bundle["compare/lab/compare.json"],
+        {"a": bundle["compare/lab/a/lab.json"], "b": bundle["compare/lab/b/lab.json"]}, expected))
+    if record.get("digest") != selfhost_inline_digest(bundle["compare/lab/summary.json"]):
+        problems.append("receipt self-host inline digest does not match the exported summary")
+    return problems
+
+
 def decide(expected: dict, authorized: bool, compare_result: str, receipt: object, summary: object,
            policy_value: str, throughput: object = None, require_throughput: bool = True,
            extra_reasons: list[str] | None = None, *,
@@ -424,7 +794,7 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
            expected_phase_driver_sha256: str | None = None,
            expected_measurement_revision: str | None = None,
            expected_throughput_profile: dict | None = None,
-           dispatch_refusal: str = "") -> tuple[str, str, list[str]]:
+           dispatch_refusal: str = "", evidence_bundle: dict | None = None) -> tuple[str, str, list[str]]:
     """(conclusion, title, reasons) for one attempt; never consults the verdict's direction.
 
     expected_throughput_profile is THROUGHPUT_PROFILE unless hosted pull authorization admitted
@@ -434,6 +804,8 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
     throughput is {"summary": ..., "metadata": ..., "scaling": {series: {"summary", "metadata"}}}
     from the evidence artifact. Scaling is checked whenever the receipt names
     its profile; only a pull request that asked for it has one.
+    evidence_bundle is verify_evidence_bundle's account of the artifact's sealed raw evidence
+    (#2918); None (publication-only recovery, the owned routes) leaves it unchecked.
     A receipt from before the corpus leg (#2761) has no throughput_profile;
     only publication-only recovery of such a past attempt passes
     require_throughput=False, and a receipt that names the profile is always
@@ -503,6 +875,12 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with issue #48 self-host acceptance")
                 if receipt.get("ast_pilot_acceptance") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with issue #3397 ast-pilot acceptance")
+                if receipt.get("ast_retirement_acceptance") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with issue #4058 ast-retirement acceptance")
+                if receipt.get("constant_reuse_acceptance") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with issue #3011 constant-reuse acceptance")
+                if receipt.get("process_floor") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the issue #1125 process-floor profile")
                 if receipt.get("throughput_real_source") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with real-source throughput")
                 if receipt.get("production_profile") is not None:
@@ -515,11 +893,17 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with the wild-linker leg")
                 if receipt.get("link_tls") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with the link-tls leg")
+                if receipt.get("selfhost_inline") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the self-host inline leg")
+                if receipt.get("frontend_nesting") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the frontend-nesting leg")
                 reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
                 reasons.extend(validate_analyzer_bundle(receipt,
                                                         analyzer_bundle.get("summary") if isinstance(analyzer_bundle, dict) else None,
                                                         analyzer_bundle))
             else:
+                if evidence_bundle is not None:
+                    reasons.extend(evidence_bundle_problems(receipt, evidence_bundle))
                 reasons.extend(classify(summary, receipt.get("binaries"), expected_profile=expected_profile))
                 reasons.extend(validate_closure(receipt, throughput.get("closure") if isinstance(throughput, dict) else None,
                                                 expected_phase_schema=expected_phase_schema, expected_profile=expected_profile,
@@ -564,6 +948,51 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     candidate = (receipt.get("binaries") or {}).get("candidate") or {}
                     reasons.extend(validate_ast_pilot_bundle(receipt["ast_pilot_acceptance"], corpus.get("ast_pilot_bundle"),
                                                              expected.get("head", ""), candidate.get("sha256", "")))
+                if receipt.get("ast_retirement_acceptance") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("issue #4058 ast-retirement comparison is valid only in pull mode")
+                    if any(receipt.get(key) is not None for key in
+                           ("ast_pilot_acceptance", "constant_reuse_acceptance", "process_floor", "throughput_real_source",
+                            "production_profile", "compiler_probes", "frontend_selector", "frontend_nesting",
+                            "wild_linker", "link_tls", "selfhost_inline")) or "scaling_profile" in receipt:
+                        reasons.append("issue #4058 ast-retirement acceptance cannot be combined with another opt-in leg")
+                    if not isinstance(evidence_bundle, dict) or evidence_bundle.get("state") != "verified":
+                        reasons.append("issue #4058 ast-retirement acceptance requires verified sealed raw evidence")
+                    host = receipt.get("host") if isinstance(receipt.get("host"), dict) else {}
+                    reasons.extend(validate_ast_retirement_bundle(receipt["ast_retirement_acceptance"],
+                        corpus.get("ast_retirement_bundle"), expected.get("base", ""), expected.get("head", ""),
+                        receipt.get("binaries"), host.get("cpu_model", "")))
+                if receipt.get("constant_reuse_acceptance") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("issue #3011 constant-reuse comparison is valid only in pull mode")
+                    # The inline profile rides every pull compare (main's request history holds its line), so it
+                    # is not a competing opt-in leg here.
+                    others = [key for key in ("ast_pilot_acceptance", "throughput_real_source", "production_profile",
+                                              "compiler_probes", "frontend_selector", "wild_linker", "link_tls",
+                                              "selfhost_inline")
+                              if receipt.get(key) is not None]
+                    if others:
+                        reasons.append("issue #3011 constant-reuse acceptance cannot be combined with another opt-in leg")
+                    candidate = (receipt.get("binaries") or {}).get("candidate") or {}
+                    reasons.extend(validate_constant_reuse_bundle(receipt["constant_reuse_acceptance"],
+                                                                  corpus.get("constant_reuse_bundle"),
+                                                                  expected.get("head", ""), candidate.get("sha256", "")))
+                if receipt.get("process_floor") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the issue #1125 process-floor profile is valid only in pull mode")
+                    # The inline profile rides every pull compare (main's request history holds its line), so it
+                    # is not a competing opt-in leg here.
+                    if any(receipt.get(key) is not None for key in
+                           ("ast_pilot_acceptance", "constant_reuse_acceptance", "throughput_real_source",
+                            "production_profile", "compiler_probes", "frontend_selector", "wild_linker", "link_tls",
+                            "selfhost_inline", "frontend_nesting")):
+                        reasons.append("the issue #1125 process-floor profile cannot be combined with another opt-in leg")
+                    candidate = (receipt.get("binaries") or {}).get("candidate") or {}
+                    reasons.extend(validate_process_floor_bundle(receipt["process_floor"], corpus.get("process_floor_bundle"),
+                                                                 expected.get("head", ""), candidate.get("sha256", "")))
                 if receipt.get("throughput_real_source") is not None:
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if expected.get("mode") != "pull":
@@ -626,6 +1055,32 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                                        "frontend-selector probes or the wild-linker leg")
                     reasons.extend(validate_link_tls_bundle(receipt["link_tls"], corpus.get("link_tls_bundle"),
                                                             receipt.get("binaries")))
+                if receipt.get("selfhost_inline") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the self-host inline leg is valid only in pull mode")
+                    # The #48 inline leg is selected by presence, not freshness, so it runs beside this one.
+                    if any(receipt.get(key) is not None for key in
+                           ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
+                            "frontend_selector", "wild_linker", "link_tls", "constant_reuse_acceptance")) or \
+                            "scaling_profile" in receipt:
+                        reasons.append("the self-host inline leg cannot be combined with another opt-in leg, the "
+                                       "scaling leg included")
+                    reasons.extend(validate_selfhost_inline_bundle(receipt["selfhost_inline"],
+                                                                   corpus.get("selfhost_inline_bundle"),
+                                                                   receipt.get("binaries")))
+                if receipt.get("frontend_nesting") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the frontend-nesting leg is valid only in pull mode")
+                    if any(receipt.get(key) is not None for key in
+                           ("throughput_real_source", "ast_pilot_acceptance", "production_profile", "compiler_probes",
+                            "frontend_selector", "wild_linker", "link_tls", "selfhost_inline",
+                            "constant_reuse_acceptance")):
+                        reasons.append("the frontend-nesting leg cannot be combined with another opt-in leg")
+                    reasons.extend(validate_frontend_nesting_bundle(receipt["frontend_nesting"],
+                                                                    corpus.get("frontend_nesting_bundle"),
+                                                                    receipt.get("binaries")))
             if compare_result != "success":
                 reasons.append(f"compare job result is {compare_result!r}, not success")
             if problem:
@@ -642,6 +1097,196 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
             reasons.append(f"host measurement state is {state!r}")
             reasons.extend(item for item in receipt.get("reasons", []) if isinstance(item, str))
     return conclusion, title, reasons
+
+
+# The trusted corpus replayer (#2918): this checkout's own `bench_throughput compare`, run from its root.
+TRUSTED_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+CORPUS_REPLAY_COMMAND = (os.path.join(TRUSTED_ROOT, "build.sh"), "bench_throughput", "compare")
+CORPUS_REPLAY_TIMEOUT_SECONDS = 600
+CORPUS_REPLAYED = ("summary.json", "summary.md")
+
+
+def sealed_lab_replay(files: dict[str, bytes]) -> int:
+    """Replay a verified bundle's compiler-compare-v1 lab from its raw pairs; the pair count (#2918).
+
+    The raw plan must be the frozen profile's adaptive ABBA plan, every saved variant fact must
+    follow from the raw records and the trusted uarch_lab statistics must reproduce the saved
+    inference (lab_raw_inference). The cross-variant output and code-size facts read the
+    unretained reference images, so they are not replayed. ValueError otherwise.
+    """
+    from sampling_qualification_receipt import _lab
+    raw, summary = sampling_json(files, "lab/compare.json"), sampling_json(files, "lab/summary.json")
+    records = sampling_json(files, "lab/pairs.json", False)
+    config, saved = raw.get("config"), raw.get("plan")
+    if raw.get("version") != 1 or raw.get("mode") != "compare" or not isinstance(config, dict) or \
+            any(config.get(key) != PROFILE[key] for key in ("cpu", "target_minutes", "warmups", "profile_steps")) or \
+            config.get("pairs") is not None or type(config.get("seed")) is not int or \
+            type(config.get("min_effect_percent")) not in (int, float) or \
+            any(config.get(key) for key in ("ast_pilot_pair", "ast_retirement_cell", "constant_reuse_pair", "process_floor_pair",
+                                            "canonical_inline_pair", "sudo")):
+        raise ValueError("lab raw config is not the frozen compiler-compare-v1 profile")
+    count = saved.get("pairs") if isinstance(saved, dict) else None
+    if type(count) is not int or not 10 <= count <= 1000 or count % 2 or saved.get("order") != "ABBA" or \
+            not isinstance(records, list) or len(records) != count * 2:
+        raise ValueError("lab adaptive plan or complete paired population is missing")
+    expected_plan = dict(saved, seed=config["seed"], confidence=_lab.CONFIDENCE,
+                         bootstrap_resamples=_lab.BOOTSTRAP_RESAMPLES, complete_pairs=count,
+                         fresh_copy=bool(config.get("fresh_copy")))
+    if summary.get("plan") != expected_plan or summary.get("method") != _lab.COMPARE_METHOD or \
+            summary.get("command") != config.get("command") or summary.get("cpu") != config["cpu"]:
+        raise ValueError("lab saved plan or method differs from its raw configuration")
+    variant_meta = {}
+    for key, role in _lab.VARIANTS:
+        variant, observed = (raw.get("variants") or {}).get(key), summary.get(role)
+        meta = sampling_json(files, f"lab/{key}/lab.json")
+        if not isinstance(variant, dict) or not isinstance(observed, dict) or \
+                any(observed.get(field) != value for field, value in
+                    (("path", variant.get("ide")), ("sha256", variant.get("sha256")),
+                     ("size_bytes", variant.get("size_bytes")), ("runs", count), ("failed", 0),
+                     ("identical_runs", count), ("deterministic", True))):
+            raise ValueError(f"lab saved {role} population does not follow from its raw records")
+        perf, collection = (meta.get("capabilities") or {}).get("perf_stat"), meta.get("collection")
+        if not isinstance(perf, dict) or type(perf.get("usable")) is not bool or not isinstance(perf.get("reason"), str) or \
+                not isinstance(collection, dict) or type(collection.get("metrics_out")) is not bool:
+            raise ValueError(f"lab variant {key} counter or metrics availability was not observed")
+        variant_meta[key] = meta
+    lab_raw_inference(files, "lab/", records, variant_meta, summary, raw, config["seed"], config["min_effect_percent"])
+    return count
+
+
+def sealed_corpus_replay(files: dict[str, bytes], temporary: str) -> int:
+    """Replay a verified bundle's corpus with the trusted native comparison; the case count (#2918).
+
+    `bench_throughput compare` checks the completion hashes and population and recomputes the
+    statistics in a disposable copy, since it rewrites its summaries; the regenerated summaries
+    must equal the retained bytes. A valid regression stays report-only. ValueError otherwise.
+    """
+    root = os.path.join(temporary, "corpus-replay")
+    for name, data in files.items():
+        if name.startswith("throughput/"):
+            target = os.path.join(root, *name[len("throughput/"):].split("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "xb") as writer:
+                writer.write(data)
+    try:
+        completed = subprocess.run([*CORPUS_REPLAY_COMMAND, "--output", root], capture_output=True, text=True,
+                                   timeout=CORPUS_REPLAY_TIMEOUT_SECONDS, check=False,
+                                   cwd=TRUSTED_ROOT)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError(f"corpus replay did not run: {error.__class__.__name__}: {error}") from error
+    for name in CORPUS_REPLAYED:
+        retained = files.get("throughput/" + name)
+        if name == "summary.json" or retained is not None:
+            try:
+                with open(os.path.join(root, name), "rb") as reader:
+                    replayed = reader.read()
+            except OSError:
+                replayed = None
+            if replayed != retained:
+                tail = ((completed.stderr or "") + (completed.stdout or "")).strip()[-300:]
+                raise ValueError(f"corpus {name} does not replay (bench_throughput compare exited "
+                                 f"{completed.returncode}{': ' + tail if tail else ''})")
+    comparisons = sampling_json(files, "throughput/summary.json").get("comparisons")
+    if not isinstance(comparisons, list):
+        raise ValueError("corpus summary has no comparisons")
+    return len(comparisons)
+
+
+def verify_evidence_bundle(throughput: dict, expected: dict, corpus_profile: dict, request_attempt: str,
+                           receipt: dict | None = None, required: bool = True) -> dict:
+    """The artifact's sealed raw evidence, natively verified under this publisher's own identity (#2918).
+
+    {"state": "legacy-unsealed"} when read_evidence found neither control file and the route does not
+    require v1 (sealing_required), {"state": "unsealed"} when it does; {"state": "verified",
+    "members", "payload_bytes", "manifest_sha256", "replay"} when `compiler_evidence verify` reproduces
+    the sealed manifest from the extracted bytes and the lab and corpus replay from them
+    (sealed_lab_replay, sealed_corpus_replay); otherwise {"state": "refused", "reason"}. The identity
+    comes from the authorized expected identity and admitted profiles, never from the receipt; only a
+    snapshot-v1 receipt's route lines (its declared policy and owned-phase count) come from it, and
+    validate_closure binds that policy to its closure records, so a receipt cannot select the weaker
+    ordinary inventory for a snapshot attempt (#3211). The snapshot inventory carries every ordinary
+    member, so the same replay applies.
+    """
+    import tempfile
+    result: dict = {"state": "unsealed" if required else "legacy-unsealed"}
+    if "sealed_files" in throughput:
+        files = throughput.get("sealed_files")
+        route = {key: receipt[key] for key in ("preparation_policy", "closure", "phase_ownership")
+                 if isinstance(receipt, dict) and key in receipt}
+        identity = evidence_identity({"identity": expected, "profile": PROFILE, "throughput_profile": corpus_profile, **route},
+                                     request_attempt)
+        result = {"state": "refused", "reason": throughput.get("sealed_problem") or "sealed evidence archive is unreadable"}
+        if isinstance(files, dict) and not identity:
+            result["reason"] = "the authorized identity cannot name a sealed bundle"
+        elif isinstance(files, dict):
+            try:
+                with tempfile.TemporaryDirectory(prefix="compiler-evidence-") as temporary:
+                    bundle = os.path.join(temporary, "bundle")
+                    os.mkdir(bundle)
+                    for name, data in files.items():
+                        target = os.path.join(bundle, *name.split("/"))
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        with os.fdopen(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                                               0o600), "wb") as writer:
+                            writer.write(data)
+                    with open(os.path.join(temporary, "identity.tsv"), "w", encoding="utf-8") as writer:
+                        writer.write(identity)
+                    completed = subprocess.run([*EVIDENCE_VERIFY_COMMAND, "verify", bundle,
+                                                os.path.join(temporary, "identity.tsv")],
+                                               capture_output=True, text=True, timeout=EVIDENCE_VERIFY_TIMEOUT_SECONDS,
+                                               check=False)
+                    lines = (completed.stdout or "").strip().splitlines()
+                    line = lines[-1] if lines else (completed.stderr or "").strip()[-400:]
+                    fields = dict(item.split("=", 1) for item in line.split()[1:] if "=" in item)
+                    if completed.returncode == 0 and line.startswith("COMPILER_EVIDENCE_VERIFIED ") and \
+                            fields.get("members", "").isdigit() and fields.get("payload_bytes", "").isdigit() and \
+                            re.fullmatch("[0-9a-f]{64}", fields.get("manifest_sha256", "")):
+                        try:
+                            replay = {"lab_pairs": sealed_lab_replay(files),
+                                      "corpus_cases": sealed_corpus_replay(files, temporary)}
+                            result = {"state": "verified", "inventory": evidence_inventory(route),
+                                      "members": int(fields["members"]),
+                                      "payload_bytes": int(fields["payload_bytes"]),
+                                      "manifest_sha256": fields["manifest_sha256"], "replay": replay}
+                        except (ValueError, LookupError, TypeError, AttributeError, ArithmeticError) as error:
+                            result["reason"] = f"sealed raw evidence does not replay: {error}"
+                    else:
+                        result["reason"] = f"native verify exited {completed.returncode}: {line or 'no output'}"
+            except (OSError, ValueError, subprocess.SubprocessError, UnicodeError) as error:
+                result["reason"] = f"sealed evidence could not be verified: {error.__class__.__name__}: {error}"
+    return result
+
+
+def evidence_bundle_problems(receipt: dict, bundle: dict) -> list[str]:
+    """Reasons a measured receipt's raw-evidence claim disagrees with the verified artifact (#2918)."""
+    claimed = receipt.get("evidence_bundle")
+    problems: list[str] = []
+    if bundle.get("state") == "legacy-unsealed":
+        if claimed is not None:
+            problems.append("receipt names sealed raw evidence that the artifact does not carry")
+    elif bundle.get("state") == "unsealed":
+        problems.append("sealed raw evidence v1 is required on this route, but the artifact carries neither "
+                        "control file")
+    elif bundle.get("state") != "verified":
+        problems.append(f"sealed raw evidence refused: {bundle.get('reason', 'unknown')}")
+    elif not isinstance(claimed, dict) or claimed.get("state") != "sealed" or claimed.get("inventory") != bundle.get("inventory") or \
+            any(claimed.get(key) != bundle.get(key) for key in ("manifest_sha256", "members", "payload_bytes")):
+        problems.append("receipt evidence_bundle does not name the verified sealed manifest")
+    return problems
+
+
+def evidence_bundle_note(bundle: dict) -> str:
+    """One report line for the artifact's raw-evidence state; refusals are reasons instead."""
+    note = ""
+    if bundle.get("state") == "legacy-unsealed":
+        note = ("raw evidence: legacy-unsealed (no v1 manifest or seal, #2918); the outcome stands but its "
+                "retained raw bytes are unverified")
+    elif bundle.get("state") == "verified":
+        replay = bundle.get("replay") or {}
+        note = (f"raw evidence: sealed {bundle['inventory']} verified natively, {bundle['members']} members, "
+                f"{bundle['payload_bytes']} bytes, manifest {bundle['manifest_sha256']}; replayed "
+                f"{replay.get('lab_pairs', 'NA')} lab pairs and {replay.get('corpus_cases', 'NA')} corpus cases")
+    return note
 
 
 class DuplicateKey(ValueError):
@@ -973,9 +1618,11 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
                         for operation in ("snapshot", "restore", "verify")})
     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
             not isinstance(receipt.get("inline_acceptance"), dict) or receipt["inline_acceptance"].get("requested") is not False or \
-            "ast_pilot_acceptance" in receipt or "throughput_real_source" in receipt or "production_profile" in receipt or \
+            "ast_pilot_acceptance" in receipt or "ast_retirement_acceptance" in receipt or \
+            "constant_reuse_acceptance" in receipt or "process_floor" in receipt or \
+            "throughput_real_source" in receipt or "production_profile" in receipt or \
             "compiler_probes" in receipt or "frontend_selector" in receipt or "wild_linker" in receipt or \
-            "link_tls" in receipt:
+            "link_tls" in receipt or "selfhost_inline" in receipt or "frontend_nesting" in receipt:
         raise ValueError("owned ordinary Main evidence changed the complete original corpus recipe")
     identity = receipt.get("identity")
     if not isinstance(identity, dict) or identity.get("trusted_revision") != route["main_measurement_revision"]:
@@ -1089,6 +1736,24 @@ def machine_record(raw: object, receipt: object, mode: str, run_id: str, attempt
     return problems, facts
 
 
+# The producer seals every measured ordinary attempt from the revision that added this (#2918).
+SEALING_PRODUCER = "tools/bench_direct/compiler_compare.py"
+SEALING_PRODUCER_MARKER = b"def seal_evidence("
+
+
+def sealing_required(api: Api, revision: str) -> bool:
+    """Whether an authenticated run revision's producer sealed its measured ordinary attempts (#2918).
+
+    Only a readable producer without the sealing step is a legacy revision whose recovered
+    attempt may be legacy-unsealed; a malformed revision, an unreadable or absent file and
+    every later revision require v1.
+    """
+    content = None
+    if isinstance(revision, str) and SHA.fullmatch(revision):
+        content, unused_problem = _github_file(api, revision, SEALING_PRODUCER)
+    return not content or SEALING_PRODUCER_MARKER in content
+
+
 def machine_record_required(api: Api, revision: str) -> bool:
     """Whether the bench workflow at an authenticated run revision retains the machine record.
 
@@ -1120,7 +1785,8 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
         problem = "evidence artifact is expired, oversized or malformed"
     else:
         artifact = rows[0]
-        with zipfile.ZipFile(io.BytesIO(api.download(rows[0]["archive_download_url"]))) as archive:
+        payload = api.download(rows[0]["archive_download_url"])
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             # Aliases only detect collisions; required members are still looked up by exact name.
             members: dict = {}
             aliases: set = set()
@@ -1203,6 +1869,14 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                           "scaling": {name: {"summary": values[4 + 2 * index], "metadata": values[5 + 2 * index]}
                                       for index, name in enumerate(SCALING_PROFILE["series"])},
                           "machine": machine}
+            # Sealed raw evidence (#2918): the whole bundle, through the strict bounded reader.
+            if not problem and (EVIDENCE_MANIFEST in members or EVIDENCE_SEAL in members):
+                try:
+                    throughput["sealed_files"] = sampling_archive(payload, member_limit=EVIDENCE_ARCHIVE_MEMBERS,
+                                                                  require_nonexecutable=True)
+                except ValueError as error:
+                    throughput["sealed_files"] = None
+                    throughput["sealed_problem"] = f"sealed evidence archive refused: {error}"
             if isinstance(receipt, dict) and receipt.get("closure") is not None:
                 closure_files: dict = {}
                 for operation in ("snapshot", "restore", "verify"):
@@ -1213,6 +1887,28 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                     closure_files[operation] = archive.read(info)
                 throughput["closure"] = closure_files
+            # A non-owned pull snapshot-v1 attempt's native phase population (#3211): validate_closure
+            # replays every declared phase's five retained members, as for the owned routes.
+            ownership = receipt.get("phase_ownership") if isinstance(receipt, dict) and not problem else None
+            if isinstance(ownership, dict):
+                owned: dict = {}
+                phases = ownership.get("phases")
+                for phase in phases if isinstance(phases, list) else []:
+                    name = phase.get("file") if isinstance(phase, dict) else None
+                    if not isinstance(name, str) or not re.fullmatch(r"[0-9]{4}\.json", name) or name in owned:
+                        problem = "native phase population is ambiguous"
+                        break
+                    infos = {label: members.get("owned-phases/" + name + suffix) for label, suffix in
+                             (("receipt", ""), ("command", ".argv"), ("stdout", ".stdout"), ("stderr", ".stderr"),
+                              ("bootstrap", ".bootstrap.complete"))}
+                    if any(info is None or info.file_size > MEMBER_LIMIT for info in infos.values()):
+                        problem = f"required native phase evidence owned-phases/{name} missing or oversized"
+                        break
+                    owned[name] = {label: archive.read(info) for label, info in infos.items()}
+                throughput.setdefault("closure", {})["owned_phases"] = owned
+                corpus_raw = {key: members.get(f"throughput/{key}.json") for key in ("summary", "metadata")}
+                if all(info is not None and info.file_size <= MEMBER_LIMIT for info in corpus_raw.values()):
+                    throughput["closure"]["owned_throughput"] = {key: archive.read(info) for key, info in corpus_raw.items()}
             receipt_inline = receipt.get("inline_acceptance") if isinstance(receipt, dict) else None
             if isinstance(receipt_inline, dict) and receipt_inline.get("requested") is True:
                 bundle: dict = {}
@@ -1246,6 +1942,58 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         problem = f"evidence member {member} is malformed JSON"
                         break
                 throughput["ast_pilot_bundle"] = bundle if not problem and len(bundle) == len(AST_PILOT_BUNDLE_FILES) else None
+            if isinstance(receipt, dict) and receipt.get("ast_retirement_acceptance") is not None and not problem:
+                bundle = {}
+                for key, member in AST_RETIREMENT_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required issue #4058 evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed JSON"
+                        break
+                if not problem and len(bundle) == len(AST_RETIREMENT_BUNDLE_FILES):
+                    bundle["files"] = throughput.get("sealed_files")
+                    throughput["ast_retirement_bundle"] = bundle
+                else:
+                    throughput["ast_retirement_bundle"] = None
+            if isinstance(receipt, dict) and receipt.get("constant_reuse_acceptance") is not None and not problem:
+                bundle = {}
+                for key, member in CONSTANT_REUSE_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required issue #3011 evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed JSON"
+                        break
+                throughput["constant_reuse_bundle"] = bundle if not problem and len(bundle) == len(CONSTANT_REUSE_BUNDLE_FILES) else None
+            if isinstance(receipt, dict) and receipt.get("process_floor") is not None and not problem:
+                bundle = {}
+                for key, member in PROCESS_FLOOR_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required issue #1125 evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed JSON"
+                        break
+                throughput["process_floor_bundle"] = bundle if not problem and len(bundle) == len(PROCESS_FLOOR_BUNDLE_FILES) else None
             if isinstance(receipt, dict) and receipt.get("throughput_real_source") is not None and not problem:
                 bundle = {}
                 for key, member in REAL_SOURCE_BUNDLE_FILES.items():
@@ -1315,6 +2063,23 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                 throughput["frontend_selector_bundle"] = (bundle if not problem and
                                                           len(bundle) == len(FRONTEND_SELECTOR_BUNDLE_FILES) else None)
+            if isinstance(receipt, dict) and receipt.get("frontend_nesting") is not None and not problem:
+                bundle = {}
+                for key, member in FRONTEND_NESTING_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required frontend-nesting evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["frontend_nesting_bundle"] = (bundle if not problem and
+                                                         len(bundle) == len(FRONTEND_NESTING_BUNDLE_FILES) else None)
             if isinstance(receipt, dict) and receipt.get("wild_linker") is not None and not problem:
                 bundle = {}
                 for key, member in WILD_LINKER_BUNDLE_FILES.items():
@@ -1346,6 +2111,23 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         break
                 throughput["link_tls_bundle"] = (bundle if not problem and
                                                  len(bundle) == len(LINK_TLS_BUNDLE_FILES) else None)
+            if isinstance(receipt, dict) and receipt.get("selfhost_inline") is not None and not problem:
+                bundle = {}
+                for key, member in SELFHOST_INLINE_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required self-host inline evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed"
+                        break
+                throughput["selfhost_inline_bundle"] = (bundle if not problem and
+                                                        len(bundle) == len(SELFHOST_INLINE_BUNDLE_FILES) else None)
     return receipt, summary, problem, artifact, throughput
 
 
@@ -1411,21 +2193,31 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_counts = {line: head_lines.count(line) for line in ANALYZER_REQUEST_LINES}
     head_inline_count = head_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE)
     head_ast_count = head_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE)
+    head_retirement_count = head_lines.count(AST_RETIREMENT_REQUEST_LINE)
+    head_reuse_count = head_lines.count(CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE)
+    head_floor_count = head_lines.count(PROCESS_FLOOR_REQUEST_LINE)
     head_real_count = head_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE)
     head_production_count = head_lines.count(PRODUCTION_PROFILE_REQUEST_LINE)
     head_probes_count = head_lines.count(COMPILER_PROBES_REQUEST_LINE)
     head_selector_count = head_lines.count(FRONTEND_SELECTOR_REQUEST_LINE)
     head_linker_count = head_lines.count(WILD_LINKER_REQUEST_LINE)
     head_link_tls_count = head_lines.count(LINK_TLS_REQUEST_LINE)
+    head_selfhost_count = head_lines.count(SELFHOST_INLINE_REQUEST_LINE)
+    head_nesting_count = head_lines.count(FRONTEND_NESTING_REQUEST_LINE)
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     ast_deltas = []
+    retirement_deltas = []
+    reuse_deltas = []
+    floor_deltas = []
     real_deltas = []
     production_deltas = []
     probes_deltas = []
     linker_deltas = []
     selector_deltas = []
     link_tls_deltas = []
+    selfhost_deltas = []
+    nesting_deltas = []
     for parent in parent_shas:
         parent_bytes, problem = _github_file(api, parent)
         if problem:
@@ -1438,18 +2230,41 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
             parent_analyzer_deltas[line].append(head_counts[line] - parent_lines.count(line))
         parent_inline_counts.append(parent_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE))
         ast_deltas.append(head_ast_count - parent_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE))
+        retirement_deltas.append(head_retirement_count - parent_lines.count(AST_RETIREMENT_REQUEST_LINE))
+        reuse_deltas.append(head_reuse_count - parent_lines.count(CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE))
+        floor_deltas.append(head_floor_count - parent_lines.count(PROCESS_FLOOR_REQUEST_LINE))
         real_deltas.append(head_real_count - parent_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE))
         production_deltas.append(head_production_count - parent_lines.count(PRODUCTION_PROFILE_REQUEST_LINE))
         probes_deltas.append(head_probes_count - parent_lines.count(COMPILER_PROBES_REQUEST_LINE))
         selector_deltas.append(head_selector_count - parent_lines.count(FRONTEND_SELECTOR_REQUEST_LINE))
         linker_deltas.append(head_linker_count - parent_lines.count(WILD_LINKER_REQUEST_LINE))
         link_tls_deltas.append(head_link_tls_count - parent_lines.count(LINK_TLS_REQUEST_LINE))
+        selfhost_deltas.append(head_selfhost_count - parent_lines.count(SELFHOST_INLINE_REQUEST_LINE))
+        nesting_deltas.append(head_nesting_count - parent_lines.count(FRONTEND_NESTING_REQUEST_LINE))
     ast_record = receipt.get("ast_pilot_acceptance")
     if ast_record is not None and not all(delta == 1 for delta in ast_deltas):
         return ("the exact ast-pilot selector was not freshly added once at this head relative to every parent; "
                 "append one selector line for each explicit ast-pilot request")
     if ast_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in ast_deltas):
         return "a fresh ast-pilot selector has no ast-pilot acceptance record in the receipt"
+    retirement_record = receipt.get("ast_retirement_acceptance")
+    if retirement_record is not None and not all(delta == 1 for delta in retirement_deltas):
+        return ("the exact ast-retirement selector was not freshly added once at this head relative to every parent; "
+                "append one selector line for each explicit ast-retirement request")
+    if retirement_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in retirement_deltas):
+        return "a fresh ast-retirement selector has no ast-retirement acceptance record in the receipt"
+    reuse_record = receipt.get("constant_reuse_acceptance")
+    if reuse_record is not None and not all(delta == 1 for delta in reuse_deltas):
+        return ("the exact constant-reuse selector was not freshly added once at this head relative to every parent; "
+                "append one selector line for each explicit constant-reuse request")
+    if reuse_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in reuse_deltas):
+        return "a fresh constant-reuse selector has no constant-reuse acceptance record in the receipt"
+    floor_record = receipt.get("process_floor")
+    if floor_record is not None and not all(delta == 1 for delta in floor_deltas):
+        return ("the exact process-floor selector was not freshly added once at this head relative to every parent; "
+                "append one selector line for each explicit process-floor request")
+    if floor_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in floor_deltas):
+        return "a fresh process-floor selector has no process-floor record in the receipt"
     real_record = receipt.get("throughput_real_source")
     if real_record is not None and not all(delta == 1 for delta in real_deltas):
         return ("the exact real-source throughput selector was not freshly added once at this head relative to every "
@@ -1486,6 +2301,18 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
                 "parent; append one selector line for each explicit link-tls request")
     if link_tls_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in link_tls_deltas):
         return "a fresh link-tls selector has no link-tls record in the receipt"
+    selfhost_record = receipt.get("selfhost_inline")
+    if selfhost_record is not None and not all(delta == 1 for delta in selfhost_deltas):
+        return ("the exact self-host inline selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit self-host inline request")
+    if selfhost_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in selfhost_deltas):
+        return "a fresh self-host inline selector has no self-host inline record in the receipt"
+    nesting_record = receipt.get("frontend_nesting")
+    if nesting_record is not None and not all(delta == 1 for delta in nesting_deltas):
+        return ("the exact frontend-nesting selector was not freshly added once at this head relative to every "
+                "parent; append one selector line for each explicit frontend-nesting request")
+    if nesting_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in nesting_deltas):
+        return "a fresh frontend-nesting selector has no frontend-nesting record in the receipt"
     if analyzer_profile:
         selected_deltas = parent_analyzer_deltas[request_line]
         other_deltas = [delta for line, values in parent_analyzer_deltas.items() if line != request_line
@@ -1543,6 +2370,43 @@ def inventory_rows(shown: dict) -> str:
     return ", ".join(f"`{row}`" for row in rows) or "none"
 
 
+UNRESOLVED_OUTCOMES = ("no detectable difference", "below-floor", "inconclusive")
+
+
+def selected_profile(shown: dict, profile: dict) -> str:
+    """The profile a report measured and which trusted route selected it (#3212)."""
+    route = shown.get("main_route") if isinstance(shown.get("main_route"), dict) else None
+    if shown.get("mode") == "pull":
+        return f"`{profile.get('name', 'NA')}` (explicit pull-request request)"
+    if route is None:
+        return f"`{profile.get('name', 'NA')}` (Main route not resolved)"
+    policy = str(route.get("main_policy_revision", "NA"))[:12]
+    if route.get("main_owned") is True:
+        certificate = route.get("main_certificate_revision")
+        reviewed = f"certificate `{certificate[:12]}`" if isinstance(certificate, str) and certificate != "-" \
+            else "no short-profile certificate"
+        return f"`{route.get('main_profile', 'NA')}` (authenticated automatic Main route, policy `{policy}`, {reviewed})"
+    return f"`{route.get('main_profile', 'NA')}` (Main routing disabled at policy `{policy}`)"
+
+
+def achieved_uncertainty(verdict: dict) -> str:
+    """Half the 95% B/A interval in percent of the baseline, or NA when unmeasured."""
+    low, high = verdict.get("ci_low"), verdict.get("ci_high")
+    result = "NA (not measured)"
+    if type(low) in (int, float) and type(high) in (int, float) and 0 < low <= high < float("inf"):
+        result = "±%.2f%% (half-width of the 95%% CI of wall B/A)" % ((high - low) * 50.0)
+    return result
+
+
+def leg_costs(timings: dict) -> str:
+    """Per-leg host seconds as recorded; missing legs stay NA, never zero."""
+    builds = timings.get("build_seconds") if isinstance(timings.get("build_seconds"), dict) else {}
+    return "builds %s s, self-host measurement %s s, corpus %s s, total %s s; queue delay %s s" % (
+        " + ".join(number(builds.get(key), "%.0f") for key in ("baseline", "candidate")),
+        number(timings.get("measurement_seconds"), "%.0f"), number(timings.get("throughput_seconds"), "%.0f"),
+        number(timings.get("total_seconds"), "%.0f"), number(timings.get("queue_delay_seconds"), "%.0f"))
+
+
 def commit_report(shown: dict, summary: object, conclusion: str, title: str, notes: list[str],
                   link_line: str) -> str:
     """The commit-page report (#2804): verdict, scope, metrics with units, links; tables collapsed."""
@@ -1588,12 +2452,14 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
     unit = wall.get("unit") if isinstance(wall.get("unit"), str) else "s"
     coverage = shown.get("coverage") if isinstance(shown.get("coverage"), dict) else {}
     baseline = range_label(coverage.get("range"), coverage.get("first_parent")) or "first parent or range baseline"
+    unresolved = " This outcome is unresolved at the achieved resolution: it is neither equivalence nor a " \
+        "performance pass." if verdict.get("outcome") in UNRESOLVED_OUTCOMES else ""
     lines = [
         f"### {check_name(shown.get('mode', 'main'))}: {conclusion}, {title}", "",
         (verdict.get("text") if isinstance(verdict.get("text"), str) else
          "No valid measurement: this commit was not benchmarked by this attempt.")
-        + " Performance policy: report-only. This never blocks merging, and a successful measurement is not by "
-        "itself a speedup or an equivalence.", "",
+        + unresolved + " Performance policy: report-only. This never blocks merging, and a successful measurement "
+        "is not by itself a speedup or an equivalence.", "",
         "| | |", "| --- | --- |",
         f"| Candidate | `{identity.get('head', 'NA')}` (this commit) |",
         f"| Baseline | `{identity.get('base', 'NA')}` ({baseline}) |",
@@ -1603,6 +2469,9 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
         f"| Wall median A / B | {number(wall.get('a_median'), '%.6g')} {unit} / "
         f"{number(wall.get('b_median'), '%.6g')} {unit} |",
         f"| Complete pairs | {number(plan.get('complete_pairs'), '%d')} |",
+        f"| Achieved uncertainty | {achieved_uncertainty(verdict)} |",
+        f"| Selected profile | {selected_profile(shown, profile)} |",
+        f"| Host cost per leg | {leg_costs(timings)} |",
         f"| Host (observed) | `{host.get('cpu_model', 'NA')}` |",
         f"| Inventory rows discharged | {inventory_rows(shown)} |",
         f"| Scope | `{profile.get('name', 'NA')}`: {profile.get('workload', 'NA')}; corpus "
@@ -1621,6 +2490,10 @@ def commit_report(shown: dict, summary: object, conclusion: str, title: str, not
         text = "\n".join(lines[:lines.index("<details><summary>All metrics, identities and host timings</summary>")]) \
             + "\nThe full tables exceed the comment bound; see the full check."
     return text
+
+
+# The bench workflow's run-name: "9700X request <request run>.<request attempt> head <sha>".
+REQUEST_TITLE = re.compile(r"9700X request ([1-9][0-9]*)\.([1-9][0-9]*) head ([0-9a-f]{40})")
 
 
 def recovered_identity(api: Api, repository: str, run_id: str, attempt: str) -> tuple[dict, str, str, list[str]]:
@@ -1650,6 +2523,11 @@ def recovered_identity(api: Api, repository: str, run_id: str, attempt: str) -> 
     head = heads[0] if len(heads) == 1 else ""
     expected = {"mode": "main", "repository": repository, "ref": "refs/heads/main", "head": head,
                 "trusted_revision": run.get("head_sha", ""), "run_id": run_id, "run_attempt": attempt}
+    # The workflow's own run-name records the request run and attempt that started it; sealed
+    # raw evidence (#2918) is verified under that original request attempt.
+    title = REQUEST_TITLE.fullmatch(run.get("display_title", "")) if isinstance(run.get("display_title"), str) else None
+    if title and title.group(3) == head:
+        expected["titled_request"] = (title.group(1), title.group(2))
     if not head:
         problems.append(f"expected one evidence artifact of attempt {attempt}, found {len(heads)}")
     return expected, result["authorize"], result["compare"], problems
@@ -4271,9 +5149,50 @@ def preparation_validate(api: Api, authority: dict, files: dict[str, bytes]) -> 
             "control_failures": controls, "authenticated_attempt_history": history, "problems": []}
 
 
+PREPARATION_FAILURE_TAIL_BYTES = 512
+
+
+def preparation_failure_problems(files: dict[str, bytes]) -> list[str]:
+    """Diagnostics only (#3960): name the retained failed controller phase.
+
+    Reads the artifact's raw controller.tsv, preparation.tsv and the failed
+    phase's stderr log as data. Never raises and never changes the packet
+    state, qualification or publication refusal."""
+    def clean(raw: bytes) -> str:
+        return "".join(chr(byte) if 32 <= byte <= 126 else " " if byte in (9, 10, 13) else "?" for byte in raw)
+    problems = []
+    try:
+        rows = sampling_tsv(files.get("controller.tsv", b""), True)
+    except (ValueError, UnicodeError, TypeError):
+        rows = None
+        problems.append("controller phase table is missing or malformed in the retained artifact")
+    for row in (rows or [])[:32]:
+        if row.get("state") != "failed":
+            continue
+        stem = f"controller-{row.get('stage')}-{row.get('phase')}"
+        error = files.get(stem + ".stderr.log", b"")
+        error = error if isinstance(error, bytes) else b""
+        problems.append(("failed controller phase " + " ".join(
+            f"{key}={clean(str(row.get(key, '')).encode('ascii', 'replace'))}" for key in
+            ("stage", "phase", "wall_us", "exit_status", "timed_out", "cleanup_failed", "cancelled")) +
+            f" stderr_bytes={len(error)} stderr_tail=\"" +
+            clean(error[-PREPARATION_FAILURE_TAIL_BYTES:]).replace('"', "?") + "\"")[:1000])
+    try:
+        terminal = sampling_tsv(files.get("preparation.tsv", b""))
+    except (ValueError, UnicodeError, TypeError):
+        terminal = None
+        problems.append("worker preparation.tsv is missing or malformed in the retained artifact")
+    if terminal is not None and terminal.get("process_state") != "complete":
+        problems.append(("worker preparation.tsv " + " ".join(
+            f"{key}={clean(str(terminal[key]).encode('ascii', 'replace'))}" for key in
+            ("process_state", "reason", "cleanup_proven", "tools_before", "tools_after", "exported")
+            if key in terminal))[:1000])
+    return problems
+
+
 def preparation_publish(environment: dict) -> int:
     api, authority = preparation_authority(environment)
-    files, artifact = {}, {}
+    files, artifact, diagnostics = {}, {}, []
     result = {"schema": "buster-compiler-preparation-publication-v1", "packet_state": "incomplete",
               "qualification_state": "unqualified", "default_activated": False, "routine_profile_enabled": False,
               "evidence_class": "unqualified-preparation-research", "phase": "qualify", "packet": 0,
@@ -4281,11 +5200,13 @@ def preparation_publish(environment: dict) -> int:
     try:
         files, artifact = preparation_read_artifact(api, authority)
         if environment.get("BQ_PREPARATION_RESULT") != "success":
+            diagnostics = preparation_failure_problems(files)
             raise ValueError("preparation physical job is failed, cancelled, skipped or unavailable")
         result = preparation_validate(api, authority, files)
     except (OSError, ValueError, UnicodeError, TypeError, KeyError, IndexError, AttributeError, RecursionError,
             urllib.error.URLError, TimeoutError) as error:
         result["problems"].append(("evidence validation failed: " + type(error).__name__ + ": " + str(error))[:1000])
+        result["problems"].extend(diagnostics)
         result["accounting"] = preparation_observed_costs(api, authority, files)
         result["authenticated_attempt_history"] = list(authority["history"]) + [{
             "phase": "qualify", "packet": 0, "request_run_id": authority["request_id"], "run_id": authority["run_id"],
@@ -4917,6 +5838,68 @@ def utility_leg_records(authority: dict, files: dict[str, bytes], host: dict, te
 
 
 
+def lab_raw_inference(files: dict[str, bytes], prefix: str, records: list, variant_meta: dict, summary: dict,
+                      raw: dict, seed: int, min_effect: float) -> object:
+    """Recompute a compare lab's inference from its retained raw pairs with the trusted uarch_lab statistics.
+
+    Each record must be the next member of the declared ABBA order, succeeded, deterministic and
+    bounded, with its counter state equal to its variant's actual probe and the raw counter and
+    compiler-metrics files its availability claims. The saved counters, metrics, phases, checks
+    and verdict must equal the recomputed ones; ValueError otherwise. Returns the phases.
+    """
+    from sampling_qualification_receipt import _lab
+    loaded = []
+    for index, record in enumerate(records):
+        number, variant = index // 2 + 1, ("ab" if index // 2 % 2 == 0 else "ba")[index % 2]
+        order = "AB" if number % 2 else "BA"
+        if not isinstance(record, dict) or type(record.get("pair")) is not int or record["pair"] != number or \
+                record.get("order") != order or record.get("variant") != variant or \
+                type(record.get("exit")) is not int or record["exit"] != 0 or record.get("identical") is not True or \
+                not _number(record.get("span_s")) or \
+                not 0 < record["span_s"] <= 3600 or type(record.get("counters")) is not bool:
+            raise ValueError("lab raw pair is failed, truncated, unordered or non-deterministic")
+        if record["counters"] is not variant_meta[variant]["capabilities"]["perf_stat"]["usable"]:
+            raise ValueError("lab raw timed counter status differs from its actual probe")
+        for field in ("cpu_s", "maxrss_bytes", "harness_rss_bytes", "wrapper_rss_bytes"):
+            value = record.get(field)
+            if value is not None and (not _number(value) or value < 0):
+                raise ValueError("lab unavailable resource observation is malformed")
+        stem = prefix + "pairs/" + f"{number:04d}-{variant}"
+        counter_raw, metrics_raw = files.get(stem + ".csv"), files.get(stem + ".ccmetrics")
+        if record["counters"] and (not isinstance(counter_raw, bytes) or not counter_raw) or \
+                variant_meta[variant]["collection"]["metrics_out"] and (not isinstance(metrics_raw, bytes) or not metrics_raw):
+            raise ValueError("lab claimed counters/compiler metrics lack their raw files")
+        rows = _lab.parse_stat((counter_raw or b"").decode("utf-8"))
+        metrics = _lab.parse_cc_metrics((metrics_raw or b"").decode("utf-8"))
+        wall_ns = metrics["header"].get("wall_ns")
+        task = record.get("cpu_s") if record["counters"] is False else _lab.task_seconds(rows)
+        loaded.append(dict(record, values=_lab.stat_values(rows), lines=_lab.stat_lines(rows), metrics=metrics,
+                           cc_wall_s=_lab.ratio(wall_ns, 1e9) if type(wall_ns) in (int, float) else None, task_s=task))
+    pairs = _lab.complete_pairs(loaded)
+    metrics = {key: dict(_lab.compare_series([(pair["metrics_a"][key], pair["metrics_b"][key]) for pair in pairs],
+                    unit, direction, seed, time_metric=unit == "s", floor=_lab.metric_floor(key, min_effect)), label=label)
+               for key, unit, direction, label in _lab.COMPARE_METRICS}
+    phase_records = [(_lab.measured_input(pair["a"]["metrics"]), _lab.measured_input(pair["b"]["metrics"])) for pair in pairs]
+    phase_records = [(a, b) for a, b in phase_records if a and b]
+    phases = None
+    if phase_records:
+        phases = {}
+        for phase in _lab.PHASES + ("total",):
+            a, b = (_lab.phase_ns_series([pair[side] for pair in phase_records], phase) for side in (0, 1))
+            values = [(x / 1e6, y / 1e6) for x, y in zip(a, b)] if a and b else [(None, None)] * len(phase_records)
+            phases[phase] = _lab.compare_series(values, "ms", "lower", seed, time_metric=True, floor=min_effect / 100.0)
+    counter_states = [variant_meta[key]["capabilities"]["perf_stat"] for key in ("a", "b")]
+    counters = {"perf_stat": all(row["usable"] for row in counter_states),
+                "reason": "; ".join(sorted({str(row["reason"]) for row in counter_states}))}
+    if summary.get("counters") != counters or summary.get("phase_metrics") != raw.get("phase_metrics"):
+        raise ValueError("lab saved optional counter/phase availability contradicts raw observations")
+    if summary.get("metrics") != metrics or summary.get("phases") != phases or \
+            summary.get("checks") != _lab.compare_checks(pairs) or \
+            summary.get("verdict") != _lab.compare_verdict(metrics, phases, min_effect):
+        raise ValueError("lab inference contradicts independently retained raw pairs")
+    return phases
+
+
 def utility_series_replay(files: dict[str, bytes], prefix: str, plan: dict, leg: str, binaries: dict, *,
                           expected_cpu_model: str = "AMD Ryzen 7 9700X 8-Core Processor",
                           expected_profile: str = "compiler-compare-v1", work_root: str | None = None) -> dict:
@@ -4989,55 +5972,7 @@ def utility_series_replay(files: dict[str, bytes], prefix: str, plan: dict, leg:
             if not isinstance(files.get(prefix + key + "/" + suffix), bytes):
                 raise ValueError("utility ordinary raw preparation/warmup/command log is missing")
     sampling_json(files, prefix + "a/env/env.json")
-    loaded = []
-    for index, record in enumerate(records):
-        number, variant = index // 2 + 1, ("ab" if index // 2 % 2 == 0 else "ba")[index % 2]
-        order = "AB" if number % 2 else "BA"
-        if not isinstance(record, dict) or type(record.get("pair")) is not int or record["pair"] != number or \
-                record.get("order") != order or record.get("variant") != variant or \
-                type(record.get("exit")) is not int or record["exit"] != 0 or record.get("identical") is not True or \
-                not _number(record.get("span_s")) or \
-                not 0 < record["span_s"] <= 3600 or type(record.get("counters")) is not bool:
-            raise ValueError("utility ordinary raw pair is failed, truncated, unordered or non-deterministic")
-        if record["counters"] is not variant_meta[variant]["capabilities"]["perf_stat"]["usable"]:
-            raise ValueError("utility raw timed counter status differs from its actual probe")
-        for field in ("cpu_s", "maxrss_bytes", "harness_rss_bytes", "wrapper_rss_bytes"):
-            value = record.get(field)
-            if value is not None and (not _number(value) or value < 0):
-                raise ValueError("utility unavailable resource observation is malformed")
-        stem = prefix + "pairs/" + f"{number:04d}-{variant}"
-        counter_raw, metrics_raw = files.get(stem + ".csv"), files.get(stem + ".ccmetrics")
-        if record["counters"] and (not isinstance(counter_raw, bytes) or not counter_raw) or \
-                variant_meta[variant]["collection"]["metrics_out"] and (not isinstance(metrics_raw, bytes) or not metrics_raw):
-            raise ValueError("utility claimed counters/compiler metrics lack their raw files")
-        rows = _lab.parse_stat((counter_raw or b"").decode("utf-8"))
-        metrics = _lab.parse_cc_metrics((metrics_raw or b"").decode("utf-8"))
-        wall_ns = metrics["header"].get("wall_ns")
-        task = record.get("cpu_s") if record["counters"] is False else _lab.task_seconds(rows)
-        loaded.append(dict(record, values=_lab.stat_values(rows), lines=_lab.stat_lines(rows), metrics=metrics,
-                           cc_wall_s=_lab.ratio(wall_ns, 1e9) if type(wall_ns) in (int, float) else None, task_s=task))
-    pairs = _lab.complete_pairs(loaded)
-    metrics = {key: dict(_lab.compare_series([(pair["metrics_a"][key], pair["metrics_b"][key]) for pair in pairs],
-                    unit, direction, 20261003, time_metric=unit == "s", floor=_lab.metric_floor(key, 0.5)), label=label)
-               for key, unit, direction, label in _lab.COMPARE_METRICS}
-    phase_records = [(_lab.measured_input(pair["a"]["metrics"]), _lab.measured_input(pair["b"]["metrics"])) for pair in pairs]
-    phase_records = [(a, b) for a, b in phase_records if a and b]
-    phases = None
-    if phase_records:
-        phases = {}
-        for phase in _lab.PHASES + ("total",):
-            a, b = (_lab.phase_ns_series([pair[side] for pair in phase_records], phase) for side in (0, 1))
-            values = [(x / 1e6, y / 1e6) for x, y in zip(a, b)] if a and b else [(None, None)] * len(phase_records)
-            phases[phase] = _lab.compare_series(values, "ms", "lower", 20261003, time_metric=True, floor=0.005)
-    counter_states = [variant_meta[key]["capabilities"]["perf_stat"] for key in ("a", "b")]
-    counters = {"perf_stat": all(row["usable"] for row in counter_states),
-                "reason": "; ".join(sorted({str(row["reason"]) for row in counter_states}))}
-    if summary.get("counters") != counters or summary.get("phase_metrics") != raw.get("phase_metrics"):
-        raise ValueError("utility saved optional counter/phase availability contradicts raw observations")
-    if summary.get("metrics") != metrics or summary.get("phases") != phases or \
-            summary.get("checks") != _lab.compare_checks(pairs) or \
-            summary.get("verdict") != _lab.compare_verdict(metrics, phases, 0.5):
-        raise ValueError("utility ordinary inference contradicts independently retained raw pairs")
+    phases = lab_raw_inference(files, prefix, records, variant_meta, summary, raw, 20261003, 0.5)
     # Flags, cross-arm outputs, wide CIs and NA counters remain report-only.
     return {"complete_pairs": count, "observed_timed_wall_us": sum(row["span_s"] for row in records) * 1000000,
             "verdict": summary["verdict"], "checks": summary["checks"], "warnings": summary.get("warnings"),
@@ -5516,6 +6451,108 @@ def utility_publish(environment: dict) -> int:
 
 
 
+UNCHANGED_SCHEMA = "buster-ci-main-unchanged-v1"
+UNCHANGED_TITLE = "Not measured: compiler/build and benchmark inputs unchanged."
+UNCHANGED_KEYS = ("schema", "event", "unchanged", "base", "head", "policy", "subject_changes", "policy_changes", "reason")
+
+
+def unchanged_proof(api: Api, environment: dict, expected: dict, route: dict | None, compare_result: str) -> tuple[dict, list[str]]:
+    """The validated #3923 unchanged-input decision for one authorized MAIN attempt, or its refusal reasons.
+
+    Every identity is re-checked here as data: the native receipt must name
+    this attempt's baseline, head and trusted policy; the compare job must not
+    have run; the route must be the non-owned legacy route; and the baseline
+    must still hold a valid main measurement in GitHub's own check records,
+    so a reference that changed or vanished while planning never anchors a skip.
+    """
+    get = lambda key: environment.get(key, "")  # noqa: E731
+    problems: list[str] = []
+    try:
+        receipt = json.loads(get("BQ_UNCHANGED_RECEIPT"), object_pairs_hook=unique_object)
+    except ValueError:
+        receipt = None
+    if not (isinstance(receipt, dict) and tuple(receipt) == UNCHANGED_KEYS):
+        problems.append("unchanged-input receipt is missing or malformed")
+        receipt = {}
+    for key, wanted in (("schema", UNCHANGED_SCHEMA), ("event", "main_push"), ("unchanged", True),
+                        ("base", expected.get("base")), ("head", expected.get("head")),
+                        ("policy", get("BQ_TRUSTED_REVISION")), ("reason", "reviewed-prose-only")):
+        if receipt and receipt.get(key) != wanted:
+            problems.append(f"unchanged-input receipt {key} {receipt.get(key)!r} is not {wanted!r}")
+    for key in ("subject_changes", "policy_changes"):
+        if receipt and not (type(receipt.get(key)) is int and receipt[key] >= 0):
+            problems.append(f"unchanged-input receipt {key} is not a count")
+    if compare_result != "skipped":
+        problems.append(f"compare job result is {compare_result!r}, not skipped")
+    if route is None or route.get("main_owned") is not False:
+        problems.append("unchanged-input skips apply only to the non-owned legacy main route")
+    if not DECIMAL.fullmatch(get("BQ_CLASSIFICATION_MS")):
+        problems.append("hosted classification time is missing")
+    reference = {"check_url": get("BQ_REFERENCE_CHECK_URL"), "measured_at": get("BQ_REFERENCE_MEASURED_AT")}
+    base = expected.get("base", "")
+    if get("BQ_BASE_MEASURED") != "true" or not SHA.fullmatch(base):
+        problems.append("the baseline is not an actual measurement")
+    elif not problems:
+        rows = [row for row in owned_checks(api, base, "main", "") if measured(row, base)]
+        if not any(row.get("html_url") == reference["check_url"] and row.get("completed_at") == reference["measured_at"]
+                   for row in rows):
+            problems.append("the baseline measurement changed or vanished while planning")
+    return ({**receipt, "reference": reference, "classification_ms": int(get("BQ_CLASSIFICATION_MS"))}
+            if not problems else {}), problems
+
+
+def unchanged_report(expected: dict, proof: dict, request_attempt: str, coverage: dict) -> str:
+    """The neutral report; it links the reference measurement and copies none of its samples or verdict."""
+    reference = proof["reference"]
+    lines = [f"**{check_name('main')}: neutral**", "", f"### {UNCHANGED_TITLE}", "",
+             "No 9700X job was allocated: no compiler was built and nothing was sampled. This is not a "
+             "measurement and carries no verdict, samples or 0% change; it makes no claim about physical host "
+             "conditions, the host toolchain or performance (docs/compiler-main-unchanged-skip.md).", "",
+             f"- Head: `{expected['head']}` (request run {expected['request_run_id']}.{request_attempt}, executor "
+             f"run {expected['run_id']} attempt {expected['run_attempt']})",
+             f"- Last actual measurement: `{expected['base']}`, [its check]({reference['check_url']}) completed "
+             f"{reference['measured_at']}; any regression or failure it reported is unchanged by this skip",
+             f"- Range: {expected.get('range', 'NA')} first-parent commits since that measurement "
+             f"(first parent `{expected.get('first_parent', 'NA')}`)",
+             f"- Classifier: `{proof['schema']}` at trusted revision `{proof['policy']}`; reason "
+             f"`{proof['reason']}`; {proof['subject_changes']} prose path changes in the measured subject, "
+             f"{proof['policy_changes']} in the measurement policy since the head",
+             f"- Observed hosted classification time: {proof['classification_ms'] / 1000:.3f} s. Avoided physical "
+             "runner time is not estimated here.", ""]
+    lines += render_inventory_coverage(coverage)
+    return "\n".join(lines)
+
+
+def unchanged_publish(api: Api, environment: dict, expected: dict, proof: dict) -> int:
+    """Complete the attempt's check as neutral and hand the commit report its entry."""
+    get = lambda key: environment.get(key, "")  # noqa: E731
+    head, attempt, mode = expected["head"], expected["run_attempt"], "main"
+    coverage = covered_inventory_rows(None, "neutral", mode)
+    shown = {"mode": mode, "identity": expected, "state": "unchanged-not-measured", "unchanged": proof,
+             "coverage": {"first_parent": expected.get("first_parent"), "range": expected.get("range")},
+             "inventory_coverage": coverage, "reasons": [UNCHANGED_TITLE]}
+    workflow_url = run_url(expected["repository"], expected["run_id"], attempt)
+    report = unchanged_report(expected, proof, get("BQ_REQUEST_ATTEMPT"), coverage)
+    marker = attempt_marker(head, mode, expected["request_run_id"], get("BQ_REQUEST_ATTEMPT"), attempt)
+    body = {"details_url": get("BQ_DETAILS_URL"), "status": "completed", "conclusion": "neutral",
+            "output": {"title": UNCHANGED_TITLE, "summary": (report + "\n\n" + links("", workflow_url, attempt, "", ""))[:TEXT_LIMIT],
+                       "text": ("```json\n" + json.dumps(shown, sort_keys=True, indent=2))[:TEXT_LIMIT - 4] + "\n```"}}
+    rows, written = complete_check(api, head, mode, marker, body)
+    check_url = rows[-1].get("html_url", "") if rows and isinstance(rows[-1].get("html_url"), str) else ""
+    print(f"BENCH_COMPILER_PUBLISHED neutral unchanged check_runs={[row.get('id') for row in rows]}"
+          + ("" if written else " (already completed by another writer; left unchanged)"))
+    link_line = links(check_url, workflow_url, attempt, "", "")
+    with open(get("GITHUB_STEP_SUMMARY") or os.devnull, "a", encoding="utf-8") as stream:
+        stream.write(report + "\n\n" + link_line + "\n")
+    entry = {"mode": mode, "head": head, "base": expected["base"], "run_id": expected["run_id"], "run_attempt": attempt,
+             "request_run_id": expected["request_run_id"], "trusted_revision": expected["trusted_revision"],
+             "conclusion": "neutral", "title": UNCHANGED_TITLE, "captured_at": stamp(), "check_url": check_url,
+             "run_url": workflow_url, "artifact_url": "", "artifact_expires_at": "NA",
+             "markdown": (report + "\n\n" + link_line)[:REPORT_MARKDOWN_LIMIT]}
+    write_output(get("GITHUB_OUTPUT"), {"comment": json.dumps(entry, sort_keys=True, separators=(",", ":")), "head": head})
+    return 0
+
+
 def main() -> int:
     if sys.argv[1:] in (["utility-queue"], ["utility-publish"]):
         try:
@@ -5563,6 +6600,7 @@ def main() -> int:
         workflow_revision = ""
         if recover:
             expected, authorize_result, compare_result, problems = recovered_identity(api, repository, run_id, attempt)
+            titled = expected.pop("titled_request", None)
             head = expected["head"]
             authorized = authorize_result == "success" and not problems
             # The original run's own workflow revision, before the Main route rebinds trusted_revision.
@@ -5575,7 +6613,7 @@ def main() -> int:
                         "run_id": run_id, "run_attempt": attempt}
             if mode == "main":
                 expected.update(first_parent=get("BQ_FIRST_PARENT"), range=get("BQ_RANGE"))
-            compare_result, problems = get("BQ_COMPARE_RESULT"), []
+            compare_result, problems, titled = get("BQ_COMPARE_RESULT"), [], None
             authorized = get("BQ_AUTHORIZE_RESULT") == "success" and get("BQ_AUTHORIZED_ATTEMPT") == attempt
         notes.extend(problems)
         receipt = summary = None
@@ -5585,6 +6623,7 @@ def main() -> int:
         route = None
         machine_problems: list[str] = []
         machine_facts: dict = {}
+        evidence_bundle: dict | None = None
         if mode == "main" and authorized:
             try:
                 route = main_route(api, repository, run_id, attempt)
@@ -5593,6 +6632,13 @@ def main() -> int:
                 authorized = False
                 problem = "Main route refused: " + str(error)
                 notes.append(problem)
+        # #3923: a proven unchanged-input attempt never dispatched the 9700X;
+        # a refused proof falls through and reports the missing measurement.
+        if mode == "main" and not recover and authorized and get("BQ_UNCHANGED") == "true":
+            proof, refusals = unchanged_proof(api, environment, expected, route, compare_result)
+            if proof:
+                return unchanged_publish(api, environment, expected, proof)
+            notes.extend("unchanged-input skip refused: " + reason for reason in refusals)
         # #3714: the hosted pre-dispatch corpus disposition. An unsupported base was never
         # dispatched, so it has no evidence to read; only "historical" admits the named recipe.
         admission = get("BQ_HARNESS_ADMISSION") if mode == "pull" and not recover else "admitted"
@@ -5621,6 +6667,16 @@ def main() -> int:
                 problems = bind_request(api, expected, receipt, trusted_main_route=route)
                 notes.extend(problems)
                 authorized = not problems
+            owned = route is not None and route["main_owned"]
+            if isinstance(receipt, dict) and not owned and receipt.get("profile") == PROFILE:
+                # Recovery verifies under the original request attempt its own run-name records; one
+                # that names another request run, or none, cannot name a sealed bundle and refuses it.
+                request_attempt = get("BQ_REQUEST_ATTEMPT") if not recover else \
+                    titled[1] if titled and titled[0] == expected.get("request_run_id") else ""
+                evidence_bundle = verify_evidence_bundle(throughput, expected, expected_corpus, request_attempt, receipt,
+                                                         not recover or sealing_required(api, workflow_revision))
+                if evidence_bundle_note(evidence_bundle):
+                    notes.append(evidence_bundle_note(evidence_bundle))
             if isinstance(receipt, dict):
                 require = not recover or machine_record_required(api, workflow_revision)
                 machine_problems, machine_facts = machine_record(throughput.get("machine"), receipt, mode, run_id,
@@ -5636,7 +6692,7 @@ def main() -> int:
                                                 "expected_measurement_revision": route["main_measurement_revision"]}
                                                if route is not None and route["main_owned"] else
                                                {"expected_throughput_profile": expected_corpus,
-                                                "dispatch_refusal": refusal}))
+                                                "dispatch_refusal": refusal, "evidence_bundle": evidence_bundle}))
         shown = dict(receipt) if isinstance(receipt, dict) else {"mode": mode, "identity": expected}
         # The authorized range, never the host's own account of it.
         shown.pop("coverage", None)
@@ -5648,6 +6704,8 @@ def main() -> int:
         shown["inventory_coverage"] = covered_inventory_rows(receipt, conclusion, mode)
         if machine_facts:
             shown["machine"] = machine_facts
+        if evidence_bundle is not None:
+            shown["evidence_bundle_verified"] = evidence_bundle
         if route is not None:
             shown["main_route"] = {key: route[key] for key in ("main_owned", *MAIN_ROUTE_FIELDS)}
         # The corpus as its own retained summary says, never the host's digest.

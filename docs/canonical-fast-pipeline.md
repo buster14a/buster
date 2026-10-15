@@ -135,7 +135,17 @@ module a second time. Any mutation between the two points clears the reuse,
 and the guard still scans whenever nothing has proven the current
 representation. In the default tests-enabled Release `ide`, a translation
 unit in which promotion changes any function therefore pays one strict scan
-before FAST, not two.
+before FAST, not two. The promotion-output check also reuses a strict input
+proof for each body promotion left unchanged; changed bodies still receive
+their independent output check. The allocation diagnostic counter
+`ir_construction.preparation_promotion_input_proofs_reused` counts these
+avoided body traversals. When that scan excludes a legacy-invalid body, its
+successful neighbors retain individual post-promotion proofs in temporary
+preparation storage. FAST reuses those exact-state proofs while still checking
+shared scope and every unproven body. The proofs expire at the end of the
+preparation call, before later caller mutations; transformed FAST output keeps
+its existing independent check. The allocation diagnostic counter
+`ir_construction.preparation_promotion_proofs_reused` counts this work reduction.
 
 ## Purity contract
 
@@ -218,11 +228,17 @@ map on every row the C builder commits through `c_ir_append_instruction`:
 
 - `fold_birth_scalar_rows`: committed `CAST`, `UNARY` and `BINARY` rows probed.
 - `fold_birth_<rule>`: rows a rule already folds from the operands committed
-  before them. `fold_birth_metadata_mismatches` counts identities rejected by
-  the replacement metadata check. `fold_birth_avoidable_bytes` is logical
-  row/value/operand/source storage: an identity needs none of it, while a
-  constant still needs its row and immediate. This is not an arena-call or RSS
-  figure.
+  before them (direct). `fold_birth_metadata_mismatches` counts identities
+  rejected by the replacement metadata check. `fold_birth_avoidable_bytes` is
+  logical row/value/operand/source storage for direct birth folds: an identity
+  needs none of it, while a constant still needs its row and immediate. This
+  is not an arena-call or RSS figure.
+- `fold_birth_cascade_<rule>`: rows no rule folds directly but one does once
+  earlier birth folds are applied: identity birth folds are followed to their
+  replacement, and constant birth folds supply their folded bits.
+  `fold_birth_cascade_uncached` counts rows that stayed unfoldable while an
+  operand's birth-constant bits had left the bounded cache, so it bounds the
+  cascades the census may have missed.
 - `fold_late_<rule>`: folds FAST actually applied. `fold_late_replaced_roots`
   counts the folds whose operand had to be followed through the replacement map
   (an earlier identity or a parameter sweep).
@@ -230,17 +246,119 @@ map on every row the C builder commits through `c_ir_append_instruction`:
 The rules are `cast_identity`, `cast_constant`, `unary_constant`,
 `binary_constant`, `binary_right_identity` and `binary_left_identity`. Probes
 suppress `ir_semantics` recording, so those counters keep measuring only the
-compiler's own semantic work. Rows that SSA construction inserts behind a commit
-(`ir_block_insert_instruction_after`) are not probed, and neither is
-inlined-callee output.
+compiler's own semantic work, and they allocate nothing, so `allocation.*` is
+unchanged.
 
-`fold_birth_*` and `fold_late_*` count independent populations. Birth counts
-include functions that FAST later skips or does not run (`-fno-canonical-fast`,
-budget and provenance skips) and rows that later passes delete. Late counts
-include rows that SSA insertion, promotion and inlining add after commit. No
-per-row birth classification reaches FAST, so neither a birth/late ratio nor
-late minus birth attributes or bounds the late folds that were available at
-commit; that needs a matched per-row association.
+### Matched birth/late association
+
+Taken alone, `fold_birth_*` and `fold_late_*` count independent populations.
+Birth counts include functions that FAST later skips or does not run
+(`-fno-canonical-fast`, budget and provenance skips) and rows that later passes
+delete. Late counts include rows that SSA insertion, promotion and inlining add
+after commit. Neither a birth/late ratio nor late minus birth attributes or
+bounds anything.
+
+The `fold_match_*` counters join them per row. The census stores its answer in
+the committed row: the diagnostic-only `IrInstruction.fold_birth` byte, which
+exists only under `BUSTER_BENCH_ALLOCATIONS` and occupies the row's existing
+padding, so `sizeof(IrInstruction)` stays 64. Whole-row copies carry it through
+promotion, `ir_rewrite_compact` renumbering, CFG publication and inlining; rows
+created after commit start zeroed. Each fold `ir_fast_fold` applies is counted
+once, by rule, in exactly one class:
+
+- `fold_match_direct_<rule>`: the row's birth tag names the same rule, decided
+  from its committed operands.
+- `fold_match_cascade_<rule>`: the birth tag names the same rule, decided
+  through earlier birth folds.
+- `fold_match_post_<rule>`: anything else, so the fold needed a fact
+  construction did not have: SSA insertion, promotion, inlining, or a root the
+  late scan supplied. The causes split as `fold_match_post_unprobed` (a row the
+  C builder never committed, such as SSA or promotion output),
+  `fold_match_post_unfoldable_at_birth` (committed, but no rule folded it) and
+  `fold_match_post_rule_changed` (committed and foldable, but late facts chose
+  another rule).
+
+For each rule, `fold_late_<rule>` equals the sum of the three
+`fold_match_*_<rule>` counters. An inlined copy keeps its callee row's tag
+and the inliner adds a clone bit: a callee row foldable at its own commit
+stays direct or cascade, while one that folds only with the caller's
+arguments is post. `fold_match_clone_{direct,cascade,post}` count the clone
+share of each class; they are a split, not further folds.
+
+Survival follows each committed, non-clone birth-foldable row (direct or
+cascade) into FAST. `fold_survival_reached` counts those in functions FAST
+admits and `fold_survival_skipped` those in functions it declines (budget or
+provenance). `fold_survival_unfolded` counts reached rows that the fold pass
+did not fold in that run, for example because `fold` was not among the
+selected passes. Birth folds in functions that never reach
+`ir_fast_function` (`-fno-canonical-fast`, validation skips) or in rows
+deleted before FAST appear in neither; they stay in `fold_birth_*` only.
+These are hosted diagnostic counts, not performance evidence.
+
+#### End-of-body breakdown and net account
+
+`c_ir_fold_census_body` takes a second census of each C function after its body
+lowers and before `c_ir_ssa_finish`. At that point the rows are still the
+committed ones, minus retractions, and values are not yet renumbered. It asks
+the same rule of every row (an operand defined after its reader does not count,
+as at commit) and walks the rows twice more. Direct SSA still keeps stored
+values in its `STORE` events and resolved reads, so those are counted as
+readers (`fold_net_ssa_uses`). This population is close to the commit-time one
+but not identical: retracted rows, functions whose body failed to lower, and
+rows committed outside a function body are absent.
+
+- **Form.** `fold_form_<shape>_<consumer>` crosses the folded row's IR shape
+  with the construct that first reads its result. Shapes: `reinterpret`,
+  `sign_extend`, `zero_extend`, `truncate` (literal casts), `bool_compare` (a
+  two-literal binary producing `bool`), `other` (unary, non-boolean binary,
+  identities). Consumers: `store` (a store row or an SSA store), `aggregate`
+  (array/aggregate construction, which includes initializers), `return`,
+  `call`, `branch` (conditional branch or switch), `operator` (cast, unary or
+  binary), `other`, `unused`.
+- **Function size.** `fold_size_<bucket>_{functions,rows,folds,dead_literals}`
+  buckets functions by committed rows: `rows_lt_64`, `rows_lt_256`,
+  `rows_lt_1024`, `rows_lt_4096`, `rows_ge_4096`.
+- **Net account.** These are object counts, not bytes multiplied by a presumed
+  size.
+  - `fold_net_constant_rows` and `fold_net_identity_rows` partition the folded
+    rows.
+  - `fold_net_operand_slots` counts the operand slots those rows filled. Each
+    row's slice is its own arena request in the C builder.
+  - `fold_net_literal_uses` counts the literal reads that folding removes; an
+    identity's forwarded operand is not counted.
+  - `fold_net_dead_literals` counts literals left with no reader. Each would
+    need no row, value or immediate request.
+  - `fold_net_adjacent_dead_literals` counts the dead literals committed directly
+    before their folded reader in the same block. Those could be rewritten in
+    place.
+
+  Rows, values and source ranges come from per-unit streams trimmed to the
+  final count (`c_ir_row_streams_trim`). So the rows and values a birth fold
+  saves free stream slots, not arena requests. In that model:
+  - Rows and values not built: `identity_rows + dead_literals`.
+  - Operand-slice requests saved: `constant_rows + identity_rows`.
+  - Immediate requests at construction: `constant_rows - dead_literals` more,
+    since each folded constant needs one.
+- **Late side.** Each `fold_late_*_constant` is one FAST immediate request, and
+  `fold_late_dce_constants` counts `CONSTANT_INTEGER` rows FAST DCE deleted
+  (literals and folded rows alike). Promotion compacts rows before FAST runs,
+  so this census cannot tell which late requests or deletions belong to
+  birth-foldable rows. They only bound what a birth fold would also save:
+  - FAST immediates spared: at most `min(fold_net_constant_rows, Σ fold_late_*_constant)`.
+  - DCE deletions spared: at most `min(fold_net_dead_literals, fold_late_dce_constants)`.
+
+  The late folds themselves are attributed per row by the
+  [matched association](#matched-birthlate-association):
+  `fold_match_direct_*` plus `fold_match_cascade_*` are exactly the late folds
+  a birth fold would replace. The immediates and DCE deletions remain bounds.
+  Whether FAST would skip a whole function's compaction is not measured.
+
+Scratch is a per-thread arena created on first use and carved with the raw
+arena primitive. The census therefore adds no `allocation.*` request and does
+not move any other arena's dirty prefix. The arena's reservation does appear
+among OS events in the exit census, and its pages in minor-fault counts. A
+function with more than 2^25 values is skipped and counted in
+`fold_net_skipped_functions`.
 
 ## Opt-in block-local CSE (#3011)
 
@@ -332,15 +450,182 @@ arm to byte-identical output. What the data show:
 So this census answers the recurrence question and makes the cost comparison
 diagnostically. It does not complete #3011's first gate, which needs the
 matched Zen 5 A/A and A/B comparison (#2761). Because hits concentrate in
-constants, a construction-time constant cache (#3010) remains a cheaper
-candidate that neither arm measures. The pass stays opt-in. Adopting either
-arm, or that alternative, also needs allocation, spill and runtime data.
+constants, the next section measures a construction-time constant cache
+against the late pass.
+
+## Construction-time constant interning (#3011)
+
+C lowering reuses an integer constant already built earlier in the current
+block instead of building another one. This is on by default;
+`-fno-canonical-intern-constants` turns it off and
+`-fcanonical-intern-constants` turns it back on, the last one given winning.
+It is independent of every `-O` level and FAST control. It was opt-in until
+the Zen 5 measurement below justified making it the default.
+`c_ir_emit_integer_value_at` looks up a 64-slot direct-mapped table shared by
+one lowering. Each function builder takes a fresh generation, so no entry
+crosses a function and none is cleared. The key is the canonical type, the
+canonicalized immediate bits and the sign flag.
+
+An entry is only a hint. Lowering can retract a row
+(`ir_block_retract_tail`) or truncate a block's tail
+(`ir_block_truncate_after`) and then reuse the freed row and value IDs. So a
+hit must re-prove all of the following:
+
+- the cached value is still defined by its cached row;
+- the row is still the same `CONSTANT_INTEGER`;
+- the row lies in the builder's current block.
+
+A hit allocates no row, value or immediate. A failed proof builds the row as
+before and is counted as `stale`. Global initializers and the test hooks have
+no table. `-v` prints `C_CONSTANT_INTERN lookups hits stale`.
+
+### Four-arm comparison (diagnostic, not performance evidence)
+
+Measured on a hosted 4-vCPU container with a Clang-built Release `ide`
+(production code as in the commit that adds this section). The compile is
+self-host `ide.c` with tests off, `-g -march=native`, the default four FAST
+passes and `-v`. Compile wall time and peak RSS are medians of 7 interleaved
+runs per arm. Spill, reload and push counts come from `-v` and
+`llvm-objdump` of each object.
+
+| Arm | Wall s (min-max) | Peak RSS KiB | Rows into FAST | Rows after FAST | `.text` bytes | Spills | Reloads | Remats | `pushq` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| None | 5.299 (5.177-5.603) | 854,084 | 2,026,447 | 1,822,939 | 28,520,268 | 30,135 | 53,991 | 49,886 | 116,050 |
+| Interning | 5.292 (5.118-5.911) | 835,708 | 1,859,956 | 1,740,671 | 28,298,232 | 30,040 | 53,191 | 29,619 | 116,504 |
+| CSE table | 5.302 (5.130-5.692) | 852,412 | 2,026,447 | 1,729,373 | 28,265,508 | 31,786 | 54,829 | 35,302 | 116,720 |
+| Interning + table | 5.298 (5.143-5.396) | 835,256 | 1,859,956 | 1,716,648 | 28,259,145 | 31,938 | 54,973 | 33,319 | 116,811 |
+
+Interning reports 421,116 lookups, 166,402 hits and 75 stale entries. With
+interning, CSE still finds 25,384 hits, 25,347 of them constants that only
+become equal after folding. The CSE pass costs about 20 ms per compile;
+interning has no separate pass.
+
+Generated-code runtime: each arm's object was linked into a compiler. Each
+compiler then compiled the same input with default flags, 5 interleaved
+runs per arm.
+
+| Compiler built with | Wall s (min-max) | Peak RSS KiB |
+| --- | ---: | ---: |
+| None | 24.308 (23.678-25.540) | 860,524 |
+| Interning | 24.103 (22.971-25.238) | 860,248 |
+| CSE table | 23.551 (23.546-25.524) | 860,080 |
+| Interning + table | 24.330 (23.656-25.816) | 859,976 |
+
+All four compilers produced byte-identical objects. The compilers built with
+interning, and with interning plus CSE, each recompile themselves with the
+same flags to byte-identical output.
+
+What the data show:
+
+- **Rows and memory:** interning removes 8.2% of the rows entering FAST
+  before they are allocated. Peak RSS falls by about 18 MiB (2.2%), against
+  about 2 MiB for the late CSE pass.
+- **Code size:** after FAST, interning leaves 4.5% fewer rows and 0.78% less
+  `.text`. The late table gets 5.1% and 0.89%, because folding exposes about
+  25k further equal constants.
+- **Spills:** the late table raises spills by 5.5% and reloads by 1.6%.
+  Interning leaves both slightly lower. Both extend constant live ranges
+  across calls in the same block. That shows as more callee-saved pushes:
+  +0.4% with interning and +0.6% with the table. In a small Windows module
+  that change shows up directly in hand-checked frames.
+- **Time:** compile-time and generated-runtime differences are inside the
+  hosted run-to-run range. Neither is established here.
+
+Interning is therefore the cheaper way to obtain most of the constant reuse,
+with less memory and without the spill growth. The fixed report-only profile
+`profile: constant-reuse-acceptance-v1` measures both flags on the 9700X; its
+method is in [benchmarking.md](agents/benchmarking.md).
+
+### Zen 5 measurement (9700X)
+
+The profile ran on main `446f742e`, check
+[115128610735](https://github.com/buster14a/buster/runs/115128610735). It used
+one binary on the `-g0` unity `-c` self-host compile, with 20 ABBA pairs per
+cell. Ratios are B (flag) over A (default):
+
+| Flag | Wall [95% CI] | Retired instructions | Peak RSS | Code bytes |
+| --- | --- | --- | --- | --- |
+| `-fcanonical-intern-constants` | 0.9932 [0.9912, 0.9954] | 0.9868 | −1.81% | −1.62% |
+| `-fcanonical-fast-cse` | 1.0024 [1.0007, 1.0034] | 0.9957 | −0.47% | −1.96% |
+
+Both flags left diagnostics identical to the default. Interning is a
+detectable compile-time win, while the late table is a detectable cost that
+buys 0.34 points more code reduction. Interning is the only adoption candidate
+under the throughput priority. On that measurement it became the default; the
+late CSE table stays opt-in. Making interning the default also updated the C
+frontend's row-capacity, codegen-shape and CSE-count tests, which had
+expected the old default. The constant-reuse profile's `intern` cell passes
+`-fcanonical-intern-constants` to B, so after this change both of its
+variants intern and the cell no longer measures the arm.
+
+## Opt-in construction-time folding (#3010)
+
+`-fcanonical-construction-fold` (cleared by
+`-fno-canonical-construction-fold`, the last one given winning) is the bounded
+experiment that the [fold census](#construction-time-fold-census-3010) pointed
+to. It is off by default and independent of every `-O` level and FAST control.
+It touches only the two C-lowering helpers where the census found birth folds:
+
+- `c_ir_emit_cast`, for an integer sign-extend, zero-extend, truncate or
+  reinterpret;
+- `c_ir_truth_value`, for the `_Bool` conversion of an integer.
+
+When the operand is a committed single-limb `CONSTANT_INTEGER`, the helper
+describes the row it would build and asks `ir_fast_fold_candidate`, which
+calls `ir_fast_fold_rule` exactly as `ir_fast_fold` does. If that is a
+constant rule, the helper builds that constant through
+`c_ir_emit_integer_value_at` instead of the `CAST` or `BINARY` row. A truth
+test is the candidate `value != 0`: the zero is supplied as bits, and the
+operand supplies its type, as the converted zero would. So a folded truth
+also builds no zero literal and no conversion of it. Anything else builds
+the rows as before:
+
+- an identity rule;
+- an unfoldable row;
+- a type wider than 64 bits;
+- a volatile or atomic type;
+- floating or pointer operands;
+- an operand whose `points_to_read_only` or label provenance the row's result
+  would have inherited.
+
+The constant's value then has the metadata the late fold keeps, and
+`ir_fast_fold` still folds every row this leaves.
+
+The operand's own literal row is still built and stays for FAST DCE when it
+has no other reader. Operands are evaluated as before, since only an
+already-built constant is read. `-fno-canonical-fast` keeps its meaning:
+FAST's admission, validation and late folding are unchanged, and the
+construction fold runs whether or not FAST does. `-v` prints
+`C_CONSTRUCTION_FOLD casts truths`. In `BUSTER_BENCH_ALLOCATIONS` builds, a
+row this experiment never builds is never seen by the commit census. So the
+`fold_birth_*` and `fold_match_direct_*` counters drop for the rows it folds.
 
 ## Tests
+
+`ir_test_inline_required_work_budget` exercises 400 required sites and 16
+assignment statements. Its actual copied-row floor for the old repeated-
+projection formula exceeds the unchanged 4 Mi work allowance, while the full
+retained-storage estimate remains subject to its unchanged cap. The explicit
+399-site case confirms that the configured site limit still refuses expansion.
+Its 5000-site flat caller uses a leaf with no body statements and derives a
+prefix-search lower bound above twice the base allowance before confirming
+refusal at the existing per-caller work cap.
+`ir_test_canonical_inline` continues to cover mandatory cycles and the
+explicit growth, storage, shape and site-limit refusals.
 
 `ir_fast_test.c` checks all 16 subsets structurally, transitive dead work,
 retained calls/memory effects, existing trivial parameters, repeat preparation,
 classification exclusions and budget refusal before value-storage access.
+`ir_fast_intern_tests` checks that interning shares a repeated constant
+within a block, never across blocks, types or signs, and that each hit is
+one row and one value never built. `ir_fast_construction_fold_tests` checks, with
+construction folding on and off, the widths, signedness, wrapping and `_Bool`
+cases, an effectful comma operand, and unchanged non-constant, 128-bit and
+floating operands. Each folded case returns the constant FAST folds to
+without its row; diagnostic builds also check that no birth fold remains. A
+direct check rejects a volatile result type through `ir_fast_fold_candidate`. The driver test runs the shared fixture
+with interning and CSE, and with construction folding and no FAST pass, on
+every backend.
 `ir_fast_cse_tests` runs each case under both strategies and checks the
 window boundary for distinct rows and for repeated hits. The cases cover
 commuted and ordered pairs, duplicate operands, block boundaries, excluded
@@ -387,7 +672,9 @@ embedders start with the conservative interposition policy.
 Mandatory candidates can contain
 multiple blocks, local storage, ordinary calls and aggregate returns.
 The iterative mandatory-call graph processes callees before callers and
-rejects cycles. Dynamic stack lifetime operations, computed labels,
+rejects cycles. Caller-owned computed-goto label values and destinations retain
+their IDs across a splice; computed labels inside the callee remain refused
+until their provenance has a cloning contract (#3995). Dynamic stack lifetime operations, callee-owned computed labels,
 variadic bodies, returns-twice calls and unsupported ABI shapes are refused.
 Unsupported candidates remain calls when optional and diagnose when mandatory.
 Arguments are evaluated once before the splice. Expansion remaps canonical
@@ -397,11 +684,11 @@ address is observed. Cloned instruction ranges preserve supported source line
 information; the debug model does not gain inline call-stack records.
 
 Positive decimal limits are configurable through
-`-fcanonical-inline-max-callee=N` (default 16 canonical instructions),
-`-fcanonical-inline-function-growth=N` (default 2048 copied rows per caller),
-`-fcanonical-inline-module-growth=N` (default: the larger of 4096 copied rows
+`-fcanonical-inline-max-callee=N` (default 13 canonical instructions),
+`-fcanonical-inline-function-growth=N` (optional default 2048 copied rows per caller),
+`-fcanonical-inline-module-growth=N` (optional default: the larger of 4096 copied rows
 and 1/32 of the module's lowered canonical instruction rows), and
-`-fcanonical-inline-call-sites=N` (default 64 sites per caller).
+`-fcanonical-inline-call-sites=N` (optional default 64 sites per caller).
 The fixed 4096-row module default stopped optional expansion of the unity
 self-host source after 243 sites, because callers are visited in module
 order; per-caller limits refused only 54 further sites once the module limit
@@ -429,20 +716,82 @@ memory. Diagnostic only; 9700X qualification is separate. Mandatory sites are ne
 dropped. `-fcanonical-inline-caller-growth-shift=N` and
 `IrInlineOptions.caller_growth_shift` override the shift (a zero API field
 selects the default, 32 or more keeps every planned site).
-The caller default is twice the 64-site times 16-row tiny-body budget. This leaves
-headroom for larger mandatory checked-arithmetic expansions; the module, work
-and storage guards still independently bound expansion.
-Zero numeric fields in embedding options normalize to those defaults.
-Mandatory calls are processed before optional tiny candidates across the module;
-both phases share the same row-growth, call-site and per-caller limits. Mandatory
-planning and splicing share one module-wide work and retained-storage budget.
+The optional caller default stays 2048 rows, twice the 64-site times 16-row
+tiny-body budget it was sized from.
+Required intrinsic wrappers can exceed both optional row caps (the RAD AVX-512
+probe copies 6318 rows), so zero function/module row and call-site limits leave
+required expansion to the independent work and storage guards. Explicit
+row/site limits cap both phases and still produce a source-mapped refusal.
+Zero row/site limits remain zero in embedding options across modules;
+other zero numeric fields normalize to their named defaults.
+Mandatory calls are processed before optional tiny candidates across the module.
+Their growth and sites count against any subsequent optional allowance.
+Mandatory graph planning retains its module-wide work and scratch bounds.
+Required splicing keeps the fixed 4 Mi work-unit and 16 MiB retained-storage
+limits per caller, plus one input-proportional relocation of the caller's
+existing tables and local/debug snapshots. The required work charge follows
+the splice loops: two call-block prefix walks (three for an aggregate result),
+the moved-tail target walk and its successor phi repairs, the output proof's
+caller-phi scans once per caller and once more for each spliced original block,
+the caller's debug-row preflight once per caller, the marginal caller reservation,
+and each callee clone/output payload once. Callee debug locals are charged for
+their two support checks and clone, and callee debug scopes for their planning
+and splice checks.
+The work estimate covers the production splice and proof path; builds with
+`BUSTER_IR_TRANSFORM_CHECKS` also run their existing full canonical validation
+after each splice batch, outside that admission estimate.
+Earlier planned calls
+also walk the one-edge branch to the prior callee entry. The pass does not
+recharge every existing caller block, unrelated phi list or prior clone at each
+required site. Planning scratch remains bounded at 16 MiB, copied rows retain
+the independent 4 Mi module-wide ceiling, and explicit row/site limits and
+cycle/shape refusals still apply.
+
+The 13-row callee default comes from a per-callee census of the unity
+self-host source (#3854). Most optional callees are one-line field predicates
+that lower to 10-16 promoted rows (arguments, address, load, casts, compare,
+return); a limit of 10 or less keeps almost none of them. One 11-row callee,
+`c_token_is_punctuator`, took 2072 of 3586 spliced sites and 55% of the row
+growth, and 409 M of the generated compiler's 1.65 G calls to optional
+callees when it self-hosts. A 13-row shape test added 25 M calls from 4 sites.
+The 12-row band (184 sites) and the 14-16-row band (337 sites, 4224 rows)
+together took about 3 M calls: mostly backends an x86-64 self-host never
+runs. Row shape does not separate those from the hot predicates, so no
+sharper static rule was found. Under cachegrind at `-march=x86-64-v3`
+(diagnostic only; 9700X qualification is separate), against tiny-off:
+
+| Callee limit, caller shift | Compiler instructions with the flags | Generated stage-2 instructions | `.text` growth |
+|---|---|---|---|
+| 16, 5 (previous default) | 1.0106 | 0.9853 | +0.76% |
+| 13, 5 (default) | 1.0097 | 0.9845 | +0.65% |
+| 12, 5 | 1.0096 | 0.9861 | +0.63% |
+| 11, 5 | 1.0090 | 0.9855 | +0.59% |
+| 11, 4 | 1.0061 | 0.9878 | +0.43% |
+| 11, 6 | 1.0103 | 0.9862 | +0.63% |
+| 13, 4 | 1.0067 | 0.9869 | +0.48% |
+| 13, 6 | 1.0111 | 0.9852 | +0.69% |
+
+The first column is a fixed no-inline compiler compiling the unity source with
+each setting; the second runs that setting's own stage-1 compiler with the
+same flags. The 13-row limit drops the 14-16-row band's growth and the work
+of splicing it, so it improves on 16 in every column. At 13 rows, shift 4 cuts the
+compiler's added instructions by a third but keeps only 89% of the stage-2
+saving; shift 6 is worse than 5 in every column.
+
 Optional selection, like FAST, bounds work and retained storage per caller:
 splicing into a caller copies its exactly sized tables, so module-wide byte or
 work totals let the first few large callers starve every later one. Optional
 expansion across the module stays bounded by the module row-growth limit.
 The mandatory graph captures
 call sites in one bounded scan rather than
-rescanning every instruction to build reverse edges. Planning storage includes
+rescanning every instruction to build reverse edges. That scan skips a
+function whose producer opcode summary records no `CALL`
+(`IR_OPCODE_SUMMARY_TRACKED`) and streams the dense rows of the rest. Planning
+classifies every call row with one byte of per-symbol callee facts
+(`ir_inline_plan_facts`: required, `noinline`, linkage-allowed, tiny leaf),
+filled once per pass, instead of re-deriving the symbol and callee predicates
+at every site. The table adds one byte per symbol to the planning scratch
+charge; work charges and statistics are unchanged. Planning storage includes
 function metadata, captured edge chunks and reverse-edge arrays. Caller planning counts block tails and phi metadata, with instruction prefixes
 recorded during the candidate scan. Splices preserve existing IDs and repair block
 chains directly, so no full caller compaction is required. Each caller has one
@@ -478,19 +827,56 @@ spliced caller again after its last splice (an output failure reports the
 so the planner checks a caller's debug-local scopes and scope parents once
 rather than once per site. A mandatory call whose caller or callee is a legacy producer-certified
 shape that fails that check is diagnosed; an optional one stays a call (all of
-an invalid caller's planned optional sites count as shape skips). When FAST
-is selected, a caller whose splices were all optional skips that output check:
-it is listed in `inline_unchecked_callers` and proven by the validation that
-follows anyway (the promotion output check of a checked build, else the FAST
-input guard's per-function check). A listed caller that fails reports the
-`inlining output` boundary instead of a FAST decline; a shared-scope failure is
-attributed to it only if its own rows also fail, and failures outside the list
-keep their legacy decline. This removed 0.87 G of 3.4 G inliner instructions
-from an uncapped tiny self-host compile under cachegrind (#48). Any other
-rewritten caller is checked at once, so the FAST input guard still checks all
-functions on a producer-certified default compile. The verbose
+an invalid caller's planned optional sites count as shape skips).
+
+Every spliced caller was proven valid just before its splices, so its output
+check, `ir_validate_canonical_splice`, walks only what they rewrote (#3854).
+Before the first splice the pass records the original blocks that hold
+planned sites, their rows and the values those rows and the blocks'
+parameters define (`IrValidationSplice`). The check then reuses the full
+validator's per-block step on those blocks and every new block, marking every
+other row as already owned and every other old value as already defined, so a
+rewritten chain that reaches an untouched row, or a rewritten row that also
+defines an untouched value, is refused. It requires the rewritten chains to
+reach exactly the recorded rows plus every new row, rechecks the parameters
+of every block (predecessor lists are rebuilt for all of them) and sweeps
+only recorded and new values. Rows outside the rewritten blocks keep their
+verdict because a row check reads only its own row, its operands' records,
+counts that only grow, and three facts about an operand's defining row; the
+argument is spelled out above `ir_validate_canonical_splice`. Label metadata
+or a published CFG makes the check refuse, as does a spliced call result of
+pointer-to-function type left without a defining row, the one rewrite that
+changes an outside row's verdict (#3988).
+
+The check may refuse a valid caller but never accepts one the full validator
+refuses, provided the splices wrote only what was recorded. A production
+build trusts that write set. When the check refuses, the full validator
+decides and names the location, and a checked build
+(`BUSTER_IR_TRANSFORM_CHECKS`) also runs the full validator after every splice
+batch, so a write outside the recorded set still fails there. `IR_INLINE`
+reports `splice_proofs` and `splice_fallbacks`. Since every rewritten caller
+is checked at once, a module the input check had already proven stays proven.
+
+When FAST will run, the pass publishes one byte per function in
+`module->inline_proven` for every function it proved and left in that state:
+callees, callers that kept all their sites as calls, and spliced callers.
+Promotion clears the byte of a function it rewrites. The FAST input guard
+skips the per-function check of a marked function (`reused_proofs`) but still
+checks the shared scope, and preparation drops the table before it returns.
+A legacy caller that failed its check is never marked, so the guard checks it
+and keeps its FAST decline. On the unity self-host source, under local
+callgrind with a tests-off `-march=x86-64-v3` build (diagnostic, not a
+performance result), the tiny-on stage-1 compile proves 661 spliced callers
+with no fallback, reuses 721 proofs and retires 85.1 M fewer instructions
+(26.154 G to 26.069 G, -0.33%). The default compile, whose 70 mandatory
+sites take the same path, retires 30.1 M fewer (25.768 G to 25.738 G). The
+object bytes are unchanged in both. Both checks share one walk
+(`ir_validate_function_walk`): two walks over shared helpers cost the default
+compile 11.6 M to 16.8 M more instructions, because the leaf validators then
+had two callers and were no longer inlined. The verbose
 `IR_INLINE` record reports candidates, accepted/mandatory calls, copied rows,
-growth, rejection categories, visits and released relocation bytes. These counts are diagnostics, not a
+growth, rejection categories, visits, released relocation bytes, splice proofs
+and fallbacks, and reused proofs. These counts are diagnostics, not a
 performance result. Mandatory budget refusals additionally report the first
 resource category, requested amount and applicable limit in the source diagnostic.
 

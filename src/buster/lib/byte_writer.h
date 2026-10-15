@@ -9,6 +9,11 @@
 // Source and destination of a nonempty copy must not overlap.
 // byte_writer_commit publishes the prefix only on success, leaving the caller's
 // output unchanged on failure. It neither copies nor transfers storage ownership.
+//
+// byte_slice_read_* are the reader twin: the single bounds-checked load from an
+// untrusted span (object files, archives, PE images). A read succeeds only when
+// the whole field lies inside the span; on failure `*value` is untouched. Loads
+// use host byte order, which is little-endian on every supported host.
 
 #include <buster/lib/base.h>
 
@@ -33,3 +38,8 @@ BUSTER_F_DECL void byte_writer_patch_u16_le(ByteWriter* writer, u64 offset, u16 
 BUSTER_F_DECL void byte_writer_patch_u32_le(ByteWriter* writer, u64 offset, u32 value);
 BUSTER_F_DECL void byte_writer_align4(ByteWriter* writer);
 BUSTER_F_DECL bool byte_writer_commit(ByteWriter const* writer, ByteSlice* output);
+
+BUSTER_F_DECL bool byte_slice_read_u16(ByteSlice bytes, u64 offset, u16* value);
+BUSTER_F_DECL bool byte_slice_read_u32(ByteSlice bytes, u64 offset, u32* value);
+BUSTER_F_DECL bool byte_slice_read_u64(ByteSlice bytes, u64 offset, u64* value);
+BUSTER_F_DECL bool byte_slice_read_s64(ByteSlice bytes, u64 offset, s64* value);

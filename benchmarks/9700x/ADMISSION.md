@@ -92,6 +92,13 @@ succeeded in an earlier attempt, so a maintainer re-run
 must use **Re-run all jobs**. An agent that pushes with the owner's
 credentials is the owner for this gate.
 
+The adapter's read-only API GETs allow at most three attempts, retaining the
+30-second timeout per attempt and waiting one then two seconds after transient
+transport failures or HTTP 5xx responses (#4145). HTTP 4xx responses, malformed
+JSON and authorization refusals are not retried. An exhausted transport failure
+still fails closed before host outputs are emitted. This repeats only an API
+read; it does not retry a campaign or physical work or change native admission.
+
 `bench` receives no token capability, no secret and no environment. It checks
 out `main`'s `tools/bench_direct` as the trusted harness and the pull request
 head's `benchmarks/9700x` as data, both without persisted credentials, then
@@ -171,6 +178,11 @@ landed, against its baseline (its first parent, or a range baseline; see
   trusted code, so there is no author gate: everything that lands is measured,
   bot-authored catch-up pull requests included. A queue merge's second parent
   and pull request number are recorded for the report (`0` for a direct push).
+- When the range since the baseline's actual measurement is proven to change
+  only reviewed prose, `authorize-compiler` reports it unchanged, `compare` is
+  not allocated, and `publish-compiler` completes the check as `neutral`
+  **Not measured** (#3923; contract, rollback and limits in
+  [compiler-main-unchanged-skip.md](../../docs/compiler-main-unchanged-skip.md)).
 - `compare` (the 9700X, no token capability) checks out `main`'s `tools` and the
   commit with its history but no blobs (`filter: blob:none`), without
   persisted credentials, verifies the baseline is on the commit's first-parent
@@ -271,6 +283,8 @@ request's verified head, never the trusted harness revision `github.sha`.
 - **Completed.** `publish-compiler` / `publish-pull` complete the same check:
   success for a valid measurement, failure for a refused authorization or
   missing or invalid evidence, neutral for a superseded pull request head.
+  Native recovery also reports verified pending routine-main replacement as
+  neutral, with no measurement claim (below).
   The check summary links the workflow attempt and the evidence artifact
   explicitly, because GitHub may not honour `details_url` for checks written
   with `GITHUB_TOKEN`.
@@ -314,6 +328,33 @@ request's verified head, never the trusted harness revision `github.sha`.
   existing evidence validator. Unavailable provenance/API records are
   reported as unavailable, never as a pass. No host job is started and the
   9700X receives no publication credential.
+
+  For an automatic main comparison only, recovery can present pending
+  replacement as `neutral`, titled **Not measured: superseded before
+  execution** (#3885). Its request must have succeeded; executor and request
+  must both still be attempt 1. Existing app/name/head/marker/protocol and
+  exact request bindings remain mandatory. The complete exact-attempt jobs
+  response must declare numeric zero with an empty jobs array. Recovery reads
+  the workflow at the executor's trusted revision and requires the existing
+  main-compare concurrency stanza, then reads GitHub's public exact-attempt
+  page through the already installed `gh` CLI. Only GitHub's native annotation
+  **Canceling since a higher priority waiting request for
+  buster-9700x-direct-bench-main-compare exists**, inside the annotation markup
+  bound to that executor's workflow link, establishes the cancellation cause.
+  Fresh current executor/request records must retain the joined identities
+  and attempts. These bounded reads add no polling or physical-runner work.
+  A changed HTML shape, unavailable page, incomplete/malformed job listing,
+  changed policy/attempt, any recorded job, manual/unknown cancellation or
+  failed request cannot receive this exception. The native executor stays
+  cancelled. The annotation does not identify a successor run; a newer commit
+  or nearby timestamp never supplies one or transfers a measurement result.
+
+  Terminal recovery starts its summary with the current not-measured state,
+  retains exact request/executor/head/harness provenance and a concrete
+  baseline SHA when setup recorded one, and otherwise reports the baseline
+  unavailable. Previous waiting text is quoted as explicitly historical.
+  Published measurements and already-terminal checks remain immutable; PR
+  comparisons and research keep their existing outcome semantics.
 
   If a callback failed or ran before a controller repair landed, an owner can
   dispatch the same lifecycle workflow on `main` with the original completed
@@ -368,6 +409,20 @@ request's verified head, never the trusted harness revision `github.sha`.
   a terminal result. The same request/time/writer bounds apply. Native Actions
   identifies `Compiler preparation qualification` as physical and its queue
   and publisher as hosted control; recovery starts no work.
+- **Failed preparation diagnostics.** A failed preparation worker prints one
+  `COMPILER_PREPARATION_FAILED_PHASE` job-log line per failed
+  `controller.tsv` row (stage, phase, wall, exit status, timeout, cleanup and
+  cancellation flags, stderr size and a printable 512-byte stderr tail),
+  then one `COMPILER_PREPARATION_FAILED_CHECKS` line with each non-phase
+  check as `pass`, `fail` or `not_run`. A failed owner prints
+  `COMPILER_PREPARATION_OWNER_FAILED`. When the physical job did not succeed,
+  `preparation-publish` adds the same failed rows and the worker's
+  non-complete `preparation.tsv` state from the retained artifact to the
+  check's `problems`. These are diagnostics only: the attempt stays
+  incomplete and unqualified, and publication is still refused. The TCC
+  bootstrap check runs `--self-test-preparation-failed-phase`, which fails a
+  named fixture phase through the production emission, and replays that
+  evidence and log into the check with `--preparation-failed-phase`.
 - **Commit report.** `comment-compiler`, the only bench job with
   `contents: write` (the permission of the commit-comment API), upserts one
   general comment on the main commit with `compiler_comment.py`. It downloads

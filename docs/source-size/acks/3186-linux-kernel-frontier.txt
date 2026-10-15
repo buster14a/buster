@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 53620
+reason Opt-in pinned Linux v6.12 reference/blocker frontier harness, trusted control init and config fragment, with index-independent source-pin verification, exclusive action-record reservation and their refusal controls (#3186, PR #3447); no workflow, whole-kernel scheduling stays with the shared main-only owner.

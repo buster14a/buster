@@ -1,4 +1,5 @@
 #pragma once
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 // Renumber blocks without changing the graph, instruction chains, or values.
 // These fixtures have no address-taken labels, so every block reference is an
@@ -211,7 +212,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }

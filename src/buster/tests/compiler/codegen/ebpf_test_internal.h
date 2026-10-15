@@ -7,6 +7,7 @@
 #include <buster/lib/string.h>
 #include <buster/lib/file.h>
 #include <buster/tests/compiler/codegen/ebpf_test_vm.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 #if BUSTER_INCLUDE_TESTS
 
@@ -182,7 +183,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_string_symbols(UnitTestArgu
             BUSTER_TEST(arguments, !string_equal(name, S8("filtered_type")) && !string_equal(name, S8("bpf_helper#7")));
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -326,7 +327,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_string_ranges(UnitTestArgum
             }
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -431,7 +432,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_global_symbols(UnitTestArgu
             for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(address_references); index += 1) BUSTER_TEST(arguments, address_references[index] != 0);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -451,7 +452,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_symbols(UnitTestArguments* 
         // depending on elapsed time, machine load or a generated-code oracle.
         BUSTER_TEST(arguments, probe.lookup_steps <= (u64)counts[index] * 4);
 #endif
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     UnitTestResult strings = codegen_test_ebpf_string_symbols(arguments);
     result.succeeded_test_count += strings.succeeded_test_count;
@@ -541,6 +542,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_scalars(UnitTestArguments* 
                 }
             }
         }
+        c_test_release_preprocess_arenas_from(arguments->arena, mark);
         arena_set_position(arguments->arena, mark);
     }
     codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_scalars"));
@@ -623,7 +625,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_argument_images(UnitTestArg
                         }
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -695,7 +697,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_integer_images(UnitTestArgu
         u8 expected[] = {0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfd, 0xff, 200};
         BUSTER_TEST(arguments, data.length >= sizeof(expected) && memcmp(data.pointer, expected, sizeof(expected)) == 0);
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -758,6 +760,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_aggregates(UnitTestAr
                     }
                 }
             }
+            c_test_release_preprocess_arenas_from(arguments->arena, mark);
             arena_set_position(arguments->arena, mark);
         }
     }
@@ -779,6 +782,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_local_aggregates(UnitTestAr
             EbpfArtifact artifact = ebpf_emit_program(arguments->arena, lowered.program);
             BUSTER_TEST(arguments, !artifact.success && artifact.error.message.length != 0 && artifact.bytes.length == 0);
         }
+        c_test_release_preprocess_arenas_from(arguments->arena, mark);
         arena_set_position(arguments->arena, mark);
     }
     codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_local_aggregates"));
@@ -848,7 +852,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
                     if (ssa) BUSTER_TEST(arguments, reloads <= count + 1);
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     String8 sources[] = {
@@ -902,7 +906,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     ByteSlice fixture = file_read(arguments->arena, S8("tests/basic_c_ebpf_stack_liveness.c"), (FileReadOptions){0});
@@ -933,7 +937,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
                                                                    (u32)((u32)inputs[index] * 7u + 4u)));
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     for (u32 sample = 0; sample < 3; sample += 1)
@@ -966,7 +970,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_stack_liveness(UnitTestArgu
             if (sample == 0) BUSTER_TEST(arguments, artifact.success && artifact.stats.max_stack_bytes == 512);
             else BUSTER_TEST(arguments, !artifact.success && artifact.error.code == EBPF_ERROR_STACK_LIMIT && artifact.bytes.length == 0);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_stack_liveness"));
     return result;
@@ -1060,7 +1064,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_kernel_regressions(UnitTest
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     // The VM refuses what it does not model. A helper placed before the entry
@@ -1084,7 +1088,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_kernel_regressions(UnitTest
             u64 observed = 0;
             BUSTER_TEST(arguments, artifact.success && !codegen_test_ebpf_execute(artifact.bytes, 7, 2, &observed));
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Hand-assembled functions pin each VM rule. When the kernel is available
     // it must agree on acceptance and on the result.
@@ -1151,7 +1155,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_kernel_regressions(UnitTest
             oracle.kernel_executions += 1;
             if (!kernel_agreed) arguments->show(arguments, S8("eBPF kernel rule {u32}: {S8}, observed {u64}\n"), index, reason, kernel_observed);
             BUSTER_TEST(arguments, kernel_agreed);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     codegen_test_ebpf_oracle_report(arguments, oracle, S8("codegen_test_ebpf_kernel_regressions"));
@@ -1222,7 +1226,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_ebpf_rejections(UnitTestArgument
             BUSTER_TEST(arguments, no_output);
             BUSTER_TEST(arguments, exact);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }

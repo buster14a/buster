@@ -10,9 +10,36 @@ syntax-only and ordinary compilation share diagnostic ownership. The older
 `c_parse` / `c_analyze_semantics` entry points retain their model-building contract
 for callers that explicitly pair them with `c_lower_to_ir`.
 
+At the end of lowering-constraint validation, file-scope tentative object
+definitions are checked against their final translation-unit types. An object
+whose type is still incomplete is rejected before semantic-only success. An
+external-linkage tentative array with a complete element type is completed to
+one element on a per-object type copy under C17 6.9.2p2; a later tag or array
+completion and an extern-only declaration remain valid. C17 6.9.2p3 also
+requires every internal-linkage tentative definition to have a complete type
+at that declaration, using the compatible composite type visible at that
+point. A prior known array bound, or a bound inferred from an earlier initialized
+unsized array, can therefore complete a later `[]` tentative declaration, but a
+later bound cannot rescue an earlier `[]` declaration; raw declaration and
+typedef types retain their source-spelled bounds.
+End-of-unit completion does not make an earlier `sizeof` of an incomplete
+array valid. The registered
+compiler_driver_test_tentative_object_completeness fixture checks
+syntax-only/object diagnostic parity, declaration completion, exact final
+array symbol sizes, the internal-linkage declaration-point constraint, and
+point-of-use refusals in C17, GNU17, C23 and GNU23 across both canonical
+frontend forms and the AST pilot.
+
+
 The semantic model remains `CAnalysisResult` (`CParseResult` is its compatibility
 name). Validation uses its types, entities, declaration ranges, identifier
 bindings, delimiter index and scope index. It does not construct a second IR.
+Size and alignment operator recognition in semantic analysis and lowering uses
+the existing well-known symbol IDs. `C_ALIGNOF_WORDS` preserves `_Alignof`,
+`__alignof` and `__alignof__`; `C_SIZEOF_ALIGNOF_WORDS` additionally accepts
+`sizeof`. Readers that accept plain C23 `alignof` retain their separate rule.
+Uninterned tokens retain spelling lookup. `c_test_word_class_token_kinds`
+checks the spelling and ID paths, including tokens with no accessible spelling.
 Expression/type queries and initializer walks use explicit work stacks. Constant
 values contain scalar bits and a C type, including the target's integer width
 and floating representation; they are not canonical values or instructions.
@@ -28,6 +55,28 @@ boundaries alongside cast-truncated indices, scoped enumerators and valid
 unevaluated operands. This addresses the constant-designator validation residual
 of [#1570](https://github.com/buster14a/buster/issues/1570); shared parser/lowering
 member authority and nonconstant-index validation remain separate work.
+
+`c_parse_validate_bit_field_addresses` checks unary address operands against
+semantic member widths before constant folding, including parenthesized,
+indirect and promoted anonymous members. GNU `__extension__` prefixes before
+`&` and around its operand retain the same constraint. Unevaluated and unselected operands
+retain this constraint; binary `&` remains a value operation. The registered
+`compiler_driver_test_bit_field_addresses` matrix requires matching structured
+syntax-only/object diagnostics and no object for rejected source in four C
+dialects, three frontend routes and three target layouts (#3743).
+
+## Block-scope static initializers
+
+In GNU dialects, a block-scope scalar static initializer whose complete
+expression is a statement expression with one expression statement can be
+folded when the existing typed scalar evaluator proves that tail constant.
+Aggregate destinations and tails that read mutable globals, update values or
+call functions retain the statement-expression refusal. The parser and folder
+use the same bounded tail range. Bodies with declarations, multiple statements
+or an evaluated nested statement expression remain nonconstant. File-scope
+statement expressions remain rejected by the separate file-scope constraint.
+The registered driver regression checks the constant-only runtime result
+alongside aggregate and nonconstant-tail refusals.
 
 ## Declaration constraints
 
@@ -146,6 +195,17 @@ separate array-only duration check still permits a static pointer to a VLA while
 rejecting a VLA object with static duration. Function prototype parameter types
 retain their existing rules; the VM walk stops at function types.
 
+Array declarators record function and incomplete element types at construction,
+including typedef, parameter and abstract declarators. Aggregate definition
+extents distinguish a completed nested definition from the enclosing record or
+a tag completed later. The bound-constraint walk reports each invalid source
+bracket once before canonical lowering; later tag completion cannot erase the
+refusal. Incomplete outer bounds, flexible members, GNU zero-length arrays,
+VLAs and pointers to incomplete types retain their separate rules.
+`c_test_array_element_constraints` covers rejected and accepted neighbors on
+three target layouts, four dialects and both canonical frontend forms; the
+driver equivalence fixture pins syntax-only/object parity (#3744).
+
 Constant negative array bounds are rejected at the original bound expression
 by `c_parse_validate_array_bound_values`, after expression/type-name validation
 has populated the bound table. A temporary source-token bitset also admits
@@ -174,6 +234,17 @@ rejected file/block/type-name/nested/typedef forms, exact member locations and
 valid neighbors through semantic-only analysis and both canonical frontend
 forms. This enforces C11/C17 6.7.6.2p2 and 6.7.2.1p9; see
 [WG14 N1570](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
+
+The typed-constant precedence scan keeps `sizeof` and the alignment operators
+as unary prefixes while it finds binary splits. A parenthesized type operand
+belongs to that operator, rather than being mistaken for a cast, and GNU
+`__extension__` remains a prefix through the full unary operand. The existing
+expression-type and layout queries still validate the complete inner operand
+before folding, so an incomplete type inside nested `sizeof` remains an error.
+The registered `compiler_driver_test_local_sizeof_static_asserts` fixture checks
+nested unary, dereference, alignment, extension, parenthesized and type-name
+forms, GNU statement-expression neighbors, incomplete-inner refusal, syntax-only
+and object parity, and execution in both canonical frontend forms (#3566).
 
 The bound check uses the semantic typed constant folder. NORMAL-mode sizeof
 type operands use the complete abstract-declarator reader, so parenthesized
@@ -230,8 +301,12 @@ casts, zero bounds, VLAs and flexible arrays across six native layouts plus
 Wasm32/Wasm64 and both frontend forms. Types at the accepted limit have no
 backing object in the regression. GNU arrays of zero-sized elements retain
 zero-byte products; existing static range-designator tests pin that extension.
-Record member sums and final alignment rounding remain the separate #1479
-follow-up; this bounded repair does not certify those operations.
+Record member sums and final alignment rounding use the shared saturating
+record cursor (#3278). Semantic-only validation also covers complete records
+whose layout no expression has queried: one uncached array or complete record
+triggers a complete-pending ordered solve, and the existing cache scan reports
+oversized records at their definition. The solve commits every settled pending
+row once; validation does not add a solve per record.
 
 A static assertion that measured an oversized type folds a value from its
 saturated size, so the size error stands for it. The decision is local to the
@@ -247,15 +322,18 @@ deferred (enumerator, `_Generic`) forms, and
 `c_test_static_assert_object_size_scaling` bounds layout queries for 2,000
 failing assertions over 2,000 array types.
 
-The validation must not add whole-table layout solves per array. A pass solve
-copies and seeds the whole type table and stops once its own request resolves,
-and an inferred bound's layout was provisional, so it was never cached. Asking
-each array in table order therefore cost one solve per array: self-hosting
-`ide.c` went from about 160 to about 34,000 solves (#2406's merge). An
-inferred bound is checked from its element layout and known count, which
-gives the same verdict. A single query for the call's last array then warms
-the cache for the explicit bounds. `c_type_layout_test_array_validation_solves`
-requires the solve count to stay constant as the number of arrays grows.
+The validator must not add one whole-table solve per array or record. A
+pass solve copies and seeds the whole type table; inferred bounds are checked
+from their element layout and known count, while one uncached array or complete
+record triggers the ordered complete-pending solve that warms every settled
+layout for the existing cache scan. This keeps the new record coverage to
+one solve per validation call rather than one per record; special unresolved
+bounds retain the per-item exception documented below. Asking each array in
+table order previously cost one solve per array: self-hosting `ide.c` went from
+about 160 to about 34,000 solves (#2406's merge).
+`c_type_layout_test_array_validation_solves` and the unqueried record row in
+`c_type_layout_test_validation_scaling` require pass solves to stay constant
+and layout work to grow linearly as their item counts increase.
 
 ## Whole-unit pass scaling
 
@@ -294,7 +372,7 @@ whole-table solve at each use (#3096).
 | `c_parse_validate_array_bound_syntax` | constant-expression syntax walk per bound | none; token walk |
 | `c_parse_infer_file_array_bounds`, local inference loop | initializer walk per unsized array | layouts and typed constants per element; run before `inferred_bounds_final` |
 | type-alignment entries, declaration alignment, `c_parse_validate_alignment_redeclarations` | `c_parse_validate_alignment_range` per specifier | a layout miss; a protected query for `_Alignof(x.m)` operands |
-| `c_parse_validate_array_object_sizes` | one layout per bound, one warm-up per call | a bound the layout pass cannot fold (`offsetof`, `_Alignof(x.m)`, `sizeof ident`) never commits, so each such array misses (#3113) |
+| `c_parse_validate_array_object_sizes` | one layout per bound, one complete-pending warm-up per call for arrays and unqueried complete records | a bound the layout pass cannot fold (`offsetof`, `_Alignof(x.m)`, `sizeof ident`) never commits, so each such array misses (#3113) |
 | `c_parse_validate_members`, `c_parse_validate_member_types` | alignment range per member; bound and unresolved width typed constants | a layout miss; uncommitted `offsetof` in a member bound (#1297) |
 | `c_parse_validate_deferred_assertions` | typed constant per deferred assertion | uncommitted `offsetof` (#1297); a protected query for `_Alignof(x.m)` |
 | `c_parse_validate_static_initializers` | expression queries and typed constants per initializer element | uncommitted `offsetof` (#1297); a protected query for `_Alignof(x.m)` |
@@ -393,12 +471,85 @@ expression task stack without a row; its value belongs to lowering. Each query
 re-walks its range, so a site whose row is retained is recognized from its
 slot's hint without a search.
 
-Lowering's own constant evaluator does not yet fold a `__builtin_choose_expr`
-value in a deferred `_Static_assert`, and lowering cannot take a choice whose
-condition is another choice (#3860); `c_test_builtin_operand_types` therefore
-checks those forms through the parser only. Append-only answers participate in semantic
+Lowering follows the same `__builtin_choose_expr` row through
+`c_ir_selection_answer`, as it does for `_Generic` (#3860). Prepared-call
+lowering, `c_ir_constant_evaluate` (static-storage array bounds) and the strict
+sizeof walk take the retained arm, so a choice whose condition is another
+choice needs no folding in lowering. They fold the condition themselves only
+when the parser recorded no row, which happens for a `__builtin_constant_p`
+condition. A deferred `_Static_assert` does not reach lowering's evaluator at
+all: lowering consumes the stored verdict (see the static-assertion entry in
+[foundations](foundations.md)). `c_test_builtin_operand_types` lowers and
+runs those forms in both frontend forms. Append-only answers participate in semantic
 result checkpoints. Lowering consumes retained answers; model-building-only
 callers resolve missing answers through the same semantic helper.
+
+### Sizeof handoff comparison (#2531)
+
+Lowering does not yet read the semantic type of a `sizeof` expression
+operand; it derives the operand's size itself. A default-off, test-only
+comparison measures whether the two agree before any lowering consumer is
+made to depend on semantic answers. `c_test_sizeof_handoff_set` turns it on
+for the calling thread. While it is on:
+
+- Semantic analysis keeps a 16-byte `CSizeofOperandType` row in
+  `CParseResult.sizeof_operand_types` for each `sizeof` expression operand it
+  types as a scalar integer. The row holds the keyword token, the scope the
+  producer typed it in, the unqualified kind (an enum's underlying kind) and
+  the size. It holds no `CTypeId`, so a rollback cannot leave it naming a
+  truncated row. The table is append-only and part of result checkpoints, and
+  a protected constant query copies it on first append.
+- Rows have two producers. `c_parse_typed_constant` contributes the operands
+  it already types in constant contexts in the normal mode. The
+  `c_parse_validate_sizeof_operands` walk asks for the operand type of
+  runtime `sizeof`s for this comparison alone, because ordinary validation
+  types nothing inside a `sizeof`.
+- Rows of the two producers for one keyword are also compared with each
+  other: a different kind or size is counted as a conflict. Each producer
+  keeps its own row and counts.
+- Lowering reports every size the `C_IR_QUERY_FRAME_SIZEOF` resolver settles,
+  and the body's prediction fallback, to `c_sizeof_handoff_compare`. Each path
+  of `c_ir_sizeof_expression_attempt` records the operand type it sized; when
+  that is an integer type, its signedness is compared as well as its size.
+  The outcomes are agree, size mismatch, signedness mismatch, declined, or
+  unmatched (no row for that keyword). Rows whose producer scope differs from
+  the keyword's innermost scope are counted separately.
+
+The fields exist only in builds with tests; there they add 16 bytes to
+`CParseResult`, which the default `ide` build also carries. When the
+comparison is off, the only work is a flag test at each recording and
+comparison site. When it is on, the emitted program does not change: the
+fixture compares it with the program lowered with the comparison off.
+
+`c_test_sizeof_semantic_handoff` covers the following in both frontend
+forms:
+- the 64-operator cast operand;
+- qualified, promoted, enum, bit-field-promoted, conditional, comma,
+  `_Generic` and cast-to-`typeof` operands;
+- a shadowing block;
+- static assertions.
+
+It runs each case for Linux x86-64, Windows x86-64 and Linux AArch64 layouts.
+It checks:
+- each row's kind;
+- that the syntax-only and `-c` analyses keep identical rows;
+- that a protected query leaves the rows unchanged;
+- that signedness was compared and agreed.
+
+As a negative control, `c_test_sizeof_handoff_perturb_set` flips the
+validation rows' signedness while keeping their size. The comparison must then
+report signedness mismatches, no size mismatch, and a conflict for each static
+assertion operand that both producers keep. The fixture also runs the
+`c_test_tall_expression_types` heights (1, 2, 63, 64, 65, 4096 and 10000) with
+the comparison on. That is the sampled sweep the regression already uses; a
+dense 1 to 10,000 sweep would lower about 50 million operands.
+`c_ast_test_sizeof_handoff` runs the comparison over the `c_ast` corpus and
+the hosted frontend sources and enforces floors on both. At `4ed35b59` on
+Linux x86-64 it keeps about 7,230 rows (17 from constant contexts). Of those
+operands, 7,165 are settled by the resolver with 0 mismatches. Another 7,515
+resolver answers have no row; they are operands outside the scalar-integer
+population. The prediction path is not reached. The validation producer made
+about 14,750 operand queries that ordinary validation does not make.
 
 Prepared `_Generic` lowering consumes the selected token range and lets its
 ordinary child expression produce the value and canonical type. It does not

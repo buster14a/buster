@@ -461,13 +461,14 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         self.assertNotIn("always()", artifact)
 
 
-    def test_ordinary_desktop_has_no_full_lint_ancestor(self):
+    def test_desktop_has_no_lint_ancestor_in_any_event(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         blocks = dict(re.findall(r"(?ms)^  (\w+):\n(.*?)(?=^  \w+:|\Z)",
                                  text.split("\njobs:\n", 1)[1]))
         desktop = blocks["test"].split("    steps:", 1)[0]
-        self.assertIn("needs: [queue_lint, reuse, no_code_plan]", desktop)
-        self.assertIn("github.event_name != 'merge_group' || needs.queue_lint.result == 'success'", desktop)
+        # Merge-group lint runs beside desktop; CI complete still requires it (#3912).
+        self.assertIn("needs: [reuse, no_code_plan]", desktop)
+        self.assertNotIn("queue_lint", desktop)
         self.assertNotIn("needs.lint", desktop)
         self.assertIn("needs: [reuse, no_code_plan]", blocks["native"])
         self.assertIn("needs: no_code_plan", blocks["queue_lint"])
@@ -683,7 +684,7 @@ class CurrentActionPinsTests(_frozen_actions.ActionPinsTest):
     def test_buster_ci_uses_native_node24_artifact_action(self):
         github = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertNotIn(_frozen_actions.UPLOAD_ARTIFACT_V4_PIN, github)
-        self.assertEqual(github.count(_frozen_actions.UPLOAD_ARTIFACT_V7_PIN), 11)
+        self.assertEqual(github.count(_frozen_actions.UPLOAD_ARTIFACT_V7_PIN), 9)
         self.assertEqual(_frozen_actions.PINS.APPROVED["actions/upload-artifact"],
                          {_frozen_actions.UPLOAD_ARTIFACT_V4_SHA,
                           _frozen_actions.UPLOAD_ARTIFACT_V7_SHA})

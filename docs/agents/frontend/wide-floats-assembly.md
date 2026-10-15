@@ -2,6 +2,14 @@
 
 [Agent instructions](../../../AGENTS.md) · Paths and commands below are relative to the repository root.
 
+Bare `asm` is a keyword in GNU C dialects. Its spelling, interned-symbol and
+cached-token classification agree, so a statement such as
+`asm volatile("pause" ::: "memory")` is not bound as an undeclared identifier
+(#3778). ISO C dialects keep `asm` available as an ordinary identifier;
+`__asm` and `__asm__` retain their existing extension behavior.
+`c_test_inline_assembly_volatile_ir` checks the dialect boundary in both
+canonical frontend forms.
+
 Generic `__builtin_isfinite`, `__builtin_isinf`, `__builtin_isinf_sign` and
 `__builtin_isnan` retain a wide argument's original floating format. Narrower
 floating arguments keep their existing exact binary64 widening. Their
@@ -55,7 +63,10 @@ arithmetic comparison or libm import. The registered embedded driver fixture
 executes explicit images, integer conversion and exactly-once calls in both
 frontend forms, FAST and QUALITY and O0/O2 without `-lm`. Arity and
 non-arithmetic/vector operands are diagnosed before lowering. `fabsl` remains
-separately tracked.
+separately tracked. Explicit long-double math builtins are available on
+x86-64/AArch64 only: the shared target capability query makes their
+`__has_builtin` result match semantic call rejection on Wasm32, Wasm64, eBPF
+and other unsupported routes, before arguments reach IR lowering.
 
 AArch64 binary128 widening and scalar transport use ordinary MIR frame
 images; see the machine guide for their exact conversion and ABI-boundary
@@ -380,17 +391,28 @@ negative-zero rows preserve finite-boundary and per-literal rounding behavior.
   both reject duplicate normalized names, including ordinary `rax`/`rax`
   lists in unused static definitions. Other numeric clobbers remain refused.
   `inb` and `outb` use the shared assembler's checked AL/DX forms; their port
-  fixture is compile-only because execution requires OS privileges. GNU
-  operand-width modifiers such as `%w1` retain their existing refusal; the
-  fixture supplies the port operand's width through its `unsigned short` type.
+  fixture is compile-only because execution requires OS privileges. GNU's x86
+  `%w` modifier now selects the 16-bit spelling of a scalar GPR while the
+  operand's C staging and store widths remain unchanged. The new fixture covers
+  numeric and named references, an R10 view, tied and pointer operands, a
+  narrow-output guard, and compile-only word/dword port forms.
   `c_test_inline_assembly_constraint_unions` checks both frontend forms,
   semantic-only validation, normalized IR, malformed neighbours and the
   deliberately unsupported register-conflict cases described above.
   `machine_test_inline_assembly_constraint_unions` checks exact port bytes
   `EC`/`EE`, FAST and QUALITY and both PIC/frontend forms on three x86 OS
   layouts; the registered driver fixture executes the nonprivileged union and
-  numeric-clobber cases on matching desktop hosts. These registrations do not
-  constitute a validation result.
+  numeric-clobber cases on matching desktop hosts. The separate
+  `machine_test_inline_assembly_width_modifier` and driver fixture are
+  registrations, not validation results. The bounded Linux demand slice is
+  pinned to v6.12's [shared x86 I/O header](https://github.com/torvalds/linux/blob/adc218676eef25575469234709c2d87185ca223a/arch/x86/include/asm/shared/io.h)
+  (`GPL-2.0` per the file's SPDX tag): word I/O uses `%w` on both operands,
+  while dword forms use it on the port. These source-level demands are
+  compile-only because port I/O is privileged. Byte forms also use `%b` for
+  data, so this slice does not establish support for the complete helper
+  family. The broader Linux and FFmpeg census, including enabled and
+  preprocessed cells, remains pending; companion Linux mechanism accounting
+  is in [PR #4093](https://github.com/buster14a/buster/pull/4093).
 - **A module-level `__asm__` block emits into the module's text through
   `codegen_emit_global_assembly` in `codegen.c`.** It interprets the
   directives itself — `.text`, `.byte`, `.p2align`, and the symbol directives

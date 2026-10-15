@@ -1,0 +1,4 @@
+# 359 work-ledger fixtures; Release ide-base (446f742e) vs ide-cand (b9e347e8, same flags); per unit: cc -march=znver3 -E, and cc -march=znver3 -g0 -v -c; stdout, stderr and object compared
+IDENTITY_SWEEP units=359 mismatches=0
+# 14 targets x {gnu89,gnu17,c99,c11,c23} x {default,-fPIE} x {empty.c, uses.c} x {-dM -E, -E}; stdout+stderr+status compared
+CROSS_TARGET_E runs=560 mismatches=0

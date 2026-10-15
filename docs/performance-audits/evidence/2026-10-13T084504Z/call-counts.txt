@@ -1,0 +1,31 @@
+# caller -> callee call counts and inclusive Ir, from calls.py
+## census.cg: python3 calls.py census.cg '^(census_|c_parse_type_word_for_dialect$|c_parse_type_word_for_dialect_token)'
+     48306 calls      8,251,549 Ir  c_ir_query_execute -> census_type_word
+      8067 calls        266,436 Ir  c_parse_label_address_prefix_proven_at -> c_parse_type_word_for_dialect_token
+     48315 calls        193,260 Ir  census_type_word -> census_tw1_call
+     24855 calls         99,420 Ir  census_type_word -> census_tw1_predefined
+      3571 calls         14,284 Ir  census_type_word -> census_tw1_true
+         9 calls          2,025 Ir  c_ir_query_execute'2 -> census_type_word
+## A.cg: python3 calls.py A.cg '^c_parse_type_word_for_dialect(_token)?$'
+     48306 calls      4,973,114 Ir  c_ir_query_execute -> c_parse_type_word_for_dialect
+      8067 calls        266,436 Ir  c_parse_label_address_prefix_proven_at -> c_parse_type_word_for_dialect_token
+         9 calls          1,386 Ir  c_ir_query_execute'2 -> c_parse_type_word_for_dialect
+## B.cg: python3 calls.py B.cg '^c_parse_type_word_for_dialect(_token)?$'
+     48306 calls      4,973,114 Ir  c_ir_query_execute -> c_parse_type_word_for_dialect
+      8067 calls        266,436 Ir  c_parse_label_address_prefix_proven_at -> c_parse_type_word_for_dialect_token
+         9 calls          1,386 Ir  c_ir_query_execute'2 -> c_parse_type_word_for_dialect
+## C.cg: python3 calls.py C.cg '^c_parse_type_word_for_dialect(_token)?$'
+      8067 calls        266,436 Ir  c_parse_label_address_prefix_proven_at -> c_parse_type_word_for_dialect_token
+## D.cg: python3 calls.py D.cg '^c_parse_type_word_for_dialect(_token)?$'
+      8067 calls        266,436 Ir  c_parse_label_address_prefix_proven_at -> c_parse_type_word_for_dialect_token
+## inclusive c_ir_query_execute (callgrind_annotate --inclusive=yes)
+A 435,335,135
+B 427,268,283
+C 423,182,286
+D 431,249,138
+## I refs
+A 24,968,327,492
+B 23,069,795,935
+C 23,065,709,494
+D 24,964,241,051
+census 24,972,261,311

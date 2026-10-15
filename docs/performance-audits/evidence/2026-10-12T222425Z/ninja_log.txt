@@ -1,0 +1,3 @@
+# ninja log v5
+1	255844	1791843253867461866	CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o	492a00ddd015bf83
+255844	256011	1791843254587461908	Release/ide	21ad2bfeba657702

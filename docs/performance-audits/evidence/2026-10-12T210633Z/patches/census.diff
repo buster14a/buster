@@ -1,0 +1,207 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_parse.c b/src/buster/lib/compiler/frontend/c/c_parse.c
+index 62d8a59e..02cac8a8 100644
+--- a/src/buster/lib/compiler/frontend/c/c_parse.c
++++ b/src/buster/lib/compiler/frontend/c/c_parse.c
+@@ -19543,6 +19543,155 @@ BUSTER_GLOBAL_LOCAL CAstSpecifierFallback c_parse_tree_specifiers_type(CTypePars
+     return reason;
+ }
+ 
++
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Weverything"
++#include <stdio.h>
++enum { CENSUS_CALLERS = 3, CENSUS_SHAPES = 12, CENSUS_REASONS = 6 };
++static const char* census_shape_names[CENSUS_SHAPES] = {"tag_definition", "typeof", "atomic_paren", "alignas", "attribute", "bitint",
++    "tag_reference", "extension", "restrict", "atomic_word", "other_word", "empty"};
++static const char* census_caller_names[CENSUS_CALLERS] = {"parameter", "file_scope", "block"};
++static u64 census_counts[CENSUS_CALLERS][CENSUS_SHAPES][CENSUS_REASONS];
++static u64 census_tagref_plain[CENSUS_CALLERS];
++u32 census_caller;
++static bool census_eq(String8 a, const char* b)
++{
++    return string_equal(a, (String8){.pointer = (char8*)b, .length = strlen(b)});
++}
++__attribute__((destructor)) static void census_print(void)
++{
++    for (u32 c = 0; c < CENSUS_CALLERS; c += 1)
++        for (u32 h = 0; h < CENSUS_SHAPES; h += 1)
++            for (u32 r = 0; r < CENSUS_REASONS; r += 1)
++                if (census_counts[c][h][r]) fprintf(stderr, "CENSUS %s %s reason=%u runs=%llu\n", census_caller_names[c], census_shape_names[h], r, (unsigned long long)census_counts[c][h][r]);
++    for (u32 c = 0; c < CENSUS_CALLERS; c += 1) fprintf(stderr, "CENSUS_TAGREF_PLAIN %s %llu\n", census_caller_names[c], (unsigned long long)census_tagref_plain[c]);
++}
++// tag_reference_plain: a tag reference whose other words are all plain words (no attribute/typeof/etc.)
++static u32 census_classify(CPreprocessResult preprocess, u32 start, u32 end, bool* tag_reference_plain)
++{
++    bool f[CENSUS_SHAPES] = {0};
++    u32 i = start;
++    bool typed = false;
++    bool stop = false;
++    while (!stop && i < end)
++    {
++        CToken const* t = &preprocess.tokens[i];
++        if (t->kind == C_TOKEN_IDENTIFIER)
++        {
++            String8 w = c_token_spelling(preprocess.spelling_base, *t);
++            if (census_eq(w, "struct") || census_eq(w, "union") || census_eq(w, "enum"))
++            {
++                i += 1;
++                i = c_parse_skip_attributes(preprocess, i, end);
++                bool named = i < end && preprocess.tokens[i].kind == C_TOKEN_IDENTIFIER;
++                i += named;
++                u32 a = i;
++                i = c_parse_skip_attributes(preprocess, i, end);
++                f[4] |= a != i;
++                if (i < end && c_token_is_punctuator(&preprocess.tokens[i], C_PUNCTUATOR_LEFT_BRACE))
++                {
++                    f[0] = true;
++                    u32 depth = 0;
++                    for (; i < end; i += 1)
++                    {
++                        if (c_token_is_punctuator(&preprocess.tokens[i], C_PUNCTUATOR_LEFT_BRACE)) depth += 1;
++                        if (c_token_is_punctuator(&preprocess.tokens[i], C_PUNCTUATOR_RIGHT_BRACE)) { depth -= 1; if (!depth) { i += 1; break; } }
++                    }
++                }
++                else
++                {
++                    f[6] = true;
++                }
++                typed = true;
++            }
++            else if (census_eq(w, "__attribute__") || census_eq(w, "__attribute") || census_eq(w, "__declspec") ||
++                     census_eq(w, "_Alignas") || census_eq(w, "alignas") || census_eq(w, "typeof") || census_eq(w, "__typeof__") ||
++                     census_eq(w, "__typeof") || census_eq(w, "typeof_unqual") || census_eq(w, "__typeof_unqual__") || census_eq(w, "_BitInt") ||
++                     (census_eq(w, "_Atomic") && i + 1 < end && c_token_is_punctuator(&preprocess.tokens[i + 1], C_PUNCTUATOR_LEFT_PARENTHESIS)))
++            {
++                u32 shape = (census_eq(w, "_Alignas") || census_eq(w, "alignas")) ? 3 : census_eq(w, "_BitInt") ? 5 : census_eq(w, "_Atomic") ? 2 :
++                            (w.pointer[0] == 't' || census_eq(w, "__typeof__") || census_eq(w, "__typeof") || census_eq(w, "__typeof_unqual__")) ? 1 : 4;
++                f[shape] = true;
++                typed |= shape == 1 || shape == 2 || shape == 5;
++                i += 1;
++                if (i < end && c_token_is_punctuator(&preprocess.tokens[i], C_PUNCTUATOR_LEFT_PARENTHESIS))
++                {
++                    u32 depth = 0;
++                    for (; i < end; i += 1)
++                    {
++                        if (c_token_is_punctuator(&preprocess.tokens[i], C_PUNCTUATOR_LEFT_PARENTHESIS)) depth += 1;
++                        if (c_token_is_punctuator(&preprocess.tokens[i], C_PUNCTUATOR_RIGHT_PARENTHESIS)) { depth -= 1; if (!depth) { i += 1; break; } }
++                    }
++                }
++            }
++            else if (c_parse_type_word_for_dialect_token(preprocess, *t) || census_eq(w, "typedef") || census_eq(w, "extern") || census_eq(w, "static") ||
++                     census_eq(w, "register") || census_eq(w, "_Thread_local") || census_eq(w, "__thread") || census_eq(w, "inline") ||
++                     census_eq(w, "__inline") || census_eq(w, "__inline__") || census_eq(w, "_Noreturn") || census_eq(w, "__extension__") ||
++                     census_eq(w, "restrict") || census_eq(w, "__restrict") || census_eq(w, "__restrict__") || census_eq(w, "_Atomic") ||
++                     census_eq(w, "const") || census_eq(w, "volatile") || census_eq(w, "auto") || census_eq(w, "__const") || census_eq(w, "__volatile__"))
++            {
++                f[7] |= census_eq(w, "__extension__");
++                f[8] |= census_eq(w, "restrict") || census_eq(w, "__restrict") || census_eq(w, "__restrict__");
++                f[9] |= census_eq(w, "_Atomic");
++                typed |= c_parse_type_specifier_token(preprocess, i);
++                i += 1;
++            }
++            else if (!typed)
++            {
++                typed = true; // typedef name
++                i += 1;
++            }
++            else
++            {
++                stop = true;
++            }
++        }
++        else if (c_token_is_punctuator(t, C_PUNCTUATOR_LEFT_BRACKET) && i + 1 < end && c_token_is_punctuator(&preprocess.tokens[i + 1], C_PUNCTUATOR_LEFT_BRACKET))
++        {
++            f[4] = true;
++            u32 depth = 0;
++            for (; i < end; i += 1)
++            {
++                if (c_token_is_punctuator(&preprocess.tokens[i], C_PUNCTUATOR_LEFT_BRACKET)) depth += 1;
++                if (c_token_is_punctuator(&preprocess.tokens[i], C_PUNCTUATOR_RIGHT_BRACKET)) { depth -= 1; if (!depth) { i += 1; break; } }
++            }
++        }
++        else
++        {
++            stop = true;
++        }
++    }
++    u32 shape = 11;
++    for (u32 k = 0; k < 10; k += 1)
++    {
++        if (f[k]) { shape = k; break; }
++    }
++    if (shape == 11 && i > start) shape = 10;
++    *tag_reference_plain = shape == 6;
++    return shape;
++}
++#define CENSUS_WRAP(c, h) __attribute__((noinline)) static CTypeId census_##c##_##h(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult* preprocess, CScopeId scope, u32 start, u32 end, bool tag_only, u32* declarator_start) \
++{ CTypeId t = c_parse_scalar_type_in_scope_context(machine, result, *preprocess, scope, start, end, tag_only, declarator_start); __asm__ volatile("" ::: "memory"); return t; }
++#define CENSUS_WRAP_ALL(c) CENSUS_WRAP(c, tag_definition) CENSUS_WRAP(c, typeof) CENSUS_WRAP(c, atomic_paren) CENSUS_WRAP(c, alignas) CENSUS_WRAP(c, attribute) CENSUS_WRAP(c, bitint) \
++    CENSUS_WRAP(c, tag_reference) CENSUS_WRAP(c, extension) CENSUS_WRAP(c, restrict) CENSUS_WRAP(c, atomic_word) CENSUS_WRAP(c, other_word) CENSUS_WRAP(c, empty)
++CENSUS_WRAP_ALL(parameter)
++CENSUS_WRAP_ALL(file_scope)
++CENSUS_WRAP_ALL(block)
++#pragma clang diagnostic pop
++#define CENSUS_CASE(c, ci) \
++    case ci * 16 + 0: type = census_##c##_tag_definition(machine, result, &preprocess, scope, start, end, tag_only_declaration, declarator_start); break; \
++    case ci * 16 + 1: type = census_##c##_typeof(machine, result, &preprocess, scope, start, end, tag_only_declaration, declarator_start); break; \
++    case ci * 16 + 2: type = census_##c##_atomic_paren(machine, result, &preprocess, scope, start, end, tag_only_declaration, declarator_start); break; \
++    case ci * 16 + 3: type = census_##c##_alignas(machine, result, &preprocess, scope, start, end, tag_only_declaration, declarator_start); break; \
++    case ci * 16 + 4: type = census_##c##_attribute(machine, result, &preprocess, scope, start, end, tag_only_declaration, declarator_start); break; \
++    case ci * 16 + 5: type = census_##c##_bitint(machine, result, &preprocess, scope, start, end, tag_only_declaration, declarator_start); break; \
++    case ci * 16 + 6: type = census_##c##_tag_reference(machine, result, &preprocess, scope, start, end, tag_only_declaration, declarator_start); break; \
++    case ci * 16 + 7: type = census_##c##_extension(machine, result, &preprocess, scope, start, end, tag_only_declaration, declarator_start); break; \
++    case ci * 16 + 8: type = census_##c##_restrict(machine, result, &preprocess, scope, start, end, tag_only_declaration, declarator_start); break; \
++    case ci * 16 + 9: type = census_##c##_atomic_word(machine, result, &preprocess, scope, start, end, tag_only_declaration, declarator_start); break; \
++    case ci * 16 + 10: type = census_##c##_other_word(machine, result, &preprocess, scope, start, end, tag_only_declaration, declarator_start); break; \
++    case ci * 16 + 11: type = census_##c##_empty(machine, result, &preprocess, scope, start, end, tag_only_declaration, declarator_start); break;
++
+ // The base type of a declaration's specifier run [start, end): read from the
+ // syntax tree when the run is plain (above), else by the type machine, which
+ // is the default path and the fallback for every other run.
+@@ -19569,7 +19718,21 @@ BUSTER_C_INTERNAL CTypeId c_parse_declaration_specifiers_type(CTypeParseMachine*
+             }
+         }
+     }
+-    if (reason)
++    if (reason && machine->ast_specifier_starts)
++    {
++        bool plain = false;
++        u32 shape = census_classify(preprocess, start, end, &plain);
++        census_counts[census_caller][shape][reason] += 1;
++        census_tagref_plain[census_caller] += plain;
++        switch (census_caller * 16 + shape)
++        {
++            CENSUS_CASE(parameter, 0)
++            CENSUS_CASE(file_scope, 1)
++            CENSUS_CASE(block, 2)
++            default: break;
++        }
++    }
++    else if (reason)
+     {
+         type = c_parse_scalar_type_in_scope_context(machine, result, preprocess, scope, start, end, tag_only_declaration, declarator_start);
+     }
+@@ -21527,6 +21690,7 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
+     u32 first_bound = result->array_bound_count;
+     u32 declarator_start = start;
+     u32 type_diagnostic_start = result->diagnostic_count;
++    census_caller = 0;
+     CTypeId type = c_parse_declaration_specifiers_type(machine, result, preprocess, result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
+                                                        start, end, false, &declarator_start);
+     if (type.value == C_ID_UNDERLYING_INVALID)
+@@ -21900,6 +22064,7 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
+         u32 type_diagnostic_start = result->diagnostic_count;
+         if (base.value == C_ID_UNDERLYING_INVALID)
+         {
++            census_caller = 1;
+             base = c_parse_declaration_specifiers_type(machine, result, preprocess,
+                                                        result->scope_count ? (CScopeId){.value = 0} : C_SCOPE_ID_INVALID,
+                                                        declaration->token_start, name_index, false, &declarator_start);
+@@ -25626,6 +25791,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
+     u32 enum_member_start = result->enum_member_count;
+     u32 specifier_type_start = result->type_count;
+     u32 declarator_start = start;
++    census_caller = 2;
+     CTypeId base = is_auto_type ? C_TYPE_ID_INVALID :
+         c_parse_declaration_specifiers_type(machine, result, preprocess, scope, start, end, true, &declarator_start);
+     if (is_auto_type)

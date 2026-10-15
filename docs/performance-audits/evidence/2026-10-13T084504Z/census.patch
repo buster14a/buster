@@ -1,0 +1,64 @@
+diff --git a/src/buster/lib/compiler/frontend/c/c_gen.c b/src/buster/lib/compiler/frontend/c/c_gen.c
+index 863acb24..336ad93d 100644
+--- a/src/buster/lib/compiler/frontend/c/c_gen.c
++++ b/src/buster/lib/compiler/frontend/c/c_gen.c
+@@ -31423,6 +31423,41 @@ BUSTER_C_INTERNAL IrTypeId c_ir_vla_typeof_array(CIntegerIrBuilder* builder, IrT
+     return result;
+ }
+ 
++__attribute__((noinline)) static void census_tw1_call(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw1_true(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw1_nosymbol(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw1_predefined(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw1_mismatch(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw2_call(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw2_true(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw2_nosymbol(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw2_predefined(void) { __asm__ volatile(""); }
++__attribute__((noinline)) static void census_tw2_mismatch(void) { __asm__ volatile(""); }
++
++__attribute__((noinline)) static bool census_type_word(CIntegerIrBuilder* builder, CToken first, u32 site)
++{
++    bool answer = c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect);
++    bool token_answer = c_parse_type_word_for_dialect_token(builder->preprocess, first);
++    bool predefined = first.symbol && builder->preprocess.symbols && first.symbol <= builder->preprocess.symbols->predefined_limit;
++    if (site == 1)
++    {
++        census_tw1_call();
++        if (answer) census_tw1_true();
++        if (!first.symbol) census_tw1_nosymbol();
++        if (predefined) census_tw1_predefined();
++        if (answer != token_answer) census_tw1_mismatch();
++    }
++    else
++    {
++        census_tw2_call();
++        if (answer) census_tw2_true();
++        if (!first.symbol) census_tw2_nosymbol();
++        if (predefined) census_tw2_predefined();
++        if (answer != token_answer) census_tw2_mismatch();
++    }
++    return answer;
++}
++
+ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32 start, u32 end, u32* index_out, CType* qualifiers_out)
+ {
+     if (start >= end)
+@@ -31453,7 +31488,7 @@ BUSTER_C_INTERNAL IrTypeId c_ir_type_name_prefix(CIntegerIrBuilder* builder, u32
+     CToken first = builder->preprocess.tokens[index];
+     CEntityId entity = first.kind == C_TOKEN_IDENTIFIER ? c_ir_identifier_entity(builder, index) : C_ENTITY_ID_INVALID;
+     if (entity.value == C_ID_UNDERLYING_INVALID && first.kind == C_TOKEN_IDENTIFIER &&
+-        !c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect))
++        !census_type_word(builder, first, 1))
+     {
+         CScopeId scope = c_ir_current_scope(builder);
+         entity = c_parse_lookup_entity_token(&builder->parse, builder->preprocess.spelling_base, scope, &first);
+@@ -41643,7 +41678,7 @@ BUSTER_C_INTERNAL bool c_ir_statement_expression_tail(CIntegerIrBuilder* builder
+         CEntityId first_entity = c_ir_identifier_entity(builder, tail_start);
+         bool declaration = first.kind == C_TOKEN_IDENTIFIER &&
+                            (c_token_is_well_known(builder->preprocess.spelling_base, first, C_SYMBOL_WELL_KNOWN_TYPEDEF) ||
+-                            c_parse_type_word_for_dialect(c_token_spelling(builder->preprocess.spelling_base, first), builder->preprocess.dialect) ||
++                            census_type_word(builder, first, 2) ||
+                             (first_entity.value < builder->parse.entity_count && builder->parse.entities[first_entity.value].kind == C_ENTITY_TYPEDEF) ||
+                             (first_entity.value == C_ID_UNDERLYING_INVALID &&
+                              c_parse_type_start_token(&builder->parse, builder->preprocess, c_ir_current_scope(builder), first)));

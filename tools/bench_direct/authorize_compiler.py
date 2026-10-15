@@ -25,6 +25,7 @@ pull requests, is measured.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import urllib.parse
 
@@ -52,6 +53,22 @@ def choose_base(chain: list[str], checks: dict) -> str:
     """The nearest commit of chain with a valid main measurement in checks (sha -> rows), else chain[0]."""
     found = [sha for sha in chain if any(measured(row, sha) for row in checks.get(sha, []))]
     return found[0] if found else chain[0]
+
+
+def measured_reference(repository: str, base: str, rows: object) -> dict:
+    """base's newest valid main measurement as {check_url, measured_at}, or {} (#3923).
+
+    Only this proves the baseline is an actual measurement rather than the
+    first-parent fallback; a neutral "Not measured" check is never one. Both
+    fields are bounded and shaped before they reach a workflow output.
+    """
+    found = [row for row in (rows if isinstance(rows, list) else []) if measured(row, base)]
+    found.sort(key=lambda row: row["id"])
+    url = found[-1].get("html_url") if found else None
+    when = found[-1].get("completed_at") if found else None
+    shaped = isinstance(url, str) and re.fullmatch(rf"https://github\.com/{re.escape(repository)}/runs/[1-9][0-9]*", url) \
+        and isinstance(when, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", when)
+    return {"check_url": url, "measured_at": when} if shaped else {}
 
 
 def verify(repository: str, run_id: int, head: str, run: object, commit: object, base_commit: object,
@@ -103,12 +120,17 @@ def verify(repository: str, run_id: int, head: str, run: object, commit: object,
     return failures, result
 
 
-def main_chain(prefix: str, token: str, head: str, commit: object) -> tuple[list[str], str]:
-    """(head's first-parent chain, chosen baseline) from GitHub's records; ([], '') without a first parent."""
+def main_chain(prefix: str, token: str, head: str, commit: object) -> tuple[list[str], str, dict]:
+    """(head's first-parent chain, chosen baseline, its measured reference) from GitHub's records.
+
+    ([], '', {}) without a first parent. The reference is {} unless the
+    baseline holds a valid main measurement (measured_reference).
+    """
     parents = commit.get("parents") if isinstance(commit, dict) else None
     first = parents[0].get("sha") if isinstance(parents, list) and parents and isinstance(parents[0], dict) else ""
     chain: list[str] = []
     base = ""
+    reference: dict = {}
     if isinstance(first, str) and COMMIT.fullmatch(first):
         chain, base = [first], first
         try:
@@ -123,11 +145,12 @@ def main_chain(prefix: str, token: str, head: str, commit: object) -> tuple[list
                 if any(measured(row, sha) for row in checks[sha]):
                     break
             base = choose_base(chain, checks)
+            reference = measured_reference(prefix.removeprefix("/repos/"), base, checks.get(base))
         except (OSError, ValueError) as error:
             # Losing the range never refuses the measurement: the first parent is measured.
-            chain, base = [first], first
+            chain, base, reference = [first], first, {}
             print(f"BENCH_COMPILER_RANGE_UNAVAILABLE {error}; measuring against the first parent", file=sys.stderr)
-    return chain, base
+    return chain, base, reference
 
 
 MAIN_ROUTE_PATH = "docs/compiler-main-profile-routing-v1.tsv"
@@ -390,7 +413,7 @@ def main() -> int:
         prefix = f"/repos/{repository}"
         run = fetch(f"{prefix}/actions/runs/{run_id}", token)
         commit = fetch(f"{prefix}/commits/{head}", token)
-        chain, base = main_chain(prefix, token, head, commit)
+        chain, base, reference = main_chain(prefix, token, head, commit)
         base_commit = fetch(f"{prefix}/commits/{base}", token) if isinstance(base, str) and COMMIT.fullmatch(base) else None
         # status "ahead"/"identical": main descends from (or is) the commit.
         on_main = fetch(f"{prefix}/compare/{head}...main", token)
@@ -413,7 +436,11 @@ def main() -> int:
         with open(output, "a", encoding="utf-8") as stream:
             stream.write(f"attempt={attempt}\nbase={result['base']}\nbase_tree={result['base_tree']}\n"
                          f"head_tree={result['head_tree']}\npull={result['pull']}\npull_head={result['pull_head']}\n"
-                         f"first_parent={result['first_parent']}\nrange={result['range']}\n")
+                         f"first_parent={result['first_parent']}\nrange={result['range']}\n"
+                         # #3923: only an actual measured baseline may anchor an unchanged-input skip.
+                         f"base_measured={'true' if reference else 'false'}\n"
+                         f"reference_check_url={reference.get('check_url', '')}\n"
+                         f"reference_measured_at={reference.get('measured_at', '')}\n")
             for name in (*MAIN_ROUTE_OUTPUT_FIELDS, "main_policy_revision", "main_route_data", "main_facts_data", "main_identity_data"):
                 if name in result:
                     value = result[name]

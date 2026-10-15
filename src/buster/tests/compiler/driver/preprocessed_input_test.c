@@ -111,6 +111,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_preprocessed_c_input(Uni
     BUSTER_TEST(arguments, os_file_delete(saved_path));
     BUSTER_TEST(arguments, os_file_delete(roundtrip_path));
     BUSTER_TEST(arguments, os_file_delete(extensionless_path));
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }

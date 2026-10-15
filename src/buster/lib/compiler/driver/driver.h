@@ -35,6 +35,39 @@
 #define COMPILER_DRIVER_RESPONSE_FILE_BYTE_LIMIT BUSTER_MB(4)
 #define COMPILER_DRIVER_RESPONSE_FILE_ARGUMENT_LIMIT ((u64)1 << 16)
 
+// Lane gate for -fcompile-jobs translation-unit lanes (#53). Estimated work is
+// each eligible input's file size plus a per-input charge for the fixed cost
+// of a translation unit, in bytes. Below COMPILER_DRIVER_LANE_MIN_WORK_BYTES a
+// link keeps the one-worker path; otherwise the worker count is capped so each
+// worker keeps at least COMPILER_DRIVER_LANE_WORK_PER_WORKER_BYTES (never below
+// two). Values fitted from the 9700X scaling-v1 receipt of #3943 (check run
+// 115115906751, main 10e44760 with the one-family prewarm and lane-safe x86
+// fills): two equal TUs already gain 1.20x, so the serial minimum is 0; serial
+// time is ~5.6 ms + 0.067 us/byte + 0.035 ms/input, so the per-input charge is
+// 513 bytes; tiny TUs lose at 10.8 KB/worker (0.93x, 7 workers) and gain most
+// at 37.8 KB/worker (2 workers: 1.15x there, 1.09x in the validation run
+// 115276385855, ahead of 4 workers' 1.11x and 1.04x), so the floor is 32 KiB.
+// Re-derive all three whenever the lane entry cost changes
+// (docs/agents/driver.md, "Opt-in native translation-unit lanes").
+#define COMPILER_DRIVER_LANE_MIN_WORK_BYTES ((u64)0)
+#define COMPILER_DRIVER_LANE_INPUT_WORK_BYTES ((u64)513)
+#define COMPILER_DRIVER_LANE_WORK_PER_WORKER_BYTES ((u64)32 * 1024)
+
+// What the lane gate decided for one invocation. NONE: lanes were not
+// requested or cannot apply (one worker, fewer than two eligible inputs, an
+// embedding gang or a source cache). LANES: lanes were permitted at the
+// requested width. SERIAL: the population was too small, so the one-worker
+// path ran. CAPPED: lanes ran with fewer workers than requested so each keeps
+// the per-worker minimum.
+typedef enum CompilerDriverLaneGate
+{
+    COMPILER_DRIVER_LANE_GATE_NONE,
+    COMPILER_DRIVER_LANE_GATE_LANES,
+    COMPILER_DRIVER_LANE_GATE_SERIAL,
+    COMPILER_DRIVER_LANE_GATE_CAPPED,
+    COMPILER_DRIVER_LANE_GATE_COUNT,
+} CompilerDriverLaneGate;
+
 typedef enum CompilerDriverError
 {
     COMPILER_DRIVER_ERROR_NONE,
@@ -116,13 +149,18 @@ typedef enum CompilerDriverCDialect
     COMPILER_DRIVER_C_DIALECT_C17,
     COMPILER_DRIVER_C_DIALECT_C23,
     COMPILER_DRIVER_C_DIALECT_GNU89,
+    COMPILER_DRIVER_C_DIALECT_C89,
     COMPILER_DRIVER_C_DIALECT_COUNT,
 } CompilerDriverCDialect;
 
 // -fc-ast-pilot[=layout] (GitHub #3102): build the implicit postorder C syntax
 // tree of each C input after preprocessing and before c_parse_ast, inside the
-// parse phase. The tree feeds no later stage yet; a unit the tree builder
-// rejects fails with the parse error class. OFF is the default.
+// parse phase, for analysis and lowering to read; a unit the tree builder
+// rejects on syntax compiles without a tree
+// (CompilerDriverCAstPilotResult.rejections); one that cannot reserve its
+// storage fails with the parse error class. compiler_driver_parse_arguments
+// defaults to IMPLICIT; -fno-c-ast-pilot selects OFF, the tree-free reference
+// path, until #4058 deletes it. A zero-initialized invocation is OFF.
 typedef enum CompilerDriverCAstPilot
 {
     COMPILER_DRIVER_C_AST_PILOT_OFF,
@@ -160,6 +198,9 @@ typedef enum CompilerDriverWarningGroup
     // GNU `member: value` designator in a strict ISO dialect (Clang
     // -Wgnu-designator).
     COMPILER_DRIVER_WARNING_GROUP_GNU_DESIGNATOR,
+    // Implicit pointer conversions whose pointees differ only in integer
+    // signedness (GCC/Clang -Wpointer-sign), published by semantic analysis.
+    COMPILER_DRIVER_WARNING_GROUP_POINTER_SIGN,
     COMPILER_DRIVER_WARNING_GROUP_COUNT,
 } CompilerDriverWarningGroup;
 
@@ -339,6 +380,10 @@ struct CompilerDriverInvocation
     // Accepted only for I386, where native artifact generation is refused.
     bool no_asynchronous_unwind_tables;
     bool disable_direct_ssa;
+    // -fno-canonical-intern-constants: CIRLowerOptions.disable_block_constant_interning.
+    bool disable_block_constant_interning;
+    // -fcanonical-construction-fold: CIRLowerOptions.construction_fold.
+    bool construction_fold;
     bool disable_local_promotion;
     bool disable_target_local_promotion;
     // -fpinned-debug-locals / -fno-pinned-debug-locals override the default.
@@ -534,7 +579,8 @@ struct CompilerDriverFallbackRecord
 };
 
 // What the -fc-ast-pilot hook measured, summed over the inputs that built a
-// tree. `units` is zero when the hook did not run. The walk, scan and
+// tree. `units` is zero when the hook did not run; `rejections` counts the
+// units whose tree the builder refused on syntax, which compiled without one. The walk, scan and
 // children rows are diagnostic passes over the finished tree and are timed
 // only under -v: one full c_ast_walk (`walk_steps` events), one linear pass
 // over the kinds column counting CALL nodes (`scan_calls`), and
@@ -544,12 +590,15 @@ typedef struct CompilerDriverCAstPilotResult CompilerDriverCAstPilotResult;
 struct CompilerDriverCAstPilotResult
 {
     u64 units;
+    u64 rejections;
     u64 nodes;
     u64 tokens;
     u64 build_nanoseconds;
     u64 retained_bytes;
     u64 transient_high_water;
     u64 column_copy_bytes;
+    u64 parenthesis_copy_bytes;
+    u64 parenthesis_committed_bytes;
     u64 finalize_child_entries;
     u64 walk_nanoseconds;
     u64 walk_steps;
@@ -571,13 +620,13 @@ struct CompilerDriverCAstPilotResult
     // answered, and runs left to the type machine and why. Zero when the
     // analysis had no tree to use.
     CAstSpecifierStatistics specifiers;
-    // The extent table lowering read controlled body ranges from
-    // (c_gen.c): bodies, entries and answers, and the queries the token
-    // walker answered and why. Zero when lowering had no tree to use.
-    CAstExtentStatistics extents;
-    // What lowering read from the tree (CAstLowerStatistics). Zero for
-    // -fsyntax-only and when lowering had no tree.
+    // What lowering read from the tree (CAstLowerStatistics), on every
+    // compile that lowers: lowering builds the unit's tree itself when the
+    // pilot did not (GitHub #3102 step 1). Zero for -fsyntax-only.
     CAstLowerStatistics lower;
+    // The facts analysis retained for lowering (CAstFactStatistics, GitHub
+    // #4062). Zero for -fsyntax-only, which does not lower.
+    CAstFactStatistics facts;
 };
 
 typedef struct CompilerDriverResult CompilerDriverResult;
@@ -587,6 +636,8 @@ struct CompilerDriverResult
     IrFastStatistics fast;
     IrInlineStatistics inlining;
     CIRDirectSsaStatistics direct_ssa;
+    CIRConstantInternStatistics constant_interning;
+    CIRConstructionFoldStatistics construction_folds;
     CTypeLayoutStatistics type_layout;
     CompilerDriverCAstPilotResult c_ast;
     String8 diagnostic;
@@ -638,9 +689,14 @@ struct CompilerDriverResult
     u32 tokenizer_warning_count;
     u32 parser_diagnostic_count;
     u32 analysis_diagnostic_count;
+    // Published semantic-analysis warnings (-Wpointer-sign), less any that
+    // -Werror promoted; like tokenizer_warning_count it still counts one -w
+    // or -Wno-pointer-sign dropped.
+    u32 analysis_warning_count;
     // Maximum lanes actually participating in a native C input batch, or
     // one on serial/unsupported paths. This is not a physical-core count.
     u32 compilation_workers;
+    CompilerDriverLaneGate lane_gate;
     bool has_object;
     bool has_wasm;
     bool has_wasm64;
@@ -648,16 +704,24 @@ struct CompilerDriverResult
     bool has_llvm_bitcode;
     bool has_ebpf;
     bool has_spirv;
+    // Physical C source/header files kept alive for the enclosing native-link
+    // output guard. Virtual builtin headers are absent; the system bit only
+    // classifies depfile text and never filters this safety closure.
+    CPreprocessDependency* physical_inputs;
+    u32 physical_input_count;
 };
 
 // Prepare the target-independent frontend, ABI and opcode tables. Serial
 // native emission also prepares its target's metadata on demand.
 BUSTER_F_DECL void compiler_prewarm(void);
 // Before an embedding caller launches a gang that may compile native C,
-// prepare both native families, including all x86 forms/inline assembly.
-// Idle persistent workers are still live threads; preparing a new target
-// after the first gang starts is too late. The opt-in multi-TU driver calls
-// this before creating its first gang; ordinary serial compilation does not.
+// prepare both native families' serially built tables. The x86 per-form
+// caches, exact plans and machine-encoder tables are not among them: lanes
+// fill the entries they reach, under once-claims. Idle persistent workers are
+// still live threads; preparing a new target after the first gang starts is
+// too late. The opt-in multi-TU driver does not call this: it prepares only
+// its cohort's family and releases its own parked gang (lane_release) before
+// preparing another. Ordinary serial compilation does neither.
 BUSTER_F_DECL void compiler_parallel_prewarm(void);
 // When true, an absent -march keeps the host CPU (the test runners set it);
 // when false, the default is the portable baseline like Clang and GCC (#1557).

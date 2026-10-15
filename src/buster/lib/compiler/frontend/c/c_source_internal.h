@@ -116,6 +116,13 @@ BUSTER_F_DECL bool c_test_released_log_contains(void const* pointer, u64 length)
 // what a rewind of that arena to `position` is about to discard. A null owner
 // releases every unit of the thread.
 BUSTER_F_DECL void c_test_release_preprocess_arenas_from(Arena* owner, u64 position);
+// The calling thread's next registration serial. Releasing `since` a mark
+// returns every unit the thread preprocessed after taking it and has not
+// released, whatever arena its result lives in. The test harness takes a mark
+// when each fixture and module body begins and releases since it when the
+// scope ends, so no unit outlives the scope that created it (GitHub #3431).
+BUSTER_F_DECL u64 c_test_preprocess_unit_mark(void);
+BUSTER_F_DECL void c_test_release_preprocess_arenas_since(u64 mark);
 // scratch_end for a test that preprocessed into the scratch arena: releases
 // the units the rewind discards, then rewinds.
 BUSTER_F_DECL void c_test_scratch_end(TemporalArena temporary);
@@ -124,6 +131,30 @@ BUSTER_F_DECL void c_test_scratch_end(TemporalArena temporary);
     do \
     { \
         BUSTER_TEST_FIXTURE(arguments, function); \
+        c_test_release_preprocess_arenas(); \
+    } while (0)
+// The thread's unit registry reserves its own arena at its first unit. A
+// module whose fixtures check live reservations creates it before the first.
+BUSTER_F_DECL void c_test_unit_registry_prewarm(void);
+// C_TEST_FIXTURE that also requires the fixture to return every reservation
+// it made. The reading is taken inside the fixture's scope, before the scope's
+// end releases the units it left, so a unit kept alive across the fixture
+// fails here instead of being released silently. On failure it reports both
+// readings (GitHub #3306, #3431). Like BUSTER_TEST_FIXTURE, it calls through a
+// volatile pointer to keep the fixture out of line (#2816).
+#define C_TEST_BOUNDED_FIXTURE(arguments, function) \
+    do \
+    { \
+        TestArenaScope fixture_scope_ = buster_test_arena_begin((arguments), (arguments)->arena, S8(#function), false); \
+        TestFunction* volatile fixture_function_ = function; \
+        u64 live_ = arena_test_live_reserved_bytes(); \
+        UnitTestResult fixture_result_ = fixture_function_(arguments); \
+        u64 left_ = arena_test_live_reserved_bytes(); \
+        result.test_count += fixture_result_.test_count; \
+        result.succeeded_test_count += fixture_result_.succeeded_test_count; \
+        buster_test_arena_end((arguments), fixture_scope_, true); \
+        BUSTER_TEST_RAW(arguments, left_ == live_, \
+                        string_format((arguments)->arena, S8("{S8}: {u64} reserved bytes live before, {u64} after"), S8(#function), live_, left_)); \
         c_test_release_preprocess_arenas(); \
     } while (0)
 // Test the private append-only finalization boundary, not arbitrary map edits.
@@ -139,4 +170,30 @@ BUSTER_F_DECL u64 c_test_preprocess_references_range(CPreprocessResult const* re
 BUSTER_F_DECL u32 c_test_symbol_intern(CSymbolTable* table, String8 name);
 BUSTER_F_DECL u32 c_test_symbol_find(CSymbolTable const* table, String8 name);
 BUSTER_F_DECL u32 c_test_symbol_count(CSymbolTable const* table);
+// The spelling id `symbol` names, or empty for 0 and ids past the count.
+BUSTER_F_DECL String8 c_test_symbol_name(CSymbolTable const* table, u32 symbol);
+// Predefined object-like macro texts take a direct tokenizer instead of the
+// lexer when their bytes allow it (c_predefined_text_tokens). `compare` lexes
+// one text into a fresh space and says whether the direct tokens agree with
+// the lexer's, or that the text is left to the lexer.
+typedef enum CTestPredefinedTextResult
+{
+    C_TEST_PREDEFINED_TEXT_LEXED,
+    C_TEST_PREDEFINED_TEXT_AGREES,
+    C_TEST_PREDEFINED_TEXT_DISAGREES,
+} CTestPredefinedTextResult;
+BUSTER_F_DECL CTestPredefinedTextResult c_test_predefined_text_compare(Arena* arena, String8 text);
+// The calling thread's prelude: `force_lexer` lexes every text; `verify`
+// also compares each text as above and counts it until taken.
+typedef struct CTestPredefinedTextCounts CTestPredefinedTextCounts;
+struct CTestPredefinedTextCounts
+{
+    u64 direct;
+    u64 lexed;
+    // Lexed texts that are not string literals.
+    u64 lexed_unquoted;
+    u64 disagreements;
+};
+BUSTER_F_DECL void c_test_predefined_text_mode(bool force_lexer, bool verify);
+BUSTER_F_DECL CTestPredefinedTextCounts c_test_predefined_text_take(void);
 #endif

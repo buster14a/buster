@@ -1,0 +1,11 @@
+==1023899== Callgrind, a call-graph generating cache profiler
+==1023899== Copyright (C) 2002-2017, and GNU GPL'd, by Josef Weidendorfer et al.
+==1023899== Using Valgrind-3.25.1 and LibVEX; rerun with -h for copyright info
+==1023899== Command: /home/david/Documents/Codex/2026-10-12/s/work/glibc/usr/lib/ld-linux-x86-64.so.2 --library-path /home/david/Documents/Codex/2026-10-12/s/work/glibc/usr/lib /home/david/Documents/Codex/2026-10-12/s/work/subjects/final-profile cc -Isrc -Igenerated -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=0 -target x86_64-unknown-linux -march=znver5 -c -fc-ast-pilot -g0 src/buster/apps/ide/ide.c -o /home/david/Documents/Codex/2026-10-12/s/work/profiles/final-pilot-profile.o
+==1023899== 
+==1023899== For interactive control, run 'callgrind_control -h'.
+==1023899== 
+==1023899== Events    : Ir
+==1023899== Collected : 23698153308
+==1023899== 
+==1023899== I   refs:      23,698,153,308

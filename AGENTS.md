@@ -92,7 +92,7 @@ Run from the repository root. Configure a fresh tree once, then build it:
 **`generate` deletes and recreates its selected build directory.** Never run it
 alongside a build, self-host, benchmark, or harness using that directory. On an
 existing configured tree, use `build` for incremental work. `--sanitize`,
-`--fuzz`, `--lto`, `--ci`, `--time-trace`, `--instrument`, and `--cc` belong to
+`--tsan`, `--fuzz`, `--lto`, `--ci`, `--time-trace`, `--instrument`, and `--cc` belong to
 `generate`, not `build`. On Windows use `./build.ps1` with the same arguments.
 
 | Change or goal | Validation from the repository root |
@@ -102,6 +102,7 @@ existing configured tree, use `build` for incremental work. `--sanitize`,
 | Growing production or build code | Commit, then `./build.sh source_size --base "$(git merge-base origin/main HEAD)"`; past 32 KiB, acknowledge per [source-size policy](docs/source-size.md). |
 | Allocator, ABI, or backend changes | `./build.sh test_mode_matrix --config Release`; cover `fast` and `quality` as applicable. |
 | Sanitized validation | With the build directory idle: `./build.sh generate --sanitize`, then `./build.sh build -t test_all`. |
+| Lane-parallel or shared-initialization changes | In a separate tree: `./build.sh generate --tsan --build-directory build/tsan`, then `./build.sh build --build-directory build/tsan --config Release -t test_tsan`. |
 | Full local compiler/configuration matrix | `./build.sh test_all_combinations`. |
 | External compatibility work | Read the [harness index](docs/agents/compatibility.md); use its pristine pinned inputs and affected harness. |
 | Documentation only | Check commands against their implementation, `python3 tools/check_markdown_links.py`, and `git diff --check`; compiler tests are unnecessary unless behavior also changes. Raw audit evidence is byte-exact and [exempt from the whitespace check](docs/agents/benchmarking.md#performance-audit-notes); audit prose is not. |
@@ -144,12 +145,19 @@ performance evidence keeps its existing request and acceptance requirements.
 See [request decisions and examples](docs/agents/benchmarking.md#request-decisions-and-examples)
 for correctness, performance-claim and task-acceptance handoffs.
 
-Every performance-validation test requires actual execution of its relevant
-workload on the approved Zen 5 host (Ryzen 7 9700X). Without complete evidence
-matching the candidate, workload and configuration, report performance
-validation as incomplete. Hosted, simulated and static evidence is diagnostic.
+Choose performance evidence by mechanism and claim (#4013). A Zen 5 or
+microarchitecture-sensitive claim (SIMD, branched versus branchless,
+scheduling, alignment/cache/TLB tuning, an explicit Zen 5 speed) requires
+actual execution of its relevant workload on the approved Zen 5 host (Ryzen 7
+9700X); simulated, static and non-target evidence never satisfies it. A
+work-reduction claim may complete with repeatable work counts, and a native
+runtime or resource claim that no CPU mechanism decides may complete with
+paired uninstrumented native-host timing, each only for what it establishes
+([alternative evidence](docs/agents/benchmarking.md#alternative-evidence-routes)).
+Split mixed claims. Without complete evidence of the required class matching
+the candidate, workload and configuration, report that claim as incomplete.
 [docs/performance-validation-v1.json](docs/performance-validation-v1.json)
-lists each entry point's route; a new one needs a row (#2761).
+lists each entry point's route and evidence classes; a new one needs a row (#2761).
 
 For an explicitly requested standalone C experiment, add its workload under
 `benchmarks/9700x/` in an owner pull request, following

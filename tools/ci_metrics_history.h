@@ -121,7 +121,7 @@ BUSTER_GLOBAL_LOCAL int cm_history_load(CmTransport *t, CmStore *s, unsigned day
 BUSTER_GLOBAL_LOCAL int cm_history_append(CmTransport *t, CmStore *s, CmOutputs *out, unsigned begin, const char *observed)
 {
     char date[11], path[128];
-    cm_copy(date, sizeof(date), observed);
+    snprintf(date, sizeof(date), "%.10s", observed ? observed : "");
     snprintf(path, sizeof(path), "history/%s/index.json", date);
     int available = 0;
     char *index = cm_data_read(t, path, &available);

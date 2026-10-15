@@ -154,6 +154,9 @@ if [[ $android_aarch64_package == 1 && $android_aarch64_build_directory == "$bui
     echo "error: x86-64 runtime and arm64-v8a package coverage require separate build directories" >&2
     exit 1
 fi
+# With AArch64 package coverage on, the native build driver's android_packages
+# command runs the x86-64 and arm64-v8a package batches concurrently (#3912).
+android_host_driver=${BUSTER_ANDROID_HOST_DRIVER:-$repo_root/build.sh}
 
 android_phase=configure
 android_config=none
@@ -266,65 +269,75 @@ configure_android_tree() {
 cmake --version
 ninja --version
 
-configure_started=$SECONDS
-configure_android_tree "$build_directory" "$android_abi"
-if [[ $android_execution == package ]]; then
-    echo "TIMING_ANDROID_PACKAGE abi=$android_abi configure_seconds=$((SECONDS - configure_started))"
-else
-    echo "TIMING_ANDROID configure_seconds=$((SECONDS - configure_started))"
-fi
-
 apk_paths=()
-android_phase=build
-for index in "${!build_configs[@]}"; do
-    build_config=${build_configs[$index]}
-    android_config=$build_config
-    if [[ $android_execution == runtime ]]; then
-        echo "Building and packaging Android ${build_config} while the emulator boots"
-    else
-        echo "Building and packaging Android ${android_abi} ${build_config}"
-    fi
-    build_started=$SECONDS
-    cmake --build "$build_directory" --config "$build_config" --target apk --verbose
-    apk_source="$build_directory/buster.apk"
-    apk_path="$build_directory/$build_config/buster.apk"
-    if [[ ! -f $apk_source ]]; then
-        echo "error: expected Android APK not found at '$apk_source' after ${build_config} build" >&2
-        exit 1
-    fi
-    mkdir -p "$(dirname "$apk_path")"
-    cp -f "$apk_source" "$apk_path"
-    apk_paths+=("$apk_path")
+if [[ $android_aarch64_package == 1 ]]; then
+    # Both ABIs build as package batches at the same time; the driver replays
+    # each batch's output in ABI order and fails if either batch fails. The
+    # x86-64 batch leaves the runtime APKs at the paths the payloads install.
+    android_phase=build
+    android_config=none
+    packages_started=$SECONDS
+    echo "Building and packaging Android ${android_abi} and arm64-v8a concurrently while the emulator boots"
+    "$android_host_driver" android_packages --script "$repo_root/android/test_ci.sh" \
+        --configs "${build_configs[@]}" \
+        --package "$android_abi" "$build_directory" \
+        --package arm64-v8a "$android_aarch64_build_directory" \
+        --emulator-marker "$android_emulator_started_marker"
+    echo "TIMING_ANDROID packages_seconds=$((SECONDS - packages_started))"
+    for build_config in "${build_configs[@]}"; do
+        apk_path="$build_directory/$build_config/buster.apk"
+        if [[ ! -f $apk_path ]]; then
+            echo "error: expected Android APK not found at '$apk_path' after the concurrent package batches" >&2
+            exit 1
+        fi
+        apk_paths+=("$apk_path")
+    done
+    printf 'ANDROID_AARCH64_COVERAGE abi=arm64-v8a execution=compile-link-package runtime=not-run reason=github-hosted-x86_64-kvm status=0\n'
+else
+    configure_started=$SECONDS
+    configure_android_tree "$build_directory" "$android_abi"
     if [[ $android_execution == package ]]; then
-        verify_android_apk "$apk_path" "$android_abi"
-        config_statuses[$index]=0
-        printf 'ANDROID_PACKAGE_ARTIFACT abi=%s config=%s path=%s\n' \
-            "$android_abi" "$build_config" "$apk_path"
-        echo "TIMING_ANDROID_PACKAGE abi=$android_abi build_seconds config=$build_config value=$((SECONDS - build_started))"
+        echo "TIMING_ANDROID_PACKAGE abi=$android_abi configure_seconds=$((SECONDS - configure_started))"
     else
-        echo "TIMING_ANDROID build_seconds config=$build_config value=$((SECONDS - build_started))"
+        echo "TIMING_ANDROID configure_seconds=$((SECONDS - configure_started))"
     fi
-done
+
+    android_phase=build
+    for index in "${!build_configs[@]}"; do
+        build_config=${build_configs[$index]}
+        android_config=$build_config
+        if [[ $android_execution == runtime ]]; then
+            echo "Building and packaging Android ${build_config} while the emulator boots"
+        else
+            echo "Building and packaging Android ${android_abi} ${build_config}"
+        fi
+        build_started=$SECONDS
+        cmake --build "$build_directory" --config "$build_config" --target apk --verbose
+        apk_source="$build_directory/buster.apk"
+        apk_path="$build_directory/$build_config/buster.apk"
+        if [[ ! -f $apk_source ]]; then
+            echo "error: expected Android APK not found at '$apk_source' after ${build_config} build" >&2
+            exit 1
+        fi
+        mkdir -p "$(dirname "$apk_path")"
+        cp -f "$apk_source" "$apk_path"
+        apk_paths+=("$apk_path")
+        if [[ $android_execution == package ]]; then
+            verify_android_apk "$apk_path" "$android_abi"
+            config_statuses[$index]=0
+            printf 'ANDROID_PACKAGE_ARTIFACT abi=%s config=%s path=%s\n' \
+                "$android_abi" "$build_config" "$apk_path"
+            echo "TIMING_ANDROID_PACKAGE abi=$android_abi build_seconds config=$build_config value=$((SECONDS - build_started))"
+        else
+            echo "TIMING_ANDROID build_seconds config=$build_config value=$((SECONDS - build_started))"
+        fi
+    done
+fi
 
 if [[ $android_execution == package ]]; then
     android_phase=package
     android_config=none
     exit 0
-fi
-
-if [[ $android_aarch64_package == 1 ]]; then
-    android_phase=aarch64-package
-    android_config=none
-    aarch64_started=$SECONDS
-    echo "Building required Android AArch64 compile/link/package coverage"
-    BUSTER_ANDROID_EXECUTION=package \
-        BUSTER_ANDROID_ABI=arm64-v8a \
-        BUSTER_ANDROID_BUILD_DIRECTORY="$android_aarch64_build_directory" \
-        BUSTER_ANDROID_AARCH64_PACKAGE=0 \
-        BUSTER_ANDROID_EMULATOR_STARTED_MARKER="${android_emulator_started_marker}.aarch64-package" \
-        bash "$repo_root/android/test_ci.sh" --package-only --configs "${build_configs[@]}"
-    printf 'ANDROID_AARCH64_COVERAGE abi=arm64-v8a execution=compile-link-package runtime=not-run reason=github-hosted-x86_64-kvm status=0\n'
-    echo "TIMING_ANDROID aarch64_package_seconds=$((SECONDS - aarch64_started))"
 fi
 
 # A probe that fails to build is recorded like one that fails to run: the

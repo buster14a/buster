@@ -34,7 +34,10 @@ run's Release compiler against its PGO+LTO compiler on the corpus. A fresh exact
 FRONTEND_SELECTOR_REQUEST_LINE adds the frontend and selector probes (#2761):
 the base revision's benchmark_frontend_scaling.py and selection_benchmark.py
 run on the same two binaries, then `ide bench` runs in alternating fresh
-processes of both.
+processes of both. A fresh exact FRONTEND_NESTING_REQUEST_LINE adds the
+deep-nesting leg (#2676): the base revision's benchmark_frontend_scaling.py
+--suite nesting times the same two binaries on control statements nested to
+growing depths.
 A fresh exact COMPILER_PROBES_REQUEST_LINE adds the compiler-probes leg (#2761): the
 trusted native compiler_probes.c harness builds the FAST register-allocation and
 scheduler line-mark probes against both revisions in isolated clones and times
@@ -52,24 +55,40 @@ A fresh exact LINK_TLS_REQUEST_LINE adds the TLS companion link leg (#1915):
 the trusted revision's tools/link_tls_bench.py builds frozen TLS-heavy inputs
 and times fresh `ide cc` links of both binaries, after requiring byte-identical
 images that print the frozen output.
+A fresh exact SELFHOST_INLINE_REQUEST_LINE adds the self-built inline-mode leg
+(#58): after each role's build its ide builds that revision's stage-1
+compiler with -fcanonical-inline, and after the ordinary comparison the
+trusted selfhost_inline_compare.py times the two stage-1 compilers on the
+frozen merge-base tree with topdown and sampling profiles.
 
 The receipt records identities, the profile, toolchain versions, binary hashes
 and timings, and is written even when a step fails. The candidate's build runs
 as the runner account before measurement, so the receipt is evidence produced
 under the direct path's owner-only trust boundary, not a sealed result.
+With --request-attempt, an ordinary (not owned, MAIN-owned or analyzer) attempt,
+legacy-rebuild or pull snapshot-v1 (whose closure records and owned phases join
+the snapshot inventory), also exports the v1 raw inventory as required (#2918), writes
+evidence-omissions.json and, once measured, seals the retained bundle last with
+the trusted `./build.sh compiler_evidence seal`; the receipt's evidence_bundle
+names that seal, and a refused seal fails the attempt.
 
 Map: queue_head (pull-mode supersession), build (one ide), toolchain, export_tree (bounded evidence export),
-read_exported_json (classification reads the export, #2929), collect_evidence,
+read_exported_json (classification reads the export, #2929), lab_evidence_required and collect_evidence,
+evidence_omissions_document and seal_evidence (#2918 sealed raw evidence),
 throughput_harness_problem (#3714 base-harness admission), historical_request_selection and
 prepare_historical_harness (#3714 named historical corpus), measure_throughput (corpus leg),
 scaling_requested and measure_scaling (scaling leg),
 ast_pilot_request_selection and measure_ast_pilot (#3397 opt-in flag pair),
+constant_reuse_request_selection and measure_constant_reuse (#3011 opt-in flag pairs),
+process_floor_request_selection and measure_process_floor (#1125 per-process floor),
 real_source_request_selection and measure_real_source (#2761 real-source leg),
 production_profile_request_selection and measure_production_profile (#2761 PGO/LTO leg),
 compiler_probes_request_selection and measure_compiler_probes (#2761 probe leg),
 frontend_selector_request_selection and measure_frontend_selector (#2761 probes),
+frontend_nesting_request_selection and measure_frontend_nesting (#2676 deep nesting),
 wild_linker_request_selection, host_linker and measure_wild_linker (#2761 linker leg),
-link_tls_request_selection and measure_link_tls (#1915 TLS link leg), main. Validity rules live in compiler_receipt.classify.
+link_tls_request_selection and measure_link_tls (#1915 TLS link leg),
+selfhost_inline_request_selection, build_selfhost_inline_stage1 and measure_selfhost_inline (#58), main. Validity rules live in compiler_receipt.classify.
 """
 
 from __future__ import annotations
@@ -96,6 +115,12 @@ from pathlib import Path
 from compiler_github import ARTIFACT_LIMIT, RECONCILE_DEPTH
 from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE_PROFILE, INLINE_ACCEPTANCE_REQUEST_LINE,
                               AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_ACCEPTANCE_REQUEST_LINE, validate_ast_pilot_acceptance,
+                              AST_RETIREMENT_PROFILE, AST_RETIREMENT_CELLS, AST_RETIREMENT_CORPUS, AST_RETIREMENT_REQUEST_LINE,
+                              validate_ast_retirement_acceptance,
+                              CONSTANT_REUSE_ACCEPTANCE_PROFILE, CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
+                              validate_constant_reuse_acceptance,
+                              PROCESS_FLOOR_PROFILE, PROCESS_FLOOR_REQUEST_LINE, PROCESS_FLOOR_CELLS,
+                              validate_process_floor_acceptance,
                               THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                               throughput_real_source_digest, validate_throughput_real_source,
                               PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
@@ -104,11 +129,15 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               compiler_probes_digest, validate_compiler_probes,
                               FRONTEND_SELECTOR_PROFILE, FRONTEND_SELECTOR_REQUEST_LINE, FRONTEND_SELECTOR_SCHEMA,
                               frontend_selector_digest, validate_frontend_selector,
+                              FRONTEND_NESTING_PROFILE, FRONTEND_NESTING_REQUEST_LINE, frontend_scaling_digest,
+                              validate_frontend_nesting,
                               WILD_LINKER_PROFILE, WILD_LINKER_REQUEST_LINE, WILD_LINKER_SCHEMA, WILD_LINKER_COMPARATORS,
                               wild_linker_bundle_files, wild_linker_digest, validate_wild_linker, WILD_IDENTITY,
                               WILD_LINKER_LINKERS,
                               LINK_TLS_PROFILE, LINK_TLS_REQUEST_LINE, LINK_TLS_HARNESS, link_tls_digest,
                               validate_link_tls,
+                              SELFHOST_INLINE_PROFILE, SELFHOST_INLINE_REQUEST_LINE, SELFHOST_INLINE_HARNESS,
+                              selfhost_inline_digest, validate_selfhost_inline,
                               INLINE_ACCEPTANCE_SCHEMA, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUEST_LINE,
                               ANALYZER_REQUEST_LINES,
                               ANALYZER_REQUEST_PATH, ANALYZER_REQUIRED_FILES, MODES, PROFILE, MAIN40_PROFILE, MAIN_PROFILES, named_main_profile, RECEIPT_SCHEMA, SCALING_PROFILE,
@@ -119,7 +148,11 @@ from compiler_receipt import (validate_closure, IDENTITY_KEYS, INLINE_ACCEPTANCE
                               render, scaling_digest, throughput_digest, validate_inline_acceptance,
                               analyzer_bootstrap_provenance, analyzer_profile_summary)
 from compiler_receipt import observed_cpu_model as cpu_model
+from compiler_receipt import (EVIDENCE_OMISSIONS, EVIDENCE_OMISSIONS_SCHEMA,
+                              EVIDENCE_OMISSION_REASONS, EVIDENCE_OMISSION_EXAMPLES, EVIDENCE_SEAL,
+                              evidence_lab_required, evidence_corpus_required, evidence_identity, evidence_inventory)
 import throughput_real_source
+from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 
 BUILD_TIMEOUT_SECONDS = 1800
 LAB_TIMEOUT_SECONDS = 3000
@@ -127,6 +160,11 @@ THROUGHPUT_TIMEOUT_SECONDS = 1800
 SCALING_TIMEOUT_SECONDS = 1200
 INLINE_ACCEPTANCE_TIMEOUT_SECONDS = 3 * 60 * 60
 AST_PILOT_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
+AST_RETIREMENT_ACCEPTANCE_TIMEOUT_SECONDS = 45 * 60
+# Two -c cells of 20 ABBA pairs each, the size of the ast-pilot object cell.
+CONSTANT_REUSE_ACCEPTANCE_TIMEOUT_SECONDS = 2 * 60 * 60
+# Three cells of tiny compiles, each bounded by process_floor_acceptance.COMPARE_TIMEOUT_SECONDS.
+PROCESS_FLOOR_TIMEOUT_SECONDS = 60 * 60
 # Measured: the whole leg (42 passes over its six cells) took 508 s on a hosted
 # 2.8 GHz Xeon; this bound keeps it inside the unchanged compare-pull budget.
 REAL_SOURCE_TIMEOUT_SECONDS = 1800
@@ -145,6 +183,10 @@ COMPILER_PROBES_TIMEOUT_SECONDS = 20 * 60
 FRONTEND_SCALING_TIMEOUT_SECONDS = 20 * 60
 SELECTION_TIMEOUT_SECONDS = 10 * 60
 IDE_BENCH_TIMEOUT_SECONDS = 30
+# Measured: the whole frontend-nesting leg (68 cells, one warmup and eleven
+# repetitions of each binary) took 190 s on a hosted 4-vCPU 2.1 GHz Xeon and
+# exported 196 KB; this bound keeps it inside the unchanged compare-pull budget.
+FRONTEND_NESTING_TIMEOUT_SECONDS = 20 * 60
 # Measured on a hosted 4-vCPU 2.3 GHz Xeon: the head's three input builds (two
 # generations, Release unity, Debug and Release separate, and the harness compile)
 # took 281 s together and the link-only harness 24 s (GNU ld as comparator, 3.4 MB
@@ -157,6 +199,10 @@ WILD_LINKER_PROBE_TIMEOUT_SECONDS = 30
 # is slowest: building the inputs and the seven cells of 2 warmups + 20 pairs took
 # 248 s. The bound stays inside the unchanged compare-pull job with its ordinary comparison.
 LINK_TLS_TIMEOUT_SECONDS = 20 * 60
+# One untimed stage-1 build per role, then 30 pairs and both profile steps of
+# two self-built compilers: about 120 compiles of roughly 5 s each on the 9700X.
+SELFHOST_INLINE_STAGE1_TIMEOUT_SECONDS = 15 * 60
+SELFHOST_INLINE_TIMEOUT_SECONDS = 45 * 60
 ANALYZER_DRIVER_BUILD_TIMEOUT_SECONDS = 600
 ANALYZER_GENERATE_TIMEOUT_SECONDS = 900
 ANALYZER_HELPER_TIMEOUT_SECONDS = 76 * 60
@@ -171,8 +217,20 @@ EVIDENCE_FILE_LIMIT = 32 * 1024 * 1024
 # (compiler_publish.MEMBER_LIMIT; compiler_test keeps them equal), and the whole
 # evidence directory within three quarters of the 64 MiB artifact limit.
 EVIDENCE_MEMBER_LIMIT = 8 * 1024 * 1024
-EVIDENCE_TOTAL_LIMIT = ARTIFACT_LIMIT * 3 // 4
-EVIDENCE_FILE_COUNT = 4096
+# The sealed raw-evidence contract (#2918, docs/compiler-evidence-v1.md): the
+# native verifier bounds the retained bundle by EVIDENCE_SEALED_LIMITS, and
+# the exports keep EVIDENCE_CONTROL_RESERVE for the manifest, seal and
+# omissions document written after them.
+EVIDENCE_SEALED_LIMITS = (ARTIFACT_LIMIT * 3 // 4, 4096)
+EVIDENCE_CONTROL_RESERVE = (6 * 1024 * 1024, 3)
+EVIDENCE_TOTAL_LIMIT = EVIDENCE_SEALED_LIMITS[0] - EVIDENCE_CONTROL_RESERVE[0]
+EVIDENCE_FILE_COUNT = EVIDENCE_SEALED_LIMITS[1] - EVIDENCE_CONTROL_RESERVE[1]
+# Sealed attempts' optional members, exported after every leg's required ones (export_deferred_optional).
+EVIDENCE_DEFERRED_OPTIONAL: list[dict] = []
+# Set by main for a sealed attempt: every export_tree defers its optional members, opt-in legs included.
+EVIDENCE_DEFER_ALL = False
+# (bundle path, reason code) of every omission in this attempt, for evidence-omissions.json.
+EVIDENCE_OMISSION_LEDGER: list[tuple[str, str]] = []
 OMISSIONS_SHOWN = 50
 LAB_REQUIRED = ("summary.json",)
 THROUGHPUT_REQUIRED = ("summary.json", "metadata.json")
@@ -186,6 +244,9 @@ FRONTEND_SCALING_REQUIRED = ("provenance.json", "results.json")
 SELECTION_REQUIRED = ("report.json",)
 WILD_LINKER_REQUIRED = tuple(wild_linker_bundle_files().values())
 LINK_TLS_REQUIRED = ("summary.json",)
+SELFHOST_INLINE_REQUIRED = ("stage1-baseline/stage1.json", "stage1-candidate/stage1.json", "compare/result.json",
+                            "compare/lab/summary.json", "compare/lab/compare.json", "compare/lab/a/lab.json",
+                            "compare/lab/b/lab.json")
 # Raw evidence without compiled outputs, per-run binary copies or perf data.
 EVIDENCE_IGNORE = ("*.exe", "instances", "*.data", "*.data.old", "*.o", "*.obj")
 # A scaling bundle keeps its reports, raw samples and per-sample logs; its
@@ -636,9 +697,13 @@ def toolchain() -> dict:
 
 
 def evidence_usage(evidence: Path) -> tuple[int, int]:
-    """(bytes, files) already under the evidence root, without following symlinks."""
+    """(bytes, entries) already under the evidence root, without following symlinks.
+
+    Entries are files and directories below the root, as the sealed bound counts them (#2918).
+    """
     total = count = 0
-    for directory, _, names in os.walk(evidence):
+    for directory, folders, names in os.walk(evidence):
+        count += len(folders)
         for name in names:
             try:
                 total += os.lstat(os.path.join(directory, name)).st_size
@@ -648,78 +713,135 @@ def evidence_usage(evidence: Path) -> tuple[int, int]:
     return total, count
 
 
-def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple) -> tuple[list[str], list]:
-    """Copy a measurement tree into the evidence under byte/file limits enforced before and during copying.
+def copy_evidence_member(path: str, target: Path, limit: int, room: int) -> tuple[int, str, str]:
+    """(bytes copied, reason, code): one regular file copied without following links, within its limits.
+
+    room is the aggregate budget left; a file over its limit or one that grows past either bound while
+    being read is not copied, and any partial target is removed.
+    """
+    copied, reason, code = 0, "", ""
+    try:
+        status = os.lstat(path)
+        if not stat.S_ISREG(status.st_mode):
+            reason, code = "not a regular file", "excluded-type"
+        elif status.st_size > limit:
+            reason, code = f"{status.st_size} bytes exceeds the {limit} byte file limit", "member-limit"
+        elif status.st_size > room:
+            reason, code = "evidence byte budget exhausted", "byte-budget"
+        else:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(descriptor, "rb") as reader, target.open("xb") as writer:
+                for block in iter(lambda: reader.read(1 << 20), b""):
+                    copied += len(block)
+                    if copied > limit or copied > room:
+                        reason, code = "grew past its limit while being copied", "changed-during-copy"
+                        break
+                    writer.write(block)
+            if reason:
+                target.unlink()
+    except OSError as error:
+        reason, code = f"copy failed: {error}", "read-error"
+        if target.is_file() and not target.is_symlink():
+            target.unlink()
+    return (0 if reason else copied), reason, code
+
+
+def evidence_leaves(source: Path, ignore: tuple) -> tuple[list[tuple[str, str]], list[dict]]:
+    """(relative path, source path) of every non-ignored leaf below source, and the symlinked directories skipped."""
+    leaves: list[tuple[str, str]] = []
+    skipped: list[dict] = []
+    for directory, names, found in os.walk(source, followlinks=False):
+        relative = Path(directory).relative_to(source)
+        kept = []
+        for name in sorted(names):
+            if any(fnmatch.fnmatch(name, pattern) for pattern in ignore):
+                continue
+            if os.path.islink(os.path.join(directory, name)):
+                skipped.append({"path": (relative / name).as_posix(), "reason": "symlink is not followed"})
+                continue
+            kept.append(name)
+        names[:] = kept
+        leaves.extend(((relative / name).as_posix(), os.path.join(directory, name)) for name in found
+                      if not any(fnmatch.fnmatch(name, pattern) for pattern in ignore))
+    return sorted(leaves, key=lambda leaf: leaf[0].encode()), skipped
+
+
+def admit_evidence_leaves(leaves: list[tuple[str, str]], root: Path, created: set[str], usage: list[int],
+                          present: set[str], omissions: list, codes: list[str]) -> None:
+    """Copy leaves under root in order, charging each file and its not yet created ancestor directories.
+
+    usage is [bytes, entries] of the whole evidence directory; a directory is created only for an admitted
+    file, so empty or unadmitted optional subtrees never consume the entry budget (#2918).
+    """
+    for shown, path in leaves:
+        parts = shown.split("/")
+        parents = [ancestor for ancestor in ("/".join(parts[:depth]) for depth in range(1, len(parts)))
+                   if ancestor not in created]
+        limit = EVIDENCE_MEMBER_LIMIT if shown.endswith(".json") else EVIDENCE_FILE_LIMIT
+        copied, reason, code = 0, "", ""
+        if usage[1] + 1 + len(parents) > EVIDENCE_FILE_COUNT:
+            reason, code = "evidence file-count budget exhausted", "file-budget"
+        else:
+            try:
+                for parent in parents:
+                    (root / parent).mkdir(exist_ok=True)
+                    created.add(parent)
+                    usage[1] += 1
+                copied, reason, code = copy_evidence_member(path, root / shown, limit, EVIDENCE_TOTAL_LIMIT - usage[0])
+            except OSError as error:
+                reason, code = f"copy failed: {error}", "read-error"
+        if reason:
+            omissions.append({"path": shown, "reason": reason})
+            codes.append(code)
+        else:
+            usage[0] += copied
+            usage[1] += 1
+            present.add(shown)
+
+
+def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple,
+                defer_optional: bool = False) -> tuple[list[str], list]:
+    """Copy a measurement tree into the evidence under byte/entry limits enforced before and during copying.
 
     Only regular files are admitted: symlinks and other types are never followed or copied. A file over
     its limit (EVIDENCE_MEMBER_LIMIT for JSON, else EVIDENCE_FILE_LIMIT), one that would exceed the
     aggregate budget, one that grows while being read, or one that cannot be read is omitted and listed.
-    The tree is staged beside its destination and moved into place afterwards. Returns (problems,
-    omissions); an omitted or absent required member is a problem, so the export is incomplete rather than
-    quietly successful. The source is never modified.
+    Every required member is copied before any optional one, and a directory is created only as the
+    ancestor of an admitted file. With defer_optional (a sealed attempt, #2918) no optional member is
+    copied now: export_deferred_optional adds them after every leg's required members. EVIDENCE_DEFER_ALL
+    applies the same to every export of a sealed attempt, so an opt-in leg exported before the ordinary lab
+    and corpus never spends their budget on optional data; each leg still validates only required members,
+    which are exported at once. The tree is staged
+    beside its destination and moved into place afterwards. Returns (problems, omissions); an omitted or
+    absent required member is a problem, so the export is incomplete rather than quietly successful. Each
+    omission also reaches EVIDENCE_OMISSION_LEDGER with its fixed reason code. The source is never modified.
     """
     problems: list[str] = []
     omissions: list = []
+    codes: list[str] = []
     staging = destination.with_name(destination.name + ".staging")
     used, files = evidence_usage(evidence)
     if destination.is_dir():  # a re-export replaces it
         replaced = evidence_usage(destination)
         used, files = used - replaced[0], files - replaced[1]
+    else:  # the destination directory itself is a retained entry
+        files += 1
     present: set[str] = set()
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     try:
-        for directory, names, leaves in os.walk(source, followlinks=False):
-            relative = Path(directory).relative_to(source)
-            kept = []
-            for name in sorted(names):
-                shown = (relative / name).as_posix()
-                if any(fnmatch.fnmatch(name, pattern) for pattern in ignore):
-                    continue
-                if os.path.islink(os.path.join(directory, name)):
-                    omissions.append({"path": shown, "reason": "symlink is not followed"})
-                    continue
-                kept.append(name)
-                (staging / relative / name).mkdir(parents=True, exist_ok=True)
-            names[:] = kept
-            # Required members first, so an exhausted budget never starves them.
-            for name in sorted(leaves, key=lambda leaf: ((relative / leaf).as_posix() not in required, leaf)):
-                shown = (relative / name).as_posix()
-                if any(fnmatch.fnmatch(name, pattern) for pattern in ignore):
-                    continue
-                reason = ""
-                path = os.path.join(directory, name)
-                limit = EVIDENCE_MEMBER_LIMIT if name.endswith(".json") else EVIDENCE_FILE_LIMIT
-                try:
-                    status = os.lstat(path)
-                    if not stat.S_ISREG(status.st_mode):
-                        reason = "not a regular file"
-                    elif status.st_size > limit:
-                        reason = f"{status.st_size} bytes exceeds the {limit} byte file limit"
-                    elif used + status.st_size > EVIDENCE_TOTAL_LIMIT or files + 1 > EVIDENCE_FILE_COUNT:
-                        reason = "evidence byte or file-count budget exhausted"
-                    else:
-                        target = staging / shown
-                        copied = 0
-                        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-                        with os.fdopen(descriptor, "rb") as reader, target.open("wb") as writer:
-                            for block in iter(lambda: reader.read(1 << 20), b""):
-                                copied += len(block)
-                                if copied > limit or used + copied > EVIDENCE_TOTAL_LIMIT:
-                                    reason = "grew past its limit while being copied"
-                                    break
-                                writer.write(block)
-                        if reason:
-                            target.unlink()
-                        else:
-                            used += copied
-                            files += 1
-                            present.add(shown)
-                except OSError as error:
-                    reason = f"copy failed: {error}"
-                if reason:
-                    omissions.append({"path": shown, "reason": reason})
+        leaves, skipped = evidence_leaves(source, ignore)
+        omissions.extend(skipped)
+        codes.extend("excluded-type" for _ in skipped)
+        usage = [used, files]
+        created: set[str] = set()
+        admit_evidence_leaves([leaf for leaf in leaves if leaf[0] in required], staging, created, usage, present,
+                              omissions, codes)
+        defer_optional = defer_optional or EVIDENCE_DEFER_ALL
+        if not defer_optional:
+            admit_evidence_leaves([leaf for leaf in leaves if leaf[0] not in required], staging, created, usage, present,
+                                  omissions, codes)
         for member in required:
             if member not in present:
                 why = next((item["reason"] for item in omissions if item["path"] == member), "absent from the source")
@@ -728,10 +850,72 @@ def export_tree(source: Path, destination: Path, evidence: Path, ignore: tuple, 
         if destination.exists():
             shutil.rmtree(destination)
         os.replace(staging, destination)
+        if defer_optional:
+            EVIDENCE_DEFERRED_OPTIONAL.append({"source": source, "destination": destination, "ignore": ignore,
+                                               "required": required, "created": created, "evidence": evidence})
     except OSError as error:
         problems.append(f"evidence export of {destination.name} failed: {error}")
         shutil.rmtree(staging, ignore_errors=True)
+    record_evidence_omissions(destination, evidence, omissions, codes)
     return problems, omissions
+
+
+def record_evidence_omissions(destination: Path, evidence: Path, omissions: list, codes: list[str]) -> None:
+    try:
+        prefix = destination.relative_to(evidence).as_posix() + "/"
+    except ValueError:
+        prefix = destination.name + "/"
+    EVIDENCE_OMISSION_LEDGER.extend((prefix + item["path"], code) for item, code in zip(omissions, codes))
+
+
+def promote_deferred_member(path: Path) -> None:
+    """Export a deferred optional member now, because a leg is about to read it (#2918).
+
+    A sealed attempt defers every member a leg did not list as required, but some legs validate members
+    they never listed (for example a part exported with required=()). The member is admitted on demand
+    within the export budget, exactly as the final pass would; bulk optional data stays deferred.
+    """
+    for record in EVIDENCE_DEFERRED_OPTIONAL:
+        try:
+            relative = path.relative_to(record["destination"]).as_posix()
+        except ValueError:
+            continue
+        # Only a leaf the same nofollow walk would export: never through a symlinked or ignored directory.
+        leaves = dict(evidence_leaves(record["source"], record["ignore"])[0]) if not os.path.lexists(path) else {}
+        if relative in leaves:
+            omissions: list = []
+            codes: list[str] = []
+            admit_evidence_leaves([(relative, leaves[relative])], record["destination"], record["created"],
+                                  list(evidence_usage(record["evidence"])), set(), omissions, codes)
+            record_evidence_omissions(record["destination"], record["evidence"], omissions, codes)
+            record["omitted"] = record.get("omitted", []) + omissions
+        break
+
+
+def export_deferred_optional(evidence: Path, receipt_omissions: dict) -> None:
+    """Add sealed attempts' optional members once every leg's required members are retained (#2918).
+
+    Trees are visited in export order and each tree's optional leaves in bytewise path order, within what
+    is left of the export budget; omissions join the ledger and the receipt section of their tree.
+    """
+    used, files = evidence_usage(evidence)
+    usage = [used, files]
+    for record in EVIDENCE_DEFERRED_OPTIONAL:
+        omissions: list = []
+        codes: list[str] = []
+        leaves, _ = evidence_leaves(record["source"], record["ignore"])
+        promoted = {item["path"] for item in record.get("omitted", [])}
+        admit_evidence_leaves([leaf for leaf in leaves if leaf[0] not in record["required"] and leaf[0] not in promoted and
+                               not os.path.lexists(record["destination"] / leaf[0])],
+                              record["destination"], record["created"], usage, set(), omissions, codes)
+        record_evidence_omissions(record["destination"], evidence, omissions, codes)
+        omissions = record.get("omitted", []) + omissions  # on-demand omissions are already in the ledger
+        if omissions:
+            name = record["destination"].relative_to(evidence).as_posix()
+            earlier = receipt_omissions.get(name, {"count": 0, "shown": []})
+            receipt_omissions[name] = {"count": earlier["count"] + len(omissions),
+                                       "shown": (earlier["shown"] + omissions)[:OMISSIONS_SHOWN]}
+    EVIDENCE_DEFERRED_OPTIONAL.clear()
 
 
 def read_exported_json(path: Path) -> tuple[object, str]:
@@ -739,10 +923,12 @@ def read_exported_json(path: Path) -> tuple[object, str]:
 
     Classification must see the bytes the publisher will see, not the measurement tree they were copied
     from (#2929), so this reads the evidence member without following a symlink and within
-    EVIDENCE_MEMBER_LIMIT. Every failure is a returned reason, never an exception.
+    EVIDENCE_MEMBER_LIMIT. A member a sealed attempt deferred is exported first (promote_deferred_member).
+    Every failure is a returned reason, never an exception.
     """
     document: object = None
     problem = ""
+    promote_deferred_member(path)
     try:
         if not stat.S_ISREG(os.lstat(path).st_mode):
             problem = "not a regular file"
@@ -776,17 +962,39 @@ def note_omissions(omissions: dict, name: str, found: list) -> None:
         omissions[name] = {"count": len(found), "shown": found[:OMISSIONS_SHOWN]}
 
 
-def collect_evidence(lab: Path, evidence: Path, omissions: dict) -> list[str]:
+def lab_evidence_required(lab: Path) -> tuple[str, ...]:
+    """The v1 required lab members (#2918) from the source lab's own plan and availability records.
+
+    An unreadable or malformed record leaves the fixed members only; the native seal then refuses the bundle.
+    """
+    compare, _ = read_exported_json(lab / "compare.json")
+    plan = compare.get("plan") if isinstance(compare, dict) else None
+    pairs = plan.get("pairs") if isinstance(plan, dict) else None
+    variants = [read_exported_json(lab / variant / "lab.json")[0] for variant in "ab"]
+
+    def flag(document: object, section: str, key: str) -> bool:
+        value = document.get(section) if isinstance(document, dict) else None
+        if section == "capabilities" and isinstance(value, dict):
+            value = value.get("perf_stat")
+        return isinstance(value, dict) and value.get(key) is True
+
+    valid = type(pairs) is int and 0 < pairs <= 1000
+    return evidence_lab_required(pairs if valid else 0, tuple(flag(item, "capabilities", "usable") for item in variants),
+                                 tuple(flag(item, "collection", "metrics_out") for item in variants))
+
+
+def collect_evidence(lab: Path, evidence: Path, omissions: dict, sealed: bool = False) -> list[str]:
     problems: list[str] = []
     if lab.is_dir():
-        problems, found = export_tree(lab, evidence / "lab", evidence, EVIDENCE_IGNORE, LAB_REQUIRED)
+        required = lab_evidence_required(lab) if sealed else LAB_REQUIRED
+        problems, found = export_tree(lab, evidence / "lab", evidence, EVIDENCE_IGNORE, required, defer_optional=sealed)
         note_omissions(omissions, "lab", found)
     return problems
 
 
 def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, base: str, head: str,
                        binaries: dict, omissions: dict, harness: Path | None = None,
-                       cwd: Path | None = None) -> tuple[list[str], dict]:
+                       cwd: Path | None = None, sealed: bool = False) -> tuple[list[str], dict]:
     """Run and validate the exported corpus before admitting a later snapshot child.
 
     cwd is the pinned historical harness worktree (#3714); its own build.sh runs the corpus there.
@@ -805,7 +1013,9 @@ def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, 
                                      exit_policy="corpus-report-only-v1").returncode
         reasons = []
         if output.is_dir():
-            problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, THROUGHPUT_REQUIRED)
+            required = evidence_corpus_required(THROUGHPUT_PROFILE) if sealed else THROUGHPUT_REQUIRED
+            problems, found = export_tree(output, evidence / "throughput", evidence, EVIDENCE_IGNORE, required,
+                                          defer_optional=sealed)
             reasons.extend(problems)
             note_omissions(omissions, "throughput", found)
         # Classify the exact exported bytes the hosted publisher will read.
@@ -829,9 +1039,12 @@ def measure_throughput(candidate: Path, bins: Path, work: Path, evidence: Path, 
     return reasons, section
 
 
+# The trusted native sealer (#2918); compiler_test substitutes a stand-in.
+EVIDENCE_SEAL_TIMEOUT_SECONDS = 600
 SCRATCH_MARKER = ".buster-compiler-compare-scratch"
 SCRATCH_PROTOCOL = "buster-compiler-compare-scratch-v1\n"
 TRUSTED_ROOT = Path(__file__).resolve().parents[2]
+EVIDENCE_SEAL_COMMAND = (str(TRUSTED_ROOT / "build.sh"), "compiler_evidence")
 
 
 class ScratchError(Exception):
@@ -1029,6 +1242,42 @@ def ast_pilot_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
     return True, ""
 
 
+def ast_retirement_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #4058 only on one exact new occurrence against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, AST_RETIREMENT_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the AST retirement selector against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the AST retirement selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def constant_reuse_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #3011's fixed profile only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the constant-reuse acceptance selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the constant-reuse acceptance selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def process_floor_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #1125's fixed profile only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, PROCESS_FLOOR_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the process-floor selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the process-floor selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
 def real_source_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
     """Select #2761's real-source profile only when its exact line is added once against every head parent."""
     deltas = request_selector_parent_deltas(candidate, head, THROUGHPUT_REAL_SOURCE_REQUEST_LINE)
@@ -1122,6 +1371,18 @@ def frontend_selector_request_selection(candidate: Path, head: str) -> tuple[boo
     return True, ""
 
 
+def frontend_nesting_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #2676's deep-nesting leg only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, FRONTEND_NESTING_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the frontend-nesting selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the frontend-nesting selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
 def wild_linker_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
     """Select #2761's Wild linker leg only when its exact line is added once against every head parent."""
     deltas = request_selector_parent_deltas(candidate, head, WILD_LINKER_REQUEST_LINE)
@@ -1143,6 +1404,18 @@ def link_tls_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
         return False, ""
     if any(delta != 1 for delta in deltas):
         return False, "the link-tls selector must be added exactly once relative to every head parent"
+    return True, ""
+
+
+def selfhost_inline_request_selection(candidate: Path, head: str) -> tuple[bool, str]:
+    """Select #58's self-built inline-mode leg only when its exact line is added once against every head parent."""
+    deltas = request_selector_parent_deltas(candidate, head, SELFHOST_INLINE_REQUEST_LINE)
+    if deltas is None:
+        return False, "could not prove the self-host inline selector count against every head parent"
+    if not any(delta > 0 for delta in deltas):
+        return False, ""
+    if any(delta != 1 for delta in deltas):
+        return False, "the self-host inline selector must be added exactly once relative to every head parent"
     return True, ""
 
 
@@ -1367,6 +1640,21 @@ def measure_analyzer_profile(arguments: argparse.Namespace, candidate: Path, wor
         reasons.append(ast_problem)
     elif getattr(arguments, "ast_pilot_requested", False):
         reasons.append(f"{selected_profile['name']} cannot be combined with the ast-pilot acceptance selector")
+    reuse_problem = getattr(arguments, "constant_reuse_request_problem", "")
+    if reuse_problem:
+        reasons.append(reuse_problem)
+    elif getattr(arguments, "constant_reuse_requested", False):
+        reasons.append(f"{selected_profile['name']} cannot be combined with the constant-reuse acceptance selector")
+    floor_problem = getattr(arguments, "process_floor_request_problem", "")
+    if floor_problem:
+        reasons.append(floor_problem)
+    elif getattr(arguments, "process_floor_requested", False):
+        reasons.append(f"{selected_profile['name']} cannot be combined with the process-floor selector")
+    retirement_problem = getattr(arguments, "ast_retirement_request_problem", "")
+    if retirement_problem:
+        reasons.append(retirement_problem)
+    elif getattr(arguments, "ast_retirement_requested", False):
+        reasons.append(f"{selected_profile['name']} cannot be combined with the AST retirement selector")
     if scaling_requested(candidate, arguments.base, arguments.head):
         reasons.append(f"{selected_profile['name']} cannot be combined with a scaling.request profile")
     drivers: dict[str, Path] = {}
@@ -1496,6 +1784,8 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
     parser.add_argument("--harness-admission", choices=HARNESS_ADMISSIONS[:2],
                         help="pull only: the hosted pre-dispatch corpus disposition this host must re-derive (#3714)")
+    parser.add_argument("--request-attempt",
+                        help="the request run's attempt; seals the ordinary raw evidence for the publisher (#2918)")
     for name in IDENTITY_KEYS[1:]:
         parser.add_argument("--" + name.replace("_", "-"), required=True)
     arguments = parser.parse_args(argv)
@@ -1507,6 +1797,10 @@ def parse(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--main-profile requires --main-owned-phases")
     if arguments.harness_admission is not None and arguments.mode != "pull":
         parser.error("--harness-admission is the pull route's hosted disposition")
+    if arguments.request_attempt is not None and (not arguments.request_attempt.isdigit() or
+                                                  not arguments.request_attempt.isascii() or
+                                                  arguments.request_attempt.startswith("0")):
+        parser.error("--request-attempt must be a positive decimal attempt")
     if arguments.main_owned_phases and arguments.main_profile is None:
         arguments.main_profile = PROFILE["name"]
     return arguments
@@ -1550,6 +1844,58 @@ def mark(receipt: dict, evidence: Path, phase: str) -> None:
         receipt.setdefault("notes", []).append(problem)
 
 
+def evidence_omissions_document() -> dict:
+    """evidence-omissions.json from this attempt's omission ledger: fixed reason codes and at most 50 examples."""
+    counts = {reason: 0 for reason in EVIDENCE_OMISSION_REASONS}
+    for _, code in EVIDENCE_OMISSION_LEDGER:
+        counts[code] += 1
+    return {"schema": EVIDENCE_OMISSIONS_SCHEMA, "total": len(EVIDENCE_OMISSION_LEDGER), "by_reason": counts,
+            "examples": [{"path": path, "reason": code} for path, code in EVIDENCE_OMISSION_LEDGER[:EVIDENCE_OMISSION_EXAMPLES]]}
+
+
+def seal_evidence(receipt: dict, evidence: Path, work: Path, request_attempt: str) -> str:
+    """Write the omissions document, then seal the retained bundle with the trusted native driver (#2918).
+
+    Runs after every export and before the final receipt, which binds the seal through
+    receipt["evidence_bundle"]. Returns '' or why the bundle is not sealed; the native seal refuses an
+    incomplete bundle, so an unsealed measured attempt fails rather than publishing unverifiable raw bytes.
+    """
+    identity = evidence_identity(receipt, request_attempt)
+    problem = "" if identity else "sealed evidence identity is incomplete"
+    output = ""
+    if not problem:
+        try:
+            (evidence / EVIDENCE_OMISSIONS).write_text(dumps(evidence_omissions_document()) + "\n", encoding="utf-8")
+            (work / "evidence-identity.tsv").write_text(identity, encoding="utf-8")
+            completed = captured_run([*EVIDENCE_SEAL_COMMAND, "seal", str(evidence), str(work / "evidence-identity.tsv")],
+                                     cwd=TRUSTED_ROOT, capture_output=True, text=True, timeout=EVIDENCE_SEAL_TIMEOUT_SECONDS,
+                                     check=False)
+            lines = (completed.stdout or "").strip().splitlines()
+            output = lines[-1] if lines else ""
+            if completed.returncode != 0 or output != "COMPILER_EVIDENCE_SEALED":
+                problem = f"raw evidence not sealed (exit {completed.returncode}): {output or (completed.stderr or '').strip()[-400:]}"
+        except (OSError, subprocess.SubprocessError, UnicodeError) as error:
+            problem = f"raw evidence not sealed: {error.__class__.__name__}: {error}"
+    seal: dict = {}
+    if not problem:
+        try:
+            with os.fdopen(os.open(evidence / EVIDENCE_SEAL, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as reader:
+                text = reader.read(4097).decode("ascii")
+            seal = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+        except (OSError, UnicodeError, ValueError) as error:
+            problem = f"evidence seal unreadable after sealing: {error}"
+    if not problem and not all(seal.get(key, "").isdigit() for key in ("manifest_bytes", "members", "payload_bytes")):
+        problem = "evidence seal is malformed after sealing"
+    inventory = evidence_inventory(receipt)
+    bundle = {"inventory": inventory, "state": "failed", "reason": problem}
+    if not problem:
+        bundle = {"inventory": inventory, "state": "sealed", "manifest_sha256": seal.get("manifest_sha256", ""),
+                  "manifest_bytes": int(seal["manifest_bytes"]), "members": int(seal["members"]),
+                  "payload_bytes": int(seal["payload_bytes"]), "omissions": len(EVIDENCE_OMISSION_LEDGER)}
+    receipt["evidence_bundle"] = bundle
+    return problem
+
+
 class ClosureCleanupUncertain(RuntimeError):
     """A native owner could not prove cleanup; preserve its work and stop the attempt."""
 
@@ -1585,6 +1931,46 @@ AST_PILOT_REQUIRED = ("acceptance.json", "probe/probe.json",
                       *(f"{cell}/{name}" for cell in AST_PILOT_ACCEPTANCE_PROFILE["cells"]
                         for name in ("summary.json", "compare.json", "a/lab.json", "b/lab.json")))
 
+AST_RETIREMENT_REQUIRED = ("acceptance.json", "source.json", "inputs/unity.c",
+                           *(f"inputs/{name}.c" for name in AST_RETIREMENT_CORPUS),
+                           *(f"{cell}/{name}" for cell in AST_RETIREMENT_CELLS
+                             for name in ("summary.json", "compare.json", "pairs.json", "reference.json", "a/lab.json", "b/lab.json",
+                                          "a/env/env.json", "b/env/env.json", "a/reference.diagnostics", "b/reference.diagnostics",
+                                          "reference.000.bin.gz", "reference.001.bin.gz")),
+                           *(f"{cell}/pairs/{pair:04d}-{arm}.csv" for cell in AST_RETIREMENT_CELLS
+                             for pair in range(1, AST_RETIREMENT_PROFILE["pairs"] + 1) for arm in ("a", "b")),
+                           *(f"probe/{cell}/{name}" for cell in AST_RETIREMENT_CELLS for name in ("probe.json", "a.log", "b.log")))
+
+
+def measure_ast_retirement(arguments: argparse.Namespace, candidate: Path, bins: Path, work: Path, evidence: Path,
+                           receipt: dict, harness: Path | None) -> None:
+    """Run the fixed default/default leg after both binaries and the base corpus exist."""
+    mark(receipt, evidence, "ast-retirement-acceptance")
+    output = work / "ast-retirement-acceptance"
+    helper = Path(__file__).with_name("ast_retirement_acceptance.py").resolve()
+    measured = time.monotonic()
+    native = harness if harness is not None else candidate / "build/throughput-tools/throughput"
+    status = run([sys.executable, "-B", str(helper), "--lab", str(arguments.lab.resolve()), "--harness", str(native),
+                  "--baseline-ide", str(bins / "ide-base"), "--candidate-ide", str(bins / "ide-cand"),
+                  "--repo-root", str(candidate), "--base-revision", arguments.base, "--head-revision", arguments.head,
+                  "--cpu", str(AST_RETIREMENT_PROFILE["cpu"]), "--output", str(output)],
+                 candidate, evidence / "ast-retirement-acceptance.log", AST_RETIREMENT_ACCEPTANCE_TIMEOUT_SECONDS)
+    receipt["timings"]["ast_retirement_acceptance_seconds"] = round(time.monotonic() - measured, 3)
+    record = receipt["ast_retirement_acceptance"]
+    record["exit"] = status
+    errors, omissions = export_tree(output, evidence / "ast_retirement_acceptance", evidence, EVIDENCE_IGNORE, AST_RETIREMENT_REQUIRED)
+    record["evidence_omissions"] = omissions
+    summary, problem = read_exported_json(evidence / "ast_retirement_acceptance" / "acceptance.json")
+    if problem:
+        errors.append(f"issue #4058 retirement receipt unreadable: {problem}")
+    else:
+        record["summary"] = summary
+        errors.extend(validate_ast_retirement_acceptance(summary, arguments.base, arguments.head, receipt["binaries"]))
+    if status != 0:
+        errors.append(f"issue #4058 retirement measurement exited {status}; raw unavailable/failed evidence is retained")
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
 
 def measure_ast_pilot(arguments: argparse.Namespace, candidate: Path, binary: Path, work: Path, evidence: Path,
                       receipt: dict) -> None:
@@ -1611,6 +1997,75 @@ def measure_ast_pilot(arguments: argparse.Namespace, candidate: Path, binary: Pa
         errors.extend(validate_ast_pilot_acceptance(summary, arguments.head, receipt["binaries"]["candidate"]["sha256"]))
     if status != 0:
         errors.append(f"issue #3397 ast-pilot acceptance exited {status}")
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
+CONSTANT_REUSE_REQUIRED = ("acceptance.json",
+                           *(f"{cell}/{name}" for cell in CONSTANT_REUSE_ACCEPTANCE_PROFILE["cells"]
+                             for name in ("summary.json", "compare.json", "a/lab.json", "b/lab.json")))
+
+
+def measure_constant_reuse(arguments: argparse.Namespace, candidate: Path, binary: Path, work: Path, evidence: Path,
+                           receipt: dict) -> None:
+    """Run #3011's fixed constant-reuse profile on the frozen candidate build and record it in the receipt."""
+    mark(receipt, evidence, "constant-reuse-acceptance")
+    output = work / "constant-reuse-acceptance"
+    helper = Path(__file__).with_name("constant_reuse_acceptance.py").resolve()
+    measured = time.monotonic()
+    status = run([sys.executable, "-B", str(helper),
+                  "--lab", str(arguments.lab.resolve()), "--candidate-ide", str(binary),
+                  "--repo-root", str(candidate), "--head-revision", arguments.head,
+                  "--cpu", str(CONSTANT_REUSE_ACCEPTANCE_PROFILE["cpu"]), "--output", str(output)],
+                 candidate, evidence / "constant-reuse-acceptance.log", CONSTANT_REUSE_ACCEPTANCE_TIMEOUT_SECONDS)
+    receipt["timings"]["constant_reuse_acceptance_seconds"] = round(time.monotonic() - measured, 3)
+    record = receipt["constant_reuse_acceptance"]
+    record["exit"] = status
+    errors, omissions = export_tree(output, evidence / "constant_reuse_acceptance", evidence, EVIDENCE_IGNORE,
+                                    CONSTANT_REUSE_REQUIRED)
+    record["evidence_omissions"] = omissions
+    summary, problem = read_exported_json(evidence / "constant_reuse_acceptance" / "acceptance.json")
+    if problem:
+        errors.append(f"issue #3011 constant-reuse acceptance receipt unreadable: {problem}")
+    else:
+        record["summary"] = summary
+        errors.extend(validate_constant_reuse_acceptance(summary, arguments.head, receipt["binaries"]["candidate"]["sha256"]))
+    if status != 0:
+        errors.append(f"issue #3011 constant-reuse acceptance exited {status}")
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
+PROCESS_FLOOR_REQUIRED = ("acceptance.json",
+                          *(f"{cell}/{name}" for cell in PROCESS_FLOOR_CELLS
+                            for name in ("summary.json", "compare.json", "a/lab.json", "b/lab.json")))
+
+
+def measure_process_floor(arguments: argparse.Namespace, candidate: Path, binary: Path, work: Path, evidence: Path,
+                          receipt: dict) -> None:
+    """Run #1125's fixed per-process floor profile on the frozen candidate build and record it in the receipt."""
+    mark(receipt, evidence, "process-floor")
+    output = work / "process-floor"
+    helper = Path(__file__).with_name("process_floor_acceptance.py").resolve()
+    measured = time.monotonic()
+    status = run([sys.executable, "-B", str(helper),
+                  "--lab", str(arguments.lab.resolve()), "--candidate-ide", str(binary),
+                  "--repo-root", str(candidate), "--head-revision", arguments.head,
+                  "--cpu", str(PROCESS_FLOOR_PROFILE["cpu"]), "--output", str(output)],
+                 candidate, evidence / "process-floor.log", PROCESS_FLOOR_TIMEOUT_SECONDS)
+    receipt["timings"]["process_floor_seconds"] = round(time.monotonic() - measured, 3)
+    record = receipt["process_floor"]
+    record["exit"] = status
+    errors, omissions = export_tree(output, evidence / "process_floor", evidence, EVIDENCE_IGNORE, PROCESS_FLOOR_REQUIRED)
+    record["evidence_omissions"] = omissions
+    summary, problem = read_exported_json(evidence / "process_floor" / "acceptance.json")
+    if problem:
+        errors.append(f"issue #1125 process-floor receipt unreadable: {problem}")
+    else:
+        record["summary"] = summary
+        errors.extend(validate_process_floor_acceptance(summary, arguments.head, receipt["binaries"]["candidate"]["sha256"]))
+    if status != 0:
+        errors.append(f"issue #1125 process-floor profile exited {status}")
     record["errors"] = errors
     record["status"] = "complete" if not errors else "failed"
 
@@ -1842,6 +2297,37 @@ def measure_frontend_selector(candidate: Path, bins: Path, work: Path, evidence:
     record["status"] = "complete" if not errors else "failed"
 
 
+def measure_frontend_nesting(candidate: Path, bins: Path, work: Path, evidence: Path, receipt: dict) -> None:
+    """Run #2676's deep-nesting families from the base checkout on both binaries and record them."""
+    record = receipt["frontend_nesting"]
+    profile = FRONTEND_NESTING_PROFILE
+    exported = evidence / "frontend_nesting"
+    output = work / "frontend-nesting"
+    errors: list[str] = []
+    measured = time.monotonic()
+    status = run([sys.executable, "-B", "tools/benchmark_frontend_scaling.py", "--baseline", str(bins / "ide-base"),
+                  "--candidate", str(bins / "ide-cand"), "--out", str(output), *profile["frontend_scaling"]["arguments"]],
+                 candidate, evidence / "frontend-nesting.log", FRONTEND_NESTING_TIMEOUT_SECONDS)
+    receipt["timings"]["frontend_nesting_seconds"] = round(time.monotonic() - measured, 3)
+    documents = {"provenance.json": None, "results.json": None}
+    if output.is_dir():
+        problems, record["evidence_omissions"] = export_tree(output, exported, evidence, FRONTEND_SCALING_IGNORE,
+                                                             FRONTEND_SCALING_REQUIRED)
+        errors.extend(problems)
+        for name in documents:
+            documents[name], problem = read_exported_json(exported / name)
+            if problem:
+                errors.append(f"exported evidence frontend_nesting/{name} unreadable: {problem}")
+    else:
+        errors.append("frontend-nesting produced no output")
+    errors.extend(validate_frontend_nesting(status, documents["provenance.json"], documents["results.json"],
+                                            receipt["binaries"]))
+    record["cells"] = frontend_scaling_digest(documents["results.json"])
+    record["exit"] = status
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
 def host_linker(command: str, log: Path) -> tuple[dict | None, str, bool]:
     """(identity, problem, absent) of the host's installed `command`, found with `command -v`, never downloaded."""
     identity, problem, found = None, "", ""
@@ -2042,6 +2528,77 @@ def measure_link_tls(bins: Path, work: Path, evidence: Path, receipt: dict) -> N
     record["status"] = "complete" if not errors else "failed"
 
 
+def selfhost_inline_helper() -> Path:
+    """The trusted revision's #58 helper, never the candidate's."""
+    return Path(__file__).resolve().with_name(SELFHOST_INLINE_HARNESS)
+
+
+def build_selfhost_inline_stage1(role: str, binary: Path, candidate: Path, revision: str, work: Path, evidence: Path,
+                                 receipt: dict) -> None:
+    """Build one role's stage-1 compiler with -fcanonical-inline while its revision is checked out (#58)."""
+    record = receipt["selfhost_inline"]
+    measured = time.monotonic()
+    status = run([sys.executable, "-B", str(selfhost_inline_helper()), "stage1", "--ide", str(binary),
+                  "--repo-root", str(candidate), "--revision", revision,
+                  "--output", str(work / "selfhost-inline" / f"stage1-{role}")],
+                 candidate, evidence / f"selfhost-inline-stage1-{role}.log", SELFHOST_INLINE_STAGE1_TIMEOUT_SECONDS)
+    receipt["timings"][f"selfhost_inline_stage1_{role}_seconds"] = round(time.monotonic() - measured, 3)
+    record.setdefault("stage1_exit", {})[role] = status
+    if status != 0:
+        record.setdefault("errors", []).append(f"self-host inline {role} stage-1 build exited {status}")
+
+
+def measure_selfhost_inline(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path,
+                            receipt: dict) -> None:
+    """Time both stage-1 compilers on the frozen merge-base tree and record the validated result (#58)."""
+    record = receipt["selfhost_inline"]
+    root = work / "selfhost-inline"
+    exported = evidence / "selfhost_inline"
+    errors = list(record.get("errors", []))
+    helper = selfhost_inline_helper()
+    record["harness_sha256"] = sha256(helper) if helper.is_file() else None
+    status = None
+    if not errors and all(record.get("stage1_exit", {}).get(role) == 0 for role in ("baseline", "candidate")):
+        measured = time.monotonic()
+        status = run([sys.executable, "-B", str(helper), "compare", "--lab", str(arguments.lab.resolve()),
+                      "--baseline-stage1", str(root / "stage1-baseline/stage1.json"),
+                      "--candidate-stage1", str(root / "stage1-candidate/stage1.json"),
+                      "--repo-root", str(candidate), "--base-revision", arguments.base, "--output", str(root / "compare")],
+                     candidate, evidence / "selfhost-inline.log", SELFHOST_INLINE_TIMEOUT_SECONDS)
+        receipt["timings"]["selfhost_inline_seconds"] = round(time.monotonic() - measured, 3)
+        if status != 0:
+            errors.append(f"self-host inline comparison exited {status}")
+    elif not errors:
+        errors.append("self-host inline stage-1 compilers were not both built")
+    documents = {}
+    if root.is_dir():
+        record["evidence_omissions"] = []
+        # Each part has its own destination: an export replaces its destination directory. Each part
+        # names its mandatory documents, so they are exported now even when optional files are deferred.
+        for part in ("stage1-baseline", "stage1-candidate", "compare"):
+            if (root / part).is_dir():
+                required = tuple(name[len(part) + 1:] for name in SELFHOST_INLINE_REQUIRED
+                                 if name.startswith(part + "/"))
+                problems, omissions = export_tree(root / part, exported / part, evidence, EVIDENCE_IGNORE, required)
+                errors.extend(problems)
+                record["evidence_omissions"].extend(omissions)
+        for name in SELFHOST_INLINE_REQUIRED:
+            documents[name], problem = read_exported_json(exported / name)
+            if problem:
+                errors.append(f"exported evidence selfhost_inline/{name} unreadable: {problem}")
+    if status == 0 and len(documents) == len(SELFHOST_INLINE_REQUIRED) and all(documents.values()):
+        stage1 = {role: documents[f"stage1-{role}/stage1.json"] for role in ("baseline", "candidate")}
+        errors.extend(validate_selfhost_inline(stage1, documents["compare/result.json"], receipt["binaries"]))
+        expected = {role: (stage1[role].get("stage1") or {}).get("sha256") for role in ("baseline", "candidate")}
+        errors.extend(validate_selfhost_inline_documents(
+            documents["compare/lab/summary.json"], documents["compare/lab/compare.json"],
+            {"a": documents["compare/lab/a/lab.json"], "b": documents["compare/lab/b/lab.json"]}, expected))
+        record["digest"] = selfhost_inline_digest(documents["compare/lab/summary.json"])
+    record["exit"] = status
+    record["errors"] = errors
+    record["status"] = "complete" if not errors else "failed"
+
+
 def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence: Path, bins: Path, log: Path,
             receipt: dict, summaries: list) -> None:
     """Build both revisions and run the lab, corpus and scaling legs; the lab summary goes to summaries."""
@@ -2077,6 +2634,17 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if ast_requested:
         receipt["ast_pilot_acceptance"] = {"requested": True, "request_line": AST_PILOT_ACCEPTANCE_REQUEST_LINE,
                                            "profile": AST_PILOT_ACCEPTANCE_PROFILE, "status": "pending"}
+    reuse_requested = arguments.mode == "pull" and getattr(arguments, "constant_reuse_requested", False)
+    problem = getattr(arguments, "constant_reuse_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if reuse_requested:
+        receipt["constant_reuse_acceptance"] = {"requested": True, "request_line": CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE,
+                                                "profile": CONSTANT_REUSE_ACCEPTANCE_PROFILE, "status": "pending"}
+        # One long opt-in leg per compare-pull job keeps the unchanged compare-pull budget provable. The inline
+        # profile is not one: its exact line is in main's request history, so it rides every pull compare.
+        if ast_requested:
+            reasons.append("constant-reuse-acceptance-v1 cannot be combined with the ast-pilot acceptance profile")
     real_requested = arguments.mode == "pull" and getattr(arguments, "real_source_requested", False)
     problem = getattr(arguments, "real_source_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2084,6 +2652,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
     if real_requested:
         receipt["throughput_real_source"] = {"requested": True, "request_line": THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                                              "profile": THROUGHPUT_REAL_SOURCE_PROFILE, "status": "pending"}
+        if reuse_requested:
+            reasons.append("constant-reuse-acceptance-v1 cannot be combined with real-source throughput")
     production_requested = arguments.mode == "pull" and getattr(arguments, "production_profile_requested", False)
     problem = getattr(arguments, "production_profile_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2092,8 +2662,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["production_profile"] = {"requested": True, "request_line": PRODUCTION_PROFILE_REQUEST_LINE,
                                          "profile": PRODUCTION_PROFILE_PROFILE, "status": "pending"}
         # Its build leg and the other long opt-in legs together would not fit the compare-pull job.
-        if real_requested or ast_requested:
-            reasons.append("production-profile-v1 cannot be combined with real-source throughput or ast-pilot acceptance")
+        if real_requested or ast_requested or reuse_requested:
+            reasons.append("production-profile-v1 cannot be combined with real-source throughput, ast-pilot or "
+                           "constant-reuse acceptance")
     probes_requested = arguments.mode == "pull" and getattr(arguments, "compiler_probes_requested", False)
     problem = getattr(arguments, "compiler_probes_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2102,9 +2673,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["compiler_probes"] = {"requested": True, "request_line": COMPILER_PROBES_REQUEST_LINE,
                                       "profile": COMPILER_PROBES_PROFILE, "status": "pending"}
         # One long opt-in leg per compare-pull job keeps the unchanged 90-minute budget provable.
-        if real_requested or ast_requested or production_requested:
-            reasons.append("compiler-probes-v1 cannot be combined with real-source throughput, ast-pilot acceptance "
-                           "or the PGO/LTO production profile")
+        if real_requested or ast_requested or production_requested or reuse_requested:
+            reasons.append("compiler-probes-v1 cannot be combined with real-source throughput, ast-pilot or "
+                           "constant-reuse acceptance or the PGO/LTO production profile")
     selector_requested = arguments.mode == "pull" and getattr(arguments, "frontend_selector_requested", False)
     problem = getattr(arguments, "frontend_selector_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2113,9 +2684,9 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["frontend_selector"] = {"requested": True, "request_line": FRONTEND_SELECTOR_REQUEST_LINE,
                                         "profile": FRONTEND_SELECTOR_PROFILE, "status": "pending"}
         # One long opt-in leg per compare-pull job keeps the leg's measured cost inside its unchanged budget.
-        if real_requested or ast_requested or production_requested or probes_requested:
-            reasons.append("frontend-selector-v1 cannot be combined with real-source throughput, ast-pilot "
-                           "acceptance, the PGO/LTO production profile or compiler-probes-v1")
+        if real_requested or ast_requested or production_requested or probes_requested or reuse_requested:
+            reasons.append("frontend-selector-v1 cannot be combined with real-source throughput, ast-pilot or "
+                           "constant-reuse acceptance, the PGO/LTO production profile or compiler-probes-v1")
     linker_requested = arguments.mode == "pull" and getattr(arguments, "wild_linker_requested", False)
     problem = getattr(arguments, "wild_linker_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2125,9 +2696,10 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                                   "profile": WILD_LINKER_PROFILE, "status": "pending"}
         # The long opt-in legs and its input builds together would not fit the compare-pull job, and one
         # opt-in leg per attempt keeps a report from being shared between two profiles.
-        if real_requested or ast_requested or production_requested or probes_requested or selector_requested:
-            reasons.append("wild-linker-v1 cannot be combined with real-source throughput, ast-pilot acceptance, "
-                           "the PGO/LTO production profile, compiler-probes-v1 or the frontend-selector probes")
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                reuse_requested:
+            reasons.append("wild-linker-v1 cannot be combined with real-source throughput, ast-pilot or constant-reuse "
+                           "acceptance, the PGO/LTO production profile, compiler-probes-v1 or the frontend-selector probes")
     link_tls_requested = arguments.mode == "pull" and getattr(arguments, "link_tls_requested", False)
     problem = getattr(arguments, "link_tls_request_problem", "") if arguments.mode == "pull" else ""
     if problem and problem not in reasons:
@@ -2137,16 +2709,70 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                                "status": "pending"}
         # One opt-in leg per attempt keeps a report from being shared between two profiles.
         if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
-                linker_requested:
-            reasons.append("link-tls-v1 cannot be combined with real-source throughput, ast-pilot acceptance, the "
-                           "PGO/LTO production profile, compiler-probes-v1, the frontend-selector probes or wild-linker-v1")
+                linker_requested or reuse_requested:
+            reasons.append("link-tls-v1 cannot be combined with real-source throughput, ast-pilot or constant-reuse "
+                           "acceptance, the PGO/LTO production profile, compiler-probes-v1, the frontend-selector probes "
+                           "or wild-linker-v1")
+    selfhost_requested = arguments.mode == "pull" and getattr(arguments, "selfhost_inline_requested", False)
+    problem = getattr(arguments, "selfhost_inline_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if selfhost_requested:
+        receipt["selfhost_inline"] = {"requested": True, "request_line": SELFHOST_INLINE_REQUEST_LINE,
+                                      "profile": SELFHOST_INLINE_PROFILE, "status": "pending"}
+        # One opt-in leg per attempt keeps a report from being shared between two profiles; the
+        # scaling leg also runs before this one and would share its budget. The #48 inline leg is
+        # not an opt-in here: inline_acceptance_requested selects it whenever its line is anywhere in
+        # the request file, which it has been on main since #48, so it runs beside this leg.
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested or link_tls_requested or reuse_requested or \
+                scaling_requested(candidate, arguments.base, arguments.head):
+            reasons.append("self-host-inline-compare-v1 cannot be combined with another opt-in leg, the scaling "
+                           "leg included")
+    nesting_requested = arguments.mode == "pull" and getattr(arguments, "frontend_nesting_requested", False)
+    problem = getattr(arguments, "frontend_nesting_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if nesting_requested:
+        receipt["frontend_nesting"] = {"requested": True, "request_line": FRONTEND_NESTING_REQUEST_LINE,
+                                       "profile": FRONTEND_NESTING_PROFILE, "status": "pending"}
+        # One opt-in leg per attempt keeps a report from being shared between two profiles.
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested or link_tls_requested or selfhost_requested or reuse_requested:
+            reasons.append("frontend-nesting-v1 cannot be combined with another opt-in leg")
+    floor_requested = arguments.mode == "pull" and getattr(arguments, "process_floor_requested", False)
+    problem = getattr(arguments, "process_floor_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if floor_requested:
+        receipt["process_floor"] = {"requested": True, "request_line": PROCESS_FLOOR_REQUEST_LINE,
+                                    "profile": PROCESS_FLOOR_PROFILE, "status": "pending"}
+        # One opt-in leg per attempt keeps a report from being shared between two profiles. The #48 inline leg
+        # is not an opt-in here: its line is in main's request history, so it rides every pull compare.
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested or link_tls_requested or selfhost_requested or reuse_requested or nesting_requested:
+            reasons.append("process-floor-v1 cannot be combined with another opt-in leg")
+    retirement_requested = arguments.mode == "pull" and getattr(arguments, "ast_retirement_requested", False)
+    problem = getattr(arguments, "ast_retirement_request_problem", "") if arguments.mode == "pull" else ""
+    if problem and problem not in reasons:
+        reasons.append(problem)
+    if retirement_requested:
+        receipt["ast_retirement_acceptance"] = {"requested": True, "request_line": AST_RETIREMENT_REQUEST_LINE,
+                                                "profile": AST_RETIREMENT_PROFILE, "status": "pending"}
+        if real_requested or ast_requested or production_requested or probes_requested or selector_requested or \
+                linker_requested or link_tls_requested or selfhost_requested or reuse_requested or nesting_requested or floor_requested or \
+                scaling_requested(candidate, arguments.base, arguments.head) or getattr(arguments, "analyzer_profile_requested", False):
+            reasons.append("ast-retirement-acceptance-v1 cannot be combined with another opt-in leg or scaling")
+        if not getattr(arguments, "evidence_seal", False):
+            reasons.append("ast-retirement-acceptance-v1 requires the ordinary verified evidence-seal route")
     # #3714: the named historical recipe swaps only the corpus harness; every other opt-in leg would
     # still run the base's own pre-floor harness, so none may join it. Its pinned worktree is prepared
     # before any build.
     historical_root = None
     if receipt.get("throughput_profile") == THROUGHPUT_HISTORICAL_PROFILE:
         others = (real_requested or ast_requested or production_requested or probes_requested or selector_requested
-                  or inline_requested or linker_requested or link_tls_requested
+                  or inline_requested or linker_requested or link_tls_requested or reuse_requested
+                  or selfhost_requested or nesting_requested or floor_requested or retirement_requested
                   or (arguments.mode == "pull" and scaling_requested(candidate, arguments.base,
                                                                                            arguments.head)))
         if snapshot_closure:
@@ -2219,6 +2845,13 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
                     inline["status"] = "complete" if not errors else "failed"
                 if role == "candidate" and ast_requested:
                     measure_ast_pilot(arguments, candidate, binary, work, evidence, receipt)
+                if role == "candidate" and reuse_requested:
+                    measure_constant_reuse(arguments, candidate, binary, work, evidence, receipt)
+                if role == "candidate" and floor_requested:
+                    measure_process_floor(arguments, candidate, binary, work, evidence, receipt)
+                if selfhost_requested:
+                    mark(receipt, evidence, f"selfhost-inline-stage1-{role}")
+                    build_selfhost_inline_stage1(role, binary, candidate, commit, work, evidence, receipt)
 
     if not reasons:
         lab = work / "lab"
@@ -2235,7 +2868,8 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         receipt["timings"]["measurement_seconds"] = round(time.monotonic() - measured, 3)
         receipt["lab"]["exit"] = status
         mark(receipt, evidence, "lab-evidence")
-        reasons.extend(collect_evidence(lab, evidence, receipt.setdefault("evidence_omissions", {})))
+        reasons.extend(collect_evidence(lab, evidence, receipt.setdefault("evidence_omissions", {}),
+                                        getattr(arguments, "evidence_seal", False)))
         summary, problem = read_exported_json(evidence / "lab" / "summary.json")
         if problem:
             reasons.append(f"lab summary unreadable: {problem}")
@@ -2257,9 +2891,12 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         corpus, receipt["throughput"] = measure_throughput(candidate, bins, work, evidence, arguments.base,
                                                            arguments.head, receipt["binaries"],
                                                            receipt.setdefault("evidence_omissions", {}), harness,
-                                                           cwd=historical_root)
+                                                           cwd=historical_root,
+                                                           sealed=getattr(arguments, "evidence_seal", False))
         receipt["timings"]["throughput_seconds"] = round(time.monotonic() - measured, 3)
         reasons.extend(corpus)
+        if retirement_requested and not reasons:
+            measure_ast_retirement(arguments, candidate, bins, work, evidence, receipt, harness)
         if arguments.mode == "pull" and scaling_requested(candidate, arguments.base, arguments.head):
             mark(receipt, evidence, "scaling")
             measured = time.monotonic()
@@ -2286,6 +2923,12 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
         if link_tls_requested:
             mark(receipt, evidence, "link-tls")
             measure_link_tls(bins, work, evidence, receipt)
+        if selfhost_requested:
+            mark(receipt, evidence, "selfhost-inline")
+            measure_selfhost_inline(arguments, candidate, work, evidence, receipt)
+        if nesting_requested:
+            mark(receipt, evidence, "frontend-nesting")
+            measure_frontend_nesting(candidate, bins, work, evidence, receipt)
         mark(receipt, evidence, "validate")
         raw_closure = {}
         if snapshot_closure:
@@ -2351,6 +2994,30 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("issue #3397 ast-pilot acceptance was requested but did not reach its candidate-build phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if reuse_requested:
+        record = receipt["constant_reuse_acceptance"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("issue #3011 constant-reuse acceptance was requested but did not reach its candidate-build phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
+    if floor_requested:
+        record = receipt["process_floor"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("issue #1125 process-floor profile was requested but did not reach its candidate-build phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
+    if retirement_requested:
+        record = receipt["ast_retirement_acceptance"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("issue #4058 retirement profile was requested but did not reach its two-binary measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
     if real_requested:
         record = receipt["throughput_real_source"]
         reasons.extend(record.get("errors", []))
@@ -2399,11 +3066,27 @@ def measure(arguments: argparse.Namespace, candidate: Path, work: Path, evidence
             reasons.append("the link-tls leg was requested but did not reach its measurement phase")
         if record["status"] != "complete":
             receipt["state"] = "failed"
+    if selfhost_requested:
+        record = receipt["selfhost_inline"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the self-host inline leg was requested but did not reach its measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
+    if nesting_requested:
+        record = receipt["frontend_nesting"]
+        reasons.extend(record.get("errors", []))
+        if record["status"] == "pending":
+            record["status"] = "failed"
+            reasons.append("the frontend-nesting leg was requested but did not reach its measurement phase")
+        if record["status"] != "complete":
+            receipt["state"] = "failed"
 
 
 
 def main(argv: list[str] | None = None) -> int:
-    global OWNED_PHASE_CONTEXT
+    global OWNED_PHASE_CONTEXT, EVIDENCE_DEFER_ALL
     arguments = parse(argv)
     started = time.monotonic()
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -2424,6 +3107,12 @@ def main(argv: list[str] | None = None) -> int:
     arguments.analyzer_profile_request_problem = analyzer_request_problem
     arguments.ast_pilot_requested, arguments.ast_pilot_request_problem = (
         ast_pilot_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.ast_retirement_requested, arguments.ast_retirement_request_problem = (
+        ast_retirement_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.constant_reuse_requested, arguments.constant_reuse_request_problem = (
+        constant_reuse_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.process_floor_requested, arguments.process_floor_request_problem = (
+        process_floor_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.real_source_requested, arguments.real_source_request_problem = (
         real_source_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.historical_requested, arguments.historical_request_problem = (
@@ -2434,15 +3123,26 @@ def main(argv: list[str] | None = None) -> int:
         compiler_probes_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.frontend_selector_requested, arguments.frontend_selector_request_problem = (
         frontend_selector_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.frontend_nesting_requested, arguments.frontend_nesting_request_problem = (
+        frontend_nesting_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.wild_linker_requested, arguments.wild_linker_request_problem = (
         wild_linker_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     arguments.link_tls_requested, arguments.link_tls_request_problem = (
         link_tls_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
+    arguments.selfhost_inline_requested, arguments.selfhost_inline_request_problem = (
+        selfhost_inline_request_selection(candidate, arguments.head) if arguments.mode == "pull" else (False, ""))
     identity = {key: getattr(arguments, key) for key in IDENTITY_KEYS}
     utility = getattr(arguments, "utility_owned_phases", False)
     main_owned = getattr(arguments, "main_owned_phases", False)
     selected_profile = named_main_profile(arguments.main_profile) if main_owned else PROFILE
     early_owned = utility or main_owned or (arguments.mode == "main" and arguments.closure_policy == "snapshot-v1")
+    # Contract v1 (#2918) seals the ordinary lab and corpus, on the legacy-rebuild and the pull
+    # snapshot-v1 route alike (#3211); the owned, MAIN-owned and analyzer routes keep their own contracts.
+    arguments.evidence_seal = getattr(arguments, "request_attempt", None) is not None and not early_owned and \
+        not analyzer_requested and arguments.closure_policy in ("legacy-rebuild", "snapshot-v1")
+    EVIDENCE_OMISSION_LEDGER.clear()
+    EVIDENCE_DEFERRED_OPTIONAL.clear()
+    EVIDENCE_DEFER_ALL = arguments.evidence_seal
     receipt = {"schema": RECEIPT_SCHEMA, "mode": arguments.mode, "state": "failed", "reasons": [], "identity": identity,
                "profile": ANALYZER_PROFILE_BY_LINE[analyzer_request_line] if analyzer_requested else selected_profile,
                "throughput_profile": THROUGHPUT_PROFILE if not analyzer_requested else None,
@@ -2453,6 +3153,10 @@ def main(argv: list[str] | None = None) -> int:
     reasons = receipt["reasons"]
     if analyzer_request_problem:
         reasons.append(analyzer_request_problem)
+    if arguments.ast_retirement_request_problem:
+        reasons.append(arguments.ast_retirement_request_problem)
+    if analyzer_requested and arguments.ast_retirement_requested:
+        reasons.append("an analyzer profile cannot be combined with AST retirement acceptance")
     if analyzer_requested and arguments.real_source_requested:
         reasons.append("an analyzer profile cannot be combined with real-source throughput")
     log = evidence / "build.log"
@@ -2567,8 +3271,16 @@ def main(argv: list[str] | None = None) -> int:
     receipt["timings"]["total_seconds"] = round(time.monotonic() - started, 3)
     receipt["timings"]["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     receipt.pop("phase", None)
+    if EVIDENCE_DEFERRED_OPTIONAL and aborted is None:
+        export_deferred_optional(evidence, receipt.setdefault("evidence_omissions", {}))
+    EVIDENCE_DEFER_ALL = False
     if not receipt.get("evidence_omissions"):
         receipt.pop("evidence_omissions", None)
+    if arguments.evidence_seal and receipt["state"] == "measured" and aborted is None:
+        problem = seal_evidence(receipt, evidence, work, arguments.request_attempt)
+        if problem:
+            reasons.append(problem)
+            receipt["state"] = "failed"
     persisted = write_receipt(receipt, evidence)
     if persisted:
         reasons.append(persisted)

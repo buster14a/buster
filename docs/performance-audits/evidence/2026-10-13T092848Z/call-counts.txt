@@ -1,0 +1,45 @@
+== A
+c_ir_call_argument_separator: calls 287,040 inclusive 18.67 M self 17.10 M
+c_ir_has_root_comma: calls 210,861 inclusive 27.83 M self 24.93 M
+c_ir_root_conditional_scan: calls 61,998 inclusive 17.84 M self 16.17 M
+c_ir_token_prefix_build: calls 6,387 inclusive 62.82 M self 62.82 M
+== B
+c_ir_call_argument_separator: calls 287,040 inclusive 18.67 M self 17.10 M
+c_ir_has_root_comma: calls 210,861 inclusive 27.83 M self 24.93 M
+c_ir_root_conditional_scan: calls 9,069 inclusive 2.15 M self 1.60 M
+c_ir_token_prefix_build: calls 6,387 inclusive 62.82 M self 62.82 M
+c_ir_tree_root_conditional: calls 894,657 inclusive 79.26 M self 76.81 M
+== C
+c_ir_call_argument_separator_scan: calls 197,752 inclusive 13.74 M self 12.64 M
+c_ir_has_root_comma_scan: calls 25,684 inclusive 4.78 M self 3.76 M
+c_ir_root_conditional_scan: calls 9,069 inclusive 2.15 M self 1.60 M
+c_ir_token_prefix_build: calls 6,387 inclusive 103.72 M self 103.72 M
+c_ir_tree_root_conditional: calls 61,998 inclusive 14.25 M self 11.80 M
+== D
+c_ir_call_argument_separator_scan: calls 197,752 inclusive 13.74 M self 12.64 M
+c_ir_has_root_comma_scan: calls 25,684 inclusive 4.78 M self 3.76 M
+c_ir_root_conditional_scan: calls 61,998 inclusive 17.84 M self 16.17 M
+c_ir_token_prefix_build: calls 6,387 inclusive 103.72 M self 103.72 M
+== C2
+c_ir_call_argument_separator: calls 287,040 inclusive 18.67 M self 17.10 M
+c_ir_has_root_comma: calls 210,861 inclusive 27.83 M self 24.93 M
+c_ir_root_conditional_scan: calls 9,069 inclusive 2.15 M self 1.60 M
+c_ir_token_prefix_build: calls 6,387 inclusive 62.82 M self 62.82 M
+c_ir_tree_root_conditional: calls 61,998 inclusive 14.25 M self 11.80 M
+== D2
+c_ir_call_argument_separator: calls 287,040 inclusive 18.67 M self 17.10 M
+c_ir_has_root_comma: calls 210,861 inclusive 27.83 M self 24.93 M
+c_ir_root_conditional_scan: calls 61,998 inclusive 17.84 M self 16.17 M
+c_ir_token_prefix_build: calls 6,387 inclusive 62.82 M self 62.82 M
+== C6
+c_ir_call_argument_separator: calls 287,040 inclusive 18.67 M self 17.10 M
+c_ir_has_root_comma: calls 210,861 inclusive 27.83 M self 24.93 M
+c_ir_root_conditional_scan: calls 9,069 inclusive 2.15 M self 1.60 M
+c_ir_token_prefix_build: calls 6,387 inclusive 62.82 M self 62.82 M
+c_ir_tree_root_conditional: calls 323,811 inclusive 17.57 M self 14.51 M
+c_ir_tree_root_conditional_records: calls 61,998 inclusive 14.25 M self 11.80 M
+== D6
+c_ir_call_argument_separator: calls 287,040 inclusive 18.67 M self 17.10 M
+c_ir_has_root_comma: calls 210,861 inclusive 27.83 M self 24.93 M
+c_ir_root_conditional_scan: calls 61,998 inclusive 17.84 M self 16.17 M
+c_ir_token_prefix_build: calls 6,387 inclusive 62.82 M self 62.82 M

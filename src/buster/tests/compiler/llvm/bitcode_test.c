@@ -5,6 +5,7 @@
 #include <buster/lib/os.h>
 #include <buster/lib/file.h>
 #include <buster/lib/hash.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 
 // Integer wire coverage: llvm_bitcode_test_integer_encoding exhausts the
 // scalar operand boundary; llvm_bitcode_test_integer reads complete serialized
@@ -13,6 +14,8 @@
 // llvm_bitcode_test_weak_consumers checks ELF bindings and linked behavior.
 // llvm_bitcode_test_section_index pins ordered section IDs and scaling work;
 // the weak-record fixture also checks mixed global/function section operands.
+// llvm_bitcode_test_type_index pins exact type IDs under collisions and growth,
+// with geometric work bounds for distinct and repeated wide operand keys.
 // Scalar ABI coverage: llvm_bitcode_test_scalar_abi_wire pins target attributes;
 // llvm_bitcode_test_scalar_abi_runtime exchanges original C with independent compilers.
 // llvm_bitcode_test_lifecycle checks canonical registrations and independently
@@ -137,7 +140,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_uefi_boundary(UnitTestArgum
                                     target.triple, modes[mode], frontends[frontend], compiled.diagnostic);
                 }
                 BUSTER_TEST(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object);
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
@@ -180,7 +183,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_uefi_boundary(UnitTestArgum
         {
             BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE && emitted.has_llvm_bitcode && emitted.llvm_bitcode.success);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -381,7 +384,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_consumers(UnitTestArguments
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -694,7 +697,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle(UnitTestArguments
                                 }
                             }
                         }
-                        scratch_end(temporary);
+                        c_test_scratch_end(temporary);
                     }
                 }
             }
@@ -819,7 +822,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_lifecycle(UnitTestArguments
             BUSTER_TEST(arguments, observer_after.length == observer.length && observer_after.pointer &&
                 !memcmp(observer_after.pointer, observer.pointer, observer_after.length));
             os_file_delete(observer_path);
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
 #else
@@ -982,7 +985,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArgume
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -1008,7 +1011,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_stack_scopes(UnitTestArgume
         BUSTER_TEST(arguments, preserved.bytes.length == sentinel.length && preserved.bytes.pointer &&
                                !memcmp(preserved.bytes.pointer, sentinel.pointer, sentinel.length));
         file_map_unmap(preserved);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -1108,7 +1111,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_debug_trap(UnitTestArgument
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -1282,7 +1285,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_aggregate_va_arg(UnitTestAr
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -1324,7 +1327,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_aggregate_va_arg(UnitTestAr
                 BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #else
     (void)arguments;
@@ -1496,7 +1499,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_wide_va_arg(UnitTestArgumen
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -1538,7 +1541,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_wide_va_arg(UnitTestArgumen
                 BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #else
     (void)arguments;
@@ -1652,7 +1655,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_clear_cache(UnitTestArgumen
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -1828,7 +1831,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_inline_assembly(UnitTestArg
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -1863,7 +1866,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_inline_assembly(UnitTestArg
         BUSTER_TEST(arguments, preserved.bytes.length == sentinel.length && preserved.bytes.pointer &&
                                !memcmp(preserved.bytes.pointer, sentinel.pointer, sentinel.length));
         file_map_unmap(preserved);
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -1985,7 +1988,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_array_compound_literals(Uni
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -2065,7 +2068,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_switches(UnitTestArguments*
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -2111,7 +2114,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_abi_diagnostics(UnitTestArg
                 BUSTER_TEST(arguments, emitted.error == COMPILER_DRIVER_ERROR_NONE);
                 BUSTER_TEST(arguments, llvm_bitcode_artifact_is_valid(emitted.llvm_bitcode));
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     return result;
@@ -2163,7 +2166,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_variadic_diagnostics(UnitTe
                                   !memcmp(retained.bytes.pointer, sentinel.pointer, sentinel.length));
             file_map_unmap(retained);
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #endif
     return result;
@@ -2208,7 +2211,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_variadic_win64_object(UnitT
             BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
 #endif
     return result;
 }
@@ -3266,7 +3269,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_scalar_abi_wire(UnitTestArg
             BUSTER_TEST_RAW(arguments, boolean_seen == 255, boolean_context);
         }
         types[5].bit_width = 1;
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -3653,7 +3656,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_scalar_abi_runtime(UnitTest
                         BUSTER_TEST_RAW(arguments, passed, detail);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
         for (u32 unit = 0; unit < BUSTER_ARRAY_LENGTH(units); unit += 1)
@@ -4031,7 +4034,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_records(UnitTestArgume
             {
                 arguments->show(arguments, S8("LLVM weak ELF validation requires clang and llvm-readelf/readelf on PATH\n"));
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
 #endif
         }
     }
@@ -4173,7 +4176,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_weak_consumers(UnitTestArgu
                 }
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length || !inspector.length)
     {
@@ -4370,7 +4373,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_alias(UnitTestArguments* ar
             }
         }
 #endif
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }
@@ -4457,7 +4460,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestA
                 BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
 #endif
 
@@ -4485,6 +4488,93 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_relocated_globals(UnitTestA
 
 // First-seen IDs depend on content, never storage or lexical order. The
 // generated common-prefix family counts real hash probes at N through 16N.
+BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_type_index(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    u64 words[] = {0, UINT64_MAX, UINT64_C(1) << 63, 1, 0};
+    u64 copy[] = {0, UINT64_MAX, UINT64_C(1) << 63, 1, 0};
+    u64 first[] = {UINT64_C(1) << 63, UINT64_MAX, UINT64_C(1) << 63, 1, 0};
+    u64 last[] = {0, UINT64_MAX, UINT64_C(1) << 63, 1, 1};
+    LlvmBitcodeTestType mixed[] = {
+        {.code = 2}, {.code = 2}, {.code = 3},
+        {.code = 18, .operand_count = 5, .operands = words},
+        {.code = 18, .operand_count = 5, .operands = copy},
+        {.code = 18, .operand_count = 4, .operands = words},
+        {.code = 19, .operand_count = 5, .operands = words},
+        {.code = 18, .operand_count = 5, .operands = first},
+        {.code = 18, .operand_count = 5, .operands = last},
+        {.code = 18, .operand_count = 5, .operands = words},
+    };
+    u32 expected[] = {0, 0, 1, 2, 2, 3, 4, 5, 6, 2};
+    u32 ids[BUSTER_ARRAY_LENGTH(mixed)];
+    for (u32 collision = 0; collision < 2; collision += 1)
+    {
+        LlvmBitcodeTestTypes indexed = llvm_bitcode_test_type_ids(arena, mixed, BUSTER_ARRAY_LENGTH(mixed), collision != 0, ids);
+        BUSTER_TEST(arguments, indexed.record_count == 7 && !memcmp(ids, expected, sizeof(expected)));
+    }
+
+    u64 colliding_words[128];
+    LlvmBitcodeTestType colliding[256];
+    u32 colliding_ids[BUSTER_ARRAY_LENGTH(colliding)];
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(colliding_words); index += 1)
+    {
+        colliding_words[index] = (u64)index << 32;
+        colliding[index] = (LlvmBitcodeTestType){.code = 7, .operand_count = 1, .operands = colliding_words + index};
+        colliding[128 + index] = (LlvmBitcodeTestType){.code = 7, .operand_count = 1, .operands = colliding_words + 127 - index};
+    }
+    LlvmBitcodeTestTypes collided = llvm_bitcode_test_type_ids(arena, colliding, BUSTER_ARRAY_LENGTH(colliding), true, colliding_ids);
+    BUSTER_TEST(arguments, collided.record_count == 128);
+    for (u32 index = 0; index < 128; index += 1)
+    {
+        BUSTER_TEST(arguments, colliding_ids[index] == index && colliding_ids[128 + index] == 127 - index);
+    }
+
+    u32 widths[] = {2, 129};
+    for (u32 width_index = 0; width_index < BUSTER_ARRAY_LENGTH(widths); width_index += 1)
+    {
+        u32 width = widths[width_index];
+        for (u32 shape = 0; shape < 3; shape += 1)
+        {
+            u64 initial_probes = 0;
+            for (u32 count = 128; count <= 2048; count *= 16)
+            {
+                TemporalArena temporary = scratch_begin(&arena, 1);
+                Arena* scratch = temporary.arena;
+                u64* keys = arena_allocate(scratch, u64, (u64)count * width);
+                LlvmBitcodeTestType* requests = arena_allocate(scratch, LlvmBitcodeTestType, (u64)count * 3);
+                u32* actual = arena_allocate(scratch, u32, (u64)count * 3);
+                memset(keys, 0, (size_t)count * width * sizeof(*keys));
+                for (u32 index = 0; index < count; index += 1)
+                {
+                    keys[(u64)index * width + (shape ? 0 : width - 1)] = shape == 2 ? 0 : index;
+                    requests[index] = (LlvmBitcodeTestType){.code = 18, .operand_count = width, .operands = keys + (u64)index * width};
+                }
+                for (u32 index = 0; index < count; index += 1)
+                {
+                    requests[count + index] = requests[count - 1 - index];
+                    requests[2 * count + index] = requests[index];
+                }
+                LlvmBitcodeTestTypes measured = llvm_bitcode_test_type_ids(scratch, requests, count * 3, false, actual);
+                BUSTER_TEST(arguments, measured.record_count == (shape == 2 ? 1 : count));
+                BUSTER_TEST(arguments, measured.probes >= (u64)count * 3 && measured.probes <= (u64)count * 18);
+                for (u32 index = 0; index < count; index += 1)
+                {
+                    u32 forward = shape == 2 ? 0 : index;
+                    u32 reverse = shape == 2 ? 0 : count - 1 - index;
+                    BUSTER_TEST(arguments, actual[index] == forward && actual[count + index] == reverse && actual[2 * count + index] == forward);
+                }
+                if (count == 128) initial_probes = measured.probes;
+                else BUSTER_TEST(arguments, measured.probes <= initial_probes * 24);
+                arguments->show(arguments, S8("LLVM_TYPE_INDEX shape={u32} width={u32} records={u32} probes={u64}\n"),
+                                shape, width, count, measured.probes);
+                scratch_end(temporary);
+            }
+        }
+    }
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_section_index(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -4856,7 +4946,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_fixed_allocas(UnitTestArgum
                 file_map_unmap(original);
                 BUSTER_TEST(arguments, os_file_delete(input));
                 BUSTER_TEST(arguments, os_file_delete(output));
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -4917,7 +5007,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_fixed_allocas(UnitTestArgum
         BUSTER_TEST(arguments, os_file_delete(output));
         BUSTER_TEST(arguments, os_file_delete(mixed_output));
         BUSTER_TEST(arguments, os_file_delete(executable));
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (!compiler.length)
     {
@@ -5034,7 +5124,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArgu
                         BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
                     }
                 }
-                scratch_end(temporary);
+                c_test_scratch_end(temporary);
             }
         }
     }
@@ -5121,7 +5211,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_integer_counts(UnitTestArgu
                 BUSTER_TEST(arguments, compiled.result == PROCESS_RESULT_SUCCESS);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     types[1].bit_width = 32;
     types[1].layout.size = 4;
@@ -5163,7 +5253,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult llvm_bitcode_test_constant_handoff(UnitTestAr
         BUSTER_TEST_RAW(arguments, success, emitted.diagnostic);
         emitted_all &= success;
         stats[variant] = emitted.llvm_bitcode.stats;
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     if (emitted_all)
     {
@@ -5407,6 +5497,7 @@ UnitTestResult llvm_bitcode_tests(UnitTestArguments* arguments)
     UnitTestResult constant_handoff = llvm_bitcode_test_constant_handoff(arguments);
     result.test_count += constant_handoff.test_count;
     result.succeeded_test_count += constant_handoff.succeeded_test_count;
+    BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_type_index);
     BUSTER_TEST_FIXTURE(arguments, llvm_bitcode_test_section_index);
     UnitTestResult indexed_lookups = llvm_bitcode_test_indexed_lookups(arguments);
     result.test_count += indexed_lookups.test_count;

@@ -13,7 +13,6 @@ exact AArch64 object-relocation denominator is the 14 enum members below
 | Path | Supported | Explicitly excluded |
 | --- | --- | --- |
 | Mach-O writer/reader | `CALL26/JUMP26`, `PREL32`, `ABS64`, `PAGE21/PAGEOFF12`, `GOT_LOAD PAGE21/PAGEOFF12`, `TLVP PAGE21/PAGEOFF12` | TLSLE/PE TLS are non-Mach-O formats |
-| `object_link_executable` | `CALL26/JUMP26`, `PREL32`, `ABS64`, `PAGE21/PAGEOFF12`, and `GOT_LOAD PAGE21/PAGEOFF12` relaxed to the definition's `ADRP`/`ADD` | TLVP and all TLS forms (`OBJECT_ERROR_UNSUPPORTED_TARGET`); no platform resolver exists in a standalone mapping |
 | JIT | `ABS64`, native `PC32`, `CALL26/JUMP26`, `PREL32`, `PAGE21/PAGEOFF12`, and `GOT_LOAD PAGE21/PAGEOFF12` relaxed to the target's `ADRP`/`ADD`; bound external data is accepted for direct and GOT page/absolute relocations | TLVP and all TLS forms (`JIT_ERROR_TLS_UNSUPPORTED`); unresolved external data without a binding remains `JIT_ERROR_EXTERNAL_DATA` |
 | Native Darwin link | local `CALL26/JUMP26`, `PREL32`, `ABS64`, `PAGE21/PAGEOFF12`, and TLVP descriptor forms; `GOT_LOAD PAGE21/PAGEOFF12` against an import's bound `__got` slot or relaxed to a local definition; `ABS64` against an import in a `__DATA` section (`__data`, `__const`, initializer and thread-local templates) as a dyld `BIND_TYPE_POINTER` with its addend (#3547). A direct page reference, or an absolute one in code, to imported data is refused | external TLVP without a local descriptor/resolver and TLSLE; out-of-range branches return `LINK_ERROR_RELOCATION` because this layout has no safe insertion point for a veneer pool |
 
@@ -33,7 +32,7 @@ stored signed addend must fit `int32_t`; the writer rewrites the relocated word
 even when that addend is zero. A bare arm64 32-bit `UNSIGNED` record is rejected
 for regular sections (debug `ABS32` remains supported). Callers that construct
 `ObjectFile` values directly still need valid section and symbol indexes;
-writer, in-memory linker, and JIT preflight reject malformed PREL32
+writer and JIT preflight reject malformed PREL32
 alignment/range inputs, while serialized readers check section-base arithmetic
 before mapping relocations.
 

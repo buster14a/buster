@@ -1,0 +1,86 @@
+"""Apply the single-reservation prototype to the untouched baseline source."""
+from pathlib import Path
+R=Path(__file__).resolve().parent
+P=R/'buster/src/buster/lib/compiler/codegen/register_allocator_fast.c'
+s=(R/'register_allocator_fast.base.c').read_text()
+a='''    MachineFastPrepass prepass = machine_fast_prepass_build(arena, function, false);
+    return machine_fast_placement_build_prepassed(arena, function, &prepass, pinned_registers, pinned_mask, pin_active_masks, pin_span_starts,
+                                                  pin_span_ends, split_entries, split_entry_count, split_stores, split_store_count);'''
+b='''    // #3933 diagnostic prototype: one whole-function callee-saved lane for
+    // the most frequently used escaping immutable value. No baseline replay,
+    // interval sorting, split planning, or acceptance retry. ABI captures and
+    // constrained operands remain excluded. Whole-function ownership is
+    // conservative across every loop and branch, including absence on a path.
+    bool experiment = !pinned_registers && function->block_count > 1;
+    MachineFastPrepass prepass = machine_fast_prepass_build(arena, function, experiment);
+    u32 selected = UINT32_MAX;
+    if (experiment)
+    {
+        u32 count = function->virtual_register_count;
+        u32* uses = arena_allocate_zeroed(arena, u32, count ? count : 1);
+        u64 available = function->target->callee_saved_mask & function->target->allocatable_mask;
+        for (u32 block = 0; block < function->block_count; block += 1)
+        {
+            MachineBlock const* current = function->blocks + block;
+            for (u32 offset = 0; offset < current->instruction_count; offset += 1)
+            {
+                u32 index = current->first_instruction + offset;
+                MachineInstruction const* instruction = function->instructions + index;
+                MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
+                available &= ~info->clobber_mask;
+                u32 masks = prepass.operand_masks[index];
+                u32 physical = machine_fast_operand_mask(masks, MACHINE_FAST_OPERAND_PHYSICAL_SHIFT);
+                u32 virtuals = machine_fast_operand_mask(masks, MACHINE_FAST_OPERAND_VIRTUAL_SHIFT);
+                u32 used = machine_fast_operand_mask(masks, MACHINE_FAST_OPERAND_USE_SHIFT);
+                u32 defined = machine_fast_operand_mask(masks, MACHINE_FAST_OPERAND_DEFINE_SHIFT);
+                for (u32 slots = physical; slots; slots &= slots - 1u)
+                {
+                    u32 slot = machine_fast_first_set(slots);
+                    available &= ~machine_fast_lane(machine_ref_payload(instruction->operands[slot]));
+                }
+                for (u32 slots = virtuals; slots; slots &= slots - 1u)
+                {
+                    u32 slot = machine_fast_first_set(slots);
+                    u32 value = machine_ref_payload(instruction->operands[slot]);
+                    // Incoming argument and call-result captures are the
+                    // deferred slice B; this experiment cannot select them.
+                    prepass.disqualified[value] |= physical && (defined & (1u << slot)) ? 1u : 0u;
+                    uses[value] += (used & (1u << slot)) && prepass.definition_blocks[value] != block;
+                }
+            }
+        }
+        u32 best = 2;
+        for (u32 value = 0; value < count; value += 1)
+        {
+            MachineVirtualRegister const* reg = function->virtual_registers + value;
+            if (uses[value] > best && prepass.escapes[value] && !prepass.disqualified[value] &&
+                prepass.rematerialize_immediates[value] == UINT32_MAX &&
+                !(reg->flags & MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE) &&
+                reg->register_class == MACHINE_REGISTER_CLASS_GENERAL && reg->definition_point != MACHINE_POINT_INVALID)
+            {
+                best = uses[value];
+                selected = value;
+            }
+        }
+        if (selected != UINT32_MAX && available)
+        {
+            u32* assigned = arena_allocate(arena, u32, count);
+            memset(assigned, 0xff, (u64)count * sizeof(*assigned));
+            assigned[selected] = machine_fast_first_set(available);
+            pinned_registers = assigned;
+            pinned_mask = machine_fast_lane(assigned[selected]);
+        }
+        else
+        {
+            selected = UINT32_MAX;
+        }
+    }
+    MachineStackPlacement placement = machine_fast_placement_build_prepassed(arena, function, &prepass, pinned_registers, pinned_mask, pin_active_masks,
+                                                                            pin_span_starts, pin_span_ends, split_entries, split_entry_count,
+                                                                            split_stores, split_store_count);
+    placement.pinned_register_count += selected != UINT32_MAX;
+    return placement;'''
+assert s.count(a)==1
+P.write_text(s.replace(a,b))
+for name in ('codegen','register_allocator_predicate'):
+    (R/f'buster/src/buster/lib/compiler/codegen/{name}.c').write_bytes((R/f'{name}.base.c').read_bytes())

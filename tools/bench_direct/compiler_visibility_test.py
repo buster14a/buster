@@ -20,6 +20,7 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.parse
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -389,6 +390,21 @@ class CheckLifecycleTest(unittest.TestCase):
         self.assertEqual(displaced["conclusion"], "neutral")
         self.assertIn(f"inside the range comparison of `{HEAD}` against `{OLDER}`", displaced["output"]["summary"])
 
+    def test_unchanged_range_reconciliation_never_promises_a_comparison(self) -> None:
+        # #3923: a skipped range has no comparison to cover the displaced commit.
+        api = FakeGitHub()
+        api.commits = [{"sha": HEAD, "parents": [{"sha": PARENT}]}, {"sha": PARENT, "parents": [{"sha": OLDER}]},
+                       {"sha": OLDER, "parents": [{"sha": "e" * 40}]}]
+        displaced = api.add_check(PARENT, marker(PARENT, request="80"))
+        chain = compiler_github.first_parent_chain(api, HEAD)
+        closed = compiler_github.reconcile_main(api, HEAD, OLDER, "run", "2026-10-06T16:00:00Z", chain, True)
+        self.assertEqual(closed, [displaced["id"]])
+        summary = displaced["output"]["summary"]
+        self.assertEqual(displaced["conclusion"], "neutral")
+        self.assertIn(f"from `{OLDER}`, the last actual measurement, to `{HEAD}`", summary)
+        self.assertIn("is not measured", summary)
+        self.assertNotIn("range comparison", summary)
+
     def test_pull_reconciliation_supersedes_only_earlier_heads_of_that_pull_request(self) -> None:
         api = FakeGitHub()
         api.pull_commits = [OLDER, PARENT, HEAD]
@@ -527,6 +543,43 @@ class ReportTest(unittest.TestCase):
         self.assertIn("No valid measurement", text)
         self.assertIn("| Wall time B/A | NA, 95% CI [NA, NA], NA |", text)
         self.assertIn("- no readable receipt.json", text)
+        self.assertIn("| Achieved uncertainty | NA (not measured) |", text)
+        self.assertIn("| Host cost per leg | builds NA + NA s, self-host measurement NA s, corpus NA s, "
+                      "total NA s; queue delay NA s |", text)
+        self.assertNotIn("unresolved at the achieved resolution", text)
+
+    def test_report_names_route_profile_uncertainty_and_leg_costs(self) -> None:
+        # #3212 items 6-7: the selected profile, its trusted route, the achieved
+        # interval and every leg's recorded seconds are visible on the commit page.
+        shown = self.shown()
+        shown["timings"].update(build_seconds={"baseline": 61.0, "candidate": 62.0}, measurement_seconds=600.0,
+                                throughput_seconds=23.0, total_seconds=822.0, queue_delay_seconds=5.0)
+        route = {"main_owned": False, "main_profile": "compiler-compare-v1", "main_policy_revision": "b" * 40,
+                 "main_certificate_revision": "-"}
+        text = compiler_publish.commit_report(dict(shown, main_route=route), summary(), "success", "Measured", [], "LINKS")
+        for marker in ("| Achieved uncertainty | ±1.00% (half-width of the 95% CI of wall B/A) |",
+                       "| Selected profile | `compiler-compare-v1` (Main routing disabled at policy `bbbbbbbbbbbb`) |",
+                       "| Host cost per leg | builds 61 + 62 s, self-host measurement 600 s, corpus 23 s, total 822 s; "
+                       "queue delay 5 s |"):
+            self.assertIn(marker, text)
+        route = dict(route, main_owned=True, main_profile="compiler-main-40pairs-v1", main_certificate_revision="c" * 40)
+        text = compiler_publish.commit_report(dict(shown, main_route=route), summary(), "success", "Measured", [], "LINKS")
+        self.assertIn("| Selected profile | `compiler-main-40pairs-v1` (authenticated automatic Main route, policy "
+                      "`bbbbbbbbbbbb`, certificate `cccccccccccc`) |", text)
+        text = compiler_publish.commit_report(dict(shown, mode="pull"), summary(), "success", "Measured", [], "LINKS")
+        self.assertIn("| Selected profile | `compiler-compare-v1` (explicit pull-request request) |", text)
+        text = compiler_publish.commit_report(shown, summary(), "success", "Measured", [], "LINKS")
+        self.assertIn("| Selected profile | `compiler-compare-v1` (Main route not resolved) |", text)
+
+    def test_unresolved_outcomes_never_read_as_equivalence(self) -> None:
+        for outcome in ("no detectable difference", "below-floor", "inconclusive"):
+            data = summary()
+            data["verdict"] = dict(data["verdict"], outcome=outcome, ci_low=0.99, ci_high=1.01)
+            text = compiler_publish.commit_report(self.shown(), data, "success", "Measured", [], "LINKS")
+            with self.subTest(outcome=outcome):
+                self.assertIn("neither equivalence nor a performance pass", text)
+        text = compiler_publish.commit_report(self.shown(), summary(), "success", "Measured", [], "LINKS")
+        self.assertNotIn("neither equivalence nor a performance pass", text)
 
     def test_links_name_check_attempt_and_expiring_evidence(self) -> None:
         line = compiler_publish.links("https://c", "https://w", "2", "https://e", "2027-01-04T00:00:00Z")
@@ -543,6 +596,8 @@ class RecoveryApi(FakeGitHub):
         self.compare, self.artifacts, self.run_path = compare, artifacts, run_path
         # The original run's bench workflow; this default predates machine-record retention.
         self.workflow = "jobs:\n  compare:\n"
+        # The original run's producer; this default predates sealing (#2918).
+        self.producer = "def export_tree():\n"
         self.payload = archive({"receipt.json": json.dumps(self.recorded()), "lab/summary.json": json.dumps(summary()), **corpus_members()})
         self.add_check(HEAD, compiler_receipt.check_marker(HEAD), status="completed")
 
@@ -590,6 +645,11 @@ class RecoveryApi(FakeGitHub):
             if urllib.parse.parse_qs(urllib.parse.urlsplit(path).query) != {"ref": [TRUSTED]}:
                 raise urllib.error.HTTPError(path, 404, "not the original run revision", {}, None)
             raw = self.workflow.encode()
+            return {"type": "file", "encoding": "base64", "size": len(raw), "content": base64.b64encode(raw).decode()}
+        if bare == "/contents/" + compiler_publish.SEALING_PRODUCER:
+            if urllib.parse.parse_qs(urllib.parse.urlsplit(path).query) != {"ref": [TRUSTED]}:
+                raise urllib.error.HTTPError(path, 404, "not the original run revision", {}, None)
+            raw = self.producer.encode()
             return {"type": "file", "encoding": "base64", "size": len(raw), "content": base64.b64encode(raw).decode()}
         if bare in ("/contents/docs/compiler-main-profile-routing-v1.tsv",
                     "/contents/tools/compiler_main_profile_policy.c"):
@@ -675,25 +735,113 @@ class RecoveryTest(unittest.TestCase):
                     self.assertIn("machine-specification record", published["markdown"])
                 self.assertEqual(api.writes, [])
 
+    def sealed_recovery(self, *, claim: bool = True, controls: bool = True, unsafe: bool = False, tamper: bool = False,
+                        title: str = f"9700X request 91.1 head {HEAD}", producer_seals: bool = True) -> tuple[int, dict]:
+        """Recovery of a sealed v1 attempt (#2918) through a stand-in native verify and replay.
+
+        The stand-in verifies only under request attempt 1 and only an untampered bundle; replay
+        has its own tests. producer_seals says whether the original run's producer sealed.
+        """
+        recorded = RecoveryApi.recorded()
+        if claim:
+            recorded["evidence_bundle"] = {"inventory": compiler_receipt.EVIDENCE_INVENTORY, "state": "sealed",
+                                           "manifest_sha256": "a" * 64, "manifest_bytes": 9, "members": 3,
+                                           "payload_bytes": 4, "omissions": 0}
+        members = {"receipt.json": json.dumps(recorded), "lab/summary.json": json.dumps(summary()), **corpus_members()}
+        if controls:
+            members.update({compiler_receipt.EVIDENCE_MANIFEST: "manifest\n", compiler_receipt.EVIDENCE_SEAL: "seal\n"})
+        if tamper:
+            members["lab/tampered.txt"] = "x"
+        api = RecoveryApi()
+        api.payload = archive(members)
+        if producer_seals:
+            api.producer = compiler_publish.SEALING_PRODUCER_MARKER.decode() + "receipt, evidence):\n"
+        if unsafe:
+            stream = io.BytesIO(api.payload)
+            with zipfile.ZipFile(stream, "a") as output:
+                info = zipfile.ZipInfo("lab/run.sh")
+                info.external_attr = 0o100755 << 16
+                output.writestr(info, "#!/bin/sh\n")
+            api.payload = stream.getvalue()
+        original = api.request
+
+        def titled(path: str, data: dict | None = None, method: str = "") -> object:
+            answer = original(path, data, method)
+            if urllib.parse.urlsplit(path).path.startswith("/actions/runs/37486885378") and isinstance(answer, dict) and \
+                    "display_title" in answer:
+                answer = dict(answer, display_title=title)
+            return answer
+
+        script = ("import sys, os\n"
+                  "identity = open(sys.argv[3]).read()\n"
+                  "ok = 'request_attempt\\t1\\n' in identity and not os.path.exists(os.path.join(sys.argv[2], 'lab', 'tampered.txt'))\n"
+                  "print('COMPILER_EVIDENCE_VERIFIED members=3 payload_bytes=4 manifest_sha256=' + 'a' * 64 if ok else\n"
+                  "      'COMPILER_EVIDENCE_REFUSED reason=retained bytes, roles or identity do not reproduce the sealed manifest')\n"
+                  "raise SystemExit(0 if ok else 1)\n")
+        with mock.patch.object(api, "request", titled), \
+                mock.patch.object(compiler_publish, "EVIDENCE_VERIFY_COMMAND", (sys.executable, "-c", script)), \
+                mock.patch.object(compiler_publish, "sealed_lab_replay", lambda files: 12), \
+                mock.patch.object(compiler_publish, "sealed_corpus_replay", lambda files, temporary: 12):
+            return self.run_recovery(api)
+
+    def test_recovery_verifies_sealed_evidence_under_the_original_request_attempt(self) -> None:
+        code, published = self.sealed_recovery()
+        self.assertEqual((code, published["conclusion"]), (0, "success"), published.get("markdown"))
+        for label, change, expected in (
+                ("altered bytes", {"tamper": True}, "sealed raw evidence refused: native verify exited 1"),
+                ("missing controls", {"controls": False}, "is required on this route, but the artifact carries neither"),
+                ("missing controls of a legacy producer", {"controls": False, "producer_seals": False},
+                 "receipt names sealed raw evidence that the artifact does not carry"),
+                ("unsafe archive", {"unsafe": True}, "sealed raw evidence refused: sealed evidence archive refused"),
+                ("another request run", {"title": f"9700X request 92.1 head {HEAD}"},
+                 "the authorized identity cannot name a sealed bundle"),
+                ("no run-name", {"title": "9700X direct workload benchmark"},
+                 "the authorized identity cannot name a sealed bundle")):
+            with self.subTest(label=label):
+                code, published = self.sealed_recovery(**change)
+                self.assertEqual((code, published["conclusion"]), (0, "failure"))
+                self.assertIn(expected, published["markdown"])
+
+    def test_recovery_of_an_unsealed_attempt_is_legacy_only_before_sealing(self) -> None:
+        code, published = self.sealed_recovery(claim=False, controls=False, producer_seals=False)
+        self.assertEqual((code, published["conclusion"]), (0, "success"))
+        self.assertIn("legacy-unsealed", published["markdown"])
+        code, published = self.sealed_recovery(claim=False, controls=False)
+        self.assertEqual((code, published["conclusion"]), (0, "failure"))
+        self.assertIn("is required on this route", published["markdown"])
+
     def test_recovered_failure_keeps_its_meaning(self) -> None:
         code, published = self.run_recovery(RecoveryApi(compare="failure"))
         self.assertEqual((code, published["conclusion"]), (0, "failure"))
         self.assertIn("No valid measurement", published["markdown"])
 
 
+# A natively verified and replayed sealed bundle (#2918), as verify_evidence_bundle reports it.
+VERIFIED = {"state": "verified", "inventory": compiler_receipt.EVIDENCE_INVENTORY, "members": 3, "payload_bytes": 4, "manifest_sha256": "a" * 64,
+            "replay": {"lab_pairs": 12, "corpus_cases": 12}}
+
+
 class PublishTest(unittest.TestCase):
     def publish(self, record: bytes | None, document: dict | None = None,
-                mode: str = "main", admission: str | None = "admitted") -> tuple[RecoveryApi, dict, dict]:
+                mode: str = "main", admission: str | None = "admitted",
+                sealed: bool = True) -> tuple[RecoveryApi, dict, dict]:
         """(api, started check, job outputs) after one publication of a retained receipt (default: valid main).
 
-        Pull mode stubs only the request-file freshness gate, which has its own tests.
+        Pull mode stubs only the request-file freshness gate, which has its own tests. A sealed
+        publication stubs native verify and replay (#2918), which have their own tests, and its
+        receipt names that verified manifest.
         """
         api = RecoveryApi()
         api.checks = []
         started = api.add_check(HEAD, marker(request="91", attempt="1", mode=mode), status="in_progress",
                                 name=compiler_receipt.check_name(mode))
         machine = {} if record is None else {compiler_publish.MACHINE_RECORD: record}
-        api.payload = archive({"receipt.json": json.dumps(receipt() if document is None else document),
+        document = copy.deepcopy(receipt() if document is None else document)
+        if sealed:
+            document.setdefault("evidence_bundle", {"inventory": compiler_receipt.EVIDENCE_INVENTORY, "state": "sealed",
+                                                    **{key: VERIFIED[key] for key in ("manifest_sha256", "members",
+                                                                                     "payload_bytes")}})
+        api.payload = archive({"receipt.json": json.dumps(document),
                                "lab/summary.json": json.dumps(summary()), **corpus_members(), **machine})
         listing = {"artifacts": [{"id": 8, "name": f"buster-9700x-compiler-{HEAD}-1", "expired": False,
                                   "size_in_bytes": 100, "archive_download_url": "https://api.invalid/zip",
@@ -732,6 +880,8 @@ class PublishTest(unittest.TestCase):
                     mock.patch.object(compiler_publish, "Api", lambda repository, token: api), \
                     mock.patch.object(compiler_publish, "verify_analyzer_request_freshness",
                                       lambda *unused: "" if mode == "pull" else "not a pull request"), \
+                    mock.patch.object(compiler_publish, "verify_evidence_bundle",
+                                      (lambda *unused: dict(VERIFIED)) if sealed else compiler_publish.verify_evidence_bundle), \
                     mock.patch("sys.stdout", new_callable=io.StringIO):
                 self.assertEqual(compiler_publish.main(), 0)
             written = dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.exists() else {}
@@ -820,6 +970,23 @@ class PublishTest(unittest.TestCase):
         self.assertIn("| Inventory rows discharged | `build:bench_throughput@main`, `uarch_lab:compare@main` |",
                       published["markdown"])
         self.assertIn('"cpu_vendor": "unknown (not exposed', started["output"]["text"])
+
+    def test_publisher_requires_sealed_raw_evidence_on_the_ordinary_routes(self) -> None:
+        # #2918: a measured ordinary attempt without v1 control files fails on main and pull alike.
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull", ref="refs/pull/7/head")
+        for mode, document, record in (
+                ("main", None, machine_bytes()),
+                ("pull", pull, machine_bytes(job={"value": "compare-pull", "status": "available", "reason": ""}))):
+            with self.subTest(mode=mode):
+                started = self.publish(record, document, mode, sealed=False)[1]
+                self.assertEqual((started["status"], started["conclusion"]), ("completed", "failure"))
+                self.assertIn("is required on this route, but the artifact carries neither control file",
+                              started["output"]["summary"])
+                started = self.publish(record, document, mode)[1]
+                self.assertEqual(started["conclusion"], "success", started["output"]["summary"])
+                self.assertIn("replayed 12 lab pairs and 12 corpus cases", started["output"]["summary"])
 
     def test_publisher_refuses_a_missing_or_stale_machine_record(self) -> None:
         stale = machine_bytes(run_id={"value": "90", "status": "available", "reason": ""})

@@ -1,0 +1,84 @@
+# phase totals (seconds; nested, not additive)
+   256.725 ExecuteCompiler
+    12.973 Frontend
+   243.736 Backend
+   113.087 Optimizer
+   130.605 CodeGenPasses
+# Total events (seconds; nested, not additive)
+   256.725 Total ExecuteCompiler
+   243.736 Total Backend
+   130.605 Total CodeGenPasses
+   130.175 Total OptModule
+   123.960 Total OptFunction
+   123.853 Total RunPass
+   113.087 Total Optimizer
+    91.241 Total PassManager<Function>
+    79.122 Total ModuleInlinerWrapperPass
+    78.748 Total ModuleToPostOrderCGSCCPassAdaptor
+    78.414 Total DevirtSCCRepeatedPass
+    78.173 Total PassManager<LazyCallGraph::SCC, CGSCCAnalysisManager, LazyCallGraph &, CGSCCUpdateResult &>
+    66.804 Total CGSCCToFunctionPassAdaptor
+    24.891 Total ModuleToFunctionPassAdaptor
+    18.510 Total FunctionToLoopPassAdaptor
+    17.902 Total InstCombinePass
+    14.127 Total PassManager<Loop, LoopAnalysisManager, LoopStandardAnalysisResults &, LPMUpdater &>
+    12.973 Total Frontend
+    10.000 Total GVNPass
+     9.913 Total InlinerPass
+     7.482 Total JumpThreadingPass
+     6.896 Total SimplifyCFGPass
+     6.377 Total Source
+     6.359 Total ParseDeclarationOrFunctionDefinition
+     6.163 Total CodeGen Function
+# OptFunction: 2307 functions recorded, 123.503 s; top 30
+     8.578 c_lower_to_ir_reserved_run
+     5.399 c_parse_validate_lowering_constraints
+     4.017 machine_encode_x86_64_into
+     2.788 c_preprocess_run
+     2.501 machine_encode_aarch64_into
+     2.209 c_type_parse_machine_run
+     2.005 machine_select_canonical_function_aarch64
+     1.883 machine_fast_placement_build_prepassed
+     1.832 c_ir_query_execute
+     1.804 run_completion_census
+     1.781 compiler_driver_parse_arguments
+     1.690 c_ir_lower_dispatch_run
+     1.321 c_ast_run
+     1.308 link_native_executable_pe64
+     1.287 c_ir_lower_body_advance
+     1.159 pdb_build
+     1.122 machine_select_canonical_function_x86_64
+     1.117 ir_inline_module
+     1.100 machine_quality_placement_build_core
+     0.957 link_native_image_elf64_position_independent
+     0.926 llvm_bitcode_emit_with_options
+     0.833 c_parse_typed_constant
+     0.807 c_ir_emit_prepared_call_step
+     0.803 a64_base_assemble
+     0.802 object_read_mach_o64
+     0.766 object_read_elf
+     0.753 machine_schedule_function_core
+     0.745 assembly_x86_metadata_instruction_parse
+     0.682 c_parse_type_layout_agenda
+     0.666 c_analyze_semantics_core
+# RunPass inside CodeGenPasses; top 20
+    20.995 Live DEBUG_VALUE analysis
+    19.921 X86 DAG->DAG Instruction Selection
+     9.263 Greedy Register Allocator
+     9.230 Assignment Tracking Analysis
+     8.266 CodeGen Prepare
+     6.152 X86 Assembly Printer
+     5.000 Loop Pass Manager
+     2.457 Register Coalescer
+     2.128 X86 Domain Reassignment Pass
+     1.655 Live Interval Analysis
+     1.443 Machine Instruction Scheduler
+     1.310 Control Flow Optimizer
+     1.149 Eliminate PHI nodes for register allocation
+     1.099 Branch Probability Basic Block Placement
+     0.930 Live Variable Analysis
+     0.773 Machine code sinking
+     0.753 ReachingDefAnalysis
+     0.439 Merge disjoint stack slots
+     0.421 Machine Common Subexpression Elimination
+     0.343 Virtual Register Rewriter

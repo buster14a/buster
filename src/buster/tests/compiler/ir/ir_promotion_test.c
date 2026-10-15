@@ -1,6 +1,6 @@
 // Included by ir_test.c: structural coverage is separate from the executable
 // fixture so unchanged runtime behavior cannot conceal missing promotion.
-BUSTER_GLOBAL_LOCAL CIRLowerResult ir_promotion_lower(Arena* arena, String8 source, Target target)
+BUSTER_GLOBAL_LOCAL CIRLowerResult ir_promotion_lower_with_options(Arena* arena, String8 source, Target target, CIRLowerOptions options)
 {
     CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
     CAnalysisResult analysis = c_parse(arena, preprocess);
@@ -8,10 +8,15 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult ir_promotion_lower(Arena* arena, String8 sour
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
         // Keep this pass's reference tests independent of direct frontend SSA.
-        result = c_lower_to_ir_with_options(arena, S8("local-promotion.c"), preprocess, analysis, target,
-                                           (CIRLowerOptions){.disable_direct_ssa = true});
+        options.disable_direct_ssa = true;
+        result = c_lower_to_ir_with_options(arena, S8("local-promotion.c"), preprocess, analysis, target, options);
     }
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL CIRLowerResult ir_promotion_lower(Arena* arena, String8 source, Target target)
+{
+    return ir_promotion_lower_with_options(arena, source, target, (CIRLowerOptions){0});
 }
 
 // A stale input certificate is deliberately supplied after a safely backed
@@ -130,7 +135,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_validation_tests(UnitTestArgumen
                     }
                 }
             }
-            scratch_end(temporary);
+            c_test_scratch_end(temporary);
         }
     }
     // A certified function that already fails the strict validator and that
@@ -189,7 +194,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_validation_tests(UnitTestArgumen
                 }
             }
         }
-        scratch_end(predating);
+        c_test_scratch_end(predating);
     }
     // A preparation marker is not a certificate after a subsequent mutation.
     // The caller must revoke its input proof; preparation must then validate
@@ -218,7 +223,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_validation_tests(UnitTestArgumen
             BUSTER_TEST(arguments, mutated.instruction.value == block->last_instruction.value);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -411,7 +416,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                 BUSTER_TEST(arguments, (function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) != 0);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // Linked-builder input can have parameters before local promotion. The
     // strict validator follows first/next but does not check last_parameter;
@@ -503,7 +508,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                 BUSTER_TEST(arguments, memory_compare(&stats, &module->local_promotion, sizeof(stats)));
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     // The two expressions deliberately share their source operand slice.
     // Dense compaction must copy it per retained row before remapping IDs.
@@ -587,7 +592,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_promotion_tests(UnitTestArguments* argumen
                 BUSTER_TEST(arguments, matching >= 1);
             }
         }
-        scratch_end(temporary);
+        c_test_scratch_end(temporary);
     }
     return result;
 }

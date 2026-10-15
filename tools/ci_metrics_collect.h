@@ -1,5 +1,6 @@
 // Finalized REST execution inventory and exact-job startup/source log joins.
 // cm_jobs pages attempt-specific inventories and checks every API binding.
+// cm_controller_check authenticates unexecuted owned admission checks.
 // cm_machine proves the pinned startup precedes checkout in the executed job;
 // ambiguous schemas, workflow ownership or source records stay unavailable.
 // Logs are a bounded fallback for reports already emitted by #2758, not probes.
@@ -502,6 +503,54 @@ BUSTER_GLOBAL_LOCAL int cm_seen_job(const CmStore *s, uint64_t run, uint64_t job
     }
     return result;
 }
+BUSTER_GLOBAL_LOCAL int cm_null_field(const CmJson *j, unsigned node, const char *key)
+{
+    unsigned value = cm_member(j, node, key);
+    int result = value && j->tokens[value].kind == 'v' && cm_equal(cm_value(j, value), "null");
+    return result;
+}
+// The admission writer creates controller-only checks that GitHub also puts
+// in an Actions job inventory. A stale in-progress check is not a physical
+// execution. Authenticate its owned marker before excluding it; real queued
+// jobs and unknown controllers must still leave the inventory incomplete.
+BUSTER_GLOBAL_LOCAL int cm_controller_check(CmCollection *c, const CmJson *j, unsigned job, const CmJson *run)
+{
+    const char *name = cm_get(j, job, "name"), *prefix = NULL;
+    if (cm_equal(name, "Main integration admission")) prefix = "buster-merge-queue-admission-v1";
+    else if (cm_equal(name, "Native retirement merge admission")) prefix = "buster-native-retirement-admission-v1";
+    unsigned steps = cm_member(j, job, "steps"), labels = cm_member(j, job, "labels");
+    int candidate = prefix && cm_equal(cm_get(j, job, "status"), "in_progress") &&
+        cm_null_field(j, job, "conclusion") && cm_null_field(j, job, "runner_name") &&
+        steps && j->tokens[steps].kind == 'a' && !j->tokens[steps].child &&
+        labels && j->tokens[labels].kind == 'a' && !j->tokens[labels].child;
+    const char *runner_fields[] = {"runner_id", "runner_group_id"};
+    for (unsigned i = 0; candidate && i < sizeof(runner_fields) / sizeof(runner_fields[0]); ++i)
+    {
+        unsigned value = cm_member(j, job, runner_fields[i]);
+        candidate = cm_null_field(j, job, runner_fields[i]) ||
+            (value && j->tokens[value].kind == 'v' && cm_equal(cm_value(j, value), "0"));
+    }
+    int result = 0;
+    if (candidate)
+    {
+        uint64_t id = cm_number(j, job, "id");
+        const char *head = cm_get(run, 1, "head_sha");
+        char endpoint[128], marker[128], url[256];
+        snprintf(endpoint, sizeof(endpoint), "check-runs/%" PRIu64, id);
+        snprintf(marker, sizeof(marker), "%s:%s", prefix, head);
+        snprintf(url, sizeof(url), "https://github.com/" CM_REPO "/runs/%" PRIu64, id);
+        CmJson check = cm_api_json(c->transport, endpoint, "GET", NULL, NULL);
+        unsigned app = cm_member(&check, 1, "app");
+        result = check.valid && cm_number(&check, 1, "id") == id && cm_sha(head) &&
+            cm_equal(cm_get(&check, 1, "head_sha"), head) && cm_equal(cm_get(&check, 1, "name"), name) &&
+            cm_equal(cm_get(&check, 1, "status"), "in_progress") && cm_null_field(&check, 1, "conclusion") &&
+            cm_equal(cm_get(&check, 1, "external_id"), marker) &&
+            cm_equal(cm_get(&check, 1, "details_url"), url) && cm_equal(cm_get(j, job, "html_url"), url) &&
+            cm_number(&check, app, "id") == 15368 && cm_equal(cm_get(&check, app, "slug"), "github-actions");
+        cm_json_free(&check);
+    }
+    return result;
+}
 BUSTER_GLOBAL_LOCAL int cm_collect_job(CmCollection *c, const CmJson *j, unsigned job, const CmJson *run, uint64_t attempt)
 {
     CmRow row = {0};
@@ -510,10 +559,16 @@ BUSTER_GLOBAL_LOCAL int cm_collect_job(CmCollection *c, const CmJson *j, unsigne
     for (unsigned i = 0; i < CM_FIELD_COUNT; ++i) row.s[i] = fields[i];
     row.run = cm_number(run, 1, "id"); row.job = cm_number(j, job, "id"); row.attempt = attempt;
     row.origin_job = row.job; row.origin_attempt = attempt;
-    int valid = row.run && row.job && cm_number(j, job, "run_id") == row.run &&
-        cm_number(j, job, "run_attempt") == attempt && cm_equal(cm_get(j, job, "head_sha"), cm_get(run, 1, "head_sha")) &&
-        cm_equal(cm_get(j, job, "status"), "completed");
-    if (valid && (!c->selected_job || c->selected_job == row.job) &&
+    int identities = row.run && row.job && cm_number(j, job, "run_id") == row.run &&
+        cm_number(j, job, "run_attempt") == attempt && cm_equal(cm_get(j, job, "head_sha"), cm_get(run, 1, "head_sha"));
+    int controller = identities && !cm_equal(cm_get(j, job, "status"), "completed") && cm_controller_check(c, j, job, run);
+    int valid = identities && (cm_equal(cm_get(j, job, "status"), "completed") || controller);
+    if (controller)
+    {
+        ++c->skipped;
+        if (!c->quiet) printf("CI_HISTORY_CONTROLLER_ONLY run=%" PRIu64 " check=%" PRIu64 " excluded_from_physical=1\n", row.run, row.job);
+    }
+    if (valid && !controller && (!c->selected_job || c->selected_job == row.job) &&
         !cm_seen_job(c->store, row.run, row.job, attempt, 1))
     {
         const struct { unsigned to; const char *from; int in_run; } mapping[] =

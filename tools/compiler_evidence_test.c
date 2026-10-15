@@ -123,12 +123,45 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_try_verify(CompilerEvidenceTest* test
     return written && compiler_evidence_verify(test->arena, bundle, identity_path, problem, &summary);
 }
 
+// The snapshot-v1 route lines (#3211) after an ordinary identity.
+BUSTER_GLOBAL_LOCAL String8 compiler_evidence_test_route(Arena* arena, String8 identity, String8 phases)
+{
+    return string_format(arena, S8("{S8}preparation_policy\tsnapshot-v1\nowned_phases\t{S8}\n"), identity, phases);
+}
+
+// A complete ordinary bundle plus a snapshot attempt's closure records and `phases`
+// owned phases of five members each; every phase's stdout is empty, as a quiet child's is.
+BUSTER_GLOBAL_LOCAL String8 compiler_evidence_route_fixture(CompilerEvidenceTest* test, u64 phases)
+{
+    Arena* arena = test->arena;
+    String8 bundle = compiler_evidence_fixture(test, S8("10"), compiler_evidence_valid_omissions());
+    bool written = compiler_evidence_put(arena, bundle, S8("closure.log"), S8("optional closure log\n"));
+    for (u64 index = 0; written && index < BUSTER_ARRAY_LENGTH(compiler_evidence_closure_members); index += 1)
+    {
+        written = compiler_evidence_put(arena, bundle, compiler_evidence_closure_members[index], S8("closure\n"));
+    }
+    for (u64 phase = 1; written && phase <= phases; phase += 1)
+    {
+        for (u64 index = 0; written && index < BUSTER_ARRAY_LENGTH(compiler_evidence_phase_suffixes); index += 1)
+        {
+            String8 suffix = compiler_evidence_phase_suffixes[index];
+            written = compiler_evidence_put(arena, bundle, string_format(arena, S8(COMPILER_EVIDENCE_PHASE_DIRECTORY "{u64:width=[0,4]}.json{S8}"),
+                phase, suffix), string_equal(suffix, S8(".stdout")) ? (String8){0} : S8("phase\n"));
+        }
+    }
+    compiler_evidence_expect(test, written, S8("fixture:route-written"), (String8){0});
+    return bundle;
+}
+
 // Seal a fresh fixture, apply one change, and expect verify to refuse with a reason containing `expected`.
-BUSTER_GLOBAL_LOCAL void compiler_evidence_tamper(CompilerEvidenceTest* test, String8 name, String8 relative, String8 text, String8 expected)
+// phases selects the snapshot-v1 route with that many owned phases; 0 is the ordinary route.
+BUSTER_GLOBAL_LOCAL void compiler_evidence_tamper_route(CompilerEvidenceTest* test, u64 phases, String8 name, String8 relative, String8 text,
+    String8 expected)
 {
     String8 identity = compiler_evidence_test_identity(test->arena, S8("cccccccccccccccccccccccccccccccccccccccc"), S8("throughput-corpus-v2"),
         S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
-    String8 bundle = compiler_evidence_fixture(test, S8("10"), compiler_evidence_valid_omissions());
+    if (phases) { identity = compiler_evidence_test_route(test->arena, identity, string_format(test->arena, S8("{u64}"), phases)); }
+    String8 bundle = phases ? compiler_evidence_route_fixture(test, phases) : compiler_evidence_fixture(test, S8("10"), compiler_evidence_valid_omissions());
     String8 problem = {0};
     bool sealed = compiler_evidence_try_seal(test, bundle, identity, &problem);
     bool changed = text.length ? compiler_evidence_put(test->arena, bundle, relative, text) : remove_path_recursive(test->arena, path_join(test->arena, bundle, relative));
@@ -136,6 +169,11 @@ BUSTER_GLOBAL_LOCAL void compiler_evidence_tamper(CompilerEvidenceTest* test, St
     bool verified = compiler_evidence_try_verify(test, bundle, identity, &refusal);
     compiler_evidence_expect(test, sealed && changed && !verified && string_first_sequence(refusal, expected) != BUSTER_STRING_NO_MATCH, name,
         refusal.length ? refusal : problem);
+}
+
+BUSTER_GLOBAL_LOCAL void compiler_evidence_tamper(CompilerEvidenceTest* test, String8 name, String8 relative, String8 text, String8 expected)
+{
+    compiler_evidence_tamper_route(test, 0, name, relative, text, expected);
 }
 
 BUSTER_GLOBAL_LOCAL bool compiler_evidence_self_test(Arena* arena)
@@ -200,20 +238,101 @@ BUSTER_GLOBAL_LOCAL bool compiler_evidence_self_test(Arena* arena)
         String8 historical = compiler_evidence_test_identity(arena, S8("cccccccccccccccccccccccccccccccccccccccc"), S8("throughput-corpus-historical-v1"),
             S8("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         compiler_evidence_expect(&test, !compiler_evidence_try_verify(&test, bundle, historical, &problem), S8("identity:historical-unpinned"), problem);
+        u64 phases = 0;
         problem = (String8){0};
-        compiler_evidence_expect(&test, !compiler_evidence_identity(arena, historical, &problem).length, S8("identity:historical-unpinned-parse"), (String8){0});
+        compiler_evidence_expect(&test, !compiler_evidence_identity(arena, historical, &phases, &problem).length, S8("identity:historical-unpinned-parse"), (String8){0});
         String8 pinned = compiler_evidence_test_identity(arena, S8("cccccccccccccccccccccccccccccccccccccccc"), S8("throughput-corpus-historical-v1"),
             S8(COMPILER_EVIDENCE_HARNESS_REVISION));
         problem = (String8){0};
-        compiler_evidence_expect(&test, compiler_evidence_identity(arena, pinned, &problem).length != 0, S8("identity:historical-pinned-parse"), problem);
+        compiler_evidence_expect(&test, compiler_evidence_identity(arena, pinned, &phases, &problem).length != 0 && phases == 0,
+            S8("identity:historical-pinned-parse"), problem);
         String8 malformed[] = {S8(""), S8("repository\tbuster14a/buster\n"), string_format(arena, S8("{S8}extra\tvalue\n"), ordinary),
             string_format(arena, S8("x{S8}"), ordinary)};
         for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(malformed); index += 1)
         {
             problem = (String8){0};
-            compiler_evidence_expect(&test, !compiler_evidence_identity(arena, malformed[index], &problem).length,
+            compiler_evidence_expect(&test, !compiler_evidence_identity(arena, malformed[index], &phases, &problem).length,
                 string_format(arena, S8("identity:malformed-{u64}"), index), (String8){0});
         }
+
+        // The snapshot-v1 route (#3211): its own inventory, closure records and exact owned-phase population.
+        String8 snapshot = compiler_evidence_test_route(arena, ordinary, S8("3"));
+        problem = (String8){0};
+        compiler_evidence_expect(&test, compiler_evidence_identity(arena, snapshot, &phases, &problem).length != 0 && phases == 3,
+            S8("route:parse"), problem);
+        String8 bad_routes[] = {
+            compiler_evidence_test_route(arena, ordinary, S8("0")), compiler_evidence_test_route(arena, ordinary, S8("257")),
+            compiler_evidence_test_route(arena, ordinary, S8("03")), compiler_evidence_test_route(arena, ordinary, S8("1x")),
+            compiler_evidence_test_route(arena, pinned, S8("3")),
+            string_format(arena, S8("{S8}preparation_policy\tlegacy-rebuild\nowned_phases\t3\n"), ordinary),
+            string_format(arena, S8("{S8}preparation_policy\tsnapshot-v1\n"), ordinary),
+            string_format(arena, S8("{S8}owned_phases\t3\n"), ordinary),
+            string_format(arena, S8("{S8}extra\tvalue\n"), snapshot),
+        };
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(bad_routes); index += 1)
+        {
+            problem = (String8){0};
+            compiler_evidence_expect(&test, !compiler_evidence_identity(arena, bad_routes[index], &phases, &problem).length,
+                string_format(arena, S8("route:malformed-{u64}"), index), (String8){0});
+        }
+        problem = (String8){0};
+        compiler_evidence_expect(&test, compiler_evidence_identity(arena, compiler_evidence_test_route(arena, ordinary, S8("256")), &phases,
+            &problem).length != 0 && phases == 256, S8("route:phase-limit"), problem);
+        bundle = compiler_evidence_route_fixture(&test, 3);
+        problem = (String8){0};
+        compiler_evidence_expect(&test, compiler_evidence_try_seal(&test, bundle, snapshot, &problem), S8("route:seal"), problem);
+        problem = (String8){0};
+        compiler_evidence_expect(&test, compiler_evidence_try_verify(&test, bundle, snapshot, &problem), S8("route:verify"), problem);
+        manifest = compiler_closure_read(arena, path_join(arena, bundle, S8(COMPILER_EVIDENCE_MANIFEST)), COMPILER_EVIDENCE_MANIFEST_LIMIT);
+        compiler_evidence_expect(&test, string_starts_with_sequence(manifest, S8("schema\t" COMPILER_EVIDENCE_MANIFEST_SCHEMA "\ninventory\t"
+            COMPILER_EVIDENCE_SNAPSHOT_INVENTORY "\n")) && string_first_sequence(manifest,
+            S8("corpus_harness_revision\tbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\npreparation_policy\tsnapshot-v1\nowned_phases\t3\nmembers\t")) !=
+            BUSTER_STRING_NO_MATCH, S8("route:manifest-header"), (String8){0});
+        String8 route_roles[][2] = {
+            {S8("closure-snapshot.json"), S8("required")}, {S8("closure-verify.json.manifest.tsv"), S8("required")},
+            {S8("owned-phases/0001.json"), S8("required")}, {S8("owned-phases/0001.json.stdout"), S8("required")},
+            {S8("owned-phases/0003.json.bootstrap.complete"), S8("required")}, {S8("lab/pairs/0010-a.csv"), S8("required")},
+            {S8("closure.log"), S8("optional")}, {S8("lab/report.md"), S8("optional")},
+        };
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(route_roles); index += 1)
+        {
+            compiler_evidence_expect(&test, string_equal(compiler_evidence_row_role(arena, manifest, route_roles[index][0]), route_roles[index][1]),
+                string_format(arena, S8("route:role:{S8}"), route_roles[index][0]), (String8){0});
+        }
+        // The route binds the manifest: neither the ordinary identity nor another phase count reproduces it.
+        String8 other_routes[] = {ordinary, compiler_evidence_test_route(arena, ordinary, S8("2")),
+            compiler_evidence_test_route(arena, ordinary, S8("4"))};
+        for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(other_routes); index += 1)
+        {
+            problem = (String8){0};
+            compiler_evidence_expect(&test, !compiler_evidence_try_verify(&test, bundle, other_routes[index], &problem),
+                string_format(arena, S8("route:identity-differs-{u64}"), index), problem);
+        }
+        // An ordinary bundle never seals under the snapshot route, nor a truncated population.
+        bundle = compiler_evidence_fixture(&test, S8("10"), compiler_evidence_valid_omissions());
+        problem = (String8){0};
+        compiler_evidence_expect(&test, !compiler_evidence_try_seal(&test, bundle, snapshot, &problem) &&
+            string_first_sequence(problem, S8("required raw evidence is missing: closure-")) != BUSTER_STRING_NO_MATCH, S8("route:closure-required"), problem);
+        bundle = compiler_evidence_route_fixture(&test, 2);
+        problem = (String8){0};
+        compiler_evidence_expect(&test, !compiler_evidence_try_seal(&test, bundle, snapshot, &problem) &&
+            string_first_sequence(problem, S8("required raw evidence is missing: owned-phases/0003.json")) != BUSTER_STRING_NO_MATCH,
+            S8("route:phases-required"), problem);
+        bundle = compiler_evidence_route_fixture(&test, 4);
+        problem = (String8){0};
+        compiler_evidence_expect(&test, !compiler_evidence_try_seal(&test, bundle, snapshot, &problem) &&
+            string_first_sequence(problem, S8("owned-phase population")) != BUSTER_STRING_NO_MATCH, S8("route:extra-phase-sealed"), problem);
+        compiler_evidence_tamper_route(&test, 3, S8("route:tamper-closure-manifest"), S8("closure-restore.json.manifest.tsv"), S8("other\n"), S8("reproduce"));
+        compiler_evidence_tamper_route(&test, 3, S8("route:tamper-closure-record"), S8("closure-verify.json"), S8("{}"), S8("reproduce"));
+        compiler_evidence_tamper_route(&test, 3, S8("route:closure-removed"), S8("closure-snapshot.json.manifest.tsv"), (String8){0},
+            S8("required raw evidence is missing"));
+        compiler_evidence_tamper_route(&test, 3, S8("route:phase-member-removed"), S8("owned-phases/0002.json.argv"), (String8){0},
+            S8("required raw evidence is missing"));
+        compiler_evidence_tamper_route(&test, 3, S8("route:phase-output-changed"), S8("owned-phases/0001.json.stdout"), S8("x\n"), S8("reproduce"));
+        compiler_evidence_tamper_route(&test, 3, S8("route:extra-phase"), S8("owned-phases/0004.json"), S8("{}"), S8("owned-phase population"));
+        compiler_evidence_tamper_route(&test, 3, S8("route:unknown-phase-member"), S8("owned-phases/0001.json.tmp"), S8("x\n"),
+            S8("owned-phase population"));
+        compiler_evidence_tamper_route(&test, 3, S8("route:optional-log"), S8("closure.log"), (String8){0}, S8("reproduce"));
 
         // Retained bytes, roles and seal.
         compiler_evidence_tamper(&test, S8("tamper:raw-byte"), S8("lab/pairs/0003-a.csv"), S8("2,,cycles\n"), S8("reproduce"));

@@ -2,6 +2,7 @@
 #include <buster/lib/compiler/debug/debug.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/ir/ir.h>
+#include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #if BUSTER_INCLUDE_TESTS
 
 
@@ -1005,7 +1006,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codeview_test_lexical_block_nesting(UnitTestA
             }
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 

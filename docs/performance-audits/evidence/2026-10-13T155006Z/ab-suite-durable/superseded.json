@@ -1,0 +1,6 @@
+{
+  "complete": false,
+  "completed_pairs": 4,
+  "candidate": "bf29aed8e0b9369ee4e59b2e7315b842fae32945",
+  "reason": "test-only correction for hosted analyzer; final comparisons use e1fb941 and a new binary"
+}
