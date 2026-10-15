@@ -182,3 +182,6 @@ request: issue #3854 owner-requested 9700X validation, head after merging main 9
 request: issue #3854 owner-requested 9700X validation, PR #4022 head after the clang-analyzer dead-store fix in ir_inline_module (output initializer; no behavior change) over the main 964e3ee0 merge: incremental post-splice proof of spliced callers and FAST input-guard reuse of inliner proofs; supersedes the b9089c59 line; fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification
 request: issue #1125 owner-requested 9700X measurement of the x86-64 per-process floor (davidgmbb, 2026-10-13; issuecomment-6146795512), on main 7069f078 after PR #4098: one candidate ide on int main(void){return 0;}, x86-64 -g0 -c against itself (A/A), -target aarch64-unknown-linux -c and -fsyntax-only; no compiler change; fresh process-floor-v1
 profile: process-floor-v1
+
+request: PR #4239 issues #3102 #4058 owner-authorized final AST-only retirement acceptance; current main 614353c082fe8fbc5fdaaa57e67d3fd5b106b4dd; fresh exact-head default/default physical-9700X comparison; acceptance hold remains
+profile: ast-retirement-acceptance-v1
