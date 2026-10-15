@@ -1,0 +1,59 @@
+TARGET cpu=baseline features=sse,sse2
+SOURCE work/ast-retirement-inputs/backend_pressure.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                  1                        1
+bytes on disk                    711.531                  711.531
+physical lines                    19.202                   19.202
+
+bytes scanned                    711.531                  711.531
+  code                           457.673   64.3 %         457.673   64.3 %
+  comment                             87    0.0 %              87    0.0 %
+  whitespace                     253.771   35.7 %         253.771   35.7 %
+  literals, within code                0    0.0 %               0    0.0 %
+
+lines scanned                     19.202                   19.202
+  code, the sLOC                  19.201  100.0 %          19.201  100.0 %
+  comment                              1    0.0 %               1    0.0 %
+  blank                                0    0.0 %               0    0.0 %
+  both, counted twice                  0    0.0 %               0    0.0 %
+
+comments                               1                        1
+tokens                           275.861                  275.861
+spliced-away lines                     0    0.0 %               0    0.0 %
+
+preprocessed output                      of lexed
+  tokens to the parser           275.861  100.0 %
+  their spelling bytes           457.673  100.0 %
+  bytes retained                 714.188  100.4 %
+  macro expansions                     0
+  #define directives                   0
+IR_FRONTEND_SSA functions=64 locals=2176 reads=59456 writes=19072 parameters_created=0 parameters_removed=0 temporaries=0 fallback_locals=0
+C_CONSTANT_INTERN lookups=20480 hits=14400 stale=0
+C_TYPE_LAYOUT solves=0 pass_solves=0 pass_state_types=0 pass_attempts=0 agenda_solves=0 agenda_types=0 agenda_attempts=0 agenda_edges=0 agenda_notifications=0 agenda_pushes=0 agenda_fallbacks=0
+C_AST_RETAINED trees_built=0 tree_rejections=0 tree_nodes=0 tree_bytes=0 span_nodes=174337 span_bytes=3506920 hoist_steps=0 evaluator_steps=232000
+C_AST nodes=200289 tokens=275862 build_ns=1703198 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit
+C_AST_WALK walk_ns=191857 walk_steps=499031 scan_ns=4799 children_ns=388483 child_entries=200288 scan_calls=512
+C_AST_TYPES bodies=64 initializers=0 nodes_typed=172096 nodes_accepted=172096 answers=59456 declines=0 misses=0 gated=0 lookups_settled=1024 lookups_walked=0
+C_AST_SPLIT units=1 records=65 assertions=0 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_STATEMENTS bodies=64 segments=64 segment_tokens=244416 uses=72768 bails=0 declaration_hints=2048 loop_hints=0 declines=0 declarator_hints=2048 initializer_hints=2048 auto_skips=2048 declarator_declines=0 braced=0 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_SPECIFIERS lists=2249 indexed=2249 index_reads=2250 primitive_answers=2249 typedef_answers=0 fallbacks=0 input=0 specifiers=0 storage=0 primitive=0 typedef=0 reason=none fallback_token=4294967295
+C_AST_TYPE_NAMES skips=0 retries=0 primitive_answers=0 typedef_answers=0 fallbacks=0 input=0 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_MEMBERS primitive_answers=0 typedef_answers=0 fallbacks=0 input=0 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_LOWER steps=0 answers=0 negatives=46208 statement_bodies=64 statements=19008 range_adapters=0
+C_AST_FACTS nodes=200289 retained_bytes=6110733 regions=64 candidates=172096 tree=172096 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=78977 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0
+IR_FAST_PASS name=fold enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST_PASS name=address enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST_PASS name=dce enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST_PASS name=parameters enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST_PASS name=cse enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST functions=0 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=0 retained_bound=0 compact_ns=0 instructions_before=0 instructions_after=0
+IR_LOCAL_PROMOTION candidates=0 promoted=0 loads_removed=0 stores_removed=0 parameters_inserted=0 parameters_removed=0 uninitialized=0 barriers=0 instructions_before=81024 instructions_after=81024 values_before=80960 values_after=80960
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=0 block_visits=0 parameter_visits=0 incoming_visits=0
+CODEGEN cpu=baseline vector_bits=128 functions=64 instructions=81024 values=80960 stack_value_bytes=15872 stack_frame_bytes=15872 max_stack_frame_bytes=248 code_bytes=1024000 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=0 allocator=quality fallback_functions=0
+CODEGEN_ENCODER exact_attempts=99648 exact_successes=99648 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=16384
+CODEGEN_LANES function_workers=1
+CODEGEN_EMIT machine_code_in_place=1024000 machine_code_copied=0
+OBJECT_WRITE format=elf64 section_visits=148 symbol_visits=198 relocation_visits=1728 image_reserved=1044104 image_stored=20104 image_zeroed=93 image_patched=0 payload_copied=3096 payload_borrowed=1024000 scratch=2072 retained=1044128 output=1044104
+CODEGEN_ALLOCATOR reloads=22848 spills=18240 boundary_spills=0 boundary_reloads=0 boundary_copies=0 copies=167040 rematerializations=0 pins=0 splits=0 scheduled=0 schedule_kept=0

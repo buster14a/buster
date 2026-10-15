@@ -1,0 +1,21 @@
+{
+  "schema": "buster-4239-final02a-request-commit-v1",
+  "at": "2026-10-15T13:27:48.524203+00:00",
+  "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+  "tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+  "parents": [
+    "056bb69aecf3db4f2720ab82adee99cc800f5f45"
+  ],
+  "code_parent": "056bb69aecf3db4f2720ab82adee99cc800f5f45",
+  "code_parent_tree": "d2594fa48efe985600f071d357aec62abb1e9044",
+  "actual_main_before_request": "02a6414e020f5d549122197c3a7c8407df5bed76",
+  "request_sha256": "97222cf4fcde6990278b683e222e36fda3d5946be87361f8ad3106221e059285",
+  "prefix_bytes_exact": true,
+  "ast_selectors_before": 3,
+  "ast_selectors_after": 4,
+  "frontend_nesting_selectors_preserved": 1,
+  "src_tree_exact": true,
+  "all_nonrequest_paths_exact": true,
+  "published": false,
+  "final_local_hosted_physical_qualification": "PENDING"
+}

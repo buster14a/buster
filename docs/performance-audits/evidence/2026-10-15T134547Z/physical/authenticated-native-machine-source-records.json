@@ -1,0 +1,747 @@
+{
+  "raw_log": {
+    "bytes": 65796,
+    "path": "native-terminal.raw.log",
+    "sha256": "c78684c76af90a42178650b3b07564322dc1195d40463729dba4e74bca42a173"
+  },
+  "records": [
+    {
+      "raw_line": "2026-10-15T13:30:27.9409225Z MACHINE_SPECIFICATIONS_JSON {\"schema\":{\"value\":\"buster-machine-specifications-v1\",\"status\":\"available\",\"reason\":\"\"},\"collected_at_utc\":{\"value\":\"2026-10-15T13:30:27Z\",\"status\":\"available\",\"reason\":\"\"},\"workflow\":{\"value\":\"9700X direct workload benchmark\",\"status\":\"available\",\"reason\":\"\"},\"workflow_ref\":{\"value\":\"buster14a/buster/.github/workflows/9700x-direct-bench.yml@refs/heads/main\",\"status\":\"available\",\"reason\":\"\"},\"workflow_sha\":{\"value\":\"02a6414e020f5d549122197c3a7c8407df5bed76\",\"status\":\"available\",\"reason\":\"\"},\"run_id\":{\"value\":\"38743190006\",\"status\":\"available\",\"reason\":\"\"},\"run_attempt\":{\"value\":\"1\",\"status\":\"available\",\"reason\":\"\"},\"job\":{\"value\":\"compare-pull\",\"status\":\"available\",\"reason\":\"\"},\"matrix_index\":{\"value\":\"not_applicable\",\"status\":\"not_applicable\",\"reason\":\"job has no matrix\"},\"event_sha\":{\"value\":\"02a6414e020f5d549122197c3a7c8407df5bed76\",\"status\":\"available\",\"reason\":\"\"},\"tested_source_sha\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"startup precedes checkout; actual source records follow checkout\"},\"requested_runner\":{\"value\":\"group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]\",\"status\":\"available\",\"reason\":\"\"},\"runner_os\":{\"value\":\"Linux\",\"status\":\"available\",\"reason\":\"\"},\"runner_arch\":{\"value\":\"X64\",\"status\":\"available\",\"reason\":\"\"},\"runner_class\":{\"value\":\"self-hosted\",\"status\":\"available\",\"reason\":\"\"},\"runner_image\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"runner_image_version\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"runner_software_version\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_model\":{\"value\":\"AMD Ryzen 7 9700X 8-Core Processor\",\"status\":\"available\",\"reason\":\"\"},\"cpu_vendor\":{\"value\":\"AuthenticAMD\",\"status\":\"available\",\"reason\":\"\"},\"machine_arch\":{\"value\":\"x86_64\",\"status\":\"available\",\"reason\":\"\"},\"process_arch\":{\"value\":\"x86_64\",\"status\":\"available\",\"reason\":\"\"},\"cpu_physical_cores_os_visible\":{\"value\":\"8\",\"status\":\"available\",\"reason\":\"\"},\"cpu_sockets_os_visible\":{\"value\":\"1\",\"status\":\"available\",\"reason\":\"\"},\"cpu_logical_online\":{\"value\":\"15\",\"status\":\"available\",\"reason\":\"\"},\"cpu_process_available\":{\"value\":\"15\",\"status\":\"available\",\"reason\":\"\"},\"cpu_affinity\":{\"value\":\"0-9,11-15\",\"status\":\"available\",\"reason\":\"\"},\"cpu_cpuset_limit\":{\"value\":\"0-9,11-15\\u000a\",\"status\":\"available\",\"reason\":\"\"},\"cpu_quota\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"memory_total_bytes\":{\"value\":\"67005935616\",\"status\":\"available\",\"reason\":\"\"},\"memory_available_bytes\":{\"value\":\"64421593088\",\"status\":\"available\",\"reason\":\"\"},\"memory_limit_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"swap_total_bytes\":{\"value\":\"8589930496\",\"status\":\"available\",\"reason\":\"\"},\"swap_available_bytes\":{\"value\":\"8589930496\",\"status\":\"available\",\"reason\":\"\"},\"commit_limit_bytes\":{\"value\":\"42092896256\",\"status\":\"available\",\"reason\":\"\"},\"os_name\":{\"value\":\"Arch Linux\",\"status\":\"available\",\"reason\":\"\"},\"os_version\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"os_build\":{\"value\":\"rolling\",\"status\":\"available\",\"reason\":\"\"},\"kernel_name\":{\"value\":\"Linux\",\"status\":\"available\",\"reason\":\"\"},\"kernel_release\":{\"value\":\"6.18.50-2-lts\",\"status\":\"available\",\"reason\":\"\"},\"kernel_version\":{\"value\":\"#1 SMP PREEMPT_DYNAMIC Tue, 08 Sep 2026 10:48:06 +0000\",\"status\":\"available\",\"reason\":\"\"},\"execution_context\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"guest_context\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"this report describes executing host; guest identity requires workload evidence\"},\"workspace_total_bytes\":{\"value\":\"509809590272\",\"status\":\"available\",\"reason\":\"\"},\"workspace_available_bytes\":{\"value\":\"477146910720\",\"status\":\"available\",\"reason\":\"\"},\"workspace_filesystem\":{\"value\":\"Linux filesystem magic 0x9123683e\",\"status\":\"available\",\"reason\":\"\"},\"collection_elapsed_ms\":{\"value\":\"0\",\"status\":\"available\",\"reason\":\"\"},\"source_repository\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"}}",
+      "record": {
+        "collected_at_utc": {
+          "reason": "",
+          "status": "available",
+          "value": "2026-10-15T13:30:27Z"
+        },
+        "collection_elapsed_ms": {
+          "reason": "",
+          "status": "available",
+          "value": "0"
+        },
+        "commit_limit_bytes": {
+          "reason": "",
+          "status": "available",
+          "value": "42092896256"
+        },
+        "cpu_affinity": {
+          "reason": "",
+          "status": "available",
+          "value": "0-9,11-15"
+        },
+        "cpu_cpuset_limit": {
+          "reason": "",
+          "status": "available",
+          "value": "0-9,11-15\n"
+        },
+        "cpu_logical_online": {
+          "reason": "",
+          "status": "available",
+          "value": "15"
+        },
+        "cpu_model": {
+          "reason": "",
+          "status": "available",
+          "value": "AMD Ryzen 7 9700X 8-Core Processor"
+        },
+        "cpu_physical_cores_os_visible": {
+          "reason": "",
+          "status": "available",
+          "value": "8"
+        },
+        "cpu_process_available": {
+          "reason": "",
+          "status": "available",
+          "value": "15"
+        },
+        "cpu_quota": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_sockets_os_visible": {
+          "reason": "",
+          "status": "available",
+          "value": "1"
+        },
+        "cpu_vendor": {
+          "reason": "",
+          "status": "available",
+          "value": "AuthenticAMD"
+        },
+        "event_sha": {
+          "reason": "",
+          "status": "available",
+          "value": "02a6414e020f5d549122197c3a7c8407df5bed76"
+        },
+        "execution_context": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "guest_context": {
+          "reason": "this report describes executing host; guest identity requires workload evidence",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "job": {
+          "reason": "",
+          "status": "available",
+          "value": "compare-pull"
+        },
+        "kernel_name": {
+          "reason": "",
+          "status": "available",
+          "value": "Linux"
+        },
+        "kernel_release": {
+          "reason": "",
+          "status": "available",
+          "value": "6.18.50-2-lts"
+        },
+        "kernel_version": {
+          "reason": "",
+          "status": "available",
+          "value": "#1 SMP PREEMPT_DYNAMIC Tue, 08 Sep 2026 10:48:06 +0000"
+        },
+        "machine_arch": {
+          "reason": "",
+          "status": "available",
+          "value": "x86_64"
+        },
+        "matrix_index": {
+          "reason": "job has no matrix",
+          "status": "not_applicable",
+          "value": "not_applicable"
+        },
+        "memory_available_bytes": {
+          "reason": "",
+          "status": "available",
+          "value": "64421593088"
+        },
+        "memory_limit_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "memory_total_bytes": {
+          "reason": "",
+          "status": "available",
+          "value": "67005935616"
+        },
+        "os_build": {
+          "reason": "",
+          "status": "available",
+          "value": "rolling"
+        },
+        "os_name": {
+          "reason": "",
+          "status": "available",
+          "value": "Arch Linux"
+        },
+        "os_version": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "process_arch": {
+          "reason": "",
+          "status": "available",
+          "value": "x86_64"
+        },
+        "requested_runner": {
+          "reason": "",
+          "status": "available",
+          "value": "group: buster-9700x-service-dispatch labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]"
+        },
+        "run_attempt": {
+          "reason": "",
+          "status": "available",
+          "value": "1"
+        },
+        "run_id": {
+          "reason": "",
+          "status": "available",
+          "value": "38743190006"
+        },
+        "runner_arch": {
+          "reason": "",
+          "status": "available",
+          "value": "X64"
+        },
+        "runner_class": {
+          "reason": "",
+          "status": "available",
+          "value": "self-hosted"
+        },
+        "runner_image": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "runner_image_version": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "runner_os": {
+          "reason": "",
+          "status": "available",
+          "value": "Linux"
+        },
+        "runner_software_version": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "schema": {
+          "reason": "",
+          "status": "available",
+          "value": "buster-machine-specifications-v1"
+        },
+        "source_repository": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "swap_available_bytes": {
+          "reason": "",
+          "status": "available",
+          "value": "8589930496"
+        },
+        "swap_total_bytes": {
+          "reason": "",
+          "status": "available",
+          "value": "8589930496"
+        },
+        "tested_source_sha": {
+          "reason": "startup precedes checkout; actual source records follow checkout",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "workflow": {
+          "reason": "",
+          "status": "available",
+          "value": "9700X direct workload benchmark"
+        },
+        "workflow_ref": {
+          "reason": "",
+          "status": "available",
+          "value": "buster14a/buster/.github/workflows/9700x-direct-bench.yml@refs/heads/main"
+        },
+        "workflow_sha": {
+          "reason": "",
+          "status": "available",
+          "value": "02a6414e020f5d549122197c3a7c8407df5bed76"
+        },
+        "workspace_available_bytes": {
+          "reason": "",
+          "status": "available",
+          "value": "477146910720"
+        },
+        "workspace_filesystem": {
+          "reason": "",
+          "status": "available",
+          "value": "Linux filesystem magic 0x9123683e"
+        },
+        "workspace_total_bytes": {
+          "reason": "",
+          "status": "available",
+          "value": "509809590272"
+        }
+      },
+      "tag": "MACHINE_SPECIFICATIONS_JSON"
+    },
+    {
+      "raw_line": "2026-10-15T13:30:28.7407820Z MACHINE_SOURCE_IDENTITY_JSON {\"schema\":{\"value\":\"buster-machine-source-identity-v1\",\"status\":\"available\",\"reason\":\"\"},\"collected_at_utc\":{\"value\":\"2026-10-15T13:30:28Z\",\"status\":\"available\",\"reason\":\"\"},\"workflow\":{\"value\":\"9700X direct workload benchmark\",\"status\":\"available\",\"reason\":\"\"},\"workflow_ref\":{\"value\":\"buster14a/buster/.github/workflows/9700x-direct-bench.yml@refs/heads/main\",\"status\":\"available\",\"reason\":\"\"},\"workflow_sha\":{\"value\":\"02a6414e020f5d549122197c3a7c8407df5bed76\",\"status\":\"available\",\"reason\":\"\"},\"run_id\":{\"value\":\"38743190006\",\"status\":\"available\",\"reason\":\"\"},\"run_attempt\":{\"value\":\"1\",\"status\":\"available\",\"reason\":\"\"},\"job\":{\"value\":\"compare-pull\",\"status\":\"available\",\"reason\":\"\"},\"matrix_index\":{\"value\":\"not_applicable\",\"status\":\"not_applicable\",\"reason\":\"job has no matrix\"},\"event_sha\":{\"value\":\"02a6414e020f5d549122197c3a7c8407df5bed76\",\"status\":\"available\",\"reason\":\"\"},\"tested_source_sha\":{\"value\":\"02a6414e020f5d549122197c3a7c8407df5bed76\",\"status\":\"available\",\"reason\":\"\"},\"requested_runner\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"runner_os\":{\"value\":\"Linux\",\"status\":\"available\",\"reason\":\"\"},\"runner_arch\":{\"value\":\"X64\",\"status\":\"available\",\"reason\":\"\"},\"runner_class\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"runner_image\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"runner_image_version\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"runner_software_version\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_model\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_vendor\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"machine_arch\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"process_arch\":{\"value\":\"x86_64\",\"status\":\"available\",\"reason\":\"\"},\"cpu_physical_cores_os_visible\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_sockets_os_visible\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_logical_online\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_process_available\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_affinity\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_cpuset_limit\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_quota\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"memory_total_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"memory_available_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"memory_limit_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"swap_total_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"swap_available_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"commit_limit_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"os_name\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"os_version\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"os_build\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"kernel_name\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"kernel_release\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"kernel_version\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"execution_context\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"guest_context\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"this report describes executing host; guest identity requires workload evidence\"},\"workspace_total_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"workspace_available_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"workspace_filesystem\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"collection_elapsed_ms\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"source_repository\":{\"value\":\"buster14a/buster\",\"status\":\"available\",\"reason\":\"\"}}",
+      "record": {
+        "collected_at_utc": {
+          "reason": "",
+          "status": "available",
+          "value": "2026-10-15T13:30:28Z"
+        },
+        "collection_elapsed_ms": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "commit_limit_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_affinity": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_cpuset_limit": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_logical_online": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_model": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_physical_cores_os_visible": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_process_available": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_quota": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_sockets_os_visible": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_vendor": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "event_sha": {
+          "reason": "",
+          "status": "available",
+          "value": "02a6414e020f5d549122197c3a7c8407df5bed76"
+        },
+        "execution_context": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "guest_context": {
+          "reason": "this report describes executing host; guest identity requires workload evidence",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "job": {
+          "reason": "",
+          "status": "available",
+          "value": "compare-pull"
+        },
+        "kernel_name": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "kernel_release": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "kernel_version": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "machine_arch": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "matrix_index": {
+          "reason": "job has no matrix",
+          "status": "not_applicable",
+          "value": "not_applicable"
+        },
+        "memory_available_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "memory_limit_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "memory_total_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "os_build": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "os_name": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "os_version": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "process_arch": {
+          "reason": "",
+          "status": "available",
+          "value": "x86_64"
+        },
+        "requested_runner": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "run_attempt": {
+          "reason": "",
+          "status": "available",
+          "value": "1"
+        },
+        "run_id": {
+          "reason": "",
+          "status": "available",
+          "value": "38743190006"
+        },
+        "runner_arch": {
+          "reason": "",
+          "status": "available",
+          "value": "X64"
+        },
+        "runner_class": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "runner_image": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "runner_image_version": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "runner_os": {
+          "reason": "",
+          "status": "available",
+          "value": "Linux"
+        },
+        "runner_software_version": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "schema": {
+          "reason": "",
+          "status": "available",
+          "value": "buster-machine-source-identity-v1"
+        },
+        "source_repository": {
+          "reason": "",
+          "status": "available",
+          "value": "buster14a/buster"
+        },
+        "swap_available_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "swap_total_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "tested_source_sha": {
+          "reason": "",
+          "status": "available",
+          "value": "02a6414e020f5d549122197c3a7c8407df5bed76"
+        },
+        "workflow": {
+          "reason": "",
+          "status": "available",
+          "value": "9700X direct workload benchmark"
+        },
+        "workflow_ref": {
+          "reason": "",
+          "status": "available",
+          "value": "buster14a/buster/.github/workflows/9700x-direct-bench.yml@refs/heads/main"
+        },
+        "workflow_sha": {
+          "reason": "",
+          "status": "available",
+          "value": "02a6414e020f5d549122197c3a7c8407df5bed76"
+        },
+        "workspace_available_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "workspace_filesystem": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "workspace_total_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        }
+      },
+      "tag": "MACHINE_SOURCE_IDENTITY_JSON"
+    },
+    {
+      "raw_line": "2026-10-15T13:30:30.6422372Z MACHINE_SOURCE_IDENTITY_JSON {\"schema\":{\"value\":\"buster-machine-source-identity-v1\",\"status\":\"available\",\"reason\":\"\"},\"collected_at_utc\":{\"value\":\"2026-10-15T13:30:30Z\",\"status\":\"available\",\"reason\":\"\"},\"workflow\":{\"value\":\"9700X direct workload benchmark\",\"status\":\"available\",\"reason\":\"\"},\"workflow_ref\":{\"value\":\"buster14a/buster/.github/workflows/9700x-direct-bench.yml@refs/heads/main\",\"status\":\"available\",\"reason\":\"\"},\"workflow_sha\":{\"value\":\"02a6414e020f5d549122197c3a7c8407df5bed76\",\"status\":\"available\",\"reason\":\"\"},\"run_id\":{\"value\":\"38743190006\",\"status\":\"available\",\"reason\":\"\"},\"run_attempt\":{\"value\":\"1\",\"status\":\"available\",\"reason\":\"\"},\"job\":{\"value\":\"compare-pull\",\"status\":\"available\",\"reason\":\"\"},\"matrix_index\":{\"value\":\"not_applicable\",\"status\":\"not_applicable\",\"reason\":\"job has no matrix\"},\"event_sha\":{\"value\":\"02a6414e020f5d549122197c3a7c8407df5bed76\",\"status\":\"available\",\"reason\":\"\"},\"tested_source_sha\":{\"value\":\"3cdf6ee16c6c543cd7933f7a7d24cff407328d56\",\"status\":\"available\",\"reason\":\"\"},\"requested_runner\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"runner_os\":{\"value\":\"Linux\",\"status\":\"available\",\"reason\":\"\"},\"runner_arch\":{\"value\":\"X64\",\"status\":\"available\",\"reason\":\"\"},\"runner_class\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"runner_image\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"runner_image_version\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"runner_software_version\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_model\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_vendor\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"machine_arch\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"process_arch\":{\"value\":\"x86_64\",\"status\":\"available\",\"reason\":\"\"},\"cpu_physical_cores_os_visible\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_sockets_os_visible\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_logical_online\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_process_available\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_affinity\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_cpuset_limit\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"cpu_quota\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"memory_total_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"memory_available_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"memory_limit_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"swap_total_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"swap_available_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"commit_limit_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"os_name\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"os_version\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"os_build\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"kernel_name\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"kernel_release\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"kernel_version\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"execution_context\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"guest_context\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"this report describes executing host; guest identity requires workload evidence\"},\"workspace_total_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"workspace_available_bytes\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"workspace_filesystem\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"collection_elapsed_ms\":{\"value\":\"unknown\",\"status\":\"unknown\",\"reason\":\"not exposed by this OS, unsupported or probe failed\"},\"source_repository\":{\"value\":\"buster14a/buster\",\"status\":\"available\",\"reason\":\"\"}}",
+      "record": {
+        "collected_at_utc": {
+          "reason": "",
+          "status": "available",
+          "value": "2026-10-15T13:30:30Z"
+        },
+        "collection_elapsed_ms": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "commit_limit_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_affinity": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_cpuset_limit": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_logical_online": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_model": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_physical_cores_os_visible": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_process_available": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_quota": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_sockets_os_visible": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "cpu_vendor": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "event_sha": {
+          "reason": "",
+          "status": "available",
+          "value": "02a6414e020f5d549122197c3a7c8407df5bed76"
+        },
+        "execution_context": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "guest_context": {
+          "reason": "this report describes executing host; guest identity requires workload evidence",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "job": {
+          "reason": "",
+          "status": "available",
+          "value": "compare-pull"
+        },
+        "kernel_name": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "kernel_release": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "kernel_version": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "machine_arch": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "matrix_index": {
+          "reason": "job has no matrix",
+          "status": "not_applicable",
+          "value": "not_applicable"
+        },
+        "memory_available_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "memory_limit_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "memory_total_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "os_build": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "os_name": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "os_version": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "process_arch": {
+          "reason": "",
+          "status": "available",
+          "value": "x86_64"
+        },
+        "requested_runner": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "run_attempt": {
+          "reason": "",
+          "status": "available",
+          "value": "1"
+        },
+        "run_id": {
+          "reason": "",
+          "status": "available",
+          "value": "38743190006"
+        },
+        "runner_arch": {
+          "reason": "",
+          "status": "available",
+          "value": "X64"
+        },
+        "runner_class": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "runner_image": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "runner_image_version": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "runner_os": {
+          "reason": "",
+          "status": "available",
+          "value": "Linux"
+        },
+        "runner_software_version": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "schema": {
+          "reason": "",
+          "status": "available",
+          "value": "buster-machine-source-identity-v1"
+        },
+        "source_repository": {
+          "reason": "",
+          "status": "available",
+          "value": "buster14a/buster"
+        },
+        "swap_available_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "swap_total_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "tested_source_sha": {
+          "reason": "",
+          "status": "available",
+          "value": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56"
+        },
+        "workflow": {
+          "reason": "",
+          "status": "available",
+          "value": "9700X direct workload benchmark"
+        },
+        "workflow_ref": {
+          "reason": "",
+          "status": "available",
+          "value": "buster14a/buster/.github/workflows/9700x-direct-bench.yml@refs/heads/main"
+        },
+        "workflow_sha": {
+          "reason": "",
+          "status": "available",
+          "value": "02a6414e020f5d549122197c3a7c8407df5bed76"
+        },
+        "workspace_available_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "workspace_filesystem": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        },
+        "workspace_total_bytes": {
+          "reason": "not exposed by this OS, unsupported or probe failed",
+          "status": "unknown",
+          "value": "unknown"
+        }
+      },
+      "tag": "MACHINE_SOURCE_IDENTITY_JSON"
+    }
+  ]
+}

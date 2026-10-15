@@ -1,0 +1,6 @@
+schema=buster-compiler-evidence-seal-v1
+state=complete
+manifest_bytes=515063
+manifest_sha256=06461ba4a6e573f1d1221d45ddd2939b629621ac0ac3bfdd472cb4b2a47d4f76
+members=3927
+payload_bytes=17852995

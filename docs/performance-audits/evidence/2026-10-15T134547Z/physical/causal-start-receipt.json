@@ -1,0 +1,141 @@
+{
+  "authorize_job_id": 116449911842,
+  "authorize_result": "success",
+  "baseline": "02a6414e020f5d549122197c3a7c8407df5bed76",
+  "baseline_tree": "5aa95687f3d2056f07760ae0347d200b06c84eee",
+  "custom_check_external_id": "buster-9700x-compiler-pr-v1:3cdf6ee16c6c543cd7933f7a7d24cff407328d56:38743139164.1:1",
+  "custom_check_id": 116450275648,
+  "custom_check_state_at_snapshot": "queued",
+  "evidence": [
+    {
+      "bytes": 4949,
+      "file": "02a-trusted-tooling-rebind.copy.json",
+      "sha256": "d585a2ccc541dffe8faa99cc208aab870b8c459275fe91ef7d36c3cb2d35dfeb"
+    },
+    {
+      "bytes": 32596,
+      "file": "authorize.raw.log",
+      "sha256": "5efc8bb170175fd5149dc625adfcce60df6623ee84d0c8ac9a2e2cc765b980af"
+    },
+    {
+      "bytes": 99,
+      "file": "authorize.raw.log.unavailable",
+      "sha256": "8b6407b2fdbca54bf3d53fb93e79a3560dbe59567fa5044cfee4bed1b5b6e467"
+    },
+    {
+      "bytes": 4362,
+      "file": "check-initial.json",
+      "sha256": "0758763893bd4671b4a4fea8d160a25194af2a19ddc90c228fa07aa3095a4a31"
+    },
+    {
+      "bytes": 12003,
+      "file": "executor-attempt-initial.json",
+      "sha256": "1d43466d9d75138491b3be83e23e3cb6a32a049a1e18f7f4c85b9b03bb3480e4"
+    },
+    {
+      "bytes": 22306,
+      "file": "executor-jobs-initial.json",
+      "sha256": "34e207f085ad0aa939e148ed7b12bd95016135f2f5ce1b7032477533de4191fb"
+    },
+    {
+      "bytes": 249664,
+      "file": "head-checks-initial.json",
+      "sha256": "e654386a3f4e8f465ddaa285b6ad24da0d1b2462eaa857c45da248c349f484c3"
+    },
+    {
+      "bytes": 4986,
+      "file": "head-commit.json",
+      "sha256": "26bc8af78f6830a27da4068b1b407e36bc5a14810a78f83eb312358d18d63b96"
+    },
+    {
+      "bytes": 311798,
+      "file": "head-runs-initial.json",
+      "sha256": "da2f5540f2c9e910f19db4ab6b323003e7133fe6305d699b378d6fae62b59f4a"
+    },
+    {
+      "bytes": 5358,
+      "file": "owner-authorization.json",
+      "sha256": "985ac523cc1a60db15e261ba9aa4fece4ff7827c9b36bb34c69f3537b1a2a3de"
+    },
+    {
+      "bytes": 23419,
+      "file": "pr-initial.json",
+      "sha256": "4caa472a293c59911f91b1968b51721a5951c272064ff0b06a55278d61b93a15"
+    },
+    {
+      "bytes": 1752,
+      "file": "publication-head-confirmation.copy.json",
+      "sha256": "f0065515e25168dd60238f5bcd7827b61d6977055e113d30ba4727a7f0d5a9e7"
+    },
+    {
+      "bytes": 2318,
+      "file": "publication-transaction.copy.json",
+      "sha256": "cd1270238a53f7354f05d09b290589e49f07975c03177e68b959ff91238ae617"
+    },
+    {
+      "bytes": 12408,
+      "file": "request-attempt.json",
+      "sha256": "93c9ec7c08b205dbcbb8da87e8546a6124c62f574b58a3e2a38a074ca0e6b9fa"
+    },
+    {
+      "bytes": 843,
+      "file": "request-commit.copy.json",
+      "sha256": "593c29b0536e5988cd11d93cc8eab414a754c9b923bd25825c4f9c64359878b1"
+    },
+    {
+      "bytes": 30479,
+      "file": "request-file.raw",
+      "sha256": "97222cf4fcde6990278b683e222e36fda3d5946be87361f8ad3106221e059285"
+    },
+    {
+      "bytes": 184830,
+      "file": "service-runs-initial.json",
+      "sha256": "9a41db679670c56c287ba61d21c5197780bd5cc75b6cd4c7d414897e51b4dff6"
+    },
+    {
+      "bytes": 38599,
+      "file": "show-check.raw.log",
+      "sha256": "9b1ced9b13ce502bbb9fa99ecde1a0ecce51bd6859459eec718c53abfbeb3107"
+    },
+    {
+      "bytes": 99,
+      "file": "show-check.raw.log.unavailable",
+      "sha256": "8b6407b2fdbca54bf3d53fb93e79a3560dbe59567fa5044cfee4bed1b5b6e467"
+    },
+    {
+      "bytes": 20996,
+      "file": "trusted-commit.json",
+      "sha256": "6a4d12523cc8aba833d9afadcc0062bfe4ba662a53a42613145c250ca4d33a79"
+    }
+  ],
+  "executor_attempt": 1,
+  "executor_run_id": 38743190006,
+  "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+  "head_tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+  "limits": [
+    "API runner assignment is not physical CPU evidence.",
+    "Native artifact, independent publisher and all correctness gates pending at this snapshot.",
+    "Report-only measurement completion does not accept the roadmap.",
+    "No benchmark or artifact binary executed locally; no dispatch, cancel, rerun, queue or source mutation.",
+    "Wall/instructions include compiler plus RSS observer without subtraction; no compiler-only small-effect claim."
+  ],
+  "merge_base": "02a6414e020f5d549122197c3a7c8407df5bed76",
+  "native_api_runner_group_id": 5,
+  "native_api_runner_id": 2831,
+  "native_api_runner_name": "buster-zen5-9700x",
+  "native_job_id": 116450130508,
+  "native_started_at": "2026-10-15T13:30:23Z",
+  "native_status_at_snapshot": "in_progress",
+  "parent": "056bb69aecf3db4f2720ab82adee99cc800f5f45",
+  "publication_confirmation_file": "publication-head-confirmation.copy.json",
+  "publication_graphql_lag_preserved": true,
+  "recorded_at": "2026-10-15T13:34:38.069071+00:00",
+  "request_attempt": 1,
+  "request_file_sha256": "97222cf4fcde6990278b683e222e36fda3d5946be87361f8ad3106221e059285",
+  "request_run_id": 38743139164,
+  "schema": "buster-4239-final-physical-causal-start-v1",
+  "single_parent_request_only_numstat": [
+    "3\t0\tbenchmarks/9700x/compiler-compare.request"
+  ],
+  "trusted_revision": "02a6414e020f5d549122197c3a7c8407df5bed76"
+}

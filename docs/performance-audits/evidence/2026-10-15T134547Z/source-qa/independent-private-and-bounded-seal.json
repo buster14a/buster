@@ -1,0 +1,83 @@
+{
+  "schema": "buster.finalH.independent-private-and-bounded-peer-seal.v1",
+  "status": "pass",
+  "sealed_utc": "2026-10-15T13:49:40.723738+00:00",
+  "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+  "tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+  "baseline": {
+    "head": "02a6414e020f5d549122197c3a7c8407df5bed76",
+    "tree": "5aa95687f3d2056f07760ae0347d200b06c84eee"
+  },
+  "owner_handoff": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/finalH-closed-qualification-and-issues.json",
+    "bytes": 2838,
+    "sha256": "841a20755a9c34b2cfe6167481f86f85cd0371ebf1c5b9a76ff63ccb6d136efa"
+  },
+  "private_qualification_peer": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-finalH-independent-private-audit/private-qualification-peer-receipt.json",
+    "bytes": 919773,
+    "sha256": "f843c86b4af92349c22468c8d111737530869709439f9e939a2bd1ec595c1f43"
+  },
+  "bounded_issue_peer": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-finalH-independent-private-audit/bounded-issue-peer/independent-bounded-issue-receipt.json",
+    "bytes": 121971,
+    "sha256": "cbba699646b109631d1c730dc166f683030708faa4f485c03faa76fc35ecd6c4"
+  },
+  "peer_audit_script": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-finalH-independent-private-audit/audit_private.py",
+    "bytes": 19841,
+    "sha256": "ffb6871004eaf0332cdff13655f94828db92f742d72163bc0507dfeaa1367281"
+  },
+  "all_union_input_artifacts_rehashed_at_final_seal": 1737,
+  "summary": {
+    "self_host_fixedpoints": {
+      "main": {
+        "bytes": 42298040,
+        "sha256": "4b969f178b8286689929d1ee61b1587af3f929efdf06fccd919421782f61a7ea",
+        "actual_stage1_stage2_byte_comparison": true
+      },
+      "candidate": {
+        "bytes": 42121672,
+        "sha256": "09a3a60970fd011f3a0cda87d901f5d2bcc7b905bee820f814a2817487b17d1c",
+        "actual_stage1_stage2_byte_comparison": true
+      }
+    },
+    "mode_legs": 12,
+    "native_behavioral": 2,
+    "qemu_behavioral": 2,
+    "structural_oracles": 8,
+    "corruption_controls": 2,
+    "corpus_cases": 848,
+    "corpus_object_pairs_actual_bytes_equal": 776,
+    "shared_rejections": 72,
+    "raw_corpus_differences": 0,
+    "bounded_compiler_endpoints": 37,
+    "bounded_native_endpoints": 28,
+    "actual02a_proper_object_controls": 4,
+    "actual02a_controls_expected_rejection": 4,
+    "bounded_outputs_original_byte_equal": 32,
+    "bounded_outputs_original_one_symbol_byte_difference": 4,
+    "bounded_all36_outputs_equal_D824": true
+  },
+  "all_readers_closed": true,
+  "new_source_reader_hold_acquired": false,
+  "performed": "Offline peer audit only; no binary execution, compilation, source or Git checkout read/mutation, forge, queue or hardware action.",
+  "limits": [
+    "Exact recorded fresh actual02a baseline versus exact published H local private qualification only. No older binary/manifest is substituted.",
+    "Source head/tree provenance is joined from the recorded clean transition/build/publication receipts; these offline files do not independently reconstruct the full compiler source-to-binary dependency closure. No new source-reader hold was acquired.",
+    "Recorded 1157 input rows are fingerprinted and cross-checked across all four inventories; their source paths and external/system/resource headers are not reopened here. No historical environment/header equality is asserted.",
+    "Selfhost timing/instruction records and Ryzen 9 7940HS execution are correctness/work evidence only, not target-host physical performance acceptance.",
+    "This audit verifies recorded raw data, argv, expectations and retained files; it does not independently recreate runtime executions.",
+    "Exact H/tree and actual02a associations are anchored to the sealed outside qualification/build receipts; no live checkout/Git source was read.",
+    "All eight outside config snapshots match their recorded hashes; no assertion is made about current live build/config paths or historical unrecorded environments.",
+    "The original ab2 receipt omits cwd, environment, timeout, timestamps and native argv; only prospective replay values are available and no historical equality is invented.",
+    "The original4235 syntax/object rows omit a source hash. The retained84-byte source is pinned prospectively; no missing historical source hash is invented.",
+    "32 artifacts equal originalab2 bytes; four g0 objects differ solely in byte212, a synthetic local .text symbol st_info change. All36 equal D824 bytes. Source-cause commit ancestry was not reaudited.",
+    "The four actual02a controls expose a file-scope statement-expression rejection on proper object commands; baseline outputs are absent. They are expected baseline-versus-H differences, not four passing baseline compiles.",
+    "Native evidence is Linuxx86-64 only. This is no hosted CI, protected integration, main-containment, hardware-performance or issue-closure proof.",
+    "Full private selfhost/modes/corpus audit belongs to the parent and is not repeated here.",
+    "The separate component peer receipts above are now both sealed and passed; their exact scope limitations remain in force.",
+    "Buster first-party license remains unselected / NOASSERTION; no imported implementation.",
+    "No hosted CI, protected integration, main containment, physical performance acceptance or issue-closure proof."
+  ]
+}

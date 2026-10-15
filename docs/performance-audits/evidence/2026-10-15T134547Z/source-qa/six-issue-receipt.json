@@ -1,0 +1,735 @@
+{
+  "schema": "buster3cdf-original-six-issue-raw-output-seal-v1",
+  "status": "pass",
+  "sealed_utc": "2026-10-15T13:42:00.010938+00:00",
+  "source_head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+  "source_tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+  "compiler": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-finalH-3cdf6-release-ide",
+    "bytes": 74138400,
+    "sha256": "db89b91a53bdf47f2bc62d51c0f9ffef67e0cd1267224e9ad64dfdfee19d468f"
+  },
+  "fresh_full_private_qualification": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/finalH-private-qualification-receipt.json",
+    "bytes": 16378,
+    "sha256": "3ebb6634afce5a3db683cd81719702ae79c7d600856735549546f5d4430b9f18"
+  },
+  "primary": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/3cdf-bounded-issue-recheck.json",
+    "bytes": 143864,
+    "sha256": "0a9a9a184a57cd630d1f50a10a1a88ccea31e84a3eda424c22a1bbeb558e7635"
+  },
+  "sealer": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/baseline_controls.py",
+    "bytes": 5961,
+    "sha256": "73047bc694bd9b431a32c38b9836d8ac8038ca149aaa691b5b2aa22c79f2f29e"
+  },
+  "original": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/roadmap-final-audit-1015/bounded-issue-native-recheck.json",
+    "bytes": 35200,
+    "sha256": "17ec62506da35f17ca39d0062b4e1259c0673b40ed0b621bf8fb4c6d9780abd5"
+  },
+  "old_D824_primary": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/d824-bounded-issue-recheck.json",
+    "bytes": 130709,
+    "sha256": "833ff5ce54c05a33f1f1837c3fc888fb9b18b3565e1310cdae083dbd34b3d826"
+  },
+  "old_D824_six_issue_seal": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/d824-six-issue-receipt.json",
+    "bytes": 9428,
+    "sha256": "c69d464697ba71dc1c54f8afadd416aec74ed0c0b8d9c1f27952acfcac6a9c18"
+  },
+  "historical_ELF_drift": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/d824-historical-object-elf-drift.json",
+    "bytes": 10016,
+    "sha256": "f6931d036f6ef8913f355a29354f8044b072bdb070eaef8c07634b1751512160"
+  },
+  "summary": {
+    "compile_endpoints": 37,
+    "native_executions": 28,
+    "syntax_only_endpoints": 1,
+    "object_endpoints": 8,
+    "raw_expectation_differences": 0,
+    "output_hash_matches_original": 32,
+    "output_hash_differences_from_original": 4,
+    "successful_outputs_reverified": 36,
+    "valid_native_executions_reverified": 28,
+    "H_D824_exact_byte_equal_outputs": 36,
+    "H_D824_byte_drifts": 0,
+    "baseline02a_proper_object_controls": 4,
+    "baseline_outputs": 0
+  },
+  "all_H_D824_file_comparisons": [
+    {
+      "endpoint": 0,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4194-gnu17-fast-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4194-gnu17-fast-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 1,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4194-gnu17-fast-no-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4194-gnu17-fast-no-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 2,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4194-gnu17-quality-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4194-gnu17-quality-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 3,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4194-gnu17-quality-no-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4194-gnu17-quality-no-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 4,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4194-index-gnu17-fast-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4194-index-gnu17-fast-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 5,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4194-index-gnu17-fast-no-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4194-index-gnu17-fast-no-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 6,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4194-index-gnu17-quality-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4194-index-gnu17-quality-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 7,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4194-index-gnu17-quality-no-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4194-index-gnu17-quality-no-frontend-ssa",
+        "bytes": 1368,
+        "sha256": "22f62a0e7fcfd051e0f887c1fa7b3cc04bf6cf394ac59aed787a174512bcd287"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 8,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4195-gnu17-fast-frontend-ssa",
+        "bytes": 5504,
+        "sha256": "4353605418a9c041053288a675200a896fdef2de727dd6d74b93074ba2a6498a"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4195-gnu17-fast-frontend-ssa",
+        "bytes": 5504,
+        "sha256": "4353605418a9c041053288a675200a896fdef2de727dd6d74b93074ba2a6498a"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 9,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4195-gnu17-fast-no-frontend-ssa",
+        "bytes": 5504,
+        "sha256": "4353605418a9c041053288a675200a896fdef2de727dd6d74b93074ba2a6498a"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4195-gnu17-fast-no-frontend-ssa",
+        "bytes": 5504,
+        "sha256": "4353605418a9c041053288a675200a896fdef2de727dd6d74b93074ba2a6498a"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 10,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4195-gnu17-quality-frontend-ssa",
+        "bytes": 5504,
+        "sha256": "4353605418a9c041053288a675200a896fdef2de727dd6d74b93074ba2a6498a"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4195-gnu17-quality-frontend-ssa",
+        "bytes": 5504,
+        "sha256": "4353605418a9c041053288a675200a896fdef2de727dd6d74b93074ba2a6498a"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 11,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4195-gnu17-quality-no-frontend-ssa",
+        "bytes": 5504,
+        "sha256": "4353605418a9c041053288a675200a896fdef2de727dd6d74b93074ba2a6498a"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4195-gnu17-quality-no-frontend-ssa",
+        "bytes": 5504,
+        "sha256": "4353605418a9c041053288a675200a896fdef2de727dd6d74b93074ba2a6498a"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 12,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4210-gnu17-fast-frontend-ssa",
+        "bytes": 5288,
+        "sha256": "061527756441c39cc18daf3bdcbc365b8c5bb1ef344849643b5cf32a82b5724a"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4210-gnu17-fast-frontend-ssa",
+        "bytes": 5288,
+        "sha256": "061527756441c39cc18daf3bdcbc365b8c5bb1ef344849643b5cf32a82b5724a"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 13,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4210-gnu17-fast-no-frontend-ssa",
+        "bytes": 5288,
+        "sha256": "061527756441c39cc18daf3bdcbc365b8c5bb1ef344849643b5cf32a82b5724a"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4210-gnu17-fast-no-frontend-ssa",
+        "bytes": 5288,
+        "sha256": "061527756441c39cc18daf3bdcbc365b8c5bb1ef344849643b5cf32a82b5724a"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 14,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4210-gnu17-quality-frontend-ssa",
+        "bytes": 5288,
+        "sha256": "061527756441c39cc18daf3bdcbc365b8c5bb1ef344849643b5cf32a82b5724a"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4210-gnu17-quality-frontend-ssa",
+        "bytes": 5288,
+        "sha256": "061527756441c39cc18daf3bdcbc365b8c5bb1ef344849643b5cf32a82b5724a"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 15,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4210-gnu17-quality-no-frontend-ssa",
+        "bytes": 5288,
+        "sha256": "061527756441c39cc18daf3bdcbc365b8c5bb1ef344849643b5cf32a82b5724a"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4210-gnu17-quality-no-frontend-ssa",
+        "bytes": 5288,
+        "sha256": "061527756441c39cc18daf3bdcbc365b8c5bb1ef344849643b5cf32a82b5724a"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 16,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4206-gnu23-fast-frontend-ssa",
+        "bytes": 5400,
+        "sha256": "fc22efb00baa98edb2d1261e1f7666cbea3abcb56d7410659a711c79c7a3ed3b"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4206-gnu23-fast-frontend-ssa",
+        "bytes": 5400,
+        "sha256": "fc22efb00baa98edb2d1261e1f7666cbea3abcb56d7410659a711c79c7a3ed3b"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 17,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4206-gnu23-fast-no-frontend-ssa",
+        "bytes": 5400,
+        "sha256": "fc22efb00baa98edb2d1261e1f7666cbea3abcb56d7410659a711c79c7a3ed3b"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4206-gnu23-fast-no-frontend-ssa",
+        "bytes": 5400,
+        "sha256": "fc22efb00baa98edb2d1261e1f7666cbea3abcb56d7410659a711c79c7a3ed3b"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 18,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4206-gnu23-quality-frontend-ssa",
+        "bytes": 5400,
+        "sha256": "fc22efb00baa98edb2d1261e1f7666cbea3abcb56d7410659a711c79c7a3ed3b"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4206-gnu23-quality-frontend-ssa",
+        "bytes": 5400,
+        "sha256": "fc22efb00baa98edb2d1261e1f7666cbea3abcb56d7410659a711c79c7a3ed3b"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 19,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4206-gnu23-quality-no-frontend-ssa",
+        "bytes": 5400,
+        "sha256": "fc22efb00baa98edb2d1261e1f7666cbea3abcb56d7410659a711c79c7a3ed3b"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4206-gnu23-quality-no-frontend-ssa",
+        "bytes": 5400,
+        "sha256": "fc22efb00baa98edb2d1261e1f7666cbea3abcb56d7410659a711c79c7a3ed3b"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 20,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4227-gnu17-fast-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4227-gnu17-fast-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 21,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4227-gnu17-fast-no-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4227-gnu17-fast-no-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 22,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4227-gnu17-quality-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4227-gnu17-quality-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 23,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4227-gnu17-quality-no-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4227-gnu17-quality-no-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 24,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4227-gnu23-fast-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4227-gnu23-fast-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 25,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4227-gnu23-fast-no-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4227-gnu23-fast-no-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 26,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4227-gnu23-quality-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4227-gnu23-quality-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 27,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4227-gnu23-quality-no-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4227-gnu23-quality-no-frontend-ssa",
+        "bytes": 1552,
+        "sha256": "606b18ee97d2fc5f587ef930ebdb28451eae1ccf32c740ca6c3383c6b1147c79"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 28,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4235-fast-frontend-ssa-g0.o",
+        "bytes": 952,
+        "sha256": "711fbed817f1f5acb57dc502a2a37d7ca25f8c84b63f1f1d087ad7c8e840b9fe"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4235-fast-frontend-ssa-g0.o",
+        "bytes": 952,
+        "sha256": "711fbed817f1f5acb57dc502a2a37d7ca25f8c84b63f1f1d087ad7c8e840b9fe"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 29,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4235-fast-frontend-ssa-g.o",
+        "bytes": 4312,
+        "sha256": "9dfa57501121f178acded6df0cf118916345f14f36998b86a1e0f11c34e9b2ae"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4235-fast-frontend-ssa-g.o",
+        "bytes": 4312,
+        "sha256": "9dfa57501121f178acded6df0cf118916345f14f36998b86a1e0f11c34e9b2ae"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 30,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4235-fast-no-frontend-ssa-g0.o",
+        "bytes": 952,
+        "sha256": "711fbed817f1f5acb57dc502a2a37d7ca25f8c84b63f1f1d087ad7c8e840b9fe"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4235-fast-no-frontend-ssa-g0.o",
+        "bytes": 952,
+        "sha256": "711fbed817f1f5acb57dc502a2a37d7ca25f8c84b63f1f1d087ad7c8e840b9fe"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 31,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4235-fast-no-frontend-ssa-g.o",
+        "bytes": 4312,
+        "sha256": "9dfa57501121f178acded6df0cf118916345f14f36998b86a1e0f11c34e9b2ae"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4235-fast-no-frontend-ssa-g.o",
+        "bytes": 4312,
+        "sha256": "9dfa57501121f178acded6df0cf118916345f14f36998b86a1e0f11c34e9b2ae"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 32,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4235-quality-frontend-ssa-g0.o",
+        "bytes": 952,
+        "sha256": "711fbed817f1f5acb57dc502a2a37d7ca25f8c84b63f1f1d087ad7c8e840b9fe"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4235-quality-frontend-ssa-g0.o",
+        "bytes": 952,
+        "sha256": "711fbed817f1f5acb57dc502a2a37d7ca25f8c84b63f1f1d087ad7c8e840b9fe"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 33,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4235-quality-frontend-ssa-g.o",
+        "bytes": 4312,
+        "sha256": "9dfa57501121f178acded6df0cf118916345f14f36998b86a1e0f11c34e9b2ae"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4235-quality-frontend-ssa-g.o",
+        "bytes": 4312,
+        "sha256": "9dfa57501121f178acded6df0cf118916345f14f36998b86a1e0f11c34e9b2ae"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 34,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4235-quality-no-frontend-ssa-g0.o",
+        "bytes": 952,
+        "sha256": "711fbed817f1f5acb57dc502a2a37d7ca25f8c84b63f1f1d087ad7c8e840b9fe"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4235-quality-no-frontend-ssa-g0.o",
+        "bytes": 952,
+        "sha256": "711fbed817f1f5acb57dc502a2a37d7ca25f8c84b63f1f1d087ad7c8e840b9fe"
+      },
+      "exact_bytes_equal": true
+    },
+    {
+      "endpoint": 35,
+      "H": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4235-quality-no-frontend-ssa-g.o",
+        "bytes": 4312,
+        "sha256": "9dfa57501121f178acded6df0cf118916345f14f36998b86a1e0f11c34e9b2ae"
+      },
+      "D824": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-d824-bounded-issue-recheck/4235-quality-no-frontend-ssa-g.o",
+        "bytes": 4312,
+        "sha256": "9dfa57501121f178acded6df0cf118916345f14f36998b86a1e0f11c34e9b2ae"
+      },
+      "exact_bytes_equal": true
+    }
+  ],
+  "baseline_controls": [
+    {
+      "primary_endpoint_index": 28,
+      "compile": {
+        "argv": [
+          "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-final02a-main-release-ide",
+          "cc",
+          "-std=gnu23",
+          "-march=znver3",
+          "-fregister-allocator=fast",
+          "-ffrontend-ssa",
+          "-g0",
+          "-c",
+          "/home/david/Documents/Codex/2026-10-14/deis/work/roadmap-final-audit-1015/4235-object.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/baseline02a-controls/4235-fast-frontend-ssa-g0.o"
+        ],
+        "cwd": "/home/david/Documents/Codex/2026-10-14/deis",
+        "status": 1,
+        "stdout": "",
+        "stderr": "cc: error: /home/david/Documents/Codex/2026-10-14/deis/work/roadmap-final-audit-1015/4235-object.c:1:27: statement expression not allowed at file scope\n",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "b7505eb6c8d4af1bba65802f95da343ca33bbb7d3e653d7ab9d343e0ce3a2dc3",
+        "started_utc": "2026-10-15T13:41:59.906671+00:00",
+        "completed_utc": "2026-10-15T13:41:59.909819+00:00",
+        "elapsed_ns": 3168890,
+        "timeout_seconds": 60,
+        "timed_out": false
+      },
+      "baseline_output": null,
+      "candidate_output": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4235-fast-frontend-ssa-g0.o",
+        "bytes": 952,
+        "sha256": "711fbed817f1f5acb57dc502a2a37d7ca25f8c84b63f1f1d087ad7c8e840b9fe"
+      },
+      "baseline_raw_matches_H": false,
+      "byte_equal_H": null
+    },
+    {
+      "primary_endpoint_index": 30,
+      "compile": {
+        "argv": [
+          "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-final02a-main-release-ide",
+          "cc",
+          "-std=gnu23",
+          "-march=znver3",
+          "-fregister-allocator=fast",
+          "-fno-frontend-ssa",
+          "-g0",
+          "-c",
+          "/home/david/Documents/Codex/2026-10-14/deis/work/roadmap-final-audit-1015/4235-object.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/baseline02a-controls/4235-fast-no-frontend-ssa-g0.o"
+        ],
+        "cwd": "/home/david/Documents/Codex/2026-10-14/deis",
+        "status": 1,
+        "stdout": "",
+        "stderr": "cc: error: /home/david/Documents/Codex/2026-10-14/deis/work/roadmap-final-audit-1015/4235-object.c:1:27: statement expression not allowed at file scope\n",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "b7505eb6c8d4af1bba65802f95da343ca33bbb7d3e653d7ab9d343e0ce3a2dc3",
+        "started_utc": "2026-10-15T13:41:59.910081+00:00",
+        "completed_utc": "2026-10-15T13:41:59.913454+00:00",
+        "elapsed_ns": 3388781,
+        "timeout_seconds": 60,
+        "timed_out": false
+      },
+      "baseline_output": null,
+      "candidate_output": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4235-fast-no-frontend-ssa-g0.o",
+        "bytes": 952,
+        "sha256": "711fbed817f1f5acb57dc502a2a37d7ca25f8c84b63f1f1d087ad7c8e840b9fe"
+      },
+      "baseline_raw_matches_H": false,
+      "byte_equal_H": null
+    },
+    {
+      "primary_endpoint_index": 32,
+      "compile": {
+        "argv": [
+          "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-final02a-main-release-ide",
+          "cc",
+          "-std=gnu23",
+          "-march=znver3",
+          "-fregister-allocator=quality",
+          "-ffrontend-ssa",
+          "-g0",
+          "-c",
+          "/home/david/Documents/Codex/2026-10-14/deis/work/roadmap-final-audit-1015/4235-object.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/baseline02a-controls/4235-quality-frontend-ssa-g0.o"
+        ],
+        "cwd": "/home/david/Documents/Codex/2026-10-14/deis",
+        "status": 1,
+        "stdout": "",
+        "stderr": "cc: error: /home/david/Documents/Codex/2026-10-14/deis/work/roadmap-final-audit-1015/4235-object.c:1:27: statement expression not allowed at file scope\n",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "b7505eb6c8d4af1bba65802f95da343ca33bbb7d3e653d7ab9d343e0ce3a2dc3",
+        "started_utc": "2026-10-15T13:41:59.913713+00:00",
+        "completed_utc": "2026-10-15T13:41:59.917053+00:00",
+        "elapsed_ns": 3352451,
+        "timeout_seconds": 60,
+        "timed_out": false
+      },
+      "baseline_output": null,
+      "candidate_output": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4235-quality-frontend-ssa-g0.o",
+        "bytes": 952,
+        "sha256": "711fbed817f1f5acb57dc502a2a37d7ca25f8c84b63f1f1d087ad7c8e840b9fe"
+      },
+      "baseline_raw_matches_H": false,
+      "byte_equal_H": null
+    },
+    {
+      "primary_endpoint_index": 34,
+      "compile": {
+        "argv": [
+          "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-final02a-main-release-ide",
+          "cc",
+          "-std=gnu23",
+          "-march=znver3",
+          "-fregister-allocator=quality",
+          "-fno-frontend-ssa",
+          "-g0",
+          "-c",
+          "/home/david/Documents/Codex/2026-10-14/deis/work/roadmap-final-audit-1015/4235-object.c",
+          "-o",
+          "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/baseline02a-controls/4235-quality-no-frontend-ssa-g0.o"
+        ],
+        "cwd": "/home/david/Documents/Codex/2026-10-14/deis",
+        "status": 1,
+        "stdout": "",
+        "stderr": "cc: error: /home/david/Documents/Codex/2026-10-14/deis/work/roadmap-final-audit-1015/4235-object.c:1:27: statement expression not allowed at file scope\n",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_sha256": "b7505eb6c8d4af1bba65802f95da343ca33bbb7d3e653d7ab9d343e0ce3a2dc3",
+        "started_utc": "2026-10-15T13:41:59.917287+00:00",
+        "completed_utc": "2026-10-15T13:41:59.920551+00:00",
+        "elapsed_ns": 3281977,
+        "timeout_seconds": 60,
+        "timed_out": false
+      },
+      "baseline_output": null,
+      "candidate_output": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/4235-quality-no-frontend-ssa-g0.o",
+        "bytes": 952,
+        "sha256": "711fbed817f1f5acb57dc502a2a37d7ca25f8c84b63f1f1d087ad7c8e840b9fe"
+      },
+      "baseline_raw_matches_H": false,
+      "byte_equal_H": null
+    }
+  ],
+  "baseline_control_execution": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-bounded-issue-recheck/baseline02a-control-execution.json",
+    "bytes": 10147,
+    "sha256": "be94fe60368b47b4d5da6e599e461218cce4feb7619a563359025872039d1610"
+  },
+  "old_records_sources_outputs_and_both_images_unchanged": true,
+  "invalid_historical_native_setups_executed": false,
+  "provenance_limits": [
+    "Original receipt omits cwd, environment, timeout, timestamps and native argv; actual prospective values are recorded here, with no claim of historical equality.",
+    "Original4235 syntax/object rows name the retained84-byte source but omit a source hash. The exact retained source bytes are pinned and checked before/after this replay; no missing historical hash is invented.",
+    "Only compiler argv0 and -o destination change. The syntax-only row has no -o and changes only argv0.",
+    "Raw compile/native status, stdout and stderr use the recorded expectations. Old/new artifact hashes are recorded separately; historical backend changes may change bytes.",
+    "Execution guards are60seconds per compiler invocation and10seconds per native invocation; original limits are unrecorded. No source test or acceptance oracle is added."
+  ],
+  "all_compiler_native_processes_completed": true,
+  "independent_peer": "Root may perform independent offline raw/hash audit after this owner closes; no independent-agent approval invented.",
+  "license": "Buster first-party unselected/NOASSERTION per LICENSES/README.md/#621; no external implementation imported."
+}

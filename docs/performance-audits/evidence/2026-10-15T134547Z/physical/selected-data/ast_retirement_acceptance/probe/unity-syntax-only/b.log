@@ -1,0 +1,70 @@
+TARGET cpu=baseline features=sse,sse2
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                389                      430
+bytes on disk                 35.169.314               35.237.246
+physical lines                   509.284                  511.177
+
+bytes scanned                 35.165.626               35.233.550
+  code                        26.175.161   74.4 %      26.219.637   74.4 %
+  comment                      2.971.380    8.4 %       2.989.240    8.5 %
+  whitespace                   6.019.085   17.1 %       6.024.673   17.1 %
+  literals, within code       11.034.430   31.4 %      11.036.535   31.3 %
+
+lines scanned                    507.440                  509.329
+  code, the sLOC                 445.943   87.9 %         447.414   87.8 %
+  comment                         47.827    9.4 %          48.175    9.5 %
+  blank                           15.865    3.1 %          15.950    3.1 %
+  both, counted twice              2.195    0.4 %           2.210    0.4 %
+
+comments                          42.564                   42.671
+tokens                         3.875.875                3.884.409
+spliced-away lines                 1.844    0.4 %           1.848    0.4 %
+
+preprocessed output                      of lexed
+  tokens to the parser         4.443.543  114.4 %
+  their spelling bytes        26.944.223  102.8 %
+  bytes retained              39.560.418  112.3 %
+  macro expansions               177.250
+  #define directives               4.174
+
+files lexed more than once
+         lexes re-read bytes  path
+            17        33.072  stddef.h
+             5        17.136  /usr/include/bits/libc-header-start.h
+             5         8.200  src/buster/lib/compiler/assembly/x86_64_conditions.inc
+            14         5.174  /usr/include/bits/wordsize.h
+             2         2.231  /usr/include/bits/stat.h
+             2         1.109  /usr/include/bits/timesize.h
+             2           970  /usr/include/bits/long-double.h
+             2            32  /usr/include/asm/ioctls.h
+                      67.924  re-read in total
+IR_FRONTEND_SSA functions=0 locals=0 reads=0 writes=0 parameters_created=0 parameters_removed=0 temporaries=0 fallback_locals=0
+C_CONSTANT_INTERN lookups=0 hits=0 stale=0
+C_TYPE_LAYOUT solves=0 pass_solves=0 pass_state_types=0 pass_attempts=0 agenda_solves=0 agenda_types=0 agenda_attempts=0 agenda_edges=0 agenda_notifications=0 agenda_pushes=0 agenda_fallbacks=0
+C_SYMBOL_BINDINGS rows=17 retained_bytes=2056 copy_bytes=2040
+C_AST_RETAINED span_nodes=0 span_bytes=0 hoist_steps=0 evaluator_steps=0
+C_AST nodes=2977423 tokens=4443544 build_ns=22861662 retained_bytes=42851187 transient_high_water=64704 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=4194304 finalize_child_entries=0 layout=implicit
+C_AST_WALK walk_ns=8297727 walk_steps=7353534 scan_ns=76553 children_ns=11125859 child_entries=2977422 scan_calls=55822
+C_AST_TYPES bodies=7297 initializers=2702 nodes_typed=1371120 nodes_accepted=1238155 answers=847208 declines=13082 misses=5386 gated=0 lookups_settled=135254 lookups_walked=185
+C_AST_SPLIT units=1 records=16836 assertions=77 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_STATEMENTS bodies=7297 segments=105710 segment_tokens=1696567 uses=368694 bails=0 declaration_hints=40494 loop_hints=5322 declines=815 declarator_hints=40615 initializer_hints=39634 auto_skips=40494 declarator_declines=0 braced=10126 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_SPECIFIERS lists=162950 indexed=159068 index_reads=182568 primitive_answers=15022 typedef_answers=72298 fallbacks=2355 input=2328 specifiers=24 storage=0 primitive=0 typedef=3 reason=input fallback_token=4442564
+C_AST_TYPE_NAMES skips=47088 retries=0 primitive_answers=156 typedef_answers=29212 fallbacks=29 input=29 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_MEMBERS primitive_answers=1278 typedef_answers=8955 fallbacks=122 input=122 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_LOWER steps=0 answers=0 negatives=0 statement_bodies=0 statements=0
+C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=0 changes=0
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=0 changes=0
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=0 changes=0
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=0 changes=0
+IR_FAST_PASS name=cse enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST functions=0 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=0 retained_bound=0 compact_ns=0 instructions_before=0 instructions_after=0
+IR_LOCAL_PROMOTION candidates=0 promoted=0 loads_removed=0 stores_removed=0 parameters_inserted=0 parameters_removed=0 uninitialized=0 barriers=0 instructions_before=0 instructions_after=0 values_before=0 values_after=0
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=0 block_visits=0 parameter_visits=0 incoming_visits=0
+CODEGEN cpu=baseline vector_bits=128 functions=0 instructions=0 values=0 stack_value_bytes=0 stack_frame_bytes=0 max_stack_frame_bytes=0 code_bytes=0 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=0 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=0 exact_successes=0 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=0
+CODEGEN_LANES function_workers=0
+CODEGEN_EMIT machine_code_in_place=0 machine_code_copied=0

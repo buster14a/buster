@@ -1,0 +1,1998 @@
+{
+  "schema": "buster-4239-3cdf-closed-local-checkpoint-v1",
+  "sealed_at_utc": "2026-10-15T13:46:08.786201+00:00",
+  "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+  "tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+  "baseline": "02a6414e020f5d549122197c3a7c8407df5bed76",
+  "status": "pass",
+  "scope": "Exact 3cdf closed local correctness/static checkpoint only; no borrowing old heads, hardware acceptance, hosted green or protected integration claim.",
+  "gates": {
+    "debug-all": {
+      "receipt": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-debug-all.json",
+        "bytes": 978,
+        "sha256": "76d3c0763b4faaad05b4817f817636a933a454296dfe1e5641a646c51c848d9f"
+      },
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-debug-all.log",
+        "bytes": 3430190,
+        "sha256": "fdccad8b3e50190fe2404b1ab66d71571a3e4677912c83c4d2072e0fe8e66655"
+      },
+      "command": [
+        "./build.sh",
+        "build",
+        "--build-directory",
+        "build/final-debug-h4",
+        "--config",
+        "Debug",
+        "-t",
+        "test_all"
+      ],
+      "started": "2026-10-15T13:32:43.574242+00:00",
+      "completed": "2026-10-15T13:38:29.509530+00:00",
+      "exit": 0,
+      "source_stable": true
+    },
+    "release-all": {
+      "receipt": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-release-all.json",
+        "bytes": 931,
+        "sha256": "2703165b7e66b531ce4d327ea740d566fbb91de65ed6f343ff8e90fede25cf76"
+      },
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-release-all.log",
+        "bytes": 3421544,
+        "sha256": "4dc4f487cc10e4c2f1f73bcd3c55c638dee952de2c1e1a46a357fa809c7ce217"
+      },
+      "command": [
+        "./build.sh",
+        "build",
+        "--config",
+        "Release",
+        "-t",
+        "test_all"
+      ],
+      "started": "2026-10-15T13:32:43.586505+00:00",
+      "completed": "2026-10-15T13:39:30.786507+00:00",
+      "exit": 0,
+      "source_stable": true
+    },
+    "sanitize-all": {
+      "receipt": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-sanitize-all.json",
+        "bytes": 985,
+        "sha256": "a80735210b5c908f1e4e803b5aa3b5db97a0e9e1571544327daa846153f72e4d"
+      },
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-sanitize-all.log",
+        "bytes": 3169231,
+        "sha256": "37b8d53b1e3b135e16027c52e7244a4c121dc01b3f807059836e28f18d581a2f"
+      },
+      "command": [
+        "./build.sh",
+        "build",
+        "--build-directory",
+        "build/final-sanitize",
+        "--config",
+        "Release",
+        "-t",
+        "test_all"
+      ],
+      "started": "2026-10-15T13:32:43.577244+00:00",
+      "completed": "2026-10-15T13:40:20.578209+00:00",
+      "exit": 0,
+      "source_stable": true
+    },
+    "analyzer-local-run": {
+      "receipt": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-analyzer-local-run.json",
+        "bytes": 1139,
+        "sha256": "34f07f5939038d2f0316701ad601d77c7b6c8e16a7b8a716b27324234f761721"
+      },
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-analyzer-local-run.log",
+        "bytes": 1491,
+        "sha256": "fbe59cf1a1b8b422c2f09436517b38c36cdfa6b6cd6c9613076d0e05ce0ec28f"
+      },
+      "command": [
+        "./build.sh",
+        "clang_analyze",
+        "build/analyzer-h4",
+        "--config",
+        "Release",
+        "--shards",
+        "8",
+        "--jobs",
+        "4",
+        "--quiet",
+        "--results",
+        "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-analyzer-local-results"
+      ],
+      "started": "2026-10-15T13:33:10.026373+00:00",
+      "completed": "2026-10-15T13:42:08.825360+00:00",
+      "exit": 0,
+      "source_stable": true
+    },
+    "api": {
+      "receipt": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-api.json",
+        "bytes": 873,
+        "sha256": "99603e0c9af924b25390667040cf51c92b91e65ad26e13f125897e8122475397"
+      },
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-api.log",
+        "bytes": 64,
+        "sha256": "a098125e78c0f15f8550614c073781e67e10942404279fc36b93022a79840217"
+      },
+      "command": [
+        "python3",
+        "tools/api_migration_audit.py"
+      ],
+      "started": "2026-10-15T13:33:39.019623+00:00",
+      "completed": "2026-10-15T13:33:39.139758+00:00",
+      "exit": 0,
+      "source_stable": true
+    },
+    "docs": {
+      "receipt": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-docs.json",
+        "bytes": 876,
+        "sha256": "0bd945467fb8978a66c409f2611e543a77b657d8ca076dd70d48304d91e0c241"
+      },
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-docs.log",
+        "bytes": 48,
+        "sha256": "2c2cdebb36cc95837b52ca8f0a06fd227e64c3e31cce8c836c6fe4b4619b08ad"
+      },
+      "command": [
+        "python3",
+        "tools/check_markdown_links.py"
+      ],
+      "started": "2026-10-15T13:33:39.017693+00:00",
+      "completed": "2026-10-15T13:33:39.920480+00:00",
+      "exit": 0,
+      "source_stable": true
+    },
+    "history": {
+      "receipt": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-history.json",
+        "bytes": 1017,
+        "sha256": "4f3a10dabfa9053ab63c69e5dc248d45fb63340303d87c1f2444932aa161b000"
+      },
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-history.log",
+        "bytes": 247,
+        "sha256": "a3e9e016f1f6dc49325cd506da49f8f1102411fd6b15402ac7e2e4f7cba6601e"
+      },
+      "command": [
+        "python3",
+        "tools/merge_parent_preservation.py",
+        "--candidate",
+        "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+        "--base",
+        "02a6414e020f5d549122197c3a7c8407df5bed76"
+      ],
+      "started": "2026-10-15T13:33:39.022032+00:00",
+      "completed": "2026-10-15T13:33:40.961437+00:00",
+      "exit": 0,
+      "source_stable": true
+    },
+    "provenance": {
+      "receipt": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-provenance.json",
+        "bytes": 893,
+        "sha256": "5d1b7a56bd6f3e3dc80b20e22c21bb85cc9768319399e4637b8adab59bc3781a"
+      },
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-provenance.log",
+        "bytes": 43,
+        "sha256": "b86cc5bc9b00bb4b7444edfce36d44e628b19b75714c071dac7afeb0ed0bfd3f"
+      },
+      "command": [
+        "python3",
+        "tools/check_c_lowering_provenance.py"
+      ],
+      "started": "2026-10-15T13:33:39.033013+00:00",
+      "completed": "2026-10-15T13:33:40.555198+00:00",
+      "exit": 0,
+      "source_stable": true
+    },
+    "provenance-controls": {
+      "receipt": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-provenance-controls.json",
+        "bytes": 919,
+        "sha256": "04a6f84e9fbd4688bb1a59120c01c46b68c98257e42011990adaa5eac6a736f7"
+      },
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-provenance-controls.log",
+        "bytes": 106,
+        "sha256": "da21d9aa5f7f82b6da2adfd55d1e377b4a3007cfece305f1cad2e2f28f5ef275"
+      },
+      "command": [
+        "python3",
+        "tools/check_c_lowering_provenance_test.py"
+      ],
+      "started": "2026-10-15T13:33:39.060752+00:00",
+      "completed": "2026-10-15T13:33:40.789909+00:00",
+      "exit": 0,
+      "source_stable": true
+    },
+    "source-size": {
+      "receipt": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-source-size.json",
+        "bytes": 939,
+        "sha256": "a21cb17753458b0a1bf6d89b7b263f90731b43c8b13ebe2f4fc121eb17bd8f13"
+      },
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-source-size.log",
+        "bytes": 4755,
+        "sha256": "c2a119cfdc87c820232d727c9faa32d54568e317dda274d982a5f67458f519cd"
+      },
+      "command": [
+        "./build.sh",
+        "source_size",
+        "--base",
+        "02a6414e020f5d549122197c3a7c8407df5bed76"
+      ],
+      "started": "2026-10-15T13:33:39.028506+00:00",
+      "completed": "2026-10-15T13:33:39.834006+00:00",
+      "exit": 0,
+      "source_stable": true
+    }
+  },
+  "suites": {
+    "debug-all": {
+      "assertions_passed": 7240098,
+      "assertions_total": 7240098,
+      "modules_passed": 61,
+      "modules_total": 61,
+      "external_tests": 0,
+      "module_rows": [
+        {
+          "index": 0,
+          "module": "byte_writer_tests",
+          "duration_ns": 28174,
+          "passed": 494,
+          "failed": 0,
+          "assertions": 494,
+          "status": "pass"
+        },
+        {
+          "index": 1,
+          "module": "arena_tests",
+          "duration_ns": 946192974,
+          "passed": 633,
+          "failed": 0,
+          "assertions": 633,
+          "status": "pass"
+        },
+        {
+          "index": 2,
+          "module": "integer_tests",
+          "duration_ns": 101556705,
+          "passed": 2052209,
+          "failed": 0,
+          "assertions": 2052209,
+          "status": "pass"
+        },
+        {
+          "index": 3,
+          "module": "sanitizer_tests",
+          "duration_ns": 1083773813,
+          "passed": 27,
+          "failed": 0,
+          "assertions": 27,
+          "status": "pass"
+        },
+        {
+          "index": 4,
+          "module": "hash_tests",
+          "duration_ns": 22628915,
+          "passed": 2273,
+          "failed": 0,
+          "assertions": 2273,
+          "status": "pass"
+        },
+        {
+          "index": 5,
+          "module": "simd_tests",
+          "duration_ns": 28715,
+          "passed": 163,
+          "failed": 0,
+          "assertions": 163,
+          "status": "pass"
+        },
+        {
+          "index": 6,
+          "module": "string_tests",
+          "duration_ns": 97380145,
+          "passed": 161668,
+          "failed": 0,
+          "assertions": 161668,
+          "status": "pass"
+        },
+        {
+          "index": 7,
+          "module": "os_tests",
+          "duration_ns": 5284973242,
+          "passed": 2046,
+          "failed": 0,
+          "assertions": 2046,
+          "status": "pass"
+        },
+        {
+          "index": 8,
+          "module": "file_tests",
+          "duration_ns": 43443289,
+          "passed": 804,
+          "failed": 0,
+          "assertions": 804,
+          "status": "pass"
+        },
+        {
+          "index": 9,
+          "module": "target_tests",
+          "duration_ns": 5459065,
+          "passed": 8166,
+          "failed": 0,
+          "assertions": 8166,
+          "status": "pass"
+        },
+        {
+          "index": 10,
+          "module": "c_frontend_tests",
+          "duration_ns": 135739687929,
+          "passed": 1502201,
+          "failed": 0,
+          "assertions": 1502201,
+          "status": "pass"
+        },
+        {
+          "index": 11,
+          "module": "c_ast_tests",
+          "duration_ns": 22053019665,
+          "passed": 189160,
+          "failed": 0,
+          "assertions": 189160,
+          "status": "pass"
+        },
+        {
+          "index": 12,
+          "module": "c_once_tests",
+          "duration_ns": 37866099,
+          "passed": 47617,
+          "failed": 0,
+          "assertions": 47617,
+          "status": "pass"
+        },
+        {
+          "index": 13,
+          "module": "c_type_layout_tests",
+          "duration_ns": 592434345,
+          "passed": 637,
+          "failed": 0,
+          "assertions": 637,
+          "status": "pass"
+        },
+        {
+          "index": 14,
+          "module": "c_macro_conditional_tests",
+          "duration_ns": 4876883763,
+          "passed": 65225,
+          "failed": 0,
+          "assertions": 65225,
+          "status": "pass"
+        },
+        {
+          "index": 15,
+          "module": "record_layout_tests",
+          "duration_ns": 736726688,
+          "passed": 47,
+          "failed": 0,
+          "assertions": 47,
+          "status": "pass"
+        },
+        {
+          "index": 16,
+          "module": "metamorphic_tests",
+          "duration_ns": 671603782,
+          "passed": 198,
+          "failed": 0,
+          "assertions": 198,
+          "status": "pass"
+        },
+        {
+          "index": 17,
+          "module": "aarch64_encoding_tests",
+          "duration_ns": 4231940904,
+          "passed": 258615,
+          "failed": 0,
+          "assertions": 258615,
+          "status": "pass"
+        },
+        {
+          "index": 18,
+          "module": "aarch64_exact_bridge_tests",
+          "duration_ns": 65505,
+          "passed": 102,
+          "failed": 0,
+          "assertions": 102,
+          "status": "pass"
+        },
+        {
+          "index": 19,
+          "module": "aarch64_base_assembly_tests",
+          "duration_ns": 511339359,
+          "passed": 1646,
+          "failed": 0,
+          "assertions": 1646,
+          "status": "pass"
+        },
+        {
+          "index": 20,
+          "module": "aarch64_control_semantics_tests",
+          "duration_ns": 381048,
+          "passed": 3377,
+          "failed": 0,
+          "assertions": 3377,
+          "status": "pass"
+        },
+        {
+          "index": 21,
+          "module": "aarch64_system_registers_tests",
+          "duration_ns": 2695322,
+          "passed": 108,
+          "failed": 0,
+          "assertions": 108,
+          "status": "pass"
+        },
+        {
+          "index": 22,
+          "module": "aarch64_semantics_tests",
+          "duration_ns": 109237011,
+          "passed": 219,
+          "failed": 0,
+          "assertions": 219,
+          "status": "pass"
+        },
+        {
+          "index": 23,
+          "module": "aarch64_system_semantics_tests",
+          "duration_ns": 33673013,
+          "passed": 694,
+          "failed": 0,
+          "assertions": 694,
+          "status": "pass"
+        },
+        {
+          "index": 24,
+          "module": "aarch64_syntax_tests",
+          "duration_ns": 447371341,
+          "passed": 112,
+          "failed": 0,
+          "assertions": 112,
+          "status": "pass"
+        },
+        {
+          "index": 25,
+          "module": "aarch64_semantic_vm_tests",
+          "duration_ns": 132476088,
+          "passed": 90,
+          "failed": 0,
+          "assertions": 90,
+          "status": "pass"
+        },
+        {
+          "index": 26,
+          "module": "aarch64_direct_simd_tests",
+          "duration_ns": 373992000,
+          "passed": 152,
+          "failed": 0,
+          "assertions": 152,
+          "status": "pass"
+        },
+        {
+          "index": 27,
+          "module": "aarch64_complex_simd_tests",
+          "duration_ns": 431870719,
+          "passed": 43,
+          "failed": 0,
+          "assertions": 43,
+          "status": "pass"
+        },
+        {
+          "index": 28,
+          "module": "aarch64_memory_semantics_tests",
+          "duration_ns": 2016140863,
+          "passed": 24,
+          "failed": 0,
+          "assertions": 24,
+          "status": "pass"
+        },
+        {
+          "index": 29,
+          "module": "aarch64_alias_projection_tests",
+          "duration_ns": 774942,
+          "passed": 28,
+          "failed": 0,
+          "assertions": 28,
+          "status": "pass"
+        },
+        {
+          "index": 30,
+          "module": "assembly_tests",
+          "duration_ns": 1396548426,
+          "passed": 20291,
+          "failed": 0,
+          "assertions": 20291,
+          "status": "pass"
+        },
+        {
+          "index": 31,
+          "module": "x86_64_forwarding_tests",
+          "duration_ns": 430242,
+          "passed": 13113,
+          "failed": 0,
+          "assertions": 13113,
+          "status": "pass"
+        },
+        {
+          "index": 32,
+          "module": "x86_64_metadata_tests",
+          "duration_ns": 2143575821,
+          "passed": 1683,
+          "failed": 0,
+          "assertions": 1683,
+          "status": "pass"
+        },
+        {
+          "index": 33,
+          "module": "x86_64_tls_tests",
+          "duration_ns": 23915240,
+          "passed": 575071,
+          "failed": 0,
+          "assertions": 575071,
+          "status": "pass"
+        },
+        {
+          "index": 34,
+          "module": "executable_padding_tests",
+          "duration_ns": 8002458,
+          "passed": 33174,
+          "failed": 0,
+          "assertions": 33174,
+          "status": "pass"
+        },
+        {
+          "index": 35,
+          "module": "x86_64_got_tests",
+          "duration_ns": 5699937,
+          "passed": 156385,
+          "failed": 0,
+          "assertions": 156385,
+          "status": "pass"
+        },
+        {
+          "index": 36,
+          "module": "x86_64_completion_census_tests",
+          "duration_ns": 5855153965,
+          "passed": 88165,
+          "failed": 0,
+          "assertions": 88165,
+          "status": "pass"
+        },
+        {
+          "index": 37,
+          "module": "ir_tests",
+          "duration_ns": 2564289264,
+          "passed": 648946,
+          "failed": 0,
+          "assertions": 648946,
+          "status": "pass"
+        },
+        {
+          "index": 38,
+          "module": "ir_oracle_tests",
+          "duration_ns": 7853785863,
+          "passed": 228,
+          "failed": 0,
+          "assertions": 228,
+          "status": "pass"
+        },
+        {
+          "index": 39,
+          "module": "ir_oracle_native_tests",
+          "duration_ns": 1263,
+          "passed": 0,
+          "failed": 0,
+          "assertions": 0,
+          "status": "pass"
+        },
+        {
+          "index": 40,
+          "module": "vector_contract_tests",
+          "duration_ns": 145085302,
+          "passed": 3820,
+          "failed": 0,
+          "assertions": 3820,
+          "status": "pass"
+        },
+        {
+          "index": 41,
+          "module": "llvm_bitcode_tests",
+          "duration_ns": 19140805381,
+          "passed": 213034,
+          "failed": 0,
+          "assertions": 213034,
+          "status": "pass"
+        },
+        {
+          "index": 42,
+          "module": "machine_selection_tests",
+          "duration_ns": 43300994,
+          "passed": 821,
+          "failed": 0,
+          "assertions": 821,
+          "status": "pass"
+        },
+        {
+          "index": 43,
+          "module": "machine_tests",
+          "duration_ns": 2767126245,
+          "passed": 557766,
+          "failed": 0,
+          "assertions": 557766,
+          "status": "pass"
+        },
+        {
+          "index": 44,
+          "module": "codegen_tests",
+          "duration_ns": 695899750,
+          "passed": 21158,
+          "failed": 0,
+          "assertions": 21158,
+          "status": "pass"
+        },
+        {
+          "index": 45,
+          "module": "investigation_tests",
+          "duration_ns": 13837345,
+          "passed": 988,
+          "failed": 0,
+          "assertions": 988,
+          "status": "pass"
+        },
+        {
+          "index": 46,
+          "module": "aarch64_stride_tests",
+          "duration_ns": 6608103,
+          "passed": 98,
+          "failed": 0,
+          "assertions": 98,
+          "status": "pass"
+        },
+        {
+          "index": 47,
+          "module": "debug_model_tests",
+          "duration_ns": 10447524,
+          "passed": 758,
+          "failed": 0,
+          "assertions": 758,
+          "status": "pass"
+        },
+        {
+          "index": 48,
+          "module": "dwarf_tests",
+          "duration_ns": 1893020,
+          "passed": 143,
+          "failed": 0,
+          "assertions": 143,
+          "status": "pass"
+        },
+        {
+          "index": 49,
+          "module": "codeview_tests",
+          "duration_ns": 10984981,
+          "passed": 46839,
+          "failed": 0,
+          "assertions": 46839,
+          "status": "pass"
+        },
+        {
+          "index": 50,
+          "module": "pdb_tests",
+          "duration_ns": 476007856,
+          "passed": 26572,
+          "failed": 0,
+          "assertions": 26572,
+          "status": "pass"
+        },
+        {
+          "index": 51,
+          "module": "object_tests",
+          "duration_ns": 1751478691,
+          "passed": 143510,
+          "failed": 0,
+          "assertions": 143510,
+          "status": "pass"
+        },
+        {
+          "index": 52,
+          "module": "jit_tests",
+          "duration_ns": 127574761,
+          "passed": 1639,
+          "failed": 0,
+          "assertions": 1639,
+          "status": "pass"
+        },
+        {
+          "index": 53,
+          "module": "embed_tests",
+          "duration_ns": 19250974,
+          "passed": 130,
+          "failed": 0,
+          "assertions": 130,
+          "status": "pass"
+        },
+        {
+          "index": 54,
+          "module": "link_tests",
+          "duration_ns": 906145480,
+          "passed": 283076,
+          "failed": 0,
+          "assertions": 283076,
+          "status": "pass"
+        },
+        {
+          "index": 55,
+          "module": "gpu_pipeline_tests",
+          "duration_ns": 2029179059,
+          "passed": 635,
+          "failed": 0,
+          "assertions": 635,
+          "status": "pass"
+        },
+        {
+          "index": 56,
+          "module": "spirv_compute_tests",
+          "duration_ns": 50647199,
+          "passed": 324,
+          "failed": 0,
+          "assertions": 324,
+          "status": "pass"
+        },
+        {
+          "index": 57,
+          "module": "compiler_diagnostic_tests",
+          "duration_ns": 48050846,
+          "passed": 324,
+          "failed": 0,
+          "assertions": 324,
+          "status": "pass"
+        },
+        {
+          "index": 58,
+          "module": "compiler_driver_tests",
+          "duration_ns": 97169038749,
+          "passed": 101661,
+          "failed": 0,
+          "assertions": 101661,
+          "status": "pass"
+        },
+        {
+          "index": 59,
+          "module": "compiler_driver_object_path_tests",
+          "duration_ns": 7572495250,
+          "passed": 939,
+          "failed": 0,
+          "assertions": 939,
+          "status": "pass"
+        },
+        {
+          "index": 60,
+          "module": "x86_64_tests",
+          "duration_ns": 528951,
+          "passed": 29,
+          "failed": 0,
+          "assertions": 29,
+          "status": "pass"
+        }
+      ],
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-debug-all.log",
+        "bytes": 3430190,
+        "sha256": "fdccad8b3e50190fe2404b1ab66d71571a3e4677912c83c4d2072e0fe8e66655"
+      }
+    },
+    "release-all": {
+      "assertions_passed": 7240077,
+      "assertions_total": 7240077,
+      "modules_passed": 61,
+      "modules_total": 61,
+      "external_tests": 0,
+      "module_rows": [
+        {
+          "index": 0,
+          "module": "byte_writer_tests",
+          "duration_ns": 18666,
+          "passed": 494,
+          "failed": 0,
+          "assertions": 494,
+          "status": "pass"
+        },
+        {
+          "index": 1,
+          "module": "arena_tests",
+          "duration_ns": 972527381,
+          "passed": 633,
+          "failed": 0,
+          "assertions": 633,
+          "status": "pass"
+        },
+        {
+          "index": 2,
+          "module": "integer_tests",
+          "duration_ns": 130582750,
+          "passed": 2052209,
+          "failed": 0,
+          "assertions": 2052209,
+          "status": "pass"
+        },
+        {
+          "index": 3,
+          "module": "sanitizer_tests",
+          "duration_ns": 18144,
+          "passed": 6,
+          "failed": 0,
+          "assertions": 6,
+          "status": "pass"
+        },
+        {
+          "index": 4,
+          "module": "hash_tests",
+          "duration_ns": 5012884,
+          "passed": 2273,
+          "failed": 0,
+          "assertions": 2273,
+          "status": "pass"
+        },
+        {
+          "index": 5,
+          "module": "simd_tests",
+          "duration_ns": 15891,
+          "passed": 163,
+          "failed": 0,
+          "assertions": 163,
+          "status": "pass"
+        },
+        {
+          "index": 6,
+          "module": "string_tests",
+          "duration_ns": 194412010,
+          "passed": 161668,
+          "failed": 0,
+          "assertions": 161668,
+          "status": "pass"
+        },
+        {
+          "index": 7,
+          "module": "os_tests",
+          "duration_ns": 5982017613,
+          "passed": 2046,
+          "failed": 0,
+          "assertions": 2046,
+          "status": "pass"
+        },
+        {
+          "index": 8,
+          "module": "file_tests",
+          "duration_ns": 44974723,
+          "passed": 804,
+          "failed": 0,
+          "assertions": 804,
+          "status": "pass"
+        },
+        {
+          "index": 9,
+          "module": "target_tests",
+          "duration_ns": 1840559,
+          "passed": 8166,
+          "failed": 0,
+          "assertions": 8166,
+          "status": "pass"
+        },
+        {
+          "index": 10,
+          "module": "c_frontend_tests",
+          "duration_ns": 66271980414,
+          "passed": 1502201,
+          "failed": 0,
+          "assertions": 1502201,
+          "status": "pass"
+        },
+        {
+          "index": 11,
+          "module": "c_ast_tests",
+          "duration_ns": 8479724006,
+          "passed": 189160,
+          "failed": 0,
+          "assertions": 189160,
+          "status": "pass"
+        },
+        {
+          "index": 12,
+          "module": "c_once_tests",
+          "duration_ns": 22336688,
+          "passed": 47617,
+          "failed": 0,
+          "assertions": 47617,
+          "status": "pass"
+        },
+        {
+          "index": 13,
+          "module": "c_type_layout_tests",
+          "duration_ns": 189269399,
+          "passed": 637,
+          "failed": 0,
+          "assertions": 637,
+          "status": "pass"
+        },
+        {
+          "index": 14,
+          "module": "c_macro_conditional_tests",
+          "duration_ns": 1947247594,
+          "passed": 65225,
+          "failed": 0,
+          "assertions": 65225,
+          "status": "pass"
+        },
+        {
+          "index": 15,
+          "module": "record_layout_tests",
+          "duration_ns": 174979708,
+          "passed": 47,
+          "failed": 0,
+          "assertions": 47,
+          "status": "pass"
+        },
+        {
+          "index": 16,
+          "module": "metamorphic_tests",
+          "duration_ns": 346212042,
+          "passed": 198,
+          "failed": 0,
+          "assertions": 198,
+          "status": "pass"
+        },
+        {
+          "index": 17,
+          "module": "aarch64_encoding_tests",
+          "duration_ns": 717432180,
+          "passed": 258615,
+          "failed": 0,
+          "assertions": 258615,
+          "status": "pass"
+        },
+        {
+          "index": 18,
+          "module": "aarch64_exact_bridge_tests",
+          "duration_ns": 14057,
+          "passed": 102,
+          "failed": 0,
+          "assertions": 102,
+          "status": "pass"
+        },
+        {
+          "index": 19,
+          "module": "aarch64_base_assembly_tests",
+          "duration_ns": 85201073,
+          "passed": 1646,
+          "failed": 0,
+          "assertions": 1646,
+          "status": "pass"
+        },
+        {
+          "index": 20,
+          "module": "aarch64_control_semantics_tests",
+          "duration_ns": 73971,
+          "passed": 3377,
+          "failed": 0,
+          "assertions": 3377,
+          "status": "pass"
+        },
+        {
+          "index": 21,
+          "module": "aarch64_system_registers_tests",
+          "duration_ns": 532698,
+          "passed": 108,
+          "failed": 0,
+          "assertions": 108,
+          "status": "pass"
+        },
+        {
+          "index": 22,
+          "module": "aarch64_semantics_tests",
+          "duration_ns": 21925261,
+          "passed": 219,
+          "failed": 0,
+          "assertions": 219,
+          "status": "pass"
+        },
+        {
+          "index": 23,
+          "module": "aarch64_system_semantics_tests",
+          "duration_ns": 5744864,
+          "passed": 694,
+          "failed": 0,
+          "assertions": 694,
+          "status": "pass"
+        },
+        {
+          "index": 24,
+          "module": "aarch64_syntax_tests",
+          "duration_ns": 77261723,
+          "passed": 112,
+          "failed": 0,
+          "assertions": 112,
+          "status": "pass"
+        },
+        {
+          "index": 25,
+          "module": "aarch64_semantic_vm_tests",
+          "duration_ns": 22846422,
+          "passed": 90,
+          "failed": 0,
+          "assertions": 90,
+          "status": "pass"
+        },
+        {
+          "index": 26,
+          "module": "aarch64_direct_simd_tests",
+          "duration_ns": 59364414,
+          "passed": 152,
+          "failed": 0,
+          "assertions": 152,
+          "status": "pass"
+        },
+        {
+          "index": 27,
+          "module": "aarch64_complex_simd_tests",
+          "duration_ns": 88659235,
+          "passed": 43,
+          "failed": 0,
+          "assertions": 43,
+          "status": "pass"
+        },
+        {
+          "index": 28,
+          "module": "aarch64_memory_semantics_tests",
+          "duration_ns": 405158298,
+          "passed": 24,
+          "failed": 0,
+          "assertions": 24,
+          "status": "pass"
+        },
+        {
+          "index": 29,
+          "module": "aarch64_alias_projection_tests",
+          "duration_ns": 135008,
+          "passed": 28,
+          "failed": 0,
+          "assertions": 28,
+          "status": "pass"
+        },
+        {
+          "index": 30,
+          "module": "assembly_tests",
+          "duration_ns": 278940610,
+          "passed": 20291,
+          "failed": 0,
+          "assertions": 20291,
+          "status": "pass"
+        },
+        {
+          "index": 31,
+          "module": "x86_64_forwarding_tests",
+          "duration_ns": 180785,
+          "passed": 13113,
+          "failed": 0,
+          "assertions": 13113,
+          "status": "pass"
+        },
+        {
+          "index": 32,
+          "module": "x86_64_metadata_tests",
+          "duration_ns": 540925393,
+          "passed": 1683,
+          "failed": 0,
+          "assertions": 1683,
+          "status": "pass"
+        },
+        {
+          "index": 33,
+          "module": "x86_64_tls_tests",
+          "duration_ns": 18352490,
+          "passed": 575071,
+          "failed": 0,
+          "assertions": 575071,
+          "status": "pass"
+        },
+        {
+          "index": 34,
+          "module": "executable_padding_tests",
+          "duration_ns": 5024476,
+          "passed": 33174,
+          "failed": 0,
+          "assertions": 33174,
+          "status": "pass"
+        },
+        {
+          "index": 35,
+          "module": "x86_64_got_tests",
+          "duration_ns": 2896027,
+          "passed": 156385,
+          "failed": 0,
+          "assertions": 156385,
+          "status": "pass"
+        },
+        {
+          "index": 36,
+          "module": "x86_64_completion_census_tests",
+          "duration_ns": 1008527384,
+          "passed": 88165,
+          "failed": 0,
+          "assertions": 88165,
+          "status": "pass"
+        },
+        {
+          "index": 37,
+          "module": "ir_tests",
+          "duration_ns": 789830780,
+          "passed": 648946,
+          "failed": 0,
+          "assertions": 648946,
+          "status": "pass"
+        },
+        {
+          "index": 38,
+          "module": "ir_oracle_tests",
+          "duration_ns": 5727278194,
+          "passed": 228,
+          "failed": 0,
+          "assertions": 228,
+          "status": "pass"
+        },
+        {
+          "index": 39,
+          "module": "ir_oracle_native_tests",
+          "duration_ns": 451,
+          "passed": 0,
+          "failed": 0,
+          "assertions": 0,
+          "status": "pass"
+        },
+        {
+          "index": 40,
+          "module": "vector_contract_tests",
+          "duration_ns": 75531236,
+          "passed": 3820,
+          "failed": 0,
+          "assertions": 3820,
+          "status": "pass"
+        },
+        {
+          "index": 41,
+          "module": "llvm_bitcode_tests",
+          "duration_ns": 14879131450,
+          "passed": 213034,
+          "failed": 0,
+          "assertions": 213034,
+          "status": "pass"
+        },
+        {
+          "index": 42,
+          "module": "machine_selection_tests",
+          "duration_ns": 36916476,
+          "passed": 821,
+          "failed": 0,
+          "assertions": 821,
+          "status": "pass"
+        },
+        {
+          "index": 43,
+          "module": "machine_tests",
+          "duration_ns": 1411047838,
+          "passed": 557766,
+          "failed": 0,
+          "assertions": 557766,
+          "status": "pass"
+        },
+        {
+          "index": 44,
+          "module": "codegen_tests",
+          "duration_ns": 597749637,
+          "passed": 21158,
+          "failed": 0,
+          "assertions": 21158,
+          "status": "pass"
+        },
+        {
+          "index": 45,
+          "module": "investigation_tests",
+          "duration_ns": 11001125,
+          "passed": 988,
+          "failed": 0,
+          "assertions": 988,
+          "status": "pass"
+        },
+        {
+          "index": 46,
+          "module": "aarch64_stride_tests",
+          "duration_ns": 5783028,
+          "passed": 98,
+          "failed": 0,
+          "assertions": 98,
+          "status": "pass"
+        },
+        {
+          "index": 47,
+          "module": "debug_model_tests",
+          "duration_ns": 6369519,
+          "passed": 758,
+          "failed": 0,
+          "assertions": 758,
+          "status": "pass"
+        },
+        {
+          "index": 48,
+          "module": "dwarf_tests",
+          "duration_ns": 453186,
+          "passed": 143,
+          "failed": 0,
+          "assertions": 143,
+          "status": "pass"
+        },
+        {
+          "index": 49,
+          "module": "codeview_tests",
+          "duration_ns": 2184968,
+          "passed": 46839,
+          "failed": 0,
+          "assertions": 46839,
+          "status": "pass"
+        },
+        {
+          "index": 50,
+          "module": "pdb_tests",
+          "duration_ns": 244893054,
+          "passed": 26572,
+          "failed": 0,
+          "assertions": 26572,
+          "status": "pass"
+        },
+        {
+          "index": 51,
+          "module": "object_tests",
+          "duration_ns": 892226838,
+          "passed": 143510,
+          "failed": 0,
+          "assertions": 143510,
+          "status": "pass"
+        },
+        {
+          "index": 52,
+          "module": "jit_tests",
+          "duration_ns": 30553078,
+          "passed": 1639,
+          "failed": 0,
+          "assertions": 1639,
+          "status": "pass"
+        },
+        {
+          "index": 53,
+          "module": "embed_tests",
+          "duration_ns": 9414051,
+          "passed": 130,
+          "failed": 0,
+          "assertions": 130,
+          "status": "pass"
+        },
+        {
+          "index": 54,
+          "module": "link_tests",
+          "duration_ns": 565453538,
+          "passed": 283076,
+          "failed": 0,
+          "assertions": 283076,
+          "status": "pass"
+        },
+        {
+          "index": 55,
+          "module": "gpu_pipeline_tests",
+          "duration_ns": 2277867201,
+          "passed": 635,
+          "failed": 0,
+          "assertions": 635,
+          "status": "pass"
+        },
+        {
+          "index": 56,
+          "module": "spirv_compute_tests",
+          "duration_ns": 37838058,
+          "passed": 324,
+          "failed": 0,
+          "assertions": 324,
+          "status": "pass"
+        },
+        {
+          "index": 57,
+          "module": "compiler_diagnostic_tests",
+          "duration_ns": 33942450,
+          "passed": 324,
+          "failed": 0,
+          "assertions": 324,
+          "status": "pass"
+        },
+        {
+          "index": 58,
+          "module": "compiler_driver_tests",
+          "duration_ns": 58461297646,
+          "passed": 101661,
+          "failed": 0,
+          "assertions": 101661,
+          "status": "pass"
+        },
+        {
+          "index": 59,
+          "module": "compiler_driver_object_path_tests",
+          "duration_ns": 4137817865,
+          "passed": 939,
+          "failed": 0,
+          "assertions": 939,
+          "status": "pass"
+        },
+        {
+          "index": 60,
+          "module": "x86_64_tests",
+          "duration_ns": 108938,
+          "passed": 29,
+          "failed": 0,
+          "assertions": 29,
+          "status": "pass"
+        }
+      ],
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-release-all.log",
+        "bytes": 3421544,
+        "sha256": "4dc4f487cc10e4c2f1f73bcd3c55c638dee952de2c1e1a46a357fa809c7ce217"
+      }
+    },
+    "sanitize-all": {
+      "assertions_passed": 7192264,
+      "assertions_total": 7192264,
+      "modules_passed": 61,
+      "modules_total": 61,
+      "external_tests": 0,
+      "module_rows": [
+        {
+          "index": 0,
+          "module": "byte_writer_tests",
+          "duration_ns": 43814,
+          "passed": 494,
+          "failed": 0,
+          "assertions": 494,
+          "status": "pass"
+        },
+        {
+          "index": 1,
+          "module": "arena_tests",
+          "duration_ns": 3676487619,
+          "passed": 637,
+          "failed": 0,
+          "assertions": 637,
+          "status": "pass"
+        },
+        {
+          "index": 2,
+          "module": "integer_tests",
+          "duration_ns": 24361660,
+          "passed": 2052209,
+          "failed": 0,
+          "assertions": 2052209,
+          "status": "pass"
+        },
+        {
+          "index": 3,
+          "module": "sanitizer_tests",
+          "duration_ns": 371918524,
+          "passed": 56,
+          "failed": 0,
+          "assertions": 56,
+          "status": "pass"
+        },
+        {
+          "index": 4,
+          "module": "hash_tests",
+          "duration_ns": 7698650,
+          "passed": 2273,
+          "failed": 0,
+          "assertions": 2273,
+          "status": "pass"
+        },
+        {
+          "index": 5,
+          "module": "simd_tests",
+          "duration_ns": 2815,
+          "passed": 163,
+          "failed": 0,
+          "assertions": 163,
+          "status": "pass"
+        },
+        {
+          "index": 6,
+          "module": "string_tests",
+          "duration_ns": 368587242,
+          "passed": 161668,
+          "failed": 0,
+          "assertions": 161668,
+          "status": "pass"
+        },
+        {
+          "index": 7,
+          "module": "os_tests",
+          "duration_ns": 7397952555,
+          "passed": 2046,
+          "failed": 0,
+          "assertions": 2046,
+          "status": "pass"
+        },
+        {
+          "index": 8,
+          "module": "file_tests",
+          "duration_ns": 84647363,
+          "passed": 804,
+          "failed": 0,
+          "assertions": 804,
+          "status": "pass"
+        },
+        {
+          "index": 9,
+          "module": "target_tests",
+          "duration_ns": 10318381,
+          "passed": 8166,
+          "failed": 0,
+          "assertions": 8166,
+          "status": "pass"
+        },
+        {
+          "index": 10,
+          "module": "c_frontend_tests",
+          "duration_ns": 156965668741,
+          "passed": 1502201,
+          "failed": 0,
+          "assertions": 1502201,
+          "status": "pass"
+        },
+        {
+          "index": 11,
+          "module": "c_ast_tests",
+          "duration_ns": 27480757609,
+          "passed": 189160,
+          "failed": 0,
+          "assertions": 189160,
+          "status": "pass"
+        },
+        {
+          "index": 12,
+          "module": "c_once_tests",
+          "duration_ns": 34210330,
+          "passed": 47617,
+          "failed": 0,
+          "assertions": 47617,
+          "status": "pass"
+        },
+        {
+          "index": 13,
+          "module": "c_type_layout_tests",
+          "duration_ns": 715511275,
+          "passed": 637,
+          "failed": 0,
+          "assertions": 637,
+          "status": "pass"
+        },
+        {
+          "index": 14,
+          "module": "c_macro_conditional_tests",
+          "duration_ns": 4031508338,
+          "passed": 65225,
+          "failed": 0,
+          "assertions": 65225,
+          "status": "pass"
+        },
+        {
+          "index": 15,
+          "module": "record_layout_tests",
+          "duration_ns": 1061764489,
+          "passed": 47,
+          "failed": 0,
+          "assertions": 47,
+          "status": "pass"
+        },
+        {
+          "index": 16,
+          "module": "metamorphic_tests",
+          "duration_ns": 1684063012,
+          "passed": 198,
+          "failed": 0,
+          "assertions": 198,
+          "status": "pass"
+        },
+        {
+          "index": 17,
+          "module": "aarch64_encoding_tests",
+          "duration_ns": 1305605943,
+          "passed": 258615,
+          "failed": 0,
+          "assertions": 258615,
+          "status": "pass"
+        },
+        {
+          "index": 18,
+          "module": "aarch64_exact_bridge_tests",
+          "duration_ns": 42240,
+          "passed": 102,
+          "failed": 0,
+          "assertions": 102,
+          "status": "pass"
+        },
+        {
+          "index": 19,
+          "module": "aarch64_base_assembly_tests",
+          "duration_ns": 222371737,
+          "passed": 1646,
+          "failed": 0,
+          "assertions": 1646,
+          "status": "pass"
+        },
+        {
+          "index": 20,
+          "module": "aarch64_control_semantics_tests",
+          "duration_ns": 414502,
+          "passed": 3377,
+          "failed": 0,
+          "assertions": 3377,
+          "status": "pass"
+        },
+        {
+          "index": 21,
+          "module": "aarch64_system_registers_tests",
+          "duration_ns": 2218572,
+          "passed": 108,
+          "failed": 0,
+          "assertions": 108,
+          "status": "pass"
+        },
+        {
+          "index": 22,
+          "module": "aarch64_semantics_tests",
+          "duration_ns": 29056556,
+          "passed": 219,
+          "failed": 0,
+          "assertions": 219,
+          "status": "pass"
+        },
+        {
+          "index": 23,
+          "module": "aarch64_system_semantics_tests",
+          "duration_ns": 9809656,
+          "passed": 694,
+          "failed": 0,
+          "assertions": 694,
+          "status": "pass"
+        },
+        {
+          "index": 24,
+          "module": "aarch64_syntax_tests",
+          "duration_ns": 124337935,
+          "passed": 112,
+          "failed": 0,
+          "assertions": 112,
+          "status": "pass"
+        },
+        {
+          "index": 25,
+          "module": "aarch64_semantic_vm_tests",
+          "duration_ns": 66431387,
+          "passed": 90,
+          "failed": 0,
+          "assertions": 90,
+          "status": "pass"
+        },
+        {
+          "index": 26,
+          "module": "aarch64_direct_simd_tests",
+          "duration_ns": 241071081,
+          "passed": 152,
+          "failed": 0,
+          "assertions": 152,
+          "status": "pass"
+        },
+        {
+          "index": 27,
+          "module": "aarch64_complex_simd_tests",
+          "duration_ns": 333213098,
+          "passed": 43,
+          "failed": 0,
+          "assertions": 43,
+          "status": "pass"
+        },
+        {
+          "index": 28,
+          "module": "aarch64_memory_semantics_tests",
+          "duration_ns": 1420759292,
+          "passed": 24,
+          "failed": 0,
+          "assertions": 24,
+          "status": "pass"
+        },
+        {
+          "index": 29,
+          "module": "aarch64_alias_projection_tests",
+          "duration_ns": 652147,
+          "passed": 28,
+          "failed": 0,
+          "assertions": 28,
+          "status": "pass"
+        },
+        {
+          "index": 30,
+          "module": "assembly_tests",
+          "duration_ns": 1423609476,
+          "passed": 20291,
+          "failed": 0,
+          "assertions": 20291,
+          "status": "pass"
+        },
+        {
+          "index": 31,
+          "module": "x86_64_forwarding_tests",
+          "duration_ns": 698686,
+          "passed": 13110,
+          "failed": 0,
+          "assertions": 13110,
+          "status": "pass"
+        },
+        {
+          "index": 32,
+          "module": "x86_64_metadata_tests",
+          "duration_ns": 1848901297,
+          "passed": 1683,
+          "failed": 0,
+          "assertions": 1683,
+          "status": "pass"
+        },
+        {
+          "index": 33,
+          "module": "x86_64_tls_tests",
+          "duration_ns": 41038206,
+          "passed": 575071,
+          "failed": 0,
+          "assertions": 575071,
+          "status": "pass"
+        },
+        {
+          "index": 34,
+          "module": "executable_padding_tests",
+          "duration_ns": 9920488,
+          "passed": 33174,
+          "failed": 0,
+          "assertions": 33174,
+          "status": "pass"
+        },
+        {
+          "index": 35,
+          "module": "x86_64_got_tests",
+          "duration_ns": 12442871,
+          "passed": 156385,
+          "failed": 0,
+          "assertions": 156385,
+          "status": "pass"
+        },
+        {
+          "index": 36,
+          "module": "x86_64_completion_census_tests",
+          "duration_ns": 9877438155,
+          "passed": 88165,
+          "failed": 0,
+          "assertions": 88165,
+          "status": "pass"
+        },
+        {
+          "index": 37,
+          "module": "ir_tests",
+          "duration_ns": 3041706091,
+          "passed": 648946,
+          "failed": 0,
+          "assertions": 648946,
+          "status": "pass"
+        },
+        {
+          "index": 38,
+          "module": "ir_oracle_tests",
+          "duration_ns": 5637389,
+          "passed": 172,
+          "failed": 0,
+          "assertions": 172,
+          "status": "pass"
+        },
+        {
+          "index": 39,
+          "module": "ir_oracle_native_tests",
+          "duration_ns": 211,
+          "passed": 0,
+          "failed": 0,
+          "assertions": 0,
+          "status": "pass"
+        },
+        {
+          "index": 40,
+          "module": "vector_contract_tests",
+          "duration_ns": 208942387,
+          "passed": 3820,
+          "failed": 0,
+          "assertions": 3820,
+          "status": "pass"
+        },
+        {
+          "index": 41,
+          "module": "llvm_bitcode_tests",
+          "duration_ns": 11841230950,
+          "passed": 213034,
+          "failed": 0,
+          "assertions": 213034,
+          "status": "pass"
+        },
+        {
+          "index": 42,
+          "module": "machine_selection_tests",
+          "duration_ns": 47462511,
+          "passed": 821,
+          "failed": 0,
+          "assertions": 821,
+          "status": "pass"
+        },
+        {
+          "index": 43,
+          "module": "machine_tests",
+          "duration_ns": 2730850192,
+          "passed": 515607,
+          "failed": 0,
+          "assertions": 515607,
+          "status": "pass"
+        },
+        {
+          "index": 44,
+          "module": "codegen_tests",
+          "duration_ns": 615685995,
+          "passed": 20332,
+          "failed": 0,
+          "assertions": 20332,
+          "status": "pass"
+        },
+        {
+          "index": 45,
+          "module": "investigation_tests",
+          "duration_ns": 11027005,
+          "passed": 988,
+          "failed": 0,
+          "assertions": 988,
+          "status": "pass"
+        },
+        {
+          "index": 46,
+          "module": "aarch64_stride_tests",
+          "duration_ns": 6954568,
+          "passed": 98,
+          "failed": 0,
+          "assertions": 98,
+          "status": "pass"
+        },
+        {
+          "index": 47,
+          "module": "debug_model_tests",
+          "duration_ns": 6604709,
+          "passed": 758,
+          "failed": 0,
+          "assertions": 758,
+          "status": "pass"
+        },
+        {
+          "index": 48,
+          "module": "dwarf_tests",
+          "duration_ns": 1362305,
+          "passed": 143,
+          "failed": 0,
+          "assertions": 143,
+          "status": "pass"
+        },
+        {
+          "index": 49,
+          "module": "codeview_tests",
+          "duration_ns": 6734627,
+          "passed": 46839,
+          "failed": 0,
+          "assertions": 46839,
+          "status": "pass"
+        },
+        {
+          "index": 50,
+          "module": "pdb_tests",
+          "duration_ns": 289464006,
+          "passed": 26572,
+          "failed": 0,
+          "assertions": 26572,
+          "status": "pass"
+        },
+        {
+          "index": 51,
+          "module": "object_tests",
+          "duration_ns": 690037662,
+          "passed": 143487,
+          "failed": 0,
+          "assertions": 143487,
+          "status": "pass"
+        },
+        {
+          "index": 52,
+          "module": "jit_tests",
+          "duration_ns": 324481,
+          "passed": 1357,
+          "failed": 0,
+          "assertions": 1357,
+          "status": "pass"
+        },
+        {
+          "index": 53,
+          "module": "embed_tests",
+          "duration_ns": 4153492,
+          "passed": 71,
+          "failed": 0,
+          "assertions": 71,
+          "status": "pass"
+        },
+        {
+          "index": 54,
+          "module": "link_tests",
+          "duration_ns": 344853936,
+          "passed": 283033,
+          "failed": 0,
+          "assertions": 283033,
+          "status": "pass"
+        },
+        {
+          "index": 55,
+          "module": "gpu_pipeline_tests",
+          "duration_ns": 1889693566,
+          "passed": 635,
+          "failed": 0,
+          "assertions": 635,
+          "status": "pass"
+        },
+        {
+          "index": 56,
+          "module": "spirv_compute_tests",
+          "duration_ns": 43370227,
+          "passed": 324,
+          "failed": 0,
+          "assertions": 324,
+          "status": "pass"
+        },
+        {
+          "index": 57,
+          "module": "compiler_diagnostic_tests",
+          "duration_ns": 79705713,
+          "passed": 324,
+          "failed": 0,
+          "assertions": 324,
+          "status": "pass"
+        },
+        {
+          "index": 58,
+          "module": "compiler_driver_tests",
+          "duration_ns": 87349385494,
+          "passed": 97245,
+          "failed": 0,
+          "assertions": 97245,
+          "status": "pass"
+        },
+        {
+          "index": 59,
+          "module": "compiler_driver_object_path_tests",
+          "duration_ns": 4085977953,
+          "passed": 939,
+          "failed": 0,
+          "assertions": 939,
+          "status": "pass"
+        },
+        {
+          "index": 60,
+          "module": "x86_64_tests",
+          "duration_ns": 639393,
+          "passed": 29,
+          "failed": 0,
+          "assertions": 29,
+          "status": "pass"
+        }
+      ],
+      "raw_log": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/gates/3cdf6ee16c-final-sanitize-all.log",
+        "bytes": 3169231,
+        "sha256": "37b8d53b1e3b135e16027c52e7244a4c121dc01b3f807059836e28f18d581a2f"
+      }
+    }
+  },
+  "static_summary": {
+    "api_registry_active_migrations": 0,
+    "markdown_files": 936,
+    "unresolved_markdown_targets": 0,
+    "provenance_files": 6,
+    "provenance_violations": 0,
+    "provenance_negative_control_tests": 8,
+    "history_merges": 17,
+    "production_growth_bytes": -256078,
+    "build_growth_bytes": 13194,
+    "source_size_ratchet_limit": 32768
+  },
+  "analyzer": {
+    "independent_receipt": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-analyzer-receipt.json",
+      "bytes": 561588,
+      "sha256": "f13e35b5dbe22f41b85cb6aa52044ff4cf8a5ff77317ad1bc04e5a5043ab8e22"
+    },
+    "eligible": 118,
+    "checked": 118,
+    "excluded": 118,
+    "shards": 8,
+    "jobs": 4,
+    "per_unit_budget_seconds": 600,
+    "native_run": {
+      "elapsed_us": "538599606",
+      "peak_pending_workers": "4",
+      "jobs": "4",
+      "samples": "21206",
+      "peak_live_processes": "9",
+      "sampled_peak_tree_rss_bytes": "1518080000",
+      "process_tree_status": "complete",
+      "process_tree_reason": "none",
+      "results": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-analyzer-local-results",
+      "status": "pass"
+    },
+    "all_results_status_zero": true,
+    "all_118_logs_present_empty_and_hash_replayed": true,
+    "manifest_reconstructed_byte_for_byte": true
+  },
+  "preservation": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/preservation-receipt.json",
+    "bytes": 103667,
+    "sha256": "e8759c9de9492e35236ef401fabb61a9a9b5878fb5776748181d078aa4480bf0"
+  },
+  "frozen_images": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs/frozen-images-receipt.json",
+    "bytes": 5238,
+    "sha256": "ca9d801c6463c356103b48f127ac6361701a9f159e79c7ce329f23459e792de3"
+  },
+  "snapshot": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-inputs",
+  "root_source_and_build_readers_closed": true,
+  "all_this_agent_readers_closed": true,
+  "source_license": {
+    "project": "Buster first-party",
+    "spdx": null,
+    "status": "Unselected; frozen LICENSES/README.md and #621. Clang external tool license not subsumed."
+  },
+  "limits": [
+    "Data-only replay of exact closed local Release analyzer run; no new analyzer/build/test execution.",
+    "Source identity joined to clean before/after exact-head wrapper and independent snapshot association; this does not assert complete source/header dependency-byte archive or independently reconstructed Git tree closure.",
+    "No hosted CI, protected integration, physical performance or hardware acceptance claim."
+  ],
+  "performed": "Only outside-checkout snapshots, frozen image copies and data-only derived receipts created. No source/config/build/forge/queue/hardware mutation."
+}

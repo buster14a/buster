@@ -1,0 +1,57 @@
+{
+  "corpus": {
+    "backend_pressure": {
+      "path": "work/ast-retirement-inputs/backend_pressure.c",
+      "sha256": "ff18c7018039abf36ff0ad499facd66a9e91f768b264e171579f491550ffb51d",
+      "size_bytes": 711531
+    },
+    "control_flow": {
+      "path": "work/ast-retirement-inputs/control_flow.c",
+      "sha256": "2d7c13661910bbcc01c3465fdb9a724b6e65598033dc60de1dfa3602bfcc4497",
+      "size_bytes": 235398
+    },
+    "large_function": {
+      "path": "work/ast-retirement-inputs/large_function.c",
+      "sha256": "b1f9fcec7b85a8ccf0489f5b43c95d4dee29cc9ec4fea5b07d053694315fe6cf",
+      "size_bytes": 51085
+    },
+    "many_functions": {
+      "path": "work/ast-retirement-inputs/many_functions.c",
+      "sha256": "baf3a60857bffc10dd484591a8f8d11d86888afaeac6e1615143d216016af0c4",
+      "size_bytes": 39898
+    },
+    "symbol_table": {
+      "path": "work/ast-retirement-inputs/symbol_table.c",
+      "sha256": "f1bee39d36c032a699f75936ac8c926a69ca66fd54fa86658228c5fa5759da20",
+      "size_bytes": 280189
+    },
+    "tiny_startup": {
+      "path": "work/ast-retirement-inputs/tiny_startup.c",
+      "sha256": "4aff03a3b92f04efeff63a3e020ca55b8d98ede8488abeda6974fd62eacb90de",
+      "size_bytes": 133
+    }
+  },
+  "frozen_input_tree": {
+    "build/generated": {
+      "bytes": 703,
+      "files": 1,
+      "sha256": "227a27ea5fb19f3d3fbd27e7c979aa204dac8fcff6ea73428f2b9a374ad9819b"
+    },
+    "src": {
+      "bytes": 93885615,
+      "files": 603,
+      "sha256": "56454c88d9af125b6682a27d47f44268e639ea1f739d8d01b231888c4a6f9d4a"
+    }
+  },
+  "generator": {
+    "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+    "sha256": "e95146de99a1dd0ada00d2195b3bdcb23809590e6cd94c012896cf433be1d4eb",
+    "size_bytes": 308280
+  },
+  "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+  "unity": {
+    "path": "src/buster/apps/ide/ide.c",
+    "sha256": "9b0893cb6b06eacaed5787d453797971f45a63cb211db358d72c7545a90ebc54",
+    "size_bytes": 171040
+  }
+}

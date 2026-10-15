@@ -1,0 +1,4538 @@
+{
+  "identity": {
+    "base": "02a6414e020f5d549122197c3a7c8407df5bed76",
+    "base_tree": "5aa95687f3d2056f07760ae0347d200b06c84eee",
+    "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+    "head_tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+    "mode": "pull",
+    "pull": "4239",
+    "pull_head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+    "ref": "refs/pull/4239/head",
+    "repository": "buster14a/buster",
+    "request_run_id": "38743139164",
+    "run_attempt": "1",
+    "run_id": "38743190006",
+    "trusted_revision": "02a6414e020f5d549122197c3a7c8407df5bed76"
+  },
+  "limits": [
+    "No historical producer census reused",
+    "Counters describe their recorded source/input/operation; not every AST expression has a fact",
+    "uncovered and outside retained separately from named missing-candidate gaps",
+    "Tree/facts/symbol bindings stay separate; aliases are not added",
+    "Absent baseline type-name counters are unavailable, never zero",
+    "Untimed probe census is not a timed observation"
+  ],
+  "row_count": 40,
+  "rows": [
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "unity-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=2977423 tokens=4443544 build_ns=22686477 retained_bytes=42851187 transient_high_water=64704 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=4194304 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g0",
+        "src/buster/apps/ide/ide.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5827,
+      "raw_log_member": "ast_retirement_acceptance/probe/unity-syntax-only/a.log",
+      "raw_log_sha256": "2a90e8d6d9d00b2432352aab5b9c68ca7508ac04ca0d68ee9219ba461f3c7882",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=2977423 tokens=4443544 build_ns=22686477 retained_bytes=42851187 transient_high_water=64704 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=4194304 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 42851187
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "src/buster/apps/ide/ide.c",
+        "sha256": "9b0893cb6b06eacaed5787d453797971f45a63cb211db358d72c7545a90ebc54",
+        "size_bytes": 171040
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "unity"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "unity-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=2977423 tokens=4443544 build_ns=22861662 retained_bytes=42851187 transient_high_water=64704 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=4194304 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=17 retained_bytes=2056 copy_bytes=2040"
+          ]
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g0",
+        "src/buster/apps/ide/ide.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5867,
+      "raw_log_member": "ast_retirement_acceptance/probe/unity-syntax-only/b.log",
+      "raw_log_sha256": "6fdf2993754e44c52f9bb9730a78641e79c1a3e8a36df98f0f8117dee7bdab6a",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=17 retained_bytes=2056 copy_bytes=2040"
+      ],
+      "raw_tree_line": "C_AST nodes=2977423 tokens=4443544 build_ns=22861662 retained_bytes=42851187 transient_high_water=64704 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=4194304 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 2056,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 42851187
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "src/buster/apps/ide/ide.c",
+        "sha256": "9b0893cb6b06eacaed5787d453797971f45a63cb211db358d72c7545a90ebc54",
+        "size_bytes": 171040
+      },
+      "unavailable_fields": [],
+      "workload": "unity"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 459,
+        "bound": 517394,
+        "builtin_identities": 1396,
+        "busy": 0,
+        "candidates": 1804328,
+        "completed": 61488,
+        "completion_queries": 61510,
+        "function_names": 888,
+        "invalid": 22,
+        "machine": 24074,
+        "missing": 22,
+        "nodes": 2977423,
+        "outside": 6155,
+        "recipes": 182,
+        "regions": 10069,
+        "retained_bytes": 94177047,
+        "stale": 0,
+        "strings": 54500,
+        "tree": 1718744,
+        "uncovered": 29,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "unity-object",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 459,
+        "bound": 517394,
+        "builtin_identities": 1396,
+        "busy": 0,
+        "candidates": 1804328,
+        "completed": 61488,
+        "completion_queries": 61510,
+        "function_names": 888,
+        "invalid": 22,
+        "machine": 24074,
+        "missing": 22,
+        "missing_type_names": null,
+        "nodes": 2977423,
+        "outside": 6155,
+        "recipes": 182,
+        "regions": 10069,
+        "retained_bytes": 94177047,
+        "stale": 0,
+        "strings": 54500,
+        "tree": 1718744,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 29,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=2977423 tokens=4443544 build_ns=22716608 retained_bytes=42851187 transient_high_water=64704 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=4194304 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=2977423 retained_bytes=94177047 regions=10069 candidates=1804328 tree=1718744 machine=24074 completed=61488 missing=22 unspanned=0 invalid=22 appends=0 busy=0 bound=517394 bit_fields=459 strings=54500 uncovered=29 outside=6155 stale=0 completion_queries=61510 recipes=182 builtin_identities=1396 function_names=888"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "1c41e9d876c395e711cf5a6f8f959f0755637db530339b5769d7b3c13922c992",
+        "output_size_bytes": 30659960,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g0",
+        "src/buster/apps/ide/ide.c",
+        "-c",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=2977423 retained_bytes=94177047 regions=10069 candidates=1804328 tree=1718744 machine=24074 completed=61488 missing=22 unspanned=0 invalid=22 appends=0 busy=0 bound=517394 bit_fields=459 strings=54500 uncovered=29 outside=6155 stale=0 completion_queries=61510 recipes=182 builtin_identities=1396 function_names=888",
+      "raw_log_bytes": 6882,
+      "raw_log_member": "ast_retirement_acceptance/probe/unity-object/a.log",
+      "raw_log_sha256": "70ba68526468ac83b0adfbcc1b13d936f7f5b03b8db7d763f9122985417d6b9a",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=2977423 tokens=4443544 build_ns=22716608 retained_bytes=42851187 transient_high_water=64704 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=4194304 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 94177047,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 42851187
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "src/buster/apps/ide/ide.c",
+        "sha256": "9b0893cb6b06eacaed5787d453797971f45a63cb211db358d72c7545a90ebc54",
+        "size_bytes": 171040
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "unity"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 459,
+        "bound": 517609,
+        "builtin_identities": 1396,
+        "busy": 0,
+        "candidates": 1805357,
+        "completed": 62537,
+        "completion_queries": 62446,
+        "function_names": 888,
+        "invalid": 0,
+        "machine": 24076,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 2977423,
+        "outside": 5155,
+        "recipes": 937,
+        "regions": 10069,
+        "retained_bytes": 95317067,
+        "stale": 0,
+        "strings": 54500,
+        "tree": 1718744,
+        "type_names": 61002,
+        "typed_type_names": 61002,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "unity-object",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 459,
+        "bound": 517609,
+        "builtin_identities": 1396,
+        "busy": 0,
+        "candidates": 1805357,
+        "completed": 62537,
+        "completion_queries": 62446,
+        "function_names": 888,
+        "invalid": 0,
+        "machine": 24076,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 2977423,
+        "outside": 5155,
+        "recipes": 937,
+        "regions": 10069,
+        "retained_bytes": 95317067,
+        "stale": 0,
+        "strings": 54500,
+        "tree": 1718744,
+        "type_names": 61002,
+        "typed_type_names": 61002,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=2977423 tokens=4443544 build_ns=22834226 retained_bytes=42851187 transient_high_water=64704 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=4194304 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=2977423 retained_bytes=95317067 regions=10069 candidates=1805357 tree=1718744 machine=24076 completed=62537 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=517609 bit_fields=459 strings=54500 uncovered=0 outside=5155 stale=0 completion_queries=62446 recipes=937 builtin_identities=1396 function_names=888 type_names=61002 typed_type_names=61002 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=17 retained_bytes=2056 copy_bytes=2040"
+          ]
+        },
+        "output_sha256": "1c41e9d876c395e711cf5a6f8f959f0755637db530339b5769d7b3c13922c992",
+        "output_size_bytes": 30659960,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-Isrc",
+        "-Ibuild/generated",
+        "-DBUSTER_UNITY_BUILD=1",
+        "-DBUSTER_INCLUDE_TESTS=0",
+        "-g0",
+        "src/buster/apps/ide/ide.c",
+        "-c",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=2977423 retained_bytes=95317067 regions=10069 candidates=1805357 tree=1718744 machine=24076 completed=62537 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=517609 bit_fields=459 strings=54500 uncovered=0 outside=5155 stale=0 completion_queries=62446 recipes=937 builtin_identities=1396 function_names=888 type_names=61002 typed_type_names=61002 missing_type_names=0",
+      "raw_log_bytes": 6938,
+      "raw_log_member": "ast_retirement_acceptance/probe/unity-object/b.log",
+      "raw_log_sha256": "36474ed9f8f2d0302d364026e0ad5b565546d31afe9d711f18d69324dbeb4365",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=17 retained_bytes=2056 copy_bytes=2040"
+      ],
+      "raw_tree_line": "C_AST nodes=2977423 tokens=4443544 build_ns=22834226 retained_bytes=42851187 transient_high_water=64704 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=4194304 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 95317067,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 2056,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 42851187
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "src/buster/apps/ide/ide.c",
+        "sha256": "9b0893cb6b06eacaed5787d453797971f45a63cb211db358d72c7545a90ebc54",
+        "size_bytes": 171040
+      },
+      "unavailable_fields": [],
+      "workload": "unity"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "tiny_startup-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=16 tokens=14 build_ns=32831 retained_bytes=224 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/tiny_startup.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5070,
+      "raw_log_member": "ast_retirement_acceptance/probe/tiny_startup-syntax-only/a.log",
+      "raw_log_sha256": "0b2e7b3ff5584cd83dde3bdb5f34d4ae8fcb64c8f8b9483466f554aa5fbfb6e1",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=16 tokens=14 build_ns=32831 retained_bytes=224 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 224
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/tiny_startup.c",
+        "sha256": "4aff03a3b92f04efeff63a3e020ca55b8d98ede8488abeda6974fd62eacb90de",
+        "size_bytes": 133
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "tiny_startup"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "tiny_startup-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=16 tokens=14 build_ns=20217 retained_bytes=224 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/tiny_startup.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5102,
+      "raw_log_member": "ast_retirement_acceptance/probe/tiny_startup-syntax-only/b.log",
+      "raw_log_sha256": "6a3a73b72f02a067d03a1e8f9ddd14368dca2e0a83729b8b760390be8506171b",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=16 tokens=14 build_ns=20217 retained_bytes=224 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 224
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/tiny_startup.c",
+        "sha256": "4aff03a3b92f04efeff63a3e020ca55b8d98ede8488abeda6974fd62eacb90de",
+        "size_bytes": 133
+      },
+      "unavailable_fields": [],
+      "workload": "tiny_startup"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "large_function-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=14354 tokens=20495 build_ns=118690 retained_bytes=235770 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/large_function.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5109,
+      "raw_log_member": "ast_retirement_acceptance/probe/large_function-syntax-only/a.log",
+      "raw_log_sha256": "62d7f3eec03bfdd774ee6da8b3b2511f8dde5532b93225241c7a97ee71183679",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=14354 tokens=20495 build_ns=118690 retained_bytes=235770 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 235770
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/large_function.c",
+        "sha256": "b1f9fcec7b85a8ccf0489f5b43c95d4dee29cc9ec4fea5b07d053694315fe6cf",
+        "size_bytes": 51085
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "large_function"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "large_function-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=14354 tokens=20495 build_ns=112679 retained_bytes=235770 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/large_function.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5142,
+      "raw_log_member": "ast_retirement_acceptance/probe/large_function-syntax-only/b.log",
+      "raw_log_sha256": "927ff03d68c16e6490f592eebc999e0b5016e0a2d0a1da413530e916b17ed508",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=14354 tokens=20495 build_ns=112679 retained_bytes=235770 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 235770
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/large_function.c",
+        "sha256": "b1f9fcec7b85a8ccf0489f5b43c95d4dee29cc9ec4fea5b07d053694315fe6cf",
+        "size_bytes": 51085
+      },
+      "unavailable_fields": [],
+      "workload": "large_function"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "many_functions-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=9729 tokens=10753 build_ns=88384 retained_bytes=151053 transient_high_water=15584 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/many_functions.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5121,
+      "raw_log_member": "ast_retirement_acceptance/probe/many_functions-syntax-only/a.log",
+      "raw_log_sha256": "e930424b34cbe5c9f738c691f32c7eec1aa211b324155ab7f078c3b4f3484fad",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=9729 tokens=10753 build_ns=88384 retained_bytes=151053 transient_high_water=15584 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 151053
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/many_functions.c",
+        "sha256": "baf3a60857bffc10dd484591a8f8d11d86888afaeac6e1615143d216016af0c4",
+        "size_bytes": 39898
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "many_functions"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "many_functions-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=9729 tokens=10753 build_ns=87022 retained_bytes=151053 transient_high_water=15584 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/many_functions.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5154,
+      "raw_log_member": "ast_retirement_acceptance/probe/many_functions-syntax-only/b.log",
+      "raw_log_sha256": "0bc952107a8e8b54e921b9cae35521def993cf683092c3f5dd36c9b11320785d",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=9729 tokens=10753 build_ns=87022 retained_bytes=151053 transient_high_water=15584 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 151053
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/many_functions.c",
+        "sha256": "baf3a60857bffc10dd484591a8f8d11d86888afaeac6e1615143d216016af0c4",
+        "size_bytes": 39898
+      },
+      "unavailable_fields": [],
+      "workload": "many_functions"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "symbol_table-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=22542 tokens=20492 build_ns=213047 retained_bytes=293062 transient_high_water=17120 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/symbol_table.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5119,
+      "raw_log_member": "ast_retirement_acceptance/probe/symbol_table-syntax-only/a.log",
+      "raw_log_sha256": "6598fb17602dc3ca83dd1d2f82428b60e2c3ad27075d55f604324cd29518b3e1",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=22542 tokens=20492 build_ns=213047 retained_bytes=293062 transient_high_water=17120 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 293062
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/symbol_table.c",
+        "sha256": "f1bee39d36c032a699f75936ac8c926a69ca66fd54fa86658228c5fa5759da20",
+        "size_bytes": 280189
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "symbol_table"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "symbol_table-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=22542 tokens=20492 build_ns=145640 retained_bytes=293062 transient_high_water=17120 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/symbol_table.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5152,
+      "raw_log_member": "ast_retirement_acceptance/probe/symbol_table-syntax-only/b.log",
+      "raw_log_sha256": "f433f3f5f8036ae717e451c4446b6ecf8494801633bc90d82baa58602eaf6206",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=22542 tokens=20492 build_ns=145640 retained_bytes=293062 transient_high_water=17120 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 293062
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/symbol_table.c",
+        "sha256": "f1bee39d36c032a699f75936ac8c926a69ca66fd54fa86658228c5fa5759da20",
+        "size_bytes": 280189
+      },
+      "unavailable_fields": [],
+      "workload": "symbol_table"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "control_flow-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=68801 tokens=90113 build_ns=732421 retained_bytes=1042893 transient_high_water=15136 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=196608 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/control_flow.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5141,
+      "raw_log_member": "ast_retirement_acceptance/probe/control_flow-syntax-only/a.log",
+      "raw_log_sha256": "e8fb4c48f8086f4d14d2b14906f81535c6901a69a8f2e5b3c529b586326804b6",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=68801 tokens=90113 build_ns=732421 retained_bytes=1042893 transient_high_water=15136 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=196608 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 1042893
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/control_flow.c",
+        "sha256": "2d7c13661910bbcc01c3465fdb9a724b6e65598033dc60de1dfa3602bfcc4497",
+        "size_bytes": 235398
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "control_flow"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "control_flow-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=68801 tokens=90113 build_ns=1044071 retained_bytes=1042893 transient_high_water=15136 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=196608 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/control_flow.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5175,
+      "raw_log_member": "ast_retirement_acceptance/probe/control_flow-syntax-only/b.log",
+      "raw_log_sha256": "762d695da6182c37baa1e2cc7418aa846e0252aa5f66b9469661790bc3c20d90",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=68801 tokens=90113 build_ns=1044071 retained_bytes=1042893 transient_high_water=15136 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=196608 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 1042893
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/control_flow.c",
+        "sha256": "2d7c13661910bbcc01c3465fdb9a724b6e65598033dc60de1dfa3602bfcc4497",
+        "size_bytes": 235398
+      },
+      "unavailable_fields": [],
+      "workload": "control_flow"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "backend_pressure-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=200289 tokens=275862 build_ns=1443854 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/backend_pressure.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5159,
+      "raw_log_member": "ast_retirement_acceptance/probe/backend_pressure-syntax-only/a.log",
+      "raw_log_sha256": "2578ed35d9b2da1e3fa10ca75b1d3889160f8dc525f299fea92c5340998b5c6e",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=200289 tokens=275862 build_ns=1443854 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 3194605
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/backend_pressure.c",
+        "sha256": "ff18c7018039abf36ff0ad499facd66a9e91f768b264e171579f491550ffb51d",
+        "size_bytes": 711531
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "backend_pressure"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": null,
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "backend_pressure-syntax-only",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 0,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 0,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 0,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 0,
+        "retained_bytes": 0,
+        "stale": 0,
+        "strings": 0,
+        "tree": 0,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "syntax-only",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=200289 tokens=275862 build_ns=1450577 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": null,
+        "output_size_bytes": null,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/backend_pressure.c",
+        "-fsyntax-only",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=0 retained_bytes=0 regions=0 candidates=0 tree=0 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=0 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5192,
+      "raw_log_member": "ast_retirement_acceptance/probe/backend_pressure-syntax-only/b.log",
+      "raw_log_sha256": "b5e007dee5d425abda0c9edef239d3e55a9f71522f0ce300f1fdd4518d549d4e",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=200289 tokens=275862 build_ns=1450577 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 0,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 3194605
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/backend_pressure.c",
+        "sha256": "ff18c7018039abf36ff0ad499facd66a9e91f768b264e171579f491550ffb51d",
+        "size_bytes": 711531
+      },
+      "unavailable_fields": [],
+      "workload": "backend_pressure"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 2,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 16,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 516,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "fast",
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "tiny_startup-object-fast",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 2,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 16,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 516,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=16 tokens=14 build_ns=29114 retained_bytes=224 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=16 retained_bytes=516 regions=1 candidates=3 tree=3 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=2 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "66210a1ec192dbec96cde5bb816b81d2f7c3acdd3eb781640bbca3c48c7a7a6f",
+        "output_size_bytes": 840,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/tiny_startup.c",
+        "-c",
+        "-fregister-allocator=fast",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=16 retained_bytes=516 regions=1 candidates=3 tree=3 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=2 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5466,
+      "raw_log_member": "ast_retirement_acceptance/probe/tiny_startup-object-fast/a.log",
+      "raw_log_sha256": "c39132ee3093f414c727b167f2139dff616a8b6ff524f85867742ea482fbfb69",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=16 tokens=14 build_ns=29114 retained_bytes=224 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 516,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 224
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/tiny_startup.c",
+        "sha256": "4aff03a3b92f04efeff63a3e020ca55b8d98ede8488abeda6974fd62eacb90de",
+        "size_bytes": 133
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "tiny_startup"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 2,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 16,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 516,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "fast",
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "tiny_startup-object-fast",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 2,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 16,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 516,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=16 tokens=14 build_ns=19757 retained_bytes=224 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=16 retained_bytes=516 regions=1 candidates=3 tree=3 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=2 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": "66210a1ec192dbec96cde5bb816b81d2f7c3acdd3eb781640bbca3c48c7a7a6f",
+        "output_size_bytes": 840,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/tiny_startup.c",
+        "-c",
+        "-fregister-allocator=fast",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=16 retained_bytes=516 regions=1 candidates=3 tree=3 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=2 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5498,
+      "raw_log_member": "ast_retirement_acceptance/probe/tiny_startup-object-fast/b.log",
+      "raw_log_sha256": "74fab95a506963cbcf884435fa5c49e03e34041e95f07ddf39442f79cae2dc39",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=16 tokens=14 build_ns=19757 retained_bytes=224 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 516,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 224
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/tiny_startup.c",
+        "sha256": "4aff03a3b92f04efeff63a3e020ca55b8d98ede8488abeda6974fd62eacb90de",
+        "size_bytes": 133
+      },
+      "unavailable_fields": [],
+      "workload": "tiny_startup"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 2,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 16,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 516,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "quality",
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "tiny_startup-object-quality",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 2,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 16,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 516,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=16 tokens=14 build_ns=21921 retained_bytes=224 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=16 retained_bytes=516 regions=1 candidates=3 tree=3 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=2 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "66210a1ec192dbec96cde5bb816b81d2f7c3acdd3eb781640bbca3c48c7a7a6f",
+        "output_size_bytes": 840,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/tiny_startup.c",
+        "-c",
+        "-fregister-allocator=quality",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=16 retained_bytes=516 regions=1 candidates=3 tree=3 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=2 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5469,
+      "raw_log_member": "ast_retirement_acceptance/probe/tiny_startup-object-quality/a.log",
+      "raw_log_sha256": "271cf55965e522ee6c0d9014a4cda6659e67a416dbbf7d79ce2ef51c9c0ceecf",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=16 tokens=14 build_ns=21921 retained_bytes=224 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 516,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 224
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/tiny_startup.c",
+        "sha256": "4aff03a3b92f04efeff63a3e020ca55b8d98ede8488abeda6974fd62eacb90de",
+        "size_bytes": 133
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "tiny_startup"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 2,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 16,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 516,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "quality",
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "tiny_startup-object-quality",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 2,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 16,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 516,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=16 tokens=14 build_ns=19236 retained_bytes=224 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=16 retained_bytes=516 regions=1 candidates=3 tree=3 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=2 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": "66210a1ec192dbec96cde5bb816b81d2f7c3acdd3eb781640bbca3c48c7a7a6f",
+        "output_size_bytes": 840,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/tiny_startup.c",
+        "-c",
+        "-fregister-allocator=quality",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=16 retained_bytes=516 regions=1 candidates=3 tree=3 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=2 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5501,
+      "raw_log_member": "ast_retirement_acceptance/probe/tiny_startup-object-quality/b.log",
+      "raw_log_sha256": "c4495f4e15dff8f2bef60ae7178be7b6383a67c722f9d8e5b28e0cafef2eb4d8",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=16 tokens=14 build_ns=19236 retained_bytes=224 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 516,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 224
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/tiny_startup.c",
+        "sha256": "4aff03a3b92f04efeff63a3e020ca55b8d98ede8488abeda6974fd62eacb90de",
+        "size_bytes": 133
+      },
+      "unavailable_fields": [],
+      "workload": "tiny_startup"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 4098,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 13313,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 14354,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 440890,
+        "stale": 0,
+        "strings": 0,
+        "tree": 13313,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "fast",
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "large_function-object-fast",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 4098,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 13313,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 14354,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 440890,
+        "stale": 0,
+        "strings": 0,
+        "tree": 13313,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=14354 tokens=20495 build_ns=113421 retained_bytes=235770 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=14354 retained_bytes=440890 regions=1 candidates=13313 tree=13313 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=4098 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "91b8d67f7a25c831996568b7f13b0517bad56cd1671dc73a372381edda635f25",
+        "output_size_bytes": 68448,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/large_function.c",
+        "-c",
+        "-fregister-allocator=fast",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=14354 retained_bytes=440890 regions=1 candidates=13313 tree=13313 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=4098 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5601,
+      "raw_log_member": "ast_retirement_acceptance/probe/large_function-object-fast/a.log",
+      "raw_log_sha256": "5b7f1c2dbcbf507b1247e341ff95f6bf68801b821e104de40fed28bf81a53350",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=14354 tokens=20495 build_ns=113421 retained_bytes=235770 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 440890,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 235770
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/large_function.c",
+        "sha256": "b1f9fcec7b85a8ccf0489f5b43c95d4dee29cc9ec4fea5b07d053694315fe6cf",
+        "size_bytes": 51085
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "large_function"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 4098,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 13313,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 14354,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 440890,
+        "stale": 0,
+        "strings": 0,
+        "tree": 13313,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "fast",
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "large_function-object-fast",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 4098,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 13313,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 14354,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 440890,
+        "stale": 0,
+        "strings": 0,
+        "tree": 13313,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=14354 tokens=20495 build_ns=111307 retained_bytes=235770 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=14354 retained_bytes=440890 regions=1 candidates=13313 tree=13313 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=4098 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": "91b8d67f7a25c831996568b7f13b0517bad56cd1671dc73a372381edda635f25",
+        "output_size_bytes": 68448,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/large_function.c",
+        "-c",
+        "-fregister-allocator=fast",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=14354 retained_bytes=440890 regions=1 candidates=13313 tree=13313 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=4098 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5634,
+      "raw_log_member": "ast_retirement_acceptance/probe/large_function-object-fast/b.log",
+      "raw_log_sha256": "9ee5c11245c5d3675237f838a104fb9e77eae1e5ebf83d71543d0cf9697768c9",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=14354 tokens=20495 build_ns=111307 retained_bytes=235770 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 440890,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 235770
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/large_function.c",
+        "sha256": "b1f9fcec7b85a8ccf0489f5b43c95d4dee29cc9ec4fea5b07d053694315fe6cf",
+        "size_bytes": 51085
+      },
+      "unavailable_fields": [],
+      "workload": "large_function"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 4098,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 13313,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 14354,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 440890,
+        "stale": 0,
+        "strings": 0,
+        "tree": 13313,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "quality",
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "large_function-object-quality",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 4098,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 13313,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 14354,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 440890,
+        "stale": 0,
+        "strings": 0,
+        "tree": 13313,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=14354 tokens=20495 build_ns=112650 retained_bytes=235770 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=14354 retained_bytes=440890 regions=1 candidates=13313 tree=13313 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=4098 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "91b8d67f7a25c831996568b7f13b0517bad56cd1671dc73a372381edda635f25",
+        "output_size_bytes": 68448,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/large_function.c",
+        "-c",
+        "-fregister-allocator=quality",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=14354 retained_bytes=440890 regions=1 candidates=13313 tree=13313 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=4098 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5604,
+      "raw_log_member": "ast_retirement_acceptance/probe/large_function-object-quality/a.log",
+      "raw_log_sha256": "872dbab61a9f542fc41b058b9cb8d335212697b4035177856fbad297e9d33439",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=14354 tokens=20495 build_ns=112650 retained_bytes=235770 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 440890,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 235770
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/large_function.c",
+        "sha256": "b1f9fcec7b85a8ccf0489f5b43c95d4dee29cc9ec4fea5b07d053694315fe6cf",
+        "size_bytes": 51085
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "large_function"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 4098,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 13313,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 14354,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 440890,
+        "stale": 0,
+        "strings": 0,
+        "tree": 13313,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "quality",
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "large_function-object-quality",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 4098,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 13313,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 14354,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 1,
+        "retained_bytes": 440890,
+        "stale": 0,
+        "strings": 0,
+        "tree": 13313,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=14354 tokens=20495 build_ns=138267 retained_bytes=235770 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=14354 retained_bytes=440890 regions=1 candidates=13313 tree=13313 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=4098 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": "91b8d67f7a25c831996568b7f13b0517bad56cd1671dc73a372381edda635f25",
+        "output_size_bytes": 68448,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/large_function.c",
+        "-c",
+        "-fregister-allocator=quality",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=14354 retained_bytes=440890 regions=1 candidates=13313 tree=13313 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=4098 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5637,
+      "raw_log_member": "ast_retirement_acceptance/probe/large_function-object-quality/b.log",
+      "raw_log_sha256": "18cb4dcbb24141b420ab3ffb7f83a95d47e23ca8dcd1efdfd95cfb35e15b9d72",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=14354 tokens=20495 build_ns=138267 retained_bytes=235770 transient_high_water=15072 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 440890,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 235770
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/large_function.c",
+        "sha256": "b1f9fcec7b85a8ccf0489f5b43c95d4dee29cc9ec4fea5b07d053694315fe6cf",
+        "size_bytes": 51085
+      },
+      "unavailable_fields": [],
+      "workload": "large_function"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 1536,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3584,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 9729,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 512,
+        "retained_bytes": 286297,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3584,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "fast",
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "many_functions-object-fast",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 1536,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3584,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 9729,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 512,
+        "retained_bytes": 286297,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3584,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=9729 tokens=10753 build_ns=137706 retained_bytes=151053 transient_high_water=15584 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=9729 retained_bytes=286297 regions=512 candidates=3584 tree=3584 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=1536 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "5e85d21e3973151a367ef1faad0b0976e4d6be6f663f8058e3419a7c39638376",
+        "output_size_bytes": 72416,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/many_functions.c",
+        "-c",
+        "-fregister-allocator=fast",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=9729 retained_bytes=286297 regions=512 candidates=3584 tree=3584 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=1536 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5617,
+      "raw_log_member": "ast_retirement_acceptance/probe/many_functions-object-fast/a.log",
+      "raw_log_sha256": "e5434d645a10f0dc8070d329a899eff64392ee443eddd5c30c3a7b17d3980aef",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=9729 tokens=10753 build_ns=137706 retained_bytes=151053 transient_high_water=15584 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 286297,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 151053
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/many_functions.c",
+        "sha256": "baf3a60857bffc10dd484591a8f8d11d86888afaeac6e1615143d216016af0c4",
+        "size_bytes": 39898
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "many_functions"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 1536,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3584,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 9729,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 512,
+        "retained_bytes": 286297,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3584,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "fast",
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "many_functions-object-fast",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 1536,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3584,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 9729,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 512,
+        "retained_bytes": 286297,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3584,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=9729 tokens=10753 build_ns=86641 retained_bytes=151053 transient_high_water=15584 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=9729 retained_bytes=286297 regions=512 candidates=3584 tree=3584 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=1536 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": "5e85d21e3973151a367ef1faad0b0976e4d6be6f663f8058e3419a7c39638376",
+        "output_size_bytes": 72416,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/many_functions.c",
+        "-c",
+        "-fregister-allocator=fast",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=9729 retained_bytes=286297 regions=512 candidates=3584 tree=3584 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=1536 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5648,
+      "raw_log_member": "ast_retirement_acceptance/probe/many_functions-object-fast/b.log",
+      "raw_log_sha256": "c6889f909de4c9a4908ebcd54bab9d022a69f2010ea6751eea4e69c48e3e02c3",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=9729 tokens=10753 build_ns=86641 retained_bytes=151053 transient_high_water=15584 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 286297,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 151053
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/many_functions.c",
+        "sha256": "baf3a60857bffc10dd484591a8f8d11d86888afaeac6e1615143d216016af0c4",
+        "size_bytes": 39898
+      },
+      "unavailable_fields": [],
+      "workload": "many_functions"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 1536,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3584,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 9729,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 512,
+        "retained_bytes": 286297,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3584,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "quality",
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "many_functions-object-quality",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 1536,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3584,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 9729,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 512,
+        "retained_bytes": 286297,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3584,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=9729 tokens=10753 build_ns=91450 retained_bytes=151053 transient_high_water=15584 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=9729 retained_bytes=286297 regions=512 candidates=3584 tree=3584 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=1536 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "5e85d21e3973151a367ef1faad0b0976e4d6be6f663f8058e3419a7c39638376",
+        "output_size_bytes": 72416,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/many_functions.c",
+        "-c",
+        "-fregister-allocator=quality",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=9729 retained_bytes=286297 regions=512 candidates=3584 tree=3584 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=1536 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5618,
+      "raw_log_member": "ast_retirement_acceptance/probe/many_functions-object-quality/a.log",
+      "raw_log_sha256": "bcfb11c533d192e90ceea7b5f86a66b084e5191e6bb4c42b3bcbac692657b08a",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=9729 tokens=10753 build_ns=91450 retained_bytes=151053 transient_high_water=15584 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 286297,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 151053
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/many_functions.c",
+        "sha256": "baf3a60857bffc10dd484591a8f8d11d86888afaeac6e1615143d216016af0c4",
+        "size_bytes": 39898
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "many_functions"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 1536,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3584,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 9729,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 512,
+        "retained_bytes": 286297,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3584,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "quality",
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "many_functions-object-quality",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 1536,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 3584,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 9729,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 512,
+        "retained_bytes": 286297,
+        "stale": 0,
+        "strings": 0,
+        "tree": 3584,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=9729 tokens=10753 build_ns=86841 retained_bytes=151053 transient_high_water=15584 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=9729 retained_bytes=286297 regions=512 candidates=3584 tree=3584 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=1536 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": "5e85d21e3973151a367ef1faad0b0976e4d6be6f663f8058e3419a7c39638376",
+        "output_size_bytes": 72416,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/many_functions.c",
+        "-c",
+        "-fregister-allocator=quality",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=9729 retained_bytes=286297 regions=512 candidates=3584 tree=3584 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=1536 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5651,
+      "raw_log_member": "ast_retirement_acceptance/probe/many_functions-object-quality/b.log",
+      "raw_log_sha256": "6bbb9e6bd1aad799be9b7d8f97aec66b1975a331f1b06bb5736f2bc1db247220",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=9729 tokens=10753 build_ns=86841 retained_bytes=151053 transient_high_water=15584 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 286297,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 151053
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/many_functions.c",
+        "sha256": "baf3a60857bffc10dd484591a8f8d11d86888afaeac6e1615143d216016af0c4",
+        "size_bytes": 39898
+      },
+      "unavailable_fields": [],
+      "workload": "many_functions"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 6146,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 8193,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 22542,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 2049,
+        "retained_bytes": 839114,
+        "stale": 0,
+        "strings": 0,
+        "tree": 8193,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "fast",
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "symbol_table-object-fast",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 6146,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 8193,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 22542,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 2049,
+        "retained_bytes": 839114,
+        "stale": 0,
+        "strings": 0,
+        "tree": 8193,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=22542 tokens=20492 build_ns=146523 retained_bytes=293062 transient_high_water=17120 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=22542 retained_bytes=839114 regions=2049 candidates=8193 tree=8193 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=6146 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "8c032c4f6ded2e244c12102a027b838c12a9fc0912ab43c57fbddbfdb7ca5237",
+        "output_size_bytes": 232424,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/symbol_table.c",
+        "-c",
+        "-fregister-allocator=fast",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=22542 retained_bytes=839114 regions=2049 candidates=8193 tree=8193 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=6146 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5611,
+      "raw_log_member": "ast_retirement_acceptance/probe/symbol_table-object-fast/a.log",
+      "raw_log_sha256": "87607960fc5d7d8d7a7961ac731286d5a977deb339d19150ecd02c56d21a69e6",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=22542 tokens=20492 build_ns=146523 retained_bytes=293062 transient_high_water=17120 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 839114,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 293062
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/symbol_table.c",
+        "sha256": "f1bee39d36c032a699f75936ac8c926a69ca66fd54fa86658228c5fa5759da20",
+        "size_bytes": 280189
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "symbol_table"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 6146,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 8193,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 22542,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 2049,
+        "retained_bytes": 871370,
+        "stale": 0,
+        "strings": 0,
+        "tree": 8193,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "fast",
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "symbol_table-object-fast",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 6146,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 8193,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 22542,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 2049,
+        "retained_bytes": 871370,
+        "stale": 0,
+        "strings": 0,
+        "tree": 8193,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=22542 tokens=20492 build_ns=141763 retained_bytes=293062 transient_high_water=17120 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=22542 retained_bytes=871370 regions=2049 candidates=8193 tree=8193 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=6146 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": "8c032c4f6ded2e244c12102a027b838c12a9fc0912ab43c57fbddbfdb7ca5237",
+        "output_size_bytes": 232424,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/symbol_table.c",
+        "-c",
+        "-fregister-allocator=fast",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=22542 retained_bytes=871370 regions=2049 candidates=8193 tree=8193 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=6146 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5644,
+      "raw_log_member": "ast_retirement_acceptance/probe/symbol_table-object-fast/b.log",
+      "raw_log_sha256": "5f59ae488f8e4b9d486141633715ecad43465fa3cba9670cf51b78e14d986b7e",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=22542 tokens=20492 build_ns=141763 retained_bytes=293062 transient_high_water=17120 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 871370,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 293062
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/symbol_table.c",
+        "sha256": "f1bee39d36c032a699f75936ac8c926a69ca66fd54fa86658228c5fa5759da20",
+        "size_bytes": 280189
+      },
+      "unavailable_fields": [],
+      "workload": "symbol_table"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 6146,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 8193,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 22542,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 2049,
+        "retained_bytes": 839114,
+        "stale": 0,
+        "strings": 0,
+        "tree": 8193,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "quality",
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "symbol_table-object-quality",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 6146,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 8193,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 22542,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 2049,
+        "retained_bytes": 839114,
+        "stale": 0,
+        "strings": 0,
+        "tree": 8193,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=22542 tokens=20492 build_ns=147424 retained_bytes=293062 transient_high_water=17120 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=22542 retained_bytes=839114 regions=2049 candidates=8193 tree=8193 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=6146 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "8c032c4f6ded2e244c12102a027b838c12a9fc0912ab43c57fbddbfdb7ca5237",
+        "output_size_bytes": 232424,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/symbol_table.c",
+        "-c",
+        "-fregister-allocator=quality",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=22542 retained_bytes=839114 regions=2049 candidates=8193 tree=8193 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=6146 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5614,
+      "raw_log_member": "ast_retirement_acceptance/probe/symbol_table-object-quality/a.log",
+      "raw_log_sha256": "454e514cd6eaf45021fad48d42db29a66bd96b669f12353b66b72a8110ce34a0",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=22542 tokens=20492 build_ns=147424 retained_bytes=293062 transient_high_water=17120 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 839114,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 293062
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/symbol_table.c",
+        "sha256": "f1bee39d36c032a699f75936ac8c926a69ca66fd54fa86658228c5fa5759da20",
+        "size_bytes": 280189
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "symbol_table"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 6146,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 8193,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 22542,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 2049,
+        "retained_bytes": 871370,
+        "stale": 0,
+        "strings": 0,
+        "tree": 8193,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "quality",
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "symbol_table-object-quality",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 6146,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 8193,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 22542,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 2049,
+        "retained_bytes": 871370,
+        "stale": 0,
+        "strings": 0,
+        "tree": 8193,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=22542 tokens=20492 build_ns=167612 retained_bytes=293062 transient_high_water=17120 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=22542 retained_bytes=871370 regions=2049 candidates=8193 tree=8193 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=6146 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": "8c032c4f6ded2e244c12102a027b838c12a9fc0912ab43c57fbddbfdb7ca5237",
+        "output_size_bytes": 232424,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/symbol_table.c",
+        "-c",
+        "-fregister-allocator=quality",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=22542 retained_bytes=871370 regions=2049 candidates=8193 tree=8193 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=6146 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5647,
+      "raw_log_member": "ast_retirement_acceptance/probe/symbol_table-object-quality/b.log",
+      "raw_log_sha256": "bf5b3fbf76c4d890776d0864fe740f20dc6d4f5bb71a51f2ef42775daa8ed2e3",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=22542 tokens=20492 build_ns=167612 retained_bytes=293062 transient_high_water=17120 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=65536 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 871370,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 293062
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/symbol_table.c",
+        "sha256": "f1bee39d36c032a699f75936ac8c926a69ca66fd54fa86658228c5fa5759da20",
+        "size_bytes": 280189
+      },
+      "unavailable_fields": [],
+      "workload": "symbol_table"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 20672,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 43200,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 68801,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 2274077,
+        "stale": 0,
+        "strings": 0,
+        "tree": 43200,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "fast",
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "control_flow-object-fast",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 20672,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 43200,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 68801,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 2274077,
+        "stale": 0,
+        "strings": 0,
+        "tree": 43200,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=68801 tokens=90113 build_ns=748481 retained_bytes=1042893 transient_high_water=15136 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=196608 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=68801 retained_bytes=2274077 regions=64 candidates=43200 tree=43200 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=20672 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "d9755b65d36960d3cd1d1c31584d1eb30ddedad0040c7c71f09e71bf714c5e60",
+        "output_size_bytes": 276000,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/control_flow.c",
+        "-c",
+        "-fregister-allocator=fast",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=68801 retained_bytes=2274077 regions=64 candidates=43200 tree=43200 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=20672 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5686,
+      "raw_log_member": "ast_retirement_acceptance/probe/control_flow-object-fast/a.log",
+      "raw_log_sha256": "2c616cf66be07d7cc30d47857239fd39212ecc549defd9831cf57ecfc07e65f0",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=68801 tokens=90113 build_ns=748481 retained_bytes=1042893 transient_high_water=15136 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=196608 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 2274077,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 1042893
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/control_flow.c",
+        "sha256": "2d7c13661910bbcc01c3465fdb9a724b6e65598033dc60de1dfa3602bfcc4497",
+        "size_bytes": 235398
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "control_flow"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 20672,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 43200,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 68801,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 2306333,
+        "stale": 0,
+        "strings": 0,
+        "tree": 43200,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "fast",
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "control_flow-object-fast",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 20672,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 43200,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 68801,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 2306333,
+        "stale": 0,
+        "strings": 0,
+        "tree": 43200,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=68801 tokens=90113 build_ns=760985 retained_bytes=1042893 transient_high_water=15136 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=196608 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=68801 retained_bytes=2306333 regions=64 candidates=43200 tree=43200 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=20672 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": "d9755b65d36960d3cd1d1c31584d1eb30ddedad0040c7c71f09e71bf714c5e60",
+        "output_size_bytes": 276000,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/control_flow.c",
+        "-c",
+        "-fregister-allocator=fast",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=68801 retained_bytes=2306333 regions=64 candidates=43200 tree=43200 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=20672 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5719,
+      "raw_log_member": "ast_retirement_acceptance/probe/control_flow-object-fast/b.log",
+      "raw_log_sha256": "349e45f7eee706523d98696d2110de54f59b391c99aa9301ebf2ddffb283f4bb",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=68801 tokens=90113 build_ns=760985 retained_bytes=1042893 transient_high_water=15136 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=196608 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 2306333,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 1042893
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/control_flow.c",
+        "sha256": "2d7c13661910bbcc01c3465fdb9a724b6e65598033dc60de1dfa3602bfcc4497",
+        "size_bytes": 235398
+      },
+      "unavailable_fields": [],
+      "workload": "control_flow"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 20672,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 43200,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 68801,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 2274077,
+        "stale": 0,
+        "strings": 0,
+        "tree": 43200,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "quality",
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "control_flow-object-quality",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 20672,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 43200,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 68801,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 2274077,
+        "stale": 0,
+        "strings": 0,
+        "tree": 43200,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=68801 tokens=90113 build_ns=798355 retained_bytes=1042893 transient_high_water=15136 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=196608 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=68801 retained_bytes=2274077 regions=64 candidates=43200 tree=43200 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=20672 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "d9755b65d36960d3cd1d1c31584d1eb30ddedad0040c7c71f09e71bf714c5e60",
+        "output_size_bytes": 276000,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/control_flow.c",
+        "-c",
+        "-fregister-allocator=quality",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=68801 retained_bytes=2274077 regions=64 candidates=43200 tree=43200 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=20672 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5690,
+      "raw_log_member": "ast_retirement_acceptance/probe/control_flow-object-quality/a.log",
+      "raw_log_sha256": "b4f9e3016e004b3dea2f3ecbb8bda3bd28a7c3169bcf8af33458516754fef2cb",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=68801 tokens=90113 build_ns=798355 retained_bytes=1042893 transient_high_water=15136 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=196608 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 2274077,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 1042893
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/control_flow.c",
+        "sha256": "2d7c13661910bbcc01c3465fdb9a724b6e65598033dc60de1dfa3602bfcc4497",
+        "size_bytes": 235398
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "control_flow"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 20672,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 43200,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 68801,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 2306333,
+        "stale": 0,
+        "strings": 0,
+        "tree": 43200,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "quality",
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "control_flow-object-quality",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 20672,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 43200,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 68801,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 2306333,
+        "stale": 0,
+        "strings": 0,
+        "tree": 43200,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=68801 tokens=90113 build_ns=755205 retained_bytes=1042893 transient_high_water=15136 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=196608 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=68801 retained_bytes=2306333 regions=64 candidates=43200 tree=43200 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=20672 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": "d9755b65d36960d3cd1d1c31584d1eb30ddedad0040c7c71f09e71bf714c5e60",
+        "output_size_bytes": 276000,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/control_flow.c",
+        "-c",
+        "-fregister-allocator=quality",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=68801 retained_bytes=2306333 regions=64 candidates=43200 tree=43200 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=20672 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5722,
+      "raw_log_member": "ast_retirement_acceptance/probe/control_flow-object-quality/b.log",
+      "raw_log_sha256": "2b4b489ddee052e2390881502e2948119dce07e94320f5e37a569f28227f0c40",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=68801 tokens=90113 build_ns=755205 retained_bytes=1042893 transient_high_water=15136 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=196608 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 2306333,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 1042893
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/control_flow.c",
+        "sha256": "2d7c13661910bbcc01c3465fdb9a724b6e65598033dc60de1dfa3602bfcc4497",
+        "size_bytes": 235398
+      },
+      "unavailable_fields": [],
+      "workload": "control_flow"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 78977,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 172096,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 200289,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 6110733,
+        "stale": 0,
+        "strings": 0,
+        "tree": 172096,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "fast",
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "backend_pressure-object-fast",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 78977,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 172096,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 200289,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 6110733,
+        "stale": 0,
+        "strings": 0,
+        "tree": 172096,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=200289 tokens=275862 build_ns=1475945 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=200289 retained_bytes=6110733 regions=64 candidates=172096 tree=172096 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=78977 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "7dbef7bdf77c66e6a34bf46b68d0de547a936ff4c4b6c8335f6f27bdf77d9f00",
+        "output_size_bytes": 1044104,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/backend_pressure.c",
+        "-c",
+        "-fregister-allocator=fast",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=200289 retained_bytes=6110733 regions=64 candidates=172096 tree=172096 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=78977 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5718,
+      "raw_log_member": "ast_retirement_acceptance/probe/backend_pressure-object-fast/a.log",
+      "raw_log_sha256": "9d64dd23df5426b1a5dece677c68df1c2d13eecc052de9c8b71aa1a9cceeb29d",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=200289 tokens=275862 build_ns=1475945 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 6110733,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 3194605
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/backend_pressure.c",
+        "sha256": "ff18c7018039abf36ff0ad499facd66a9e91f768b264e171579f491550ffb51d",
+        "size_bytes": 711531
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "backend_pressure"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 78977,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 172096,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 200289,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 6110733,
+        "stale": 0,
+        "strings": 0,
+        "tree": 172096,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "fast",
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "backend_pressure-object-fast",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 78977,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 172096,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 200289,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 6110733,
+        "stale": 0,
+        "strings": 0,
+        "tree": 172096,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=200289 tokens=275862 build_ns=1478650 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=200289 retained_bytes=6110733 regions=64 candidates=172096 tree=172096 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=78977 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": "7dbef7bdf77c66e6a34bf46b68d0de547a936ff4c4b6c8335f6f27bdf77d9f00",
+        "output_size_bytes": 1044104,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/backend_pressure.c",
+        "-c",
+        "-fregister-allocator=fast",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=200289 retained_bytes=6110733 regions=64 candidates=172096 tree=172096 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=78977 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5751,
+      "raw_log_member": "ast_retirement_acceptance/probe/backend_pressure-object-fast/b.log",
+      "raw_log_sha256": "2eec7535f5b48df8dbcef693d6c5e3c8a432b9f462dbe1421942313a017f415b",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=200289 tokens=275862 build_ns=1478650 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 6110733,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 3194605
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/backend_pressure.c",
+        "sha256": "ff18c7018039abf36ff0ad499facd66a9e91f768b264e171579f491550ffb51d",
+        "size_bytes": 711531
+      },
+      "unavailable_fields": [],
+      "workload": "backend_pressure"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 78977,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 172096,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "nodes": 200289,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 6110733,
+        "stale": 0,
+        "strings": 0,
+        "tree": 172096,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "quality",
+      "arm": "a",
+      "binary_sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+      "binary_size_bytes": 34632680,
+      "cell": "backend_pressure-object-quality",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 78977,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 172096,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": null,
+        "nodes": 200289,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 6110733,
+        "stale": 0,
+        "strings": 0,
+        "tree": 172096,
+        "type_names": null,
+        "typed_type_names": null,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=200289 tokens=275862 build_ns=1703198 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=200289 retained_bytes=6110733 regions=64 candidates=172096 tree=172096 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=78977 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": []
+        },
+        "output_sha256": "7dbef7bdf77c66e6a34bf46b68d0de547a936ff4c4b6c8335f6f27bdf77d9f00",
+        "output_size_bytes": 1044104,
+        "sha256": "4ae9e066a23310038a8fc9476f8774c4b524a48fa0477789d507415d9b570ad5",
+        "size_bytes": 34632680
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/backend_pressure.c",
+        "-c",
+        "-fregister-allocator=quality",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=200289 retained_bytes=6110733 regions=64 candidates=172096 tree=172096 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=78977 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0",
+      "raw_log_bytes": 5721,
+      "raw_log_member": "ast_retirement_acceptance/probe/backend_pressure-object-quality/a.log",
+      "raw_log_sha256": "c53abd31ef90be540bebb177cde4e865c85c293501d655ce303b95b51c2cd32b",
+      "raw_symbol_binding_lines": [],
+      "raw_tree_line": "C_AST nodes=200289 tokens=275862 build_ns=1703198 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 6110733,
+        "symbol_binding_reason": "compiler emits no separate symbol-binding ledger counter",
+        "symbol_binding_retained_bytes": null,
+        "symbol_binding_status": "unreported",
+        "tree_retained_bytes": 3194605
+      },
+      "revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "role": "baseline",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/backend_pressure.c",
+        "sha256": "ff18c7018039abf36ff0ad499facd66a9e91f768b264e171579f491550ffb51d",
+        "size_bytes": 711531
+      },
+      "unavailable_fields": [
+        "type_names",
+        "typed_type_names",
+        "missing_type_names"
+      ],
+      "workload": "backend_pressure"
+    },
+    {
+      "all_raw_counter_fields": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 78977,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 172096,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 200289,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 6110733,
+        "stale": 0,
+        "strings": 0,
+        "tree": 172096,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "allocator": "quality",
+      "arm": "b",
+      "binary_sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+      "binary_size_bytes": 34716816,
+      "cell": "backend_pressure-object-quality",
+      "facts": {
+        "appends": 0,
+        "bit_fields": 0,
+        "bound": 78977,
+        "builtin_identities": 0,
+        "busy": 0,
+        "candidates": 172096,
+        "completed": 0,
+        "completion_queries": 0,
+        "function_names": 0,
+        "invalid": 0,
+        "machine": 0,
+        "missing": 0,
+        "missing_type_names": 0,
+        "nodes": 200289,
+        "outside": 0,
+        "recipes": 0,
+        "regions": 64,
+        "retained_bytes": 6110733,
+        "stale": 0,
+        "strings": 0,
+        "tree": 172096,
+        "type_names": 0,
+        "typed_type_names": 0,
+        "uncovered": 0,
+        "unspanned": 0
+      },
+      "operation": "object",
+      "probe_arm_record": {
+        "exit": 0,
+        "lines": {
+          "C_AST": [
+            "C_AST nodes=200289 tokens=275862 build_ns=1468121 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit"
+          ],
+          "C_AST_FACTS": [
+            "C_AST_FACTS nodes=200289 retained_bytes=6110733 regions=64 candidates=172096 tree=172096 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=78977 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0"
+          ],
+          "C_SYMBOL_BINDINGS": [
+            "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+          ]
+        },
+        "output_sha256": "7dbef7bdf77c66e6a34bf46b68d0de547a936ff4c4b6c8335f6f27bdf77d9f00",
+        "output_size_bytes": 1044104,
+        "sha256": "f9cedbf32425f99e42f38f9cb079b79d1ebad77f2fd944a67062ee39fd2325b4",
+        "size_bytes": 34716816
+      },
+      "probe_command": [
+        "cc",
+        "-g0",
+        "-O0",
+        "work/ast-retirement-inputs/backend_pressure.c",
+        "-c",
+        "-fregister-allocator=quality",
+        "-o",
+        "OUT",
+        "-v"
+      ],
+      "raw_facts_line": "C_AST_FACTS nodes=200289 retained_bytes=6110733 regions=64 candidates=172096 tree=172096 machine=0 completed=0 missing=0 unspanned=0 invalid=0 appends=0 busy=0 bound=78977 bit_fields=0 strings=0 uncovered=0 outside=0 stale=0 completion_queries=0 recipes=0 builtin_identities=0 function_names=0 type_names=0 typed_type_names=0 missing_type_names=0",
+      "raw_log_bytes": 5754,
+      "raw_log_member": "ast_retirement_acceptance/probe/backend_pressure-object-quality/b.log",
+      "raw_log_sha256": "e75ca740047fcb1ad7dfa7417b73f01f8f411bce4ce24f31f0cc92227432fb44",
+      "raw_symbol_binding_lines": [
+        "C_SYMBOL_BINDINGS rows=0 retained_bytes=0 copy_bytes=0"
+      ],
+      "raw_tree_line": "C_AST nodes=200289 tokens=275862 build_ns=1468121 retained_bytes=3194605 transient_high_water=15168 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=655360 finalize_child_entries=0 layout=implicit",
+      "retained_components": {
+        "fact_retained_bytes": 6110733,
+        "symbol_binding_reason": "",
+        "symbol_binding_retained_bytes": 0,
+        "symbol_binding_status": "reported",
+        "tree_retained_bytes": 3194605
+      },
+      "revision": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "role": "candidate",
+      "source_identity": {
+        "path": "work/ast-retirement-inputs/backend_pressure.c",
+        "sha256": "ff18c7018039abf36ff0ad499facd66a9e91f768b264e171579f491550ffb51d",
+        "size_bytes": 711531
+      },
+      "unavailable_fields": [],
+      "workload": "backend_pressure"
+    }
+  ],
+  "schema": "buster-4239-final-retained-raw-fact-census-v1",
+  "source": "actual retained untimed -v logs from final physical artifact"
+}
