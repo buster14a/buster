@@ -25,6 +25,7 @@
 #include <buster/lib/compiler/assembly/assembly.h>
 
 #include <buster/lib/os.h>
+#include <buster/lib/simd.h>
 #include <buster/lib/string.h>
 
 MachineRef machine_ref_make(MachineRefKind kind, u32 payload)
@@ -2035,35 +2036,47 @@ BUSTER_GLOBAL_LOCAL void machine_builder_mark_virtual_register_mutable(MachineFu
 // explicit in the published MIR. A pure DEFINE that happens to name the same
 // vreg in a USE slot is the three-address spelling of the same mutation. Pure
 // duplicate DEFINE rows remain unclassified so the verifier catches them.
-BUSTER_GLOBAL_LOCAL void machine_builder_classify_instruction_mutability(MachineFunctionBuilder* builder, MachineInstruction const* instruction)
+BUSTER_GLOBAL_LOCAL void machine_builder_classify_instruction_mutability(MachineFunctionBuilder* builder, MachineOpcodeRow const* opcode_rows,
+                                                                        MachineInstruction const* instruction)
 {
-    MachineOpcodeInfo const* info = instruction ? machine_opcode_info(instruction->opcode) : 0;
-    if (!info)
+    if (instruction && instruction->opcode < MACHINE_OPCODE_COUNT)
     {
-        return;
-    }
-    for (u32 destination_slot = 0; destination_slot < info->operand_count; destination_slot += 1)
-    {
-        MachineRef destination = instruction->operands[destination_slot];
-        u32 destination_role = info->operand_info[destination_slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-        if (machine_ref_kind(destination) != MACHINE_REF_VIRTUAL_REGISTER ||
-            (destination_role != MACHINE_OPERAND_ROLE_DEFINE && destination_role != MACHINE_OPERAND_ROLE_USE_DEFINE))
+        // Operand membership is immutable opcode data, already published for
+        // placement and scheduling. Visit only definitions and their actual
+        // readers instead of decoding every slot's role on every emitted row.
+        u32 roles = opcode_rows[instruction->opcode].role_lanes;
+        u32 use_defines = roles >> MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT;
+        u32 definitions = ((roles >> MACHINE_OPCODE_ROW_DEFINE_SHIFT) | use_defines) & MACHINE_OPCODE_ROW_LANE_MASK;
+        while (definitions)
         {
-            continue;
-        }
-        bool mutable = destination_role == MACHINE_OPERAND_ROLE_USE_DEFINE;
-        for (u32 source_slot = 0; source_slot < info->operand_count && !mutable; source_slot += 1)
-        {
-            u32 source_role = info->operand_info[source_slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
-            mutable = (source_role == MACHINE_OPERAND_ROLE_USE || source_role == MACHINE_OPERAND_ROLE_USE_DEFINE) &&
-                      instruction->operands[source_slot] == destination;
-        }
-        if (mutable)
-        {
-            machine_builder_mark_virtual_register_mutable(builder, machine_ref_payload(destination));
+            u32 destination_slot = mask64_first_set(definitions);
+            definitions &= definitions - 1u;
+            MachineRef destination = instruction->operands[destination_slot];
+            if (machine_ref_kind(destination) == MACHINE_REF_VIRTUAL_REGISTER)
+            {
+                bool mutable = ((use_defines >> destination_slot) & 1u) != 0;
+                u32 sources = roles & MACHINE_OPCODE_ROW_LANE_MASK;
+                while (sources && !mutable)
+                {
+                    u32 source_slot = mask64_first_set(sources);
+                    sources &= sources - 1u;
+                    mutable = instruction->operands[source_slot] == destination;
+                }
+                if (mutable)
+                {
+                    machine_builder_mark_virtual_register_mutable(builder, machine_ref_payload(destination));
+                }
+            }
         }
     }
 }
+
+#if BUSTER_INCLUDE_TESTS
+void machine_test_classify_instruction_mutability(MachineFunctionBuilder* builder, MachineInstruction const* instruction)
+{
+    machine_builder_classify_instruction_mutability(builder, machine_opcode_row_table(), instruction);
+}
+#endif
 
 u32 machine_builder_block_begin(MachineFunctionBuilder* builder)
 {

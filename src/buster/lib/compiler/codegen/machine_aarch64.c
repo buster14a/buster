@@ -181,6 +181,7 @@ struct MachineA64Selector
     IrProgram* program;
     IrFunction* function;
     MachineFunctionBuilder builder;
+    MachineOpcodeRow const* opcode_rows;
     u64 reserved_selection_layout[MACHINE_SELECTION_RESERVED_LAYOUT_WORDS];
     Target target;
     MachineBuilderStream immediates;
@@ -677,7 +678,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_operand_register(MachineA64Selector* select
 
 BUSTER_GLOBAL_LOCAL u32 machine_a64_select_row(MachineA64Selector* selector, MachineInstruction instruction)
 {
-    machine_builder_classify_instruction_mutability(&selector->builder, &instruction);
+    machine_builder_classify_instruction_mutability(&selector->builder, selector->opcode_rows, &instruction);
     return machine_builder_instruction(&selector->builder, instruction);
 }
 
@@ -6252,6 +6253,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             .program = program,
             .function = function,
             .builder = machine_function_builder_begin(arena),
+            .opcode_rows = machine_opcode_row_table(),
             .value_virtual_registers = arena_allocate(arena, u32, function->value_count),
             .value_stack_slots = arena_allocate(arena, u32, function->value_count),
             .value_indirect_slots = arena_allocate(arena, u32, function->value_count),

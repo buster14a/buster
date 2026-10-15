@@ -1746,12 +1746,107 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_single_block_layout(Un
     return result;
 }
 
+// Exhaust every opcode against all four-slot combinations of equal/distinct
+// virtual registers, nonvirtual references and an out-of-range virtual id.
+// The oracle reads descriptor roles directly, independently of the projection
+// and sparse membership walk used by the production selector.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_mutability_roles(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    MachineFunctionBuilder builder = machine_function_builder_begin(arguments->arena);
+    u32 boundary = builder.virtual_registers.chunk_capacity;
+    u32 register_count = boundary + 1u;
+    for (u32 index = 0; index < register_count; index += 1)
+    {
+        machine_builder_virtual_register(&builder, (MachineVirtualRegister){
+            .definition_point = MACHINE_POINT_INVALID,
+            .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+            .typed_origin = index,
+        });
+    }
+    u32 ids[] = {0, 1, boundary};
+    MachineVirtualRegister* registers[] = {
+        machine_builder_virtual_register_at(&builder, ids[0]),
+        machine_builder_virtual_register_at(&builder, ids[1]),
+        machine_builder_virtual_register_at(&builder, ids[2]),
+    };
+    MachineRef choices[] = {
+        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, ids[0]),
+        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, ids[1]),
+        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, ids[2]),
+        machine_ref_make(MACHINE_REF_PHYSICAL_REGISTER, 0),
+        machine_ref_make(MACHINE_REF_STACK_SLOT, 0),
+        MACHINE_REF_NONE_VALUE,
+        machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, register_count),
+    };
+    u32 case_count = 1;
+    for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(((MachineInstruction){0}).operands); slot += 1)
+    {
+        case_count *= BUSTER_ARRAY_LENGTH(choices);
+    }
+    for (u32 opcode = 0; opcode < MACHINE_OPCODE_COUNT; opcode += 1)
+    {
+        MachineOpcodeInfo const* info = machine_opcode_info((u16)opcode);
+        bool exact = true;
+        for (u32 test_case = 0; test_case < case_count && exact; test_case += 1)
+        {
+            MachineInstruction instruction = {.opcode = (u16)opcode};
+            u32 combination = test_case;
+            for (u32 slot = 0; slot < BUSTER_ARRAY_LENGTH(instruction.operands); slot += 1)
+            {
+                instruction.operands[slot] = choices[combination % BUSTER_ARRAY_LENGTH(choices)];
+                combination /= BUSTER_ARRAY_LENGTH(choices);
+            }
+            u8 expected[BUSTER_ARRAY_LENGTH(ids)] = {0};
+            for (u32 reg = 0; reg < BUSTER_ARRAY_LENGTH(ids); reg += 1)
+            {
+                registers[reg]->flags = 0;
+                for (u32 destination = 0; destination < info->operand_count; destination += 1)
+                {
+                    u32 role = info->operand_info[destination] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                    bool writes = role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE;
+                    if (writes && instruction.operands[destination] == choices[reg])
+                    {
+                        bool reads = role == MACHINE_OPERAND_ROLE_USE_DEFINE;
+                        for (u32 source = 0; source < info->operand_count; source += 1)
+                        {
+                            u32 source_role = info->operand_info[source] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u);
+                            reads |= (source_role == MACHINE_OPERAND_ROLE_USE || source_role == MACHINE_OPERAND_ROLE_USE_DEFINE) &&
+                                     instruction.operands[source] == choices[reg];
+                        }
+                        if (reads) { expected[reg] = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE; }
+                    }
+                }
+            }
+            MachineInstruction before = instruction;
+            machine_test_classify_instruction_mutability(&builder, &instruction);
+            machine_test_classify_instruction_mutability(&builder, &instruction);
+            exact &= memory_compare(&before, &instruction, sizeof(instruction));
+            for (u32 reg = 0; reg < BUSTER_ARRAY_LENGTH(ids); reg += 1)
+            {
+                exact &= registers[reg]->flags == expected[reg] && registers[reg]->typed_origin == ids[reg] &&
+                         registers[reg]->definition_point == MACHINE_POINT_INVALID;
+            }
+        }
+        BUSTER_TEST(arguments, exact);
+    }
+    MachineInstruction invalid = {.opcode = UINT16_MAX, .operands = {choices[0], choices[0], choices[0], choices[0]}};
+    registers[0]->flags = 0;
+    machine_test_classify_instruction_mutability(&builder, &invalid);
+    invalid.opcode = MACHINE_OPCODE_COUNT;
+    machine_test_classify_instruction_mutability(&builder, &invalid);
+    machine_test_classify_instruction_mutability(&builder, 0);
+    BUSTER_TEST(arguments, registers[0]->flags == 0);
+    return result;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     // Each fixture returns every unit it preprocessed; the registry's own
     // arena is reserved once, before the first fixture's reading.
     c_test_unit_registry_prewarm();
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_mutability_roles);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_single_block_layout);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_incoming_signature_reuse);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_deferred_registers);

@@ -290,6 +290,14 @@ hosts execute its independent expected-value fixture.
   do not introduce a third permanent graph IR. The unused declarative selector
   was removed in [#269](https://github.com/buster14a/buster/pull/269), resolving
   [#42](https://github.com/buster14a/buster/issues/42).
+- Both target selectors retain the prewarmed `MachineOpcodeRow` table and use
+  its role membership to classify mutable virtual registers on emitted rows.
+  Only definition slots and their actual use slots need inspection. A
+  `USE_DEFINE` or a `DEFINE` sharing its register with a `USE` marks the
+  register mutable; duplicate pure definitions remain verifier errors.
+  `machine_selection_test_mutability_roles` checks every opcode against an
+  independent descriptor-role oracle, including equal/distinct registers,
+  chunk boundaries, nonvirtual operands and invalid register/opcode ids.
 - Each target selector decodes canonical operands once per function, in its
   first canonical-row walk. That walk accumulates value/use,
   local-promotion and direct-call facts and the aliasing/fusion candidate
