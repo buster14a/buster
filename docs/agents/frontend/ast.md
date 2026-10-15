@@ -336,7 +336,13 @@ it publishes and does not parse differently.
    the machine over its span, unchecked and in the region's mode, operands
    before operators, so each operator's run reads its operands' answers from
    the body's memo (`c_parse_region_facts`). The typer is set aside for these
-   queries. Nothing a run appends or mutates is kept. A run that appended a
+   queries. A typed region's `typeof`/`typeof_unqual` scalar arithmetic and bitwise
+   prefixes instead publish from completed nonrecipe child facts using the
+   same semantic arithmetic authority and retained bit-field widths. A
+   temporary region-sized postorder interval union selects only those
+   operands, and successful binary answers clear the projection value-category
+   flag. Pointer/vector/recipe operands and file-scope completion retain the
+   existing query path. Nothing a run appends or mutates is kept. A run that appended a
    row, bound, alignment record or interned-log entry, or mutated a row, is
    rolled back, including the mutations a valid root commits
    (`CTypeParseMachine.committed_mutation_count`), and the memo slot it may

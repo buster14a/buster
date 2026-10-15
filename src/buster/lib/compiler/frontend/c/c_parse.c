@@ -12024,7 +12024,7 @@ BUSTER_C_INTERNAL void c_parse_ast_storage_half_layout_publish(CTypeParseMachine
 // required unevaluated operands outside them. All transient model changes
 // are captured before the same checkpoint rollback.
 BUSTER_C_INTERNAL void c_parse_retained_fact_complete(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
-                                                       CScopeId node_scope, u32 node, u32 first, u32 end, bool compose)
+                                                       CScopeId node_scope, u32 node, u32 first, u32 end, bool compose, CAstTypeBody const* arithmetic_region)
 {
     CAstFacts* facts = machine->ast_facts;
     u32 slot = machine->expression_queries && machine->expression_query_result == result && first >= machine->expression_query_start &&
@@ -12041,8 +12041,9 @@ BUSTER_C_INTERNAL void c_parse_retained_fact_complete(CTypeParseMachine* machine
     u32 derived_recipe = C_AST_FACT_NONE;
     // Deep indirection chains already have their completed child
     // fact. Re-reading every nested prefix would be quadratic.
-    bool derived = (compose || machine->syntax_tree->kinds[node] == C_AST_DEREFERENCE || machine->syntax_tree->kinds[node] == C_AST_CAST) &&
-                   c_ast_types_facts_derive(machine, result, &preprocess, node, &type, &derived_recipe);
+    bool derived = arithmetic_region && c_ast_types_facts_scalar_arithmetic(machine, result, &preprocess, arithmetic_region, node, &type);
+    derived = derived || ((compose || machine->syntax_tree->kinds[node] == C_AST_DEREFERENCE || machine->syntax_tree->kinds[node] == C_AST_CAST) &&
+        c_ast_types_facts_derive(machine, result, &preprocess, node, &type, &derived_recipe));
     bool valid = derived || c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, node_scope, first, end, &type);
     if (!valid)
     {
@@ -12116,6 +12117,59 @@ BUSTER_C_INTERNAL void c_parse_retained_fact_complete(CTypeParseMachine* machine
     }
 }
 
+// TYPEOF owns the entire operand subtree. A backward interval union marks
+// membership once; nested or disjoint operands never rescan their prefixes.
+// These temporary marks select publication from finished scalar child facts,
+// leaving every semantic validator and other completion view unchanged.
+BUSTER_C_INTERNAL u8* c_parse_typeof_fact_marks(CTypeParseMachine* machine, CParseResult* result, u32 begin, u32 end)
+{
+    CAst const* ast = machine->syntax_tree;
+    u8* marks = 0;
+    u32 floor = C_AST_NODE_INVALID;
+    u64 bytes = ((u64)end - begin + 7) / 8;
+    for (u32 position = end; position > begin && !machine->failed && !c_parse_body_scratch_exhausted(); position -= 1)
+    {
+        u32 node = position - 1;
+        u32 relative = node - begin;
+#if BUSTER_INCLUDE_TESTS
+        c_assignment_chain_work += 1;
+#endif
+        if (floor != C_AST_NODE_INVALID)
+        {
+            marks[relative / 8] |= (u8)(1u << (relative % 8));
+            if (node == floor) floor = C_AST_NODE_INVALID;
+        }
+        u32 kind = ast->kinds[node];
+        if (kind == C_AST_TYPEOF || kind == C_AST_TYPEOF_UNQUAL)
+        {
+            u32 operand = c_ast_child_at(ast, node, 0);
+            if (ast->kinds[operand] != C_AST_TYPE_NAME)
+            {
+                if (!marks)
+                {
+                    bool room = machine->scratch_arena->position <= machine->scratch_arena->reserved_size &&
+                        bytes <= machine->scratch_arena->reserved_size - machine->scratch_arena->position;
+                    marks = room ? C_PARSE_BODY_SCRATCH_ARRAY(machine->scratch_arena, u8, bytes) : 0;
+                    if (marks) memset(marks, 0, bytes);
+                    else
+                    {
+                        c_parse_body_scratch_refuse();
+                        if (!c_parse_body_scratch_exhausted())
+                        {
+                            machine->failed = true;
+                            c_parse_diagnostic(result, (CSourceLocation){0}, C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                                S8("could not reserve typeof operand fact completion marks"));
+                        }
+                    }
+                }
+                u32 operand_begin = c_ast_subtree_begin(ast, operand);
+                floor = floor == C_AST_NODE_INVALID ? operand_begin : BUSTER_MIN(floor, operand_begin);
+            }
+        }
+    }
+    return marks;
+}
+
 BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, bool body)
 {
     CAstTypeBody* region = machine->ast_facts ? c_ast_types_facts_begin(machine, &preprocess) : 0;
@@ -12140,10 +12194,11 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
         // The runs' scratch goes back after them, so an initializer's region
         // arrays below it are still released by their caller.
         u64 scratch_mark = machine->scratch_arena->position;
+        u8* typeof_marks = c_parse_typeof_fact_marks(machine, result, region_begin, region_end);
         u32 node = 0;
         u32 first = 0;
         u32 end = 0;
-        while (c_ast_types_facts_next(region, facts, &node, &first, &end))
+        while (!c_parse_body_scratch_exhausted() && c_ast_types_facts_next(region, facts, &node, &first, &end))
         {
             if (machine->failed)
             {
@@ -12152,7 +12207,11 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
             else
             {
                 CScopeId node_scope = body ? c_parse_scope_for_token(result, scope, first) : scope;
-                c_parse_retained_fact_complete(machine, preprocess, result, node_scope, node, first, end, false);
+                u32 relative = node - region_begin;
+                u32 kind = machine->syntax_tree->kinds[node];
+                bool scalar_arithmetic = typeof_marks && (typeof_marks[relative / 8] & (1u << (relative % 8))) &&
+                    ((kind >= C_AST_MULTIPLY && kind <= C_AST_SUBTRACT) || kind == C_AST_BIT_AND || kind == C_AST_BIT_XOR || kind == C_AST_BIT_OR);
+                c_parse_retained_fact_complete(machine, preprocess, result, node_scope, node, first, end, false, scalar_arithmetic ? region : 0);
             }
             if (facts->recipe_failed && !machine->failed)
             {
@@ -12240,7 +12299,7 @@ BUSTER_C_INTERNAL void c_parse_unevaluated_operand_facts(CTypeParseMachine* mach
                     }
                 }
                 if (first != C_AST_SPAN_NONE && first < end && end <= preprocess.token_count)
-                    c_parse_retained_fact_complete(machine, preprocess, result, scope, node, first, end, true);
+                    c_parse_retained_fact_complete(machine, preprocess, result, scope, node, first, end, true, 0);
                 else facts->statistics.gaps[C_AST_FACT_GAP_UNSPANNED] += 1;
                 if (facts->recipe_failed && !machine->failed)
                 {

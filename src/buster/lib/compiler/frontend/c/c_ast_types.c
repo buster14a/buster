@@ -875,14 +875,22 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_probe_fails(CAstTypeBody const* body, u32 s
 // final `.` or `->`. That probe is 0 when it provably fails without a new row
 // (c_ast_types_probe_fails), and every other such node (`x, s.f`, `(T)s.f`)
 // is left to the machine.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_operand_member_tail(CAstTypeBody const* body, u32 node)
+{
+    u32 relative = node - body->begin;
+    u32 first = body->first[relative];
+    u32 end = body->end[relative];
+    return end >= first + 3 && body->tokens[end - 1].kind == C_TOKEN_IDENTIFIER &&
+        (c_ast_types_punctuator_at(body, end - 2, C_PUNCTUATOR_DOT) || c_ast_types_punctuator_at(body, end - 2, C_PUNCTUATOR_ARROW));
+}
+
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE u32 c_ast_types_operand_width(CAstTypeBody const* body, u32 node)
 {
     u32 relative = node - body->begin;
     u32 kind = body->ast->kinds[node];
     u32 first = body->first[relative];
     u32 end = body->end[relative];
-    bool member_tail = end >= first + 3 && body->tokens[end - 1].kind == C_TOKEN_IDENTIFIER &&
-                       (c_ast_types_punctuator_at(body, end - 2, C_PUNCTUATOR_DOT) || c_ast_types_punctuator_at(body, end - 2, C_PUNCTUATOR_ARROW));
+    bool member_tail = c_ast_types_operand_member_tail(body, node);
     bool member = kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW;
     return member ? body->widths[relative] : member_tail && !c_ast_types_probe_fails(body, first, end - 2) ? C_AST_TYPE_NONE : 0;
 }
@@ -3465,6 +3473,48 @@ BUSTER_GLOBAL_LOCAL CAstFactTypeReference c_ast_types_fact_nested(CAstFacts cons
     bool temporary = recipe && nested.value != C_ID_UNDERLYING_INVALID && nested.value >= recipe->row_begin;
     u32 index = temporary ? recipe->recipe_begin + nested.value - recipe->row_begin : nested.value;
     return c_ast_types_fact_reference(facts, result, index, temporary);
+}
+
+// Only a marked TYPEOF operand in the current typed region may compose
+// these scalar answers. Unknown widths, recipes and non-scalars keep the
+// existing protected query and its generic publication fallback.
+BUSTER_C_SHARED bool c_ast_types_facts_scalar_arithmetic(CTypeParseMachine* machine, CParseResult* result,
+    CPreprocessResult const* preprocess, CAstTypeBody const* region, u32 node, CTypeId* type_out)
+{
+    CAstFacts const* facts = machine->ast_facts;
+    CAst const* ast = machine->syntax_tree;
+    u32 a = c_ast_child_at(ast, node, 0);
+    u32 b = c_ast_child_at(ast, node, 1);
+    CAstFactTypeReference left = c_ast_types_fact_node(facts, result, a);
+    CAstFactTypeReference right = c_ast_types_fact_node(facts, result, b);
+    bool a_member = ast->kinds[a] == C_AST_MEMBER || ast->kinds[a] == C_AST_MEMBER_ARROW;
+    bool b_member = ast->kinds[b] == C_AST_MEMBER || ast->kinds[b] == C_AST_MEMBER_ARROW;
+    // The semantic width probe may read a member tail through a comma,
+    // cast or conditional. Its completed result is not a member fact.
+    // A machine-only member without a published width is unknown too.
+    bool a_width_known = a_member ? !(facts->flags[a] & C_AST_FACT_MACHINE) || (facts->flags[a] & C_AST_FACT_BIT_FIELD)
+                                  : !c_ast_types_operand_member_tail(region, a);
+    bool b_width_known = b_member ? !(facts->flags[b] & C_AST_FACT_MACHINE) || (facts->flags[b] & C_AST_FACT_BIT_FIELD)
+                                  : !c_ast_types_operand_member_tail(region, b);
+    CTypeId type = C_TYPE_ID_INVALID;
+    if (left.type && right.type && !left.recipe && !right.recipe && region->scalars_published && result->expression_scalar_types && a_width_known && b_width_known)
+    {
+        u32 a_width = (facts->flags[a] & C_AST_FACT_BIT_FIELD) ? facts->payloads[a] : 0;
+        u32 b_width = (facts->flags[b] & C_AST_FACT_BIT_FIELD) ? facts->payloads[b] : 0;
+        u32 type_count = result->type_count;
+        type = c_parse_expression_arithmetic_type(result, preprocess->target,
+            (CTypeId){.value = left.index}, (CTypeId){.value = right.index}, a_width, b_width);
+        type = type.value < type_count && result->type_count == type_count ? type : C_TYPE_ID_INVALID;
+    }
+    bool valid = type.value < result->type_count;
+    if (valid)
+    {
+        // Every binary result clears the projection left by a completed
+        // __real__/__imag__ child, exactly as the semantic query does.
+        machine->result_nonplace_projection = false;
+    }
+    *type_out = type;
+    return valid;
 }
 
 // Facts can describe valid nodes the range machine cannot answer: a call

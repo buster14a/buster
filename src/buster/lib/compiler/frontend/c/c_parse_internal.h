@@ -20,7 +20,8 @@ BUSTER_F_DECL CTypeId c_test_aggregate_lookup_add(CParseResult* result, CType ty
 BUSTER_F_DECL CTypeId c_test_aggregate_lookup_find(CParseResult* result, CTypeKind kind, String8 tag, CScopeId scope);
 BUSTER_F_DECL void c_test_aggregate_lookup_rollback(CParseResult* result, CParseResult checkpoint);
 
-// Type-task steps, operator-token visits, and expression-end table/walk rows.
+// Type-task steps, operator-token visits, expression-end table/walk rows,
+// and TYPEOF completion membership-node visits.
 BUSTER_F_DECL u64 c_test_assignment_chain_work(void);
 
 // Caps, on the calling thread, the scratch bytes each function body's guarded

@@ -9723,6 +9723,195 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_required_conditional_recipe_growth
     return result;
 }
 
+// A typed region publishes each TYPEOF scalar prefix from its completed
+// children. The ordinary semantic work counter and query bound fail if the
+// growing prefix is retyped; reference analysis still owns all model rows.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_typeof_arithmetic_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const depths[] = {64, 1024};
+    String8 const operations[] = {S8(" + i"), S8(" - i"), S8(" * i"), S8(" / i"), S8(" % i"), S8(" & i"), S8(" ^ i"), S8(" | i"), S8(" * i - i ^ i | i")};
+    for (u32 operation = 0; operation < BUSTER_ARRAY_LENGTH(operations); operation += 1)
+    {
+        u64 previous_work = 0;
+        for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(depths); sample += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            u32 depth = depths[sample];
+            String8* parts = arena_allocate(temporary.arena, String8, depth);
+            for (u32 index = 0; index < depth; index += 1) parts[index] = operations[operation];
+            String8 chain = string_join_arena(temporary.arena, (SliceString8){parts, depth}, false);
+            String8 source = string_format(temporary.arena,
+                S8("int f(int i){{__typeof__(i{S8}) t=0;return t;}"), chain);
+            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+            u64 before = c_test_assignment_chain_work();
+            CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+            u64 work = c_test_assignment_chain_work() - before;
+            string_print(S8("TYPEOF_ARITHMETIC_WORK operation={u32} depth={u32} queries={u64} work={u64}\n"), operation, depth,
+                analysis.ast_facts ? analysis.ast_facts->statistics.completion_queries : 0, work);
+            if (BUSTER_REQUIRE(arguments, analysis.analysis_complete && !analysis.diagnostic_count && analysis.ast && analysis.ast_facts))
+            {
+                CAstFacts const* facts = analysis.ast_facts;
+                BUSTER_TEST_RAW(arguments, facts->statistics.completion_queries <= (operation == 8 ? depth * 4 : depth) + 16 && work <= (u64)depth * 512 + 4096,
+                    string_format(temporary.arena, S8("typeof op={u32} depth={u32} queries={u64} work={u64}"),
+                        operation, depth, facts->statistics.completion_queries, work));
+                if (previous_work) BUSTER_TEST(arguments, work <= previous_work * 16 + 4096);
+                previous_work = work;
+                u32 found = 0;
+                for (u32 node = 0; node < analysis.ast->node_count; node += 1)
+                {
+                    if ((analysis.ast->kinds[node] >= C_AST_MULTIPLY && analysis.ast->kinds[node] <= C_AST_SUBTRACT) ||
+                        analysis.ast->kinds[node] == C_AST_BIT_AND || analysis.ast->kinds[node] == C_AST_BIT_XOR || analysis.ast->kinds[node] == C_AST_BIT_OR)
+                    {
+                        found += 1;
+                        BUSTER_TEST(arguments, (facts->flags[node] & C_AST_FACT_TYPED) &&
+                            !(facts->flags[node] & (C_AST_FACT_RECIPE | C_AST_FACT_NONPLACE)) &&
+                            facts->types[node] < analysis.type_count && analysis.types[facts->types[node]].kind == C_TYPE_INT);
+                    }
+                }
+                BUSTER_TEST(arguments, found == depth * (operation == 8 ? 4 : 1) && !facts->statistics.stale && !facts->statistics.gaps[C_AST_FACT_GAP_APPENDS]);
+                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                syntax.type_interning = true;
+                syntax.reference_tokens = true;
+                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+                difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &analysis);
+                BUSTER_TEST_RAW(arguments, !difference.length, difference);
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    u64 previous_work = 0;
+    for (u32 sample = 0; sample < 2; sample += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 copies = sample ? 16 : 1;
+        String8* functions = arena_allocate(temporary.arena, String8, copies);
+        for (u32 index = 0; index < copies; index += 1)
+            functions[index] = string_format(temporary.arena, S8("int f{u32}(int i){{__typeof__(i+1) t=0;return t;}"), index);
+        String8 source = string_join_arena(temporary.arena, (SliceString8){functions, copies}, false);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+        u64 before = c_test_assignment_chain_work();
+        CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+        u64 work = c_test_assignment_chain_work() - before;
+        BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && analysis.ast_facts);
+        string_print(S8("TYPEOF_REGION_WORK copies={u32} work={u64}\n"), copies, work);
+        BUSTER_TEST(arguments, work < (u64)copies * 512 && (!previous_work || work <= previous_work * 16 + 64));
+        previous_work = work;
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
+// Completed child types retain the semantic authority's promotions, scopes
+// and value category. Pointer/recipe/invalid operands keep the ordinary path.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_typeof_arithmetic_authority(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const accepted[] = {
+        S8("int f(int i){const volatile unsigned short u=1;__typeof__(u+i) t=0;_Static_assert(__builtin_types_compatible_p(__typeof__(t),int),\"qualified\");return t;}"),
+        S8("enum E{A=1};int f(enum E e){_Atomic(int) a=1;__typeof__(e+a) t=0;_Static_assert(__builtin_types_compatible_p(__typeof__(t),unsigned int),\"enum atomic\");return t;}"),
+        S8("int f(int i){struct B{unsigned int a:3;unsigned long long b:40;} b={0};__typeof__(b.a+i) t=0;__typeof__(b.b+i) u=0;_Static_assert(sizeof(t)==sizeof(int),\"narrow\");_Static_assert(sizeof(u)==8,\"wide\");return t+(int)u;}"),
+        S8("int f(int i,float x,double y,long double z){__typeof__(x+i) a=0;__typeof__(y-x) b=0;__typeof__(z*y) c=0;_Static_assert(__builtin_types_compatible_p(__typeof__(a),float),\"float\");_Static_assert(__builtin_types_compatible_p(__typeof__(b),double),\"double\");_Static_assert(__builtin_types_compatible_p(__typeof__(c),long double),\"long double\");return 0;}"),
+        S8("int f(int i,double _Complex z){__typeof__(z+i) a=0;__typeof__(z/i) b=0;_Static_assert(__builtin_types_compatible_p(__typeof__(a),double _Complex),\"complex\");return 0;}"),
+        S8("int f(int i,unsigned __int128 u){__typeof__(u+i) a=0;_Static_assert(__builtin_types_compatible_p(__typeof__(a),unsigned __int128),\"int128\");return 0;}"),
+        S8("int f(double d,int i){__typeof__((__real__ d)+i) a=0;__typeof__(i+(__imag__ d)) b=0;_Static_assert(__builtin_types_compatible_p(__typeof__(a),double),\"real projection\");return (int)(a+b);}"),
+        S8("int f(int* p,int i){__typeof__(p+i) a=p;__typeof__(p-p) b=0;return *a+(int)b;}"),
+        S8("int f(int i){__typeof__((__typeof__(i+1))i+2) a=0;__typeof__(i*2) b=0;return a+b;}"),
+        S8("long x;int f(int x){__typeof__(x+1) a=0;{long x=0;__typeof__(x+1) b=0;_Static_assert(__builtin_types_compatible_p(__typeof__(b),long),\"scope\");}return a;}"),
+        S8("int f(const int i){typeof_unqual(i+1) a=0;typeof_unqual(long) b=0;return a+(int)b;}"),
+        S8("struct S{unsigned long long b:3;};int f(struct S s,int x){__typeof__((x,s.b)+0) y=0;return (int)y;}"),
+        S8("struct S{unsigned long long b:3;};int f(struct S s,int x){__typeof__((x,s).b+0) y=0;return (int)y;}"),
+        S8("struct S{unsigned long long b:3;};int f(struct S s,int x){__typeof__((x?s.b:s.b)+0) y=0;return (int)y;}"),
+        S8("struct S{unsigned long long b:3;};int f(struct S s,int x){__typeof__((unsigned long long)s.b+0) y=0;return (int)y;}"),
+        // The historical unchecked TYPEOF query admits this; publication
+        // must preserve that answer until its separate constraint fix.
+        S8("int f(double x){__typeof__(x%2) a;return 0;}"),
+    };
+    String8 const rejected[] = {
+        S8("typedef int V __attribute__((vector_size(16)));int f(V x,V z){__typeof__(x&z) a=x;return a[0];}"),
+        S8("struct S{unsigned long long b:3;};int f(struct S s,int x){__typeof__((__extension__ s.b)+0) y=0;return (int)y;}"),
+        S8("int f(int* p){__typeof__(p*2) a;return 0;}"),
+        S8("int f(void){struct S{int x;} s;__typeof__(s+1) a;return 0;}"),
+        S8("int f(int* p){__typeof__(p+1.0) a;return 0;}"),
+    };
+    for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(accepted) + BUSTER_ARRAY_LENGTH(rejected); sample += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        bool valid = sample < BUSTER_ARRAY_LENGTH(accepted);
+        String8 source = valid ? accepted[sample] : rejected[sample - BUSTER_ARRAY_LENGTH(accepted)];
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU23);
+        CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+        CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+        syntax.type_interning = true;
+        syntax.reference_tokens = true;
+        CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+        BUSTER_TEST_RAW(arguments, !preprocess.diagnostic_count && analysis.analysis_complete &&
+            (valid ? !analysis.diagnostic_count : analysis.diagnostic_count != 0),
+            string_format(temporary.arena, S8("typeof authority sample={u32}: {S8}"), sample,
+                analysis.diagnostic_count ? analysis.diagnostics[0].message : S8("missing expected refusal")));
+        String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+        difference = difference.length || !valid ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &analysis);
+        BUSTER_TEST_RAW(arguments, !difference.length, difference);
+        if (valid && analysis.ast && analysis.ast_facts)
+        {
+            CAstFacts const* facts = analysis.ast_facts;
+            for (u32 node = 0; node < analysis.ast->node_count; node += 1)
+            {
+                if (analysis.ast->kinds[node] >= C_AST_MULTIPLY && analysis.ast->kinds[node] <= C_AST_SUBTRACT)
+                    BUSTER_TEST(arguments, !(facts->flags[node] & C_AST_FACT_NONPLACE));
+            }
+            for (u32 node = 0; node < analysis.ast->node_count; node += 1)
+            {
+                if (analysis.ast->kinds[node] == C_AST_TYPEOF || analysis.ast->kinds[node] == C_AST_TYPEOF_UNQUAL)
+                {
+                    u32 operand = c_ast_child_at(analysis.ast, node, 0);
+                    u32 kind = analysis.ast->kinds[operand];
+                    if ((kind >= C_AST_MULTIPLY && kind <= C_AST_SUBTRACT) || kind == C_AST_BIT_AND || kind == C_AST_BIT_XOR || kind == C_AST_BIT_OR)
+                    {
+                        u32 owners = 0;
+                        for (u32 entity = 0; entity < analysis.entity_count; entity += 1)
+                        {
+                            CEntity const* row = analysis.entities + entity;
+                            u32 declaration = row->declaration_node_plus_one ? row->declaration_node_plus_one - 1 : C_AST_NODE_INVALID;
+                            if ((row->kind == C_ENTITY_OBJECT || row->kind == C_ENTITY_LOCAL) && declaration < analysis.ast->node_count &&
+                                node >= c_ast_subtree_begin(analysis.ast, declaration) && node < declaration)
+                            {
+                                owners += 1;
+                                bool typed = (facts->flags[operand] & C_AST_FACT_TYPED) &&
+                                    !(facts->flags[operand] & (C_AST_FACT_RECIPE | C_AST_FACT_NONPLACE)) &&
+                                    facts->types[operand] < analysis.type_count && row->type.value < analysis.type_count;
+                                CType const* actual = typed ? analysis.types + facts->types[operand] : 0;
+                                CType const* expected = typed ? analysis.types + row->type.value : 0;
+                                bool same = typed && actual->kind == expected->kind && actual->is_const == expected->is_const &&
+                                    actual->is_volatile == expected->is_volatile && actual->is_restrict == expected->is_restrict &&
+                                    actual->is_atomic == expected->is_atomic && actual->is_complete == expected->is_complete &&
+                                    actual->vector_byte_size == expected->vector_byte_size;
+                                if (same && (actual->kind == C_TYPE_POINTER || actual->kind == C_TYPE_VECTOR))
+                                {
+                                    bool elements = actual->element_type.value < analysis.type_count && expected->element_type.value < analysis.type_count;
+                                    CType const* a = elements ? analysis.types + actual->element_type.value : 0;
+                                    CType const* b = elements ? analysis.types + expected->element_type.value : 0;
+                                    same = elements && a->kind == b->kind && a->is_const == b->is_const && a->is_volatile == b->is_volatile &&
+                                        a->is_restrict == b->is_restrict && a->is_atomic == b->is_atomic;
+                                }
+                                BUSTER_TEST_RAW(arguments, same,
+                                    string_format(temporary.arena, S8("typeof arithmetic root authority sample={u32} entity={S8}"), sample, row->name));
+                            }
+                        }
+                        BUSTER_TEST(arguments, owners != 0);
+                    }
+                }
+            }
+            CIRLowerResult lowered = c_lower_to_ir(temporary.arena, S8("typeof-arithmetic.c"), preprocess, analysis, target_native);
+            BUSTER_TEST_RAW(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified,
+                lowered.diagnostic_count ? lowered.diagnostics[0].message : S8("missing canonical typeof arithmetic program"));
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // Completed indirection facts compose from their children. Query count is
 // bounded independently of the grouped function designator's input depth.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_indirection_work(UnitTestArguments* arguments)
@@ -9949,6 +10138,8 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_cast_prefix_machine_capacity);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_required_conditional_recipe_growth);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_indirection_work);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_typeof_arithmetic_work);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_typeof_arithmetic_authority);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_typeof_postfix_calls);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_enum_scope_scratch_reuse);
 #if !BUSTER_ANDROID && !BUSTER_IOS

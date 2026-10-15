@@ -566,6 +566,59 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_exhaustion(Uni
         BUSTER_TEST(arguments, both.diagnostic_count == 2 && c_test_body_scratch_reported(arguments, &both, 0, S8("big")) &&
                                    string_equal(both.messages[1], invalid_open.messages[0]));
     }
+    // TYPEOF membership is a real region-sized guarded byte request. The
+    // earlier control-validator peak masks a mark-first-refusal cap; test the
+    // whole-body boundary and later-body recovery through production instead.
+    {
+        u32 depth = 1024;
+        String8* terms = arena_allocate(arguments->arena, String8, depth);
+        for (u32 step = 0; step < depth; step += 1) terms[step] = S8("+i");
+        String8 chain = string_join_arena(arguments->arena, (SliceString8){terms, depth}, false);
+        String8 source = string_format(arguments->arena,
+            S8("int big(int i){{__typeof__(i{S8}) t=0;return t;}int later(int i){{return i+1;}"), chain);
+        CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
+                                 .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CAstResult built = c_ast_build(arguments->arena, preprocess, (CAstOptions){0});
+        u32 region_nodes = 0;
+        for (u32 node = 1; built.complete && node < built.ast.node_count && !region_nodes; node += 1)
+        {
+            if (built.ast.kinds[node] == C_AST_FUNCTION_DEFINITION && built.ast.kinds[node - 1] == C_AST_COMPOUND_STATEMENT)
+                region_nodes = built.ast.extents[node - 1];
+        }
+        u64 mark_bytes = ((u64)region_nodes + 7) / 8;
+        CTestBodyScratchRun typeof_open = c_test_body_scratch_run(arguments, source, 0, trace);
+        if (BUSTER_REQUIRE(arguments, built.complete && region_nodes && typeof_open.lowered &&
+                                     typeof_open.trace_count < C_TEST_BODY_SCRATCH_TRACE_CAPACITY))
+        {
+            u32 mark_row = c_test_body_scratch_find(trace, typeof_open.trace_count, 0, sizeof(u8), mark_bytes);
+            u32 matches = 0;
+            for (u32 row = c_test_body_scratch_body_start(trace, typeof_open.trace_count, 0) + 1;
+                 row < typeof_open.trace_count && trace[row].element_size; row += 1)
+            {
+                matches += trace[row].element_size == sizeof(u8) && trace[row].count == mark_bytes;
+            }
+            // Unique byte count identifies the production marks request in
+            // this workload. Never silently accept an ambiguous trace row.
+            BUSTER_TEST(arguments, matches == 1);
+            if (BUSTER_REQUIRE(arguments, matches == 1 && mark_row < typeof_open.trace_count))
+            {
+                u64 earlier_peak = c_test_body_scratch_peak(trace, typeof_open.trace_count, 0, mark_row);
+                u64 peak = c_test_body_scratch_peak(trace, typeof_open.trace_count, 0, UINT32_MAX);
+                u64 later_peak = c_test_body_scratch_peak(trace, typeof_open.trace_count, 1, UINT32_MAX);
+                BUSTER_TEST(arguments, trace[mark_row].end >= mark_bytes && trace[mark_row].end <= earlier_peak);
+                BUSTER_TEST(arguments, peak > later_peak && later_peak);
+                CTestBodyScratchRun typeof_fits = c_test_body_scratch_run(arguments, source, peak, trace);
+                BUSTER_TEST(arguments, typeof_fits.lowered && c_test_body_scratch_refused(trace, typeof_fits.trace_count) == UINT32_MAX);
+                CTestBodyScratchRun typeof_short = c_test_body_scratch_run(arguments, source, peak - 1, trace);
+                BUSTER_TEST(arguments, !typeof_short.lowered && typeof_short.diagnostic_count == 1 &&
+                    c_test_body_scratch_reported(arguments, &typeof_short, 0, S8("big")));
+                BUSTER_TEST(arguments, c_test_body_scratch_body_start(trace, typeof_short.trace_count, 1) < typeof_short.trace_count);
+            }
+        }
+        c_ast_release(&built.ast);
+        c_preprocess_release(&preprocess);
+    }
     return result;
 }
 
