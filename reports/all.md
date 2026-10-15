@@ -6,15 +6,15 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 
 | Job / matrix | OS / actual CPU | Event / branch | Successful samples | Missing context | History |
 |---|---|---|---:|---:|---|
-| Collect terminal Actions executions / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 0 | 1 | [series](series-0109083458cb9d60.md) |
+| Collect terminal Actions executions / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 0 | 2 | [series](series-0109083458cb9d60.md) |
 | Report required job step changes / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | schedule / main | 3 | 3 | [series](series-83ed1af80b7b8574.md) |
-| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 26 | [series](series-e460ad260f8a45e8.md) |
-| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 26 | [series](series-f666f9001ca74394.md) |
-| Publish advisory CI history / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | schedule / main | 1 | 1 | [series](series-6a4898acd94420e1.md) |
+| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 27 | [series](series-e460ad260f8a45e8.md) |
+| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 27 | [series](series-f666f9001ca74394.md) |
+| Publish advisory CI history / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | schedule / main | 2 | 2 | [series](series-6a4898acd94420e1.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | schedule / main | 1 | 1 | [series](series-81526bc99a167891.md) |
-| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | schedule / main | 1 | 1 | [series](series-ef4146adf6df2506.md) |
+| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | schedule / main | 2 | 2 | [series](series-ef4146adf6df2506.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 3 | 7 | [series](series-3849565cbf5b0152.md) |
-| Open the native-retirement catch-up request / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 2 | 2 | [series](series-9d03e2991bd3143d.md) |
+| Open the native-retirement catch-up request / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 3 | 3 | [series](series-9d03e2991bd3143d.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 4 | 4 | [series](series-d8a73100e4551997.md) |
 | Hosted ordinary compiler bridge proof / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | push / main | 2 | 2 | [series](series-dcdd48ee362f256d.md) |
 | Hosted TCC native proofs / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | push / main | 1 | 1 | [series](series-63f2f448f64573ee.md) |
@@ -34,7 +34,7 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / Intel&#40;R&#41; Xeon&#40;R&#41; 6973P-C | workflow&#95;run / main | 2 | 2 | [series](series-a6995fda2f37e6c6.md) |
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 20 | 20 | [series](series-2920b31d99ae0d1d.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 13 | 13 | [series](series-0571bc9f9540bac0.md) |
-| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 2 | 2 | [series](series-0c23520928a68d97.md) |
+| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 3 | 3 | [series](series-0c23520928a68d97.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 6 | 6 | [series](series-19099ca16926fec2.md) |
 | watch-merge-group /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 189 | [series](series-913f439ad1b303c4.md) |
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | workflow&#95;run / main | 4 | 4 | [series](series-5d35a6e5ea745d91.md) |
@@ -86,7 +86,7 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | schedule / main | 1 | 1 | [series](series-209d6e7bec73898e.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | schedule / main | 1 | 1 | [series](series-a8862cde95aea4e0.md) |
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 2 | 2 | [series](series-6bc06e5fc6be903c.md) |
-| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 5 | 5 | [series](series-33ea968a7c5f4ce4.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 9 | 9 | [series](series-33ea968a7c5f4ce4.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | schedule / main | 1 | 1 | [series](series-548cffdbfa2f0f01.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | merge&#95;group / gh-readonly-queue/main/pr-4205-ad8c8373c319eeca3e3f233e1c7cd7b22b6fbf9d | 0 | 1 | [series](series-aa66be9ccc62c599.md) |
 | test &#40;windows-2025&#41; / unavailable-dynamic-or-reusable-matrix | Windows Server 2025 Datacenter / AMD EPYC 9V74 80-Core Processor | merge&#95;group / gh-readonly-queue/main/pr-4205-ad8c8373c319eeca3e3f233e1c7cd7b22b6fbf9d | 1 | 1 | [series](series-7a8855af7ce5e71a.md) |
