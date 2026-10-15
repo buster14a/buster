@@ -4682,7 +4682,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_emms_tests(UnitTestArguments*
                         compiler_driver_object_path_test_report(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), compiled);
                     }
                     os_file_delete(object_path);
-                    arena_end_temporal(compile);
+                    scratch_end(compile);
                 }
             }
         }
@@ -4717,7 +4717,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_emms_tests(UnitTestArguments*
                     arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
                 BUSTER_TEST(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE && compiled.diagnostic.length && !compiled.has_object);
                 os_file_delete(object_path);
-                arena_end_temporal(compile);
+                scratch_end(compile);
             }
         }
     }
