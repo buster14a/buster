@@ -3010,6 +3010,115 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
     return prepass;
 }
 
+
+#define MACHINE_FAST_BLOCK_COLOR_WORD_LIMIT 25000000u
+// Small populations cannot exhaust the comparison budget and need no
+// failure-certificate census. This upper bound never rejects a coloring.
+BUSTER_GLOBAL_LOCAL bool machine_fast_block_color_fits(u32 count, u32 block_count)
+{
+    u64 words = ((u64)block_count + 63u) / 64u;
+    u64 pairs = count ? (u64)count * (count - 1u) / 2u : 0;
+    return !words || pairs <= MACHINE_FAST_BLOCK_COLOR_WORD_LIMIT / words;
+}
+
+#if BUSTER_INCLUDE_TESTS
+bool machine_fast_block_color_budget_test(void)
+{
+    bool result = machine_fast_block_color_fits(0, UINT32_MAX) && machine_fast_block_color_fits(1, UINT32_MAX) &&
+                  machine_fast_block_color_fits(1000, 64) && !machine_fast_block_color_fits(1000, 4000) &&
+                  !machine_fast_block_color_fits(UINT32_MAX, UINT32_MAX);
+    for (u32 words = 1; words <= 8u; words += 1)
+    {
+        u32 count = 1;
+        while ((u64)count * (count - 1u) / 2u <= MACHINE_FAST_BLOCK_COLOR_WORD_LIMIT / words) count += 1u;
+        result &= machine_fast_block_color_fits(count - 1u, words * 64u);
+        result &= !machine_fast_block_color_fits(count, words * 64u);
+    }
+    return result;
+}
+#endif
+
+// If every home occupies one common block, same-class homes form a clique:
+// the greedy scan can never merge their groups. Every pair must read through
+// at least the later first-occupied word. Sum that lower bound by first-word
+// histogram; exceeding the old budget proves it would discard this coloring.
+// No successful coloring is rejected. The solve is still needed for the proof,
+// but the dense occupancy transpose and quadratic group scan are avoided.
+BUSTER_GLOBAL_LOCAL bool machine_fast_home_color_exhausted(Arena* arena, MachineFunction const* function,
+    u32 const* values, u32 count, u32 words, u64 const* reads, u64 const* writes, u64 const* live_in, u64 const* live_out)
+{
+    bool exhausted = false;
+    if (!machine_fast_block_color_fits(count, function->block_count))
+    {
+        u32 counts[2] = {0};
+        for (u32 object = 0; object < count; object += 1)
+        {
+            counts[function->virtual_registers[values[object]].register_class == MACHINE_REGISTER_CLASS_VECTOR] += 1;
+        }
+        if (!machine_fast_block_color_fits(counts[0], function->block_count) ||
+            !machine_fast_block_color_fits(counts[1], function->block_count))
+        {
+            u32 common = UINT32_MAX;
+            for (u32 block = 0; common == UINT32_MAX && block < function->block_count; block += 1)
+            {
+                bool full = true;
+                for (u32 word = 0; full && word < words; word += 1)
+                {
+                    u64 cell = (u64)block * words + word;
+                    u64 mask = word + 1u == words && (count & 63u) ? (UINT64_C(1) << (count & 63u)) - 1u : UINT64_MAX;
+                    full = ((reads[cell] | writes[cell] | live_in[cell] | live_out[cell]) & mask) == mask;
+                }
+                common = full ? block : common;
+            }
+            if (common != UINT32_MAX)
+            {
+                u64 mark = arena->position;
+                u32 block_words = (u32)(((u64)function->block_count + 63u) / 64u);
+                u64* seen = arena_allocate_zeroed(arena, u64, words);
+                u32* first_counts = arena_allocate_zeroed(arena, u32, (u64)block_words * 2u);
+                for (u32 block = 0; block <= common; block += 1)
+                {
+                    for (u32 word = 0; word < words; word += 1)
+                    {
+                        u64 cell = (u64)block * words + word;
+                        u64 present = reads[cell] | writes[cell] | live_in[cell] | live_out[cell];
+                        u64 first = present & ~seen[word];
+                        seen[word] |= present;
+                        while (first)
+                        {
+                            u32 object = word * 64u + trailing_zeroes_u64(first);
+                            first &= first - 1u;
+                            if (object < count)
+                            {
+                                bool vector = function->virtual_registers[values[object]].register_class == MACHINE_REGISTER_CLASS_VECTOR;
+                                first_counts[(u64)vector * block_words + block / 64u] += 1;
+                            }
+                        }
+                    }
+                }
+                for (u32 pool = 0; !exhausted && pool < 2u; pool += 1)
+                {
+                    u64 earlier = 0;
+                    u64 cost = 0;
+                    for (u32 word = 0; !exhausted && word < block_words; word += 1)
+                    {
+                        u64 entries = first_counts[(u64)pool * block_words + word];
+                        u64 pairs = entries * earlier + (entries ? entries * (entries - 1u) / 2u : 0);
+                        exhausted = pairs > (MACHINE_FAST_BLOCK_COLOR_WORD_LIMIT - cost) / (word + 1u);
+                        if (!exhausted)
+                        {
+                            cost += pairs * (word + 1u);
+                            earlier += entries;
+                        }
+                    }
+                }
+                arena_set_position(arena, mark);
+            }
+        }
+    }
+    return exhausted;
+}
+
 // Loop closure asks only whether a range meets a backward edge, so in a
 // function that is one enormous loop — an interpreter dispatch loop, say —
 // every range inside it widens to the whole loop and nothing shares anything.
@@ -3028,8 +3137,8 @@ MachineFastPrepass machine_fast_prepass_build(Arena* arena, MachineFunction* fun
 // objects the selector named and the homes the allocator's own memory edits
 // name are found in different places — and own the row ranges of the touches
 // themselves; this only widens them.
-BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFunction const* function, MachineFastPrepass const* prepass, u64 const* reads,
-                                                        u64 const* writes, u32 words, u32* starts, u32* ends, u64* occupied_blocks)
+BUSTER_GLOBAL_LOCAL bool machine_fast_close_live_ranges_checked(Arena* arena, MachineFunction const* function, MachineFastPrepass const* prepass, u64 const* reads,
+    u64 const* writes, u32 words, u32* starts, u32* ends, u64* occupied_blocks, u32 const* color_values, u32 color_count)
 {
     u32 block_count = function->block_count;
     u64 plane = (u64)block_count * words;
@@ -3038,7 +3147,9 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFun
     memset(live_in, 0, (plane ? plane : 1) * sizeof(*live_in));
     memset(live_out, 0, (plane ? plane : 1) * sizeof(*live_out));
     machine_fast_solve_liveness(arena, block_count, prepass->predecessor_offsets, prepass->predecessor_list, reads, writes, words, live_in, live_out);
-    for (u32 block_index = 0; block_index < block_count; block_index += 1)
+    bool exhausted = occupied_blocks && color_count && machine_fast_home_color_exhausted(arena, function, color_values, color_count,
+        words, reads, writes, live_in, live_out);
+    for (u32 block_index = 0; !exhausted && block_index < block_count; block_index += 1)
     {
         MachineBlock const* block = function->blocks + block_index;
         u64 const* block_in = live_in + (u64)block_index * words;
@@ -3079,6 +3190,13 @@ BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFun
         }
     }
 
+    return !exhausted;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_fast_close_live_ranges(Arena* arena, MachineFunction const* function, MachineFastPrepass const* prepass, u64 const* reads,
+                                                        u64 const* writes, u32 words, u32* starts, u32* ends, u64* occupied_blocks)
+{
+    machine_fast_close_live_ranges_checked(arena, function, prepass, reads, writes, words, starts, ends, occupied_blocks, 0, 0);
 }
 
 #if BUSTER_INCLUDE_TESTS
@@ -3520,8 +3638,13 @@ BUSTER_GLOBAL_LOCAL MachineFastBlockObjects machine_fast_close_home_ranges(Arena
             }
             first = limit;
         }
-        machine_fast_close_live_ranges(arena, function, prepass, reads, writes, words, starts, ends, occupied);
-        for (u32 home = 0; home < home_count; home += 1)
+        bool closed = machine_fast_close_live_ranges_checked(arena, function, prepass, reads, writes, words, starts, ends, occupied,
+            home_values, record_occupancy ? home_count : 0);
+        if (!closed)
+        {
+            result = (MachineFastBlockObjects){0};
+        }
+        for (u32 home = 0; closed && home < home_count; home += 1)
         {
             u32 value = home_values[home];
             home_starts[value] = starts[home];
@@ -4351,34 +4474,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_color_slots(Arena* arena, MachineFunction c
 // rows inside that block. This scan stores color occupancy, not pairwise
 // interference; a bounded comparison budget preserves compiler throughput.
 #define MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT BUSTER_MB(3)
-#define MACHINE_FAST_BLOCK_COLOR_WORD_LIMIT 25000000u
 
-// Each new object can test every earlier color, and each test can read every
-// block word. Admit that upper bound before building occupancy; a memory cap
-// alone allowed closure followed by 25 M comparisons that were all discarded.
-BUSTER_GLOBAL_LOCAL bool machine_fast_block_color_fits(u32 count, u32 block_count)
-{
-    u64 words = ((u64)block_count + 63u) / 64u;
-    u64 pairs = count ? (u64)count * (count - 1u) / 2u : 0;
-    return !words || pairs <= MACHINE_FAST_BLOCK_COLOR_WORD_LIMIT / words;
-}
-
-#if BUSTER_INCLUDE_TESTS
-bool machine_fast_block_color_budget_test(void)
-{
-    bool result = machine_fast_block_color_fits(0, UINT32_MAX) && machine_fast_block_color_fits(1, UINT32_MAX) &&
-                  machine_fast_block_color_fits(1000, 64) && !machine_fast_block_color_fits(1000, 4000) &&
-                  !machine_fast_block_color_fits(UINT32_MAX, UINT32_MAX);
-    for (u32 words = 1; words <= 8u; words += 1)
-    {
-        u32 count = 1;
-        while ((u64)count * (count - 1u) / 2u <= MACHINE_FAST_BLOCK_COLOR_WORD_LIMIT / words) count += 1u;
-        result &= machine_fast_block_color_fits(count - 1u, words * 64u);
-        result &= !machine_fast_block_color_fits(count, words * 64u);
-    }
-    return result;
-}
-#endif
 BUSTER_GLOBAL_LOCAL u32 machine_fast_color_block_objects(Arena* arena, MachineFunction const* function,
                                                          MachineFastBlockObjects const* objects, bool homes, bool vector_pool,
                                                          u32* colors, u32* group_sizes, u32* group_alignments)
@@ -4448,6 +4544,62 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_color_block_objects(Arena* arena, MachineFu
     arena_set_position(arena, scratch_mark);
     return valid ? group_count : UINT32_MAX;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool machine_fast_home_color_budget_test(Arena* arena)
+{
+    u64 mark = arena->position;
+    u32 count = 1537;
+    u32 blocks = 8192;
+    u32 words = (count + 63u) / 64u;
+    u32 block_words = blocks / 64u;
+    MachineFunction function = {.target = machine_target_x86_64(), .block_count = blocks, .virtual_register_count = count};
+    function.virtual_registers = arena_allocate_zeroed(arena, MachineVirtualRegister, count);
+    u32* ids = arena_allocate(arena, u32, count);
+    u32* colors = arena_allocate(arena, u32, count);
+    u64* plane = arena_allocate_zeroed(arena, u64, (u64)blocks * words);
+    u64* occupied = arena_allocate_zeroed(arena, u64, (u64)count * block_words);
+    for (u32 object = 0; object < count; object += 1)
+    {
+        ids[object] = object;
+        u32 first = object * 4u;
+        plane[(u64)first * words + object / 64u] |= UINT64_C(1) << (object & 63u);
+        plane[(u64)(blocks - 1u) * words + object / 64u] |= UINT64_C(1) << (object & 63u);
+        occupied[(u64)object * block_words + first / 64u] |= UINT64_C(1) << (first & 63u);
+        occupied[(u64)object * block_words + block_words - 1u] |= UINT64_C(1) << 63u;
+    }
+    MachineFastBlockObjects objects = {.count = count, .ids = ids, .occupied = occupied, .block_words = block_words};
+    bool result = machine_fast_home_color_exhausted(arena, &function, ids, count, words, plane, plane, plane, plane);
+    // Independent execution of the original greedy scan confirms the proof.
+    result &= machine_fast_color_block_objects(arena, &function, &objects, true, false, colors, 0, 0) == UINT32_MAX;
+    for (u32 object = 0; object < count; object += 1)
+    {
+        function.virtual_registers[object].register_class = object & 1u ? MACHINE_REGISTER_CLASS_VECTOR : MACHINE_REGISTER_CLASS_GENERAL;
+    }
+    // Cross-class pairs never enter the same greedy scan. Summing them would
+    // incorrectly certify a failure for these two independently smaller pools.
+    result &= !machine_fast_home_color_exhausted(arena, &function, ids, count, words, plane, plane, plane, plane);
+    for (u32 object = 0; object < count; object += 1)
+    {
+        function.virtual_registers[object].register_class = MACHINE_REGISTER_CLASS_GENERAL;
+    }
+    plane[(u64)(blocks - 1u) * words] &= ~UINT64_C(1);
+    result &= !machine_fast_home_color_exhausted(arena, &function, ids, count, words, plane, plane, plane, plane);
+    // A common block alone is insufficient: early first words can keep the
+    // exact old comparison count below its limit despite a high upper bound.
+    memset(plane, 0, (u64)blocks * words * sizeof(*plane));
+    memset(occupied, 0, (u64)count * block_words * sizeof(*occupied));
+    for (u32 object = 0; object < count; object += 1)
+    {
+        plane[object / 64u] |= UINT64_C(1) << (object & 63u);
+        occupied[(u64)object * block_words] = 1;
+    }
+    result &= !machine_fast_home_color_exhausted(arena, &function, ids, count, words, plane, plane, plane, plane);
+    result &= machine_fast_color_block_objects(arena, &function, &objects, true, false, colors, 0, 0) == count;
+    arena_set_position(arena, mark);
+    return result;
+}
+#endif
 
 // `pinned_registers` holds a physical register per virtual register that
 // owns it, or UINT32_MAX; `pinned_mask` collects them; `pin_active_masks`
@@ -5469,21 +5621,16 @@ BUSTER_GLOBAL_LOCAL void machine_fast_placement_finish(Arena* arena, MachineFunc
     u32* pool_indices = arena_allocate(arena, u32, value_count);
     memset(pool_indices, 0xff, (u64)value_count * sizeof(*pool_indices));
     u32 home_count = 0;
-    u32 home_counts[2] = {0};
     for (u32 value = 0; value < function->virtual_register_count; value += 1)
     {
-        bool eligible = slot_needed[value] && !home_opaque[value];
-        home_count += eligible;
-        home_counts[function->virtual_registers[value].register_class == MACHINE_REGISTER_CLASS_VECTOR] += eligible;
+        home_count += slot_needed[value] && !home_opaque[value];
     }
     u32 home_block_words = (function->block_count + 63u) / 64u;
     u64 home_plane_bytes = (u64)function->block_count * ((home_count + 63u) / 64u) * sizeof(u64);
     u64 home_color_bytes = (u64)home_count * home_block_words * sizeof(u64);
     bool block_color_homes = reuse_frame_storage && !linear_cfg && home_count &&
                              home_plane_bytes <= MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT &&
-                             home_color_bytes <= MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT &&
-                             machine_fast_block_color_fits(home_counts[0], function->block_count) &&
-                             machine_fast_block_color_fits(home_counts[1], function->block_count);
+                             home_color_bytes <= MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT;
     u32 block_pool_size = UINT32_MAX;
     u32 block_vector_pool_size = UINT32_MAX;
     if (block_color_homes)
@@ -5495,10 +5642,13 @@ BUSTER_GLOBAL_LOCAL void machine_fast_placement_finish(Arena* arena, MachineFunc
         memcpy(branch_ends, home_ends, (u64)value_count * sizeof(*branch_ends));
         MachineFastBlockObjects objects = machine_fast_close_home_ranges(arena, function, prepass, &placement, row_blocks, slot_needed,
                                                                           home_opaque, branch_starts, branch_ends, true);
-        block_pool_size = machine_fast_color_block_objects(arena, function, &objects, true, false, pool_indices, 0, 0);
-        if (block_pool_size != UINT32_MAX)
+        if (objects.count)
         {
-            block_vector_pool_size = machine_fast_color_block_objects(arena, function, &objects, true, true, pool_indices, 0, 0);
+            block_pool_size = machine_fast_color_block_objects(arena, function, &objects, true, false, pool_indices, 0, 0);
+            if (block_pool_size != UINT32_MAX)
+            {
+                block_vector_pool_size = machine_fast_color_block_objects(arena, function, &objects, true, true, pool_indices, 0, 0);
+            }
         }
         arena_set_position(arena, scratch_mark);
         if (block_pool_size == UINT32_MAX || block_vector_pool_size == UINT32_MAX)
@@ -5645,8 +5795,7 @@ BUSTER_GLOBAL_LOCAL void machine_fast_placement_finish(Arena* arena, MachineFunc
     u64 slot_color_bytes = (u64)shareable_slots * block_words * sizeof(u64);
     bool block_color_slots = coalesce_slots && !linear_cfg && shareable_slots &&
                              slot_plane_bytes <= MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT &&
-                             slot_color_bytes <= MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT &&
-                             machine_fast_block_color_fits(shareable_slots, function->block_count);
+                             slot_color_bytes <= MACHINE_FAST_BLOCK_COLOR_PLANE_LIMIT;
     MachineFastBlockObjects slot_blocks = {0};
     if (coalesce_slots)
     {

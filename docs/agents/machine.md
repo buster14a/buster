@@ -623,15 +623,16 @@ hosts execute its independent expected-value fixture.
   unknown and keeps dedicated storage. An absent array preserves manual
   fixtures' existing reuse subject to the other lifetime and ownership guards.
 
-  Block coloring also requires its worst-case group-word comparisons to fit
-  `MACHINE_FAST_BLOCK_COLOR_WORD_LIMIT`: `count * (count - 1) / 2` possible
-  earlier groups times `ceil(block_count / 64)` words. Scalar and vector home
-  pools are admitted independently. This conservative throughput policy can
-  decline a population that would find conflicts early; it avoids constructing
-  home occupancy only to discard a budget-exhausted coloring. Such populations
-  use the existing interval/local-home fallback. The separate prepass value
-  liveness cap does not change with this gate. Empty interval home pools skip
-  their instruction-row histograms using the existing eligibility counts.
+  Large home populations have an additional sufficient failure check after
+  liveness converges. If every home occupies one common block, same-class
+  homes cannot share a group. A histogram of first occupied block words gives
+  a lower bound on the old greedy scan's word comparisons. Only when that
+  lower bound exceeds `MACHINE_FAST_BLOCK_COLOR_WORD_LIMIT` does placement
+  skip the occupancy transpose and greedy scan and take the existing fallback.
+  This preserves every successful coloring. The conservative upper bound is
+  used only to bypass this check on small populations. The separate prepass
+  value-liveness cap is unchanged. Empty interval home pools skip their
+  instruction-row histograms using the existing eligibility counts.
 
 - Retroactive allocation edits retain stable equal-point order. Ordered
   streams need no moves, small streams use ping-pong merges, and streams of at
