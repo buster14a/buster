@@ -39512,33 +39512,35 @@ BUSTER_C_INTERNAL bool c_ir_lower_condition_branch_on_leaf(CIntegerIrBuilder* bu
 {
     CIrLowerMachine* machine = &builder->lower_machine;
     IrValueId condition = machine->child_result.value;
-    // The expression has already emitted its effects. A literal result (for
-    // example the final zero in (effect(), 0)) needs only one entry target;
-    // retaining both would lower references from an arm that cannot execute.
-    IrValue* value = machine->child_result.success && condition.value < builder->function->value_count
-                        ? builder->function->values + condition.value
-                        : 0;
-    IrInstruction* definition = value && value->definition.value < builder->function->instruction_count
-                                    ? builder->function->instructions + value->definition.value
-                                    : 0;
-    u32 width = value ? ir_integer_type_width(ir_type_from_id(&builder->program->types, value->canonical_type)) : 0;
-    IrInteger constant = {0};
-    bool branched;
-    if (definition && definition->opcode == IR_OPCODE_CONSTANT_INTEGER && definition->immediate_count == 1 && width &&
-        ir_integer_constant_decode(definition, width, &constant))
+    bool branched = false;
+    if (machine->child_result.success && builder->function->values && condition.value < builder->function->value_count &&
+        (!builder->function->instruction_count || builder->function->instructions))
     {
-        IrBlockId target = ir_integer_is_zero(constant) ? frame->as.condition.leaf_false_block : frame->as.condition.leaf_true_block;
-        branched = c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, frame->as.condition.source);
-    }
-    else
-    {
-        condition = machine->child_result.success ? c_ir_truth_value(builder, condition, frame->as.condition.source) : IR_VALUE_ID_INVALID;
-        IrBlockId targets[2] = {
-            frame->as.condition.leaf_true_block,
-            frame->as.condition.leaf_false_block,
-        };
-        branched = condition.value != IR_ID_UNDERLYING_INVALID &&
-                   c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, frame->as.condition.source);
+        // The expression has already emitted its effects. A literal result
+        // (for example the final zero in (effect(), 0)) needs one entry target;
+        // retaining both would lower references from an arm that cannot execute.
+        IrValue* value = builder->function->values + condition.value;
+        IrInstruction* definition = value->definition.value < builder->function->instruction_count
+                                        ? builder->function->instructions + value->definition.value
+                                        : 0;
+        u32 width = ir_integer_type_width(ir_type_from_id(&builder->program->types, value->canonical_type));
+        IrInteger constant = {0};
+        if (definition && definition->opcode == IR_OPCODE_CONSTANT_INTEGER && definition->immediate_count == 1 && width &&
+            ir_integer_constant_decode(definition, width, &constant))
+        {
+            IrBlockId target = ir_integer_is_zero(constant) ? frame->as.condition.leaf_false_block : frame->as.condition.leaf_true_block;
+            branched = c_ir_terminate(builder, IR_OPCODE_BRANCH, 0, 0, &target, 1, frame->as.condition.source);
+        }
+        else
+        {
+            condition = c_ir_truth_value(builder, condition, frame->as.condition.source);
+            IrBlockId targets[2] = {
+                frame->as.condition.leaf_true_block,
+                frame->as.condition.leaf_false_block,
+            };
+            branched = condition.value != IR_ID_UNDERLYING_INVALID &&
+                       c_ir_terminate(builder, IR_OPCODE_BRANCH_IF, &condition, 1, targets, 2, frame->as.condition.source);
+        }
     }
     if (branched)
     {
