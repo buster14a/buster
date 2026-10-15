@@ -161,6 +161,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
 STEPS = ("env", "timed", "topdown", "timeline", "sampling", "ibs", "threads", "micro")
 # The driver default is baseline since #1557; the compiler-compare workload
@@ -986,6 +987,7 @@ class Lab:
         self.fresh_copy = fresh_copy
         # The fresh copy the workload runs inside Lab.instance(), else None (lab.ide).
         self.binary = None
+        self.binary_sha256 = None
         self.repo_root = os.path.abspath(repo_root)
         self.extra = list(extra)
         self.compile = list(compile_command) if compile_command is not None else list(DEFAULT_COMPILE)
@@ -1000,6 +1002,8 @@ class Lab:
         self.last_maxrss = None
         self.last_harness_rss = None
         self.last_cpu_s = None
+        self.last_process_id = None
+        self.rss_observer = None
         # Whether timed runs go under `perf stat` (probe_counters): None until
         # probed, then True, or False when perf is absent or cannot count.
         self.counters = None
@@ -1059,11 +1063,12 @@ class Lab:
         path = os.path.join(directory, os.path.basename(self.ide))
         previous = self.binary
         try:
-            fresh_binary_copy(self.ide, path)
+            self.binary_sha256 = fresh_binary_copy(self.ide, path, digest=bool(self.rss_observer))
             self.binary = path
             yield path
         finally:
             self.binary = previous
+            self.binary_sha256 = None
             shutil.rmtree(directory, ignore_errors=True)
             with contextlib.suppress(OSError):
                 os.rmdir(parent)
@@ -1090,6 +1095,7 @@ class Lab:
                                                                                     reap_orphans_after=probe)
         orphans = "".join("  orphan reaped: %s\n" % orphan for orphan in usage.get("orphans", ()))
         self.last_cpu_s = usage.get("cpu_s")
+        self.last_process_id = usage.get("pid")
         if status == 0 and output and not os.path.isfile(output):
             status, err = 1, err + b"\ncompiler did not create the requested output\n"
         self.last_elapsed = time.monotonic() - started
@@ -1226,6 +1232,8 @@ def run_measured_child(argv, cwd, environment, timeout, usage_out, harness, subr
         except FileNotFoundError as error:
             return 127, b"", str(error).encode(), None, harness
         expired = []
+        if usage_out is not None:
+            usage_out["pid"] = process.pid
 
         def expire():
             expired.append(True)
@@ -1294,17 +1302,21 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def fresh_binary_copy(source, destination):
+def fresh_binary_copy(source, destination, digest=False):
     """Copy an executable by plain read/write into a new file (a new inode, so
     new page-cache pages; never a hard link, reflink or copy_file_range, which
     could share the source's pages or extents), fsync it so no writeback runs
     during the timed span, and close it before anyone executes it (ETXTBSY)."""
+    hasher = hashlib.sha256() if digest else None
     with open(source, "rb") as reader, open(destination, "xb") as writer:
         for block in iter(lambda: reader.read(1 << 20), b""):
             writer.write(block)
+            if hasher:
+                hasher.update(block)
         writer.flush()
         os.fchmod(writer.fileno(), os.stat(source).st_mode & 0o7777)
         os.fsync(writer.fileno())
+    return hasher.hexdigest() if hasher else None
 
 
 def safe_name(text):
@@ -1961,7 +1973,15 @@ def load_run(record, csv_path, metrics_path, span, source):
     wall_ns = metrics["header"].get("wall_ns")
     # A run timed without perf (counters False) takes its CPU time from wait4.
     task = record.get("cpu_s") if record.get("counters") is False else task_seconds(rows)
-    return {**record, "values": stat_values(rows), "lines": stat_lines(rows), "metrics": metrics,
+    child = {}
+    if "child_rss_binding" in record:
+        try:
+            with open(os.path.splitext(csv_path)[0] + ".rss", "rb") as handle:
+                packet = handle.read(CHILD_RSS_PACKET_BYTES + 1)
+            child["child_rss"] = child_rss_packet(packet, record["child_rss_binding"])
+        except (OSError, ValueError, TypeError) as error:
+            child = {"child_rss": None, "child_rss_error": str(error)}
+    return {**record, **child, "values": stat_values(rows), "lines": stat_lines(rows), "metrics": metrics,
             "span_s": span, "span_source": source if span is not None else None,
             "cc_wall_s": ratio(wall_ns, 1e9) if isinstance(wall_ns, (int, float)) else None,
             "task_s": task}
@@ -1978,21 +1998,112 @@ def run_metrics(run):
 
 
 def rss_floor(run):
-    """The larger of the two non-compiler terms in a run's maxrss_bytes: the
-    harness's resident RSS at spawn and the perf wrapper's own (probe), or
-    None when either is unknown."""
+    """Native child pre-exec floor, or the unchanged legacy harness/perf floor."""
+    if "child_rss_binding" in run:
+        child = run.get("child_rss") or {}
+        return positive(child.get("pre_exec_floor_kib", 0) * 1024)
     harness, wrapper = positive(run.get("harness_rss_bytes")), positive(run.get("wrapper_rss_bytes"))
     return max(harness, wrapper) if harness is not None and wrapper is not None else None
 
 
 def rss_value(run):
-    """A run's compiler peak RSS in bytes, or None.  maxrss_bytes is the
-    maximum of the harness floor, the perf wrapper and the compiler
-    (run_measured), so it is the compiler's only when above
-    RSS_WRAPPER_MARGIN times rss_floor; without a floor (probe failed, older
-    directory) it is NA."""
-    value, floor = positive(run.get("maxrss_bytes")), rss_floor(run)
+    """Uncorrected wait4 peak above the same attribution margin, or None.
+
+    Retirement packets measure the exact compiler child after observer
+    exec/fork. Legacy rows retain the harness/perf ancestry observation.
+    A missing native packet never falls back to the ancestor measurement.
+    """
+    child = run.get("child_rss") or {}
+    raw = child.get("maxrss_kib", 0) * 1024 if "child_rss_binding" in run else run.get("maxrss_bytes")
+    value, floor = positive(raw), rss_floor(run)
     return value if value is not None and floor is not None and value > RSS_WRAPPER_MARGIN * floor else None
+
+
+CHILD_RSS_SCHEMA = "buster-retirement-child-rss-v1"
+CHILD_RSS_PACKET_BYTES = 256
+CHILD_RSS_FLAGS = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-Wpedantic",
+                   "-fwrapv", "-fno-strict-aliasing", "-funsigned-char"]
+CHILD_RSS_SCOPE = "compiler child wait4 after observer exec/fork; wall/instructions include fixed observer startup/fork/wait/write work"
+
+
+def child_rss_argv_digest(argv):
+    return hashlib.sha256(json.dumps(argv, ensure_ascii=True, separators=(",", ":")).encode("ascii")).hexdigest()
+
+
+def child_rss_packet(packet, binding):
+    """Decode the native fixed-width LE packet, never ancestor/wrapper RSS."""
+    if not isinstance(packet, bytes) or len(packet) != CHILD_RSS_PACKET_BYTES or not isinstance(binding, dict):
+        raise ValueError("child-RSS packet/binding is missing or has the wrong size")
+    fields = struct.unpack("<8s10I2Q32s64s64s32s", packet)
+    magic, size, version, helper, child, waited, group, child_group, status, error, stage, rss, floor, nonce, binary, argv, reserved = fields
+    if magic != b"BSTRSS1\0" or size != CHILD_RSS_PACKET_BYTES or version != 1 or reserved != bytes(32):
+        raise ValueError("child-RSS packet schema/width/byte-order/reserved bytes differ")
+    expected = (binding.get("nonce"), binding.get("binary_sha256"), binding.get("argv_sha256"))
+    if any(not isinstance(value, str) or not re.fullmatch(pattern, value) for value, pattern in
+           zip(expected, (r"[0-9a-f]{32}", r"[0-9a-f]{64}", r"[0-9a-f]{64}"))) or \
+            (nonce, binary, argv) != tuple(value.encode("ascii") for value in expected):
+        raise ValueError("child-RSS packet sample/binary/argv identity differs")
+    if not helper or not child or not group or helper == child or waited != child or group != child_group or \
+            type(binding.get("process_group")) is not int or group != binding["process_group"]:
+        raise ValueError("child-RSS packet direct-child wait or outer process group differs")
+    if error or stage or status != 0 or not rss or not floor or \
+            rss < floor or rss > ((1 << 64) - 1) // 1024 or floor > ((1 << 64) - 1) // 1024:
+        raise ValueError("child-RSS launch/wait/exit or positive native measurement is unavailable")
+    return {"schema": CHILD_RSS_SCHEMA, "helper_pid": helper, "child_pid": child, "waited_pid": waited,
+            "process_group": group, "wait_status": status, "exec_errno": error, "launch_stage": stage,
+            "maxrss_kib": rss, "pre_exec_floor_kib": floor, "unit": "KiB", "packet_bytes": size}
+
+
+def child_rss_build_validate(info):
+    """Data-only native build identity/flags check shared with raw replay."""
+    if not isinstance(info, dict) or set(info) != {"schema", "source", "compiler", "binary", "argv"} or \
+            info.get("schema") != "buster-retirement-rss-build-v1":
+        raise ValueError("child-RSS helper lacks the native build receipt")
+    for key in ("source", "compiler", "binary"):
+        row = info.get(key) or {}
+        if not isinstance(row, dict):
+            raise ValueError("child-RSS helper %s native identity is malformed" % key)
+        name = row.get("path")
+        if not isinstance(row, dict) or set(row) != {"path", "sha256", "size_bytes", *(["version"] if key == "compiler" else [])} or \
+                not isinstance(name, str) or not os.path.isabs(name) or len(name) > 4096 or "\0" in name or \
+                not re.fullmatch(r"[0-9a-f]{64}", str(row.get("sha256", ""))) or \
+                type(row.get("size_bytes")) is not int or not 0 < row["size_bytes"] <= (1 << 64) - 1:
+            raise ValueError("child-RSS helper %s native identity is malformed" % key)
+    if info["binary"]["size_bytes"] > 1 << 20 or info["source"]["size_bytes"] > 32768:
+        raise ValueError("child-RSS helper exceeds its source/binary evidence bounds")
+    if not isinstance(info["compiler"]["version"], str) or not 0 < len(info["compiler"]["version"]) <= 4096:
+        raise ValueError("child-RSS helper compiler version is unavailable")
+    expected = [info["compiler"]["path"], *CHILD_RSS_FLAGS, info["source"]["path"], "-o", info["binary"]["path"]]
+    if info.get("argv") != expected:
+        raise ValueError("child-RSS helper native build flags differ")
+
+
+def child_rss_observer_validate(observer):
+    if not isinstance(observer, dict) or set(observer) != {"schema", "build", "run_nonce", "packet_bytes", "rss_margin", "measurement_scope"} or \
+            observer.get("schema") != CHILD_RSS_SCHEMA or observer.get("packet_bytes") != CHILD_RSS_PACKET_BYTES or \
+            observer.get("rss_margin") != RSS_WRAPPER_MARGIN or observer.get("measurement_scope") != CHILD_RSS_SCOPE or \
+            not re.fullmatch(r"[0-9a-f]{32}", str(observer.get("run_nonce", ""))):
+        raise ValueError("child-RSS observation method or sample binding differs")
+    child_rss_build_validate(observer["build"])
+
+
+def child_rss_observer(path):
+    """Only the native builder chooses compiler/flags; validate live bytes."""
+    path = os.path.abspath(path)
+    with open(path, "rb") as handle:
+        data = handle.read(16385)
+    if len(data) > 16384:
+        raise ValueError("child-RSS native build receipt exceeds its bound")
+    info = json.loads(data)
+    child_rss_build_validate(info)
+    for key in ("source", "compiler", "binary"):
+        row = info[key]
+        name = row["path"]
+        if os.path.islink(name) or not os.path.isfile(name) or os.path.getsize(name) != row["size_bytes"] or sha256_file(name) != row["sha256"]:
+            raise ValueError("child-RSS helper %s identity differs from its native build" % key)
+    return {"schema": CHILD_RSS_SCHEMA, "build": info, "run_nonce": uuid.uuid4().hex,
+            "packet_bytes": CHILD_RSS_PACKET_BYTES, "rss_margin": RSS_WRAPPER_MARGIN,
+            "measurement_scope": CHILD_RSS_SCOPE}
 
 
 def timed_problems(good):
@@ -2133,8 +2244,9 @@ def rss_line(good):
     values = [rss_value(run) for run in good]
     stats = summarize([value for value in values if value is not None])
     floors = [rss_floor(run) for run in good if rss_floor(run)]
-    return "- peak RSS (wait4 ru_maxrss of taskset/perf and the compiler; harness/perf floor up to %s bytes): median %s, min %s, max %s bytes%s" % (
-        fmt(max(floors) if floors else None), fmt(stats and stats["median"]), fmt(stats and stats["min"]), fmt(stats and stats["max"]),
+    scope = "exact compiler child; native pre-exec floor" if any("child_rss_binding" in run for run in good) else "taskset/perf and the compiler; harness/perf floor"
+    return "- peak RSS (wait4 ru_maxrss of %s up to %s bytes): median %s, min %s, max %s bytes%s" % (
+        scope, fmt(max(floors) if floors else None), fmt(stats and stats["median"]), fmt(stats and stats["min"]), fmt(stats and stats["max"]),
         "" if all(value is not None for value in values) else "; %d of %d runs NA (not above %gx the floor, or not measured)" % (
             sum(value is None for value in values), len(values), RSS_WRAPPER_MARGIN))
 
@@ -3125,8 +3237,39 @@ def prepare_variant(lab, warmups):
 def run_pair_member(lab, directory, pair, key):
     base = os.path.join(directory, "pairs", "%04d-%s" % (pair, key))
     out = os.path.join(lab.output, "out.exe")
+    child_fields = {}
     with lab.instance():
-        status, out_text, err = lab.run_workload(timed_command(lab, base + ".csv"), out, compile_flags(lab, base + ".ccmetrics"))
+        flags = compile_flags(lab, base + ".ccmetrics")
+        prefix = timed_command(lab, base + ".csv")
+        observer = lab.rss_observer
+        if observer:
+            workload = lab.workload(out, flags)
+            compiler_hash = lab.binary_sha256 or sha256_file(workload[0])
+            expected = lab.meta["rss_observer"]["compiler_sha256"]
+            helper = observer["build"]["binary"]
+            if compiler_hash != expected or sha256_file(helper["path"]) != helper["sha256"]:
+                raise RuntimeError("child-RSS compiler/helper identity changed before timed observation")
+            nonce = hashlib.sha256((observer["run_nonce"] + ":%d:%s" % (pair, key)).encode("ascii")).hexdigest()[:32]
+            binding = {"nonce": nonce, "binary_sha256": compiler_hash, "argv_sha256": child_rss_argv_digest(workload)}
+            prefix += [helper["path"], "--output", base + ".rss", "--nonce", nonce,
+                       "--binary-sha256", compiler_hash, "--argv-sha256", binding["argv_sha256"], "--"]
+            child_fields = {"child_rss_binding": binding, "compiler_argv": workload, "wrapper_argv": prefix + workload}
+        status, out_text, err = lab.run_workload(prefix, out, flags)
+        if observer:
+            binding["process_group"] = lab.last_process_id
+            try:
+                with open(base + ".rss", "rb") as handle:
+                    packet = handle.read(CHILD_RSS_PACKET_BYTES + 1)
+                child_fields["child_rss"] = child_rss_packet(packet, binding)
+                if status != 0 or sha256_file(helper["path"]) != helper["sha256"]:
+                    raise ValueError("child-RSS helper failed or changed during the timed observation")
+            except (OSError, ValueError, TypeError) as error:
+                # Stop before another pair. Its group leader has been reaped;
+                # signaling a naked recycled PGID is unsafe. The existing
+                # outer native owner retains descendant cleanup authority.
+                write_json(base + ".rss-error.json", {**child_fields, "exit": status, "error": str(error),
+                                                      "cleanup": "outer-native-owner-required"})
+                raise RuntimeError("child-RSS observation unavailable: " + str(error)) from error
     span = lab.last_elapsed
     if status != 0:
         write_text(base + ".err", out_text[-20000:] + err[-20000:])
@@ -3135,7 +3278,7 @@ def run_pair_member(lab, directory, pair, key):
     return {"pair": pair, "order": abba_order(pair), "variant": key, "exit": status, "identical": identical, "span_s": round(span, 6),
             "maxrss_bytes": lab.last_maxrss, "harness_rss_bytes": lab.last_harness_rss,
             "wrapper_rss_bytes": lab.meta["capabilities"].get("wrapper_rss_bytes"),
-            "cpu_s": lab.last_cpu_s, "counters": lab.counters}
+            "cpu_s": lab.last_cpu_s, "counters": lab.counters, **child_fields}
 
 
 def compare_timed(labs, directory, meta, arguments, started, other_compiles):
@@ -3201,6 +3344,9 @@ def command_compare(arguments):
     retirement_cell = getattr(arguments, "ast_retirement_cell", None)
     if retirement_cell and (extra or arguments.canonical_inline_pair or ast_cell or reuse_cell or floor_cell or arguments.profile_steps or arguments.sudo):
         sys.exit("uarch_lab: --ast-retirement-cell accepts no extra compile arguments, flag pair or profile steps")
+    observer_path = getattr(arguments, "retirement_rss_helper", None)
+    if observer_path and not retirement_cell:
+        sys.exit("uarch_lab: --retirement-rss-helper requires the fixed AST retirement cell")
     steps = [step for step in (arguments.profile_steps or "").replace(" ", "").split(",") if step]
     if arguments.sudo and "ibs" not in steps:
         steps.append("ibs")
@@ -3250,6 +3396,13 @@ def command_compare(arguments):
                                                 for key, _ in VARIANTS}
     if retirement_cell:
         meta["config"]["ast_retirement_cell"] = retirement_cell
+    if observer_path:
+        observer = child_rss_observer(observer_path)
+        meta["rss_observer"] = observer
+        for key, lab in labs.items():
+            lab.rss_observer = observer
+            lab.meta["rss_observer"] = {**observer, "compiler_sha256": meta["variants"][key]["sha256"]}
+            lab.save_meta()
     save_compare_meta(directory, meta)
     print("uarch_lab: compare output %s; %s" % (directory, "%d pairs (--pairs)" % arguments.pairs if arguments.pairs is not None else
                                                 "pair count chosen after %d pilot pairs to land near %g min" % (PILOT_PAIRS, arguments.target_minutes)), flush=True)
@@ -3268,6 +3421,8 @@ def command_compare(arguments):
         return state["status"] == "ok"
 
     stage("env", lambda: step_env(labs["a"]))
+    if retirement_cell:
+        stage("env-b", lambda: step_env(labs["b"]))
     groups = json.loads(read_text(os.path.join(labs["a"].output, "env", "env.json")) or "{}").get("metric_groups")
     if steps and not probe_counters(labs["a"]):
         sys.exit("uarch_lab: --profile-steps %s need a working perf (%s); rerun without them for a wall, CPU-time and "
@@ -3596,8 +3751,9 @@ def rss_warnings(runs):
         good = [run for run in runs if run["variant"] == key and run["exit"] == 0]
         missing = [run for run in good if rss_value(run) is None]
         if missing:
-            warnings.append("%s: peak RSS NA in %d of %d runs (not above %gx the harness/perf floor of %s bytes, or not measured)" % (
-                role, len(missing), len(good), RSS_WRAPPER_MARGIN, fmt(rss_floor(missing[0]))))
+            scope = "native pre-exec" if "child_rss_binding" in missing[0] else "harness/perf"
+            warnings.append("%s: peak RSS NA in %d of %d runs (not above %gx the %s floor of %s bytes, or not measured)" % (
+                role, len(missing), len(good), RSS_WRAPPER_MARGIN, scope, fmt(rss_floor(missing[0]))))
     return warnings
 
 
@@ -4223,6 +4379,8 @@ def main(argv=None):
                          help="fixed issue #3397 acceptance cell: A omits -fc-ast-pilot, B passes it, on the -g0 unity source")
     compare.add_argument("--ast-retirement-cell", choices=sorted(AST_RETIREMENT_CELLS), default=None,
                          help="fixed issue #4058 default/default syntax/object cell on the frozen base unity or throughput CI source")
+    compare.add_argument("--retirement-rss-helper", default=None,
+                         help="native retirement_rss_build receipt; direct-child RSS only for the fixed retirement profile")
     compare.add_argument("--constant-reuse-pair", choices=sorted(CONSTANT_REUSE_CELLS), default=None,
                          help="fixed issue #3011 acceptance cell: A default, B passes the cell's opt-in flag, on the -g0 unity object compile")
     compare.add_argument("--process-floor-pair", choices=sorted(PROCESS_FLOOR_CELLS), default=None,

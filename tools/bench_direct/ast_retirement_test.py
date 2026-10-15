@@ -16,6 +16,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -54,14 +55,42 @@ def source_binding() -> dict:
             "generator": {"revision": BASE, "sha256": "6" * 64, "size_bytes": 16}}
 
 
-@lru_cache(maxsize=1)
-def paired_observations() -> tuple:
+def observer_fixture(cell: str) -> dict:
+    source = Path(__file__).with_name("retirement_rss.c").read_bytes()
+    build = {"schema": "buster-retirement-rss-build-v1",
+             "source": {"path": "/trusted/tools/bench_direct/retirement_rss.c", "sha256": digest(source), "size_bytes": len(source)},
+             "compiler": {"path": "/usr/bin/clang", "sha256": "c" * 64, "size_bytes": 16, "version": "qualified synthetic clang"},
+             "binary": {"path": "/run/rss-helper/retirement-rss", "sha256": digest(b"synthetic helper"), "size_bytes": 16}}
+    build["argv"] = [build["compiler"]["path"], *_lab.CHILD_RSS_FLAGS, build["source"]["path"], "-o", build["binary"]["path"]]
+    return {"schema": _lab.CHILD_RSS_SCHEMA, "build": build, "run_nonce": digest(cell.encode())[:32],
+            "packet_bytes": 256, "rss_margin": 1.5, "measurement_scope": _lab.CHILD_RSS_SCOPE}
+
+
+def paired_observations(cell: str, observer: dict) -> tuple:
     records, files, loaded = [], {}, []
     for pair, key in _lab.abba_schedule(receipt.AST_RETIREMENT_PROFILE["pairs"]):
         factor = 1.0 if key == "a" else 0.95
         record = {"pair": pair, "order": _lab.abba_order(pair), "variant": key, "exit": 0,
                   "identical": True, "span_s": 2.0 * factor, "maxrss_bytes": 1000000,
                   "harness_rss_bytes": 1000, "wrapper_rss_bytes": 1000, "cpu_s": 2.0 * factor, "counters": True}
+        directory = Path("/run/ast-retirement-acceptance") / cell
+        workload = [str(directory / key / "instances" / f"run-{pair}" / ("ide-baseline" if key == "a" else "ide-candidate")),
+                    *receipt.ast_retirement_cell_command(cell)]
+        if receipt.AST_RETIREMENT_CELLS[cell]["operation"] == "object":
+            workload += ["-o", str(directory / key / "out.exe")]
+        nonce = digest((observer["run_nonce"] + f":{pair}:{key}").encode())[:32]
+        binding = {"nonce": nonce, "binary_sha256": BINARIES["baseline" if key == "a" else "candidate"]["sha256"],
+                   "argv_sha256": _lab.child_rss_argv_digest(workload), "process_group": 1000 + pair}
+        packet = struct.pack("<8s10I2Q32s64s64s32s", b"BSTRSS1\0", 256, 1, 2000 + pair, 3000 + pair,
+                             3000 + pair, 1000 + pair, 1000 + pair, 0, 0, 0, 1024, 1, nonce.encode(),
+                             binding["binary_sha256"].encode(), binding["argv_sha256"].encode(), bytes(32))
+        files[f"pairs/{pair:04d}-{key}.rss"] = packet
+        wrapper = ["taskset", "-c", "2", "perf", "stat", "-x,", "-o", str(directory / "pairs" / f"{pair:04d}-{key}.csv"),
+                   "-e", ",".join(_lab.TIMED_EVENTS), "--", observer["build"]["binary"]["path"], "--output",
+                   str(directory / "pairs" / f"{pair:04d}-{key}.rss"), "--nonce", nonce, "--binary-sha256", binding["binary_sha256"],
+                   "--argv-sha256", binding["argv_sha256"], "--", *workload]
+        record.update(child_rss_binding=binding, child_rss=_lab.child_rss_packet(packet, binding),
+                      compiler_argv=workload, wrapper_argv=wrapper)
         counter = (f"{2000 * factor},msec,task-clock,2000000000,100.00,,\n"
                    f"{200000000 * factor},,cycles:u,2000000000,100.00,,\n"
                    f"{100000000 * factor},,instructions:u,2000000000,100.00,,\n"
@@ -105,14 +134,88 @@ def probe_documents(cell: str, source: dict, reference: dict) -> tuple:
     return probe, logs
 
 
+def ownership_fixture(*, argv: list[str] | None = None, repo_root: str = "/repo",
+                      work_root: str = "/run", output_root: str = "/run/ast-retirement-acceptance",
+                      owner_root: str = "/run/ast-retirement-owner", trusted_root: str = "/trusted",
+                      baseline: str = "b" * 40, head: str = "a" * 40,
+                      timeout: int = 2700, python: str = "/usr/bin/python3",
+                      archive_prefix: str = "ast_retirement_acceptance/") -> tuple[dict, dict[str, bytes]]:
+    """Return metadata plus all six archive members for one complete owned phase.
+
+    Bootstrap/record helpers come from the existing data-only owner tests.
+    They claim no source-to-binary relation or actual execution. The resulting
+    native packet and bootstrap must validate through the production readers.
+    """
+    import compiler_owned_phase as contract
+    from compiler_owned_phase_test import marker, record
+
+    def encoded(value: object) -> bytes:
+        return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
+
+    def digest(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    if argv is None:
+        argv = [python, "-B", trusted_root + "/tools/bench_direct/ast_retirement_acceptance.py",
+                "--lab", trusted_root + "/tools/uarch_lab.py",
+                "--harness", repo_root + "/build/throughput-tools/throughput",
+                "--baseline-ide", "/bin/ide-baseline", "--candidate-ide", "/bin/ide-candidate",
+                "--repo-root", repo_root, "--base-revision", baseline, "--head-revision", head,
+                "--cpu", "2", "--output", output_root]
+    else:
+        argv = list(argv)
+
+    driver_hash, configuration = "d" * 64, "c" * 64
+    bootstrap = marker(driver_hash)
+    driver = trusted_root + "/.cache/bootstrap-driver/posix/" + configuration + "/build-fixture"
+    directory = owner_root + "/owned-phases"
+    native_path = directory + "/0001.json"
+    stdout, stderr = b"synthetic AST retirement completed\n", b""
+    native = record(argv, cwd=repo_root, timeout=timeout, stdout=stdout, stderr=stderr)
+    # The shared record helper defaults to /evidence; bind the actual scoped
+    # owner's exact absolute pathname and trusted-root spelling instead.
+    native.update(receipt_path_sha256=digest(native_path.encode()),
+                  trusted_root_sha256=digest(trusted_root.encode()),
+                  duration_us=100, bootstrap_marker_sha256=digest(bootstrap))
+    raw = encoded(native)
+    row = {"ordinal": 1, "file": "0001.json", "phase": "ast-retirement-acceptance",
+           "kind": "run", "argv": argv, "cwd": repo_root, "timeout": timeout,
+           "allow_exit_failure": False, "bridge_wall_us": 150, "receipt_sha256": digest(raw)}
+    ownership = {"schema": contract.POPULATION_SCHEMA, "state": "complete",
+                 "trusted_root": trusted_root, "directory": directory,
+                 "trusted_revision": "9" * 40, "trusted_tree": "f" * 40,
+                 "driver_sha256": driver_hash, "driver_path": driver,
+                 "bootstrap_marker_sha256": digest(bootstrap), "work_root": work_root,
+                 "evidence_root": owner_root, "python_path": python, "owned_preflight": False,
+                 "count": 1, "phases": [row]}
+    metadata = {"schema": "buster-ast-retirement-owner-v1", "ownership": ownership}
+    stem = archive_prefix + "owner/owned-phases/0001.json"
+    files = {archive_prefix + "owner/metadata.json": encoded(metadata), stem: raw,
+             stem + ".argv": contract.command_bytes(argv), stem + ".stdout": stdout,
+             stem + ".stderr": stderr, stem + ".bootstrap.complete": bootstrap}
+    problems = contract.validate_record(native, argv, repo_root, timeout, driver_hash, stdout, stderr,
+                                        receipt_path=native_path)
+    problems += contract.validate_bootstrap(native, bootstrap, ownership)
+    if problems:
+        raise AssertionError("synthetic scoped-owner fixture is invalid: " + "; ".join(problems))
+    return metadata, files
+
+
 def evidence() -> tuple:
     source, files, bundle, cells, probes = source_binding(), {}, {}, {}, {}
     bundle["source"] = source
+    bundle["owner"], owner_files = ownership_fixture()
+    files.update(owner_files)
     for name in ("unity", *receipt.AST_RETIREMENT_CORPUS):
         files[f"ast_retirement_acceptance/inputs/{name}.c"] = SOURCE_BYTES
-    records, counter_files, metrics, checks, verdict = paired_observations()
+    bundle["rss_build"] = observer_fixture("unused")["build"]
+    files["ast_retirement_acceptance/rss-helper/source.c"] = Path(__file__).with_name("retirement_rss.c").read_bytes()
+    files["ast_retirement_acceptance/rss-helper/retirement-rss"] = b"synthetic helper"
+    files["ast_retirement_acceptance/rss-helper-build.log"] = b"synthetic native build transcript\n"
     for cell in receipt.AST_RETIREMENT_CELLS:
         prefix = f"ast_retirement_acceptance/{cell}/"
+        observer = observer_fixture(cell)
+        records, counter_files, metrics, checks, verdict = paired_observations(cell, observer)
         command = receipt.ast_retirement_cell_command(cell)
         if receipt.AST_RETIREMENT_CELLS[cell]["operation"] == "object":
             command += ["-o", "OUT"]
@@ -120,7 +223,7 @@ def evidence() -> tuple:
                   "canonical_inline_pair": False, "ast_pilot_pair": None, "constant_reuse_pair": None,
                   "process_floor_pair": None, "command": " ".join(["IDE", *command]), "pairs": 20,
                   "warmups": 1, "cpu": 2, "extra": [], "profile_steps": [], "fresh_copy": True,
-                  "seed": _lab.DEFAULT_SEED, "min_effect_percent": 0.5, "sudo": False, "repo_root": "/repo"}
+                  "seed": _lab.DEFAULT_SEED, "min_effect_percent": 0.5, "sudo": False, "repo_root": "/repo", "perf": "perf"}
         plan = {"pairs": 20, "reason": "--pairs 20", "order": "ABBA", "fresh_copy": True}
         phase = {"enabled": False, "reason": "retirement profile records components only in untimed probes"}
         labs, variants, summary_variants, reference = {}, {}, {}, {}
@@ -130,7 +233,7 @@ def evidence() -> tuple:
             labs[key] = {"config": {"ast_retirement_cell": cell, "extra": [], "cpu": 2, "ide": path,
                                    "command": " ".join([path, *command]), "fresh_copy": True, "repo_root": "/repo", "role": role},
                          "capabilities": {"perf_stat": {"usable": True, "reason": "usable"}},
-                         "collection": {"metrics_out": False}}
+                         "collection": {"metrics_out": False}, "rss_observer": {**observer, "compiler_sha256": BINARIES[role]["sha256"]}}
             summary_variants[role] = {"path": path, **BINARIES[role], "runs": 20, "failed": 0,
                                       "identical_runs": 20, "deterministic": True, "metrics_out_enabled": False}
             environment = {"cpu_model": CPU_MODEL, "cpu": 2, "ide_sha256": BINARIES[role]["sha256"], "git_revision": BASE}
@@ -145,7 +248,7 @@ def evidence() -> tuple:
             for index, chunk in enumerate(chunks):
                 files[prefix + f"reference.{index:03d}.bin.gz"] = retirement.compress_reference(chunk)
             files[prefix + key + "/reference.diagnostics"] = b""
-        meta = {"version": 1, "mode": "compare", "config": config, "plan": plan, "variants": variants, "phase_metrics": phase}
+        meta = {"version": 1, "mode": "compare", "config": config, "plan": plan, "variants": variants, "phase_metrics": phase, "rss_observer": observer}
         summary = {"schema": _lab.COMPARE_SCHEMA, "plan": dict(plan, seed=_lab.DEFAULT_SEED, confidence=_lab.CONFIDENCE,
                        bootstrap_resamples=_lab.BOOTSTRAP_RESAMPLES, complete_pairs=20), "method": _lab.COMPARE_METHOD,
                    "command": config["command"], "repo_root": "/repo", "cpu": 2, "host": {"cpu_model": CPU_MODEL},
@@ -164,13 +267,13 @@ def evidence() -> tuple:
         probes[cell] = retirement.validate_probe(cell, probe, BINARIES, source, logs)
     acceptance = {"schema": receipt.AST_RETIREMENT_SCHEMA, "status": "complete", "profile": receipt.AST_RETIREMENT_PROFILE,
                   "base_revision": BASE, "head_revision": HEAD, "binaries": BINARIES, "source": source,
-                  "cpu_model": CPU_MODEL, "cells": cells, "probes": probes, "elapsed_seconds": 60.0}
+                  "cpu_model": CPU_MODEL, "cells": cells, "probes": probes, "rss_observer_build": bundle["rss_build"], "elapsed_seconds": 60.0}
     bundle["acceptance"] = acceptance
     for key, path in publisher.AST_RETIREMENT_BUNDLE_FILES.items():
         files[path] = encoded(bundle[key])
     bundle["files"] = files
     record = {"requested": True, "request_line": receipt.AST_RETIREMENT_REQUEST_LINE, "profile": receipt.AST_RETIREMENT_PROFILE,
-              "status": "complete", "exit": 0, "summary": acceptance}
+              "status": "complete", "exit": 0, "summary": acceptance, "owner": bundle["owner"]}
     return copy.deepcopy(record), copy.deepcopy(bundle)
 
 
@@ -185,7 +288,7 @@ class RetirementPublisherTest(unittest.TestCase):
         cls.good = evidence()
 
     def validate(self, record: dict, bundle: dict, **change) -> list:
-        arguments = {"base": BASE, "head": HEAD, "binaries": BINARIES, "cpu_model": CPU_MODEL}
+        arguments = {"base": BASE, "head": HEAD, "binaries": BINARIES, "cpu_model": CPU_MODEL, "trusted_revision": "9" * 40}
         arguments.update(change)
         return publisher.validate_ast_retirement_bundle(record, bundle, **arguments)
 
@@ -193,6 +296,101 @@ class RetirementPublisherTest(unittest.TestCase):
         record, bundle = copy.deepcopy(self.good)
         self.assertEqual(self.validate(record, bundle), [])
         self.assertEqual(len(record["summary"]["cells"]), 20)
+        self.assertEqual(sum(path.endswith(".rss") for path in bundle["files"]), 800)
+
+    def test_native_rss_packets_cannot_be_replaced_by_saved_pairs_or_ancestor_rss(self) -> None:
+        prefix = "ast_retirement_acceptance/unity-syntax-only/"
+        path = prefix + "pairs/0001-a.rss"
+        for label, change in {
+            "missing": lambda data: None,
+            "truncated": lambda data: data[:-1],
+            "trailing": lambda data: data + b"x",
+            "byte order": lambda data: data[:8] + data[8:12][::-1] + data[12:],
+            "reserved": lambda data: data[:-1] + b"x",
+            "nonce": lambda data: data[:64] + b"f" * 32 + data[96:],
+            "compiler": lambda data: data[:96] + b"f" * 64 + data[160:],
+            "argv": lambda data: data[:160] + b"f" * 64 + data[224:],
+            "waited pid": lambda data: data[:24] + struct.pack("<I", 777) + data[28:],
+            "wrong group": lambda data: data[:28] + struct.pack("<I", 777) + data[32:],
+            "signal": lambda data: data[:36] + struct.pack("<I", 15) + data[40:],
+            "core bit only": lambda data: data[:36] + struct.pack("<I", 128) + data[40:],
+            "exec error": lambda data: data[:40] + struct.pack("<I", 2) + data[44:],
+            "zero rss": lambda data: data[:48] + bytes(8) + data[56:],
+            "hidden by floor": lambda data: data[:56] + struct.pack("<Q", 1024) + data[64:],
+            "overflow": lambda data: data[:48] + struct.pack("<Q", (1 << 64) - 1) + data[56:],
+        }.items():
+            record, bundle = copy.deepcopy(self.good)
+            data = change(bundle["files"][path])
+            if data is None:
+                bundle["files"].pop(path)
+            else:
+                bundle["files"][path] = data
+            with self.subTest(label=label):
+                self.assertTrue(self.validate(record, bundle))
+
+    def test_native_rss_method_command_and_live_variant_environment_are_required(self) -> None:
+        pair_path = "ast_retirement_acceptance/unity-syntax-only/pairs.json"
+        changes = {
+            "missing binding": lambda row: row.pop("child_rss_binding"),
+            "changed scope": lambda row: row["child_rss_binding"].update(process_group=0),
+            "other compiler": lambda row: row["compiler_argv"].__setitem__(0, "/other/ide-baseline"),
+            "other wrapper": lambda row: row["wrapper_argv"].__setitem__(2, "3"),
+            "other packet": lambda row: row["wrapper_argv"].__setitem__(13, "/other/0001-a.rss"),
+            "saved raw rss": lambda row: row["child_rss"].update(maxrss_kib=2048),
+            "ancestor substitution": lambda row: (row.pop("child_rss"), row.update(maxrss_bytes=10**12)),
+            "other role": lambda row: row["child_rss_binding"].update(binary_sha256=BINARIES["candidate"]["sha256"]),
+            "other nonce": lambda row: row["child_rss_binding"].update(nonce="e" * 32),
+            "wrapper ordering": lambda row: row["wrapper_argv"].__setitem__(slice(14, 16), list(reversed(row["wrapper_argv"][14:16]))),
+            "nested workload flag": lambda row: row["compiler_argv"].append("-fc-ast-pilot"),
+        }
+        for label, change in changes.items():
+            record, bundle = copy.deepcopy(self.good)
+            rows = json.loads(bundle["files"][pair_path])
+            change(rows[0])
+            bundle["files"][pair_path] = encoded(rows)
+            with self.subTest(label=label):
+                self.assertTrue(self.validate(record, bundle))
+        record, bundle = copy.deepcopy(self.good)
+        prefix = "ast_retirement_acceptance/unity-syntax-only/pairs/"
+        bundle["files"][prefix + "0001-a.rss"] = bundle["files"][prefix + "0001-b.rss"]
+        self.assertTrue(self.validate(record, bundle))
+        for path in ("ast_retirement_acceptance/unity-syntax-only/b/env/env.json",
+                     "ast_retirement_acceptance/rss-helper/source.c", "ast_retirement_acceptance/rss-helper/retirement-rss"):
+            record, bundle = copy.deepcopy(self.good)
+            bundle["files"].pop(path)
+            with self.subTest(path=path):
+                self.assertTrue(self.validate(record, bundle))
+
+    def test_native_rss_build_identity_and_fixed_policy_are_replayed(self) -> None:
+        for change in (lambda d: d.update(schema="unknown"), lambda d: d["argv"].append("-g"),
+                       lambda d: d["source"].update(sha256="7" * 64), lambda d: d["binary"].update(size_bytes=1 << 22)):
+            record, bundle = copy.deepcopy(self.good)
+            mutate_document(bundle, "rss_build", change)
+            bundle["acceptance"]["rss_observer_build"] = bundle["rss_build"]
+            bundle["files"][publisher.AST_RETIREMENT_BUNDLE_FILES["acceptance"]] = encoded(bundle["acceptance"])
+            record["summary"] = copy.deepcopy(bundle["acceptance"])
+            self.assertTrue(self.validate(record, bundle))
+
+    def test_ast_scoped_owner_raw_proof_cannot_be_omitted_or_forged(self) -> None:
+        stem = "ast_retirement_acceptance/owner/owned-phases/0001.json"
+        for suffix in ("", ".argv", ".stdout", ".stderr", ".bootstrap.complete"):
+            record, bundle = copy.deepcopy(self.good)
+            bundle["files"].pop(stem + suffix)
+            with self.subTest(suffix=suffix):
+                self.assertTrue(self.validate(record, bundle))
+        for field, value in (("cleanup_proven", False), ("cleanup_signalled", 1), ("ownership_lost", 1),
+                             ("driver_sha256", "e" * 64), ("state", "failed"), ("timed_out", 1)):
+            record, bundle = copy.deepcopy(self.good)
+            native = json.loads(bundle["files"][stem])
+            native[field] = value
+            bundle["files"][stem] = encoded(native)
+            bundle["owner"]["ownership"]["phases"][0]["receipt_sha256"] = digest(bundle["files"][stem])
+            bundle["files"][publisher.AST_RETIREMENT_BUNDLE_FILES["owner"]] = encoded(bundle["owner"])
+            record["owner"] = copy.deepcopy(bundle["owner"])
+            with self.subTest(field=field):
+                self.assertTrue(self.validate(record, bundle))
+        record, bundle = copy.deepcopy(self.good)
+        self.assertTrue(self.validate(record, bundle, trusted_revision="8" * 40))
 
     def test_receipt_head_base_binary_profile_and_host_are_bound(self) -> None:
         for change in ({"base": "c" * 40}, {"head": "d" * 40}, {"cpu_model": "AMD Ryzen 9 7940HS"},
@@ -425,6 +623,70 @@ class RetirementPublicationPolicyTest(unittest.TestCase):
 
 
 class RetirementProducerRoutingTest(unittest.TestCase):
+    def test_scoped_owner_io_and_interruption_failures_retain_the_outer_attempt(self) -> None:
+        for error in (OSError("native log publication failed"), KeyboardInterrupt(), SystemExit(143)):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                work, exported = root / "work", root / "evidence"
+                work.mkdir()
+                exported.mkdir()
+                output = work / "ast-retirement-acceptance"
+                current = {"mode": "pull", "ast_retirement_acceptance": {}}
+                instance = mock.Mock()
+                instance.execute.side_effect = error
+                found = subprocess.CompletedProcess([], 0, b"/trusted/driver\n", b"")
+                expected = type(error) if isinstance(error, (KeyboardInterrupt, SystemExit)) else compare.ClosureCleanupUncertain
+                with mock.patch.object(compare.subprocess, "run", return_value=found), \
+                        mock.patch.object(compare, "NativePhaseContext", return_value=instance), \
+                        mock.patch.object(compare.shutil, "copytree") as copied:
+                    with self.assertRaises(expected) as caught:
+                        compare.run_ast_retirement_owned(["/bin/true"], root, work, output, exported, current)
+                    copied.assert_not_called()
+                if isinstance(error, SystemExit):
+                    self.assertEqual(caught.exception.code, 143)
+                instance.finish.assert_called_once()
+                self.assertIs(current["cleanup_proven"], False)
+                self.assertEqual(current["work_retained"], str(work))
+                self.assertTrue((exported / "cleanup-uncertain").is_file())
+                self.assertFalse(output.exists())
+
+    def test_uncertainty_marker_io_failure_preserves_retention_and_the_interruption(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = {"mode": "pull", "ast_retirement_acceptance": {}}
+            with mock.patch.object(Path, "write_text", side_effect=OSError("full")):
+                compare.retain_ast_retirement_uncertainty(current, root, root, "interrupted")
+            self.assertIs(current["cleanup_proven"], False)
+            self.assertEqual(current["work_retained"], str(root))
+            self.assertIn("could not be persisted", current["reasons"][0])
+
+    def test_prelaunch_owner_failure_without_raw_proof_retains_uncertainty_before_export(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            work, exported = root / "work", root / "evidence"
+            work.mkdir()
+            exported.mkdir()
+            output = work / "ast-retirement-acceptance"
+            current = {"mode": "pull", "ast_retirement_acceptance": {}}
+
+            def context(driver, owned_work, owner_root, local):
+                local["phase_ownership"] = {"phases": []}
+                instance = mock.Mock(directory=owner_root / "owned-phases", driver_hash="d" * 64)
+                instance.execute.side_effect = compare.OwnedPhaseFailed("prelaunch refusal")
+                return instance
+
+            found = subprocess.CompletedProcess([], 0, b"/trusted/driver\n", b"")
+            with mock.patch.object(compare.subprocess, "run", return_value=found), \
+                    mock.patch.object(compare, "NativePhaseContext", side_effect=context), \
+                    mock.patch.object(compare.shutil, "copytree") as copied:
+                with self.assertRaises(compare.ClosureCleanupUncertain):
+                    compare.run_ast_retirement_owned(["/bin/true"], root, work, output, exported, current)
+                copied.assert_not_called()
+            self.assertIs(current["cleanup_proven"], False)
+            self.assertEqual(current["work_retained"], str(work))
+            self.assertTrue((exported / "cleanup-uncertain").is_file())
+            self.assertFalse(output.exists())
+
     def test_actual_reference_transport_crosses_raw_chunk_boundary_without_raising_limits(self) -> None:
         data = b"B" * (retirement.CHUNK_BYTES + 17)
         with tempfile.TemporaryDirectory() as directory:
@@ -473,14 +735,18 @@ class RetirementProducerRoutingTest(unittest.TestCase):
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(data)
                 record = {"requested": True, "status": "pending"}
-                current = {"timings": {}, "binaries": BINARIES, "ast_retirement_acceptance": record}
+                current = {"mode": "pull", "timings": {}, "binaries": BINARIES, "ast_retirement_acceptance": record}
                 arguments = argparse.Namespace(lab=root / "trusted-lab.py", base=BASE, head=HEAD)
-                with mock.patch.object(compare, "run", return_value=0), mock.patch.object(compare, "mark"), \
+                with mock.patch.object(compare, "run_ast_retirement_owned", return_value=0), mock.patch.object(compare, "mark"), \
                         mock.patch.object(compare, "EVIDENCE_DEFER_ALL", True), \
                         mock.patch.object(compare, "EVIDENCE_DEFERRED_OPTIONAL", []), \
                         mock.patch.object(compare, "EVIDENCE_OMISSION_LEDGER", []), \
                         mock.patch.object(compare, "EVIDENCE_FILE_COUNT", 0 if case == "budget" else compare.EVIDENCE_FILE_COUNT):
-                    compare.measure_ast_retirement(arguments, root, root / "bin", work, exported, current, None)
+                    if case == "complete":
+                        compare.measure_ast_retirement(arguments, root, root / "bin", work, exported, current, None)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "no later measurement admitted"):
+                            compare.measure_ast_retirement(arguments, root, root / "bin", work, exported, current, None)
                 if case == "complete":
                     self.assertEqual(record["status"], "complete")
                     self.assertEqual(record["errors"], [])

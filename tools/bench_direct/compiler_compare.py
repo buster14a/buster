@@ -1931,7 +1931,8 @@ AST_PILOT_REQUIRED = ("acceptance.json", "probe/probe.json",
                       *(f"{cell}/{name}" for cell in AST_PILOT_ACCEPTANCE_PROFILE["cells"]
                         for name in ("summary.json", "compare.json", "a/lab.json", "b/lab.json")))
 
-AST_RETIREMENT_REQUIRED = ("acceptance.json", "source.json", "inputs/unity.c",
+AST_RETIREMENT_REQUIRED = ("acceptance.json", "source.json", "inputs/unity.c", "rss-helper/build.json",
+                           "rss-helper/source.c", "rss-helper/retirement-rss", "rss-helper-build.log",
                            *(f"inputs/{name}.c" for name in AST_RETIREMENT_CORPUS),
                            *(f"{cell}/{name}" for cell in AST_RETIREMENT_CELLS
                              for name in ("summary.json", "compare.json", "pairs.json", "reference.json", "a/lab.json", "b/lab.json",
@@ -1939,7 +1940,85 @@ AST_RETIREMENT_REQUIRED = ("acceptance.json", "source.json", "inputs/unity.c",
                                           "reference.000.bin.gz", "reference.001.bin.gz")),
                            *(f"{cell}/pairs/{pair:04d}-{arm}.csv" for cell in AST_RETIREMENT_CELLS
                              for pair in range(1, AST_RETIREMENT_PROFILE["pairs"] + 1) for arm in ("a", "b")),
+                           *(f"{cell}/pairs/{pair:04d}-{arm}.rss" for cell in AST_RETIREMENT_CELLS
+                             for pair in range(1, AST_RETIREMENT_PROFILE["pairs"] + 1) for arm in ("a", "b")),
+                           "owner/metadata.json", *("owner/owned-phases/0001.json" + suffix
+                              for suffix in ("", ".argv", ".stdout", ".stderr", ".bootstrap.complete")),
                            *(f"probe/{cell}/{name}" for cell in AST_RETIREMENT_CELLS for name in ("probe.json", "a.log", "b.log")))
+
+
+def retain_ast_retirement_uncertainty(receipt: dict, work: Path, evidence: Path, reason: str) -> None:
+    """Retain outer ownership even if log or sentinel publication itself fails."""
+    receipt["cleanup_proven"] = False
+    receipt["work_retained"] = str(work)
+    try:
+        (evidence / "cleanup-uncertain").write_text(reason + "; no export or later child admitted.\n")
+    except OSError as error:
+        receipt.setdefault("reasons", []).append("AST cleanup uncertainty marker could not be persisted: " + str(error))
+
+
+def run_ast_retirement_owned(argv: list[str], candidate: Path, work: Path, output: Path,
+                             evidence: Path, receipt: dict) -> int:
+    """One AST leg under exact native descendant ownership, including failure cleanup."""
+    # This leg creates nested perf sessions. The legacy process-group bridge
+    # cannot settle those after helper death; use the existing exact native
+    # descendant owner locally, without claiming the full snapshot population.
+    found = subprocess.run([str(TRUSTED_ROOT / "build.sh"), "compiler_closure", "driver-path"],
+                           cwd=TRUSTED_ROOT, capture_output=True, timeout=BUILD_TIMEOUT_SECONDS, check=True)
+    if len(found.stdout) > 4096 or len(found.stderr) > 65536:
+        raise RuntimeError("AST native driver discovery exceeded its fixed output bound")
+    driver = Path(found.stdout.decode().strip())
+    owner_root = work / "ast-retirement-owner"
+    owner_root.mkdir()
+    local_receipt = {"state": "pending", "reasons": [], "mode": receipt["mode"], "phase": "ast-retirement-acceptance"}
+    context = NativePhaseContext(driver, work, owner_root, local_receipt)
+    status = 1
+    try:
+        status = context.execute(argv, candidate, evidence / "ast-retirement-acceptance.log",
+                                 AST_RETIREMENT_ACCEPTANCE_TIMEOUT_SECONDS).returncode
+    except ClosureCleanupUncertain:
+        retain_ast_retirement_uncertainty(receipt, work, evidence, "AST native owner cleanup unproven")
+        raise
+    except OwnedPhaseFailed:
+        # Prelaunch failures can precede any native proof. A failed phase may
+        # publish diagnostics only after the same exact raw cleanup authority
+        # has been checked; absence is never inferred to mean a quiet tree.
+        from compiler_owned_phase import read_record, validate_record, validate_bootstrap, command_bytes, sha
+        path = context.directory / "0001.json"
+        try:
+            raw = bounded_owned_member(path)
+            native = read_record(raw)
+            stdout = bounded_owned_member(Path(str(path) + ".stdout"), empty=True)
+            stderr = bounded_owned_member(Path(str(path) + ".stderr"), empty=True)
+            marker = bounded_owned_member(Path(str(path) + ".bootstrap.complete"))
+            issues = validate_record(native, argv, str(candidate.resolve()), AST_RETIREMENT_ACCEPTANCE_TIMEOUT_SECONDS,
+                                     context.driver_hash, stdout, stderr, nominal=False, receipt_path=str(path))
+            issues += validate_bootstrap(native, marker, local_receipt["phase_ownership"])
+            if bounded_owned_member(Path(str(path) + ".argv")) != command_bytes(argv) or \
+                    local_receipt["phase_ownership"]["phases"][0]["receipt_sha256"] != sha(raw):
+                issues.append("AST owner raw command/receipt identity differs")
+            if issues:
+                raise ValueError("; ".join(issues))
+        except (OSError, ValueError, KeyError, IndexError) as error:
+            retain_ast_retirement_uncertainty(receipt, work, evidence, "AST native failure has no exact cleanup proof")
+            raise ClosureCleanupUncertain("AST native failure cleanup unproven: " + str(error)) from error
+        status = 1
+    except BaseException as error:
+        # Native proof/log publication can fail before execute reaches its
+        # cleanup admission check. Never let that release outer ownership.
+        retain_ast_retirement_uncertainty(receipt, work, evidence, "AST native execute or proof publication interrupted")
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise ClosureCleanupUncertain("AST native execute cleanup unproven: " + str(error)) from error
+    finally:
+        context.finish()
+    owner = {"schema": "buster-ast-retirement-owner-v1", "ownership": local_receipt["phase_ownership"]}
+    owner_directory = output / "owner"
+    owner_directory.mkdir(parents=True)
+    shutil.copytree(owner_root / "owned-phases", owner_directory / "owned-phases")
+    (owner_directory / "metadata.json").write_text(dumps(owner) + "\n")
+    receipt["ast_retirement_acceptance"]["owner"] = owner
+    return status
 
 
 def measure_ast_retirement(arguments: argparse.Namespace, candidate: Path, bins: Path, work: Path, evidence: Path,
@@ -1950,11 +2029,11 @@ def measure_ast_retirement(arguments: argparse.Namespace, candidate: Path, bins:
     helper = Path(__file__).with_name("ast_retirement_acceptance.py").resolve()
     measured = time.monotonic()
     native = harness if harness is not None else candidate / "build/throughput-tools/throughput"
-    status = run([sys.executable, "-B", str(helper), "--lab", str(arguments.lab.resolve()), "--harness", str(native),
+    argv = [sys.executable, "-B", str(helper), "--lab", str(arguments.lab.resolve()), "--harness", str(native),
                   "--baseline-ide", str(bins / "ide-base"), "--candidate-ide", str(bins / "ide-cand"),
                   "--repo-root", str(candidate), "--base-revision", arguments.base, "--head-revision", arguments.head,
-                  "--cpu", str(AST_RETIREMENT_PROFILE["cpu"]), "--output", str(output)],
-                 candidate, evidence / "ast-retirement-acceptance.log", AST_RETIREMENT_ACCEPTANCE_TIMEOUT_SECONDS)
+                  "--cpu", str(AST_RETIREMENT_PROFILE["cpu"]), "--output", str(output)]
+    status = run_ast_retirement_owned(argv, candidate, work, output, evidence, receipt)
     receipt["timings"]["ast_retirement_acceptance_seconds"] = round(time.monotonic() - measured, 3)
     record = receipt["ast_retirement_acceptance"]
     record["exit"] = status
@@ -1970,6 +2049,8 @@ def measure_ast_retirement(arguments: argparse.Namespace, candidate: Path, bins:
         errors.append(f"issue #4058 retirement measurement exited {status}; raw unavailable/failed evidence is retained")
     record["errors"] = errors
     record["status"] = "complete" if not errors else "failed"
+    if errors:
+        raise RuntimeError("AST retirement leg failed; no later measurement admitted: " + "; ".join(errors))
 
 
 def measure_ast_pilot(arguments: argparse.Namespace, candidate: Path, binary: Path, work: Path, evidence: Path,
