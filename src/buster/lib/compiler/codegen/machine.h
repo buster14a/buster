@@ -1782,6 +1782,8 @@ struct MachineEncodeResult
     // instruction, one per return row; the AArch64 encoder fills these for
     // the Windows unwind data, the x86-64 encoder leaves them empty.
     u32* epilog_offsets;
+    // Exclusive function-relative offset after each emitted epilogue.
+    u32* epilog_end_offsets;
     u32 call_site_count;
     u32 inline_assembly_relocation_count;
     u32 epilog_count;
@@ -2154,6 +2156,7 @@ BUSTER_F_DECL MachineEncodeResult machine_encode_aarch64_into(Arena* arena, Mach
                                                               u8* caller_bytes, u64 caller_capacity);
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL u32 machine_test_compact_virtual_registers(Arena* arena, MachineFunction* function);
 BUSTER_F_DECL bool machine_test_debug_values_build(Arena* arena, IrProgram* program, IrFunction* function,
                                                     MachineFunction* machine_function, u32 const* value_stack_slots,
                                                     u32 const* value_indirect_slots);

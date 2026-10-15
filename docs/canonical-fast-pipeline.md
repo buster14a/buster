@@ -135,7 +135,17 @@ module a second time. Any mutation between the two points clears the reuse,
 and the guard still scans whenever nothing has proven the current
 representation. In the default tests-enabled Release `ide`, a translation
 unit in which promotion changes any function therefore pays one strict scan
-before FAST, not two.
+before FAST, not two. The promotion-output check also reuses a strict input
+proof for each body promotion left unchanged; changed bodies still receive
+their independent output check. The allocation diagnostic counter
+`ir_construction.preparation_promotion_input_proofs_reused` counts these
+avoided body traversals. When that scan excludes a legacy-invalid body, its
+successful neighbors retain individual post-promotion proofs in temporary
+preparation storage. FAST reuses those exact-state proofs while still checking
+shared scope and every unproven body. The proofs expire at the end of the
+preparation call, before later caller mutations; transformed FAST output keeps
+its existing independent check. The allocation diagnostic counter
+`ir_construction.preparation_promotion_proofs_reused` counts this work reduction.
 
 ## Purity contract
 
@@ -592,6 +602,17 @@ row this experiment never builds is never seen by the commit census. So the
 
 ## Tests
 
+`ir_test_inline_required_work_budget` exercises 400 required sites and 16
+assignment statements. Its actual copied-row floor for the old repeated-
+projection formula exceeds the unchanged 4 Mi work allowance, while the full
+retained-storage estimate remains subject to its unchanged cap. The explicit
+399-site case confirms that the configured site limit still refuses expansion.
+Its 5000-site flat caller uses a leaf with no body statements and derives a
+prefix-search lower bound above twice the base allowance before confirming
+refusal at the existing per-caller work cap.
+`ir_test_canonical_inline` continues to cover mandatory cycles and the
+explicit growth, storage, shape and site-limit refusals.
+
 `ir_fast_test.c` checks all 16 subsets structurally, transitive dead work,
 retained calls/memory effects, existing trivial parameters, repeat preparation,
 classification exclusions and budget refusal before value-storage access.
@@ -706,13 +727,25 @@ other zero numeric fields normalize to their named defaults.
 Mandatory calls are processed before optional tiny candidates across the module.
 Their growth and sites count against any subsequent optional allowance.
 Mandatory graph planning retains its module-wide work and scratch bounds.
-Required splicing bounds work and retained storage per caller: independent
-consumers cannot exhaust one shared allowance. Its fixed expansion allowances
-are 4 Mi work units and 16 MiB, plus one input-proportional relocation of the
-caller's existing tables and local/debug snapshots, computed before planning
-sites. This permits large existing callers without granting unbounded repeated
-expansion. Planning scratch remains bounded at 16 MiB, and copied rows retain
-the independent 4 Mi module-wide ceiling.
+Required splicing keeps the fixed 4 Mi work-unit and 16 MiB retained-storage
+limits per caller, plus one input-proportional relocation of the caller's
+existing tables and local/debug snapshots. The required work charge follows
+the splice loops: two call-block prefix walks (three for an aggregate result),
+the moved-tail target walk and its successor phi repairs, the output proof's
+caller-phi scans once per caller and once more for each spliced original block,
+the caller's debug-row preflight once per caller, the marginal caller reservation,
+and each callee clone/output payload once. Callee debug locals are charged for
+their two support checks and clone, and callee debug scopes for their planning
+and splice checks.
+The work estimate covers the production splice and proof path; builds with
+`BUSTER_IR_TRANSFORM_CHECKS` also run their existing full canonical validation
+after each splice batch, outside that admission estimate.
+Earlier planned calls
+also walk the one-edge branch to the prior callee entry. The pass does not
+recharge every existing caller block, unrelated phi list or prior clone at each
+required site. Planning scratch remains bounded at 16 MiB, copied rows retain
+the independent 4 Mi module-wide ceiling, and explicit row/site limits and
+cycle/shape refusals still apply.
 
 The 13-row callee default comes from a per-callee census of the unity
 self-host source (#3854). Most optional callees are one-line field predicates

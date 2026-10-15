@@ -30,6 +30,27 @@ destinations are explicitly refused. Write failures name the path and the OS
 error when supplied; native link failures identify the executable or PDB that
 failed. External GPU tools retain their own file-publication behavior.
 
+Before publishing a named output, the driver compares the followed file
+identity of the destination with every positional input and each physical
+source or header file the C preprocessor opened, including forced `-include`
+and `#include_next` files. Virtual builtin resource headers have no filesystem
+identity and are not treated as files read from the working directory; real
+files with the same basename remain protected. System headers stay in the
+collision closure even when `-MMD` omits them from dependency text. A match
+fails with an argument diagnostic before staging or replacing the destination,
+preserving both the input and any existing output bytes. This catches direct,
+symbolic-link, hard-link and case aliases whenever the filesystem reports the
+same identity. Direct Wasm, SPIR-V and eBPF emitters use the same action-aware
+path selector for checking and publication, including their default artifact
+names. Native executable link outputs and `-MF` dependency outputs are checked
+against each unit's physical inputs before publication; multi-input links
+retain each C and preprocessed-assembly unit's physical closure through the
+final output check. For multi-input `-c` and `-emit-llvm`, every derived `.o`
+or `.bc` destination is checked against the full positional input set before
+any unit runs, so an earlier output cannot replace a later input. The check
+does not resolve implicit `-lNAME` library searches or compiler-generated
+secondary evidence outputs.
+
 Publication (`file_publish_checked`, `file_publish_slices_checked` and
 `file_copy_checked` in `src/buster/lib/file.c`) writes a staging file beside
 the destination, closes it and renames it over the destination. It promises
@@ -260,6 +281,11 @@ must call it before starting their own gang, or before calling the driver from
 more than one thread, because the driver cannot release a gang it does not
 own. The lighter `compiler_prewarm()` remains the serial frontend/common-table
 entry. The AArch64 prewarm is an opt-in cost, not a new serial startup floor.
+The x86-64 target prewarm is the existing one: every x86-64 process that
+generates code pays it once, on the first `codegen_prewarm_for_target`. On the
+Ryzen 7 9700X it costs 1.74 ms of the compiler's own time and 6.6 M retired
+instructions above an AArch64 compile of the same one-function unit
+([`2026-10-13T160944Z`](../performance-audits/2026-10-13T160944Z.md), #1125).
 `CompilerDriverResult.compilation_workers` reports the largest active cohort
 (or one); it is not a physical-core or memory measurement.
 
@@ -362,10 +388,15 @@ the batch.
 
 **Setup stays outside every input.** With metrics requested, before the first
 interval opens the driver runs `compiler_prewarm()` and
-`codegen_prewarm_for_target(target)` (the one-time frontend, ABI and x86
-metadata tables, about 20 ms that used to land in input 0's `codegen` phase),
-and primes first-touch page faults: it commits and touches a pooled TU arena
-(`COMPILER_DRIVER_METRICS_TU_PRIME_BYTES`, which the first unit's arena
+`codegen_prewarm_for_target(target)` (the one-time frontend, ABI and target
+tables that used to land in input 0's `codegen` phase), and primes first-touch
+page faults. On the 9700X this setup put an x86-64 one-function input's
+`start_ns` at 2.4 ms and an AArch64 one's at 0.7 ms
+([`2026-10-13T160944Z`](../performance-audits/2026-10-13T160944Z.md)). It runs
+for every action, so a measured `-fsyntax-only` or `-E` pays a target prewarm
+that the same command without `-fmetrics-out` never runs; compare such runs
+only with each other (#4135). The priming commits and touches a pooled TU
+arena (`COMPILER_DRIVER_METRICS_TU_PRIME_BYTES`, which the first unit's arena
 reuses) and the calling thread's scratch arenas once per thread, plus the
 result arena when a single input compiles in it. No warm-up input is needed.
 `compiler_driver_test_input_metrics` observes the completed setup calls and
@@ -727,6 +758,8 @@ inlining is disabled; an impossible requirement produces a source-mapped
 tiny inlining; zero is rejected on the command line. Zero-valued API row/site limits
 select the optional defaults while required expansion uses independent per-caller
 work/storage guards (including one relocation of existing caller data); other zero API fields normalize to the named defaults.
+Those guards price block local-value snapshots only for blocks that carry one,
+and canonical C construction attaches none (#4050).
 Explicit budgets cap callee instruction count, added instructions per
 caller, added instructions per module, and accepted call sites, respectively;
 the shift sets the caller relocation bound described below. The callee limit
@@ -753,8 +786,9 @@ disable frontend SSA as well. Verbose compilation reports `IR_FRONTEND_SSA`
 counters beside `IR_LOCAL_PROMOTION`; see the
 [frontend ownership contract](frontend/foundations.md#direct-local-ssa-github-34).
 
-`-fc-ast-pilot[=implicit|hybrid|explicit]` (default off; the bare flag is
-`implicit`) builds the [implicit postorder syntax
+`-fc-ast-pilot[=implicit|hybrid|explicit]` (default `implicit` since the
+[owner decision of 2026-10-13](https://github.com/buster14a/buster/issues/3102#issuecomment-6146782845);
+the bare flag is `implicit`) builds the [implicit postorder syntax
 tree](frontend/ast.md#driver-pilot-hook) of each C input after a successful
 `c_preprocess`, inside the parse phase, so its time lands in `parse_ns`. The
 unit's declaration records then come from the tree
@@ -767,19 +801,25 @@ binder follows each function body's
 [statement plan](frontend/ast.md#statement-plan-from-the-tree), and lowering
 answers its root-conditional splits from it
 ([lowering from the tree](frontend/ast.md#lowering-from-the-tree)); no other
-stage reads it. Only under the flag does analysis share the primitive and
+stage reads it. Only with the tree does analysis share the primitive and
 pointer type rows those queries mint
 ([interned rows](frontend/ast.md#interned-rows)). With the flag the object
-and every diagnostic are byte-identical, and a tree the builder rejects fails
-the unit with the parse error class and a located diagnostic published like
-`c_parse_ast`'s. It does nothing for `-E`, assembly inputs or the other
+and every diagnostic are byte-identical to the tree-free path's. A builder that
+cannot reserve its storage fails the unit with the parse error class; a unit
+whose tree the builder rejects on syntax compiles without a tree, so it reports what
+`-fno-c-ast-pilot` reports; `-v` counts it in a `C_AST_REJECTED` row. It does nothing for `-E`, assembly inputs or the other
 languages. Any other layout value is an argument error
 (`unsupported -fc-ast-pilot layout: <value>`). Verbose compilation prints
 `C_AST`, `C_AST_WALK`, `C_AST_TYPES`, `C_AST_SPLIT`, `C_AST_STATEMENTS`,
 `C_AST_LOWER` and `C_AST_FACTS` rows, among others, beside `C_TYPE_LAYOUT`.
-Except under `-fsyntax-only`, the flag also retains semantic analysis's
+Except under `-fsyntax-only`, the tree also retains semantic analysis's
 per-node facts for lowering
-([retained facts](frontend/ast.md#retained-facts)).
+([retained facts](frontend/ast.md#retained-facts)). `-fno-c-ast-pilot` selects
+the tree-free path: analysis and lowering answer every question from tokens,
+as they did before the switch, and no facts are retained. It is the reference
+arm for differentials and bisection, and
+[#4058](https://github.com/buster14a/buster/issues/4058) removes it once
+lowering reads only the tree. The last of the two flags wins.
 
 `-fsysv-unnamed-bitfields=integer|padding` selects the classification of
 nonzero-width unnamed bit-fields on native System V x86-64 targets. `padding`
@@ -2297,7 +2337,36 @@ switches, runtime paths, and other `-z` modes are refused.
 `-Wp,` and `-Wa,` are never warning options. Only the exact
 `-Wp,-MD,PATH` and `-Wp,-MMD,PATH` dependency spellings described below are
 supported; other pass-through requests, including macro/include operations,
-are refused. Direct `-D`, `-U`, and `-I` remain available.
+are refused. The one accepted `-Wa,` value is `--noexecstack` (alone or as a
+comma-separated list of it): every Linux and Android ELF object already ends
+in an empty non-allocated `.note.GNU-stack` marking a non-executable stack
+unless an assembly input requests `"x"`, so the option changes nothing, for
+`-c`, `-S` and `-E` alike. Any other `-Wa,` value, including `--execstack`,
+an empty item and `-Wa,` alone, is refused with `unsupported pass-through
+option`.
+
+## C90 dialects, `-P` and `-Qunused-arguments`
+
+`-std=c89`, `-std=c90`, `-std=iso9899:1990` and `-ansi` select a strict ISO C90
+preprocessing dialect (`C_PREPROCESS_DIALECT_C89`), separate from the existing
+`-std=gnu89`/`-std=gnu90`. Like the other strict dialects it defines
+`__STRICT_ANSI__`, leaves out the GNU `linux`/`unix` macros and the GNU
+keywords (`typeof`, `asm`), and replaces trigraphs by default. Like `gnu89` it
+leaves `__STDC_VERSION__` undefined and defines `__GNUC_GNU_INLINE__`, with
+GNU inline semantics for `inline`. `-ansi` is exactly `-std=c90`; the last of
+`-ansi` and `-std=` wins. `-std=iso9899:199409` and `-std=c88` stay refused.
+
+The dialect is a preprocessing and keyword switch only. The frontend has no
+C90 language-rule switches, so `//` comments, mixed declarations and
+statements, and compound literals and other C99 constructs that GCC and Clang
+diagnose or reject under `-std=c90 -pedantic` are accepted. What the dialect
+supplies is the predefined-macro and header-selection behavior real C90
+projects (SDL's tests, parson) depend on, not a conformance check.
+
+`-P` (suppress linemarkers) and `-Qunused-arguments` (suppress Clang's
+unused-argument warning) are accepted for every action. The `-E` serializer
+never writes linemarkers, so `-P` already holds, and no unused-argument
+warning exists to suppress. Direct `-D`, `-U`, and `-I` remain available.
 Standalone `-M`, `-MM`, and `-MG` remain unsupported.
 
 ## Macro filename prefix maps
@@ -2620,6 +2689,8 @@ allocators; `codegen_test_machine_scratch_plan` checks the plan, the
 replacement and its restoration. Backend time, not memory, is the next limit
 for such functions: 128,000 and 256,000 `sink += x + i;` statements in one
 function take about 10 s and 42 s.
+
+Windows ARM64 stores function length in 18 bits of four-byte instructions. Larger functions therefore use aligned `.pdata`/`.xdata` fragments strictly shorter than 1 MiB; epilogs remain whole, their scopes are relative to each fragment, and continuation records carry the parent's unwind state through `end_c`. A registered large C fixture exercises compilation, linking, and execution across those fragment boundaries on native Windows ARM64.
 
 ## ELF TLS companion lookup
 

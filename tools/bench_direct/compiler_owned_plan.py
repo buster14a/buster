@@ -11,6 +11,7 @@ import hashlib
 import re
 from compiler_receipt import (PROFILE, THROUGHPUT_PROFILE, SCALING_PROFILE, INLINE_ACCEPTANCE_PROFILE,
                               AST_PILOT_ACCEPTANCE_PROFILE, CONSTANT_REUSE_ACCEPTANCE_PROFILE, PROCESS_FLOOR_PROFILE,
+                              AST_RETIREMENT_PROFILE, AST_RETIREMENT_REQUEST_LINE,
                               named_main_profile)
 
 HASH = re.compile(r"[a-f0-9]{64}\Z")
@@ -26,6 +27,7 @@ INLINE_TIMEOUT = 10800
 AST_PILOT_TIMEOUT = 7200
 CONSTANT_REUSE_TIMEOUT = 7200
 PROCESS_FLOOR_TIMEOUT = 3600
+AST_RETIREMENT_TIMEOUT = 2700
 POPULATION_SCHEMA = "buster-compiler-snapshot-phases-v1"
 UTILITY_POPULATION_SCHEMA = "buster-compiler-utility-phases-v1"
 MAIN_POPULATION_SCHEMA = "buster-compiler-main-owned-phases-v1"
@@ -123,6 +125,12 @@ def _commands(receipt: dict, ownership: dict, *, utility: bool = False,
         "--output", work + "/throughput", "--baseline-id", base, "--candidate-id", head,
         *THROUGHPUT_PROFILE["arguments"]], CORPUS_TIMEOUT)
     rows[-1]["exit_policy"] = "corpus-report-only-v1"
+    if receipt.get("ast_retirement_acceptance") is not None:
+        add("ast-retirement-acceptance", [python, "-B", trusted + "/tools/bench_direct/ast_retirement_acceptance.py",
+            "--lab", lab, "--harness", native_harness, "--baseline-ide", bins + "/ide-base",
+            "--candidate-ide", bins + "/ide-cand", "--repo-root", root, "--base-revision", base,
+            "--head-revision", head, "--cpu", str(AST_RETIREMENT_PROFILE["cpu"]),
+            "--output", work + "/ast-retirement-acceptance"], AST_RETIREMENT_TIMEOUT)
     if receipt.get("scaling_profile") is not None:
         for name, arguments in SCALING_PROFILE["series"].items():
             add("scaling", [native_harness, "scale", "--compiler", bins + "/ide-cand",
@@ -235,6 +243,14 @@ def validate_plan(receipt: object, ownership: object, core_rows: object, *,
                                   floor.get("requested") is not True or
                                   not _same(floor.get("profile"), PROCESS_FLOOR_PROFILE)):
             return ["ordinary snapshot semantic plan extension profile/mode unsupported"]
+        retirement = receipt.get("ast_retirement_acceptance")
+        if retirement is not None and (restricted or receipt["mode"] != "pull" or not isinstance(retirement, dict) or
+                retirement.get("requested") is not True or retirement.get("request_line") != AST_RETIREMENT_REQUEST_LINE or
+                not _same(retirement.get("profile"), AST_RETIREMENT_PROFILE) or any(receipt.get(key) is not None for key in
+                    ("ast_pilot_acceptance", "constant_reuse_acceptance", "process_floor", "throughput_real_source",
+                     "production_profile", "compiler_probes", "frontend_selector", "frontend_nesting", "wild_linker",
+                     "link_tls", "selfhost_inline", "analyzer_profile", "analyzer", "scaling_profile"))):
+            return ["ordinary snapshot AST retirement profile/mode/extensions unsupported"]
         planned = _commands(receipt, ownership, utility=utility, main_profile=profile if main else None)
         if len(core_rows) != len(planned):
             return ["ordinary snapshot semantic core/extension command count differs from the complete route"]

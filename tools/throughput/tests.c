@@ -2402,6 +2402,9 @@ int main(int argc, char** argv)
         result = test_failures ? 1 : 0;
     }
     else fprintf(stderr, "usage: throughput-tests OUTPUT_DIRECTORY\n");
+#if BUSTER_WINDOWS
+    if (!os_process_shutdown_keep_alive()) result = 1;
+#endif
     thread_context_release(context);
     arena_pool_release_thread();
     return result;

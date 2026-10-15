@@ -7840,6 +7840,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         {
                             memcpy(descriptor->epilog_offsets, encoded.epilog_offsets, sizeof(u32) * encoded.epilog_count);
                         }
+                        descriptor->epilog_end_offsets = encoded.epilog_count ? arena_allocate(arena, u32, encoded.epilog_count) : 0;
+                        if (encoded.epilog_count)
+                        {
+                            memcpy(descriptor->epilog_end_offsets, encoded.epilog_end_offsets, sizeof(u32) * encoded.epilog_count);
+                        }
                         descriptor->epilog_count = encoded.epilog_count;
                         bool machine_relocations_valid = codegen_publish_machine_relocations(program, &result, relocation_capacity,
                                                                                                &selected.function, &encoded,

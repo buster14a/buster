@@ -1,0 +1,96 @@
+name: Watchdog ThreadSanitizer
+
+# Repeated correctness evidence for the shared test-watchdog slot (#4175).
+# The native driver and generated test_tsan target own build/test policy.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/watchdog-tsan.yml'
+      - 'src/buster/lib/os.c'
+      - 'src/buster/lib/os.h'
+      - 'src/buster/tests/test.c'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watchdog-tsan-${{ github.event_name }}-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  tsan:
+    name: Five consecutive ThreadSanitizer runs
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    # First hosted run: ~5 min build + ~3 min 10 s tests (#4175, run
+    # 38544639141). Five full passes need ~21 min; 30 min covers that new work.
+    timeout-minutes: 30
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Configure the ThreadSanitizer tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang --version
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/buster-watchdog-build"
+          "$RUNNER_TEMP/buster-watchdog-build" generate --tsan --cc clang --ci --linker DEFAULT --build-directory build/tsan
+      - name: ThreadSanitizer run 1 of 5
+        shell: bash
+        run: '"$RUNNER_TEMP/buster-watchdog-build" build --build-directory build/tsan --config Release -t test_tsan'
+      - name: ThreadSanitizer run 2 of 5
+        shell: bash
+        run: '"$RUNNER_TEMP/buster-watchdog-build" build --build-directory build/tsan --config Release -t test_tsan'
+      - name: ThreadSanitizer run 3 of 5
+        shell: bash
+        run: '"$RUNNER_TEMP/buster-watchdog-build" build --build-directory build/tsan --config Release -t test_tsan'
+      - name: ThreadSanitizer run 4 of 5
+        shell: bash
+        run: '"$RUNNER_TEMP/buster-watchdog-build" build --build-directory build/tsan --config Release -t test_tsan'
+      - name: ThreadSanitizer run 5 of 5
+        shell: bash
+        run: '"$RUNNER_TEMP/buster-watchdog-build" build --build-directory build/tsan --config Release -t test_tsan'
+  serial:
+    name: Single-threaded watchdog regression
+    if: ${{ github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Machine specifications
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          requested-runner: >-
+            ubuntu-26.04
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record actual checkout identity
+        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+        with:
+          mode: source
+          source-directory: .
+          source-repository: ${{ github.repository }}
+      - name: Configure the single-threaded tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char -g build.c -o "$RUNNER_TEMP/buster-watchdog-serial-build"
+          "$RUNNER_TEMP/buster-watchdog-serial-build" generate --cc clang --ci --linker DEFAULT --build-directory build/serial -- -DBUSTER_SINGLE_THREADED=ON
+      - name: Run the single-threaded tests
+        shell: bash
+        run: '"$RUNNER_TEMP/buster-watchdog-serial-build" build --build-directory build/serial --config Release -t test_all'

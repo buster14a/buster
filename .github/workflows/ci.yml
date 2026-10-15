@@ -135,6 +135,7 @@ jobs:
           grep --fixed-strings --quiet 'if (DEFINED ENV{VULKAN_SDK})' CMakeLists.txt
           grep --fixed-strings --quiet 'test_gpu_toolchains --self-test' .github/workflows/gpu-toolchains.yml
           grep --fixed-strings --quiet -- '--profile spirv-dxc-2025.07' .github/workflows/gpu-toolchains.yml
+          grep --fixed-strings --quiet -- '--profile spirv-direct-vulkan1.2' .github/workflows/gpu-toolchains.yml
       - name: Validate the performance audit index
         shell: bash
         run: |
@@ -308,6 +309,7 @@ jobs:
           grep --fixed-strings --quiet 'if (DEFINED ENV{VULKAN_SDK})' CMakeLists.txt
           grep --fixed-strings --quiet 'test_gpu_toolchains --self-test' .github/workflows/gpu-toolchains.yml
           grep --fixed-strings --quiet -- '--profile spirv-dxc-2025.07' .github/workflows/gpu-toolchains.yml
+          grep --fixed-strings --quiet -- '--profile spirv-direct-vulkan1.2' .github/workflows/gpu-toolchains.yml
       - name: Validate the performance audit index
         shell: bash
         run: |
@@ -1676,9 +1678,9 @@ jobs:
           set -euo pipefail
           # The immutable snapshot keeps the exact packages available after updates.
           cat > "$RUNNER_TEMP/uefi-sources.list" <<'SOURCES'
-          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble main universe
-          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-updates main universe
-          deb [arch=amd64 signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-security main universe
+          deb [arch=amd64 target=Packages signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble main universe
+          deb [arch=amd64 target=Packages signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-updates main universe
+          deb [arch=amd64 target=Packages signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/20260828T000000Z noble-security main universe
           SOURCES
           # Retry transient snapshot transport failures without changing the signed source or package pins.
           apt_options=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/uefi-sources.list" -o 'Dir::Etc::sourceparts=-' \

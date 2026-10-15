@@ -102,6 +102,17 @@
   later assertion. Failure counts and diagnostics remain unchanged.
   `test_debugger_failure_self_test` checks debugger-present/absent decisions,
   restoration, and argument-free failures without changing registered totals.
+- Each `c_preprocess` unit reserves three 1 GiB arenas that stay registered
+  on the test thread until released, so a test must release a unit after its
+  last reader. IR names point into the unit's spelling arena, so that includes
+  readers of the lowered IR. A `BUSTER_TEST_FIXTURE` or module scope releases
+  its units when it ends. Inside a scope, use `c_test_scratch_end` for a
+  scratch, `c_preprocess_release` for one result, or
+  `c_test_preprocess_unit_mark` / `c_test_release_preprocess_arenas_since` for
+  units in a loop or behind a helper. `C_TEST_BOUNDED_FIXTURE`
+  (`c_source_internal.h`) also requires a fixture to return every reservation
+  it made; call `c_test_unit_registry_prewarm()` before the first one. See
+  #3306 and #3431.
 - Keep test-only declarations behind `BUSTER_INCLUDE_TESTS`. Private structures
   shared with tests belong in a narrow `*_internal.h` seam rather than being
   exposed through a production public header.
@@ -157,15 +168,26 @@
   and required step records. When the Actions API returns incomplete or stale
   metadata, it retries with 1/2/4-second backoff, at most three refreshes and
   a 30-second total metadata budget. Transient 5xx/429/transport reads retry
-  in that budget, falling back to smaller jobs pages after a 5xx; a 4xx fails
-  immediately. A later exact snapshot may recover a transient omission; a
-  persistent empty, stale or ambiguous record fails closed, and its errors are
-  printed to the log and step summary. It never borrows step proof from an older attempt when a newer attempt
-  shadows that job. Run a fresh full CI attempt when required metadata remains
-  unresolved; a green job-level conclusion alone is not execution evidence.
+  in that budget, each read capped at a third of it, falling back to smaller
+  jobs pages after a 5xx or read timeout; a 4xx fails immediately. A later
+  exact snapshot may recover a transient omission; an ambiguous record fails
+  closed, and its errors are printed to the log and step summary. It never
+  borrows step proof from an older attempt when a newer attempt shadows that
+  job. After every refresh, a completed successful job whose required steps are
+  only absent (`steps=[]`) or still pending passes on its job conclusion, never
+  when any step record failed or was skipped. Each such job is logged as
+  `CI complete inventory gate: step proof unavailable, accepted on job conclusion: <job>`
+  (#4102); see [GitHub Actions CI](../ci-github-actions.md). Run a fresh full
+  CI attempt when other required metadata remains unresolved.
   GitHub can attach externally published admission and compiler-benchmark checks
   to this Actions inventory. `github_ci_time.py` separates their metadata only
-  after exact check ID/name/head/app/namespace proof. The compiler benchmark
+  after exact check ID/name/head/app/namespace proof. Compiler sampling research
+  uses its freeze/phase/packet/request/executor marker and first-attempt-only
+  trusted-main sampling queue or terminal publication writer (#4209). It requires
+  the authorized exact-head request, matching executor run title and actor,
+  frozen-implementation checkout and state-appropriate writer step. A default
+  check URL must have one matching current executor link in its report.
+  The compiler benchmark
   additionally binds request and measurement attempts, re-reads the matching
   same-repository request and trusted-main publisher, and requires the publisher's
   exact-attempt checkout and writer-step execution. Its queued/running/completed
@@ -461,6 +483,14 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   hangs and abnormal exits still fail. This control establishes the reachable
   finalization tail, not the cause or acknowledgement timing of a native probe
   failure. Probe failure does not establish an app crash.
+  After GO authorization, the existing caller receipt retains
+  `reason=awaiting-completion` with `admission=0`, so an expired capture can
+  be distinguished from startup that never reached GO (#4158). This records
+  only the caller boundary; it proves neither native launch, readiness, exit,
+  EOF nor snapshot completion. The final closed snapshot still exclusively
+  admits stable receipts. A real native deadline with finite delayed owner
+  publication preserves this phase while remaining unadmitted; no retry or
+  recovery follows from the phase observation.
   `bash ios/launch_diagnostics_mock_test.sh` runs the existing attached-monitor
   controls, `python3 ios/lifecycle_capture_test.py -v` and the caller-clock
   controls in `python3 ios/lifecycle_capture_bridge_test.py -v`. They cover
@@ -1173,6 +1203,14 @@ that check serial initialization. On expiry it terminates the process without
 running exit handlers, because the stuck thread may hold any lock.
 `test_fixture_watchdog_self_test` covers deadline parsing, start records,
 nested transitions, expiry and the record text without a thread or a sleep.
+`test_watch_contention_self_test` checks complete atomic slot snapshots while
+one lane publishes alternating states and another reads them; serial builds
+exercise the same publication path with one lane. Rejected snapshots are never
+used to read string bytes. The slot keeps the single-writer sequence check,
+with atomic pointer, length and scalar fields on every supported compiler (#4175).
+The focused `Watchdog ThreadSanitizer` hosted job requires five consecutive
+`test_tsan` passes. The PIE fixture qualifies child ASLR from the kernel sysctl
+and inherited process personality, which a sanitizer runtime may change (#4179).
 `os_tests` also runs a real `ide test` child through the private
 `BUSTER_TEST_WATCHDOG_CHILD_MODE` payload. That payload spins in one fixture
 under a one-second override. The child must exit with status 124, print the

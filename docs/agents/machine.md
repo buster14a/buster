@@ -7,6 +7,23 @@ The retained native allocator modes are FAST and QUALITY; both select and
 encode MIR. NONE and MIR-stack are retired modes referenced only in archived
 evidence.
 
+The five numeric A64 semantic blobs use private storage version 1, independent
+of semantic schema version 2. The generator transposes each block of up to 32
+fixed-width records by byte column, packs literal/repeated-byte packets, then
+base64-encodes each block with explicit offsets. Record bytes, IDs and Arm
+source identities do not change. `buster_aarch64_semantics_prewarm` restores
+the original row bytes serially and publishes readiness last; packets decode
+directly into row storage without a temporary block or a second copy. Warmed
+readers retain direct byte access. Before prewarm, each block fills its disjoint
+part of those same buffers under a leaf-level once-claim, with acquire/release
+publication and no other claims or callbacks during decoding. The descriptor
+slot is checked against generated identity before using shared storage;
+temporary descriptors use pure bounded reads. Serial prewarm follows the
+same block path and never overwrites a published block.
+`buster_aarch64_semantics_test_storage` checks malformed packets, partial
+blocks, concurrent cold fills and prewarmed bytes against hashes of the
+preceding uncompressed payloads.
+
 The typed AArch64 ADD/SUB extended-register recipe chooses Rm width from both
 the instruction width and the extension option. Every 32-bit form uses Wm,
 including UXTX and SXTX; a 64-bit form uses Xm only for UXTX/SXTX. Shifts 0–4
@@ -165,6 +182,11 @@ hosts execute its independent expected-value fixture.
   switch-case target, even an unused row, because FAST consumes the whole table.
   Keep these checks at the existing verification boundary; selector-certified
   fresh functions continue directly to placement without another verifier pass.
+- Virtual-register compaction preserves opcode and virtual-reference validation
+  for rows, parameters and edge copies before recognizing an already dense
+  register population. That identity case keeps IDs and metadata without
+  allocating or applying a remap; a population with holes retains stable
+  original-ID order and rewrites every virtual-reference family.
 - Debug-enabled production selection publishes canonical-local identity in the
   cold `MachineDebugValue` side table after virtual-register compaction. Its
   source spans remain canonical instruction IDs and its references name final

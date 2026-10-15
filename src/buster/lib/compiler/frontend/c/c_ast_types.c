@@ -131,6 +131,8 @@
 //   IDENTIFIER   bound through identifier_use_by_token_plus_one to an object,
 //                function, parameter, local or enumerator: the entity's type,
 //                as c_parse_direct_expression_base answers the single token.
+//                An array parameter reads its interned adjusted pointer row;
+//                absent rows decline to the token query without appending.
 //                In an initializer, an unbound name is looked up instead, as
 //                that function falls back to doing.
 //   NUMBER,      c_parse_expression_leaf_without_cast itself, the leaf the
@@ -229,7 +231,7 @@
 //   c_ast_types_initializer_begin, _end,         the per-initializer entry points
 //   c_ast_types_waiting
 //   c_ast_types_looked_up_entity                 an initializer's unbound names
-//   c_ast_types_span, c_ast_types_expand         span rules
+//   c_ast_types_span                             span rules (c_ast_span_rule)
 //   c_ast_types_probe_fails,                      bit-field widths of operands
 //   c_ast_types_operand_width
 //   c_ast_types_type_body, c_ast_types_type_node the eager pass and its rules
@@ -339,7 +341,7 @@ struct CAstTypeArithmeticMemo
 #define C_AST_TYPE_ARITHMETIC_MEMO_COUNT 64
 BUSTER_CT_CHECK(C_AST_TYPE_ARITHMETIC_MEMO_COUNT == 64);
 // c_ast_types_type_body fills the entity array with all-ones bytes.
-BUSTER_CT_CHECK(C_AST_TYPE_NONE == UINT32_MAX);
+BUSTER_CT_CHECK(C_AST_TYPE_NONE == UINT32_MAX && C_AST_SPAN_NONE == C_AST_TYPE_NONE);
 
 // The `{` token of every top-level function definition, ascending, and the
 // FUNCTION_DEFINITION node it opens; and the first token of every top-level
@@ -683,23 +685,12 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_ast_types_punctuator_at(CAstTypeBody co
     return token < body->token_total && c_token_is_punctuator(&body->tokens[token], punctuator);
 }
 
-// The span of the node at `relative`, widened over every balanced pair of
-// parentheses that wraps it exactly. The tree has no node for a parenthesis, so
-// an operator's own span begins or ends outside its operand's.
-BUSTER_GLOBAL_LOCAL void c_ast_types_expand(CAstTypeBody const* body, u32 relative, u32* first_out, u32* end_out)
+// The rules are c_ast_span_rule's (c_ast.c), applied to this region's arrays,
+// which hold spans at relative indices.
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE CAstSpanInput c_ast_types_span_input(CAstTypeBody const* body)
 {
-    u32 first = body->first[relative];
-    u32 end = body->end[relative];
-    if (first != C_AST_TYPE_NONE)
-    {
-        while (first > 0 && c_ast_types_punctuator_at(body, first - 1, C_PUNCTUATOR_LEFT_PARENTHESIS) && c_ast_types_match(body, first - 1) == end)
-        {
-            first -= 1;
-            end += 1;
-        }
-    }
-    *first_out = first;
-    *end_out = end;
+    return (CAstSpanInput){.ast = body->ast, .tokens = body->tokens, .matches_plus_one = body->matches, .first = body->first,
+                           .end = body->end, .token_total = body->token_total, .base = body->begin};
 }
 
 // Computes [first, end) for one expression node. Returns false when the span
@@ -708,130 +699,9 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_expand(CAstTypeBody const* body, u32 relati
 // accepted.
 BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u32 relative, u32* first_out, u32* end_out)
 {
-    CAst const* ast = body->ast;
-    u32 kind = ast->kinds[node];
-    u32 token = ast->tokens[node];
-    u32 first = C_AST_TYPE_NONE;
-    u32 end = C_AST_TYPE_NONE;
-    switch (kind)
-    {
-    case C_AST_IDENTIFIER:
-    case C_AST_NUMBER:
-    case C_AST_CHARACTER:
-    case C_AST_BOOLEAN_CONSTANT:
-    case C_AST_NULLPTR:
-    {
-        first = token;
-        end = token + 1;
-    }
-    break;
-    case C_AST_STRING:
-    {
-        first = token;
-        end = token + ast->data[node];
-    }
-    break;
-    case C_AST_LABEL_ADDRESS:
-    {
-        first = token ? token - 1 : C_AST_TYPE_NONE;
-        end = token + 1;
-    }
-    break;
-    case C_AST_STATEMENT_EXPRESSION:
-    {
-        u32 close = c_ast_types_match(body, token);
-        first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
-        end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
-    }
-    break;
-    case C_AST_GENERIC_SELECTION:
-    case C_AST_SIZEOF_TYPE:
-    case C_AST_ALIGNOF_TYPE:
-    {
-        u32 close = c_ast_types_match(body, token + 1);
-        first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
-        end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
-    }
-    break;
-    case C_AST_CALL:
-    case C_AST_INDEX:
-    {
-        u32 callee = c_ast_types_first_child(ast, node);
-        u32 expanded_first = C_AST_TYPE_NONE;
-        u32 expanded_end = C_AST_TYPE_NONE;
-        c_ast_types_expand(body, callee - body->begin, &expanded_first, &expanded_end);
-        u32 close = c_ast_types_match(body, token);
-        if (expanded_first != C_AST_TYPE_NONE && close != C_AST_TYPE_NONE)
-        {
-            first = expanded_first;
-            end = close + 1;
-        }
-    }
-    break;
-    case C_AST_MEMBER:
-    case C_AST_MEMBER_ARROW:
-    case C_AST_POST_INCREMENT:
-    case C_AST_POST_DECREMENT:
-    {
-        u32 expanded_first = C_AST_TYPE_NONE;
-        u32 expanded_end = C_AST_TYPE_NONE;
-        c_ast_types_expand(body, relative - 1, &expanded_first, &expanded_end);
-        if (expanded_first != C_AST_TYPE_NONE)
-        {
-            first = expanded_first;
-            end = token + 1;
-        }
-    }
-    break;
-    case C_AST_COMPOUND_LITERAL:
-    {
-        u32 close = c_ast_types_match(body, ast->tokens[node - 1]);
-        first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
-        end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
-    }
-    break;
-    case C_AST_INITIALIZER_LIST:
-    {
-        u32 close = c_ast_types_match(body, token);
-        first = close != C_AST_TYPE_NONE ? token : C_AST_TYPE_NONE;
-        end = close != C_AST_TYPE_NONE ? close + 1 : C_AST_TYPE_NONE;
-    }
-    break;
-    default:
-    {
-        if (kind >= C_AST_PRE_INCREMENT && kind <= C_AST_CAST)
-        {
-            u32 expanded_first = C_AST_TYPE_NONE;
-            u32 expanded_end = C_AST_TYPE_NONE;
-            c_ast_types_expand(body, relative - 1, &expanded_first, &expanded_end);
-            if (expanded_first != C_AST_TYPE_NONE)
-            {
-                first = token;
-                end = expanded_end;
-            }
-        }
-        else if (kind >= C_AST_MULTIPLY && kind <= C_AST_COMMA)
-        {
-            u32 leftmost = c_ast_types_first_child(ast, node);
-            u32 left_first = C_AST_TYPE_NONE;
-            u32 left_end = C_AST_TYPE_NONE;
-            u32 right_first = C_AST_TYPE_NONE;
-            u32 right_end = C_AST_TYPE_NONE;
-            c_ast_types_expand(body, leftmost - body->begin, &left_first, &left_end);
-            c_ast_types_expand(body, relative - 1, &right_first, &right_end);
-            if (left_first != C_AST_TYPE_NONE && right_end != C_AST_TYPE_NONE)
-            {
-                first = left_first;
-                end = right_end;
-            }
-        }
-    }
-    break;
-    }
-    bool valid = first != C_AST_TYPE_NONE && end != C_AST_TYPE_NONE && first < end && end <= body->token_total;
-    *first_out = valid ? first : C_AST_TYPE_NONE;
-    *end_out = valid ? end : C_AST_TYPE_NONE;
-    return valid;
+    BUSTER_CHECK(node - body->begin == relative);
+    CAstSpanInput input = c_ast_types_span_input(body);
+    return c_ast_span_rule(&input, node, first_out, end_out);
 }
 
 // ---- the typing rules ----------------------------------------------------------
@@ -1081,7 +951,11 @@ BUSTER_GLOBAL_LOCAL void c_ast_types_identifier(CAstTypeBody* body, CPreprocessR
     }
     if (entity && c_ast_types_value_entity(entity, true) && entity->type.value < result->type_count)
     {
-        c_ast_types_accept(body, relative, entity->type, flags);
+        CTypeId type = c_parse_expression_entity_type(result, entity, true);
+        if (type.value < result->type_count)
+        {
+            c_ast_types_accept(body, relative, type, flags);
+        }
     }
     else if (identifier && !entity)
     {
@@ -2701,6 +2575,7 @@ BUSTER_C_SHARED void c_ast_types_publish(CTypeParseMachine* machine, CParseResul
 #define C_AST_FACT_HEADROOM BUSTER_KB(64)
 // One node's columns: types, payloads and flags.
 #define C_AST_FACT_NODE_BYTES (sizeof(u32) + sizeof(u32) + sizeof(u8))
+#define C_AST_CONSTANT_INITIAL_CAPACITY 64u
 
 BUSTER_GLOBAL_LOCAL String8 const c_ast_fact_gap_names[C_AST_FACT_GAP_COUNT] = {
     [C_AST_FACT_GAP_UNSPANNED] = S8_INITIALIZER("unspanned"),
@@ -2735,7 +2610,16 @@ bool c_ast_facts_create(CAstFacts* facts, CAst const* ast)
     u32* types = arena ? arena_allocate(arena, u32, count) : 0;
     u32* payloads = types ? arena_allocate(arena, u32, count) : 0;
     u8* flags = payloads ? arena_allocate(arena, u8, count) : 0;
-    bool created = flags != 0;
+    // Sparse rows double on demand. Their abandoned prefixes sum to less
+    // than twice the previous power of two. The last capacity can be capped
+    // at node_count, so three rows per node also cover that final carve.
+    u64 constant_reservation = (u64)count * (sizeof(u32) + 3 * (sizeof(CAstConstantFact) + sizeof(CAstOffsetofPlan) +
+                                                               sizeof(CAstOffsetofStep) + sizeof(CAstExt80InitializerFact))) + C_AST_FACT_HEADROOM;
+    Arena* constants_arena = flags && constant_reservation <= ARENA_MAX_RESERVATION
+        ? c_frontend_arena_create((ArenaCreation){.reserved_size = constant_reservation, .initial_size = C_AST_FACT_HEADROOM,
+                                                 .flags = {.no_pool = true}}, C_FRONTEND_RESERVATION_ANALYSIS) : 0;
+    u32* constant_slots = constants_arena ? arena_allocate_zeroed(constants_arena, u32, count) : 0;
+    bool created = flags && constant_slots;
     if (created)
     {
         memset(types, 0xff, sizeof(*types) * count);
@@ -2743,22 +2627,278 @@ bool c_ast_facts_create(CAstFacts* facts, CAst const* ast)
         memset(flags, 0, sizeof(*flags) * count);
         *facts = (CAstFacts){
             .arena = arena,
+            .constants_arena = constants_arena,
+            .constant_slots = constant_slots,
             .types = types,
             .payloads = payloads,
             .flags = flags,
             .node_count = count,
-            .statistics = {.nodes = count, .retained_bytes = arena->position - arena_minimum_position},
+            .statistics = {.nodes = count, .retained_bytes = arena->position - arena_minimum_position +
+                                                           constants_arena->position - arena_minimum_position},
         };
     }
     else if (arena)
     {
         c_ast_facts_retire(arena);
+        if (constants_arena)
+        {
+            arena_destroy(constants_arena, 1);
+        }
     }
     return created;
 }
 
+// The producer index is prepared once before the first semantic query. It
+// uses the shared span rules, and lowering can borrow it for the whole unit.
+bool c_ast_facts_prepare(CAstFacts* facts, CAst const* ast, CPreprocessResult const* preprocess, CParseResult* result)
+{
+    bool ready = facts && facts->flags && ast && ast->node_count == facts->node_count && preprocess->token_count < UINT32_MAX;
+    if (ready && !facts->spans)
+    {
+        c_parse_position_index_ensure(result, *preprocess);
+        u32 const* matches = result->position_index && result->position_index->built && !result->position_index->delimiter_mismatch_count
+                                 ? result->position_index->matching_delimiters_plus_one : 0;
+        u64 size = (3 * (u64)ast->node_count + preprocess->token_count + 1) * sizeof(u32) + sizeof(CAstSpans) + C_AST_FACT_HEADROOM;
+        Arena* arena = matches ? c_frontend_arena_create((ArenaCreation){.reserved_size = size, .initial_size = C_AST_FACT_HEADROOM,
+                                                                           .flags = {.no_pool = true}}, C_FRONTEND_RESERVATION_ANALYSIS) : 0;
+        CAstSpans* spans = arena ? arena_allocate(arena, CAstSpans, 1) : 0;
+        ready = spans && c_ast_spans_build(arena, ast, preprocess->tokens, (u32)preprocess->token_count, matches, spans);
+        if (ready)
+        {
+            facts->index_arena = arena;
+            facts->spans = spans;
+            facts->matches = matches;
+            facts->statistics.retained_bytes += arena->position - arena_minimum_position;
+        }
+        else if (arena)
+        {
+            arena_destroy(arena, 1);
+        }
+    }
+    return ready;
+}
+
+u32 c_ast_facts_locate(CAstFacts const* facts, CPreprocessResult const* preprocess, u32 start, u32 end)
+{
+    return facts && facts->spans ? c_ast_spans_locate(facts->spans, preprocess->tokens, facts->matches, start, end) : C_AST_NODE_INVALID;
+}
+
+CAstConstantFact c_ast_facts_constant(CAstFacts const* facts, u32 node)
+{
+    CAstConstantFact result = {.type = C_TYPE_ID_INVALID, .primitive_kind = C_TYPE_INVALID, .status = C_AST_CONSTANT_UNQUERIED};
+    if (facts && facts->constant_slots && node < facts->node_count)
+    {
+        u32 stored = facts->constant_slots[node];
+        if (stored && stored - 1 < facts->constant_count)
+        {
+            result = facts->constants[stored - 1];
+        }
+    }
+    return result;
+}
+
+// A homogeneous sparse buffer, bounded by the unit's node count. The final
+// capacity may stop between powers of two; its reservation includes all
+// abandoned prefixes as well as that last carve.
+BUSTER_GLOBAL_LOCAL void* c_ast_facts_sparse_reserve(CAstFacts* facts, void* rows, u32 count, u32 capacity, u32 required,
+                                                   u64 size, u64 alignment, u32* capacity_out)
+{
+    void* result = rows;
+    u32 grown_capacity = capacity;
+    if (required <= facts->node_count && required > capacity)
+    {
+        grown_capacity = capacity ? capacity : BUSTER_MIN(facts->node_count, C_AST_CONSTANT_INITIAL_CAPACITY);
+        while (grown_capacity < required)
+        {
+            grown_capacity = grown_capacity <= facts->node_count / 2 ? grown_capacity * 2 : facts->node_count;
+        }
+        result = arena_allocate_bytes(facts->constants_arena, size * grown_capacity, alignment);
+        if (count)
+        {
+            memcpy(result, rows, size * count);
+        }
+    }
+    *capacity_out = grown_capacity;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL u64 c_ast_facts_retained_size(CAstFacts const* facts)
+{
+    return (facts->arena ? facts->arena->position - arena_minimum_position : 0) +
+           (facts->index_arena ? facts->index_arena->position - arena_minimum_position : 0) +
+           (facts->recipe_arena ? facts->recipe_arena->position - arena_minimum_position : 0) +
+           (facts->constants_arena ? facts->constants_arena->position - arena_minimum_position : 0);
+}
+
+// Metadata-only roots remain UNQUERIED until a semantic scalar query runs.
+BUSTER_GLOBAL_LOCAL u32 c_ast_facts_constant_slot(CAstFacts* facts, u32 node)
+{
+    u32 stored = 0;
+    if (facts && facts->constant_slots && facts->constants_arena && node < facts->node_count)
+    {
+        stored = facts->constant_slots[node];
+        if (!stored)
+        {
+            facts->constants = (CAstConstantFact*)c_ast_facts_sparse_reserve(facts, facts->constants, facts->constant_count,
+                facts->constant_capacity, facts->constant_count + 1, sizeof(*facts->constants), BUSTER_ALIGN_OF(CAstConstantFact),
+                &facts->constant_capacity);
+            if (facts->constant_count < facts->constant_capacity)
+            {
+                stored = ++facts->constant_count;
+                facts->constant_slots[node] = stored;
+                facts->constants[stored - 1] = (CAstConstantFact){.type = C_TYPE_ID_INVALID, .primitive_kind = C_TYPE_INVALID};
+            }
+        }
+    }
+    return stored;
+}
+
+bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fact)
+{
+    u32 stored = fact.status > C_AST_CONSTANT_UNQUERIED && fact.status < C_AST_CONSTANT_STATUS_COUNT
+        ? c_ast_facts_constant_slot(facts, node) : 0;
+    bool valid = stored != 0;
+    if (valid)
+    {
+        CAstConstantFact* previous = facts->constants + stored - 1;
+        fact.offsetof_plus_one = fact.offsetof_plus_one ? fact.offsetof_plus_one : previous->offsetof_plus_one;
+        fact.ext80_initializer_plus_one = fact.ext80_initializer_plus_one ? fact.ext80_initializer_plus_one : previous->ext80_initializer_plus_one;
+        // A later unmodelled probe cannot erase an earlier certified scalar
+        // result; destination initializer and path annotations remain separate.
+        bool certified = previous->status == C_AST_CONSTANT_INTEGER || previous->status == C_AST_CONSTANT_FLOAT;
+        if (!certified || fact.status != C_AST_CONSTANT_UNSUPPORTED)
+        {
+            *previous = fact;
+        }
+        else
+        {
+            previous->offsetof_plus_one = fact.offsetof_plus_one;
+            previous->ext80_initializer_plus_one = fact.ext80_initializer_plus_one;
+        }
+        facts->statistics.retained_bytes = c_ast_facts_retained_size(facts);
+    }
+    return valid;
+}
+
+CAstOffsetofPlan const* c_ast_facts_offsetof(CAstFacts const* facts, u32 node)
+{
+    CAstConstantFact fact = c_ast_facts_constant(facts, node);
+    CAstOffsetofPlan const* result = 0;
+    if (fact.offsetof_plus_one && fact.offsetof_plus_one - 1 < facts->offsetof_plan_count)
+    {
+        result = facts->offsetof_plans + fact.offsetof_plus_one - 1;
+    }
+    return result;
+}
+
+bool c_ast_facts_store_offsetof(CAstFacts* facts, u32 node, CAstOffsetofStep const* steps, u32 count, bool valid)
+{
+    u32 stored = (!count || steps) && facts && count <= facts->node_count ? c_ast_facts_constant_slot(facts, node) : 0;
+    bool recorded = stored != 0;
+    if (recorded && !facts->constants[stored - 1].offsetof_plus_one)
+    {
+        recorded = count <= facts->node_count - facts->offsetof_step_count && facts->offsetof_plan_count < facts->node_count;
+        if (recorded)
+        {
+            facts->offsetof_plans = (CAstOffsetofPlan*)c_ast_facts_sparse_reserve(facts, facts->offsetof_plans, facts->offsetof_plan_count,
+                facts->offsetof_plan_capacity, facts->offsetof_plan_count + 1, sizeof(*facts->offsetof_plans), BUSTER_ALIGN_OF(CAstOffsetofPlan),
+                &facts->offsetof_plan_capacity);
+            facts->offsetof_steps = (CAstOffsetofStep*)c_ast_facts_sparse_reserve(facts, facts->offsetof_steps, facts->offsetof_step_count,
+                facts->offsetof_step_capacity, facts->offsetof_step_count + count, sizeof(*facts->offsetof_steps), BUSTER_ALIGN_OF(CAstOffsetofStep),
+                &facts->offsetof_step_capacity);
+            recorded = facts->offsetof_plan_count < facts->offsetof_plan_capacity &&
+                       count <= facts->offsetof_step_capacity - facts->offsetof_step_count;
+        }
+        if (recorded)
+        {
+            u32 plan = facts->offsetof_plan_count++;
+            facts->offsetof_plans[plan] = (CAstOffsetofPlan){.first_step = facts->offsetof_step_count, .step_count = count, .valid = valid};
+            if (count)
+            {
+                memcpy(facts->offsetof_steps + facts->offsetof_step_count, steps, sizeof(*steps) * (u64)count);
+            }
+            facts->offsetof_step_count += count;
+            facts->constants[stored - 1].offsetof_plus_one = plan + 1;
+            facts->statistics.retained_bytes = c_ast_facts_retained_size(facts);
+        }
+    }
+    return recorded;
+}
+
+CAstExt80InitializerFact const* c_ast_facts_ext80_initializer(CAstFacts const* facts, u32 node)
+{
+    CAstConstantFact fact = c_ast_facts_constant(facts, node);
+    CAstExt80InitializerFact const* result = 0;
+    if (fact.ext80_initializer_plus_one && fact.ext80_initializer_plus_one - 1 < facts->ext80_initializer_count)
+    {
+        result = facts->ext80_initializers + fact.ext80_initializer_plus_one - 1;
+    }
+    return result;
+}
+
+bool c_ast_facts_store_ext80_initializer(CAstFacts* facts, u32 node, u64 significand, u16 exponent_sign)
+{
+    u32 stored = c_ast_facts_constant_slot(facts, node);
+    bool recorded = stored != 0;
+    if (recorded)
+    {
+        u32 initializer = facts->constants[stored - 1].ext80_initializer_plus_one;
+        if (!initializer)
+        {
+            facts->ext80_initializers = (CAstExt80InitializerFact*)c_ast_facts_sparse_reserve(facts, facts->ext80_initializers,
+                facts->ext80_initializer_count, facts->ext80_initializer_capacity, facts->ext80_initializer_count + 1,
+                sizeof(*facts->ext80_initializers), BUSTER_ALIGN_OF(CAstExt80InitializerFact), &facts->ext80_initializer_capacity);
+            recorded = facts->ext80_initializer_count < facts->ext80_initializer_capacity;
+            if (recorded)
+            {
+                initializer = ++facts->ext80_initializer_count;
+                facts->constants[stored - 1].ext80_initializer_plus_one = initializer;
+            }
+        }
+        if (recorded)
+        {
+            facts->ext80_initializers[initializer - 1] = (CAstExt80InitializerFact){.significand = significand, .exponent_sign = exponent_sign};
+            facts->statistics.retained_bytes = c_ast_facts_retained_size(facts);
+        }
+    }
+    return recorded;
+}
+
 void c_ast_facts_release(CAstFacts* facts)
 {
+    if (facts->recipe_arena)
+    {
+        arena_destroy(facts->recipe_arena, 1);
+    }
+    facts->recipe_arena = 0;
+    facts->recipes = 0;
+    facts->recipe_count = 0;
+    facts->recipe_failed = false;
+    if (facts->constants_arena)
+    {
+        arena_destroy(facts->constants_arena, 1);
+    }
+    facts->constants_arena = 0;
+    facts->constant_slots = 0;
+    facts->constants = 0;
+    facts->constant_count = 0;
+    facts->constant_capacity = 0;
+    facts->offsetof_plans = 0;
+    facts->offsetof_steps = 0;
+    facts->ext80_initializers = 0;
+    facts->offsetof_plan_count = 0;
+    facts->offsetof_plan_capacity = 0;
+    facts->offsetof_step_count = 0;
+    facts->offsetof_step_capacity = 0;
+    facts->ext80_initializer_count = 0;
+    facts->ext80_initializer_capacity = 0;
+    if (facts->index_arena)
+    {
+        arena_destroy(facts->index_arena, 1);
+    }
+    facts->index_arena = 0;
+    facts->spans = 0;
+    facts->matches = 0;
     if (facts->arena)
     {
         c_ast_facts_retire(facts->arena);
@@ -2801,12 +2941,18 @@ BUSTER_C_SHARED CAstTypeBody* c_ast_types_facts_begin(CTypeParseMachine* machine
                 u32 typed = body->flags[relative];
                 u32 flags = facts->flags[node] | C_AST_FACT_EXPRESSION;
                 statistics->candidates += 1;
-                if (typed & C_AST_TYPE_FLAG_ACCEPTED)
+                bool accepted = (typed & C_AST_TYPE_FLAG_ACCEPTED) != 0;
+#if BUSTER_INCLUDE_TESTS
+                bool uncached = c_ast_types_facts_uncached();
+                accepted = accepted && !uncached;
+                flags = uncached ? flags & ~(u32)C_AST_FACT_TYPED : flags;
+#endif
+                if (accepted)
                 {
                     // The typer's rule is the fact; a query's answer for the
                     // same node, which it made exact, is the same row.
                     facts->types[node] = body->types[relative].value;
-                    flags = (flags | C_AST_FACT_TYPED) & ~(u32)(C_AST_FACT_MACHINE | C_AST_FACT_NONPLACE | C_AST_FACT_STRING);
+                    flags = (flags | C_AST_FACT_TYPED) & ~(u32)(C_AST_FACT_MACHINE | C_AST_FACT_NONPLACE | C_AST_FACT_STRING | C_AST_FACT_RECIPE);
                     statistics->tree += 1;
                     if ((kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW) && body->widths[relative])
                     {
@@ -2885,6 +3031,243 @@ BUSTER_C_SHARED bool c_ast_types_facts_string(CAstFacts* facts, CParseResult con
     return kept;
 }
 
+// Only sparse descriptions live in this arena; every allocation has the
+// same element size and alignment, so the index remains stable in place.
+BUSTER_GLOBAL_LOCAL CAstTypeRecipe* c_ast_types_recipes_append(CAstFacts* facts, u32 count)
+{
+    if (!facts->recipe_arena && !facts->recipe_failed)
+    {
+        facts->recipe_arena = c_frontend_arena_create((ArenaCreation){.reserved_size = C_PHASE_ARENA_RESERVED_SIZE,
+                                                                        .initial_size = C_AST_FACT_HEADROOM,
+                                                                        .flags = {.no_pool = true}}, C_FRONTEND_RESERVATION_ANALYSIS);
+        facts->recipe_failed = !facts->recipe_arena;
+    }
+    Arena* arena = facts->recipe_arena;
+    u64 first = arena ? align_forward(arena->position, BUSTER_ALIGN_OF(CAstTypeRecipe)) : 0;
+    bool room = arena && first <= arena->reserved_size && count < C_AST_FACT_NONE - facts->recipe_count &&
+                (u64)count * sizeof(CAstTypeRecipe) <= arena->reserved_size - first;
+    CAstTypeRecipe* appended = room ? arena_allocate(arena, CAstTypeRecipe, count) : 0;
+    if (appended)
+    {
+        facts->recipes = facts->recipes ? facts->recipes : appended;
+        BUSTER_CHECK(appended == facts->recipes + facts->recipe_count);
+        facts->recipe_count += count;
+    }
+    facts->recipe_failed = facts->recipe_failed || !appended;
+    return appended;
+}
+
+// Capture the complete temporary row run before the semantic checkpoint is
+// restored. Published rows and parameter/member slices already existed; no
+// new member/parameter slice is admitted by c_parse_region_facts_sound.
+BUSTER_C_SHARED bool c_ast_types_facts_recipe(CAstFacts* facts, CParseResult const* result, CPreprocessResult const* preprocess,
+                                               u32 node, CTypeId type, u32 rows)
+{
+    bool kept = rows <= type.value && type.value < result->type_count;
+    u32 count = result->type_count - rows;
+    u32 base = facts->recipe_count;
+    CAstTypeRecipe* recipes = kept ? c_ast_types_recipes_append(facts, count) : 0;
+    kept = recipes != 0;
+    if (kept)
+    {
+        for (u32 index = 0; index < count; index += 1)
+        {
+            CType row = result->types[rows + index];
+            CTypeAlignment const* alignment = c_parse_type_alignment(result, (CTypeId){.value = rows + index});
+            CArrayBound bound = row.kind == C_TYPE_ARRAY && row.array_bound < result->array_bound_count
+                                    ? result->array_bounds[row.array_bound] : (CArrayBound){0};
+            u32 bound_node = bound.token_count ? c_ast_facts_locate(facts, preprocess, bound.token_start, bound.token_start + bound.token_count)
+                                             : C_AST_NODE_INVALID;
+            recipes[index] = (CAstTypeRecipe){.type = row, .bound = bound, .bound_node = bound_node, .row_begin = rows,
+                                                  .recipe_begin = base, .alignment = alignment ? *alignment : (CTypeAlignment){0},
+                                                  .has_alignment = alignment != 0, .declaration = C_AST_FACT_NONE};
+        }
+        facts->types[node] = base + type.value - rows;
+        facts->flags[node] |= C_AST_FACT_TYPED | C_AST_FACT_MACHINE | C_AST_FACT_RECIPE;
+        facts->statistics.completed += 1;
+        facts->statistics.recipes += 1;
+    }
+    return kept;
+}
+
+// The two candidate forms for which the semantic machine has no ordinary
+// CType answer. Builtin identities are admitted only for recognised semantic
+// builtins, not for an arbitrary unbound spelling. Function-name objects name
+// the declaration whose body actually contains the use.
+BUSTER_C_SHARED bool c_ast_types_facts_identity(CAstFacts* facts, CParseResult const* result, CAst const* ast,
+                                                 CPreprocessResult const* preprocess, u32 node)
+{
+    u32 token = ast->tokens[node];
+    String8 name = token < preprocess->token_count ? c_token_spelling(preprocess->spelling_base, preprocess->tokens[token]) : S8("");
+    bool identifier = ast->kinds[node] == C_AST_IDENTIFIER && !(facts->flags[node] & C_AST_FACT_BOUND);
+    bool function_name = identifier && (string_equal(name, S8("__func__")) || string_equal(name, S8("__FUNCTION__")) ||
+                                        string_equal(name, S8("__PRETTY_FUNCTION__")));
+    CSymbolBuiltin builtin = identifier && !function_name ? c_symbol_builtin_from_spelling(name) : C_SYMBOL_BUILTIN_NONE;
+    u32 declaration = C_AST_FACT_NONE;
+    // Body binding may append block-scope function prototypes after the
+    // file declarations, so this table is not globally sorted by source.
+    for (u32 index = 0; function_name && declaration == C_AST_FACT_NONE && index < result->declaration_count; index += 1)
+    {
+        CDeclaration const* row = result->declarations + index;
+        declaration = row->kind == C_DECLARATION_FUNCTION && token >= row->body_start && token - row->body_start < row->body_token_count
+                          ? index : C_AST_FACT_NONE;
+    }
+    bool kept = declaration != C_AST_FACT_NONE || builtin != C_SYMBOL_BUILTIN_NONE;
+    u32 index = facts->recipe_count;
+    CAstTypeRecipe* recipe = kept ? c_ast_types_recipes_append(facts, 1) : 0;
+    kept = recipe != 0;
+    if (kept)
+    {
+        *recipe = (CAstTypeRecipe){.form = declaration != C_AST_FACT_NONE ? C_AST_TYPE_RECIPE_FUNCTION_NAME : C_AST_TYPE_RECIPE_BUILTIN,
+                                       .declaration = declaration, .builtin = (u32)builtin, .bound_node = C_AST_NODE_INVALID,
+                                       .type = {.element_type = C_TYPE_ID_INVALID, .return_type = C_TYPE_ID_INVALID,
+                                                .unqualified_type = C_TYPE_ID_INVALID, .array_bound = C_ARRAY_BOUND_INVALID}};
+        if (declaration != C_AST_FACT_NONE)
+        {
+            recipe->bound = (CArrayBound){.inferred_count = result->declarations[declaration].name.length + 1, .has_inferred_count = true};
+            recipe->type.kind = C_TYPE_ARRAY;
+            recipe->type.is_complete = true;
+            recipe->type.is_const = true;
+            recipe->type.element_type = result->expression_scalar_types ? result->expression_scalar_types[C_TYPE_CHAR] : C_TYPE_ID_INVALID;
+        }
+        facts->types[node] = index;
+        facts->flags[node] |= C_AST_FACT_TYPED | C_AST_FACT_MACHINE | C_AST_FACT_RECIPE;
+        facts->statistics.completed += 1;
+        facts->statistics.function_names += declaration != C_AST_FACT_NONE;
+        facts->statistics.builtin_identities += declaration == C_AST_FACT_NONE;
+    }
+    return kept;
+}
+
+// A published row or row-free description. References in a description's
+// temporary run remain recipe references rather than reused type-table ids.
+typedef struct CAstFactTypeReference CAstFactTypeReference;
+struct CAstFactTypeReference
+{
+    CType const* type;
+    u32 index;
+    bool recipe;
+};
+
+BUSTER_GLOBAL_LOCAL CAstFactTypeReference c_ast_types_fact_reference(CAstFacts const* facts, CParseResult const* result, u32 index, bool recipe)
+{
+    CType const* type = recipe ? index < facts->recipe_count && facts->recipes[index].form == C_AST_TYPE_RECIPE_DERIVATION
+                                    ? &facts->recipes[index].type : 0
+                              : index < result->type_count ? result->types + index : 0;
+    return (CAstFactTypeReference){.type = type, .index = index, .recipe = recipe};
+}
+
+BUSTER_GLOBAL_LOCAL CAstFactTypeReference c_ast_types_fact_node(CAstFacts const* facts, CParseResult const* result, u32 node)
+{
+    u32 flags = node < facts->node_count ? facts->flags[node] : 0;
+    return (flags & C_AST_FACT_TYPED) && !(flags & C_AST_FACT_STRING)
+               ? c_ast_types_fact_reference(facts, result, facts->types[node], (flags & C_AST_FACT_RECIPE) != 0)
+               : (CAstFactTypeReference){.index = C_AST_FACT_NONE};
+}
+
+BUSTER_GLOBAL_LOCAL CAstFactTypeReference c_ast_types_fact_nested(CAstFacts const* facts, CParseResult const* result,
+                                                                 CAstFactTypeReference parent, CTypeId nested)
+{
+    CAstTypeRecipe const* recipe = parent.recipe ? facts->recipes + parent.index : 0;
+    bool temporary = recipe && nested.value != C_ID_UNDERLYING_INVALID && nested.value >= recipe->row_begin;
+    u32 index = temporary ? recipe->recipe_begin + nested.value - recipe->row_begin : nested.value;
+    return c_ast_types_fact_reference(facts, result, index, temporary);
+}
+
+// Facts can describe valid nodes the range machine cannot answer: a call
+// through a member, a member of a compound literal, and vector bitwise values.
+// This is publication only. It reads finished operand facts and the existing
+// semantic member/scalar helpers, without changing any validator's answer.
+BUSTER_C_SHARED bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, u32 node,
+                                               CTypeId* type_out, u32* recipe_out)
+{
+    CAstFacts* facts = machine->ast_facts;
+    CAst const* ast = machine->syntax_tree;
+    CAstFactTypeReference answer = {.index = C_AST_FACT_NONE};
+    u32 kind = ast->kinds[node];
+    if (result && (kind == C_AST_MEMBER || kind == C_AST_MEMBER_ARROW || kind == C_AST_CALL))
+    {
+        u32 child = c_ast_child_at(ast, node, 0);
+        CAstFactTypeReference base = c_ast_types_fact_node(facts, result, child);
+        if (base.type && (kind == C_AST_MEMBER_ARROW || (kind == C_AST_CALL && base.type->kind == C_TYPE_POINTER)))
+        {
+            base = base.type->kind == C_TYPE_POINTER ? c_ast_types_fact_nested(facts, result, base, base.type->element_type)
+                                                     : (CAstFactTypeReference){.index = C_AST_FACT_NONE};
+        }
+        if (base.type && kind == C_AST_CALL && base.type->kind == C_TYPE_FUNCTION)
+        {
+            answer = c_ast_types_fact_nested(facts, result, base, base.type->return_type);
+        }
+        else if (base.type && kind != C_AST_CALL && (base.type->kind == C_TYPE_STRUCT || base.type->kind == C_TYPE_UNION))
+        {
+            u32 width = 0;
+            CTypeId aggregate = base.recipe ? C_TYPE_ID_INVALID : (CTypeId){.value = base.index};
+            CTypeId member = aggregate.value < result->type_count
+                                 ? c_parse_member_type(machine->scratch_arena, result, aggregate, ast->data[node],
+                                                       c_token_spelling(preprocess->spelling_base, preprocess->tokens[ast->tokens[node]]), &width, 0, 0)
+                                 : C_TYPE_ID_INVALID;
+            if (member.value < result->type_count)
+            {
+                CType qualifiers = {.is_const = base.type->is_const, .is_volatile = base.type->is_volatile,
+                                    .is_restrict = base.type->is_restrict, .is_atomic = base.type->is_atomic};
+                member = qualifiers.is_const || qualifiers.is_volatile || qualifiers.is_restrict || qualifiers.is_atomic
+                             ? c_parse_add_qualified_type(result, member, qualifiers) : member;
+                answer = c_ast_types_fact_reference(facts, result, member.value, false);
+                if (width)
+                {
+                    facts->payloads[node] = width;
+                    facts->flags[node] |= C_AST_FACT_BIT_FIELD;
+                    facts->statistics.bit_fields += 1;
+                }
+            }
+        }
+    }
+    else if (result && ((kind >= C_AST_LESS && kind <= C_AST_NOT_EQUAL) || kind == C_AST_LOGICAL_AND || kind == C_AST_LOGICAL_OR))
+    {
+        answer = c_ast_types_fact_reference(facts, result, c_parse_expression_scalar_type(result, C_TYPE_INT).value, false);
+    }
+    else if (result && (kind == C_AST_BIT_AND || kind == C_AST_BIT_XOR || kind == C_AST_BIT_OR || kind == C_AST_CONDITIONAL))
+    {
+        u32 children = c_ast_child_count(ast, node);
+        CAstFactTypeReference left = c_ast_types_fact_node(facts, result, c_ast_child_at(ast, node, children - 2));
+        CAstFactTypeReference right = c_ast_types_fact_node(facts, result, c_ast_child_at(ast, node, children - 1));
+        bool same = left.type && right.type && left.index == right.index && left.recipe == right.recipe;
+        bool vector = left.type && right.type && left.type->kind == C_TYPE_VECTOR && right.type->kind == C_TYPE_VECTOR &&
+                      left.type->vector_byte_size == right.type->vector_byte_size && !left.type->is_const && !left.type->is_volatile &&
+                      !left.type->is_atomic && !right.type->is_const && !right.type->is_volatile && !right.type->is_atomic;
+        if (vector)
+        {
+            CAstFactTypeReference a = c_ast_types_fact_nested(facts, result, left, left.type->element_type);
+            CAstFactTypeReference b = c_ast_types_fact_nested(facts, result, right, right.type->element_type);
+            vector = a.type && b.type && a.index == b.index && a.recipe == b.recipe;
+        }
+        if (vector || (kind == C_AST_CONDITIONAL && same && (left.type->kind == C_TYPE_STRUCT || left.type->kind == C_TYPE_UNION)))
+        {
+            answer = left;
+        }
+        else if (kind == C_AST_CONDITIONAL && left.type && right.type && !left.recipe && !right.recipe &&
+                 left.type->kind == right.type->kind && (left.type->kind == C_TYPE_STRUCT || left.type->kind == C_TYPE_UNION))
+        {
+            CTypeId a = {.value = c_ast_types_unqualified_row(result, (CTypeId){.value = left.index})};
+            CTypeId b = {.value = c_ast_types_unqualified_row(result, (CTypeId){.value = right.index})};
+            if (c_parse_types_compatible(machine->scratch_arena, result, *preprocess, a, b))
+            {
+                CType qualifiers = {.is_const = left.type->is_const || right.type->is_const,
+                                    .is_volatile = left.type->is_volatile || right.type->is_volatile,
+                                    .is_restrict = left.type->is_restrict || right.type->is_restrict,
+                                    .is_atomic = left.type->is_atomic || right.type->is_atomic};
+                CTypeId merged = qualifiers.is_const || qualifiers.is_volatile || qualifiers.is_restrict || qualifiers.is_atomic
+                                     ? c_parse_add_qualified_type(result, a, qualifiers) : a;
+                answer = c_ast_types_fact_reference(facts, result, merged.value, false);
+            }
+        }
+    }
+    bool valid = answer.type != 0;
+    *type_out = valid && !answer.recipe ? (CTypeId){.value = answer.index} : C_TYPE_ID_INVALID;
+    *recipe_out = valid && answer.recipe ? answer.index : C_AST_FACT_NONE;
+    return valid;
+}
+
 // A top-level query's valid answer, kept for the fact candidate whose span
 // [start, end) is, when nothing has typed it yet. The region's own pass may
 // still overwrite it with the typer's rule (c_ast_types_facts_begin). A
@@ -2929,10 +3312,10 @@ BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast,
             u32 kind = ast->kinds[node];
             floor = floor != C_AST_TYPE_NONE && node < floor ? C_AST_TYPE_NONE : floor;
             floor = floor == C_AST_TYPE_NONE && kind == C_AST_FUNCTION_DEFINITION ? c_ast_subtree_begin(ast, node) : floor;
-            if ((flags & C_AST_FACT_TYPED) && facts->types[node] >= result->type_count)
+            if ((flags & C_AST_FACT_TYPED) && !(flags & C_AST_FACT_RECIPE) && facts->types[node] >= result->type_count)
             {
                 facts->types[node] = C_AST_FACT_NONE;
-                facts->flags[node] = (u8)(flags & ~(u32)(C_AST_FACT_TYPED | C_AST_FACT_MACHINE | C_AST_FACT_NONPLACE | C_AST_FACT_STRING));
+                facts->flags[node] = (u8)(flags & ~(u32)(C_AST_FACT_TYPED | C_AST_FACT_MACHINE | C_AST_FACT_NONPLACE | C_AST_FACT_STRING | C_AST_FACT_RECIPE));
                 statistics->stale += 1;
             }
             if (!(flags & C_AST_FACT_EXPRESSION) && c_ast_types_fact_kind(kind))
@@ -2941,7 +3324,7 @@ BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast,
                 statistics->outside += floor == C_AST_TYPE_NONE;
             }
         }
-        statistics->retained_bytes = facts->arena ? facts->arena->position - arena_minimum_position : 0;
+        statistics->retained_bytes = c_ast_facts_retained_size(facts);
     }
 }
 
@@ -2949,6 +3332,17 @@ BUSTER_C_SHARED void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast,
 
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_verify_enabled;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_facts_uncached_enabled;
+
+void c_test_ast_fact_uncached_set(bool enabled)
+{
+    c_ast_types_facts_uncached_enabled = enabled;
+}
+
+BUSTER_C_SHARED bool c_ast_types_facts_uncached(void)
+{
+    return c_ast_types_facts_uncached_enabled;
+}
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestAstTypeVerify c_ast_types_verify_state;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_ast_types_verify_perturb_alignments;
 
@@ -3084,15 +3478,30 @@ BUSTER_GLOBAL_LOCAL bool c_ast_types_rows_equal(CType const* x, CType const* y)
            x->parameter_start == y->parameter_start && x->parameter_count == y->parameter_count && x->member_start == y->member_start &&
            x->member_count == y->member_count && x->enum_member_start == y->enum_member_start && x->enum_member_count == y->enum_member_count &&
            x->definition_start == y->definition_start && x->definition_token_count == y->definition_token_count &&
-           x->vector_byte_size == y->vector_byte_size && x->kind == y->kind && x->is_const == y->is_const && x->is_volatile == y->is_volatile &&
-           x->is_restrict == y->is_restrict && x->is_atomic == y->is_atomic && x->is_variadic == y->is_variadic && x->is_complete == y->is_complete &&
-           x->is_transparent_union == y->is_transparent_union && x->has_unqualified_type == y->has_unqualified_type &&
+           x->vector_byte_size == y->vector_byte_size && x->effective_named_member_count == y->effective_named_member_count &&
+           x->effective_named_member_count_final == y->effective_named_member_count_final && x->kind == y->kind && x->is_const == y->is_const &&
+           x->is_volatile == y->is_volatile && x->is_restrict == y->is_restrict && x->is_atomic == y->is_atomic && x->is_variadic == y->is_variadic &&
+           x->is_complete == y->is_complete && x->is_transparent_union == y->is_transparent_union && x->has_unqualified_type == y->has_unqualified_type &&
            x->is_unprototyped == y->is_unprototyped && x->has_fixed_underlying_type == y->has_fixed_underlying_type;
 }
 
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_C_SHARED bool c_test_ast_type_replay_effective_member_count(void)
+{
+    CType original = {.effective_named_member_count = 1, .effective_named_member_count_final = true};
+    CType changed_count = original;
+    changed_count.effective_named_member_count = 2;
+    CType changed_finality = original;
+    changed_finality.effective_named_member_count_final = false;
+    return !c_ast_types_rows_equal(&original, &changed_count) && !c_ast_types_rows_equal(&original, &changed_finality);
+}
+#endif
+
 BUSTER_GLOBAL_LOCAL bool c_ast_types_alignments_equal(CTypeAlignment const* x, CTypeAlignment const* y)
 {
-    return x->type_index == y->type_index && x->alignment_start == y->alignment_start && x->alignment_count == y->alignment_count;
+    return x->type_index == y->type_index && x->source_type_index == y->source_type_index && x->alignment_start == y->alignment_start &&
+           x->alignment_count == y->alignment_count;
 }
 
 BUSTER_GLOBAL_LOCAL bool c_ast_types_bounds_equal(CArrayBound const* x, CArrayBound const* y)

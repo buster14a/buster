@@ -1,6 +1,9 @@
 // Machine backend regressions: instruction metadata, selection, allocation,
 // CFG/parameter-edge remapping, scheduling and native ABI execution.
-// machine_tests is the module entry; machine_test_parameter_edge_split owns
+// machine_tests is the module entry; every fixture runs under
+// C_TEST_BOUNDED_FIXTURE, and the module body releases each C unit it
+// compiles after that program's last reader (GitHub #3431).
+// machine_test_parameter_edge_split owns
 // the bounded linear remapping oracle and large-fanout structural controls.
 // machine_test_a64_atomic_pair_updates pins pair-update payloads, clobbers,
 // both frontend forms, small/large frame expansion and the direct CAS oracle.
@@ -59,7 +62,7 @@ BUSTER_CT_CHECK(sizeof(MachineVirtualRegister) == 16);
 BUSTER_CT_CHECK(sizeof(MachineBlock) == 32);
 BUSTER_CT_CHECK(sizeof(MachineEdge) == 16);
 BUSTER_CT_CHECK(sizeof(MachineEdit) == 16);
-BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(MachineEncodeResult) == 96);
+BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(MachineEncodeResult) == 104);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrInstruction) == 64);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrValue) == 16);
 BUSTER_CT_CHECK(sizeof(void*) != 8 || sizeof(IrBlock) == 64);
@@ -2114,6 +2117,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
     UnitTestResult result = {0};
     for (u32 architecture = 0; architecture < 2; architecture += 1)
     {
+        // The programs below live in the fixture arena; their units are
+        // released when this architecture's last reader is done.
+        u64 preprocess_mark = c_test_preprocess_unit_mark();
         u32 sizes[] = {0, 1, 7, 8, 16, 64, 65, UINT32_MAX};
         u32 offsets[] = {0, 1, 7, 8, 15, 56, 63, 64, UINT32_MAX - 7u, UINT32_MAX};
         for (u32 size_index = 0; size_index < BUSTER_ARRAY_LENGTH(sizes); size_index += 1)
@@ -2477,6 +2483,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_stack_aliases(UnitTestArguments*
                 BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
             }
         }
+        c_test_release_preprocess_arenas_since(preprocess_mark);
     }
     return result;
 }
@@ -5199,7 +5206,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_a64_dying_clobber_input(UnitTest
             BUSTER_TEST(arguments, encoded.valid);
         }
     }
-    scratch_end(temporary);
+    c_test_scratch_end(temporary);
     return result;
 }
 
@@ -10498,9 +10505,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_schedule_trace_equivalence(UnitT
         for (u32 slot = 0; slot < MACHINE_INSTRUCTION_OPERAND_COUNT; slot += 1)
         {
             u32 role = slot < info->operand_count ? info->operand_info[slot] & ((1u << MACHINE_OPERAND_ROLE_BITS) - 1u) : MACHINE_OPERAND_ROLE_NONE;
-            u32 uses = (row.role_lanes >> (MACHINE_OPCODE_ROW_USE_SHIFT + slot)) & 1u;
-            u32 define_only = (row.role_lanes >> (MACHINE_OPCODE_ROW_DEFINE_SHIFT + slot)) & 1u;
-            u32 use_define = (row.role_lanes >> (MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT + slot)) & 1u;
+            u32 uses = ((u32)row.role_lanes >> (MACHINE_OPCODE_ROW_USE_SHIFT + slot)) & 1u;
+            u32 define_only = ((u32)row.role_lanes >> (MACHINE_OPCODE_ROW_DEFINE_SHIFT + slot)) & 1u;
+            u32 use_define = ((u32)row.role_lanes >> (MACHINE_OPCODE_ROW_USE_DEFINE_SHIFT + slot)) & 1u;
             projection_exact &= uses == (u32)(role == MACHINE_OPERAND_ROLE_USE || role == MACHINE_OPERAND_ROLE_USE_DEFINE);
             projection_exact &= (define_only | use_define) == (u32)(role == MACHINE_OPERAND_ROLE_DEFINE || role == MACHINE_OPERAND_ROLE_USE_DEFINE);
             projection_exact &= !(define_only && use_define);
@@ -10580,11 +10587,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_schedule_trace_equivalence(UnitT
     u32 moved = 0;
     u32 rejected = 0;
     bool corpus_equivalent = true;
+    u64 preprocess_mark = c_test_preprocess_unit_mark();
     for (u32 architecture = 0; architecture < 2; architecture += 1)
     {
         Target target = {.cpu_arch = architecture ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
         for (u32 source_index = 0; source_index < BUSTER_ARRAY_LENGTH(sources); source_index += 1)
         {
+            // Release the previous source's unit; nothing reads it any more.
+            c_test_release_preprocess_arenas_since(preprocess_mark);
             ByteSlice source = file_read(arguments->arena, sources[source_index], (FileReadOptions){0});
             // The corpus must reach a gate-rejected candidate; with constants interned it no longer does.
             IrProgram* program = source.pointer ? machine_test_compile_c_with_options(arguments->arena, sources[source_index],
@@ -10612,6 +10622,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_schedule_trace_equivalence(UnitT
             }
         }
     }
+    c_test_release_preprocess_arenas_since(preprocess_mark);
     arguments->show(arguments, S8("MACHINE_SCHEDULE_TRACE scheduled_functions={u32} moved={u32} gate_rejected={u32} stale={u32}\n"), compared, moved,
                     rejected, stale);
     BUSTER_TEST(arguments, corpus_equivalent && compared > 0 && moved > 0 && rejected > 0);
@@ -10848,81 +10859,146 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_fast_consumer_register_hint(Unit
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_register_compaction(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 shape = 0; shape < 2; shape += 1)
+    {
+        u32 count = shape ? 6u : 4u;
+        u32 ids[4] = {0, shape ? 2u : 1u, shape ? 3u : 2u, shape ? 5u : 3u};
+        MachineVirtualRegister registers[6] = {0};
+        for (u32 index = 0; index < count; index += 1)
+        {
+            registers[index] = (MachineVirtualRegister){.definition_point = machine_point_make(index, MACHINE_POINT_AFTER),
+                                                        .typed_origin = index + 100u,
+                                                        .register_class = MACHINE_REGISTER_CLASS_GENERAL};
+        }
+        registers[ids[2]].flags = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE;
+        MachineVirtualRegister expected[4];
+        for (u32 index = 0; index < 4; index += 1) memcpy(expected + index, registers + ids[index], sizeof(*expected));
+        MachineInstruction instructions[2] = {
+            {.opcode = MACHINE_X64_MOV_RR,
+             .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, ids[0]),
+                          machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, ids[1])}},
+            {.opcode = MACHINE_X64_RET},
+        };
+        MachineBlockParameter parameter = {.virtual_register = ids[2]};
+        MachineRef sources[2] = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, ids[3]),
+                                machine_ref_make(MACHINE_REF_IMMEDIATE, 7)};
+        MachineFunction function = {.virtual_registers = registers, .virtual_register_count = count,
+                                    .instructions = instructions, .instruction_count = 2,
+                                    .block_parameters = &parameter, .block_parameter_count = 1,
+                                    .edge_copy_sources = sources, .edge_copy_source_count = 2};
+        u32 mutable_count = machine_test_compact_virtual_registers(arguments->arena, &function);
+        BUSTER_TEST(arguments, mutable_count == 1 && function.virtual_register_count == 4);
+        BUSTER_TEST(arguments, !memcmp(registers, expected, sizeof(expected)));
+        BUSTER_TEST(arguments, instructions[0].operands[0] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 0) &&
+                               instructions[0].operands[1] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1));
+        BUSTER_TEST(arguments, parameter.virtual_register == 2 && sources[0] == machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 3) &&
+                               sources[1] == machine_ref_make(MACHINE_REF_IMMEDIATE, 7));
+        BUSTER_TEST(arguments, machine_test_compact_virtual_registers(arguments->arena, &function) == 1 &&
+                               function.virtual_register_count == 4 && !memcmp(registers, expected, sizeof(expected)));
+        // Each reference family still rejects out-of-range IDs before any
+        // identity shortcut can succeed or mutate the machine function.
+        for (u32 invalid = 0; invalid < 4; invalid += 1)
+        {
+            MachineInstruction bad_row = {.opcode = invalid ? MACHINE_X64_MOV_RR : MACHINE_OPCODE_COUNT,
+                                          .operands = {machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, invalid == 1 ? 4u : 0u),
+                                                       machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, 1)}};
+            MachineBlockParameter bad_parameter = {.virtual_register = invalid == 2 ? 4u : 2u};
+            MachineRef bad_source = machine_ref_make(MACHINE_REF_VIRTUAL_REGISTER, invalid == 3 ? 4u : 3u);
+            MachineFunction bad_function = {.virtual_registers = registers, .virtual_register_count = 4,
+                                            .instructions = &bad_row, .instruction_count = 1,
+                                            .block_parameters = &bad_parameter, .block_parameter_count = 1,
+                                            .edge_copy_sources = &bad_source, .edge_copy_source_count = 1};
+            BUSTER_TEST(arguments, machine_test_compact_virtual_registers(arguments->arena, &bad_function) == UINT32_MAX);
+            BUSTER_TEST(arguments, bad_function.virtual_register_count == 4 && !memcmp(registers, expected, sizeof(expected)));
+        }
+    }
+    MachineFunction empty = {0};
+    BUSTER_TEST(arguments, machine_test_compact_virtual_registers(arguments->arena, &empty) == 0);
+    return result;
+}
+
 UnitTestResult machine_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    // Each fixture returns every unit it preprocessed; the registry's own
+    // arena is reserved once, before the first fixture's reading.
+    c_test_unit_registry_prewarm();
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_solve_liveness_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_close_slot_ranges_test(arguments->arena));
-    BUSTER_TEST_FIXTURE(arguments, machine_test_fast_consumer_register_hint);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_source_writer_guards);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_sparse_local_state);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_encode_into_caller_buffer);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_constant_short_circuit);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_line_mark_repair);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_schedule_trace_equivalence);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_capacity);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_initialized_blocks);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_initialized_run);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_value_initialized_budget);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_differential);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_debug_values_sparse_work);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_sparse_pins);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_traffic);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_widths);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_zero_idiom_flags);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_edges);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_join_parameter_registers);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_source);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_predicate_bank);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_win64_wide);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_wide_vector_boundaries);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_win64_aligned);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_win64_vector);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_result_alignment);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_native_aggregate);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_f80);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_native_variadic);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_sysv_va_list_extent);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_aarch64_call_relocations);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_block_relocations);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_inline_shift_breakpoint);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_inline_port_environment);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_cpu_queries);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_counters);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_inline_timestamps);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_compiler_barrier);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_fixed_register_alias);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_fixed_register_overlap);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_uefi_platform_variadic);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_variadic_workspace);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_a64_atomic_pair_updates);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_a64_large_aggregate_copy);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_constraint_unions);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_width_modifier);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_assembly_goto);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_reverse_postorder_layout);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_inline_hints);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_clear_instruction_cache);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_unsigned_switch);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_division_clobber_vacate);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_a64_dying_clobber_input);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_switch_cfg);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_quality_backward_switch_cfg);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_disconnected_dominance);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_incoming_aggregate_capacity);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_frame_capacity);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_frame_storage_reuse);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_frame_address_rematerialization);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_recreated_edge_sources);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_boolean_i128_cast);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_narrow_call_results);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_i128_block_parameters);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_pointer_block_parameters);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_parameter_edge_split);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_fast_edge_index);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_dynamic_stack);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_x64_i128_complement);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_register_compaction);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_fast_consumer_register_hint);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_source_writer_guards);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_sparse_local_state);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_encode_into_caller_buffer);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_constant_short_circuit);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_schedule_line_mark_repair);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_schedule_trace_equivalence);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_debug_value_capacity);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_debug_value_initialized_blocks);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_debug_value_initialized_run);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_debug_value_initialized_budget);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_debug_values_differential);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_debug_values_sparse_work);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_quality_sparse_pins);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_quality_traffic);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_predicate_widths);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_zero_idiom_flags);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_predicate_edges);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_join_parameter_registers);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_predicate_source);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_predicate_bank);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_win64_wide);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_wide_vector_boundaries);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_win64_aligned);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_win64_vector);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_x64_result_alignment);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_native_aggregate);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_f80);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_native_variadic);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_sysv_va_list_extent);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_aarch64_call_relocations);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_inline_assembly_block_relocations);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_x64_inline_shift_breakpoint);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_x64_inline_port_environment);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_cpu_queries);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_inline_assembly_counters);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_x64_inline_timestamps);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_compiler_barrier);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_inline_assembly_fixed_register_alias);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_inline_assembly_fixed_register_overlap);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_x64_uefi_platform_variadic);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_x64_variadic_workspace);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_a64_atomic_pair_updates);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_a64_large_aggregate_copy);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_inline_assembly_constraint_unions);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_inline_assembly_width_modifier);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_inline_assembly_goto);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_reverse_postorder_layout);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_inline_hints);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_clear_instruction_cache);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_unsigned_switch);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_x64_division_clobber_vacate);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_a64_dying_clobber_input);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_quality_switch_cfg);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_quality_backward_switch_cfg);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_disconnected_dominance);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_incoming_aggregate_capacity);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_frame_capacity);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_frame_storage_reuse);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_frame_address_rematerialization);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_recreated_edge_sources);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_boolean_i128_cast);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_x64_narrow_call_results);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_i128_block_parameters);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_pointer_block_parameters);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_parameter_edge_split);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_fast_edge_index);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_x64_dynamic_stack);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_x64_i128_complement);
 
     // Malformed publication inputs must fail before placement or encoding.
     MachineInstruction storage_rows[2] = {{.opcode = MACHINE_X64_MOV_RI}, {.opcode = MACHINE_X64_RET}};
@@ -12098,11 +12174,11 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, exact_map.fixed_template_pending_rows == 0);
     BUSTER_TEST_RAW(arguments, exact_map.fixed_template_invalid_rows == 0,
                     string_format(arguments->arena, S8("exact_map.fixed_template_invalid_rows == 0 (invalid: {u32})"), exact_map.fixed_template_invalid_rows));
-    BUSTER_TEST_FIXTURE(arguments, machine_test_gpr_preparation);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_movabs);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_condition_bindings);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_frame_chunk);
-    BUSTER_TEST_FIXTURE(arguments, machine_test_prepared_pointer_vector_chunk);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_gpr_preparation);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_prepared_movabs);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_condition_bindings);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_prepared_frame_chunk);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_prepared_pointer_vector_chunk);
     MachineX64MetadataShapeCacheAudit metadata_shape_cache = machine_x86_64_metadata_shape_cache_audit();
     BUSTER_TEST(arguments, metadata_shape_cache.valid);
     // Atomic NAND adds the 8-, 16-, 32- and 64-bit NOT register shapes; the
@@ -12724,6 +12800,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     {
         for (u32 reference = 0; reference < 2; reference += 1)
         {
+            u64 contract_units = c_test_preprocess_unit_mark();
             IrProgram* contract_program = machine_test_compile_c_with_options(arguments->arena, S8("machine-definition-contract.c"), definition_contract_source,
                                                            definition_contract_targets[target_index], (CIRLowerOptions){.disable_direct_ssa = reference != 0});
             BUSTER_TEST(arguments, contract_program && contract_program->module_count);
@@ -12749,6 +12826,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, (contract_selected.mutable_virtual_register_count != 0) == (reference != 0));
             BUSTER_TEST(arguments,
                         contract_selected.mutable_virtual_register_count == contract_verified.mutable_virtual_register_count);
+            c_test_release_preprocess_arenas_since(contract_units);
         }
     }
 
@@ -12761,6 +12839,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         "long bootstrap_switch(long n) { long value = 0; switch(n) { case 1: case 2: value = 7; break; default: value = 9; } return value; }\n");
     for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(definition_contract_targets); target_index += 1)
     {
+        u64 edge_units = c_test_preprocess_unit_mark();
         IrProgram* edge_program = machine_test_compile_c(arguments->arena, S8("bootstrap-edges.c"), bootstrap_edge_source,
                                                         definition_contract_targets[target_index]);
         BUSTER_TEST(arguments, edge_program && edge_program->module_count);
@@ -12799,6 +12878,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 }
             }
         }
+        c_test_release_preprocess_arenas_since(edge_units);
     }
 
     // Mode plumbing: the driver-facing enum and its report spelling.
@@ -12880,6 +12960,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         };
         for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(schedule_targets); target_index += 1)
         {
+            u64 schedule_units = c_test_preprocess_unit_mark();
             IrProgram* schedule_program =
                 machine_test_compile_c_with_options(arguments->arena, S8("machine-schedule.c"), schedule_source, schedule_targets[target_index],
                                                    (CIRLowerOptions){.disable_direct_ssa = true});
@@ -12989,10 +13070,11 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             BUSTER_TEST(arguments, verified_schedule.statistics.verified_scheduled_function_count > 0);
             BUSTER_TEST(arguments, verified_schedule.statistics.verified_scheduled_function_count ==
                                    verified_schedule.statistics.allocator_scheduled_function_count);
+            c_test_release_preprocess_arenas_since(schedule_units);
         }
     }
 
-    BUSTER_TEST_FIXTURE(arguments, machine_test_stack_aliases);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_test_stack_aliases);
 
     // x86-64 selection, FAST/QUALITY placement, and encoding over the scalar
     // subset. Selection and encoding are host-independent; execution requires
@@ -13296,6 +13378,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                                       machine_c_source_a64_variadic, machine_c_source_a64_atomic);
     String8 machine_c_source = string_format(arguments->arena, S8("{S8}{S8}{S8}{S8}{S8}"), machine_c_source_head, machine_c_source_tail,
                                               machine_c_source_extra, machine_c_source_i128, machine_c_source_variadic);
+    u64 machine_units = c_test_preprocess_unit_mark();
     IrProgram* machine_program = machine_test_compile_c(arguments->arena, S8("machine-stage2.c"), machine_c_source, machine_target);
     BUSTER_TEST(arguments, machine_program != 0);
     // Seventeen operands remain outside the MIR inline-assembly vocabulary.
@@ -13306,6 +13389,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
         "\"x\"(floating), \"x\"(floating), \"x\"(floating), \"x\"(floating), "
         "\"x\"(floating), \"x\"(floating), \"x\"(floating), \"x\"(floating) : \"memory\"); return value; }\n");
+    u64 unsupported_units = c_test_preprocess_unit_mark();
     IrProgram* unsupported_program =
         machine_test_compile_c(arguments->arena, S8("machine-unsupported.c"), machine_c_source_unsupported, machine_target);
     BUSTER_TEST(arguments, unsupported_program != 0);
@@ -13339,6 +13423,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                                           unsupported_result.statistics.fallback_function_count));
         }
     }
+    c_test_release_preprocess_arenas_since(unsupported_units);
     if (machine_program && machine_program->module_count)
     {
         IrModule* machine_module = machine_program->modules;
@@ -13836,9 +13921,9 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                             atomic_store16_short_call((_Atomic unsigned __int128*)atomic_store16_short_cell, atomic_store16_value);
                             for (u32 byte_index = 0; byte_index < 16; byte_index += 1)
                             {
-                                unsigned char expected_byte = byte_index < short_size
-                                    ? (unsigned char)(atomic_store16_value >> (byte_index * 8u))
-                                    : 0;
+                                unsigned char expected_byte = (unsigned char)(byte_index < short_size
+                                    ? atomic_store16_value >> (byte_index * 8u)
+                                    : 0);
                                 atomic_store16_short_bytes_match &= atomic_store16_short_cell[byte_index] == expected_byte;
                             }
                         }
@@ -13986,6 +14071,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
             "int labels_conditional(int v) { goto *(v ? &&yes : &&no); yes: return 1; no: return 0; }\n"
             "int labels_address_only(int v) { void* p = &&target; return p == &&target ? v : 0; target: return 1; }\n"
             "int labels_compare(int v) { void* p = &&target; if (p == &&target) goto *p; target: return v; }\n");
+        u64 label_fixture_units = c_test_preprocess_unit_mark();
         IrProgram* label_fixture_program = machine_test_compile_c(arguments->arena, S8("machine-label-fixtures.c"), label_fixture_source, machine_target);
         BUSTER_TEST(arguments, label_fixture_program && label_fixture_program->module_count);
         if (label_fixture_program && label_fixture_program->module_count)
@@ -14084,10 +14170,12 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, fixture_module.relocation_count == 0);
             }
         }
+        c_test_release_preprocess_arenas_since(label_fixture_units);
         Target label_fixture_a64_target = {
             .cpu_arch = CPU_ARCH_AARCH64,
             .os = OPERATING_SYSTEM_LINUX,
         };
+        u64 label_fixture_a64_units = c_test_preprocess_unit_mark();
         IrProgram* label_fixture_a64_program =
             machine_test_compile_c(arguments->arena, S8("machine-label-fixtures-a64.c"), label_fixture_source, label_fixture_a64_target);
         BUSTER_TEST(arguments, label_fixture_a64_program && label_fixture_a64_program->module_count);
@@ -14181,6 +14269,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
                 BUSTER_TEST(arguments, fixture_module.relocation_count == 0);
             }
         }
+        c_test_release_preprocess_arenas_since(label_fixture_a64_units);
         // Variadic direct calls select (AL zero, register-only integer
         // arguments); execution is proven by the linked soak because the
         // extern callee cannot resolve in a raw code copy.
@@ -15158,6 +15247,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         codegen_release_executable(quality_module_executable);
 #endif
     }
+    c_test_release_preprocess_arenas_since(machine_units);
 
     // DIRECT exact-form smoke: MFENCE and INT3 have no visible operands, so
     // one tiny function exercises selection-independent placement and the
@@ -15409,6 +15499,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
            "    V64 loaded = *value;\n"
            "    return ((const unsigned char*)&loaded)[0];\n"
            "}\n");
+    u64 machine_vector_fallback_units = c_test_preprocess_unit_mark();
     IrProgram* machine_vector_fallback_program =
         machine_test_compile_c(arguments->arena, S8("machine-vector-load-fallback.c"), machine_vector_fallback_source,
                                machine_vector_fallback_target);
@@ -15437,6 +15528,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_opcode_counts[IR_OPCODE_LOAD] == 0);
         BUSTER_TEST(arguments, machine_vector_fallback_module.statistics.fallback_reason_counts[CODEGEN_FALLBACK_OPCODE] == 0);
     }
+    c_test_release_preprocess_arenas_since(machine_vector_fallback_units);
 
     // Stage 10: the 512-bit vector subset. The corpus fixes a znver5 Linux
     // target, which carries every feature the vocabulary needs, so
@@ -15599,6 +15691,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
            "}\n");
     String8 machine_vector_source =
         string_format(arguments->arena, S8("{S8}{S8}{S8}"), machine_vector_source_head, machine_vector_source_tail, machine_vector_source_abi);
+    u64 machine_vector_units = c_test_preprocess_unit_mark();
     IrProgram* machine_vector_program = machine_test_compile_c(arguments->arena, S8("machine-stage10.c"), machine_vector_source, machine_vector_target);
     BUSTER_TEST(arguments, machine_vector_program != 0);
     if (machine_vector_program && machine_vector_program->module_count)
@@ -15831,6 +15924,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         }
 #endif
     }
+    c_test_release_preprocess_arenas_since(machine_vector_units);
 
     // Stage 11: AArch64 selection, FAST/QUALITY placement, and encoding over
     // the scalar integer subset — plus the AAPCS64 shape coverage: a
@@ -16224,6 +16318,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, scaling_stats[1].bytes_moved <= scaling_stats[1].passes * (u64)scaling_code_size);
         BUSTER_TEST(arguments, scaling_stats[1].bytes_moved <= 2u * scaling_stats[0].bytes_moved);
     }
+    u64 machine_a64_units = c_test_preprocess_unit_mark();
     IrProgram* machine_a64_program = machine_test_compile_c(arguments->arena, S8("machine-stage11.c"), machine_c_source_stage11, machine_a64_target);
     BUSTER_TEST(arguments, machine_a64_program != 0);
     if (machine_a64_program && machine_a64_program->module_count)
@@ -17014,6 +17109,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
         codegen_release_executable(a64_reference_executable);
 #endif
     }
+    c_test_release_preprocess_arenas_since(machine_a64_units);
 
     return result;
 }

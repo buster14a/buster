@@ -6,7 +6,8 @@
 // compatibility checks (cpu_model_supports_arch), validated model defaults
 // (target_cpu_features_default; x86 table in target_cpu_features_x86_default),
 // target triple splitting/printing, and per-target
-// data layouts. New CPU models are added to the tables here, spelled the
+// data layouts (target_scalar_type_layout projects one scalar; target_data_layout
+// materializes the complete record). New CPU models are added to the tables here, spelled the
 // way cpu_model_to_string_os prints them.
 
 #include <buster/lib/target.h>
@@ -217,64 +218,138 @@ bool target_uses_pe_unwind(Target target)
            (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64);
 }
 
+// Default scalar storage, with the target-dependent categories projected below.
+// Both the narrow and complete layout APIs use this single policy definition.
+BUSTER_GLOBAL_LOCAL TargetTypeLayout const target_scalar_layouts[] = {
+    [TARGET_SCALAR_BOOL] = {.size = 1, .alignment = 1, .bit_width = 1},
+    [TARGET_SCALAR_CHAR] = {.size = 1, .alignment = 1, .bit_width = 8},
+    [TARGET_SCALAR_SHORT] = {.size = 2, .alignment = 2, .bit_width = 16},
+    [TARGET_SCALAR_INT] = {.size = 4, .alignment = 4, .bit_width = 32},
+    [TARGET_SCALAR_LONG] = {.size = 8, .alignment = 8, .bit_width = 64},
+    [TARGET_SCALAR_LONG_LONG] = {.size = 8, .alignment = 8, .bit_width = 64},
+    [TARGET_SCALAR_INT128] = {.size = 16, .alignment = 16, .bit_width = 128},
+    [TARGET_SCALAR_FLOAT16] = {.size = 2, .alignment = 2, .bit_width = 16},
+    [TARGET_SCALAR_BFLOAT16] = {.size = 2, .alignment = 2, .bit_width = 16},
+    [TARGET_SCALAR_FLOAT] = {.size = 4, .alignment = 4, .bit_width = 32},
+    [TARGET_SCALAR_DOUBLE] = {.size = 8, .alignment = 8, .bit_width = 64},
+    [TARGET_SCALAR_LONG_DOUBLE] = {.size = 16, .alignment = 16, .bit_width = 128},
+    [TARGET_SCALAR_POINTER] = {.size = 8, .alignment = 8, .bit_width = 64},
+    [TARGET_SCALAR_VA_LIST] = {.size = 32, .alignment = 8, .bit_width = 256},
+};
+BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(target_scalar_layouts) == TARGET_SCALAR_COUNT);
+
+bool target_plain_char_is_signed(Target target)
+{
+    bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+    bool arm_unsigned = target.cpu_arch == CPU_ARCH_AARCH64 && !apple && target.os != OPERATING_SYSTEM_WINDOWS;
+    return target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED ||
+           (target.plain_char_policy != TARGET_PLAIN_CHAR_POLICY_UNSIGNED && !arm_unsigned);
+}
+
+TargetTypeLayout target_scalar_type_layout(Target target, TargetScalarKind kind)
+{
+    TargetTypeLayout layout = {0};
+    if ((u32)kind < TARGET_SCALAR_COUNT)
+    {
+        layout = target_scalar_layouts[kind];
+        bool i386 = target.cpu_arch == CPU_ARCH_I386;
+        switch (kind)
+        {
+        case TARGET_SCALAR_LONG:
+            if (i386 || target_uses_llp64_data_model(target) || target.cpu_arch == CPU_ARCH_WASM32 ||
+                target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE)
+            {
+                layout = (TargetTypeLayout){.size = 4, .alignment = 4, .bit_width = 32};
+            }
+            break;
+        case TARGET_SCALAR_LONG_LONG:
+        case TARGET_SCALAR_DOUBLE:
+            if (i386) layout.alignment = 4;
+            break;
+        case TARGET_SCALAR_LONG_DOUBLE:
+        {
+            bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+            bool binary64 = target_uses_llp64_data_model(target) || target.cpu_arch == CPU_ARCH_BPFEL ||
+                            target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
+            bool x87 = target.cpu_arch == CPU_ARCH_X86_64 && target.os != OPERATING_SYSTEM_ANDROID;
+            layout.size = i386 ? 12 : binary64 ? 8 : 16;
+            layout.alignment = i386 ? 4 : layout.size;
+            layout.bit_width = i386 ? 80 : binary64 ? 64 : x87 ? 80 : 128;
+            break;
+        }
+        case TARGET_SCALAR_POINTER:
+            if (i386 || target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE)
+            {
+                layout = (TargetTypeLayout){.size = 4, .alignment = 4, .bit_width = 32};
+            }
+            break;
+        case TARGET_SCALAR_VA_LIST:
+        {
+            bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
+            bool pointer_list = target.cpu_arch == CPU_ARCH_AARCH64 && (apple || target.os == OPERATING_SYSTEM_WINDOWS);
+            bool pointer32 = i386 || target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE;
+            layout.size = pointer32 ? 4 : target_uses_llp64_data_model(target) || target.cpu_arch == CPU_ARCH_WASM64 ||
+                          target.cpu_arch == CPU_ARCH_BPFEL || pointer_list ? 8 :
+                          target.cpu_arch == CPU_ARCH_X86_64 ? TARGET_X86_64_SYSV_VA_LIST_SIZE : 32;
+            layout.alignment = pointer32 ? 4 : 8;
+            layout.bit_width = layout.size * 8;
+            break;
+        }
+        case TARGET_SCALAR_BOOL:
+        case TARGET_SCALAR_CHAR:
+        case TARGET_SCALAR_SHORT:
+        case TARGET_SCALAR_INT:
+        case TARGET_SCALAR_INT128:
+        case TARGET_SCALAR_FLOAT16:
+        case TARGET_SCALAR_BFLOAT16:
+        case TARGET_SCALAR_FLOAT:
+        case TARGET_SCALAR_COUNT:
+            break;
+        }
+    }
+    return layout;
+}
+
 TargetDataLayout target_data_layout(Target target)
 {
-    bool windows = target.os == OPERATING_SYSTEM_WINDOWS;
-    bool llp64 = target_uses_llp64_data_model(target);
-    bool apple = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
     bool i386 = target.cpu_arch == CPU_ARCH_I386;
-    bool wasm32 = target.cpu_arch == CPU_ARCH_WASM32;
-    bool wasm64 = target.cpu_arch == CPU_ARCH_WASM64;
+    bool wasm = target.cpu_arch == CPU_ARCH_WASM32 || target.cpu_arch == CPU_ARCH_WASM64;
     bool bpfel = target.cpu_arch == CPU_ARCH_BPFEL;
     bool spirv_compute = target.cpu_arch == CPU_ARCH_SPIRV_COMPUTE;
-    bool wasm = wasm32 || wasm64;
-    bool arm_plain_char_unsigned = target.cpu_arch == CPU_ARCH_AARCH64 && !apple && !windows;
-    u32 pointer_size = i386 || wasm32 || spirv_compute ? 4 : 8;
-    u32 long_size = i386 || llp64 || wasm32 || spirv_compute ? 4 : 8;
-    bool plain_char_is_signed = target.plain_char_policy == TARGET_PLAIN_CHAR_POLICY_SIGNED ||
-                                (target.plain_char_policy != TARGET_PLAIN_CHAR_POLICY_UNSIGNED && !arm_plain_char_unsigned);
-    // WebAssembly uses IEEE binary128 long double in both pointer-width ABIs.
-    bool double_long_double = llp64 || bpfel || spirv_compute || (apple && target.cpu_arch == CPU_ARCH_AARCH64);
-    u32 long_double_size = i386 ? 12 : double_long_double ? 8 : 16;
-    bool x87_long_double = target.cpu_arch == CPU_ARCH_X86_64 && target.os != OPERATING_SYSTEM_ANDROID;
-    u32 long_double_bits = i386 ? 80 : double_long_double ? 64 : x87_long_double ? 80 : 128;
-    bool aarch64_pointer_list = target.cpu_arch == CPU_ARCH_AARCH64 && (apple || windows);
-    u32 va_list_size = i386 || wasm32 || spirv_compute ? 4 : llp64 || wasm64 || bpfel || aarch64_pointer_list ? 8 :
-                       target.cpu_arch == CPU_ARCH_X86_64 ? TARGET_X86_64_SYSV_VA_LIST_SIZE : 32;
-    u32 va_list_alignment = i386 || wasm32 || spirv_compute ? 4 : 8;
     u32 i386_stack_alignment = target.x86_preferred_stack_boundary >= 2 && target.x86_preferred_stack_boundary <= 4
                                    ? 1u << target.x86_preferred_stack_boundary
                                    : 16;
-
+    TargetTypeLayout long_integer = target_scalar_type_layout(target, TARGET_SCALAR_LONG);
+    TargetTypeLayout long_long_integer = target_scalar_type_layout(target, TARGET_SCALAR_LONG_LONG);
     TargetDataLayout layout = {
-        .boolean = {.size = 1, .alignment = 1, .bit_width = 1},
-        .plain_char = {.size = 1, .alignment = 1, .bit_width = 8},
-        .signed_char = {.size = 1, .alignment = 1, .bit_width = 8},
-        .unsigned_char = {.size = 1, .alignment = 1, .bit_width = 8},
-        .short_integer = {.size = 2, .alignment = 2, .bit_width = 16},
-        .unsigned_short_integer = {.size = 2, .alignment = 2, .bit_width = 16},
-        .integer = {.size = 4, .alignment = 4, .bit_width = 32},
-        .unsigned_integer = {.size = 4, .alignment = 4, .bit_width = 32},
-        .long_integer = {.size = long_size, .alignment = long_size, .bit_width = long_size * 8},
-        .unsigned_long_integer = {.size = long_size, .alignment = long_size, .bit_width = long_size * 8},
-        .long_long_integer = {.size = 8, .alignment = i386 ? 4u : 8u, .bit_width = 64},
-        .unsigned_long_long_integer = {.size = 8, .alignment = i386 ? 4u : 8u, .bit_width = 64},
-        .integer128 = {.size = 16, .alignment = 16, .bit_width = 128},
-        .unsigned_integer128 = {.size = 16, .alignment = 16, .bit_width = 128},
-        .float16_type = {.size = 2, .alignment = 2, .bit_width = 16},
-        .bfloat16_type = {.size = 2, .alignment = 2, .bit_width = 16},
-        .float_type = {.size = 4, .alignment = 4, .bit_width = 32},
-        .double_type = {.size = 8, .alignment = i386 ? 4u : 8u, .bit_width = 64},
-        .long_double_type = {.size = long_double_size, .alignment = i386 ? 4u : long_double_size, .bit_width = long_double_bits},
-        .pointer = {.size = pointer_size, .alignment = pointer_size, .bit_width = pointer_size * 8},
-        .va_list = {.size = va_list_size, .alignment = va_list_alignment, .bit_width = va_list_size * 8},
+        .boolean = target_scalar_layouts[TARGET_SCALAR_BOOL],
+        .plain_char = target_scalar_layouts[TARGET_SCALAR_CHAR],
+        .signed_char = target_scalar_layouts[TARGET_SCALAR_CHAR],
+        .unsigned_char = target_scalar_layouts[TARGET_SCALAR_CHAR],
+        .short_integer = target_scalar_layouts[TARGET_SCALAR_SHORT],
+        .unsigned_short_integer = target_scalar_layouts[TARGET_SCALAR_SHORT],
+        .integer = target_scalar_layouts[TARGET_SCALAR_INT],
+        .unsigned_integer = target_scalar_layouts[TARGET_SCALAR_INT],
+        .long_integer = long_integer,
+        .unsigned_long_integer = long_integer,
+        .long_long_integer = long_long_integer,
+        .unsigned_long_long_integer = long_long_integer,
+        .integer128 = target_scalar_layouts[TARGET_SCALAR_INT128],
+        .unsigned_integer128 = target_scalar_layouts[TARGET_SCALAR_INT128],
+        .float16_type = target_scalar_layouts[TARGET_SCALAR_FLOAT16],
+        .bfloat16_type = target_scalar_layouts[TARGET_SCALAR_BFLOAT16],
+        .float_type = target_scalar_layouts[TARGET_SCALAR_FLOAT],
+        .double_type = target_scalar_type_layout(target, TARGET_SCALAR_DOUBLE),
+        .long_double_type = target_scalar_type_layout(target, TARGET_SCALAR_LONG_DOUBLE),
+        .pointer = target_scalar_type_layout(target, TARGET_SCALAR_POINTER),
+        .va_list = target_scalar_type_layout(target, TARGET_SCALAR_VA_LIST),
         .atomic_min_width = 8,
         .atomic_max_width = i386 || wasm || bpfel ? 64 : 128,
         .atomic_alignment = i386 || wasm || bpfel ? 8 : 16,
         .abi_stack_alignment = i386 ? i386_stack_alignment : bpfel ? 8 : 16,
         .abi_max_alignment = bpfel ? 8 : 16,
         .endianness = TARGET_ENDIAN_LITTLE,
-        .plain_char_is_signed = plain_char_is_signed,
+        .plain_char_is_signed = target_plain_char_is_signed(target),
         .has_128_bit_integer = !i386 && !wasm && !bpfel && !spirv_compute,
     };
     return layout;

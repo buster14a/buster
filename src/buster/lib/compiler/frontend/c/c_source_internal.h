@@ -133,6 +133,9 @@ BUSTER_F_DECL void c_test_scratch_end(TemporalArena temporary);
         BUSTER_TEST_FIXTURE(arguments, function); \
         c_test_release_preprocess_arenas(); \
     } while (0)
+// The thread's unit registry reserves its own arena at its first unit. A
+// module whose fixtures check live reservations creates it before the first.
+BUSTER_F_DECL void c_test_unit_registry_prewarm(void);
 // C_TEST_FIXTURE that also requires the fixture to return every reservation
 // it made. The reading is taken inside the fixture's scope, before the scope's
 // end releases the units it left, so a unit kept alive across the fixture

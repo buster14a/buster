@@ -1,0 +1,37 @@
+{ "Success": true, "Result": {
+    "Type": "Profiler::LLMTraverseCallGraphTool::Response",
+    "Columns": [
+        "NodeKey",
+        "ParentNodeKey",
+        "Depth",
+        "Function",
+        "Module",
+        "InclusiveTimeMs",
+        "InclusiveExecutingTimeMs",
+        "InclusiveWaitTimeMs",
+        "ExclusiveTimeMs",
+        "HasChildren"
+    ],
+    "Truncated": true,
+    "Rows": [
+        "1;0;1;__clone3;libc.so.6;1.390;0.940;0.450;0.000;1",
+        "2;1;2;start_thread;libc.so.6;1.390;0.940;0.450;0.000;1",
+        "3;2;3;pthread_entry_point;ide;1.390;0.940;0.450;0.000;1",
+        "4;3;4;thread_context_allocate;ide;0.274;0.074;0.200;0.000;1",
+        "5;4;5;arena_create;ide;0.274;0.074;0.200;0.000;1",
+        "6;5;6;0xFFFFFFFF994012A6;<unknown>;0.070;0.070;0.000;0.000;1",
+        "7;6;7;0xFFFFFFFF9AA30416;<unknown>;0.070;0.070;0.000;0.000;1",
+        "8;7;8;0xFFFFFFFF996EB915;<unknown>;0.070;0.070;0.000;0.000;1",
+        "15;5;6;__GI___mmap64;libc.so.6;0.204;0.004;0.200;0.000;1",
+        "16;15;7;0xFFFFFFFF9940012F;<unknown>;0.204;0.004;0.200;0.000;1",
+        "17;16;8;0xFFFFFFFF9AA2A146;<unknown>;0.204;0.004;0.200;0.000;1",
+        "34;3;4;x86_64_metadata_test_concurrent_lookup;ide;0.693;0.693;0.000;0.000;1",
+        "35;34;5;atomic_u64_add;ide;0.693;0.693;0.000;0.693;0",
+        "36;3;4;__GI___munmap;libc.so.6;0.279;0.030;0.250;0.000;1",
+        "37;36;5;0xFFFFFFFF9940012F;<unknown>;0.279;0.030;0.250;0.000;1",
+        "38;37;6;0xFFFFFFFF9AA2A146;<unknown>;0.279;0.030;0.250;0.000;1",
+        "39;38;7;0xFFFFFFFF9973B34B;<unknown>;0.279;0.030;0.250;0.000;1",
+        "40;39;8;0xFFFFFFFF9973B43B;<unknown>;0.246;0.005;0.241;0.000;1",
+        "47;39;8;0xFFFFFFFF9973B474;<unknown>;0.016;0.007;0.009;0.000;1"
+    ]
+} }

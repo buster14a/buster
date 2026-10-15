@@ -18,6 +18,7 @@
 // into MODULE_CODE_ALIAS records numbered after every function.
 //
 // Collection-time lookups stay O(1) expected as the module grows:
+// llvm_bc_add_type_record locates exact type keys through the type_slots index,
 // llvm_bc_add_constant deduplicates through the constant_slots hash index,
 // llvm_bc_name_available checks link names through the name_slots hash index,
 // llvm_bc_section_id interns ordered section names through a content hash index,
@@ -32,7 +33,7 @@
 // llvm_bc_prepare_inline_assembly translates GCC inline assembly into an
 // INLINEASM constant during collection; llvm_bc_emit_inline_assembly writes
 // its call or callbr. LLVM_BITCODE.md tabulates the translation.
-// Private test seams expose integer operands and section lookup probe counts;
+// Private test seams expose integer operands and type/section lookup probes;
 // normal builds omit those boundaries entirely.
 
 enum
@@ -237,6 +238,7 @@ typedef struct LlvmBcTypeRecord LlvmBcTypeRecord;
 struct LlvmBcTypeRecord
 {
     u64* operands;
+    u64 hash;
     u32 code;
     u32 operand_count;
 };
@@ -431,6 +433,12 @@ struct LlvmBcContext
     LlvmBcTypeRecord* types;
     u32 type_count;
     u32 type_capacity;
+    u32* type_slots;
+    u64 type_slot_capacity;
+#if BUSTER_INCLUDE_TESTS
+    u64 type_index_probes;
+    bool type_hash_collision;
+#endif
     u32* ir_type_ids;
     u32** ir_field_indices;
     LlvmBcAbiSignature** abi_signatures;
@@ -710,36 +718,121 @@ static void llvm_bc_string_record(LlvmBcBitstream* stream, u32 code, String8 str
     }
 }
 
-static u32 llvm_bc_add_type_record(LlvmBcContext* context, u32 code, u64 const* operands, u32 operand_count)
+BUSTER_GLOBAL_LOCAL u64 llvm_bc_free_type_slot(LlvmBcContext* context, u32 const* slots, u64 mask, u64 hash)
 {
+    u64 slot = hash & mask;
+    bool occupied = true;
+    while (occupied)
+    {
+#if BUSTER_INCLUDE_TESTS
+        context->type_index_probes += 1;
+#else
+        (void)context;
+#endif
+        occupied = slots[slot] != LLVM_BC_INVALID_ID;
+        if (occupied)
+        {
+            slot = (slot + 1) & mask;
+        }
+    }
+    return slot;
+}
+
+BUSTER_GLOBAL_LOCAL void llvm_bc_grow_type_index(LlvmBcContext* context)
+{
+    u64 capacity = context->type_slot_capacity ? context->type_slot_capacity * 2 : LLVM_BC_INDEX_MIN_CAPACITY;
+    u32* slots = arena_allocate(context->arena, u32, capacity);
+    memset(slots, 0xff, (size_t)capacity * sizeof(*slots));
     for (u32 index = 0; index < context->type_count; index += 1)
     {
-        LlvmBcTypeRecord* record = context->types + index;
-        if (record->code != code || record->operand_count != operand_count)
-        {
-            continue;
-        }
-        bool equal = true;
-        for (u32 operand = 0; operand < operand_count; operand += 1)
-        {
-            equal &= record->operands[operand] == operands[operand];
-        }
-        if (equal)
-        {
-            return index;
-        }
+        slots[llvm_bc_free_type_slot(context, slots, capacity - 1, context->types[index].hash)] = index;
     }
-    llvm_bc_vec_reserve(context->arena, (void**)&context->types, &context->type_capacity, context->type_count + 1,
-                        sizeof(*context->types), BUSTER_ALIGN_OF(LlvmBcTypeRecord));
-    LlvmBcTypeRecord* record = context->types + context->type_count;
-    *record = (LlvmBcTypeRecord){.code = code, .operand_count = operand_count};
-    if (operand_count)
-    {
-        record->operands = arena_allocate(context->arena, u64, operand_count);
-        memcpy(record->operands, operands, (size_t)operand_count * sizeof(*operands));
-    }
-    return context->type_count++;
+    context->type_slots = slots;
+    context->type_slot_capacity = capacity;
 }
+
+// Slots locate immutable (code, operand count, operand words) keys. Ordered
+// records still assign the wire IDs, and full equality resolves collisions.
+// Store hashes in the records so growing the index never rereads their words.
+BUSTER_GLOBAL_LOCAL u32 llvm_bc_add_type_record(LlvmBcContext* context, u32 code, u64 const* operands, u32 operand_count)
+{
+    u64 hash = buster_hash_64((u8*)operands, (u64)operand_count * sizeof(*operands));
+    hash ^= (((u64)code << 32) | operand_count) * UINT64_C(0x9E3779B97F4A7C15);
+#if BUSTER_INCLUDE_TESTS
+    if (context->type_hash_collision) hash = 0;
+#endif
+    u32 result = LLVM_BC_INVALID_ID;
+    u64 slot = 0;
+    if (context->type_slot_capacity)
+    {
+        u64 mask = context->type_slot_capacity - 1;
+        slot = hash & mask;
+        bool searching = true;
+        while (searching)
+        {
+#if BUSTER_INCLUDE_TESTS
+            context->type_index_probes += 1;
+#endif
+            u32 index = context->type_slots[slot];
+            if (index == LLVM_BC_INVALID_ID)
+            {
+                searching = false;
+            }
+            else
+            {
+                LlvmBcTypeRecord* record = context->types + index;
+                if (record->hash == hash && record->code == code && record->operand_count == operand_count &&
+                    (!operand_count || !memcmp(record->operands, operands, (size_t)operand_count * sizeof(*operands))))
+                {
+                    result = index;
+                    searching = false;
+                }
+                else
+                {
+                    slot = (slot + 1) & mask;
+                }
+            }
+        }
+    }
+    if (result == LLVM_BC_INVALID_ID && context->type_count == LLVM_BC_INVALID_ID)
+    {
+        llvm_bc_fail(context, LLVM_BITCODE_ERROR_UNSUPPORTED_TYPE, llvm_bc_s8("LLVM type count exceeds the type ID limit"),
+                     0, 0, 0, IR_SYMBOL_ID_INVALID);
+    }
+    else if (result == LLVM_BC_INVALID_ID)
+    {
+        if ((u64)context->type_count + 1 > context->type_slot_capacity / 2)
+        {
+            llvm_bc_grow_type_index(context);
+            slot = llvm_bc_free_type_slot(context, context->type_slots, context->type_slot_capacity - 1, hash);
+        }
+        llvm_bc_vec_reserve(context->arena, (void**)&context->types, &context->type_capacity, context->type_count + 1,
+                            sizeof(*context->types), BUSTER_ALIGN_OF(LlvmBcTypeRecord));
+        LlvmBcTypeRecord* record = context->types + context->type_count;
+        *record = (LlvmBcTypeRecord){.code = code, .operand_count = operand_count, .hash = hash};
+        if (operand_count)
+        {
+            record->operands = arena_allocate(context->arena, u64, operand_count);
+            memcpy(record->operands, operands, (size_t)operand_count * sizeof(*operands));
+        }
+        context->type_slots[slot] = context->type_count;
+        result = context->type_count++;
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+LlvmBitcodeTestTypes llvm_bitcode_test_type_ids(Arena* arena, LlvmBitcodeTestType const* records, u32 count, bool collision, u32* ids)
+{
+    LlvmBcContext context = {.arena = arena, .type_hash_collision = collision};
+    for (u32 index = 0; index < count; index += 1)
+    {
+        LlvmBitcodeTestType const* record = records + index;
+        ids[index] = llvm_bc_add_type_record(&context, record->code, record->operands, record->operand_count);
+    }
+    return (LlvmBitcodeTestTypes){.record_count = context.type_count, .probes = context.type_index_probes};
+}
+#endif
 
 static u32 llvm_bc_integer_type(LlvmBcContext* context, u32 width)
 {

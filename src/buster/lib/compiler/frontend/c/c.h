@@ -449,6 +449,7 @@ struct CPreprocessDependency
     bool system;
 };
 
+typedef struct CMacroPrefixMap CMacroPrefixMap;
 typedef struct CPreprocessDetail CPreprocessDetail;
 enum
 {
@@ -496,6 +497,10 @@ struct CPreprocessDetail
     u64 macro_expansion_peak_bytes;
 #endif
     u32 lexed_file_count;
+    // Caller-arena-owned copy that survives option-array expiry through
+    // parser/lowering source-name expansion.
+    CMacroPrefixMap* macro_prefix_maps;
+    u32 macro_prefix_map_count;
 };
 
 typedef struct CLexResult CLexResult;
@@ -563,7 +568,6 @@ struct CPreprocessorOperation
 
 // Literal, case-sensitive filename prefix substitutions in command-line order.
 // The last matching entry wins once; replacements are not remapped.
-typedef struct CMacroPrefixMap CMacroPrefixMap;
 struct CMacroPrefixMap
 {
     String8 old_prefix;
@@ -581,6 +585,8 @@ typedef enum CPreprocessDialect
     C_PREPROCESS_DIALECT_C17,
     C_PREPROCESS_DIALECT_C23,
     C_PREPROCESS_DIALECT_GNU89,
+    // Strict ISO C90: -std=c89, -std=c90, -std=iso9899:1990 and -ansi.
+    C_PREPROCESS_DIALECT_C89,
     C_PREPROCESS_DIALECT_COUNT,
 } CPreprocessDialect;
 
@@ -1024,6 +1030,13 @@ struct CType
     // For enums, element_type is the resolved compatible integer type. This
     // flag distinguishes a written fixed base from ordinary range selection.
     bool has_fixed_underlying_type;
+    // Saturated count of names this complete aggregate contributes to the
+    // C flexible-array rule. Anonymous aggregates promote their names;
+    // named aggregate members contribute one without promoting their fields.
+    u8 effective_named_member_count;
+    // Set after every nested definition in this aggregate's source range has
+    // settled, so a zero count distinguishes a finalized empty shape.
+    bool effective_named_member_count_final;
 };
 
 typedef struct CMember CMember;
@@ -1118,6 +1131,8 @@ typedef struct CTypeAlignment CTypeAlignment;
 struct CTypeAlignment
 {
     u32 type_index;
+    // The type row whose written request this row inherits; self for its owner.
+    u32 source_type_index;
     // Range into CParseResult.alignments, as CMember/CDeclaration name theirs.
     u32 alignment_start;
     u32 alignment_count;
@@ -1261,6 +1276,8 @@ struct CEntity
     u32 declaration_statement_start;
     u32 declaration_token_start;
     u32 declaration_token_count;
+    // The initializer assignment anchor, published by the declarator binder.
+    u32 initializer_token_plus_one;
     u32 alignment_start;
     u32 alignment_count;
     CEntityKind kind;
@@ -1383,8 +1400,8 @@ struct CDeclaration
     bool is_variadic;
     bool is_constexpr;
     bool is_identifier_list_definition;
-    // A GNU `extern inline` function definition: its body is only for
-    // inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
+    // An externally linked GNU `extern inline` definition: its body is only
+    // for inlining, so it defines no symbol (c_ir_declaration_is_gnu_inline_only).
     bool is_gnu_inline_only;
     // Set on the second and later declarators of a list: the specifiers were
     // already parsed for the first one, so base_type is supplied rather than
@@ -1639,58 +1656,43 @@ struct CAstSpecifierStatistics
     u32 fallback_token;
 };
 
-// Why lowering's token walker, not the tree's extent table
-// (c_ir_statement_extents in c_gen.c, GitHub #3102), answered a controlled
-// body range query.
-typedef enum CAstExtentFallback
-{
-    C_AST_EXTENT_FALLBACK_NONE,
-    // The body has no table: no tree, no function definition whose body is
-    // this one, a body whose delimiters do not nest, or a table that does
-    // not fit its arena.
-    C_AST_EXTENT_FALLBACK_INPUT,
-    // A token the grammar puts next to a statement's anchor (the `(` after a
-    // header keyword, the `else` before an else-branch, the `goto` before a
-    // label) is not that token; the whole body goes to the walker.
-    C_AST_EXTENT_FALLBACK_ANCHOR,
-    // The query is not an entry, or its bound is shorter than the entry.
-    C_AST_EXTENT_FALLBACK_SHAPE,
-    C_AST_EXTENT_FALLBACK_COUNT,
-} CAstExtentFallback;
-
-// What the extent table did over one lowering: tables built (one per body
-// that asks), entries, queries answered, queries the walker answered by
-// reason (`walked`), and bodies whose table was refused (`body_fallbacks`).
-typedef struct CAstExtentStatistics CAstExtentStatistics;
-struct CAstExtentStatistics
-{
-    u64 bodies;
-    u64 entries;
-    u64 entry_declines;
-    u64 answers;
-    u64 walked[C_AST_EXTENT_FALLBACK_COUNT];
-    u64 body_fallbacks[C_AST_EXTENT_FALLBACK_COUNT];
-    // The last body fallback: its reason, and the `{` of the body.
-    CAstExtentFallback reason;
-    u32 fallback_token;
-};
-
-// What lowering read from the tree (GitHub #3102) over one lowering: the
-// top-level function bodies whose conditional nodes it indexed, the nodes, and
-// how each root-conditional query inside an indexed body ended. An answer is
-// a root `?:` the tree reported; a negative is a range holding no `?`; a
-// fallback went to the token scan. Steps are the nodes and parentheses the
-// index build's walks and widening visited, a work count that must stay linear
-// in the input; it leaves out the memo's binary-search comparisons.
+// What lowering read from the tree (GitHub #3102) over one lowering: how each
+// root-conditional query (c_ir_root_conditional) ended, an answer being a
+// root `?:` the range's node holds and a negative any other range, and the
+// nodes those queries' descents visited, a work count that must stay linear in
+// the input.
+// The retained facts (GitHub #3102 step 1): trees_built counts the units whose
+// tree lowering built itself because the caller passed none, with that tree's
+// nodes and retained bytes (CAstStatistics.retained_bytes); tree_rejections
+// the units whose syntax that build rejected, which fail with its
+// diagnostics (c_lower_to_ir_tree_run); span_nodes and
+// span_bytes are the nodes c_ast_spans_build gave a span and the bytes of its
+// columns, for every lowered unit with a tree.
 typedef struct CAstLowerStatistics CAstLowerStatistics;
 struct CAstLowerStatistics
 {
-    u64 bodies;
-    u64 conditionals;
     u64 steps;
     u64 answers;
     u64 negatives;
-    u64 fallbacks;
+    // The statement walker (#4060): bodies and statements it lowered from
+    // their statement nodes, and the token ranges it derived at the
+    // temporary expression and declaration adapter (#4058). It has no token
+    // fallback to count.
+    u64 statement_bodies;
+    u64 statements;
+    u64 range_adapters;
+    u64 trees_built;
+    u64 tree_rejections;
+    u64 tree_nodes;
+    u64 tree_bytes;
+    u64 span_nodes;
+    u64 span_bytes;
+    // The nodes the control-group walk visited (c_ir_tree_control_groups), a
+    // work count that must stay linear in the input.
+    u64 hoist_steps;
+    // The evaluator's walk steps and name-chain descents
+    // (c_ir_lower_expression_core_walk), linear in the input as well.
+    u64 evaluator_steps;
 };
 
 // The semantic facts semantic analysis retains for lowering (GitHub #4062,
@@ -1715,7 +1717,7 @@ typedef enum CAstFactFlag
     // The machine's nonplace-projection fact (`__real__`/`__imag__` of a real
     // operand).
     C_AST_FACT_NONPLACE = 1u << 3,
-    // An IDENTIFIER: `payloads` holds the entity it names.
+    // An IDENTIFIER or DECLARATOR_NAME: `payloads` holds its entity.
     C_AST_FACT_BOUND = 1u << 4,
     // A MEMBER or MEMBER_ARROW of a bit-field: `payloads` holds its width.
     C_AST_FACT_BIT_FIELD = 1u << 5,
@@ -1724,19 +1726,52 @@ typedef enum CAstFactFlag
     // row is kept for it: unless a validator's query already minted one,
     // minting it would give lowering an IR type of its own and change -g.
     C_AST_FACT_STRING = 1u << 6,
+    // `types` names a sparse CAstTypeRecipe, including a derivation that a
+    // rolled-back completion query built, or an explicit builtin/name form.
+    C_AST_FACT_RECIPE = 1u << 7,
 } CAstFactFlag;
+
+typedef enum CAstTypeRecipeForm
+{
+    C_AST_TYPE_RECIPE_DERIVATION,
+    // No callable CType row exists: builtin records retain its semantic
+    // identity. A call's own result is a separate ordinary type fact.
+    C_AST_TYPE_RECIPE_BUILTIN,
+    // The implicit function-name object: const char[name length + 1].
+    C_AST_TYPE_RECIPE_FUNCTION_NAME,
+} CAstTypeRecipeForm;
+
+// A row-free semantic type. All rows appended by its query are copied into
+// one contiguous recipe run before rollback. A CType reference below
+// row_begin is an existing published row; a later one names
+// recipe_begin + reference - row_begin. Bounds and alignment inheritance
+// are copied too, so no recipe points into rolled-back rows or bound tables.
+typedef struct CAstTypeRecipe CAstTypeRecipe;
+struct CAstTypeRecipe
+{
+    CType type;
+    CArrayBound bound;
+    CTypeAlignment alignment;
+    u32 bound_node;
+    u32 row_begin;
+    u32 recipe_begin;
+    u32 declaration;
+    u32 builtin;
+    CAstTypeRecipeForm form;
+    bool has_alignment;
+};
 
 // Why a fact candidate has no type.
 typedef enum CAstFactGap
 {
     // The span rules give the node no token range.
     C_AST_FACT_GAP_UNSPANNED,
-    // The machine types its range to nothing (`__func__`, an unbound
-    // `__builtin_expect(...)`, a void-typed failure).
+    // The machine types its range to nothing, and no explicit semantic
+    // identity or implicit object form describes it.
     C_AST_FACT_GAP_INVALID,
-    // The machine's answer is a type row its own run appended (an appended
-    // row would get an IR type and change -g), or the run mutated a row or
-    // raised a diagnostic; the run is rolled back.
+    // The run changed semantic state outside a describable temporary type
+    // graph: a row mutation, member/parameter addition or diagnostic. The
+    // run is rolled back.
     C_AST_FACT_GAP_APPENDS,
     // The machine had failed or had no capacity left.
     C_AST_FACT_GAP_BUSY,
@@ -1765,6 +1800,9 @@ struct CAstFactStatistics
     u64 bound;
     u64 bit_fields;
     u64 strings;
+    u64 recipes;
+    u64 builtin_identities;
+    u64 function_names;
     u64 gaps[C_AST_FACT_GAP_COUNT];
     u64 uncovered;
     u64 outside;
@@ -1773,15 +1811,102 @@ struct CAstFactStatistics
     u64 retained_bytes;
 };
 
+// A semantic constant query has a separate result from the expression's
+// type. A fold that does not model a shape is UNSUPPORTED, not proof that
+// the source is nonconstant; INVALID means an evaluated C operation faulted.
+typedef enum CAstConstantStatus
+{
+    C_AST_CONSTANT_UNQUERIED,
+    C_AST_CONSTANT_INTEGER,
+    C_AST_CONSTANT_FLOAT,
+    C_AST_CONSTANT_NONCONSTANT,
+    C_AST_CONSTANT_UNSUPPORTED,
+    C_AST_CONSTANT_INVALID,
+    C_AST_CONSTANT_STATUS_COUNT,
+} CAstConstantStatus;
+
+typedef struct CAstConstantFact CAstConstantFact;
+struct CAstConstantFact
+{
+    u64 low;
+    u64 high;
+    f64 floating;
+    // An already committed source type, or invalid when the query appended
+    // it. The primitive semantic kind remains stable across a rollback.
+    CTypeId type;
+    CTypeKind primitive_kind;
+    CAstConstantStatus status;
+    // Narrow floats use `floating`, wide floats retain their target image in
+    // low/high. Initializer destination conversions have separate records.
+    u8 float_width;
+    u8 reserved[3];
+    u32 offsetof_plus_one;
+    u32 ext80_initializer_plus_one;
+};
+
+typedef struct CAstOffsetofStep CAstOffsetofStep;
+struct CAstOffsetofStep
+{
+    u32 node;
+    // Invalid for a member (amount is its semantic offset); otherwise this
+    // is the index operand node and amount is its element byte size.
+    u32 index_node;
+    u64 amount;
+};
+
+typedef struct CAstOffsetofPlan CAstOffsetofPlan;
+struct CAstOffsetofPlan
+{
+    u32 first_step;
+    u32 step_count;
+    bool valid;
+    u8 reserved[3];
+};
+
+typedef struct CAstExt80InitializerFact CAstExt80InitializerFact;
+struct CAstExt80InitializerFact
+{
+    u64 significand;
+    u16 exponent_sign;
+    u8 reserved[6];
+};
+
 // The retained columns: `types` (a CTypeId value or C_AST_FACT_NONE),
 // `payloads` (an entity id or a bit-field width, per flag, else
 // C_AST_FACT_NONE) and `flags` (CAstFactFlag), each `node_count` long. They
 // are the only allocations in `arena`, which the facts own: c_ast_facts_create
 // reserves it, c_ast_facts_release retires it once lowering is done.
+typedef struct CAstSpans CAstSpans;
 typedef struct CAstFacts CAstFacts;
 struct CAstFacts
 {
     Arena* arena;
+    // The producer range-to-node index, computed before semantic queries and
+    // retained with the facts. Its delimiter rows belong to CParseResult.
+    Arena* index_arena;
+    // F3's dense node slots and sparse query results have their own lifetime
+    // and reservation; they never repurpose the type/payload/flag columns.
+    Arena* constants_arena;
+    u32* constant_slots;
+    CAstConstantFact* constants;
+    u32 constant_count;
+    u32 constant_capacity;
+    CAstOffsetofPlan* offsetof_plans;
+    CAstOffsetofStep* offsetof_steps;
+    CAstExt80InitializerFact* ext80_initializers;
+    u32 offsetof_plan_count;
+    u32 offsetof_plan_capacity;
+    u32 offsetof_step_count;
+    u32 offsetof_step_capacity;
+    u32 ext80_initializer_count;
+    u32 ext80_initializer_capacity;
+    CAstSpans* spans;
+    u32 const* matches;
+    // Sparse completion descriptions, appended in place in their own arena.
+    Arena* recipe_arena;
+    CAstTypeRecipe* recipes;
+    u32 recipe_count;
+    bool recipe_failed;
     u32* types;
     u32* payloads;
     u8* flags;
@@ -1827,8 +1952,8 @@ struct CParserResult
     // Share the primitive and pointer rows the file-scope initializer and
     // function-body queries mint (CTypeInterning in c_internal.h), which the
     // tree's answers for casts and `&` need. The driver asks for it with the
-    // tree (-fc-ast-pilot); without it every row is appended, as the default
-    // path always has.
+    // tree (-fc-ast-pilot); without it every row is appended, as the tree-free
+    // path (-fno-c-ast-pilot) always has.
     bool type_interning;
     // Nothing will lower this unit (the driver's -fsyntax-only), so no
     // consumer reads the bytes of a string literal: the literal memo records
@@ -1942,7 +2067,7 @@ struct CTokenPositionIndex
 #endif
     u32* alignas_positions;
     // Ascending positions of every identifier token directly followed by a
-    // ':' punctuator — the necessary condition c_ir_named_label_at tests
+    // ':' punctuator — the necessary condition c_parse_named_label_at tests
     // before its out-of-line proof. Label-table sizing and dead-code label
     // scans enumerate these instead of re-asking the condition of every
     // body token; the population includes ternary and bit-field colons, so
@@ -2089,6 +2214,80 @@ struct CSizeofOperandType
 };
 #endif
 
+// Semantic initializer selections retained through lowering (#4061). Paths
+// project a root object through member or array edges; member indices are
+// relative to the container's member list, UINT32_MAX names an array edge.
+// A ranged edge selects [first,last], evaluating its value only once.
+typedef struct CInitializerPath CInitializerPath;
+struct CInitializerPath
+{
+    CTypeId container;
+    u64 first;
+    u64 last;
+    u32 parent_plus_one;
+    u32 member;
+    // UINT32_MAX uses the current value anchor; other rows retain the
+    // member/bracket source needed by the original FIELD/INDEX emission.
+    u32 source_token;
+};
+
+typedef enum CInitializerItemFlag
+{
+    C_INITIALIZER_ITEM_VALUE = 1,
+    C_INITIALIZER_ITEM_LIST_BEGIN = 2,
+    C_INITIALIZER_ITEM_LIST_END = 4,
+    C_INITIALIZER_ITEM_DESIGNATED = 8,
+    // Complex brace components use the parent type's primitive real kind,
+    // with member 0/1 paths, without appending semantic scalar rows.
+    C_INITIALIZER_ITEM_COMPLEX_COMPONENT = 16,
+} CInitializerItemFlag;
+
+typedef struct CInitializerItem CInitializerItem;
+struct CInitializerItem
+{
+    CTypeId type;
+    u32 node;
+    u32 path_plus_one;
+    // Value and range-copy anchors preserve the original debug emission.
+    u32 source_token;
+    u32 range_source_token;
+    // Exact value provenance; parentheses are absent from syntax topology.
+    u32 value_start;
+    u32 value_end;
+    // Matched list entry/exit event, plus one; zero for a value event.
+    u32 paired_item_plus_one;
+    u8 flags;
+};
+
+typedef enum CInitializerPlanFlag
+{
+    // `{0}` retains the original zero-constructor emission. `{0,}` does not.
+    C_INITIALIZER_PLAN_SINGLE_ZERO = 1,
+} CInitializerPlanFlag;
+
+typedef struct CInitializerPlan CInitializerPlan;
+struct CInitializerPlan
+{
+    CInitializerPlan* next;
+    CInitializerPlan* hash_next;
+    CInitializerPath* paths;
+    CInitializerItem* items;
+    CTypeId type;
+    u64 inferred_count;
+    // The existing positional flexible-tail extension's object count; the
+    // shared omitted C array bound remains unchanged.
+    u64 flexible_count;
+    u32 flexible_member_plus_one;
+    u32 node;
+    u32 path_count;
+    u32 item_count;
+    u32 path_capacity;
+    u32 item_capacity;
+    u8 flags;
+    bool complete;
+    bool failed;
+};
+
 typedef struct CParseResult CParseResult;
 struct CParseResult
 {
@@ -2099,6 +2298,11 @@ struct CParseResult
     // the parse intern names on demand so entity lookups key on symbol ids.
     CSymbolTable* symbols;
     CDeclaration* declarations;
+    // Published by the initializer validator; never rewound with body scratch.
+    CInitializerPlan* initializer_plans;
+    CInitializerPlan** initializer_plan_buckets;
+    u32 initializer_plan_bucket_count;
+    u32 initializer_plan_count;
     CType* types;
     // Borrowed only while semantic constraints are checked. Scalar query
     // results share immutable types; declarator types remain independent.
@@ -2328,15 +2532,14 @@ struct CIRLowerOptions
     // instruction result names it (see IrProgram pin_debug_locals).
     bool pin_debug_locals;
     // The unit's syntax tree when the caller built one (the driver's
-    // -fc-ast-pilot, GitHub #3102): lowering answers root-conditional splits
-    // from its nodes and runs the token scans for everything else. Null
-    // lowers exactly as before. Read only during the call; the tree and the
-    // preprocessing result must outlive it.
+    // -fc-ast-pilot, GitHub #3102). Lowering always reads a tree: when this is
+    // null it builds one from `preprocess` itself (c_lower_to_ir_tree_run) and
+    // releases it before returning, and a unit whose tree cannot be built
+    // fails with the builder's diagnostic. Read only during the call; a
+    // caller's tree and the preprocessing result must outlive it.
     CAst const* syntax_tree;
     // Optional: receives the counts, added to what it already holds.
     CAstLowerStatistics* ast_lower_statistics;
-    // Optional: receives the extent table's counts, added to what it holds.
-    CAstExtentStatistics* syntax_tree_extent_statistics;
     // The facts semantic analysis published over `syntax_tree`
     // (CParserResult.ast_facts), or null. Step 1 of #3102's lowering plan
     // retains them; no lowering consumer reads them yet.
@@ -2571,8 +2774,6 @@ BUSTER_F_DECL String8 c_parser_tree_fallback_name(CParserTreeFallback reason);
 BUSTER_F_DECL String8 c_ast_statement_fallback_name(CAstStatementFallback reason);
 // The CAstSpecifierFallback in lower case without its prefix ("none", "input", ...).
 BUSTER_F_DECL String8 c_ast_specifier_fallback_name(CAstSpecifierFallback reason);
-// The CAstExtentFallback in lower case without its prefix ("none", "input", "anchor", "shape").
-BUSTER_F_DECL String8 c_ast_extent_fallback_name(CAstExtentFallback reason);
 // The CAstFactGap in lower case without its prefix ("unspanned", "invalid", ...).
 BUSTER_F_DECL String8 c_ast_fact_gap_name(CAstFactGap gap);
 // Reserves and clears the fact columns for every node of `ast` in a private
@@ -2582,6 +2783,20 @@ BUSTER_F_DECL bool c_ast_facts_create(CAstFacts* facts, CAst const* ast);
 // Retires the facts' arena and clears the columns; the statistics stay.
 // Idempotent.
 BUSTER_F_DECL void c_ast_facts_release(CAstFacts* facts);
+// Prepare the unit's exact range-to-node index once, before semantic fact
+// producers run. The parse result's delimiter rows outlive the facts. False
+// means the required index could not be reserved or the input is incomplete.
+BUSTER_F_DECL bool c_ast_facts_prepare(CAstFacts* facts, CAst const* ast, CPreprocessResult const* preprocess, CParseResult* result);
+// The same span lookup every producer uses; C_AST_NODE_INVALID on a miss.
+BUSTER_F_DECL u32 c_ast_facts_locate(CAstFacts const* facts, CPreprocessResult const* preprocess, u32 start, u32 end);
+// Sparse semantic constant results. Missing nodes answer UNQUERIED; integer
+// bits and fault status are retained independently of type-query recipes.
+BUSTER_F_DECL CAstConstantFact c_ast_facts_constant(CAstFacts const* facts, u32 node);
+BUSTER_F_DECL bool c_ast_facts_store_constant(CAstFacts* facts, u32 node, CAstConstantFact fact);
+BUSTER_F_DECL CAstOffsetofPlan const* c_ast_facts_offsetof(CAstFacts const* facts, u32 node);
+BUSTER_F_DECL bool c_ast_facts_store_offsetof(CAstFacts* facts, u32 node, CAstOffsetofStep const* steps, u32 count, bool valid);
+BUSTER_F_DECL CAstExt80InitializerFact const* c_ast_facts_ext80_initializer(CAstFacts const* facts, u32 node);
+BUSTER_F_DECL bool c_ast_facts_store_ext80_initializer(CAstFacts* facts, u32 node, u64 significand, u16 exponent_sign);
 BUSTER_F_DECL void c_parse_position_index_ensure(CParseResult* result, CPreprocessResult preprocess);
 // Complete syntax and semantic analysis without constructing canonical IR.
 BUSTER_F_DECL CAnalysisResult c_analyze_semantics_only(Arena* arena, CPreprocessResult preprocess, CParserResult syntax);
