@@ -17,6 +17,9 @@ The older component/mobile procedures below document preserved source only.
 - Compiler and foundation module tests run inside the `ide` executable; there
   is no external unit-test framework. From the repository root, run
   `ide test --verbose=1 --ci=1` or build the `test_all` target.
+  Main self-host audits run that complete maintained suite after bootstrap
+  validation and retain its output as `build/self-host-audit/compiler-regressions.log`;
+  preserved component suites are not required markers in that log.
 - `ide test --module=<name>[,<name>...]` runs only the named modules. A name
   is a `TestDescriptor.name` from `test_descriptors` in
   `src/buster/tests/test.c`, such as `object_tests`, and must match exactly.

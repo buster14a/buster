@@ -191,3 +191,4 @@ profile: ast-retirement-acceptance-v1
 
 request: PR #4239 issues #3102 #4058 owner-authorized final AST-only retirement acceptance after protected #4234; current main 35fee905e39941acafb26db6d6ff3f41eb7d8dc7; supersedes request 18bcd1e61dc87e82d7a136b51bfde4240d1345a2 cancelled before physical execution in run 38704722896; fresh exact-head default/default physical-9700X comparison; acceptance hold remains
 profile: ast-retirement-acceptance-v1
+request: issues #4009 (home-coloring slice), #351, #1912 and #4257 user-requested exact-head placement qualification (2026-10-15: file the issues and solve all of them); stable repair sorting, empty home pools, rejected QUALITY frame/arena work and certified exhausted home coloring; preserve frozen output; implementation c05d9b1945eca31adc01a2681b1dcfd301c7cbdf over baseline 84f051c13044938bcb8cbe1ac48ea3ee79defcff; fresh compiler-compare-v1 for the inherited physical-host acceptance gates

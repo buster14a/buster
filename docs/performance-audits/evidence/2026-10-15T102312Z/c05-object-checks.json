@@ -1,0 +1,43 @@
+{
+  "implementation": "c05d9b1945eca31adc01a2681b1dcfd301c7cbdf",
+  "binary_sha256": "5489ba87e99fc3f166dc1b4c122f24a2b39fa5e7f0c0324b67698f00469a3d07",
+  "configuration": "tests-on Clang Release, original object-control arguments",
+  "cases": [
+    {
+      "input": "nested-1000.c",
+      "exit": 0,
+      "same": true,
+      "sha256": "07a35a358376cd94659d9978d96c038ccbf081cd62c429347038d2169f7f54c2"
+    },
+    {
+      "input": "nested-1500.c",
+      "exit": 0,
+      "same": true,
+      "sha256": "6dbf811a981d669a91ef9171b58fcb4b8c0106f196d9cc60c2cd9033ffd52072"
+    },
+    {
+      "input": "nested-2000.c",
+      "exit": 0,
+      "same": true,
+      "sha256": "81332ba6bbc6a5c99626c55798f049345526ced4720c0c7d1c0497287ff6197e"
+    },
+    {
+      "input": "nested-3000.c",
+      "exit": 0,
+      "same": true,
+      "sha256": "db038dd00edb529164cd3bf6e6b9ac09687f72e952ad7c660962726f110864d7"
+    },
+    {
+      "input": "nested-500.c",
+      "exit": 0,
+      "same": true,
+      "sha256": "686510ac3b590219acea7b40ed6b19e9691d652fe0d25016739dd4c22e96cfc7"
+    },
+    {
+      "input": "small.c",
+      "exit": 0,
+      "same": true,
+      "sha256": "da64577bb2d8b59c26eeff57f66a4b9fe5e433ad8f44ddcb46c86499abf7c481"
+    }
+  ]
+}
