@@ -65,6 +65,7 @@ BUSTER_GLOBAL_LOCAL u32 ir_test_binary_operation_count(IrFunction* function, IrB
 #include <buster/tests/compiler/ir/ir_label_sets_test.c>
 #include <buster/tests/compiler/ir/ir_label_paths_test.c>
 #include <buster/tests/compiler/ir/ir_validate_test.c>
+#include <buster/tests/compiler/ir/ir_validate_scaling_test.c>
 #include <buster/tests/compiler/ir/ir_label_transfer_test.c>
 
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_test_canonical_wide_float_constant(Arena* arena, u32 bit_width, u64 low, u64 high,
@@ -3670,6 +3671,8 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     result.test_count += protocol.test_count;
     result.succeeded_test_count += protocol.succeeded_test_count;
     BUSTER_TEST_FIXTURE(arguments, ir_validate_equivalence_tests);
+    BUSTER_TEST_FIXTURE(arguments, ir_validate_instruction_scaling_tests);
+    BUSTER_TEST_FIXTURE(arguments, ir_validate_splice_scaling_tests);
     BUSTER_TEST_FIXTURE(arguments, ir_validate_incomplete_place_tests);
     BUSTER_TEST_FIXTURE(arguments, ir_test_va_instruction_type_storage);
     BUSTER_TEST_FIXTURE(arguments, ir_test_i386_abi);

@@ -1,0 +1,2 @@
+{"shape":"aggregate-bad","n":17,"error":11,"ok":true,"ns":10360,"rows":3,"values":2}
+{"field_visits":34,"label_set_work":0,"marker_bytes":5,"swept_values":0,"parameter_blocks":0,"index_work":0,"row_checks":2}

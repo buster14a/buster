@@ -302,19 +302,31 @@ differential reference: with and without it, the published IR must be
 identical.
 
 After predecessor propagation finishes, parameter simplification reuses its
-block cursor for a stable list of blocks that still own parameters.
-`c_ir_ssa_simplify_parameters` reproduces the repeated block-order sweep
-without its repeated visits: each retained parameter is numbered in sweep
-order and filed as a user of the roots its incoming rows read, and it is
-evaluated again only when one of those roots is replaced, at the (sweep,
-position) key the full sweep would next reach it, drawn from a min-heap. A
-nested chain of N joins therefore costs O(N log N), not N sweeps (#2801).
-Retain ascending block order and each block's parameter order: changing
-elimination order can change replacement representatives and canonical value
-IDs, for example which member of a closed parameter cycle survives. The
-allocation diagnostic census counts the initial list construction and the one
-final unlink sweep as block visits, and `SSA_SIMPLIFY_PASSES` reports the
-sweeps the full sweep would have taken.
+block cursor for a stable list of blocks that still own parameters. Empty
+parameter sets skip simplifier tables and the live-parameter worklist (#4259).
+`c_ir_ssa_simplify_parameters` keeps two distinct non-self roots as witnesses
+that a parameter cannot simplify. Witnesses belong to union groups independent
+of the canonical replacement representative. Joining groups by rank moves each
+witness through at most logarithmically many groups; it does not walk every
+live reader at every intermediate replacement (#4258). A reader is due again
+only when its witnesses meet or one becomes its own value. Its two list rows
+are then detached until evaluation, so it has at most one queued retry.
+The retry key remains the (sweep, position) at which the full ordered sweep
+would first see a possible verdict change. Skipped evaluations still have two
+distinct non-self roots, so they cannot replace anything. Retain ascending
+block and parameter order: representative choices and canonical IDs match the
+ordered sweep, including closed cycles and unreachable incoming edges.
+The allocation census counts witness moves, parameter/incoming visits and the
+highest scheduled sweep. Test-only generated graphs compare final roots and
+survivor order with an independent repeated-sweep oracle.
+
+The parameter index is initialized once, loses removed parameters during the
+final unlink walk and then serves liveness directly. Witness/order/heap scratch
+expires before the retained-parameter-sized liveness queue is carved. The
+reservation preflight prices both lifetimes, including the two witness rows
+per eligible parameter. Predecessor publication bulk-carves one contiguous
+record array and retains its existing stable linked interface, complete edges
+and sealed state; output reservation refusal stays structured (#4261).
 
 Temporary places and read aliases preserve C lvalue/qualifier checks without
 emitting `LOCAL`, `LOAD` or `STORE` rows for promoted owners. Finalization
@@ -323,9 +335,13 @@ IDs, scopes and source ranges are preserved; frontend entity IDs do not escape.
 Named-local initializer provenance consumes old value rows before compaction.
 Dense numbering and retained-root copying share one ascending old-ID scan;
 each destination is at or below its source, so no future source row is
-overwritten. Alias resolution follows in its existing old-ID order. Shared
-operand slices still remap into a fresh dense pool so no old operand is
-interpreted twice through an already updated ID.
+overwritten. A row already at its destination needs no self-copy. This scan
+also proves whether every value ID and replacement is the identity (#4260).
+An identity publication retains its existing operand slices and metadata IDs,
+without the second value scan or a new operand pool. Otherwise alias resolution
+follows in its existing old-ID order, and shared operand slices still remap
+into a fresh dense pool so no old operand is interpreted twice through an
+already updated ID. `operand_total` is published in either case.
 The existing conservative opcode summary also tracks `LOCAL`, so shared
 promotion skips its discovery scan for certified functions with no memory
 locals. Unknown summaries still scan and the shared algorithm stays independent.

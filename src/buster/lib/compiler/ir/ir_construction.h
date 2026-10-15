@@ -89,6 +89,11 @@
     X(SSA_SIMPLIFY_EMPTY_BLOCK_VISITS, ssa_simplify_empty_block_visits) \
     X(SSA_SIMPLIFY_PARAMETER_VISITS, ssa_simplify_parameter_visits) \
     X(SSA_SIMPLIFY_INCOMING_VISITS, ssa_simplify_incoming_visits) \
+    X(SSA_SIMPLIFY_GROUP_ROWS, ssa_simplify_group_rows) \
+    X(SSA_SIMPLIFY_USER_VISITS, ssa_simplify_user_visits) \
+    X(SSA_PREDECESSOR_ALLOCATIONS, ssa_predecessor_allocations) \
+    X(SSA_IDENTITY_PUBLICATIONS, ssa_identity_publications) \
+    X(SSA_IDENTITY_OPERAND_SLOTS, ssa_identity_operand_slots) \
     X(SSA_LIVE_WORK_VISITS, ssa_live_work_visits) \
     X(SSA_REMAP_VALUE_ROWS, ssa_remap_value_rows) \
     X(SSA_REMAP_INSTRUCTION_ROWS, ssa_remap_instruction_rows) \
@@ -126,6 +131,10 @@
     X(VALIDATION_OWNERSHIP_BLOCKS, validation_ownership_blocks) \
     X(VALIDATION_OWNERSHIP_INSTRUCTIONS, validation_ownership_instructions) \
     X(VALIDATION_OWNERSHIP_BYTES_CLEARED, validation_ownership_bytes_cleared) \
+    X(VALIDATION_MARKER_INDEX_WORK, validation_marker_index_work) \
+    X(VALIDATION_VALUE_SWEEP_VISITS, validation_value_sweep_visits) \
+    X(VALIDATION_SPLICE_PARAMETER_BLOCKS, validation_splice_parameter_blocks) \
+    X(VALIDATION_AGGREGATE_FIELD_VISITS, validation_aggregate_field_visits) \
     X(VALIDATION_GLOBALS, validation_globals) \
     X(VALIDATION_GLOBAL_RELOCATIONS, validation_global_relocations) \
     X(VALIDATION_GLOBAL_RELOCATION_PAIRS, validation_global_relocation_pairs) \

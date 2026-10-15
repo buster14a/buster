@@ -1,6 +1,26 @@
 #pragma once
 #include <buster/lib/compiler/ir/ir.h>
 
+// The old blocks/rows/values an inline batch may rewrite, and the original
+// parameter-bearing blocks whose rebuilt incoming lists must be rechecked.
+// Every ID at or beyond a base count is new. Only the inliner produces this
+// trusted write set; the strict validator remains the independent fallback.
+typedef struct IrValidationSplice IrValidationSplice;
+struct IrValidationSplice
+{
+    u32* blocks;
+    u32* rows;
+    u32* values;
+    u32* parameter_blocks;
+    u32 block_count;
+    u32 row_count;
+    u32 value_count;
+    u32 parameter_block_count;
+    u32 base_blocks;
+    u32 base_instructions;
+    u32 base_values;
+};
+
 // A defect ir_inline_module plants in each spliced caller before its output
 // check, so tests can show the splice proof refuses what it covers and that
 // checked builds still catch a write outside it. Production passes NONE.
@@ -33,6 +53,7 @@ BUSTER_F_DECL IrValidationError ir_test_validate_va_instruction_operation(IrProg
 // every value, then blocks and rows), retained as the traversal oracle for the
 // fused single-walk ir_validate_canonical_function. Same leaf predicates.
 BUSTER_F_DECL IrValidationResult ir_test_validate_canonical_module_reference(IrProgram* program, IrModule* module);
+BUSTER_F_DECL IrValidationResult ir_test_validate_canonical_splice(IrProgram* program, IrFunction* function, IrValidationSplice const* splice);
 // ir_inline_module with `fault` planted in every spliced caller.
 BUSTER_F_DECL IrValidationResult ir_test_inline_module(IrProgram* program, IrModule* module, IrInlineSpliceFault fault);
 #endif

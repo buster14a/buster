@@ -1,0 +1,6 @@
+In file included from src/buster/tests/compiler/ir/ir_test.c:68:
+src/buster/tests/compiler/ir/ir_validate_scaling_test.c: In function ‘ir_validate_scale_fixture’:
+src/buster/tests/compiler/ir/ir_validate_scaling_test.c:36:48: error: operand of ‘?:’ changes signedness from ‘int’ to ‘u32’ {aka ‘unsigned int’} due to unsignedness of other operand [-Werror=sign-compare]
+   36 |         u32 last = labelled && block ? first : 2 + cast;
+      |                                                ^~~~~~~~
+cc1: all warnings being treated as errors

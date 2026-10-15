@@ -864,6 +864,15 @@ or a published CFG makes the check refuse, as does a spliced call result of
 pointer-to-function type left without a defining row, the one rewrite that
 changes an outside row's verdict (#3988).
 
+The proof's markers also follow that region (#4251). Small old regions use
+immutable radix-sorted ID indexes, binary lookup and marker bytes for those IDs
+plus the appended suffix. Missing old IDs implicitly retain their owned or
+parameter-defined state. A dense prefix is used only when it is at most four
+times the recorded old region, so setup remains bounded by relevant IDs. The
+inliner's existing pre-splice scan records all original parameter-bearing
+blocks; the proof checks that list instead of rediscovering it across every
+old block. Splices add parameters only on new blocks, which the row walk checks.
+
 The check may refuse a valid caller but never accepts one the full validator
 refuses, provided the splices wrote only what was recorded. A production
 build trusts that write set. When the check refuses, the full validator

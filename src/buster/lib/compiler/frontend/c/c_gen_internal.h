@@ -74,6 +74,22 @@ struct CTestExpressionTypeProjection
 BUSTER_F_DECL void c_test_expression_type_projection_set(CTestExpressionTypeProjection* projection);
 BUSTER_F_DECL bool c_test_constant_node_numeric(Arena* arena, CPreprocessResult preprocess, CAst const* ast, CAstFacts const* facts,
                                                  u32 node, u64* low, u64* high, f64* floating, bool* is_float);
+
+typedef struct CTestIrSsaWork CTestIrSsaWork;
+struct CTestIrSsaWork
+{
+    u64 simplify_setups;
+    u64 simplify_scratch_bytes;
+    u64 parameter_visits;
+    u64 witness_moves;
+    u64 predecessor_allocations;
+    u64 predecessor_rows;
+    u64 identity_publications;
+    u64 identity_operand_slots;
+};
+BUSTER_F_DECL CTestIrSsaWork c_test_ir_ssa_work(void);
+BUSTER_F_DECL bool c_test_ir_ssa_witness_graph(u32 seed);
+BUSTER_F_DECL bool c_test_ir_ssa_publication(void);
 // Calling-thread root-conditional, comma and assignment operator visits.
 BUSTER_F_DECL u64 c_test_assignment_lower_work(void);
 // Visits along known leading-constructor paths on the calling thread.

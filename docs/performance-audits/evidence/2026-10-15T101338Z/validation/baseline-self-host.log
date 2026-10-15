@@ -1,0 +1,248 @@
+MACHINE_INFO arch=x86_64 cpu="AMD Ryzen 9 7940HS w/ Radeon 780M Graphics" model=znver4 cores=16 ram_mib=47955
+STAGE_OBJECT_PROVENANCE_SELF_TEST matching=1 stale=1 source=1 tree=1 compiler=1 toolchain=1 cached=1 malformed_cached=1 pre_link=1
+SELF_HOST_STAGE_SLOW_SELF_TEST cases=7 factor=3
+SELF_HOST_WORK_GATE_SELF_TEST current=1 at_ceiling=1 over_ceiling=1 pr2406=1 missing=1 duplicate=1
+ninja: no work to do.
+TARGET cpu=native features=adx,aes,avx,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,monitor,movbe,pclmul,pku,popcnt,rdpid,rdrand,rdseed,rdtscp,sha,shstk,smap,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,svm,vaes,vpclmulqdq,wbnoinvd,xsave,xsavec,xsaveopt,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                387                      428
+bytes on disk                 35.025.439               35.093.371
+physical lines                   506.310                  508.203
+
+bytes scanned                 35.021.789               35.089.713
+  code                        26.079.766   74.5 %      26.124.242   74.4 %
+  comment                      2.962.336    8.5 %       2.980.196    8.5 %
+  whitespace                   5.979.687   17.1 %       5.985.275   17.1 %
+  literals, within code       11.033.464   31.5 %      11.035.569   31.4 %
+
+lines scanned                    504.485                  506.374
+  code, the sLOC                 443.196   87.9 %         444.667   87.8 %
+  comment                         47.704    9.5 %          48.052    9.5 %
+  blank                           15.778    3.1 %          15.863    3.1 %
+  both, counted twice              2.193    0.4 %           2.208    0.4 %
+
+comments                          42.445                   42.552
+tokens                         3.854.612                3.863.146
+spliced-away lines                 1.825    0.4 %           1.829    0.4 %
+
+preprocessed output                      of lexed
+  tokens to the parser         4.426.407  114.6 %
+  their spelling bytes        26.877.618  102.9 %
+  bytes retained              39.408.456  112.3 %
+  macro expansions               176.545
+  #define directives               4.166
+
+files lexed more than once
+         lexes re-read bytes  path
+            17        33.072  stddef.h
+             5        17.136  /usr/include/bits/libc-header-start.h
+             5         8.200  src/buster/lib/compiler/assembly/x86_64_conditions.inc
+            14         5.174  /usr/include/bits/wordsize.h
+             2         2.231  /usr/include/bits/stat.h
+             2         1.109  /usr/include/bits/timesize.h
+             2           970  /usr/include/bits/long-double.h
+             2            32  /usr/include/asm/ioctls.h
+                      67.924  re-read in total
+IR_FRONTEND_SSA functions=6161 locals=30752 reads=105253 writes=46481 parameters_created=191612 parameters_removed=176656 temporaries=14042 fallback_locals=32855
+C_CONSTANT_INTERN lookups=422260 hits=163408 stale=79
+C_TYPE_LAYOUT solves=219 pass_solves=167 pass_state_types=9771998 pass_attempts=395714 agenda_solves=52 agenda_types=54 agenda_attempts=54 agenda_edges=2 agenda_notifications=2 agenda_pushes=56 agenda_fallbacks=0
+C_AST_RETAINED trees_built=0 tree_rejections=0 tree_nodes=0 tree_bytes=0 span_nodes=2084399 span_bytes=53267252 hoist_steps=39380 evaluator_steps=1124018
+C_AST nodes=2963468 tokens=4426408 build_ns=39765867 retained_bytes=42652172 transient_high_water=64480 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=4128768 finalize_child_entries=0 layout=implicit
+C_AST_WALK walk_ns=12210070 walk_steps=7317755 scan_ns=150307 children_ns=16932561 child_entries=2963467 scan_calls=55625
+C_AST_TYPES bodies=7221 initializers=2702 nodes_typed=1918218 nodes_accepted=1711627 answers=842214 declines=13377 misses=5373 gated=0 lookups_settled=134470 lookups_walked=179
+C_AST_SPLIT units=1 records=16734 assertions=77 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_STATEMENTS bodies=7221 segments=105027 segment_tokens=1685712 uses=366353 bails=0 declaration_hints=40236 loop_hints=5267 declines=814 declarator_hints=40357 initializer_hints=39381 auto_skips=40236 declarator_declines=0 braced=10063 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_SPECIFIERS lists=161875 indexed=158046 index_reads=181360 primitive_answers=14922 typedef_answers=71750 fallbacks=2313 input=2286 specifiers=24 storage=0 primitive=0 typedef=3 reason=input fallback_token=4425428
+C_AST_TYPE_NAMES skips=46964 retries=0 primitive_answers=156 typedef_answers=29025 fallbacks=29 input=29 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_MEMBERS primitive_answers=1266 typedef_answers=8878 fallbacks=122 input=122 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_LOWER steps=54714 answers=54714 negatives=838776 statement_bodies=6555 statements=159886 range_adapters=0
+C_AST_FACTS nodes=2963468 retained_bytes=93780104 regions=9995 candidates=1797229 tree=1711627 machine=24086 completed=61494 missing=22 unspanned=0 invalid=22 appends=0 busy=0 bound=514219 bit_fields=459 strings=54359 uncovered=29 outside=6162 stale=0 completion_queries=61516 recipes=184 builtin_identities=1533 function_names=878
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1897160 changes=151669
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1897160 changes=710
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=3891066 changes=120754
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=46845 changes=71
+IR_FAST_PASS name=cse enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST functions=6555 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=640000 retained_bound=23210880 compact_ns=0 instructions_before=1897160 instructions_after=1775461
+IR_INLINE tiny=0 candidates=71 inlined=71 always_inlined=71 copied_instructions=2353 growth=2353 budget_skips=0 shape_skips=0 linkage_skips=0 recursion_skips=0 visits=2465976 released_bytes=3264512 splice_proofs=45 splice_fallbacks=0 reused_proofs=0
+IR_LOCAL_PROMOTION candidates=69899 promoted=132 loads_removed=375 stores_removed=257 parameters_inserted=618 parameters_removed=493 uninitialized=0 barriers=9 instructions_before=1897924 instructions_after=1897160 values_before=1559880 values_after=1559498
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=42 block_visits=7949 parameter_visits=1564 incoming_visits=3344
+CODEGEN cpu=native vector_bits=512 functions=6555 instructions=1775461 values=1437728 stack_value_bytes=6152432 stack_frame_bytes=6152432 max_stack_frame_bytes=135128 code_bytes=15170523 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=125 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=2052217 exact_successes=2052217 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=141504
+CODEGEN_EMIT machine_code_in_place=15121457 machine_code_copied=0
+OBJECT_WRITE format=elf64 section_visits=154 symbol_visits=104004 relocation_visits=930972 image_reserved=49453696 image_stored=8964509 image_zeroed=110 image_patched=0 payload_copied=387 payload_borrowed=40489187 scratch=140744 retained=49453912 output=49453696
+CODEGEN_ALLOCATOR reloads=44426 spills=22664 boundary_spills=8925 boundary_reloads=4678 boundary_copies=434 copies=300939 rematerializations=29943 pins=0 splits=0 scheduled=0 schedule_kept=0
+SELF_HOST_WORK stage=1 c_type_layout.solves=219 ceiling=400 c_type_layout.pass_state_types=9771998 ceiling=36000000
+TARGET cpu=native features=adx,aes,avx,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,monitor,movbe,pclmul,pku,popcnt,rdpid,rdrand,rdseed,rdtscp,sha,shstk,smap,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,svm,vaes,vpclmulqdq,wbnoinvd,xsave,xsavec,xsaveopt,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                384                      425
+bytes on disk                 34.990.488               35.058.420
+physical lines                   505.251                  507.144
+
+bytes scanned                 34.986.872               35.054.796
+  code                        26.057.668   74.5 %      26.102.144   74.5 %
+  comment                      2.953.860    8.4 %       2.971.720    8.5 %
+  whitespace                   5.975.344   17.1 %       5.980.932   17.1 %
+  literals, within code       11.033.440   31.5 %      11.035.545   31.5 %
+
+lines scanned                    503.443                  505.332
+  code, the sLOC                 442.429   87.9 %         443.900   87.8 %
+  comment                         47.500    9.4 %          47.848    9.5 %
+  blank                           15.644    3.1 %          15.729    3.1 %
+  both, counted twice              2.130    0.4 %           2.145    0.4 %
+
+comments                          42.322                   42.429
+tokens                         3.851.031                3.859.565
+spliced-away lines                 1.808    0.4 %           1.812    0.4 %
+
+preprocessed output                      of lexed
+  tokens to the parser         4.426.407  114.7 %
+  their spelling bytes        26.877.618  103.0 %
+  bytes retained              39.373.536  112.3 %
+  macro expansions               176.534
+  #define directives               4.142
+
+files lexed more than once
+         lexes re-read bytes  path
+            17        33.072  stddef.h
+             5        17.136  /usr/include/bits/libc-header-start.h
+             5         8.200  src/buster/lib/compiler/assembly/x86_64_conditions.inc
+            14         5.174  /usr/include/bits/wordsize.h
+             2         2.231  /usr/include/bits/stat.h
+             2         1.109  /usr/include/bits/timesize.h
+             2           970  /usr/include/bits/long-double.h
+             2            32  /usr/include/asm/ioctls.h
+                      67.924  re-read in total
+IR_FRONTEND_SSA functions=6161 locals=30752 reads=105253 writes=46481 parameters_created=191612 parameters_removed=176656 temporaries=14042 fallback_locals=32855
+C_CONSTANT_INTERN lookups=422260 hits=163408 stale=79
+C_TYPE_LAYOUT solves=219 pass_solves=167 pass_state_types=9773203 pass_attempts=395714 agenda_solves=52 agenda_types=54 agenda_attempts=54 agenda_edges=2 agenda_notifications=2 agenda_pushes=56 agenda_fallbacks=0
+C_AST_RETAINED trees_built=0 tree_rejections=0 tree_nodes=0 tree_bytes=0 span_nodes=2084399 span_bytes=53267252 hoist_steps=39380 evaluator_steps=1124018
+C_AST nodes=2963468 tokens=4426408 build_ns=203103650 retained_bytes=42652172 transient_high_water=64320 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=4128768 finalize_child_entries=0 layout=implicit
+C_AST_WALK walk_ns=34173814 walk_steps=7317755 scan_ns=3957849 children_ns=41464225 child_entries=2963467 scan_calls=55625
+C_AST_TYPES bodies=7221 initializers=2702 nodes_typed=1918218 nodes_accepted=1711627 answers=916453 declines=13454 misses=5373 gated=0 lookups_settled=149514 lookups_walked=179
+C_AST_SPLIT units=1 records=16734 assertions=77 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_STATEMENTS bodies=7221 segments=105027 segment_tokens=1685712 uses=366353 bails=0 declaration_hints=40236 loop_hints=5267 declines=814 declarator_hints=40357 initializer_hints=39381 auto_skips=40236 declarator_declines=0 braced=10063 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_SPECIFIERS lists=161875 indexed=158046 index_reads=181360 primitive_answers=14922 typedef_answers=71750 fallbacks=2313 input=2286 specifiers=24 storage=0 primitive=0 typedef=3 reason=input fallback_token=4425428
+C_AST_TYPE_NAMES skips=46964 retries=0 primitive_answers=156 typedef_answers=29025 fallbacks=29 input=29 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_MEMBERS primitive_answers=1266 typedef_answers=8878 fallbacks=122 input=122 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_LOWER steps=54714 answers=54714 negatives=838776 statement_bodies=6555 statements=159886 range_adapters=0
+C_AST_FACTS nodes=2963468 retained_bytes=93780104 regions=9995 candidates=1797229 tree=1711627 machine=24086 completed=61494 missing=22 unspanned=0 invalid=22 appends=0 busy=0 bound=514219 bit_fields=459 strings=54359 uncovered=29 outside=6162 stale=0 completion_queries=61516 recipes=184 builtin_identities=1533 function_names=878
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1897160 changes=151669
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1897160 changes=710
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=3891066 changes=120754
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=46845 changes=71
+IR_FAST_PASS name=cse enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST functions=6555 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=640000 retained_bound=23210880 compact_ns=0 instructions_before=1897160 instructions_after=1775461
+IR_INLINE tiny=0 candidates=71 inlined=71 always_inlined=71 copied_instructions=2353 growth=2353 budget_skips=0 shape_skips=0 linkage_skips=0 recursion_skips=0 visits=2465976 released_bytes=3252224 splice_proofs=45 splice_fallbacks=0 reused_proofs=0
+IR_LOCAL_PROMOTION candidates=69899 promoted=132 loads_removed=375 stores_removed=257 parameters_inserted=618 parameters_removed=493 uninitialized=0 barriers=9 instructions_before=1897924 instructions_after=1897160 values_before=1559880 values_after=1559498
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=42 block_visits=7949 parameter_visits=1564 incoming_visits=3344
+CODEGEN cpu=native vector_bits=512 functions=6555 instructions=1775461 values=1437728 stack_value_bytes=6152432 stack_frame_bytes=6152432 max_stack_frame_bytes=135128 code_bytes=15170523 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=125 allocator=fast fallback_functions=0
+CODEGEN_ENCODER exact_attempts=2052217 exact_successes=2052217 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=141504
+CODEGEN_EMIT machine_code_in_place=15121457 machine_code_copied=0
+OBJECT_WRITE format=elf64 section_visits=154 symbol_visits=104004 relocation_visits=930972 image_reserved=49453696 image_stored=8964509 image_zeroed=110 image_patched=0 payload_copied=387 payload_borrowed=40489187 scratch=140744 retained=49453912 output=49453696
+CODEGEN_ALLOCATOR reloads=44426 spills=22664 boundary_spills=8925 boundary_reloads=4678 boundary_copies=434 copies=300939 rematerializations=29943 pins=0 splits=0 scheduled=0 schedule_kept=0
+SELF_HOST fixed_point bytes=42078720 stage1=build/self-host/Release/ide-stage1 stage2=build/self-host/Release/ide-stage2
+SELF_HOST stage 1 throughput
+  workload:      35.089.713 bytes | 506.374 LOC | 444.667 SLOC | 4.426.407 tokens
+  elapsed:       2.741434 seconds
+  bandwidth:     12.800 MB/s | 184.711 LOC/s | 162.202 SLOC/s
+  instructions:  24.159.402.730 total | 688.504/byte | 54331.450/SLOC | 5458.017/token
+SELF_HOST stage 2 throughput
+  workload:      35.054.796 bytes | 505.332 LOC | 443.900 SLOC | 4.426.407 tokens
+  elapsed:       12.811820 seconds
+  bandwidth:     2.736 MB/s | 39.443 LOC/s | 34.648 SLOC/s
+  instructions:  128.715.933.012 total | 3671.849/byte | 289966.058/SLOC | 29079.100/token
+BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=5 bytes=21042 min_ns=14676958 median_ns=14948077 throughput_mb_s=1
+TARGET cpu=native features=adx,aes,avx,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vpopcntdq,bmi1,bmi2,clflushopt,clwb,cx16,f16c,fma,fsgsbase,gfni,invpcid,lzcnt,monitor,movbe,pclmul,pku,popcnt,rdpid,rdrand,rdseed,rdtscp,sha,shstk,smap,sse,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,svm,vaes,vpclmulqdq,wbnoinvd,xsave,xsavec,xsaveopt,xsaves
+SOURCE src/buster/apps/ide/ide.c
+                                  unique                    lexed
+--------------------------------------------------------------------------
+files                                384                      425
+bytes on disk                 34.990.488               35.058.420
+physical lines                   505.251                  507.144
+
+bytes scanned                 34.986.872               35.054.796
+  code                        26.057.668   74.5 %      26.102.144   74.5 %
+  comment                      2.953.860    8.4 %       2.971.720    8.5 %
+  whitespace                   5.975.344   17.1 %       5.980.932   17.1 %
+  literals, within code       11.033.440   31.5 %      11.035.545   31.5 %
+
+lines scanned                    503.443                  505.332
+  code, the sLOC                 442.429   87.9 %         443.900   87.8 %
+  comment                         47.500    9.4 %          47.848    9.5 %
+  blank                           15.644    3.1 %          15.729    3.1 %
+  both, counted twice              2.130    0.4 %           2.145    0.4 %
+
+comments                          42.322                   42.429
+tokens                         3.851.031                3.859.565
+spliced-away lines                 1.808    0.4 %           1.812    0.4 %
+
+preprocessed output                      of lexed
+  tokens to the parser         4.426.407  114.7 %
+  their spelling bytes        26.877.618  103.0 %
+  bytes retained              39.373.536  112.3 %
+  macro expansions               176.534
+  #define directives               4.142
+
+files lexed more than once
+         lexes re-read bytes  path
+            17        33.072  stddef.h
+             5        17.136  /usr/include/bits/libc-header-start.h
+             5         8.200  src/buster/lib/compiler/assembly/x86_64_conditions.inc
+            14         5.174  /usr/include/bits/wordsize.h
+             2         2.231  /usr/include/bits/stat.h
+             2         1.109  /usr/include/bits/timesize.h
+             2           970  /usr/include/bits/long-double.h
+             2            32  /usr/include/asm/ioctls.h
+                      67.924  re-read in total
+IR_FRONTEND_SSA functions=6161 locals=30752 reads=105253 writes=46481 parameters_created=191612 parameters_removed=176656 temporaries=14042 fallback_locals=32855
+C_CONSTANT_INTERN lookups=422260 hits=163408 stale=79
+C_TYPE_LAYOUT solves=219 pass_solves=167 pass_state_types=9773203 pass_attempts=395714 agenda_solves=52 agenda_types=54 agenda_attempts=54 agenda_edges=2 agenda_notifications=2 agenda_pushes=56 agenda_fallbacks=0
+C_AST_RETAINED trees_built=0 tree_rejections=0 tree_nodes=0 tree_bytes=0 span_nodes=2084399 span_bytes=53267252 hoist_steps=39380 evaluator_steps=1124018
+C_AST nodes=2963468 tokens=4426408 build_ns=209754531 retained_bytes=42652172 transient_high_water=64320 column_copy_bytes=0 parenthesis_copy_bytes=0 parenthesis_committed_bytes=4128768 finalize_child_entries=0 layout=implicit
+C_AST_WALK walk_ns=35498557 walk_steps=7317755 scan_ns=4126642 children_ns=42232645 child_entries=2963467 scan_calls=55625
+C_AST_TYPES bodies=7221 initializers=2702 nodes_typed=1918218 nodes_accepted=1711627 answers=916453 declines=13454 misses=5373 gated=0 lookups_settled=149514 lookups_walked=179
+C_AST_SPLIT units=1 records=16734 assertions=77 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_STATEMENTS bodies=7221 segments=105027 segment_tokens=1685712 uses=366353 bails=0 declaration_hints=40236 loop_hints=5267 declines=814 declarator_hints=40357 initializer_hints=39381 auto_skips=40236 declarator_declines=0 braced=10063 fallbacks=0 reason=none fallback_token=4294967295
+C_AST_SPECIFIERS lists=161875 indexed=158046 index_reads=181360 primitive_answers=14922 typedef_answers=71750 fallbacks=2313 input=2286 specifiers=24 storage=0 primitive=0 typedef=3 reason=input fallback_token=4425428
+C_AST_TYPE_NAMES skips=46964 retries=0 primitive_answers=156 typedef_answers=29025 fallbacks=29 input=29 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_MEMBERS primitive_answers=1266 typedef_answers=8878 fallbacks=122 input=122 specifiers=0 storage=0 primitive=0 typedef=0
+C_AST_LOWER steps=54714 answers=54714 negatives=838776 statement_bodies=6555 statements=159886 range_adapters=0
+C_AST_FACTS nodes=2963468 retained_bytes=93780104 regions=9995 candidates=1797229 tree=1711627 machine=24086 completed=61494 missing=22 unspanned=0 invalid=22 appends=0 busy=0 bound=514219 bit_fields=459 strings=54359 uncovered=29 outside=6162 stale=0 completion_queries=61516 recipes=184 builtin_identities=1533 function_names=878
+IR_FAST_PASS name=fold enabled=1 timed=0 ns=0 visits=1897160 changes=151669
+IR_FAST_PASS name=address enabled=1 timed=0 ns=0 visits=1897160 changes=710
+IR_FAST_PASS name=dce enabled=1 timed=0 ns=0 visits=3891066 changes=120754
+IR_FAST_PASS name=parameters enabled=1 timed=0 ns=0 visits=46845 changes=71
+IR_FAST_PASS name=cse enabled=0 timed=0 ns=0 visits=0 changes=0
+IR_FAST functions=6555 validation_skips=0 budget_skips=0 provenance_skips=0 parameter_budget_hits=0 scratch_peak_bound=640000 retained_bound=23210880 compact_ns=0 instructions_before=1897160 instructions_after=1775461
+IR_INLINE tiny=0 candidates=71 inlined=71 always_inlined=71 copied_instructions=2353 growth=2353 budget_skips=0 shape_skips=0 linkage_skips=0 recursion_skips=0 visits=2465976 released_bytes=3178496 splice_proofs=45 splice_fallbacks=0 reused_proofs=0
+IR_LOCAL_PROMOTION candidates=69899 promoted=132 loads_removed=375 stores_removed=257 parameters_inserted=618 parameters_removed=493 uninitialized=0 barriers=9 instructions_before=1897924 instructions_after=1897160 values_before=1559880 values_after=1559498
+IR_LOCAL_PROMOTION_WORK parameter_sweeps=42 block_visits=7949 parameter_visits=1564 incoming_visits=3344
+CODEGEN cpu=native vector_bits=512 functions=6555 instructions=1775461 values=1437728 stack_value_bytes=6110352 stack_frame_bytes=6110352 max_stack_frame_bytes=135128 code_bytes=15042763 forwarded_wide_vector_loads=0 native_vector_operations=0 split_vector_operations=0 vzeroupper=0 simd_operations=125 allocator=quality fallback_functions=0
+CODEGEN_ENCODER exact_attempts=2052217 exact_successes=2052217 exact_failures=0
+CODEGEN_MIR mutable_virtual_registers=141504
+CODEGEN_EMIT machine_code_in_place=14994145 machine_code_copied=0
+OBJECT_WRITE format=elf64 section_visits=154 symbol_visits=104004 relocation_visits=930972 image_reserved=48433208 image_stored=8964513 image_zeroed=114 image_patched=0 payload_copied=387 payload_borrowed=39468695 scratch=140744 retained=48433424 output=48433208
+CODEGEN_ALLOCATOR reloads=13625 spills=10939 boundary_spills=2712 boundary_reloads=1342 boundary_copies=180 copies=292005 rematerializations=28662 pins=6235 splits=19 scheduled=173 schedule_kept=104
+BENCH_C_FRONTEND path=tests/basic_c_operations.c iterations=5 bytes=21042 min_ns=14005263 median_ns=14299386 throughput_mb_s=1
+Self-host stage 1 took 2.741434 seconds (2741434000 nanoseconds)
+STEP_INSTRUCTIONS Self-host stage 1 instructions=24159402730
+Self-host stage 1 link took 0.030545 seconds (30545000 nanoseconds)
+STEP_INSTRUCTIONS Self-host stage 1 link instructions=144635679
+Self-host stage 2 took 12.811820 seconds (12811820000 nanoseconds)
+STEP_INSTRUCTIONS Self-host stage 2 instructions=128715933012
+Self-host stage 2 link took 0.091098 seconds (91098000 nanoseconds)
+STEP_INSTRUCTIONS Self-host stage 2 link instructions=789176603
+Self-host stage 2 benchmark took 0.100951 seconds (100951000 nanoseconds)
+STEP_INSTRUCTIONS Self-host stage 2 benchmark instructions=703805728
+Self-host machine stage took 13.481821 seconds (13481821000 nanoseconds)
+STEP_INSTRUCTIONS Self-host machine stage instructions=141247688774
+Self-host machine stage link took 0.091026 seconds (91026000 nanoseconds)
+STEP_INSTRUCTIONS Self-host machine stage link instructions=789075908
+Self-host machine stage benchmark took 0.090964 seconds (90964000 nanoseconds)
+STEP_INSTRUCTIONS Self-host machine stage benchmark instructions=700204380

@@ -1,0 +1,86 @@
+TEST_TEMPORARY_ROOT_PRESERVED status=failed path=/tmp/buster-tests-460181-5-9733319955290
+TEST_FIXTURE_WATCHDOG_V1 status=armed deadline_seconds=1800
+TEST_FIXTURE_START_V1 kind=module module=ir_tests fixture=body index=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_test_type_from_id_bounds index=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_type_from_id_bounds index=0 arena_slot=0 start=13320 end=13320 retained_bytes=0 high_water=13320 peak_bytes=0 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_type_from_id_bounds index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_type_from_id_bounds index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_test_canonical_inline index=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_canonical_inline index=1 arena_slot=0 start=13320 end=1440520 retained_bytes=1427200 high_water=1440520 peak_bytes=1427200 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_canonical_inline index=1 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=212539464 peak_bytes=212539336 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_canonical_inline index=1 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=54015792 peak_bytes=54015728 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_test_inline_required_work_budget index=2
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_inline_required_work_budget index=2 arena_slot=0 start=13320 end=13320 retained_bytes=0 high_water=13320 peak_bytes=0 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_inline_required_work_budget index=2 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=41164332 peak_bytes=41164204 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_inline_required_work_budget index=2 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=14414864 peak_bytes=14414800 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_test_inline_required_snapshot_budget index=3
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_inline_required_snapshot_budget index=3 arena_slot=0 start=13320 end=13320 retained_bytes=0 high_water=13320 peak_bytes=0 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_inline_required_snapshot_budget index=3 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=26822600 peak_bytes=26822472 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_inline_required_snapshot_budget index=3 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=2116432 peak_bytes=2116368 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_test_label_owner_index index=4
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_label_owner_index index=4 arena_slot=0 start=13320 end=7184808 retained_bytes=7171488 high_water=7184808 peak_bytes=7171488 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_label_owner_index index=4 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=16512 peak_bytes=16384 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_label_owner_index index=4 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=16448 peak_bytes=16384 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_test_label_sets index=5
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_label_sets index=5 arena_slot=0 start=13320 end=13320 retained_bytes=0 high_water=54280 peak_bytes=40960 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_label_sets index=5 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=17536 peak_bytes=17408 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_label_sets index=5 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_test_label_paths index=6
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_label_paths index=6 arena_slot=0 start=13320 end=13320 retained_bytes=0 high_water=13320 peak_bytes=0 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_label_paths index=6 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=672 peak_bytes=544 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_label_paths index=6 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_test_label_transfer index=7
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_label_transfer index=7 arena_slot=0 start=13320 end=13320 retained_bytes=0 high_water=28768 peak_bytes=15448 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_label_transfer index=7 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=3904 peak_bytes=3776 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_label_transfer index=7 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_fast_decline_tests index=8
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_decline_tests index=8 arena_slot=0 start=13320 end=13320 retained_bytes=0 high_water=580448 peak_bytes=567128 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_decline_tests index=8 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=13312 peak_bytes=13184 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_decline_tests index=8 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=84 peak_bytes=20 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_fast_promotion_proof_tests index=9
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_promotion_proof_tests index=9 arena_slot=0 start=13320 end=13320 retained_bytes=0 high_water=616008 peak_bytes=602688 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_promotion_proof_tests index=9 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=19576 peak_bytes=19448 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_promotion_proof_tests index=9 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=96 peak_bytes=32 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_fast_cse_tests index=10
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_cse_tests index=10 arena_slot=0 start=13320 end=13320 retained_bytes=0 high_water=2451120 peak_bytes=2437800 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_cse_tests index=10 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=750320 peak_bytes=750192 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_cse_tests index=10 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=88 peak_bytes=24 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_fast_intern_tests index=11
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_intern_tests index=11 arena_slot=0 start=13320 end=13320 retained_bytes=0 high_water=1165536 peak_bytes=1152216 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_intern_tests index=11 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=25856 peak_bytes=25728 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_intern_tests index=11 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=80 peak_bytes=16 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_fast_construction_fold_tests index=12
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_construction_fold_tests index=12 arena_slot=0 start=13320 end=13320 retained_bytes=0 high_water=2220816 peak_bytes=2207496 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_construction_fold_tests index=12 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=15720 peak_bytes=15592 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_fast_construction_fold_tests index=12 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=76 peak_bytes=12 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_validate_equivalence_tests index=13
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_validate_equivalence_tests index=13 arena_slot=0 start=1232760 end=1232760 retained_bytes=0 high_water=1251112 peak_bytes=18352 after=1232760 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_validate_equivalence_tests index=13 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=376 peak_bytes=248 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_validate_equivalence_tests index=13 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_validate_instruction_scaling_tests index=14
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_validate_instruction_scaling_tests index=14 arena_slot=0 start=1232760 end=1232760 retained_bytes=0 high_water=1809232 peak_bytes=576472 after=1232760 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_validate_instruction_scaling_tests index=14 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=69768 peak_bytes=69640 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_validate_instruction_scaling_tests index=14 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_validate_splice_scaling_tests index=15
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_validate_splice_scaling_tests index=15 arena_slot=0 start=1232760 end=1232760 retained_bytes=0 high_water=2117724 peak_bytes=884964 after=1232760 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_validate_splice_scaling_tests index=15 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=32904 peak_bytes=32776 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_validate_splice_scaling_tests index=15 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_validate_incomplete_place_tests index=16
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_validate_incomplete_place_tests index=16 arena_slot=0 start=1232760 end=1232760 retained_bytes=0 high_water=2392840 peak_bytes=1160080 after=1232760 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_validate_incomplete_place_tests index=16 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=19792 peak_bytes=19664 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_validate_incomplete_place_tests index=16 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=112 peak_bytes=48 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_test_va_instruction_type_storage index=17
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_va_instruction_type_storage index=17 arena_slot=0 start=1232760 end=1232760 retained_bytes=0 high_water=1232760 peak_bytes=0 after=1232760 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_va_instruction_type_storage index=17 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_va_instruction_type_storage index=17 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_FIXTURE_START_V1 kind=fixture module=ir_tests fixture=ir_test_i386_abi index=18
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_i386_abi index=18 arena_slot=0 start=1232760 end=1248824 retained_bytes=16064 high_water=1248824 peak_bytes=16064 after=1232760 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_i386_abi index=18 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=128 peak_bytes=0 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=fixture module=ir_tests fixture=ir_test_i386_abi index=18 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=64 peak_bytes=0 after=64 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=ir_tests fixture=body index=0 arena_slot=0 start=13320 end=2117960 retained_bytes=2104640 high_water=7930608 peak_bytes=7917288 after=13320 live_bytes=0 rewind=1
+TEST_ARENA_V1 kind=module module=ir_tests fixture=body index=0 arena_slot=1 start=128 end=128 retained_bytes=0 high_water=212539464 peak_bytes=212539336 after=128 live_bytes=0 rewind=0
+TEST_ARENA_V1 kind=module module=ir_tests fixture=body index=0 arena_slot=2 start=64 end=64 retained_bytes=0 high_water=54015792 peak_bytes=54015728 after=64 live_bytes=0 rewind=0
+TEST_ARENA_TOP_V1 module=ir_tests fixtures=19 retained_fixture=ir_test_label_owner_index retained_bytes=7171488 peak_fixture=ir_test_label_owner_index peak_bytes=7171488
+[506230/506230] Unit tests (1 of 64 modules selected)
+[1/1] Module tests
+[0/0] External tests
