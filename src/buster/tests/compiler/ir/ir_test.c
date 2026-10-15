@@ -1989,7 +1989,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, defaults_program->inline_options.max_callee_instructions == IR_INLINE_TINY_INSTRUCTIONS);
             BUSTER_TEST(arguments, defaults_program->inline_options.max_function_growth == 0);
             BUSTER_TEST(arguments, IR_INLINE_FUNCTION_GROWTH == 2048u);
-            BUSTER_TEST(arguments, IR_INLINE_TINY_INSTRUCTIONS == 13u);
+            BUSTER_TEST(arguments, IR_INLINE_TINY_INSTRUCTIONS == 16u);
             // The module limit stays relative so each module derives its own.
             BUSTER_TEST(arguments, defaults_program->inline_options.max_module_growth == 0);
             BUSTER_TEST(arguments, ir_inline_module_growth_limit(0, 0) == IR_INLINE_MODULE_GROWTH);
@@ -2008,6 +2008,57 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_canonical_inline(UnitTestArguments* a
             BUSTER_TEST(arguments, ir_validate_canonical_module(defaults_program, defaults_module).error == IR_VALIDATION_NONE);
         }
         c_test_scratch_end(defaults_temporary);
+    }
+    // The callee limit is the eligibility boundary (#3854): leaves of exactly 14,
+    // 16 and 17 canonical rows, with the caller relocation bound lifted so only
+    // the limit decides. The default admits 14 and 16 rows and refuses 17; an
+    // explicit 13-row limit refuses 14 and 16 too.
+    for (u32 limit_case = 0; limit_case < 2; limit_case += 1)
+    {
+        TemporalArena band_temporary = scratch_begin(&arguments->arena, 1);
+        String8 band_source = S8(
+            "static int leaf_14(int v) { return (((((v + 1) * 3) ^ 5) - 7) | 9) & 11; }\n"
+            "static int leaf_16(int v) { return ((((((v + 1) * 3) ^ 5) - 7) | 9) & 11) + 13; }\n"
+            "static int leaf_17(int v) { return ~(((((((v + 1) * 3) ^ 5) - 7) | 9) & 11) + 13); }\n"
+            "int band_caller(int v) { return leaf_14(v) + leaf_16(v) + leaf_17(v); }\n");
+        CPreprocessResult band_preprocess = c_preprocess(band_temporary.arena, band_source,
+            (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
+        CAnalysisResult band_analysis = c_parse(band_temporary.arena, band_preprocess);
+        CIRLowerResult band_lowered = {0};
+        if (!band_preprocess.error_count && !band_analysis.diagnostic_count)
+        {
+            band_lowered = c_lower_to_ir(band_temporary.arena, S8("canonical-inline-band.c"), band_preprocess, band_analysis,
+                                         target_native);
+        }
+        BUSTER_TEST(arguments, band_preprocess.error_count == 0 && band_analysis.diagnostic_count == 0);
+        if (BUSTER_REQUIRE(arguments, band_lowered.diagnostic_count == 0 && band_lowered.program &&
+                                          band_lowered.program->module_count == 1))
+        {
+            IrProgram* band_program = band_lowered.program;
+            IrModule* band_module = band_program->modules;
+            IrFunction* leaf_14 = ir_test_inline_find_function(band_module, S8("leaf_14"));
+            IrFunction* leaf_16 = ir_test_inline_find_function(band_module, S8("leaf_16"));
+            IrFunction* leaf_17 = ir_test_inline_find_function(band_module, S8("leaf_17"));
+            IrFunction* band_caller = ir_test_inline_find_function(band_module, S8("band_caller"));
+            if (BUSTER_REQUIRE(arguments, leaf_14 && leaf_16 && leaf_17 && band_caller))
+            {
+                BUSTER_TEST(arguments, leaf_14->instruction_count == 14);
+                BUSTER_TEST(arguments, leaf_16->instruction_count == 16);
+                BUSTER_TEST(arguments, leaf_17->instruction_count == 17);
+                band_program->inline_options = (IrInlineOptions){
+                    .tiny = true,
+                    .max_callee_instructions = limit_case ? 13u : 0,
+                    .caller_growth_shift = 32u,
+                };
+                BUSTER_TEST(arguments, ir_prepare_canonical_module(band_program, band_module, false).error == IR_VALIDATION_NONE);
+                u32 remaining_calls = limit_case ? 1u : 0;
+                BUSTER_TEST(arguments, ir_test_direct_call_count(band_program, band_caller, S8("leaf_14")) == remaining_calls);
+                BUSTER_TEST(arguments, ir_test_direct_call_count(band_program, band_caller, S8("leaf_16")) == remaining_calls);
+                BUSTER_TEST(arguments, ir_test_direct_call_count(band_program, band_caller, S8("leaf_17")) == 1);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(band_program, band_module).error == IR_VALIDATION_NONE);
+            }
+        }
+        c_test_scratch_end(band_temporary);
     }
     // Inlining a call whose result is a function pointer leaves the indirect
     // call's callee as a continuation-block parameter with no defining row.

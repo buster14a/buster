@@ -230,6 +230,20 @@ proves host exit and an empty outer job before its consuming wait can rescue
 containment. Linux builds establish shared-source compatibility only; hosted
 Windows controls qualify native behavior at the exact tested revision.
 
+Shutdown controls also retain independent duplicate witnesses for the admitted
+parent's process, job and captured stdout/stderr handles. After consuming wait,
+`CompareObjectHandles` distinguishes a surviving reference to the same kernel
+object from a recycled handle value; `GetHandleInformation` records closed-value
+errors and flags. Every witness closes before the original process-wide census.
+The receipt retains both census calls' validity, native errors and raw counts,
+plus read-only registry IDs/states/handle rows with explicit truncation status.
+These rows carry no close or termination authority. The native observation
+control demonstrates that balanced unrelated handle changes can preserve the
+scalar count while an owned kernel object remains live. Equal counts alone are
+not ownership proof, and these four witnesses do not inventory unrelated native
+runtime handles. A census mismatch with all four owned references closed remains
+an unresolved diagnostic, not an accepted leak classification or relaxed gate.
+
 ## Linux process-group census reads
 
 When `self/status` proves that procfs and the caller use the same PID namespace

@@ -24,6 +24,8 @@
 // contract lives in os_internal.h, without process-group identity changes.
 // Test-only generated-image retention is isolated behind BUSTER_INCLUDE_TESTS
 // (os_image_retention_*); it owns executable registration and guarded cleanup.
+// os_process_cleanup_windows_test_inventory reads owner IDs/states/handles
+// without transferring native close authority.
 // The lane model's implementation lives at the bottom — lane_run dispatches through a
 // persistent LaneGang of workers that survives across phases
 // (lane_persistent_worker_entry_point); creating threads per phase is the
@@ -4147,6 +4149,29 @@ OsProcessCleanupWindowsTestStats os_process_cleanup_windows_test_end(void)
 {
     OsProcessCleanupWindowsTestStats result = os_windows_cleanup_test.stats;
     os_windows_cleanup_test = (OsWindowsCleanupTest){0};
+    return result;
+}
+
+u64 os_process_cleanup_windows_test_inventory(OsProcessCleanupWindowsTestOwner* rows, u64 capacity)
+{
+    u64 result = 0;
+    AcquireSRWLockShared(&os_windows_owner_lock);
+    for (OsWindowsProcessOwner* owner = os_windows_owners; owner; owner = owner->next)
+    {
+        if (result < capacity)
+        {
+            rows[result] = (OsProcessCleanupWindowsTestOwner){
+                .id = owner->id, .state = (u32)owner->state, .pending = owner->pending,
+                .process = (OsProcessHandle*)owner->process, .job = (OsProcessHandle*)owner->job,
+            };
+            for (u32 stream = 0; stream < STANDARD_STREAM_COUNT; stream += 1)
+            {
+                rows[result].pipes[stream] = (OsFileDescriptor*)owner->pipes[stream];
+            }
+        }
+        result += 1;
+    }
+    ReleaseSRWLockShared(&os_windows_owner_lock);
     return result;
 }
 

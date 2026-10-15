@@ -684,7 +684,7 @@ address is observed. Cloned instruction ranges preserve supported source line
 information; the debug model does not gain inline call-stack records.
 
 Positive decimal limits are configurable through
-`-fcanonical-inline-max-callee=N` (default 13 canonical instructions),
+`-fcanonical-inline-max-callee=N` (default 16 canonical instructions),
 `-fcanonical-inline-function-growth=N` (optional default 2048 copied rows per caller),
 `-fcanonical-inline-module-growth=N` (optional default: the larger of 4096 copied rows
 and 1/32 of the module's lowered canonical instruction rows), and
@@ -747,8 +747,8 @@ required site. Planning scratch remains bounded at 16 MiB, copied rows retain
 the independent 4 Mi module-wide ceiling, and explicit row/site limits and
 cycle/shape refusals still apply.
 
-The 13-row callee default comes from a per-callee census of the unity
-self-host source (#3854). Most optional callees are one-line field predicates
+A per-callee census of the unity self-host source (#3854, before the syntax
+tree was built on every compile) found the following. Most optional callees are one-line field predicates
 that lower to 10-16 promoted rows (arguments, address, load, casts, compare,
 return); a limit of 10 or less keeps almost none of them. One 11-row callee,
 `c_token_is_punctuator`, took 2072 of 3586 spliced sites and 55% of the row
@@ -762,8 +762,8 @@ sharper static rule was found. Under cachegrind at `-march=x86-64-v3`
 
 | Callee limit, caller shift | Compiler instructions with the flags | Generated stage-2 instructions | `.text` growth |
 |---|---|---|---|
-| 16, 5 (previous default) | 1.0106 | 0.9853 | +0.76% |
-| 13, 5 (default) | 1.0097 | 0.9845 | +0.65% |
+| 16, 5 (default) | 1.0106 | 0.9853 | +0.76% |
+| 13, 5 | 1.0097 | 0.9845 | +0.65% |
 | 12, 5 | 1.0096 | 0.9861 | +0.63% |
 | 11, 5 | 1.0090 | 0.9855 | +0.59% |
 | 11, 4 | 1.0061 | 0.9878 | +0.43% |
@@ -773,10 +773,26 @@ sharper static rule was found. Under cachegrind at `-march=x86-64-v3`
 
 The first column is a fixed no-inline compiler compiling the unity source with
 each setting; the second runs that setting's own stage-1 compiler with the
-same flags. The 13-row limit drops the 14-16-row band's growth and the work
-of splicing it, so it improves on 16 in every column. At 13 rows, shift 4 cuts the
-compiler's added instructions by a third but keeps only 89% of the stage-2
-saving; shift 6 is worse than 5 in every column.
+same flags. On that tree 13 rows improved on 16 in every column. At 13 rows,
+shift 4 cut the compiler's added instructions by a third but kept only 89% of
+the stage-2 saving; shift 6 was worse than 5 in every column.
+
+The 13-row default (#4044) was reverted. Once #4089 built the syntax tree on
+every compile, its 14-row `c_ast_is_punctuator` (165 sites) and the 16-row
+`c_punctuator_in_set` became hot in the self-host, so the "dead 14-16-row
+band" premise no longer held. The 9700X `canonical-inline-self-host-v1`
+receipt for 13/5 at `e4d15cbc` (run 38434056637) measured stage-1 wall
+1.0251, instructions 1.0115 and peak RSS 1.0136; stage-2 wall 1.0011 (no
+detectable difference), instructions 0.9924 and peak RSS 1.0155; code bytes
+1.0071. The #3877 receipt for 16/5 measured stage-1 wall 1.0260, but on an
+older tree, so the two 9700X runs are not a controlled comparison of callee
+limits. On the `e4d15cbc` tree, a diagnostic cachegrind sweep gave stage-2
+instructions of 0.9925 at 13 rows, 0.9919 at 14 and 0.9909 at 16 (`.text`
++0.71%, +0.76%, +0.82%). So 16 rows executes about 0.16% fewer stage-2
+instructions than 13, at slightly larger code size. Stage-1 wall time and peak
+RSS for the restored 16-row setting remain unmeasured on the current tree. A
+static size cut is also tuned to one workload: the 14-16-row band went from
+never executed to hot when the workload changed.
 
 Optional selection, like FAST, bounds work and retained storage per caller:
 splicing into a caller copies its exactly sized tables, so module-wide byte or
