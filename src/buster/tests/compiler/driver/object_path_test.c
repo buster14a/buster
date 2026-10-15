@@ -4152,7 +4152,7 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
         "    if (1 || constant_dead_missing()) count += 2; else count += constant_dead_data;\n"
         "    goto entered;\n"
         "    if (0) { count += constant_dead_missing(); entered: count += 4; }\n"
-        "    switch (3) { if (0) { count += constant_dead_missing(); case 3: count += 8; } }\n"
+        "    switch (3) { case 1: if (0) { count += constant_dead_missing(); case 3: count += 8; } }\n"
         "    if (count != 15 || initializer_calls != 1) return 1;\n"
         "    initializer_calls = 0;\n"
         "    goto live;\n"
