@@ -2068,6 +2068,7 @@ BUSTER_F_DECL MachineStackPlacement machine_fast_placement_build_pinned(Arena* a
 // callee-saved subset of implicit opcode clobbers into that walk. Computed
 // once and shared across every scan of the same function: QUALITY's baseline
 // and pinned runs read one prepass instead of re-deriving it all per run.
+typedef struct MachineFastLiveSets MachineFastLiveSets;
 typedef struct MachineFastPrepass MachineFastPrepass;
 struct MachineFastPrepass
 {
@@ -2075,6 +2076,7 @@ struct MachineFastPrepass
     u32* definition_blocks;
     u32* last_use;
     u8* escapes;
+    // Null for a function without calls; otherwise one next-call index per row.
     u32* next_call;
     // One advisory physical register per virtual register, or 0xFF: the
     // fixed register (or forced scratch) of the value's first constrained
@@ -2108,14 +2110,18 @@ struct MachineFastPrepass
     u64* loop_spans;
     // Block live-out and live-in of the values a write-back can store:
     // escaping and not rematerializable. `live_index` maps such a value to
-    // its dense bit, or UINT32_MAX; `live_out` and `live_in` hold
-    // `live_words` words per block. All are null when the function has one
-    // block or the planes would pass `MACHINE_FAST_LIVENESS_WORD_LIMIT`;
-    // every value then counts as live.
+    // its dense bit, or UINT32_MAX. Small populations use `live_out` and
+    // `live_in` with `live_words` words per block; large ones use shared
+    // immutable `live_sets` roots. No facts are built for one block or zero
+    // tracked values. If the shared-node budget and former dense envelope
+    // both fail, all liveness pointers stay null; no partial facts escape.
+    // Untracked values conservatively count as live.
     u32* live_index;
     u64* live_out;
     u64* live_in;
     u32 live_words;
+    u32 live_value_count;
+    MachineFastLiveSets* live_sets;
     u32 loop_span_count;
     u32 active_register_count;
     // Callee-saved subset of implicit opcode clobbers, folded into the
