@@ -1173,9 +1173,6 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/os_test.c
     src/buster/tests/file_test.c
     src/buster/tests/target_test.c
-    src/buster/tests/truetype_test.c
-    src/buster/tests/image_test.c
-    src/buster/tests/disk_builder_test.c
     src/buster/tests/compiler/metamorphic/metamorphic_test.c
     src/buster/tests/compiler/frontend/c/c_test.c
     src/buster/tests/compiler/frontend/c/c_ast_test.c
@@ -1226,9 +1223,7 @@ set(BUSTER_TEST_SOURCES
     src/buster/tests/compiler/driver/driver_test.c
     src/buster/tests/compiler/driver/object_path_test.c
 )
-if (BUSTER_INCLUDE_TESTS)
-    list(APPEND BUSTER_TEST_SOURCES src/buster/apps/disk_builder_verification.c)
-endif()
+
 set(BUSTER_TEST_HEADERS
     src/buster/tests/test.h
     src/buster/tests/byte_writer_test.h
@@ -1243,9 +1238,6 @@ set(BUSTER_TEST_HEADERS
     src/buster/tests/os_capture_replay_test_internal.h
     src/buster/tests/file_test.h
     src/buster/tests/target_test.h
-    src/buster/tests/truetype_test.h
-    src/buster/tests/image_test.h
-    src/buster/tests/disk_builder_test.h
     src/buster/tests/x86_64_test.h
     src/buster/tests/compiler/metamorphic/metamorphic_test.h
     src/buster/tests/compiler/codegen/ebpf_test_vm.h
@@ -2191,16 +2183,13 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND BUSTER_COMPILER_PLATFORM_MODULES window)
 endif()
 
-# The headless compiler has no production font, image or AArch64 syntax-model
-# consumer. Keep the reusable modules registered above, but add them to ide only
-# for their tests (and image fuzzing). Future product targets must name their
-# own dependencies.
+# The maintained compiler graph excludes the preserved application, GUI, font
+# and image suites. Only the AArch64 syntax model has test-only compiler consumers.
+# Optional product/component CMake fragments remain as unmaintained source and
+# are not included by the default graph.
 set(BUSTER_COMPILER_TEST_MODULES)
 if (BUSTER_INCLUDE_TESTS)
-    list(APPEND BUSTER_COMPILER_TEST_MODULES truetype compiler_aarch64_syntax)
-endif()
-if (BUSTER_INCLUDE_TESTS OR BUSTER_FUZZ_AVAILABLE)
-    list(APPEND BUSTER_COMPILER_TEST_MODULES image)
+    list(APPEND BUSTER_COMPILER_TEST_MODULES compiler_aarch64_syntax)
 endif()
 
 # buster_add_executable(<name> <main_file> MODULES <module>... [SOURCES <source>...])
@@ -2263,9 +2252,6 @@ buster_add_executable(ide src/buster/apps/ide/ide.c
 if (NOT BUSTER_INVESTIGATION_REVISION STREQUAL "")
     target_compile_definitions(ide PRIVATE BUSTER_INVESTIGATION_REVISION="${BUSTER_INVESTIGATION_REVISION}")
 endif()
-
-include(cmake/HotReloadDemo.cmake)
-include(cmake/CompilerSdk.cmake)
 
 if (((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows") AND
      CMAKE_SYSTEM_PROCESSOR MATCHES
@@ -2393,57 +2379,6 @@ elseif (CMAKE_SYSTEM_NAME STREQUAL "iOS")
         VERBATIM
     )
 else()
-    if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC)
-        executable_add(ui_slider_component_tests OFF src/buster/tests/ui_slider_component_test.c
-            MODULES os arena integer string file hash time float ui_core ui_builder
-            SOURCES src/buster/tests/ui_slider_test.c)
-        if (UNIX)
-            target_link_libraries(ui_slider_component_tests PRIVATE m)
-        elseif (WIN32)
-            target_link_libraries(ui_slider_component_tests PRIVATE ws2_32)
-        endif()
-        add_custom_target(test_ui_slider
-            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:ui_slider_component_tests>"
-            DEPENDS ui_slider_component_tests
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            COMMENT "Run headless UI slider input regressions"
-            VERBATIM)
-    endif()
-    if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC)
-        # Exercise real UI consumers without adding native window/rendering
-        # modules to the headless compiler. The runner owns an inert renderer
-        # boundary and the same foundation modules as the measurement tools.
-        executable_add(ui_utf8_component_tests OFF src/buster/tests/ui_utf8_component_test.c
-            MODULES os arena integer string file hash time float ui_core)
-        if (UNIX)
-            target_link_libraries(ui_utf8_component_tests PRIVATE m)
-        elseif (WIN32)
-            target_link_libraries(ui_utf8_component_tests PRIVATE ws2_32)
-        endif()
-        add_custom_target(test_ui_utf8
-            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:ui_utf8_component_tests>"
-            DEPENDS ui_utf8_component_tests
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            COMMENT "Run headless UI UTF-8 consumer regressions"
-            VERBATIM)
-    endif()
-    if (BUSTER_INCLUDE_TESTS AND BUSTER_LINK_LIBC)
-        # Counter-based scalability regressions for keyed-box lookup and focus
-        # navigation, against the production ui_core and an inert renderer.
-        executable_add(ui_scale_component_tests OFF src/buster/tests/ui_scale_component_test.c
-            MODULES os arena integer string file hash time float ui_core)
-        if (UNIX)
-            target_link_libraries(ui_scale_component_tests PRIVATE m)
-        elseif (WIN32)
-            target_link_libraries(ui_scale_component_tests PRIVATE ws2_32)
-        endif()
-        add_custom_target(test_ui_scale
-            COMMAND ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV} "$<TARGET_FILE:ui_scale_component_tests>"
-            DEPENDS ui_scale_component_tests
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            COMMENT "Run headless UI scalability regressions"
-            VERBATIM)
-    endif()
     add_custom_target(test_units
         COMMAND
         ${CMAKE_COMMAND} -E env ${BUSTER_TEST_ENV}
@@ -2522,21 +2457,6 @@ else()
         )
     endif()
 
-    if (TARGET test_ui_slider)
-        add_dependencies(test_all test_ui_slider)
-        add_dependencies(test_units test_ui_slider)
-    endif()
-
-    if (TARGET test_ui_utf8)
-        add_dependencies(test_all test_ui_utf8)
-        add_dependencies(test_units test_ui_utf8)
-    endif()
-
-    if (TARGET test_ui_scale)
-        add_dependencies(test_all test_ui_scale)
-        add_dependencies(test_units test_ui_scale)
-    endif()
-
     # Desktop-only performance benchmark. Not wired up for Android/iOS:
     # emulator/simulator numbers are too noisy for useful local comparisons.
     add_custom_target(bench_all
@@ -2582,9 +2502,3 @@ if ((C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG) AND CMAKE_EXPORT_COMPILE_COMMAN
 elseif (C_COMPILER_CLANG OR C_COMPILER_APPLE_CLANG)
     message(STATUS "clang_analyze target disabled: CMAKE_EXPORT_COMPILE_COMMANDS is OFF")
 endif()
-
-# Separate application/component graphs keep graphics out of the compiler.
-include(cmake/Raster.cmake)
-include(cmake/RenderingTextureFormat.cmake)
-include(cmake/ImageBrowser.cmake)
-include(cmake/DiskBuilder.cmake)

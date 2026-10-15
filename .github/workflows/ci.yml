@@ -4,7 +4,7 @@ name: Buster CI
 # Windows x86-64 use independent sanitized Release (checks-enabled sanitizer
 # runtime) and portability (including build-only sanitized Debug) owners;
 # Windows AArch64 retains grouped checks. Five native mode lanes,
-# three Unix differential lanes and two mobile lanes retain full coverage.
+# three Unix differential lanes retain compiler coverage.
 # See docs/ci-suite-partition.md for suite ownership
 # and measurement; docs/ci-combination-shards.md describes the internal
 # combination partition; docs/ci-workflow-audit.md documents cache boundaries
@@ -43,7 +43,6 @@ permissions:
 env:
   # Sanitizer correctness policy belongs to generated test commands; keeping a
   # second workflow default would conceal precedence regressions.
-  BUSTER_ANDROID_SYSTEM_IMAGE: "system-images;android-35;google_apis;x86_64"
   BUSTER_CI_CHECKS_LAYOUT: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds') && 'combined' || 'split' }}
   BUSTER_CI_CONDITIONS_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/codex/ci-checks-combined-overlap' || github.ref == 'refs/heads/codex/ci-checks-combined-all-builds' || github.ref == 'refs/heads/codex/ci-checks-split-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-overlap' || github.ref == 'refs/heads/codex/2120-evidence-v2-combined-all-builds' || github.ref == 'refs/heads/codex/2120-evidence-v2-split-overlap') && '1' || '0' }}
 
@@ -113,7 +112,6 @@ jobs:
           python3 -B tools/ci_checks_tools_test.py -v
           python3 -B tools/ci_job_environment_test.py -v
           python3 -B tools/matrix_shard_test.py DraftMacosDeferralTests.test_every_step_after_checkout_skips_in_a_deferred_lane -v
-          python3 -B tools/ci_ios_simulator_test.py -v
           python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
       - name: Validate retired Vulkan installer boundary
@@ -287,7 +285,6 @@ jobs:
           python3 -B tools/ci_checks_tools_test.py -v
           python3 -B tools/ci_job_environment_test.py -v
           python3 -B tools/matrix_shard_test.py DraftMacosDeferralTests.test_every_step_after_checkout_skips_in_a_deferred_lane -v
-          python3 -B tools/ci_ios_simulator_test.py -v
           python3 tools/ci_artifact_upload_test.py
           python3 tools/compiler_throughput_workflow_test.py
       - name: Validate retired Vulkan installer boundary
@@ -660,7 +657,6 @@ jobs:
             tools/main_ci_reuse_test.py=main-ci-reuse.log
             tools/ci_zig_test.py=zig-installer-test.log
             tools/ci_zig_cache_test.py=zig-cache-policy-test.log
-            tools/ci_android_sdk_test.py=android-sdk-installer-test.log
             tools/analyzer_selection_test.py=analyzer-selection.log
             tools/differential_ci_policy_test.py=differential-ci-policy.log
             tools/native_producer_profile_test.py=native-producer-profile.log
@@ -1432,216 +1428,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  mobile:
-    needs: [reuse, no_code_plan]
-    if: ${{ !cancelled() && (needs.no_code_plan.result != 'success' || needs.no_code_plan.outputs.no_code != 'true') && (github.server_url == 'https://github.com' && vars.GH_ACTIONS_CI_ENABLED == 'true' && needs.reuse.outputs.reuse != 'true') }}
-    # Draft pull-request deferral of macOS runners; see the desktop job.
-    name: ${{ matrix.name }}${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && ' (deferred for draft PR)' || '' }}
-    timeout-minutes: 300
-    strategy:
-      fail-fast: ${{ github.event_name == 'merge_group' }}
-      matrix:
-        include:
-          - name: Android x86-64
-            runner: ubuntu-26.04
-            os: android
-            arch: x86_64
-          - name: iOS AArch64
-            runner: macos-26
-            os: ios
-            arch: aarch64
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
-    steps:
-      - name: Machine specifications
-        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
-        with:
-          requested-runner: >-
-            ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' && startsWith(matrix.runner, 'macos-') && 'ubuntu-26.04' || matrix.runner }}
-          matrix-index: ${{ strategy.job-index }}
-      - name: Defer macOS runner lane for draft pull request
-        if: ${{ startsWith(matrix.runner, 'macos-') && runner.os != 'macOS' }}
-        shell: bash
-        env:
-          DEFERRAL_AUTHORIZED: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.run_attempt == '1' }}
-          DEFERRED_LANE: ${{ matrix.name }}
-          DEFERRED_RUNNER: ${{ matrix.runner }}
-        run: |
-          set -euo pipefail
-          if [[ "$DEFERRAL_AUTHORIZED" != true ]]; then
-            echo "::error::$DEFERRED_LANE must run on $DEFERRED_RUNNER; only a first-attempt draft pull-request run may defer it."
-            exit 1
-          fi
-          echo "::notice title=macOS lane deferred::$DEFERRED_LANE did not run because this pull request is a draft. It runs on the first push after the pull request is ready, on Re-run all jobs, and always in the merge queue."
-          printf '## %s deferred\n\nThis draft pull-request run did not request a %s runner. The merge queue always runs this lane.\n' "$DEFERRED_LANE" "$DEFERRED_RUNNER" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Checkout
-        id: checkout
-        if: ${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-
-      - name: Record actual checkout identity
-        if: ${{ !startsWith(matrix.runner, 'macos-') || runner.os == 'macOS' }}
-        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
-        with:
-          mode: source
-          source-directory: .
-          source-repository: ${{ github.repository }}
-      - name: Install coreutils
-        if: ${{ matrix.os == 'ios' && steps.checkout.outcome == 'success' }}
-        shell: bash
-        run: brew install --quiet coreutils
-
-      - name: Grant the runner access to KVM
-        if: ${{ matrix.os == 'android' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          printf '%s\n' 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
-            sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Install the emulator system image
-        id: android_sdk
-        if: ${{ matrix.os == 'android' }}
-        timeout-minutes: 20
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/buster-ci"
-          sdkmanager=$(command -v sdkmanager || true)
-          if [[ -z $sdkmanager ]]; then
-            sdkmanager=$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -type f -name sdkmanager | sort | tail -n 1)
-          fi
-          if [[ -z $sdkmanager ]]; then
-            echo "error: sdkmanager was not found under $ANDROID_HOME" >&2
-            exit 1
-          fi
-          printf '%s\n' "$(dirname "$sdkmanager")" >>"$GITHUB_PATH"
-          python3 tools/ci_android_sdk.py \
-            --sdkmanager "$sdkmanager" \
-            --sdk-root "$ANDROID_HOME" \
-            --log-directory "$RUNNER_TEMP/buster-ci" \
-            --attempts 3 \
-            --attempt-timeout-seconds 300 \
-            --backoff-seconds 5 \
-            --package emulator \
-            --package "platforms;android-35" \
-            --package "$BUSTER_ANDROID_SYSTEM_IMAGE"
-          printf '%s\n' "$ANDROID_HOME/emulator" "$ANDROID_HOME/platform-tools" >>"$GITHUB_PATH"
-
-      - name: Bootstrap the build driver (Android packages and runtime order)
-        if: ${{ matrix.os == 'android' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Hosted jobs build build.c only with Clang (the documented CI
-          # bootstrap exception). android/test_ci.sh uses this driver to build
-          # both ABIs' packages concurrently, and android/runtime_order.sh to
-          # generate and build its host ide.
-          clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -fwrapv -fno-strict-aliasing -funsigned-char \
-            build.c -o "$RUNNER_TEMP/buster-android-build-driver"
-          "$RUNNER_TEMP/buster-android-build-driver" android_packages --self-test "$RUNNER_TEMP/buster-android-packages-self-test"
-
-      - name: Test (Android)
-        id: android
-        if: ${{ matrix.os == 'android' }}
-        shell: bash
-        env:
-          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
-          BUSTER_ANDROID_AVD: buster-ci
-          BUSTER_ANDROID_DEVICE: pixel_6
-          BUSTER_ANDROID_EMULATOR_GPU: swiftshader_indirect
-          BUSTER_ANDROID_EMULATOR_HEADLESS: "1"
-          BUSTER_ANDROID_EMULATOR_LOG: ${{ runner.temp }}/buster-ci/android-emulator.log
-          BUSTER_ANDROID_EMULATOR_STARTED_MARKER: ${{ runner.temp }}/buster-ci/android-emulator.started
-          BUSTER_ANDROID_RUNTIME_ORDER: "1"
-          BUSTER_ANDROID_HOST_DRIVER: ${{ runner.temp }}/buster-android-build-driver
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/buster-ci"
-          exec > >(tee "$RUNNER_TEMP/buster-ci/android.log") 2>&1
-          android_phase=start
-          cleanup_android_emulator() {
-            status=$?
-            payload_status=$status
-            cleanup_status=not-run
-            trap - EXIT INT TERM
-            if [[ $status -ne 0 && -f "${BUSTER_ANDROID_EMULATOR_LOG:-}" ]]; then
-              printf 'Android emulator log follows an already-failed phase=%s status=%s\n' "$android_phase" "$payload_status" >&2
-              tail -n 200 "$BUSTER_ANDROID_EMULATOR_LOG" || true
-            fi
-            if [[ -f "$BUSTER_ANDROID_EMULATOR_STARTED_MARKER" ]]; then
-              cleanup_timeout_seconds=${BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS:-${BUSTER_ANDROID_COMMAND_TIMEOUT_SECONDS:-30}}
-              if BUSTER_ANDROID_CLEANUP_TIMEOUT_SECONDS="$cleanup_timeout_seconds" bash ./android/start_emulator_ci.sh stop; then
-                cleanup_status=0
-              else
-                cleanup_status=$?
-                echo "warning: Android emulator cleanup failed with exit status $cleanup_status" >&2
-                if [[ $status -eq 0 ]]; then status=1; fi
-              fi
-            fi
-            printf 'ANDROID_CI_RESULT phase=%s payload_status=%s cleanup_status=%s status=%s\n' "$android_phase" "$payload_status" "$cleanup_status" "$status"
-            if [[ $payload_status -ne 0 ]]; then
-              printf 'error: Android CI failed before final emulator cleanup (phase=%s status=%s)\n' "$android_phase" "$payload_status" >&2
-            elif [[ $status -ne 0 ]]; then
-              printf 'error: Android CI required emulator cleanup failed (status=%s)\n' "$cleanup_status" >&2
-            fi
-            exit "$status"
-          }
-          trap cleanup_android_emulator EXIT
-          # Preserve cancellation's nonzero status while the EXIT trap cleans up.
-          trap 'exit 130' INT
-          trap 'exit 143' TERM
-          bash ./android/start_emulator_ci.sh start
-          android_phase=tests
-          ./android/test_ci.sh --all
-
-      - name: Test (iOS simulator)
-        id: ios
-        if: ${{ matrix.os == 'ios' && steps.checkout.outcome == 'success' }}
-        shell: bash
-        env:
-          BUSTER_CI_CONDITIONS_EVIDENCE: ${{ env.BUSTER_CI_CONDITIONS_EVIDENCE }}
-          BUSTER_IOS_ARCH: arm64
-          BUSTER_IOS_CONSOLE_LOG: ${{ runner.temp }}/buster-ci/ios-console.log
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/buster-ci"
-          exec > >(tee "$RUNNER_TEMP/buster-ci/ios.log") 2>&1
-          ./ios/test_ci.sh --all
-
-      - name: Mobile result and reproduction
-        if: ${{ always() && steps.checkout.outcome == 'success' }}
-        shell: bash
-        env:
-          BUSTER_CI_STEPS: ${{ toJSON(steps) }}
-          BUSTER_CI_RUNNER: ${{ matrix.runner }}
-          BUSTER_CI_REQUIRED: ${{ matrix.os == 'ios' && 'ios' || (steps.android_sdk.outcome == 'success' && 'android_sdk android' || 'android_sdk') }}
-          BUSTER_CI_REPRO: See docs/ci-github-actions.md for the matching mobile SDK and lifecycle commands.
-        run: python3 tools/ci_summary.py
-
-      - name: Retain machine records in existing evidence
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
-        with:
-          mode: retain
-          retention-directory: ${{ runner.temp }}/buster-ci
-      - name: Retain mobile logs
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        # Loading a local action requires checkout, not successful build/test steps.
-        # The same-commit action uses actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a for both attempts.
-        uses: ./.github/actions/native-artifact-upload
-        with:
-          label: mobile
-          label_title: Mobile
-          name: mobile-${{ matrix.os }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/buster-ci/
-          compression-level: 6
-          if-no-files-found: ignore
-          retention-days: 7
 
   uefi:
     needs: [reuse, no_code_plan]
@@ -1872,7 +1658,7 @@ jobs:
       contents: read
       actions: read
       checks: read
-    needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse, no_code_plan]
+    needs: [lint, queue_lint, test, native, uefi, analyzer, reuse, no_code_plan]
     if: ${{ always() && github.server_url == 'https://github.com' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -2016,7 +1802,6 @@ jobs:
           INACTIVE_LINT_RESULT: ${{ github.event_name == 'merge_group' && needs.lint.result || needs.queue_lint.result }}
           DESKTOP_RESULT: ${{ needs.test.result }}
           NATIVE_RESULT: ${{ needs.native.result }}
-          MOBILE_RESULT: ${{ needs.mobile.result }}
           UEFI_RESULT: ${{ needs.uefi.result }}
           ANALYZER_RESULT: ${{ needs.analyzer.result }}
           NO_CODE: ${{ needs.no_code_plan.outputs.no_code }}
@@ -2030,7 +1815,7 @@ jobs:
             if [[ "${NO_CODE_RESULT:-}" != success || "${NO_CODE_VERIFIED:-}" != success ||
                   "$LINT_RESULT" != skipped || "$INACTIVE_LINT_RESULT" != skipped ||
                   "$DESKTOP_RESULT" != skipped || "$NATIVE_RESULT" != skipped ||
-                  "$MOBILE_RESULT" != skipped || "$UEFI_RESULT" != skipped ||
+                  "$UEFI_RESULT" != skipped ||
                   "$ANALYZER_RESULT" != skipped || "${REUSE_RESULT:-}" != skipped ||
                   "$REUSE_REQUESTED" == true ]]; then
               echo '::error::No-code completion requires trusted exact classification and every workload omitted.'
@@ -2040,7 +1825,7 @@ jobs:
             exit 0
           fi
           {
-            printf '| Shards | Result |\n| --- | --- |\n| All desktop shards | %s |\n| All two mobile lanes | %s |\n' "$DESKTOP_RESULT" "$MOBILE_RESULT"
+            printf '| Shards | Result |\n| --- | --- |\n| All desktop shards | %s |\n' "$DESKTOP_RESULT"
             printf '| All five native lanes | %s |\n' "$NATIVE_RESULT"
             printf '| UEFI firmware boot | %s |\n' "$UEFI_RESULT"
             printf '| Clang analyzer shards | %s |\n' "$ANALYZER_RESULT"
@@ -2055,11 +1840,11 @@ jobs:
             exit 1
           fi
           if [[ "$REUSE_REQUESTED" == true ]]; then
-            if [[ "$REUSE_REVERIFIED" != success || "$NATIVE_RESULT" != skipped || "$MOBILE_RESULT" != skipped || "$UEFI_RESULT" != skipped ]]; then
+            if [[ "$REUSE_REVERIFIED" != success || "$NATIVE_RESULT" != skipped || "$UEFI_RESULT" != skipped ]]; then
               echo '::error::Skipped main jobs require fresh, exact queue proof and completed main-only work.'
               exit 1
             fi
-          elif [[ "$NATIVE_RESULT" != success || "$MOBILE_RESULT" != success || "$UEFI_RESULT" != success ]]; then
-            echo '::error::All native, mobile and UEFI jobs must succeed without queue proof; failure, cancellation and skips do not pass.'
+          elif [[ "$NATIVE_RESULT" != success || "$UEFI_RESULT" != success ]]; then
+            echo '::error::All native and UEFI jobs must succeed without queue proof; failure, cancellation and skips do not pass.'
             exit 1
           fi

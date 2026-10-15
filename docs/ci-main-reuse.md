@@ -3,7 +3,7 @@
 `Buster CI` may reuse validation from twenty-three jobs from a successful `merge_group` execution when
 GitHub merges **that same commit SHA** to `main`. The source run remains the
 authoritative execution. The main `CI complete` job links it and says that the
-native/mobile/UEFI main jobs were skipped and desktop jobs ran only their cache lifecycle. It does not claim that their validation ran twice. Required
+native/UEFI main jobs were skipped and desktop jobs ran only their cache lifecycle. It does not claim that their validation ran twice. Required
 check names and the merge-queue ruleset are unchanged.
 
 ## Deterministic coverage inventory
@@ -36,7 +36,7 @@ contents and Actions permissions. It checks the current run's repository ID,
 workflow ID/path, exact commit, main ref, push event and first attempt. It
 requires one successful, completed first-attempt merge-queue run with the same
 SHA, the expected queue ref, and completion within two hours before the main
-run. It checks the exact workflow blob against the local checkout, all 23
+run. It checks the exact workflow blob against the local checkout, all 21
 successful source job identities and mandatory coverage steps, and twenty-three
 nonempty, unexpired, source-bound artifacts with SHA-256 digests. Paged API
 results must be complete. It rereads the source and current runs after
@@ -48,7 +48,7 @@ API error or incomplete pagination schedules all normal jobs. `CI complete`
 then uses its original exact job and step inventory. A deliberate manual
 measurement retains its normal full execution.
 
-After a positive decision, native, mobile and UEFI jobs are skipped **before
+After a positive decision, native and UEFI jobs are skipped **before
 runner allocation**. Desktop jobs run their existing Zig cache lifecycle, sanitation and log retention on main. They skip workflow/wrapper regressions, mold/LLVM installation, compiler probes, combination matrices and configure/coverage collection. A separate summary explicitly identifies this as reused validation. Lint continues in full on main. Analyzer retains its existing named job and artifact, but runs only a truthful reuse summary; all four analyzer execution steps must be skipped on main and their source counterparts must have succeeded. `CI complete`
 rechecks the source evidence and receipt digest, validates the retained main
 jobs and their steps (cache-only desktop jobs require every cache/evidence step, and successful skipping of every validation step), and requires the three skipped job groups. A source
@@ -97,15 +97,14 @@ the canonical receipt passed between jobs. They contain no token or full API
 response. No failed finish prints a successful-reuse summary. An unusable output
 filesystem makes the command fail rather than authorize reuse without retention.
 
-GitHub can represent skipped native/mobile matrices as two same-name,
-unexpanded placeholders instead of eight named native/mobile/UEFI rows. The
-reuse reader validates these before name-based executed-job de-duplication. It
-accepts only the complete eight named skips, or exactly two recognized matrix
-placeholders plus the UEFI skip. Skipped rows require unique IDs, the exact main
+GitHub can represent the skipped native matrix as one unexpanded placeholder,
+plus the UEFI row, instead of six named native/UEFI rows. The reuse reader
+accepts only all six named skips or exactly that native placeholder and UEFI skip.
+Skipped rows require unique IDs, the exact main
 run/SHA/first attempt, terminal `skipped`, no steps and no allocated runner.
 Mixed, missing, extra or unrecognized rows fail. Diagnostics retain their IDs
 as **skipped**, never as successful executions. The workflow independently
-requires each native/mobile/UEFI group result to be skipped; all source coverage
+requires each native/UEFI group result to be skipped; all source coverage
 and retained main execution checks remain required.
 
 ## Terminal benchmark announcement provenance (#3209)

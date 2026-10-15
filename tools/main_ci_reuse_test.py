@@ -169,7 +169,7 @@ class MainCIReuseTests(unittest.TestCase):
                 receipt = reuse.verify_source(self.api, SHA, CURRENT_ID, BLOB, NOW,
                                               diagnostics=source_evidence)
                 current = reuse.verify_current_jobs(self.api, SHA, CURRENT_ID, diagnostics=main_evidence)
-                self.assertEqual(len(receipt["source_jobs"]), 23)
+                self.assertEqual(len(receipt["source_jobs"]), 21)
                 self.assertEqual(len(current), 17)
                 self.assertEqual([row["job"] for row in source_evidence["source_reconciled_checks"]],
                                  self.api.jobs[-2:])
@@ -329,16 +329,16 @@ class MainCIReuseTests(unittest.TestCase):
 
     def test_exact_commit_source_and_main_specific_jobs(self):
         receipt = self.admit()
-        self.assertEqual(len(receipt["source_jobs"]), 23)
-        self.assertEqual(len(receipt["source_artifacts"]), 23)
+        self.assertEqual(len(receipt["source_jobs"]), 21)
+        self.assertEqual(len(receipt["source_artifacts"]), 21)
         self.assertEqual(receipt["source_run_id"], SOURCE_ID)
         self.assertEqual(len(reuse.verify_current_jobs(self.api, SHA, CURRENT_ID)), 17)
         self.assertRegex(reuse.receipt_digest(receipt), r"[0-9a-f]{64}\Z")
 
     def test_current_split_reuse_rejects_the_historical_combined_inventory(self):
         self.assertEqual(inventory.combination_jobs(), inventory.SPLIT_COMBINATION_JOBS)
-        self.assertEqual(len(inventory.combination_jobs()), 25)
-        self.assertEqual(len(inventory.combination_jobs("split")), 25)
+        self.assertEqual(len(inventory.combination_jobs()), 23)
+        self.assertEqual(len(inventory.combination_jobs("split")), 23)
         self.assertEqual(len(reuse.RETAINED_NAMES), 17)
         self.assertNotIn("Windows x86-64 checks", reuse.RETAINED_NAMES)
         self.assertIn("Windows x86-64 sanitized-release", reuse.RETAINED_NAMES)
@@ -563,9 +563,9 @@ class MainCIReuseTests(unittest.TestCase):
     def test_workflow_wiring_and_inventory_match_policy(self):
         text = (Path(__file__).resolve().parents[1] / reuse.WORKFLOW_PATH).read_text()
         self.assertEqual(reuse.REUSED_NAMES,
-                         set(inventory.NATIVE + inventory.MOBILE + inventory.UEFI))
+                         set(inventory.NATIVE + inventory.UEFI))
         self.assertEqual(len(reuse.RETAINED_NAMES), 17)
-        for key in ("native", "mobile", "uefi"):
+        for key in ("native", "uefi"):
             header = re.split(r"\n  [a-z][a-z_]*:\n", text.split(f"\n  {key}:\n", 1)[1], maxsplit=1)[0]
             self.assertIn("needs: [reuse, no_code_plan]", header)
             self.assertIn("needs.reuse.outputs.reuse != 'true'", header)
@@ -638,7 +638,7 @@ class MainCIReuseFinishTests(unittest.TestCase):
                 self.assertEqual(code, 0, text)
                 self.assertEqual(report["status"], "verified")
                 self.assertEqual(report["diagnostics"]["stage"], "complete")
-                self.assertEqual(len(report["receipt"]["source_jobs"]), 23)
+                self.assertEqual(len(report["receipt"]["source_jobs"]), 21)
                 self.assertEqual(len(report["receipt"]["main_jobs"]), 17)
                 check = self.api.checks[-1]
                 self.assertEqual((check["status"], check["conclusion"]), ("queued", None))
@@ -678,7 +678,7 @@ class MainCIReuseFinishTests(unittest.TestCase):
                 code, report, _, text = self.invoke("finish", handoff)
                 self.assertEqual(code, 0, text)
                 self.assertEqual(report["status"], "verified")
-                self.assertEqual(len(report["receipt"]["source_jobs"]), 23)
+                self.assertEqual(len(report["receipt"]["source_jobs"]), 21)
                 self.assertEqual(len(report["receipt"]["main_jobs"]), 17)
                 metadata = report["diagnostics"]["source_reconciled_checks"][-1]
                 self.assertEqual(metadata["check"]["conclusion"], check["conclusion"])
@@ -714,8 +714,7 @@ class MainCIReuseFinishTests(unittest.TestCase):
 
     def unexpanded_jobs(self):
         self.api.main_jobs = [row for row in self.api.main_jobs if row["name"] not in reuse.REUSED_NAMES]
-        for index, name in enumerate((reuse.UNEXPANDED_REUSE_NAME, reuse.UNEXPANDED_REUSE_NAME,
-                                      "UEFI firmware boot")):
+        for index, name in enumerate((reuse.UNEXPANDED_REUSE_NAME, "UEFI firmware boot")):
             row = job(name, CURRENT_ID, conclusion="skipped")
             row.update(id=4000 + index, steps=[], runner_id=None)
             self.api.main_jobs.append(row)
@@ -926,7 +925,7 @@ class MainCIReuseFinishTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(report["receipt"]["main_jobs"]), 17)
         skipped = report["diagnostics"]["skipped_jobs"]
-        self.assertEqual([row["job_id"] for row in skipped], [4000, 4001, 4002])
+        self.assertEqual([row["job_id"] for row in skipped], [4000, 4001])
         self.assertTrue(all(row["conclusion"] == "skipped" for row in skipped))
 
     def test_missing_duplicate_or_unrecognized_skip_groups_fail(self):
@@ -979,8 +978,8 @@ class MainCIReuseFinishTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(outputs["reuse"], "true")
         self.assertEqual(report["status"], "verified")
-        self.assertEqual(len(report["receipt"]["source_jobs"]), 23)
-        self.assertEqual(len(report["receipt"]["source_artifacts"]), 23)
+        self.assertEqual(len(report["receipt"]["source_jobs"]), 21)
+        self.assertEqual(len(report["receipt"]["source_artifacts"]), 21)
         self.assertEqual(len(report["diagnostics"]["discovery"]), 2)
         self.sleeps.assert_called_once_with(1)
 

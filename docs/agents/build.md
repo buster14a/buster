@@ -112,6 +112,15 @@ recorded stage-1 counts fail on both counters.
 
 ## Build
 
+The maintained build and automatic CI cover the headless compiler on Linux,
+Windows and macOS. Application, GUI, image/font and mobile-hosting source is
+preserved without a maintenance or CI-support promise. It is excluded from
+the default build, compiler tests/fuzzing and analyzer database.
+
+The default graph registers one product executable, `ide`. Application/GUI
+CMake fragments remain in source but are not included; the optional SDK and
+example workflows are also outside automatic maintenance.
+
 Three layers: `./build.sh` / `./build.ps1` bootstrap `build.c` using **tcc**,
 then the native driver runs CMake + ninja (multi-config, outputs in
 `build/<Config>/`). The wrappers retain immutable drivers under
@@ -623,17 +632,17 @@ accepts `--config <name>`, `--optimize`, `--target/-t <ninja target>`, and
 `--verbose/-v`. Booleans have `--no-` twins; `--` passes the rest through to
 Ninja (`build`) or CMake (`generate`).
 
-Ninja targets: `ide`, `test_all` (on Android packages/runs the APK, on iOS
-drives the simulator), `bench_all` (desktop only — runs `ide bench`),
+Maintained Ninja targets: `ide`, `test_all`, `bench_all` (runs `ide bench`),
 `test_self_host` (Linux and Windows x86-64, and macOS), `test_mode_matrix`
 (same platforms), `run_ide`,
 `test_ide`, `debug_ide`,
-`buster_shaders`, `apk` (Android), `clang_analyze`. Rendering backends and
-shader compilation are retained as opt-in infrastructure and default off. The
-Vulkan SDK (`VULKAN_SDK` env) is required only when Vulkan or Slang shader
-compilation is explicitly enabled.
+`clang_analyze`. Preserved renderer/shader and mobile packaging code has no
+automatic build or test support. Its earlier procedures below are reference
+material; they do not promise current buildability.
 
-## Android SDK packaging inputs
+## Preserved reference: Android SDK packaging inputs
+
+This unmaintained path is not exercised by automatic CI.
 
 The explicit `BUSTER_ANDROID_BUILD_TOOLS_DIR` and `BUSTER_ANDROID_JAR` overrides
 win. Otherwise packaging selects build-tools by numeric `major.minor.patch`,
@@ -647,7 +656,9 @@ SDK diagnostic. The selection requires only CMake 3.17. Controlled mixed-digit,
 preview, override and missing-candidate fixtures run in the same compatibility
 suite as the cwd and Apple architecture regressions.
 
-## Incremental Android test assets
+## Preserved reference: Incremental Android test assets
+
+This unmaintained path is not exercised by automatic CI.
 
 The Android `apk` graph in `cmake/AndroidApk.cmake` treats the active files under
 `tests/` and the SPIR-V, codegen and driver fixture directories under
@@ -675,7 +686,9 @@ signing or device execution; those remain the regular Android mobile CI gates.
 Do not run two configurations' packaging concurrently in one build directory:
 the existing APK and staging paths are shared.
 
-## Incremental iOS test assets
+## Preserved reference: Incremental iOS test assets
+
+This unmaintained path is not exercised by automatic CI.
 
 The iOS `ide` target stages active files under `tests/` and the SPIR-V, codegen
 and driver fixture directories under `src/buster/tests/compiler/` through

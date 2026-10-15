@@ -1,5 +1,12 @@
 # Apple CI architecture policy (#1986)
 
+Current scope: automatic CI maintains the headless compiler on Linux, Windows
+and macOS. Application, graphics/UI, image/font and mobile-hosting sources remain
+preserved but are not built or tested automatically. Earlier mobile/component
+commands and measurements below describe preserved paths or historical runs,
+not current CI coverage. See [current build guidance](agents/build.md) and
+[component status](../PROJECTS.md).
+
 Routine CI validates Apple platforms on AArch64 / Apple Silicon only. Apple
 x86-64 source and compiler-target compatibility remains best-effort. Linux
 x86-64 and macOS AArch64 successes do not establish Intel Apple correctness.
@@ -63,7 +70,7 @@ workflow revisions and the #1866 incident regression; it schedules no work.
 
 ## Mobile monitor runner policy (#3489)
 
-[The mobile monitor workflow](../.github/workflows/ios-monitor-tests.yml) keeps
+[The mobile monitor workflow](https://github.com/buster14a/buster/blob/801a7b338f0230583d7d70e9e76ec600f3ebd43a/.github/workflows/ios-monitor-tests.yml) keeps
 three separate jobs:
 
 | Job | Runner selection | Job cap |
