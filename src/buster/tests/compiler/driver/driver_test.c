@@ -7801,7 +7801,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_numeric_declarators(Unit
         {S8("typedef int T;\nint bad(void) { return sizeof(int (*)(1,2,3)); }\n"), S8("invalid size or alignment type operand")},
         {S8("typedef int T;\nint bad(void) { return sizeof(int (*)(int,2)); }\n"), S8("invalid size or alignment type operand")},
         {S8("typedef int T;\nint bad(void) { return _Alignof(T(1,2)); }\n"), S8("invalid size or alignment type operand")},
-        {S8("typedef int T;\nint bad(void) { static unsigned long n = sizeof(T(1,2)); return n; }\n"), S8("invalid size or alignment type operand")},
+        {S8("typedef int T;\nint bad(void) { static unsigned long n = sizeof(T(1,2)); return n; }\n"), S8("cannot fold 'sizeof' in a static initializer")},
         {S8("typedef int T; typedef int (*Callback)(int);\nint inc(int x) { return x+1; } int good(void) { Callback (*table)[16]; T ((x))=3; Callback p=inc; (void)table; return x + sizeof(Callback(*)(int)) + sizeof(Callback(*)[16]) + sizeof(int (*[3])(int)) + sizeof(int (*(*)[4])[5]) + _Alignof(Callback(*)[16]) + _Generic((Callback(*)[3])0, Callback(*)[3]:1, default:0) + p(1); }\n"), {0}},
         {S8("typedef int (*Callback)(int,int,int);\nint sum(int a,int b,int c) { return a+b+c; } int good(void) { Callback p=sum; { Callback Callback=p; Callback(1,2,3); return sizeof(Callback(1,2,3)); } }\n"), {0}},
     };
