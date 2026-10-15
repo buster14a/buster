@@ -1757,6 +1757,11 @@ typedef.
 
 ## Lowering from the tree
 
+This section records the earlier optional pilot and queries over source
+ranges. Its flag-dependent ownership and mechanisms are historical.
+Current production behavior is the [mandatory retained boundary](#retained-facts-for-lowering)
+and [consumer and retirement map](#consumer-and-retirement-map).
+
 Under `-fc-ast-pilot` the driver hands its tree to lowering, in
 `CIRLowerOptions.syntax_tree`, and releases it at the end of the unit, after
 the backend. Without the pilot, lowering builds and releases the unit's tree
@@ -3139,13 +3144,15 @@ publication. Existing region candidates are not queried a second time, and
 already completed outside compound facts are counted when their required
 subtree becomes a candidate region.
 
-On frozen main `2c2c46fc9` unity input, the current producer census describes
-all 1,787,510 typed-region expression candidates with zero missing, appended
-state or stale gaps, and all 60,387 TYPE_NAME nodes. The 29 uncovered function
-expression nodes and 6,096 outside-region nodes remain explicitly counted;
-this is not a claim that every expression in the unit has a fact. The
-lowering consumer migration remains open and this producer checkpoint does
-not claim retirement of the query machine.
+At producer checkpoint `b5e2ccdff1`, the census on frozen main `2c2c46fc9`
+unity input recorded all 1,787,510 typed-region expression candidates with
+zero missing, appended state or stale gaps, and all 60,387 TYPE_NAME nodes.
+The 29 uncovered function expression nodes and 6,096 outside-region nodes
+remained explicitly counted; this was not a claim that every expression in
+the unit had a fact. These historical counts describe that checkpoint and
+input, not current source revisions. The lowering consumer migration was
+open at that checkpoint; current retirement status is recorded in the
+[consumer and retirement map](#consumer-and-retirement-map).
 
 Semantic array layout binds each identifier at the bound's own source site.
 Ordinary constants use lexical scope and declaration-point visibility; inline
