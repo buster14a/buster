@@ -2,13 +2,13 @@
 
 Operational Actions observations; advisory. Compiler performance acceptance and the qualified 9700X dashboard are separate.
 
-Collected at 2026-10-14T23:29:37Z. Policy hosted-ci-cohort-v1. 173 active observations, 2173 unknown hardware, 1 API/ingestion gaps, 0 incomplete runs, 70 aliases, 1316 unresolved cost intervals.
+Collected at 2026-10-15T01:52:51Z. Policy hosted-ci-cohort-v1. 148 active observations, 2197 unknown hardware, 1 API/ingestion gaps, 0 incomplete runs, 70 aliases, 1323 unresolved cost intervals.
 
-Observed hosted runner-seconds: 463592; observed unsuccessful-job runner-seconds: 37892 (138 jobs). These exclude unknown-hosting and missing intervals; they are neither billed minutes nor process CPU time. Dependency/deployment waits and required-CI critical-path attribution remain unavailable.
+Observed hosted runner-seconds: 482819; observed unsuccessful-job runner-seconds: 40787 (140 jobs). These exclude unknown-hosting and missing intervals; they are neither billed minutes nor process CPU time. Dependency/deployment waits and required-CI critical-path attribution remain unavailable.
 
-Reporting bounds: 30 observation-date shards / 32768 rows / 96 rendered series; 3637 rows outside the rendered series bound remain in exports. Raw history is retained separately from these bounded derived reports.
+Reporting bounds: 30 observation-date shards / 32768 rows / 96 rendered series; 3714 rows outside the rendered series bound remain in exports. Raw history is retained separately from these bounded derived reports.
 
-Bounded view omitted 0 older shards and 4090 older loaded rows; their raw records remain on the data branch.
+Bounded view omitted 0 older shards and 4202 older loaded rows; their raw records remain on the data branch.
 
 [JSON export](recent.jsonl) · [CSV export](recent.csv) · [Collector policy](https://github.com/buster14a/buster/blob/main/docs/ci-timing-history.md)
 
@@ -42,7 +42,7 @@ Default view: trusted main push observations only. [All events, PRs and queues](
 | Hosted ordinary compiler bridge proof / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | push / main | 2 | 2 | [series](series-b1cc0ce81c796933.md) |
 | Hosted compiler closure Utility proof / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | push / main | 2 | 2 | [series](series-7d006970abfdd831.md) |
 | Hosted TCC native proofs / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | push / main | 4 | 4 | [series](series-684ab76cd9826139.md) |
-| No-code plan /  | unknown OS / unknown CPU | push / main | 0 | 12 | [series](series-58dd6628997072af.md) |
+| No-code plan /  | unknown OS / unknown CPU | push / main | 0 | 13 | [series](series-58dd6628997072af.md) |
 | Canonical TCC bootstrap / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | push / main | 2 | 2 | [series](series-772699bac82a8140.md) |
 | Pages validation and artifact /  | unknown OS / unknown CPU | push / main | 0 | 8 | [series](series-fe39ffa1f1875ff1.md) |
 | No-code plan /  | unknown OS / unknown CPU | push / main | 0 | 8 | [series](series-3e4ea91afe05e1e2.md) |
@@ -63,8 +63,8 @@ Default view: trusted main push observations only. [All events, PRs and queues](
 | Reconstruct candidate closure ephemerally / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 6 | 6 | [series](series-471f555b9fc27065.md) |
 | No-code plan /  | unknown OS / unknown CPU | push / main | 0 | 8 | [series](series-e6a5018658203188.md) |
 | GPU Linux consumers / non-matrix | Ubuntu 26.04.1 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | push / main | 1 | 1 | [series](series-95939e56e61aa76c.md) |
-| GPU Metal consumer /  | unknown OS / unknown CPU | push / main | 0 | 13 | [series](series-5055dc4fc114973a.md) |
-| No-code plan /  | unknown OS / unknown CPU | push / main | 0 | 12 | [series](series-4ec16058bf5d4207.md) |
+| GPU Metal consumer /  | unknown OS / unknown CPU | push / main | 0 | 14 | [series](series-5055dc4fc114973a.md) |
+| No-code plan /  | unknown OS / unknown CPU | push / main | 0 | 13 | [series](series-4ec16058bf5d4207.md) |
 | embedding / non-matrix | Ubuntu 24.04.5 LTS / Intel&#40;R&#41; Xeon&#40;R&#41; 6973P-C | push / main | 1 | 1 | [series](series-38a8534cdab88a17.md) |
 | Exact merge-tree preflight / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | push / main | 3 | 3 | [series](series-b7b64658b76266ad.md) |
 | No-code plan /  | unknown OS / unknown CPU | push / main | 0 | 13 | [series](series-1ec309cd5d3078c1.md) |
@@ -73,8 +73,8 @@ Default view: trusted main push observations only. [All events, PRs and queues](
 | lifecycle &#40;Debug, OFF, --sanitize&#41; / {"config":"Debug","unity":"OFF","sanitize":"--sanitize"} | Ubuntu 24.04.5 LTS / INTEL&#40;R&#41; XEON&#40;R&#41; PLATINUM 8573C | push / main | 2 | 2 | [series](series-a00fea82f8997176.md) |
 | lifecycle &#40;Release, ON, --no-sanitize&#41; / {"config":"Release","unity":"ON","sanitize":"--no-sanitize"} | Ubuntu 24.04.5 LTS / AMD EPYC 9V74 80-Core Processor | push / main | 1 | 1 | [series](series-1ffcfa757a4e01b7.md) |
 | Linux x86-64 bootstrap evidence / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 7 | 7 | [series](series-45419f71ad96fa6a.md) |
-| Windows x86-64 inventory &#40;qualification pending&#41; / non-matrix | Windows Server 2025 Datacenter / AMD EPYC 7763 64-Core Processor | push / main | 2 | 2 | [series](series-f2b47fd69cbbdcd7.md) |
-| macOS AArch64 inventory &#40;qualification pending&#41; / non-matrix | macOS / Apple M1 &#40;Virtual&#41; | push / main | 2 | 2 | [series](series-90951964e10474ae.md) |
+| Windows x86-64 inventory &#40;qualification pending&#41; / non-matrix | Windows Server 2025 Datacenter / AMD EPYC 7763 64-Core Processor | push / main | 3 | 3 | [series](series-f2b47fd69cbbdcd7.md) |
+| macOS AArch64 inventory &#40;qualification pending&#41; / non-matrix | macOS / Apple M1 &#40;Virtual&#41; | push / main | 3 | 3 | [series](series-90951964e10474ae.md) |
 | Linux x86-64 external projects / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | push / main | 0 | 1 | [series](series-0816922646fd89b0.md) |
 
 ## Largest observed main time changes
@@ -84,4 +84,4 @@ Ordered by absolute median seconds per physical execution; candidate frequency i
 | Series | Median change s | Change % | Candidate executions | State |
 |---|---:|---:|---:|---|
 
-Last selected execution completed: 2026-10-14T23:28:17Z; collection lag 80 s. Pending runs: 1; reverse-sweep cursor 2026-10-08T17:36:47Z. The cursor measures discovery progress, not evidence of complete historical coverage.
+Last selected execution completed: 2026-10-15T01:39:16Z; collection lag 815 s. Pending runs: 1; reverse-sweep cursor 2026-10-08T17:36:47Z. The cursor measures discovery progress, not evidence of complete historical coverage.
