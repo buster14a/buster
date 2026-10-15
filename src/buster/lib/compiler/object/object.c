@@ -11754,11 +11754,14 @@ BUSTER_GLOBAL_LOCAL u32 object_append_dwarf(ObjectFile* object, DwarfResult buil
     {
         object->sections[object_section_kind_for_dwarf((DwarfSectionKind)kind)].data = built.sections[kind];
     }
+    // This is a section base, not a callable entry: keep the internal code
+    // kind while x86-64 ELF writes NOTYPE, as reassembled section references do.
     u32 text_symbol = object->symbol_count++;
     object->symbols[text_symbol] = (ObjectSymbol){
         .name = S8(".text"),
         .section = OBJECT_SECTION_TEXT,
         .kind = OBJECT_SYMBOL_FUNCTION,
+        .untyped = object_assembly_is_x86_64_elf(object->target),
     };
     object_symbol_name_index_add(name_index, object->symbols + text_symbol, text_symbol);
     u32 debug_symbols[DWARF_SECTION_COUNT];
@@ -13722,6 +13725,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                     .name = S8(".text"),
                     .section = OBJECT_SECTION_TEXT,
                     .kind = OBJECT_SYMBOL_FUNCTION,
+                    .untyped = object_assembly_is_x86_64_elf(target),
                 };
             }
             cfi_section_symbols[OBJECT_SECTION_TEXT] = cfi_text_symbol;
@@ -13737,6 +13741,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                         .name = named.sections[index].name,
                         .section = OBJECT_SECTION_COUNT + index,
                         .kind = OBJECT_SYMBOL_FUNCTION,
+                        .untyped = object_assembly_is_x86_64_elf(target),
                     };
                 }
             }

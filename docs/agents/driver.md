@@ -1014,7 +1014,11 @@ the resulting GOT slot. Its
 object comparison keeps symbol, section, offset and addend exact and permits
 only a different spelling within the GOT relocation family. Undefined ELF
 function, object and TLS-object types are emitted and parsed, preserving
-function/data/TLS identity through reassembly. The listing is always Intel
+function/data/TLS identity through reassembly. Producer-created x86-64 ELF text
+section bases retain the internal code kind but serialize as STT_NOTYPE;
+actual function entries retain STT_FUNC. The round-trip fixture covers both
+`-g` and `-g0`, default and named text bases, and the unwind relocations
+that use them. The listing is always Intel
 syntax: `-S` with `-masm=att` on a C input is refused ("-masm=att is not supported
 with -S"), while `-masm=att` with `-c` or with an assembly input (where it names
 the dialect the input is read in) is unchanged.
