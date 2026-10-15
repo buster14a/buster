@@ -429,11 +429,7 @@ BUSTER_GLOBAL_LOCAL int os_posix_map_flags(MapFlags flags)
 // collide with the null pointer, which means "no descriptor" everywhere.
 BUSTER_GLOBAL_LOCAL OsFileDescriptor* posix_fd_to_generic_fd(int fd)
 {
-<<<<<<< Updated upstream
     BUSTER_RT_CHECK(fd >= 0);
-=======
-    BUSTER_CHECK(fd >= 0);
->>>>>>> Stashed changes
     return (OsFileDescriptor*)((u64)fd + 1);
 }
 
@@ -547,11 +543,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsResourceTestFailure
 
 void os_resource_test_fail_on_call(OsResourceTestOperation operation, u64 call_index)
 {
-<<<<<<< Updated upstream
     BUSTER_RT_CHECK((u64)operation < (u64)OS_RESOURCE_TEST_OPERATION_COUNT);
-=======
-    BUSTER_CHECK((u64)operation < (u64)OS_RESOURCE_TEST_OPERATION_COUNT);
->>>>>>> Stashed changes
     os_resource_test_failures[(u64)operation] = (OsResourceTestFailure){
         .calls_before_failure = call_index,
         .armed = true,
@@ -565,11 +557,7 @@ void os_resource_test_clear(void)
 
 BUSTER_GLOBAL_LOCAL bool os_resource_test_should_fail(OsResourceTestOperation operation)
 {
-<<<<<<< Updated upstream
     BUSTER_RT_CHECK((u64)operation < (u64)OS_RESOURCE_TEST_OPERATION_COUNT);
-=======
-    BUSTER_CHECK((u64)operation < (u64)OS_RESOURCE_TEST_OPERATION_COUNT);
->>>>>>> Stashed changes
     OsResourceTestFailure* failure = &os_resource_test_failures[(u64)operation];
     bool result = false;
     if (failure->armed)
@@ -1722,11 +1710,7 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
             if (syscall_result)
             {
                 result = string_from_pointer(syscall_result);
-<<<<<<< Updated upstream
                 BUSTER_RT_CHECK(result.length <= length);
-=======
-                BUSTER_CHECK(result.length <= length);
->>>>>>> Stashed changes
             }
 
             arena_set_position(arena, position + result.length + null_terminate);
@@ -3088,11 +3072,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsFileTestState os_file_test_state;
 
 void os_file_test_begin(String8 path, const OsFileTestStep* steps, u32 count)
 {
-<<<<<<< Updated upstream
     BUSTER_RT_CHECK(!os_file_test_state.path.length && path.length && count <= 16);
-=======
-    BUSTER_CHECK(!os_file_test_state.path.length && path.length && count <= 16);
->>>>>>> Stashed changes
     os_file_test_state = (OsFileTestState){.path = path, .steps = steps, .count = count};
 }
 
@@ -3383,14 +3363,10 @@ bool os_file_write_attempt(OsFileDescriptor* file_descriptor, ByteSlice buffer)
 void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice buffer)
 {
     bool success = os_file_write_attempt(file_descriptor, buffer);
-<<<<<<< Updated upstream
     if (!success)
     {
         os_fail_message(S8("file write failed"));
     }
-=======
-    BUSTER_CHECK(success);
->>>>>>> Stashed changes
 }
 
 OsFileReadResult os_file_read_some(OsFileDescriptor* file_descriptor, ByteSlice buffer)
@@ -4686,11 +4662,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsProcessSpawnTestState os_process_
 
 void os_process_spawn_test_fail_on_call(OsProcessSpawnTestOperation operation, u64 call_index)
 {
-<<<<<<< Updated upstream
     BUSTER_RT_CHECK(operation < OS_PROCESS_SPAWN_TEST_OPERATION_COUNT);
-=======
-    BUSTER_CHECK(operation < OS_PROCESS_SPAWN_TEST_OPERATION_COUNT);
->>>>>>> Stashed changes
     os_process_spawn_test_state = (OsProcessSpawnTestState){
         .fail_call = call_index,
         .operation = operation,
@@ -5140,11 +5112,7 @@ bool os_early_exit_arm(void)
 #if BUSTER_INCLUDE_TESTS
         if (injected)
         {
-<<<<<<< Updated upstream
             BUSTER_RT_CHECK(os_process_spawn_test_end() && !created);
-=======
-            BUSTER_CHECK(os_process_spawn_test_end() && !created);
->>>>>>> Stashed changes
         }
 #endif
     }
@@ -6007,11 +5975,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 os_process_capture_test_calls_r
 
 void os_process_capture_test_fail_on_call(OsProcessCaptureEvent event, u32 call_index)
 {
-<<<<<<< Updated upstream
     BUSTER_RT_CHECK(os_process_capture_test_failure == OS_PROCESS_CAPTURE_EVENT_COUNT &&
-=======
-    BUSTER_CHECK(os_process_capture_test_failure == OS_PROCESS_CAPTURE_EVENT_COUNT &&
->>>>>>> Stashed changes
         call_index < 16 &&
         (event == OS_PROCESS_CAPTURE_WAIT_FAILED || event == OS_PROCESS_CAPTURE_READ_FAILED || event == OS_PROCESS_CAPTURE_CLOSE_FAILED));
     os_process_capture_test_failure = event;
@@ -6093,13 +6057,8 @@ OsProcessCaptureTestResult os_process_capture_test_collect(Arena* arena, Process
     for (u64 index = 0; index < input_count; index += 1)
     {
         OsProcessCaptureTestInput const* input = inputs + index;
-<<<<<<< Updated upstream
         BUSTER_RT_CHECK(input->stream == STANDARD_STREAM_OUTPUT || input->stream == STANDARD_STREAM_ERROR);
         BUSTER_RT_CHECK(!input->bytes.length || input->bytes.pointer);
-=======
-        BUSTER_CHECK(input->stream == STANDARD_STREAM_OUTPUT || input->stream == STANDARD_STREAM_ERROR);
-        BUSTER_CHECK(!input->bytes.length || input->bytes.pointer);
->>>>>>> Stashed changes
         u64 offset = 0;
         do
         {
@@ -9271,11 +9230,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType lane_persistent_worker_entry_point(void* ar
                     {
                         // arenas[0] owns ThreadContext itself, so preserve its
                         // stable prefix and decommit only the unused tail.
-<<<<<<< Updated upstream
                         BUSTER_RT_CHECK(arena_set_position_and_decommit(scratch, saved_arena_positions[arena_index]));
-=======
-                        BUSTER_CHECK(arena_set_position_and_decommit(scratch, saved_arena_positions[arena_index]));
->>>>>>> Stashed changes
                     }
                     else
                     {
@@ -9346,34 +9301,22 @@ BUSTER_GLOBAL_LOCAL LaneGang* lane_gang_create(ThreadContext* owner, u64 count)
             {
                 for (u64 lane = 1; lane < next_lane; lane += 1)
                 {
-<<<<<<< Updated upstream
                     if (!os_thread_join(gang->handles[lane]))
                     {
                         os_fail_message(S8("thread join failed"));
                     }
-=======
-                    BUSTER_CHECK(os_thread_join(gang->handles[lane]));
->>>>>>> Stashed changes
                 }
                 if (gang->dispatch_barrier)
                 {
                     os_barrier_destroy(gang->dispatch_barrier);
                 }
                 os_mutex_destroy(gang->startup.mutex);
-<<<<<<< Updated upstream
                 BUSTER_RT_CHECK(arena_destroy(arena, 1));
-=======
-                BUSTER_CHECK(arena_destroy(arena, 1));
->>>>>>> Stashed changes
             }
         }
         else
         {
-<<<<<<< Updated upstream
             BUSTER_RT_CHECK(arena_destroy(arena, 1));
-=======
-            BUSTER_CHECK(arena_destroy(arena, 1));
->>>>>>> Stashed changes
         }
     }
     return result;
@@ -9390,14 +9333,10 @@ BUSTER_GLOBAL_LOCAL void lane_gang_destroy(LaneGang* gang)
     os_barrier_wait(gang->dispatch_barrier);
     for (u64 lane = 1; lane < gang->capacity; lane += 1)
     {
-<<<<<<< Updated upstream
         if (!os_thread_join(gang->handles[lane]))
         {
             os_fail_message(S8("thread join failed"));
         }
-=======
-        BUSTER_CHECK(os_thread_join(gang->handles[lane]));
->>>>>>> Stashed changes
     }
     if (gang->active_barrier)
     {
@@ -9415,11 +9354,7 @@ void lane_gang_release(ThreadContext* thread_context)
         thread_context->lane_gang = 0;
         Arena* lane_arena = thread_context->lane_arena;
         thread_context->lane_arena = 0;
-<<<<<<< Updated upstream
         BUSTER_RT_CHECK(arena_destroy(lane_arena, 1));
-=======
-        BUSTER_CHECK(arena_destroy(lane_arena, 1));
->>>>>>> Stashed changes
     }
 }
 
@@ -9430,14 +9365,10 @@ BUSTER_GLOBAL_LOCAL void lane_gang_dispatch(ThreadContext* thread_context, LaneG
     if (!gang->active_barrier || gang->active_count != count)
     {
         OsBarrierHandle* replacement = os_barrier_create((u32)count);
-<<<<<<< Updated upstream
         if (!replacement)
         {
             os_fail_message(S8("lane barrier creation failed"));
         }
-=======
-        BUSTER_CHECK(replacement != 0);
->>>>>>> Stashed changes
         if (gang->active_barrier)
         {
             os_barrier_destroy(gang->active_barrier);
@@ -9558,14 +9489,10 @@ BUSTER_GLOBAL_LOCAL bool lane_run_fresh(ThreadContext* thread_context, u64 count
             callback(argument);
             for (u64 lane = 1; lane < count; lane += 1)
             {
-<<<<<<< Updated upstream
                 if (!os_thread_join(handles[lane]))
                 {
                     os_fail_message(S8("thread join failed"));
                 }
-=======
-                BUSTER_CHECK(os_thread_join(handles[lane]));
->>>>>>> Stashed changes
             }
             thread_context->lane_context = saved;
             result = true;
@@ -9574,14 +9501,10 @@ BUSTER_GLOBAL_LOCAL bool lane_run_fresh(ThreadContext* thread_context, u64 count
         {
             for (u64 lane = 1; lane < next_lane; lane += 1)
             {
-<<<<<<< Updated upstream
                 if (!os_thread_join(handles[lane]))
                 {
                     os_fail_message(S8("thread join failed"));
                 }
-=======
-                BUSTER_CHECK(os_thread_join(handles[lane]));
->>>>>>> Stashed changes
             }
         }
 
@@ -9688,28 +9611,20 @@ void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument
     // region and would break the documented nested-gang behavior.
     else if (saved.lane_count > 1 || (thread_context->lane_gang && thread_context->lane_gang->running))
     {
-<<<<<<< Updated upstream
         if (!lane_run_fresh(thread_context, count, callback, argument))
         {
             os_fail_message(S8("lane gang creation failed"));
         }
-=======
-        BUSTER_CHECK(lane_run_fresh(thread_context, count, callback, argument));
->>>>>>> Stashed changes
     }
     else
     {
         if (!thread_context->lane_gang || thread_context->lane_gang->capacity < count)
         {
             lane_gang_release(thread_context);
-<<<<<<< Updated upstream
             if (!lane_gang_create(thread_context, count))
             {
                 os_fail_message(S8("lane gang creation failed"));
             }
-=======
-            BUSTER_CHECK(lane_gang_create(thread_context, count) != 0);
->>>>>>> Stashed changes
         }
         lane_gang_dispatch(thread_context, thread_context->lane_gang, count, callback, argument);
     }

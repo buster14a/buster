@@ -523,11 +523,7 @@ void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, b
         {
             ends[slot] = mark.arena->position;
             peaks[slot] = BUSTER_MAX(mark.arena->high_water, ends[slot]);
-<<<<<<< Updated upstream
             BUSTER_RT_CHECK(ends[slot] >= mark.start);
-=======
-            BUSTER_CHECK(ends[slot] >= mark.start);
->>>>>>> Stashed changes
         }
     }
     if (rewind)
@@ -834,11 +830,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult test_os_with_fatal_child_isolation(UnitTestAr
     UnitTestResult watchdog = test_fixture_watchdog_child(arguments);
     result.succeeded_test_count += watchdog.succeeded_test_count;
     result.test_count += watchdog.test_count;
-<<<<<<< Updated upstream
     BUSTER_RT_CHECK(test_parallel_crash_child_self_test(arguments));
-=======
-    BUSTER_CHECK(test_parallel_crash_child_self_test(arguments));
->>>>>>> Stashed changes
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     enum { TEST_FATAL_CHILD_REPETITIONS = 3, TEST_FATAL_CHILD_TIMEOUT_US = 30000000 };
     Arena* arena = arguments->arena;
@@ -4271,7 +4263,6 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
         return result;
     }
 
-<<<<<<< Updated upstream
     BUSTER_RT_CHECK(buster_test_temporary_root_failure_self_test(arguments));
     BUSTER_RT_CHECK(buster_test_temporary_root_preservation_self_test(arguments));
     BUSTER_RT_CHECK(buster_test_image_retention_self_test(arguments));
@@ -4285,21 +4276,6 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     BUSTER_RT_CHECK(test_module_group_self_test());
     BUSTER_RT_CHECK(test_parallel_gang_report_self_test());
     BUSTER_RT_CHECK(test_process_failure_report_self_test());
-=======
-    BUSTER_CHECK(buster_test_temporary_root_failure_self_test(arguments));
-    BUSTER_CHECK(buster_test_temporary_root_preservation_self_test(arguments));
-    BUSTER_CHECK(buster_test_image_retention_self_test(arguments));
-    BUSTER_CHECK(test_debugger_failure_self_test());
-    BUSTER_CHECK(test_arena_self_test());
-    BUSTER_CHECK(test_require_self_test());
-    BUSTER_CHECK(test_fixture_timing_self_test());
-    BUSTER_CHECK(test_fixture_watchdog_self_test());
-    BUSTER_CHECK(test_watch_contention_self_test());
-    BUSTER_CHECK(test_module_selection_self_test());
-    BUSTER_CHECK(test_module_group_self_test());
-    BUSTER_CHECK(test_parallel_gang_report_self_test());
-    BUSTER_CHECK(test_process_failure_report_self_test());
->>>>>>> Stashed changes
 
     String8 module_group_name = os_get_environment_variable(S8("BUSTER_TEST_MODULE_GROUP"));
     TestModuleGroup module_group = test_module_group_resolve(module_group_name);

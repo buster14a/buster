@@ -287,21 +287,12 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool arena_align_position_c
 
 BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
 {
-<<<<<<< Updated upstream
     BUSTER_RT_CHECK(size <= ARENA_MAX_RESERVATION);
     BUSTER_RT_CHECK(arena->position >= arena_minimum_position && arena->position <= arena->reserved_size);
     u64 aligned_offset;
     BUSTER_RT_CHECK(arena_align_position_checked(arena, arena->position, alignment, &aligned_offset));
     BUSTER_RT_CHECK(aligned_offset <= arena->reserved_size);
     BUSTER_RT_CHECK(size <= arena->reserved_size - aligned_offset);
-=======
-    BUSTER_CHECK(size <= ARENA_MAX_RESERVATION);
-    BUSTER_CHECK(arena->position >= arena_minimum_position && arena->position <= arena->reserved_size);
-    u64 aligned_offset;
-    BUSTER_CHECK(arena_align_position_checked(arena, arena->position, alignment, &aligned_offset));
-    BUSTER_CHECK(aligned_offset <= arena->reserved_size);
-    BUSTER_CHECK(size <= arena->reserved_size - aligned_offset);
->>>>>>> Stashed changes
     u64 aligned_size_after = aligned_offset + size;
     if (BUSTER_UNLIKELY(aligned_size_after > arena->os_position))
     {

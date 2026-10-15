@@ -2358,11 +2358,7 @@ CodegenTestMachineScratch codegen_test_machine_scratch(Arena* arena, u32 instruc
         // A thread context holds SCRATCH_ARENA_COUNT distinct live arenas,
         // so one besides `first` exists; anything else is a broken context,
         // and the control must fail rather than quietly not occupy one.
-<<<<<<< Updated upstream
         BUSTER_RT_CHECK(other != 0);
-=======
-        BUSTER_CHECK(other != 0);
->>>>>>> Stashed changes
         u64 remaining = other->reserved_size - other->position;
         (void)arena_allocate_bytes(other, remaining > other_remaining ? remaining - other_remaining : 0, 1);
     }
