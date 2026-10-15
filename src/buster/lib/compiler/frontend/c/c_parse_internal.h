@@ -200,6 +200,32 @@ BUSTER_F_DECL CTestAstTypeVerify c_test_ast_type_verify_take(void);
 // Turns the declaration specifier read from the tree (c_parse.c) off and back
 // on, per thread, so a test can analyse the same unit with and without it.
 BUSTER_F_DECL void c_test_ast_specifiers_set(bool enabled);
+
+// Private controls for existing-row TYPE_NAME publication. Recorded original
+// mode executes the unchanged semantic producer and compares both type IDs.
+typedef struct CTestAstTypeNamePublication CTestAstTypeNamePublication;
+struct CTestAstTypeNamePublication
+{
+    u64 attempted;
+    u64 eligible;
+    u64 reused;
+    u64 qualified_primitive;
+    u64 multiple_pointers;
+    u64 state_checked;
+    u64 state_mismatches;
+    u64 queries;
+    u64 closed;
+    u64 suspended;
+    u64 uncached;
+    u64 readonly_checked;
+    u64 readonly_failed;
+    u64 authority_compared;
+    u64 authority_mismatches;
+    u64 authority_appended;
+};
+BUSTER_F_DECL void c_test_ast_type_name_publication_set(bool record, bool original);
+BUSTER_F_DECL CTestAstTypeNamePublication c_test_ast_type_name_publication_take(void);
+
 // Verify mode for the type-name runs skipped as no type name
 // (c_parse_type_name_specifiers under -fc-ast-pilot): the machine's attempt
 // also runs on every skipped run, and the counts record the runs it checked
