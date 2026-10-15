@@ -182,3 +182,5 @@ request: issue #3854 owner-requested 9700X validation, head after merging main 9
 request: issue #3854 owner-requested 9700X validation, PR #4022 head after the clang-analyzer dead-store fix in ir_inline_module (output initializer; no behavior change) over the main 964e3ee0 merge: incremental post-splice proof of spliced callers and FAST input-guard reuse of inliner proofs; supersedes the b9089c59 line; fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification
 request: issue #1125 owner-requested 9700X measurement of the x86-64 per-process floor (davidgmbb, 2026-10-13; issuecomment-6146795512), on main 7069f078 after PR #4098: one candidate ide on int main(void){return 0;}, x86-64 -g0 -c against itself (A/A), -target aarch64-unknown-linux -c and -fsyntax-only; no compiler change; fresh process-floor-v1
 profile: process-floor-v1
+request: issue #2676 owner-requested 9700X deep-nesting evidence (2026-10-13 session): frontend-nesting-v1 from PR #4015 on main 5899677b8, eleven nesting families at depths 2000/8000/32000, -fsyntax-only and -c; byte-identical objects required
+profile: frontend-nesting-v1
