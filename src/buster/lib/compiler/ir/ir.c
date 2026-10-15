@@ -5880,6 +5880,7 @@ struct IrValidationMarkers
     u8* states;
     u32 count;
     u32 base;
+    u8 outside;
 };
 
 BUSTER_GLOBAL_LOCAL bool ir_validation_markers_initialize(Arena* arena, IrValidationMarkers* markers, u32 total, u32 base,
@@ -5891,6 +5892,7 @@ BUSTER_GLOBAL_LOCAL bool ir_validation_markers_initialize(Arena* arena, IrValida
     markers->ids = 0;
     markers->count = count;
     markers->base = base;
+    markers->outside = outside;
     markers->states = arena_allocate(arena, u8, state_count);
     IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BYTES_CLEARED, state_count);
     if (valid && !sparse)
@@ -5952,30 +5954,34 @@ BUSTER_GLOBAL_LOCAL bool ir_validation_markers_initialize(Arena* arena, IrValida
     return valid;
 }
 
-BUSTER_GLOBAL_LOCAL BUSTER_INLINE u8* ir_validation_marker(IrValidationMarkers* markers, u32 id)
+// Only the indexed splice path needs binary search and suffix decoding.
+// Keeping it outside the row walk leaves dense checks with byte indexing.
+BUSTER_COLD BUSTER_GLOBAL_LOCAL u8* ir_validation_marker_indexed(IrValidationMarkers* index, u32 id)
 {
     u8* result;
-    if (!markers->ids)
+    if (id >= index->base)
     {
-        result = markers->states + id;
-    }
-    else if (id >= markers->base)
-    {
-        result = markers->states + markers->count + (id - markers->base);
+        result = index->states + index->count + (id - index->base);
     }
     else
     {
         u32 low = 0;
-        u32 high = markers->count;
+        u32 high = index->count;
         while (low < high)
         {
             IR_CONSTRUCTION_RECORD(VALIDATION_MARKER_INDEX_WORK, 1);
             u32 middle = low + (high - low) / 2;
-            if (markers->ids[middle] < id) low = middle + 1;
+            if (index->ids[middle] < id) low = middle + 1;
             else high = middle;
         }
-        result = low < markers->count && markers->ids[low] == id ? markers->states + low : 0;
+        result = low < index->count && index->ids[low] == id ? index->states + low : &index->outside;
     }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL BUSTER_INLINE u8* ir_validation_marker(u8* states, IrValidationMarkers* index, u32 id)
+{
+    u8* result = index ? ir_validation_marker_indexed(index, id) : states + id;
     return result;
 }
 
@@ -6084,7 +6090,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_value(IrProgram* program, IrF
 // A block's parameter values: each in range, carried by no other parameter,
 // and -- through ir_validate_value -- defined by no row. `defined` records the
 // claim so the row walk can refuse a result that a parameter already carries.
-BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameter_values(IrProgram* program, IrFunction* function, IrBlock* block, IrValidationMarkers* defined)
+BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameter_values(IrProgram* program, IrFunction* function, IrBlock* block, u8* defined, IrValidationMarkers* defined_index, u32* defined_count)
 {
     IrValidationResult result = ir_validation_ok();
     IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_BLOCKS, 1);
@@ -6103,8 +6109,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameter_values(IrProg
             value = builder_parameter->value;
             builder_parameter = builder_parameter->next;
         }
-        u8* state = value.value < function->value_count ? ir_validation_marker(defined, value.value) : 0;
-        if (!state || *state == IR_VALIDATION_DEFINED_PARAMETER)
+        u8* state = value.value < function->value_count ? ir_validation_marker(defined, defined_index, value.value) : 0;
+        if (value.value >= function->value_count || *state == IR_VALIDATION_DEFINED_PARAMETER)
         {
             result = ir_validation_error(IR_VALIDATION_BLOCK_PARAMETER, function, block->id, IR_INSTRUCTION_ID_INVALID);
         }
@@ -6113,6 +6119,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_parameter_values(IrProg
             // A value a visited row already defines fails inside as the
             // shared definition it is, naming that row.
             *state = IR_VALIDATION_DEFINED_PARAMETER;
+            *defined_count += 1;
             result = ir_validate_value(program, function, value, true);
         }
     }
@@ -7101,7 +7108,8 @@ BUSTER_GLOBAL_LOCAL IrValidationError ir_validate_instruction_row(IrProgram* pro
 // function-level sweep afterwards reaches only values no row or parameter
 // defines.
 BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_rows(IrProgram* program, IrFunction* function, IrType* signature, IrBlock* block,
-                                                               IrValidationMarkers* visited, IrValidationMarkers* defined, u32* visited_count)
+                                                               u8* visited, u8* defined, IrValidationMarkers* visited_index,
+                                                               IrValidationMarkers* defined_index, u32* visited_count, u32* defined_count)
 {
     IrValidationResult result = ir_validation_ok();
     IrInstructionId instruction_id = block->first_instruction;
@@ -7109,12 +7117,12 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_rows(IrProgram* program
     bool terminated = false;
     while (instruction_id.value != IR_ID_UNDERLYING_INVALID && result.error == IR_VALIDATION_NONE)
     {
-        u8* visited_state = instruction_id.value < function->instruction_count ? ir_validation_marker(visited, instruction_id.value) : 0;
+        u8* visited_state = instruction_id.value < function->instruction_count ? ir_validation_marker(visited, visited_index, instruction_id.value) : 0;
         if (instruction_id.value >= function->instruction_count)
         {
             result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, block->id, instruction_id);
         }
-        else if (!visited_state || *visited_state)
+        else if (*visited_state)
         {
             result = ir_validation_error(IR_VALIDATION_INSTRUCTION_OWNERSHIP, function, block->id, instruction_id);
         }
@@ -7127,9 +7135,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_block_rows(IrProgram* program
             IrValidationError value_error = IR_VALIDATION_NONE;
             if (defined_value < function->value_count && function->values[defined_value].definition.value == instruction_id.value)
             {
-                u8* state = ir_validation_marker(defined, defined_value);
-                value_error = ir_validate_value_error(program, function, instruction->result, !state || *state == IR_VALIDATION_DEFINED_PARAMETER);
-                if (state) *state = IR_VALIDATION_DEFINED_INSTRUCTION;
+                u8* state = ir_validation_marker(defined, defined_index, defined_value);
+                value_error = ir_validate_value_error(program, function, instruction->result, *state == IR_VALIDATION_DEFINED_PARAMETER);
+                if (value_error == IR_VALIDATION_NONE)
+                {
+                    *state = IR_VALIDATION_DEFINED_INSTRUCTION;
+                    *defined_count += 1;
+                }
             }
             if (value_error != IR_VALIDATION_NONE)
             {
@@ -7327,8 +7339,11 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_walk(IrProgram* prog
         IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_FUNCTIONS, splice ? 0u : 1u);
         IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_BLOCKS, splice ? 0u : function->block_count);
         IR_CONSTRUCTION_RECORD(VALIDATION_OWNERSHIP_INSTRUCTIONS, splice ? 0u : function->instruction_count);
+        IrValidationMarkers* visited_index = visited.ids ? &visited : 0;
+        IrValidationMarkers* defined_index = defined.ids ? &defined : 0;
         bool validate_label_provenance = function->label_metadata_count != 0;
         u32 visited_count = 0;
+        u32 defined_count = 0;
         // The splice proof walks the region's original blocks, then every
         // block the splices added; the full check walks every block.
         u32 walked_blocks = splice ? splice->block_count + (function->block_count - splice->base_blocks) : function->block_count;
@@ -7351,14 +7366,14 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_walk(IrProgram* prog
             }
             else
             {
-                result = ir_validate_block_parameter_values(program, function, block, &defined);
+                result = ir_validate_block_parameter_values(program, function, block, defined.states, defined_index, &defined_count);
                 if (result.error == IR_VALIDATION_NONE)
                 {
                     result = ir_validate_block_parameters(function, block, validate_label_provenance);
                 }
                 if (result.error == IR_VALIDATION_NONE)
                 {
-                    result = ir_validate_block_rows(program, function, signature, block, &visited, &defined, &visited_count);
+                    result = ir_validate_block_rows(program, function, signature, block, visited.states, defined.states, visited_index, defined_index, &visited_count, &defined_count);
                 }
             }
         }
@@ -7402,16 +7417,33 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_walk(IrProgram* prog
                 }
             }
         }
-        u32 swept_values = splice ? splice->value_count + (function->value_count - splice->base_values) : function->value_count;
-        for (u32 index = 0; index < swept_values && result.error == IR_VALIDATION_NONE; index += 1)
+        if (!splice)
         {
-            IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_SWEEP_VISITS, 1);
-            u32 value_index = !splice ? index : index < splice->value_count ? splice->values[index]
-                                                                           : splice->base_values + (index - splice->value_count);
-            u8* state = ir_validation_marker(&defined, value_index);
-            if (state && *state == IR_VALIDATION_DEFINED_NONE)
+            // Successful claims are distinct: rows are uniquely owned and a
+            // result names this row, while parameter/row sharing is refused.
+            // Equal counts therefore prove there is no orphan to discover.
+            // Keep the ordinary dense path free of index decoding.
+            for (u32 value_index = 0; defined_count != function->value_count && value_index < function->value_count && result.error == IR_VALIDATION_NONE; value_index += 1)
             {
-                result = ir_validate_value(program, function, (IrValueId){.value = value_index}, false);
+                IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_SWEEP_VISITS, 1);
+                if (defined.states[value_index] == IR_VALIDATION_DEFINED_NONE)
+                {
+                    result = ir_validate_value(program, function, (IrValueId){.value = value_index}, false);
+                }
+            }
+        }
+        else
+        {
+            u32 swept_values = splice->value_count + (function->value_count - splice->base_values);
+            for (u32 index = 0; index < swept_values && result.error == IR_VALIDATION_NONE; index += 1)
+            {
+                IR_CONSTRUCTION_RECORD(VALIDATION_VALUE_SWEEP_VISITS, 1);
+                u32 value_index = index < splice->value_count ? splice->values[index] : splice->base_values + (index - splice->value_count);
+                u8* state = ir_validation_marker(defined.states, defined_index, value_index);
+                if (*state == IR_VALIDATION_DEFINED_NONE)
+                {
+                    result = ir_validate_value(program, function, (IrValueId){.value = value_index}, false);
+                }
             }
         }
         // A spliced call result left without a defining row loses the
@@ -7419,8 +7451,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_validate_function_walk(IrProgram* prog
         for (u32 index = 0; splice && index < splice->value_count && result.error == IR_VALIDATION_NONE; index += 1)
         {
             IrValueId value = {.value = splice->values[index]};
-            u8* state = ir_validation_marker(&defined, value.value);
-            IrType* type = (!state || *state != IR_VALIDATION_DEFINED_INSTRUCTION)
+            u8* state = ir_validation_marker(defined.states, defined_index, value.value);
+            IrType* type = (*state != IR_VALIDATION_DEFINED_INSTRUCTION)
                                ? ir_type_from_id(&program->types, function->values[value.value].canonical_type) : 0;
             IrType* element = type && type->kind == IR_TYPE_POINTER ? ir_type_from_id(&program->types, type->element_type) : 0;
             if (element && element->kind == IR_TYPE_FUNCTION)

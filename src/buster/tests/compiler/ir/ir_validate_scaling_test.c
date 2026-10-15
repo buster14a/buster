@@ -163,6 +163,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_instruction_scaling_tests(UnitTes
                             before.values[IR_CONSTRUCTION_VALIDATION_AGGREGATE_FIELD_VISITS] <= 2 * (u64)count);
                         BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_VALIDATION_LABEL_SET_WORK] -
                             before.values[IR_CONSTRUCTION_VALIDATION_LABEL_SET_WORK] <= 150 * (u64)count + 4096);
+                        BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_VALIDATION_VALUE_SWEEP_VISITS] ==
+                            before.values[IR_CONSTRUCTION_VALIDATION_VALUE_SWEEP_VISITS]);
                     }
 #endif
                     IrValidationResult reference = ir_test_validate_canonical_module_reference(&fixture->program, &fixture->module);
@@ -277,6 +279,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_splice_scaling_tests(UnitTestArgu
                         before.values[IR_CONSTRUCTION_VALIDATION_VALUE_SWEEP_VISITS] == (variant == 1 ? 1u : 0u));
                     BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_VALIDATION_SPLICE_PARAMETER_BLOCKS] -
                         before.values[IR_CONSTRUCTION_VALIDATION_SPLICE_PARAMETER_BLOCKS] == 1);
+                    BUSTER_TEST(arguments, after.values[IR_CONSTRUCTION_VALIDATION_MARKER_INDEX_WORK] -
+                        before.values[IR_CONSTRUCTION_VALIDATION_MARKER_INDEX_WORK] <= 64);
                 }
 #endif
                 BUSTER_TEST(arguments, (checked.error == IR_VALIDATION_NONE) == valid);
