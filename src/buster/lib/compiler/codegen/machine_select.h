@@ -191,10 +191,10 @@ BUSTER_F_DECL MachineTypeClass* machine_type_classes_build(Arena* arena, IrTypeT
 // One module's selection context: what its functions share across their
 // selections, built once before the first of them selects
 // (machine_select_module_prepare) and read by every one. The x86-64 plans
-// fill on first use, which is per lane by construction — a module is
-// selected by one lane and a program is never shared between lanes — and
-// their pool is sized and allocated by the prepare, so a codegen attempt's
-// rewind cannot take a plan away from the slot that names it.
+// fill on first use. Function lanes share only the immutable type projection;
+// machine_select_module_for_lane gives each a separate plan pool and ABI
+// context. Every pool lives across codegen retries, so an attempt's rewind
+// cannot take a plan away from the slot that names it.
 typedef struct MachineX64SignaturePlan MachineX64SignaturePlan;
 typedef struct MachineSelectionModule MachineSelectionModule;
 struct MachineSelectionModule

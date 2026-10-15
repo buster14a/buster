@@ -12,7 +12,9 @@
 // codegen_layout_globals owns the per-attempt data images and global
 // descriptors; codegen_plan_module_capacity computes the reservation bound
 // without allocating. codegen_generate_canonical_module_attempt owns the
-// initializer relocations, then per function runs the machine path. Remaining
+// initializer relocations, then publishes prepared function artifacts in order.
+// codegen_machine_prepare_lane selects, allocates and encodes bounded cohorts
+// using private ABI/signature caches and a shared immutable type projection. Remaining
 // ABI and metadata helpers serve machine, assembly, or focused regressions.
 // codegen_generate_canonical_module wraps the attempt in a retry loop that
 // grows the code-buffer capacity scale when an attempt runs out. The current
@@ -67,6 +69,7 @@
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/codegen/bootstrap_trace.h>
 #include <buster/lib/compiler/codegen/investigation.h>
+#include <buster/lib/compiler/assembly/aarch64_semantics.h>
 
 bool codegen_module_relocation_kind_valid(u8 kind)
 {
@@ -2198,6 +2201,7 @@ void codegen_statistics_add(CodegenStatistics* total, CodegenStatistics* unit)
     total->verified_scheduled_function_count += unit->verified_scheduled_function_count;
     total->machine_code_bytes_in_place += unit->machine_code_bytes_in_place;
     total->machine_code_bytes_copied += unit->machine_code_bytes_copied;
+    total->machine_function_workers = BUSTER_MAX(total->machine_function_workers, unit->machine_function_workers);
     for (u32 index = 0; index < IR_OPCODE_COUNT + 1; index += 1)
     {
         total->fallback_opcode_counts[index] += unit->fallback_opcode_counts[index];
@@ -7149,6 +7153,284 @@ bool codegen_test_canonical_block_offsets(u32* offsets, IrFunction* function, Ma
 }
 #endif
 
+typedef struct CodegenMachinePreparation CodegenMachinePreparation;
+struct CodegenMachinePreparation
+{
+    MachineSelectResult selected;
+    MachineStackPlacement placement;
+    MachineEncodeResult encoded;
+    CodegenStatistics statistics;
+    MachineVerifyResult failed_machine_verification;
+    CodegenPhase failed_phase;
+    bool failed_machine_scheduled;
+    CodegenFallbackReason fallback_reason;
+    IrOpcode fallback_opcode;
+    String8 fallback_detail;
+    Arena* arena;
+};
+
+// Selection and allocation read canonical IR, but their ABI/signature caches
+// and arena cursors belong to a lane. Parallel encoding retains private
+// fragments; code, debug, relocation and unwind publication remain ordered.
+BUSTER_GLOBAL_LOCAL CodegenMachinePreparation codegen_machine_prepare(Arena* machine_arena, IrProgram* program, IrFunction* function,
+                                                                     Target target, CodegenModuleOptions options,
+                                                                     MachineSelectionModule* machine_module, BootstrapTrace* bootstrap_trace)
+{
+    CodegenMachinePreparation result = {.failed_phase = CODEGEN_PHASE_MACHINE_SELECTION, .arena = machine_arena};
+    bool position_independent = options.position_independent &&
+                                (object_format_for_target(target) == OBJECT_FORMAT_ELF64);
+    CodegenFallbackReason fallback_reason = CODEGEN_FALLBACK_TARGET_EXCLUDED;
+    IrOpcode fallback_opcode = IR_OPCODE_COUNT;
+    String8 fallback_detail = {0};
+    MachineStackPlacement placement = {0};
+    CodegenMachineScratch machine_scratch = codegen_machine_scratch_begin(machine_arena, function);
+    MachineSelectResult selected = {0};
+    if (machine_scratch.fits && codegen_machine_scratch_bound(function) <= machine_arena->reserved_size - machine_arena->position)
+    {
+        selected = machine_select_validated_canonical_function(machine_arena, program, function, target, position_independent,
+                                                               options.debug_info, machine_module);
+    }
+    else
+    {
+        fallback_reason = CODEGEN_FALLBACK_MACHINE_SCRATCH;
+    }
+    if (bootstrap_trace && machine_scratch.fits)
+    {
+        bootstrap_trace_machine(bootstrap_trace, function, &selected);
+        if (bootstrap_trace->invalid_mir)
+        {
+            // Do not let a selector certificate bypass a failed
+            // audit verifier and feed invalid MIR to allocation.
+            result.failed_machine_verification = bootstrap_trace->invalid_validation;
+            fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+            selected.supported = false;
+        }
+    }
+    if (!selected.supported && fallback_reason != CODEGEN_FALLBACK_VERIFICATION && fallback_reason != CODEGEN_FALLBACK_MACHINE_SCRATCH)
+    {
+        fallback_opcode = selected.failed_opcode < IR_OPCODE_COUNT ? selected.failed_opcode : IR_OPCODE_COUNT;
+        fallback_reason = selected.signature_rejected ? CODEGEN_FALLBACK_SIGNATURE
+                          : fallback_opcode < IR_OPCODE_COUNT ? CODEGEN_FALLBACK_OPCODE
+                                                              : CODEGEN_FALLBACK_SELECTION_OTHER;
+        if (fallback_reason == CODEGEN_FALLBACK_OPCODE && selected.failure_detail.length)
+        {
+            // Retain the exact refusal until ordered publication copies
+            // it into the module result arena.
+            fallback_detail = string_duplicate_arena(machine_arena, selected.failure_detail, false);
+        }
+    }
+    // The target selectors publish a complete machine function only
+    // after their typed builder streams and side tables are closed.
+    // Keep the verifier as the authority for replayed/manual machine
+    // IR, but do not reread every freshly selected row before its
+    // immediate allocator consumer.
+    MachineVerifyResult verification = selected.supported && (options.verify_invariants || !selected.selector_certified)
+                                           ? machine_verify_function(&selected.function) : (MachineVerifyResult){0};
+    MachineVerifyError verify_error = verification.error;
+    if (options.verify_invariants && selected.supported)
+    {
+        result.statistics.verified_mir_function_count += 1;
+        if (verify_error != MACHINE_VERIFY_NONE)
+        {
+            result.failed_machine_verification = verification;
+            fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+            selected.supported = false;
+        }
+    }
+    if (selected.supported && verify_error != MACHINE_VERIFY_NONE)
+    {
+        fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+    }
+    if (selected.supported && verify_error == MACHINE_VERIFY_NONE)
+    {
+        result.failed_phase = CODEGEN_PHASE_MACHINE_PLACEMENT;
+
+        if (options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY)
+        {
+            placement = machine_quality_placement_build(machine_arena, &selected.function);
+        }
+        else
+        {
+            placement = machine_fast_placement_build(machine_arena, &selected.function);
+        }
+
+        // Stage-9 scheduling, QUALITY only: reorder rows within
+        // over-pressured blocks to sink definitions toward their
+        // first use, then keep whichever form places cheaper. The
+        // currency is the stage-7 acceptance metric — memory
+        // traffic plus a push/pop pair per callee-saved register
+        // the placement binds — so a schedule that trades reloads
+        // for prologue saves cannot sneak through, and an unmoved
+        // schedule costs nothing. FAST measured the same absolute
+        // win but pays the acceptance's second placement out of the
+        // budget that makes it the default -O allocator, so it
+        // stays byte-identical to the unscheduled path
+        // (2026-08-10n). The traffic gate bounds the pass's cost:
+        // a placement that evicted nothing has nothing to save.
+        if (placement.valid && placement.reload_count + placement.spill_count > 0 &&
+            options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY)
+        {
+            MachineScheduleResult scheduled = machine_schedule_function(machine_arena, &selected.function);
+            if (scheduled.moved)
+            {
+                bool scheduled_valid = true;
+                if (options.verify_invariants)
+                {
+                    result.statistics.verified_scheduled_function_count += 1;
+                    MachineVerifyResult scheduled_verification = machine_verify_function(&scheduled.function);
+                    if (scheduled_verification.error != MACHINE_VERIFY_NONE)
+                    {
+                        result.failed_machine_verification = scheduled_verification;
+                        result.failed_machine_scheduled = true;
+                        fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+                        scheduled_valid = false;
+                        placement.valid = false;
+                    }
+                }
+                if (scheduled_valid)
+                {
+                    result.statistics.allocator_scheduled_function_count += 1;
+                    MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_arena, &scheduled.function);
+                    if (options.verify_invariants && !scheduled_placement.valid)
+                    {
+                        // Frame capacity keeps its own diagnostic; any other
+                        // invalid placement is a verification failure.
+                        fallback_reason = scheduled_placement.capacity_exceeded ? CODEGEN_FALLBACK_PLACEMENT : CODEGEN_FALLBACK_VERIFICATION;
+                        placement.capacity_exceeded = scheduled_placement.capacity_exceeded;
+                        placement.valid = false;
+                    }
+                    u32 placement_saved_registers = 0;
+                    u32 scheduled_saved_registers = 0;
+                    for (u32 physical_register = 0; physical_register < MACHINE_TARGET_REGISTER_LIMIT; physical_register += 1)
+                    {
+                        placement_saved_registers += (u32)((placement.callee_saved_mask >> physical_register) & 1u);
+                        scheduled_saved_registers += (u32)((scheduled_placement.callee_saved_mask >> physical_register) & 1u);
+                    }
+                    if (scheduled_placement.valid &&
+                        scheduled_placement.reload_count + scheduled_placement.spill_count + 2 * scheduled_saved_registers <
+                            placement.reload_count + placement.spill_count + 2 * placement_saved_registers)
+                    {
+                        result.statistics.allocator_schedule_kept_count += 1;
+                        selected.function = scheduled.function;
+                        placement = scheduled_placement;
+                    }
+                }
+            }
+        }
+        if (!placement.valid)
+        {
+            fallback_reason = CODEGEN_FALLBACK_PLACEMENT;
+            if (options.verify_invariants && !placement.capacity_exceeded)
+            {
+                fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
+            }
+        }
+    }
+    if (selected.supported && placement.valid && options.function_jobs > 1)
+    {
+        result.failed_phase = CODEGEN_PHASE_MACHINE_ENCODING;
+        switch (target.cpu_arch)
+        {
+            break; case CPU_ARCH_X86_64: result.encoded = machine_encode_x86_64_into(machine_arena, &selected.function, &placement, 0, 0);
+            break; case CPU_ARCH_AARCH64: result.encoded = machine_encode_aarch64_into(machine_arena, &selected.function, &placement, 0, 0);
+            break; default: break;
+        }
+    }
+    result.selected = selected;
+    result.placement = placement;
+    result.fallback_reason = fallback_reason;
+    result.fallback_opcode = fallback_opcode;
+    result.fallback_detail = fallback_detail;
+    codegen_machine_scratch_end(&machine_scratch);
+    return result;
+}
+
+typedef struct CodegenMachineWorker CodegenMachineWorker;
+struct CodegenMachineWorker
+{
+    Arena* output;
+    Arena* cache;
+    IrProgram private_program;
+    IrProgram* program;
+    MachineSelectionModule* module;
+};
+
+typedef struct CodegenMachineBatch CodegenMachineBatch;
+struct CodegenMachineBatch
+{
+    AtomicU64 next;
+    CodegenMachineWorker* workers;
+    CodegenMachinePreparation* prepared;
+    IrModule* module;
+    u32* function_order;
+    Target target;
+    CodegenModuleOptions options;
+    BootstrapTrace* trace;
+    u32 worker_count;
+    u32 active_workers;
+    u32 first;
+    u32 end;
+};
+
+// Four pending functions per requested lane amortize the gang barrier without
+// retaining the complete module's MIR. The sum of conservative scratch bounds
+// also caps a cohort, so any take-index distribution fits one lane's reserve.
+#define CODEGEN_MACHINE_FUNCTIONS_PER_LANE 4u
+
+BUSTER_GLOBAL_LOCAL ThreadReturnType codegen_machine_prepare_lane(void* argument)
+{
+    CodegenMachineBatch* batch = (CodegenMachineBatch*)argument;
+    if (batch->worker_count == 1 || lane_index() == 0)
+    {
+        batch->active_workers = batch->worker_count == 1 ? 1 : (u32)lane_count();
+    }
+    CodegenMachineWorker* worker = batch->workers + (batch->worker_count == 1 ? 0 : lane_index());
+    for (u64 item = atomic_u64_increment(&batch->next); item < batch->end; item = atomic_u64_increment(&batch->next))
+    {
+        u32 function_index = batch->function_order ? batch->function_order[item] : (u32)item;
+        IrFunction* function = batch->module->functions + function_index;
+        if (function->state == IR_FUNCTION_LOWERED)
+        {
+            batch->prepared[item - batch->first] = codegen_machine_prepare(worker->output, worker->program, function,
+                                                                          batch->target, batch->options, worker->module, batch->trace);
+        }
+    }
+}
+
+BUSTER_GLOBAL_LOCAL void codegen_machine_batch_run(CodegenMachineBatch* batch, u32 first)
+{
+    for (u32 worker = 0; worker < batch->worker_count; worker += 1)
+    {
+        if (batch->worker_count > 1)
+        {
+            arena_release_to_position(batch->workers[worker].output, arena_minimum_position);
+        }
+    }
+    batch->first = first;
+    batch->end = first;
+    u64 bytes = 0;
+    u32 count_limit = batch->worker_count == 1 ? 1 : batch->worker_count * CODEGEN_MACHINE_FUNCTIONS_PER_LANE;
+    while (batch->end < batch->module->function_count && batch->end - first < count_limit)
+    {
+        u32 function_index = batch->function_order ? batch->function_order[batch->end] : batch->end;
+        IrFunction* function = batch->module->functions + function_index;
+        u64 bound = function->state == IR_FUNCTION_LOWERED ? codegen_machine_scratch_bound(function) : 0;
+        if (batch->end > first && bound > CODEGEN_MACHINE_SCRATCH_LIMIT - bytes)
+        {
+            break;
+        }
+        bytes = bound > CODEGEN_MACHINE_SCRATCH_LIMIT ? CODEGEN_MACHINE_SCRATCH_LIMIT : bytes + bound;
+        batch->end += 1;
+    }
+    batch->next = first;
+    if (batch->worker_count > 1)
+    {
+        lane_run(batch->worker_count, codegen_machine_prepare_lane, batch);
+    }
+    // The one-lane caller supplies its existing per-function scratch before
+    // entering this same kernel, so it needs neither private arenas nor a gang.
+}
+
 // One generation of the whole module -- globals, functions and global assembly
 // -- into a code buffer reserved at `capacity_scale` times the flat estimate
 // below. Everything it produces comes out of `arena`, so a caller that does not
@@ -7159,7 +7441,7 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                                                                            Target target, CodegenModuleOptions options, u64 capacity_scale,
                                                                            bool* code_buffer_exhausted,
                                                                            CodegenX64MetadataCache* x64_metadata_cache,
-                                                                           MachineSelectionModule* machine_module, BootstrapTrace* bootstrap_trace)
+                                                                           CodegenMachineBatch* batch)
 {
     CodegenModule result = {
         .ir_module = module,
@@ -7364,8 +7646,14 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
             }
         }
     }
+    batch->function_order = function_order;
+    batch->end = 0;
     for (u32 emission = 0; emission < module->function_count; emission += 1)
     {
+        if (emission == batch->end)
+        {
+            codegen_machine_batch_run(batch, emission);
+        }
         result.failed_phase = CODEGEN_PHASE_FUNCTION_ENTRY;
         u32 function_index = function_order ? function_order[emission] : emission;
         if (emission == function_ordinary_count)
@@ -7458,29 +7746,23 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
         if (target.cpu_arch == CPU_ARCH_X86_64 || target.cpu_arch == CPU_ARCH_AARCH64)
         {
             CodegenMachineScratch machine_scratch = codegen_machine_scratch_begin(arena, function);
-            Arena* machine_arena = machine_scratch.scratch.arena;
-            MachineSelectResult selected = {0};
-            if (machine_scratch.fits)
+            if (batch->worker_count == 1)
             {
-                selected = machine_select_validated_canonical_function(machine_arena, program, function, target, position_independent,
-                                                                       options.debug_info, machine_module);
+                batch->workers[0].output = machine_scratch.scratch.arena;
+                codegen_machine_prepare_lane(batch);
             }
-            else
-            {
-                fallback_reason = CODEGEN_FALLBACK_MACHINE_SCRATCH;
-            }
-            if (bootstrap_trace && machine_scratch.fits)
-            {
-                bootstrap_trace_machine(bootstrap_trace, function, &selected);
-                if (bootstrap_trace->invalid_mir)
-                {
-                    // Do not let a selector certificate bypass a failed
-                    // audit verifier and feed invalid MIR to allocation.
-                    result.failed_machine_verification = bootstrap_trace->invalid_validation;
-                    fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
-                    selected.supported = false;
-                }
-            }
+            CodegenMachinePreparation* prepared = batch->prepared + emission - batch->first;
+            Arena* machine_arena = prepared->arena;
+            MachineSelectResult selected = prepared->selected;
+            MachineStackPlacement placement = prepared->placement;
+            fallback_reason = prepared->fallback_reason;
+            fallback_opcode = prepared->fallback_opcode;
+            fallback_detail = string_duplicate_arena(arena, prepared->fallback_detail, false);
+            result.failed_phase = prepared->failed_phase;
+            result.failed_machine_verification = prepared->failed_machine_verification;
+            result.failed_machine_scheduled = prepared->failed_machine_scheduled;
+            codegen_statistics_add(&result.statistics, &prepared->statistics);
+            result.statistics.machine_function_workers = BUSTER_MAX(result.statistics.machine_function_workers, batch->active_workers);
             machine_simd_operation_count = selected.simd_operation_count;
             if (selected.supported)
             {
@@ -7489,130 +7771,16 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                 WORK_LEDGER_RECORD(MACHINE_VIRTUAL_REGISTERS, selected.function.virtual_register_count);
                 WORK_LEDGER_RECORD(MACHINE_BLOCKS, selected.function.block_count);
             }
-            if (!selected.supported && fallback_reason != CODEGEN_FALLBACK_VERIFICATION && fallback_reason != CODEGEN_FALLBACK_MACHINE_SCRATCH)
+            if (!machine_scratch.fits)
             {
-                fallback_opcode = selected.failed_opcode < IR_OPCODE_COUNT ? selected.failed_opcode : IR_OPCODE_COUNT;
-                fallback_reason = selected.signature_rejected ? CODEGEN_FALLBACK_SIGNATURE
-                                  : fallback_opcode < IR_OPCODE_COUNT ? CODEGEN_FALLBACK_OPCODE
-                                                                      : CODEGEN_FALLBACK_SELECTION_OTHER;
-                if (fallback_reason == CODEGEN_FALLBACK_OPCODE && selected.failure_detail.length)
-                {
-                    // The selector's scratch arena ends below. Keep the exact
-                    // refusal in this attempt's output arena for the driver.
-                    fallback_detail = string_duplicate_arena(arena, selected.failure_detail, false);
-                }
+                fallback_reason = CODEGEN_FALLBACK_MACHINE_SCRATCH;
             }
-            // The target selectors publish a complete machine function only
-            // after their typed builder streams and side tables are closed.
-            // Keep the verifier as the authority for replayed/manual machine
-            // IR, but do not reread every freshly selected row before its
-            // immediate allocator consumer.
-            MachineVerifyResult verification = selected.supported && (options.verify_invariants || !selected.selector_certified)
-                                                   ? machine_verify_function(&selected.function) : (MachineVerifyResult){0};
-            MachineVerifyError verify_error = verification.error;
-            if (options.verify_invariants && selected.supported)
+            if (selected.supported && placement.valid && machine_scratch.fits)
             {
-                result.statistics.verified_mir_function_count += 1;
-                if (verify_error != MACHINE_VERIFY_NONE)
-                {
-                    result.failed_machine_verification = verification;
-                    fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
-                    selected.supported = false;
-                }
-            }
-            if (selected.supported && verify_error != MACHINE_VERIFY_NONE)
-            {
-                fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
-            }
-            if (selected.supported && verify_error == MACHINE_VERIFY_NONE)
-            {
-                result.failed_phase = CODEGEN_PHASE_MACHINE_PLACEMENT;
-                MachineStackPlacement placement;
-
-                if (options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY)
-                {
-                    placement = machine_quality_placement_build(machine_arena, &selected.function);
-                }
-                else
-                {
-                    placement = machine_fast_placement_build(machine_arena, &selected.function);
-                }
-
-                // Stage-9 scheduling, QUALITY only: reorder rows within
-                // over-pressured blocks to sink definitions toward their
-                // first use, then keep whichever form places cheaper. The
-                // currency is the stage-7 acceptance metric — memory
-                // traffic plus a push/pop pair per callee-saved register
-                // the placement binds — so a schedule that trades reloads
-                // for prologue saves cannot sneak through, and an unmoved
-                // schedule costs nothing. FAST measured the same absolute
-                // win but pays the acceptance's second placement out of the
-                // budget that makes it the default -O allocator, so it
-                // stays byte-identical to the unscheduled path
-                // (2026-08-10n). The traffic gate bounds the pass's cost:
-                // a placement that evicted nothing has nothing to save.
-                if (placement.valid && placement.reload_count + placement.spill_count > 0 &&
-                    options.register_allocator == CODEGEN_REGISTER_ALLOCATOR_QUALITY)
-                {
-                    MachineScheduleResult scheduled = machine_schedule_function(machine_arena, &selected.function);
-                    if (scheduled.moved)
-                    {
-                        bool scheduled_valid = true;
-                        if (options.verify_invariants)
-                        {
-                            result.statistics.verified_scheduled_function_count += 1;
-                            MachineVerifyResult scheduled_verification = machine_verify_function(&scheduled.function);
-                            if (scheduled_verification.error != MACHINE_VERIFY_NONE)
-                            {
-                                result.failed_machine_verification = scheduled_verification;
-                                result.failed_machine_scheduled = true;
-                                fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
-                                scheduled_valid = false;
-                                placement.valid = false;
-                            }
-                        }
-                        if (scheduled_valid)
-                        {
-                            result.statistics.allocator_scheduled_function_count += 1;
-                            MachineStackPlacement scheduled_placement = machine_quality_placement_build(machine_arena, &scheduled.function);
-                            if (options.verify_invariants && !scheduled_placement.valid)
-                            {
-                                // Frame capacity keeps its own diagnostic; any other
-                                // invalid placement is a verification failure.
-                                fallback_reason = scheduled_placement.capacity_exceeded ? CODEGEN_FALLBACK_PLACEMENT : CODEGEN_FALLBACK_VERIFICATION;
-                                placement.capacity_exceeded = scheduled_placement.capacity_exceeded;
-                                placement.valid = false;
-                            }
-                            u32 placement_saved_registers = 0;
-                            u32 scheduled_saved_registers = 0;
-                            for (u32 physical_register = 0; physical_register < MACHINE_TARGET_REGISTER_LIMIT; physical_register += 1)
-                            {
-                                placement_saved_registers += (u32)((placement.callee_saved_mask >> physical_register) & 1u);
-                                scheduled_saved_registers += (u32)((scheduled_placement.callee_saved_mask >> physical_register) & 1u);
-                            }
-                            if (scheduled_placement.valid &&
-                                scheduled_placement.reload_count + scheduled_placement.spill_count + 2 * scheduled_saved_registers <
-                                    placement.reload_count + placement.spill_count + 2 * placement_saved_registers)
-                            {
-                                result.statistics.allocator_schedule_kept_count += 1;
-                                selected.function = scheduled.function;
-                                placement = scheduled_placement;
-                            }
-                        }
-                    }
-                }
-                if (!placement.valid)
-                {
-                    fallback_reason = CODEGEN_FALLBACK_PLACEMENT;
-                    if (options.verify_invariants && !placement.capacity_exceeded)
-                    {
-                        fallback_reason = CODEGEN_FALLBACK_VERIFICATION;
-                    }
-                }
                 if (placement.valid)
                 {
                     result.failed_phase = CODEGEN_PHASE_MACHINE_ENCODING;
-                    MachineEncodeResult encoded = {0};
+                    MachineEncodeResult encoded = prepared->encoded;
                     WORK_LEDGER_RECORD(MACHINE_PLACEMENT_EDITS, placement.edit_count);
 
                     // The encoder writes where the function will live when
@@ -7622,18 +7790,21 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                     // this position receives instead.
                     u8* code_destination = buffer.bytes + buffer.count;
                     u64 code_remaining = buffer.count <= buffer.capacity ? buffer.capacity - buffer.count : 0;
-                    switch (target.cpu_arch)
+                    if (batch->worker_count == 1)
                     {
-                        break; case CPU_ARCH_I386:
-                            buffer.error = CODEGEN_ERROR_UNSUPPORTED_TARGET;
-                            result.error = CODEGEN_ERROR_UNSUPPORTED_TARGET;
-                            result.failure_reason = S8("i386 code generation is not implemented");
-                            break;
-                        break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64_into(machine_arena, &selected.function, &placement,
-                                                                                           code_destination, code_remaining);
-                        break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64_into(machine_arena, &selected.function, &placement,
-                                                                                         code_destination, code_remaining);
-                        break; default: BUSTER_TODO();
+                        switch (target.cpu_arch)
+                        {
+                            break; case CPU_ARCH_I386:
+                                buffer.error = CODEGEN_ERROR_UNSUPPORTED_TARGET;
+                                result.error = CODEGEN_ERROR_UNSUPPORTED_TARGET;
+                                result.failure_reason = S8("i386 code generation is not implemented");
+                                break;
+                            break; case CPU_ARCH_AARCH64: encoded = machine_encode_aarch64_into(machine_arena, &selected.function, &placement,
+                                                                                               code_destination, code_remaining);
+                            break; case CPU_ARCH_X86_64: encoded = machine_encode_x86_64_into(machine_arena, &selected.function, &placement,
+                                                                                             code_destination, code_remaining);
+                            break; default: BUSTER_TODO();
+                        }
                     }
 
                     WORK_LEDGER_RECORD(MACHINE_ENCODED_BYTES, encoded.valid ? encoded.byte_count : 0);
@@ -7854,6 +8025,33 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
     return result;
 }
 
+// A requested worker must have useful IR to amortize prewarm, private caches
+// and gang startup. This is a conservative work gate, not a host timing model.
+#define CODEGEN_MACHINE_INSTRUCTIONS_PER_LANE 4096u
+
+u32 codegen_function_worker_limit(IrModule const* module, u32 requested)
+{
+    u32 result = 1;
+    if (module && requested > 1 && lane_count() == 1 && !BUSTER_SINGLE_THREADED)
+    {
+        u64 instructions = 0;
+        u32 functions = 0;
+        for (u32 index = 0; index < module->function_count; index += 1)
+        {
+            IrFunction const* function = module->functions + index;
+            if (function->state == IR_FUNCTION_LOWERED)
+            {
+                instructions += function->instruction_count;
+                functions += 1;
+            }
+        }
+        u64 limit = BUSTER_MIN(instructions / CODEGEN_MACHINE_INSTRUCTIONS_PER_LANE, (u64)functions);
+        limit = BUSTER_MIN(limit, (u64)os_get_logical_thread_count());
+        result = (u32)BUSTER_MAX(1u, BUSTER_MIN((u64)requested, limit));
+    }
+    return result;
+}
+
 CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options, BootstrapTrace* bootstrap_trace)
 {
     CodegenModule result = {
@@ -7929,8 +8127,74 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
     {
         machine_module = machine_select_module_prepare(arena, program, target);
     }
+    u32 worker_count = bootstrap_trace ? 1 : codegen_function_worker_limit(module, options.function_jobs);
+    if (worker_count > 1)
+    {
+        // CFG caches must live with the canonical program, never in a worker
+        // cache that is destroyed when codegen returns.
+        for (u32 index = 0; index < module->function_count; index += 1)
+        {
+            IrFunction* function = module->functions + index;
+            if (function->state == IR_FUNCTION_LOWERED)
+            {
+                IrValidationResult publication = ir_function_publish_cfg(program->arena, function);
+                if (publication.error != IR_VALIDATION_NONE)
+                {
+                    result.error = CODEGEN_ERROR_INVALID_IR;
+                    return result;
+                }
+            }
+        }
+        if (target.cpu_arch == CPU_ARCH_X86_64)
+        {
+            buster_x86_metadata_prewarm_for_lanes();
+        }
+        else
+        {
+            buster_aarch64_prewarm();
+            buster_aarch64_semantics_prewarm();
+        }
+    }
+    CodegenMachineWorker singleton_worker = {0};
+    CodegenMachinePreparation singleton_preparation;
+    CodegenMachineBatch batch = {
+        .workers = worker_count == 1 ? &singleton_worker : arena_allocate_zeroed(arena, CodegenMachineWorker, worker_count),
+        .prepared = worker_count == 1 ? &singleton_preparation : arena_allocate(arena, CodegenMachinePreparation, worker_count * CODEGEN_MACHINE_FUNCTIONS_PER_LANE),
+        .module = module,
+        .target = target,
+        .options = options,
+        .trace = bootstrap_trace,
+        .worker_count = worker_count,
+    };
+    batch.options.function_jobs = worker_count;
+    bool workers_ready = true;
+    for (u32 index = 0; index < worker_count; index += 1)
+    {
+        CodegenMachineWorker* worker = batch.workers + index;
+        worker->program = program;
+        worker->module = machine_module;
+        if (worker_count > 1)
+        {
+            worker->output = arena_create((ArenaCreation){.reserved_size = CODEGEN_MACHINE_SCRATCH_LIMIT + CODEGEN_MACHINE_SCRATCH_RESERVATION_GRANULE,
+                                                         .flags = {.no_pool = 1}});
+            worker->cache = arena_create((ArenaCreation){.flags = {.no_pool = 1}});
+            workers_ready = workers_ready && worker->output && worker->cache;
+            if (worker->output && worker->cache)
+            {
+                worker->private_program = *program;
+                worker->program = &worker->private_program;
+                worker->program->arena = worker->cache;
+                for (u32 convention = 0; convention < IR_ABI_CONVENTION_COUNT; convention += 1)
+                {
+                    worker->program->abi_contexts[convention] = ir_abi_context_initialize(worker->cache, &program->types, (IrAbiConvention)convention);
+                    worker->program->abi_contexts[convention].sysv_unnamed_bitfields_integer = program->abi_contexts[convention].sysv_unnamed_bitfields_integer;
+                }
+                worker->module = machine_module ? machine_select_module_for_lane(worker->cache, worker->program, machine_module) : 0;
+            }
+        }
+    }
     TemporalArena attempt_scope = arena_begin_temporal(arena);
-    for (u64 capacity_scale = 1;; capacity_scale *= 2)
+    for (u64 capacity_scale = 1; workers_ready; capacity_scale *= 2)
     {
         bool code_buffer_exhausted = false;
         if (options.investigation)
@@ -7950,7 +8214,7 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
             bootstrap_trace_u64(bootstrap_trace, capacity_scale);
         }
         result = codegen_generate_canonical_module_attempt(arena, program, slot_costs, module, target, options, capacity_scale,
-                                                           &code_buffer_exhausted, x64_metadata_cache, machine_module, bootstrap_trace);
+                                                           &code_buffer_exhausted, x64_metadata_cache, &batch);
         // Every other capacity failure -- a frame displacement out of range, a
         // frame past `UINT32_MAX`, a reserve that cannot be addressed -- is one
         // more room cannot fix, and is reported as it stands.
@@ -7988,10 +8252,30 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
             {
                 result.failure_reason = S8("exact SIMD intrinsic requires a supported target and feature set; select an explicit source fallback");
             }
-            return result;
+            break;
         }
         scratch_end(attempt_scope);
     }
+    if (!workers_ready)
+    {
+        result.error = CODEGEN_ERROR_CAPACITY;
+        result.failure_reason = S8("could not reserve machine worker arenas");
+    }
+    for (u32 index = 0; worker_count > 1 && index < worker_count; index += 1)
+    {
+        CodegenMachineWorker* worker = batch.workers + index;
+        if (worker->output)
+        {
+            bool destroyed = arena_destroy(worker->output, 1);
+            BUSTER_CHECK(destroyed);
+        }
+        if (worker->cache)
+        {
+            bool destroyed = arena_destroy(worker->cache, 1);
+            BUSTER_CHECK(destroyed);
+        }
+    }
+    return result;
 }
 
 CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options)

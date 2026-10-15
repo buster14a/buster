@@ -128,6 +128,8 @@
 #include <buster/lib/hash.h>
 #include <buster/lib/compiler/driver/archive.c>
 
+BUSTER_GLOBAL_LOCAL void compiler_driver_native_family_prepare(CpuArch cpu_arch);
+
 void compiler_prewarm(void)
 {
     c_prewarm();
@@ -9546,8 +9548,14 @@ static CompilerDriverResult compiler_driver_execute_c_single(Arena* arena, Compi
             goto end;
         }
     }
+    u32 function_jobs = codegen_function_worker_limit(module, invocation.compile_jobs);
+    if (function_jobs > 1)
+    {
+        compiler_driver_native_family_prepare(invocation.target.cpu_arch);
+    }
     CodegenModule code = codegen_generate_canonical_module_with_trace(arena, lowered.program, module, invocation.target,
                                                            (CodegenModuleOptions){
+                                                               .function_jobs = function_jobs,
                                                                .investigation = investigation,
                                                                .debug_info = invocation.debug_info,
                                                                .assume_validated = true,

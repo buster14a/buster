@@ -431,6 +431,8 @@ struct CodegenStatistics
     // path after encoding counts in neither.
     u64 machine_code_bytes_in_place;
     u64 machine_code_bytes_copied;
+    // Largest actual function gang, independent of translation-unit workers.
+    u32 machine_function_workers;
 };
 
 struct CodegenModule
@@ -567,6 +569,9 @@ struct CodegenModuleOptions
     u8 register_allocator;
     // An AssemblySyntax value, also stored as one byte.
     u8 assembly_syntax;
+    // Maximum function-preparation lanes; zero and one use the same one-lane kernel.
+    // An enclosing TU gang owns the budget and prevents nested gangs.
+    u32 function_jobs;
     // Optional cold sink. No source resolution or retention when null.
     InvestigationCapture* investigation;
 };
@@ -600,6 +605,8 @@ BUSTER_F_DECL void codegen_statistics_add(CodegenStatistics* total, CodegenStati
 // have their own sequences and never ask.
 BUSTER_F_DECL CodegenThreadLocalModel codegen_thread_local_model(bool position_independent, bool symbol_is_definition);
 BUSTER_F_DECL CodegenAbi codegen_abi_for_target(Target target);
+// Clamp function lanes by available CPUs, lowered population and IR work.
+BUSTER_F_DECL u32 codegen_function_worker_limit(IrModule const* module, u32 requested);
 BUSTER_F_DECL CodegenModule codegen_generate_canonical_module(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options);
 // Tracing is a separate entrypoint: keep the ordinary compact options ABI.
 BUSTER_F_DECL CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgram* program, IrModule* module, Target target, CodegenModuleOptions options, BootstrapTrace* bootstrap_trace);

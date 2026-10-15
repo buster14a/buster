@@ -2006,6 +2006,8 @@ BUSTER_F_DECL MachineSelectResult machine_select_canonical_function(Arena* arena
 // prepare a context for this function alone, which is the unvalidated entry
 // point's cost and never module code generation's.
 BUSTER_F_DECL MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* program, Target target);
+// Share the immutable type projection, allocate lane-private lazy call plans.
+BUSTER_F_DECL MachineSelectionModule* machine_select_module_for_lane(Arena* arena, IrProgram* program, MachineSelectionModule const* shared);
 // Native selection retains source K chains for FAST/QUALITY placement.
 BUSTER_F_DECL MachineSelectResult machine_select_validated_canonical_function(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                                                bool position_independent,
