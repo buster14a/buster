@@ -25488,7 +25488,8 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             }
             // Fixed void builtins keep the statement placeholder emitted by
             // their lowering; void is not an operand conversion destination.
-            bool fixed_void = fixed && signature.types[0].kind == C_TYPE_VOID;
+            bool fixed_void = fixed && signature.types[0].kind == C_TYPE_VOID &&
+                              !signature.types[0].pointer_depth && !signature.types[0].lanes;
             IrTypeId type = fixed_void ? builder->void_type : IR_TYPE_ID_INVALID;
             if (!fixed_void && !c_ir_vendor_result_type(builder, selected->node, &type))
                 return C_IR_PREPARED_CALL_STEP_FAILED;
