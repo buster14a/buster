@@ -11019,6 +11019,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, machine_fast_placement_refusal_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_solve_liveness_test(arguments->arena));
+    BUSTER_TEST(arguments, machine_fast_prepass_summary_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_close_slot_ranges_test(arguments->arena));
     C_TEST_BOUNDED_FIXTURE(arguments, machine_test_register_compaction);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_test_fast_consumer_register_hint);

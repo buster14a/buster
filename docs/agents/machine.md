@@ -531,17 +531,31 @@ hosts execute its independent expected-value fixture.
   that use lies below the floor. A parameter-edge source whose copy found no
   register still stores, because that copy reloads its home.
 - The shared prepass also computes block live-out for every escaping,
-  non-rematerializable value (`machine_fast_value_liveness`, one bitset row
-  per block over a dense index of those values, solved by the same worklist
-  as frame-object closure). An edge-copy source starts live out of its
-  edge's source block. A boundary write-back, or an eviction past the
+  non-rematerializable value (`machine_fast_value_liveness`). It builds no
+  index for one block or zero tracked values. Small populations use dense
+  bitset rows and the frame-object worklist; above 2^18 words per plane,
+  `register_allocator_live_sets.c` shares immutable binary set subtrees.
+  Zero/full subtrees use sentinel IDs, unchanged children keep their old IDs,
+  and a reverse-CFG-ordered iterative solve propagates only changed roots.
+  The node pool is bounded at 64 MiB. Exhaustion rewinds all unpublished
+  nodes and uses the dense solve within the established analysis envelope.
+  The 2^22-word block-by-value work budget remains a deliberate throughput
+  boundary: outside it, the prepass publishes no liveness index or sets and
+  keeps the textual rules. Expanding that population was measured to slow
+  large nested-function compilation by 18-29%, so memory sharing does not
+  authorize extra analysis for smaller generated frames. The
+  classification pass also counts tracked values and detects vectors during
+  its completed escape reduction. The backward gen/kill row walk remains:
+  escape identities are not final until every defining block is known. An
+  edge-copy source starts live out of its edge's source block. A boundary write-back, or an eviction past the
   value's last textual use, skips the store when the value is not live out
   of the block whose exit it conforms (`machine_fast_dead_out`). The decision
   is per block, not per edge: one store at a conditional's terminator serves
   both successors. Contract construction still carries a dirty value that is
   dead in the join, because dropping it would force the store onto the
-  predecessor's other path. Functions with one block, or past
-  `MACHINE_FAST_LIVENESS_WORD_LIMIT` words per plane, keep the textual rules.
+  predecessor's other path. The representation switch preserves exact facts
+  and the existing conservative fallback population. The size discontinuity
+  is an intended analysis-work limit, not a reason to allocate dense planes.
 - The prepass keeps block live-in from the same solve. An edge conform
   leaves a value its destination does not read (`machine_fast_dead_in`)
   dirty instead of storing it, unless it sits in a register the contract
@@ -572,8 +586,8 @@ hosts execute its independent expected-value fixture.
   crossing a later call moves only into a paid callee-saved register. Dead,
   rematerializable, or unplaceable occupants keep the eviction.
 - FAST/QUALITY decide whether a value crosses a call
-  (`machine_fast_crosses_call`) against the prepass's `next_call`, which runs
-  across block boundaries in layout order: a value whose last textual use lies
+  (`machine_fast_crosses_call`) against the prepass's `next_call`, which is
+  absent for call-free functions and otherwise runs across block boundaries in layout order: a value whose last textual use lies
   past any later call, in its own block or a later one, prefers a callee-saved
   register at its definition, at every free reload pick, and when vacated.
   Once there it survives every later call on every path, so joins stop losing

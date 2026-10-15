@@ -29,7 +29,8 @@
 //   lookup    symbol interning calls, probes and bytes hashed
 //   target    per-process x86-64 metadata preparation versus what a compile
 //             reads back
-//   machine   machine records selected, placed, encoded and described
+//   machine   machine records selected, placed, encoded and described; dense
+//             liveness word updates, shared-set node visits and nodes created
 //   output    object and linked-image bytes produced
 // Phases (WorkLedgerPhase) additionally attribute minor page faults (touched
 // pages) and arena request traffic to the pipeline stage that caused them.
@@ -107,6 +108,9 @@
     X(MACHINE_HOME_COLOR_HISTOGRAM_ROWS, machine, home_color_histogram_rows) \
     X(MACHINE_BLOCK_COLOR_WORD_COMPARISONS, machine, block_color_word_comparisons) \
     X(MACHINE_LIVENESS_WORD_UPDATES, machine, liveness_word_updates) \
+    X(MACHINE_LIVENESS_SET_VISITS, machine, liveness_set_visits) \
+    X(MACHINE_LIVENESS_SET_NODES, machine, liveness_set_nodes) \
+    X(MACHINE_LIVENESS_SET_FALLBACKS, machine, liveness_set_fallbacks) \
     X(MACHINE_ENCODED_BYTES, machine, encoded_bytes) \
     X(MACHINE_DEBUG_LOCATION_ROWS, machine, debug_location_rows) \
     X(OUTPUT_OBJECT_BYTES, output, object_bytes) \

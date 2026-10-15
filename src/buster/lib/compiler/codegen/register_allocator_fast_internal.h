@@ -12,5 +12,6 @@ BUSTER_F_DECL bool machine_fast_home_color_budget_test(Arena* arena);
 BUSTER_F_DECL bool machine_fast_placement_refusal_test(Arena* arena);
 BUSTER_F_DECL bool machine_fast_close_live_ranges_test(Arena* arena);
 BUSTER_F_DECL bool machine_fast_solve_liveness_test(Arena* arena);
+BUSTER_F_DECL bool machine_fast_prepass_summary_test(Arena* arena);
 BUSTER_F_DECL bool machine_fast_close_slot_ranges_test(Arena* arena);
 #endif
