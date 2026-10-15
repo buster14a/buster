@@ -1434,7 +1434,19 @@ The same memory effects and source/destination ownership apply in every allocato
   16-byte `MachineX64ValueUse` carries a one-based local-use index, with zero
   for nonlocals/disqualified places. Sparse `local_places` sizing and the
   summary-unknown row fallback feed the same state. Store-free locals stay
-  in frame slots; resetting store ordinals visits only the sparse local rows.
+  in frame slots. After the operand walk finishes disqualifying places, probe
+  the sparse local rows until a surviving local-use index is found. An empty
+  result proves that no LOAD can seed an alias and skips both reverse alias
+  sweeps; DEREFERENCE can only extend an existing alias. Keep store-free
+  places conservative and preserve the original sweep order when eligible.
+  With no aliases, branch fusion inspects only each block's final candidate:
+  a valid BRANCH_IF is a terminator, and earlier store ordinals can only
+  constrain aliased reads. With aliases, reset store ordinals and retain the
+  complete candidate walk. Use counts still include CFG-edge operands, and
+  the existing recognizer, initialization, line marks and call workspace
+  remain authoritative. `machine_test_sparse_local_state` covers direct and
+  pointer aliases, store order, widths, cross-block and disqualified places,
+  store-free locals and branch fusion after preceding escaped-local accesses.
 
 ## MIR-only cutover boundary
 
