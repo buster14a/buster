@@ -5,21 +5,24 @@
 ## Tests
 
 The maintained build and automatic CI cover the headless compiler on Linux,
-Windows and macOS. Application, GUI, image/font and mobile-hosting source is
-preserved without a maintenance or CI-support promise. It is excluded from
-the default build, compiler tests/fuzzing and analyzer database.
+Windows and macOS. Shared GUI, image/font and mobile-hosting source remains
+unmaintained, excluded from the default build, compiler tests/fuzzing and
+analyzer database. The image-browser and disk-builder applications, ancillary
+component tests and their CMake helpers have been removed.
 
-The image, font, disk-builder and GUI component suites are not registered in
+The removed image, font, disk-builder and GUI suites are not registered in
 `ide` or `test_all`; compiler fuzzing exercises compiler/object inputs only.
 Android/iOS application and lifecycle workflows are not automatic CI gates.
-The older component/mobile procedures below document preserved source only.
+Older component/mobile procedures are historical references; the
+[build guide](build.md#removed-ancillary-build-integration) identifies removed
+helpers and links the pre-removal procedures.
 
 - Compiler and foundation module tests run inside the `ide` executable; there
   is no external unit-test framework. From the repository root, run
   `ide test --verbose=1 --ci=1` or build the `test_all` target.
   Main self-host audits run that complete maintained suite after bootstrap
   validation and retain its output as `build/self-host-audit/compiler-regressions.log`;
-  preserved component suites are not required markers in that log.
+  removed component suites are not required markers in that log.
 - `ide test --module=<name>[,<name>...]` runs only the named modules. A name
   is a `TestDescriptor.name` from `test_descriptors` in
   `src/buster/tests/test.c`, such as `object_tests`, and must match exactly.

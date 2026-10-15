@@ -1,9 +1,13 @@
 # Image test fixture provenance
 
 [Media component](projects/media.md) ·
-[Test source](../src/buster/tests/image_test.c)
+[Historical test source](https://github.com/buster14a/buster/blob/02a6414e020f5d549122197c3a7c8407df5bed76/src/buster/tests/image_test.c)
 
 ## Scope and provenance
+
+The image test suite and native image-browser fixtures have been removed. This
+document retains their provenance and byte identities at the pre-removal commit
+`02a6414e020f5d549122197c3a7c8407df5bed76`; no current test target consumes them.
 
 The tables below identify every encoded byte array referenced by
 `image_test_fixtures` and `image_test_advanced_fixtures`. The SHA-256 values
@@ -62,16 +66,19 @@ IDCT rounding and chroma reconstruction are observable there.
 
 ## Verification and updates
 
-Run this from the repository root to derive the byte counts and hashes directly
-from the two fixture tables and their numeric C initializers:
+Run this from a Git checkout containing the pre-removal commit to derive the
+byte counts and hashes from its two fixture tables and numeric C initializers:
 
 ```sh
 python3 - <<'PY'
-from pathlib import Path
 import hashlib
 import re
+import subprocess
 
-source = Path("src/buster/tests/image_test.c").read_text()
+source = subprocess.check_output([
+    "git", "show",
+    "02a6414e020f5d549122197c3a7c8407df5bed76:src/buster/tests/image_test.c",
+], text=True)
 fixtures = []
 for table in ("image_test_fixtures", "image_test_advanced_fixtures"):
     match = re.search(rf"{table}\[\] = \{{(.*?)\n\}};", source, re.S)
@@ -94,7 +101,7 @@ for fixture in fixtures:
 PY
 ```
 
-When an encoded fixture must change, preserve or replace its documented
+If these fixtures are restored, preserve or replace each documented
 producer, compare its decoded RGBA with the named external implementation, run
 the focused `image_tests` module, and update the corresponding byte count and
 hash in the same commit. Pixel equivalence alone is insufficient when a test
@@ -105,11 +112,12 @@ also relies on exact encoded offsets or packet structure.
 `src/buster/tests/image_browser/fixtures/first.ppm` (2×2 RGB/white) and `second.ppm` (3×2
 asymmetric yellow/cyan/magenta and three distinct colours) are hand-authored
 ASCII P3 images created for this application. No corpus, third-party image or
-external encoder was used. Their complete encoded contents are retained as
-text. These application fixtures live beside their component tests, outside the
-compiler's frozen `tests/` input inventory. Git blob identities are `7517a64e2ad17667e4fdf1b488d8de0eb6876495` and
-`926927e2656ad32a143bf13d4c77d6f03b5ce763`, respectively. The native
-smoke validates decoded dimensions and colour samples, then compares the
+external encoder was used. Their complete encoded contents are available in the
+[pre-removal fixture directory](https://github.com/buster14a/buster/tree/02a6414e020f5d549122197c3a7c8407df5bed76/src/buster/tests/image_browser/fixtures).
+These deleted application fixtures lived beside their component tests, outside
+the compiler's frozen `tests/` input inventory. Git blob identities are `7517a64e2ad17667e4fdf1b488d8de0eb6876495` and
+`926927e2656ad32a143bf13d4c77d6f03b5ce763`, respectively. The removed native
+smoke validated decoded dimensions and colour samples, then compared the
 presented canvas with server pixels. The state tests' byte arrays and synthetic
 metadata are also authored in the test source. New code and fixtures follow
 Buster's current first-party licensing status: no license has been selected

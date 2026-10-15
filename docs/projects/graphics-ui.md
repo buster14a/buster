@@ -1,10 +1,10 @@
 # Graphics and UI components
 
 Status: **preserved, unmaintained source**. This area has no default build,
-compiler-test, fuzz, analyzer or automatic CI coverage. Existing source, tests,
-CMake fragments and earlier procedures below are retained for reference; their
-buildability and behavior are not a current support promise. Reconnecting a
-consumer requires an explicit maintenance decision.
+compiler-test, fuzz, analyzer or automatic CI coverage. The ancillary test
+sources and CMake helpers have been removed; the shared library sources remain.
+Earlier test descriptions are historical references, not runnable current-tree
+commands. Reconnecting a consumer requires an explicit maintenance decision.
 
 [Catalogue](../../PROJECTS.md) · Area: `graphics-ui` · [Tracking](../project-tracking.md)
 
@@ -19,9 +19,9 @@ IDE, nor a request to restore the removed custom-language editor.
 | Stable feature ID | Existing source | Integration boundary |
 |---|---|---|
 | `graphics-ui.rendering` | [rendering.h](../../src/buster/lib/rendering.h), [rendering.c](../../src/buster/lib/rendering.c) | Retained rendering front door and backend implementations. Vulkan admits at most 16 texture slots per renderer and returns the invalid `UINT32_MAX` index when full; texture binding ignores invalid indices and retains the prior binding. Textures still have no per-texture replacement/release and live until renderer teardown. Device execution/support must be demonstrated by the consuming target. |
-| `graphics-ui.raster` | [rendering_raster.h](../../src/buster/lib/rendering_raster.h) | Bounded CPU pixels and Linux/XCB presentation for the separate image-browser target; no GPU support claim. |
+| `graphics-ui.raster` | [rendering_raster.h](../../src/buster/lib/rendering_raster.h) | Retained bounded CPU pixels and Linux/XCB presentation library; the image-browser application and raster test targets are removed. No GPU support claim. |
 | `graphics-ui.windows` | Window modules described in the [platform guide](../agents/platform.md) | Native lifecycle/event/surface boundary. Android/iOS lifecycle use does not demonstrate a complete desktop UI. |
-| `graphics-ui.fonts` | [truetype.h](../../src/buster/lib/truetype.h), [font_provider.h](../../src/buster/lib/font_provider.h) | TrueType has preserved test source without a registered compiler-test consumer; the current headless compiler has no production font consumer. |
+| `graphics-ui.fonts` | [truetype.h](../../src/buster/lib/truetype.h), [font_provider.h](../../src/buster/lib/font_provider.h) | TrueType test sources are removed; the current headless compiler has no production font consumer. |
 | `graphics-ui.construction` | [ui_builder.h](../../src/buster/lib/ui_builder.h) | Retained UI construction API, not a supported end-user application by itself. |
 
 ## Texture storage and sampling
@@ -36,9 +36,9 @@ both the texture resource and sampled view, and Metal uses
 do not select a render-target or presentation color space; those remain separate
 backend contracts.
 
-`test_rendering_texture_formats` checks the shared channel/encoding contract
-and, when a native renderer is selected, its native format mapping without
-creating a device or submitting GPU commands. It does not establish executed
+The removed `test_rendering_texture_formats` target checked the shared
+channel/encoding contract and selected native format mapping without creating
+a device or submitting GPU commands. It did not establish executed
 sampling or cross-device pixel equivalence.
 
 The [platform/backend guide](../agents/platform.md) owns native-surface boundaries,
@@ -49,52 +49,18 @@ using that library from a graphical product is an explicit consumer decision.
 
 ## Validation and future consumers
 
-Use the existing `truetype_tests` and dependency checks described in that guide
-for font changes; keep geometry/error limits in one place rather than copying them
-here. A new graphical consumer must explicitly register its dependencies, document
-its runnable entry point and supported backend/platform combinations, and report
-actual rendering/lifecycle validation. Do not add unused UI or font dependencies
-to the compiler merely to make this area appear active.
+The TrueType, rendering, window and UI suites and their component targets have
+been removed, including `test_ui_utf8`, `test_ui_scale`, `test_ui_slider` and
+the raster/native tests. Neither `test_all` nor `test_units` includes them.
+Their [pre-removal guide](https://github.com/buster14a/buster/blob/02a6414e020f5d549122197c3a7c8407df5bed76/docs/projects/graphics-ui.md)
+records the former coverage and work-count controls. Test names mentioned
+below describe that historical coverage only.
 
-`./build.sh build --config Release -t test_ui_utf8` runs a separate headless UI
-component executable when tests and libc are enabled on desktop targets. It uses
-the production `ui_core` module to check Unicode scalar text-event activation and
-underline draw commands, including UTF-8 width/scalar boundaries and per-byte
-replacement of malformed input. Native rendering calls are counted and must
-remain unused. Desktop `test_all` and `test_units` include this component gate;
-the compiler has no added UI, window, or rendering dependency. The retained
-`ui_test.c` suite is not registered by this target, and these headless checks do
-not establish device rendering or a supported graphical application.
-
-`./build.sh build --config Release -t test_ui_scale` runs a headless component
-that counts `ui_core` work instead of timing it. Keyed-box lookup goes through a
-power-of-two index that doubles whenever the keyed population exceeds its size,
-so chains stay short at any scale (`UI_State.box_key_probes` per
-`box_key_lookups`). The fixed 4096-slot box table remains only as the ordering
-structure behind the dense active list, so that list's order does not change
-when the index grows. The target also checks box identity, duplicate and zero
-keys, pruning and free-list reuse, and the active-list order across growth.
-Keyboard focus navigation stamps the chosen scope's subtree once per request
-(one iterative pre-order pass) so scope membership is a single compare per
-candidate rather than a parent-chain walk; `UI_State.focus_scope_steps` counts
-the parent hops and subtree visits. The target compares selected keys with an
-independent copy of the ancestor-walk algorithm on chain, nested-scope, comb and
-broad trees with ineligible nodes, and bounds steps per box on 500 to 4000 deep
-spines. Pointer hit testing (`ui_route_event_owners`) builds one grid index over
-the previous tree's pointer-visible rectangles per build (when at least 32 boxes
-and 3 pointer queries justify it), so a query visits only the boxes in the
-point's cell plus a short list of very wide boxes instead of every active box.
-The topmost box is still the maximum of build order then active-list position, a
-press reuses the clickable target resolved for its own pointer update, and the
-full scan remains the fallback and the oracle (`UI_State.hit_index_disabled`).
-`UI_State.hit_test_candidates` counts visited boxes; the target bounds visits per
-event while boxes and events vary independently (sparse boxes, miss-only moves,
-clicks) and compares indexed and linear routing on randomized scenes with
-overlaps, disabled occluders, zero-size, clipped and off-screen boxes.
-Desktop `test_all` and `test_units` include it when tests and libc are enabled.
-
-Create a feature issue for a concrete application workflow or component behavior,
-not a speculative checklist claiming that a future editor/viewer already exists.
+A new graphical consumer must explicitly register its dependencies, provide
+focused tests, document its runnable entry point and supported backend/platform
+combinations, and report actual rendering/lifecycle validation. Keep font
+geometry/error limits in the [platform guide](../agents/platform.md). Do not add
+unused UI or font dependencies to the compiler to activate this area.
 
 ## Slider input contract
 
@@ -110,17 +76,13 @@ A completed slider click reads its own release coordinate from
 still update hover state, but do not change that committed value. A slider with
 live left-button capture continues following the current pointer, including
 outside its bounds; an outside release ends capture without reporting a click.
-`./build.sh build --config Release -t test_ui_slider` runs the focused
-`ui_slider_tests` module against the real `ui_core`/`ui_builder` front doors and
-an inert native renderer boundary. Desktop `test_all` and `test_units` include
-this component when tests and libc are enabled; mobile and tests-disabled graphs
-omit it. It covers the completed hit tree and reordered widget builds without
-adding UI dependencies to the compiler. The broad retained `ui_tests` suite is
-unregistered; these component checks do not establish device rendering support.
+The removed `ui_slider_tests` module covered completed-hit-tree and reordered
+widget builds through the real UI front doors and an inert renderer. No current
+component target exercises this contract.
 
 ## CPU raster image presentation
 
-The separately registered `rendering_raster` component borrows caller-owned
+The retained, unregistered `rendering_raster` component borrows caller-owned
 RGBA8 source and canvas storage only for a draw/present call. It uses nearest
 sampling, all eight reported Exif orientations, and straight-alpha composition
 over a checkerboard. Canvas admission is capped at 4096 per axis and 64 MiB;
@@ -128,11 +90,11 @@ rejected admission leaves the canvas unchanged. It applies no ICC/gamma
 conversion. Native presentation currently admits Linux XCB TrueColor visuals
 with 16-, 24- or 32-bit pixels; other native surfaces fail explicitly.
 
-`test_rendering_raster` checks independent headless orientation, alpha, pan,
-zoom and admission goldens. `test_rendering_raster_native` requires a real
-X server (Xvfb qualifies for this software backend), reads server pixels back,
-and exercises window events, resize and repeated shutdown. The separate
-unavailable-display invocation validates recoverable connection failure.
+The removed `test_rendering_raster` checked independent headless orientation,
+alpha, pan, zoom and admission goldens. The removed native test required a real
+X server (Xvfb qualified for this software backend), read server pixels back,
+and exercised window events, resize and repeated shutdown. A separate
+unavailable-display invocation checked recoverable connection failure.
 Headless raster checks do not prove native transfer; XCB readback proves CPU
 presentation and native lifecycle, with no GPU-rendering claim. These targets
 do not add graphics dependencies to `ide`.
@@ -165,7 +127,7 @@ nonempty accepted chunk creates one precommitted, non-pooled staging arena:
 storage. Reservation or commitment refusal rejects the transfer recoverably;
 subsequent chunks append without replacement buffers. Completion, cancellation,
 superseding negotiation and shutdown release this owner. INCR's advertised
-length is a hint and cannot allocate storage. The browser continues opting out
+length is a hint and cannot allocate storage. The former browser opted out
 of drops; these enabled-consumer bounds do not alter its workflow.
 
 XIM callbacks borrow the active poll's arena/list only during native polling;
@@ -190,7 +152,7 @@ every window's IC, pending CREATE_IC, style attempt, negotiated styles,
 style-query state, open state and provider event masks while retaining windows,
 focus and arena ownership. Automatic reconnect then rebuilds contexts.
 
-`test_rendering_raster_native` exercises actual X-server XDND negotiation,
+The removed `test_rendering_raster_native` exercised actual X-server XDND negotiation,
 direct/INCR transfer, decoded-path ownership, cancellation and shutdown, plus
 synthetic XIM reducer boundaries and actual poll scope teardown. Its ordinary
 native invocation also requires a real XIM provider on a second XCB connection,
@@ -228,8 +190,8 @@ Required window-arena allocation failure releases native initialization and
 returns failure. The existing arena reservation fault seam exercises this
 recovery before subsequent successful native lifecycles.
 
-The separately registered [native image browser](image-browser.md) consumes
-window lifecycle/events/title updates and CPU raster presentation. Its first
-platform, file/decode ownership, loading policy and executable launch live in
-the application guide. Retained UI construction, fonts and Vulkan rendering
-remain independent components rather than unused application dependencies.
+The removed [native image browser](image-browser.md) consumed window lifecycle,
+events, title updates and CPU raster presentation. Its historical workflow and
+ownership reference is linked from the application guide. Retained UI
+construction, fonts and Vulkan rendering remain independent unmaintained
+components.

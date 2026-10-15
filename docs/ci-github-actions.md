@@ -1,10 +1,11 @@
 # GitHub Actions CI
 
 Current scope: automatic CI maintains the headless compiler on Linux, Windows
-and macOS. Application, graphics/UI, image/font and mobile-hosting sources remain
-preserved but are not built or tested automatically. Earlier mobile/component
-commands and measurements below describe preserved paths or historical runs,
-not current CI coverage. See [current build guidance](agents/build.md) and
+and macOS. Shared graphics/UI, image/font and mobile-hosting sources remain
+unmaintained. The image-browser and disk-builder applications, ancillary tests
+and their CMake helpers are removed. Earlier mobile/component commands and
+measurements below are historical references, not current CI coverage or
+current-tree invocations. See [current build guidance](agents/build.md) and
 [component status](../PROJECTS.md).
 
 `.github/workflows/ci.yml` owns the active GitHub CI matrix on **standard**

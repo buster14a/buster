@@ -11,7 +11,7 @@ import textwrap
 import unittest
 
 from linux_asan_runtime_test import LinuxAsanFullConfigureTests
-from build_configuration_test import AndroidSdkSelectionTests, AppleArchitectureTests, BuildProcessDirectoryTests
+from build_configuration_test import AppleArchitectureTests, BuildProcessDirectoryTests
 
 
 ROOT = Path(__file__).resolve().parents[1]
