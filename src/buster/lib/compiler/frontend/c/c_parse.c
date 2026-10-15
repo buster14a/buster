@@ -26,6 +26,9 @@
 //   _Static_assert ranges from the tree's declaration nodes. It hands the
 //   whole unit to c_parse_ast's walker when the walker would report a
 //   diagnostic or read a shape differently from the grammar.
+// - c_parse_add_qualified_type copies array-alias element qualification with
+//   an iterative graph walk; its new rows retain bound/alignment owners and
+//   leave the original graph intact (GitHub #4183).
 // - c_analyze_semantics sizes its tables from a token census
 //   (c_parse_token_census, vectorized), then builds the CParseResult the
 //   lowering stage consumes: interned types, entities, scopes, and
@@ -6381,18 +6384,16 @@ BUSTER_C_INTERNAL CTypeId c_parse_bfloat16_builtin_result(CParseResult* result, 
     return type;
 }
 
-// Keep the declared array for parameter-bound/VLA ownership; an unqualified
-// outer array's identifier denotes the adjusted pointer (C17 6.7.6.3p7), even
-// under &. Qualified array aliases keep their existing path pending #4183:
-// their outer qualifiers belong to elements, not to this pointer.
+// Keep the declared array for parameter-bound/VLA ownership; its identifier
+// denotes the adjusted pointer (C17 6.7.6.3p7), even under &. Array-alias
+// qualifiers belong to the element graph, not to this pointer (#4183).
 // Ordinary arrays retain their type, so &local still points at the whole array.
 // The read-only tree typer declines if the query has not interned this row.
 BUSTER_C_SHARED CTypeId c_parse_expression_entity_type(CParseResult* result, CEntity const* entity, bool existing_only)
 {
     CTypeId type = entity->type;
     if (entity->kind == C_ENTITY_PARAMETER && type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY &&
-        !result->types[type.value].is_const && !result->types[type.value].is_volatile &&
-        !result->types[type.value].is_restrict && !result->types[type.value].is_atomic)
+        !result->types[type.value].is_atomic)
     {
         CType array = result->types[type.value];
         bool pointer_const = array.array_bound < result->array_bound_count && result->array_bounds[array.array_bound].is_const;
@@ -8126,15 +8127,15 @@ BUSTER_C_SHARED bool c_parse_expression_place_shape(CParseResult* result, CPrepr
 // bound/VLA readers retain `int a[4]` or `char *argv[]` as an array. Expression
 // queries use c_parse_expression_entity_type. C17 6.7.6.3p7
 // adjusts it to a pointer to the element, qualified by what the brackets
-// carry: `int a[const 2]` is a const pointer. The array type's own `const`
-// is what c_ir_mark_local_read_only also keeps read-only for that pointer.
+// carry: `int a[const 2]` is a const pointer. An array alias's qualifiers
+// belong to the element graph, not this adjusted pointer.
 BUSTER_C_INTERNAL bool c_parse_array_parameter_pointer_is_const(CParseResult* result, CTypeId type)
 {
     bool is_const = false;
     if (type.value < result->type_count && result->types[type.value].kind == C_TYPE_ARRAY)
     {
         CType array = result->types[type.value];
-        is_const = array.is_const || (array.array_bound < result->array_bound_count && result->array_bounds[array.array_bound].is_const);
+        is_const = array.array_bound < result->array_bound_count && result->array_bounds[array.array_bound].is_const;
     }
     return is_const;
 }
@@ -14925,23 +14926,18 @@ BUSTER_C_SHARED bool c_parse_atomic_drops_type_alignment(CParseResult const* res
    carries and a qualifier cannot take away.  The guard is the empty table, so
    a translation unit without an aligned typedef -- almost every one -- pays
    one compare per qualified type. */
-BUSTER_C_SHARED CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId base, CType qualifiers)
+BUSTER_C_INTERNAL CTypeId c_parse_add_qualified_row(CParseResult* result, CTypeId base, CType qualified)
 {
     CTypeId qualified_id = C_TYPE_ID_INVALID;
     if (base.value < result->type_count)
     {
-        CType qualified = result->types[base.value];
-        qualified.is_const |= qualifiers.is_const;
-        qualified.is_volatile |= qualifiers.is_volatile;
-        qualified.is_restrict |= qualifiers.is_restrict;
-        qualified.is_atomic |= qualifiers.is_atomic;
         qualified.unqualified_type = qualified.has_unqualified_type ? qualified.unqualified_type : base;
         qualified.has_unqualified_type = true;
         // `_Atomic` applied *to* the alias is the exception; see
         // c_parse_atomic_drops_type_alignment above, which is also what the
         // type-name resolver in c_gen.c asks so the two cannot answer
         // differently.
-        bool atomic_applied = c_parse_atomic_drops_type_alignment(result, base, qualifiers.is_atomic);
+        bool atomic_applied = c_parse_atomic_drops_type_alignment(result, base, qualified.is_atomic);
         CTypeAlignment const* base_alignment = result->type_alignment_count && !atomic_applied ? c_parse_type_alignment(result, base) : 0;
         u32 alignment_start = base_alignment ? base_alignment->alignment_start : 0;
         u32 alignment_count = base_alignment ? base_alignment->alignment_count : 0;
@@ -14962,6 +14958,61 @@ BUSTER_C_SHARED CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId
     }
 
     return qualified_id;
+}
+
+// A qualifier on an array alias belongs to its element (C17 6.7.3p10).
+// Copy the array chain forward, retaining each bound and alignment owner.
+// Only the newly appended rows are linked; the original graph is immutable.
+// Atomic array handling keeps its existing path rather than moving _Atomic
+// onto an element and silently admitting a different type.
+BUSTER_C_SHARED CTypeId c_parse_add_qualified_type(CParseResult* result, CTypeId base, CType qualifiers)
+{
+    CTypeId qualified = C_TYPE_ID_INVALID;
+    CTypeId parent = C_TYPE_ID_INVALID;
+    u32 remaining = result->type_count;
+    bool complete = false;
+    while (base.value < result->type_count && remaining && !complete)
+    {
+        CType copy = result->types[base.value];
+        CTypeId element = copy.element_type;
+        bool array = copy.kind == C_TYPE_ARRAY && !copy.is_atomic && !qualifiers.is_atomic &&
+                     (copy.is_const || copy.is_volatile || copy.is_restrict ||
+                      qualifiers.is_const || qualifiers.is_volatile || qualifiers.is_restrict);
+        if (array)
+        {
+            qualifiers.is_const |= copy.is_const;
+            qualifiers.is_volatile |= copy.is_volatile;
+            qualifiers.is_restrict |= copy.is_restrict;
+            copy.is_const = false;
+            copy.is_volatile = false;
+            copy.is_restrict = false;
+        }
+        else
+        {
+            copy.is_const |= qualifiers.is_const;
+            copy.is_volatile |= qualifiers.is_volatile;
+            copy.is_restrict |= qualifiers.is_restrict;
+            copy.is_atomic |= qualifiers.is_atomic;
+        }
+        CTypeId row = c_parse_add_qualified_row(result, base, copy);
+        if (row.value == C_ID_UNDERLYING_INVALID)
+        {
+            break;
+        }
+        if (parent.value == C_ID_UNDERLYING_INVALID)
+        {
+            qualified = row;
+        }
+        else
+        {
+            result->types[parent.value].element_type = row;
+        }
+        parent = row;
+        base = element;
+        remaining -= 1;
+        complete = !array;
+    }
+    return complete ? qualified : C_TYPE_ID_INVALID;
 }
 
 // ---- shared qualified member copies (CTypeInterning's `qualified_*`) ----
@@ -15001,7 +15052,8 @@ BUSTER_C_SHARED bool c_test_parse_type_replay_effective_member_count(void)
 // and never a restrict or atomic row (CTypeInterning).
 BUSTER_C_INTERNAL bool c_parse_qualified_copy(CParseResult const* result, CTypeId base, CType qualifiers, CType* copy_out)
 {
-    bool shareable = base.value < result->type_count;
+    // Array qualification rewrites an element graph; a single-row key cannot certify it.
+    bool shareable = base.value < result->type_count && result->types[base.value].kind != C_TYPE_ARRAY;
     if (shareable)
     {
         CType copy = result->types[base.value];
@@ -27393,7 +27445,11 @@ BUSTER_C_INTERNAL CTypeId c_parse_auto_decay_type(CParseResult* result, CTypeId 
     {
         return C_TYPE_ID_INVALID;
     }
-    type = c_parse_unqualified_type(result, type);
+    // Array qualifiers belong to the element graph and survive decay.
+    if (result->types[type.value].kind != C_TYPE_ARRAY)
+    {
+        type = c_parse_unqualified_type(result, type);
+    }
     if (type.value >= result->type_count)
     {
         return C_TYPE_ID_INVALID;

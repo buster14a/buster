@@ -2,6 +2,9 @@
 // point is c_lower_to_ir at the bottom of the file: it sizes and fills one
 // IrProgram from the preprocessed token stream and the parser's entities,
 // scopes, and types, lowering every function body and global initializer.
+// Qualified-array mapping retains alias layout ownership while reading the
+// element graph, and adjusted parameter pointers take const only from their
+// brackets (c_ir_type_mapping_blocker, c_ir_mark_local_read_only; #4183).
 // c_ir_lower_capacity_plan owns the non-mutating count/overflow check before
 // the program arena is touched. c_ir_constant_initializer_bytes owns the
 // checked fixed context array while its dynamic work remains in task scratch.
@@ -8970,7 +8973,7 @@ BUSTER_C_INTERNAL void c_ir_mark_local_read_only(CIntegerIrBuilder* builder, CIn
             if (declared.value < builder->parse.type_count && builder->parse.types[declared.value].kind == C_TYPE_ARRAY)
             {
                 CType array = builder->parse.types[declared.value];
-                adjusted_pointer = !array.is_const;
+                adjusted_pointer = true;
                 const_pointer = array.array_bound < builder->parse.array_bound_count && builder->parse.array_bounds[array.array_bound].is_const;
             }
         }
@@ -61265,6 +61268,12 @@ BUSTER_C_INTERNAL u32 c_ir_type_mapping_blocker(CParseResult* parse, IrProgram* 
         {
             result = needed;
         }
+        if (result == UINT32_MAX && c_type->has_unqualified_type && c_type->kind == C_TYPE_ARRAY &&
+            c_type->element_type.value < parse->type_count &&
+            !c_ir_type_mapping_layout_resolved(program, c_type_ir_map[c_type->element_type.value]))
+        {
+            result = c_type->element_type.value;
+        }
     }
     else if (c_type->kind == C_TYPE_STRUCT || c_type->kind == C_TYPE_UNION)
     {
@@ -62271,6 +62280,20 @@ BUSTER_C_INTERNAL CIRLowerResult c_lower_to_ir_reserved_run(Arena* arena, String
                         continue;
                     }
                     IrTypeId qualified = unqualified;
+                    if (c_type->kind == C_TYPE_ARRAY && !c_type->is_atomic)
+                    {
+                        // The alias keeps its layout/alignment owner, but its
+                        // element graph may now carry const/volatile qualifiers.
+                        // Mapping the unqualified link alone would erase them.
+                        IrType* array = ir_type_from_id(&program->types, unqualified);
+                        IrTypeId element = c_type->element_type.value < parse.type_count
+                                               ? c_type_ir_map[c_type->element_type.value] : IR_TYPE_ID_INVALID;
+                        if (!array || array->kind != IR_TYPE_ARRAY || element.value == IR_ID_UNDERLYING_INVALID)
+                        {
+                            continue;
+                        }
+                        qualified = c_ir_add_array_type(program, &pointer_types, element, array->element_count);
+                    }
                     if (c_type->is_atomic || c_type->is_volatile)
                     {
                         qualified = c_ir_add_qualified_type(program, unqualified, c_type->is_atomic, c_type->is_volatile);

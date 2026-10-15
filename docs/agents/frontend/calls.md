@@ -6,23 +6,33 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
 
 ## Array parameter expression types
 
-An identifier denoting a parameter with an unqualified outer array row has its adjusted pointer type in
+An identifier denoting an array parameter has its adjusted pointer type in
 expression queries, including under address-of. `char *argv[]` therefore
-permits `char ***p = &argv`, while the address of a local `char *a[3]` retains
+permits `char ***p = &argv`, while a local array's address retains
 pointer-to-array type. `c_parse_expression_entity_type` supplies this rule to
-both the token query and tree expression typer; declaration/entity rows keep
-the array bounds for signature and VLA ownership. The tree only reads existing
+the token query and tree expression typer; declaration/entity rows keep the
+array bounds for signature and VLA ownership. The tree only reads existing
 interned pointer rows and declines to the query when a row is unavailable.
-Element qualifiers and the
-parameter's bracket `const` are retained. The registered
-`c_test_array_parameter_expression_type` checks accepted and rejected pointer
-conversions in semantic-only analysis and both canonical frontend forms;
-`c_test_array_parameter_address_runtime` checks pointer-object mutation and
-multidimensional parameters with both allocators and tree/query routes (#4173).
-Qualifiers applied to an array typedef remain on the existing path pending
-[#4183](https://github.com/buster14a/buster/issues/4183); they cannot be moved to
-the pointer to disguise lost element qualifiers. Wrong-target const/volatile
-alias conversions remain rejected.
+
+Qualifying an array alias copies its array chain and qualifies the element,
+including nested arrays and pointer elements. `const A a` therefore denotes
+a mutable pointer to const elements; only a bracket `const` makes the adjusted
+pointer read-only. Copies retain their original bound IDs and alignment
+records; expression decay retains the qualified element graph. Canonical mapping uses the copied element graph as well as the alias
+layout owner, preserving volatile element accesses. Array qualification does
+not fit the member interner's single-row key, so its read-only probe declines
+and the semantic producer constructs the graph without changing original rows.
+
+`c_test_array_parameter_expression_type` checks accepted and rejected alias,
+nested-array, pointer-element, bracket and VLA controls through semantic-only
+analysis and both frontend SSA forms. Desktop driver controls compare
+syntax-only/object diagnostics with AST on/off, and the canonical control pins
+volatile element load/store counts. `c_test_array_parameter_address_runtime`
+checks mutable adjusted pointers, nested const/volatile aliases and one-time
+VLA bound evaluation with both allocators, frontend SSA forms and AST routes.
+Hosted Linux GCC/Clang compile and run the same independent control source.
+`c_test_qualified_member_sharing` checks immutable original graphs, bound
+identity, alignment inheritance and read-only interner refusal (#4183).
 
 ## Transparent-union pointer arguments
 
