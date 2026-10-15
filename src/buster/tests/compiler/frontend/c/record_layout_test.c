@@ -23,7 +23,9 @@
 // the canonical object, record_layout_test_clang_corpus compiles the corpus
 // for every target through the real driver and compares every probe, and
 // record_layout_test_rule_selection checks which rule each target selects,
-// including targets Buster writes no object for. Both end every scratch that
+// including targets Buster writes no object for. The anonymous-attribute fixture
+// checks packed/aligned member promotion and neighboring malformed declarators.
+// Each fixture ends every scratch that
 // holds a unit with c_test_scratch_end, and C_TEST_BOUNDED_FIXTURE checks that
 // each returned every reservation it made (GitHub #3431).
 //
@@ -216,6 +218,91 @@ BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_rule_selection(UnitTestArg
     return result;
 }
 
+
+// Trailing type attributes must not turn an anonymous member into a missing
+// declarator. Fixed byte expectations also observe promoted layout and writes.
+BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_anonymous_attributes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    String8 source_path = buster_test_temporary_path(temporary.arena, S8("buster-anonymous-attributes"), S8(".c"));
+    String8 source = S8(
+        "struct PackedUnion { char head; union { int value; unsigned char bytes[4]; } __attribute__((packed)); char tail; };\n"
+        "struct PackedStruct { char head; struct { char byte; int value; } __attribute__((packed)); char tail; };\n"
+        "struct AlignedUnion { char head; union { int value; char bytes[4]; } __attribute__((aligned(16))); char tail; };\n"
+        "struct Repeated { char head; union { int value; char bytes[4]; } __attribute__((packed)) __attribute__((aligned(2))); char tail; };\n"
+        "struct Named { char head; struct { char byte; int value; } __attribute__((packed)) named[2]; char tail; };\n"
+        "_Static_assert(sizeof(struct PackedUnion) == 6 && _Alignof(struct PackedUnion) == 1, \"packed union\");\n"
+        "_Static_assert(sizeof(struct PackedStruct) == 7 && _Alignof(struct PackedStruct) == 1, \"packed struct\");\n"
+        "_Static_assert(sizeof(struct AlignedUnion) == 48 && _Alignof(struct AlignedUnion) == 16, \"aligned union\");\n"
+        "_Static_assert(sizeof(struct Repeated) == 8 && _Alignof(struct Repeated) == 2, \"repeated attributes\");\n"
+        "_Static_assert(sizeof(struct Named) == 12 && _Alignof(struct Named) == 1, \"named array\");\n"
+        "unsigned char anonymous_layout[] = { sizeof(struct PackedUnion), _Alignof(struct PackedUnion),\n"
+        " __builtin_offsetof(struct PackedUnion, value), __builtin_offsetof(struct PackedUnion, tail),\n"
+        " sizeof(struct PackedStruct), __builtin_offsetof(struct PackedStruct, byte), __builtin_offsetof(struct PackedStruct, value),\n"
+        " __builtin_offsetof(struct PackedStruct, tail), sizeof(struct AlignedUnion), _Alignof(struct AlignedUnion),\n"
+        " __builtin_offsetof(struct AlignedUnion, value), __builtin_offsetof(struct AlignedUnion, tail),\n"
+        " sizeof(struct Repeated), _Alignof(struct Repeated), __builtin_offsetof(struct Repeated, value), __builtin_offsetof(struct Repeated, tail),\n"
+        " sizeof(struct Named), __builtin_offsetof(struct Named, named[1].value), __builtin_offsetof(struct Named, tail) };\n"
+        "struct PackedUnion anonymous_image = { .head = 17, .bytes = {34, 51, 68, 85}, .tail = 102 };\n");
+    RecordLayoutExpectation expectations[] = {
+        {S8("anonymous_layout"), S8("060101050701020630101020080202060c070b")},
+        {S8("anonymous_image"), S8("112233445566")},
+    };
+    String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17")};
+    String8 invalid[] = {
+        S8("struct Invalid { union { int member; } __attribute__((packed)) *; };"),
+        S8("struct Invalid { union { int member; } __attribute__((packed)) , named; };"),
+        S8("struct Invalid { union { int member; } __attribute__((packed)) named junk; };"),
+    };
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+    {
+        if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            for (u32 target_index = 0; target_index < BUSTER_ARRAY_LENGTH(record_layout_targets); target_index += 1)
+            {
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    TemporalArena compile_temporary = arena_begin_temporal(temporary.arena);
+                    String8 object_path = buster_test_temporary_path(compile_temporary.arena, S8("buster-anonymous-attributes"), S8(".o"));
+                    String8 command[] = {S8("-nostdinc"), dialects[dialect], S8("-c"), S8("-target"), record_layout_targets[target_index].target,
+                        form ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"), S8("-o"), object_path, source_path};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        compile_temporary.arena, compiler_driver_parse_arguments(compile_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object))
+                    {
+                        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(expectations); index += 1)
+                        {
+                            BUSTER_TEST(arguments, record_layout_test_probe_matches(&compiled.object, expectations[index]));
+                        }
+                    }
+                    else
+                    {
+                        arguments->show(arguments, S8("anonymous attributes: {S8}: {S8}\n"), record_layout_targets[target_index].target, compiled.diagnostic);
+                    }
+                    os_file_delete(object_path);
+                    c_test_scratch_end(compile_temporary);
+                }
+            }
+        }
+        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+        {
+            if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(invalid[index]))))
+            {
+                TemporalArena compile_temporary = arena_begin_temporal(temporary.arena);
+                String8 command[] = {S8("-nostdinc"), dialects[dialect], S8("-fsyntax-only"), source_path};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    compile_temporary.arena, compiler_driver_parse_arguments(compile_temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE && compiled.diagnostic.length);
+                c_test_scratch_end(compile_temporary);
+            }
+        }
+    }
+    os_file_delete(source_path);
+    c_test_scratch_end(temporary);
+    return result;
+}
+
 UnitTestResult record_layout_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -228,6 +315,7 @@ UnitTestResult record_layout_tests(UnitTestArguments* arguments)
     }
     C_TEST_BOUNDED_FIXTURE(arguments, record_layout_test_clang_corpus);
     C_TEST_BOUNDED_FIXTURE(arguments, record_layout_test_rule_selection);
+    C_TEST_BOUNDED_FIXTURE(arguments, record_layout_test_anonymous_attributes);
     return result;
 }
 #endif
