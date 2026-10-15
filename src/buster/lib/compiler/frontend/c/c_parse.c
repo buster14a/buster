@@ -242,6 +242,19 @@ BUSTER_C_INTERNAL void c_parse_symbol_bindings_finish(CParseSymbolBindings* bind
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u64 c_assignment_chain_work;
 BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 c_test_type_parse_frame_capacity_limit;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestConstantPrefixWork c_constant_prefix_work;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_constant_prefix_rescan;
+CTestConstantPrefixWork c_test_constant_prefix_work_take(void)
+{
+    CTestConstantPrefixWork result = c_constant_prefix_work;
+    c_constant_prefix_work = (CTestConstantPrefixWork){0};
+    return result;
+}
+void c_test_constant_prefix_rescan_set(bool rescan)
+{
+    c_constant_prefix_rescan = rescan;
+}
+
 u64 c_test_assignment_chain_work(void)
 {
     return c_assignment_chain_work;
@@ -40234,7 +40247,41 @@ struct CParseConstantTask
     };
     CParseConstant left;
     u8 state;
+    bool operators_checked;
 };
+
+// Type-name probes can construct rows or complete an existing tag. Check each
+// probe immediately: a later successful root replaces committed_mutation_count.
+// Only a scan with no semantic writes may be reused by an unchanged suffix.
+BUSTER_C_INTERNAL bool c_parse_constant_prefix_plain(CPreprocessResult preprocess, CParseResult const* result, CTypeId type, u32 start, u32 end)
+{
+    CTypeKind kind = type.value < result->type_count ? result->types[type.value].kind : C_TYPE_INVALID;
+    bool plain = kind != C_TYPE_ENUM && c_parse_expression_real_kind(kind);
+    // This limits reuse only. The existing semantic parser still recognizes
+    // and validates every type name; constructor-bearing forms keep rescanning.
+    for (u32 token = start; plain && token < end; token += 1)
+        plain = preprocess.tokens[token].kind == C_TOKEN_IDENTIFIER;
+    return plain;
+}
+
+BUSTER_C_INTERNAL bool c_parse_constant_prefix_scan_stable(CTypeParseMachine const* machine, CParseResult const* result,
+                                                           CParseResult const* checkpoint, u32 mutation_mark)
+{
+    return machine->mutation_count == mutation_mark && machine->committed_mutation_count <= mutation_mark &&
+        result->declaration_count == checkpoint->declaration_count && result->type_count == checkpoint->type_count &&
+        result->array_bound_count == checkpoint->array_bound_count && result->type_alignment_count == checkpoint->type_alignment_count &&
+        result->interned_type_count == checkpoint->interned_type_count && result->interned_qualified_count == checkpoint->interned_qualified_count &&
+        result->member_count == checkpoint->member_count && result->enum_member_count == checkpoint->enum_member_count &&
+        result->parameter_count == checkpoint->parameter_count && result->alignment_count == checkpoint->alignment_count &&
+        result->aggregate_attribute_count == checkpoint->aggregate_attribute_count && result->entity_count == checkpoint->entity_count &&
+        result->scope_count == checkpoint->scope_count && result->identifier_use_count == checkpoint->identifier_use_count &&
+        result->type_identity_query_count == checkpoint->type_identity_query_count &&
+        result->noreturn_function_type_count == checkpoint->noreturn_function_type_count &&
+        result->diagnostic_count == checkpoint->diagnostic_count && result->warning_count == checkpoint->warning_count &&
+        result->deferred_static_assert_count == checkpoint->deferred_static_assert_count &&
+        result->deferred_bit_field_width_diagnostic_count == checkpoint->deferred_bit_field_width_diagnostic_count &&
+        result->bfloat16_builtin_call_count == checkpoint->bfloat16_builtin_call_count;
+}
 
 typedef struct CParseArrayDependency CParseArrayDependency;
 struct CParseArrayDependency
@@ -41561,9 +41608,18 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
             u32 conditional_depth = 0;
             bool operand = false;
             bool size_operator_operand = false;
-            for (u32 cursor = begin; cursor < limit; cursor += 1)
+            bool scan_stable = true;
+            bool operators_checked = task->operators_checked;
+#if BUSTER_INCLUDE_TESTS
+            operators_checked = operators_checked && !c_constant_prefix_rescan;
+            c_constant_prefix_work.reused += operators_checked;
+#endif
+            for (u32 cursor = begin; !operators_checked && cursor < limit; cursor += 1)
             {
                 CToken token = preprocess.tokens[cursor];
+#if BUSTER_INCLUDE_TESTS
+                c_constant_prefix_work.tokens += 1;
+#endif
                 if (c_token_in_well_known_set(preprocess.spelling_base, token, C_SYMBOL_WELL_KNOWN_BIT(EXTENSION)))
                 {
                     size_operator_operand = false;
@@ -41577,12 +41633,21 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                     if (!operand && !size_operator_operand && close < limit && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_PARENTHESIS))
                     {
                         u32 type_cursor = cursor + 1;
+                        CParseResult checkpoint = *result;
+                        u32 mutation_mark = machine->mutation_count;
                         CTypeId type = c_parse_constant_type_name(machine, result, preprocess, scope, type_cursor, close, &type_cursor);
                         if (type.value < result->type_count)
                         {
                             type = c_parse_pointer_chain(result, preprocess, type, &type_cursor, close);
                             cast = type.value < result->type_count && type_cursor == close;
                         }
+                        bool stable = c_parse_constant_prefix_plain(preprocess, result, type, cursor + 1, close) &&
+                            c_parse_constant_prefix_scan_stable(machine, result, &checkpoint, mutation_mark);
+                        scan_stable = scan_stable && stable;
+#if BUSTER_INCLUDE_TESTS
+                        c_constant_prefix_work.probes += 1;
+                        c_constant_prefix_work.refused += !stable;
+#endif
                     }
                     cursor = close < limit ? close : limit;
                     operand = !cast;
@@ -41645,6 +41710,13 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 tasks[count++] = (CParseConstantTask){.start = begin, .end = split, .cast_type = C_TYPE_ID_INVALID};
                 continue;
             }
+            // Removing a leading cast or unary operator leaves the same
+            // delimiter-level scan state. Groups and selected arms expose new
+            // operators and must start a fresh scan instead.
+            operators_checked = operators_checked || scan_stable;
+#if BUSTER_INCLUDE_TESTS
+            operators_checked = operators_checked && !c_constant_prefix_rescan;
+#endif
             if (c_token_is_punctuator(&first, C_PUNCTUATOR_LEFT_PARENTHESIS))
             {
                 u32 close = c_parse_matching_delimiter_indexed(result, preprocess, begin);
@@ -41652,9 +41724,12 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 {
                     task->start += 1;
                     task->end -= 1;
+                    task->operators_checked = false;
                     continue;
                 }
                 u32 cursor = begin + 1;
+                CParseResult checkpoint = *result;
+                u32 mutation_mark = machine->mutation_count;
                 CTypeId type = close < limit ? c_parse_constant_type_name(machine, result, preprocess, scope, cursor, close, &cursor)
                                              : C_TYPE_ID_INVALID;
                 if (type.value < result->type_count)
@@ -41665,7 +41740,14 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 {
                     task->state = 3;
                     task->cast_type = type;
-                    tasks[count++] = (CParseConstantTask){.start = close + 1, .end = limit, .cast_type = C_TYPE_ID_INVALID};
+                    bool stable = c_parse_constant_prefix_plain(preprocess, result, type, begin + 1, close) &&
+                        c_parse_constant_prefix_scan_stable(machine, result, &checkpoint, mutation_mark);
+                    tasks[count++] = (CParseConstantTask){.start = close + 1, .end = limit, .cast_type = C_TYPE_ID_INVALID,
+                        .operators_checked = operators_checked && stable};
+#if BUSTER_INCLUDE_TESTS
+                    c_constant_prefix_work.probes += 1;
+                    c_constant_prefix_work.refused += !stable;
+#endif
                     continue;
                 }
             }
@@ -41698,7 +41780,8 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 c_token_is_punctuator(&first, C_PUNCTUATOR_TILDE) || c_token_is_punctuator(&first, C_PUNCTUATOR_EXCLAMATION))
             {
                 task->state = 4;
-                tasks[count++] = (CParseConstantTask){.start = begin + 1, .end = limit, .cast_type = C_TYPE_ID_INVALID};
+                tasks[count++] = (CParseConstantTask){.start = begin + 1, .end = limit, .cast_type = C_TYPE_ID_INVALID,
+                    .operators_checked = operators_checked};
                 continue;
             }
             if (first.kind == C_TOKEN_IDENTIFIER && (string_equal(c_token_spelling(preprocess.spelling_base, first), S8("_Generic")) ||
@@ -41714,6 +41797,7 @@ BUSTER_C_INTERNAL CParseConstant c_parse_typed_constant(CTypeParseMachine* machi
                 {
                     task->start = selected_start;
                     task->end = selected_end;
+                    task->operators_checked = false;
                     continue;
                 }
             }

@@ -253,6 +253,19 @@ valid neighbors through semantic-only analysis and both canonical frontend
 forms. This enforces C11/C17 6.7.6.2p2 and 6.7.2.1p9; see
 [WG14 N1570](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf).
 
+The typed-constant precedence scan reuses a completed no-operator verdict
+only for unchanged cast and unary suffixes. Each type-name probe must preserve
+semantic inventories and mutation records; only identifier-only primitive
+scalar type-name runs can certify reuse. Constructor, `typeof`, attribute,
+array and function forms retain their existing scan order. Exposing a
+parenthesized group or a selected generic/choose arm starts a fresh scan;
+binary, builtin and array-dependency children also begin independently.
+`c_test_constant_prefix_scan_work` counts actual visits at geometric sizes and
+retains the original scan as a quadratic negative control.
+`c_test_constant_prefix_scan_boundaries` compares model inventories, protected
+query rollback, structured diagnostics and global images against that control.
+The original deep wide-float initializer population is unchanged.
+
 The typed-constant precedence scan keeps `sizeof` and the alignment operators
 as unary prefixes while it finds binary splits. A parenthesized type operand
 belongs to that operator, rather than being mistaken for a cast, and GNU

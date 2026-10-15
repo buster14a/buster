@@ -50,6 +50,21 @@ struct CTestBodyScratchRequest
 BUSTER_F_DECL void c_test_body_validation_scratch_trace(CTestBodyScratchRequest* entries, u32 capacity);
 BUSTER_F_DECL u32 c_test_body_validation_scratch_trace_count(void);
 
+// Actual typed-constant precedence token visits and type-name probes. Reuse
+// counts suffix tasks whose parent already proved no top-level operator;
+// refused counts nonplain type-name probes or probes whose semantic writes
+// prevented that reuse.
+typedef struct CTestConstantPrefixWork CTestConstantPrefixWork;
+struct CTestConstantPrefixWork
+{
+    u64 tokens;
+    u64 probes;
+    u64 reused;
+    u64 refused;
+};
+BUSTER_F_DECL CTestConstantPrefixWork c_test_constant_prefix_work_take(void);
+BUSTER_F_DECL void c_test_constant_prefix_rescan_set(bool rescan);
+
 // The tree expression typer (c_ast_types.c). c_test_ast_type_probe answers one
 // range of an analyzed function body on a private machine. `status` is a
 // C_TEST_AST_TYPE_PROBE_* value: the function has no body, the body was not

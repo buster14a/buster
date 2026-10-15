@@ -53445,6 +53445,217 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_wide_float_integer_global_initializers
     return result;
 }
 
+// Reuse the completed precedence scan only across unchanged unary/cast
+// suffixes. Counters observe actual production work, including the original
+// scan path selected by the negative control.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_prefix_scan_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 depths[] = {64, 256, 1024};
+    String8 prefixes[] = {S8("(int)"), S8("- "), S8("- (int)"), S8("(int)("), S8("(int)")};
+    String8 cores[] = {S8("7"), S8("7"), S8("7"), S8("3+4"), S8("_Generic(0,int:3+4,default:9)")};
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(prefixes); shape += 1)
+    {
+        u64 previous = 0;
+        for (u32 size = 0; size < BUSTER_ARRAY_LENGTH(depths); size += 1)
+        {
+            TemporalArena temporary = scratch_begin(0, 0);
+            u32 depth = depths[size];
+            String8 head = S8("static int probe=");
+            String8 tail = S8(";int main(void){return 0;}");
+            u64 length = head.length + prefixes[shape].length * depth + cores[shape].length + tail.length + (shape == 3 ? depth : 0);
+            char8* bytes = arena_allocate(temporary.arena, char8, length);
+            u64 cursor = 0;
+            memcpy(bytes + cursor, head.pointer, head.length);
+            cursor += head.length;
+            for (u32 index = 0; index < depth; index += 1)
+            {
+                memcpy(bytes + cursor, prefixes[shape].pointer, prefixes[shape].length);
+                cursor += prefixes[shape].length;
+            }
+            memcpy(bytes + cursor, cores[shape].pointer, cores[shape].length);
+            cursor += cores[shape].length;
+            if (shape == 3)
+                for (u32 index = 0; index < depth; index += 1) bytes[cursor++] = ')';
+            memcpy(bytes + cursor, tail.pointer, tail.length);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){.pointer = bytes, .length = length},
+                (CPreprocessOptions){.target = target_native, .dialect = C_PREPROCESS_DIALECT_GNU17});
+            c_test_constant_prefix_work_take();
+            CParseResult parsed = c_parse_for_lowering(temporary.arena, preprocess);
+            CTestConstantPrefixWork work = c_test_constant_prefix_work_take();
+            u64 visits = work.tokens + work.probes;
+            BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && parsed.diagnostic_count == 0);
+            BUSTER_TEST_RAW(arguments, visits >= depth && visits <= 24 * (u64)depth + 128 &&
+                (!size || visits <= 5 * previous),
+                string_format(temporary.arena, S8("constant prefix shape={u32} depth={u32} tokens={u64} probes={u64} reused={u64} previous={u64}"),
+                    shape, depth, work.tokens, work.probes, work.reused, previous));
+            if (shape != 3) BUSTER_TEST(arguments, work.reused >= depth);
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("constant-prefix.c"), preprocess, parsed, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified);
+                IrGlobal* global = lowered.program ? c_test_find_ir_global(lowered.program->modules, lowered.program, S8("probe")) : 0;
+                BUSTER_TEST(arguments, global && global->initializer_kind == IR_GLOBAL_INITIALIZER_INTEGER && global->initializer_bits == 7);
+            }
+            previous = visits;
+            c_test_scratch_end(temporary);
+        }
+    }
+    // The original production path is an independent work negative control.
+    // It must retain quadratic growth on small cases while the reused scan
+    // takes linear work; never accelerate or shrink the deep fixture above.
+    u64 original[2] = {0};
+    for (u32 size = 0; size < 2; size += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u32 depth = size ? 64 : 16;
+        String8 head = S8("static int probe=");
+        String8 tail = S8("7;int main(void){return 0;}");
+        u64 length = head.length + 5 * (u64)depth + tail.length;
+        char8* bytes = arena_allocate(temporary.arena, char8, length);
+        memcpy(bytes, head.pointer, head.length);
+        for (u32 index = 0; index < depth; index += 1) memcpy(bytes + head.length + 5 * (u64)index, "(int)", 5);
+        memcpy(bytes + head.length + 5 * (u64)depth, tail.pointer, tail.length);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, (String8){.pointer = bytes, .length = length},
+            (CPreprocessOptions){.target = target_native, .dialect = C_PREPROCESS_DIALECT_GNU17});
+        c_test_constant_prefix_work_take();
+        c_test_constant_prefix_rescan_set(true);
+        CParseResult parsed = c_parse_for_lowering(temporary.arena, preprocess);
+        c_test_constant_prefix_rescan_set(false);
+        CTestConstantPrefixWork work = c_test_constant_prefix_work_take();
+        original[size] = work.tokens + work.probes;
+        BUSTER_TEST(arguments, !parsed.diagnostic_count && work.reused == 0 && work.tokens > (u64)depth * depth / 2);
+        c_test_scratch_end(temporary);
+    }
+    BUSTER_TEST(arguments, original[1] > 10 * original[0]);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_constant_prefix_scan_boundaries(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    struct
+    {
+        String8 source;
+        bool valid;
+        bool refused;
+    } cases[] = {
+        {S8("static int probe=(int)(int)(3+4);int main(void){return 0;}"), true, false},
+        {S8("static int probe=-(int)(3+4);int main(void){return 0;}"), true, false},
+        {S8("static int probe=(int)(int)_Generic(0,int:3+4,default:9);int main(void){return 0;}"), true, false},
+        {S8("static int probe=(int)(int)__builtin_choose_expr(1,3+4,9);int main(void){return 0;}"), true, false},
+        {S8("static int probe=(int)(int)(0?9:3+4);int main(void){return 0;}"), true, false},
+        {S8("static int probe=(int)(int)__builtin_popcount(1+126);int main(void){return 0;}"), true, false},
+        {S8("typedef const int T;static int probe=(int)(T)(3+4);int main(void){return 0;}"), true, false},
+        {S8("static int probe=(int)(_Atomic(int))(3+4);int main(void){return 0;}"), true, true},
+        {S8("static int probe=(int)(int)sizeof(int[1+2]);int main(void){return 0;}"), true, false},
+        {S8("static int probe=(int)(int)_Alignof(double);int main(void){return 0;}"), true, false},
+        {S8("struct S;static unsigned long k=(typeof(sizeof(struct S {})))(int)1;"
+            "_Static_assert(sizeof(struct S)==sizeof(struct {}),\"complete\");int main(void){return 0;}"), true, true},
+        {S8("struct S;static unsigned long k=(unsigned long)(typeof(sizeof(struct S {})))(int)1;"
+            "_Static_assert(sizeof(struct S)==sizeof(struct {}),\"complete\");int main(void){return 0;}"), true, true},
+        {S8("struct S;static unsigned long k=(unsigned long)(typeof(sizeof(struct S {char a[7];})))(int)1;"
+            "_Static_assert(sizeof(struct S)==7,\"complete\");int main(void){return 0;}"), true, true},
+        {S8("typedef int V __attribute__((vector_size(16)));static V probe=(V){1,2,3,4};int main(void){return 0;}"), true, false},
+        {S8("static int probe=(int __attribute__((vector_size(16))))1;int main(void){return 0;}"), false, true},
+        {S8("enum E{A=7};static int probe=(int)(enum E)A;int main(void){return 0;}"), true, true},
+        {S8("static int probe=(int)(int)(1/0);int main(void){return 0;}"), false, false},
+        {S8("static int probe=(int)(int)missing;int main(void){return 0;}"), false, false},
+        {S8("static int probe=(int)(unsigned signed int)1;int main(void){return 0;}"), false, false},
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(cases); index += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult preprocess = c_preprocess(temporary.arena, cases[index].source,
+            (CPreprocessOptions){.target = target_native, .dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParseResult models[2] = {0};
+        for (u32 mode = 0; mode < 2; mode += 1)
+        {
+            c_test_constant_prefix_work_take();
+            c_test_constant_prefix_rescan_set(mode != 0);
+            models[mode] = c_parse_for_lowering(temporary.arena, preprocess);
+            c_test_constant_prefix_rescan_set(false);
+            CTestConstantPrefixWork work = c_test_constant_prefix_work_take();
+            BUSTER_TEST_RAW(arguments, (models[mode].diagnostic_count == 0) == cases[index].valid,
+                string_format(temporary.arena, S8("constant prefix boundary={u32} mode={u32} diagnostics={u32}"),
+                    index, mode, models[mode].diagnostic_count));
+            if (cases[index].refused)
+                BUSTER_TEST_RAW(arguments, work.refused != 0,
+                    string_format(temporary.arena, S8("constant prefix refusal boundary={u32} mode={u32} probes={u64}"), index, mode, work.probes));
+        }
+        CParseResult* left = models;
+        CParseResult* right = models + 1;
+        BUSTER_TEST(arguments, left->type_count == right->type_count && left->array_bound_count == right->array_bound_count &&
+            left->type_alignment_count == right->type_alignment_count && left->interned_type_count == right->interned_type_count &&
+            left->interned_qualified_count == right->interned_qualified_count && left->member_count == right->member_count &&
+            left->enum_member_count == right->enum_member_count && left->parameter_count == right->parameter_count &&
+            left->alignment_count == right->alignment_count && left->aggregate_attribute_count == right->aggregate_attribute_count &&
+            left->entity_count == right->entity_count && left->scope_count == right->scope_count &&
+            left->identifier_use_count == right->identifier_use_count && left->type_identity_query_count == right->type_identity_query_count &&
+            left->noreturn_function_type_count == right->noreturn_function_type_count && left->warning_count == right->warning_count &&
+            left->deferred_static_assert_count == right->deferred_static_assert_count &&
+            left->deferred_bit_field_width_diagnostic_count == right->deferred_bit_field_width_diagnostic_count);
+        BUSTER_TEST(arguments, left->diagnostic_count == right->diagnostic_count);
+        for (u32 row = 0; row < BUSTER_MIN(left->diagnostic_count, right->diagnostic_count); row += 1)
+        {
+            CDiagnostic a = left->diagnostics[row];
+            CDiagnostic b = right->diagnostics[row];
+            BUSTER_TEST(arguments, a.kind == b.kind && a.severity == b.severity && a.location.offset == b.location.offset &&
+                a.location.line == b.location.line && a.location.column == b.location.column);
+            BUSTER_STRING_TEST(arguments, a.message, b.message);
+        }
+        if (index == 0)
+        {
+            u32 start = 0;
+            u32 end = 0;
+            for (u32 token = 0; token < preprocess.token_count; token += 1)
+            {
+                if (!start && c_token_is_punctuator(&preprocess.tokens[token], C_PUNCTUATOR_ASSIGN)) start = token + 1;
+                if (start && !end && c_token_is_punctuator(&preprocess.tokens[token], C_PUNCTUATOR_SEMICOLON)) end = token;
+            }
+            for (u32 mode = 0; mode < 2; mode += 1)
+            {
+                CParseResult checkpoint = models[mode];
+                u64 bytes = (u64)checkpoint.type_count * sizeof(CType);
+                CType* held = arena_allocate(temporary.arena, CType, checkpoint.type_count);
+                memcpy(held, checkpoint.types, bytes);
+                c_test_constant_prefix_rescan_set(mode != 0);
+                CIntegerConstant constant = c_test_type_integer_constant_read(temporary.arena, preprocess, models + mode,
+                    (CScopeId){0}, start, end);
+                c_test_constant_prefix_rescan_set(false);
+                BUSTER_TEST(arguments, constant.valid && !constant.is_negative && !constant.magnitude_high && constant.magnitude == 7);
+                BUSTER_TEST(arguments, !memcmp(&checkpoint, models + mode, sizeof(checkpoint)) && !memcmp(held, checkpoint.types, bytes));
+            }
+        }
+        if (cases[index].valid)
+        {
+            CIRLowerResult lowered[2] = {0};
+            for (u32 mode = 0; mode < 2; mode += 1)
+            {
+                lowered[mode] = c_lower_to_ir_with_options(temporary.arena, S8("constant-prefix-boundary.c"), preprocess, models[mode], target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = mode != 0});
+                BUSTER_TEST(arguments, lowered[mode].program && !lowered[mode].diagnostic_count && lowered[mode].canonical_ir_certified);
+            }
+            if (lowered[0].program && lowered[1].program)
+            {
+                IrModule* module = lowered[0].program->modules;
+                for (u32 row = 0; row < module->global_count; row += 1)
+                {
+                    IrGlobal* a = module->globals + row;
+                    IrSymbol* symbol = ir_symbol_from_id(&lowered[0].program->symbols, a->symbol);
+                    IrGlobal* b = symbol ? c_test_find_ir_global(lowered[1].program->modules, lowered[1].program, symbol->name) : 0;
+                    BUSTER_TEST(arguments, b && a->initializer_kind == b->initializer_kind && a->initializer_bits == b->initializer_bits &&
+                        a->initializer_is_negative == b->initializer_is_negative && a->bytes.length == b->bytes.length && a->relocation_count == b->relocation_count &&
+                        (!a->bytes.length || (a->bytes.pointer && b->bytes.pointer && !memcmp(a->bytes.pointer, b->bytes.pointer, a->bytes.length))));
+                }
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // The x87 initializer folder keeps its pending operators on an explicit stack
 // sized from the token count, so nesting depth is not a limit (#2779).  Each
 // row nests one operator form `depth` times around 1.0L and pins the exact
@@ -70291,6 +70502,8 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_wasm_long_double_storage);
     C_TEST_FIXTURE(arguments, c_test_wide_float_android_boundaries);
     C_TEST_FIXTURE(arguments, c_test_wide_float_cleanup_signature_calls);
+    C_TEST_FIXTURE(arguments, c_test_constant_prefix_scan_work);
+    C_TEST_FIXTURE(arguments, c_test_constant_prefix_scan_boundaries);
     C_TEST_FIXTURE(arguments, c_test_wide_float_deep_initializers);
     C_TEST_FIXTURE(arguments, c_test_wide_float_function_signatures);
     C_TEST_FIXTURE(arguments, c_test_wide_float_global_boundaries);
