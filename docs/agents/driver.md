@@ -189,13 +189,56 @@ program is released and its arena is destroyed; when the program calls
 Executed test coverage is x86-64 Linux only; shebang execution is not
 implemented.
 
+## Native function lanes
+
+For native x86-64 and AArch64, `-fcompile-jobs=N` also permits selection,
+MIR verification, allocation, QUALITY scheduling and machine encoding of
+independent functions within one translation unit. Canonical IR preparation
+and final code/debug/unwind/relocation publication remain serial. A TU lane
+uses one function lane, so the budgets do not multiply. Omission and `N=1`
+retain one-lane execution and in-place encoding. Bootstrap MIR tracing also
+uses one lane to retain its ordered trace.
+
+`codegen_function_worker_limit` caps the requested width by the permitted
+logical CPU count, the number of lowered functions and 4,096 canonical
+instructions per worker. Tiny inputs therefore avoid prewarm and worker
+arenas. This is a conservative work gate; it is not a physical-core or RAM
+estimate. The verbose `CODEGEN_LANES function_workers=N` line reports the
+largest actual function gang, separately from `compilation_workers`, which
+continues to describe translation-unit cohorts.
+
+The driver prewarms the native family before starting function lanes. An
+embedding pipeline that invokes frontend APIs after its own gang must use
+`compiler_parallel_prewarm()` before that gang, as described below.
+
+Each worker shares immutable canonical rows and the machine type projection,
+with private ABI classification pages, call-signature plans and source cursor.
+A bounded cohort has at most four pending functions per requested lane and
+its summed conservative machine scratch bounds cannot exceed 256 GiB.
+Reservations commit only touched pages; this ceiling does not promise that a
+host has enough RAM. Output and cache arenas are coordinator-owned and
+released before codegen returns. Results occupy stable emission-indexed slots;
+ordered publication copies encoded fragments and preserves the original code
+layout, assembly placement, line suppression and earliest failure. A code-buffer
+retry discards the previous attempt's module state and prepares its functions
+again. Failed modules publish no partial artifact.
+
+The registered `compiler_driver_test_function_lanes` compares byte-identical
+objects at 1/2/4/8 workers under both allocators, with debug information and
+verification, races cold x86 metadata fills in fresh children, and checks
+source-ordered rejection, artifact preservation and subsequent recovery.
+`test_tsan` includes this fixture. Native runtime evidence is scoped to the
+measured host; a different architecture or worker population needs its own
+measurement.
+
 ## Opt-in native translation-unit lanes
 
 `-fcompile-jobs=N` accepts a positive 32-bit worker request. Omission (or
-zero in the invocation API) means one worker. Only consecutive native C
-inputs in a link invocation are batched; preprocessing, syntax-only, `-S`,
-`-c`, LLVM/GPU/Wasm/eBPF paths and single-input fast paths retain their
-existing execution. Objects, archives, assembly and each `-l` occurrence are
+zero in the invocation API) means one worker. Consecutive native C
+inputs in a link invocation use translation-unit cohorts. Native single-unit
+code generation can also use the requested budget for function preparation,
+including `-c` and `-S`; see [function lanes](#native-function-lanes).
+Preprocessing, syntax-only and LLVM/GPU/Wasm/eBPF retain their existing execution. Objects, archives, assembly and each `-l` occurrence are
 serial boundaries, even when `-x c` is present. A library between C sources
 ends the cohort before later translation units can publish definitions. Worker count is clamped to the logical CPUs the
 process may run on (the affinity mask on Linux and Windows, so `taskset`, a

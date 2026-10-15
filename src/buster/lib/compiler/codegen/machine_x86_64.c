@@ -29,6 +29,8 @@
 // machine_x64_index_constant_offset folds a constant INDEX index into its base
 // address offset, so a frame array element's address is one rematerializable
 // LEA_FRAME; constants only such rows read are marked fused_dead too.
+// The first fact walk records CAST/INDEX rows in the candidate allocation's
+// unused tail; after branch fusion, folded reads retire their use counts.
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_internal.h>
@@ -8342,6 +8344,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     MachineX64CandidateRow* candidate_rows =
         arena_allocate(arena, MachineX64CandidateRow, function->instruction_count ? function->instruction_count : 1);
     u32 candidate_count = 0;
+    u32 fold_candidate_count = 0;
     bool nonvolatile_memory = true;
     bool returns_twice_free = true;
     u32 walk_ordinal = 0;
@@ -8439,6 +8442,14 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 candidate_rows[candidate_count] = (MachineX64CandidateRow){.row = id.value, .ordinal = walk_ordinal + 1};
                 candidate_count += 1;
                 block_candidate_count += 1;
+            }
+            else if (instruction->opcode == IR_OPCODE_CAST || instruction->opcode == IR_OPCODE_INDEX)
+            {
+                // These opcodes cannot be alias/fusion candidates. The two
+                // populations share the existing allocation from opposite
+                // ends, with at most one entry per visited canonical row.
+                fold_candidate_count += 1;
+                candidate_rows[function->instruction_count - fold_candidate_count].row = id.value;
             }
             walk_ordinal += 1;
             if (instruction->result.value != IR_ID_UNDERLYING_INVALID && instruction->result.value < function->value_count)
@@ -9070,38 +9081,32 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // use of which is one of those rows selects into nothing. The reads are
     // counted over the same rows as use_count; edge arguments are uses no
     // row accounts for, so a value reaching a block parameter stays live.
-    u32* constant_folded_reads = arena_allocate(arena, u32, value_capacity);
-    memset(constant_folded_reads, 0, sizeof(u32) * value_capacity);
+    // Fusion was the last reader of the original counts. Retire each folded
+    // read directly, without a value-wide counter or another marking walk.
     u64 copied_constant = 0;
     u32 folded_offset = 0;
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+    for (u32 fold_index = 0; fold_index < fold_candidate_count; fold_index += 1)
     {
-        IrBlock* block = function->blocks + block_index;
-        for (IrInstructionId id = block->first_instruction; id.value <= block->last_instruction.value; id.value += 1)
+        u32 row = candidate_rows[function->instruction_count - 1u - fold_index].row;
+        IrInstruction* instruction = function->instructions + row;
+        bool selected_result = instruction->result.value < function->value_count &&
+                               selector.value_virtual_registers[instruction->result.value] != UINT32_MAX;
+        u32 source = UINT32_MAX;
+        if (selected_result && instruction->opcode == IR_OPCODE_CAST && machine_x64_cast_copies_constant(&selector, instruction, &copied_constant))
         {
-            IrInstruction* instruction = function->instructions + id.value;
-            bool selected_result = instruction->result.value < function->value_count &&
-                                   selector.value_virtual_registers[instruction->result.value] != UINT32_MAX;
-            if (selected_result && instruction->opcode == IR_OPCODE_CAST && machine_x64_cast_copies_constant(&selector, instruction, &copied_constant))
-            {
-                constant_folded_reads[instruction->operands[0].value] += 1;
-            }
-            else if (selected_result && instruction->opcode == IR_OPCODE_INDEX &&
-                     machine_x64_index_constant_offset(&selector, instruction, &folded_offset))
-            {
-                constant_folded_reads[instruction->operands[1].value] += 1;
-            }
+            source = instruction->operands[0].value;
         }
-    }
-    for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
-    {
-        IrBlock* block = function->blocks + block_index;
-        for (IrInstructionId id = block->first_instruction; id.value <= block->last_instruction.value; id.value += 1)
+        else if (selected_result && instruction->opcode == IR_OPCODE_INDEX &&
+                 machine_x64_index_constant_offset(&selector, instruction, &folded_offset))
         {
-            u32 value = function->instructions[id.value].result.value;
-            if (value < function->value_count && constant_folded_reads[value] && constant_folded_reads[value] == value_uses[value].use_count)
+            source = instruction->operands[1].value;
+        }
+        if (source != UINT32_MAX)
+        {
+            value_uses[source].use_count -= 1;
+            if (!value_uses[source].use_count)
             {
-                selector.fused_dead[value] = 1;
+                selector.fused_dead[source] = 1;
             }
         }
     }

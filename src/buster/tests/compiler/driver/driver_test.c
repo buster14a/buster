@@ -1826,24 +1826,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lazy_x86_shapes(UnitTest
     return result;
 }
 
-// Lanes fill the x86 caches they reach on first use, under once-claims, with
-// no complete prewarm (#53).  Eight translation units spell the same bodies
-// under their own names, so the lanes of a fresh `cc` child reach the same
-// cold forms, exact plans, shapes, dense tables, variable-memory cells and
-// template rows at once: x87, division, atomics, conversions, flag
-// materialization, near and far field offsets, a loop and inline assembly.
-// Every worker count must link the bytes the one-worker child links, under
-// both machine allocators, with -fno-machine-fallback so an unresolved shape
-// fails the compile instead of falling back.  A fill that ran twice, raced a
-// reader or aborted on a serial check would show up as a failed child or a
-// byte difference.
-BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lane_first_fills(UnitTestArguments* arguments)
-{
-    UnitTestResult result = {0};
 #if !BUSTER_ANDROID && !BUSTER_IOS
-    Arena* arena = arguments->arena;
-    u64 position = arena->position;
-    String8 body =
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_lane_body(void)
+{
+    String8 result =
         S8("typedef long long i64;\n"
            "typedef unsigned long long u64;\n"
            "long double FN(ld_mix)(long double a, long double b) { return a * b + a / b - (a < b ? a : -b); }\n"
@@ -1865,6 +1851,28 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lane_first_fills(UnitTes
            "int FN(scaled_sum)(int* v, int n) { int s = 0; for (int i = 0; i < n; i += 1) s += v[i] * (i + 3) - (v[i] >> 2); return s; }\n"
            "int FN(asm_add)(int a, int b) { __asm__(\"addl %1, %0\" : \"+r\"(a) : \"r\"(b)); return a; }\n"
            "u64 FN(rotate)(u64 x, int k) { return (x << (k & 63)) | (x >> ((64 - k) & 63)); }\n");
+    return result;
+}
+#endif
+
+// Lanes fill the x86 caches they reach on first use, under once-claims, with
+// no complete prewarm (#53).  Eight translation units spell the same bodies
+// under their own names, so the lanes of a fresh `cc` child reach the same
+// cold forms, exact plans, shapes, dense tables, variable-memory cells and
+// template rows at once: x87, division, atomics, conversions, flag
+// materialization, near and far field offsets, a loop and inline assembly.
+// Every worker count must link the bytes the one-worker child links, under
+// both machine allocators, with -fno-machine-fallback so an unresolved shape
+// fails the compile instead of falling back.  A fill that ran twice, raced a
+// reader or aborted on a serial check would show up as a failed child or a
+// byte difference.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_lane_first_fills(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    Arena* arena = arguments->arena;
+    u64 position = arena->position;
+    String8 body = compiler_driver_test_lane_body();
     enum
     {
         COMPILER_DRIVER_TEST_LANE_FILL_UNITS = 8,
@@ -2070,6 +2078,81 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_contains(String8 text, String8 nee
     return string_first_sequence(text, needle) != BUSTER_STRING_NO_MATCH;
 }
 #endif
+
+// One TU shares canonical types and call signatures across many independent
+// functions. Fresh children race cold metadata fills; -g and verification cover
+// retained MIR, private encoding, ordered debug/unwind/relocation publication.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_function_lanes(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    Arena* arena = temporary.arena;
+    String8 input = buster_test_temporary_path(arena, S8("function-lanes"), S8(".c"));
+    String8 output = buster_test_temporary_path(arena, S8("function-lanes"), S8(".o"));
+    String8 chunks[160];
+    for (u32 chunk = 0; chunk < BUSTER_ARRAY_LENGTH(chunks); chunk += 1)
+    {
+        chunks[chunk] = string_format(arena, S8("#undef FN\n#define FN(name) name##_{u32}\n{S8}"
+            "int FN(caller)(int* p) {{ return FN(signed_divide)(*p, 3) + FN(asm_add)(*p, 7); }}\n"),
+            chunk, compiler_driver_test_lane_body());
+    }
+    String8 source = string_join_arena(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(chunks), false);
+    String8 refused = S8("int refused(int value) { __asm__ __volatile__(\"\" : : "
+        "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
+        "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
+        "\"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), \"r\"(value), "
+        "\"r\"(value), \"r\"(value)); return value; }");
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    u32 jobs[] = {1, 2, 4, 8};
+    for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(allocators); mode += 1)
+    {
+        String8 serial = {0};
+        String8 serial_error = {0};
+        for (u32 width = 0; width < BUSTER_ARRAY_LENGTH(jobs); width += 1)
+        {
+            String8 command[] = {S8("-target"), S8("x86_64-unknown-linux"), allocators[mode], S8("-g"), S8("-nostdinc"),
+                S8("-fverify-codegen"), string_format(arena, S8("-fcompile-jobs={u32}"), jobs[width]), S8("-v"), S8("-c"), S8("-o"), output, input};
+            String8 stdout_text = {0};
+            String8 stderr_text = {0};
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+            bool compiled = compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), &stdout_text, &stderr_text);
+            BUSTER_TEST_RAW(arguments, compiled, stderr_text);
+            String8 image = BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0}));
+            serial = width == 0 ? image : serial;
+            BUSTER_TEST(arguments, image.length && string_equal(image, serial));
+            u32 expected_workers = BUSTER_SINGLE_THREADED ? 1 : BUSTER_MIN(jobs[width], BUSTER_MAX(1u, os_get_logical_thread_count()));
+            BUSTER_TEST_RAW(arguments, compiler_driver_test_contains(stdout_text,
+                string_format(arena, S8("CODEGEN_LANES function_workers={u32}\n"), expected_workers)), stdout_text);
+            // Later worker failures cannot publish an earlier function's bytes.
+            // Repeat a valid compile after each rejection to catch cache/scratch
+            // lifetime damage, and require the same source-ordered diagnostic.
+            String8 invalid = string_format(arena, S8("{S8}\n{S8}\n"), source, refused);
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(invalid)));
+            String8 sentinel = S8("failed module must preserve the prior artifact");
+            BUSTER_TEST(arguments, file_write(output, BUSTER_SLICE_TO_BYTE_SLICE(sentinel)));
+            command[7] = S8("-fno-machine-fallback");
+            compiled = compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), &stdout_text, &stderr_text);
+            BUSTER_TEST(arguments, !compiled);
+            serial_error = width == 0 ? stderr_text : serial_error;
+            BUSTER_STRING_TEST(arguments, stderr_text, serial_error);
+            image = BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0}));
+            BUSTER_TEST(arguments, string_equal(image, sentinel));
+            BUSTER_TEST(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(source)));
+            compiled = compiler_driver_test_run_cc(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), &stdout_text, &stderr_text);
+            BUSTER_TEST_RAW(arguments, compiled, stderr_text);
+            image = BYTE_SLICE_TO_STRING(8, file_read(arena, output, (FileReadOptions){0}));
+            BUSTER_TEST(arguments, image.length && string_equal(image, serial));
+        }
+    }
+    (void)os_file_delete(input);
+    (void)os_file_delete(output);
+    scratch_end(temporary);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
 
 // `-include FILE` of #1418: both spellings, command-line order, -D visibility
 // inside the header, the primary file's own line numbers, and refusals.
@@ -37476,6 +37559,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_response_file_batch);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lazy_x86_shapes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_lane_first_fills);
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_function_lanes);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_cold_x86_source_selection);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_pass_through_arguments);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_test_runtime_path_arguments);

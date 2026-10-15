@@ -5925,6 +5925,14 @@ MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* p
     return module;
 }
 
+MachineSelectionModule* machine_select_module_for_lane(Arena* arena, IrProgram* program, MachineSelectionModule const* shared)
+{
+    MachineSelectionModule* result = arena_allocate(arena, MachineSelectionModule, 1);
+    *result = *shared;
+    machine_x64_signature_plans_prepare(arena, program, result);
+    return result;
+}
+
 #if BUSTER_INCLUDE_TESTS
 BUSTER_GLOBAL_LOCAL void machine_fast_picker_test_state_reset(MachineFastState* state, MachineTargetDescription const* description,
                                                               MachineStackPlacement* placement, u32* locations, u32* last_use,

@@ -424,6 +424,13 @@ hosts execute its independent expected-value fixture.
   through `machine_a64_cast_copies_constant` and `MACHINE_A64_MOV_RI`; its
   classification pass counts the copy-cast reads and the marking runs after
   branch fusion against the same use counts, edge arguments included.
+- x86-64 records CAST/INDEX candidate row IDs in the unused tail of the
+  alias/fusion candidate allocation during the existing fact walk. Those
+  opcode populations are disjoint, so at most one entry is retained per
+  visited row. After branch fusion's last use-count read, folded reads
+  decrement the existing counts; zero marks the source `fused_dead`.
+  No value-wide folded-read table, clear or full-row marking walk is needed.
+  Keep virtual-register classification and fold recognition unchanged.
 - x86-64 selection folds a constant `INDEX` index into its base address
   offset (`machine_x64_index_constant_offset`). When the index is a
   `CONSTANT_INTEGER` whose value, read at the index's width and signedness, is

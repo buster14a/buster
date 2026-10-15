@@ -152,9 +152,16 @@ bounded slice. Extending to more pending inputs must evaluate dynamic claims,
 full-TU/fragment lifetimes, grain size and memory together; no load-balancing
 speedup is established by this implementation.
 
-Do not parallelize functions by copying the TU design blindly: signature plans,
-IR source cursors, module line suppression and inline-assembly symbol changes
-are shared within a TU. Serial table prewarm does not remove these dependencies.
+Function lanes do not copy full translation units. The codegen coordinator
+publishes canonical CFGs and module-assembly labels before the gang. Workers
+share canonical rows and the immutable type projection, but own ABI pages,
+call-signature plans, source cursors and bounded machine fragments. Encoding
+runs on these private fragments; module line suppression, debug locations,
+relocation resolution and code layout publish serially in emission order.
+The one-lane caller enters the same preparation kernel with its original
+program and per-function scratch, then encodes in place. An enclosing TU gang
+clamps function workers to one. Serial prewarm alone would not remove any of
+these ownership dependencies.
 `compiler_parallel_prewarm()` is the complete native-C prewarm entry for a
 caller launching an external gang; idle persistent workers still count as live.
 Its x86 part is the serial compile's own `codegen_prewarm_for_target` plus
