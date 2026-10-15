@@ -1,5 +1,11 @@
 # Disk-image tooling
 
+Status: **preserved, unmaintained source**. This area has no default build,
+compiler-test, fuzz, analyzer or automatic CI coverage. Existing source, tests,
+CMake fragments and earlier procedures below are retained for reference; their
+buildability and behavior are not a current support promise. Reconnecting a
+consumer requires an explicit maintenance decision.
+
 [Catalogue](../../PROJECTS.md) · Area: `disk-tools` · [Tracking](../project-tracking.md)
 
 ## Purpose and existing source
@@ -21,9 +27,9 @@ filesystems, or bootability, and `entry_point` still does not call `verify_disk`
 ## Integration and validation boundary
 
 `cmake/DiskBuilder.cmake` defines the `disk_builder` target, independent of `ide`
-and its module closure (see the [repository map](../agents/project.md)). On Linux
-it is a default target and a `test_all` dependency, so a source that stops
-compiling fails the normal build under Clang and GCC with warnings as errors.
+and its module closure (see the [repository map](../agents/project.md)). The fragment is not included by the default graph. It was formerly a Linux
+default target and a `test_all` dependency; that compile-maintenance obligation
+has been removed.
 Fuzz-enabled trees (the Linux Release and sanitized Release CI shards) skip it,
 because `entry_point.c` then needs the libFuzzer driver that only Buster programs
 link; the Linux portability shard still compiles it. Windows and Apple

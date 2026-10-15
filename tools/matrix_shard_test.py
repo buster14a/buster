@@ -29,7 +29,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import ci_summary
 import github_ci_time
-import mobile_coverage
 
 MATRIX_OWNERS = ("release", "sanitized-release", "portability")
 MATRIX_SELECTIONS = ("combinations", "checks") + MATRIX_OWNERS
@@ -56,27 +55,11 @@ class AppleCIPolicyTests(unittest.TestCase):
         entries = re.findall(r"^          - name: (.+ native)$", evidence, re.M)
         self.assertEqual(Counter(entries), Counter(github_ci_time.NATIVE))
 
-    def test_mobile_inventory_rejects_missing_duplicate_foreign_and_intel_lanes(self):
-        original = mobile_coverage.WORKFLOW_PATH.read_text(encoding="utf-8")
-        ios = ("          - name: iOS AArch64\n            runner: macos-26\n"
-               "            os: ios\n            arch: aarch64\n")
-        self.assertEqual(original.count(ios), 1)
-        mutations = {
-            "missing-retained-ios": original.replace(ios, ""),
-            "duplicate-ios": original.replace(ios, ios + ios),
-            "intel-runner": original.replace(ios, ios.replace("macos-26", "macos-26-intel")),
-            "intel-target": original.replace(ios, ios.replace("iOS AArch64", "iOS x86-64").replace("aarch64", "x86_64")),
-            "wrong-android-runner": original.replace("runner: ubuntu-26.04\n            os: android", "runner: windows-2025\n            os: android"),
-        }
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "ci.yml"
-            path.write_text(original, encoding="utf-8", newline="\n")
-            self.assertEqual(len(mobile_coverage._workflow_mobile_lanes(path)), 2)
-            for name, text in mutations.items():
-                with self.subTest(mutation=name):
-                    path.write_text(text, encoding="utf-8", newline="\n")
-                    with self.assertRaises(mobile_coverage.MobileCoverageError):
-                        mobile_coverage._workflow_mobile_lanes(path)
+    def test_main_inventory_has_no_mobile_application_jobs(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertNotIn("\n  mobile:", workflow)
+        self.assertNotIn("needs.mobile", workflow)
+        self.assertTrue(set(github_ci_time.MOBILE).isdisjoint(github_ci_time.combination_jobs()))
 
 C_FIXTURE = r'''
 BUSTER_GLOBAL_LOCAL ProcessResult matrix_fixture_export(Arena* arena)
@@ -535,7 +518,7 @@ class WorkflowSetupTests(unittest.TestCase):
         expected = {
             "tools/ci_admission_test.py", "tools/main_ci_reuse_test.py",
             "tools/ci_zig_test.py",
-            "tools/ci_zig_cache_test.py", "tools/ci_android_sdk_test.py",
+            "tools/ci_zig_cache_test.py",
             "tools/analyzer_selection_test.py", "tools/coverage_manifest_test.py",
             "tools/matrix_shard_test.py", "tools/differential_ci_policy_test.py",
             "tools/native_producer_profile_test.py", "tools/native_target_compatibility_test.py",
@@ -798,7 +781,7 @@ class CompletionGateTests(unittest.TestCase):
         jobs = self.sample("split")
         # #2657: four split platforms x (release, sanitized-release,
         # portability) plus Windows AArch64 release/checks.
-        self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_JOBS), 25)
+        self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_JOBS), 23)
         self.assertEqual(len(github_ci_time.SPLIT_COMBINATION_PLATFORMS), 14)
         self.assertEqual(len(github_ci_time.MACOS_SPLIT_COMBINATION_JOBS), 29)
         self.assertFalse(any(name.endswith(" sanitized-debug") for name in github_ci_time.SPLIT_COMBINATION_JOBS))
@@ -1538,7 +1521,7 @@ class CompletionGateTests(unittest.TestCase):
         self.assertIn("BUSTER_MATRIX_SHARD: ${{ matrix.shard }}", desktop)
         self.assertIn("matrix.shard == 'release'", desktop)
         self.assertIn("name: desktop-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.shard }}-", desktop)
-        native = workflow.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
+        native = workflow.split("\n  native:", 1)[1].split("\n  uefi:", 1)[0]
         native_names = re.findall(r"^          - name: (.+ native)$", native, re.M)
         self.assertEqual(Counter(native_names), Counter(github_ci_time.NATIVE))
         self.assertIn("Execution-mode matrix (Windows)", native)
@@ -1548,7 +1531,7 @@ class CompletionGateTests(unittest.TestCase):
         self.assertIn("checks: read", aggregate)
         self.assertIn("github_ci_time.py require-jobs", aggregate)
         self.assertIn("Verify every desktop partition exists", aggregate)
-        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse, no_code_plan]", aggregate)
+        self.assertIn("needs: [lint, queue_lint, test, native, uefi, analyzer, reuse, no_code_plan]", aggregate)
         self.assertIn('--checks-layout "$BUSTER_CI_CHECKS_LAYOUT"', aggregate)
 
     def test_default_split_keeps_only_combined_and_barrier_dispatch_overrides(self):
@@ -1607,7 +1590,7 @@ class CompletionGateTests(unittest.TestCase):
         return run
 
     def test_timing_includes_every_new_shard_and_rejects_partial_runs(self):
-        for layout, job_count in (("combined", 21), ("historical-split", 27), ("macos-split", 29), ("split", 25)):
+        for layout, job_count in (("combined", 19), ("historical-split", 27), ("macos-split", 29), ("split", 23)):
             with self.subTest(layout=layout):
                 run = (self.historical_split_timing_sample() if layout == "historical-split" else
                        self.macos_split_timing_sample() if layout == "macos-split" else self.timing_sample(layout))
@@ -1677,20 +1660,19 @@ class DraftMacosDeferralTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         return {
             "test": workflow.split("\n  test:\n", 1)[1].split("\n  native:\n", 1)[0],
-            "native": workflow.split("\n  native:\n", 1)[1].split("\n  mobile:\n", 1)[0],
-            "mobile": workflow.split("\n  mobile:\n", 1)[1].split("\n  uefi:\n", 1)[0],
+            "native": workflow.split("\n  native:\n", 1)[1].split("\n  uefi:\n", 1)[0],
         }
 
-    def test_exactly_the_five_macos_runner_jobs_are_deferrable(self):
+    def test_exactly_the_four_macos_runner_jobs_are_deferrable(self):
         jobs = self.workflow_jobs()
         expected = []
         desktop = re.findall(r"^          - name: (.+)\n            lane: .+\n            runner: (.+)$", jobs["test"], re.M)
         expected += [f"{name} {shard}" for name, runner in desktop if runner.startswith("macos-")
                      for shard in ("release",) + github_ci_time.SPLIT_CHECK_SHARDS]
-        for job in ("native", "mobile"):
+        for job in ("native",):
             entries = re.findall(r"^          - name: (.+)\n            runner: (.+)$", jobs[job], re.M)
             expected += [name for name, runner in entries if runner.startswith("macos-")]
-        self.assertEqual(len(expected), 5)
+        self.assertEqual(len(expected), 4)
         self.assertEqual(Counter(expected), Counter(github_ci_time.MACOS_RUNNER_JOBS))
 
     def test_first_attempt_draft_accepts_deferred_macos_lanes_only(self):
@@ -1698,16 +1680,16 @@ class DraftMacosDeferralTests(unittest.TestCase):
         self.assertEqual(self.check(self.sample(deferred=False), draft=True), [])
         self.assertEqual(self.check(self.sample(deferred=False), draft=False), [])
         errors = self.check(self.sample(), draft=False)
-        self.assertEqual(sum("only the first attempt of a draft pull-request run" in error for error in errors), 5)
+        self.assertEqual(sum("only the first attempt of a draft pull-request run" in error for error in errors), 4)
         # A cancelled no-op rerun by rerun-failed-jobs runs the real lane
         # instead; a deferral record from a later attempt is never accepted.
         jobs = self.sample()
         for job in jobs:
-            if job["name"] in ("CI complete", "iOS AArch64" + github_ci_time.DEFERRED_SUFFIX):
+            if job["name"] in ("CI complete", "macOS AArch64 native" + github_ci_time.DEFERRED_SUFFIX):
                 job["run_attempt"] = 2
         errors = self.check(jobs, draft=True, attempt=2)
         self.assertEqual(len(errors), 1)
-        self.assertIn("iOS AArch64 (deferred for draft PR): only the first attempt", errors[0])
+        self.assertIn("macOS AArch64 native (deferred for draft PR): only the first attempt", errors[0])
         for job in jobs:
             job["run_attempt"] = 1 if job["name"] != "CI complete" else 2
         self.assertEqual(self.check(jobs, draft=True, attempt=2), [])
@@ -1896,7 +1878,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
             with mock.patch("builtins.print") as printed:
                 github_ci_time.report_deferrals(unrelated, None, notice=True)
             self.assertIn("(accepted by CI complete)", printed.call_args.args[0])
-            rejected = dict(unrelated, errors=["iOS AArch64" + github_ci_time.DEFERRED_SUFFIX + ": only the first attempt"])
+            rejected = dict(unrelated, errors=["macOS AArch64 native" + github_ci_time.DEFERRED_SUFFIX + ": only the first attempt"])
             with mock.patch("builtins.print") as printed:
                 github_ci_time.report_deferrals(rejected, None, notice=True)
             self.assertIn("(not accepted by CI complete)", printed.call_args.args[0])

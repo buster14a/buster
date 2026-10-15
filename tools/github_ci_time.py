@@ -43,6 +43,7 @@ import urllib.request
 # Current scheduling policy; historical inventories are timing inputs only.
 PLATFORMS = ("Linux x86-64", "Linux AArch64", "macOS AArch64",
              "Windows x86-64", "Windows AArch64")
+# Historical timing cohorts only; mobile application hosting was removed.
 MOBILE = ("Android x86-64", "iOS AArch64")
 NATIVE = tuple(name + " native" for name in PLATFORMS)
 UNIX_NATIVE = tuple(name for name in NATIVE if not name.startswith("Windows"))
@@ -63,7 +64,7 @@ HISTORICAL_COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in H
 COMBINATION_PLATFORMS = tuple(f"{platform} {shard}" for platform in PLATFORMS for shard in COMBINATION_SHARDS)
 LEGACY_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_UNIX_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 HISTORICAL_COMBINATION_JOBS = HISTORICAL_COMBINATION_PLATFORMS + HISTORICAL_MOBILE + HISTORICAL_NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
-COMBINATION_JOBS = COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
+COMBINATION_JOBS = COMBINATION_PLATFORMS + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 # #2657 moved sanitized Debug to build-only portability coverage, so the
 # current split owners are sanitized Release and portability. The #2120 and
 # #2659 layouts with a separate sanitized-debug job remain historical cohorts.
@@ -83,7 +84,7 @@ SPLIT_COMBINATION_PLATFORMS = tuple(
     f"{platform} {shard}" for platform in PLATFORMS
     for shard in (("release",) + SPLIT_CHECK_SHARDS
                   if platform in SPLIT_CHECK_PLATFORMS else COMBINATION_SHARDS))
-SPLIT_COMBINATION_JOBS = SPLIT_COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
+SPLIT_COMBINATION_JOBS = SPLIT_COMBINATION_PLATFORMS + NATIVE + UEFI + ANALYZER + ("Workflow lint", "CI complete")
 # The 27-job split layout before macOS AArch64 left grouped checks (#2659);
 # a separate timing cohort only, never an admissible current inventory.
 HISTORICAL_SPLIT_CHECK_PLATFORMS = ("Linux x86-64", "Linux AArch64", "Windows x86-64")
@@ -102,7 +103,7 @@ MACOS_SPLIT_COMBINATION_JOBS = MACOS_SPLIT_COMBINATION_PLATFORMS + MOBILE + NATI
     "Workflow lint", "CI complete")
 # Only these retained Apple jobs may defer on first-attempt draft PRs. Draft
 # pull requests always run the default split layout.
-MACOS_RUNNER_JOBS = tuple(name for name in SPLIT_COMBINATION_PLATFORMS + NATIVE + MOBILE
+MACOS_RUNNER_JOBS = tuple(name for name in SPLIT_COMBINATION_PLATFORMS + NATIVE
                           if name.startswith(("macOS ", "iOS ")))
 DEFERRED_SUFFIX = " (deferred for draft PR)"
 DEFERRAL_STEP = "Defer macOS runner lane for draft pull request"

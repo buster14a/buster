@@ -2171,7 +2171,7 @@ function(executable_add name is_buster_program main_file)
     endif()
 endfunction()
 
-function(buster_executable_add name main_file)
+function(buster_add_executable name main_file)
     executable_add(${name} ON ${main_file} ${ARGN})
 endfunction()
 
@@ -2182,17 +2182,17 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     list(APPEND BUSTER_COMPILER_PLATFORM_MODULES window)
 endif()
 
-# The headless compiler has no production font, image or AArch64 syntax-model
-# consumer. Keep the reusable modules registered above, but add them to ide only
-# for their tests (and image fuzzing). Future product targets must name their
-# own dependencies.
+# The maintained compiler graph excludes the preserved application, GUI, font
+# and image suites. Only the AArch64 syntax model has test-only compiler consumers.
+# Optional product/component CMake fragments remain as unmaintained source and
+# are not included by the default graph.
 set(BUSTER_COMPILER_TEST_MODULES)
 if (BUSTER_INCLUDE_TESTS)
     list(APPEND BUSTER_COMPILER_TEST_MODULES compiler_aarch64_syntax)
 endif()
 
-# buster_executable_add(<name> <main_file> MODULES <module>... [SOURCES <source>...])
-buster_executable_add(ide src/buster/apps/ide/ide.c
+# buster_add_executable(<name> <main_file> MODULES <module>... [SOURCES <source>...])
+buster_add_executable(ide src/buster/apps/ide/ide.c
     MODULES
     os
     entry_point
@@ -2454,21 +2454,6 @@ else()
             COMMENT "Test all"
             VERBATIM
         )
-    endif()
-
-    if (TARGET test_ui_slider)
-        add_dependencies(test_all test_ui_slider)
-        add_dependencies(test_units test_ui_slider)
-    endif()
-
-    if (TARGET test_ui_utf8)
-        add_dependencies(test_all test_ui_utf8)
-        add_dependencies(test_units test_ui_utf8)
-    endif()
-
-    if (TARGET test_ui_scale)
-        add_dependencies(test_all test_ui_scale)
-        add_dependencies(test_units test_ui_scale)
     endif()
 
     # Desktop-only performance benchmark. Not wired up for Android/iOS:

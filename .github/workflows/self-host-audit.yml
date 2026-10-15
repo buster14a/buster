@@ -55,11 +55,6 @@ jobs:
         run: |
           clang --version
           clang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o "$RUNNER_TEMP/buster-build"
-      - name: Verify the TrueType dependency boundary
-        run: >-
-          python3 tests/truetype_dependency_test.py
-          --driver "$RUNNER_TEMP/buster-build"
-          --output-directory "$RUNNER_TEMP/truetype-dependency"
       - name: Retain machine records in existing evidence
         if: ${{ !cancelled() }}
         uses: buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768

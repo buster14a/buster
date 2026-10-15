@@ -140,36 +140,6 @@ _frozen_actions = frozen_suite("frozen_action_pins", "tests/action_pins_test.py"
 
 
 class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
-    def test_mobile_monitor_runner_policy_and_evidence(self):
-        source = (ROOT / ".github/workflows/ios-monitor-tests.yml").read_text()
-        jobs = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)",
-                               source.split("\njobs:\n", 1)[1]))
-        self.assertEqual(set(jobs), {"launch-trace", "fake-tools", "native-probes"})
-        for name, runner, cap, artifact in (("launch-trace", "macos-26", 5, "ios-launch-trace"),
-                                            ("fake-tools", "macos-15", 10, "mobile-lifecycle")):
-            with self.subTest(job=name):
-                job = jobs[name]
-                self.assertEqual(re.findall(r"(?m)^        os: \[(.*?)\]$", job),
-                                 ["ubuntu-26.04, " + runner])
-                self.assertIn("    runs-on: ${{ matrix.os }}\n", job)
-                self.assertEqual(re.findall(r"(?m)^    timeout-minutes: (\d+)$", job), [str(cap)])
-                self.assertIn("fail-fast: false", job)
-                self.assertIn("name: " + artifact +
-                              "-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}", job)
-                for command in ("python3 --version", "/bin/bash --version", "bash --version",
-                                "python3 ios/gnu_timeout.py"):
-                    self.assertIn(command, job)
-                self.assertIn("${{ runner.temp }}/mobile-monitor-tool-versions.log", job)
-                self.assertIn("${{ runner.temp }}/machine-specifications/", job)
-        native = jobs["native-probes"]
-        self.assertEqual(re.findall(r"(?m)^    runs-on: (.+)$", native), ["macos-26"])
-        self.assertEqual(re.findall(r"(?m)^    timeout-minutes: (\d+)$", native), ["30"])
-        self.assertEqual(source.count("macos-15"), 1)
-        policy = (ROOT / "docs/apple-ci-policy.md").read_text()
-        for required in ("Temporary fake-tools version exception", "**Purpose:**", "**Evidence:**",
-                         "**Owner:**", "**Review condition:**", "#3479"):
-            self.assertIn(required, policy)
-
     def test_integrity_and_security_policy(self):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             with self.subTest(path=path.name):
@@ -485,7 +455,7 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
     def test_native_suites_are_independent_and_keep_all_three_unix_runners(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         desktop = text.split("\n  test:", 1)[1].split("\n  native:", 1)[0]
-        native = text.split("\n  native:", 1)[1].split("\n  mobile:", 1)[0]
+        native = text.split("\n  native:", 1)[1].split("\n  uefi:", 1)[0]
         self.assertIn("needs: [reuse, no_code_plan]", native)
         self.assertNotIn("needs: test", native)
         self.assertNotIn("test_mode_matrix", desktop)
@@ -519,10 +489,9 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         condition = re.search(r"id: modes\n        if: (.+)", text).group(1)
         self.assertIn("!cancelled()", condition)
         self.assertNotIn("steps.combinations_", condition)
-        mobile = text.split("\n  mobile:", 1)[1].split("\n  complete:", 1)[0]
-        self.assertIn("needs: [reuse, no_code_plan]", mobile)
-        self.assertNotIn("needs: test", mobile)
-        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse, no_code_plan]", text)
+        self.assertNotIn("\n  mobile:", text)
+        self.assertNotIn("needs.mobile", text)
+        self.assertIn("needs: [lint, queue_lint, test, native, uefi, analyzer, reuse, no_code_plan]", text)
         self.assertIn("github.run_id", text.split("concurrency:", 1)[1].split("permissions:", 1)[0])
 
     def test_actual_no_code_completion_requires_classification_and_all_omissions(self):
@@ -536,7 +505,7 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
         bash = module.CIAdmissionTests().workflow_bash()
         with tempfile.TemporaryDirectory() as temporary:
             outcomes = ("LINT_RESULT", "INACTIVE_LINT_RESULT", "DESKTOP_RESULT", "NATIVE_RESULT",
-                        "MOBILE_RESULT", "UEFI_RESULT", "ANALYZER_RESULT", "REUSE_RESULT")
+                        "UEFI_RESULT", "ANALYZER_RESULT", "REUSE_RESULT")
             good = dict(os.environ, NO_CODE="true", NO_CODE_RESULT="success",
                         NO_CODE_VERIFIED="success", REUSE_REQUESTED="false", REUSE_REVERIFIED="skipped",
                         GITHUB_STEP_SUMMARY=str(Path(temporary) / "summary"))
@@ -561,10 +530,10 @@ class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
     def test_actual_aggregate_rejects_missing_skipped_cancelled_and_failed_shards(self):
         text = (ROOT / ".github/workflows/ci.yml").read_text()
         aggregate = text.split("\n  complete:", 1)[1]
-        self.assertIn("needs: [lint, queue_lint, test, native, mobile, uefi, analyzer, reuse, no_code_plan]", aggregate)
+        self.assertIn("needs: [lint, queue_lint, test, native, uefi, analyzer, reuse, no_code_plan]", aggregate)
         self.assertIn("always()", aggregate)
         # Execute the workflow's real shell body, not a Python copy of its
-        # predicate. Exercise all 625 existing shard outcomes with UEFI/analyzer
+        # predicate. Exercise all 125 active shard outcomes with UEFI/analyzer
         # green, then reject unavailable/unsuccessful UEFI and analyzer results.
         body = aggregate.split("      - name: Require every shard\n", 1)[1].split("        run: |\n", 1)[1]
         body = textwrap.dedent(body)
@@ -581,22 +550,20 @@ export UEFI_RESULT ANALYZER_RESULT REUSE_REQUESTED REUSE_REVERIFIED INACTIVE_LIN
 for LINT_RESULT in success failure cancelled skipped ''; do
   for DESKTOP_RESULT in success failure cancelled skipped ''; do
     for NATIVE_RESULT in success failure cancelled skipped ''; do
-     for MOBILE_RESULT in success failure cancelled skipped ''; do
-      export LINT_RESULT DESKTOP_RESULT NATIVE_RESULT MOBILE_RESULT
+      export LINT_RESULT DESKTOP_RESULT NATIVE_RESULT
       actual=0
       ( . "$BUSTER_CI_GATE" ) >/dev/null 2>&1 || actual=$?
-      if [[ "$LINT_RESULT" == success && "$DESKTOP_RESULT" == success && "$NATIVE_RESULT" == success && "$MOBILE_RESULT" == success ]]; then
+      if [[ "$LINT_RESULT" == success && "$DESKTOP_RESULT" == success && "$NATIVE_RESULT" == success ]]; then
         [[ "$actual" -eq 0 ]] || exit 1
       else
         [[ "$actual" -ne 0 ]] || exit 1
       fi
       checked=$((checked + 1))
-     done
     done
   done
 done
-LINT_RESULT=success DESKTOP_RESULT=success NATIVE_RESULT=success MOBILE_RESULT=success
-export LINT_RESULT DESKTOP_RESULT NATIVE_RESULT MOBILE_RESULT
+LINT_RESULT=success DESKTOP_RESULT=success NATIVE_RESULT=success
+export LINT_RESULT DESKTOP_RESULT NATIVE_RESULT
 for UEFI_RESULT in failure cancelled skipped ''; do
   export UEFI_RESULT
   actual=0
@@ -614,8 +581,8 @@ for ANALYZER_RESULT in failure cancelled skipped ''; do
   checked=$((checked + 1))
 done
 ANALYZER_RESULT=success REUSE_REQUESTED=true
-NATIVE_RESULT=skipped MOBILE_RESULT=skipped UEFI_RESULT=skipped
-export ANALYZER_RESULT REUSE_REQUESTED NATIVE_RESULT MOBILE_RESULT UEFI_RESULT
+NATIVE_RESULT=skipped UEFI_RESULT=skipped
+export ANALYZER_RESULT REUSE_REQUESTED NATIVE_RESULT UEFI_RESULT
 for REUSE_REVERIFIED in success failure cancelled skipped ''; do
   export REUSE_REVERIFIED
   actual=0
@@ -636,8 +603,8 @@ for NATIVE_RESULT in success failure cancelled ''; do
   [[ "$actual" -ne 0 ]] || exit 1
   checked=$((checked + 1))
 done
-REUSE_REQUESTED=false NATIVE_RESULT=success MOBILE_RESULT=success UEFI_RESULT=success
-export REUSE_REQUESTED NATIVE_RESULT MOBILE_RESULT UEFI_RESULT
+REUSE_REQUESTED=false NATIVE_RESULT=success UEFI_RESULT=success
+export REUSE_REQUESTED NATIVE_RESULT UEFI_RESULT
 for INACTIVE_LINT_RESULT in success failure cancelled ''; do
   export INACTIVE_LINT_RESULT
   actual=0
@@ -661,7 +628,7 @@ printf '%s\n' "$checked"
             result = subprocess.run([bash, "--noprofile", "--norc", "-c", script], env=environment,
                                     capture_output=True, text=True, timeout=120 if os.name == "nt" else 30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout.strip(), "646")
+            self.assertEqual(result.stdout.strip(), "146")
 
 
 class CurrentActionPinsTests(_frozen_actions.ActionPinsTest):

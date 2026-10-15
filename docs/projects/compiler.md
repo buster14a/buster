@@ -18,8 +18,8 @@ contract; this page does not maintain a second copy of command-line flags.
 | `compiler.c` | Preprocess, parse, analyze and lower the active C frontend. | [Frontend guide](../agents/frontend.md) and its topic guides. |
 | `compiler.gnu-callback-storage` | GNU-dialect function-pointer storage through `void *` on native Linux/macOS; strict-C and other target restrictions remain explicit. | [Calls contract](../agents/frontend/calls.md#gnu-callback-storage-through-void-pointers) and [pinned evidence](../capability-portfolios/callback-storage.md). |
 | `compiler.artifacts` | Compile, assemble and link through the headless driver; reusable toolchain modules have their own boundaries. | [Driver guide](../agents/driver.md) and [source map](../agents/project.md). |
-| `compiler.embedding` | Packaged in-memory C compilation and native object JIT for embedding clients. | [Embedding example and contract](../../tools/embed_example/README.md) and [public header](../../src/buster/lib/compiler/embed/embed.h). |
-| `compiler.hot-reload-demo` | Opt-in trusted-module Linux x86-64 counter consumer: edit/rebuild/reload at explicit safe points with host-owned state. | [Runnable workflow and support contract](../../tools/hot_replace_probe/README.md). Application dispatch stays outside compiler internals. |
+| `compiler.embedding` | In-memory compiler/JIT module retained; packaged SDK/example targets and their automatic workflow are not maintained. | [Embedding example and contract](../../tools/embed_example/README.md) and [public header](../../src/buster/lib/compiler/embed/embed.h). |
+| `compiler.hot-reload-demo` | Preserved, unmaintained Linux x86-64 counter example; no default target or automatic lifecycle workflow. | [Runnable workflow and support contract](../../tools/hot_replace_probe/README.md). Application dispatch stays outside compiler internals. |
 | `compiler.wasm64` | Direct core Wasm64 output. | [Wasm64 contract](../../WASM64.md). |
 | `compiler.llvm-bitcode` | Direct binary LLVM bitcode output. | [Bitcode contract](../../LLVM_BITCODE.md). |
 | `compiler.ir-oracle` | Test-only bounded canonical IR interpreter and isolated native comparison. | [Executable-semantics boundary](../canonical-ir-oracle.md). |
@@ -82,6 +82,15 @@ the [driver guide](../agents/driver.md#in-memory-execution-ide-run) for its
 full contract and refusals.
 
 ## Validation and work
+
+The maintained build and automatic CI cover the headless compiler on Linux,
+Windows and macOS. Application, GUI, image/font and mobile-hosting source is
+preserved without a maintenance or CI-support promise. It is excluded from
+the default build, compiler tests/fuzzing and analyzer database.
+
+Compiler target backends (GPU, SPIR-V, eBPF, Wasm, LLVM bitcode and UEFI)
+remain in scope. This change removes ancillary maintenance, not compiler targets.
+
 
 Use the existing [test/CI guide](../agents/testing.md), focused regression cases
 and applicable self-host/target gates. Keep source revision, configuration,

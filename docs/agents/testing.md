@@ -4,6 +4,16 @@
 
 ## Tests
 
+The maintained build and automatic CI cover the headless compiler on Linux,
+Windows and macOS. Application, GUI, image/font and mobile-hosting source is
+preserved without a maintenance or CI-support promise. It is excluded from
+the default build, compiler tests/fuzzing and analyzer database.
+
+The image, font, disk-builder and GUI component suites are not registered in
+`ide` or `test_all`; compiler fuzzing exercises compiler/object inputs only.
+Android/iOS application and lifecycle workflows are not automatic CI gates.
+The older component/mobile procedures below document preserved source only.
+
 - Compiler and foundation module tests run inside the `ide` executable; there
   is no external unit-test framework. From the repository root, run
   `ide test --verbose=1 --ci=1` or build the `test_all` target.
@@ -39,22 +49,6 @@
   `*_test.h` pairs. `src/buster/tests/test.c` owns registration. Unity builds
   include implementations into the main translation unit; non-unity builds
   compile each test source independently.
-- The desktop `test_ui_slider` component target runs the focused
-  `ui_slider_tests` module against production `ui_core`/`ui_builder` and an
-  unused native renderer boundary. It is part of `test_all` and `test_units`
-  when tests and libc are enabled, without adding UI dependencies to `ide`.
-  The retained broad `ui_tests` suite remains unregistered; see
-  [graphics/UI](../projects/graphics-ui.md).
-- The separate desktop `test_ui_utf8` component target runs actual UI text-event
-  activation and underline draw-command consumers using the production
-  `ui_core` module and an inert native renderer boundary. It is included in
-  `test_all` and `test_units` when tests and libc are enabled, without adding UI
-  dependencies or a descriptor to `ide`; see [graphics/UI](../projects/graphics-ui.md).
-- The desktop `test_ui_scale` component target (`ui_scale_component_test.c`)
-  counts keyed-box lookup probes and focus-navigation work against the
-  production `ui_core` and an inert renderer, with behavior controls for the box
-  table. It is part of `test_all` and `test_units` when tests and libc are
-  enabled; see [graphics/UI](../projects/graphics-ui.md).
 - A new compiler pass over every type, member or declaration needs a scaling
   fixture in addition to its single-item correctness cases. The fixture runs
   the same item at N and 16N copies and requires counted work to stay constant
@@ -118,7 +112,7 @@
   exposed through a production public header.
 - Modules with only test consumers join `ide` through
   `BUSTER_COMPILER_TEST_MODULES` and a matching `#if BUSTER_INCLUDE_TESTS`
-  unity include. `truetype` and the AArch64 syntax model (`aarch64_syntax.c`
+  unity include. The AArch64 syntax model (`aarch64_syntax.c`
   and its generated table) follow this rule; `aarch64_syntax.c` fails with
   `#error` in a tests-disabled compile, so self-host stage 1 cannot silently
   regain it.
@@ -150,10 +144,9 @@
 - Active CI is defined under `.github/workflows/`; the current tree has no
   Forgejo workflow definitions. The source-free broker retirement record is
   documented in `docs/ci-github-hosted-runners.md`. `.github/workflows/ci.yml`
-  runs the combination matrix, execution-mode matrix, Android and iOS on
+  runs the combination matrix and execution-mode matrix on
   GitHub standard runners. Its five desktop lanes cover Linux and Windows at
-  x86-64 and AArch64, plus macOS AArch64; two independent mobile shards retain
-  Android x86-64 and iOS AArch64. Apple x86-64 is best-effort source/target
+  x86-64 and AArch64, plus macOS AArch64. Apple x86-64 is best-effort source/target
   compatibility, outside routine CI; see [Apple CI policy](../apple-ci-policy.md). The independent
   `UEFI firmware boot` lane executes both firmware targets in every allocator
   and retains boot evidence; see [UEFI validation](../uefi-target.md#reference-firmware-execution-gate).
@@ -199,7 +192,7 @@
   Both workflows cover the same PR merge revision, main/tag pushes, merge groups
   and explicit dispatches without duplicate feature-push runs. Buster CI keeps
   full matrix diagnostics for pull requests, main/tag pushes and manual runs.
-  On `merge_group`, desktop and mobile enable matrix fail-fast; the native
+  On `merge_group`, desktop enables matrix fail-fast; the native
   matrix retains `fail-fast: false` under the frozen CI test contract. The trusted
   controller cancels exact-head merge-group runs after a failed Buster CI job
   or required check from another workflow. It also stops a desktop Release
