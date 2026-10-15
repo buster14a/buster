@@ -4638,12 +4638,8 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_fast_placement_scan_prepassed(
         .operand_registers = arena_allocate(arena, u8, (u64)function->instruction_count * 4),
     };
     MachineTargetDescription const* description = function->target;
-    if (description)
+    if (description && prepass->valid)
     {
-        if (!prepass->valid)
-        {
-            return placement;
-        }
         MachineBuilderStream edits;
         machine_stream_initialize(&edits, sizeof(MachineEdit));
         // Only the callee-saved pins cost a prologue save; a caller-saved pin
@@ -4722,7 +4718,8 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_fast_placement_scan_prepassed(
         memset(state.virtual_register_locations, 0xff, (u64)function->virtual_register_count * sizeof(*state.virtual_register_locations));
         memset(state.preferred_registers, 0xff, function->virtual_register_count);
         memset(state.owner, 0xff, (u64)description->register_count * sizeof(*state.owner));
-        for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
+        bool scan_valid = true;
+        for (u32 block_index = 0; scan_valid && block_index < function->block_count; block_index += 1)
         {
             MachineBlock* block = function->blocks + block_index;
             u32* entry_owner = contract_owner + (u64)block_index * register_count;
@@ -4969,7 +4966,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_fast_placement_scan_prepassed(
                 state.virtual_register_locations[value] = contract_register;
                 state.age[contract_register] = ++state.clock;
             }
-            for (u32 offset = 0; offset < block->instruction_count; offset += 1)
+            for (u32 offset = 0; scan_valid && offset < block->instruction_count; offset += 1)
             {
                 u32 instruction_index = block->first_instruction + offset;
                 MachineInstruction* instruction = function->instructions + instruction_index;
@@ -5083,7 +5080,8 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_fast_placement_scan_prepassed(
                 MachineOpcodeInfo const* info = machine_opcode_info(instruction->opcode);
                 if (!info)
                 {
-                    return placement;
+                    scan_valid = false;
+                    break;
                 }
                 u32 physical_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_PHYSICAL_SHIFT);
                 u32 block_slots = machine_fast_operand_mask(operand_masks, MACHINE_FAST_OPERAND_BLOCK_SHIFT);
@@ -5484,34 +5482,37 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_fast_placement_scan_prepassed(
                 }
             }
         }
-        // The scan's own stream is point-sorted by construction; retroactive
-        // conforms are not, so they sort and merge behind it — after the
-        // terminator's own edits at the same point, which is the state every
-        // retroactive repair was computed against.
-        placement.edit_count = edits.total_count + retro_edits.total_count;
-        placement.edits = arena_allocate(arena, MachineEdit, placement.edit_count ? placement.edit_count : 1);
-        if (!retro_edits.total_count)
+        if (scan_valid)
         {
-            machine_stream_flatten(&edits, placement.edits);
-        }
-        else
-        {
-            MachineEdit* main_edits = arena_allocate(arena, MachineEdit, edits.total_count ? edits.total_count : 1);
-            MachineEdit* retro_flat = arena_allocate(arena, MachineEdit, retro_edits.total_count);
-            MachineEdit* retro_scratch = arena_allocate(arena, MachineEdit, retro_edits.total_count);
-            machine_stream_flatten(&edits, main_edits);
-            machine_stream_flatten(&retro_edits, retro_flat);
-            machine_fast_sort_edits(retro_flat, retro_scratch, retro_edits.total_count);
-            u32 main_cursor = 0;
-            u32 retro_cursor = 0;
-            for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
+            // The scan's own stream is point-sorted by construction; retroactive
+            // conforms are not, so they sort and merge behind it — after the
+            // terminator's own edits at the same point, which is the state every
+            // retroactive repair was computed against.
+            placement.edit_count = edits.total_count + retro_edits.total_count;
+            placement.edits = arena_allocate(arena, MachineEdit, placement.edit_count ? placement.edit_count : 1);
+            if (!retro_edits.total_count)
             {
-                bool take_main = main_cursor < edits.total_count &&
-                                 (retro_cursor >= retro_edits.total_count || main_edits[main_cursor].point <= retro_flat[retro_cursor].point);
-                placement.edits[edit_index] = take_main ? main_edits[main_cursor++] : retro_flat[retro_cursor++];
+                machine_stream_flatten(&edits, placement.edits);
             }
+            else
+            {
+                MachineEdit* main_edits = arena_allocate(arena, MachineEdit, edits.total_count ? edits.total_count : 1);
+                MachineEdit* retro_flat = arena_allocate(arena, MachineEdit, retro_edits.total_count);
+                MachineEdit* retro_scratch = arena_allocate(arena, MachineEdit, retro_edits.total_count);
+                machine_stream_flatten(&edits, main_edits);
+                machine_stream_flatten(&retro_edits, retro_flat);
+                machine_fast_sort_edits(retro_flat, retro_scratch, retro_edits.total_count);
+                u32 main_cursor = 0;
+                u32 retro_cursor = 0;
+                for (u32 edit_index = 0; edit_index < placement.edit_count; edit_index += 1)
+                {
+                    bool take_main = main_cursor < edits.total_count &&
+                                     (retro_cursor >= retro_edits.total_count || main_edits[main_cursor].point <= retro_flat[retro_cursor].point);
+                    placement.edits[edit_index] = take_main ? main_edits[main_cursor++] : retro_flat[retro_cursor++];
+                }
+            }
+            placement.valid = true;
         }
-        placement.valid = true;
     }
 
     return placement;
@@ -5942,6 +5943,30 @@ MachineStackPlacement machine_fast_placement_build_prepassed(Arena* arena, Machi
     }
     return placement;
 }
+
+#if BUSTER_INCLUDE_TESTS
+bool machine_fast_placement_refusal_test(Arena* arena)
+{
+    u64 mark = arena->position;
+    MachineInstruction row = {.opcode = MACHINE_X64_RET};
+    MachineBlock block = {.first_instruction = 0, .instruction_count = 1};
+    MachineFunction function = {.target = machine_target_x86_64(), .blocks = &block, .block_count = 1,
+        .instructions = &row, .instruction_count = 1};
+    MachineFastPrepass prepass = machine_fast_prepass_build(arena, &function, false);
+    bool result = prepass.valid;
+    row.opcode = MACHINE_OPCODE_COUNT;
+    MachineStackPlacement placement = machine_fast_placement_build_prepassed(arena, &function, &prepass, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    result &= !placement.valid;
+    prepass.valid = false;
+    placement = machine_fast_placement_build_prepassed(arena, &function, &prepass, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    result &= !placement.valid;
+    function.target = 0;
+    placement = machine_fast_placement_build_prepassed(arena, &function, &prepass, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    result &= !placement.valid;
+    arena_set_position(arena, mark);
+    return result;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_fast_placement_build_core(Arena* arena, MachineFunction* function)
 {

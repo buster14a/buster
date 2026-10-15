@@ -10947,6 +10947,7 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, machine_fast_sort_edits_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_block_color_budget_test());
     BUSTER_TEST(arguments, machine_fast_home_color_budget_test(arguments->arena));
+    BUSTER_TEST(arguments, machine_fast_placement_refusal_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_solve_liveness_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_close_slot_ranges_test(arguments->arena));
