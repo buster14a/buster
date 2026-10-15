@@ -27859,13 +27859,19 @@ BUSTER_C_INTERNAL void c_parse_array_bound_words_build(CParseResult* result, CPr
                             ? C_ARRAY_BOUND_WORD_STAR : 0);
                 }
             }
-            bool is_static;
-            bool is_const;
-            bool word = c_parse_array_bound_word(preprocess, current, &is_static, &is_const);
-            statics += is_static;
-            consts += is_const;
-            words += word;
-            if (word) last_word = token;
+            // Each row subtracts its post-opener prefix from its pre-closer
+            // prefix. Tokens outside all brackets cannot affect that interval.
+            // Nested openers and closers still count while a parent is active.
+            if (stack_count)
+            {
+                bool is_static;
+                bool is_const;
+                bool word = c_parse_array_bound_word(preprocess, current, &is_static, &is_const);
+                statics += is_static;
+                consts += is_const;
+                words += word;
+                if (word) last_word = token;
+            }
             if (c_token_is_punctuator(&current, C_PUNCTUATOR_LEFT_BRACKET))
             {
                 u32 close = positions->matching_delimiters_plus_one[token] - 1;
