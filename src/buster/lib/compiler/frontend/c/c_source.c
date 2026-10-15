@@ -14101,7 +14101,6 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         CTargetFeatureMacro entry = c_target_feature_macros[feature_index];
         if ((!entry.i386_only || options.target.cpu_arch == CPU_ARCH_I386) &&
             cpu_arch_is_x86(entry.cpu_arch) && cpu_arch_is_x86(options.target.cpu_arch) &&
-            !(entry.feature == TARGET_CPU_FEATURE_X86_MMX && options.target.cpu_arch == CPU_ARCH_X86_64) &&
             target_cpu_feature_has(options.target, entry.feature))
         {
             c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, entry.name, standard_replacement, 1, 0, 0, false, false);

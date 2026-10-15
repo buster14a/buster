@@ -38982,7 +38982,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         BUSTER_TEST(arguments, target_cpu_features_contains(scalar_features, scalar_feature_bits[scalar_index]));
     }
     BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, scalar_feature_invocation.target),
-                       S8("adx,avx,bmi2,clflushopt,clwb,f16c,fma,fsgsbase,movbe,pku,prefetchwt1,ptwrite,rdrand,rdseed,rtm,serialize,sha,sse,sse2,sse4.1,sse4.2,ssse3,tsxldtrk,uintr,waitpkg"));
+                       S8("adx,avx,bmi2,clflushopt,clwb,f16c,fma,fsgsbase,mmx,movbe,pku,prefetchwt1,ptwrite,rdrand,rdseed,rtm,serialize,sha,sse,sse2,sse4.1,sse4.2,ssse3,tsxldtrk,uintr,waitpkg"));
     String8 sha_disable_command_line[] = {
         S8("--target=x86_64-linux"), S8("-march=znver4"), S8("-mattr=-sha"), S8("source.c"),
     };
@@ -38996,7 +38996,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverInvocation sha_dependency_invocation =
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(sha_dependency_command_line));
     BUSTER_TEST(arguments, sha_dependency_invocation.error == COMPILER_DRIVER_ERROR_ARGUMENT);
-    BUSTER_STRING_TEST(arguments, sha_dependency_invocation.diagnostic, S8("invalid target feature combination: sha,sse"));
+    BUSTER_STRING_TEST(arguments, sha_dependency_invocation.diagnostic, S8("invalid target feature combination: mmx,sha,sse"));
     String8 sha512_sm3_sm4_ordered_command_line[] = {
         S8("--target=x86_64-linux"), S8("-march=baseline"),
         S8("-mattr=+avx,+avx2,+sha512,+sm3,+sm4,-sm4,+sm4,-sha512,+sha512,-sm3,+sm3"), S8("source.c"),
@@ -39008,7 +39008,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, target_cpu_feature_has(sha512_sm3_sm4_ordered.target, TARGET_CPU_FEATURE_X86_SM3));
     BUSTER_TEST(arguments, target_cpu_feature_has(sha512_sm3_sm4_ordered.target, TARGET_CPU_FEATURE_X86_SM4));
     BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, sha512_sm3_sm4_ordered.target),
-                       S8("avx,avx2,sha512,sm3,sm4,sse,sse2"));
+                       S8("avx,avx2,mmx,sha512,sm3,sm4,sse,sse2"));
     String8 invalid_sha512_without_avx2_command_line[] = {
         S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-mattr=+avx,+sha512"), S8("source.c"),
     };
@@ -39016,7 +39016,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_sha512_without_avx2_command_line));
     BUSTER_TEST(arguments, invalid_sha512_without_avx2.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, invalid_sha512_without_avx2.diagnostic,
-                       S8("invalid target feature combination: avx,sha512,sse,sse2"));
+                       S8("invalid target feature combination: avx,mmx,sha512,sse,sse2"));
     String8 invalid_sm4_without_avx2_command_line[] = {
         S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-mattr=+avx,+sm4"), S8("source.c"),
     };
@@ -39024,7 +39024,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_sm4_without_avx2_command_line));
     BUSTER_TEST(arguments, invalid_sm4_without_avx2.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, invalid_sm4_without_avx2.diagnostic,
-                       S8("invalid target feature combination: avx,sm4,sse,sse2"));
+                       S8("invalid target feature combination: avx,mmx,sm4,sse,sse2"));
     String8 invalid_sm3_without_avx_command_line[] = {
         S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-mattr=+sm3"), S8("source.c"),
     };
@@ -39032,7 +39032,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
         arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_sm3_without_avx_command_line));
     BUSTER_TEST(arguments, invalid_sm3_without_avx.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, invalid_sm3_without_avx.diagnostic,
-                       S8("invalid target feature combination: sm3,sse,sse2"));
+                       S8("invalid target feature combination: mmx,sm3,sse,sse2"));
     String8 valid_sm3_with_avx_command_line[] = {
         S8("--target=x86_64-linux"), S8("-march=baseline"), S8("-mattr=+avx,+sm3"), S8("source.c"),
     };
@@ -39075,7 +39075,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     BUSTER_TEST(arguments, invalid_ace_spelling.error == COMPILER_DRIVER_ERROR_ARGUMENT);
     BUSTER_STRING_TEST(arguments, invalid_ace_spelling.diagnostic, S8("unsupported target feature: ACE_1"));
     BUSTER_STRING_TEST(arguments, target_cpu_features_to_string(arguments->arena, feature_invocation.target),
-                       S8("avx,avx2,avx512bw,avx512f,avx512vl,bmi1,bmi2,cldemote,cx16,f16c,fma,fsgsbase,ibt,invpcid,lzcnt,movbe,movrs,pclmul,popcnt,prefetchi,rdrand,rdtscp,shstk,sse,sse2,sse3,sse4.1,sse4.2,ssse3,svm,vmx,xsave,xsaveopt"));
+                       S8("avx,avx2,avx512bw,avx512f,avx512vl,bmi1,bmi2,cldemote,cx16,f16c,fma,fsgsbase,ibt,invpcid,lzcnt,mmx,movbe,movrs,pclmul,popcnt,prefetchi,rdrand,rdtscp,shstk,sse,sse2,sse3,sse4.1,sse4.2,ssse3,svm,vmx,xsave,xsaveopt"));
     String8 invalid_avx512_dependency_command_line[] = {
         S8("--target=x86_64-linux"),
         S8("-mattr=+avx512f,+avx512vl,-avx2,+avx512bw"),
@@ -39119,7 +39119,7 @@ UnitTestResult compiler_driver_tests(UnitTestArguments* arguments)
     CompilerDriverInvocation invalid_feature_combination =
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(invalid_feature_combination_command_line));
     BUSTER_TEST(arguments, invalid_feature_combination.error == COMPILER_DRIVER_ERROR_ARGUMENT);
-    BUSTER_STRING_TEST(arguments, invalid_feature_combination.diagnostic, S8("invalid target feature combination: avx2,sse,sse2"));
+    BUSTER_STRING_TEST(arguments, invalid_feature_combination.diagnostic, S8("invalid target feature combination: avx2,mmx,sse,sse2"));
     String8 aarch64_feature_command_line[] = {S8("--target=aarch64-linux"), S8("-mattr"), S8("-neon"), S8("source.c")};
     CompilerDriverInvocation aarch64_features =
         compiler_driver_parse_arguments(arguments->arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(aarch64_feature_command_line));
