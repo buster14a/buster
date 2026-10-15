@@ -189,39 +189,30 @@ BUSTER_F_DECL CTestAstTypeVerify c_test_ast_type_verify_take(void);
 // on, per thread, so a test can analyse the same unit with and without it.
 BUSTER_F_DECL void c_test_ast_specifiers_set(bool enabled);
 
-// Read-only census before the original retained TYPE_NAME completion. The
-// source/base/final candidate never publishes or replaces a semantic query.
-typedef enum CTestTypeNameProbeRefusal
-{
-    C_TEST_TYPE_NAME_PROBE_CONTEXT,
-    C_TEST_TYPE_NAME_PROBE_WINDOW,
-    C_TEST_TYPE_NAME_PROBE_SUSPENDED,
-    C_TEST_TYPE_NAME_PROBE_SHAPE,
-    C_TEST_TYPE_NAME_PROBE_BINDING,
-    C_TEST_TYPE_NAME_PROBE_NON_PRIMITIVE,
-    C_TEST_TYPE_NAME_PROBE_BASE_ROW,
-    C_TEST_TYPE_NAME_PROBE_POINTER_ROW,
-    C_TEST_TYPE_NAME_PROBE_REFUSAL_COUNT,
-} CTestTypeNameProbeRefusal;
-typedef struct CTestAstTypeNamePublicationProbe CTestAstTypeNamePublicationProbe;
-struct CTestAstTypeNamePublicationProbe
+// Private controls for existing-row TYPE_NAME publication. Recorded original
+// mode executes the unchanged semantic producer and compares both type IDs.
+typedef struct CTestAstTypeNamePublication CTestAstTypeNamePublication;
+struct CTestAstTypeNamePublication
 {
     u64 attempted;
     u64 eligible;
-    u64 primitive;
-    u64 typedef_names;
-    u64 pointers;
-    u64 body_eligible;
-    u64 nonbody_eligible;
-    u64 refusals[C_TEST_TYPE_NAME_PROBE_REFUSAL_COUNT];
+    u64 reused;
+    u64 qualified_primitive;
+    u64 multiple_pointers;
+    u64 state_checked;
+    u64 state_mismatches;
+    u64 queries;
+    u64 closed;
+    u64 suspended;
+    u64 uncached;
     u64 readonly_checked;
     u64 readonly_failed;
     u64 authority_compared;
     u64 authority_mismatches;
     u64 authority_appended;
 };
-BUSTER_F_DECL void c_test_ast_type_name_publication_probe_set(bool enabled);
-BUSTER_F_DECL CTestAstTypeNamePublicationProbe c_test_ast_type_name_publication_probe_take(void);
+BUSTER_F_DECL void c_test_ast_type_name_publication_set(bool record, bool original);
+BUSTER_F_DECL CTestAstTypeNamePublication c_test_ast_type_name_publication_take(void);
 
 // Verify mode for the type-name runs skipped as no type name
 // (c_parse_type_name_specifiers under -fc-ast-pilot): the machine's attempt

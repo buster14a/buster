@@ -9341,53 +9341,89 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_type_name_publication_probe(UnitTe
 {
     UnitTestResult result = {0};
     String8 sources[] = {
-        S8("typedef unsigned long U; U f(U x) { return (U)(int)x + *(U*)&x; }"),
-        S8("typedef int T; void f(int n) { (void)sizeof(int (*)[n]); (void)sizeof(int (*)(int, double)); (void)sizeof(const T); (void)sizeof(_Atomic(int)); }"),
+        S8("typedef unsigned long U; U f(U x, int** p) { return (U)(int)x + *(U*)&x + (const int)x + (volatile unsigned long)x + **(int**)p; }"),
+        S8("typedef int T; void f(int n) { (void)sizeof(int (*)[n]); (void)sizeof(int (*)(int, double)); (void)sizeof(const T); (void)sizeof(_Atomic(int)); (void)sizeof(__typeof__(n)); }"),
         S8("typedef int* P; struct S { int x; }; typedef struct S S; int f(P p) { return ((P)p)[0] + ((S){0}).x; }"),
+        S8("typedef const int Q; Q f(Q q) { return (Q)q; }"),
+        S8("typedef int V __attribute__((vector_size(16))); V f(V v) { return (V)v; }"),
+        S8("int x = (int)1; typedef int T; T y = (T)2;"),
+        S8("enum { A = sizeof(int) }; _Static_assert(sizeof(int) > 0, \"positive size\"); typedef int Array[sizeof(int)]; int array[sizeof(int)]; extern int (*p)[sizeof(int)];"),
     };
     for (u32 off = 0; off < 2; off += 1)
     {
-        for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
+        for (u32 uncached = 0; uncached < 2; uncached += 1)
         {
-            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-            CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[index], C_PREPROCESS_DIALECT_GNU17);
-            CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
-            CAstFacts facts = {0};
-            if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&facts, &built.ast)))
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(sources); index += 1)
             {
-                CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
-                syntax.ast = &built.ast;
-                syntax.type_interning = true;
-                c_test_set_type_interning_off(off != 0);
-                CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
-                syntax.ast_facts = &facts;
-                (void)c_test_ast_type_name_publication_probe_take();
-                c_test_ast_type_name_publication_probe_set(true);
-                CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
-                c_test_ast_type_name_publication_probe_set(false);
-                c_test_set_type_interning_off(false);
-                CTestAstTypeNamePublicationProbe probe = c_test_ast_type_name_publication_probe_take();
-                BUSTER_TEST(arguments, analysis.analysis_complete && !analysis.diagnostic_count && probe.attempted);
-                String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
-                difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &analysis);
-                BUSTER_TEST_RAW(arguments, !difference.length, difference);
-                BUSTER_TEST(arguments, probe.readonly_checked == probe.attempted && !probe.readonly_failed);
-                BUSTER_TEST(arguments, probe.authority_compared == probe.eligible && !probe.authority_mismatches && !probe.authority_appended);
-                u64 refused = 0;
-                for (u32 reason = 0; reason < C_TEST_TYPE_NAME_PROBE_REFUSAL_COUNT; reason += 1) refused += probe.refusals[reason];
-                BUSTER_TEST(arguments, probe.attempted == probe.eligible + refused);
-                if (off)
-                    BUSTER_TEST(arguments, !probe.eligible && probe.refusals[C_TEST_TYPE_NAME_PROBE_WINDOW]);
-                else if (index == 0)
-                    BUSTER_TEST(arguments, probe.primitive && probe.typedef_names && probe.pointers);
-                else if (index == 1)
-                    BUSTER_TEST(arguments, probe.refusals[C_TEST_TYPE_NAME_PROBE_SHAPE]);
-                else
-                    BUSTER_TEST(arguments, probe.refusals[C_TEST_TYPE_NAME_PROBE_NON_PRIMITIVE]);
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, sources[index], C_PREPROCESS_DIALECT_GNU17);
+                CAstResult built = c_ast_build(temporary.arena, preprocess, (CAstOptions){0});
+                CAstFacts original_facts = {0};
+                CAstFacts facts = {0};
+                if (BUSTER_REQUIRE(arguments, built.complete && c_ast_facts_create(&original_facts, &built.ast) && c_ast_facts_create(&facts, &built.ast)))
+                {
+                    CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+                    syntax.ast = &built.ast;
+                    syntax.type_interning = true;
+                    c_test_set_type_interning_off(off != 0);
+                    c_test_ast_fact_uncached_set(uncached != 0);
+                    syntax.ast_facts = &original_facts;
+                    (void)c_test_ast_type_name_publication_take();
+                    c_test_ast_type_name_publication_set(true, true);
+                    CAnalysisResult original = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                    CTestAstTypeNamePublication reference = c_test_ast_type_name_publication_take();
+                    syntax.ast_facts = &facts;
+                    c_test_ast_type_name_publication_set(true, false);
+                    CAnalysisResult analysis = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+                    CTestAstTypeNamePublication published = c_test_ast_type_name_publication_take();
+                    c_test_ast_type_name_publication_set(false, false);
+                    c_test_ast_fact_uncached_set(false);
+                    c_test_set_type_interning_off(false);
+                    BUSTER_TEST(arguments, original.analysis_complete && !original.diagnostic_count && analysis.analysis_complete && !analysis.diagnostic_count);
+                    String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &original, &analysis);
+                    difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &original, &analysis);
+                    BUSTER_TEST_RAW(arguments, !difference.length, difference);
+                    BUSTER_TEST(arguments, reference.attempted && reference.attempted == reference.queries && !reference.reused);
+                    BUSTER_TEST(arguments, published.attempted == published.reused + published.queries && published.reused == published.eligible);
+                    BUSTER_TEST(arguments, reference.readonly_checked == reference.attempted && !reference.readonly_failed &&
+                                           published.readonly_checked == published.attempted && !published.readonly_failed);
+                    BUSTER_TEST(arguments, reference.authority_compared == reference.eligible && !reference.authority_mismatches && !reference.authority_appended);
+                    BUSTER_TEST(arguments, !published.authority_compared && !published.authority_mismatches && !published.authority_appended);
+                    BUSTER_TEST(arguments, reference.state_checked == reference.eligible && !reference.state_mismatches &&
+                                           published.state_checked == published.reused && !published.state_mismatches);
+                    for (u32 node = 0; node < built.ast.node_count; node += 1)
+                    {
+                        if (built.ast.kinds[node] == C_AST_TYPE_NAME)
+                        {
+                            u32 owners[] = {c_ast_child_at(&built.ast, node, 0), node};
+                            for (u32 owner = 0; owner < BUSTER_ARRAY_LENGTH(owners); owner += 1)
+                            {
+                                u32 at = owners[owner];
+                                BUSTER_TEST(arguments, facts.flags[at] == original_facts.flags[at] && facts.types[at] == original_facts.types[at] &&
+                                                       facts.payloads[at] == original_facts.payloads[at]);
+                            }
+                        }
+                    }
+                    if (off)
+                        BUSTER_TEST(arguments, !published.eligible && !reference.eligible && published.closed && reference.closed);
+                    else if (uncached)
+                        BUSTER_TEST(arguments, !published.eligible && !reference.eligible && published.uncached && reference.uncached);
+                    else if (index == 0)
+                        BUSTER_TEST(arguments, published.reused && reference.authority_compared &&
+                                               published.qualified_primitive && reference.qualified_primitive &&
+                                               published.multiple_pointers && reference.multiple_pointers);
+                    else if (index == 5)
+                        BUSTER_TEST(arguments, published.reused && reference.authority_compared);
+                    else if (index >= 2)
+                        BUSTER_TEST(arguments, !published.reused && published.queries);
+                    if (index == 6)
+                        BUSTER_TEST(arguments, published.closed && reference.closed);
+                }
+                c_ast_facts_release(&facts);
+                c_ast_facts_release(&original_facts);
+                c_ast_release(&built.ast);
+                c_test_scratch_end(temporary);
             }
-            c_ast_facts_release(&facts);
-            c_ast_release(&built.ast);
-            c_test_scratch_end(temporary);
         }
     }
     return result;
