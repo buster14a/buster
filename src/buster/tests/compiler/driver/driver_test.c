@@ -5623,7 +5623,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
     String8 generic_update_output =
         buster_test_temporary_path(generic_update_temporary.arena, S8("generic-place-update"), S8(""));
     String8 generic_update_command[] = {
-        S8("-std=c17"), S8("-o"), generic_update_output, S8("tests/basic_c_generic_place_update.c"),
+        S8("-std=c17"), S8("-o"), generic_update_output, S8("src/buster/tests/compiler/driver/fixtures/generic_place_update.c"),
     };
     CompilerDriverResult generic_update = compiler_driver_execute_invocation(
         generic_update_temporary.arena,
