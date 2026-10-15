@@ -19,6 +19,8 @@
 // block_entries/block_exits preserve canonical control-flow destinations.
 // MachineX64ValueUse is the hot value-use projection; MachineX64LocalUse
 // holds sparse local-promotion store and alias state during selection.
+// Sparse local facts prove when load-alias sweeps have no eligible root;
+// with no aliases, branch fusion needs only each block's final candidate.
 // machine_x64_condition_form_agrees joins retained exact keys with the shared
 // condition identity; serial prewarm refuses mismatched condition bindings.
 // machine_x64_plan_call reuses selector-owned variadic shape/placement rows;
@@ -8562,10 +8564,8 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // requirement is what makes the layout reasoning sound — a jump can
     // only re-enter at a block head, above the load, never between the
     // load and a use.
-    // The values the sweeps alias, in assignment order.  About an eighth of a
-    // function's values end up aliased, so the pass that hands each one its
-    // local's register reads this list — 128 K entries in a self-compile —
-    // instead of asking all 1.01 M values whether they have an alias.
+    // The values the sweeps alias, in assignment order. Register assignment
+    // reads this sparse list instead of testing every value for an alias.
     u32 alias_count = 0;
     // Probe the sparse, already-produced local facts after disqualification.
     // Zero surviving places proves no LOAD can seed an alias; DEREFERENCE
@@ -8875,7 +8875,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // FCMP_SET materialization and only feed the chain as its bool.
     // The store counts the sweeps read are done with; the same sparse column now
     // carries the latest store ordinal per promoted local.
-    for (u32 index = 1; index < local_use_count; index += 1)
+    for (u32 index = 1; index < local_use_count && alias_count; index += 1)
     {
         local_uses[index].store_count = 0;
     }
@@ -8886,7 +8886,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     for (u32 block_index = 0; block_index < function->block_count && selector.supported; block_index += 1)
     {
         u32 block_candidate_count = block_candidate_counts[block_index];
-        for (u32 candidate_index = 0; candidate_index < block_candidate_count; candidate_index += 1)
+        // BRANCH_IF terminates a valid canonical block, so it is the final
+        // candidate if present. Only aliased reads need the earlier stores'
+        // ordinals to prove that moving their reads to the branch is safe.
+        u32 first_candidate = alias_count || !block_candidate_count ? 0 : block_candidate_count - 1;
+        for (u32 candidate_index = first_candidate; candidate_index < block_candidate_count; candidate_index += 1)
         {
             MachineX64CandidateRow candidate_row = candidate_rows[fusion_candidate_base + candidate_index];
             IrInstruction* instruction = function->instructions + candidate_row.row;
