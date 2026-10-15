@@ -815,9 +815,9 @@ BUSTER_GLOBAL_LOCAL int hk_append_trace_record(char *buffer,
     unsigned session)
 {
     int written = snprintf(buffer + *used, capacity - *used, format, prefix, session);
-    if (written < 0 || (size_t)written >= capacity - *used) return 0;
-    *used += (size_t)written;
-    return 1;
+    int valid = written >= 0 && (size_t)written < capacity - *used;
+    if (valid) *used += (size_t)written;
+    return valid;
 }
 
 BUSTER_GLOBAL_LOCAL int hk_large_trace_control(void)
