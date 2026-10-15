@@ -88,7 +88,6 @@
 // still be included before the region, as simd.h's fallbacks are here;
 // `./build.sh optnone_audit` fails when one is not.
 #include <buster/lib/simd.h>
-#include <buster/apps/disk_builder_verification.c>
 #if BUSTER_COMPILER_CLANG
 #pragma clang optimize off
 #endif
@@ -106,11 +105,6 @@
 #include <buster/lib/target.c>
 #include <buster/lib/simd.c>
 #include <buster/lib/file.c>
-#if BUSTER_ANDROID || BUSTER_IOS
-// Mobile platforms own the process lifecycle through the window module even
-// though the compiler program itself is headless.
-#include <buster/lib/window.c>
-#endif
 #include <buster/lib/time.c>
 #include <buster/lib/float.c>
 #if BUSTER_INCLUDE_TESTS
