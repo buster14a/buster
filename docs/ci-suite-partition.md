@@ -1,7 +1,7 @@
 # Independent Unix CI suites
 
 > Historical suite-level design/evidence. The subsequent internal desktop
-> partition and current 25-job completion contract are documented in
+> partition and current completion contract are documented in
 > [Desktop combination shards](ci-combination-shards.md). Historical timings
 > below are not matched before/after evidence for #333.
 
@@ -12,8 +12,9 @@ This is a suite-level first slice, not completion of deterministic partitioning
 inside the compiler/configuration matrix or the Clang analyzer.
 
 The inventories and measurements below describe their recorded revisions.
-Current CI retains five desktop architectures, five native jobs and two mobile
-lanes; [Apple CI policy](apple-ci-policy.md) records the Intel Apple removal.
+Current CI retains five desktop compiler hosts and five native jobs. Android/iOS
+application hosting and lifecycle jobs have no automatic CI coverage.
+[Apple CI policy](apple-ci-policy.md) records the Intel Apple removal.
 
 ## Evidence and rationale
 
