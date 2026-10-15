@@ -1596,7 +1596,7 @@ BUSTER_GLOBAL_LOCAL void dwarf_model_build_scope_children(DwarfModelWriter* writ
         if (parent < scope_count)
         {
             // This parent contributed a child in the count pass above.
-            BUSTER_CHECK(cursors && writer->scope_children);
+            BUSTER_RT_CHECK(cursors && writer->scope_children);
             writer->scope_children[writer->scope_child_offsets[parent] + cursors[parent]] = scope_index;
             cursors[parent] += 1;
         }

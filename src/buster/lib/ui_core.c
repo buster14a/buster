@@ -294,7 +294,7 @@ BUSTER_GLOBAL_LOCAL void ui_stack_reset(UI_State* state)
     type ui_push_##name(type v)                                                                                                                                \
     {                                                                                                                                                          \
         type old = ui_top_##name();                                                                                                                            \
-        BUSTER_CHECK(ui_state->stacks.name##_length < UI_STACK_CAPACITY);                                                                                      \
+        BUSTER_RT_CHECK(ui_state->stacks.name##_length < UI_STACK_CAPACITY);                                                                                      \
         ui_state->stacks.name[ui_state->stacks.name##_length++] = v;                                                                                           \
         ui_state->stacks.name##_auto_pop = 0;                                                                                                                  \
         return old;                                                                                                                                            \
@@ -303,7 +303,7 @@ BUSTER_GLOBAL_LOCAL void ui_stack_reset(UI_State* state)
 #define UI_STACK_POP_IMPL(name, type)                                                                                                                          \
     type ui_pop_##name(void)                                                                                                                                   \
     {                                                                                                                                                          \
-        BUSTER_CHECK(ui_state->stacks.name##_length != 0);                                                                                                     \
+        BUSTER_RT_CHECK(ui_state->stacks.name##_length != 0);                                                                                                     \
         type result = ui_state->stacks.name[--ui_state->stacks.name##_length];                                                                                 \
         ui_state->stacks.name##_auto_pop = 0;                                                                                                                  \
         return result;                                                                                                                                         \
@@ -313,7 +313,7 @@ BUSTER_GLOBAL_LOCAL void ui_stack_reset(UI_State* state)
     type ui_set_next_##name(type v)                                                                                                                            \
     {                                                                                                                                                          \
         type old = ui_top_##name();                                                                                                                            \
-        BUSTER_CHECK(ui_state->stacks.name##_length < UI_STACK_CAPACITY);                                                                                      \
+        BUSTER_RT_CHECK(ui_state->stacks.name##_length < UI_STACK_CAPACITY);                                                                                      \
         ui_state->stacks.name[ui_state->stacks.name##_length++] = v;                                                                                           \
         ui_state->stacks.name##_auto_pop = 1;                                                                                                                  \
         return old;                                                                                                                                            \
@@ -463,7 +463,7 @@ BUSTER_GLOBAL_LOCAL SliceString8 ui_copy_string8_slice_checked(Arena* arena, Sli
                 result.pointer[index] = ui_copy_string8_checked(arena, sources.pointer[index]);
                 if (sources.pointer[index].length != 0 && result.pointer[index].pointer == 0)
                 {
-                    BUSTER_CHECK(false);
+                    BUSTER_RT_CHECK(false);
                 }
             }
         }
@@ -745,7 +745,7 @@ UI_Size ui_percentage(f32 percentage, f32 strictness)
 UI_Size ui_em(f32 value, f32 strictness)
 {
     f32 font_size = ui_top_font_size();
-    BUSTER_CHECK(font_size != 0);
+    BUSTER_RT_CHECK(font_size != 0);
     return ui_size(UI_SizeKind_Pixels, value * font_size, strictness);
 }
 
@@ -836,7 +836,7 @@ void ui_state_deinitialize(UI_State* state)
 
 BUSTER_GLOBAL_LOCAL u64 ui_box_slot_from_key(UI_Key key)
 {
-    BUSTER_CHECK(ui_state->box_table_size != 0);
+    BUSTER_RT_CHECK(ui_state->box_table_size != 0);
     return key.value & (ui_state->box_table_size - 1);
 }
 
@@ -877,7 +877,7 @@ BUSTER_GLOBAL_LOCAL void ui_box_index_grow(void)
     u64 shift = ui_state->box_index_shift;
     while (size < ui_state->box_count)
     {
-        BUSTER_CHECK(shift > 1);
+        BUSTER_RT_CHECK(shift > 1);
         size *= 2;
         shift -= 1;
     }
@@ -913,7 +913,7 @@ BUSTER_GLOBAL_LOCAL void ui_box_hash_push(UI_Box* box)
         box->hash_prev = slot->last;
         slot->last = box;
     }
-    BUSTER_CHECK(ui_state->box_count != UINT64_MAX);
+    BUSTER_RT_CHECK(ui_state->box_count != UINT64_MAX);
     ui_state->box_count += 1;
     if (ui_state->box_count > ui_state->box_index_size)
     {
@@ -950,10 +950,10 @@ BUSTER_GLOBAL_LOCAL void ui_box_hash_remove(UI_Box* box, u64 slot_index)
     {
         link = &(*link)->index_next;
     }
-    BUSTER_CHECK(*link == box);
+    BUSTER_RT_CHECK(*link == box);
     *link = box->index_next;
     box->index_next = 0;
-    BUSTER_CHECK(ui_state->box_count != 0);
+    BUSTER_RT_CHECK(ui_state->box_count != 0);
     ui_state->box_count -= 1;
 }
 
@@ -1332,7 +1332,7 @@ BUSTER_GLOBAL_LOCAL void ui_prune_untouched_boxes(void)
         u64 capacity = ui_state->active_box_capacity ? ui_state->active_box_capacity : 1;
         while (capacity < ui_state->box_count)
         {
-            BUSTER_CHECK(capacity <= UINT64_MAX / 2);
+            BUSTER_RT_CHECK(capacity <= UINT64_MAX / 2);
             capacity *= 2;
         }
         // Event routing has already consumed the preceding frame's list, so
@@ -1356,13 +1356,13 @@ BUSTER_GLOBAL_LOCAL void ui_prune_untouched_boxes(void)
             }
             else
             {
-                BUSTER_CHECK(active_box_count < ui_state->active_box_capacity);
+                BUSTER_RT_CHECK(active_box_count < ui_state->active_box_capacity);
                 ui_state->active_boxes[active_box_count] = box;
                 active_box_count += 1;
             }
         }
     }
-    BUSTER_CHECK(active_box_count == ui_state->box_count);
+    BUSTER_RT_CHECK(active_box_count == ui_state->box_count);
     ui_state->active_box_count = active_box_count;
 }
 
@@ -1458,7 +1458,7 @@ UI_EventList ui_event_list_from_wm_events(Arena* arena, WmWindowHandle* window, 
 
 void ui_build_begin(WmHandle* windowing, WmWindowHandle* window, f64 frame_time, UI_EventList events)
 {
-    BUSTER_CHECK(ui_state != 0);
+    BUSTER_RT_CHECK(ui_state != 0);
 
     ui_state->build_index += 1;
     arena_reset_to_start(ui_build_arena());
@@ -3393,7 +3393,7 @@ BUSTER_GLOBAL_LOCAL float2 ui_box_text_position(UI_Box* box)
 
 BUSTER_GLOBAL_LOCAL void ui_draw_command_count_add(u64* count, u64 increment)
 {
-    BUSTER_CHECK(count != 0 && *count <= (u64)-1 - increment);
+    BUSTER_RT_CHECK(count != 0 && *count <= (u64)-1 - increment);
     if (count && *count <= (u64)-1 - increment)
     {
         *count += increment;
@@ -3522,13 +3522,13 @@ BUSTER_GLOBAL_LOCAL u64 ui_draw_command_upper_bound(UI_Box* root)
 
 BUSTER_GLOBAL_LOCAL void ui_draw_command_push(UI_DrawCommand command)
 {
-    BUSTER_CHECK(ui_state != 0 && ui_state->draw_commands != 0);
+    BUSTER_RT_CHECK(ui_state != 0 && ui_state->draw_commands != 0);
     if (ui_state && ui_state->draw_commands)
     {
         if (ui_state->draw_command_count >= ui_state->draw_command_capacity)
         {
             ui_state->draw_commands_complete = false;
-            BUSTER_CHECK(false);
+            BUSTER_RT_CHECK(false);
             return;
         }
         ui_state->draw_commands[ui_state->draw_command_count++] = command;
@@ -4014,13 +4014,13 @@ bool ui_draw(void)
     ui_state->draw_command_capacity = ui_draw_command_upper_bound(root);
     if (ui_state->draw_command_capacity > (u64)-1 / sizeof(UI_DrawCommand))
     {
-        BUSTER_CHECK(false);
+        BUSTER_RT_CHECK(false);
         return false;
     }
     u64 position = ui_build_arena()->position;
     bool capacity_fits = ui_arena_try_advance(ui_build_arena(), &position, ui_state->draw_command_capacity * sizeof(UI_DrawCommand),
                                               BUSTER_ALIGN_OF(UI_DrawCommand));
-    BUSTER_CHECK(capacity_fits);
+    BUSTER_RT_CHECK(capacity_fits);
     if (!capacity_fits)
     {
         ui_state->draw_command_capacity = 0;

@@ -64,7 +64,7 @@ static int through_definition(int status) { defined_noreturn(status); }
 
 // A noreturn call inside a conditional or short-circuit operand must not end
 // the block it sits in: the enclosing expression created a merge the arm still
-// has to reach.  This is the shape buster's own BUSTER_CHECK expands to, and
+// has to reach.  This is the shape buster's own BUSTER_RT_CHECK expands to, and
 // the reason the flow analysis has to know statement position from operand
 // position.
 static int guarded(int status)

@@ -962,7 +962,7 @@ BUSTER_GLOBAL_LOCAL CToken c_ast_peek_slow(CAstBuilder* builder, u32 at)
 // whether the window holds it.
 BUSTER_GLOBAL_LOCAL BUSTER_INLINE CToken c_ast_peek(CAstBuilder* builder, u32 ahead)
 {
-    BUSTER_CHECK(ahead < C_AST_LOOKAHEAD);
+    BUSTER_RT_CHECK(ahead < C_AST_LOOKAHEAD);
     u32 at = builder->position + ahead;
     CToken result;
     if (BUSTER_LIKELY(at < builder->filled))
@@ -1072,7 +1072,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_columns_move(CAstBuilder* builder, u32 capacity)
         {
             u64 bytes = (u64)builder->column_end * c_ast_column_sizes[column];
             u8* destination = (u8*)arena_allocate_bytes(moved.columns[column], bytes, 1);
-            BUSTER_CHECK(destination == arena_buffer_start(moved.columns[column]));
+            BUSTER_RT_CHECK(destination == arena_buffer_start(moved.columns[column]));
             memcpy(destination, sources[column], bytes);
         }
         builder->statistics.column_copy_bytes += (u64)builder->column_end * C_AST_NODE_BYTES;
@@ -1162,7 +1162,7 @@ BUSTER_GLOBAL_LOCAL void c_ast_columns_grow(CAstBuilder* builder)
         {
             Arena* arena = builder->storage.columns[column];
             u8* tail = (u8*)arena_allocate_bytes(arena, (u64)count * c_ast_column_sizes[column], 1);
-            BUSTER_CHECK(tail == arena_buffer_start(arena) + (u64)end * c_ast_column_sizes[column]);
+            BUSTER_RT_CHECK(tail == arena_buffer_start(arena) + (u64)end * c_ast_column_sizes[column]);
         }
         builder->column_end = end + count;
     }

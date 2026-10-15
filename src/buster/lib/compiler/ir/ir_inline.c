@@ -270,7 +270,7 @@ BUSTER_GLOBAL_LOCAL void ir_inline_plant_fault(IrFunction* caller, IrValidationS
             planted = true;
         }
     }
-    BUSTER_CHECK(planted);
+    BUSTER_RT_CHECK(planted);
 }
 #endif
 

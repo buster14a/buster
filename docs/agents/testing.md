@@ -292,19 +292,25 @@ The optional `.github/workflows/native-investigation.yml` report uses the checke
   private subprocess seam; use the registered suite rather than invoking it as
   standalone evidence.
 - `sanitizer_tests` also pins the invariant-macro selection in every
-  configuration. `BUSTER_CHECK`, `BUSTER_ASSERT` and `BUSTER_UNREACHABLE`
-  become optimizer assumptions or unevaluated expressions only under
-  `BUSTER_OPTIMIZE && !BUSTER_SANITIZE`; Debug and sanitized builds at every
-  optimization level keep them as diagnostics. The suite compares the BUSTER_
-  defines with the compiler's own `__OPTIMIZE__` and AddressSanitizer
-  predicates, counts operand evaluations (an optimized unsanitized
-  `BUSTER_ASSERT` must evaluate nothing), and, where the macros are
-  diagnostics, requires false `BUSTER_CHECK`/`BUSTER_ASSERT` children to exit
-  1 with their `assertion failed at` report and, outside Windows, a
-  `BUSTER_UNREACHABLE` child to die by SIGILL or SIGTRAP. Android and iOS
+  configuration. `BUSTER_RT_CHECK` and `BUSTER_UNREACHABLE` become optimizer
+  assumptions only under `BUSTER_OPTIMIZE && !BUSTER_SANITIZE`; Debug and
+  sanitized builds at every optimization level keep them as diagnostics.
+  `BUSTER_RT_CHECK_RAW` keeps its allocation-free diagnostic in every build.
+  Both check macros evaluate their operand once, including ordinary Release.
+  The removed `BUSTER_ASSERT` and `BUSTER_VALIDATE` macros have no compatibility
+  aliases. Fallible inputs and system calls requiring defined failure in every
+  build need explicit error handling. Arena cursor, alignment and reservation
+  preconditions use `BUSTER_RT_CHECK`; their false-condition children run only
+  in Debug or sanitized builds, while real commit-failure children run in every
+  desktop configuration.
+  The suite compares the BUSTER_ defines with the compiler's own
+  `__OPTIMIZE__` and AddressSanitizer predicates and counts operand evaluations.
+  Where regular checks are diagnostic, false regular/raw check children must
+  exit 1 with their `assertion failed at` report and, outside Windows, a
+  `BUSTER_UNREACHABLE` child must die by SIGILL or SIGTRAP. Android and iOS
   payloads cannot relaunch themselves, so they run only the in-process
   controls and report the children as `status=unsupported`. It never executes
-  a false raw assumption.
+  a false optimizer assumption.
   It also requires `BUSTER_REFERENCE_CHECKS` (the reference-equivalence
   checks once reached only in Debug) to equal that checked-contract
   configuration. Routine CI runs this suite in the optimized sanitized

@@ -1080,7 +1080,7 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
         return false;
     }
     // Validated assembly has one constraint and value for every operand.
-    BUSTER_CHECK(!instruction->operand_count || (instruction->immediates && instruction->operands));
+    BUSTER_RT_CHECK(!instruction->operand_count || (instruction->immediates && instruction->operands));
     // The registers this asm has already committed to, which is what licenses a
     // template to name one of them literally. Only the pinned operand classes
     // and the clobbers are here: a generically allocated `r` operand is a
@@ -2307,7 +2307,7 @@ BUSTER_GLOBAL_LOCAL CodegenMachineScratch codegen_machine_scratch_begin(Arena* a
             else if (result.owned[index])
             {
                 bool destroyed = arena_destroy(result.owned[index], 1);
-                BUSTER_CHECK(destroyed);
+                BUSTER_RT_CHECK(destroyed);
                 result.owned[index] = 0;
             }
         }
@@ -2327,7 +2327,7 @@ BUSTER_GLOBAL_LOCAL void codegen_machine_scratch_end(CodegenMachineScratch* mach
         {
             context->arenas[index] = machine_scratch->saved[index];
             bool destroyed = arena_destroy(machine_scratch->owned[index], 1);
-            BUSTER_CHECK(destroyed);
+            BUSTER_RT_CHECK(destroyed);
         }
     }
 }
@@ -2358,7 +2358,7 @@ CodegenTestMachineScratch codegen_test_machine_scratch(Arena* arena, u32 instruc
         // A thread context holds SCRATCH_ARENA_COUNT distinct live arenas,
         // so one besides `first` exists; anything else is a broken context,
         // and the control must fail rather than quietly not occupy one.
-        BUSTER_CHECK(other != 0);
+        BUSTER_RT_CHECK(other != 0);
         u64 remaining = other->reserved_size - other->position;
         (void)arena_allocate_bytes(other, remaining > other_remaining ? remaining - other_remaining : 0, 1);
     }
@@ -8267,12 +8267,12 @@ CodegenModule codegen_generate_canonical_module_with_trace(Arena* arena, IrProgr
         if (worker->output)
         {
             bool destroyed = arena_destroy(worker->output, 1);
-            BUSTER_CHECK(destroyed);
+            BUSTER_RT_CHECK(destroyed);
         }
         if (worker->cache)
         {
             bool destroyed = arena_destroy(worker->cache, 1);
-            BUSTER_CHECK(destroyed);
+            BUSTER_RT_CHECK(destroyed);
         }
     }
     return result;

@@ -164,7 +164,7 @@ struct MetaSummary
 
 BUSTER_GLOBAL_LOCAL void meta_append(MetaText* text, String8 part)
 {
-    BUSTER_CHECK(text->count < BUSTER_ARRAY_LENGTH(text->parts));
+    BUSTER_RT_CHECK(text->count < BUSTER_ARRAY_LENGTH(text->parts));
     text->parts[text->count++] = part;
 }
 
@@ -640,7 +640,7 @@ BUSTER_GLOBAL_LOCAL void meta_save_outcome(Arena* arena, String8 directory, Stri
         outcome.command, (String8){(char8*)outcome.wait.streams[STANDARD_STREAM_OUTPUT].pointer, outcome.wait.streams[STANDARD_STREAM_OUTPUT].length},
         (String8){(char8*)outcome.wait.streams[STANDARD_STREAM_ERROR].pointer, outcome.wait.streams[STANDARD_STREAM_ERROR].length});
     String8 path = string_format_z(arena, S8("{S8}/{S8}.log"), directory, side);
-    BUSTER_CHECK(file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(report)));
+    BUSTER_RT_CHECK(file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(report)));
 }
 
 BUSTER_GLOBAL_LOCAL bool meta_reduction_accept(MetaContext* context, MetaSpec spec, u32 mask, MetaTarget target,
@@ -968,7 +968,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL MetaSummary meta_run(MetaContext* context
                                 reduced_mask, reduced.terms, reduced.rounds, reduced.salt, reduced.factor, reduced.input_count, reductions,
                                 (u32)meta_same_failure(pair, final), context->compiler);
                             String8 report_path = string_format_z(arena, S8("{S8}/reproducer.txt"), failure);
-                            BUSTER_CHECK(file_write(report_path, BUSTER_SLICE_TO_BYTE_SLICE(report)));
+                            BUSTER_RT_CHECK(file_write(report_path, BUSTER_SLICE_TO_BYTE_SLICE(report)));
                             string_print(S8("METAMORPHIC_FAILURE seed={u32} mask={u32} target={S8} allocator={u32} bundle={S8}\n"),
                                          spec.seed, mask, target.name, mode, failure);
                             // Keep signature storage below the next rewind.

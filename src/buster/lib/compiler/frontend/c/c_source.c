@@ -450,10 +450,10 @@ BUSTER_C_INTERNAL char8* c_space_allocate(CSpellingSpace* space, u64 size)
     {
         char8* result = (char8*)arena_allocate_bytes(space->arena, size, 1);
         space->used = (u64)(result - space->base) + size;
-        BUSTER_CHECK(space->used <= UINT32_MAX);
+        BUSTER_RT_CHECK(space->used <= UINT32_MAX);
         return result;
     }
-    BUSTER_CHECK(space->used + size <= space->capacity);
+    BUSTER_RT_CHECK(space->used + size <= space->capacity);
     char8* result = space->base + space->used;
     space->used += size;
     return result;
@@ -521,9 +521,9 @@ BUSTER_C_INTERNAL u64 c_token_literal_scan_length(char8 const* spelling, u64 lim
 // the sentinel for terminated string and character literals (see CToken).
 u64 c_token_length_oversized(char8 const* spelling_base, CToken token)
 {
-    BUSTER_CHECK(token.kind == C_TOKEN_STRING_LITERAL || token.kind == C_TOKEN_CHARACTER_LITERAL);
+    BUSTER_RT_CHECK(token.kind == C_TOKEN_STRING_LITERAL || token.kind == C_TOKEN_CHARACTER_LITERAL);
     u64 length = c_token_literal_scan_length(spelling_base + token.offset, UINT64_MAX);
-    BUSTER_CHECK(length >= C_TOKEN_LENGTH_OVERSIZED);
+    BUSTER_RT_CHECK(length >= C_TOKEN_LENGTH_OVERSIZED);
     return length;
 }
 
@@ -542,7 +542,7 @@ BUSTER_C_SHARED CToken c_space_token(CSpellingSpace* space, String8 text, CToken
 {
     // The sentinel is only valid on terminated literals; no other caller
     // synthesizes a spelling anywhere near it.
-    BUSTER_CHECK(text.length < C_TOKEN_LENGTH_OVERSIZED || kind == C_TOKEN_STRING_LITERAL || kind == C_TOKEN_CHARACTER_LITERAL);
+    BUSTER_RT_CHECK(text.length < C_TOKEN_LENGTH_OVERSIZED || kind == C_TOKEN_STRING_LITERAL || kind == C_TOKEN_CHARACTER_LITERAL);
 #if BUSTER_BENCH_ALLOCATIONS
     if (space->arena)
     {
@@ -1872,7 +1872,7 @@ CSourceLocation c_preprocess_token_location(CPreprocessResult const* preprocess,
 BUSTER_C_SHARED CSourceSite c_preprocess_token_site_cursor(CPreprocessResult const* preprocess, CToken token, IrSourceMapCursor* cursor)
 {
     IR_DIAGNOSTIC_CENSUS_RECORD(C_RECORD_SITES, 1);
-    BUSTER_CHECK(token.offset < UINT32_MAX);
+    BUSTER_RT_CHECK(token.offset < UINT32_MAX);
     CSourceSite result = {
         .map_offset_plus_one = token.offset + 1,
         .file = c_preprocess_token_source(preprocess, token, cursor),
@@ -1882,7 +1882,7 @@ BUSTER_C_SHARED CSourceSite c_preprocess_token_site_cursor(CPreprocessResult con
     // region resolves to (TEXT regions answer region->source, STAMP regions a
     // stamp built with the same source), so the site agrees with the eager
     // location it replaces.
-    BUSTER_CHECK(result.file == c_preprocess_token_location(preprocess, token).file);
+    BUSTER_RT_CHECK(result.file == c_preprocess_token_location(preprocess, token).file);
 #endif
     return result;
 }
@@ -2365,7 +2365,7 @@ BUSTER_C_INTERNAL void c_diagnostic_push(CLexState* state, u64 offset, CDiagnost
 {
     IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTICS_RECORDED, 1);
     CLexResult* result = state->result;
-    BUSTER_CHECK(result->diagnostic_count < state->maximum_diagnostic_count);
+    BUSTER_RT_CHECK(result->diagnostic_count < state->maximum_diagnostic_count);
     if (state->diagnostic_storage == C_LEX_DIAGNOSTIC_STORAGE_NONE)
     {
         c_lex_diagnostic_storage_begin(state);
@@ -2417,7 +2417,7 @@ BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE u64 c_lex_mask_below_reference(
 
 BUSTER_C_INLINE BUSTER_INLINE u64 c_lex_mask_below(u64 bit_index)
 {
-    BUSTER_CHECK(bit_index < C_LEX_MASK_BELOW_LIMIT);
+    BUSTER_RT_CHECK(bit_index < C_LEX_MASK_BELOW_LIMIT);
 #if defined(__BMI2__)
     u64 result = _bzhi_u64(~(u64)0, (u32)bit_index);
 #else
@@ -2945,7 +2945,7 @@ BUSTER_C_INTERNAL void c_lex_compact_tables_build(void)
     for (u32 index = C_PUNCTUATOR_NONE + 1; index < C_PUNCTUATOR_COUNT; index += 1)
     {
         String8 spelling = c_punctuator_spellings[index];
-        BUSTER_CHECK(spelling.length && (u8)spelling.pointer[0] < 128);
+        BUSTER_RT_CHECK(spelling.length && (u8)spelling.pointer[0] < 128);
         u8 first = (u8)spelling.pointer[0];
         if (spelling.length == 1)
         {
@@ -2954,7 +2954,7 @@ BUSTER_C_INTERNAL void c_lex_compact_tables_build(void)
         else if (spelling.length == 2)
         {
             u8 second = (u8)spelling.pointer[1];
-            BUSTER_CHECK(second < 128);
+            BUSTER_RT_CHECK(second < 128);
             if (c_lex_pair_row[first] == 0xFF)
             {
                 c_lex_pair_row[first] = (u8)row_count++;
@@ -2963,19 +2963,19 @@ BUSTER_C_INTERNAL void c_lex_compact_tables_build(void)
             {
                 c_lex_pair_column[second] = (u8)column_count++;
             }
-            BUSTER_CHECK(row_count <= C_LEX_PAIR_TABLE_SIZE && column_count <= C_LEX_PAIR_TABLE_SIZE);
+            BUSTER_RT_CHECK(row_count <= C_LEX_PAIR_TABLE_SIZE && column_count <= C_LEX_PAIR_TABLE_SIZE);
             c_lex_pair_punctuators[c_lex_pair_row[first]][c_lex_pair_column[second]] = (u8)c_punctuator_canonical((CPunctuator)index);
         }
         else if (spelling.length == 3)
         {
-            BUSTER_CHECK(!c_lex_triple_punctuators[first]);
+            BUSTER_RT_CHECK(!c_lex_triple_punctuators[first]);
             c_lex_triple_punctuators[first] = (u8)index;
         }
         else
         {
             // The one four-character spelling, %:%:, which the emitter finds
             // as two adjacent %: pairs rather than through a fourth table.
-            BUSTER_CHECK(spelling.length == 4 && index == C_PUNCTUATOR_HASH_HASH_DIGRAPH);
+            BUSTER_RT_CHECK(spelling.length == 4 && index == C_PUNCTUATOR_HASH_HASH_DIGRAPH);
         }
     }
 
@@ -3448,7 +3448,7 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
             {
                 u64 first_high = (u64)__builtin_ctzll(word_high);
                 u64 owners = (identifier_starts | number_starts) & c_lex_mask_below(first_high + 1);
-                BUSTER_CHECK(owners);
+                BUSTER_RT_CHECK(owners);
                 u64 candidate = (u64)(63 - __builtin_clzll(owners));
                 trigger_at = BUSTER_MIN(trigger_at, candidate);
             }
@@ -3469,7 +3469,7 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
                 if (first && ((word | number_span) & (UINT64_C(1) << (first - 1))))
                 {
                     u64 owners = (identifier_starts | number_starts) & c_lex_mask_below(first);
-                    BUSTER_CHECK(owners);
+                    BUSTER_RT_CHECK(owners);
                     candidate = (u64)(63 - __builtin_clzll(owners));
                 }
                 trigger_at = BUSTER_MIN(trigger_at, candidate);
@@ -3505,7 +3505,7 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
         }
         else
         {
-            BUSTER_CHECK(boundary);
+            BUSTER_RT_CHECK(boundary);
             bound = (u64)(63 - __builtin_clzll(boundary));
         }
 
@@ -3569,7 +3569,7 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
         if (bound)
         {
             // Each emission bound is a window position or its length (64 max).
-            BUSTER_CHECK(bound <= 64);
+            BUSTER_RT_CHECK(bound <= 64);
             // Starts and ends compress through the token-boundary masks, one
             // byte subtract yields every length in the window, and the kind
             // and punctuator vectors ride the same starts mask.
@@ -3579,7 +3579,7 @@ BUSTER_C_INTERNAL void c_lex_compact(CLexState* state)
             u64 final_lane = emitted & ~(emitted >> 1);
             u64 end_mask = ((boundary >> 1) | final_lane) & token_span & emitted;
             u32 count = (u32)__builtin_popcountll(start_mask);
-            BUSTER_CHECK(count == (u32)__builtin_popcountll(end_mask));
+            BUSTER_RT_CHECK(count == (u32)__builtin_popcountll(end_mask));
 
             __m512i kind_vector = _mm512_maskz_set1_epi8((__mmask64)newline_starts, (char)C_TOKEN_NEWLINE);
             kind_vector = _mm512_mask_set1_epi8(kind_vector, (__mmask64)identifier_starts, (char)C_TOKEN_IDENTIFIER);
@@ -4270,12 +4270,12 @@ BUSTER_C_SHARED u64 c_macro_name_hash(String8 name)
 // entries; the caller guarantees every defined symbol id lies below it.
 BUSTER_C_INTERNAL void c_macro_index_rebuild(Arena* arena, CMacro* first, u32 capacity)
 {
-    BUSTER_CHECK(first && capacity);
+    BUSTER_RT_CHECK(first && capacity);
     CMacro** by_symbol = arena_allocate(arena, CMacro*, capacity);
     memset(by_symbol, 0, sizeof(*by_symbol) * capacity);
     for (CMacro* macro = first; macro; macro = macro->next)
     {
-        BUSTER_CHECK(macro->symbol < capacity);
+        BUSTER_RT_CHECK(macro->symbol < capacity);
         by_symbol[macro->symbol] = macro;
     }
     first->by_symbol = by_symbol;
@@ -5358,14 +5358,14 @@ BUSTER_C_INTERNAL void c_symbol_table_seed(CSymbolTable* table)
         // An enumerator with no spelling would intern the empty name and
         // match nothing, so the gap is caught here rather than as a pass
         // that silently stops recognizing its keyword.
-        BUSTER_CHECK(c_symbol_well_known_spellings[well_known].length);
+        BUSTER_RT_CHECK(c_symbol_well_known_spellings[well_known].length);
         u32 id = c_symbol_intern(table, c_symbol_well_known_spellings[well_known]);
-        BUSTER_CHECK(id == well_known);
+        BUSTER_RT_CHECK(id == well_known);
     }
     for (u64 index = 0; index < C_SYMBOL_PREDEFINED_COUNT; index += 1)
     {
         u32 id = c_symbol_intern(table, c_symbol_predefined[index].name);
-        BUSTER_CHECK(id == C_SYMBOL_WELL_KNOWN_COUNT + index);
+        BUSTER_RT_CHECK(id == C_SYMBOL_WELL_KNOWN_COUNT + index);
         // Routed through the spelling scan instead of reading
         // c_symbol_predefined[index].builtin directly, so the two
         // classification paths cannot drift.
@@ -5382,7 +5382,7 @@ BUSTER_C_INTERNAL void c_symbol_table_seed(CSymbolTable* table)
     {
         c_symbol_intern(table, c_symbol_classified_extras[index]);
     }
-    BUSTER_CHECK(table->count < C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
+    BUSTER_RT_CHECK(table->count < C_SYMBOL_PREDEFINED_LIMIT_CAPACITY);
     table->predefined_limit = table->count;
     for (u32 id = 1; id <= table->count; id += 1)
     {
@@ -5425,7 +5425,7 @@ BUSTER_C_INTERNAL void c_symbol_prototype_build(void)
     c_symbol_table_seed(&c_symbol_prototype);
     // The predefined range never grows a table or decodes a UCN name, so the
     // prototype has no arena and still owns only the static arrays above.
-    BUSTER_CHECK(c_symbol_prototype.names == c_symbol_prototype_names && c_symbol_prototype.slots == c_symbol_prototype_slots &&
+    BUSTER_RT_CHECK(c_symbol_prototype.names == c_symbol_prototype_names && c_symbol_prototype.slots == c_symbol_prototype_slots &&
                  !c_symbol_prototype.has_ucn_names);
     c_symbol_prototype_built = true;
 }
@@ -5601,7 +5601,7 @@ BUSTER_C_INTERNAL u32 c_pp_stamp_push(CPpStampTable* stamps, CSourceLocation loc
         stamps->entries = entries;
         stamps->capacity = capacity;
     }
-    BUSTER_CHECK(stamps->count < C_PP_STAMP_MASK);
+    BUSTER_RT_CHECK(stamps->count < C_PP_STAMP_MASK);
     stamps->entries[stamps->count] = location;
     stamps->count += 1;
     return stamps->count;
@@ -6190,7 +6190,7 @@ BUSTER_C_INTERNAL CMacro* c_macro_define_indexed(Arena* arena, char8 const* spel
         // so an index of that size covers this symbol and every earlier one;
         // the first definition builds it, and a definition whose id lies
         // past it (the table doubled since) regrows it from the list.
-        BUSTER_CHECK(*first); // The first/last list endpoints are published together.
+        BUSTER_RT_CHECK(*first); // The first/last list endpoints are published together.
         if (symbol >= (*first)->by_symbol_capacity)
         {
             c_macro_index_rebuild(arena, *first, symbols->name_capacity);
@@ -6656,7 +6656,7 @@ BUSTER_C_INTERNAL void c_macro_context_output_push(Arena* arena, Arena* expansio
         {
             context->output_tokens = slot;
         }
-        BUSTER_CHECK(slot == context->output_tokens + context->output_count);
+        BUSTER_RT_CHECK(slot == context->output_tokens + context->output_count);
         *slot = token;
         context->output_count += 1;
     }
@@ -6673,7 +6673,7 @@ BUSTER_C_INTERNAL void c_macro_context_output_push(Arena* arena, Arena* expansio
 BUSTER_C_INTERNAL void c_macro_expansion_tasks_reserve(Arena* arena, CMacroExpansionTaskStack* tasks, u64 token_count, bool enable)
 {
     u64 maximum_count = UINT64_MAX / sizeof(CMacroExpansionTask);
-    BUSTER_CHECK(tasks->count < maximum_count && token_count <= maximum_count - tasks->count - enable);
+    BUSTER_RT_CHECK(tasks->count < maximum_count && token_count <= maximum_count - tasks->count - enable);
     u64 required = tasks->count + token_count + enable;
     if (required > tasks->capacity)
     {
@@ -6814,7 +6814,7 @@ BUSTER_C_INTERNAL bool c_macro_invocation_arguments(Arena* arena, CMacroExpansio
                     {
                         run = slot;
                     }
-                    BUSTER_CHECK(slot == run + run_count);
+                    BUSTER_RT_CHECK(slot == run + run_count);
                     *slot = token;
                     run_count += 1;
                     arguments[current].token_count += 1;
@@ -7750,7 +7750,7 @@ BUSTER_C_INTERNAL void c_macro_produce_plain_tasks(Arena* arena, CMacroExpansion
             }
         }
     }
-    BUSTER_CHECK(cursor == batch + 1);
+    BUSTER_RT_CHECK(cursor == batch + 1);
     tasks->count += 1 + token_count;
     *trailing_space_out = pending_space;
 }
@@ -10382,7 +10382,7 @@ BUSTER_C_INTERNAL void c_preprocess_process_expanded_line(CPreprocessPragmaConte
         if (item.foreign)
         {
             String8 spelling = c_token_spelling(space->base, item.token);
-            BUSTER_CHECK(!spelling.length || copy); // Counted in foreign_length above.
+            BUSTER_RT_CHECK(!spelling.length || copy); // Counted in foreign_length above.
             u32 spelling_offset = copy ? c_space_offset(space, copy) : (u32)space->used;
             for (u64 byte_index = 0; byte_index < spelling.length; byte_index += 1)
             {
@@ -12537,7 +12537,7 @@ BUSTER_C_INTERNAL u64 c_preprocess_rewrite_obsolete_designators(Arena* arena, CS
             else if (shapes[index] == C_TOKEN_IDENTIFIER && in_initializer && (top & C_OBSOLETE_DESIGNATOR_BRACE) && index + 1 < count &&
                      shapes[index + 1] == colon && (before == left_brace || before == comma))
             {
-                BUSTER_CHECK(accepted < candidates);
+                BUSTER_RT_CHECK(accepted < candidates);
                 positions[accepted++] = (u32)index;
             }
         }
@@ -13223,7 +13223,7 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
     c_source_metrics_add(&result.detail->source_lexed, &root_lex.metrics);
     {
         u32 root_row = c_source_metrics_file_row(arena, &metrics_files, options.source_path);
-        BUSTER_CHECK(metrics_files.rows && root_row < metrics_files.count);
+        BUSTER_RT_CHECK(metrics_files.rows && root_row < metrics_files.count);
         if (metrics_files.rows[root_row].lex_count == 0)
         {
             c_source_metrics_add(&result.detail->source_unique, &root_lex.metrics);

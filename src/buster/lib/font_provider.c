@@ -108,7 +108,7 @@ BUSTER_GLOBAL_LOCAL void font_candidate_append(String8* candidates, u64* count, 
 {
     if (path.pointer && path.length)
     {
-        BUSTER_CHECK(*count < BUSTER_FONT_CANDIDATE_CAPACITY);
+        BUSTER_RT_CHECK(*count < BUSTER_FONT_CANDIDATE_CAPACITY);
         candidates[*count] = path;
         *count += 1;
     }
@@ -249,8 +249,8 @@ String8 font_file_get_path(FontIndex index)
 {
     BUSTER_GLOBAL_LOCAL String8 table[(u64)FONT_INDEX_COUNT] = {0};
 
-    BUSTER_CHECK(os_state.arena != 0);
-    BUSTER_CHECK((u64)index < (u64)FONT_INDEX_COUNT);
+    BUSTER_RT_CHECK(os_state.arena != 0);
+    BUSTER_RT_CHECK((u64)index < (u64)FONT_INDEX_COUNT);
 
     if (!font_config_initialized)
     {
@@ -399,7 +399,7 @@ String8 font_file_get_path(FontIndex index)
         font_config_initialized = true;
     }
 
-    BUSTER_CHECK(font_config_initialized);
+    BUSTER_RT_CHECK(font_config_initialized);
     BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(table) == (u64)FONT_INDEX_COUNT);
 
     return table[(u64)index];

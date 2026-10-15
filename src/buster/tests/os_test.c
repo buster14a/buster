@@ -37,9 +37,9 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_thread_pool_entry(void* argument)
 {
     OsTestThreadPoolState* state = (OsTestThreadPoolState*)argument;
     Arena* pooled = arena_create((ArenaCreation){0});
-    BUSTER_CHECK(pooled != 0);
+    BUSTER_RT_CHECK(pooled != 0);
     state->pooled_arena = pooled;
-    BUSTER_CHECK(arena_destroy(pooled, 1));
+    BUSTER_RT_CHECK(arena_destroy(pooled, 1));
 }
 
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -380,9 +380,9 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType os_test_inner_lane_gang(void* argument)
         // arenas. Generic OS-thread teardown must drain all of them before
         // the TLS pool root disappears.
         Arena* pooled = arena_create((ArenaCreation){0});
-        BUSTER_CHECK(pooled != 0);
+        BUSTER_RT_CHECK(pooled != 0);
         state->inner_pooled_arenas[state->invocation][index] = pooled;
-        BUSTER_CHECK(arena_destroy(pooled, 1));
+        BUSTER_RT_CHECK(arena_destroy(pooled, 1));
     }
 }
 
@@ -1047,7 +1047,7 @@ void os_test_process_child_run(UnitTestArguments* arguments)
         if (string_equal(resource_failure_mode, S8("barrier")) || string_equal(resource_failure_mode, S8("thread")))
         {
             ThreadContext* owner = thread_context_allocate();
-            BUSTER_CHECK(owner != 0);
+            BUSTER_RT_CHECK(owner != 0);
             thread_context_select(owner);
             if (string_equal(resource_failure_mode, S8("barrier")))
             {
@@ -1067,9 +1067,12 @@ void os_test_process_child_run(UnitTestArguments* arguments)
                 .callback = &os_test_resource_noop,
                 .argument = 0,
             });
-            BUSTER_CHECK(handle != 0);
+            BUSTER_RT_CHECK(handle != 0);
             os_resource_test_fail_on_call(OS_RESOURCE_TEST_THREAD_JOIN, 0);
-            BUSTER_CHECK(os_thread_join(handle));
+            if (!os_thread_join(handle))
+            {
+                os_fail_message(S8("thread join failed"));
+            }
         }
         os_fail_message(S8("resource failure injection was not observed"));
     }
@@ -1707,9 +1710,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
     OsTestEnvironment warm_environment = os_test_environment(arena, keys, warm_values, BUSTER_ARRAY_LENGTH(keys));
     ProcessSpawnResult warm_spawn = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(child),
         warm_environment.keys, warm_environment.values, outer);
-    BUSTER_CHECK(warm_spawn.handle != 0 && warm_spawn.process_group);
+    BUSTER_RT_CHECK(warm_spawn.handle != 0 && warm_spawn.process_group);
     ProcessWaitResult warm_wait = os_process_wait_deadline(arena, warm_spawn, 30000000);
-    BUSTER_CHECK(warm_wait.result == PROCESS_RESULT_SUCCESS && !warm_wait.timed_out && !warm_wait.capture_failed &&
+    BUSTER_RT_CHECK(warm_wait.result == PROCESS_RESULT_SUCCESS && !warm_wait.timed_out && !warm_wait.capture_failed &&
         !warm_wait.output_truncated && !warm_wait.capture_limit_exceeded && !warm_wait.process_tree_cleanup_failed &&
         !warm_wait.process_group_reservation_retained && !warm_wait.process_group_ownership_lost &&
         warm_wait.streams[STANDARD_STREAM_OUTPUT].length == 5);
@@ -1720,7 +1723,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult os_test_capture_sink_admission(UnitTestArgume
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(owned); index += 1)
     {
         DWORD flags = 0;
-        BUSTER_CHECK(owned[index] && !GetHandleInformation(owned[index], &flags) && GetLastError() == ERROR_INVALID_HANDLE);
+        BUSTER_RT_CHECK(owned[index] && !GetHandleInformation(owned[index], &flags) && GetLastError() == ERROR_INVALID_HANDLE);
     }
     arguments->show(arguments, S8("OS_CAPTURE_CENSUS_WARMUP_V1 before={u64} after={u64} owned_handles=closed status=pass\n"),
         cold_resources, os_process_spawn_test_resource_count());
@@ -3426,7 +3429,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
         if (BUSTER_REQUIRE(arguments, module != 0 && expected != 0))
         {
             char8 suffix_storage[64] = {0};
-            BUSTER_CHECK(symbol.length + sizeof("_suffix") <= sizeof(suffix_storage));
+            BUSTER_RT_CHECK(symbol.length + sizeof("_suffix") <= sizeof(suffix_storage));
             memcpy(suffix_storage, symbol.pointer, symbol.length);
             memcpy(suffix_storage + symbol.length, "_suffix", sizeof("_suffix"));
 
@@ -5377,6 +5380,8 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
     // builds. Deadlock is a failure too, so every child has a deadline.
     {
         String8 modes[] = {S8("barrier"), S8("thread"), S8("join")};
+        String8 diagnostics[] = {S8("lane gang creation failed"), S8("lane gang creation failed"), S8("thread join failed")};
+        BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(modes) == BUSTER_ARRAY_LENGTH(diagnostics));
         String8 child_arguments[] = {program_state->input.arguments.pointer[0], S8("test")};
         for (u64 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(modes); mode_index += 1)
         {
@@ -5413,7 +5418,7 @@ UnitTestResult os_tests(UnitTestArguments* arguments)
                 };
                 BUSTER_TEST(arguments, !wait.timed_out);
                 BUSTER_TEST(arguments, wait.result == PROCESS_RESULT_FAILED);
-                BUSTER_TEST(arguments, string_first_sequence(error, S8("validation failed")) != BUSTER_STRING_NO_MATCH);
+                BUSTER_TEST(arguments, string_first_sequence(error, diagnostics[mode_index]) != BUSTER_STRING_NO_MATCH);
             }
         }
     }

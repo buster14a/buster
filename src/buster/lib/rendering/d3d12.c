@@ -1214,7 +1214,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 {
     RenderingWindowHandle* result = arena_allocate(arena, RenderingWindowHandle, 1);
     WmNativeSurface native_surface = wm_window_get_native_surface(windowing, window);
-    BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_WIN32);
+    BUSTER_RT_CHECK(native_surface.kind == WM_NATIVE_SURFACE_WIN32);
     result->hwnd = (HWND)native_surface.window;
     result->frame_count = BUSTER_D3D12_FRAME_COUNT;
     result->scale = (RenderingScale){.x = 1.0f, .y = 1.0f};
@@ -1363,8 +1363,8 @@ void rendering_window_rect_texture_update_begin(RenderingWindowHandle* window)
 
 void rendering_window_queue_rect_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, RectTextureSlot slot, TextureIndex texture_index)
 {
-    BUSTER_CHECK(slot < RECT_TEXTURE_SLOT_COUNT);
-    BUSTER_CHECK(texture_index.value < rendering->texture_count);
+    BUSTER_RT_CHECK(slot < RECT_TEXTURE_SLOT_COUNT);
+    BUSTER_RT_CHECK(texture_index.value < rendering->texture_count);
     D3D12_CPU_DESCRIPTOR_HANDLE source =
         d3d12_cpu_descriptor(rendering->srv_heap, rendering->srv_descriptor_size, rendering->textures[texture_index.value].descriptor_index);
     D3D12_CPU_DESCRIPTOR_HANDLE destination =
@@ -1382,8 +1382,8 @@ void rendering_window_rect_texture_update_end(RenderingHandle* rendering, Render
 
 TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory texture_memory)
 {
-    BUSTER_CHECK(texture_memory.depth == 1);
-    BUSTER_CHECK(rendering->texture_count < MAX_D3D12_TEXTURE_COUNT);
+    BUSTER_RT_CHECK(texture_memory.depth == 1);
+    BUSTER_RT_CHECK(rendering->texture_count < MAX_D3D12_TEXTURE_COUNT);
     u32 texture_index = rendering->texture_count;
     rendering->texture_count += 1;
     D3D12Texture* texture = &rendering->textures[texture_index];
@@ -1416,7 +1416,7 @@ TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory 
     UINT64 row_size_in_bytes = 0;
     UINT64 upload_size = 0;
     ID3D12Device_GetCopyableFootprints(rendering->device, &texture_desc, 0, 1, 0, &footprint, &num_rows, &row_size_in_bytes, &upload_size);
-    BUSTER_CHECK(num_rows == texture_memory.height);
+    BUSTER_RT_CHECK(num_rows == texture_memory.height);
     BUSTER_UNUSED(row_size_in_bytes);
 
     D3D12_HEAP_PROPERTIES upload_heap = {.Type = D3D12_HEAP_TYPE_UPLOAD, .CreationNodeMask = 1, .VisibleNodeMask = 1};

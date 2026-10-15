@@ -327,7 +327,7 @@ BUSTER_GLOBAL_LOCAL void ir_promote_remove_events(IrFunction* function, IrPromot
         }
         else
         {
-            BUSTER_CHECK(current != IR_PROMOTE_NONE);
+            BUSTER_RT_CHECK(current != IR_PROMOTE_NONE);
             replacements[row->result.value] = current;
             statistics->removed_loads += 1;
         }
@@ -356,7 +356,7 @@ BUSTER_GLOBAL_LOCAL void ir_promote_stage_reserve(Arena* arena, IrPromoteStagedV
 
 BUSTER_GLOBAL_LOCAL void ir_promote_publish_values(Arena* arena, IrFunction* function, IrPromoteStagedValues const* staged)
 {
-    BUSTER_CHECK(function->value_count == staged->base);
+    BUSTER_RT_CHECK(function->value_count == staged->base);
     ir_function_invalidate_cfg(function);
     u32 needed = staged->base + staged->count;
     if (needed > function->value_capacity)
@@ -531,7 +531,7 @@ BUSTER_GLOBAL_LOCAL bool ir_promote_global(Arena* arena, IrProgram* program, IrF
                     IrBlock* destination = function->blocks + block;
                     IrValueId value = {.value = staged->base + staged->count};
                     staged->types[staged->count++] = type;
-                    BUSTER_CHECK(value.value == entries[block]);
+                    BUSTER_RT_CHECK(value.value == entries[block]);
                     IrBlockParameter* parameter = arena_allocate(program->arena, IrBlockParameter, 1);
                     *parameter = (IrBlockParameter){.value = value, .canonical_type = type, .canonical_local = canonical_local};
                     for (u32 index = cfg->offsets[block]; index < cfg->offsets[block + 1]; index += 1)
@@ -681,7 +681,7 @@ BUSTER_GLOBAL_LOCAL void ir_rewrite_compact(Arena* arena, IrProgram* program, Ir
             for (u32 operand = 0; operand < row->operand_count; operand += 1)
             {
                 u32 value = replacements[old_operands[operand].value];
-                BUSTER_CHECK(value != IR_PROMOTE_NONE);
+                BUSTER_RT_CHECK(value != IR_PROMOTE_NONE);
                 row->operands[operand].value = value;
             }
             operand_cursor += row->operand_count;
@@ -703,7 +703,7 @@ BUSTER_GLOBAL_LOCAL void ir_rewrite_compact(Arena* arena, IrProgram* program, Ir
             for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
             {
                 incoming->value.value = replacements[incoming->value.value];
-                BUSTER_CHECK(incoming->value.value != IR_PROMOTE_NONE);
+                BUSTER_RT_CHECK(incoming->value.value != IR_PROMOTE_NONE);
             }
         }
         if (destination->local_values)
@@ -736,7 +736,7 @@ BUSTER_GLOBAL_LOCAL void ir_rewrite_compact(Arena* arena, IrProgram* program, Ir
     function->extra_count = extra_count;
     // Label-bearing functions are excluded before classification. Keeping their
     // identity/provenance graph untouched is intentional, not a lossy remap.
-    BUSTER_CHECK(function->label_metadata_count == 0);
+    BUSTER_RT_CHECK(function->label_metadata_count == 0);
     function->instruction_count = instruction_count;
     function->value_count = value_count;
 }

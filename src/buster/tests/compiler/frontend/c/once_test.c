@@ -123,7 +123,7 @@ BUSTER_GLOBAL_LOCAL bool c_once_test_file_identity_equal(FileIdentity left, File
 
 BUSTER_GLOBAL_LOCAL void c_once_test_append(char8* destination, u64 capacity, u64* length, String8 source)
 {
-    BUSTER_CHECK(*length <= capacity && source.length <= capacity - *length);
+    BUSTER_RT_CHECK(*length <= capacity && source.length <= capacity - *length);
     memcpy(destination + *length, source.pointer, source.length);
     *length += source.length;
 }

@@ -67,9 +67,12 @@ qualification, not assumed free.
 
 ## Sanitizer execution policy (#2657)
 
-Sanitized Release is checks-enabled: since #2656, `BUSTER_CHECK`,
-`BUSTER_ASSERT` and `BUSTER_UNREACHABLE` are diagnostics whenever
-`BUSTER_SANITIZE` is set, at every optimization level. Policy v2 therefore runs
+Sanitized Release is checks-enabled: `BUSTER_RT_CHECK` and
+`BUSTER_UNREACHABLE` are diagnostics whenever `BUSTER_SANITIZE` is set, at
+every optimization level, preserving the #2656 checked-contract policy.
+`BUSTER_RT_CHECK_RAW` retains its allocation-free diagnostic in every build.
+Regular and raw checks both evaluate their operands once; the separate
+unevaluated assertion and always-on validation macros have been removed. Policy v2 therefore runs
 the sanitizer suite once, in the optimized tree, and keeps sanitized Debug as
 compile-and-link portability coverage. `matrix_coverage_row_execution` in
 `build.c` is the single rule: only optimized Clang rows are `runtime`; every

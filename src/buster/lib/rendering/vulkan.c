@@ -315,7 +315,7 @@ BUSTER_GLOBAL_LOCAL VkBool32 buster_vulkan_debug_callback(VkDebugUtilsMessageSev
     bool is_validation = (message_type & (VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT)) != 0;
     bool is_performance = (message_type & (VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT)) != 0;
     bool is_device_address_binding = (message_type & (VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT)) != 0;
-    BUSTER_CHECK(is_general || is_validation || is_performance || is_device_address_binding);
+    BUSTER_RT_CHECK(is_general || is_validation || is_performance || is_device_address_binding);
 
     String8 message_id = string_from_pointer((char8*)callback_data->pMessageIdName);
     if (!message_id.pointer)
@@ -568,8 +568,8 @@ BUSTER_GLOBAL_LOCAL GPUMemory vk_allocate_memory(VkDevice device, const VkAlloca
 BUSTER_GLOBAL_LOCAL VulkanImage vk_image_create(VkDevice device, const VkAllocationCallbacks* allocation_callbacks,
                                                 const VkPhysicalDeviceMemoryProperties* memory_properties, VulkanImageCreate create)
 {
-    BUSTER_CHECK(create.width);
-    BUSTER_CHECK(create.height);
+    BUSTER_RT_CHECK(create.width);
+    BUSTER_RT_CHECK(create.height);
     VulkanImage result = {0};
     result.format = create.format;
 
@@ -1936,9 +1936,9 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_device(RenderingHandle* rendering, Vk
 BUSTER_GLOBAL_LOCAL void rendering_window_texture_update_begin(RenderingWindowHandle* window, BusterPipeline pipeline_index, u32 descriptor_count)
 {
     PipelineInstantiation* pipeline_instantiation = &window->pipeline_instantiations[(u64)pipeline_index];
-    BUSTER_CHECK(descriptor_count <= BUSTER_ARRAY_LENGTH(pipeline_instantiation->texture_descriptors));
-    BUSTER_CHECK(descriptor_count);
-    BUSTER_CHECK(pipeline_instantiation->descriptor_sets[0]);
+    BUSTER_RT_CHECK(descriptor_count <= BUSTER_ARRAY_LENGTH(pipeline_instantiation->texture_descriptors));
+    BUSTER_RT_CHECK(descriptor_count);
+    BUSTER_RT_CHECK(pipeline_instantiation->descriptor_sets[0]);
 
     pipeline_instantiation->descriptor_set_update = (VkWriteDescriptorSet){
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -2079,10 +2079,10 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
         .shader_binaries = BUSTER_ARRAY_TO_SLICE(shader_binaries),
     };
     u64 graphics_pipeline_count = create_data.pipelines.length;
-    BUSTER_CHECK(graphics_pipeline_count);
+    BUSTER_RT_CHECK(graphics_pipeline_count);
     u64 pipeline_layout_count = create_data.layouts.length;
-    BUSTER_CHECK(pipeline_layout_count);
-    BUSTER_CHECK(pipeline_layout_count <= graphics_pipeline_count);
+    BUSTER_RT_CHECK(pipeline_layout_count);
+    BUSTER_RT_CHECK(pipeline_layout_count <= graphics_pipeline_count);
     u64 shader_count = create_data.shader_binaries.length;
 
     VkPipeline pipeline_handles[BUSTER_PIPELINE_COUNT + 1];
@@ -2267,7 +2267,7 @@ BUSTER_GLOBAL_LOCAL bool vulkan_initialize_pipelines(RenderingHandle* rendering,
         u64 push_constant_range_count = create.push_constant_ranges.length;
         Pipeline* pipeline = &rendering_handle.pipelines[pipeline_index];
         pipeline->descriptor_set_count = (u32)descriptor_set_layout_count;
-        BUSTER_CHECK(pipeline->descriptor_set_count);
+        BUSTER_RT_CHECK(pipeline->descriptor_set_count);
         pipeline->push_constant_range_count = (u32)push_constant_range_count;
 
         if (descriptor_set_layout_count > MAX_DESCRIPTOR_SET_LAYOUT_COUNT)
@@ -2838,7 +2838,7 @@ BUSTER_GLOBAL_LOCAL void swapchain_recreate(RenderingHandle* rendering, Renderin
                 swapchain_create_info.minImageCount, swapchain_create_info.presentMode);
             if (create_swapchain_result == VK_SUCCESS)
             {
-                BUSTER_CHECK(window->swapchain != old_swapchain);
+                BUSTER_RT_CHECK(window->swapchain != old_swapchain);
 
                 if (old_swapchain)
                 {
@@ -2950,7 +2950,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     WmNativeSurface native_surface = wm_window_get_native_surface(windowing, window);
     BUSTER_UNUSED(native_surface);
 #if defined(VK_USE_PLATFORM_XCB_KHR)
-    BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_XCB);
+    BUSTER_RT_CHECK(native_surface.kind == WM_NATIVE_SURFACE_XCB);
     xcb_connection_t* native_connection = (xcb_connection_t*)native_surface.display;
     xcb_window_t native_window = (xcb_window_t)(u64)native_surface.window;
     BUSTER_RENDERING_TRACE(S8("Vulkan render window initialization: platform=xcb, native_window={u64:x}, connection={u64:x}\n"), (u64)native_window,
@@ -2970,7 +2970,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
         os_fail();
     }
 #elif defined(VK_USE_PLATFORM_WIN32_KHR)
-    BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_WIN32);
+    BUSTER_RT_CHECK(native_surface.kind == WM_NATIVE_SURFACE_WIN32);
     HINSTANCE native_instance = (HINSTANCE)native_surface.display;
     HWND native_window = (HWND)native_surface.window;
     BUSTER_RENDERING_TRACE(S8("Vulkan render window initialization: platform=win32, hwnd={u64:x}, hinstance={u64:x}\n"), (u64)native_window, (u64)native_instance);
@@ -2989,7 +2989,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
         os_fail();
     }
 #elif defined(VK_USE_PLATFORM_ANDROID_KHR)
-    BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_ANDROID);
+    BUSTER_RT_CHECK(native_surface.kind == WM_NATIVE_SURFACE_ANDROID);
     struct ANativeWindow* native_window = (struct ANativeWindow*)native_surface.window;
     BUSTER_RENDERING_TRACE(S8("Vulkan render window initialization: platform=android, native_window={u64:x}\n"), (u64)native_window);
     VkAndroidSurfaceCreateInfoKHR surface_create_info = {
@@ -3087,7 +3087,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     for (BusterPipeline pipeline_index = 0; pipeline_index < BUSTER_PIPELINE_COUNT; pipeline_index += 1)
     {
         Pipeline* pipeline_descriptor = &rendering->pipelines[pipeline_index];
-        BUSTER_CHECK(pipeline_descriptor->descriptor_set_count);
+        BUSTER_RT_CHECK(pipeline_descriptor->descriptor_set_count);
         PipelineInstantiation* pipeline_instantiation = &result->pipeline_instantiations[pipeline_index];
 
         u32 descriptor_type_counter[(u64)DESCRIPTOR_TYPE_COUNT] = {0};
@@ -3148,7 +3148,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
             {
                 os_fail();
             }
-            BUSTER_CHECK(pipeline_instantiation->descriptor_sets[0]);
+            BUSTER_RT_CHECK(pipeline_instantiation->descriptor_sets[0]);
 
             if (pipeline_descriptor->descriptor_set_count == 1)
             {
@@ -3307,7 +3307,7 @@ void rendering_window_surface_recreate(RenderingHandle* rendering, WmHandle* win
     }
 
     WmNativeSurface native_surface = wm_window_get_native_surface(windowing, wm_window);
-    BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_ANDROID);
+    BUSTER_RT_CHECK(native_surface.kind == WM_NATIVE_SURFACE_ANDROID);
     struct ANativeWindow* native_window = (struct ANativeWindow*)native_surface.window;
     VkAndroidSurfaceCreateInfoKHR surface_create_info = {
         .sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
@@ -3425,7 +3425,7 @@ BUSTER_GLOBAL_LOCAL VulkanBuffer vk_buffer_create(VkDevice device, const VkAlloc
         if (vkBindBufferMemory(device, result.handle, result.memory.handle, memory_offset) == VK_SUCCESS)
         {
             u8 map_memory = !!(memory_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-            BUSTER_CHECK(((map_memory | use_device_address_bit) == 0) | (map_memory == !use_device_address_bit));
+            BUSTER_RT_CHECK(((map_memory | use_device_address_bit) == 0) | (map_memory == !use_device_address_bit));
             if (map_memory)
             {
                 void* data = 0;
@@ -3805,7 +3805,7 @@ BUSTER_GLOBAL_LOCAL TextureIndex vulkan_texture_upload_admitted(RenderingHandle*
 
 TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory texture_memory)
 {
-    BUSTER_CHECK(texture_memory.depth == 1);
+    BUSTER_RT_CHECK(texture_memory.depth == 1);
     TextureIndex result = {.value = UINT32_MAX};
     u32 texture_index = 0;
     if (rendering_vulkan_texture_index_admit(rendering->texture_count, &texture_index))
@@ -3989,7 +3989,7 @@ struct SliceHostBufferCopy
 
 BUSTER_GLOBAL_LOCAL void buffer_copy_to_host(VulkanBuffer buffer, SliceHostBufferCopy regions)
 {
-    BUSTER_CHECK(buffer.type == BUFFER_TYPE_STAGING);
+    BUSTER_RT_CHECK(buffer.type == BUFFER_TYPE_STAGING);
 
     u8* buffer_pointer = (u8*)buffer.address;
 
@@ -3997,7 +3997,7 @@ BUSTER_GLOBAL_LOCAL void buffer_copy_to_host(VulkanBuffer buffer, SliceHostBuffe
     {
         HostBufferCopy region = regions.pointer[i];
         u8* destination = buffer_pointer + region.destination_offset;
-        BUSTER_CHECK(destination + region.source.length <= (u8*)buffer.address + buffer.size);
+        BUSTER_RT_CHECK(destination + region.source.length <= (u8*)buffer.address + buffer.size);
         memcpy(destination, region.source.pointer, region.source.length);
     }
 }

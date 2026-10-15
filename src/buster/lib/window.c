@@ -39,7 +39,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL SliceWmWindowHandle get_windows(WmHandle*
         Arena* arena = handle->window_arena;
         u64 byte_count = arena->position - arena_minimum_position;
         u64 window_size = sizeof(WmWindowHandle);
-        BUSTER_CHECK(byte_count % window_size == 0);
+        BUSTER_RT_CHECK(byte_count % window_size == 0);
         result.pointer = (WmWindowHandle*)(arena + 1);
         result.length = byte_count / window_size;
     }

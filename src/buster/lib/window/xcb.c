@@ -4593,7 +4593,7 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
         {
             xcb_change_property(connection, XCB_PROP_MODE_REPLACE, window_id, wm_protocols, XCB_ATOM_ATOM, 32, 1, &wm_delete_window);
         }
-        BUSTER_CHECK(window_id != 0);
+        BUSTER_RT_CHECK(window_id != 0);
         result = arena_allocate(windowing->window_arena, WmWindowHandle, 1);
         *result = (WmWindowHandle){
             .handle = window_id,

@@ -1030,7 +1030,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_punctuator_separator_tests(UnitTestArgument
 // comparison counts, not a clock, must grow about linearly with the size.
 BUSTER_GLOBAL_LOCAL void c_identity_scaling_append(char8* bytes, u64 capacity, u64* length, String8 text)
 {
-    BUSTER_CHECK(*length + text.length <= capacity);
+    BUSTER_RT_CHECK(*length + text.length <= capacity);
     memcpy(bytes + *length, text.pointer, text.length);
     *length += text.length;
 }

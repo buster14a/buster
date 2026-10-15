@@ -51,14 +51,14 @@ new = '''        u64 changes = 0;
         u32* research_queue = 0;
         String8 schedule = os_get_environment_variable(S8("BUSTER_PHASE_ORDER_SCHEDULE"));
         if (!schedule.length) schedule = S8("FADP");
-        BUSTER_CHECK(schedule.length <= 8);
+        BUSTER_RT_CHECK(schedule.length <= 8);
         for (u32 ordinal = 0; ordinal < schedule.length; ordinal += 1)
         {
             u8 code = schedule.pointer[ordinal];
             bool selective = code == 'f' || code == 'd';
             u32 pass = code == 'F' || code == 'f' ? IR_FAST_FOLD : code == 'A' ? IR_FAST_ADDRESS :
                        code == 'D' || code == 'd' ? IR_FAST_DCE : IR_FAST_PARAMETERS;
-            BUSTER_CHECK(code == 'F' || code == 'A' || code == 'D' || code == 'P' || code == 'f' || code == 'd');
+            BUSTER_RT_CHECK(code == 'F' || code == 'A' || code == 'D' || code == 'P' || code == 'f' || code == 'd');
             if (!(program->fast_passes & IR_FAST_PASS_BIT(pass)) || (selective && !parameter_changes)) continue;
             IrFastPassStatistics* measurement = statistics->passes + pass;
             IrFastPassStatistics before = *measurement;
