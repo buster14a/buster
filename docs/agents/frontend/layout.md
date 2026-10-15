@@ -712,6 +712,22 @@ boundary. `c_test_array_bound_object_layout` checks semantic-only analysis,
 both frontend SSA forms, enum and static-assert constants, canonical array
 sizes/counts, shadowing, parameter adjustment, false assertions and refusals.
 
+## Anonymous record attributes
+
+A trailing GNU attribute list on an in-place anonymous struct or union belongs
+to its record type. The aggregate reader records its packing/alignment facts;
+`c_type_parse_aggregate_segment_step` consumes the suffix tokens before deciding
+whether a member declarator is present. An attribute-only suffix therefore
+preserves anonymous member promotion, while a following name, pointer or array
+continues through the ordinary declarator path and its diagnostics.
+
+`record_layout_test_anonymous_attributes` checks fixed layout and promoted
+initializer bytes for packed structs/unions, aligned and repeated attributes,
+and named array neighbors in ISO/GNU17, both frontend SSA forms and the existing
+native target corpus. Malformed pointer, comma, asm-label and trailing-token declarators
+remain rejected. This is a header-free control for the Linux V4L2 probe; actual
+full FFmpeg configure/manifest acceptance remains main-only.
+
 ## Padded GNU vectors
 
 Non-power-of-two vectors preserve their logical lane count and round their
