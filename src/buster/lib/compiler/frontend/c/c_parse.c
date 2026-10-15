@@ -19035,10 +19035,17 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         // Windows targets get alongside `_MSC_EXTENSIONS`, also makes any
         // complete struct or union named here an anonymous member.
         CType const* base = frame->base_type.value < result->type_count ? &result->types[frame->base_type.value] : 0;
-        // The record reader already records suffix attributes on the type;
-        // an attribute-only suffix does not require a named declarator.
-        if (base && (base->kind == C_TYPE_STRUCT || base->kind == C_TYPE_UNION) &&
-            c_parse_skip_attributes(preprocess, frame->declarator_start, frame->end) == frame->end)
+        bool record = base && (base->kind == C_TYPE_STRUCT || base->kind == C_TYPE_UNION);
+        u32 anonymous_end = frame->declarator_start;
+        CAttributeGroup suffix;
+        // The record reader already records GNU suffix attributes on the
+        // type. Do not use the general decoration skipper here: an asm label
+        // still needs a named member, unlike an attribute-only suffix.
+        while (record && c_parse_attribute_group_at(preprocess, anonymous_end, frame->end, &suffix))
+        {
+            anonymous_end = suffix.group_end;
+        }
+        if (record && anonymous_end == frame->end)
         {
             bool defined_in_place = base->definition_start > frame->start && base->definition_start < frame->end;
             CType const* unqualified = base;

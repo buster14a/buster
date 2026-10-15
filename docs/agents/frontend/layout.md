@@ -724,7 +724,7 @@ continues through the ordinary declarator path and its diagnostics.
 `record_layout_test_anonymous_attributes` checks fixed layout and promoted
 initializer bytes for packed structs/unions, aligned and repeated attributes,
 and named array neighbors in ISO/GNU17, both frontend SSA forms and the existing
-native target corpus. Malformed pointer, comma and trailing-token declarators
+native target corpus. Malformed pointer, comma, asm-label and trailing-token declarators
 remain rejected. This is a header-free control for the Linux V4L2 probe; actual
 full FFmpeg configure/manifest acceptance remains main-only.
 

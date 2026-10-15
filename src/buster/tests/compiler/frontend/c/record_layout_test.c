@@ -254,6 +254,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult record_layout_test_anonymous_attributes(UnitT
         S8("struct Invalid { union { int member; } __attribute__((packed)) *; };"),
         S8("struct Invalid { union { int member; } __attribute__((packed)) , named; };"),
         S8("struct Invalid { union { int member; } __attribute__((packed)) named junk; };"),
+        S8("struct Invalid { union { int member; } __asm__(\"slot\"); };"),
+        S8("struct Invalid { union { int member; } __attribute__((packed)) __asm__(\"slot\"); };"),
     };
     for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
     {
