@@ -11,6 +11,7 @@
 #include <buster/lib/compiler/work_ledger.h>
 #if BUSTER_INCLUDE_TESTS
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/tests/compiler/driver/driver_test_internal.h>
 #include <buster/lib/compiler/llvm/bitcode.h>
 #include <buster/lib/compiler/wasm/wasm.h>
 #include <buster/lib/file.h>
@@ -16217,6 +16218,126 @@ BUSTER_GLOBAL_LOCAL String8 const c_test_conditional_incomplete_array_program = 
     "}\n");
 #endif
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArguments* arguments, String8 label, String8 program);
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program_mode(UnitTestArguments* arguments, String8 label, String8 program,
+                                                                      bool disable_ast, bool compile_with_cli);
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_cast_frame_depth_runtime(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+    u64 source_capacity = BUSTER_KB(128);
+    char8* source_bytes = arena_allocate(temporary.arena, char8, source_capacity);
+    if (BUSTER_REQUIRE(arguments, source_bytes))
+    {
+        String8 fixture_labels[] = {
+            S8("cast-frame-depth-signed"),
+            S8("cast-frame-depth-unsigned"),
+            S8("cast-frame-depth-pointer"),
+            S8("cast-frame-depth-sizeof"),
+            S8("cast-frame-depth-shallow"),
+        };
+        String8 fixture_prefixes[] = {
+            S8("int main(void) { int value = 7; if ("),
+            S8("int main(void) { unsigned int unsigned_value = 9; if ("),
+            S8("int main(void) { int object = 0; void* pointer = &object; if ("),
+            S8("int main(void) { int value = 0; if (sizeof("),
+            S8("int main(void) { int value = 7; unsigned int sum = 0; "),
+        };
+        String8 fixture_even_casts[] = {
+            S8("(signed char)"),
+            S8("(unsigned int)"),
+            S8("(char*)"),
+            S8("(int)"),
+            S8(""),
+        };
+        String8 fixture_odd_casts[] = {
+            S8("(int)"),
+            S8("(int)"),
+            S8("(void*)"),
+            S8("(int)"),
+            S8(""),
+        };
+        String8 fixture_suffixes[] = {
+            S8("value != 7) return 1; return 0; }\n"),
+            S8("unsigned_value != 9u) return 1; return 0; }\n"),
+            S8("pointer != pointer) return 1; return 0; }\n"),
+            S8("value) != sizeof(int)) return 1; return 0; }\n"),
+            S8("if (sum != 3584u) return 1; return 0; }\n"),
+        };
+        // Keep each 1000-cast case in its own translation unit.
+        // c_ir_lower_capacity_plan sizes IR type rows per unit as
+        // 2 * parse.type_count + parse.declaration_count + string_literal_count
+        // + C_TYPE_COUNT + 4; combining independent chains would test
+        // aggregate IR reservation rather than the type parser's frame limit.
+        for (u32 fixture_index = 0; fixture_index < BUSTER_ARRAY_LENGTH(fixture_labels); fixture_index += 1)
+        {
+            u64 source_length = 0;
+            c_test_append_source(source_bytes, source_capacity, &source_length, fixture_prefixes[fixture_index]);
+            if (fixture_index == BUSTER_ARRAY_LENGTH(fixture_labels) - 1)
+            {
+                // Keep the wide but shallow cast control in its own unit too.
+                for (u32 index = 0; index < 512; index += 1)
+                {
+                    c_test_append_source(source_bytes, source_capacity, &source_length, S8("sum += (int)value; "));
+                }
+            }
+            else
+            {
+                for (u32 index = 0; index < 1000; index += 1)
+                {
+                    String8 cast = index % 2 ? fixture_odd_casts[fixture_index] : fixture_even_casts[fixture_index];
+                    c_test_append_source(source_bytes, source_capacity, &source_length, cast);
+                }
+            }
+            c_test_append_source(source_bytes, source_capacity, &source_length, fixture_suffixes[fixture_index]);
+            BUSTER_TEST_RAW(arguments, source_length < source_capacity, S8("isolated cast-depth fixture fits its input buffer"));
+            String8 cast_program = {.pointer = source_bytes, .length = source_length};
+            UnitTestResult runtime = c_test_run_exit_zero_program_mode(arguments, fixture_labels[fixture_index], cast_program, false, true);
+            result.test_count += runtime.test_count;
+            result.succeeded_test_count += runtime.succeeded_test_count;
+            String8 token_label = string_format(temporary.arena, S8("{S8}-no-ast"), fixture_labels[fixture_index]);
+            UnitTestResult token_runtime = c_test_run_exit_zero_program_mode(arguments, token_label, cast_program, true, true);
+            result.test_count += token_runtime.test_count;
+            result.succeeded_test_count += token_runtime.succeeded_test_count;
+        }
+    }
+    c_test_scratch_end(temporary);
+
+    String8 source = S8("int f(void) { return (int)(int)7; }\n");
+    TemporalArena limited = scratch_begin(&arguments->arena, 1);
+    CPreprocessOptions options = {.source_path = S8("cast-frame-capacity.c"), .target = target_native,
+                                  .data_layout = target_data_layout(target_native), .dialect = C_PREPROCESS_DIALECT_GNU17};
+    CPreprocessResult preprocess = c_preprocess(limited.arena, source, options);
+    CParserResult syntax = c_parse_ast(limited.arena, preprocess);
+    c_test_type_parse_frame_capacity_limit_set(1);
+    CAnalysisResult refused = c_analyze_semantics_only(limited.arena, preprocess, syntax);
+    c_test_type_parse_frame_capacity_limit_set(0);
+    BUSTER_TEST(arguments, preprocess.diagnostic_count == 0 && syntax.diagnostic_count == 0);
+    bool capacity_diagnostic = false;
+    for (u32 index = 0; index < refused.diagnostic_count; index += 1)
+    {
+        capacity_diagnostic |= refused.diagnostics[index].kind == C_DIAGNOSTIC_UNSUPPORTED_SEMANTICS &&
+                               string_first_sequence(refused.diagnostics[index].message,
+                                                     S8("C type parsing exceeded its explicit-machine capacity")) != BUSTER_STRING_NO_MATCH;
+    }
+    BUSTER_TEST(arguments, capacity_diagnostic);
+    c_test_scratch_end(limited);
+
+    TemporalArena recovered_arena = scratch_begin(&arguments->arena, 1);
+    CPreprocessResult recovered_preprocess = c_preprocess(recovered_arena.arena, source, options);
+    CParserResult recovered_syntax = c_parse_ast(recovered_arena.arena, recovered_preprocess);
+    CAnalysisResult recovered = c_analyze_semantics_only(recovered_arena.arena, recovered_preprocess, recovered_syntax);
+    BUSTER_TEST(arguments, recovered_preprocess.diagnostic_count == 0 && recovered_syntax.diagnostic_count == 0 &&
+                            recovered.analysis_complete && recovered.diagnostic_count == 0);
+    c_test_scratch_end(recovered_arena);
+#else
+    BUSTER_UNUSED(arguments);
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_conditional_incomplete_array_runtime(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -16334,7 +16455,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_variadic_function_pointer_cast_runtime
 // Compile `program` in every allocator mode and frontend form and require the
 // executable to exit zero: the program folds the answers it checks into its
 // exit status, so a wrong answer names itself by the failing check's number.
-BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArguments* arguments, String8 label, String8 program)
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program_mode(UnitTestArguments* arguments, String8 label, String8 program,
+                                                                      bool disable_ast, bool compile_with_cli)
 {
     UnitTestResult result = {0};
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
@@ -16349,13 +16471,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArgument
             {
                 TemporalArena temporary = scratch_begin(&arguments->arena, 1);
                 String8 output = buster_test_temporary_path(temporary.arena, string_format(temporary.arena, S8("{S8}-run"), label), S8(".exe"));
-                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fverify-codegen"), S8("-o"), output, source};
-                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = true;
-                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
-                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
-                    string_format(temporary.arena, S8("{S8} {S8} {S8}: {S8}"), label, modes[mode], frontends[form], compiled.diagnostic));
-                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                String8 command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fno-machine-fallback"),
+                                    S8("-fverify-codegen"), S8("-o"), output, source};
+                String8 token_command[] = {S8("-nostdinc"), S8("-std=gnu17"), modes[mode], frontends[form], S8("-fno-c-ast-pilot"),
+                                          S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-o"), output, source};
+                SliceString8 selected_command = disable_ast ? (SliceString8)BUSTER_ARRAY_TO_SLICE(token_command)
+                                                            : (SliceString8)BUSTER_ARRAY_TO_SLICE(command);
+                String8 compiler_diagnostic;
+                bool compiled;
+                if (compile_with_cli)
+                {
+                    // The CLI test helper gives this compile the production translation-unit reservation.
+                    String8 compiler_output = {0};
+                    String8 compiler_error = {0};
+                    compiled = compiler_driver_test_run_cc(arguments, selected_command, &compiler_output, &compiler_error);
+                    compiler_diagnostic = string_format(temporary.arena, S8("stdout={S8} stderr={S8}"), compiler_output, compiler_error);
+                }
+                else
+                {
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, selected_command);
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compile_result = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    compiled = compile_result.error == COMPILER_DRIVER_ERROR_NONE;
+                    compiler_diagnostic = compile_result.diagnostic;
+                }
+                BUSTER_TEST_RAW(arguments, compiled,
+                    string_format(temporary.arena, S8("{S8} {S8} {S8}: {S8}"),
+                                  label, modes[mode], frontends[form], compiler_diagnostic));
+                if (compiled)
                 {
                     String8 run[] = {output};
                     ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
@@ -16376,8 +16519,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArgument
     BUSTER_UNUSED(arguments);
     BUSTER_UNUSED(label);
     BUSTER_UNUSED(program);
+    BUSTER_UNUSED(disable_ast);
+    BUSTER_UNUSED(compile_with_cli);
 #endif
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_run_exit_zero_program(UnitTestArguments* arguments, String8 label, String8 program)
+{
+    return c_test_run_exit_zero_program_mode(arguments, label, program, false, false);
 }
 
 // Short-circuit order and exactly-once evaluation through parenthesized
@@ -68707,6 +68857,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_call_assignment_values);
     C_TEST_FIXTURE(arguments, c_test_call_result_callees);
     C_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operand_runtime);
+    C_TEST_FIXTURE(arguments, c_test_cast_frame_depth_runtime);
     C_TEST_FIXTURE(arguments, c_test_cast_and_noreturn_operands);
     C_TEST_FIXTURE(arguments, c_test_casted_dereference_update);
     C_TEST_FIXTURE(arguments, c_test_character_literal_query_types);

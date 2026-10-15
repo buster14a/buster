@@ -8085,6 +8085,7 @@ BUSTER_GLOBAL_LOCAL void link_elf_pic_copy_mark(LinkElfPicImage* image)
 }
 
 BUSTER_GLOBAL_LOCAL bool link_aarch64_elf_tprel_offset(ObjectFile* object, ObjectSymbol const* symbol, s64 addend, u64 limit, u64* offset);
+BUSTER_GLOBAL_LOCAL u64 link_elf_thread_local_alignment(ObjectFile* object, bool has_thread_local);
 BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relaxable(ObjectRelocationKind kind);
 BUSTER_GLOBAL_LOCAL bool link_aarch64_tls_relax(Arena* arena, ObjectFile* object, u8* bytes, u64 const* section_offsets, u32* failed);
 BUSTER_GLOBAL_LOCAL u32 link_aarch64_adrp(u32 destination, u64 instruction_address, u64 target_address, bool* valid);
@@ -9076,8 +9077,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_image_elf64_position_
     section_offsets[OBJECT_SECTION_DATA] = align_forward(got_plt_offset + got_plt_size, data_alignment);
     if (bind_now) relro_end = section_offsets[OBJECT_SECTION_DATA];
     cursor = section_offsets[OBJECT_SECTION_DATA] + object->sections[OBJECT_SECTION_DATA].data.length;
-    u64 thread_local_alignment =
-        BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
+    u64 thread_local_alignment = link_elf_thread_local_alignment(object, has_thread_local);
     section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] = align_forward(cursor, thread_local_alignment);
     u64 file_size = section_offsets[OBJECT_SECTION_THREAD_LOCAL_DATA] + object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length;
     u64 thread_local_initialized = align_forward(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length,
@@ -9796,6 +9796,22 @@ BUSTER_GLOBAL_LOCAL u32 link_aarch64_adrp(u32 destination, u64 instruction_addre
     return encoded ? word : 0;
 }
 
+// Bionic's AArch64 Variant-I loader compares the ABI's two-word TP offset with the
+// post-TP TCB-slot offset after applying PT_TLS alignment and skew. This writer
+// emits zero-skew PT_TLS, so nonempty Android AArch64 TLS needs the 64-byte
+// (eight-slot) floor for both segment layout and local-exec offsets. Empty TLS
+// remains omitted and keeps no alignment floor.
+BUSTER_GLOBAL_LOCAL u64 link_elf_thread_local_alignment(ObjectFile* object, bool has_thread_local)
+{
+    u64 alignment =
+        BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
+    if (has_thread_local && object->target.cpu_arch == CPU_ARCH_AARCH64 && object->target.os == OPERATING_SYSTEM_ANDROID)
+    {
+        alignment = BUSTER_MAX(alignment, UINT64_C(64));
+    }
+    return alignment;
+}
+
 // The thread-pointer offset of a defined TLS symbol plus addend for a
 // fixed-address AArch64 executable (TLS variant I). The executable's block
 // follows the 16-byte TCB, rounded to PT_TLS alignment, before module-relative
@@ -9808,8 +9824,9 @@ BUSTER_GLOBAL_LOCAL bool link_aarch64_elf_tprel_offset(ObjectFile* object, Objec
     bool valid = (symbol->section == OBJECT_SECTION_THREAD_LOCAL_DATA || symbol->section == OBJECT_SECTION_THREAD_LOCAL_ZERO) && addend >= 0;
     if (valid)
     {
-        u64 thread_local_alignment =
-            BUSTER_MAX(BUSTER_MAX(object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].alignment, object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].alignment), 1u);
+        bool has_thread_local = object->sections[OBJECT_SECTION_THREAD_LOCAL_DATA].data.length ||
+                                object->sections[OBJECT_SECTION_THREAD_LOCAL_ZERO].virtual_size;
+        u64 thread_local_alignment = link_elf_thread_local_alignment(object, has_thread_local);
         u64 thread_local_start = align_forward(16, thread_local_alignment);
         valid = link_u64_add(thread_local_start, link_elf_thread_local_offset(object, symbol), &thread_pointer_offset) &&
                 u64_add_s64_checked(thread_pointer_offset, addend, &thread_pointer_offset) && thread_pointer_offset <= limit;

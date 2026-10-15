@@ -104,6 +104,21 @@ struct OsProcessCleanupWindowsTestStats
     u64 job_queries;
     bool ceiling_reached;
 };
+// Read-only rows under the registry lock. Handles are borrowed observations,
+// never transferred close/termination authority. The return counts every owner;
+// only capacity rows are written, so diagnostics explicitly report truncation.
+typedef struct OsProcessCleanupWindowsTestOwner OsProcessCleanupWindowsTestOwner;
+struct OsProcessCleanupWindowsTestOwner
+{
+    u64 id;
+    u32 state;
+    bool pending;
+    OsProcessHandle* process;
+    OsProcessHandle* job;
+    OsFileDescriptor* pipes[STANDARD_STREAM_COUNT];
+};
+BUSTER_F_DECL u64 os_process_cleanup_windows_test_inventory(OsProcessCleanupWindowsTestOwner* rows, u64 capacity);
+
 BUSTER_F_DECL void os_process_cleanup_windows_test_begin(ProcessSpawnResult spawn, u32 flags);
 BUSTER_F_DECL OsProcessCleanupWindowsTestStats os_process_cleanup_windows_test_end(void);
 BUSTER_F_DECL void os_process_shutdown_windows_test_release_event(OsProcessHandle* event);

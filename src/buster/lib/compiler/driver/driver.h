@@ -323,7 +323,7 @@ struct CompilerDriverInvocation
     u32 input_language_count;
     // A nonzero stream covers every input and library occurrence exactly once.
     u32 link_operation_count;
-    // -fcompile-jobs=N: opt-in lanes for consecutive native C link inputs.
+    // -fcompile-jobs=N: opt-in native TU cohorts or function preparation lanes.
     // Zero/default is one. The caller owns its total process/thread budget;
     // this does not infer available RAM from the TU's virtual reservation.
     u32 compile_jobs;
