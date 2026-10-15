@@ -167,7 +167,9 @@ It admits a candidate that changes only admitted repository sources as
 exact parents, evidence trailers, generated-only post-candidate delta,
 current-main identity and GitHub Actions attestation. A main-push run
 invalidates every open integration head whose recorded base no longer equals
-current `main`, except a catch-up that is still admissible. Dispatching the
+current `main`, except a catch-up that is still admissible: no generated
+path changed since its base. When GitHub's compare truncates the range at 300
+files, the generated paths' blob ids at both ends decide instead (#3961). Dispatching the
 writer again reconstructs it without requiring a manual feature-branch rebase. The independent `API migration policy` check
 continues to enforce bounded API compatibility. The PR/main admission job lives
 in `native-retirement-admission.yml`, which has no merge-group trigger; for a
