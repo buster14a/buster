@@ -222,6 +222,8 @@ struct MachineFastState
     MachineFastLiveSets const* live_sets;
     u32 live_out_block;
     u32 live_in_block;
+    bool live_out_available;
+    bool live_in_available;
     // Index of the next call at or after each instruction in layout order,
     // across block boundaries, or UINT32_MAX: a value whose last use lies
     // past it crosses the call and is worth a callee-saved binding.
@@ -428,19 +430,20 @@ BUSTER_GLOBAL_LOCAL void machine_fast_materialize_tied(MachineFastState* state, 
 BUSTER_GLOBAL_LOCAL void machine_fast_live_out_block(MachineFastState* state, u32 block)
 {
     state->live_out_block = block;
+    state->live_out_available = state->live_index && block != UINT32_MAX;
     state->live_out_row = state->live_out && block != UINT32_MAX ? state->live_out + (u64)block * state->live_words : 0;
 }
 
 BUSTER_GLOBAL_LOCAL void machine_fast_live_in_block(MachineFastState* state, u32 block)
 {
     state->live_in_block = block;
+    state->live_in_available = state->live_index && block != UINT32_MAX;
     state->live_in_row = state->live_in && block != UINT32_MAX ? state->live_in + (u64)block * state->live_words : 0;
 }
 
 BUSTER_GLOBAL_LOCAL bool machine_fast_dead_out(MachineFastState* state, u32 value)
 {
-    bool available = state->live_out_row || (state->live_sets && state->live_out_block != UINT32_MAX);
-    u32 index = available ? state->live_index[value] : UINT32_MAX;
+    u32 index = state->live_out_available ? state->live_index[value] : UINT32_MAX;
     bool dead = false;
     if (index != UINT32_MAX)
     {
@@ -452,8 +455,7 @@ BUSTER_GLOBAL_LOCAL bool machine_fast_dead_out(MachineFastState* state, u32 valu
 
 BUSTER_GLOBAL_LOCAL bool machine_fast_dead_in(MachineFastState* state, u32 value)
 {
-    bool available = state->live_in_row || (state->live_sets && state->live_in_block != UINT32_MAX);
-    u32 index = available ? state->live_index[value] : UINT32_MAX;
+    u32 index = state->live_in_available ? state->live_index[value] : UINT32_MAX;
     bool dead = false;
     if (index != UINT32_MAX)
     {
