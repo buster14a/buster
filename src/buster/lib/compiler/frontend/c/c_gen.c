@@ -39523,7 +39523,7 @@ BUSTER_C_INTERNAL bool c_ir_lower_condition_branch_on_leaf(CIntegerIrBuilder* bu
                                     : 0;
     u32 width = value ? ir_integer_type_width(ir_type_from_id(&builder->program->types, value->canonical_type)) : 0;
     IrInteger constant = {0};
-    bool branched = false;
+    bool branched;
     if (definition && definition->opcode == IR_OPCODE_CONSTANT_INTEGER && definition->immediate_count == 1 && width &&
         ir_integer_constant_decode(definition, width, &constant))
     {
