@@ -17,6 +17,7 @@
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/codegen/machine_frame_internal.h>
+#include <buster/lib/compiler/codegen/machine_parameter_edges_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
@@ -2184,6 +2185,24 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_parts_parameter(MachineFuncti
     return valid;
 }
 
+BUSTER_GLOBAL_LOCAL MachinePoint machine_builder_definition_point(MachineFunctionBuilder* builder, u32 instruction_index)
+{
+    MachinePoint result = MACHINE_POINT_INVALID;
+    if (instruction_index < MACHINE_POINT_INSTRUCTION_LIMIT)
+    {
+        result = machine_point_make(instruction_index, MACHINE_POINT_AFTER);
+    }
+    else
+    {
+        builder->point_capacity_exceeded = true;
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool machine_parameter_edge_layout_test_legacy;
+#endif
+
 // Ordinary selectors know their complete block topology before emitting rows.
 // Plan edge blocks in that same order so definitions/debug marks are born at
 // final positions; expanded/assembly topology keeps the general splitter.
@@ -2194,7 +2213,6 @@ struct MachineParameterEdgeLayout
     u32* targets;
     u32 split_count;
     bool planned;
-    bool valid;
 };
 
 BUSTER_GLOBAL_LOCAL bool machine_parameter_edge_layout_splits(IrFunction const* function, IrCfgEdge const* edge)
@@ -2209,9 +2227,12 @@ BUSTER_GLOBAL_LOCAL MachineParameterEdgeLayout machine_parameter_edge_layout_pla
                                                                                    u32 const* canonical_layout, u32 expanded_blocks,
                                                                                    u32** block_entries, u32** block_exits)
 {
-    MachineParameterEdgeLayout result = {.valid = true};
+    MachineParameterEdgeLayout result = {0};
     result.planned = expanded_blocks == function->block_count &&
                      !ir_function_may_contain_opcodes(function, IR_OPCODE_BIT(IR_OPCODE_INLINE_ASSEMBLY));
+#if BUSTER_INCLUDE_TESTS
+    result.planned = result.planned && !machine_parameter_edge_layout_test_legacy;
+#endif
     IrPublishedCfg const* cfg = function->published_cfg;
     if (result.planned && cfg->argument_count)
     {
@@ -2219,13 +2240,13 @@ BUSTER_GLOBAL_LOCAL MachineParameterEdgeLayout machine_parameter_edge_layout_pla
         {
             result.split_count += machine_parameter_edge_layout_splits(function, cfg->edges + edge_index);
         }
-        result.valid = !result.split_count || (u64)function->block_count + result.split_count < MACHINE_REF_PAYLOAD_LIMIT;
-        if ((u64)cfg->edge_count + result.split_count > MACHINE_REF_PAYLOAD_LIMIT)
+        if ((result.split_count && (u64)function->block_count + result.split_count >= MACHINE_REF_PAYLOAD_LIMIT) ||
+            (u64)cfg->edge_count + result.split_count > MACHINE_REF_PAYLOAD_LIMIT)
         {
             result.planned = false;
             result.split_count = 0;
         }
-        if (result.valid && result.planned && result.split_count)
+        if (result.planned && result.split_count)
         {
             result.split_blocks = arena_allocate(arena, u32, cfg->edge_count);
             result.targets = arena_allocate(arena, u32, function->block_count);
@@ -6041,6 +6062,24 @@ MachineSelectResult machine_select_validated_canonical_function(Arena* arena, Ir
     return machine_select_canonical_function_internal(arena, program, function, target, true, position_independent,
                                                       preserve_debug_values, module);
 }
+
+#if BUSTER_INCLUDE_TESTS
+MachineSelectResult machine_test_select_parameter_edge_layout(Arena* arena, IrProgram* program, IrFunction* function,
+                                                              Target target, bool direct_layout, bool preserve_debug_values)
+{
+    bool previous = machine_parameter_edge_layout_test_legacy;
+    machine_parameter_edge_layout_test_legacy = !direct_layout;
+    MachineSelectResult result = machine_select_canonical_function_internal(arena, program, function, target, false, false, preserve_debug_values, 0);
+    machine_parameter_edge_layout_test_legacy = previous;
+    return result;
+}
+
+MachinePoint machine_test_builder_definition_point(MachineFunctionBuilder* builder, u32 instruction_index)
+{
+    MachinePoint result = machine_builder_definition_point(builder, instruction_index);
+    return result;
+}
+#endif
 
 MachineSelectionModule* machine_select_module_prepare(Arena* arena, IrProgram* program, Target target)
 {

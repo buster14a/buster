@@ -687,7 +687,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_define(MachineA64Selector* selector, u32 vi
     // carry their definition point from creation.
     if (virtual_register < selector->virtual_register_count && selector->virtual_register_definitions[virtual_register] == MACHINE_POINT_INVALID)
     {
-        selector->virtual_register_definitions[virtual_register] = machine_point_make(machine_index, MACHINE_POINT_AFTER);
+        selector->virtual_register_definitions[virtual_register] = machine_builder_definition_point(&selector->builder, machine_index);
     }
 }
 
@@ -753,7 +753,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_a64_synthesize_register(MachineA64Selector* sele
 {
     return machine_builder_virtual_register(&selector->builder, (MachineVirtualRegister){
                                                                     .definition_point =
-                                                                        machine_point_make(selector->builder.instructions.total_count, MACHINE_POINT_AFTER),
+                                                                        machine_builder_definition_point(&selector->builder, selector->builder.instructions.total_count),
                                                                     .register_class = MACHINE_REGISTER_CLASS_GENERAL,
                                                                     .typed_origin = IR_ID_UNDERLYING_INVALID,
                                                                 });
@@ -2892,7 +2892,7 @@ BUSTER_GLOBAL_LOCAL bool machine_a64_select_vector_lanes(MachineA64Selector* sel
             // Scalar helpers finish with the result's defining row; mask
             // constants, operand loads and remainder intermediates precede it.
             // Keep this arena-stable record so no stream search is needed.
-            result_record->definition_point = machine_point_make(selector->builder.instructions.total_count - 1, MACHINE_POINT_AFTER);
+            result_record->definition_point = machine_builder_definition_point(&selector->builder, selector->builder.instructions.total_count - 1);
         }
         if (selected && !unary && instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL)
         {
@@ -6598,10 +6598,6 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
         }
         selector.parameter_edges = machine_parameter_edge_layout_plan(arena, function, canonical_layout, expanded_blocks,
                                                                        &selector.block_entries, &selector.block_exits);
-        if (!selector.parameter_edges.valid)
-        {
-            return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
-        }
         selector.call_argument_registers = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
         selector.call_argument_shapes = arena_allocate(arena, MachineA64ValueShape, selector.call_argument_capacity);
@@ -7496,15 +7492,12 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
             machine_parameter_edge_layout_end(&selector.builder, &selector.parameter_edges, function, block_index,
                                               selector.block_entries, &machine_aarch64_description);
         }
-        if (!selector.supported)
+        if (!selector.supported || selector.builder.point_capacity_exceeded ||
+            (selector.parameter_edges.split_count && selector.builder.instructions.total_count >= MACHINE_POINT_INSTRUCTION_LIMIT))
         {
             result.failed_opcode = selector.failed_opcode;
             result.failure_detail = selector.failure_detail;
             return result;
-        }
-        if (selector.parameter_edges.split_count && selector.builder.instructions.total_count >= MACHINE_POINT_INSTRUCTION_LIMIT)
-        {
-            return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
         }
         u32 canonical_edge_offset = selector.builder.edges.total_count;
         if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers, selector.value_parts,

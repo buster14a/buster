@@ -1223,7 +1223,7 @@ BUSTER_GLOBAL_LOCAL void machine_x64_define(MachineX64Selector* selector, u32 vi
         MachineVirtualRegister* row = machine_builder_virtual_register_at(&selector->builder, virtual_register);
         if (row->definition_point == MACHINE_POINT_INVALID)
         {
-            row->definition_point = machine_point_make(machine_index, MACHINE_POINT_AFTER);
+            row->definition_point = machine_builder_definition_point(&selector->builder, machine_index);
         }
     }
 }
@@ -1587,7 +1587,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_x64_synthesize_register(MachineX64Selector* sele
 {
     return machine_builder_virtual_register(&selector->builder, (MachineVirtualRegister){
                                                                     .definition_point =
-                                                                        machine_point_make(selector->builder.instructions.total_count, MACHINE_POINT_AFTER),
+                                                                        machine_builder_definition_point(&selector->builder, selector->builder.instructions.total_count),
                                                                     .register_class = MACHINE_REGISTER_CLASS_GENERAL,
                                                                     .typed_origin = IR_ID_UNDERLYING_INVALID,
                                                                 });
@@ -4295,7 +4295,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_vector_lanes(MachineX64Selector* sel
             {
                 // Integer comparisons emit CMP before their defining SETCC.
                 // Constrained shifts/divides define at their initial MOV.
-                result_record->definition_point = machine_point_make(definition_row + (integer_comparison ? 1u : 0u), MACHINE_POINT_AFTER);
+                result_record->definition_point = machine_builder_definition_point(&selector->builder, definition_row + (integer_comparison ? 1u : 0u));
             }
         }
         if (selected && !unary && instruction->binary_operation >= IR_BINARY_VECTOR_INTEGER_EQUAL)
@@ -8557,10 +8557,6 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     }
     selector.parameter_edges = machine_parameter_edge_layout_plan(arena, function, canonical_layout, expanded_blocks,
                                                                    &selector.block_entries, &selector.block_exits);
-    if (!selector.parameter_edges.valid)
-    {
-        return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
-    }
     // Block-parameter incoming values are uses on CFG edges rather than row
     // operands. Keep them visible to aliasing and branch fusion: in
     // particular, a comparison that also supplies a promoted local is not a
@@ -9845,15 +9841,12 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         machine_parameter_edge_layout_end(&selector.builder, &selector.parameter_edges, function, block_index,
                                           selector.block_entries, &machine_x86_64_description);
     }
-    if (!selector.supported)
+    if (!selector.supported || selector.builder.point_capacity_exceeded ||
+        (selector.parameter_edges.split_count && selector.builder.instructions.total_count >= MACHINE_POINT_INSTRUCTION_LIMIT))
     {
         result.failed_opcode = selector.failed_opcode;
         result.failure_detail = selector.failure_detail;
         return result;
-    }
-    if (selector.parameter_edges.split_count && selector.builder.instructions.total_count >= MACHINE_POINT_INSTRUCTION_LIMIT)
-    {
-        return (MachineSelectResult){.failed_opcode = IR_OPCODE_COUNT};
     }
     u32 canonical_edge_offset = selector.builder.edges.total_count;
     if (!machine_builder_canonical_edges(&selector.builder, function, selector.value_virtual_registers, selector.value_parts,
