@@ -6354,7 +6354,10 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
             scope_finger = scope;
             entity = c_parse_lookup_entity_token(analysis, preprocess.spelling_base, scope, &token);
         }
-        if (entity.value < analysis->entity_count && analysis->entities[entity.value].declaration_token_plus_one == index + 1)
+        // A typedef can lead a grouped declarator, e.g. Callback (*table)[2].
+        // Its function-pointer type does not make the type name a callee.
+        if (entity.value < analysis->entity_count && (analysis->entities[entity.value].kind == C_ENTITY_TYPEDEF ||
+                                                     analysis->entities[entity.value].declaration_token_plus_one == index + 1))
         {
             continue;
         }
