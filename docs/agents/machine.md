@@ -622,6 +622,27 @@ hosts execute its independent expected-value fixture.
   `MACHINE_STACK_SLOT_MEMORY_NONVOLATILE` admits an object to reuse; zero is
   unknown and keeps dedicated storage. An absent array preserves manual
   fixtures' existing reuse subject to the other lifetime and ownership guards.
+
+  Block coloring also requires its worst-case group-word comparisons to fit
+  `MACHINE_FAST_BLOCK_COLOR_WORD_LIMIT`: `count * (count - 1) / 2` possible
+  earlier groups times `ceil(block_count / 64)` words. Scalar and vector home
+  pools are admitted independently. This conservative throughput policy can
+  decline a population that would find conflicts early; it avoids constructing
+  home occupancy only to discard a budget-exhausted coloring. Such populations
+  use the existing interval/local-home fallback. The separate prepass value
+  liveness cap does not change with this gate. Empty interval home pools skip
+  their instruction-row histograms using the existing eligibility counts.
+
+- Retroactive allocation edits retain stable equal-point order. Ordered
+  streams need no moves, small streams use ping-pong merges, and streams of at
+  least `MACHINE_FAST_RADIX_EDIT_THRESHOLD` records use stable byte radix passes
+  over differing key bytes. Every pass moves the complete `MachineEdit`.
+- QUALITY scans a candidate before constructing its frame. Traffic rejection
+  and pin-verification rejection reclaim the candidate's output-arena tail;
+  the baseline and immutable prepass remain alive. Only an otherwise accepted
+  candidate runs `machine_fast_placement_finish`, and a frame-capacity refusal
+  preserves the original retry/fallback policy. Allocation diagnostics expose
+  probe bytes, reclaimed rejected bytes and frame-layout counts separately.
   Debug records may name slots but never decide layout.
 - Static memory-chain membership comes only from `MachineOpcodeInfo.memory_effect`
   through `machine_opcode_is_memory`; the duplicate memory attribute bit is

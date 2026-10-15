@@ -384,6 +384,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
     // traffic it removes, which is exactly the edit count of that value,
     // and heuristics guessing at this were measurably worse than the
     // truth (2026-08-09ai).
+    BUSTER_QUALITY_COUNT(placement_frame_layouts, 1);
     MachineStackPlacement baseline = machine_fast_placement_build_prepassed(arena, function, &prepass, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     if (!baseline.valid)
     {
@@ -1264,9 +1265,11 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
             split_stores[store_slot] = moved;
         }
         BUSTER_QUALITY_COUNT(placement_probes, 1);
-        MachineStackPlacement placement = machine_fast_placement_build_prepassed(arena, function, &prepass, pinned_registers, pinned_mask,
+        u64 placement_mark = arena->position;
+        MachineStackPlacement placement = machine_fast_placement_scan_prepassed(arena, function, &prepass, pinned_registers, pinned_mask,
                                                                                   pin_active_masks, span_starts, span_ends, split_entries,
                                                                                   split_entry_count, split_stores, split_store_count);
+        BUSTER_QUALITY_COUNT(placement_probe_bytes, arena->position - placement_mark);
         // Accept only on modeled improvement, in the same weighted units
         // the candidacy used: both placements' spill and reload edits are
         // priced by the frequency class of the block they land in, so a
@@ -1302,6 +1305,8 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
         if (!placement.valid || placement_traffic_total + added_prologue_cost >= baseline_traffic_total)
         {
             BUSTER_QUALITY_COUNT(placement_cost_rejections, 1);
+            BUSTER_QUALITY_COUNT(placement_rejected_bytes, arena->position - placement_mark);
+            arena_set_position(arena, placement_mark);
             if (attempt == 0 && split_entry_count)
             {
                 // Retrying without splits is a genuinely different pack;
@@ -1363,6 +1368,29 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_quality_placement_build_core(A
         if (!pins_hold)
         {
             BUSTER_QUALITY_COUNT(pin_verification_rejections, 1);
+            BUSTER_QUALITY_COUNT(placement_rejected_bytes, arena->position - placement_mark);
+            arena_set_position(arena, placement_mark);
+            if (attempt == 0 && split_entry_count)
+            {
+                continue;
+            }
+            if (degradable)
+            {
+                attempt = 1;
+                continue;
+            }
+            break;
+        }
+        // Rejected scans need no home closure, coloring or frame census.
+        // Keep the baseline alive until the accepted probe also passes the
+        // ordinary frame-capacity check; a capacity refusal retries as before.
+        BUSTER_QUALITY_COUNT(placement_frame_layouts, 1);
+        machine_fast_placement_finish(arena, function, &prepass, &placement);
+        if (!placement.valid)
+        {
+            BUSTER_QUALITY_COUNT(placement_cost_rejections, 1);
+            BUSTER_QUALITY_COUNT(placement_rejected_bytes, arena->position - placement_mark);
+            arena_set_position(arena, placement_mark);
             if (attempt == 0 && split_entry_count)
             {
                 continue;
