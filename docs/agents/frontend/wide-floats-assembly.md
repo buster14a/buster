@@ -543,8 +543,9 @@ x86 object formats, both frontend SSA forms and FAST/QUALITY, plus feature
 overrides, malformed calls and the configured LLVM resource-header spelling.
 On native x86-64, an independent host-side checker consumes FXSAVE tag/control
 word bytes from the generated program. A no-reset control must retain all
-eight nonempty tags; the builtin must clear them, preserve the control word
-and permit following long-double arithmetic. Raw oracle setup/snapshot/cleanup
+eight nonempty tags; the builtin must clear them, preserve a deliberately nondefault control word
+and permit following long-double arithmetic. The oracle restores the original
+control word before emitting its observations. Raw oracle setup/snapshot/cleanup
 bytes keep this check independent of literal-MMX-register parsing and of the
 builtin under test. The child has the existing thirty-second deadline.
 

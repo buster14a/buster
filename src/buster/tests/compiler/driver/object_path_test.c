@@ -4748,6 +4748,9 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_emms_tests(UnitTestArguments*
         "static void emit(unsigned int n) { static const char hex[] = \"0123456789abcdef\"; putchar(hex[(n >> 4) & 15]); putchar(hex[n & 15]); return; }\n"
         "static void probe(int reset) {\n"
         " struct State before, after;\n"
+        " unsigned short original = 0x037f, requested = 0x0b7f;\n"
+        " __asm__ volatile(\".byte 0xd9,0x38\" : : \"a\"(&original) : \"memory\");\n"
+        " __asm__ volatile(\".byte 0xd9,0x28\" : : \"a\"(&requested) : \"memory\");\n"
         " before.bytes[0] = before.bytes[1] = before.bytes[4] = 66;\n"
         " after.bytes[0] = after.bytes[1] = after.bytes[4] = 66;\n"
         " __asm__ volatile(\".byte 0x0f,0xef,0xc0\\n.byte 0x0f,0xae,0x00\" : : \"a\"(&before) : \"memory\");\n"
@@ -4756,6 +4759,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_emms_tests(UnitTestArguments*
         " int arithmetic = 0;\n"
         " if (reset && after.bytes[4] == 0) arithmetic = left + right == 3.25L;\n"
         " __asm__ volatile(\".byte 0x0f,0x77\" : : : \"memory\");\n"
+        " __asm__ volatile(\".byte 0xd9,0x28\" : : \"a\"(&original) : \"memory\");\n"
         " emit(before.bytes[4]); emit(after.bytes[4]); emit(before.bytes[0]); emit(before.bytes[1]);\n"
         " emit(after.bytes[0]); emit(after.bytes[1]); emit((unsigned int)arithmetic); return;\n"
         "}\n"
@@ -4794,8 +4798,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_emms_tests(UnitTestArguments*
                     }
                     valid = valid && observed[0] == 255 && observed[1] == 255 && observed[6] == 0 &&
                         observed[7] == 255 && observed[8] == 0 && observed[13] == 1 &&
-                        observed[2] == observed[4] && observed[3] == observed[5] &&
-                        observed[9] == observed[11] && observed[10] == observed[12];
+                        observed[2] == 0x7f && observed[3] == 0x0b && observed[2] == observed[4] && observed[3] == observed[5] &&
+                        observed[9] == 0x7f && observed[10] == 0x0b && observed[9] == observed[11] && observed[10] == observed[12];
                     BUSTER_TEST(arguments, valid);
                     if (!valid)
                     {
