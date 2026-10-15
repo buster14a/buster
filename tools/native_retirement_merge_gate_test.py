@@ -378,10 +378,12 @@ class FakeGitHub:
     repository = "buster14a/buster"
 
     def __init__(self, pulls: list[dict], commits: dict[str, dict],
-                 comparisons: dict[str, dict] | None = None):
+                 comparisons: dict[str, dict] | None = None,
+                 blobs: dict[tuple[str, str], str] | None = None):
         self.pulls = pulls
         self.commits = commits
         self.comparisons = comparisons or {}
+        self.blobs = blobs or {}
         self.posts = []
 
     def all(self, path: str, **query):
@@ -394,6 +396,11 @@ class FakeGitHub:
             return self.commits[path.removeprefix("commits/")]
         if path.startswith("compare/") and method == "GET":
             return self.comparisons[path.removeprefix("compare/")]
+        if path.startswith("contents/") and method == "GET":
+            key = (path.removeprefix("contents/"), query["ref"])
+            if key not in self.blobs:
+                raise gate.integration.APIReadError(path, 404, 1)
+            return {"type": "file", "sha": self.blobs[key]}
         if path == "check-runs" and method == "POST":
             self.posts.append(body)
             return {"id": len(self.posts)}
@@ -714,7 +721,6 @@ class InvalidationTests(unittest.TestCase):
             ({"status": "ahead", "files": [source, generated]}, 1),
             ({"status": "ahead", "files": [renamed]}, 1),
             ({"status": "diverged", "files": [source]}, 1),
-            ({"status": "ahead", "files": [source] * gate.COMPARE_FILE_LIMIT}, 1),
             ({"status": "ahead"}, 1),
         )
         for comparison, posts in cases:
@@ -723,6 +729,73 @@ class InvalidationTests(unittest.TestCase):
                                  {old + "..." + new: comparison})
                 gate.invalidate_stale(api, new, "https://github.com/buster14a/buster/actions/runs/2")
                 self.assertEqual(len(api.posts), posts)
+
+    def test_truncated_compare_decides_catch_up_from_generated_blobs(self):
+        # A compare listing COMPARE_FILE_LIMIT files is truncated, so it cannot
+        # prove the generated pair unchanged; blob ids at both ends do (#3961).
+        old, new = "1" * 40, "2" * 40
+        message = (
+            f"{gate.TRAILER_EVIDENCE}: {'e' * 64}\n"
+            f"{gate.TRAILER_BASE}: {old}\n"
+            f"{gate.TRAILER_CANDIDATE}: {'6' * 40}\n"
+            f"{gate.TRAILER_FINAL_TREE}: {'7' * 40}\n"
+            f"{gate.TRAILER_KIND}: ordinary\n"
+        )
+        head = "3" * 40
+        pull = {"number": 9,
+                "head": {"sha": head, "ref": gate.CATCH_UP_BRANCH,
+                         "repo": {"full_name": "buster14a/buster"}},
+                "base": {"repo": {"full_name": "buster14a/buster"}}}
+        source = {"filename": "src/buster/lib/value.c"}
+        truncated = {"status": "ahead", "files": [source] * gate.COMPARE_FILE_LIMIT}
+        sources, binding = sorted(gate.integration.GENERATED_PATHS)
+        same = {(sources, old): "a" * 40, (sources, new): "a" * 40,
+                (binding, old): "b" * 40, (binding, new): "b" * 40}
+        changed = dict(same)
+        changed[(binding, new)] = "c" * 40
+        removed = dict(same)
+        del removed[(sources, new)]
+        absent = {(binding, old): "b" * 40, (binding, new): "b" * 40}
+        cases = (
+            (truncated, same, 0),
+            (truncated, changed, 1),
+            (truncated, removed, 1),
+            (truncated, absent, 0),
+            ({"status": "diverged", "files": truncated["files"]}, same, 1),
+        )
+        for comparison, blobs, posts in cases:
+            with self.subTest(blobs=blobs, status=comparison["status"]):
+                api = FakeGitHub([pull], {head: {"commit": {"message": message}}},
+                                 {old + "..." + new: comparison}, blobs)
+                gate.invalidate_stale(api, new, "https://github.com/buster14a/buster/actions/runs/2")
+                self.assertEqual(len(api.posts), posts)
+
+    def test_truncated_compare_rejects_malformed_generated_contents(self):
+        old, new = "1" * 40, "2" * 40
+        comparison = {"status": "ahead",
+                      "files": [{"filename": "src/buster/lib/value.c"}] * gate.COMPARE_FILE_LIMIT}
+        malformed = (None, [], {}, {"type": "dir"}, {"type": "symlink"},
+                     {"type": "file"}, {"type": "file", "sha": "invalid"})
+        for content in malformed:
+            api = gate.GitHub("buster14a/buster", "fixture-token")
+            responses = [comparison] + [content] * (2 * len(gate.integration.GENERATED_PATHS))
+            with self.subTest(content=content), patch.object(api, "request", side_effect=responses):
+                with self.assertRaises(gate.AdmissionError):
+                    gate.catch_up_still_admissible(api, old, new)
+
+    def test_truncated_compare_preserves_non_404_read_failures(self):
+        old, new = "1" * 40, "2" * 40
+        comparison = {"status": "ahead",
+                      "files": [{"filename": "src/buster/lib/value.c"}] * gate.COMPARE_FILE_LIMIT}
+        path = "contents/" + sorted(gate.integration.GENERATED_PATHS)[0]
+        for status in (403, 429, 500, 502):
+            api = gate.GitHub("buster14a/buster", "fixture-token")
+            error = gate.integration.APIReadError(path, status, 4)
+            with self.subTest(status=status), patch.object(api, "request",
+                                                         side_effect=[comparison, error]):
+                with self.assertRaises(gate.integration.APIReadError) as raised:
+                    gate.catch_up_still_admissible(api, old, new)
+                self.assertIs(raised.exception, error)
 
 
 class WorkflowPolicyTests(unittest.TestCase):
