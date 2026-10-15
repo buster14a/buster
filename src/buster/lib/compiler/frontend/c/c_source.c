@@ -12626,7 +12626,7 @@ struct CTargetFeatureMacro
 // GNU feature macros mirror the selected target even where code generation is
 // not available for that target.
 BUSTER_C_INTERNAL CTargetFeatureMacro const c_target_feature_macros[] = {
-    { S8_INITIALIZER("__MMX__"), TARGET_CPU_FEATURE_X86_MMX, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__MMX__"), TARGET_CPU_FEATURE_X86_MMX, CPU_ARCH_X86_64, false },
     { S8_INITIALIZER("__SSE__"), TARGET_CPU_FEATURE_X86_SSE, CPU_ARCH_X86_64, true },
     { S8_INITIALIZER("__SSE2__"), TARGET_CPU_FEATURE_X86_SSE2, CPU_ARCH_X86_64, false },
     { S8_INITIALIZER("__SSE3__"), TARGET_CPU_FEATURE_X86_SSE3, CPU_ARCH_X86_64, true },
@@ -13461,7 +13461,6 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         C_DEFINE_TYPE_MACRO("__amd64__", S8("1"));
         C_DEFINE_TYPE_MACRO("__amd64", S8("1"));
         C_DEFINE_TYPE_MACRO("__x86_64", S8("1"));
-        C_DEFINE_TYPE_MACRO("__MMX__", S8("1"));
         C_DEFINE_TYPE_MACRO("__SSE__", S8("1"));
         C_DEFINE_TYPE_MACRO("__FXSR__", S8("1"));
         C_DEFINE_TYPE_MACRO("__SSE_MATH__", S8("1"));

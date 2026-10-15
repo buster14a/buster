@@ -521,3 +521,34 @@ negation rather than substituting a u64 wrap. The existing signed-128 selection
 for parsed u64 magnitudes is preserved. Integer binary operations still refuse
 and the existing depth limit is unchanged; no new recursion, pass, allocation
 or dependency is introduced.
+
+## MMX state reset
+
+On x86 targets with the MMX feature enabled, `__builtin_ia32_emms()` has the
+pinned LLVM 21.1.8 `void(void)` contract. The existing vendor reservation and
+x86 helper lower it to volatile canonical inline assembly with a conservative
+memory barrier. Native selection uses the shared assembler's EMMS encoding;
+no backend fallback, register-data zeroing or control-word reset is involved.
+The x87 tags become empty, while ordinary f80 work remains in its existing
+closed transactions and ABI bridges.
+
+MMX is an independently represented x86-64 baseline feature. Ordered
+`-mno-mmx`/`-mmmx` overrides govern both `__MMX__` and operational builtin
+availability; disabled-MMX and foreign-target reached calls are refused.
+Other SSE/SSE2 feature policy is unchanged. This does not qualify general MMX
+arithmetic or the complete intrinsic census.
+
+The registered `compiler_driver_emms_tests` checks exact EMMS bytes on three
+x86 object formats, both frontend SSA forms and FAST/QUALITY, plus feature
+overrides, malformed calls and the configured LLVM resource-header spelling.
+On native x86-64, an independent host-side checker consumes FXSAVE tag/control
+word bytes from the generated program. A no-reset control must retain all
+eight nonempty tags; the builtin must clear them, preserve the control word
+and permit following long-double arithmetic. Raw oracle setup/snapshot/cleanup
+bytes keep this check independent of literal-MMX-register parsing and of the
+builtin under test. The child has the existing thirty-second deadline.
+
+Specification: Intel's [EMMS instruction reference](https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2a-manual.pdf)
+and [FXSAVE architecture description](https://cdrdv2-public.intel.com/843827/253665-sdm-vol-1-dec-24.pdf);
+builtin signature: [LLVM 21.1.8 BuiltinsX86.td](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/clang/include/clang/Basic/BuiltinsX86.td).
+These are contracts, not imported implementations or performance evidence.

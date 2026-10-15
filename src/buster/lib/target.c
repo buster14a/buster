@@ -842,7 +842,7 @@ BUSTER_GLOBAL_LOCAL TargetCpuFeatures target_cpu_features_x86_default(CpuModel m
     }
     bool amd_mmx = model >= CPU_MODEL_AMD_K6 && model <= CPU_MODEL_AMD_ATHLON_XP;
     bool intel_mmx = model >= CPU_MODEL_INTEL_CORE_2 && model <= CPU_MODEL_INTEL_DIAMOND_RAPIDS;
-    if (arch == CPU_ARCH_I386 && (amd_mmx || intel_mmx || x86_64_model))
+    if (arch == CPU_ARCH_X86_64 || (arch == CPU_ARCH_I386 && (amd_mmx || intel_mmx || x86_64_model)))
     {
         result = target_cpu_features_add(result, TARGET_CPU_FEATURE_X86_MMX);
     }

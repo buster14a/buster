@@ -4620,9 +4620,205 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_mach_tls_object_tests(UnitTes
 }
 #endif
 
+
+#if !BUSTER_ANDROID && !BUSTER_IOS
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_emms_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 source_path = buster_test_temporary_path(arena, S8("buster-emms"), S8(".c"));
+    String8 object_path = buster_test_temporary_path(arena, S8("buster-emms"), S8(".o"));
+    String8 enabled = S8(
+        "#ifndef __MMX__\n#error missing MMX feature macro\n#endif\n"
+        "#if !__has_builtin(__builtin_ia32_emms)\n#error missing EMMS builtin\n#endif\n"
+        "void emms_probe(void) { __builtin_ia32_emms(); }\n");
+    String8 disabled = S8(
+        "#ifdef __MMX__\n#error MMX macro ignores disabled feature\n#endif\n"
+        "#if __has_builtin(__builtin_ia32_emms)\n#error EMMS ignores disabled feature\n#endif\n"
+        "int disabled_feature_control;\n");
+    String8 targets[] = {S8("x86_64-linux"), S8("x86_64-windows"), S8("x86_64-macos")};
+    String8 allocators[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+        {
+            for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+            {
+                if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(enabled))))
+                {
+                    TemporalArena compile = arena_begin_temporal(arena);
+                    String8 command[] = {S8("-std=c17"), S8("-nostdinc"), S8("-mcpu=baseline"), S8("-target"), targets[target],
+                        forms[form], allocators[allocator], S8("-fno-machine-fallback"), S8("-fverify-codegen"), S8("-c"), S8("-o"), object_path, source_path};
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                        arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                    if (BUSTER_REQUIRE(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE && compiled.has_object))
+                    {
+                        u32 resets = 0;
+                        for (u32 index = 0; index < compiled.object.symbol_count; index += 1)
+                        {
+                            ObjectSymbol symbol = compiled.object.symbols[index];
+                            bool named = string_equal(symbol.name, S8("emms_probe")) || string_equal(symbol.name, S8("_emms_probe"));
+                            if (named && symbol.section < compiled.object.section_count)
+                            {
+                                ByteSlice bytes = compiled.object.sections[symbol.section].data;
+                                if (symbol.value <= bytes.length)
+                                {
+                                    u64 size = symbol.size ? symbol.size : bytes.length - symbol.value;
+                                    if (size <= bytes.length - symbol.value)
+                                    {
+                                        for (u64 offset = 0; offset + 1 < size; offset += 1)
+                                        {
+                                            resets += bytes.pointer[symbol.value + offset] == 0x0f && bytes.pointer[symbol.value + offset + 1] == 0x77;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        BUSTER_TEST(arguments, resets == 1 && compiled.fallback_record_count == 0);
+                    }
+                    else
+                    {
+                        compiler_driver_object_path_test_report(arguments, arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command), compiled);
+                    }
+                    os_file_delete(object_path);
+                    arena_end_temporal(compile);
+                }
+            }
+        }
+    }
+    String8 flags[] = {S8("-mno-mmx"), S8("-mmmx")};
+    for (u32 feature = 0; feature < BUSTER_ARRAY_LENGTH(flags); feature += 1)
+    {
+        String8 source = feature ? enabled : disabled;
+        if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-std=c17"), S8("-nostdinc"), S8("-target"), S8("x86_64-linux"), S8("-mcpu=baseline"),
+                S8("-mno-mmx"), flags[feature], S8("-fsyntax-only"), source_path};
+            BUSTER_TEST(arguments, compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)) == COMPILER_DRIVER_ERROR_NONE);
+        }
+    }
+    String8 invalid[] = {
+        S8("void f(void) { __builtin_ia32_emms(1); }"),
+        S8("int f(void) { return __builtin_ia32_emms(); }"),
+        S8("void f(void) { __builtin_ia32_emms(); }"),
+        S8("void f(void) { __builtin_ia32_emms(); }"),
+    };
+    for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(invalid); index += 1)
+    {
+        if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(invalid[index]))))
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                TemporalArena compile = arena_begin_temporal(arena);
+                String8 command[] = {S8("-std=c17"), S8("-nostdinc"), S8("-target"), index == 3 ? S8("aarch64-linux") : S8("x86_64-linux"),
+                    index == 2 ? S8("-mno-mmx") : S8("-mcpu=baseline"), forms[form], S8("-c"), S8("-o"), object_path, source_path};
+                CompilerDriverResult compiled = compiler_driver_execute_invocation(
+                    arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)));
+                BUSTER_TEST(arguments, compiled.error != COMPILER_DRIVER_ERROR_NONE && compiled.diagnostic.length && !compiled.has_object);
+                os_file_delete(object_path);
+                arena_end_temporal(compile);
+            }
+        }
+    }
+#if defined(BUSTER_HOST_C_RESOURCE_INCLUDE)
+    String8 resource = S8(BUSTER_HOST_C_RESOURCE_INCLUDE);
+    String8 header = string_format_z(arena, S8("{S8}/mmintrin.h"), resource);
+    if (resource.length && compiler_driver_object_path_test_file_exists(header))
+    {
+        String8 source = S8("#include <mmintrin.h>\nvoid header_emms_probe(void) { _mm_empty(); }\n");
+        if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 command[] = {S8("-target"), S8("x86_64-linux"), S8("-mcpu=baseline"), S8("-std=c17"), S8("-isystem"), resource,
+                S8("-fno-machine-fallback"), S8("-c"), S8("-o"), object_path, source_path};
+            BUSTER_TEST(arguments, compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command)) == COMPILER_DRIVER_ERROR_NONE);
+            os_file_delete(object_path);
+        }
+    }
+#endif
+#if BUSTER_CPU_ARCH_X86_64
+    // FXSAVE's abridged tag byte is at offset four. MMX makes all eight tags
+    // nonempty; EMMS makes them empty. Raw setup/observation bytes deliberately
+    // avoid relying on literal-MMX-register parsing or on the new builtin.
+    String8 program = S8(
+        "#include <stdio.h>\n"
+        "struct __attribute__((aligned(16))) State { unsigned char bytes[512]; };\n"
+        "static volatile int selectors[2] = { 0, 1 };\n"
+        "static volatile long double left = 1.25L, right = 2.0L;\n"
+        "static void emit(unsigned int n) { static const char hex[] = \"0123456789abcdef\"; putchar(hex[(n >> 4) & 15]); putchar(hex[n & 15]); return; }\n"
+        "static void probe(int reset) {\n"
+        " struct State before, after;\n"
+        " before.bytes[0] = before.bytes[1] = before.bytes[4] = 66;\n"
+        " after.bytes[0] = after.bytes[1] = after.bytes[4] = 66;\n"
+        " __asm__ volatile(\".byte 0x0f,0xef,0xc0\\n.byte 0x0f,0xae,0x00\" : : \"a\"(&before) : \"memory\");\n"
+        " if (reset) __builtin_ia32_emms();\n"
+        " __asm__ volatile(\".byte 0x0f,0xae,0x00\" : : \"a\"(&after) : \"memory\");\n"
+        " int arithmetic = 0;\n"
+        " if (reset && after.bytes[4] == 0) arithmetic = left + right == 3.25L;\n"
+        " __asm__ volatile(\".byte 0x0f,0x77\" : : : \"memory\");\n"
+        " emit(before.bytes[4]); emit(after.bytes[4]); emit(before.bytes[0]); emit(before.bytes[1]);\n"
+        " emit(after.bytes[0]); emit(after.bytes[1]); emit((unsigned int)arithmetic); return;\n"
+        "}\n"
+        "int main(void) { probe(selectors[0]); probe(selectors[1]); return 0; }\n");
+    for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        for (u32 allocator = 0; allocator < BUSTER_ARRAY_LENGTH(allocators); allocator += 1)
+        {
+            if (BUSTER_REQUIRE(arguments, file_write(source_path, BUSTER_SLICE_TO_BYTE_SLICE(program))))
+            {
+                String8 executable = buster_test_temporary_path(arena, S8("buster-emms-state"), BUSTER_WINDOWS ? S8(".exe") : S8(""));
+                String8 command[] = {S8("-mcpu=baseline"), S8("-std=c17"), forms[form], allocators[allocator], S8("-fno-machine-fallback"),
+                    S8("-fverify-codegen"), S8("-o"), executable, source_path};
+                CompilerDriverError error = compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+                if (BUSTER_REQUIRE(arguments, error == COMPILER_DRIVER_ERROR_NONE))
+                {
+                    String8 run[] = {executable};
+                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true,
+                            .capture = (UINT64_C(1) << STANDARD_STREAM_OUTPUT) | (UINT64_C(1) << STANDARD_STREAM_ERROR)});
+                    ProcessWaitResult waited = child.handle ? os_process_wait_deadline(arena, child, UINT64_C(30000000)) : (ProcessWaitResult){0};
+                    ByteSlice output = waited.streams[STANDARD_STREAM_OUTPUT];
+                    bool valid = child.handle && waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out && !waited.capture_failed &&
+                        !waited.output_truncated && !waited.streams[STANDARD_STREAM_ERROR].length && output.length == 28;
+                    u8 observed[14] = {0};
+                    for (u32 byte = 0; valid && byte < BUSTER_ARRAY_LENGTH(observed); byte += 1)
+                    {
+                        for (u32 nibble = 0; valid && nibble < 2; nibble += 1)
+                        {
+                            u8 digit = output.pointer[byte * 2 + nibble];
+                            bool decimal = digit >= '0' && digit <= '9';
+                            bool lower = digit >= 'a' && digit <= 'f';
+                            valid = decimal || lower;
+                            observed[byte] = (u8)(observed[byte] * 16 + (decimal ? digit - '0' : lower ? digit - 'a' + 10 : 0));
+                        }
+                    }
+                    valid = valid && observed[0] == 255 && observed[1] == 255 && observed[6] == 0 &&
+                        observed[7] == 255 && observed[8] == 0 && observed[13] == 1 &&
+                        observed[2] == observed[4] && observed[3] == observed[5] &&
+                        observed[9] == observed[11] && observed[10] == observed[12];
+                    BUSTER_TEST(arguments, valid);
+                    if (!valid)
+                    {
+                        arguments->show(arguments, S8("EMMS state oracle failed: result={u32} stdout='{S8}' stderr='{S8}'\n"),
+                            (u32)waited.result, BYTE_SLICE_TO_STRING(8, output), BYTE_SLICE_TO_STRING(8, waited.streams[STANDARD_STREAM_ERROR]));
+                    }
+                }
+                os_file_delete(executable);
+            }
+        }
+    }
+#endif
+    os_file_delete(source_path);
+    return result;
+}
+#endif
+
 UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_emms_tests);
+#endif
 #if BUSTER_LINUX && !BUSTER_ANDROID && (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_stack_tests);
 #endif
