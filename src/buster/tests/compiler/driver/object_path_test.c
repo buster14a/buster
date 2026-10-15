@@ -2,6 +2,7 @@
 #if BUSTER_INCLUDE_TESTS
 
 #include <buster/lib/compiler/driver/driver.h>
+#include <buster/lib/compiler/assembly/assembly_unit.h>
 #include <buster/lib/compiler/object/object.h>
 #include <buster/lib/file.h>
 #include <buster/lib/os.h>
@@ -1811,6 +1812,603 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_elf_semantic_archive(Arena* arena,
     if (padding) bytes.pointer[bytes.length - 1] = '\n';
     return bytes;
 }
+
+#if BUSTER_CPU_ARCH_X86_64
+BUSTER_GLOBAL_LOCAL String8 compiler_driver_elf_symbol_section_name(ObjectFile object, ObjectSymbol symbol)
+{
+    return symbol.section < object.section_count ? object.sections[symbol.section].name : (String8){0};
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_string_contains(String8 text, String8 value)
+{
+    bool found = false;
+    if (value.length <= text.length)
+    {
+        for (u64 index = 0; index <= text.length - value.length && !found; index += 1)
+        {
+            found = memcmp(text.pointer + index, value.pointer, value.length) == 0;
+        }
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_modifier_rejection(String8 source, String8 output,
+                                                                 String8 assembly, String8 diagnostic)
+{
+    bool result = file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(assembly));
+    Arena* compile_arena = result ? arena_create((ArenaCreation){0}) : 0;
+    if (compile_arena)
+    {
+        String8 command[] = {S8("-g0"), S8("-c"), source, S8("-o"), output};
+        CompilerDriverInvocation invocation = compiler_driver_parse_arguments(compile_arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
+        CompilerDriverResult compiled = compiler_driver_execute_invocation(compile_arena, invocation);
+        result = compiled.error != COMPILER_DRIVER_ERROR_NONE &&
+                 compiler_driver_elf_string_contains(compiled.diagnostic, diagnostic);
+        BUSTER_CHECK(arena_destroy(compile_arena, 1));
+    }
+    else
+    {
+        result = false;
+    }
+    return result;
+}
+
+// GOT type relaxation can be lost when the printer has to use a raw data
+// directive. The family may differ, but every field and symbol property stays
+// exact in the comparison below.
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_assembly_relocation_objects_match(Arena* arena, String8 expected_path, String8 actual_path,
+                                                                                       String8* mismatch_description)
+{
+    Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+    ObjectFile expected = object_read(arena, file_read(arena, expected_path, (FileReadOptions){0}), target);
+    ObjectFile actual = object_read(arena, file_read(arena, actual_path, (FileReadOptions){0}), target);
+    String8 mismatch = string_format(arena, S8("object reader errors expected={u32} actual={u32}"),
+                                     (u32)expected.error, (u32)actual.error);
+    bool valid = expected.error == OBJECT_ERROR_NONE && actual.error == OBJECT_ERROR_NONE &&
+                 expected.section_count == actual.section_count && expected.symbol_count == actual.symbol_count &&
+                 expected.relocation_count == actual.relocation_count;
+    if (expected.error == OBJECT_ERROR_NONE && actual.error == OBJECT_ERROR_NONE)
+    {
+        if (expected.section_count == actual.section_count && expected.symbol_count == actual.symbol_count &&
+            expected.relocation_count == actual.relocation_count)
+        {
+            mismatch = S8("object metadata matches");
+        }
+        else
+        {
+            mismatch = string_format(arena, S8("counts sections={u32}/{u32} symbols={u32}/{u32} relocations={u32}/{u32}"),
+                                     expected.section_count, actual.section_count, expected.symbol_count, actual.symbol_count,
+                                     expected.relocation_count, actual.relocation_count);
+        }
+    }
+    for (u32 index = 0; index < expected.section_count && valid; index += 1)
+    {
+        ObjectSection left = expected.sections[index];
+        u32 match = UINT32_MAX;
+        for (u32 candidate = 0; candidate < actual.section_count; candidate += 1)
+        {
+            if (string_equal(left.name, actual.sections[candidate].name))
+            {
+                match = candidate;
+                break;
+            }
+        }
+        if (match == UINT32_MAX)
+        {
+            valid = false;
+            mismatch = string_format(arena, S8("section {S8} is absent"), left.name);
+        }
+        else
+        {
+            ObjectSection right = actual.sections[match];
+            valid = left.kind == right.kind && left.alignment == right.alignment && left.virtual_size == right.virtual_size &&
+                    left.data.length == right.data.length &&
+                    (!left.data.length || memcmp(left.data.pointer, right.data.pointer, left.data.length) == 0);
+            if (!valid)
+            {
+                mismatch = string_format(arena, S8("section {S8}: kind={u32}/{u32} align={u32}/{u32} vsize={u64}/{u64} bytes={u64}/{u64}"),
+                                         left.name, (u32)left.kind, (u32)right.kind, left.alignment, right.alignment,
+                                         left.virtual_size, right.virtual_size, left.data.length, right.data.length);
+            }
+        }
+    }
+    for (u32 index = 0; index < expected.symbol_count && valid; index += 1)
+    {
+        ObjectSymbol left = expected.symbols[index];
+        u32 match = UINT32_MAX;
+        for (u32 candidate = 0; candidate < actual.symbol_count; candidate += 1)
+        {
+            if (string_equal(left.name, actual.symbols[candidate].name))
+            {
+                match = candidate;
+                break;
+            }
+        }
+        if (match == UINT32_MAX)
+        {
+            valid = false;
+            mismatch = string_format(arena, S8("symbol {S8} is absent"), left.name);
+        }
+        else
+        {
+            ObjectSymbol right = actual.symbols[match];
+            String8 left_section = compiler_driver_elf_symbol_section_name(expected, left);
+            String8 right_section = compiler_driver_elf_symbol_section_name(actual, right);
+            valid = left.value == right.value && left.size == right.size &&
+                    string_equal(left_section, right_section) &&
+                    left.kind == right.kind && left.global == right.global && left.weak == right.weak &&
+                    left.hidden == right.hidden && left.thread_local_state == right.thread_local_state &&
+                    left.untyped == right.untyped && left.undefined_untyped == right.undefined_untyped &&
+                    left.indirect == right.indirect;
+            if (!valid)
+            {
+                mismatch = string_format(arena, S8("symbol {S8}: value={u64}/{u64} size={u64}/{u64} section={S8}/{S8} kind={u32}/{u32} global={u32}/{u32} weak={u32}/{u32} hidden={u32}/{u32} tls={u32}/{u32} untyped={u32}/{u32} undefined_untyped={u32}/{u32} indirect={u32}/{u32}"),
+                                         left.name, left.value, right.value, left.size, right.size, left_section, right_section,
+                                         (u32)left.kind, (u32)right.kind, (u32)left.global, (u32)right.global,
+                                         (u32)left.weak, (u32)right.weak, (u32)left.hidden, (u32)right.hidden,
+                                         (u32)left.thread_local_state, (u32)right.thread_local_state, (u32)left.untyped,
+                                         (u32)right.untyped, (u32)left.undefined_untyped, (u32)right.undefined_untyped,
+                                         (u32)left.indirect, (u32)right.indirect);
+            }
+        }
+    }
+    bool* matched_relocations = arena_allocate_zeroed(arena, bool, actual.relocation_count ? actual.relocation_count : 1);
+    for (u32 index = 0; index < expected.relocation_count && valid; index += 1)
+    {
+        ObjectRelocation left = expected.relocations[index];
+        String8 left_section = expected.sections[left.section].name;
+        String8 left_symbol = expected.symbols[left.symbol].name;
+        bool found = false;
+        for (u32 candidate = 0; candidate < actual.relocation_count && !found; candidate += 1)
+        {
+            ObjectRelocation right = actual.relocations[candidate];
+            bool same_got_family = object_relocation_kind_is_x86_got(left.kind) && object_relocation_kind_is_x86_got(right.kind);
+            bool kind_matches = left.kind == right.kind || same_got_family;
+            bool match = !matched_relocations[candidate] && left.offset == right.offset && left.addend == right.addend &&
+                         kind_matches && string_equal(left_section, actual.sections[right.section].name) &&
+                         string_equal(left_symbol, actual.symbols[right.symbol].name);
+            if (match)
+            {
+                matched_relocations[candidate] = true;
+                found = true;
+            }
+        }
+        valid = found;
+        if (!found)
+        {
+            mismatch = string_format(arena, S8("relocation {S8}+{u64} symbol={S8} addend_bits={u32} kind={u32} is absent"),
+                                     left_section, left.offset, left_symbol, (u32)left.addend, (u32)left.kind);
+        }
+    }
+    *mismatch_description = mismatch;
+    return valid;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_object_undefined_symbol_is(ObjectFile object, String8 name, ObjectSymbolKind kind,
+                                                                              u8 thread_local_state)
+{
+    bool found = false;
+    bool matches = false;
+    bool valid = object.error == OBJECT_ERROR_NONE && (!object.symbol_count || object.symbols);
+    for (u32 index = 0; index < object.symbol_count && !found && valid; index += 1)
+    {
+        ObjectSymbol symbol = object.symbols[index];
+        if (string_equal(symbol.name, name))
+        {
+            found = true;
+            matches = symbol.section == OBJECT_SECTION_UNDEFINED && symbol.kind == kind &&
+                      symbol.thread_local_state == thread_local_state && !symbol.untyped && !symbol.undefined_untyped;
+        }
+    }
+    return valid && found && matches;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_object_has_relocation(ObjectFile object, ObjectRelocationKind kind)
+{
+    bool found = false;
+    for (u32 index = 0; index < object.relocation_count; index += 1)
+    {
+        found = found || object.relocations[index].kind == kind;
+    }
+    return found;
+}
+
+BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_object_has_got_relocation(ObjectFile object)
+{
+    return compiler_driver_elf_object_has_relocation(object, OBJECT_RELOCATION_X86_64_GOTPCREL) ||
+           compiler_driver_elf_object_has_relocation(object, OBJECT_RELOCATION_X86_64_GOTPCRELX) ||
+           compiler_driver_elf_object_has_relocation(object, OBJECT_RELOCATION_X86_64_REX_GOTPCRELX);
+}
+
+// The C object's own GOT/TLS/PLT listing must be accepted by both assemblers
+// and retain its ELF relocation metadata before an independent link and run.
+BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_x86_elf_modifier_roundtrip(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    Arena* arena = arguments->arena;
+    String8 compiler = S8(BUSTER_HOST_C_COMPILER_ID);
+    bool supported = string_equal(compiler, S8("GNU")) || string_equal(compiler, S8("Clang"));
+    BUSTER_TEST(arguments, supported);
+    if (!supported) arguments->show(arguments, S8("x86-64 ELF relocation round-trip requires a configured GNU or Clang host compiler\n"));
+    if (supported)
+    {
+        String8 root = buster_test_temporary_path(arena, S8("buster-x86-elf-reloc-modifiers"), S8(""));
+        OsDirectoryCreateResult created = os_make_directory(root);
+        BUSTER_TEST(arguments, created.error.v == 0);
+        if (created.error.v == 0)
+        {
+            Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
+            String8 source = string_format_z(arena, S8("{S8}/program.c"), root);
+            String8 provider_source = string_format_z(arena, S8("{S8}/provider.c"), root);
+            String8 direct_object = string_format_z(arena, S8("{S8}/program-direct.o"), root);
+            String8 listing = string_format_z(arena, S8("{S8}/program.s"), root);
+            String8 buster_object = string_format_z(arena, S8("{S8}/program-buster.o"), root);
+            String8 host_object = string_format_z(arena, S8("{S8}/program-host.o"), root);
+            String8 provider_object = string_format_z(arena, S8("{S8}/provider.o"), root);
+            String8 direct_image = string_format_z(arena, S8("{S8}/program-direct"), root);
+            String8 buster_image = string_format_z(arena, S8("{S8}/program-buster"), root);
+            String8 host_image = string_format_z(arena, S8("{S8}/program-host"), root);
+            String8 program_text = S8("extern int roundtrip_data;\n"
+                                      "extern __thread int roundtrip_tls;\n"
+                                      "__attribute__((section(\"roundtrip_text\"))) int roundtrip_sum(void) {\n"
+                                      "    return roundtrip_data + roundtrip_tls;\n"
+                                      "}\n"
+                                      "int main(void) { return roundtrip_sum() != 42; }\n");
+            String8 provider_text = S8("int roundtrip_data = 39;\n"
+                                       "__thread int roundtrip_tls = 3;\n");
+            BUSTER_TEST(arguments, file_write(source, BUSTER_SLICE_TO_BYTE_SLICE(program_text)));
+            BUSTER_TEST(arguments, file_write(provider_source, BUSTER_SLICE_TO_BYTE_SLICE(provider_text)));
+            // Exercise unwind-only -g0 CFI section bases, including the
+            // named executable section retained by roundtrip_sum.
+            String8 direct_args[] = {S8("-g0"), S8("-fPIC"), S8("-O2"), S8("-c"), source, S8("-o"), direct_object};
+            String8 listing_args[] = {S8("-g0"), S8("-fPIC"), S8("-O2"), S8("-S"), source, S8("-o"), listing};
+            String8 buster_args[] = {S8("-c"), listing, S8("-o"), buster_object};
+            String8 host_assembly_args[] = {S8("-fPIC"), S8("-c"), S8("-x"), S8("assembler"), listing, S8("-o"), host_object};
+            String8 provider_args[] = {S8("-fPIC"), S8("-c"), provider_source, S8("-o"), provider_object};
+            bool direct_ready = compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_args)) ==
+                                COMPILER_DRIVER_ERROR_NONE;
+            bool listing_ready = compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(listing_args)) ==
+                                 COMPILER_DRIVER_ERROR_NONE;
+            bool buster_ready = listing_ready &&
+                                compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_args)) ==
+                                    COMPILER_DRIVER_ERROR_NONE;
+            bool host_ready = listing_ready &&
+                              compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_assembly_args));
+            bool provider_ready = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(provider_args));
+            BUSTER_TEST(arguments, direct_ready && listing_ready && buster_ready && host_ready && provider_ready);
+            if (direct_ready && buster_ready)
+            {
+                String8 relocation_mismatch = {0};
+                bool relocation_objects_match = compiler_driver_elf_assembly_relocation_objects_match(
+                    arena, direct_object, buster_object, &relocation_mismatch);
+                BUSTER_TEST_RAW(arguments, relocation_objects_match,
+                                string_format(arena, S8("direct vs reassembled object mismatch: {S8}"), relocation_mismatch));
+                ObjectFile direct = object_read(arena, file_read(arena, direct_object, (FileReadOptions){0}), target);
+                ObjectFile buster = object_read(arena, file_read(arena, buster_object, (FileReadOptions){0}), target);
+                bool text_base = false;
+                bool named_text_base = false;
+                bool main_function = false;
+                bool sum_function = false;
+                for (u32 index = 0; index < direct.symbol_count && direct.error == OBJECT_ERROR_NONE; index += 1)
+                {
+                    ObjectSymbol symbol = direct.symbols[index];
+                    bool section_base = !symbol.global && !symbol.weak && !symbol.value && !symbol.size &&
+                                        symbol.kind == OBJECT_SYMBOL_DATA &&
+                                        string_equal(symbol.name, compiler_driver_elf_symbol_section_name(direct, symbol));
+                    text_base |= section_base && string_equal(symbol.name, S8(".text"));
+                    named_text_base |= section_base && string_equal(symbol.name, S8("roundtrip_text"));
+                    main_function |= symbol.global && symbol.kind == OBJECT_SYMBOL_FUNCTION && string_equal(symbol.name, S8("main"));
+                    sum_function |= symbol.global && symbol.kind == OBJECT_SYMBOL_FUNCTION && string_equal(symbol.name, S8("roundtrip_sum"));
+                }
+                bool text_cfi = false;
+                bool named_text_cfi = false;
+                for (u32 index = 0; index < direct.relocation_count && direct.error == OBJECT_ERROR_NONE; index += 1)
+                {
+                    ObjectRelocation relocation = direct.relocations[index];
+                    if (relocation.section < direct.section_count && relocation.symbol < direct.symbol_count &&
+                        string_equal(direct.sections[relocation.section].name, S8(".eh_frame")))
+                    {
+                        String8 symbol = direct.symbols[relocation.symbol].name;
+                        text_cfi |= string_equal(symbol, S8(".text"));
+                        named_text_cfi |= string_equal(symbol, S8("roundtrip_text"));
+                    }
+                }
+                BUSTER_TEST(arguments, text_base && named_text_base);
+                BUSTER_TEST(arguments, main_function && sum_function);
+                BUSTER_TEST(arguments, text_cfi && named_text_cfi);
+                BUSTER_TEST(arguments, direct.error == OBJECT_ERROR_NONE &&
+                                      compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_REX_GOTPCRELX) &&
+                                      compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_TLSGD) &&
+                                      compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_PLT32));
+                BUSTER_TEST(arguments, compiler_driver_elf_object_undefined_symbol_is(buster, S8("roundtrip_data"), OBJECT_SYMBOL_DATA,
+                                                                                      OBJECT_SYMBOL_THREAD_LOCAL_NO));
+                BUSTER_TEST(arguments, compiler_driver_elf_object_undefined_symbol_is(buster, S8("roundtrip_tls"), OBJECT_SYMBOL_DATA,
+                                                                                      OBJECT_SYMBOL_THREAD_LOCAL_YES));
+                BUSTER_TEST(arguments, compiler_driver_elf_object_undefined_symbol_is(buster, S8("__tls_get_addr"), OBJECT_SYMBOL_FUNCTION,
+                                                                                      OBJECT_SYMBOL_THREAD_LOCAL_NO));
+            }
+            if (host_ready)
+            {
+                ObjectFile host = object_read(arena, file_read(arena, host_object, (FileReadOptions){0}), target);
+                BUSTER_TEST(arguments, host.error == OBJECT_ERROR_NONE &&
+                                      compiler_driver_elf_object_has_got_relocation(host) &&
+                                      compiler_driver_elf_object_has_relocation(host, OBJECT_RELOCATION_X86_64_TLSGD) &&
+                                      compiler_driver_elf_object_has_relocation(host, OBJECT_RELOCATION_X86_64_PLT32));
+            }
+            if (direct_ready && host_ready && provider_ready)
+            {
+                String8 direct_link[] = {S8("-no-pie"), direct_object, provider_object, S8("-o"), direct_image};
+                bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(direct_link));
+                BUSTER_TEST(arguments, linked);
+                if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, direct_image));
+            }
+            if (buster_ready && provider_ready)
+            {
+                String8 buster_link[] = {S8("-no-pie"), buster_object, provider_object, S8("-o"), buster_image};
+                bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(buster_link));
+                BUSTER_TEST(arguments, linked);
+                if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, buster_image));
+            }
+            if (host_ready && provider_ready)
+            {
+                String8 host_link[] = {S8("-no-pie"), host_object, provider_object, S8("-o"), host_image};
+                bool linked = compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(host_link));
+                BUSTER_TEST(arguments, linked);
+                if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, host_image));
+            }
+
+            String8 modifier_source = string_format_z(arena, S8("{S8}/integer-modifiers-input.s"), root);
+            String8 modifier_direct = string_format_z(arena, S8("{S8}/integer-direct.o"), root);
+            String8 modifier_listing = string_format_z(arena, S8("{S8}/integer-modifiers.s"), root);
+            String8 modifier_buster = string_format_z(arena, S8("{S8}/integer-buster.o"), root);
+            String8 modifier_host = string_format_z(arena, S8("{S8}/integer-host.o"), root);
+            // Raw data directives belong to the standalone assembler; the C
+            // module-assembly vocabulary emits text only.
+            String8 modifier_text = S8(".extern assembly_modifier_tls\n"
+                ".type assembly_modifier_tls,@tls_object\n"
+                ".data\n"
+                ".long assembly_modifier_tls@TLSGD - ., assembly_modifier_tls@TLSLD - .\n"
+                ".long assembly_modifier_tls@GOTTPOFF - .\n"
+                ".long assembly_modifier_tls@TPOFF\n"
+                ".long assembly_modifier_tls@DTPOFF\n"
+                ".quad assembly_modifier_tls@DTPOFF\n"
+                ".text\n"
+                ".globl assembly_modifier_anchor\n"
+                ".type assembly_modifier_anchor,@function\n"
+                "assembly_modifier_anchor: ret\n");
+            BUSTER_TEST(arguments, file_write(modifier_source, BUSTER_SLICE_TO_BYTE_SLICE(modifier_text)));
+            String8 modifier_direct_args[] = {S8("-g0"), S8("-fPIC"), S8("-c"), modifier_source, S8("-o"), modifier_direct};
+            String8 modifier_listing_args[] = {S8("-g0"), S8("-fPIC"), S8("-S"), modifier_source, S8("-o"), modifier_listing};
+            String8 modifier_buster_args[] = {S8("-c"), modifier_listing, S8("-o"), modifier_buster};
+            String8 modifier_host_args[] = {S8("-fPIC"), S8("-c"), S8("-x"), S8("assembler"), modifier_listing, S8("-o"), modifier_host};
+            bool modifier_direct_ready =
+                compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(modifier_direct_args)) ==
+                COMPILER_DRIVER_ERROR_NONE;
+            bool modifier_listing_ready =
+                compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(modifier_listing_args)) ==
+                COMPILER_DRIVER_ERROR_NONE;
+            bool modifier_buster_ready = modifier_listing_ready &&
+                compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(modifier_buster_args)) ==
+                    COMPILER_DRIVER_ERROR_NONE;
+            bool modifier_host_ready = modifier_listing_ready &&
+                compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(modifier_host_args));
+            BUSTER_TEST(arguments, modifier_direct_ready && modifier_listing_ready && modifier_buster_ready && modifier_host_ready);
+            if (modifier_direct_ready && modifier_buster_ready)
+            {
+                String8 modifier_mismatch = {0};
+                bool modifier_objects_match = compiler_driver_elf_assembly_relocation_objects_match(
+                    arena, modifier_direct, modifier_buster, &modifier_mismatch);
+                BUSTER_TEST_RAW(arguments, modifier_objects_match,
+                                string_format(arena, S8("direct vs reassembled modifier object mismatch: {S8}"), modifier_mismatch));
+                ObjectFile direct = object_read(arena, file_read(arena, modifier_direct, (FileReadOptions){0}), target);
+                BUSTER_TEST(arguments, direct.error == OBJECT_ERROR_NONE &&
+                                      compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_TLSGD) &&
+                                      compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_TLSLD) &&
+                                      compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_GOTTPOFF) &&
+                                      compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_TPOFF32) &&
+                                      compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_DTPOFF32) &&
+                                      compiler_driver_elf_object_has_relocation(direct, OBJECT_RELOCATION_X86_64_DTPOFF64));
+            }
+            if (modifier_host_ready)
+            {
+                ObjectFile host = object_read(arena, file_read(arena, modifier_host, (FileReadOptions){0}), target);
+                BUSTER_TEST(arguments, host.error == OBJECT_ERROR_NONE &&
+                                      compiler_driver_elf_object_has_relocation(host, OBJECT_RELOCATION_X86_64_TLSGD) &&
+                                      compiler_driver_elf_object_has_relocation(host, OBJECT_RELOCATION_X86_64_TLSLD) &&
+                                      compiler_driver_elf_object_has_relocation(host, OBJECT_RELOCATION_X86_64_GOTTPOFF) &&
+                                      compiler_driver_elf_object_has_relocation(host, OBJECT_RELOCATION_X86_64_TPOFF32) &&
+                                      compiler_driver_elf_object_has_relocation(host, OBJECT_RELOCATION_X86_64_DTPOFF32) &&
+                                      compiler_driver_elf_object_has_relocation(host, OBJECT_RELOCATION_X86_64_DTPOFF64));
+            }
+            String8 boundary_source = string_format_z(arena, S8("{S8}/got-boundary.s"), root);
+            String8 boundary_object = string_format_z(arena, S8("{S8}/got-boundary.o"), root);
+            String8 boundary_text = S8(".text\n"
+                                       ".extern boundary_target\n"
+                                       ".byte 0x41, 0x8b, 0x05\n"
+                                       ".long boundary_target@GOTPCREL - .\n"
+                                       ".Lboundary_local:\n"
+                                       ".byte 0x90\n"
+                                       ".long .Lboundary_local@GOTPCREL - .\n");
+            String8 boundary_args[] = {S8("-g0"), S8("-c"), boundary_source, S8("-o"), boundary_object};
+            bool boundary_ready = file_write(boundary_source, BUSTER_SLICE_TO_BYTE_SLICE(boundary_text)) &&
+                                  compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(boundary_args)) ==
+                                      COMPILER_DRIVER_ERROR_NONE;
+            BUSTER_TEST(arguments, boundary_ready);
+            if (boundary_ready)
+            {
+                ObjectFile boundary = object_read(arena, file_read(arena, boundary_object, (FileReadOptions){0}), target);
+                bool external_generic = false;
+                bool local_generic = false;
+                for (u32 index = 0; index < boundary.relocation_count && boundary.error == OBJECT_ERROR_NONE; index += 1)
+                {
+                    ObjectRelocation relocation = boundary.relocations[index];
+                    if (relocation.section < boundary.section_count && relocation.symbol < boundary.symbol_count &&
+                        relocation.kind == OBJECT_RELOCATION_X86_64_GOTPCREL && relocation.addend == 0 &&
+                        string_equal(boundary.sections[relocation.section].name, S8(".text")))
+                    {
+                        String8 symbol = boundary.symbols[relocation.symbol].name;
+                        external_generic = external_generic ||
+                                           (relocation.offset == 3 && string_equal(symbol, S8("boundary_target")));
+                        local_generic = local_generic ||
+                                        (relocation.offset == 8 && string_equal(symbol, S8(".Lboundary_local")));
+                    }
+                }
+                BUSTER_TEST(arguments, boundary.error == OBJECT_ERROR_NONE && boundary.relocation_count == 2 &&
+                                      external_generic && local_generic);
+            }
+
+            String8 prefixed_got_sources[] = {
+                S8(".extern got_word_target\n"
+                   ".text\n"
+                   "mov ax, word ptr [rip + got_word_target@GOTPCREL]\n"),
+                S8(".extern got_fs_target\n"
+                   ".text\n"
+                   "mov eax, dword ptr fs:[rip + got_fs_target@GOTPCREL]\n"),
+            };
+            for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(prefixed_got_sources); index += 1)
+            {
+                AssemblyUnitResult prefixed_got = assembly_unit_encode(
+                    arena, prefixed_got_sources[index],
+                    (AssemblyEncodeOptions){.target = target, .syntax = ASSEMBLY_SYNTAX_INTEL});
+                bool prefix_refused = prefixed_got.diagnostic_count &&
+                                      prefixed_got.diagnostics[0].kind == ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE &&
+                                      string_equal(prefixed_got.diagnostics[0].message,
+                                                   S8("unsupported symbol modifier '@GOTPCREL' for this instruction field"));
+                u32 prefix_diagnostic_kind = prefixed_got.diagnostic_count ? (u32)prefixed_got.diagnostics[0].kind : UINT32_MAX;
+                String8 prefix_diagnostic_message = prefixed_got.diagnostic_count ? prefixed_got.diagnostics[0].message : S8("<none>");
+                BUSTER_TEST_RAW(arguments, prefix_refused,
+                                string_format(arena, S8("GOTPCREL prefix case {u32}: diagnostics={u32} kind={u32} message={S8}"),
+                                              index, prefixed_got.diagnostic_count, prefix_diagnostic_kind,
+                                              prefix_diagnostic_message));
+            }
+
+            String8 raw_got_source = string_format_z(arena, S8("{S8}/generic-got.s"), root);
+            String8 raw_got_object = string_format_z(arena, S8("{S8}/generic-got.o"), root);
+            String8 raw_got_main = string_format_z(arena, S8("{S8}/generic-got-main.c"), root);
+            String8 raw_got_provider = string_format_z(arena, S8("{S8}/generic-got-provider.c"), root);
+            String8 raw_got_image = string_format_z(arena, S8("{S8}/generic-got-image"), root);
+            String8 raw_got_assembly = S8(".extern raw_got_target\n"
+                                          ".data\n"
+                                          ".byte 0x41, 0x8b, 0x05\n"
+                                          ".globl raw_got_slot\n"
+                                          ".type raw_got_slot,@object\n"
+                                          "raw_got_slot:\n"
+                                          ".long raw_got_target@GOTPCREL - .\n"
+                                          ".size raw_got_slot,4\n");
+            String8 raw_got_main_text = S8("extern int raw_got_slot;\n"
+                                           "int main(void) {\n"
+                                           "    long slot_address = (long)&raw_got_slot + (long)raw_got_slot;\n"
+                                           "    long target_address = *(long *)slot_address;\n"
+                                           "    return *(int *)target_address != 42;\n"
+                                           "}\n");
+            String8 raw_got_provider_text = S8("int raw_got_target = 42;\n");
+            String8 raw_got_args[] = {S8("-g0"), S8("-c"), raw_got_source, S8("-o"), raw_got_object};
+            bool raw_got_ready = file_write(raw_got_source, BUSTER_SLICE_TO_BYTE_SLICE(raw_got_assembly)) &&
+                                 compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(raw_got_args)) ==
+                                     COMPILER_DRIVER_ERROR_NONE;
+            BUSTER_TEST(arguments, raw_got_ready);
+            if (raw_got_ready)
+            {
+                ObjectFile raw_got = object_read(arena, file_read(arena, raw_got_object, (FileReadOptions){0}), target);
+                bool generic_data_relocation = false;
+                for (u32 index = 0; index < raw_got.relocation_count && raw_got.error == OBJECT_ERROR_NONE; index += 1)
+                {
+                    ObjectRelocation relocation = raw_got.relocations[index];
+                    if (relocation.section < raw_got.section_count && relocation.symbol < raw_got.symbol_count)
+                    {
+                        generic_data_relocation = generic_data_relocation ||
+                            (relocation.kind == OBJECT_RELOCATION_X86_64_GOTPCREL && relocation.addend == 0 &&
+                             string_equal(raw_got.sections[relocation.section].name, S8(".data")) &&
+                             string_equal(raw_got.symbols[relocation.symbol].name, S8("raw_got_target")));
+                    }
+                }
+                BUSTER_TEST(arguments, raw_got.error == OBJECT_ERROR_NONE && raw_got.relocation_count == 1 &&
+                                      generic_data_relocation);
+                bool sources_ready = file_write(raw_got_main, BUSTER_SLICE_TO_BYTE_SLICE(raw_got_main_text)) &&
+                                     file_write(raw_got_provider, BUSTER_SLICE_TO_BYTE_SLICE(raw_got_provider_text));
+                String8 raw_got_link_args[] = {S8("-no-pie"), raw_got_main, raw_got_provider, raw_got_object, S8("-o"), raw_got_image};
+                bool linked = sources_ready &&
+                              compiler_driver_elf_semantic_host(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(raw_got_link_args));
+                BUSTER_TEST(arguments, linked);
+                if (linked) BUSTER_TEST(arguments, compiler_driver_elf_semantic_run(arena, raw_got_image));
+            }
+
+            String8 replay_source = string_format_z(arena, S8("{S8}/modifier-replay.s"), root);
+            String8 replay_object = string_format_z(arena, S8("{S8}/modifier-replay.o"), root);
+            String8 replay_text = S8(".intel_syntax noprefix\n"
+                                     ".extern replay_got\n"
+                                     ".extern replay_tls\n"
+                                     ".type replay_tls,@tls_object\n"
+                                     ".text\n"
+                                     ".globl modifier_replay\n"
+                                     ".type modifier_replay,@function\n"
+                                     "modifier_replay:\n"
+                                     "jmp .Lmodifier_replay_done\n"
+                                     "mov rax, qword ptr [rip + replay_got@GOTPCREL]\n"
+                                     "push replay_tls@TPOFF\n"
+                                     "mov eax, replay_tls@TPOFF\n"
+                                     "push replay_tls@DTPOFF\n"
+                                     "mov eax, replay_tls@DTPOFF\n"
+                                     ".Lmodifier_replay_done:\n"
+                                     "ret\n");
+            String8 replay_args[] = {S8("-g0"), S8("-c"), replay_source, S8("-o"), replay_object};
+            bool replay_ready = file_write(replay_source, BUSTER_SLICE_TO_BYTE_SLICE(replay_text)) &&
+                                compiler_driver_object_path_test_compile(arguments, (SliceString8)BUSTER_ARRAY_TO_SLICE(replay_args)) ==
+                                    COMPILER_DRIVER_ERROR_NONE;
+            BUSTER_TEST(arguments, replay_ready);
+            if (replay_ready)
+            {
+                ObjectFile replay = object_read(arena, file_read(arena, replay_object, (FileReadOptions){0}), target);
+                bool short_jump = false;
+                for (u32 index = 0; index < replay.section_count && replay.error == OBJECT_ERROR_NONE; index += 1)
+                {
+                    if (string_equal(replay.sections[index].name, S8(".text")))
+                    {
+                        ByteSlice text = replay.sections[index].data;
+                        short_jump = text.length && text.pointer[0] == 0xeb;
+                    }
+                }
+                u32 got_count = 0;
+                u32 tpoff_count = 0;
+                u32 dtpoff_count = 0;
+                bool got_addend = false;
+                for (u32 index = 0; index < replay.relocation_count && replay.error == OBJECT_ERROR_NONE; index += 1)
+                {
+                    ObjectRelocation relocation = replay.relocations[index];
+                    if (relocation.kind == OBJECT_RELOCATION_X86_64_REX_GOTPCRELX)
+                    {
+                        got_count += 1;
+                        got_addend = got_addend || relocation.addend == -4;
+                    }
+                    tpoff_count += relocation.kind == OBJECT_RELOCATION_X86_64_TPOFF32;
+                    dtpoff_count += relocation.kind == OBJECT_RELOCATION_X86_64_DTPOFF32;
+                }
+                BUSTER_TEST(arguments, replay.error == OBJECT_ERROR_NONE && short_jump && got_count == 1 && got_addend &&
+                                      tpoff_count == 2 && dtpoff_count == 2);
+                BUSTER_TEST(arguments, compiler_driver_elf_object_undefined_symbol_is(replay, S8("replay_tls"), OBJECT_SYMBOL_DATA,
+                                                                                       OBJECT_SYMBOL_THREAD_LOCAL_YES));
+            }
+
+            String8 invalid_source = string_format_z(arena, S8("{S8}/modifier-multisymbol.s"), root);
+            String8 invalid_output = string_format_z(arena, S8("{S8}/modifier-invalid.o"), root);
+            BUSTER_TEST(arguments, compiler_driver_elf_modifier_rejection(
+                invalid_source, invalid_output,
+                S8(".text\n.extern modifier_target\n.extern unrelated_target\n.long modifier_target@TLSGD - unrelated_target\n"),
+                S8("unsupported symbol modifier '@TLSGD' in integer expression")));
+            BUSTER_TEST(arguments, compiler_driver_elf_modifier_rejection(
+                invalid_source, invalid_output,
+                S8(".text\n.extern modifier_target\n.long modifier_target@TLSGD@DTPOFF\n"),
+                S8("unsupported symbol modifier '@DTPOFF' in integer directive")));
+            BUSTER_TEST(arguments, compiler_driver_elf_modifier_rejection(
+                invalid_source, invalid_output,
+                S8(".text\n.extern modifier_target\n.quad modifier_target@TLSGD - .\n"),
+                S8("unsupported symbol modifier '@TLSGD' for this integer field")));
+            BUSTER_TEST(arguments, os_directory_delete(root));
+        }
+    }
+    return result;
+}
+#endif
 
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_elf_semantic_tests(UnitTestArguments* arguments)
 {
@@ -4044,6 +4642,7 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_preinit_tests);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_ifunc_tests);
 #if BUSTER_CPU_ARCH_X86_64
+    BUSTER_TEST_FIXTURE(arguments, compiler_driver_x86_elf_modifier_roundtrip);
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_cpu_runtime_tests);
 #endif
     BUSTER_TEST_FIXTURE(arguments, compiler_driver_elf_aarch64_cpu_runtime_selection_tests);

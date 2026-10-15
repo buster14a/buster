@@ -5504,15 +5504,20 @@ BUSTER_GLOBAL_LOCAL String8 compiler_driver_test_record_dump(Arena* arena, Compi
 // -fsyntax-only, -c -g0 and -c -g. Valid controls must stay valid.
 // #1561 deliberately replaces alignment_redeclaration's frozen syntax-only
 // success with the later-declaration conflict shared by all three modes.
-// #3743: an unevaluated operand retains the address-of constraint. Check
-// structured diagnostic parity and absence of an object across driver routes.
+// #3743: an unevaluated operand retains the bit-field address constraint.
+// #3758: selected Generic entities retain their C value category through
+// update/address checks, including register and C23 constant rules.
 BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    u8 c17_dialect_mask = (u8)((1u << 0) | (1u << 1));
+    u8 c23_dialect_mask = (u8)((1u << 2) | (1u << 3));
     struct
     {
         String8 source;
         bool valid;
+        String8 expected_message;
+        u8 dialect_mask;
     } cases[] = {
         {S8("struct S{int b:2;}; long f(struct S s){return (long)&s.b;}"), false},
         {S8("struct S{int b:2;}; unsigned long f(struct S s){return sizeof &s.b;}"), false},
@@ -5545,6 +5550,104 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
         {S8("struct S{int b:2; int c;}; int *f(struct S *p){return &p->c;}"), true},
         {S8("struct S{int b:2; int c;}; int *f(struct S *p){return &(*p).c;}"), true},
         {S8("struct S{int b:2; int c;}; int *f(struct S *p){return &((p->c));}"), true},
+        {S8("int *f(int x){return &_Generic(0,int:x);}"), true},
+        {S8("struct S{int c;}; int *f(struct S *p){return &_Generic(0,int:p->c);}"), true},
+        {S8("struct S{int c;}; int *f(struct S *p){return &_Generic(0,int:_Generic(1,int:p->c));}"), true},
+        {S8("int *f(void){enum { E=0 }; return &_Generic(0,int:E);}"), false,
+         S8("cannot take the address of an operand that is not an lvalue")},
+        {S8("int f(void){enum { E=0 }; return _Generic(0,int:E)++;}"), false,
+         S8("in function 'f': increment or decrement operand is not a modifiable place")},
+        {S8("int *f(void){register int x=0; return &_Generic(0,int:x);}"), false,
+         S8("in function 'f': address of register variable 'x' requested")},
+        {S8("int f(void){int x=0; return _Generic(0,int:x)++;}"), true},
+        {S8("int f(void){int x=0; return ++_Generic(0,int:x);}"), true},
+        {S8("int f(void){int x=0; return ++((_Generic(0,int:x)));}"), true},
+        {S8("int f(void){int x=0; return ((_Generic(0,int:x)))++;}"), true},
+        {S8("int f(void){int x=0; return _Generic(0,int:_Generic(1,int:x))++;}"), true},
+        {S8("struct S{int x;}; int f(void){struct S s={0}; return _Generic(0,int:s.x)++;}"), true},
+        {S8("int f(void){int a[1]={0}; return _Generic(0,int:a[0])++;}"), true},
+        {S8("int f(void){int a[1]={0}; int i=0; return (_Generic(0,int *:a,default:a))[i++]++;}"), true},
+        {S8("int f(void){int x=0; int *p=&x; return (*_Generic(0,int:p))++;}"), true},
+        {S8("int f(void){register int x=0; return _Generic(0,int:x)++;}"), true},
+        {S8("int function(void); int (*f(void))(void){return &_Generic(0,int:function);}"), true},
+        {S8("int *f(void){register int x=0; return &(_Generic(0,int:x));}"), false,
+         S8("in function 'f': address of register variable 'x' requested")},
+        {S8("int *f(void){register int x=0; return &((_Generic(0,int:x)));}"), false,
+         S8("in function 'f': address of register variable 'x' requested")},
+        {S8("int f(void){register int x=0; (void)&_Generic(0,int:x); return 0;}"), false,
+         S8("in function 'f': address of register variable 'x' requested")},
+        {S8("int f(register int x,int y){return y & x;}"), true},
+        {S8("int *f(register int *p){return &*p;}"), true},
+        {S8("struct S{int i;}; int *f(void){register struct S v={0}; return &(v.i);}"), false,
+         S8("in function 'f': address of register variable 'v' requested")},
+        {S8("struct S{int i;}; int *f(void){register struct S v={0}; return &_Generic(0,int:v.i);}"), false,
+         S8("in function 'f': address of register variable 'v' requested")},
+        {S8("struct S{int a[2]; int *p;}; int *f(void){register struct S v={0}; return &v.a[0];}"), false,
+         S8("in function 'f': address of register variable 'v' requested")},
+        {S8("int *f(register int p[2]){return &p[0];} int *g(register int p[const 2][3]){return &p[0][0];}"), true},
+        {S8("void f(register int p[2]){(void)&p;}"), false,
+         S8("in function 'f': address of register variable 'p' requested")},
+        {S8("void f(register int p){(void)&p;}"), false,
+         S8("in function 'f': address of register variable 'p' requested")},
+        {S8("int (f)(register int p){(void)&p;return 0;}"), false,
+         S8("in function 'f': address of register variable 'p' requested")},
+        {S8("int f(register int); int g(int); _Static_assert(__builtin_types_compatible_p(__typeof__(f),__typeof__(g)),\"register is not function type\");"), true},
+        {S8("void f(int p); void f(register int p){(void)&p;}"), false,
+         S8("in function 'f': address of register variable 'p' requested")},
+        {S8("void f(register int p); void f(int p){(void)&p;}"), true},
+        {S8("void f(int p[2]); void f(register int p[2]){(void)&p;}"), false,
+         S8("in function 'f': address of register variable 'p' requested")},
+        {S8("void f(register int p[2]); void f(int p[2]){(void)&p;}"), true},
+        {S8("void f(register int p[2]){(void)&_Generic(0,int:p);}"), false,
+         S8("in function 'f': address of register variable 'p' requested")},
+        {S8("int *f(register int p[2]){return &_Generic(0,int:p)[0];}"), true},
+        {S8("struct S{int i; int a[2];}; int f(void){register struct S v={0}; (void)&_Generic(0,int:v).i; (void)&_Generic(0,int:v.a)[0]; return 0;}"), false,
+         S8("in function 'f': address of register variable 'v' requested")},
+        {S8("struct S{int *p;}; int *f(void){int x=0; register struct S v={.p=&x}; return &_Generic(0,int:v.p)[0];}"), true},
+        {S8("struct S{"
+            "struct{int x0;int x1;int x2;int x3;int x4;int x5;int x6;int x7;int x8;int x9;int x10;int x11;int x12;int x13;int x14;int x15;};"
+            "struct{int y1;};struct{int y2;};struct{int y3;};struct{int y4;};struct{int y5;};"
+            "struct{int y6;};struct{int y7;};struct{int y8;};struct{int y9;};struct{int y10;};"
+            "struct{int y11;};struct{int y12;};struct{int y13;};struct{int y14;};struct{int y15;};"
+            "struct{int y16;};struct{int y17;};struct{int y18;};struct{int y19;};struct{int y20;};"
+            "struct{int y21;};struct{int y22;};struct{int y23;};struct{int y24;};struct{int y25;};"
+            "struct{int y26;};struct{int y27;};struct{int y28;};struct{int y29;};struct{int y30;};"
+            "struct{int y31;};struct{int y32;};struct{int y33;};struct{int y34;};struct{int y35;};"
+            "struct{int y36;};struct{int y37;};struct{int y38;};struct{int y39;};struct{int y40;};"
+            "struct{int y41;};struct{int y42;};struct{int y43;};struct{int y44;};struct{int y45;};"
+            "struct{int y46;};struct{int y47;};struct{int y48;};struct{int y49;};struct{int y50;};"
+            "struct{int y51;};struct{int y52;};struct{int y53;};struct{int y54;};struct{int y55;};"
+            "struct{int y56;};struct{int y57;};struct{int y58;};struct{int y59;};struct{int y60;};"
+            "struct{int y61;};struct{int y62;};struct{int y63;};struct{int i;};};"
+            "int f(void){register struct S v={0}; (void)&_Generic(0,int:v).i; (void)&v.i; return 0;}"),
+         false, S8("in function 'f': address of register variable 'v' requested")},
+        {S8("struct S{int a[2]; int *p;}; int *f(void){int x=0; register struct S v={.p=&x}; return &v.p[0];}"), true},
+        {S8("struct S{int i;}; int *f(register struct S *p){return &p->i;}"), true},
+        {S8("struct S{int i; struct S *p;}; int *f(void){register struct S v={0}; return &v.p->i;}"), true},
+        {S8("_Bool *f(void){return &_Generic(0,int:true);}"), false,
+         S8("cannot take the address of an operand that is not an lvalue"), c23_dialect_mask},
+        {S8("_Bool *f(void){return &_Generic(0,int:false);}"), false,
+         S8("cannot take the address of an operand that is not an lvalue"), c23_dialect_mask},
+        {S8("int f(void){return sizeof(&_Generic(0,int:nullptr));}"), false,
+         S8("cannot take the address of an operand that is not an lvalue"), c23_dialect_mask},
+        {S8("int f(void){return sizeof(&nullptr);}"), false,
+         S8("cannot take the address of an operand that is not an lvalue"), c23_dialect_mask},
+        {S8("int f(void){return sizeof(&((nullptr)));}"), false,
+         S8("cannot take the address of an operand that is not an lvalue"), c23_dialect_mask},
+        {S8("int f(void){return sizeof(&_Generic(0,int:_Generic(1,int:nullptr)));}"), false,
+         S8("cannot take the address of an operand that is not an lvalue"), c23_dialect_mask},
+        {S8("int f(void){enum { E=0 }; return sizeof(&_Generic(0,int:E));}"), false,
+         S8("cannot take the address of an operand that is not an lvalue")},
+        {S8("int *f(void){int nullptr=0; return &_Generic(0,int:nullptr);}"), true, {0}, c17_dialect_mask},
+        {S8("void *f(void){__typeof__(nullptr) object = nullptr; return &object;}"), true, {0}, c23_dialect_mask},
+        {S8("int f(void){return _Generic(0,int:true)++;}"), false,
+         S8("in function 'f': increment or decrement operand is not a modifiable place"), c23_dialect_mask},
+        {S8("int f(void){return _Generic(0,int:false)++;}"), false,
+         S8("in function 'f': increment or decrement operand is not a modifiable place"), c23_dialect_mask},
+        {S8("void f(void){_Generic(0,int:nullptr)++;}"), false,
+         S8("in function 'f': increment or decrement operand is not a modifiable place"), c23_dialect_mask},
+        {S8("int *f(void){int true=1; return &_Generic(0,int:true);}"), true, {0}, c17_dialect_mask},
+        {S8("int *f(void){int false=0; return &_Generic(0,int:false);}"), true, {0}, c17_dialect_mask},
         {S8("struct S{int b:2;}; int f(int x,struct S s){return x & s.b;}"), true},
         {S8("struct S{int b:2;}; int f(int x,struct S s){return (x) & s.b;}"), true},
         {S8("struct S{int b:2;}; int f(struct S s){return sizeof(int) & s.b;}"), true},
@@ -5559,6 +5662,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
     {
         for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
         {
+            if (cases[row].dialect_mask && !(cases[row].dialect_mask & (1u << dialect)))
+            {
+                continue;
+            }
             for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
             {
                 for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
@@ -5574,7 +5681,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
                         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
                     CompilerDriverResult object = compiler_driver_execute_invocation(arena,
                         compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
-                    String8 description = string_format(arena, S8("bit-field address row={u32} dialect={S8} form={S8} target={S8}\nsource={S8}\nsyntax={S8}\nobject={S8}"),
+                    String8 description = string_format(arena, S8("selected place row={u32} dialect={S8} form={S8} target={S8}\nsource={S8}\nsyntax={S8}\nobject={S8}"),
                         row, dialects[dialect], forms[form], targets[target], cases[row].source, syntax.diagnostic, object.diagnostic);
                     BUSTER_TEST_RAW(arguments, (syntax.error == COMPILER_DRIVER_ERROR_NONE) == cases[row].valid, description);
                     BUSTER_TEST_RAW(arguments, syntax.error == object.error, description);
@@ -5584,8 +5691,17 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
                         BUSTER_TEST_RAW(arguments, syntax.diagnostic_count == 1 && object.diagnostic_count == 1, description);
                         if (syntax.diagnostic_count == 1 && object.diagnostic_count == 1)
                         {
-                            BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].message, S8("cannot take address of bit-field"));
-                            BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].code, S8("c.unsupported-semantics"));
+                            String8 expected_message = cases[row].expected_message.length ? cases[row].expected_message
+                                                                                       : S8("cannot take address of bit-field");
+                            String8 message_description = string_format(arena,
+                                S8("selected place diagnostic row={u32} dialect={S8} form={S8} target={S8} expected={S8} actual={S8}"),
+                                row, dialects[dialect], forms[form], targets[target], expected_message, syntax.diagnostics[0].message);
+                            BUSTER_TEST_RAW(arguments, string_equal(syntax.diagnostics[0].message, expected_message), message_description);
+                            BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].code, object.diagnostics[0].code);
+                            if (!cases[row].expected_message.length)
+                            {
+                                BUSTER_STRING_TEST(arguments, syntax.diagnostics[0].code, S8("c.unsupported-semantics"));
+                            }
                             BUSTER_STRING_TEST(arguments, compiler_diagnostic_render(arena, syntax.diagnostics[0]),
                                 compiler_diagnostic_render(arena, object.diagnostics[0]));
                         }
@@ -5600,6 +5716,34 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_bit_field_addresses(Unit
             }
         }
     }
+#if !BUSTER_ANDROID && !BUSTER_IOS
+    TemporalArena generic_update_temporary = scratch_begin(&arguments->arena, 1);
+    String8 generic_update_output =
+        buster_test_temporary_path(generic_update_temporary.arena, S8("generic-place-update"), S8(""));
+    String8 generic_update_command[] = {
+        S8("-std=c17"), S8("-o"), generic_update_output, S8("src/buster/tests/compiler/driver/fixtures/generic_place_update.c"),
+    };
+    CompilerDriverResult generic_update = compiler_driver_execute_invocation(
+        generic_update_temporary.arena,
+        compiler_driver_parse_arguments(generic_update_temporary.arena,
+                                        (SliceString8)BUSTER_ARRAY_TO_SLICE(generic_update_command)));
+    BUSTER_TEST(arguments, generic_update.error == COMPILER_DRIVER_ERROR_NONE);
+    if (generic_update.error == COMPILER_DRIVER_ERROR_NONE)
+    {
+        String8 generic_update_arguments[] = {generic_update_output};
+        ProcessSpawnResult generic_update_spawn =
+            os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(generic_update_arguments), (SliceString8){0}, (SliceString8){0},
+                             (ProcessSpawnOptions){.use_process_environment = true, .search_path = true});
+        BUSTER_TEST(arguments, generic_update_spawn.handle != 0);
+        if (generic_update_spawn.handle)
+        {
+            BUSTER_TEST(arguments,
+                        os_process_wait_sync(generic_update_temporary.arena, generic_update_spawn).result == PROCESS_RESULT_SUCCESS);
+        }
+    }
+    os_file_delete(generic_update_output);
+    scratch_end(generic_update_temporary);
+#endif
     return result;
 }
 
@@ -10934,7 +11078,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_x86_64_object_s
             // none of the weak or default-visibility names is hidden.
             BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.hidden object_hidden_value\n")) != BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.hidden object_hidden_function\n")) != BUSTER_STRING_NO_MATCH);
-            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.extern object_hidden_call\n\t.hidden object_hidden_call\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.extern object_hidden_call\n\t.type object_hidden_call, @function\n\t.hidden object_hidden_call\n")) != BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.hidden object_entry")) == BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.hidden object_weak")) == BUSTER_STRING_NO_MATCH);
             // The assembler owns each section's symbol: a label, `.type` or

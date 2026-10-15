@@ -60,6 +60,15 @@ hosts execute its independent expected-value fixture.
 
 ## Machine instruction selection and scheduling
 
+- Builder streams use fixed 4 KiB arena chunks. Keep the direct, doubling
+  virtual-register chunk index: row lookup must remain O(1), including in
+  large functions. A single chunk may be borrowed only when finish retains
+  its owning arena; a different destination arena receives an independent
+  copy. The small-function builder regression also bounds four populated
+  streams and the register index to 20 KiB. The
+  [chunk-policy audit](../performance-audits/2026-10-15T085001Z.md) records
+  reservation, copying, indexing, native CPU and RSS tradeoffs; smaller
+  cumulative reservations do not establish lower RSS or a general speedup.
 - Debug-location seed storage starts with a small arena-backed array and grows
   with actual emitted ranges in machine emission. Never
   reserve the product of lexical locals and CFG blocks or machine rows.
