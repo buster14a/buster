@@ -8567,6 +8567,14 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // local's register reads this list — 128 K entries in a self-compile —
     // instead of asking all 1.01 M values whether they have an alias.
     u32 alias_count = 0;
+    // Probe the sparse, already-produced local facts after disqualification.
+    // Zero surviving places proves no LOAD can seed an alias; DEREFERENCE
+    // only extends an existing one. Keep store-free places conservative.
+    bool may_alias_loads = false;
+    for (u32 index = 1; index < local_use_count && !may_alias_loads; index += 1)
+    {
+        may_alias_loads = value_uses[local_uses[index].value].local_use != 0;
+    }
     // Two identical reverse sweeps: the first aliases loads, the second
     // extends each alias through IR_OPCODE_DEREFERENCE, whose selection is
     // a plain pointer copy — an aliased pointer load feeding a dereference
@@ -8574,7 +8582,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     // aliased value never dies, so the chain must collapse at selection or
     // the copy just moves from the load to the address staging. A field or
     // index base folds its offset into a real lea and stops the chain.
-    for (u32 alias_sweep = 0; alias_sweep < 2; alias_sweep += 1)
+    for (u32 alias_sweep = 0; alias_sweep < 2 && may_alias_loads; alias_sweep += 1)
     {
         u32 candidate_base = 0;
         for (u32 block_index = 0; block_index < function->block_count; block_index += 1)
