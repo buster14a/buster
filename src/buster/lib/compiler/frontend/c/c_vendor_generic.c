@@ -9,7 +9,7 @@
 // It is a value of the requested type, never an uninitialized stack read.
 // No CPU instruction or target-specific IR is introduced by this module.
 
-BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrTypeId root_type, CToken token);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_zero_value(CIntegerIrBuilder* builder, IrTypeId root_type, CSourceAnchor token);
 
 typedef enum CIrVendorGenericOperation
 {
@@ -119,7 +119,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_generic_extract(CIntegerIrBuilder* build
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_generic(CIntegerIrBuilder* builder, String8 name, IrTypeId result_type,
-                                                     IrValueId const* args, u32 count, CToken token)
+                                                     IrValueId const* args, u32 count, CSourceAnchor token)
 {
     CIrVendorGenericOperation operation = C_IR_VENDOR_GENERIC_NONE;
     if (string_equal(name, S8("__builtin_bit_cast")))
@@ -140,7 +140,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_generic(CIntegerIrBuilder* builder,
     }
 
     IrValueId result = IR_VALUE_ID_INVALID;
-    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrSourceRange source = c_ir_anchor_source_range(builder, token);
     IrType* output = ir_type_from_id(&builder->program->types, result_type);
     bool valid = operation != C_IR_VENDOR_GENERIC_NONE && output && output->layout.resolved && output->layout.size &&
                  (cpu_arch_is_x86(builder->target.cpu_arch) || builder->target.cpu_arch == CPU_ARCH_AARCH64);

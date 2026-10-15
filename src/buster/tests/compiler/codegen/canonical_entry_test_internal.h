@@ -89,7 +89,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult codegen_test_canonical_entry(UnitTestArgument
                 TemporalArena temporary = arena_begin_temporal(arguments->arena);
                 CPreprocessResult tokens = c_preprocess(arguments->arena, sources[fixture],
                     (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
-                CParseResult parse = c_parse(arguments->arena, tokens);
+                CParseResult parse = c_parse_for_lowering(arguments->arena, tokens);
                 CIRLowerResult lowered = c_lower_to_ir(arguments->arena, S8("entry-layout.c"), tokens, parse, target);
                 BUSTER_TEST(arguments, !tokens.error_count && !parse.diagnostic_count && lowered.program && !lowered.diagnostic_count);
                 if (lowered.program && !lowered.diagnostic_count)

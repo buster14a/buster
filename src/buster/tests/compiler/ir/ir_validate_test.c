@@ -1533,7 +1533,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_validate_incomplete_place_tests(UnitTestAr
             Target target = targets[target_index];
             CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
                 (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
-            CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+            CAnalysisResult analysis = c_parse_for_lowering(arguments->arena, preprocess);
             CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("incomplete-address.c"), preprocess, analysis, target,
                 (CIRLowerOptions){.disable_direct_ssa = storage != 0});
             if (BUSTER_REQUIRE(arguments, !preprocess.error_count && !analysis.diagnostic_count && !lowered.diagnostic_count && lowered.program))

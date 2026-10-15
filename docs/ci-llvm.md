@@ -3,7 +3,10 @@
 Native CI prefers the newest stable upstream LLVM/Clang over the compiler the
 hosted runner image happens to ship. `tools/ci_llvm.py` runs as the
 `Install latest stable LLVM` step in the `test` (combination matrix) and
-`native` jobs on every Linux and Windows lane, before any compiler step.
+`native` jobs on every Linux and Windows lane, before any compiler step. The
+dedicated analyzer job uses the same installer before its driver bootstrap,
+failure controls and complete source analysis. Exact queue-validation reuse
+skips this installation along with the reused analysis.
 
 - **Selection.** The step lists the `llvm/llvm-project` GitHub releases and
   picks the highest `llvmorg-X.Y.Z` release that is neither a draft nor a
@@ -49,7 +52,7 @@ hosted runner image happens to ship. `tools/ci_llvm.py` runs as the
 
 Special-purpose consumers keep their own pins: the GPU profiles use the
 apt-locked LLVM 18 described in [ci-apt-inputs.md](ci-apt-inputs.md), and the
-analyzer, UEFI, and other workflows still use the image compiler.
+UEFI and other workflows still use the image compiler.
 
 `python3 tools/ci_llvm_test.py -v` covers archive/runtime integrity, private
 runtime staging, SONAME preservation and fail-closed tool readiness offline.

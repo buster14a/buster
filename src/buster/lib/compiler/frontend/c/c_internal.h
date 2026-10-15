@@ -7,7 +7,8 @@
  * three implementation translation units; it carries the shared runtime
  * includes and the linkage policy used when those units are built separately.
  * The unity aggregator includes the same header so the three files retain one
- * optimized translation unit in Release.
+ * optimized translation unit in Release. Production delimiter-scan bodies
+ * live in c_parse.c, outside test-only unity optimization pragmas.
  */
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/frontend/c/c_gen_internal.h>
@@ -59,90 +60,8 @@
 
 #include "c_vendor_builtin.h"
 
-// The matching-delimiter scan, over the one-byte shape sidecar rather than the
-// token rows.
-//
-// Every caller asks the same question: starting at `open` with depth zero,
-// where does the depth return to zero. A shape byte answers it alone -- a
-// punctuator's shape is C_TOKEN_SHAPE_PUNCTUATOR | its id -- so the scan reads
-// one byte a token instead of reaching into a twelve-byte row for one field,
-// and 64 tokens are classified at once: the openers and the closers of a
-// window are two masks, and the walk then visits only the lanes that can
-// change the depth. Delimiters are about one token in nine here, so eight
-// tokens in nine are never looked at individually.
-//
-// The window skip is what makes a long range cheap: a window can only bring
-// the depth to zero if it holds at least `depth` closers, so when it does not,
-// the entire window costs two population counts and an add -- no per-token
-// work at all, and no branch a scan of ordinary code can mispredict.
-//
-// **Lane accounting.** One masked load and two compares answer 64 tokens; the
-// row scan they replace runs a byte load, a set test and a branch on each of
-// them. Every lane of the load is useful (the sidecar is one byte a token and
-// the range is contiguous), and both compares are 64 of 64, so the trade is
-// positive on a double-pumped 256-bit datapath as well, not only on Zen 5's
-// native width.
-//
-// **The 64-bit spelling of the same algorithm is measured negative and is not
-// here.** A `-march=x86-64-v3` build of it -- eight tokens a step, the masks
-// out of the classic byte-equality and movemask identities -- costs +13,8 M
-// instructions against the row scan on the stage-1 workload, because the
-// ranges are short (~16 tokens a query, ~1,4 M queries) and the per-query
-// setup and per-window mask arithmetic outweigh a sixteen-iteration loop whose
-// branch predicts. The width is the whole of the win: at 64 tokens a window
-// the same query is one load and two compares, at eight it is two windows of
-// arithmetic. Only the wide path is compiled.
-#if BUSTER_C_LEX_COMPACT
-#define C_SHAPE_DELIMITER_WINDOW 64u
-
-BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL u32 c_shape_matching_delimiter(CTokenShape const* shapes, u32 open, u32 end, CPunctuator opening,
-                                                                     CPunctuator closing)
-{
-    Simd512 open_lanes = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | (u8)opening));
-    Simd512 close_lanes = simd512_splat((u8)(C_TOKEN_SHAPE_PUNCTUATOR | (u8)closing));
-    u32 depth = 0;
-    for (u32 base = open; base < end; base += C_SHAPE_DELIMITER_WINDOW)
-    {
-        u32 remaining = end - base;
-        u32 window_tokens = remaining < C_SHAPE_DELIMITER_WINDOW ? remaining : C_SHAPE_DELIMITER_WINDOW;
-        // The window is read once and asked both questions. Lanes past the
-        // range are masked off the load and read as C_TOKEN_INVALID, which no
-        // punctuator shape can equal, so the tail needs no separate trim.
-        Simd512 window = simd512_load_masked(shapes + base, mask64_prefix(window_tokens));
-        Mask64 opens = simd512_equal_u8(window, open_lanes);
-        Mask64 closes = simd512_equal_u8(window, close_lanes);
-        u32 close_count = mask64_count(closes);
-        if (depth > close_count)
-        {
-            depth += mask64_count(opens) - close_count;
-            continue;
-        }
-        for (Mask64 pending = mask64_or(opens, closes); pending; pending &= pending - 1u)
-        {
-            u32 lane = mask64_first_set(pending);
-            if ((opens >> lane) & 1u)
-            {
-                depth += 1;
-            }
-            else
-            {
-                if (!depth)
-                {
-                    return UINT32_MAX;
-                }
-                depth -= 1;
-                if (!depth)
-                {
-                    return base + lane;
-                }
-            }
-        }
-    }
-    return UINT32_MAX;
-}
-#endif
-
 typedef struct CTypeParseMachine CTypeParseMachine;
+typedef struct CParseSizeofArrayAnswers CParseSizeofArrayAnswers;
 typedef struct CIrDecodedString CIrDecodedString;
 typedef struct CParseInitializerLog CParseInitializerLog;
 typedef struct CParseInitializerReplays CParseInitializerReplays;
@@ -194,6 +113,9 @@ BUSTER_C_EXTERN bool c_parse_vector_size_word(String8 spelling);
 // of the token stream instead of stored in the record.
 BUSTER_C_EXTERN bool c_alignment_specifier_is_standard(CPreprocessResult preprocess, CAlignmentSpecifier specifier);
 BUSTER_C_EXTERN u8 c_parse_token_class_compute(String8 spelling);
+BUSTER_C_EXTERN bool c_ir_decode_character_spelling(Arena* arena, String8 spelling, Target target, u64* value_out, CTypeKind* kind_out);
+BUSTER_C_EXTERN bool c_ir_decode_character_node_for_target(Arena* arena, CPreprocessResult preprocess, Target target, CAst const* ast, u32 node,
+                                                           u64* value_out, CTypeKind* kind_out);
 BUSTER_C_EXTERN bool c_ir_decode_character_value(Arena* arena, char8 const* spelling_base, CToken token, Target target,
                                                    u64* value_out, CTypeKind* kind_out);
 BUSTER_C_EXTERN bool c_ir_tokens_are_string_literals(CPreprocessResult preprocess, u32 start, u32 end);
@@ -223,13 +145,21 @@ BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_parse_named_label_at
            preprocess->tokens[index].kind == C_TOKEN_IDENTIFIER && preprocess->tokens[index + 1].punctuator == C_PUNCTUATOR_COLON &&
            c_parse_named_label_proven_at(preprocess, body_start, index, body_end);
 }
+BUSTER_C_EXTERN void c_parse_string_literal_range_trim(CPreprocessResult preprocess, u32* start, u32* end);
+BUSTER_C_EXTERN bool c_ir_decode_string_literal_run_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
+                                                               u32 first, u32 end, CStringLiteralMemo const* memo, CIrDecodedString* decoded_out);
+BUSTER_C_EXTERN bool c_ir_count_string_literal_run_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
+                                                              u32 first, u32 end, CStringLiteralMemo* memo, CIrDecodedString* decoded_out);
+BUSTER_C_EXTERN bool c_ir_decode_string_node_for_target(Arena* arena, CPreprocessResult preprocess, Target target, CAst const* ast, u32 node,
+                                                        CStringLiteralMemo const* memo, CIrDecodedString* decoded_out);
+BUSTER_C_EXTERN bool c_ir_count_string_node_for_target(Arena* arena, CPreprocessResult preprocess, Target target, CAst const* ast, u32 node,
+                                                       CStringLiteralMemo* memo, CIrDecodedString* decoded_out);
 BUSTER_C_EXTERN bool c_ir_decode_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
                                                                   u32 start, u32 end, CStringLiteralMemo const* memo, CIrDecodedString* decoded_out);
 // The same answer without the bytes, for the callers that only size or type
 // the literal; see the definition.
 BUSTER_C_EXTERN bool c_ir_count_string_literal_range_for_target(Arena* arena, CPreprocessResult preprocess, Target target,
                                                                  u32 start, u32 end, CStringLiteralMemo* memo, CIrDecodedString* decoded_out);
-BUSTER_C_EXTERN String8 c_ir_unsupported_gnu_construct(CPreprocessResult preprocess, u32 start, u32 end, u32* token_index_out);
 BUSTER_C_EXTERN CTypeKind c_ir_primitive_type_kind(CPreprocessResult preprocess, u32 start, u32 end, u32* declarator_start,
                                                    u32* invalid_specifier);
 BUSTER_C_EXTERN bool c_parse_type_name_start_word_token(CPreprocessResult preprocess, CToken token);
@@ -259,9 +189,6 @@ struct CParsePrimitiveSpelling
 BUSTER_C_EXTERN CParsePrimitiveSpelling c_parse_primitive_type_read(CPreprocessResult preprocess, u32 start, u32 end);
 BUSTER_C_EXTERN bool c_semantic_type_identity_query(Arena* scratch, CPreprocessResult preprocess, CParseResult* result,
                                                    CScopeId scope, u32 start, u32 end, CTypeIdentityQuery* answer, String8* message);
-// A deferred _Static_assert row's semantic verdict, for lowering when
-// validation left the row unchecked; see CStaticAssertVerdict.
-BUSTER_C_EXTERN CStaticAssertVerdict c_semantic_static_assert_verdict(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, u32 row);
 // Size and alignment of an unevaluated sizeof/_Alignof operand whose type is
 // storage-only __fp16 or built from it, which has no canonical IR type.
 BUSTER_C_EXTERN bool c_semantic_storage_half_operand_layout(Arena* scratch, CPreprocessResult preprocess, CParseResult* result, CScopeId scope,
@@ -288,54 +215,16 @@ BUSTER_C_EXTERN CIrWideInteger c_ir_wide_subtract(CIrWideInteger left, CIrWideIn
 BUSTER_C_EXTERN CIrWideInteger c_ir_wide_multiply(CIrWideInteger left, CIrWideInteger right);
 BUSTER_C_EXTERN void c_ir_wide_divide(CIrWideInteger dividend, CIrWideInteger divisor, CIrWideInteger* quotient_out, CIrWideInteger* remainder_out);
 
-typedef struct CDeclarationBinding CDeclarationBinding;
-struct CDeclarationBinding
-{
-    String8 alias_target;
-    // IR_INITIALIZER_PRIORITY_NONE when the attribute named no priority; the
-    // written value otherwise. Meaningful only while the matching flag is set,
-    // because zero is a priority a program may write.
-    u32 constructor_priority;
-    u32 destructor_priority;
-    bool is_weak;
-    bool is_constructor;
-    bool is_destructor;
-    // The first __attribute__((visibility("..."))) written on the declaration,
-    // a CSymbolVisibility; UNSPECIFIED when there is none. Only an attribute at
-    // the declaration's own level counts: one inside a parameter list, a
-    // struct body or on a struct tag does not name the declared symbol.
-    u8 visibility;
-    // A visibility attribute whose argument is not one of the four string
-    // literals; c_parse_validate_alias_targets refuses it.
-    bool visibility_invalid;
-    // __attribute__((returns_twice)): a call to the function may return a
-    // second time, as setjmp does (issue 1431).
-    bool is_returns_twice;
-    // __attribute__((weakref("target"))), or the GCC form `weakref, alias("target")`:
-    // the declaration is a local name for a weak reference to `weakref_target`
-    // rather than a definition or an alias of one.
-    bool is_weakref;
-    // __attribute__((ifunc("resolver"))): the declaration defines the name as
-    // a GNU indirect function whose value is `ifunc_resolver`, a function this
-    // translation unit defines. It lowers to an indirect IrSymbolAlias; a
-    // missing resolver string leaves `ifunc_resolver` empty for
-    // c_parse_validate_alias_targets to refuse.
-    bool is_ifunc;
-    String8 weakref_target;
-    String8 ifunc_resolver;
-};
-
 BUSTER_C_EXTERN bool c_ir_float_parse(String8 spelling, f64* value_out, char8* suffix_out);
 
 BUSTER_C_EXTERN bool c_ir_declaration_initializer_range(CPreprocessResult preprocess, CDeclaration declaration, u32* start_out, u32* end_out);
 
-BUSTER_C_EXTERN CDeclarationBinding c_declaration_binding(Arena* arena, CPreprocessResult preprocess, CDeclaration declaration);
+BUSTER_C_EXTERN CDeclarationBinding const* c_parse_declaration_binding_fact(CParseResult const* result, u32 row_plus_one);
+BUSTER_C_EXTERN bool c_ir_decode_quoted(Arena* arena, String8 spelling, u8 delimiter, ByteSlice* bytes_out);
 
 BUSTER_C_EXTERN void c_parse_static_assert_check(CTypeParseMachine* machine, Arena* arena,
                                                   CPreprocessResult preprocess, CParseResult* result,
                                                   CDeclaration declaration, CScopeId scope);
-BUSTER_C_EXTERN String8 c_parse_static_assert_diagnostic_message(Arena* arena, CPreprocessResult preprocess,
-                                                                 CDeclaration declaration, CDiagnosticKind kind);
 BUSTER_C_EXTERN void c_parse_bind_function_body(CTypeParseMachine* machine, Arena* result_arena,
                                                  CParseResult* result, CPreprocessResult preprocess,
                                                  u32 declaration_index);
@@ -389,6 +278,7 @@ BUSTER_C_EXTERN CIRLowerResult c_lower_to_ir(Arena* arena, String8 source_path, 
                                               CAnalysisResult parse, Target target);
 BUSTER_C_EXTERN CEntityId c_parse_lookup_entity_token(CParseResult* result, char8 const* spelling_base,
                                                        CScopeId scope, CToken const* token);
+BUSTER_C_EXTERN CEntityId c_parse_lookup_existing_entity(CParseResult const* result, CScopeId scope, String8 name);
 // A stamp that changes whenever c_parse_lookup_entity_token's answer could;
 // false outside the validation families, where no stamp is kept.
 BUSTER_C_EXTERN bool c_parse_lookup_generation(CParseResult const* result, u64* generation_out);
@@ -444,14 +334,6 @@ struct CNumberFacts
     OperatingSystem os;
     u32 token_count;
     u32 number_count;
-};
-
-typedef struct CNumberFact CNumberFact;
-struct CNumberFact
-{
-    u64 value;
-    u8 flags;
-    bool present;
 };
 
 BUSTER_C_INLINE BUSTER_UNUSED_DECL BUSTER_INLINE CNumberFact c_number_fact(CNumberFacts const* facts, CToken const* tokens, u64 token_index)
@@ -523,7 +405,7 @@ struct CStringLiteralMemoSlot
 struct CStringLiteralMemo
 {
     Arena* arena;
-    CToken const* tokens;
+    CSourceIdentity source;
     CStringLiteralMemoSlot* slots;
     u32 capacity;
     u32 count;
@@ -531,7 +413,8 @@ struct CStringLiteralMemo
     // lower the unit (CParserResult.string_literal_lengths_only).
     bool lengths_only;
 };
-BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CToken const* tokens, bool lengths_only);
+BUSTER_C_EXTERN CStringLiteralMemo* c_string_literal_memo_create(Arena* arena, CSourceIdentity source, bool lengths_only);
+BUSTER_C_EXTERN CStringLiteralMemoSlot const* c_string_literal_memo_find(CStringLiteralMemo const* memo, CSourceIdentity source, u32 token_index);
 BUSTER_C_EXTERN bool c_parse_clone_incomplete_array_declarator(CTypeParseMachine* machine, CParseResult* result, CTypeId type, CTypeId* type_out);
 BUSTER_C_EXTERN void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message);
 // Per-body validation scratch (#1256). While c_parse_validate_lowering_constraints
@@ -547,6 +430,7 @@ BUSTER_C_EXTERN bool c_parse_body_scratch_fits(Arena* arena, u64 size, u64 align
 BUSTER_C_EXTERN bool c_parse_body_scratch_guarded(Arena const* arena);
 BUSTER_C_EXTERN Arena* c_parse_body_scratch_arena(void);
 BUSTER_C_EXTERN void c_parse_body_scratch_refuse(void);
+BUSTER_C_EXTERN bool c_parse_body_scratch_exhausted(void);
 #define C_PARSE_BODY_SCRATCH_ARRAY(arena, T, count) ((T*)c_parse_body_scratch_allocate((arena), sizeof(T), (count), BUSTER_ALIGN_OF(T)))
 
 // One language constraint, not a claim that an expression or translation unit
@@ -690,7 +574,7 @@ BUSTER_C_EXTERN bool c_parse_label_address_prefix_with_typedef(CParseResult* res
 // The cold half of c_parse_label_address_prefix: the full proof, reached only
 // for a token that is actually the `&&` a label address is spelled with.
 BUSTER_C_EXTERN bool c_parse_label_address_prefix_proven(CPreprocessResult const* preprocess, u32 expression_start, u32 index);
-// Whether `index` is the `&&` of a GNU label address. c_ir_unsupported_gnu_construct
+// Whether `index` is the `&&` of a GNU label address. c_parse_unsupported_gnu_construct
 // asks this of every token it scans, so the necessary condition is inline for
 // the same reason as c_parse_named_label_at above.
 BUSTER_GLOBAL_LOCAL BUSTER_UNUSED_DECL BUSTER_INLINE bool c_parse_label_address_prefix(CPreprocessResult const* preprocess, u32 expression_start,
@@ -1390,6 +1274,9 @@ struct CTypeParseFrame
     bool is_packed;
     // Query-local category fact for a GNU imaginary projection of a real value.
     bool expression_nonplace_projection;
+    // The parent operator scan proved this cast operand suffix has no
+    // top-level operator, without constructing or mutating semantic rows.
+    bool expression_operators_checked;
     // PARAMETER frames retain declaration storage across declarator children.
     bool parameter_is_register;
 };
@@ -1461,8 +1348,8 @@ typedef enum CConstantEvaluationMode
 // static-initializer walk through the loop over function bodies --
 // c_parse_intern_type returns the earlier row instead. The header exists only
 // when the caller asked for it (CParserResult.type_interning, which the driver
-// sets with the tree under -fc-ast-pilot), so the tree-free path
-// (-fno-c-ast-pilot) appends every row as before.
+// sets for every ordinary C compile). Explicit model-only parser controls
+// can omit that header and append every row as before.
 //
 // The window is what keeps the copies unobservable but for the table's size.
 // Such a row is immutable, carries no tag, link, bound or alignment record, and
@@ -1633,6 +1520,14 @@ struct CTypeParseMachine
     // c_type_parse_root_finish dropped its records (the records stay in
     // place): the completion run reads it to undo a run that mutated a row.
     u32 committed_mutation_count;
+    // A retained type-name completion runs several ordinary roots before
+    // restoring its outer checkpoint. Keep their undo records until then.
+    bool fact_checkpoint_active;
+    // Source parameter types before the semantic array/function adjustment,
+    // only while a retained type-name completion owns this scratch slice.
+    CTypeId* fact_parameter_sources;
+    u32 fact_parameter_begin;
+    u32 fact_parameter_capacity;
     // The body binder's statement plan (c_parse_statement_plan_build) reads
     // the same tree: `ast_statement_bodies` holds the `{` of every top-level
     // function definition, ascending, and its COMPOUND_STATEMENT node, built
@@ -1736,6 +1631,7 @@ struct CTypeParseMachine
     u32 identifier_list_close;
     u32 expression_task_count;
     u32 expression_task_capacity;
+    CParseSizeofArrayAnswers* sizeof_array_answers;
     CConstantEvaluationMode constant_evaluation_mode;
     // Constexpr initializers keep NORMAL's type-name grammar, but reject
     // signed arithmetic overflow before a cast can hide its wrapped bits.
@@ -1821,6 +1717,32 @@ struct CAstTypeAnswer
     bool nonplace_projection;
 };
 
+// The existing row-free cast/compound type-name authority, split so a private
+// publication probe can observe its written base and final pointer type.
+// Resolving a typedef remains the caller's declaration-point binding job.
+typedef struct CAstTypeNameShape CAstTypeNameShape;
+struct CAstTypeNameShape
+{
+    u32 specifiers;
+    u32 start;
+    u32 stars;
+    u32 end;
+    u32 name;
+    bool valid;
+};
+
+typedef struct CAstExistingTypeName CAstExistingTypeName;
+struct CAstExistingTypeName
+{
+    CTypeId base;
+    CTypeId type;
+};
+
+BUSTER_C_EXTERN CAstTypeNameShape c_ast_types_type_name_shape(CAst const* ast, CPreprocessResult const* preprocess,
+                                                             u32 node, u32 start, u32 end);
+BUSTER_C_EXTERN CAstExistingTypeName c_ast_types_existing_type_name(CParseResult const* result, CPreprocessResult const* preprocess,
+                                                                  CAstTypeNameShape shape, CTypeId named);
+
 BUSTER_C_EXTERN void c_ast_types_bodies_prepare(CTypeParseMachine* machine, CParseResult const* result);
 BUSTER_C_EXTERN void c_ast_types_body_begin(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
                                             CDeclaration const* declaration);
@@ -1849,19 +1771,40 @@ BUSTER_C_EXTERN bool c_ast_types_waiting(CTypeParseMachine const* machine);
 #if BUSTER_INCLUDE_TESTS
 BUSTER_C_EXTERN bool c_ast_types_facts_uncached(void);
 #endif
+BUSTER_C_EXTERN void c_ast_types_facts_require(CAstFacts* facts, CAst const* ast, u8* required, bool unevaluated_operands);
 BUSTER_C_EXTERN CAstTypeBody* c_ast_types_facts_begin(CTypeParseMachine* machine, CPreprocessResult const* preprocess);
+BUSTER_C_EXTERN void c_ast_types_facts_limits(CAstTypeBody const* region, u32* begin, u32* end);
 BUSTER_C_EXTERN bool c_ast_types_facts_next(CAstTypeBody const* region, CAstFacts* facts, u32* cursor, u32* first_out, u32* end_out);
 BUSTER_C_EXTERN void c_ast_types_facts_record(CAstFacts* facts, u32 node, CTypeId type, bool nonplace);
 // A string literal's fact in structural form from the array row the machine
 // answered for it (C_AST_FACT_STRING); false, and nothing kept, when the row
 // is not a string literal's or its element row is at or past `rows`.
 BUSTER_C_EXTERN bool c_ast_types_facts_string(CAstFacts* facts, CParseResult const* result, CAst const* ast, u32 node, CTypeId array, u32 rows);
+BUSTER_C_EXTERN u32 c_ast_types_facts_snapshot(CAstFacts* facts, CParseResult const* result, CPreprocessResult const* preprocess, CParseResult const* checkpoint);
 BUSTER_C_EXTERN bool c_ast_types_facts_recipe(CAstFacts* facts, CParseResult const* result, CPreprocessResult const* preprocess, u32 node, CTypeId type, u32 rows);
 BUSTER_C_EXTERN bool c_ast_types_facts_identity(CAstFacts* facts, CParseResult const* result, CAst const* ast, CPreprocessResult const* preprocess, u32 node);
+BUSTER_C_EXTERN CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end);
+BUSTER_C_EXTERN bool c_ast_types_facts_scalar_arithmetic(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
+    CAstTypeBody const* region, u32 node, CTypeId* type_out);
+// A temporary, same-region refusal summary for ordinary scalar conditional
+// publication. The prefix counts any-depth loose operators and uncertain
+// type-name probes; zero admits the existing semantic conditional authority.
+typedef struct CAstConditionalFacts CAstConditionalFacts;
+struct CAstConditionalFacts
+{
+    CAstTypeBody const* region;
+    u32* hazards;
+};
+BUSTER_C_EXTERN CAstConditionalFacts c_ast_types_facts_conditional_prepare(CTypeParseMachine* machine, CParseResult* result,
+    CPreprocessResult const* preprocess, CAstTypeBody const* region);
+BUSTER_C_EXTERN bool c_ast_types_facts_scalar_conditional(CTypeParseMachine* machine, CParseResult* result,
+    CPreprocessResult const* preprocess, CAstConditionalFacts const* prepared, CScopeId scope, u32 node, CTypeId* type_out);
 BUSTER_C_EXTERN bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, u32 node, CTypeId* type_out, u32* recipe_out);
 BUSTER_C_EXTERN void c_ast_types_facts_answer(CTypeParseMachine* machine, u32 start, u32 end, CTypeId type, bool nonplace);
-BUSTER_C_EXTERN void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result);
+BUSTER_C_EXTERN void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result, CPreprocessResult const* preprocess);
 BUSTER_C_EXTERN CInitializerPlan const* c_initializer_plan_find(CParseResult const* result, u32 node);
+BUSTER_C_EXTERN CInitializerPlan const* c_initializer_plan_refused(CParseResult const* result, u32 node);
+BUSTER_C_EXTERN String8 c_initializer_plan_refusal_message(CInitializerPlan const* plan);
 BUSTER_C_EXTERN CAstTypeAnswer c_ast_types_answer(CTypeParseMachine* machine, CPreprocessResult const* preprocess, CParseResult* result, CScopeId scope,
                                                   u32 start, u32 end);
 // The machine state a tree answer leaves, as a valid machine answer with no
@@ -2013,42 +1956,40 @@ struct CIrConstantValue
     bool function_designator;
 };
 
-BUSTER_C_EXTERN bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment);
-
-// The one offsetof member-designator walk (#1570), shared by the parser's
-// constant evaluator (c_parse_constant_offsetof) and lowering
-// (c_ir_constant_offsetof_attempt). It owns the designator grammar
-// `member ( '[' index ']' | '.' member )*`, index admission (an integer or
-// boolean of at most 128 bits whose converted value is nonnegative) and the
-// target-size_t member and index arithmetic. Each caller resolves member
-// names and element sizes in its own type system (#1247), and finds the `]`
-// matching an INDEX step with its own delimiter table.
-typedef enum COffsetofStep
+// Exact numeric operations shared by literal lowering and the semantic
+// x87 initializer folder. These helpers consume numeric values or one literal
+// spelling and never inspect source expression or declarator structure.
+enum
 {
-    C_OFFSETOF_STEP_INVALID,
-    C_OFFSETOF_STEP_MEMBER,
-    C_OFFSETOF_STEP_INDEX,
-    C_OFFSETOF_STEP_END,
-} COffsetofStep;
-
-typedef struct COffsetofWalk COffsetofWalk;
-struct COffsetofWalk
-{
-    u64 offset;
-    u64 maximum;
-    u32 cursor;
-    u32 end;
-    bool expect_member;
-    bool valid;
-    u8 reserved[2];
+    C_IR_ROUND_OK = 0,
+    C_IR_ROUND_OVERFLOW = 1,
+    C_IR_ROUND_UNDERFLOW = 2,
+    C_IR_ROUND_FAILED = 3,
 };
 
-BUSTER_C_EXTERN COffsetofWalk c_offsetof_walk_begin(Target target, u32 cursor, u32 end, u64 offset, bool expect_member, bool valid);
-BUSTER_C_EXTERN COffsetofStep c_offsetof_walk_next(COffsetofWalk* walk, CToken const* tokens);
-BUSTER_C_EXTERN void c_offsetof_walk_member(COffsetofWalk* walk, bool found, u64 member_offset);
-BUSTER_C_EXTERN void c_offsetof_walk_index(COffsetofWalk* walk, IrType const* index_type, IrInteger index, bool element_resolved, u64 element_size,
-                                           u32 close);
-BUSTER_C_EXTERN void c_offsetof_walk_runtime_index(COffsetofWalk* walk, bool element_resolved, u32 close);
+BUSTER_C_EXTERN void c_ir_ext80_big_set_u64(CIrExt80Big* value, u64 bits);
+BUSTER_C_EXTERN void c_ir_ext80_big_copy(CIrExt80Big* destination, CIrExt80Big const* source);
+BUSTER_C_EXTERN bool c_ir_ext80_big_add(CIrExt80Big* left, CIrExt80Big const* right);
+BUSTER_C_EXTERN s32 c_ir_ext80_big_compare(CIrExt80Big const* left, CIrExt80Big const* right);
+BUSTER_C_EXTERN bool c_ir_ext80_big_multiply(CIrExt80Big const* left, CIrExt80Big const* right, CIrExt80Big* product_out);
+BUSTER_C_EXTERN bool c_ir_ext80_big_shift_left(CIrExt80Big* value, u32 shift);
+BUSTER_C_EXTERN bool c_ir_ext80_big_subtract_shifted(CIrExt80Big* left, CIrExt80Big const* right, u32 shift);
+BUSTER_C_EXTERN bool c_ir_ext80_from_ieee32(u32 bits, bool negative, u64* significand_out, u16* exponent_sign_out);
+BUSTER_C_EXTERN bool c_ir_ext80_from_ieee64(u64 bits, bool negative, u64* significand_out, u16* exponent_sign_out);
+BUSTER_C_EXTERN u8 c_ir_ext80_from_rational(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                              bool negative, u64* significand_out, u16* exponent_sign_out);
+BUSTER_C_EXTERN u8 c_ir_ext80_parse_long_literal(String8 spelling, bool negative, u64* significand_out, u16* exponent_sign_out);
+BUSTER_C_EXTERN bool c_ir_ext80_parse_rational_literal(String8 spelling, CIrExt80Big* numerator_out, CIrExt80Big* denominator_out,
+                                                           s32* binary_exponent_out);
+BUSTER_C_EXTERN bool c_ir_ext80_spelling_nonzero(String8 spelling);
+BUSTER_C_EXTERN f64 c_ir_float16_to_f64(u64 bits);
+BUSTER_C_EXTERN u32 c_ir_float_suffix(String8 spelling, char8* code_out);
+BUSTER_C_EXTERN u8 c_ir_ieee_from_rational(CIrExt80Big const* numerator, CIrExt80Big const* denominator, s32 binary_exponent,
+                                             bool negative, u32 fraction_bits, s32 min_exponent, s32 max_exponent,
+                                             u32 exponent_bits, u64* bits_out);
+
+BUSTER_C_EXTERN bool c_ir_scalar_type_properties(Target target, CTypeKind kind, IrTypeKind* ir_kind, u32* bit_width, bool* is_signed, u32* alignment);
+
 BUSTER_C_EXTERN bool c_ir_constant_wide_float_cast(CIrConstantValue const* source, IrType* source_type,
                                                      IrType const* target, CIrConstantValue* result);
 BUSTER_C_EXTERN bool c_ir_constant_wide_float_to_integer(CIrConstantValue const* source, IrType const* source_type,

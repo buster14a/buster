@@ -204,7 +204,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
 {
     UnitTestResult result = {0};
     String8 nested_sizeof_unary_source = S8(
+        "typedef struct { int id; char str[12]; } SizeofMap;\n"
+        "extern const SizeofMap sizeof_tags[];\n"
         "int main(void) {\n"
+        "    static unsigned long member_array_size = sizeof(sizeof_tags->str);\n"
+        "    static unsigned long member_scalar_size = sizeof(sizeof_tags->id);\n"
+        "    static unsigned long indexed_member_size = sizeof(sizeof_tags[0].str);\n"
         "    static unsigned long long nested_size = sizeof sizeof + 1;\n"
         "    static unsigned long long nested_dereference = sizeof sizeof *(int*)0;\n"
         "    static unsigned long long nested_alignof = sizeof _Alignof + 1;\n"
@@ -219,7 +224,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_local_sizeof_static_asse
         "    static int nested_extension_statement = sizeof __extension__ +({ int x = 0; x; });\n"
         "    int side_effect = 0;\n"
         "    int unevaluated_update = sizeof side_effect++;\n"
-        "    return nested_size != sizeof(void*) || nested_dereference != sizeof(void*) ||\n"
+        "    return member_array_size != 12 || member_scalar_size != sizeof(int) || indexed_member_size != 12 ||\n"
+        "           nested_size != sizeof(void*) || nested_dereference != sizeof(void*) ||\n"
         "           side_effect != 0 || unevaluated_update != sizeof(int) ||\n"
         "           nested_alignof != sizeof(void*) || nested_extension != sizeof(int) ||\n"
         "           nested_extension_cast != sizeof(int) || nested_cast != sizeof(int) ||\n"

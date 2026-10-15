@@ -260,9 +260,55 @@ watchdog is raised. The original #4050 acceptance remains pending until the
 pristine pinned H.264 translation units complete with reviewed time/RSS evidence
 on the main-only route; a synthetic control or PR run cannot close that gate.
 
-The GNU profiles are new scheduled recipes, not observed successful builds.
-Review their actual first main-push elapsed time, resources and artifact sizes;
-deadline exhaustion is an incomplete failure, never an implicit pass.
+The first observed main-push results below establish a bounded diagnostic cost,
+not guaranteed headroom. Deadline exhaustion remains an incomplete failure.
+
+## First hosted GNU17/NASM evidence
+
+At main `609573f1ec21563598d826b3e90204fc7f33e0e9`,
+[run 38749896680](https://github.com/buster14a/buster/actions/runs/38749896680)
+retained [FFmpeg artifact 11983916554](https://github.com/buster14a/buster/actions/runs/38749896680/artifacts/11983916554).
+The unchanged FFmpeg pin was pristine before and after all three profiles.
+
+| Profile | Independent Clang reference | Buster candidate | Matched census |
+|---|---|---|---|
+| Portable C17 | Build/media and 450/450 no-sample FATE pass | Build/media pass; 381 FATE attempted/pass, 69 checkasm-dependent not-run, zero executed failures | Fail: incomplete FATE and feature mismatch |
+| Portable GNU17 | Build/media and 450/450 no-sample FATE pass | GNU17 target/host manifest, build/media, required H.264 actions and 450/450 no-sample FATE pass | Fail: feature mismatch |
+| Optimized GNU17 | Feature/dialect manifests, build, checkasm, media and 450/450 no-sample FATE pass | Configure/dialect pass; optimized feature floor fails; build and execution not run | Fail: required inline-assembly features missing |
+
+The optimized reference used external NASM 3.01, SHA-256
+`342c1c3045ad345f187ffff31bb7f9cb847cba9a1ad6917ad96d3321fd2b2b48`.
+Its direct seeded checkasm invocation passed with 5,306 unique optimized
+function pointers. This is a reference result; the Buster optimized candidate
+never executed checkasm. The generated `X86ASM`/`DEPX86ASM` recording commands
+matched on both sides, and all 18 external SIMD feature macros were present.
+The Buster floor refused missing `HAVE_MMXEXT_INLINE` and `HAVE_SSSE3_INLINE`:
+the actual `pmaxub %mm0, %mm1` and `pabsw %xmm0, %xmm0` probes reached unsupported
+operand-reference/literal-register handling. These belong to
+[#4077](https://github.com/buster14a/buster/issues/4077#issuecomment-6195206454);
+no required feature or object was removed to obtain a pass.
+
+Both portable configurations still differ from the reference in MM_EMPTY,
+EBP availability, inline-asm direct/local/nonlocal-label support, GNU symver
+and the V4L2 structure probe. Actual intrinsic-use ownership remains
+[#2405](https://github.com/buster14a/buster/issues/2405); the unreduced V4L2
+diagnostic remains recorded on [#3177](https://github.com/buster14a/buster/issues/3177#issuecomment-6193036184).
+The original #4296 arity diagnostic is absent from the retained C17 action,
+which now stops at the deliberate ISO callback-conversion policy. The named
+GNU17 portable action compiles pristine `tests/checkasm/h264qpel.c` and attempts
+its FATE target successfully. Neither result weakens the ISO policy or
+qualifies Buster's optimized paths.
+
+The complete FFmpeg step took 7 minutes 51 seconds; its native project record
+measured 471,243,049 microseconds. The text artifact was 9,204,855 compressed
+bytes. The six per-profile/compiler ledgers contain 4,360 recorded actions,
+including 58 reference and 6 candidate NASM invocations, with complete
+argv/stdout/stderr/status quartets. Expected failing configure probes are
+included. This is an action-capture census, not a complete final-object,
+implementation or production-dispatch denominator, and no performance
+qualification follows from these observations. The enclosing portfolio also
+failed an earlier pinned Ubuntu snapshot preparation with HTTP 503; this did
+not prevent NASM installation or the three FFmpeg attempts.
 
 ## Remaining qualification
 

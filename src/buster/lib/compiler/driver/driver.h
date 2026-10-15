@@ -153,17 +153,12 @@ typedef enum CompilerDriverCDialect
     COMPILER_DRIVER_C_DIALECT_COUNT,
 } CompilerDriverCDialect;
 
-// -fc-ast-pilot[=layout] (GitHub #3102): build the implicit postorder C syntax
-// tree of each C input after preprocessing and before c_parse_ast, inside the
-// parse phase, for analysis and lowering to read; a unit the tree builder
-// rejects on syntax compiles without a tree
-// (CompilerDriverCAstPilotResult.rejections); one that cannot reserve its
-// storage fails with the parse error class. compiler_driver_parse_arguments
-// defaults to IMPLICIT; -fno-c-ast-pilot selects OFF, the tree-free reference
-// path, until #4058 deletes it. A zero-initialized invocation is OFF.
+// -fc-ast-pilot[=layout] selects the retained C syntax layout (#3102).
+// Every C unit builds its tree before analysis. A syntax rejection retains
+// diagnostics until semantic checking; a storage failure is immediate.
+// IMPLICIT is both the argument default and the zero-initialized invocation.
 typedef enum CompilerDriverCAstPilot
 {
-    COMPILER_DRIVER_C_AST_PILOT_OFF,
     COMPILER_DRIVER_C_AST_PILOT_IMPLICIT,
     COMPILER_DRIVER_C_AST_PILOT_HYBRID,
     COMPILER_DRIVER_C_AST_PILOT_EXPLICIT,
@@ -579,10 +574,10 @@ struct CompilerDriverFallbackRecord
 };
 
 // What the -fc-ast-pilot hook measured, summed over the inputs that built a
-// tree. `units` is zero when the hook did not run; `rejections` counts the
-// units whose tree the builder refused on syntax, which compiled without one. The walk, scan and
-// children rows are diagnostic passes over the finished tree and are timed
-// only under -v: one full c_ast_walk (`walk_steps` events), one linear pass
+// complete tree. `units` is zero when no tree completed; `rejections` counts
+// units refused on syntax, whose retained diagnostics prevent lowering. The
+// walk, scan and children rows are diagnostic passes over the finished tree,
+// timed only under -v: one full c_ast_walk (`walk_steps` events), one linear pass
 // over the kinds column counting CALL nodes (`scan_calls`), and
 // c_ast_children over every node into a scratch buffer (`child_entries` is
 // the sum of the child counts it returned).
@@ -639,6 +634,7 @@ struct CompilerDriverResult
     CIRConstantInternStatistics constant_interning;
     CIRConstructionFoldStatistics construction_folds;
     CTypeLayoutStatistics type_layout;
+    CDeclarationBindingStatistics declaration_bindings;
     CompilerDriverCAstPilotResult c_ast;
     String8 diagnostic;
     String8 warning;
@@ -731,7 +727,7 @@ BUSTER_F_DECL CompilerDriverInvocation compiler_driver_parse_arguments(Arena* ar
 // under compiler_driver_host_cpu_default (#1557).
 BUSTER_F_DECL Target compiler_driver_default_target(bool host_cpu_default);
 // The layout spelling of -fc-ast-pilot=<layout> ("implicit", "hybrid",
-// "explicit"); "off" for COMPILER_DRIVER_C_AST_PILOT_OFF.
+// "explicit"); "unknown" for an invalid enumeration value.
 BUSTER_F_DECL String8 compiler_driver_c_ast_pilot_name(CompilerDriverCAstPilot pilot);
 // The output of a parsed --version/-dumpversion/-dumpmachine query. The version
 // is the one the C frontend presents in __clang_major__/__clang_minor__/

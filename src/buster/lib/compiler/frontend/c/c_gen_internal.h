@@ -1,15 +1,17 @@
 #pragma once
 
-// Private test seams into c_gen.c.
+// Private numeric contracts and test seams shared by C semantic analysis and lowering.
 //
 // Member lookup: the builder remains owned by c_gen.c; tests supply distinct
 // persistent and rewindable arenas so an escaped search pointer or a
 // type-universe-sized scratch request is observable.
 //
-// The exact-literal bignum (c_ir_ext80_big_* in c_gen.c): only the limbs below
+// The exact-literal bignum (c_ir_ext80_big_* in c_gen.c) is shared with
+// c_parse.c semantic constant folding. Only the limbs below
 // `count` are defined.  Tests fill every other limb with a sentinel to show a
 // helper neither reads nor writes past its live limbs, so the value layout is
-// declared here instead of inside c_gen.c.
+// declared here instead of inside c_gen.c; c_internal.h supplies the exact
+// shared arithmetic helper declarations.
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/ir/ir_append.h>
 
@@ -28,6 +30,7 @@ struct CIrLowerCapacityPlan
     u32 symbol_capacity;
     u32 function_capacity;
     u32 query_frame_capacity;
+    u32 constant_shape_nodes;
 };
 BUSTER_F_DECL bool c_ir_lower_capacity_plan(CPreprocessResult preprocess, CAnalysisResult parse, CIrLowerCapacityPlan* plan_out);
 
@@ -40,6 +43,38 @@ struct CIrExt80Big
 };
 
 #if BUSTER_INCLUDE_TESTS
+BUSTER_F_DECL u64 c_test_constant_shape_work_take(void);
+// Captures the three retained views in an actual function builder, after its
+// locals and C-to-IR map exist. Tests supply a poisoned provenance snapshot
+// and verified legacy shapes; neither the node nor query state enters IR.
+#define C_TEST_EXPRESSION_TYPE_DEPTH 4
+typedef struct CTestExpressionTypeShape CTestExpressionTypeShape;
+struct CTestExpressionTypeShape
+{
+    u64 size;
+    u64 alignment;
+    u64 element_count;
+    u32 kind;
+    u32 bit_width;
+    u32 parameter_count;
+    bool is_signed;
+    bool is_atomic;
+    bool is_volatile;
+};
+typedef struct CTestExpressionTypeProjection CTestExpressionTypeProjection;
+struct CTestExpressionTypeProjection
+{
+    CPreprocessResult const* provenance;
+    u32 node;
+    bool visited;
+    bool success[3];
+    u32 depth[3];
+    CTestExpressionTypeShape shapes[3][C_TEST_EXPRESSION_TYPE_DEPTH];
+};
+BUSTER_F_DECL void c_test_expression_type_projection_set(CTestExpressionTypeProjection* projection);
+BUSTER_F_DECL bool c_test_constant_node_numeric(Arena* arena, CPreprocessResult preprocess, CAst const* ast, CAstFacts const* facts,
+                                                 u32 node, u64* low, u64* high, f64* floating, bool* is_float);
+
 typedef struct CTestIrSsaWork CTestIrSsaWork;
 struct CTestIrSsaWork
 {
@@ -57,6 +92,8 @@ BUSTER_F_DECL bool c_test_ir_ssa_witness_graph(u32 seed);
 BUSTER_F_DECL bool c_test_ir_ssa_publication(void);
 // Calling-thread root-conditional, comma and assignment operator visits.
 BUSTER_F_DECL u64 c_test_assignment_lower_work(void);
+// Visits along known leading-constructor paths on the calling thread.
+BUSTER_F_DECL u64 c_test_lowering_prefix_work_take(void);
 // Token-free structural groups, replayed row reuse and restored node heads.
 BUSTER_F_DECL bool c_test_prepared_control_identity_replay(void);
 // Wrapper levels and hoist facts with no token stream or delimiter index.
@@ -75,6 +112,7 @@ BUSTER_F_DECL CIRLowerResult c_test_lower_to_ir_with_scratch_limits(Arena* arena
 BUSTER_F_DECL u64 c_test_ir_label_find_probes(void);
 // Blocks the direct SSA finish-time read walk has stepped to on this thread.
 BUSTER_F_DECL u64 c_test_ir_ssa_forward_steps(void);
+BUSTER_F_DECL bool c_test_ir_ssa_leading_sizeof(CAst const* ast, u32 node, u64* visits);
 // Block rows indexed by the optional loop-exit shortcut on this thread.
 BUSTER_F_DECL u64 c_test_ir_ssa_loop_exit_blocks(void);
 BUSTER_F_DECL bool c_test_ir_ssa_loop_exits_refusal(void);
@@ -94,14 +132,15 @@ typedef enum CTestIrScratchProbeKind
     C_TEST_IR_SCRATCH_SSA_FINISH_CFG,
     C_TEST_IR_SCRATCH_SSA_FINISH_PUBLISH,
 } CTestIrScratchProbeKind;
-BUSTER_F_DECL bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CDeclaration declaration, CTestIrScratchProbeKind kind);
+BUSTER_F_DECL bool c_test_ir_dynamic_scratch_rejection(CPreprocessResult preprocess, CAst const* ast, CDeclaration declaration, CTestIrScratchProbeKind kind);
 
-// Execute the production inference/materialization machines over a synthetic
-// flat integer token stream, independently of the TU query-stack reservation.
-BUSTER_F_DECL bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, u32 element_count, u8* bytes,
+// Execute the production materializer over a caller-owned node/plan fixture,
+// independently of the TU query-stack reservation.
+BUSTER_F_DECL bool c_test_initializer_flat_bytes(Arena* arena, Arena* task_arena, CPreprocessResult preprocess, CAst const* syntax,
+                                                  u32 element_count, u8* bytes,
                                                   u64* inferred_count, u64* scratch_bytes, String8* failure_message);
 BUSTER_F_DECL IrValueId c_test_ir_member_place(Arena* arena, Arena* temporary_arena, IrProgram* program,
-                                               IrFunction* function, IrValueId operand, String8 member, CPunctuator access,
+                                               IrFunction* function, IrValueId operand, String8 member, u32 kind,
                                                String8* failure_message);
 // Fields a member lookup visited, and name indexes built, on this thread.
 BUSTER_F_DECL void c_test_ir_member_lookup_counts(u64* visits, u64* builds);

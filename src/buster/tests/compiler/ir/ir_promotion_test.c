@@ -3,7 +3,7 @@
 BUSTER_GLOBAL_LOCAL CIRLowerResult ir_promotion_lower_with_options(Arena* arena, String8 source, Target target, CIRLowerOptions options)
 {
     CPreprocessResult preprocess = c_preprocess(arena, source, (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
-    CAnalysisResult analysis = c_parse(arena, preprocess);
+    CAnalysisResult analysis = c_parse_for_lowering(arena, preprocess);
     CIRLowerResult result = {0};
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {

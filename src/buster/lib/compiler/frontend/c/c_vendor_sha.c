@@ -189,7 +189,7 @@ BUSTER_C_INTERNAL bool c_ir_vendor_sha256_rounds(CIrVendorShaBuilder* sha, IrVal
 }
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_sha(CIntegerIrBuilder* builder, String8 name, IrValueId const* args, u32 count,
-                                                CToken token)
+                                                CSourceAnchor token)
 {
     IrValueId result = IR_VALUE_ID_INVALID;
     CIrVendorShaOperation operation = C_IR_VENDOR_SHA_NONE;
@@ -235,7 +235,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_sha(CIntegerIrBuilder* builder, Str
         // value check also rejects nonconstant or out-of-range direct callers.
         valid = c_ir_value_integer_constant_evaluate(builder, args[2], &selector) && selector <= 3;
     }
-    CIrVendorShaBuilder sha = {.builder = builder, .type = IR_TYPE_ID_INVALID, .source = c_ir_token_source_range(builder, token)};
+    CIrVendorShaBuilder sha = {.builder = builder, .type = IR_TYPE_ID_INVALID, .source = c_ir_anchor_source_range(builder, token)};
     IrValueId lanes[3][4] = {0};
     IrValueId output[4] = {IR_VALUE_ID_INVALID, IR_VALUE_ID_INVALID, IR_VALUE_ID_INVALID, IR_VALUE_ID_INVALID};
     if (valid)
