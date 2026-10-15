@@ -10269,6 +10269,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_debug_value_initialized_budget(U
 BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    enum { MACHINE_TEST_LOCAL_ALIAS_DIRECT = 3, MACHINE_TEST_LOCAL_ALIAS_POINTER, MACHINE_TEST_FUSION_NO_ALIAS = 12 };
     String8 sources[] = {
         S8("unsigned long test(unsigned long n){volatile unsigned long observed=n;unsigned long x=n+3,y=n*7;"
            "if(n&1)x+=y;else y+=x;if(x<y)x=y+1;return x+y+observed;}"),
@@ -10284,7 +10285,10 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArgum
         S8("extern unsigned long input;unsigned long test(void){unsigned long x=input;*(unsigned long*)&x=7;return x;}"),
         S8("extern unsigned long input;extern void escape(unsigned long*);"
            "unsigned long test(void){unsigned long x=input;escape(&x);return x;}"),
-        S8("extern unsigned long input;unsigned long test(void){unsigned long x;return input;}")
+        S8("extern unsigned long input;unsigned long test(void){unsigned long x;return input;}"),
+        S8("extern int input,other;extern void escape(int*);"
+           "int test(void){int x=input;escape(&x);x=other;if(x<input)return 7;return 3;}"),
+        S8("extern int input;int test(void){int x=input,c=x<3;x=input+7;if(c)return x;return input;}")
     };
     Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX};
     for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
@@ -10315,7 +10319,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArgum
                 // pointer case must also extend its alias through DEREFERENCE.
                 // An alias shares the local's register, so no register can own
                 // that load/dereference result as its independent typed origin.
-                if (selected.supported && (source == 3 || source == 4))
+                if (selected.supported && (source == MACHINE_TEST_LOCAL_ALIAS_DIRECT || source == MACHINE_TEST_LOCAL_ALIAS_POINTER))
                 {
                     u32 alias_loads = 0;
                     u32 alias_dereferences = 0;
@@ -10335,7 +10339,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArgum
                                     alias = true;
                                     alias_loads += 1;
                                 }
-                                else if (source == 4 && instruction->opcode == IR_OPCODE_DEREFERENCE && root == IR_OPCODE_LOAD)
+                                else if (source == MACHINE_TEST_LOCAL_ALIAS_POINTER && instruction->opcode == IR_OPCODE_DEREFERENCE && root == IR_OPCODE_LOAD)
                                 {
                                     alias = true;
                                     alias_dereferences += 1;
@@ -10348,7 +10352,21 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_sparse_local_state(UnitTestArgum
                         }
                     }
                     BUSTER_TEST(arguments, alias_loads > 0);
-                    BUSTER_TEST(arguments, source != 4 || alias_dereferences > 0);
+                    BUSTER_TEST(arguments, source != MACHINE_TEST_LOCAL_ALIAS_POINTER || alias_dereferences > 0);
+                }
+                if (selected.supported && source == MACHINE_TEST_FUSION_NO_ALIAS)
+                {
+                    // Escaping the sole local prevents aliases. Loads/stores
+                    // precede the terminator, but its single-use comparison
+                    // must still fuse directly rather than materialize a bool.
+                    u32 branches = 0;
+                    u32 materialized_comparisons = 0;
+                    for (u32 row = 0; row < selected.function.instruction_count; row += 1)
+                    {
+                        branches += selected.function.instructions[row].opcode == MACHINE_X64_JCC;
+                        materialized_comparisons += selected.function.instructions[row].opcode == MACHINE_X64_SETCC;
+                    }
+                    BUSTER_TEST(arguments, branches == 1 && materialized_comparisons == 0);
                 }
             }
         }
