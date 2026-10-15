@@ -24201,7 +24201,7 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_complex_conversion(CIntegerIrBuilder* buil
             // discarding the imaginary half. A _Bool destination is not such a
             // projection: C 6.3.1.2 compares the whole value with zero, and
             // c_ir_emit_cast answers it through c_ir_truth_value before this.
-            BUSTER_ASSERT(!ir_type_from_id(&builder->program->types, target_type) ||
+            BUSTER_CHECK(!ir_type_from_id(&builder->program->types, target_type) ||
                           ir_type_from_id(&builder->program->types, target_type)->kind != IR_TYPE_BOOLEAN);
             return c_ir_emit_cast(builder, real, target_type, source);
         }

@@ -1782,7 +1782,7 @@ String16 string16_from_pointer(const char16* pointer)
 PosixStringList posix_string_list_from_slice_string(Arena* arena, SliceString8 parts)
 {
     u64 list_count;
-    BUSTER_VALIDATE(u64_add_checked(parts.length, 1, &list_count));
+    BUSTER_CHECK(u64_add_checked(parts.length, 1, &list_count));
     PosixChar** list = arena_allocate(arena, PosixChar*, list_count);
 
     for (u64 i = 0; i < parts.length; i += 1)
@@ -1800,7 +1800,7 @@ PosixStringList posix_environment_from_keys_and_values(Arena* arena, SliceString
     BUSTER_CHECK(keys.length == values.length);
 
     u64 environment_count;
-    BUSTER_VALIDATE(u64_add_checked(keys.length, 1, &environment_count));
+    BUSTER_CHECK(u64_add_checked(keys.length, 1, &environment_count));
     // Always return a valid NULL-terminated array, even for zero keys: a NULL PosixStringList
     // (as opposed to an array containing just the terminator) is not a valid execve()/posix_spawn() envp.
     PosixStringList result = arena_allocate(arena, char8*, environment_count);
@@ -1826,7 +1826,7 @@ PosixStringList posix_environment_from_keys_and_values(Arena* arena, SliceString
 
 WindowsStringList windows_environment_from_keys_and_values(Arena* arena, SliceString8 keys, SliceString8 values)
 {
-    BUSTER_VALIDATE(keys.length == values.length);
+    BUSTER_CHECK(keys.length == values.length);
     // Always return a valid, non-NULL environment block, even for zero keys: passing a NULL
     // lpEnvironment to CreateProcessW means "inherit the caller's full environment", which is
     // the opposite of an explicitly empty environment.
@@ -1886,7 +1886,7 @@ SliceString8 slice_string_from_windows_string_list(Arena* arena, WindowsStringLi
     {
         u64 command_line_length = string16_length(command_line);
         u64 command_line_capacity;
-        BUSTER_VALIDATE(u64_add_checked(command_line_length, 1, &command_line_capacity));
+        BUSTER_CHECK(u64_add_checked(command_line_length, 1, &command_line_capacity));
         String8* strings = arena_allocate(arena, String8, command_line_capacity);
         // Decoding never expands UTF-16. Reuse one buffer for every argument;
         // each UTF-8 conversion copies its result into independent storage.
@@ -1987,7 +1987,7 @@ String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate
     // except in a well-formed four-byte sequence, which produces two from
     // four. The UTF-8 byte count is therefore a valid upper bound (#106).
     u64 code_unit_capacity;
-    BUSTER_VALIDATE(u64_add_checked(string.length, null_terminate, &code_unit_capacity));
+    BUSTER_CHECK(u64_add_checked(string.length, null_terminate, &code_unit_capacity));
     char16* pointer = arena_allocate(arena, char16, code_unit_capacity);
     u64 result_length = 0;
 
@@ -2137,7 +2137,7 @@ WindowsStringList windows_environment_block_from_slice_string(Arena* arena, Slic
 char** slice_string8_to_null_terminated_array_char(Arena* arena, SliceString8 strings)
 {
     u64 list_count;
-    BUSTER_VALIDATE(u64_add_checked(strings.length, 1, &list_count));
+    BUSTER_CHECK(u64_add_checked(strings.length, 1, &list_count));
     char** result = arena_allocate(arena, char*, list_count);
     for (u64 i = 0; i < strings.length; i += 1)
     {

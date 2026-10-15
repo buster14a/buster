@@ -404,7 +404,7 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             .initial_size = BUSTER_KB(64),
             .flags = {.no_pool = 1, .prefault_pages = prefaulting_mode},
         });
-        BUSTER_VALIDATE(arena != 0);
+        BUSTER_CHECK(arena != 0);
         if (string_equal(failure_mode, S8("commit")) || prefaulting_mode)
         {
             arena_test_fail_next_commit();
@@ -498,7 +498,7 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
 
     // Companion to the reserved_size bound: filling an arena up to its
     // reservation stays within bounds and keeps working. Requests past
-    // reserved_size abort via BUSTER_VALIDATE, so they cannot be observed
+    // reserved_size abort via BUSTER_CHECK, so they cannot be observed
     // in-process.
     {
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1)});

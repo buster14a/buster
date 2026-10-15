@@ -4,7 +4,7 @@
 u64 align_forward(u64 n, u64 a)
 {
     u64 result;
-    BUSTER_VALIDATE(align_forward_checked(n, a, &result));
+    BUSTER_CHECK(align_forward_checked(n, a, &result));
     return result;
 }
 
