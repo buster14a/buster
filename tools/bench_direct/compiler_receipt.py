@@ -2312,6 +2312,11 @@ def validate_ast_retirement_acceptance(summary: object, base: str, head: str, bi
     problems = []
     if summary.get("profile") != AST_RETIREMENT_PROFILE or summary.get("base_revision") != base or summary.get("head_revision") != head:
         problems.append(f"{label} profile or source revisions differ from the authorized comparison")
+    try:
+        from sampling_qualification_receipt import _lab
+        _lab.child_rss_build_validate(summary.get("rss_observer_build"))
+    except (ValueError, TypeError) as error:
+        problems.append(f"{label} native RSS observer build identity is unavailable: {error}")
     expected = {role: {key: binaries.get(role, {}).get(key) for key in ("sha256", "size_bytes", "revision")}
                 for role in ("baseline", "candidate")}
     if any(not SHA256.fullmatch(str(row["sha256"])) or type(row["size_bytes"]) is not int or row["size_bytes"] <= 0 or

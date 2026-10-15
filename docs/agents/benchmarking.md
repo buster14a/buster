@@ -1168,7 +1168,34 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
 
    Every cell uses twenty ABBA pairs after one warmup on CPU 2 with fresh
    binary copies. It reuses the lab's wall-time 95% interval, `instructions:u`
-   and `wait4` peak RSS. Timed phase/output metrics stay disabled; each arm
+   and `wait4` peak RSS. A qualified native Clang build supplies a small
+   Linux observer inside the existing perf/wall span. It execs before forking
+   the exact compiler child, then records that child's wait4 high-water KiB
+   and its pre-exec resident floor. Both arms include the observer's startup,
+   fork, wait and packet write work in wall time and retired instructions;
+   these observations describe compiler plus observer, with no subtraction.
+   Direct versus observer controls on the same frozen compiler and both-arm
+   observer A/A controls qualify that overhead separately. Ratios from the
+   prior wrapper observation cannot silently share this method's provenance.
+
+   The unchanged 1.5 attribution margin applies to the native pre-exec floor;
+   an unavailable or floor-masked child peak remains unavailable. The legacy
+   lab keeps its harness/perf floor and never promotes missing native RSS
+   from ancestor data. Each timed row requires a complete 256-byte versioned
+   little-endian packet binding sample nonce, compiler/argv digests, exact
+   child/wait PIDs, inherited process group and successful launch/wait status.
+   Linux pidfds protect cleanup after ambiguous wait errors. Exclusive,
+   non-symlink packet creation and close-on-exec descriptors prevent reuse or
+   compiler inheritance. A helper failure aborts the series; its caller must
+   prove descendant cleanup before admitting any further phase. The AST leg
+   alone runs through the existing native `compiler_closure owned-phase`
+   authority, including on the legacy pull route. Its isolated lifecycle
+   metadata and five raw proof files are exported and independently replayed;
+   they do not claim ownership of the rest of the ordinary route. Proven
+   failure retains diagnostics and stops the attempt. Unproven cleanup keeps
+   scratch and the uncertainty marker, with no exports or later child.
+
+   Timed phase/output metrics stay disabled; each arm
    has an untimed `-v` probe recording `C_AST.retained_bytes` and
    `C_AST_FACTS.retained_bytes`. These are distinct published tree and node
    fact components, not a whole-frontend arena total or RSS. A syntax-only
@@ -1179,7 +1206,11 @@ about 1.55 s, MAD 0.2%, instructions deterministic to about 12K of 22.29G).
    The publisher recomputes each cell's metrics from all forty raw timed
    rows, checks the exact commands/host/binaries/source population, compares
    reference diagnostics and object bytes, and re-reads the retained-byte
-   probe logs. Identical arm objects share one raw reference stored as two
+   probe logs. It also checks both variants' actual environment records,
+   native build flags/compiler/source/helper identities and all 800 raw RSS
+   packets, including their exact wrapper and fresh-copy compiler argv.
+   Saved pair JSON cannot replace a missing, malformed or unavailable packet.
+   Identical arm objects share one raw reference stored as two
    deterministic gzip chunks. Both arm manifests bind its raw size/hash;
    stored and decompressed chunks retain the existing 32-MiB member bound.
    The publisher bounds decompression and verifies each stored/raw chunk and

@@ -276,11 +276,19 @@ Build-driver commands (normally invoked through `build.sh` / `build.ps1`): `benc
 `compiler_discovery_self_test`, `compatibility_ide_selection_self_test`,
 `import_assembly_metadata`, `import_arm_a64_metadata`,
 `import_arm_a64_sysregs`, `test_self_host`, `test_mode_matrix`, `test_differential`,
-`native_retirement_census`,
+`native_retirement_census`, `retirement_rss_build`,
 `x86_64_completion_census`,
 `test_all_combinations`,
 `test_all_combinations_ci`, `test_uefi`, `source_size`; `self_host_from_existing` is an internal
 build-driver worker command used only by the pooled artifact-fanout target.
+
+`retirement_rss_build ABSOLUTE_FRESH_DIRECTORY` builds the small Linux-only
+AST retirement RSS observer with qualified native Clang and fixed strict
+release flags. The native driver owns exclusive output creation, the bounded
+compiler process and source/compiler/binary identity receipt (`build.json`).
+It is build-only support for the existing #4058 profile, not a performance
+validation entry point. Unsupported hosts or nonfresh output refuse. Python
+only orchestrates this command and decodes the observer's checked raw packet.
 
 The native `compiler_profile_qualification` command owns disabled, explicitly
 admitted sampling research packets (#3212). `--plan` prints the immutable

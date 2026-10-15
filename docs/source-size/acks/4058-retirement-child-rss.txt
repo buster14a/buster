@@ -1,0 +1,3 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 41988
