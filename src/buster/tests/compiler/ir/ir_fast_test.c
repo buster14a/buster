@@ -103,7 +103,7 @@ BUSTER_GLOBAL_LOCAL IrProgram* ir_fast_cse_lower(UnitTestArguments* arguments, S
     IrProgram* program = 0;
     CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
         (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-    CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+    CAnalysisResult analysis = c_parse_for_lowering(arguments->arena, preprocess);
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
         CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("fast-cse.c"), preprocess, analysis, target_native,
@@ -424,7 +424,7 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult ir_fast_intern_lower(UnitTestArguments* argum
     CIRLowerResult result = {0};
     CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
         (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-    CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+    CAnalysisResult analysis = c_parse_for_lowering(arguments->arena, preprocess);
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
         CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("intern.c"), preprocess, analysis, target_native,
@@ -504,7 +504,7 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult ir_fast_construction_fold_lower(UnitTestArgum
     CIRLowerResult result = {0};
     CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
         (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-    CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+    CAnalysisResult analysis = c_parse_for_lowering(arguments->arena, preprocess);
     if (!preprocess.error_count && !analysis.diagnostic_count)
     {
         CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("construction-fold.c"), preprocess, analysis, target_native,
@@ -818,7 +818,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_fast_tests(UnitTestArguments* arguments)
         TemporalArena temporary = arena_begin_temporal(arguments->arena);
         CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native)});
-        CAnalysisResult analysis = c_parse(arguments->arena, preprocess);
+        CAnalysisResult analysis = c_parse_for_lowering(arguments->arena, preprocess);
         CIRLowerResult lowered = c_lower_to_ir_with_options(arguments->arena, S8("fast-operand-total.c"),
             preprocess, analysis, target_native, (CIRLowerOptions){0});
         BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count);

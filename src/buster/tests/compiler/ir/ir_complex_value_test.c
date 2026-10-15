@@ -10,7 +10,7 @@ BUSTER_GLOBAL_LOCAL CIRLowerResult ir_complex_test_lower(Arena* arena, String8 s
                                                           .target = target,
                                                           .data_layout = target_data_layout(target),
                                                       });
-    CAnalysisResult analysis = c_parse(arena, pre);
+    CAnalysisResult analysis = c_parse_for_lowering(arena, pre);
     CIRLowerResult result = {0};
     if (!pre.error_count && !analysis.diagnostic_count)
     {

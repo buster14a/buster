@@ -217,6 +217,12 @@ helpers and links the pre-removal procedures.
   Fenced code, code spans, URL schemes and `#anchor` fragments are not checked,
   and audit records get no exemption, so deleting a linked file fails with
   `file:line: target`.
+  The lint and queue-lint `Enforce C lowering source boundary` step runs
+  `tools/check_c_lowering_provenance_test.py` and
+  `tools/check_c_lowering_provenance.py`. It covers every implementation
+  included by `c_gen.c`, rejects raw token grammar and source-range node
+  recovery, and proves planted reads fail the command. See the
+  [provenance contract](frontend/ast.md#lowering-provenance-boundary).
   Changing a `runs-on` label means changing `.github/actionlint.yaml` too,
   because actionlint knows only the labels its own release predates. Preserve
   Debug/Release, unity/non-unity, sanitizer/fuzz, self-host, and

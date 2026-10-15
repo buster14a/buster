@@ -11,7 +11,7 @@ substitute for inspecting the current implementation and fixtures.
 |---|---|
 | Pipeline, ownership, diagnostics, canonical IR, expression places and qualifiers | [Foundations](frontend/foundations.md) |
 | Semantic-only validation, lowering constraint inventory, diagnostic and allocation regression contract | [Semantic validation](frontend/semantic-validation.md) |
-| Implicit postorder syntax tree (default since 2026-10-13; `-fno-c-ast-pilot` opts out): node contract, forward construction, layouts, tree expression typer, statement plan, consumer map | [Syntax tree](frontend/ast.md) |
+| Implicit postorder syntax tree (mandatory; implicit layout is the default): node contract, forward construction, layouts, tree expression typer, statement plan, consumer map | [Syntax tree](frontend/ast.md) |
 | Phase arenas, the preprocessing seal and semantic layout queries | [Compiler phase lifetimes](../compiler-lifetime.md) |
 | Relocations, weak/alias/ifunc symbols, constructors/destructors, object formats and linker | [Linkage](frontend/linkage.md) |
 | Packed/aligned types, bit-fields, layout engines | [Layout](frontend/layout.md) |
@@ -32,8 +32,10 @@ Lowering dispatches block declarations through their `DECLARATION` and
 node's entity binding; storage flags and the initializer assignment source
 anchor come from the entity. Declarator parameter names cannot replace the
 declared name, and initializer storage words cannot change its storage.
-Initializer-layout and VLA type-query owners retain their documented temporary
-adapters; see [the syntax-tree contract](frontend/ast.md#declarations).
+Initializer layouts and VLA type queries consume completed semantic plans and
+exact nodes; source spelling and sites use opaque anchors. The required CI
+guard rejects token grammar and source-range node recovery throughout lowering;
+see [the syntax-tree contract](frontend/ast.md#lowering-provenance-boundary).
 
 ## Macro argument rescan boundaries
 

@@ -4662,7 +4662,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_emms_tests(UnitTestArguments*
                             if (named && symbol.section < compiled.object.section_count)
                             {
                                 ByteSlice bytes = compiled.object.sections[symbol.section].data;
-                                if (symbol.value <= bytes.length)
+                                if (bytes.pointer && symbol.value <= bytes.length)
                                 {
                                     u64 size = symbol.size ? symbol.size : bytes.length - symbol.value;
                                     if (size <= bytes.length - symbol.value)
@@ -4779,7 +4779,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_emms_tests(UnitTestArguments*
                     ProcessWaitResult waited = child.handle ? os_process_wait_deadline(arena, child, UINT64_C(30000000)) : (ProcessWaitResult){0};
                     ByteSlice output = waited.streams[STANDARD_STREAM_OUTPUT];
                     bool valid = child.handle && waited.result == PROCESS_RESULT_SUCCESS && !waited.timed_out && !waited.capture_failed &&
-                        !waited.output_truncated && !waited.streams[STANDARD_STREAM_ERROR].length && output.length == 28;
+                        !waited.output_truncated && !waited.streams[STANDARD_STREAM_ERROR].length && output.pointer && output.length == 28;
                     u8 observed[14] = {0};
                     for (u32 byte = 0; valid && byte < BUSTER_ARRAY_LENGTH(observed); byte += 1)
                     {

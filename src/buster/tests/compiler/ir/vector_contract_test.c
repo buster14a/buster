@@ -193,7 +193,7 @@ UnitTestResult vector_contract_tests(UnitTestArguments* arguments)
             Target target = targets[target_index];
             CPreprocessResult preprocess = c_preprocess(local.arena, source,
                 (CPreprocessOptions){.target = target, .data_layout = target_data_layout(target)});
-            CAnalysisResult analysis = c_parse(local.arena, preprocess);
+            CAnalysisResult analysis = c_parse_for_lowering(local.arena, preprocess);
             CIRLowerResult lowered = {0};
             if (!preprocess.error_count && !analysis.diagnostic_count)
             {

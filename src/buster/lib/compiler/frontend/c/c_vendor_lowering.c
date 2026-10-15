@@ -796,15 +796,15 @@ BUSTER_C_INTERNAL IrValueId c_ir_vendor_multiply_unsigned_dwords(CIntegerIrBuild
 
 // The additional modules share the lane helpers above. These declarations let
 // the textual includes follow this file without adding compiler callbacks.
-BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_sha(CIntegerIrBuilder* builder, String8 name, IrValueId const* arguments, u32 count, CToken token);
-BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_x86_query(CIntegerIrBuilder* builder, String8 name, IrValueId const* arguments, u32 count, CToken token);
-BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_emms(CIntegerIrBuilder* builder, u32 count, CToken token);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_sha(CIntegerIrBuilder* builder, String8 name, IrValueId const* arguments, u32 count, CSourceAnchor token);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_x86_query(CIntegerIrBuilder* builder, String8 name, IrValueId const* arguments, u32 count, CSourceAnchor token);
+BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_emms(CIntegerIrBuilder* builder, u32 count, CSourceAnchor token);
 
-BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_builtin(CIntegerIrBuilder* builder, String8 name, IrValueId const* arguments, u32 count, CToken token)
+BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_builtin(CIntegerIrBuilder* builder, String8 name, IrValueId const* arguments, u32 count, CSourceAnchor token)
 {
     IrValueId result = IR_VALUE_ID_INVALID;
     CIrVendorRule const* rule = c_ir_vendor_rule(name);
-    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrSourceRange source = c_ir_anchor_source_range(builder, token);
     bool valid = cpu_arch_is_x86(builder->target.cpu_arch) && arguments && rule && count == rule->arguments;
     u32 immediate = 0;
     for (u32 argument = 0; valid && argument < count; argument += 1)

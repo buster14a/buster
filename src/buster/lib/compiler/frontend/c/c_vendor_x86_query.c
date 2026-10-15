@@ -7,13 +7,13 @@
 // EDX:EAX result. The existing baseline-asm policy is owned by #1487/#2258.
 
 BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_x86_query(CIntegerIrBuilder* builder, String8 name, IrValueId const* args,
-                                                       u32 count, CToken token)
+                                                       u32 count, CSourceAnchor token)
 {
     IrValueId result = IR_VALUE_ID_INVALID;
     bool known = string_equal(name, S8("__builtin_ia32_xgetbv"));
     bool valid = known && cpu_arch_is_x86(builder->target.cpu_arch) && args && count == 1 &&
                  args[0].value < builder->function->value_count;
-    IrSourceRange source = c_ir_token_source_range(builder, token);
+    IrSourceRange source = c_ir_anchor_source_range(builder, token);
     IrTypeId word_type = IR_TYPE_ID_INVALID;
     IrTypeId result_type = IR_TYPE_ID_INVALID;
     if (valid)
@@ -114,13 +114,13 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_x86_query(CIntegerIrBuilder* builde
 // selection uses closed transactions; a volatile asm barrier keeps the reset
 // ordered beside them and the ABI call/return bridges. No register payload or
 // control word is changed, and no general MMX arithmetic support is implied.
-BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_emms(CIntegerIrBuilder* builder, u32 count, CToken token)
+BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_emms(CIntegerIrBuilder* builder, u32 count, CSourceAnchor token)
 {
     IrValueId result = IR_VALUE_ID_INVALID;
     bool valid = cpu_arch_is_x86(builder->target.cpu_arch) && target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_MMX) && !count;
     if (valid)
     {
-        IrSourceRange source = c_ir_token_source_range(builder, token);
+        IrSourceRange source = c_ir_anchor_source_range(builder, token);
         IrInstruction assembly = c_ir_instruction_initialize(IR_OPCODE_INLINE_ASSEMBLY, builder->void_type);
         assembly.volatile_access = true;
         IrInstructionId instruction = c_ir_append_instruction(builder, assembly, source);

@@ -41,6 +41,35 @@ receipt, with optimization/sanitizer flags; elapsed time is not a test gate.
 Executable controls cover narrowing, mixed compound operators, comma
 and conditional operands, aggregate/pointer values and single evaluation.
 
+## Array-bound lexical classification
+
+The token position index publishes a sparse `CArrayBoundWords` row for each
+matched bracket pair. One linear pass uses cumulative word/`static`/`const`
+counts and an explicit checked bracket stack to record the original
+full-span classification, including words in nested groups. A qualified `*`
+is recognized only when exactly one nonqualifier word remains. This changes
+no array-bound, constructor, VLA, source-order or constant-evaluation rule.
+
+`c_parse_array_suffixes` binary-searches those immutable rows only for the
+same token pointer/count, spelling base, symbol table, dialect and actual
+delimiter pair. Malformed streams, clipped ranges, other token streams and
+callers without an index use the original scalar classification. Protected
+type-constant queries copy the index header and share these immutable rows;
+their snapshot regression includes the full row allocation. The independent
+reference semantic provider retains its original queries and model checks.
+
+The sparse retained cost is `sizeof(CArrayBoundWords)` per matched bracket;
+construction temporarily uses one checked 16-byte frame per bracket.
+The index header grows by 48 bytes on x64; row-payload counters exclude that
+header, arena alignment and temporary frames. For T tokens, B bracket pairs
+and Q original suffix requests, lexical work is O(T + Q log B); the reference
+provider's semantic query population itself is unchanged.
+The registered word-index regression counts the actual producer, lookup and
+scalar token work at geometric sizes, forces the original scalar path as a
+negative control, and compares qualifier/static/nullability/star, nested-word,
+constructor, VLA, diagnostic and protected-query controls. The original
+64/128/256/1024 sizeof-array dependency population remains unchanged.
+
 ## Constant-expression cast probes
 
 The constant evaluator uses `c_ir_query_group_type_name` for parenthesized
@@ -648,6 +677,10 @@ without facts for identical bitcode and diagnostics.
   The query accepts no live declaration machine. Its isolation fixture snapshots
   full shared buffers and indexes on successful and refused queries, including
   a shortened checkpoint whose buffers contain later type rows (GitHub #1247).
+  Private queries also omit the body validator's mutable scope cursor and use
+  immutable scope buckets. The snapshot includes the cursor header and all
+  seven backing arrays; successful and refused nested-scope queries preserve
+  a caller cursor prepared in an enclosing scope.
 - Legacy integer constant ranges share the private
   `c_parse_constant_expression_evaluate` walker over original token indices.
   The shape sidecar and parse position index describe that stream; copying a
@@ -2166,7 +2199,9 @@ malformed streams, dirty storage, scalar/shape parity and 64/4096 boundaries.
 
 Label-address cast proofs reuse the matching-opener index. Before classifying a
 group's type words, `c_parse_label_address_group_may_be_type` rejects interiors
-containing an indexed `&& identifier`. The typedef-aware proof retains a scoped
+containing an indexed `&& identifier`. `c_parse_label_address_cast_at` applies
+that same rejection before its machineless type proof, so left-nested logical
+prefixes do not repeat the whole parenthesized scan. The typedef-aware proof retains a scoped
 exception for a genuine leading `typeof` specifier, after qualifiers: its bounded
 operand has its own expression/type grammar and may contain a conjunction.
 The ordinary proof still rejects that punctuator. The exception's prefix probes

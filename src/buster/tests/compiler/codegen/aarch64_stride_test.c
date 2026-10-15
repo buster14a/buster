@@ -180,7 +180,7 @@ UnitTestResult aarch64_stride_tests(UnitTestArguments* arguments)
                                           "}}\n"),
                                        stride_case.stride);
         CPreprocessResult tokens = c_preprocess(arguments->arena, source, (CPreprocessOptions){0});
-        CParseResult parse = c_parse(arguments->arena, tokens);
+        CParseResult parse = c_parse_for_lowering(arguments->arena, tokens);
         CIRLowerResult lowered = c_lower_to_ir(arguments->arena, S8("aarch64-stride.c"), tokens, parse, aarch64_target);
         BUSTER_TEST(arguments, tokens.error_count == 0);
         BUSTER_TEST(arguments, parse.diagnostic_count == 0);
