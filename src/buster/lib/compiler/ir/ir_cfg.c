@@ -107,27 +107,24 @@ struct IrCfgExtraOrder
     IrInstructionId instruction;
 };
 
-BUSTER_GLOBAL_LOCAL void ir_cfg_remap_extras(Arena* scratch, IrFunction* function, IrInstructionId const* remap)
+BUSTER_GLOBAL_LOCAL void ir_cfg_remap_extras(Arena* scratch, IrFunction* function, IrInstructionId const* remap, bool ordered)
 {
     u32 count = function->extra_count;
-    bool ordered = true;
-    u32 previous = 0;
-    for (u32 index = 0; index < count; index += 1)
+    if (ordered)
     {
-        IrInstructionId* instruction = function->extra_instructions + index;
-        *instruction = remap[instruction->value];
-        ordered &= index == 0 || instruction->value > previous;
-        previous = instruction->value;
+        for (u32 index = 0; index < count; index += 1)
+        {
+            IrInstructionId* instruction = function->extra_instructions + index;
+            *instruction = remap[instruction->value];
+        }
     }
-    // A row permutation need not disturb sparse extras' relative order.
-    // Map their keys first; only disordered keys require moving payloads.
-    if (!ordered)
+    else
     {
         IrCfgExtraOrder* rows = arena_allocate(scratch, IrCfgExtraOrder, count);
         IrCfgExtraOrder* temporary = arena_allocate(scratch, IrCfgExtraOrder, count);
         for (u32 index = 0; index < count; index += 1)
         {
-            rows[index] = (IrCfgExtraOrder){.extra = function->extras[index], .instruction = function->extra_instructions[index]};
+            rows[index] = (IrCfgExtraOrder){.extra = function->extras[index], .instruction = remap[function->extra_instructions[index].value]};
         }
         // Sparse extras must remain sorted for binary lookup after row permutation.
         // Bottom-up merging preserves linear auxiliary storage and bounded stack.
@@ -398,11 +395,19 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
     {
         result.error = IR_VALIDATION_INVALID_ID;
     }
+    bool extras_ordered = true;
+    u32 previous_extra = 0;
     for (u32 index = 0; index < function->extra_count && result.error == IR_VALIDATION_NONE; index += 1)
     {
         if (function->extra_instructions[index].value >= count)
         {
             result = ir_validation_error(IR_VALIDATION_INVALID_ID, function, IR_BLOCK_ID_INVALID, function->extra_instructions[index]);
+        }
+        else if (moved)
+        {
+            u32 mapped = remap[function->extra_instructions[index].value].value;
+            extras_ordered &= index == 0 || mapped > previous_extra;
+            previous_extra = mapped;
         }
     }
     if (result.error == IR_VALIDATION_NONE)
@@ -423,7 +428,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_cfg_publish_instruction_rows(Arena* ar
                     *definition = remap[definition->value];
                 }
             }
-            ir_cfg_remap_extras(scratch, function, remap);
+            ir_cfg_remap_extras(scratch, function, remap, extras_ordered);
         }
         // Each cycle carries its original row forward to the mapped slot.
         // A completed entry is identity. Cycles start at their lowest row,
