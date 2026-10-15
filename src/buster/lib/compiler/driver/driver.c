@@ -1506,12 +1506,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_resolve_native_target(Arena* arena, Com
         {
             CompilerDriverFeatureOverride override = feature_overrides[override_index];
             TargetCpuFeature feature = target_cpu_feature_from_string(invocation->target.cpu_arch, override.name);
-            if (feature == TARGET_CPU_FEATURE_X86_MMX && override.option.length &&
-                     invocation->target.cpu_arch == CPU_ARCH_X86_64)
-            {
-                compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8}"), override.option);
-            }
-            else if (feature == TARGET_CPU_FEATURE_NONE && override.option.length)
+            if (feature == TARGET_CPU_FEATURE_NONE && override.option.length)
             {
                 compiler_driver_argument_error(arena, invocation, S8("unsupported option: {S8}"), override.option);
             }

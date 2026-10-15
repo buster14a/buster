@@ -1,7 +1,8 @@
-// Exact x86 state queries use the same canonical fixed-register inline-asm
+// Exact x86 state queries and resets use the same canonical fixed-register inline-asm
 // contract as GNU source assembly. XGETBV reads actual processor/OS state;
 // callers own its runtime OSXSAVE/XCR availability guard. No target feature
 // is added here, and the backend retains its instruction-admission policy.
+// Entries: c_ir_emit_vendor_x86_query and c_ir_emit_vendor_emms.
 // Contract: LLVM 21.1.8 BuiltinsX86.td; Intel SDM XGETBV, ECX selector and
 // EDX:EAX result. The existing baseline-asm policy is owned by #1487/#2258.
 
@@ -105,6 +106,40 @@ BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_x86_query(CIntegerIrBuilder* builde
     if (result.value == IR_ID_UNDERLYING_INVALID)
     {
         builder->failure_message = string_format(builder->arena, S8("unsupported or invalid x86 query builtin '{S8}'"), name);
+    }
+    return result;
+}
+
+// EMMS empties the architectural x87 tags shared with MMX. Ordinary f80
+// selection uses closed transactions; a volatile asm barrier keeps the reset
+// ordered beside them and the ABI call/return bridges. No register payload or
+// control word is changed, and no general MMX arithmetic support is implied.
+BUSTER_C_INTERNAL IrValueId c_ir_emit_vendor_emms(CIntegerIrBuilder* builder, u32 count, CSourceAnchor token)
+{
+    IrValueId result = IR_VALUE_ID_INVALID;
+    bool valid = cpu_arch_is_x86(builder->target.cpu_arch) && target_cpu_feature_has(builder->target, TARGET_CPU_FEATURE_X86_MMX) && !count;
+    if (valid)
+    {
+        IrSourceRange source = c_ir_anchor_source_range(builder, token);
+        IrInstruction assembly = c_ir_instruction_initialize(IR_OPCODE_INLINE_ASSEMBLY, builder->void_type);
+        assembly.volatile_access = true;
+        IrInstructionId instruction = c_ir_append_instruction(builder, assembly, source);
+        valid = instruction.value != IR_ID_UNDERLYING_INVALID;
+        if (valid)
+        {
+            IrInstructionExtra* extra = ir_instruction_extra_ensure(builder->arena, builder->function, instruction);
+            extra->literal = S8("emms");
+            extra->clobbers = arena_allocate(builder->arena, String8, 1);
+            extra->clobbers[0] = S8("memory");
+            extra->clobber_count = 1;
+            // Other statement-like void builtins use this inert expression
+            // placeholder; semantic typing retains the declared void result.
+            result = c_ir_emit_integer_value(builder, 0, false, token);
+        }
+    }
+    if (!valid)
+    {
+        builder->failure_message = S8("unsupported or invalid MMX state-reset builtin");
     }
     return result;
 }

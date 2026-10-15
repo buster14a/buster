@@ -8655,8 +8655,10 @@ BUSTER_C_INTERNAL bool c_include_name(Arena* arena, char8 const* base, CToken* t
                                         String8* name_out, bool* quoted_out);
 BUSTER_C_INTERNAL u32 c_include_name_token_count(CToken* tokens, u32 token_count);
 
-BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu_arch, OperatingSystem os)
+BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, Target target)
 {
+    CpuArch cpu_arch = target.cpu_arch;
+    OperatingSystem os = target.os;
     static char const* supported[] = {
         "__builtin___clear_cache", "__builtin_abs",
         "__builtin_labs",          "__builtin_llabs",
@@ -8770,7 +8772,7 @@ BUSTER_C_INTERNAL bool c_conditional_builtin_supported(String8 name, CpuArch cpu
                  (builtin == C_SYMBOL_BUILTIN_INTEGER_TRANSFORM &&
                   (native || string_starts_with_sequence(name, S8("__builtin_bswap")))) ||
                  ((builtin == C_SYMBOL_BUILTIN_VENDOR_TARGET || builtin == C_SYMBOL_BUILTIN_VENDOR_GENERIC) &&
-                  c_semantic_vendor_builtin_supported((Target){.cpu_arch = cpu_arch}, name)) ||
+                  c_semantic_vendor_builtin_supported(target, name)) ||
                  (builtin == C_SYMBOL_BUILTIN_COMPLEX && (native || cpu_arch == CPU_ARCH_WASM64)) ||
                  // The libm rounding/fma/ldexp calls are floating imports: eBPF has
                  // no floating point, and Wasm64 lowers no long double (#1394).
@@ -8994,8 +8996,8 @@ BUSTER_C_INTERNAL bool c_conditional_feature_operators(Arena* arena, CSpellingSp
         else if ((has_builtin || has_attribute) && argument_count == 1 && arguments[0].kind == C_TOKEN_IDENTIFIER)
         {
             supported = has_builtin ? c_conditional_builtin_supported(c_token_spelling(base, arguments[0]),
-                                                                    options ? options->target.cpu_arch : CPU_ARCH_COUNT,
-                                                                    options ? options->target.os : OPERATING_SYSTEM_FREESTANDING)
+                                                                    options ? options->target : (Target){.cpu_arch = CPU_ARCH_COUNT,
+                                                                                                        .os = OPERATING_SYSTEM_FREESTANDING})
                                     : c_conditional_attribute_supported(base, arguments[0],
                                                                         options ? options->target : target_native);
         }
@@ -12679,7 +12681,7 @@ struct CTargetFeatureMacro
 // GNU feature macros mirror the selected target even where code generation is
 // not available for that target.
 BUSTER_C_INTERNAL CTargetFeatureMacro const c_target_feature_macros[] = {
-    { S8_INITIALIZER("__MMX__"), TARGET_CPU_FEATURE_X86_MMX, CPU_ARCH_X86_64, true },
+    { S8_INITIALIZER("__MMX__"), TARGET_CPU_FEATURE_X86_MMX, CPU_ARCH_X86_64, false },
     { S8_INITIALIZER("__SSE__"), TARGET_CPU_FEATURE_X86_SSE, CPU_ARCH_X86_64, true },
     { S8_INITIALIZER("__SSE2__"), TARGET_CPU_FEATURE_X86_SSE2, CPU_ARCH_X86_64, false },
     { S8_INITIALIZER("__SSE3__"), TARGET_CPU_FEATURE_X86_SSE3, CPU_ARCH_X86_64, true },
@@ -13514,7 +13516,6 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         C_DEFINE_TYPE_MACRO("__amd64__", S8("1"));
         C_DEFINE_TYPE_MACRO("__amd64", S8("1"));
         C_DEFINE_TYPE_MACRO("__x86_64", S8("1"));
-        C_DEFINE_TYPE_MACRO("__MMX__", S8("1"));
         C_DEFINE_TYPE_MACRO("__SSE__", S8("1"));
         C_DEFINE_TYPE_MACRO("__FXSR__", S8("1"));
         C_DEFINE_TYPE_MACRO("__SSE_MATH__", S8("1"));
@@ -14102,7 +14103,6 @@ BUSTER_C_INTERNAL CPreprocessResult c_preprocess_run(Arena* result_arena, String
         CTargetFeatureMacro entry = c_target_feature_macros[feature_index];
         if ((!entry.i386_only || options.target.cpu_arch == CPU_ARCH_I386) &&
             cpu_arch_is_x86(entry.cpu_arch) && cpu_arch_is_x86(options.target.cpu_arch) &&
-            !(entry.feature == TARGET_CPU_FEATURE_X86_MMX && options.target.cpu_arch == CPU_ARCH_X86_64) &&
             target_cpu_feature_has(options.target, entry.feature))
         {
             c_macro_define(arena, space->base, symbol_table, &first_macro, &last_macro, entry.name, standard_replacement, 1, 0, 0, false, false);

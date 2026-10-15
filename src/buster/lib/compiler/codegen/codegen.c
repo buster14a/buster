@@ -291,6 +291,8 @@ BUSTER_GLOBAL_LOCAL String8 const codegen_x64_asm_mnemonics[] = {
     // the FSTCW spelling is the wait form the assembler already folds onto
     // FNSTCW.
     S8_INITIALIZER("fnstcw"), S8_INITIALIZER("fstcw"), S8_INITIALIZER("fldcw"),
+    // Zero-operand MMX state reset; the shared assembler owns 0F 77.
+    S8_INITIALIZER("emms"),
     // The rest of the floating-point environment: the exception flags, the
     // whole x87 environment image, and the SSE control/status word. Each
     // touches only its one memory operand (or none) plus FPU or MXCSR state;
