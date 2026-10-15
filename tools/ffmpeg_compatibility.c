@@ -1,6 +1,8 @@
 // FFmpeg qualification intake (#3177, #4078): bounded matched profiles.
 // ffmpeg_main owns opt-in execution; ffmpeg_cc records candidate actions;
+// ffmpeg_external_tool records independent-Clang and external-NASM actions.
 // ffmpeg_configuration_arguments pairs portable and assembly-enabled flags.
+// ffmpeg_gnu17_profile rejects configure's target/host dialect fallback.
 // ffmpeg_profile_manifest verifies the optimized feature/tool floor;
 // ffmpeg_checkasm requires nonempty summaries and selected family records.
 // ffmpeg_run retains argv/cwd/stdout/stderr/status with bounded process cleanup.
@@ -10,6 +12,7 @@
 #define BUSTER_FFMPEG_COMMAND_SECONDS 900
 #define BUSTER_FFMPEG_CC_SECONDS 60
 #define BUSTER_FFMPEG_PCM_SAMPLES 8000
+#define BUSTER_FFMPEG_CHECKASM_SEED "4078"
 
 typedef struct FfmpegCommand FfmpegCommand;
 struct FfmpegCommand
@@ -72,7 +75,9 @@ BUSTER_GLOBAL_LOCAL FfmpegCommand ffmpeg_run(Arena* arena, String8 directory, St
     result.recorded = clang_suite_write(arena, string_format(arena, S8("{S8}.stdout"), prefix), result.output) &&
                       clang_suite_write(arena, string_format(arena, S8("{S8}.stderr"), prefix), result.error) &&
                       clang_suite_write(arena, string_format(arena, S8("{S8}.status"), prefix), status) && recorded;
-    if (!string_starts_with_sequence(quickjs_basename(prefix), S8("cc-")) && result.wait.result != PROCESS_RESULT_SUCCESS)
+    bool tool_action = string_starts_with_sequence(quickjs_basename(prefix), S8("cc-")) ||
+                       string_starts_with_sequence(quickjs_basename(prefix), S8("nasm-"));
+    if (!tool_action && result.wait.result != PROCESS_RESULT_SUCCESS)
     {
         string_print(S8("FFMPEG_COMMAND_FAILURE artifacts={S8}\n{S8}\n{S8}\n"), prefix,
                      string_slice(result.output, result.output.length > 8192 ? result.output.length - 8192 : 0, result.output.length),
@@ -513,6 +518,35 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_cc(Arena* arena, SliceString8 arguments
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_external_tool(Arena* arena, SliceString8 arguments, bool nasm)
+{
+    bool valid = arguments.length >= 3;
+    FfmpegCommand command = {.wait = {.result = PROCESS_RESULT_FAILED}};
+    if (valid)
+    {
+        String8 tool = os_path_absolute(arena, arguments.pointer[1], true);
+        String8 ledger = os_path_absolute(arena, arguments.pointer[2], true);
+        String8 directory = os_path_absolute(arena, S8("."), true);
+        valid = tool.length && ledger.length && directory.length;
+        if (valid)
+        {
+            String8 prefix = path_join(arena, ledger, string_format(arena, S8("{S8}-{u64}-{u64}"),
+                nasm ? S8("nasm") : S8("cc-reference"), os_get_current_process_id(), os_now_microseconds()));
+            OsArgumentBuilder builder = os_argument_builder_start(arena);
+            os_argument_builder_append(&builder, tool);
+            for (u64 i = 3; i < arguments.length; i += 1)
+            {
+                os_argument_builder_append(&builder, arguments.pointer[i]);
+            }
+            command = ffmpeg_run(arena, directory, prefix, os_argument_builder_flush(&builder), BUSTER_FFMPEG_CC_SECONDS);
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_OUTPUT), BUSTER_SLICE_TO_BYTE_SLICE(command.output));
+            os_file_write(os_get_standard_stream(STANDARD_STREAM_ERROR), BUSTER_SLICE_TO_BYTE_SLICE(command.error));
+        }
+    }
+    ProcessResult result = valid && ffmpeg_ok(command) ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool ffmpeg_pristine(Arena* arena, String8 checkout)
 {
     String8 git = executable_resolve_in_path(arena, S8("git"));
@@ -539,7 +573,7 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_arguments_contain(SliceString8 arguments, String
     return found;
 }
 
-BUSTER_GLOBAL_LOCAL SliceString8 ffmpeg_configuration_arguments(Arena* arena, String8 checkout, String8 cc, String8 clang, bool optimized, String8 nasm)
+BUSTER_GLOBAL_LOCAL SliceString8 ffmpeg_configuration_arguments(Arena* arena, String8 checkout, String8 cc, String8 clang, bool optimized, String8 nasm, bool gnu17)
 {
     String8List arguments = {0};
     string8_list_push(arena, &arguments, S8("sh"));
@@ -547,6 +581,7 @@ BUSTER_GLOBAL_LOCAL SliceString8 ffmpeg_configuration_arguments(Arena* arena, St
     string8_list_push(arena, &arguments, S8("--arch=x86_64"));
     string8_list_push(arena, &arguments, S8("--cpu=generic"));
     string8_list_push(arena, &arguments, S8("--target-os=linux"));
+    if (gnu17) { string8_list_push(arena, &arguments, S8("--stdc=gnu17")); }
     string8_list_push(arena, &arguments, S8("--enable-pic"));
     string8_list_push(arena, &arguments, S8("--disable-autodetect"));
     if (!optimized)
@@ -690,6 +725,61 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_contains(String8 text, String8 needle)
     return found;
 }
 
+BUSTER_GLOBAL_LOCAL bool ffmpeg_gnu17_flags(String8 flags)
+{
+    u32 standards = 0;
+    bool valid = true;
+    for (u64 start = 0; start < flags.length;)
+    {
+        while (start < flags.length && (flags.pointer[start] == ' ' || flags.pointer[start] == '\t')) { start += 1; }
+        u64 end = start;
+        while (end < flags.length && flags.pointer[end] != ' ' && flags.pointer[end] != '\t') { end += 1; }
+        String8 flag = string_slice(flags, start, end);
+        if (string_starts_with_sequence(flag, S8("-std=")))
+        {
+            standards += 1;
+            valid = string_equal(flag, S8("-std=gnu17")) && valid;
+        }
+        start = end;
+    }
+    bool result = standards == 1 && valid;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_gnu17_configuration(Arena* arena, String8 config_mak)
+{
+    String8 target = {0};
+    String8 host = {0};
+    bool result = ffmpeg_status_value(arena, config_mak, S8("CFLAGS"), &target) &&
+                  ffmpeg_status_value(arena, config_mak, S8("HOSTCFLAGS"), &host) &&
+                  ffmpeg_gnu17_flags(target) && ffmpeg_gnu17_flags(host);
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_gnu17_profile(Arena* arena, String8 directory)
+{
+    String8 config_mak = clang_suite_read(arena, path_join(arena, directory, S8("ffbuild/config.mak")));
+    bool valid = ffmpeg_gnu17_configuration(arena, config_mak);
+    String8 manifest = string_format(arena, S8("requested=gnu17\ntarget_and_host={S8}\n"), valid ? S8("pass") : S8("fail"));
+    bool written = clang_suite_write(arena, path_join(arena, directory, S8("dialect-manifest.txt")), manifest);
+    bool result = written && valid;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool ffmpeg_gnu17_controls_self_test(Arena* arena)
+{
+    bool result = ffmpeg_gnu17_configuration(arena, S8("CFLAGS=-O3 -std=gnu17 -fPIC\nHOSTCFLAGS=-std=gnu17 -O3\n")) &&
+                  !ffmpeg_gnu17_configuration(arena, S8("CFLAGS=-std=c11\nHOSTCFLAGS=-std=gnu17\n")) &&
+                  !ffmpeg_gnu17_configuration(arena, S8("CFLAGS=-std=gnu17\nHOSTCFLAGS=-std=c17\n")) &&
+                  !ffmpeg_gnu17_configuration(arena, S8("CFLAGS=-std=gnu17\n")) &&
+                  !ffmpeg_gnu17_configuration(arena, S8("CFLAGS=-std=gnu17\nCFLAGS=-std=gnu17\nHOSTCFLAGS=-std=gnu17\n")) &&
+                  !ffmpeg_gnu17_flags(S8("-DNAME=-std=gnu17 -O3")) &&
+                  !ffmpeg_gnu17_flags(S8("-std=gnu17 -std=c17")) &&
+                  !ffmpeg_gnu17_flags(S8("-std=gnu17 -std=gnu17")) &&
+                  !ffmpeg_gnu17_flags(S8("-std=gnu17-extra"));
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL bool ffmpeg_checkasm_summary(String8 text, u64* functions)
 {
     String8 prefix = S8("checkasm: all ");
@@ -782,7 +872,9 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_checkasm(Arena* arena, String8 directory, String
     String8 executable = path_join(arena, directory, S8("tests/checkasm/checkasm"));
     String8List rows = {0};
     string8_list_push(arena, &rows, S8("selection\tstatus\toptimized_function_pointers\n"));
-    String8 all_arguments[] = {executable};
+    // Upstream accepts an explicit seed. Pair the randomized cases across
+    // compilers without enabling its benchmark/timer path.
+    String8 all_arguments[] = {executable, S8(BUSTER_FFMPEG_CHECKASM_SEED)};
     FfmpegCommand all = ffmpeg_run(arena, directory, path_join(arena, output, string_format(arena, S8("checkasm-{S8}-all"), compiler)),
                                    (SliceString8)BUSTER_ARRAY_TO_SLICE(all_arguments), BUSTER_FFMPEG_CC_SECONDS);
     u64 all_count = 0;
@@ -826,14 +918,14 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_checkasm_controls_self_test(void)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool ffmpeg_config_controls_self_test(Arena* arena)
+BUSTER_GLOBAL_LOCAL bool ffmpeg_config_pair_controls_self_test(Arena* arena, bool gnu17)
 {
     String8 checkout = S8("/tmp/ffmpeg");
     String8 cc = S8("/tmp/clang");
     String8 clang = S8("/tmp/clang");
     String8 nasm = S8("/usr/bin/nasm");
-    SliceString8 portable = ffmpeg_configuration_arguments(arena, checkout, cc, clang, false, (String8){0});
-    SliceString8 optimized = ffmpeg_configuration_arguments(arena, checkout, cc, clang, true, nasm);
+    SliceString8 portable = ffmpeg_configuration_arguments(arena, checkout, cc, clang, false, (String8){0}, gnu17);
+    SliceString8 optimized = ffmpeg_configuration_arguments(arena, checkout, cc, clang, true, nasm, gnu17);
     bool portable_controls = ffmpeg_arguments_contain(portable, S8("--disable-asm")) &&
                              ffmpeg_arguments_contain(portable, S8("--disable-inline-asm")) &&
                              ffmpeg_arguments_contain(portable, S8("--disable-x86asm")) &&
@@ -860,7 +952,9 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_config_controls_self_test(Arena* arena)
                             string_equal(argument, S8("--enable-x86asm")) || string_starts_with_sequence(argument, S8("--x86asmexe="));
         common_flags_match = (profile_flag || ffmpeg_arguments_contain(portable, argument)) && common_flags_match;
     }
-    bool result = portable_controls && optimized_controls && common_flags_match;
+    bool dialect = ffmpeg_arguments_contain(portable, S8("--stdc=gnu17")) == gnu17 &&
+                   ffmpeg_arguments_contain(optimized, S8("--stdc=gnu17")) == gnu17;
+    bool result = portable_controls && optimized_controls && common_flags_match && dialect;
     return result;
 }
 
@@ -1006,23 +1100,24 @@ BUSTER_GLOBAL_LOCAL bool ffmpeg_profile_self_test(Arena* arena)
     String8 mismatched_dependency = S8("X86ASM=/usr/bin/nasm\nDEPX86ASM=/usr/local/bin/nasm\n");
     ffmpeg_profile_manifest(arena, config_h, mismatched_dependency, S8("/usr/bin/nasm"), &control_valid);
     bool dependency_mismatch_rejected = !control_valid;
-    bool configs = ffmpeg_config_controls_self_test(arena);
+    bool configs = ffmpeg_config_pair_controls_self_test(arena, false) && ffmpeg_config_pair_controls_self_test(arena, true);
+    bool dialect = ffmpeg_gnu17_controls_self_test(arena);
     bool checkasm = ffmpeg_checkasm_controls_self_test();
     bool target_actions = ffmpeg_h264_target_controls_self_test(arena);
     bool feature_floor = positive && missing_inline_rejected && missing_x86asm_rejected && missing_sse2_rejected &&
                          missing_runtime_rejected && missing_external_tier_rejected && missing_inline_tier_rejected;
-    bool result = feature_floor && tool_mismatch_rejected && dependency_mismatch_rejected && configs && checkasm && target_actions;
-    string_print(S8("FFMPEG_HARNESS_CONTROLS status={S8} config_profiles={S8} feature_manifest={S8} nasm_identity={S8} checkasm_controls={S8} h264_target_actions={S8}\n"),
+    bool result = feature_floor && tool_mismatch_rejected && dependency_mismatch_rejected && configs && dialect && checkasm && target_actions;
+    string_print(S8("FFMPEG_HARNESS_CONTROLS status={S8} config_profiles={S8} feature_manifest={S8} nasm_identity={S8} checkasm_controls={S8} h264_target_actions={S8} gnu17_dialect={S8}\n"),
                  result ? S8("pass") : S8("fail"), configs ? S8("pass") : S8("fail"),
                  feature_floor ? S8("pass") : S8("fail"),
                  (positive && tool_mismatch_rejected && dependency_mismatch_rejected) ? S8("pass") : S8("fail"),
-                 checkasm ? S8("pass") : S8("fail"), target_actions ? S8("pass") : S8("fail"));
+                 checkasm ? S8("pass") : S8("fail"), target_actions ? S8("pass") : S8("fail"), dialect ? S8("pass") : S8("fail"));
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool ffmpeg_configure(Arena* arena, String8 checkout, String8 directory, String8 cc, String8 clang, bool optimized, String8 nasm)
+BUSTER_GLOBAL_LOCAL bool ffmpeg_configure(Arena* arena, String8 checkout, String8 directory, String8 cc, String8 clang, bool optimized, String8 nasm, bool gnu17)
 {
-    SliceString8 arguments = ffmpeg_configuration_arguments(arena, checkout, cc, clang, optimized, nasm);
+    SliceString8 arguments = ffmpeg_configuration_arguments(arena, checkout, cc, clang, optimized, nasm, gnu17);
     FfmpegCommand command = ffmpeg_run(arena, directory, path_join(arena, directory, S8("configure")), arguments, BUSTER_FFMPEG_COMMAND_SECONDS);
     return ffmpeg_ok(command);
 }
@@ -1199,14 +1294,23 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
 {
     ProcessResult result = PROCESS_RESULT_FAILED;
     bool cc = arguments.length >= 1 && string_equal(arguments.pointer[0], S8("--cc"));
+    bool reference_cc = arguments.length >= 1 && string_equal(arguments.pointer[0], S8("--reference-cc"));
+    bool nasm_tool = arguments.length >= 1 && string_equal(arguments.pointer[0], S8("--nasm"));
     bool self_test = arguments.length == 2 && string_equal(arguments.pointer[0], S8("--self-test"));
     bool harness_self_test = arguments.length == 1 && string_equal(arguments.pointer[0], S8("--harness-self-test"));
-    bool portable = arguments.length == 4 && string_equal(arguments.pointer[0], S8("--portable"));
-    bool optimized = arguments.length == 5 && string_equal(arguments.pointer[0], S8("--optimized"));
+    bool portable_gnu17 = arguments.length == 4 && string_equal(arguments.pointer[0], S8("--portable-gnu17"));
+    bool optimized_gnu17 = arguments.length == 5 && string_equal(arguments.pointer[0], S8("--optimized-gnu17"));
+    bool gnu17 = portable_gnu17 || optimized_gnu17;
+    bool portable = portable_gnu17 || (arguments.length == 4 && string_equal(arguments.pointer[0], S8("--portable")));
+    bool optimized = optimized_gnu17 || (arguments.length == 5 && string_equal(arguments.pointer[0], S8("--optimized")));
     bool profile = portable || optimized;
     if (cc)
     {
         result = ffmpeg_cc(arena, arguments);
+    }
+    else if (reference_cc || nasm_tool)
+    {
+        result = ffmpeg_external_tool(arena, arguments, nasm_tool);
     }
     else if (self_test)
     {
@@ -1241,6 +1345,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
         bool claimed = valid;
         bool configured[2] = {0};
         bool manifest_valid[2] = {0};
+        bool dialect_valid[2] = {0};
         bool profile_valid[2] = {0};
         bool built[2] = {0};
         bool checkasm[2] = {0};
@@ -1284,11 +1389,14 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
             bool ready = os_make_directory_exclusive(directories[i]).created;
             String8 ledger = path_join(arena, directories[i], S8("compiler-actions"));
             ready = os_make_directory_exclusive(ledger).created && ready;
-            String8 cc_command = i == 0 ? clang : string_format(arena, S8("{S8} test_ffmpeg --cc {S8} {S8}"), driver, ide, ledger);
-            configured[i] = ready && ffmpeg_configure(arena, checkout, directories[i], cc_command, clang, optimized, nasm);
-            manifest_valid[i] = optimized && configured[i] && ffmpeg_optimized_profile(arena, directories[i], nasm);
-            profile_valid[i] = configured[i] && (!optimized || manifest_valid[i]);
-            string_print(S8("FFMPEG_CONFIGURE compiler={S8} profile={S8} status={S8}\n"), compiler_names[i], optimized ? S8("assembly-enabled") : S8("portable"),
+            String8 cc_command = string_format(arena, S8("{S8} test_ffmpeg {S8} {S8} {S8}"), driver,
+                i == 0 ? S8("--reference-cc") : S8("--cc"), i == 0 ? clang : ide, ledger);
+            String8 nasm_command = optimized ? string_format(arena, S8("{S8} test_ffmpeg --nasm {S8} {S8}"), driver, nasm, ledger) : (String8){0};
+            configured[i] = ready && ffmpeg_configure(arena, checkout, directories[i], cc_command, clang, optimized, nasm_command, gnu17);
+            manifest_valid[i] = optimized && configured[i] && ffmpeg_optimized_profile(arena, directories[i], nasm_command);
+            dialect_valid[i] = gnu17 && configured[i] && ffmpeg_gnu17_profile(arena, directories[i]);
+            profile_valid[i] = configured[i] && (!optimized || manifest_valid[i]) && (!gnu17 || dialect_valid[i]);
+            string_print(S8("FFMPEG_CONFIGURE compiler={S8} profile={S8} dialect={S8} status={S8}\n"), compiler_names[i], optimized ? S8("assembly-enabled") : S8("portable"), gnu17 ? S8("gnu17") : S8("c17"),
                          profile_valid[i] ? S8("pass") : S8("fail"));
             if (profile_valid[i])
             {
@@ -1348,7 +1456,8 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
         if (claimed)
         {
             bool pristine = ffmpeg_pristine(arena, checkout);
-            String8 receipt = string_format(arena, S8("BUSTER_FFMPEG_CENSUS_V2\nupstream={S8}\nconfiguration={S8}\n"
+            String8 receipt = string_format(arena, S8("BUSTER_FFMPEG_CENSUS_V2\nupstream={S8}\nconfiguration={S8}\nc_dialect={S8}\n"
+                                                     "reference_gnu17_manifest={S8}\nbuster_gnu17_manifest={S8}\nconfigured_checkasm_seed=" BUSTER_FFMPEG_CHECKASM_SEED "\n"
                                                      "nasm_path={S8}\nreference_configure={u32}\nreference_profile_manifest={S8}\nreference_build={u32}\n"
                                                      "reference_checkasm_status={S8}\nreference_checkasm_attempted={u32}\nreference_checkasm_function_pointers={u64}\nreference_media={u32}\nreference_no_sample_fate={u32}\n"
                                                      "buster_configure={u32}\nbuster_profile_manifest={S8}\nbuster_build={u32}\n"
@@ -1357,7 +1466,9 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
                                                      "cross_compiler_checkasm_count_comparison={S8}\nmatching_configurations={u32}\npristine_before=pass\npristine_after={u32}\n"
                                                      "sample_fate=not-run\nproduction_dispatch=not-run\nper_function_denominator=unknown\n"
                                                      "video_media=not-run\nperformance_qualified=0\nwhole_issue_qualified=0\n"),
-                                            S8(BUSTER_FFMPEG_COMMIT), optimized ? S8("assembly-enabled-software") : S8("portable-software"), nasm,
+                                            S8(BUSTER_FFMPEG_COMMIT), optimized ? S8("assembly-enabled-software") : S8("portable-software"), gnu17 ? S8("gnu17") : S8("c17"),
+                                            (gnu17 ? (configured[0] ? (dialect_valid[0] ? S8("pass") : S8("fail")) : S8("not-run")) : S8("not-applicable")),
+                                            (gnu17 ? (configured[1] ? (dialect_valid[1] ? S8("pass") : S8("fail")) : S8("not-run")) : S8("not-applicable")), nasm,
                                             (u32)configured[0],
                                             (optimized ? (configured[0] ? (manifest_valid[0] ? S8("pass") : S8("fail")) : S8("not-run")) : S8("not-applicable")),
                                             (u32)built[0],
@@ -1376,18 +1487,19 @@ BUSTER_GLOBAL_LOCAL ProcessResult ffmpeg_main(Arena* arena, SliceString8 argumen
             valid = written && pristine && configured[0] && configured[1] && profile_valid[0] && profile_valid[1] &&
                     built[0] && built[1] && checkasm_valid && media[0] && media[1] && fate[0] && fate[1] && matching &&
                     (!portable || h264_target_actions) && valid;
-            string_print(S8("FFMPEG_RESULT profile={S8} census={S8} h264_target_actions={S8} checkasm_count_comparison={S8} production_dispatch=not-run full_qualification=pending artifacts={S8}\n"),
-                         optimized ? S8("assembly-enabled") : S8("portable"), valid ? S8("pass") : S8("fail"),
+            string_print(S8("FFMPEG_RESULT profile={S8} dialect={S8} census={S8} h264_target_actions={S8} checkasm_count_comparison={S8} production_dispatch=not-run full_qualification=pending artifacts={S8}\n"),
+                         optimized ? S8("assembly-enabled") : S8("portable"), gnu17 ? S8("gnu17") : S8("c17"), valid ? S8("pass") : S8("fail"),
                          h264_target_actions_status, checkasm_count_comparison, output);
         }
         result = valid ? PROCESS_RESULT_SUCCESS : PROCESS_RESULT_FAILED;
 #else
+        (void)gnu17;
         string_print(S8("error: FFmpeg profiles currently require Linux x86-64\n"));
 #endif
     }
     else
     {
-        string_print(S8("usage: test_ffmpeg --harness-self-test | --self-test CHECKOUT | --portable CHECKOUT FRESH_RESULTS ABSOLUTE_IDE | --optimized CHECKOUT FRESH_RESULTS ABSOLUTE_IDE ABSOLUTE_NASM\n"));
+        string_print(S8("usage: test_ffmpeg --harness-self-test | --self-test CHECKOUT | --portable|--portable-gnu17 CHECKOUT FRESH_RESULTS ABSOLUTE_IDE | --optimized|--optimized-gnu17 CHECKOUT FRESH_RESULTS ABSOLUTE_IDE ABSOLUTE_NASM\n"));
     }
     return result;
 }
