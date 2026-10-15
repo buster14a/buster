@@ -169,6 +169,7 @@ BUSTER_GLOBAL_LOCAL IrValidationSplice ir_inline_splice_region(Arena* arena, IrF
     u32 parameters = 0;
     for (u32 block = 0; block < original_blocks; block += 1)
     {
+        result.parameter_block_count += caller->blocks[block].first_parameter != 0;
         if (planned_heads[block] != IR_INLINE_NONE)
         {
             result.block_count += 1;
@@ -182,10 +183,13 @@ BUSTER_GLOBAL_LOCAL IrValidationSplice ir_inline_splice_region(Arena* arena, IrF
     result.blocks = arena_allocate(arena, u32, result.block_count ? result.block_count : 1u);
     result.rows = arena_allocate(arena, u32, result.row_count ? result.row_count : 1u);
     result.values = arena_allocate(arena, u32, result.row_count + parameters ? result.row_count + parameters : 1u);
+    result.parameter_blocks = arena_allocate(arena, u32, result.parameter_block_count);
+    u32 parameter_block_cursor = 0;
     u32 block_cursor = 0;
     u32 row_cursor = 0;
     for (u32 block = 0; block < original_blocks; block += 1)
     {
+        if (caller->blocks[block].first_parameter) result.parameter_blocks[parameter_block_cursor++] = block;
         if (planned_heads[block] != IR_INLINE_NONE)
         {
             result.blocks[block_cursor] = block;

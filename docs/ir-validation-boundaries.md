@@ -197,7 +197,22 @@ and compare independent malformed-input expectations. Whole-compiler timing
 and hosted noise are reported separately; a better scaling bound is not an
 end-to-end throughput measurement.
 
+## Constructor and instruction label sets
+
+Aggregate constructor field indices are range/type checked in one pass.
+Strictly increasing indices need no scratch; arbitrary order uses one bit per
+field to refuse duplicates without changing operands or immediates (#4250).
+The nonempty multi-operand case is a complete struct, so the bitmap is bounded
+by the constructor's 16-bit immediate count; unions have at most one operand.
+
+Label-preserving CAST and INDIRECT_BRANCH operation checks validate their sets
+once, then use the same immutable sorted-view subset query as other provenance
+consumers (#2445 residual). Equal counts and independently proven uniqueness
+make that one-direction subset query exact equality. Branch label bounds and
+all existing storage, conversion and direct-label restrictions remain checked.
+
 ## A certificate describes one input
+
 
 `CIRLowerResult.canonical_ir_certified` describes the successful C producer's
 output. The `input_certified` argument of `ir_prepare_canonical_module` permits
