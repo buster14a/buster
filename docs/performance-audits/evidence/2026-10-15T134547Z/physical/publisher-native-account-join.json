@@ -1,0 +1,58 @@
+{
+  "actual_publisher_account": {
+    "inventory": "buster-compiler-ordinary-raw-v1",
+    "manifest_sha256": "06461ba4a6e573f1d1221d45ddd2939b629621ac0ac3bfdd472cb4b2a47d4f76",
+    "members": 3927,
+    "payload_bytes": 17852995,
+    "replay": {
+      "corpus_cases": 12,
+      "lab_pairs": 178
+    },
+    "state": "verified"
+  },
+  "authentic_account_raw_line": "- raw evidence: sealed buster-compiler-ordinary-raw-v1 verified natively, 3927 members, 17852995 bytes, manifest 06461ba4a6e573f1d1221d45ddd2939b629621ac0ac3bfdd472cb4b2a47d4f76; replayed 178 lab pairs and 12 corpus cases",
+  "authentic_account_source": "Complete terminal authenticated GitHub check summary from actual independent trusted publisher; not fabricated verifier output",
+  "custom_check_external_id": "buster-9700x-compiler-pr-v1:3cdf6ee16c6c543cd7933f7a7d24cff407328d56:38743139164.1:1",
+  "custom_check_id": 116450275648,
+  "direct_manifest_replay": {
+    "archive_members_outside_payload_manifest": [
+      "evidence-manifest.tsv",
+      "evidence-seal.txt",
+      "machine-specifications/report.json",
+      "machine-specifications/sources.jsonl",
+      "receipt.json"
+    ],
+    "every_payload_length_and_sha256_checked": true,
+    "identity_headers_exact": true,
+    "manifest_sha256": "06461ba4a6e573f1d1221d45ddd2939b629621ac0ac3bfdd472cb4b2a47d4f76",
+    "members": 3927,
+    "payload_bytes": 17852995,
+    "result": "pass",
+    "seal_text_exact": true
+  },
+  "identity": {
+    "base": "02a6414e020f5d549122197c3a7c8407df5bed76",
+    "base_tree": "5aa95687f3d2056f07760ae0347d200b06c84eee",
+    "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+    "head_tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+    "mode": "pull",
+    "pull": "4239",
+    "pull_head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+    "ref": "refs/pull/4239/head",
+    "repository": "buster14a/buster",
+    "request_run_id": "38743139164",
+    "run_attempt": "1",
+    "run_id": "38743190006",
+    "trusted_revision": "02a6414e020f5d549122197c3a7c8407df5bed76"
+  },
+  "limits": [
+    "Native verifier and native corpus replay ran in independently authenticated trusted publisher; none executed locally.",
+    "Local checks comprise strict artifact parsing, every payload hash, pure statistical replay and this actual native-account join.",
+    "The legacy route has AST-only native ownership proof; no whole-route host-empty certificate is claimed."
+  ],
+  "publisher_job_id": 116461227761,
+  "publisher_result": "success",
+  "pure_evidence_bundle_problems": [],
+  "recorded_at": "2026-10-15T13:54:00.410103+00:00",
+  "schema": "buster-4239-final-native-publisher-and-direct-digest-join-v1"
+}

@@ -1,0 +1,55 @@
+{
+  "ownership": {
+    "bootstrap_marker_sha256": "f54580851fe2b5ac2045b86a0f0f860aa9bbe632f4e56a6b619ed25548df07e0",
+    "count": 1,
+    "directory": "/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-owner/owned-phases",
+    "driver_path": "/var/lib/buster-github-runner/actions-runner/_work/buster/buster/trusted/.cache/bootstrap-driver/posix/1ea882b03c06619ff43292c891c40bd3008142e9aa59a7dc8f1d84010afc4d52/build-3033085-1862",
+    "driver_sha256": "2873e88bdc7d5d1202ddaea597330a4fc28018c8e49a92e9209517f674c37840",
+    "evidence_root": "/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-owner",
+    "owned_preflight": false,
+    "phases": [
+      {
+        "allow_exit_failure": false,
+        "argv": [
+          "/usr/bin/python3",
+          "-B",
+          "/var/lib/buster-github-runner/actions-runner/_work/buster/buster/trusted/tools/bench_direct/ast_retirement_acceptance.py",
+          "--lab",
+          "/var/lib/buster-github-runner/actions-runner/_work/buster/buster/trusted/tools/uarch_lab.py",
+          "--harness",
+          "/var/lib/buster-github-runner/actions-runner/_work/buster/buster/candidate/build/throughput-tools/throughput",
+          "--baseline-ide",
+          "/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/bin/ide-base",
+          "--candidate-ide",
+          "/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/bin/ide-cand",
+          "--repo-root",
+          "/var/lib/buster-github-runner/actions-runner/_work/buster/buster/candidate",
+          "--base-revision",
+          "02a6414e020f5d549122197c3a7c8407df5bed76",
+          "--head-revision",
+          "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+          "--cpu",
+          "2",
+          "--output",
+          "/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance"
+        ],
+        "bridge_wall_us": 163267457,
+        "cwd": "/var/lib/buster-github-runner/actions-runner/_work/buster/buster/candidate",
+        "file": "0001.json",
+        "kind": "run",
+        "ordinal": 1,
+        "phase": "ast-retirement-acceptance",
+        "receipt_sha256": "53e6fcbfbf58bef5098a98941f24d83cce746cd91d11fbc21dab06f99366b61e",
+        "timeout": 2700
+      }
+    ],
+    "python_path": "/usr/bin/python3",
+    "schema": "buster-compiler-snapshot-phases-v1",
+    "state": "complete",
+    "trusted_revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+    "trusted_root": "/var/lib/buster-github-runner/actions-runner/_work/buster/buster/trusted",
+    "trusted_tree": "5aa95687f3d2056f07760ae0347d200b06c84eee",
+    "work_root": "/var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work"
+  },
+  "schema": "buster-ast-retirement-owner-v1"
+}

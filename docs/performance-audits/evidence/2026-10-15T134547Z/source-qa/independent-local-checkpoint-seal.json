@@ -1,0 +1,82 @@
+{
+  "schema": "buster.finalH.independent-local-checkpoint-peer-seal.v1",
+  "status": "pass",
+  "sealed_utc": "2026-10-15T13:54:23.482517+00:00",
+  "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+  "tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+  "baseline": "02a6414e020f5d549122197c3a7c8407df5bed76",
+  "checkpoint": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-closed-local-checkpoint.json",
+    "bytes": 55841,
+    "sha256": "3da5556a9de59de2ed7892802b217cf22f3b621909cd11c0242da00d8a327cb7"
+  },
+  "descriptor_supplement": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-main4267-descriptor-supplement.json",
+    "bytes": 2697,
+    "sha256": "90a53d31b8281f0eaf4984b1b0751fc4723699a090cd7e30e60ef75df5a86ee4"
+  },
+  "checkpoint_peer": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-finalH-independent-private-audit/local-checkpoint-peer-receipt.json",
+    "bytes": 118491,
+    "sha256": "af8e869f1c61956c01d8cf2f5ad63950432714ff30fb4104c211498c5a455d2e"
+  },
+  "descriptor_main4267_peer": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-finalH-independent-private-audit/local-checkpoint-descriptor-peer/independent-descriptor-main4267-receipt.json",
+    "bytes": 21899,
+    "sha256": "020780bcdd08d596e2c14dc26f72b84bc064455bba1a3ee46dcced158aa438d4"
+  },
+  "audit_script": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-finalH-independent-private-audit/audit_local_checkpoint.py",
+    "bytes": 15267,
+    "sha256": "1e62e733c559fb906af74e32dcc98eff40c75f6601318ffb7f68ca16bf7b7c0a"
+  },
+  "all_union_artifacts_rehashed_at_final_seal": 230,
+  "summary": {
+    "fresh_snapshot_inputs": 208,
+    "frozen_root_images": 3,
+    "exact_head_clean_successful_gate_wrappers": 10,
+    "static_gates": 6,
+    "full_test_suites": 3,
+    "modules_each": 61,
+    "exact_actual_enum_designator_module_order_all_three": true,
+    "assertions": {
+      "debug-all": 7240098,
+      "release-all": 7240077,
+      "sanitize-all": 7192264
+    },
+    "object_path_index": 59,
+    "object_path_assertions_each": 939,
+    "object_path_failed_each": 0,
+    "protected4267_saved_source_actual02a_exact_identity": true,
+    "analyzer_eligible": 118,
+    "analyzer_excluded": 118,
+    "analyzer_manifest_bytes": 1019590,
+    "analyzer_manifest_sha256": "7e0acd11e5bef91841214b7ddcb4e4ae5f9863273b5ab4d4b3466f0db178193c",
+    "analyzer_all118_unique_terminal_status0_present_empty_logs_sha_verified": true,
+    "analyzer_jobs": 4,
+    "analyzer_unit_timeout_seconds": 600,
+    "process_tree_status": "complete"
+  },
+  "all_readers_closed": true,
+  "new_source_reader_hold_acquired": false,
+  "performed": "Offline hash/byte/log/source-snapshot/manifest parsing only; no live source or Git reads, test/build/native execution, source/config/forge/queue/hardware mutation.",
+  "audit_setup_notes": [
+    "Root initial textual descriptor-order assumption was independently confirmed corrected by actual TestId enum and designated initializer mapping; all three raw runtime orders were already correct.",
+    "Peer signed numeric field decoder was corrected to accept the literal +13194 build delta before producing its receipt. No recorded compiler/test invocation was rerun for either data-audit correction."
+  ],
+  "limits": [
+    "Local exact-H recorded correctness/static/analyzer evidence only; source identity joins recorded clean wrappers and snapshot preservation rather than independently reconstructing full Git/source/header dependency closure.",
+    "The six static gates are verified from exact command/source identities, terminal status and raw logs; their source scans/history computations were not rerun.",
+    "Frozen image hashes verify present bytes and their recorded associations; source build dependency closure and all old preserved artifacts are not independently recaptured.",
+    "Only saved source snapshots, the three raw suite logs and pinned outside receipts were read; no live source, Git objects or commands were accessed.",
+    "The three raw module rows corroborate the whole object-path module with939 passed assertions each. They are not individual per-variant or per-statement runtime traces.",
+    "Actual02a source identity is anchored to the previously sealed complementary review and sidecar; its Git object was not independently reopened during this offline task.",
+    "This x86-64 descriptor reconstruction does not claim other platform preprocessor branches or run configurations.",
+    "The fixture contains owning case1 before nestedcase3; no qualification of the separate first-nested-case4272 pattern is inferred.",
+    "The initial textual-order comparison was an audit setup error corrected before publication, not a source/test failure; all three actual raw sequences agree with enum/designator order.",
+    "All module count/order/source identity claims are limited to the recorded x86-64 local configurations. Whole module evidence is not a per-statement runtime trace or qualification of separate #4272 first-nested-case behavior.",
+    "Both checkpoint and descriptor component reviews above are now closed and passed.",
+    "Buster first-party license remains unselected / NOASSERTION.",
+    "No hosted CI, protected integration, main containment, target-host physical performance acceptance or issue-closure proof."
+  ]
+}

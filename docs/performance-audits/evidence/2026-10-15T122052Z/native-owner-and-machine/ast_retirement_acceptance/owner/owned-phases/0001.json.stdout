@@ -1,0 +1,581 @@
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/unity-syntax-only; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.45 s
+[compare] candidate warm-up 0.48 s
+uarch_lab: prepare ok in 2.9 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.4941 s, B 0.4855 s, B/A 0.9825
+[compare] pair 2/20 BA: A 0.4563 s, B 0.4858 s, B/A 1.0647
+[compare] pair 3/20 AB: A 0.4582 s, B 0.5034 s, B/A 1.0987
+[compare] pair 4/20 BA: A 0.4572 s, B 0.4866 s, B/A 1.0643
+[compare] pair 5/20 AB: A 0.4566 s, B 0.4852 s, B/A 1.0626
+[compare] pair 6/20 BA: A 0.4590 s, B 0.4865 s, B/A 1.0599
+[compare] pair 7/20 AB: A 0.4569 s, B 0.4846 s, B/A 1.0606
+[compare] pair 8/20 BA: A 0.4583 s, B 0.4869 s, B/A 1.0625
+[compare] pair 9/20 AB: A 0.4571 s, B 0.4868 s, B/A 1.0650
+[compare] pair 10/20 BA: A 0.4562 s, B 0.4843 s, B/A 1.0615
+[compare] pair 11/20 AB: A 0.4619 s, B 0.4870 s, B/A 1.0543
+[compare] pair 12/20 BA: A 0.4558 s, B 0.4858 s, B/A 1.0658
+[compare] pair 13/20 AB: A 0.4595 s, B 0.4869 s, B/A 1.0596
+[compare] pair 14/20 BA: A 0.4646 s, B 0.4872 s, B/A 1.0487
+[compare] pair 15/20 AB: A 0.4564 s, B 0.4853 s, B/A 1.0634
+[compare] pair 16/20 BA: A 0.4570 s, B 0.4873 s, B/A 1.0664
+[compare] pair 17/20 AB: A 0.4572 s, B 0.4863 s, B/A 1.0638
+[compare] pair 18/20 BA: A 0.4574 s, B 0.4858 s, B/A 1.0621
+[compare] pair 19/20 AB: A 0.4602 s, B 0.4856 s, B/A 1.0553
+[compare] pair 20/20 BA: A 0.4585 s, B 0.4844 s, B/A 1.0566
+uarch_lab: timed ok in 20.9 s 20 pairs (--pairs 20)
+uarch_lab: total 23.9 s; Candidate is SLOWER: wall time B/A 1.0623 (+6.23%), 95% CI [1.0596, 1.0643] over 20 pairs, beyond the 0.5% practical floor. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +7.89%; cycles +6.45%; IPC +1.35%; branch MPKI -2.33%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/unity-syntax-only/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/unity-syntax-only/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/unity-object; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 1.54 s
+[compare] candidate warm-up 1.67 s
+uarch_lab: prepare ok in 9.8 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 1.5830 s, B 1.6770 s, B/A 1.0594
+[compare] pair 2/20 BA: A 1.5400 s, B 1.6845 s, B/A 1.0938
+[compare] pair 3/20 AB: A 1.5408 s, B 1.6840 s, B/A 1.0930
+[compare] pair 4/20 BA: A 1.5410 s, B 1.6866 s, B/A 1.0944
+[compare] pair 5/20 AB: A 1.5495 s, B 1.6757 s, B/A 1.0814
+[compare] pair 6/20 BA: A 1.5445 s, B 1.6780 s, B/A 1.0865
+[compare] pair 7/20 AB: A 1.5436 s, B 1.6830 s, B/A 1.0904
+[compare] pair 8/20 BA: A 1.5415 s, B 1.6838 s, B/A 1.0923
+[compare] pair 9/20 AB: A 1.5419 s, B 1.6784 s, B/A 1.0885
+[compare] pair 10/20 BA: A 1.5441 s, B 1.6779 s, B/A 1.0867
+[compare] pair 11/20 AB: A 1.5433 s, B 1.6705 s, B/A 1.0824
+[compare] pair 12/20 BA: A 1.5403 s, B 1.6783 s, B/A 1.0896
+[compare] pair 13/20 AB: A 1.5417 s, B 1.6824 s, B/A 1.0913
+[compare] pair 14/20 BA: A 1.5397 s, B 1.6808 s, B/A 1.0917
+[compare] pair 15/20 AB: A 1.5432 s, B 1.6776 s, B/A 1.0871
+[compare] pair 16/20 BA: A 1.5403 s, B 1.6740 s, B/A 1.0868
+[compare] pair 17/20 AB: A 1.5411 s, B 1.6757 s, B/A 1.0873
+[compare] pair 18/20 BA: A 1.5499 s, B 1.6758 s, B/A 1.0812
+[compare] pair 19/20 AB: A 1.5453 s, B 1.6788 s, B/A 1.0864
+[compare] pair 20/20 BA: A 1.5432 s, B 1.6785 s, B/A 1.0877
+uarch_lab: timed ok in 66.7 s 20 pairs (--pairs 20)
+uarch_lab: total 76.6 s; Candidate is SLOWER: wall time B/A 1.0875 (+8.75%), 95% CI [1.0865, 1.0913] over 20 pairs, beyond the 0.5% practical floor. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +8.44%; cycles +8.87%; IPC -0.39% (below floor); branch MPKI -4.23%; page faults +34.86%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/unity-object/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/unity-object/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/tiny_startup-syntax-only; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.00 s
+[compare] candidate warm-up 0.00 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0066 s, B 0.0068 s, B/A 1.0266
+[compare] pair 2/20 BA: A 0.0072 s, B 0.0067 s, B/A 0.9376
+[compare] pair 3/20 AB: A 0.0069 s, B 0.0069 s, B/A 1.0062
+[compare] pair 4/20 BA: A 0.0068 s, B 0.0070 s, B/A 1.0236
+[compare] pair 5/20 AB: A 0.0068 s, B 0.0070 s, B/A 1.0279
+[compare] pair 6/20 BA: A 0.0069 s, B 0.0068 s, B/A 0.9876
+[compare] pair 7/20 AB: A 0.0071 s, B 0.0069 s, B/A 0.9742
+[compare] pair 8/20 BA: A 0.0072 s, B 0.0070 s, B/A 0.9637
+[compare] pair 9/20 AB: A 0.0067 s, B 0.0070 s, B/A 1.0397
+[compare] pair 10/20 BA: A 0.0319 s, B 0.0070 s, B/A 0.2201
+[compare] pair 11/20 AB: A 0.0071 s, B 0.0070 s, B/A 0.9814
+[compare] pair 12/20 BA: A 0.0069 s, B 0.0068 s, B/A 0.9739
+[compare] pair 13/20 AB: A 0.0071 s, B 0.0068 s, B/A 0.9691
+[compare] pair 14/20 BA: A 0.0070 s, B 0.0068 s, B/A 0.9762
+[compare] pair 15/20 AB: A 0.0071 s, B 0.0071 s, B/A 1.0058
+[compare] pair 16/20 BA: A 0.0067 s, B 0.0068 s, B/A 1.0037
+[compare] pair 17/20 AB: A 0.0072 s, B 0.0074 s, B/A 1.0275
+[compare] pair 18/20 BA: A 0.0073 s, B 0.0071 s, B/A 0.9713
+[compare] pair 19/20 AB: A 0.0070 s, B 0.0070 s, B/A 1.0080
+[compare] pair 20/20 BA: A 0.0067 s, B 0.0071 s, B/A 1.0510
+uarch_lab: timed ok in 2.0 s 20 pairs (--pairs 20)
+uarch_lab: total 2.2 s; NO DETECTABLE DIFFERENCE: wall time B/A 0.9957, 95% CI [0.9739, 1.0236] includes 1.0 over 20 pairs; any real change is within about +/-2.61% (wider than the 0.5% practical floor: more pairs are needed to rule out an effect of that size). Detectable moves (CI excludes 1; they explain, they do not decide): instructions +0.13%; branch MPKI +1.10% (below floor).
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/tiny_startup-syntax-only/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/tiny_startup-syntax-only/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/large_function-syntax-only; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.00 s
+[compare] candidate warm-up 0.00 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0082 s, B 0.0083 s, B/A 1.0144
+[compare] pair 2/20 BA: A 0.0079 s, B 0.0078 s, B/A 0.9903
+[compare] pair 3/20 AB: A 0.0079 s, B 0.0080 s, B/A 1.0121
+[compare] pair 4/20 BA: A 0.0077 s, B 0.0078 s, B/A 1.0118
+[compare] pair 5/20 AB: A 0.0078 s, B 0.0079 s, B/A 1.0160
+[compare] pair 6/20 BA: A 0.0078 s, B 0.0082 s, B/A 1.0399
+[compare] pair 7/20 AB: A 0.0079 s, B 0.0078 s, B/A 0.9850
+[compare] pair 8/20 BA: A 0.0078 s, B 0.0081 s, B/A 1.0349
+[compare] pair 9/20 AB: A 0.0078 s, B 0.0080 s, B/A 1.0328
+[compare] pair 10/20 BA: A 0.0082 s, B 0.0080 s, B/A 0.9739
+[compare] pair 11/20 AB: A 0.0294 s, B 0.0080 s, B/A 0.2716
+[compare] pair 12/20 BA: A 0.0080 s, B 0.0080 s, B/A 1.0058
+[compare] pair 13/20 AB: A 0.0082 s, B 0.0078 s, B/A 0.9454
+[compare] pair 14/20 BA: A 0.0082 s, B 0.0080 s, B/A 0.9693
+[compare] pair 15/20 AB: A 0.0081 s, B 0.0080 s, B/A 0.9933
+[compare] pair 16/20 BA: A 0.0078 s, B 0.0080 s, B/A 1.0271
+[compare] pair 17/20 AB: A 0.0080 s, B 0.0078 s, B/A 0.9742
+[compare] pair 18/20 BA: A 0.0081 s, B 0.0077 s, B/A 0.9522
+[compare] pair 19/20 AB: A 0.0078 s, B 0.0080 s, B/A 1.0278
+[compare] pair 20/20 BA: A 0.0082 s, B 0.0081 s, B/A 0.9811
+uarch_lab: timed ok in 1.9 s 20 pairs (--pairs 20)
+uarch_lab: total 2.1 s; NO DETECTABLE DIFFERENCE: wall time B/A 0.9995, 95% CI [0.9742, 1.0160] includes 1.0 over 20 pairs; any real change is within about +/-2.58% (wider than the 0.5% practical floor: more pairs are needed to rule out an effect of that size). Detectable moves (CI excludes 1; they explain, they do not decide): instructions +0.11%; branch MPKI +0.94%; page faults -0.66% (below floor).
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/large_function-syntax-only/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/large_function-syntax-only/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/many_functions-syntax-only; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.00 s
+[compare] candidate warm-up 0.00 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0079 s, B 0.0077 s, B/A 0.9756
+[compare] pair 2/20 BA: A 0.0083 s, B 0.0081 s, B/A 0.9735
+[compare] pair 3/20 AB: A 0.0079 s, B 0.0079 s, B/A 0.9971
+[compare] pair 4/20 BA: A 0.0081 s, B 0.0081 s, B/A 0.9986
+[compare] pair 5/20 AB: A 0.0083 s, B 0.0077 s, B/A 0.9320
+[compare] pair 6/20 BA: A 0.0081 s, B 0.0081 s, B/A 0.9962
+[compare] pair 7/20 AB: A 0.0080 s, B 0.0079 s, B/A 0.9786
+[compare] pair 8/20 BA: A 0.0081 s, B 0.0080 s, B/A 0.9903
+[compare] pair 9/20 AB: A 0.0081 s, B 0.0078 s, B/A 0.9637
+[compare] pair 10/20 BA: A 0.0079 s, B 0.0077 s, B/A 0.9861
+[compare] pair 11/20 AB: A 0.0328 s, B 0.0079 s, B/A 0.2419
+[compare] pair 12/20 BA: A 0.0080 s, B 0.0081 s, B/A 1.0065
+[compare] pair 13/20 AB: A 0.0079 s, B 0.0079 s, B/A 1.0053
+[compare] pair 14/20 BA: A 0.0078 s, B 0.0078 s, B/A 1.0037
+[compare] pair 15/20 AB: A 0.0080 s, B 0.0081 s, B/A 1.0066
+[compare] pair 16/20 BA: A 0.0077 s, B 0.0082 s, B/A 1.0555
+[compare] pair 17/20 AB: A 0.0078 s, B 0.0079 s, B/A 1.0121
+[compare] pair 18/20 BA: A 0.0078 s, B 0.0078 s, B/A 0.9983
+[compare] pair 19/20 AB: A 0.0078 s, B 0.0081 s, B/A 1.0296
+[compare] pair 20/20 BA: A 0.0078 s, B 0.0081 s, B/A 1.0318
+uarch_lab: timed ok in 1.9 s 20 pairs (--pairs 20)
+uarch_lab: total 2.1 s; NO DETECTABLE DIFFERENCE: wall time B/A 0.9977, 95% CI [0.9786, 1.0065] includes 1.0 over 20 pairs; any real change is within about +/-2.14% (wider than the 0.5% practical floor: more pairs are needed to rule out an effect of that size). Detectable moves (CI excludes 1; they explain, they do not decide): instructions +4.03%; cycles +3.03%; branch MPKI -4.81%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/many_functions-syntax-only/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/many_functions-syntax-only/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/symbol_table-syntax-only; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.00 s
+[compare] candidate warm-up 0.00 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0094 s, B 0.0094 s, B/A 0.9949
+[compare] pair 2/20 BA: A 0.0093 s, B 0.0095 s, B/A 1.0233
+[compare] pair 3/20 AB: A 0.0096 s, B 0.0097 s, B/A 1.0023
+[compare] pair 4/20 BA: A 0.0096 s, B 0.0096 s, B/A 0.9974
+[compare] pair 5/20 AB: A 0.0093 s, B 0.0093 s, B/A 0.9920
+[compare] pair 6/20 BA: A 0.0092 s, B 0.0095 s, B/A 1.0260
+[compare] pair 7/20 AB: A 0.0096 s, B 0.0093 s, B/A 0.9701
+[compare] pair 8/20 BA: A 0.0095 s, B 0.0097 s, B/A 1.0213
+[compare] pair 9/20 AB: A 0.0093 s, B 0.0094 s, B/A 1.0054
+[compare] pair 10/20 BA: A 0.0095 s, B 0.0094 s, B/A 0.9813
+[compare] pair 11/20 AB: A 0.0410 s, B 0.0094 s, B/A 0.2283
+[compare] pair 12/20 BA: A 0.0094 s, B 0.0097 s, B/A 1.0299
+[compare] pair 13/20 AB: A 0.0095 s, B 0.0098 s, B/A 1.0298
+[compare] pair 14/20 BA: A 0.0093 s, B 0.0096 s, B/A 1.0365
+[compare] pair 15/20 AB: A 0.0095 s, B 0.0095 s, B/A 1.0033
+[compare] pair 16/20 BA: A 0.0093 s, B 0.0095 s, B/A 1.0204
+[compare] pair 17/20 AB: A 0.0096 s, B 0.0098 s, B/A 1.0197
+[compare] pair 18/20 BA: A 0.0096 s, B 0.0095 s, B/A 0.9920
+[compare] pair 19/20 AB: A 0.0099 s, B 0.0098 s, B/A 0.9955
+[compare] pair 20/20 BA: A 0.0327 s, B 0.0095 s, B/A 0.2890
+uarch_lab: timed ok in 2.1 s 20 pairs (--pairs 20)
+uarch_lab: total 2.3 s; NO DETECTABLE DIFFERENCE: wall time B/A 1.0028, 95% CI [0.9920, 1.0213] includes 1.0 over 20 pairs; any real change is within about +/-2.13% (wider than the 0.5% practical floor: more pairs are needed to rule out an effect of that size). Detectable moves (CI excludes 1; they explain, they do not decide): instructions +3.91%; IPC +2.99%; branch MPKI +1.95%; page faults -0.50% (below floor).
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/symbol_table-syntax-only/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/symbol_table-syntax-only/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/control_flow-syntax-only; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.01 s
+[compare] candidate warm-up 0.01 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0128 s, B 0.0129 s, B/A 1.0126
+[compare] pair 2/20 BA: A 0.0128 s, B 0.0132 s, B/A 1.0362
+[compare] pair 3/20 AB: A 0.0126 s, B 0.0129 s, B/A 1.0208
+[compare] pair 4/20 BA: A 0.0126 s, B 0.0130 s, B/A 1.0314
+[compare] pair 5/20 AB: A 0.0129 s, B 0.0127 s, B/A 0.9837
+[compare] pair 6/20 BA: A 0.0126 s, B 0.0402 s, B/A 3.1971
+[compare] pair 7/20 AB: A 0.0129 s, B 0.0129 s, B/A 0.9959
+[compare] pair 8/20 BA: A 0.0131 s, B 0.0128 s, B/A 0.9835
+[compare] pair 9/20 AB: A 0.0125 s, B 0.0128 s, B/A 1.0239
+[compare] pair 10/20 BA: A 0.0126 s, B 0.0129 s, B/A 1.0176
+[compare] pair 11/20 AB: A 0.0125 s, B 0.0127 s, B/A 1.0120
+[compare] pair 12/20 BA: A 0.0128 s, B 0.0133 s, B/A 1.0410
+[compare] pair 13/20 AB: A 0.0128 s, B 0.0126 s, B/A 0.9840
+[compare] pair 14/20 BA: A 0.0129 s, B 0.0545 s, B/A 4.2243
+[compare] pair 15/20 AB: A 0.0128 s, B 0.0130 s, B/A 1.0133
+[compare] pair 16/20 BA: A 0.0126 s, B 0.0132 s, B/A 1.0524
+[compare] pair 17/20 AB: A 0.0127 s, B 0.0128 s, B/A 1.0072
+[compare] pair 18/20 BA: A 0.0128 s, B 0.0128 s, B/A 1.0001
+[compare] pair 19/20 AB: A 0.0128 s, B 0.0128 s, B/A 1.0030
+[compare] pair 20/20 BA: A 0.0126 s, B 0.0127 s, B/A 1.0009
+uarch_lab: timed ok in 2.7 s 20 pairs (--pairs 20)
+uarch_lab: total 2.8 s; BELOW THE PRACTICAL FLOOR: wall time B/A 1.0130 (+1.30%) is below the 0.5% practical floor (95% CI [1.0009, 1.0314] over 20 pairs excludes 1.0 but reaches inside the floor; measurement-instance effects of ~0.5% were seen in A/A on Zen 5, LAB3); any real change is within about +/-3.14%. Not evidence of a code effect: run an A/A comparison on this host before trusting a difference this small. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +0.42%; cycles +1.33% (below floor); IPC -0.91% (below floor).
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/control_flow-syntax-only/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/control_flow-syntax-only/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/backend_pressure-syntax-only; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.01 s
+[compare] candidate warm-up 0.01 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0196 s, B 0.0200 s, B/A 1.0202
+[compare] pair 2/20 BA: A 0.0198 s, B 0.0200 s, B/A 1.0115
+[compare] pair 3/20 AB: A 0.0198 s, B 0.0200 s, B/A 1.0101
+[compare] pair 4/20 BA: A 0.0201 s, B 0.0201 s, B/A 0.9997
+[compare] pair 5/20 AB: A 0.0196 s, B 0.0205 s, B/A 1.0480
+[compare] pair 6/20 BA: A 0.0199 s, B 0.0200 s, B/A 1.0041
+[compare] pair 7/20 AB: A 0.0343 s, B 0.0202 s, B/A 0.5887
+[compare] pair 8/20 BA: A 0.0197 s, B 0.0204 s, B/A 1.0378
+[compare] pair 9/20 AB: A 0.0198 s, B 0.0203 s, B/A 1.0237
+[compare] pair 10/20 BA: A 0.0197 s, B 0.0198 s, B/A 1.0052
+[compare] pair 11/20 AB: A 0.0198 s, B 0.0200 s, B/A 1.0096
+[compare] pair 12/20 BA: A 0.0199 s, B 0.0200 s, B/A 1.0045
+[compare] pair 13/20 AB: A 0.0197 s, B 0.0200 s, B/A 1.0143
+[compare] pair 14/20 BA: A 0.0197 s, B 0.0438 s, B/A 2.2248
+[compare] pair 15/20 AB: A 0.0201 s, B 0.0201 s, B/A 1.0008
+[compare] pair 16/20 BA: A 0.0197 s, B 0.0202 s, B/A 1.0259
+[compare] pair 17/20 AB: A 0.0198 s, B 0.0201 s, B/A 1.0119
+[compare] pair 18/20 BA: A 0.0196 s, B 0.0200 s, B/A 1.0160
+[compare] pair 19/20 AB: A 0.0199 s, B 0.0200 s, B/A 1.0066
+[compare] pair 20/20 BA: A 0.0202 s, B 0.0200 s, B/A 0.9946
+uarch_lab: timed ok in 2.9 s 20 pairs (--pairs 20)
+uarch_lab: total 3.1 s; BELOW THE PRACTICAL FLOOR: wall time B/A 1.0108 (+1.08%) is below the 0.5% practical floor (95% CI [1.0045, 1.0202] over 20 pairs excludes 1.0 but reaches inside the floor; measurement-instance effects of ~0.5% were seen in A/A on Zen 5, LAB3); any real change is within about +/-2.02%. Not evidence of a code effect: run an A/A comparison on this host before trusting a difference this small. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +0.05%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/backend_pressure-syntax-only/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/backend_pressure-syntax-only/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/tiny_startup-object-fast; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.00 s
+[compare] candidate warm-up 0.00 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0092 s, B 0.0089 s, B/A 0.9742
+[compare] pair 2/20 BA: A 0.0092 s, B 0.0089 s, B/A 0.9680
+[compare] pair 3/20 AB: A 0.0089 s, B 0.0091 s, B/A 1.0197
+[compare] pair 4/20 BA: A 0.0093 s, B 0.0092 s, B/A 0.9896
+[compare] pair 5/20 AB: A 0.0092 s, B 0.0091 s, B/A 0.9960
+[compare] pair 6/20 BA: A 0.0092 s, B 0.0093 s, B/A 1.0120
+[compare] pair 7/20 AB: A 0.0096 s, B 0.0091 s, B/A 0.9477
+[compare] pair 8/20 BA: A 0.0093 s, B 0.0088 s, B/A 0.9534
+[compare] pair 9/20 AB: A 0.0093 s, B 0.0092 s, B/A 0.9918
+[compare] pair 10/20 BA: A 0.0091 s, B 0.0435 s, B/A 4.7712
+[compare] pair 11/20 AB: A 0.0091 s, B 0.0092 s, B/A 1.0170
+[compare] pair 12/20 BA: A 0.0091 s, B 0.0093 s, B/A 1.0152
+[compare] pair 13/20 AB: A 0.0090 s, B 0.0091 s, B/A 1.0067
+[compare] pair 14/20 BA: A 0.0091 s, B 0.0091 s, B/A 1.0033
+[compare] pair 15/20 AB: A 0.0093 s, B 0.0094 s, B/A 1.0133
+[compare] pair 16/20 BA: A 0.0090 s, B 0.0093 s, B/A 1.0325
+[compare] pair 17/20 AB: A 0.0092 s, B 0.0090 s, B/A 0.9796
+[compare] pair 18/20 BA: A 0.0089 s, B 0.0091 s, B/A 1.0200
+[compare] pair 19/20 AB: A 0.0091 s, B 0.0092 s, B/A 1.0197
+[compare] pair 20/20 BA: A 0.0092 s, B 0.0093 s, B/A 1.0159
+uarch_lab: timed ok in 2.0 s 20 pairs (--pairs 20)
+uarch_lab: total 2.2 s; NO DETECTABLE DIFFERENCE: wall time B/A 1.0093, 95% CI [0.9896, 1.0170] includes 1.0 over 20 pairs; any real change is within about +/-1.70% (wider than the 0.5% practical floor: more pairs are needed to rule out an effect of that size). Detectable moves (CI excludes 1; they explain, they do not decide): instructions +0.04%; cycles +0.63% (below floor); IPC -0.59% (below floor); branch MPKI +0.49% (below floor).
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/tiny_startup-object-fast/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/tiny_startup-object-fast/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/tiny_startup-object-quality; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.00 s
+[compare] candidate warm-up 0.00 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0091 s, B 0.0090 s, B/A 0.9960
+[compare] pair 2/20 BA: A 0.0093 s, B 0.0093 s, B/A 1.0025
+[compare] pair 3/20 AB: A 0.0091 s, B 0.0090 s, B/A 0.9905
+[compare] pair 4/20 BA: A 0.0090 s, B 0.0090 s, B/A 0.9998
+[compare] pair 5/20 AB: A 0.0091 s, B 0.0093 s, B/A 1.0255
+[compare] pair 6/20 BA: A 0.0093 s, B 0.0092 s, B/A 0.9848
+[compare] pair 7/20 AB: A 0.0092 s, B 0.0091 s, B/A 0.9858
+[compare] pair 8/20 BA: A 0.0091 s, B 0.0090 s, B/A 0.9877
+[compare] pair 9/20 AB: A 0.0093 s, B 0.0094 s, B/A 1.0099
+[compare] pair 10/20 BA: A 0.0091 s, B 0.0091 s, B/A 0.9982
+[compare] pair 11/20 AB: A 0.0342 s, B 0.0095 s, B/A 0.2776
+[compare] pair 12/20 BA: A 0.0090 s, B 0.0091 s, B/A 1.0046
+[compare] pair 13/20 AB: A 0.0091 s, B 0.0089 s, B/A 0.9775
+[compare] pair 14/20 BA: A 0.0092 s, B 0.0089 s, B/A 0.9695
+[compare] pair 15/20 AB: A 0.0089 s, B 0.0094 s, B/A 1.0503
+[compare] pair 16/20 BA: A 0.0089 s, B 0.0093 s, B/A 1.0413
+[compare] pair 17/20 AB: A 0.0091 s, B 0.0094 s, B/A 1.0256
+[compare] pair 18/20 BA: A 0.0093 s, B 0.0096 s, B/A 1.0321
+[compare] pair 19/20 AB: A 0.0092 s, B 0.0090 s, B/A 0.9784
+[compare] pair 20/20 BA: A 0.0341 s, B 0.0091 s, B/A 0.2656
+uarch_lab: timed ok in 2.1 s 20 pairs (--pairs 20)
+uarch_lab: total 2.3 s; NO DETECTABLE DIFFERENCE: wall time B/A 0.9971, 95% CI [0.9848, 1.0099] includes 1.0 over 20 pairs; any real change is within about +/-1.52% (wider than the 0.5% practical floor: more pairs are needed to rule out an effect of that size). Detectable moves (CI excludes 1; they explain, they do not decide): instructions +0.04%; cycles +0.69% (below floor); IPC -0.64% (below floor); branch MPKI +0.29% (below floor).
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/tiny_startup-object-quality/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/tiny_startup-object-quality/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/large_function-object-fast; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.01 s
+[compare] candidate warm-up 0.01 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0129 s, B 0.0131 s, B/A 1.0168
+[compare] pair 2/20 BA: A 0.0129 s, B 0.0132 s, B/A 1.0236
+[compare] pair 3/20 AB: A 0.0128 s, B 0.0133 s, B/A 1.0430
+[compare] pair 4/20 BA: A 0.0127 s, B 0.0132 s, B/A 1.0415
+[compare] pair 5/20 AB: A 0.0129 s, B 0.0132 s, B/A 1.0189
+[compare] pair 6/20 BA: A 0.0128 s, B 0.0376 s, B/A 2.9347
+[compare] pair 7/20 AB: A 0.0130 s, B 0.0132 s, B/A 1.0129
+[compare] pair 8/20 BA: A 0.0129 s, B 0.0132 s, B/A 1.0214
+[compare] pair 9/20 AB: A 0.0126 s, B 0.0136 s, B/A 1.0751
+[compare] pair 10/20 BA: A 0.0129 s, B 0.0132 s, B/A 1.0216
+[compare] pair 11/20 AB: A 0.0131 s, B 0.0137 s, B/A 1.0397
+[compare] pair 12/20 BA: A 0.0128 s, B 0.0132 s, B/A 1.0268
+[compare] pair 13/20 AB: A 0.0129 s, B 0.0131 s, B/A 1.0178
+[compare] pair 14/20 BA: A 0.0129 s, B 0.0333 s, B/A 2.5843
+[compare] pair 15/20 AB: A 0.0129 s, B 0.0131 s, B/A 1.0155
+[compare] pair 16/20 BA: A 0.0130 s, B 0.0135 s, B/A 1.0405
+[compare] pair 17/20 AB: A 0.0130 s, B 0.0132 s, B/A 1.0159
+[compare] pair 18/20 BA: A 0.0129 s, B 0.0132 s, B/A 1.0252
+[compare] pair 19/20 AB: A 0.0129 s, B 0.0134 s, B/A 1.0363
+[compare] pair 20/20 BA: A 0.0129 s, B 0.0131 s, B/A 1.0108
+uarch_lab: timed ok in 2.6 s 20 pairs (--pairs 20)
+uarch_lab: total 2.8 s; Candidate is SLOWER: wall time B/A 1.0244 (+2.44%), 95% CI [1.0178, 1.0405] over 20 pairs, beyond the 0.5% practical floor. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +6.08%; cycles +8.28%; IPC -2.04%; branch MPKI +21.86%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/large_function-object-fast/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/large_function-object-fast/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/large_function-object-quality; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.01 s
+[compare] candidate warm-up 0.01 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0133 s, B 0.0133 s, B/A 0.9998
+[compare] pair 2/20 BA: A 0.0128 s, B 0.0133 s, B/A 1.0343
+[compare] pair 3/20 AB: A 0.0128 s, B 0.0134 s, B/A 1.0496
+[compare] pair 4/20 BA: A 0.0130 s, B 0.0135 s, B/A 1.0354
+[compare] pair 5/20 AB: A 0.0133 s, B 0.0133 s, B/A 0.9993
+[compare] pair 6/20 BA: A 0.0130 s, B 0.0134 s, B/A 1.0256
+[compare] pair 7/20 AB: A 0.0134 s, B 0.0132 s, B/A 0.9860
+[compare] pair 8/20 BA: A 0.0129 s, B 0.0377 s, B/A 2.9168
+[compare] pair 9/20 AB: A 0.0130 s, B 0.0133 s, B/A 1.0220
+[compare] pair 10/20 BA: A 0.0129 s, B 0.0134 s, B/A 1.0385
+[compare] pair 11/20 AB: A 0.0129 s, B 0.0135 s, B/A 1.0423
+[compare] pair 12/20 BA: A 0.0133 s, B 0.0133 s, B/A 0.9992
+[compare] pair 13/20 AB: A 0.0131 s, B 0.0133 s, B/A 1.0195
+[compare] pair 14/20 BA: A 0.0129 s, B 0.0133 s, B/A 1.0327
+[compare] pair 15/20 AB: A 0.0131 s, B 0.0137 s, B/A 1.0456
+[compare] pair 16/20 BA: A 0.0460 s, B 0.0132 s, B/A 0.2875
+[compare] pair 17/20 AB: A 0.0131 s, B 0.0136 s, B/A 1.0373
+[compare] pair 18/20 BA: A 0.0129 s, B 0.0136 s, B/A 1.0519
+[compare] pair 19/20 AB: A 0.0131 s, B 0.0136 s, B/A 1.0425
+[compare] pair 20/20 BA: A 0.0130 s, B 0.0134 s, B/A 1.0311
+uarch_lab: timed ok in 2.5 s 20 pairs (--pairs 20)
+uarch_lab: total 2.7 s; Candidate is SLOWER: wall time B/A 1.0335 (+3.35%), 95% CI [1.0195, 1.0423] over 20 pairs, beyond the 0.5% practical floor. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +5.99%; cycles +8.59%; IPC -2.39%; branch MPKI +21.70%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/large_function-object-quality/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/large_function-object-quality/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/many_functions-object-fast; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.01 s
+[compare] candidate warm-up 0.01 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0120 s, B 0.0122 s, B/A 1.0195
+[compare] pair 2/20 BA: A 0.0122 s, B 0.0122 s, B/A 1.0045
+[compare] pair 3/20 AB: A 0.0122 s, B 0.0121 s, B/A 0.9867
+[compare] pair 4/20 BA: A 0.0119 s, B 0.0120 s, B/A 1.0086
+[compare] pair 5/20 AB: A 0.0120 s, B 0.0123 s, B/A 1.0176
+[compare] pair 6/20 BA: A 0.0123 s, B 0.0121 s, B/A 0.9789
+[compare] pair 7/20 AB: A 0.0122 s, B 0.0124 s, B/A 1.0156
+[compare] pair 8/20 BA: A 0.0120 s, B 0.0123 s, B/A 1.0237
+[compare] pair 9/20 AB: A 0.0121 s, B 0.0123 s, B/A 1.0176
+[compare] pair 10/20 BA: A 0.0121 s, B 0.0121 s, B/A 1.0022
+[compare] pair 11/20 AB: A 0.0124 s, B 0.0122 s, B/A 0.9792
+[compare] pair 12/20 BA: A 0.0123 s, B 0.0122 s, B/A 0.9993
+[compare] pair 13/20 AB: A 0.0270 s, B 0.0121 s, B/A 0.4474
+[compare] pair 14/20 BA: A 0.0120 s, B 0.0123 s, B/A 1.0271
+[compare] pair 15/20 AB: A 0.0122 s, B 0.0121 s, B/A 0.9874
+[compare] pair 16/20 BA: A 0.0122 s, B 0.0125 s, B/A 1.0231
+[compare] pair 17/20 AB: A 0.0122 s, B 0.0123 s, B/A 1.0098
+[compare] pair 18/20 BA: A 0.0120 s, B 0.0124 s, B/A 1.0341
+[compare] pair 19/20 AB: A 0.0122 s, B 0.0120 s, B/A 0.9853
+[compare] pair 20/20 BA: A 0.0122 s, B 0.0123 s, B/A 1.0023
+uarch_lab: timed ok in 2.2 s 20 pairs (--pairs 20)
+uarch_lab: total 2.4 s; NO DETECTABLE DIFFERENCE: wall time B/A 1.0065, 95% CI [0.9874, 1.0176] includes 1.0 over 20 pairs; any real change is within about +/-1.76% (wider than the 0.5% practical floor: more pairs are needed to rule out an effect of that size). Detectable moves (CI excludes 1; they explain, they do not decide): instructions +3.65%; cycles +3.36%; branch MPKI +2.66%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/many_functions-object-fast/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/many_functions-object-fast/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/many_functions-object-quality; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.01 s
+[compare] candidate warm-up 0.01 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0120 s, B 0.0120 s, B/A 1.0068
+[compare] pair 2/20 BA: A 0.0121 s, B 0.0119 s, B/A 0.9860
+[compare] pair 3/20 AB: A 0.0122 s, B 0.0121 s, B/A 0.9854
+[compare] pair 4/20 BA: A 0.0119 s, B 0.0120 s, B/A 1.0072
+[compare] pair 5/20 AB: A 0.0122 s, B 0.0122 s, B/A 1.0030
+[compare] pair 6/20 BA: A 0.0120 s, B 0.0123 s, B/A 1.0275
+[compare] pair 7/20 AB: A 0.0122 s, B 0.0125 s, B/A 1.0190
+[compare] pair 8/20 BA: A 0.0121 s, B 0.0122 s, B/A 1.0065
+[compare] pair 9/20 AB: A 0.0122 s, B 0.0126 s, B/A 1.0301
+[compare] pair 10/20 BA: A 0.0122 s, B 0.0348 s, B/A 2.8636
+[compare] pair 11/20 AB: A 0.0123 s, B 0.0122 s, B/A 0.9889
+[compare] pair 12/20 BA: A 0.0119 s, B 0.0122 s, B/A 1.0317
+[compare] pair 13/20 AB: A 0.0120 s, B 0.0121 s, B/A 1.0129
+[compare] pair 14/20 BA: A 0.0119 s, B 0.0121 s, B/A 1.0159
+[compare] pair 15/20 AB: A 0.0119 s, B 0.0121 s, B/A 1.0179
+[compare] pair 16/20 BA: A 0.0121 s, B 0.0125 s, B/A 1.0308
+[compare] pair 17/20 AB: A 0.0120 s, B 0.0121 s, B/A 1.0049
+[compare] pair 18/20 BA: A 0.0122 s, B 0.0123 s, B/A 1.0071
+[compare] pair 19/20 AB: A 0.0122 s, B 0.0123 s, B/A 1.0091
+[compare] pair 20/20 BA: A 0.0469 s, B 0.0121 s, B/A 0.2568
+uarch_lab: timed ok in 2.1 s 20 pairs (--pairs 20)
+uarch_lab: total 2.3 s; BELOW THE PRACTICAL FLOOR: wall time B/A 1.0082 (+0.82%) is below the 0.5% practical floor (95% CI [1.0049, 1.0190] over 20 pairs excludes 1.0 but reaches inside the floor; measurement-instance effects of ~0.5% were seen in A/A on Zen 5, LAB3); any real change is within about +/-1.90%. Not evidence of a code effect: run an A/A comparison on this host before trusting a difference this small. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +3.60%; cycles +3.02%; IPC +0.56% (below floor); branch MPKI +3.00%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/many_functions-object-quality/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/many_functions-object-quality/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/symbol_table-object-fast; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.01 s
+[compare] candidate warm-up 0.01 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0147 s, B 0.0147 s, B/A 1.0001
+[compare] pair 2/20 BA: A 0.0145 s, B 0.0146 s, B/A 1.0024
+[compare] pair 3/20 AB: A 0.0143 s, B 0.0147 s, B/A 1.0297
+[compare] pair 4/20 BA: A 0.0145 s, B 0.0147 s, B/A 1.0150
+[compare] pair 5/20 AB: A 0.0146 s, B 0.0144 s, B/A 0.9835
+[compare] pair 6/20 BA: A 0.0301 s, B 0.0146 s, B/A 0.4838
+[compare] pair 7/20 AB: A 0.0143 s, B 0.0147 s, B/A 1.0265
+[compare] pair 8/20 BA: A 0.0147 s, B 0.0147 s, B/A 1.0019
+[compare] pair 9/20 AB: A 0.0144 s, B 0.0146 s, B/A 1.0132
+[compare] pair 10/20 BA: A 0.0145 s, B 0.0145 s, B/A 1.0022
+[compare] pair 11/20 AB: A 0.0143 s, B 0.0148 s, B/A 1.0369
+[compare] pair 12/20 BA: A 0.0142 s, B 0.0146 s, B/A 1.0273
+[compare] pair 13/20 AB: A 0.0145 s, B 0.0146 s, B/A 1.0045
+[compare] pair 14/20 BA: A 0.0144 s, B 0.0496 s, B/A 3.4390
+[compare] pair 15/20 AB: A 0.0143 s, B 0.0150 s, B/A 1.0450
+[compare] pair 16/20 BA: A 0.0145 s, B 0.0146 s, B/A 1.0028
+[compare] pair 17/20 AB: A 0.0144 s, B 0.0146 s, B/A 1.0106
+[compare] pair 18/20 BA: A 0.0144 s, B 0.0145 s, B/A 1.0120
+[compare] pair 19/20 AB: A 0.0144 s, B 0.0145 s, B/A 1.0079
+[compare] pair 20/20 BA: A 0.0143 s, B 0.0148 s, B/A 1.0349
+uarch_lab: timed ok in 2.8 s 20 pairs (--pairs 20)
+uarch_lab: total 3.0 s; BELOW THE PRACTICAL FLOOR: wall time B/A 1.0113 (+1.13%) is below the 0.5% practical floor (95% CI [1.0024, 1.0273] over 20 pairs excludes 1.0 but reaches inside the floor; measurement-instance effects of ~0.5% were seen in A/A on Zen 5, LAB3); any real change is within about +/-2.73%. Not evidence of a code effect: run an A/A comparison on this host before trusting a difference this small. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +3.88%; cycles +3.30%; IPC +0.56% (below floor); branch MPKI -2.78%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/symbol_table-object-fast/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/symbol_table-object-fast/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/symbol_table-object-quality; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.01 s
+[compare] candidate warm-up 0.01 s
+uarch_lab: prepare ok in 0.1 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0143 s, B 0.0148 s, B/A 1.0348
+[compare] pair 2/20 BA: A 0.0146 s, B 0.0144 s, B/A 0.9916
+[compare] pair 3/20 AB: A 0.0143 s, B 0.0146 s, B/A 1.0210
+[compare] pair 4/20 BA: A 0.0144 s, B 0.0153 s, B/A 1.0611
+[compare] pair 5/20 AB: A 0.0144 s, B 0.0148 s, B/A 1.0237
+[compare] pair 6/20 BA: A 0.0147 s, B 0.0146 s, B/A 0.9958
+[compare] pair 7/20 AB: A 0.0144 s, B 0.0146 s, B/A 1.0140
+[compare] pair 8/20 BA: A 0.0145 s, B 0.0145 s, B/A 1.0034
+[compare] pair 9/20 AB: A 0.0144 s, B 0.0145 s, B/A 1.0074
+[compare] pair 10/20 BA: A 0.0146 s, B 0.0145 s, B/A 0.9966
+[compare] pair 11/20 AB: A 0.0145 s, B 0.0145 s, B/A 1.0025
+[compare] pair 12/20 BA: A 0.0144 s, B 0.0150 s, B/A 1.0389
+[compare] pair 13/20 AB: A 0.0143 s, B 0.0145 s, B/A 1.0148
+[compare] pair 14/20 BA: A 0.0147 s, B 0.0146 s, B/A 0.9966
+[compare] pair 15/20 AB: A 0.0148 s, B 0.0265 s, B/A 1.7920
+[compare] pair 16/20 BA: A 0.0145 s, B 0.0145 s, B/A 1.0037
+[compare] pair 17/20 AB: A 0.0145 s, B 0.0146 s, B/A 1.0094
+[compare] pair 18/20 BA: A 0.0147 s, B 0.0145 s, B/A 0.9872
+[compare] pair 19/20 AB: A 0.0146 s, B 0.0146 s, B/A 1.0023
+[compare] pair 20/20 BA: A 0.0145 s, B 0.0150 s, B/A 1.0345
+uarch_lab: timed ok in 2.7 s 20 pairs (--pairs 20)
+uarch_lab: total 2.9 s; BELOW THE PRACTICAL FLOOR: wall time B/A 1.0084 (+0.84%) is below the 0.5% practical floor (95% CI [1.0023, 1.0237] over 20 pairs excludes 1.0 but reaches inside the floor; measurement-instance effects of ~0.5% were seen in A/A on Zen 5, LAB3); any real change is within about +/-2.37%. Not evidence of a code effect: run an A/A comparison on this host before trusting a difference this small. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +3.86%; cycles +2.88%; IPC +0.95%; branch MPKI -2.94%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/symbol_table-object-quality/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/symbol_table-object-quality/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/control_flow-object-fast; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.03 s
+[compare] candidate warm-up 0.03 s
+uarch_lab: prepare ok in 0.2 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0305 s, B 0.0326 s, B/A 1.0674
+[compare] pair 2/20 BA: A 0.0302 s, B 0.0322 s, B/A 1.0645
+[compare] pair 3/20 AB: A 0.0298 s, B 0.0322 s, B/A 1.0790
+[compare] pair 4/20 BA: A 0.0301 s, B 0.0318 s, B/A 1.0551
+[compare] pair 5/20 AB: A 0.0302 s, B 0.0321 s, B/A 1.0631
+[compare] pair 6/20 BA: A 0.0517 s, B 0.0321 s, B/A 0.6207
+[compare] pair 7/20 AB: A 0.0303 s, B 0.0318 s, B/A 1.0499
+[compare] pair 8/20 BA: A 0.0299 s, B 0.0319 s, B/A 1.0653
+[compare] pair 9/20 AB: A 0.0302 s, B 0.0321 s, B/A 1.0605
+[compare] pair 10/20 BA: A 0.0300 s, B 0.0319 s, B/A 1.0617
+[compare] pair 11/20 AB: A 0.0305 s, B 0.0323 s, B/A 1.0586
+[compare] pair 12/20 BA: A 0.0308 s, B 0.0324 s, B/A 1.0517
+[compare] pair 13/20 AB: A 0.0306 s, B 0.0322 s, B/A 1.0536
+[compare] pair 14/20 BA: A 0.0300 s, B 0.0690 s, B/A 2.2976
+[compare] pair 15/20 AB: A 0.0302 s, B 0.0320 s, B/A 1.0613
+[compare] pair 16/20 BA: A 0.0302 s, B 0.0319 s, B/A 1.0564
+[compare] pair 17/20 AB: A 0.0305 s, B 0.0324 s, B/A 1.0610
+[compare] pair 18/20 BA: A 0.0303 s, B 0.0320 s, B/A 1.0554
+[compare] pair 19/20 AB: A 0.0305 s, B 0.0321 s, B/A 1.0530
+[compare] pair 20/20 BA: A 0.0301 s, B 0.0323 s, B/A 1.0716
+uarch_lab: timed ok in 3.0 s 20 pairs (--pairs 20)
+uarch_lab: total 3.3 s; Candidate is SLOWER: wall time B/A 1.0608 (+6.08%), 95% CI [1.0551, 1.0645] over 20 pairs, beyond the 0.5% practical floor. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +5.17%; cycles +8.04%; IPC -2.66%; branch MPKI +13.34%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/control_flow-object-fast/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/control_flow-object-fast/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/control_flow-object-quality; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.03 s
+[compare] candidate warm-up 0.03 s
+uarch_lab: prepare ok in 0.2 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0305 s, B 0.0322 s, B/A 1.0537
+[compare] pair 2/20 BA: A 0.0307 s, B 0.0321 s, B/A 1.0434
+[compare] pair 3/20 AB: A 0.0306 s, B 0.0324 s, B/A 1.0581
+[compare] pair 4/20 BA: A 0.0306 s, B 0.0322 s, B/A 1.0536
+[compare] pair 5/20 AB: A 0.0303 s, B 0.0328 s, B/A 1.0817
+[compare] pair 6/20 BA: A 0.0581 s, B 0.0329 s, B/A 0.5660
+[compare] pair 7/20 AB: A 0.0308 s, B 0.0324 s, B/A 1.0528
+[compare] pair 8/20 BA: A 0.0302 s, B 0.0323 s, B/A 1.0715
+[compare] pair 9/20 AB: A 0.0308 s, B 0.0323 s, B/A 1.0476
+[compare] pair 10/20 BA: A 0.0302 s, B 0.0323 s, B/A 1.0704
+[compare] pair 11/20 AB: A 0.0306 s, B 0.0325 s, B/A 1.0640
+[compare] pair 12/20 BA: A 0.0306 s, B 0.0320 s, B/A 1.0458
+[compare] pair 13/20 AB: A 0.0306 s, B 0.0328 s, B/A 1.0714
+[compare] pair 14/20 BA: A 0.0304 s, B 0.0603 s, B/A 1.9801
+[compare] pair 15/20 AB: A 0.0311 s, B 0.0325 s, B/A 1.0443
+[compare] pair 16/20 BA: A 0.0306 s, B 0.0325 s, B/A 1.0619
+[compare] pair 17/20 AB: A 0.0301 s, B 0.0321 s, B/A 1.0661
+[compare] pair 18/20 BA: A 0.0307 s, B 0.0324 s, B/A 1.0538
+[compare] pair 19/20 AB: A 0.0306 s, B 0.0321 s, B/A 1.0502
+[compare] pair 20/20 BA: A 0.0306 s, B 0.0326 s, B/A 1.0650
+uarch_lab: timed ok in 2.9 s 20 pairs (--pairs 20)
+uarch_lab: total 3.2 s; Candidate is SLOWER: wall time B/A 1.0560 (+5.60%), 95% CI [1.0502, 1.0661] over 20 pairs, beyond the 0.5% practical floor. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +5.11%; cycles +7.39%; IPC -2.13%; branch MPKI +12.88%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/control_flow-object-quality/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/control_flow-object-quality/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/backend_pressure-object-fast; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.05 s
+[compare] candidate warm-up 0.06 s
+uarch_lab: prepare ok in 0.4 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0557 s, B 0.0613 s, B/A 1.1011
+[compare] pair 2/20 BA: A 0.0556 s, B 0.0612 s, B/A 1.1008
+[compare] pair 3/20 AB: A 0.0556 s, B 0.0612 s, B/A 1.1011
+[compare] pair 4/20 BA: A 0.0562 s, B 0.0617 s, B/A 1.0971
+[compare] pair 5/20 AB: A 0.0563 s, B 0.0614 s, B/A 1.0915
+[compare] pair 6/20 BA: A 0.0561 s, B 0.0619 s, B/A 1.1035
+[compare] pair 7/20 AB: A 0.0563 s, B 0.0612 s, B/A 1.0871
+[compare] pair 8/20 BA: A 0.0561 s, B 0.0616 s, B/A 1.0990
+[compare] pair 9/20 AB: A 0.0554 s, B 0.0969 s, B/A 1.7494
+[compare] pair 10/20 BA: A 0.0568 s, B 0.0615 s, B/A 1.0844
+[compare] pair 11/20 AB: A 0.0555 s, B 0.0621 s, B/A 1.1191
+[compare] pair 12/20 BA: A 0.0557 s, B 0.0611 s, B/A 1.0983
+[compare] pair 13/20 AB: A 0.0557 s, B 0.0614 s, B/A 1.1020
+[compare] pair 14/20 BA: A 0.0555 s, B 0.0612 s, B/A 1.1027
+[compare] pair 15/20 AB: A 0.0558 s, B 0.0617 s, B/A 1.1059
+[compare] pair 16/20 BA: A 0.0561 s, B 0.0613 s, B/A 1.0921
+[compare] pair 17/20 AB: A 0.0558 s, B 0.0615 s, B/A 1.1025
+[compare] pair 18/20 BA: A 0.0556 s, B 0.0613 s, B/A 1.1020
+[compare] pair 19/20 AB: A 0.0557 s, B 0.0943 s, B/A 1.6941
+[compare] pair 20/20 BA: A 0.0556 s, B 0.0613 s, B/A 1.1010
+uarch_lab: timed ok in 4.2 s 20 pairs (--pairs 20)
+uarch_lab: total 4.7 s; Candidate is SLOWER: wall time B/A 1.1011 (+10.11%), 95% CI [1.0983, 1.1027] over 20 pairs, beyond the 0.5% practical floor. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +7.11%; cycles +12.52%; IPC -4.81%; branch MPKI +20.64%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/backend_pressure-object-fast/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/backend_pressure-object-fast/summary.json
+uarch_lab: compare output /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/backend_pressure-object-quality; 20 pairs (--pairs)
+uarch_lab: env ok in 0.0 s 14 metric groups selected
+uarch_lab: env-b ok in 0.0 s 14 metric groups selected
+[compare] baseline warm-up 0.06 s
+[compare] candidate warm-up 0.06 s
+uarch_lab: prepare ok in 0.4 s baseline and candidate outputs identical
+[compare] pair 1/20 AB: A 0.0870 s, B 0.0659 s, B/A 0.7578
+[compare] pair 2/20 BA: A 0.0612 s, B 0.0661 s, B/A 1.0813
+[compare] pair 3/20 AB: A 0.0610 s, B 0.0662 s, B/A 1.0849
+[compare] pair 4/20 BA: A 0.0608 s, B 0.0666 s, B/A 1.0944
+[compare] pair 5/20 AB: A 0.0608 s, B 0.0946 s, B/A 1.5549
+[compare] pair 6/20 BA: A 0.0610 s, B 0.0661 s, B/A 1.0842
+[compare] pair 7/20 AB: A 0.0611 s, B 0.0666 s, B/A 1.0899
+[compare] pair 8/20 BA: A 0.0606 s, B 0.0664 s, B/A 1.0958
+[compare] pair 9/20 AB: A 0.0607 s, B 0.0666 s, B/A 1.0975
+[compare] pair 10/20 BA: A 0.0611 s, B 0.0662 s, B/A 1.0834
+[compare] pair 11/20 AB: A 0.0610 s, B 0.0670 s, B/A 1.0992
+[compare] pair 12/20 BA: A 0.0608 s, B 0.0662 s, B/A 1.0887
+[compare] pair 13/20 AB: A 0.0608 s, B 0.0669 s, B/A 1.0999
+[compare] pair 14/20 BA: A 0.0613 s, B 0.0661 s, B/A 1.0788
+[compare] pair 15/20 AB: A 0.0607 s, B 0.0666 s, B/A 1.0977
+[compare] pair 16/20 BA: A 0.0606 s, B 0.0664 s, B/A 1.0955
+[compare] pair 17/20 AB: A 0.0607 s, B 0.0664 s, B/A 1.0932
+[compare] pair 18/20 BA: A 0.0821 s, B 0.0661 s, B/A 0.8049
+[compare] pair 19/20 AB: A 0.0606 s, B 0.0669 s, B/A 1.1048
+[compare] pair 20/20 BA: A 0.0606 s, B 0.0663 s, B/A 1.0937
+uarch_lab: timed ok in 4.9 s 20 pairs (--pairs 20)
+uarch_lab: total 5.4 s; Candidate is SLOWER: wall time B/A 1.0934 (+9.34%), 95% CI [1.0842, 1.0975] over 20 pairs, beyond the 0.5% practical floor. Detectable moves (CI excludes 1; they explain, they do not decide): instructions +6.37%; cycles +11.12%; IPC -4.27%; branch MPKI +20.72%.
+uarch_lab: report /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/backend_pressure-object-quality/report.md, summary /var/lib/buster-github-runner/actions-runner/_work/_temp/compiler-bench/work/ast-retirement-acceptance/backend_pressure-object-quality/summary.json
+ast_retirement_acceptance: complete

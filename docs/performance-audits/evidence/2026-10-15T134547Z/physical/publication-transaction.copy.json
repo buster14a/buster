@@ -1,0 +1,63 @@
+{
+  "schema": "buster-4239-final02a-publication-transaction-v1",
+  "before_at": "2026-10-15T13:29:22.206697+00:00",
+  "main_before": {
+    "ref": "refs/heads/main",
+    "node_id": "REF_kwDOP-FZBa9yZWZzL2hlYWRzL21haW4",
+    "url": "https://api.github.com/repos/buster14a/buster/git/refs/heads/main",
+    "object": {
+      "sha": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "type": "commit",
+      "url": "https://api.github.com/repos/buster14a/buster/git/commits/02a6414e020f5d549122197c3a7c8407df5bed76"
+    }
+  },
+  "pr_before": {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "headRefOid": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+          "isInMergeQueue": false,
+          "mergeQueueEntry": null,
+          "autoMergeRequest": null
+        }
+      }
+    }
+  },
+  "push_started": "2026-10-15T13:29:23.198448+00:00",
+  "push_finished": "2026-10-15T13:29:26.314457+00:00",
+  "push_exit": 0,
+  "push_log_sha256": "cc9ee420f1d266452f3ec845adb6c7bf84494d2277e5edd68e62951b26bc24e9",
+  "after_at": "2026-10-15T13:29:27.297758+00:00",
+  "main_after": {
+    "ref": "refs/heads/main",
+    "node_id": "REF_kwDOP-FZBa9yZWZzL2hlYWRzL21haW4",
+    "url": "https://api.github.com/repos/buster14a/buster/git/refs/heads/main",
+    "object": {
+      "sha": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "type": "commit",
+      "url": "https://api.github.com/repos/buster14a/buster/git/commits/02a6414e020f5d549122197c3a7c8407df5bed76"
+    }
+  },
+  "pr_after": {
+    "data": {
+      "repository": {
+        "pullRequest": {
+          "headRefOid": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+          "isInMergeQueue": false,
+          "mergeQueueEntry": null,
+          "autoMergeRequest": null
+        }
+      }
+    }
+  },
+  "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+  "tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+  "code_parent": "056bb69aecf3db4f2720ab82adee99cc800f5f45",
+  "request_sha256": "97222cf4fcde6990278b683e222e36fda3d5946be87361f8ad3106221e059285",
+  "main_stable_and_actual_at_publication": true,
+  "head_published": false,
+  "source_clean": true,
+  "preflight": "https://github.com/buster14a/buster/issues/4058#issuecomment-6193233067",
+  "all_final_qualification": "PENDING; exact composition gates and physical audit required",
+  "queue_mutation": false
+}

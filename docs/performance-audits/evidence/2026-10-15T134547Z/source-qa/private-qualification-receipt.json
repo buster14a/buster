@@ -1,0 +1,398 @@
+{
+  "schema": "buster-finalH-private-qualification-v1",
+  "sealed_utc": "2026-10-15T13:39:34.920528+00:00",
+  "purpose": "Exact publishedH full private same-path qualification versus fresh actual02a main; no earlier slice/compiler/reference is substituted.",
+  "source": {
+    "baseline": {
+      "head": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "tree": "5aa95687f3d2056f07760ae0347d200b06c84eee"
+    },
+    "candidate": {
+      "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+      "clean_detached": true
+    },
+    "published_code_parent": "056bb69aecf3db4f2720ab82adee99cc800f5f45",
+    "candidate_transition": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/finalH-source-transition.json",
+      "bytes": 2593,
+      "sha256": "74e9711581f2951895199a688119dd05822af14df827f37cb475d10b78de7bc8"
+    },
+    "publication_confirmation": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-publication/publication-head-confirmation.json",
+      "bytes": 1752,
+      "sha256": "f0065515e25168dd60238f5bcd7827b61d6977055e113d30ba4727a7f0d5a9e7"
+    },
+    "private_preserved_candidate_ref": "refs/heads/codex/4239-private-frozen-3cdf6"
+  },
+  "binaries": {
+    "main": {
+      "clang_release": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-final02a-main-release-ide",
+        "bytes": 73295544,
+        "sha256": "b6659df0b07994aa520708630f4c54471585d7e940349cd4fb9ff451e4986402"
+      },
+      "self_stage1": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-final02a-main-self_stage1",
+        "bytes": 42298040,
+        "sha256": "4b969f178b8286689929d1ee61b1587af3f929efdf06fccd919421782f61a7ea",
+        "metrics": {
+          "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-main-self_stage1.metrics",
+          "bytes": 1183,
+          "sha256": "f52f2f95bb351f8782cf397c42517f618fea07ce7a287a72e61fa28194410d8a"
+        }
+      },
+      "self_stage2": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-final02a-main-self_stage2",
+        "bytes": 42298040,
+        "sha256": "4b969f178b8286689929d1ee61b1587af3f929efdf06fccd919421782f61a7ea",
+        "metrics": {
+          "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-main-self_stage2.metrics",
+          "bytes": 1183,
+          "sha256": "6cea0be2e7e3e03beba2973923c01f125d0b5fcf3f5e8ad5733a422d6e36f623"
+        }
+      },
+      "machine_stage": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-final02a-main-machine_stage",
+        "bytes": 41265832,
+        "sha256": "78935a69d6ae8c73dc52a6e667bd4eecf0ad3f238a4df6b4094d44a0e9bbf55f",
+        "metrics": {
+          "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-main-machine_stage.metrics",
+          "bytes": 1183,
+          "sha256": "6cea0be2e7e3e03beba2973923c01f125d0b5fcf3f5e8ad5733a422d6e36f623"
+        }
+      }
+    },
+    "candidate": {
+      "clang_release": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-finalH-3cdf6-release-ide",
+        "bytes": 74138400,
+        "sha256": "db89b91a53bdf47f2bc62d51c0f9ffef67e0cd1267224e9ad64dfdfee19d468f"
+      },
+      "self_stage1": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-finalH-3cdf6-self_stage1",
+        "bytes": 42121672,
+        "sha256": "09a3a60970fd011f3a0cda87d901f5d2bcc7b905bee820f814a2817487b17d1c",
+        "metrics": {
+          "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/finalH-candidate-self_stage1.metrics",
+          "bytes": 1184,
+          "sha256": "baf4a3e28438df7a7411478410116471c53581bfdf02e28013971134facc9117"
+        }
+      },
+      "self_stage2": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-finalH-3cdf6-self_stage2",
+        "bytes": 42121672,
+        "sha256": "09a3a60970fd011f3a0cda87d901f5d2bcc7b905bee820f814a2817487b17d1c",
+        "metrics": {
+          "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/finalH-candidate-self_stage2.metrics",
+          "bytes": 1184,
+          "sha256": "26a36c34eb7dfb9ce346ba81111082bb895af75ee0e9b3b0c29f99f8eeac8fc9"
+        }
+      },
+      "machine_stage": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/frozen/4239-finalH-3cdf6-machine_stage",
+        "bytes": 41108272,
+        "sha256": "6fab87fc92f7d2349e1b0286ff50d8f0adc8fba99fff642023567f759874b03a",
+        "metrics": {
+          "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/finalH-candidate-machine_stage.metrics",
+          "bytes": 1184,
+          "sha256": "26a36c34eb7dfb9ce346ba81111082bb895af75ee0e9b3b0c29f99f8eeac8fc9"
+        }
+      }
+    }
+  },
+  "build_receipts": {
+    "main": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-main-build-receipt.json",
+      "bytes": 2225,
+      "sha256": "df038126d6154f3ab23b4c5717110bb3ea11ff0266d9debdb67e32841548f8ce"
+    },
+    "candidate": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/finalH-candidate-build-receipt.json",
+      "bytes": 2238,
+      "sha256": "cc27a73bc90faa39ead7c153c80a74433d16737c1724d9a7b8bf171832c16cd0"
+    }
+  },
+  "configuration": {
+    "same_path": "/home/david/Documents/Codex/2026-10-14/deis/work/constant-prefix-scan/build",
+    "workers": 2,
+    "same_cache_and_compile_db": true,
+    "cache": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/constant-prefix-scan/build/CMakeCache.txt",
+      "bytes": 18386,
+      "sha256": "cb6256b29517fde3bffce57f8733abd32058deaa96918fb53c0d99766d877e26"
+    },
+    "compile_db": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/constant-prefix-scan/build/compile_commands.json",
+      "bytes": 338579,
+      "sha256": "5a334e4468e26f04c1a444bc62e27244b3b4c43e9f6bdfe20a21af44abbe0144"
+    },
+    "generate_or_reconfigure": false
+  },
+  "self_host": {
+    "main": {
+      "receipt": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-main-self-host-receipt.json",
+        "bytes": 7225,
+        "sha256": "c3a5fc35d67da109dda87e195f5d0c1a8001b77922704ef59f2cf4f632582ec7"
+      },
+      "status": "pass",
+      "fixedpoint_bytes": 42298040,
+      "fixedpoint_sha256": "4b969f178b8286689929d1ee61b1587af3f929efdf06fccd919421782f61a7ea",
+      "byte_identical_stage1_stage2": true,
+      "work_gate": {
+        "layout_solves": 219,
+        "layout_solves_ceiling": 400,
+        "stage1_pass_state_types": 9832157,
+        "pass_state_ceiling": 36000000
+      },
+      "actual_layout_records": [
+        {
+          "solves": 219,
+          "pass_solves": 167,
+          "pass_state_types": 9832157,
+          "pass_attempts": 395874,
+          "agenda_solves": 52,
+          "agenda_types": 54,
+          "agenda_attempts": 54,
+          "agenda_edges": 2,
+          "agenda_notifications": 2,
+          "agenda_pushes": 56,
+          "agenda_fallbacks": 0
+        },
+        {
+          "solves": 219,
+          "pass_solves": 167,
+          "pass_state_types": 9833362,
+          "pass_attempts": 395874,
+          "agenda_solves": 52,
+          "agenda_types": 54,
+          "agenda_attempts": 54,
+          "agenda_edges": 2,
+          "agenda_notifications": 2,
+          "agenda_pushes": 56,
+          "agenda_fallbacks": 0
+        },
+        {
+          "solves": 219,
+          "pass_solves": 167,
+          "pass_state_types": 9833362,
+          "pass_attempts": 395874,
+          "agenda_solves": 52,
+          "agenda_types": 54,
+          "agenda_attempts": 54,
+          "agenda_edges": 2,
+          "agenda_notifications": 2,
+          "agenda_pushes": 56,
+          "agenda_fallbacks": 0
+        }
+      ],
+      "machine_and_both_benchmarks_completed": true
+    },
+    "candidate": {
+      "receipt": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/finalH-candidate-self-host-receipt.json",
+        "bytes": 7155,
+        "sha256": "a1fdbc16c6ca34d9fb2cca4a85d95a2638b21cabd4fceb5103a1eee3158f7e26"
+      },
+      "status": "pass",
+      "fixedpoint_bytes": 42121672,
+      "fixedpoint_sha256": "09a3a60970fd011f3a0cda87d901f5d2bcc7b905bee820f814a2817487b17d1c",
+      "byte_identical_stage1_stage2": true,
+      "work_gate": {
+        "layout_solves": 244,
+        "layout_solves_ceiling": 400,
+        "stage1_pass_state_types": 9898227,
+        "pass_state_ceiling": 36000000
+      },
+      "actual_layout_records": [
+        {
+          "solves": 244,
+          "pass_solves": 167,
+          "pass_state_types": 9898227,
+          "pass_attempts": 397924,
+          "agenda_solves": 77,
+          "agenda_types": 132,
+          "agenda_attempts": 132,
+          "agenda_edges": 55,
+          "agenda_notifications": 55,
+          "agenda_pushes": 150,
+          "agenda_fallbacks": 0
+        },
+        {
+          "solves": 244,
+          "pass_solves": 167,
+          "pass_state_types": 9899432,
+          "pass_attempts": 397924,
+          "agenda_solves": 77,
+          "agenda_types": 132,
+          "agenda_attempts": 132,
+          "agenda_edges": 55,
+          "agenda_notifications": 55,
+          "agenda_pushes": 150,
+          "agenda_fallbacks": 0
+        },
+        {
+          "solves": 244,
+          "pass_solves": 167,
+          "pass_state_types": 9899432,
+          "pass_attempts": 397924,
+          "agenda_solves": 77,
+          "agenda_types": 132,
+          "agenda_attempts": 132,
+          "agenda_edges": 55,
+          "agenda_notifications": 55,
+          "agenda_pushes": 150,
+          "agenda_fallbacks": 0
+        }
+      ],
+      "machine_and_both_benchmarks_completed": true
+    }
+  },
+  "mode_matrix": {
+    "log": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/finalH-candidate-mode-matrix.log",
+      "bytes": 2185,
+      "sha256": "abe532ae58b49968300cf2c0a5f7c868817135bad7e95e3c13f7099ca467661a"
+    },
+    "legs": 12,
+    "behavioral_executions": 4,
+    "structural_oracles": 8,
+    "corruption_controls": 2,
+    "failures": 0
+  },
+  "corpus": {
+    "status": "pass",
+    "cases": 848,
+    "objects": 776,
+    "shared_rejections": 72,
+    "raw_status_stdout_stderr_object_differences": 0,
+    "exact_actual_object_bytes_independently_rechecked_by_sealer": true,
+    "case_order_and_keyset_exact": true,
+    "manifests": {
+      "main": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-controlled-main-objects/manifest.json",
+        "bytes": 192962,
+        "sha256": "91fb317449920cf09833cb7614416555ec23e7821a2ce32e27913e518329e85b"
+      },
+      "candidate": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-controlled-candidate-objects/manifest.json",
+        "bytes": 192961,
+        "sha256": "097ef9809aac519f5feeab1baf78117998f0d26b743ebaaad967bf41fa1fbd18"
+      }
+    },
+    "execution_frames": {
+      "main": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-controlled-main-execution.json",
+        "bytes": 4344,
+        "sha256": "bb5b7fcbc7bf1bd783db1c6a930dc4d591aae9000d8131ecbb40cb1fe377135c"
+      },
+      "candidate": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-controlled-candidate-execution.json",
+        "bytes": 4637,
+        "sha256": "d2de86dadf8072378e11f76ab16533402669d9155a17221e9d90fe11257e64af"
+      }
+    },
+    "execution_wrapper": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/finalH-mode-corpus-execution.json",
+      "bytes": 2326,
+      "sha256": "90730554acd9544bbce9943df7c673ce16bb49edd65fc11502e1783e014a3d7a"
+    },
+    "input_root": "/home/david/Documents/Codex/2026-10-14/deis/work/baseline",
+    "input_head": "2c2c46fc92b2e7308cce4265dfbc3758365b374a",
+    "input_tree": "c3c3545e6fb14118aceee3bf5472675791119979",
+    "input_files": 1157,
+    "input_fingerprint": "69dce03561f0c717780616a588da5f794ec86e6b1effb005f6464b5df77b9871",
+    "all_four_before_after_inventories": {
+      "mainbefore": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-main-frozen-inputs-before.json",
+        "bytes": 279100,
+        "sha256": "8909a84f2b09c24b0a67ece7ed1900ab1fa8c7536b3ba120646254b881f70b04"
+      },
+      "mainafter": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-main-frozen-inputs-after.json",
+        "bytes": 279100,
+        "sha256": "8909a84f2b09c24b0a67ece7ed1900ab1fa8c7536b3ba120646254b881f70b04"
+      },
+      "candidatebefore": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-candidate-frozen-inputs-before.json",
+        "bytes": 279100,
+        "sha256": "8909a84f2b09c24b0a67ece7ed1900ab1fa8c7536b3ba120646254b881f70b04"
+      },
+      "candidateafter": {
+        "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-candidate-frozen-inputs-after.json",
+        "bytes": 279100,
+        "sha256": "8909a84f2b09c24b0a67ece7ed1900ab1fa8c7536b3ba120646254b881f70b04"
+      }
+    },
+    "same_captured_full_environment": true,
+    "private_environment_hash_binding": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-corpus-environment.json",
+      "bytes": 8961,
+      "sha256": "4cbb403d535cf4014f21ca8fce0082184f6c6111d5580cb1218e5b17e5d5b4aa"
+    },
+    "environment_file_mode": "0600; values not printed",
+    "per_case_timeout_seconds": 180,
+    "workers": 2,
+    "fresh_baseline_independent_audit": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-main-corpus-independent-audit.json",
+      "bytes": 5825,
+      "sha256": "4629da8b977a8d5fdbba1720622eb5b6994688dc241b6b3ab5bddf8235325ead"
+    }
+  },
+  "closure": {
+    "sessions": [
+      {
+        "id": 35695,
+        "step": "main_build",
+        "status": 0,
+        "closed": true
+      },
+      {
+        "id": 55393,
+        "step": "main_selfhost",
+        "status": 0,
+        "closed": true
+      },
+      {
+        "id": 46035,
+        "step": "main_corpus",
+        "status": 0,
+        "closed": true
+      },
+      {
+        "id": 23462,
+        "step": "candidate_build",
+        "status": 0,
+        "closed": true
+      },
+      {
+        "id": 50263,
+        "step": "candidate_selfhost",
+        "status": 0,
+        "closed": true
+      },
+      {
+        "id": 55809,
+        "step": "candidate_modes_and_corpus",
+        "status": 0,
+        "closed": true
+      }
+    ],
+    "all_build_selfhost_mode_corpus_source_native_readers_closed": true,
+    "source_clean": true,
+    "no_source_changes_during_any_reader": true,
+    "baseline_closed_handoff": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final02a-private-qualification/final02a-baseline-closed.json",
+      "bytes": 927,
+      "sha256": "813932d3165b3453f617718a5a39620483e358a9f12a4e2a283d9e69de3cb9bb"
+    }
+  },
+  "preserved_old_artifacts": "All e51/770/b84/H5/d824/b170/8a/4db frozen images, fixedpoints, refs and receipts preserved.",
+  "boundaries": [
+    "Root owns global tests/analyzer/source_size/CI/physical acceptance and protected integration at sameH. This receipt is private local qualification only.",
+    "No source edits,generate,reconfigure,forge,push,request,profile or hardware action by this agent.",
+    "Additional original37endpoint/28native bounded issue replay is next; it will bind this sealed qualification without rerunning these gates.",
+    "Buster first-party license unselected/NOASSERTION per LICENSES/README.md/#621; no external implementation imported."
+  ]
+}

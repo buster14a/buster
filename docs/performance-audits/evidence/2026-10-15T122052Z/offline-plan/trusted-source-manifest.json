@@ -1,0 +1,273 @@
+{
+  "files": [
+    {
+      "bytes": 120521,
+      "path": ".github/workflows/9700x-direct-bench.yml",
+      "sha256": "7c529c499b51582ece8d21c0681d363fec50a528cf39a6b0b2edcaf9eaacd0de"
+    },
+    {
+      "bytes": 1835,
+      "path": ".github/workflows/9700x-direct-request.yml",
+      "sha256": "14d5fefc71029a8c11f761d909ed2dca731604354435ac4eb5e2e576d2faeb7c"
+    },
+    {
+      "bytes": 4995,
+      "path": "LICENSES/README.md",
+      "sha256": "4e60ce97c7cc3becdc1c9c0c45e7f637825d35511aedba99cdac66488b78a2fc"
+    },
+    {
+      "bytes": 2065837,
+      "path": "build.c",
+      "sha256": "fbd5ffc61ed684275619816f7b07c69fcb6b4fc119f7ec2373267f09f21e7f3f"
+    },
+    {
+      "bytes": 149691,
+      "path": "docs/agents/benchmarking.md",
+      "sha256": "42bfc12938c9febdb7c34eeb666fb5ab605f6c9ed0fa73331dab7e28cbaec941"
+    },
+    {
+      "bytes": 15777,
+      "path": "docs/compiler-evidence-v1.md",
+      "sha256": "da004d3dbb195fb80bffc803a83ba7b99c1b07c27a606a6b22dfdf52495deda8"
+    },
+    {
+      "bytes": 14211,
+      "path": "tools/bench_direct/ast_pilot_acceptance.py",
+      "sha256": "316a5c5058a22585c2d3272f0d5336a376762d148f171647c9db1ba886453a72"
+    },
+    {
+      "bytes": 21065,
+      "path": "tools/bench_direct/ast_retirement_acceptance.py",
+      "sha256": "be11d6ee787d735bcc428b9701f0dd284e338ccad5ff2945e04680ddc2e01a53"
+    },
+    {
+      "bytes": 52547,
+      "path": "tools/bench_direct/ast_retirement_test.py",
+      "sha256": "708fce7eb91f61f3d6a0eaf928856d71b567d4036a42a587e98152efec622f3d"
+    },
+    {
+      "bytes": 141736,
+      "path": "tools/bench_direct/authorize.py",
+      "sha256": "ad383d382ec06915b22bd77034022fa5c54245a93d51cf20ccc30a29fd8d6ae7"
+    },
+    {
+      "bytes": 28103,
+      "path": "tools/bench_direct/authorize_compiler.py",
+      "sha256": "b57a7b5b0d37fbb11a8b73b815700378318298f5e92274d4bd30c8295a9a998e"
+    },
+    {
+      "bytes": 23383,
+      "path": "tools/bench_direct/authorize_compiler_test.py",
+      "sha256": "c6a4b32d764402a5ad73f95fccb68c475b7f745f59189b5604c44bb0ea4712cf"
+    },
+    {
+      "bytes": 70996,
+      "path": "tools/bench_direct/authorize_test.py",
+      "sha256": "b1b79c85c7e6738199293a1fa4fd3aee28da5a493f46c28faae8653983f267d6"
+    },
+    {
+      "bytes": 5242,
+      "path": "tools/bench_direct/compiler_closure_test.py",
+      "sha256": "6817ead018c7dd6f462a1e8e45e1c6332cc31a2e3d9820be9073c41b70940fa5"
+    },
+    {
+      "bytes": 24301,
+      "path": "tools/bench_direct/compiler_closure_utility_diagnostic.py",
+      "sha256": "1dc5136f7458718aae9afb8499367c68be32c52793aaee4e49f6983f13801be6"
+    },
+    {
+      "bytes": 11540,
+      "path": "tools/bench_direct/compiler_comment.py",
+      "sha256": "9891f4cfbb16e85b5560fe3830a4390a3adf776bd9e3a4ba7ce7b98e0f81b660"
+    },
+    {
+      "bytes": 208174,
+      "path": "tools/bench_direct/compiler_compare.py",
+      "sha256": "3c3d87a3b44a992d0d31695b0850b897825beab3c2e47f70ba80cf06e7cb57a0"
+    },
+    {
+      "bytes": 22902,
+      "path": "tools/bench_direct/compiler_github.py",
+      "sha256": "ca4228ecb90242bc87967d8884b60418732e18375624065ee2ba5acee38a161a"
+    },
+    {
+      "bytes": 2605,
+      "path": "tools/bench_direct/compiler_github_clock_test.py",
+      "sha256": "342956d39e44448eb8f7beaf3b6c4ba1f76a10449128ca3dfdc177db6c9c49f3"
+    },
+    {
+      "bytes": 58651,
+      "path": "tools/bench_direct/compiler_ordinary_fixture_test.py",
+      "sha256": "59d3d7ffcc59f2ed964c87fb5cee9bf74397857e78c7ddee4337dd9812dec204"
+    },
+    {
+      "bytes": 24177,
+      "path": "tools/bench_direct/compiler_owned_phase.py",
+      "sha256": "3b758ba71f05f77582386301902581a6d081843833a74b497ad0ed48a153ea19"
+    },
+    {
+      "bytes": 42004,
+      "path": "tools/bench_direct/compiler_owned_phase_test.py",
+      "sha256": "c5fa1725801d0d548a5e10040a934b2b89117e71ef4b6a498fd2589718c09312"
+    },
+    {
+      "bytes": 17800,
+      "path": "tools/bench_direct/compiler_owned_plan.py",
+      "sha256": "849d51a5b8a93ddb0d1c7482391c976538bc06ffc753f244dbe20de202cf106b"
+    },
+    {
+      "bytes": 56163,
+      "path": "tools/bench_direct/compiler_owned_plan_test.py",
+      "sha256": "9cfde2917340434a18ff0d2756c354018bc016b550239dd48880b12bc4e01c78"
+    },
+    {
+      "bytes": 55750,
+      "path": "tools/bench_direct/compiler_preparation.py",
+      "sha256": "d10ee63af57724a1bbeca6249d9c1b378a949f4ceea288800d9b3e6c4d589493"
+    },
+    {
+      "bytes": 16754,
+      "path": "tools/bench_direct/compiler_preparation_diagnostic_provider.py",
+      "sha256": "ad0c2be3f91ac1bb617db57cc1154042d6c3334a4737e29f8f5ced2f1ac872e2"
+    },
+    {
+      "bytes": 47619,
+      "path": "tools/bench_direct/compiler_preparation_test.py",
+      "sha256": "37d95a8d45294c2a50fdad63bd06edf5123d7f2a3b54765e0d990366911d14e1"
+    },
+    {
+      "bytes": 76541,
+      "path": "tools/bench_direct/compiler_prerequisite_historical_api_test.py",
+      "sha256": "ae9622e23faf00ea1d332d6083b7ea53ba9fe47484030b104dce9cebe17d2619"
+    },
+    {
+      "bytes": 499457,
+      "path": "tools/bench_direct/compiler_publish.py",
+      "sha256": "0b7244b6bdae40e2ba728583017abeaf240cb55c72ee97faad4d04111f420b9c"
+    },
+    {
+      "bytes": 373992,
+      "path": "tools/bench_direct/compiler_receipt.py",
+      "sha256": "bdedf1356482558c90553c31e9f882f3511ad05231e6a31e5342cb77982a8abb"
+    },
+    {
+      "bytes": 39866,
+      "path": "tools/bench_direct/compiler_sampling_historical_api_test.py",
+      "sha256": "4c062befe5f010fae515f9fb4de2fffe18ac792abd8bbd666f902b2a0211bc77"
+    },
+    {
+      "bytes": 589559,
+      "path": "tools/bench_direct/compiler_test.py",
+      "sha256": "f3adbaec209a65da5c810b4eeb3b4f12d759d38f893bbdb2a27f9daa920c5c6d"
+    },
+    {
+      "bytes": 11930,
+      "path": "tools/bench_direct/compiler_unchanged_test.py",
+      "sha256": "4f577bc0ef678b5e38b1e78223c52313083766110d1b09d38c576344f72c0c16"
+    },
+    {
+      "bytes": 64154,
+      "path": "tools/bench_direct/compiler_visibility_test.py",
+      "sha256": "e4ff74245a8af7042236c2cdc63b86fc15c3119bc8949068a188e95648e0e754"
+    },
+    {
+      "bytes": 11242,
+      "path": "tools/bench_direct/constant_reuse_acceptance.py",
+      "sha256": "bc4ab92c3272d6ac7108a7581110b805ec1ead7db51b118a15b510fb2b8e1d0d"
+    },
+    {
+      "bytes": 13124,
+      "path": "tools/bench_direct/inline_acceptance.py",
+      "sha256": "4ee1130bc5812e519cd95984db5e544d76ad7d6158cc2f6b2be171783e86c0ce"
+    },
+    {
+      "bytes": 3124,
+      "path": "tools/bench_direct/lifecycle_pipeline_test.py",
+      "sha256": "eb1db72b12319a23f748269e9deff6e7a8221919a4cc326eee2c519db25f677e"
+    },
+    {
+      "bytes": 39007,
+      "path": "tools/bench_direct/performance_inventory_test.py",
+      "sha256": "d6128e67868f7d9411e1dcdc4dafb5483058ceabcd59b61db0c6ac74622b61f5"
+    },
+    {
+      "bytes": 12108,
+      "path": "tools/bench_direct/process_floor_acceptance.py",
+      "sha256": "f520dbc348678a97abe33514420a250167675b5e61f8fd3b3277c5be1cb297b0"
+    },
+    {
+      "bytes": 7551,
+      "path": "tools/bench_direct/retirement_rss.c",
+      "sha256": "c679a68e364f3521d3411b45479c9d07d6feb3f416863e8af35ec797d42bcc2f"
+    },
+    {
+      "bytes": 37202,
+      "path": "tools/bench_direct/run_workloads.py",
+      "sha256": "0ec591c805fd35cb22a808ac03a35064a8c6eb4d1cbacbbc3540de6b30230ac4"
+    },
+    {
+      "bytes": 48940,
+      "path": "tools/bench_direct/run_workloads_test.py",
+      "sha256": "3c0744dbb1955cf71c17f7cb1ee43e0a72e2b3e64dd13d836da7a6dc5117d97c"
+    },
+    {
+      "bytes": 7906,
+      "path": "tools/bench_direct/sampling_publish_test.py",
+      "sha256": "f66bd2a66a84873c3775b317dafc4c72668ff232e1fd504f65ee341991734ee8"
+    },
+    {
+      "bytes": 27976,
+      "path": "tools/bench_direct/sampling_qualification_receipt.py",
+      "sha256": "93b7f4da0446103dcba7ebc5f2342b616d44c414d4753c272351b1bf50802b4d"
+    },
+    {
+      "bytes": 23761,
+      "path": "tools/bench_direct/sampling_qualification_test.py",
+      "sha256": "8f6c8c7eaf70a24a0270bad06571e2c86e406027004a774794ce86a2edf96f6c"
+    },
+    {
+      "bytes": 13938,
+      "path": "tools/bench_direct/selfhost_inline_compare.py",
+      "sha256": "ddc7f3fd110d93a6239cdcbc4756b6c0ae1fb3c1a9c6f574919c43126d41b9f9"
+    },
+    {
+      "bytes": 7275,
+      "path": "tools/bench_direct/throughput_real_source.py",
+      "sha256": "3b970a49281d35d86ec6c4a320df7d32142db0965db07f9d84ef13479a1bd8a5"
+    },
+    {
+      "bytes": 23758,
+      "path": "tools/bench_direct/workflow_concurrency_test.py",
+      "sha256": "7036d2ed4851192fceb788cbfd76f9c7ec77e5caeedcedd0724e8998fb51a50e"
+    },
+    {
+      "bytes": 93817,
+      "path": "tools/bench_direct/workflow_policy_test.py",
+      "sha256": "b40f4a7956eccdf1a018906595a4b798d24c2c3f12bc45beb1c125d76d3580d5"
+    },
+    {
+      "bytes": 3923,
+      "path": "tools/bench_direct/workload_selection.py",
+      "sha256": "99b1b479b3234a4bae5f57b144485e2a992848558744d731894d4086510f2628"
+    },
+    {
+      "bytes": 44948,
+      "path": "tools/compiler_evidence.c",
+      "sha256": "2b271cf1ae9b8d047ade55a681a0ddf6dcab9e2449ddcc76171068363b397ea5"
+    },
+    {
+      "bytes": 23361,
+      "path": "tools/throughput/retirement_stats.h",
+      "sha256": "72a7c6aa80c46bb4246865a2991b34e2dfbc4ce2db9547d5b69143712383e6c8"
+    },
+    {
+      "bytes": 265470,
+      "path": "tools/uarch_lab.py",
+      "sha256": "1a552c4144f7d70076b9dfd7e6cd122a793ae076d011ab7510a6431593f34af0"
+    }
+  ],
+  "revision": "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+  "schema": "immutable-trusted-export-v1",
+  "source": "immutable local git objects; GIT_NO_LAZY_FETCH=1; source/build working files untouched",
+  "tree": "d514dc9782fed3bb6db07adc75e91bf0b79039a2"
+}

@@ -1,0 +1,216 @@
+{
+  "schema": "buster-retirement-audit-preparation-v1",
+  "state": "complete valid adverse physical evidence; requested architecture adopted for protected integration with known cost4305; actual integration not claimed",
+  "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+  "head_tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+  "code_parent": "056bb69aecf3db4f2720ab82adee99cc800f5f45",
+  "code_parent_tree": "d2594fa48efe985600f071d357aec62abb1e9044",
+  "baseline": "02a6414e020f5d549122197c3a7c8407df5bed76",
+  "trusted_revision": "02a6414e020f5d549122197c3a7c8407df5bed76",
+  "baseline_tree": "5aa95687f3d2056f07760ae0347d200b06c84eee",
+  "request_file_sha256": "97222cf4fcde6990278b683e222e36fda3d5946be87361f8ad3106221e059285",
+  "request_run_id": 38743139164,
+  "request_attempt": 1,
+  "executor_run_id": 38743190006,
+  "executor_attempt": 1,
+  "authorize_job_id": 116449911842,
+  "native_job_id": 116450130508,
+  "custom_check_id": 116450275648,
+  "api_assigned_runner": {
+    "id": 2831,
+    "group_id": 5,
+    "name": "buster-zen5-9700x",
+    "physical_cpu_proof": false
+  },
+  "state_source": "Closed physical receipt e5774f1456e733461fcdf916fd10d13019f066ac9ef361d2347d725d9659958d; no live status inferred from older snapshots.",
+  "publisher_job_id": 116461227761,
+  "artifact": {
+    "archive_download_url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11979930544/zip",
+    "created_at": "2026-10-15T13:52:32Z",
+    "digest": "sha256:7c091703dd3aa52bb1db2fe375e5032d690142731afd7126d8bbcecd70a9b1bd",
+    "expired": false,
+    "expires_at": "2027-01-13T13:29:54Z",
+    "id": 11979930544,
+    "name": "buster-9700x-compiler-3cdf6ee16c6c543cd7933f7a7d24cff407328d56-1",
+    "node_id": "MDg6QXJ0aWZhY3QxMTk3OTkzMDU0NA==",
+    "size_in_bytes": 10398338,
+    "updated_at": "2026-10-15T13:52:32Z",
+    "url": "https://api.github.com/repos/buster14a/buster/actions/artifacts/11979930544",
+    "workflow_run": {
+      "head_branch": "main",
+      "head_repository_id": 1071732997,
+      "head_sha": "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "id": 38743190006,
+      "repository_id": 1071732997
+    }
+  },
+  "observed_cpu": {
+    "artifact_machine_record_validated": true,
+    "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor",
+    "execution_context_report": {
+      "reason": "not exposed by this OS, unsupported or probe failed",
+      "status": "unknown",
+      "value": "unknown"
+    },
+    "hostname": "benchpress",
+    "limits": "Observed approved host/CPU; no extra whole-route host-empty or hypervisor classification inferred.",
+    "native_raw_machine_and_source_records_validated": true
+  },
+  "metrics": {
+    "fixed_20_cell_file": "physical/all20-cells.json",
+    "ordinary_file": "physical/ordinary-data.json"
+  },
+  "census": {
+    "file": "physical/offline-plan/replay-final/probe-census.json",
+    "rows": 40,
+    "baseline_unavailable_not_zero": true
+  },
+  "rss_population": {
+    "file": "physical/raw-observation-manifests/native-rss-floor-summary.json",
+    "rows": 800
+  },
+  "native_cleanup": {
+    "bootstrap_config_sha256": "1ea882b03c06619ff43292c891c40bd3008142e9aa59a7dc8f1d84010afc4d52",
+    "bootstrap_dependency_count": 318,
+    "bootstrap_marker_sha256": "f54580851fe2b5ac2045b86a0f0f860aa9bbe632f4e56a6b619ed25548df07e0",
+    "cancelled": 0,
+    "capture_failed": 0,
+    "cleanup_proven": true,
+    "cleanup_reaped": 0,
+    "cleanup_signalled": 0,
+    "cleanup_us": 83,
+    "cleanup_waves": 1,
+    "command_sha256": "36ccbbe8eecb27fed1b26a741c15ed6d373ff2d35e834093da3c9e630591e614",
+    "cwd_sha256": "c450d1279e25a3c0463d0323247a1d8932e6fc0d5447c4600d7979db12e09f34",
+    "driver_sha256": "2873e88bdc7d5d1202ddaea597330a4fc28018c8e49a92e9209517f674c37840",
+    "duration_scope": "entry-through-log-publication-before-terminal-receipt",
+    "duration_us": 163208547,
+    "exit_status": 0,
+    "exit_status_encoding": "posix-wait-status",
+    "launch_attempted": 1,
+    "manager_launched": 1,
+    "manager_terminal": 1,
+    "output_truncated": 0,
+    "ownership_lost": 0,
+    "ownership_schema": "buster-native-qualification-supervisor-v1",
+    "receipt_path_sha256": "be2fff086d808f617250c9dde343e75d7d7fd3adec58a0f96d2b1394a5394312",
+    "receipt_publication_us": null,
+    "reservation_retained": 0,
+    "schema": "buster-compiler-owned-phase-v1",
+    "state": "complete",
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout_sha256": "4ddb89ed6f299cb57de494ead44acb9061405130f1cbb898e94f54285ff19773",
+    "timed_out": 0,
+    "timeout_us": 2700000000,
+    "tree_cleanup_failed": 0,
+    "trusted_root_sha256": "4626b06d9e70ce2217780a6171ddbc0b600aa3f19fa247b4922d3084853179a2"
+  },
+  "publisher_join": "physical/publisher-native-account-join.json",
+  "adoption_disposition": {
+    "decision": "ADOPT_REQUESTED_ARCHITECTURE_FOR_PROTECTED_INTEGRATION",
+    "decided_at": "2026-10-15T14:10:01.245778+00:00",
+    "source_adoption_released": true,
+    "receipt": "owner-disposition/root-measured-disposition-final.json",
+    "sha256": "1e0c18ea4b0aa95342083876b2e9b2018c084a23cf50ff8e2aea7a2d7b36201b",
+    "remaining_regression": "https://github.com/buster14a/buster/issues/4305",
+    "scope": "Architecture only; no speedup/performance-fixed/mandatory-cost claim, new numerical threshold, protected merge, main containment or issue closure."
+  },
+  "pending_receipts": {
+    "local": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-closed-local-checkpoint.json",
+      "sha256": "3da5556a9de59de2ed7892802b217cf22f3b621909cd11c0242da00d8a327cb7",
+      "status": "pass",
+      "scope": "sealed exact-head local only; not physical/hosted/private/integration proof"
+    },
+    "analyzer": {
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-checkpoint-analyzer-receipt.json",
+      "sha256": "f13e35b5dbe22f41b85cb6aa52044ff4cf8a5ff77317ad1bc04e5a5043ab8e22",
+      "status": "pass",
+      "eligible": 118,
+      "checked": 118,
+      "excluded": 118,
+      "shards": 8,
+      "jobs": 4,
+      "per_unit_budget_seconds": 600,
+      "native_elapsed_us": 538599606
+    },
+    "private_selfhost_modes_corpus": "source-qa/independent-private-and-bounded-seal.json",
+    "narrow_issues": "source-qa/six-issue-receipt.json",
+    "hosted": "source-qa/hosted-source-ci-terminal-receipt.json",
+    "physical": "physical/final-physical-audit-receipt.json",
+    "protected_code_integration": null,
+    "protected_docs_integration": null
+  },
+  "domains": {
+    "ast_wall_and_instructions": "compiler plus RSS observer; no subtraction",
+    "ast_rss": "exact compiler child wait4 and native pre-exec floor",
+    "ordinary": "separate unchanged legacy route; report its actual available metrics/warnings",
+    "target_observer_overhead": "unmeasured unless separate matching target controls actually retained; not a new gate"
+  },
+  "baseline_missing_counters": "unavailable, never synthesized or borrowed from d824",
+  "historical_d824": {
+    "note": "../../2026-10-15T122052Z.md",
+    "head": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+    "baseline": "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+    "disposition": "complete valid but adverse; adoption deferred; immutable"
+  },
+  "later_main": "Parent reports57086c607d9daffd2e8b893de4e1d57e7079a446 after this publication; it is not this experiment baseline. No merge authorized into companion.",
+  "license": "Buster first-party NOASSERTION per LICENSES/README.md/#621; external toolchain terms separate; no implementation/dependency imported.",
+  "local_source_supplement": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-final3cdf-gates/3cdf6ee16c-main4267-descriptor-supplement.json",
+    "sha256": "90a53d31b8281f0eaf4984b1b0751fc4723699a090cd7e30e60ef75df5a86ee4",
+    "scope": "actual61TestId enum/designator order and protected4267source/module evidence; no per-statement trace"
+  },
+  "local_suites": {
+    "debug-all": {
+      "assertions_passed": 7240098,
+      "assertions_total": 7240098,
+      "modules_passed": 61,
+      "modules_total": 61
+    },
+    "release-all": {
+      "assertions_passed": 7240077,
+      "assertions_total": 7240077,
+      "modules_passed": 61,
+      "modules_total": 61
+    },
+    "sanitize-all": {
+      "assertions_passed": 7192264,
+      "assertions_total": 7192264,
+      "modules_passed": 61,
+      "modules_total": 61
+    }
+  },
+  "local_static_summary": {
+    "api_registry_active_migrations": 0,
+    "markdown_files": 936,
+    "unresolved_markdown_targets": 0,
+    "provenance_files": 6,
+    "provenance_violations": 0,
+    "provenance_negative_control_tests": 8,
+    "history_merges": 17,
+    "production_growth_bytes": -256078,
+    "build_growth_bytes": 13194,
+    "source_size_ratchet_limit": 32768
+  },
+  "image_identity_limit": "RootRelease frozen d7a3319f8338b180dad96003681bd54813b03bf011a3813c49d6fde469288851 is a local tests-enabled root image, not the distinct private image or physical tests-off binary.",
+  "remaining_cost_issue": "https://github.com/buster14a/buster/issues/4305",
+  "physical_receipt_sha256": "e5774f1456e733461fcdf916fd10d13019f066ac9ef361d2347d725d9659958d",
+  "source_gate_receipt_indexes": {
+    "local": "source-qa/closed-local-checkpoint.json",
+    "local_peer": "source-qa/independent-local-checkpoint-seal.json",
+    "private": "source-qa/private-qualification-receipt.json",
+    "private_peer": "source-qa/independent-private-and-bounded-seal.json",
+    "narrow": "source-qa/six-issue-receipt.json",
+    "hosted": "source-qa/hosted-source-ci-terminal-receipt.json"
+  },
+  "integration_observation": "integration/39c-prospective-composition.json",
+  "integration_disposition": "Outside immutable measurement/adoption audit; actual protected group/admissions/merge/main records belong on PR4239/#3102",
+  "independent_physical_peer": {
+    "receipt": "independent-physical-peer/final-independent-physical-peer.json",
+    "receipt_sha256": "0ec79b25778261fdce035a0a5a735cd5aea291e516f259450da4ebb0a7275f36",
+    "seal": "independent-physical-peer/final-seal.json",
+    "seal_sha256": "2ae0a05fb23c971694604057f68872abe0cd3889e87a0fa89c6731415a3e4679",
+    "status": "PASS/CLOSED data/contract review; separate final root architecture decision retained"
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "schema": "buster-4239-final02a-trusted-tooling-rebind-v1",
+  "at": "2026-10-15T13:27:48.473141+00:00",
+  "trusted_revision_expected": "02a6414e020f5d549122197c3a7c8407df5bed76",
+  "qualified_source": "67b5fda4b5adaf33a08c3e7b3332d5da0c9b9561",
+  "rows": [
+    {
+      "path": "build.c",
+      "sha256": "fbd5ffc61ed684275619816f7b07c69fcb6b4fc119f7ec2373267f09f21e7f3f",
+      "git_blob": "0bb05baa578d0bf635602386266c72e75899c9fc",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "tools/uarch_lab.py",
+      "sha256": "1a552c4144f7d70076b9dfd7e6cd122a793ae076d011ab7510a6431593f34af0",
+      "git_blob": "4613323f12dfaa8c1718dca3a6d26203bdb78889",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "tools/bench_direct/compiler_compare.py",
+      "sha256": "3c3d87a3b44a992d0d31695b0850b897825beab3c2e47f70ba80cf06e7cb57a0",
+      "git_blob": "1774016bb2f1a52412e8228916d5b49f9fc1d118",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "tools/bench_direct/compiler_publish.py",
+      "sha256": "0b7244b6bdae40e2ba728583017abeaf240cb55c72ee97faad4d04111f420b9c",
+      "git_blob": "e9a563c02c17c9c627d2cd6328303c01b10b7b31",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "tools/bench_direct/compiler_receipt.py",
+      "sha256": "bdedf1356482558c90553c31e9f882f3511ad05231e6a31e5342cb77982a8abb",
+      "git_blob": "3087244d2885b76a21e5bef78ead243980a72b40",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "tools/bench_direct/compiler_owned_phase.py",
+      "sha256": "3b758ba71f05f77582386301902581a6d081843833a74b497ad0ed48a153ea19",
+      "git_blob": "950ed3ba9d919489b4059eeafc2ed6ef4f8ae0ec",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "tools/bench_direct/compiler_owned_plan.py",
+      "sha256": "849d51a5b8a93ddb0d1c7482391c976538bc06ffc753f244dbe20de202cf106b",
+      "git_blob": "138f8380c6f15a228225e33136479291475bf823",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "tools/bench_direct/ast_retirement_acceptance.py",
+      "sha256": "be11d6ee787d735bcc428b9701f0dd284e338ccad5ff2945e04680ddc2e01a53",
+      "git_blob": "834ba8b620723daf5ca63bc617763503540ef8ac",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "tools/bench_direct/retirement_rss.c",
+      "sha256": "c679a68e364f3521d3411b45479c9d07d6feb3f416863e8af35ec797d42bcc2f",
+      "git_blob": "9cf90f5659919476f9a63f3182f3ea7ee565ac43",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "tools/bench_direct/sampling_qualification_receipt.py",
+      "sha256": "93b7f4da0446103dcba7ebc5f2342b616d44c414d4753c272351b1bf50802b4d",
+      "git_blob": "c9955a68f2a58bc244330a807b52b8f55fa9bf7a",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "tools/bench_direct/compiler_preparation.py",
+      "sha256": "d10ee63af57724a1bbeca6249d9c1b378a949f4ceea288800d9b3e6c4d589493",
+      "git_blob": "378e4fdaee944088b7d05fc25ed7745ca81e30f7",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "tools/compiler_evidence.c",
+      "sha256": "2b271cf1ae9b8d047ade55a681a0ddf6dcab9e2449ddcc76171068363b397ea5",
+      "git_blob": "738f10e43a895070d5b28ea160f41374117b3701",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "tools/throughput/retirement_stats.h",
+      "sha256": "72a7c6aa80c46bb4246865a2991b34e2dfbc4ce2db9547d5b69143712383e6c8",
+      "git_blob": "938bf70cedf5650b0bb778a47503c3007195d278",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": ".github/workflows/9700x-direct-bench.yml",
+      "sha256": "7c529c499b51582ece8d21c0681d363fec50a528cf39a6b0b2edcaf9eaacd0de",
+      "git_blob": "2ddf11f4cf4494ba985d0c30568cfb6fe5b7d678",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": ".github/workflows/9700x-direct-request.yml",
+      "sha256": "14d5fefc71029a8c11f761d909ed2dca731604354435ac4eb5e2e576d2faeb7c",
+      "git_blob": "8111b4dc0359a5aca85ef28336e87b56584667fc",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "docs/compiler-evidence-v1.md",
+      "sha256": "da004d3dbb195fb80bffc803a83ba7b99c1b07c27a606a6b22dfdf52495deda8",
+      "git_blob": "a81ad1d5f62bb3f5494f76488a234b9e3e902476",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "docs/agents/benchmarking.md",
+      "sha256": "42bfc12938c9febdb7c34eeb666fb5ab605f6c9ed0fa73331dab7e28cbaec941",
+      "git_blob": "3910d46776eef098642c84f84dea79cd5e454323",
+      "exact_qualified67_tooling": true
+    },
+    {
+      "path": "LICENSES/README.md",
+      "sha256": "4e60ce97c7cc3becdc1c9c0c45e7f637825d35511aedba99cdac66488b78a2fc",
+      "git_blob": "366189f2aa2b9f635ae1faf26a92cc68349aee46",
+      "exact_qualified67_tooling": true
+    }
+  ],
+  "differences": [],
+  "scope": "Source-only18contractfile binding; actual executor trusted SHA must be audited separately after request. No experiment executed."
+}

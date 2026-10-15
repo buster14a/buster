@@ -1,0 +1,72 @@
+{
+  "schema": "buster-retirement-capsule-plan-v1",
+  "state": "fulfilled bounded selection; owner explicitly adopted requested architecture with known cost4305; actual integration not claimed",
+  "profile": "ast-retirement-acceptance-v1",
+  "expected_cells": [
+    "unity-syntax-only",
+    "unity-object",
+    "tiny_startup-syntax-only",
+    "large_function-syntax-only",
+    "many_functions-syntax-only",
+    "symbol_table-syntax-only",
+    "control_flow-syntax-only",
+    "backend_pressure-syntax-only",
+    "tiny_startup-object-fast",
+    "tiny_startup-object-quality",
+    "large_function-object-fast",
+    "large_function-object-quality",
+    "many_functions-object-fast",
+    "many_functions-object-quality",
+    "symbol_table-object-fast",
+    "symbol_table-object-quality",
+    "control_flow-object-fast",
+    "control_flow-object-quality",
+    "backend_pressure-object-fast",
+    "backend_pressure-object-quality"
+  ],
+  "timed_rows_per_cell": 40,
+  "expected_total_timed_rows": 800,
+  "expected_probe_logs": 40,
+  "raw_handoff_owner": "/root/controls_recovery",
+  "raw_handoff_directory": "work/4239-3cdf-physical-audit",
+  "required_selections": [
+    {
+      "category": "experiment identity",
+      "content": "Publication transaction AND lag-followup confirmation, causal request/run/attempt binding, terminal artifact row, trusted source identities."
+    },
+    {
+      "category": "physical result",
+      "content": "Closed final physical receipt, pure trusted-validator replay output, exact20-cell metrics with all CIs/warnings and ordinary raw-derived summary."
+    },
+    {
+      "category": "census",
+      "content": "All40 probe logs plus binary/input/argv-bound full census JSON/CSV; retained components separate; missing baseline counters unavailable."
+    },
+    {
+      "category": "raw indexes",
+      "content": "All800timed CSV+packet member identities, RSS/floor population summary, payload member-manifest digest and artifact ZIP digest."
+    },
+    {
+      "category": "native authority",
+      "content": "Authenticated machine sources, AST-only owner metadata/bootstrap/phase recipe/five raw proof files, actual cleanup and independent publisher account join."
+    },
+    {
+      "category": "source QA",
+      "content": "Closed exact3cdf local/analyzer/selfhost/modes/original848/narrow-witness/hosted receipts, actual tested merge identities and unresolved limitations."
+    }
+  ],
+  "retention_rules": [
+    "Copy allowlisted small public receipts/logs byte-for-byte only after final raw audit closes.",
+    "Screen public-content files for credential/private-key/signed-URL patterns before copy; do not silently redact raw evidence.",
+    "Use relative wrapper paths and exactSHA256/bytes manifest; preserve raw embedded historical paths as provenance.",
+    "Exclude compiled binaries, artifact ZIP, object/reference chunks, unbounded profiles and full source/toolchain exports.",
+    "Index raw CSV/packet members when bytes remain in retained full artifact; capsule is not a full archive or standalone replay.",
+    "Do not claim complete generated-header bytes from aggregate binding only.",
+    "Do not reuse d824 metrics, census, binary/helper hashes, warnings or acceptance for3cdf.",
+    "No fixed file/byte total claimed until final selection is enumerated."
+  ],
+  "final_selection_manifest": "capsule-manifest.json",
+  "final_checksums": "SHA256SUMS",
+  "source_gate_claims": "closed exact-head receipt/peer indexes in source-qa; no full transitive dependency reconstruction",
+  "parent_scope": "Final root architecture disposition is retained separately; root owns subsequent code/docs protected integration and scoped closures. No automatic3102closure."
+}

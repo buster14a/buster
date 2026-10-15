@@ -1,0 +1,84 @@
+{
+  "schema": "buster.4239.3cdf.root-measured-disposition.v1",
+  "created": "2026-10-15T14:05:11.691410+00:00",
+  "status": "FINAL_SOURCE_ADOPTION_DECISION_ONLY",
+  "authority": [
+    "https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034",
+    "https://github.com/buster14a/buster/issues/3102#issuecomment-6146782845",
+    "https://github.com/buster14a/buster/issues/3102#issuecomment-6166924147"
+  ],
+  "candidate": {
+    "base": "02a6414e020f5d549122197c3a7c8407df5bed76",
+    "base_tree": "5aa95687f3d2056f07760ae0347d200b06c84eee",
+    "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+    "head_tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+    "mode": "pull",
+    "pull": "4239",
+    "pull_head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+    "ref": "refs/pull/4239/head",
+    "repository": "buster14a/buster",
+    "request_run_id": "38743139164",
+    "run_attempt": "1",
+    "run_id": "38743190006",
+    "trusted_revision": "02a6414e020f5d549122197c3a7c8407df5bed76"
+  },
+  "reasoning": [
+    "The user authorized taking over and completing the remaining roadmap. The owner direction mandates nodes/retained facts, deletes lowering token structure and requires final end-to-end measurement on the approved host.",
+    "All exact-source correctness, original object/debug/diagnostic comparisons, self-host, maintained modes, provenance controls and source CI have passed; final physical evidence is complete at the actual-publication current-main baseline.",
+    "No surviving numeric adoption threshold was identified. Report-only success is collection/validation evidence and is not this adoption decision. No new zero-regression, per-slice or noise budget is invented.",
+    "The architecture is adopted to implement the explicitly requested phase-output contract. The observed remaining CPU/wall cost is a performance regression, not proved mandatory and not erased by this architecture decision. Current-source attribution and a bounded reduction remain tracked in4305.",
+    "Earlier d824/e51 remains a separate valid adverse/deferred experiment. Private producer repairs have their own correctness/count evidence; their percentages are not added or recast as a direct physical d824-to3cdf ablation.",
+    "Protected exact-group gates/admissions, actual merge/main containment and separate audit/docs integration remain prerequisites for scoped roadmap issue closure. Broad3102 and independently owned semantic/scaling/layout residuals remain open."
+  ],
+  "remaining_regression": "https://github.com/buster14a/buster/issues/4305",
+  "ordinary": {
+    "instructions": {
+      "change_percent": 5.400669991097562,
+      "ci_low": 1.054006696964889,
+      "ci_high": 1.0540067026201263,
+      "a_median": 23043910231.5,
+      "b_median": 24288435760.5,
+      "n": 178,
+      "outcome": "higher"
+    },
+    "peak_rss": {
+      "change_percent": 0.611807890605709,
+      "ci_low": 1.0060790092051008,
+      "ci_high": 1.0061998388877287,
+      "a_median": 1372854272.0,
+      "b_median": 1381275648.0,
+      "n": 178,
+      "outcome": "higher"
+    },
+    "wall": {
+      "change_percent": 6.628576595945201,
+      "ci_low": 1.0658395598676629,
+      "ci_high": 1.066768939200556,
+      "a_median": 1.6091980000000001,
+      "b_median": 1.715706,
+      "n": 178,
+      "outcome": "slower"
+    }
+  },
+  "fixed_wall_outcomes": {
+    "no detectable difference": 11,
+    "slower": 9
+  },
+  "source_adoption_released": true,
+  "protected_integration": "PENDING",
+  "docs_integration": "PENDING",
+  "issue_closure": "PENDING",
+  "decided_at": "2026-10-15T14:10:01.245778+00:00",
+  "decision": "ADOPT_REQUESTED_ARCHITECTURE_FOR_PROTECTED_INTEGRATION",
+  "independent_physical_peer": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/final-independent-physical-peer.json",
+    "bytes": 73770,
+    "sha256": "0ec79b25778261fdce035a0a5a735cd5aea291e516f259450da4ebb0a7275f36"
+  },
+  "source_gate_evidence_index": {
+    "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-pr-evidence-summary.json",
+    "sha256": "229010b272a77ef42cd017cdecb807afe31ddba22c20604b436fd470d347a4eb"
+  },
+  "permitted_action": "Normal protected enqueue of ownPR4239 exactH3cdf with expectedHeadOid/jumpfalse after fresh live head/main/reviews/requiredgates/ruleset/queue checks. No foreign queue action, protection bypass, trusted-writer dispatch or generated-pair mutation.",
+  "disposition_statement": "Adopt the requested architecture for normal protected integration, with the remaining measured throughput regression explicitly open as4305; no speed improvement or performance-regression-fixed claim."
+}

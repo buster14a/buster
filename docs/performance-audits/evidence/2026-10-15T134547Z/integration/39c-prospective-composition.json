@@ -1,0 +1,431 @@
+{
+  "schema": "buster.4239.3cdf.prospective-current-main-composition.v2",
+  "captured": "2026-10-15T13:55:23.977318+00:00",
+  "candidate": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+  "actual_current_main": "39c31f0ba2abd1b8a986133fbaa25da96a4f4b49",
+  "prospective_tree": "6bfa507e1c2343421f474cd183cbfd6fe8334b2e",
+  "clean_merge": true,
+  "only_delta_from_candidate": {
+    "AGENTS.md": {
+      "prospective": "7d3468fac5e54878d239ebab9467e8d14aa90319",
+      "actual_main": "7d3468fac5e54878d239ebab9467e8d14aa90319"
+    },
+    "CMakeLists.txt": {
+      "prospective": "7bb9986795344abac2dc2e98641d339e6238bdf9",
+      "actual_main": "7bb9986795344abac2dc2e98641d339e6238bdf9"
+    },
+    "PROJECTS.md": {
+      "prospective": "461eabcf3abe301a9f0fc0be72a7ded4091211f6",
+      "actual_main": "461eabcf3abe301a9f0fc0be72a7ded4091211f6"
+    },
+    "README.md": {
+      "prospective": "a774b1abccd5e3db3ed5eb0cec6fd8d95594f826",
+      "actual_main": "a774b1abccd5e3db3ed5eb0cec6fd8d95594f826"
+    },
+    "cmake/AndroidApk.cmake": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "cmake/AndroidSdkSelection.cmake": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "cmake/CompilerSdk.cmake": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "cmake/DiskBuilder.cmake": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "cmake/HotReloadDemo.cmake": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "cmake/IOSBundleAssets.cmake": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "cmake/ImageBrowser.cmake": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "cmake/Raster.cmake": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "cmake/RenderingTextureFormat.cmake": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "cmake/embed_d3d12_shaders.cmake": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "cmake/embed_metal_shaders.cmake": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "docs/agents/build.md": {
+      "prospective": "6960eafc3ab13c2169368ea4af8501f9d31be907",
+      "actual_main": "6960eafc3ab13c2169368ea4af8501f9d31be907"
+    },
+    "docs/agents/platform.md": {
+      "prospective": "95f87244eda960f562c561586ef4cb78a35653f3",
+      "actual_main": "95f87244eda960f562c561586ef4cb78a35653f3"
+    },
+    "docs/agents/project.md": {
+      "prospective": "c1a0689f2d4f08d4e33477099e76d0cf0b75d067",
+      "actual_main": "c1a0689f2d4f08d4e33477099e76d0cf0b75d067"
+    },
+    "docs/agents/testing.md": {
+      "prospective": "962a32ebd785d542e16f7a57af08f33376da967c",
+      "actual_main": "e784a695fa7965064c7040c29ccb557b5ee49b91"
+    },
+    "docs/ci-github-actions.md": {
+      "prospective": "73bd47b501443bc2310c63fb060655b7fc07f9b7",
+      "actual_main": "73bd47b501443bc2310c63fb060655b7fc07f9b7"
+    },
+    "docs/image-test-fixtures.md": {
+      "prospective": "ee9e47465d38a33c54f47b47d130ea53e4c804d3",
+      "actual_main": "ee9e47465d38a33c54f47b47d130ea53e4c804d3"
+    },
+    "docs/native-retirement-rebinding.md": {
+      "prospective": "a999e4500f924196f3c803c0326144763ca8b3ab",
+      "actual_main": "a999e4500f924196f3c803c0326144763ca8b3ab"
+    },
+    "docs/native-retirement-repository-sources-v1.json": {
+      "prospective": "ebb51d1bdf70374ca7a0087a77420751cf95966b",
+      "actual_main": "ebb51d1bdf70374ca7a0087a77420751cf95966b"
+    },
+    "docs/projects/disk-tools.md": {
+      "prospective": "24099d566418dd624c4c75cdfe7e46ed16f5e93d",
+      "actual_main": "24099d566418dd624c4c75cdfe7e46ed16f5e93d"
+    },
+    "docs/projects/graphics-ui.md": {
+      "prospective": "eee6cf43556c413f8271610938a5569e98bcb436",
+      "actual_main": "eee6cf43556c413f8271610938a5569e98bcb436"
+    },
+    "docs/projects/image-browser.md": {
+      "prospective": "21f1299dc463d4bf13e434cff3ea9fa91f8df10c",
+      "actual_main": "21f1299dc463d4bf13e434cff3ea9fa91f8df10c"
+    },
+    "docs/projects/media.md": {
+      "prospective": "dd4eab8f53b3269a61454af3b38f02546835f905",
+      "actual_main": "dd4eab8f53b3269a61454af3b38f02546835f905"
+    },
+    "src/buster/apps/disk_builder.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/apps/disk_builder_verification.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/apps/disk_builder_verification.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/apps/image_browser/image_browser.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/apps/image_browser/image_browser_linux.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/apps/image_browser/image_browser_linux.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/apps/image_browser/image_browser_linux_internal.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/apps/image_browser/image_browser_state.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/apps/image_browser/image_browser_state.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/disk_builder_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/disk_builder_test.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/image_browser/fixtures/first.ppm": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/image_browser/fixtures/second.ppm": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/image_browser_linux_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/image_browser_linux_test.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/image_browser_state_runner.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/image_browser_state_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/image_browser_state_test.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/image_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/image_test.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/rendering_raster_component_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/rendering_raster_native_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/rendering_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/rendering_test.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/rendering_texture_admission_component_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/rendering_texture_format_component_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/truetype_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/truetype_test.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/ui_scale_component_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/ui_slider_component_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/ui_slider_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/ui_slider_test.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/ui_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/ui_test.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/ui_test_internal.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/ui_utf8_component_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/window_component_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/window_test.c": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "src/buster/tests/window_test.h": {
+      "prospective": null,
+      "actual_main": null
+    },
+    "tools/build_configuration_test.py": {
+      "prospective": "620a7cc2074bc2b5b24319dbea5250d3f4389b99",
+      "actual_main": "620a7cc2074bc2b5b24319dbea5250d3f4389b99"
+    },
+    "tools/native_retirement_dependency_binding.generated.h": {
+      "prospective": "047560ca12990f2362f9d6e5eb8bb462578f72c0",
+      "actual_main": "047560ca12990f2362f9d6e5eb8bb462578f72c0"
+    },
+    "tools/native_retirement_merge_gate.py": {
+      "prospective": "baf5e160ceca64044f13eb329cb02dc2978be6cf",
+      "actual_main": "baf5e160ceca64044f13eb329cb02dc2978be6cf"
+    },
+    "tools/native_retirement_merge_gate_test.py": {
+      "prospective": "6ed0e0093b8b878b931649e0c8a35fb22d89afed",
+      "actual_main": "6ed0e0093b8b878b931649e0c8a35fb22d89afed"
+    },
+    "tools/native_target_compatibility_test.py": {
+      "prospective": "c536bd7f1f7606301d9f414d72085a3732c59bed",
+      "actual_main": "c536bd7f1f7606301d9f414d72085a3732c59bed"
+    }
+  },
+  "all_other_tracked_blobs_unchanged": true,
+  "only_cleanly_composed_import": "docs/agents/testing.md: main cleanup wording + candidate provenance guard; all other imports/deletions exact actualmain",
+  "all_118_actual_maintained_compiler_translation_units_byte_identical": [
+    "src/buster/apps/ide/ide.c",
+    "src/buster/lib/arena.c",
+    "src/buster/lib/byte_writer.c",
+    "src/buster/lib/compiler/assembly/aarch64_alias_projection.c",
+    "src/buster/lib/compiler/assembly/aarch64_base_assembly.c",
+    "src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c",
+    "src/buster/lib/compiler/assembly/aarch64_control_semantics.c",
+    "src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c",
+    "src/buster/lib/compiler/assembly/aarch64_encoding.c",
+    "src/buster/lib/compiler/assembly/aarch64_exact_bridge.c",
+    "src/buster/lib/compiler/assembly/aarch64_memory_semantics.c",
+    "src/buster/lib/compiler/assembly/aarch64_semantic_vm.c",
+    "src/buster/lib/compiler/assembly/aarch64_semantics.c",
+    "src/buster/lib/compiler/assembly/aarch64_simd_semantics.c",
+    "src/buster/lib/compiler/assembly/aarch64_syntax.c",
+    "src/buster/lib/compiler/assembly/aarch64_system_registers.c",
+    "src/buster/lib/compiler/assembly/aarch64_system_semantics.c",
+    "src/buster/lib/compiler/assembly/assembly.c",
+    "src/buster/lib/compiler/assembly/assembly_unit.c",
+    "src/buster/lib/compiler/assembly/x86_64_completion_census.c",
+    "src/buster/lib/compiler/assembly/x86_64_metadata.c",
+    "src/buster/lib/compiler/codegen/bootstrap_trace.c",
+    "src/buster/lib/compiler/codegen/codegen.c",
+    "src/buster/lib/compiler/codegen/investigation.c",
+    "src/buster/lib/compiler/codegen/machine.c",
+    "src/buster/lib/compiler/codeview/codeview.c",
+    "src/buster/lib/compiler/debug/debug.c",
+    "src/buster/lib/compiler/diagnostic.c",
+    "src/buster/lib/compiler/driver/driver.c",
+    "src/buster/lib/compiler/dwarf/dwarf.c",
+    "src/buster/lib/compiler/ebpf/ebpf.c",
+    "src/buster/lib/compiler/embed/embed.c",
+    "src/buster/lib/compiler/frontend/c/c_ast.c",
+    "src/buster/lib/compiler/frontend/c/c_ast_types.c",
+    "src/buster/lib/compiler/frontend/c/c_gen.c",
+    "src/buster/lib/compiler/frontend/c/c_parse.c",
+    "src/buster/lib/compiler/frontend/c/c_source.c",
+    "src/buster/lib/compiler/gpu/gpu.c",
+    "src/buster/lib/compiler/ir/ir.c",
+    "src/buster/lib/compiler/jit/jit.c",
+    "src/buster/lib/compiler/link/link.c",
+    "src/buster/lib/compiler/llvm/bitcode.c",
+    "src/buster/lib/compiler/object/object.c",
+    "src/buster/lib/compiler/pdb/pdb.c",
+    "src/buster/lib/compiler/spirv/spirv.c",
+    "src/buster/lib/compiler/wasm/wasm.c",
+    "src/buster/lib/entry_point.c",
+    "src/buster/lib/file.c",
+    "src/buster/lib/float.c",
+    "src/buster/lib/hash.c",
+    "src/buster/lib/integer.c",
+    "src/buster/lib/os.c",
+    "src/buster/lib/simd.c",
+    "src/buster/lib/string.c",
+    "src/buster/lib/target.c",
+    "src/buster/lib/time.c",
+    "src/buster/lib/x86_64.c",
+    "src/buster/tests/arena_test.c",
+    "src/buster/tests/byte_writer_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_alias_projection_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_base_assembly_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_complex_simd_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_encoding_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_memory_semantics_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_semantics_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_syntax_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_system_registers_test.c",
+    "src/buster/tests/compiler/assembly/aarch64_system_semantics_test.c",
+    "src/buster/tests/compiler/assembly/assembly_test.c",
+    "src/buster/tests/compiler/assembly/padding_test.c",
+    "src/buster/tests/compiler/assembly/x86_64_completion_census_test.c",
+    "src/buster/tests/compiler/assembly/x86_64_forwarding_test.c",
+    "src/buster/tests/compiler/assembly/x86_64_got_test.c",
+    "src/buster/tests/compiler/assembly/x86_64_metadata_test.c",
+    "src/buster/tests/compiler/assembly/x86_64_tls_test.c",
+    "src/buster/tests/compiler/codegen/aarch64_stride_test.c",
+    "src/buster/tests/compiler/codegen/codegen_test.c",
+    "src/buster/tests/compiler/codegen/investigation_test.c",
+    "src/buster/tests/compiler/codegen/machine_select_test.c",
+    "src/buster/tests/compiler/codegen/machine_test.c",
+    "src/buster/tests/compiler/codeview/codeview_test.c",
+    "src/buster/tests/compiler/debug/debug_test.c",
+    "src/buster/tests/compiler/diagnostic_test.c",
+    "src/buster/tests/compiler/driver/driver_test.c",
+    "src/buster/tests/compiler/driver/object_path_test.c",
+    "src/buster/tests/compiler/dwarf/dwarf_test.c",
+    "src/buster/tests/compiler/embed/embed_test.c",
+    "src/buster/tests/compiler/frontend/c/c_ast_test.c",
+    "src/buster/tests/compiler/frontend/c/c_test.c",
+    "src/buster/tests/compiler/frontend/c/macro_conditional_test.c",
+    "src/buster/tests/compiler/frontend/c/once_test.c",
+    "src/buster/tests/compiler/frontend/c/record_layout_test.c",
+    "src/buster/tests/compiler/frontend/c/type_layout_test.c",
+    "src/buster/tests/compiler/gpu/gpu_test.c",
+    "src/buster/tests/compiler/ir/ir_oracle_test.c",
+    "src/buster/tests/compiler/ir/ir_test.c",
+    "src/buster/tests/compiler/ir/vector_contract_test.c",
+    "src/buster/tests/compiler/jit/jit_test.c",
+    "src/buster/tests/compiler/link/link_test.c",
+    "src/buster/tests/compiler/llvm/bitcode_test.c",
+    "src/buster/tests/compiler/metamorphic/metamorphic_test.c",
+    "src/buster/tests/compiler/object/object_test.c",
+    "src/buster/tests/compiler/pdb/pdb_test.c",
+    "src/buster/tests/compiler/spirv/spirv_test.c",
+    "src/buster/tests/file_test.c",
+    "src/buster/tests/hash_test.c",
+    "src/buster/tests/integer_test.c",
+    "src/buster/tests/os_test.c",
+    "src/buster/tests/sanitizer_test.c",
+    "src/buster/tests/simd_test.c",
+    "src/buster/tests/string_test.c",
+    "src/buster/tests/target_test.c",
+    "src/buster/tests/test.c",
+    "src/buster/tests/x86_64_test.c"
+  ],
+  "protected_driver_request_and_ide_exact": [
+    "build.c",
+    "build.sh",
+    "src/buster/apps/ide/ide.c",
+    "benchmarks/9700x/compiler-compare.request"
+  ],
+  "CMake_change": "Only removed IOSBundleAssets include and unselected GUI/media/font module registrations; maintained compiler options/source selection unchanged by source inspection.",
+  "publication_experiment_baseline_and_tooling": "02a6414e020f5d549122197c3a7c8407df5bed76",
+  "setup_correction": "Initial helper compared failing rev-parse stdout for deleted paths; now explicit absent=null. Initial allimports-exactmain assumption was rejected for cleanly composed testing guide. No branch/source/test change.",
+  "limits": [
+    "Prospective merge-tree only; no branch/source/request/queue mutation or protected-group/main-containment claim.",
+    "Compile source equality is not a full transitive-header archive; removed source/tests were outside118maintained TU graph.",
+    "Fresh live current-main/head/reviews/gates required immediately before own enqueue.",
+    "Physical H/B/T remain actual publication identities."
+  ]
+}

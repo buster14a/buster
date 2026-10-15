@@ -1,0 +1,101 @@
+{
+  "members": [
+    {
+      "bytes": 73770,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/final-independent-physical-peer.json",
+      "sha256": "0ec79b25778261fdce035a0a5a735cd5aea291e516f259450da4ebb0a7275f36"
+    },
+    {
+      "bytes": 23340,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/native-packet-peer/decode.py",
+      "sha256": "65b16369a37921a2e59ae6a6b1e97489381c415e6708799816c9fa6e0de8a3e7"
+    },
+    {
+      "bytes": 32273,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/native-packet-peer/instructions.tsv",
+      "sha256": "6a571500e1c984ed9ec2c5b30c06def7237c91fac157ce29ea6ae71ec7f91c42"
+    },
+    {
+      "bytes": 978675,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/native-packet-peer/packet-ledger.json",
+      "sha256": "0089561292cac9720e1eed3cd5bebb0943fdb4fd6c85655cc2d93ee6048e9c40"
+    },
+    {
+      "bytes": 16286,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/native-packet-peer/receipt.json",
+      "sha256": "36b39c75267d757bc4e29c1416c9491062b180ebe018daa40063bc09c7b10b67"
+    },
+    {
+      "bytes": 1095,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/native-packet-peer/seal.json",
+      "sha256": "6ad26d43d4384ee44f57f0b8e12b48cf74e2be241fec31ad9d2be96db25b27dc"
+    },
+    {
+      "bytes": 3377,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/primary-input-hashes-at-close.json",
+      "sha256": "87d617f69cc89e74b94582450cb112ab6d34ccf09e84052d1d52057e71ec6d7b"
+    },
+    {
+      "bytes": 6897,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/raw-symbol-binding-verification.json",
+      "sha256": "c0673c0844730a41d2e91510e6ece268b79aa7d8e7f39d418ffde8e97170551d"
+    },
+    {
+      "bytes": 14147,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/seal_independent.py",
+      "sha256": "11b0e93e051e1b4a81184b217456de386f1d5b9150aa6812186fc709b2540859"
+    },
+    {
+      "bytes": 356293,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/statistics/computed-all-cells.json",
+      "sha256": "d872148c169b1a4afe730b2ebdc799a4adad473b186fddbb52798591cd66a3dd"
+    },
+    {
+      "bytes": 55663,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/statistics/computed-ordinary.json",
+      "sha256": "7a76a424babe326f36a4a44f57e4acba7cf00b54b74fc282e1518908537cbcf4"
+    },
+    {
+      "bytes": 1909,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/statistics/independent-replay.json",
+      "sha256": "a9b61466f5483362b97f44469eedb62f3c5fc08f14a80278756dc8c69ff58785"
+    },
+    {
+      "bytes": 389,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/statistics/initial-setup-correction.json",
+      "sha256": "a2e10c7ae1d1072b748c1544a8d2d2ed854f86e494cabd4403d54d1e1a320c79"
+    },
+    {
+      "bytes": 366,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/statistics/phase-label-correction.json",
+      "sha256": "18a35528990d418cf18cd6cd7ceda8b61e5e2e7d77aa32b7e12b7b4ffc83f235"
+    },
+    {
+      "bytes": 77737,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/statistics/raw-probe-census.json",
+      "sha256": "965207fcefbb1e86bf79b723a3d533e3d15069b95e967220ea550fd80bda1c6b"
+    },
+    {
+      "bytes": 5632,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/statistics/reference-equality.json",
+      "sha256": "eb04b74fd19a6c4b97cb5a0fc4d41a199c923d8377804d4d7aa6d6c9776cd4d5"
+    },
+    {
+      "bytes": 16861,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/statistics/replay_independent.initial.py",
+      "sha256": "d2786d03ab53d09e01562f31c4a314cf4b8d8aa890dca08697693eee1c00ad92"
+    },
+    {
+      "bytes": 17239,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/statistics/replay_independent.optional-closure-fixed.py",
+      "sha256": "28069b0b65223220a68a9dd5212296300b813f81d06ed9bd792505bb9fa39d84"
+    },
+    {
+      "bytes": 17248,
+      "path": "/home/david/Documents/Codex/2026-10-14/deis/work/4239-3cdf-independent-physical-peer/statistics/replay_independent.py",
+      "sha256": "c08b108a7c9b487a8c92a4df7c130c3ff596d6a8973ae174bbdbf1582ed85b60"
+    }
+  ],
+  "reader_state": "closed",
+  "schema": "buster.4239.3cdf.independent-final-physical-peer.seal.v1"
+}

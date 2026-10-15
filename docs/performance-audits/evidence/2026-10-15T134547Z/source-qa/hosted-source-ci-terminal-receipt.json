@@ -1,0 +1,1612 @@
+{
+  "actual_rows": {
+    "analyzer_database_rows": 236,
+    "analyzer_selected_release_tus": 118,
+    "analyzer_shards": 8,
+    "analyzer_workers": 2,
+    "compiler_profiles": 23,
+    "desktop_artifacts": 14,
+    "module_assertions": 64110825,
+    "module_rows": 537,
+    "native_differential_configurations": 13176,
+    "native_distinct_accepted_objects": 487,
+    "native_expected_rejections": 1728,
+    "native_mode_avenues": {
+      "link": 10,
+      "native": 10,
+      "oracle": 40
+    },
+    "native_mode_legs": 60,
+    "native_platforms": 5,
+    "native_positive_configurations": 11448,
+    "terminal_logs": 14,
+    "uefi_boot_controls": 6,
+    "unit_process_rows": 133
+  },
+  "all_head_check_population": {
+    "queued": 1,
+    "skipped": 5,
+    "success": 71
+  },
+  "all_head_checks": [
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:49:18Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116459406922",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116459406922,
+      "name": "CI complete",
+      "started_at": "2026-10-15T13:49:00Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:49:01Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38745801678/job/116459244205",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116459244205,
+      "name": "Preflight regression tests",
+      "started_at": "2026-10-15T13:48:41Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:48:38Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38745801678/job/116459002359",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116459002359,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:48:12Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:38:04Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139091/job/116453887948",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116453887948,
+      "name": "Canonical TCC bootstrap",
+      "started_at": "2026-10-15T13:37:53Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:35:51Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743934081/job/116452713145",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116452713145,
+      "name": "Preflight regression tests",
+      "started_at": "2026-10-15T13:35:32Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:35:30Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743934081/job/116452491197",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116452491197,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:35:05Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:40:18Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139222/job/116450714187",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450714187,
+      "name": "direct-ssa-census",
+      "started_at": "2026-10-15T13:31:34Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:34:54Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139222/job/116450713652",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450713652,
+      "name": "regression-guard",
+      "started_at": "2026-10-15T13:31:34Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": null,
+      "conclusion": null,
+      "details_url": "https://github.com/buster14a/buster/runs/116450275648",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450275648,
+      "name": "9700X compiler benchmark (pull request)",
+      "started_at": "2026-10-15T13:30:39Z",
+      "status": "queued"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:30Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139059/job/116450206892",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450206892,
+      "name": "Deploy GitHub Pages",
+      "started_at": "2026-10-15T13:30:31Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:31:31Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139222/job/116450067592",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450067592,
+      "name": "harness (windows-2025)",
+      "started_at": "2026-10-15T13:30:17Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:31:13Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139222/job/116450067255",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450067255,
+      "name": "harness (ubuntu-26.04)",
+      "started_at": "2026-10-15T13:30:17Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:10Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450035240",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450035240,
+      "name": "github.event_name == 'merge_group' && 'Workflow lint' || 'Queue lint preflight (inactive)'",
+      "started_at": "2026-10-15T13:30:10Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:41:43Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450034418",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450034418,
+      "name": "Windows x86-64 release",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:33:21Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450034138",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450034138,
+      "name": "Windows AArch64 checks",
+      "started_at": "2026-10-15T13:30:13Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:36:11Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033877",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033877,
+      "name": "Windows x86-64 portability",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:33:31Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033831",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033831,
+      "name": "macOS AArch64 portability",
+      "started_at": "2026-10-15T13:30:18Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:40:22Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033678",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033678,
+      "name": "macOS AArch64 sanitized-release",
+      "started_at": "2026-10-15T13:30:19Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:39:56Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033455",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033455,
+      "name": "Linux AArch64 sanitized-release",
+      "started_at": "2026-10-15T13:30:15Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:33:26Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033447",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033447,
+      "name": "Linux x86-64 portability",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:39:30Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033401",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033401,
+      "name": "Linux x86-64 sanitized-release",
+      "started_at": "2026-10-15T13:30:13Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:39:10Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033379",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033379,
+      "name": "Windows AArch64 release",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:48:37Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033343",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033343,
+      "name": "Windows x86-64 sanitized-release",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:44:12Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033300",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033300,
+      "name": "macOS AArch64 release",
+      "started_at": "2026-10-15T13:30:19Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:09Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139052/job/116450033241",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033241,
+      "name": "GPU Metal consumer",
+      "started_at": "2026-10-15T13:30:10Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:32:47Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033233",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033233,
+      "name": "Linux AArch64 portability",
+      "started_at": "2026-10-15T13:30:15Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:35:26Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033218",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033218,
+      "name": "macOS AArch64 native",
+      "started_at": "2026-10-15T13:30:19Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:48:58Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033196",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033196,
+      "name": "Clang analyzer shards",
+      "started_at": "2026-10-15T13:30:13Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:38:44Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033112",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033112,
+      "name": "Linux AArch64 release",
+      "started_at": "2026-10-15T13:30:15Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:39:48Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033102",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033102,
+      "name": "Linux x86-64 release",
+      "started_at": "2026-10-15T13:30:14Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:34:24Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033096",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033096,
+      "name": "Linux x86-64 native",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:33:22Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033007",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450033007,
+      "name": "Linux AArch64 native",
+      "started_at": "2026-10-15T13:30:15Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:34:15Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450032983",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450032983,
+      "name": "Windows x86-64 native",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:32:34Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450032981",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450032981,
+      "name": "Workflow lint",
+      "started_at": "2026-10-15T13:30:14Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:35:29Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450032919",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450032919,
+      "name": "UEFI firmware boot",
+      "started_at": "2026-10-15T13:30:13Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:35:14Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450032903",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450032903,
+      "name": "Windows AArch64 native",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:33:59Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139052/job/116450030032",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450030032,
+      "name": "GPU Linux consumers",
+      "started_at": "2026-10-15T13:30:13Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:31:23Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139966/job/116450012789",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450012789,
+      "name": "Main integration admission",
+      "started_at": "2026-10-15T13:30:10Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:26Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139964/job/116450007255",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450007255,
+      "name": "Preflight regression tests",
+      "started_at": "2026-10-15T13:30:09Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:30Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139059/job/116449998135",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449998135,
+      "name": "Pages validation and artifact",
+      "started_at": "2026-10-15T13:30:08Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:40Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138990/job/116449996782",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449996782,
+      "name": "API migration policy",
+      "started_at": "2026-10-15T13:30:07Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:34:37Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139091/job/116449990426",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449990426,
+      "name": "Hosted TCC native proofs",
+      "started_at": "2026-10-15T13:30:07Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:37:49Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139091/job/116449990132",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449990132,
+      "name": "Hosted compiler closure Utility proof",
+      "started_at": "2026-10-15T13:30:07Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:37:51Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139091/job/116449989792",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449989792,
+      "name": "Hosted ordinary compiler bridge proof",
+      "started_at": "2026-10-15T13:30:07Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:34:31Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139345/job/116449984320",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449984320,
+      "name": "Benchmark service workflow policy",
+      "started_at": "2026-10-15T13:30:06Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:31:13Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140128/job/116449973580",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449973580,
+      "name": "Rebind unit (macos-26)",
+      "started_at": "2026-10-15T13:30:11Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:31:30Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140128/job/116449973447",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449973447,
+      "name": "Reconstruct candidate closure ephemerally",
+      "started_at": "2026-10-15T13:30:05Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:32Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140128/job/116449973409",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449973409,
+      "name": "Rebind unit (ubuntu-26.04)",
+      "started_at": "2026-10-15T13:30:05Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:32:39Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140122/job/116449973396",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449973396,
+      "name": "foundation",
+      "started_at": "2026-10-15T13:30:06Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:31:14Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139042/job/116449957697",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449957697,
+      "name": "Native retirement merge admission",
+      "started_at": "2026-10-15T13:30:03Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:29:34Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138851/job/116449792490",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449792490,
+      "name": "Windows x86-64 fixture attribution",
+      "started_at": "2026-10-15T13:29:40Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:09Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116449748098",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449748098,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:29:34Z",
+      "conclusion": "skipped",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116449748056",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449748056,
+      "name": "Main CI reuse decision",
+      "started_at": "2026-10-15T13:29:35Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:02Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140122/job/116449746463",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449746463,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:29:36Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:06Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139964/job/116449745630",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449745630,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:07Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139966/job/116449745407",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449745407,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:02Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140128/job/116449745361",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449745361,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:31:06Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138906/job/116449745261",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449745261,
+      "name": "Native no-code negative controls",
+      "started_at": "2026-10-15T13:29:38Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:04Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139059/job/116449745015",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449745015,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:35:39Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138943/job/116449744765",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449744765,
+      "name": "Hosted native AArch64 corpus",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:04Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139091/job/116449744443",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449744443,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:14Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139222/job/116449744034",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449744034,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:04Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139345/job/116449743635",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449743635,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:29:36Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:00Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139042/job/116449743540",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449743540,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:29:36Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:33:12Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138853/job/116449743401",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449743401,
+      "name": "lifetime",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:09Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139052/job/116449743321",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449743321,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:29:36Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:29:51Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139164/job/116449743097",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449743097,
+      "name": "Record the workload request",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:34:42Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138622/job/116449742637",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449742637,
+      "name": "Hosted MOVDIRI source-width validation",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:34:54Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138761/job/116449742495",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449742495,
+      "name": "Hosted SIMD structure and lane assembly",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:05Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138990/job/116449742315",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449742315,
+      "name": "No-code plan / Classify no-code changes",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:29:53Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138956/job/116449742276",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449742276,
+      "name": "test",
+      "started_at": "2026-10-15T13:29:36Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:34:33Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138882/job/116449742250",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449742250,
+      "name": "Hosted numeric low-12 assembly",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:32:57Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138816/job/116449742193",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449742193,
+      "name": "Hosted assembler form observations",
+      "started_at": "2026-10-15T13:29:36Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:33:57Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138855/job/116449741992",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449741992,
+      "name": "Hosted typed memory assembly",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:34:33Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138757/job/116449741645",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449741645,
+      "name": "Pinned baseline self-host fixed point",
+      "started_at": "2026-10-15T13:29:36Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:34:47Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138757/job/116449741336",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449741336,
+      "name": "Linux x86-64 investigation evidence",
+      "started_at": "2026-10-15T13:29:36Z",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:33:00Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138722/job/116449741037",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449741037,
+      "name": "Frozen support and environment contract",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    }
+  ],
+  "auxiliary_hash_manifest_replayed_by_parent": "sha256sum --check --quiet SHA256SUMS exited 0 after child closure",
+  "candidate_and_executed_tree_identical": true,
+  "ci_run": {
+    "conclusion": "success",
+    "event": "pull_request",
+    "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+    "id": 38743140107,
+    "path": ".github/workflows/ci.yml",
+    "run_attempt": 1,
+    "status": "completed"
+  },
+  "delegated_readers_closed": true,
+  "evidence_receipts": {
+    "analyzer": {
+      "bytes": 505185,
+      "path": "auxiliary-rows/analyzer-row-receipt.json",
+      "sha256": "5a0847acb52db64364a87a245826354a5b78419f6497e9525548779a09244419"
+    },
+    "auxiliary": {
+      "bytes": 5787,
+      "path": "auxiliary-rows/auxiliary-final-receipt.json",
+      "sha256": "99c82e38e02c1942759704ebe885c70c1f2c3f4acd75c1e1f778d2ea1c2d5f5b"
+    },
+    "auxiliary_seal": {
+      "bytes": 1903,
+      "path": "auxiliary-rows/SHA256SUMS",
+      "sha256": "b8ad60d0837e64cd3ca1449a400924b27a617effed7943fc9f50bfdf2533a801"
+    },
+    "desktop_native": {
+      "bytes": 30252,
+      "path": "desktop-native/desktop-native-terminal-receipt.json",
+      "sha256": "30d50785d6f54dc1cb9cde520e3eeb9a5cd05e1135159efb074e3af943fe4427"
+    },
+    "desktop_readers_closed": {
+      "bytes": 2006,
+      "path": "desktop-native/all-readers-closed-replay-handoff.json",
+      "sha256": "17084cc246599d26dc1e2c855a78c86b549495809127bfc01f3c986b1ca85f77"
+    },
+    "desktop_seal": {
+      "bytes": 49386,
+      "path": "desktop-native/desktop-native-seal.json",
+      "sha256": "44ae290ebb7c2add17c2dc9fda4b8426ddbffb7f3de055c32a05c10b1c543a6f"
+    },
+    "direct_ssa": {
+      "bytes": 118612,
+      "path": "auxiliary-rows/direct-ssa-receipt.json",
+      "sha256": "273a1c10a55f9b1925724b450d589bebd96b8f144cadeaab5b6ae9bee4fdb4f1"
+    },
+    "executed_binding": {
+      "bytes": 753,
+      "path": "executed-run-binding.json",
+      "sha256": "a5475386f6f6b161637a2d8dc2119433b6c6851061c28736164b1aba9d59ddfe"
+    },
+    "native": {
+      "bytes": 116556,
+      "path": "desktop-native/native-rows/native-terminal-receipt.json",
+      "sha256": "4f5b2f95557de1c3ec0c3936152e87eb7c8ce962a4be71b90842d0afb6dbae5c"
+    },
+    "native_seal": {
+      "bytes": 19236,
+      "path": "desktop-native/native-rows/native-seal.json",
+      "sha256": "8a52a938b9e3a38080cf62129ab441f0411606ffd81fa69e26b371fb3ce5c8a6"
+    },
+    "required_logs": {
+      "bytes": 2355,
+      "path": "required-check-log-receipt.json",
+      "sha256": "199227e3e59e68d460445f2e168d95f0570cb18235f109541a15ed955a499f29"
+    },
+    "throughput": {
+      "bytes": 23741,
+      "path": "auxiliary-rows/throughput-terminal-receipt.json",
+      "sha256": "78783e03b5477475c95f100dd00932ae67917165d7bb4cc04c446ab8df7745ae"
+    },
+    "uefi": {
+      "bytes": 49757,
+      "path": "auxiliary-rows/uefi-row-receipt.json",
+      "sha256": "593311b8f085a3ce1fa4d77fe6eddf69bb4b63273b88e2844bfb57a332de93e6"
+    }
+  },
+  "executed_binding": {
+    "attempt": 1,
+    "boundary": "Immutable executed source/workflow binding. Later current-main,PR-base or test-merge refs are separate live metadata and do not rewrite this execution.",
+    "ci_run_id": 38743140107,
+    "executed_tested_merge": "ad809682f81ab257b6cbf723175d348da2812a54",
+    "executed_tested_parents": [
+      "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "3cdf6ee16c6c543cd7933f7a7d24cff407328d56"
+    ],
+    "executed_tested_tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+    "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+    "head_parents": [
+      "056bb69aecf3db4f2720ab82adee99cc800f5f45"
+    ],
+    "head_tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+    "recorded_in": "20261015T133328Z",
+    "schema": "3cdf-executed-ci-binding-v1"
+  },
+  "executed_tested_merge": "ad809682f81ab257b6cbf723175d348da2812a54",
+  "executed_tested_merge_parents": [
+    "02a6414e020f5d549122197c3a7c8407df5bed76",
+    "3cdf6ee16c6c543cd7933f7a7d24cff407328d56"
+  ],
+  "executed_tested_merge_tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+  "executed_workflow_ref": "refs/pull/4239/merge",
+  "fresh_live_metadata_separate": {
+    "boundary": "GitHub PR base/merge-ref metadata remains an observed cached identity. Current main advances are reported independently and do not relabel the immutable executed run. Protected-group composition requires new evidence owned by root.",
+    "current_main": "39c31f0ba2abd1b8a986133fbaa25da96a4f4b49",
+    "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+    "merge_queue_entry": null,
+    "observed_at": "20261015T135206Z",
+    "pr_base_as_reported": "02a6414e020f5d549122197c3a7c8407df5bed76",
+    "pr_merge_ref_as_reported": "ad809682f81ab257b6cbf723175d348da2812a54",
+    "pr_merge_ref_parents_as_reported": [
+      "02a6414e020f5d549122197c3a7c8407df5bed76",
+      "3cdf6ee16c6c543cd7933f7a7d24cff407328d56"
+    ],
+    "pr_merge_ref_tree_as_reported": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+    "review_decision": null,
+    "review_threads": {
+      "nodes": [],
+      "pageInfo": {
+        "endCursor": null,
+        "hasNextPage": false
+      }
+    },
+    "reviews": []
+  },
+  "job_population": {
+    "skipped": 2,
+    "success": 24
+  },
+  "jobs": [
+    {
+      "completed_at": "2026-10-15T13:29:34Z",
+      "conclusion": "skipped",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116449748056",
+      "id": 116449748056,
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "name": "Main CI reuse decision",
+      "runner_name": null,
+      "started_at": "2026-10-15T13:29:35Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:30:09Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116449748098",
+      "id": 116449748098,
+      "labels": [
+        "ubuntu-24.04"
+      ],
+      "name": "No-code plan / Classify no-code changes",
+      "runner_name": "GitHub Actions 1000558440",
+      "started_at": "2026-10-15T13:29:37Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:35:14Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450032903",
+      "id": 116450032903,
+      "labels": [
+        "windows-11-arm"
+      ],
+      "name": "Windows AArch64 native",
+      "runner_name": "GitHub Actions 1000558466",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:35:29Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450032919",
+      "id": 116450032919,
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "name": "UEFI firmware boot",
+      "runner_name": "GitHub Actions 1000558468",
+      "started_at": "2026-10-15T13:30:13Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:32:34Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450032981",
+      "id": 116450032981,
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "name": "Workflow lint",
+      "runner_name": "GitHub Actions 1000558472",
+      "started_at": "2026-10-15T13:30:14Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:34:15Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450032983",
+      "id": 116450032983,
+      "labels": [
+        "windows-2025"
+      ],
+      "name": "Windows x86-64 native",
+      "runner_name": "GitHub Actions 1000558457",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:33:22Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033007",
+      "id": 116450033007,
+      "labels": [
+        "ubuntu-26.04-arm"
+      ],
+      "name": "Linux AArch64 native",
+      "runner_name": "GitHub Actions 1000558461",
+      "started_at": "2026-10-15T13:30:15Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:34:24Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033096",
+      "id": 116450033096,
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "name": "Linux x86-64 native",
+      "runner_name": "GitHub Actions 1000558459",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:39:48Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033102",
+      "id": 116450033102,
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "name": "Linux x86-64 release",
+      "runner_name": "GitHub Actions 1000558471",
+      "started_at": "2026-10-15T13:30:14Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:38:44Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033112",
+      "id": 116450033112,
+      "labels": [
+        "ubuntu-26.04-arm"
+      ],
+      "name": "Linux AArch64 release",
+      "runner_name": "GitHub Actions 1000558460",
+      "started_at": "2026-10-15T13:30:15Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:48:58Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033196",
+      "id": 116450033196,
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "name": "Clang analyzer shards",
+      "runner_name": "GitHub Actions 1000558469",
+      "started_at": "2026-10-15T13:30:13Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:35:26Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033218",
+      "id": 116450033218,
+      "labels": [
+        "macos-26"
+      ],
+      "name": "macOS AArch64 native",
+      "runner_name": "GitHub Actions 1000558464",
+      "started_at": "2026-10-15T13:30:19Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:32:47Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033233",
+      "id": 116450033233,
+      "labels": [
+        "ubuntu-26.04-arm"
+      ],
+      "name": "Linux AArch64 portability",
+      "runner_name": "GitHub Actions 1000558463",
+      "started_at": "2026-10-15T13:30:15Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:44:12Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033300",
+      "id": 116450033300,
+      "labels": [
+        "macos-26"
+      ],
+      "name": "macOS AArch64 release",
+      "runner_name": "GitHub Actions 1000558465",
+      "started_at": "2026-10-15T13:30:19Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:48:37Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033343",
+      "id": 116450033343,
+      "labels": [
+        "windows-2025"
+      ],
+      "name": "Windows x86-64 sanitized-release",
+      "runner_name": "GitHub Actions 1000558473",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:39:10Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033379",
+      "id": 116450033379,
+      "labels": [
+        "windows-11-arm"
+      ],
+      "name": "Windows AArch64 release",
+      "runner_name": "GitHub Actions 1000558458",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:39:30Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033401",
+      "id": 116450033401,
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "name": "Linux x86-64 sanitized-release",
+      "runner_name": "GitHub Actions 1000558467",
+      "started_at": "2026-10-15T13:30:13Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:33:26Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033447",
+      "id": 116450033447,
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "name": "Linux x86-64 portability",
+      "runner_name": "GitHub Actions 1000558470",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:39:56Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033455",
+      "id": 116450033455,
+      "labels": [
+        "ubuntu-26.04-arm"
+      ],
+      "name": "Linux AArch64 sanitized-release",
+      "runner_name": "GitHub Actions 1000558462",
+      "started_at": "2026-10-15T13:30:15Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:40:22Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033678",
+      "id": 116450033678,
+      "labels": [
+        "macos-26"
+      ],
+      "name": "macOS AArch64 sanitized-release",
+      "runner_name": "GitHub Actions 1000558477",
+      "started_at": "2026-10-15T13:30:19Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:33:31Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033831",
+      "id": 116450033831,
+      "labels": [
+        "macos-26"
+      ],
+      "name": "macOS AArch64 portability",
+      "runner_name": "GitHub Actions 1000558476",
+      "started_at": "2026-10-15T13:30:18Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:36:11Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450033877",
+      "id": 116450033877,
+      "labels": [
+        "windows-2025"
+      ],
+      "name": "Windows x86-64 portability",
+      "runner_name": "GitHub Actions 1000558474",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:33:21Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450034138",
+      "id": 116450034138,
+      "labels": [
+        "windows-11-arm"
+      ],
+      "name": "Windows AArch64 checks",
+      "runner_name": "GitHub Actions 1000558475",
+      "started_at": "2026-10-15T13:30:13Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:41:43Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450034418",
+      "id": 116450034418,
+      "labels": [
+        "windows-2025"
+      ],
+      "name": "Windows x86-64 release",
+      "runner_name": "GitHub Actions 1000558478",
+      "started_at": "2026-10-15T13:30:12Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:30:10Z",
+      "conclusion": "skipped",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116450035240",
+      "id": 116450035240,
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "name": "github.event_name == 'merge_group' && 'Workflow lint' || 'Queue lint preflight (inactive)'",
+      "runner_name": null,
+      "started_at": "2026-10-15T13:30:10Z",
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-10-15T13:49:18Z",
+      "conclusion": "success",
+      "html_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116459406922",
+      "id": 116459406922,
+      "labels": [
+        "ubuntu-26.04"
+      ],
+      "name": "CI complete",
+      "runner_name": "GitHub Actions 1000558890",
+      "started_at": "2026-10-15T13:49:00Z",
+      "status": "completed"
+    }
+  ],
+  "license": {
+    "first_party": "No license grant or SPDX selected in inspected first-party source documentation; tracked by existing issue621.",
+    "source": "https://github.com/buster14a/buster/blob/3cdf6ee16c6c543cd7933f7a7d24cff407328d56/LICENSES/README.md",
+    "third_party": "Component-specific terms are recorded separately in THIRD_PARTY_NOTICES.md and LICENSES/; no single first-party license inferred."
+  },
+  "maintained_scope": "Current headless compiler/foundation scope, including61 registered modules and118 selected analyzer TUs. Fourteen desktop jobs and five native jobs executed. Android/iOS application hosting remains outside automatic maintenance; no mobile or Intel macOS execution claim. No old d824 or other-head qualification was borrowed.",
+  "mutations": "Read-only API/log/artifact collection and local audit outputs. No source, forge, queue, workflow dispatch, retry, cancellation, build or hardware mutation.",
+  "other_head_check_failures": [],
+  "other_pending_checks": [
+    {
+      "conclusion": null,
+      "details_url": "https://github.com/buster14a/buster/runs/116450275648",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450275648,
+      "name": "9700X compiler benchmark (pull request)",
+      "status": "queued"
+    }
+  ],
+  "raw_snapshot_files": [
+    {
+      "bytes": 199064,
+      "path": "20261015T135206Z/ci-jobs.json",
+      "sha256": "7cd73016970bcd4a0cb6cc843d467e887ad150e9e939d8c8d2fc12c4fdf69716"
+    },
+    {
+      "bytes": 134925,
+      "path": "20261015T135206Z/ci-jobs.raw-pages.json",
+      "sha256": "26b5acae9dd638cb5c7a760b8581ec61e0f59f8988a2c15c5e908570d522c5dd"
+    },
+    {
+      "bytes": 369,
+      "path": "20261015T135206Z/current-main.json",
+      "sha256": "b08c3acbc99aa3a6d3eb9c2b0e82d74d2689fbd87c11d9084d6b94bc875f5b0c"
+    },
+    {
+      "bytes": 332,
+      "path": "20261015T135206Z/current-main.raw-pages.json",
+      "sha256": "91ab8076bc070dd060b274a7a5fc1a27625360f4efb467caea9b3dbe6066abbe"
+    },
+    {
+      "bytes": 331,
+      "path": "20261015T135206Z/graphql.json",
+      "sha256": "a099173058ee4f96f2fddb6a65484b90d437e42cfb502571c06df533fc263379"
+    },
+    {
+      "bytes": 2786,
+      "path": "20261015T135206Z/pr-merge-commit.json",
+      "sha256": "437b068cd6055239c467408381edf903c67b465706e12a9f9e93aceed37dd6f8"
+    },
+    {
+      "bytes": 2585,
+      "path": "20261015T135206Z/pr-merge-commit.raw-pages.json",
+      "sha256": "4b54e55a736303403ccca1806cbbe6e4d30cf4201dc6d303794c6186607d5f40"
+    },
+    {
+      "bytes": 386,
+      "path": "20261015T135206Z/pr-merge-ref.json",
+      "sha256": "ff02212932cf595cd323ac0adf86a2d3ce685eecdffeea02c8efe00473ba1bd4"
+    },
+    {
+      "bytes": 349,
+      "path": "20261015T135206Z/pr-merge-ref.raw-pages.json",
+      "sha256": "f497ae439681e312d6858f1a95902a0e64457dc2e6292cdf1c93d6f481a97321"
+    },
+    {
+      "bytes": 25133,
+      "path": "20261015T135206Z/pull.json",
+      "sha256": "87df0604abb20aa04e79a60521ea126e86dbd2ee6d882e56ae2315881d714820"
+    },
+    {
+      "bytes": 22580,
+      "path": "20261015T135206Z/pull.raw-pages.json",
+      "sha256": "7187e747a14fb81f9c69d2452a53c3c21478f5c3775e2f13d45894ee9c200c13"
+    },
+    {
+      "bytes": 3,
+      "path": "20261015T135206Z/review-comments.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "bytes": 4,
+      "path": "20261015T135206Z/review-comments.raw-pages.json",
+      "sha256": "cf1cbb66a638b4860a516671fb74850e6ccf787fe6c4c8d29e9c04efe880bd05"
+    },
+    {
+      "bytes": 3,
+      "path": "20261015T135206Z/reviews.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "bytes": 4,
+      "path": "20261015T135206Z/reviews.raw-pages.json",
+      "sha256": "cf1cbb66a638b4860a516671fb74850e6ccf787fe6c4c8d29e9c04efe880bd05"
+    },
+    {
+      "bytes": 2962,
+      "path": "20261015T135206Z/ruleset.json",
+      "sha256": "cada82add40b858995347fdae06f7a33920561ad4143bd57d60260782bf3f899"
+    },
+    {
+      "bytes": 1986,
+      "path": "20261015T135206Z/ruleset.raw-pages.json",
+      "sha256": "6fe4e5efa477122b8b44fca57d974203e6f9ebcfee9b16f0f1dcca81c4bb3a2a"
+    },
+    {
+      "bytes": 406427,
+      "path": "20261015T135206Z/runs.json",
+      "sha256": "bb2d8ff61b03f9b9bb3f094e76b56a0fe502baa1abd28e7e46d58da05c6920f9"
+    },
+    {
+      "bytes": 337036,
+      "path": "20261015T135206Z/runs.raw-pages.json",
+      "sha256": "62ea443a08da25ac6b6e3269acb43c4ca3c53cf4221b19de53e7eb2a9a0e0d5a"
+    },
+    {
+      "bytes": 388853,
+      "path": "20261015T135206Z/source-checks.json",
+      "sha256": "b533f26883f17e3ab8aa7d2bf0fc7e1ac186d33b3aec33ec93f45c484793ce8f"
+    },
+    {
+      "bytes": 271571,
+      "path": "20261015T135206Z/source-checks.raw-pages.json",
+      "sha256": "72da90b40e0f3067c202817ff3ab816e3d7411e7dd399e48961d821a309cecd6"
+    },
+    {
+      "bytes": 5480,
+      "path": "20261015T135206Z/source-status.json",
+      "sha256": "b4b408a0eb278e11923c67c67cf9757863d3834ab2247501199f097dc54c2702"
+    },
+    {
+      "bytes": 4923,
+      "path": "20261015T135206Z/source-status.raw-pages.json",
+      "sha256": "faaa8b26497502d079c02ac43148428dffcca421c8fc9069653f528a600e4103"
+    },
+    {
+      "bytes": 1327,
+      "path": "20261015T135206Z/source.json",
+      "sha256": "f3b3087af729de2e6c462453aac9432453fcb4ceccefc7a552dcd7eb20d869c6"
+    },
+    {
+      "bytes": 1160,
+      "path": "20261015T135206Z/source.raw-pages.json",
+      "sha256": "49ee65338618e7bcff0d46ae1bb0cb21d98700ff77c5f989705cfc1f955a497d"
+    },
+    {
+      "bytes": 26545,
+      "path": "20261015T135206Z/summary.json",
+      "sha256": "f4b580354d1128ae5991beeaa85391f7fd22b642684ea375c6433aa942ac0ccc"
+    }
+  ],
+  "raw_terminal_snapshot": "20261015T135206Z",
+  "required_checks": [
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:49:18Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743140107/job/116459406922",
+      "external_id": "8ecc341a-43ce-5313-b9b1-adf0f4f3cd18",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116459406922,
+      "name": "CI complete",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:38:04Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139091/job/116453887948",
+      "external_id": "1b844b0c-7251-524a-a1f3-9279591009ed",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116453887948,
+      "name": "Canonical TCC bootstrap",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:33:59Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139052/job/116450030032",
+      "external_id": "4ac8865f-d255-5bd3-9c77-571c58c7a447",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450030032,
+      "name": "GPU Linux consumers",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:34:31Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139345/job/116449984320",
+      "external_id": "05a97b05-650e-506c-8374-af8b063b9e1d",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449984320,
+      "name": "Benchmark service workflow policy",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:30:40Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743138990/job/116449996782",
+      "external_id": "03e14537-ec48-55f4-9bd0-e0cbf22feee9",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449996782,
+      "name": "API migration policy",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:31:14Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139042/job/116449957697",
+      "external_id": "10b83840-42a1-5e9d-9b57-882c31fc0e7b",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116449957697,
+      "name": "Native retirement merge admission",
+      "status": "completed"
+    },
+    {
+      "app_id": 15368,
+      "completed_at": "2026-10-15T13:31:23Z",
+      "conclusion": "success",
+      "details_url": "https://github.com/buster14a/buster/actions/runs/38743139966/job/116450012789",
+      "external_id": "45b2dd64-87e9-5d8d-b545-8726f5b35cd5",
+      "head_sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+      "id": 116450012789,
+      "name": "Main integration admission",
+      "status": "completed"
+    }
+  ],
+  "schema": "buster-pr4239-3cdf-source-ci-audit-v1",
+  "scope": "Exact 3cdf source-head hosted correctness and diagnostic CI only. The seven source-head checks do not establish protected merge-group admission, merge/main containment, physical9700X acceptance or issue closure. The separate9700X check is preserved in pending metadata and remains root-owned.",
+  "sealed_at_utc": "2026-10-15T13:53:55.701602+00:00",
+  "separate_direct_ssa_diagnostics": {
+    "assertions": 7588116,
+    "both_census_paths": "pass",
+    "instrumented": true,
+    "modules": 61,
+    "scope": "Hosted diagnostic evidence, not physical performance or native-feature population from another row.",
+    "tiny_three_arm_replay": "pass"
+  },
+  "source_commit_status": {
+    "sha": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+    "state": "success",
+    "statuses": [
+      {
+        "context": "merge-conflict-preflight",
+        "created_at": "2026-10-15T13:49:59Z",
+        "description": "v1 m=57086c607d9daffd2e8b893de4e1d57e7079a446 h=3cdf6ee16c6c543cd7933f7a7d24cff407328d56 o=3 c=clean",
+        "state": "success",
+        "target_url": "https://github.com/buster14a/buster/actions/runs/38745933810",
+        "updated_at": "2026-10-15T13:49:59Z"
+      }
+    ]
+  },
+  "source_head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+  "source_parents": [
+    "056bb69aecf3db4f2720ab82adee99cc800f5f45"
+  ],
+  "source_tree": "dc778399c63a2cdd3e3c0b7b8cc3aec8f84f9e08",
+  "status": "pass"
+}

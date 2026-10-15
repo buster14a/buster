@@ -1,0 +1,33 @@
+{
+  "authorized": true,
+  "compare_result": "success",
+  "evidence": [
+    "causal-start-receipt.json",
+    "executor-jobs-120111.json",
+    "publisher-terminal.raw.log",
+    "check-terminal.json",
+    "artifact-row.json"
+  ],
+  "executor_attempt": "1",
+  "expected": {
+    "base": "e51b8f63685c19d3ef51c848801c689132f5a1c4",
+    "base_tree": "d514dc9782fed3bb6db07adc75e91bf0b79039a2",
+    "head": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+    "head_tree": "da8b6ce77ccdfe1e42a31b7dd8034e6b462e6ee0",
+    "mode": "pull",
+    "pull": "4239",
+    "pull_head": "d824c25a829a307d39534d43fa14d9e2ed2f5407",
+    "ref": "refs/pull/4239/head",
+    "repository": "buster14a/buster",
+    "request_run_id": "38728597243",
+    "run_attempt": "1",
+    "run_id": "38728622802",
+    "trusted_revision": "e51b8f63685c19d3ef51c848801c689132f5a1c4"
+  },
+  "native_job_id": 116400682536,
+  "publisher_job_id": 116409659253,
+  "publisher_result": "success",
+  "request_attempt": "1",
+  "schema": "buster-final-physical-independent-terminal-authority-v1",
+  "trusted_tree": "d514dc9782fed3bb6db07adc75e91bf0b79039a2"
+}

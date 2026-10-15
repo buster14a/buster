@@ -2372,12 +2372,16 @@ base and callee. The existing skew fixture keeps the navigation bound.
 
 ## Initializers, declarations and type queries from the tree
 
-**Status: local declaration nodes and retained type/constant/initializer
-producers are implemented; their remaining consumers are in progress.**
+**Historical checkpoint:** local declaration nodes and retained
+type/constant/initializer producers were implemented; their remaining consumers
+were in progress. The opening account below describes that migration checkpoint.
+Current production follows the [mandatory retained boundary](#retained-facts-for-lowering)
+and [consumer and retirement map](#consumer-and-retirement-map).
 This is step 4 of the
 [owner direction](https://github.com/buster14a/buster/issues/3102#issuecomment-6144374034)
 of 2026-10-13, tracked in [#4061](https://github.com/buster14a/buster/issues/4061).
-Local declarations and their bindings use nodes and retained facts. Under the
+At that checkpoint, local declarations and their bindings used nodes and
+retained facts. Under the
 direction, `c_gen.c` lowers from nodes and retained facts, uses tokens only for
 provenance (source ranges and
 spellings), keeps no token fallback, and deletes each walker it migrates.
@@ -2391,18 +2395,18 @@ The plan:
 | 4 | [#4061](https://github.com/buster14a/buster/issues/4061) | this section |
 | 5 | [#4058](https://github.com/buster14a/buster/issues/4058) | remaining token-structure code, and a guard |
 
-No code from this step lands before step 1. Step 1
-([retained facts](#retained-facts)) retains F1's types, the bindings and
+No code from this step lands before step 1. At that checkpoint, step 1
+([retained facts](#retained-facts)) retained F1's types, the bindings and
 bit-field widths per node, under `-fc-ast-pilot` (the default since
-2026-10-13). Beyond that:
-- direct lowering receives a completed tree from `c_parse_for_lowering`
-  (`c_lower_to_ir_tree_run`), but the facts are not retained;
-- semantic analysis's initializer, declaration and `offsetof` answers are
-  not published to lowering yet; F3's existing queried roots now have a
+2026-10-13). Its remaining limitations were:
+- direct lowering received a completed tree from `c_parse_for_lowering`
+  (`c_lower_to_ir_tree_run`), but the facts were not retained;
+- semantic analysis's initializer, declaration and `offsetof` answers were
+  not published to lowering yet; F3's existing queried roots had a
   separate retained sidecar, with node consumption still pending.
 
-Deleting a walker earlier would break the default path, and keeping one as
-a fallback is what the direction rules out.
+Deleting a walker at that checkpoint would have broken the default path,
+and keeping one as a fallback is what the direction rules out.
 
 **Boundary with step 3.** The expression walk
 ([Expression lowering from the tree](#expression-lowering-from-the-tree))

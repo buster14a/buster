@@ -1,0 +1,38 @@
+{
+  "all_old_prefix_bytes_exact": true,
+  "appended_lines": [
+    "",
+    "request: PR #4239 issues #3102 #4058 owner-authorized complete retained-AST retirement acceptance after bounded analysis-cost repairs and protected main #4267/#4294; actual current-main baseline and expected trusted tooling 02a6414e020f5d549122197c3a7c8407df5bed76; preserve complete adverse d824/e51 and failed c90/H2 evidence; fresh exact-head default/default physical-9700X end-to-end profile; acceptance hold remains",
+    "profile: ast-retirement-acceptance-v1"
+  ],
+  "ast_selectors_head": 4,
+  "ast_selectors_parent": 3,
+  "head": "3cdf6ee16c6c543cd7933f7a7d24cff407328d56",
+  "head_request_sha256": "97222cf4fcde6990278b683e222e36fda3d5946be87361f8ad3106221e059285",
+  "other_profile_lines_head": [
+    "profile: clang-analyze-full-v1",
+    "profile: clang-analyze-full-v1",
+    "profile: clang-analyze-full-v1",
+    "profile: clang-analyze-full-v1",
+    "profile: clang-analyze-full-v2",
+    "profile: compiler-main-sampling-acquire-v1 packet: 0 freeze: 51ca67f6174bfa55c8e0f37a14bd1368987afaa3",
+    "profile: constant-reuse-acceptance-v1",
+    "profile: process-floor-v1",
+    "profile: frontend-nesting-v1"
+  ],
+  "other_profile_lines_parent": [
+    "profile: clang-analyze-full-v1",
+    "profile: clang-analyze-full-v1",
+    "profile: clang-analyze-full-v1",
+    "profile: clang-analyze-full-v1",
+    "profile: clang-analyze-full-v2",
+    "profile: compiler-main-sampling-acquire-v1 packet: 0 freeze: 51ca67f6174bfa55c8e0f37a14bd1368987afaa3",
+    "profile: constant-reuse-acceptance-v1",
+    "profile: process-floor-v1",
+    "profile: frontend-nesting-v1"
+  ],
+  "parent_request_sha256": "acd3081ec4dcd9401843442280e10cae945b90a4c81978ce09bdfc9c032882bb",
+  "schema": "buster-3cdf-request-history-readonly-verification-v1",
+  "single_parent": "056bb69aecf3db4f2720ab82adee99cc800f5f45",
+  "source_reader_closed": true
+}
