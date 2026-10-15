@@ -60676,7 +60676,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_publication_work(UnitTestAr
         }
         c_test_append_source(bytes, capacity, &length, S8("x=x;}return x;}"));
         CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
-        CParseResult parse = c_parse(temporary.arena, tokens);
+        CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
         CTestIrSsaWork before = c_test_ir_ssa_work();
         CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("ssa-live-readers.c"), tokens, parse, target_native);
         CTestIrSsaWork after = c_test_ir_ssa_work();
@@ -60699,7 +60699,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_publication_work(UnitTestAr
     {
         TemporalArena temporary = scratch_begin(0, 0);
         CPreprocessResult tokens = c_preprocess(temporary.arena, sources[shape], (CPreprocessOptions){0});
-        CParseResult parse = c_parse(temporary.arena, tokens);
+        CParseResult parse = c_parse_for_lowering(temporary.arena, tokens);
         CTestIrSsaWork before = c_test_ir_ssa_work();
         CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("ssa-empty-parameters.c"), tokens, parse, target_native);
         CTestIrSsaWork after = c_test_ir_ssa_work();
