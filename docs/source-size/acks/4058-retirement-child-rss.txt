@@ -1,3 +1,4 @@
 # Source-size acknowledgement; see docs/source-size.md.
 schema buster-source-size-ack-v1
 build 41988
+reason Native compiler-child RSS observation, raw replay and scoped AST lifecycle authority for #4058.
