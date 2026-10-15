@@ -720,8 +720,9 @@ and canonical C construction attaches none (#4050).
 Explicit budgets cap callee instruction count, added instructions per
 caller, added instructions per module, and accepted call sites, respectively;
 the shift sets the caller relocation bound described below. The callee limit
-defaults to 13 canonical rows (`IR_INLINE_TINY_INSTRUCTIONS`, 16 before
-#3854); the FAST pipeline contract records the per-callee census behind it.
+defaults to 16 canonical rows (`IR_INLINE_TINY_INSTRUCTIONS`); the FAST
+pipeline contract records the #3854 census and why a 13-row default was
+reverted.
 Without an explicit module limit, the optional module budget is relative: the larger of
 4096 rows and 1/32 of the module's lowered canonical instruction rows
 (`ir_inline_module_growth_limit`). A caller keeps optional splices only when
