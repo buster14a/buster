@@ -102,6 +102,10 @@
     X(MACHINE_VIRTUAL_REGISTERS, machine, virtual_registers) \
     X(MACHINE_BLOCKS, machine, blocks) \
     X(MACHINE_PLACEMENT_EDITS, machine, placement_edits) \
+    X(MACHINE_RETRO_SORT_EDITS, machine, retro_sort_edits) \
+    X(MACHINE_RETRO_SORT_RECORD_MOVES, machine, retro_sort_record_moves) \
+    X(MACHINE_HOME_COLOR_HISTOGRAM_ROWS, machine, home_color_histogram_rows) \
+    X(MACHINE_BLOCK_COLOR_WORD_COMPARISONS, machine, block_color_word_comparisons) \
     X(MACHINE_LIVENESS_WORD_UPDATES, machine, liveness_word_updates) \
     X(MACHINE_ENCODED_BYTES, machine, encoded_bytes) \
     X(MACHINE_DEBUG_LOCATION_ROWS, machine, debug_location_rows) \

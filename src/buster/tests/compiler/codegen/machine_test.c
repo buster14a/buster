@@ -9462,7 +9462,25 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_test_quality_sparse_pins(UnitTestArgu
                                 BUSTER_TEST(arguments, after.attempt_reset_bytes - before.attempt_reset_bytes ==
                                     reference_after.attempt_reset_bytes - reference_before.attempt_reset_bytes);
                                 BUSTER_TEST(arguments, after.pin_mask_values - before.pin_mask_values == assignments);
+                                BUSTER_TEST(arguments, after.placement_frame_layouts - before.placement_frame_layouts ==
+                                    1u + (placement.pinned_register_count != 0));
 #endif
+                                if (placement.valid && !placement.pinned_register_count)
+                                {
+                                    // A rejected probe must leave exactly the
+                                    // baseline's output-arena state. Rebuild
+                                    // that baseline independently, then dirty
+                                    // the reclaimed probe tail before encoding.
+                                    u64 baseline_mark = arguments->arena->position;
+                                    TemporalArena baseline_scratch = scratch_begin(&arguments->arena, 1);
+                                    MachineFastPrepass baseline_prepass = machine_fast_prepass_build(baseline_scratch.arena, &variant, true);
+                                    MachineStackPlacement baseline_placement = machine_fast_placement_build_prepassed(arguments->arena,
+                                        &variant, &baseline_prepass, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+                                    u64 baseline_bytes = arguments->arena->position - baseline_mark;
+                                    BUSTER_TEST(arguments, baseline_placement.valid && baseline_placement.frame_size == placement.frame_size);
+                                    BUSTER_TEST(arguments, retained <= baseline_bytes + 16u);
+                                    scratch_end(baseline_scratch);
+                                }
                                 BUSTER_TEST(arguments, placement.valid && placement.edit_count == reference.edit_count &&
                                     placement.frame_size == reference.frame_size && placement.callee_saved_mask == reference.callee_saved_mask &&
                                     placement.pinned_register_count == reference.pinned_register_count &&
@@ -10995,6 +11013,10 @@ UnitTestResult machine_tests(UnitTestArguments* arguments)
     // Each fixture returns every unit it preprocessed; the registry's own
     // arena is reserved once, before the first fixture's reading.
     c_test_unit_registry_prewarm();
+    BUSTER_TEST(arguments, machine_fast_sort_edits_test(arguments->arena));
+    BUSTER_TEST(arguments, machine_fast_block_color_budget_test());
+    BUSTER_TEST(arguments, machine_fast_home_color_budget_test(arguments->arena));
+    BUSTER_TEST(arguments, machine_fast_placement_refusal_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_close_live_ranges_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_solve_liveness_test(arguments->arena));
     BUSTER_TEST(arguments, machine_fast_close_slot_ranges_test(arguments->arena));

@@ -119,6 +119,9 @@ BUSTER_F_DECL u32 machine_quality_region_row_build(MachineQualityRegionTraffic* 
     X(pin_mask_values) \
     X(pin_mask_clear_bytes) \
     X(placement_probes) \
+    X(placement_probe_bytes) \
+    X(placement_rejected_bytes) \
+    X(placement_frame_layouts) \
     X(placement_cost_rejections) \
     X(pin_verification_rejections) \
     X(accepted_placements)
