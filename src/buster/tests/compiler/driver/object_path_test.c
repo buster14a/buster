@@ -4153,7 +4153,7 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
         "    goto entered;\n"
         "    if (0) { count += constant_dead_missing(); entered: count += 4; }\n"
         "    switch (3) { case 1: if (0) { count += constant_dead_missing(); case 3: count += 8; } }\n"
-        "    if (count != 15 || initializer_calls != 1) return 1;\n"
+        "    int condition_calls = initializer_calls;\n"
         "    initializer_calls = 0;\n"
         "    goto live;\n"
         "    int target = (initializer_calls += 1, 5);\n"
@@ -4161,7 +4161,7 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
         "    target = 7;\n"
         "    goto dead;\n"
         "dead:\n"
-        "    return initializer_calls != 0 || target != 7 || read_external() != 9;\n"
+        "    return count != 15 || condition_calls != 1 || initializer_calls != 0 || target != 7 || read_external() != 9;\n"
         "}\n");
     BUSTER_TEST(arguments, file_write(unreachable_source, BUSTER_SLICE_TO_BYTE_SLICE(unreachable_program)));
     String8 allocators[] = {S8("fast"), S8("quality")};
