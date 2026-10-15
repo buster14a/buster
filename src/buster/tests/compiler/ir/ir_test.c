@@ -3485,6 +3485,84 @@ BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_snapshot_budget(UnitT
     return result;
 }
 
+// Large input bodies do not consume the fixed retained-graph allowance
+// (#4289). Share immutable unrelated bodies to cross the old module census
+// without allocating millions of duplicate rows in every test process.
+BUSTER_GLOBAL_LOCAL UnitTestResult ir_test_inline_required_planning(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 calls = 0; calls < 2; calls += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        Arena* arena = temporary.arena;
+        String8 pieces[] = {
+            S8("int ordinary(int value);\n"
+               "static inline __attribute__((always_inline)) int planning_leaf(int value) { return value + 1; }\n"
+               "int planning_caller(int value) { return planning_leaf(value); }\n"
+               "int planning_unrelated(int value) {\n"),
+            calls ? S8("value = ordinary(value);\n") : S8("value = value * 3 + 1;\n"),
+            S8("return value; }\n"),
+        };
+        u32 repeats[] = {1, 1024, 1};
+        String8 source = ir_test_inline_repeat_source(arena, pieces, repeats, BUSTER_ARRAY_LENGTH(pieces));
+        IrProgram* program = ir_test_inline_lower(arena, source, false);
+        if (BUSTER_REQUIRE(arguments, program != 0))
+        {
+            IrModule* module = program->modules;
+            IrFunction* unrelated = ir_test_inline_find_function(module, S8("planning_unrelated"));
+            if (BUSTER_REQUIRE(arguments, unrelated && unrelated->instruction_count != 0))
+            {
+                IrFunction body = *unrelated;
+                IrSymbol symbol = *ir_symbol_from_id(&program->symbols, body.symbol);
+                u32 copies = IR_FAST_WORK_BUDGET / (body.instruction_count + body.block_count) + 1u;
+                u32 symbol_capacity = program->symbols.count + copies;
+                IrSymbol* symbols = arena_allocate(arena, IrSymbol, symbol_capacity);
+                memcpy(symbols, program->symbols.symbols, sizeof(*symbols) * program->symbols.count);
+                program->symbols.symbols = symbols;
+                program->symbols.capacity = symbol_capacity;
+                u64 body_bytes = sizeof(IrInstruction) * (u64)body.instruction_count;
+                u8* unchanged = arena_allocate(arena, u8, body_bytes);
+                memcpy(unchanged, body.instructions, body_bytes);
+                for (u32 copy = 0; copy < copies; copy += 1)
+                {
+                    IrFunction clone = body;
+                    clone.name = string_format(arena, S8("planning_unrelated_{u32}"), copy);
+                    symbol.name = clone.name;
+                    symbol.link_name = clone.name;
+                    clone.symbol = ir_program_add_symbol(program, symbol);
+                    BUSTER_TEST(arguments, clone.symbol.value < program->symbols.count);
+                    BUSTER_TEST(arguments, ir_module_add_function(arena, module, clone) != 0);
+                }
+                u64 old_census = program->symbols.count + (u64)module->function_count;
+                for (u32 function = 0; function < module->function_count; function += 1)
+                {
+                    old_census += module->functions[function].block_count;
+                    old_census += module->functions[function].instruction_count;
+                }
+                BUSTER_TEST(arguments, old_census > IR_FAST_WORK_BUDGET);
+                program->fast_passes = 0;
+                program->inline_options = (IrInlineOptions){0};
+                IrValidationResult prepared = ir_test_inline_module(program, module, IR_INLINE_SPLICE_FAULT_NONE);
+                IrFunction* caller = ir_test_inline_find_function(module, S8("planning_caller"));
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+                BUSTER_TEST(arguments, module->inline_complete);
+                BUSTER_TEST(arguments, module->inlining.always_inlined == 1);
+                BUSTER_TEST(arguments, module->inlining.budget_skips == 0);
+                BUSTER_TEST(arguments, module->inlining.required_budget_reason == IR_INLINE_BUDGET_NONE);
+                BUSTER_TEST(arguments, caller && ir_test_direct_call_count(program, caller, S8("planning_leaf")) == 0);
+                // Call-free bodies are skipped. Ordinary-call bodies are
+                // scanned and counted, even beyond the graph's fixed bound.
+                BUSTER_TEST(arguments, calls ? module->inlining.visits > IR_FAST_WORK_BUDGET
+                                             : module->inlining.visits < IR_FAST_WORK_BUDGET);
+                BUSTER_TEST(arguments, memcmp(unchanged, body.instructions, body_bytes) == 0);
+                BUSTER_TEST(arguments, ir_validate_canonical_module(program, module).error == IR_VALIDATION_NONE);
+            }
+        }
+        scratch_end(temporary);
+    }
+    return result;
+}
+
 typedef struct IrI386AbiTestCase IrI386AbiTestCase;
 struct IrI386AbiTestCase
 {
@@ -3636,6 +3714,7 @@ UnitTestResult ir_tests(UnitTestArguments* arguments)
     UnitTestResult result = ir_promotion_tests(arguments);
     BUSTER_TEST_FIXTURE(arguments, ir_test_type_from_id_bounds);
     BUSTER_TEST_FIXTURE(arguments, ir_test_canonical_inline);
+    BUSTER_TEST_FIXTURE(arguments, ir_test_inline_required_planning);
     BUSTER_TEST_FIXTURE(arguments, ir_test_inline_required_work_budget);
     BUSTER_TEST_FIXTURE(arguments, ir_test_inline_required_snapshot_budget);
     BUSTER_TEST_FIXTURE(arguments, ir_test_label_owner_index);

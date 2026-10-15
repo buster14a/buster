@@ -65,6 +65,31 @@ On macOS, both `ide cc` invocations additionally receive the SDK returned by
 `xcrun --sdk macosx --show-sdk-path` through `-isysroot`, plus `-framework`
 arguments for AppKit, Metal, QuartzCore, and Foundation.
 
+The fixed-point recipe excludes the unit suite. A tests-enabled unity compile
+also needs the host-oracle configuration normally supplied by CMake and the
+repository's C flags, including unsigned plain `char`. For example, on Linux
+with Clang (use the same host compiler as the configured build):
+
+```sh
+self_host_cc=/usr/bin/clang
+self_host_resource_include="$("$self_host_cc" -print-resource-dir)/include"
+build/Release/ide cc -Isrc -Ibuild/generated \
+  -DBUSTER_UNITY_BUILD=1 -DBUSTER_INCLUDE_TESTS=1 \
+  "-DBUSTER_HOST_C_COMPILER=\"$self_host_cc\"" \
+  '-DBUSTER_HOST_C_COMPILER_ID="Clang"' \
+  '-DBUSTER_HOST_C_COMPILER_ARG1=""' \
+  "-DBUSTER_HOST_C_RESOURCE_INCLUDE=\"$self_host_resource_include\"" \
+  -DBUSTER_HOST_C_COMPILER_MSVC=0 \
+  -fwrapv -fno-strict-aliasing -funsigned-char -g -v \
+  -fsource-metrics=build/ide-self-tests.metrics \
+  src/buster/apps/ide/ide.c -lm -o build/ide-self-tests
+```
+
+Required graph planning counts input scans separately from retained graph work,
+so the larger tests-enabled translation unit does not spend its graph allowance
+on unrelated bodies (#4289). Run the ordinary tests-off fixed-point gate
+separately.
+
 The target and fixed point are currently available on Linux and Windows x86-64,
 and on macOS. Preserve them when changing preprocessing, C semantics, IR, code
 generation, object writing, or linking, and report both self-hosting failures and benchmark

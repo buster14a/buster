@@ -41,6 +41,7 @@ struct IrInlinePlan
     u32* cycle_rows;
     u64 scratch_bytes;
     u64 work_units;
+    u64 input_work_units;
     u32 first_cycle;
     u32 first_required_caller;
     IrInlineBudgetReason budget_reason;
@@ -526,12 +527,14 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
             // without chasing block lists. Every listed row is in that array,
             // so no site is missed.
             bool calls_required = false;
+            u32 scanned_rows = 0;
             if (ir_function_may_contain_opcodes(caller, IR_OPCODE_BIT(IR_OPCODE_CALL)))
             {
                 IrInstruction const* rows = caller->instructions;
                 u32 row_count = caller->instruction_count;
                 for (u32 row = 0; row < row_count; row += 1)
                 {
+                    scanned_rows = row + 1u;
                     if (rows[row].opcode == IR_OPCODE_CALL && rows[row].symbol.value < symbol_count &&
                         (facts[rows[row].symbol.value] & IR_INLINE_FACT_REQUIRED))
                     {
@@ -540,11 +543,19 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
                     }
                 }
             }
+            // Discovery reads existing canonical input: at most one dense
+            // scan and one linked scan per function. Count the rows actually
+            // read separately from the fixed allowance for graph metadata
+            // and edges; unrelated bodies cannot exhaust that allowance.
+            plan->input_work_units = ir_inline_storage_add(plan->input_work_units, scanned_rows);
+            u64 linked_work = 0;
             for (u32 block = 0; block < caller->block_count && result && calls_required; block += 1)
             {
+                linked_work += 1u;
                 for (u32 row = caller->blocks[block].first_instruction.value; row != IR_INLINE_NONE && result;
                      row = caller->instructions[row].next.value)
                 {
+                    linked_work += 1u;
                     IrInstruction* call = caller->instructions + row;
                     if (call->opcode != IR_OPCODE_CALL || call->symbol.value >= symbol_count ||
                         !(facts[call->symbol.value] & IR_INLINE_FACT_REQUIRED)) continue;
@@ -620,6 +631,7 @@ BUSTER_GLOBAL_LOCAL bool ir_inline_plan_graph(IrProgram* program, IrModule* modu
                     edge_count += 1;
                 }
             }
+            plan->input_work_units = ir_inline_storage_add(plan->input_work_units, linked_work);
         }
 
         u64 total_scratch = ir_inline_storage_add(base_scratch,
@@ -741,24 +753,17 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
         {
             has_required |= program->symbols.symbols[symbol].always_inline;
         }
-        u64 planning_rows = 0;
         u64 module_rows = 0;
         for (u32 function = 0; function < module->function_count; function += 1)
         {
             IrFunction* candidate = module->functions + function;
             if (candidate->state != IR_FUNCTION_LOWERED) continue;
-            planning_rows = ir_inline_storage_add(planning_rows, candidate->block_count);
-            planning_rows = ir_inline_storage_add(planning_rows, candidate->instruction_count);
             module_rows = ir_inline_storage_add(module_rows, candidate->instruction_count);
         }
         // A zero module limit stays relative in the program's options, so
         // each module derives its own; only this pass uses the result.
         options.max_module_growth = ir_inline_module_growth_limit(options.max_module_growth, module_rows);
         u64 planning_units = ir_inline_storage_add(module->function_count, program->symbols.count);
-        if (has_required)
-        {
-            planning_units = ir_inline_storage_add(planning_units, planning_rows);
-        }
         if (!has_required && !options.tiny)
         {
             module->inline_complete = true;
@@ -797,7 +802,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                      ? ir_inline_plan_graph(program, module, arena, &plan, &options, IR_FAST_SCRATCH_BUDGET, IR_FAST_WORK_BUDGET, planning_units, &order_count)
                                      : true;
                 if (plan_ready && !has_required) ir_inline_plan_optional(program, module, arena, &plan, &options, &order_count);
-                module->inlining.visits = has_required ? plan.work_units : ir_inline_storage_add(planning_units, plan.work_units);
+                module->inlining.visits = has_required ? ir_inline_storage_add(plan.work_units, plan.input_work_units)
+                                                     : ir_inline_storage_add(planning_units, plan.work_units);
                 if (!plan_ready)
                 {
                     if (has_required)
