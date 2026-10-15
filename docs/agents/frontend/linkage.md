@@ -797,15 +797,3 @@ Read the matching sections; [the frontend index](../frontend.md) lists these not
   build/Release/ide cc -target aarch64-unknown-linux -fverify-codegen -fregister-allocator=quality tests/basic_c_aarch64_elf_page_callee.c /tmp/page-caller.o -o /tmp/page-caller
   qemu-aarch64 /tmp/page-caller
   ```
-
-## Unreferenced native Mach-O imports
-
-The native Mach-O image writer admits undefined imports from object relocation
-targets, plus its synthetic destructor-registration and TLV bootstrap calls.
-An undefined declaration without such a use does not get an eager dyld bind.
-This allows a constant-dead call removed during C lowering to disappear from
-the executable even when its symbol row remains in the object model.
-The registered Mach GOT controls retain both referenced function/data imports
-and require exactly their two GOT slots despite additional unused undefined
-symbols. Existing constructor/destructor and TLS fixtures retain synthetic
-roots; the object-path dead-if fixture exercises actual desktop loading.
