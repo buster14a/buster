@@ -1,0 +1,1779 @@
+﻿2026-10-15T10:28:01.0359363Z Current runner version: '2.337.0'
+2026-10-15T10:28:01.0383120Z ##[group]Runner Image Provisioner
+2026-10-15T10:28:01.0383953Z Hosted Compute Agent
+2026-10-15T10:28:01.0384552Z Version: 20260901.588
+2026-10-15T10:28:01.0385169Z Commit: f88ec8081b781fac6c440065ac7ff9e710ce3d0b
+2026-10-15T10:28:01.0385865Z Build Date: 2026-09-01T19:56:44Z
+2026-10-15T10:28:01.0386571Z Worker ID: {0886c72a-d619-4a6a-81b7-b14f7bab45c5}
+2026-10-15T10:28:01.0387241Z Azure Region: centralus
+2026-10-15T10:28:01.0387778Z ##[endgroup]
+2026-10-15T10:28:01.0388934Z ##[group]Operating System
+2026-10-15T10:28:01.0389549Z Ubuntu
+2026-10-15T10:28:01.0390430Z 26.04.1
+2026-10-15T10:28:01.0390946Z LTS
+2026-10-15T10:28:01.0391425Z ##[endgroup]
+2026-10-15T10:28:01.0391985Z ##[group]Runner Image
+2026-10-15T10:28:01.0392549Z Image: ubuntu-26.04
+2026-10-15T10:28:01.0393087Z Version: 20260927.149.1
+2026-10-15T10:28:01.0394289Z Included Software: https://github.com/actions/runner-images/blob/ubuntu26/20260927.149/images/ubuntu/Ubuntu2604-Readme.md
+2026-10-15T10:28:01.0395718Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20260927.149
+2026-10-15T10:28:01.0396627Z ##[endgroup]
+2026-10-15T10:28:01.0398074Z ##[group]GITHUB_TOKEN Permissions
+2026-10-15T10:28:01.0400190Z Contents: read
+2026-10-15T10:28:01.0400762Z Metadata: read
+2026-10-15T10:28:01.0401305Z ##[endgroup]
+2026-10-15T10:28:01.0403191Z Secret source: Actions
+2026-10-15T10:28:01.0404191Z Cache mode: write
+2026-10-15T10:28:01.0404846Z Prepare workflow directory
+2026-10-15T10:28:01.2383299Z Prepare all required actions
+2026-10-15T10:28:01.2427228Z Getting action download info
+2026-10-15T10:28:01.5117995Z Download action repository 'buster14a/buster@a36422384d0334a53d4be73bc306b97ccdba4768' (SHA:a36422384d0334a53d4be73bc306b97ccdba4768)
+2026-10-15T10:28:04.3537997Z Download action repository 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' (SHA:11bd71901bbe5b1630ceea73d27597364c9af683)
+2026-10-15T10:28:04.4048978Z Download action repository 'actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' (SHA:0057852bfaa89a56745cba8c7296529d2fc39830)
+2026-10-15T10:28:05.3048279Z Complete job name: Linux x86-64 portability
+2026-10-15T10:28:05.5199096Z ##[group]Run buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+2026-10-15T10:28:05.5199974Z with:
+2026-10-15T10:28:05.5200274Z   requested-runner: ubuntu-26.04
+2026-10-15T10:28:05.5200574Z   matrix-index: 2
+2026-10-15T10:28:05.5200832Z   mode: startup
+2026-10-15T10:28:05.5201089Z   source-directory: .
+2026-10-15T10:28:05.5201375Z   source-repository: buster14a/buster
+2026-10-15T10:28:05.5201783Z env:
+2026-10-15T10:28:05.5202116Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:05.5202521Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:05.5202829Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:05.5203145Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:05.5203450Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:05.5203730Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:05.5204038Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:05.5204304Z ##[endgroup]
+2026-10-15T10:28:05.5576627Z ##[start-action display=Machine specifications (Unix);id=__buster14a_buster.__run]
+2026-10-15T10:28:05.5912545Z ##[group]Run set -euo pipefail
+2026-10-15T10:28:05.5912991Z [36;1mset -euo pipefail[0m
+2026-10-15T10:28:05.5913347Z [36;1mmkdir -p "$RUNNER_TEMP/buster-machine-specifications"[0m
+2026-10-15T10:28:05.5913929Z [36;1mclang -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char \[0m
+2026-10-15T10:28:05.5914476Z [36;1m  "$MS_ACTION_PATH/../../../tools/machine_specifications.c" \[0m
+2026-10-15T10:28:05.5914894Z [36;1m  -o "$RUNNER_TEMP/buster-machine-specifications/reporter"[0m
+2026-10-15T10:28:05.5915314Z [36;1m"$RUNNER_TEMP/buster-machine-specifications/reporter" --self-test[0m
+2026-10-15T10:28:05.5915916Z [36;1m"$RUNNER_TEMP/buster-machine-specifications/reporter" --collect "$RUNNER_TEMP/buster-machine-specifications/report.json"[0m
+2026-10-15T10:28:05.6045579Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:28:05.6046032Z env:
+2026-10-15T10:28:05.6046423Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:05.6046834Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:05.6047136Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:05.6047451Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:05.6047757Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:05.6048061Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:05.6048416Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:05.6048993Z   MS_ACTION_PATH: /home/runner/work/_actions/buster14a/buster/a36422384d0334a53d4be73bc306b97ccdba4768/.github/actions/machine-specifications
+2026-10-15T10:28:05.6049605Z   MS_REQUESTED_RUNNER: ubuntu-26.04
+2026-10-15T10:28:05.6050099Z   MS_MATRIX_INDEX: 2
+2026-10-15T10:28:05.6050390Z   MS_RUNNER_CLASS: github-hosted
+2026-10-15T10:28:05.6050682Z ##[endgroup]
+2026-10-15T10:28:07.9293008Z Machine specifications self-test: PASS (0 failures)
+2026-10-15T10:28:07.9293578Z ## Machine specifications
+2026-10-15T10:28:07.9293767Z 
+2026-10-15T10:28:07.9293887Z | Field | Value | Status / reason |
+2026-10-15T10:28:07.9294174Z | --- | --- | --- |
+2026-10-15T10:28:07.9294471Z | schema | buster-machine-specifications-v1 | available |
+2026-10-15T10:28:07.9294871Z | collected_at_utc | 2026-10-15T10&#58;28&#58;07Z | available |
+2026-10-15T10:28:07.9295225Z | workflow | Buster CI | available |
+2026-10-15T10:28:07.9295649Z | workflow_ref | buster14a/buster/.github/workflows/ci.yml@refs/pull/4275/merge | available |
+2026-10-15T10:28:07.9296161Z | workflow_sha | 0873e37fefce1f0becd359e5e8c08f08dc3b75a5 | available |
+2026-10-15T10:28:07.9296521Z | run_id | 38720390446 | available |
+2026-10-15T10:28:07.9296782Z | run_attempt | 1 | available |
+2026-10-15T10:28:07.9297051Z | job | test | available |
+2026-10-15T10:28:07.9297300Z | matrix_index | 2 | available |
+2026-10-15T10:28:07.9297632Z | event_sha | 0873e37fefce1f0becd359e5e8c08f08dc3b75a5 | available |
+2026-10-15T10:28:07.9298465Z | tested_source_sha | unknown | unknown: startup precedes checkout; actual source records follow checkout |
+2026-10-15T10:28:07.9298960Z | requested_runner | ubuntu-26.04 | available |
+2026-10-15T10:28:07.9299264Z | runner_os | Linux | available |
+2026-10-15T10:28:07.9299534Z | runner_arch | X64 | available |
+2026-10-15T10:28:07.9300020Z | runner_class | github-hosted | available |
+2026-10-15T10:28:07.9300391Z | runner_image | ubuntu26 | available |
+2026-10-15T10:28:07.9300698Z | runner_image_version | 20260927.149.1 | available |
+2026-10-15T10:28:07.9301158Z | runner_software_version | unknown | unknown: not exposed by this OS, unsupported or probe failed |
+2026-10-15T10:28:07.9301655Z | cpu_model | INTEL(R) XEON(R) PLATINUM 8573C | available |
+2026-10-15T10:28:07.9301993Z | cpu_vendor | GenuineIntel | available |
+2026-10-15T10:28:07.9302285Z | machine_arch | x86&#95;64 | available |
+2026-10-15T10:28:07.9302560Z | process_arch | x86&#95;64 | available |
+2026-10-15T10:28:07.9302868Z | cpu_physical_cores_os_visible | 2 | available |
+2026-10-15T10:28:07.9303179Z | cpu_sockets_os_visible | 1 | available |
+2026-10-15T10:28:07.9303504Z | cpu_logical_online | 4 | available |
+2026-10-15T10:28:07.9303804Z | cpu_process_available | 4 | available |
+2026-10-15T10:28:07.9304127Z | cpu_affinity | 0-3 | available |
+2026-10-15T10:28:07.9304399Z | cpu_cpuset_limit | 0-3&#10; | available |
+2026-10-15T10:28:07.9304836Z | cpu_quota | unknown | unknown: not exposed by this OS, unsupported or probe failed |
+2026-10-15T10:28:07.9305254Z | memory_total_bytes | 16758460416 | available |
+2026-10-15T10:28:07.9305575Z | memory_available_bytes | 15386255360 | available |
+2026-10-15T10:28:07.9306007Z | memory_limit_bytes | unknown | unknown: not exposed by this OS, unsupported or probe failed |
+2026-10-15T10:28:07.9306456Z | swap_total_bytes | 3221221376 | available |
+2026-10-15T10:28:07.9306763Z | swap_available_bytes | 3221221376 | available |
+2026-10-15T10:28:07.9307219Z | commit_limit_bytes | 11600449536 | available |
+2026-10-15T10:28:07.9307521Z | os_name | Ubuntu 26.04.1 LTS | available |
+2026-10-15T10:28:07.9307817Z | os_version | 26.04 | available |
+2026-10-15T10:28:07.9308179Z | os_build | unknown | unknown: not exposed by this OS, unsupported or probe failed |
+2026-10-15T10:28:07.9308577Z | kernel_name | Linux | available |
+2026-10-15T10:28:07.9308864Z | kernel_release | 7.0.0-1012-azure | available |
+2026-10-15T10:28:07.9309284Z | kernel_version | #12-Ubuntu SMP PREEMPT Thu Aug  6 19&#58;23&#58;26 UTC 2026 | available |
+2026-10-15T10:28:07.9310076Z | execution_context | VM indicated by CPU hypervisor feature; underlying physical host unknown | available |
+2026-10-15T10:28:07.9310767Z | guest_context | unknown | unknown: this report describes executing host; guest identity requires workload evidence |
+2026-10-15T10:28:07.9311284Z | workspace_total_bytes | 154993672192 | available |
+2026-10-15T10:28:07.9311676Z | workspace_available_bytes | 97119768576 | available |
+2026-10-15T10:28:07.9312063Z | workspace_filesystem | Linux filesystem magic 0xef53 | available |
+2026-10-15T10:28:07.9312427Z | collection_elapsed_ms | 1 | available |
+2026-10-15T10:28:07.9312846Z | source_repository | unknown | unknown: not exposed by this OS, unsupported or probe failed |
+2026-10-15T10:28:07.9313172Z 
+2026-10-15T10:28:07.9323917Z MACHINE_SPECIFICATIONS_JSON {"schema":{"value":"buster-machine-specifications-v1","status":"available","reason":""},"collected_at_utc":{"value":"2026-10-15T10:28:07Z","status":"available","reason":""},"workflow":{"value":"Buster CI","status":"available","reason":""},"workflow_ref":{"value":"buster14a/buster/.github/workflows/ci.yml@refs/pull/4275/merge","status":"available","reason":""},"workflow_sha":{"value":"0873e37fefce1f0becd359e5e8c08f08dc3b75a5","status":"available","reason":""},"run_id":{"value":"38720390446","status":"available","reason":""},"run_attempt":{"value":"1","status":"available","reason":""},"job":{"value":"test","status":"available","reason":""},"matrix_index":{"value":"2","status":"available","reason":""},"event_sha":{"value":"0873e37fefce1f0becd359e5e8c08f08dc3b75a5","status":"available","reason":""},"tested_source_sha":{"value":"unknown","status":"unknown","reason":"startup precedes checkout; actual source records follow checkout"},"requested_runner":{"value":"ubuntu-26.04","status":"available","reason":""},"runner_os":{"value":"Linux","status":"available","reason":""},"runner_arch":{"value":"X64","status":"available","reason":""},"runner_class":{"value":"github-hosted","status":"available","reason":""},"runner_image":{"value":"ubuntu26","status":"available","reason":""},"runner_image_version":{"value":"20260927.149.1","status":"available","reason":""},"runner_software_version":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"cpu_model":{"value":"INTEL(R) XEON(R) PLATINUM 8573C","status":"available","reason":""},"cpu_vendor":{"value":"GenuineIntel","status":"available","reason":""},"machine_arch":{"value":"x86_64","status":"available","reason":""},"process_arch":{"value":"x86_64","status":"available","reason":""},"cpu_physical_cores_os_visible":{"value":"2","status":"available","reason":""},"cpu_sockets_os_visible":{"value":"1","status":"available","reason":""},"cpu_logical_online":{"value":"4","status":"available","reason":""},"cpu_process_available":{"value":"4","status":"available","reason":""},"cpu_affinity":{"value":"0-3","status":"available","reason":""},"cpu_cpuset_limit":{"value":"0-3\u000a","status":"available","reason":""},"cpu_quota":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"memory_total_bytes":{"value":"16758460416","status":"available","reason":""},"memory_available_bytes":{"value":"15386255360","status":"available","reason":""},"memory_limit_bytes":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"swap_total_bytes":{"value":"3221221376","status":"available","reason":""},"swap_available_bytes":{"value":"3221221376","status":"available","reason":""},"commit_limit_bytes":{"value":"11600449536","status":"available","reason":""},"os_name":{"value":"Ubuntu 26.04.1 LTS","status":"available","reason":""},"os_version":{"value":"26.04","status":"available","reason":""},"os_build":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"kernel_name":{"value":"Linux","status":"available","reason":""},"kernel_release":{"value":"7.0.0-1012-azure","status":"available","reason":""},"kernel_version":{"value":"#12-Ubuntu SMP PREEMPT Thu Aug  6 19:23:26 UTC 2026","status":"available","reason":""},"execution_context":{"value":"VM indicated by CPU hypervisor feature; underlying physical host unknown","status":"available","reason":""},"guest_context":{"value":"unknown","status":"unknown","reason":"this report describes executing host; guest identity requires workload evidence"},"workspace_total_bytes":{"value":"154993672192","status":"available","reason":""},"workspace_available_bytes":{"value":"97119768576","status":"available","reason":""},"workspace_filesystem":{"value":"Linux filesystem magic 0xef53","status":"available","reason":""},"collection_elapsed_ms":{"value":"1","status":"available","reason":""},"source_repository":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"}}
+2026-10-15T10:28:07.9414481Z ##[end-action id=__buster14a_buster.__run;outcome=success;conclusion=success;duration_ms=2383]
+2026-10-15T10:28:07.9666213Z ##[start-action display=Machine specifications (Windows);id=__buster14a_buster.__run_2]
+2026-10-15T10:28:07.9764602Z ##[end-action id=__buster14a_buster.__run_2;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:28:07.9986784Z ##[start-action display=Actual checkout identity (Unix);id=__buster14a_buster.__run_3]
+2026-10-15T10:28:08.0082922Z ##[end-action id=__buster14a_buster.__run_3;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:28:08.0271009Z ##[start-action display=Actual checkout identity (Windows);id=__buster14a_buster.__run_4]
+2026-10-15T10:28:08.0366886Z ##[end-action id=__buster14a_buster.__run_4;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:28:08.0601819Z ##[start-action display=Retain safe machine records (Unix);id=__buster14a_buster.__run_5]
+2026-10-15T10:28:08.0696272Z ##[end-action id=__buster14a_buster.__run_5;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:28:08.0868852Z ##[start-action display=Retain safe machine records (Windows);id=__buster14a_buster.__run_6]
+2026-10-15T10:28:08.0966497Z ##[end-action id=__buster14a_buster.__run_6;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:28:08.3546267Z ##[group]Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+2026-10-15T10:28:08.3546676Z with:
+2026-10-15T10:28:08.3546916Z   persist-credentials: false
+2026-10-15T10:28:08.3547181Z   repository: buster14a/buster
+2026-10-15T10:28:08.3549388Z   token: ***
+2026-10-15T10:28:08.3549633Z   ssh-strict: true
+2026-10-15T10:28:08.3550039Z   ssh-user: git
+2026-10-15T10:28:08.3550263Z   clean: true
+2026-10-15T10:28:08.3550490Z   sparse-checkout-cone-mode: true
+2026-10-15T10:28:08.3550751Z   fetch-depth: 1
+2026-10-15T10:28:08.3550960Z   fetch-tags: false
+2026-10-15T10:28:08.3551186Z   show-progress: true
+2026-10-15T10:28:08.3551406Z   lfs: false
+2026-10-15T10:28:08.3551620Z   submodules: false
+2026-10-15T10:28:08.3551838Z   set-safe-directory: true
+2026-10-15T10:28:08.3552066Z env:
+2026-10-15T10:28:08.3552361Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:08.3552734Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:08.3553037Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:08.3553304Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:08.3553555Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:08.3553797Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:08.3554039Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:08.3554266Z ##[endgroup]
+2026-10-15T10:28:08.4458194Z Syncing repository: buster14a/buster
+2026-10-15T10:28:08.4459356Z ##[group]Getting Git version info
+2026-10-15T10:28:08.4459687Z Working directory is '/home/runner/work/buster/buster'
+2026-10-15T10:28:08.4460844Z [command]/usr/bin/git version
+2026-10-15T10:28:08.4480699Z git version 2.55.0
+2026-10-15T10:28:08.4497827Z ##[endgroup]
+2026-10-15T10:28:08.4509620Z Temporarily overriding HOME='/home/runner/work/_temp/3f2affb3-9e8a-4521-ad9a-41f7342ba4ba' before making global git config changes
+2026-10-15T10:28:08.4512481Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-15T10:28:08.4514538Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/buster/buster
+2026-10-15T10:28:08.4572412Z Deleting the contents of '/home/runner/work/buster/buster'
+2026-10-15T10:28:08.4580638Z ##[group]Initializing the repository
+2026-10-15T10:28:08.4581287Z [command]/usr/bin/git init /home/runner/work/buster/buster
+2026-10-15T10:28:08.4773736Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-10-15T10:28:08.4774680Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-10-15T10:28:08.4775329Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-10-15T10:28:08.4775707Z hint: call:
+2026-10-15T10:28:08.4775911Z hint:
+2026-10-15T10:28:08.4776196Z hint: 	git config --global init.defaultBranch <name>
+2026-10-15T10:28:08.4776486Z hint:
+2026-10-15T10:28:08.4776769Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-10-15T10:28:08.4777226Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-10-15T10:28:08.4777589Z hint:
+2026-10-15T10:28:08.4777798Z hint: 	git branch -m <name>
+2026-10-15T10:28:08.4778029Z hint:
+2026-10-15T10:28:08.4778335Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-10-15T10:28:08.4782597Z Initialized empty Git repository in /home/runner/work/buster/buster/.git/
+2026-10-15T10:28:08.4793175Z [command]/usr/bin/git remote add origin https://github.com/buster14a/buster
+2026-10-15T10:28:08.4864967Z ##[endgroup]
+2026-10-15T10:28:08.4865510Z ##[group]Disabling automatic garbage collection
+2026-10-15T10:28:08.4868918Z [command]/usr/bin/git config --local gc.auto 0
+2026-10-15T10:28:08.4896242Z ##[endgroup]
+2026-10-15T10:28:08.4896852Z ##[group]Setting up auth
+2026-10-15T10:28:08.4903819Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-15T10:28:08.4933326Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-15T10:28:08.5362655Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-15T10:28:08.5390203Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-15T10:28:08.5595662Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-10-15T10:28:08.5627696Z ##[endgroup]
+2026-10-15T10:28:08.5628379Z ##[group]Fetching the repository
+2026-10-15T10:28:08.5636178Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +0873e37fefce1f0becd359e5e8c08f08dc3b75a5:refs/remotes/pull/4275/merge
+2026-10-15T10:28:11.7886436Z From https://github.com/buster14a/buster
+2026-10-15T10:28:11.7887320Z  * [new ref]         0873e37fefce1f0becd359e5e8c08f08dc3b75a5 -> pull/4275/merge
+2026-10-15T10:28:11.7892339Z ##[endgroup]
+2026-10-15T10:28:11.7892999Z ##[group]Determining the checkout info
+2026-10-15T10:28:11.7893824Z ##[endgroup]
+2026-10-15T10:28:11.7901192Z [command]/usr/bin/git sparse-checkout disable
+2026-10-15T10:28:11.7951421Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-10-15T10:28:11.7977157Z ##[group]Checking out the ref
+2026-10-15T10:28:11.7982722Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/4275/merge
+2026-10-15T10:28:12.8070790Z Updating files:  92% (5946/6403)
+2026-10-15T10:28:12.8180127Z Updating files:  93% (5955/6403)
+2026-10-15T10:28:12.8244607Z Updating files:  94% (6019/6403)
+2026-10-15T10:28:12.8323887Z Updating files:  95% (6083/6403)
+2026-10-15T10:28:12.8367737Z Updating files:  96% (6147/6403)
+2026-10-15T10:28:12.8440142Z Updating files:  97% (6211/6403)
+2026-10-15T10:28:12.8505024Z Updating files:  98% (6275/6403)
+2026-10-15T10:28:12.8580769Z Updating files:  99% (6339/6403)
+2026-10-15T10:28:12.8581083Z Updating files: 100% (6403/6403)
+2026-10-15T10:28:12.8581460Z Updating files: 100% (6403/6403), done.
+2026-10-15T10:28:12.8630914Z Note: switching to 'refs/remotes/pull/4275/merge'.
+2026-10-15T10:28:12.8631228Z 
+2026-10-15T10:28:12.8631545Z You are in 'detached HEAD' state. You can look around, make experimental
+2026-10-15T10:28:12.8632128Z changes and commit them, and you can discard any commits you make in this
+2026-10-15T10:28:12.8634020Z state without impacting any branches by switching back to a branch.
+2026-10-15T10:28:12.8634446Z 
+2026-10-15T10:28:12.8634706Z If you want to create a new branch to retain commits you create, you may
+2026-10-15T10:28:12.8635235Z do so (now or later) by using -c with the switch command. Example:
+2026-10-15T10:28:12.8635531Z 
+2026-10-15T10:28:12.8635658Z   git switch -c <new-branch-name>
+2026-10-15T10:28:12.8635867Z 
+2026-10-15T10:28:12.8635986Z Or undo this operation with:
+2026-10-15T10:28:12.8636199Z 
+2026-10-15T10:28:12.8636317Z   git switch -
+2026-10-15T10:28:12.8636568Z 
+2026-10-15T10:28:12.8636874Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-10-15T10:28:12.8637272Z 
+2026-10-15T10:28:12.8637728Z HEAD is now at 0873e37 Merge 9029ed8fe7cb7968be283cdd9404e6eb3537fb91 into 0f98c215dc265962abd46b7a5f315312e98a6426
+2026-10-15T10:28:12.8725587Z ##[endgroup]
+2026-10-15T10:28:12.8730778Z [command]/usr/bin/git log -1 --format=%H
+2026-10-15T10:28:12.8750880Z 0873e37fefce1f0becd359e5e8c08f08dc3b75a5
+2026-10-15T10:28:12.8762909Z ##[group]Removing auth
+2026-10-15T10:28:12.8763410Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-15T10:28:12.8790047Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-15T10:28:12.9007782Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-15T10:28:12.9025684Z http.https://github.com/.extraheader
+2026-10-15T10:28:12.9030559Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-10-15T10:28:12.9056459Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-15T10:28:12.9258558Z ##[endgroup]
+2026-10-15T10:28:12.9759041Z ##[group]Run buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+2026-10-15T10:28:12.9759497Z with:
+2026-10-15T10:28:12.9759701Z   mode: source
+2026-10-15T10:28:12.9760043Z   source-directory: .
+2026-10-15T10:28:12.9760287Z   source-repository: buster14a/buster
+2026-10-15T10:28:12.9760533Z env:
+2026-10-15T10:28:12.9760819Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:12.9761176Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:12.9761422Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:12.9761672Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:12.9761918Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:12.9762151Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:12.9762386Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:12.9762601Z ##[endgroup]
+2026-10-15T10:28:12.9837027Z ##[start-action display=Machine specifications (Unix);id=__buster14a_buster_2.__run]
+2026-10-15T10:28:12.9928408Z ##[end-action id=__buster14a_buster_2.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:28:12.9997133Z ##[start-action display=Machine specifications (Windows);id=__buster14a_buster_2.__run_2]
+2026-10-15T10:28:13.0033453Z ##[end-action id=__buster14a_buster_2.__run_2;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:28:13.0105771Z ##[start-action display=Actual checkout identity (Unix);id=__buster14a_buster_2.__run_3]
+2026-10-15T10:28:13.0193767Z ##[group]Run set -euo pipefail
+2026-10-15T10:28:13.0194075Z [36;1mset -euo pipefail[0m
+2026-10-15T10:28:13.0194444Z [36;1msource_sha=$(git -C "$MS_SOURCE_DIRECTORY" rev-parse --verify 'HEAD^{commit}')[0m
+2026-10-15T10:28:13.0195037Z [36;1m"$RUNNER_TEMP/buster-machine-specifications/reporter" --source "$source_sha" "$MS_SOURCE_REPOSITORY" \[0m
+2026-10-15T10:28:13.0195572Z [36;1m  "$RUNNER_TEMP/buster-machine-specifications/sources.jsonl"[0m
+2026-10-15T10:28:13.0231002Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:28:13.0231328Z env:
+2026-10-15T10:28:13.0231622Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:13.0231993Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:13.0232251Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:13.0232505Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:13.0232746Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:13.0232979Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:13.0233212Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:13.0233436Z   MS_SOURCE_DIRECTORY: .
+2026-10-15T10:28:13.0233671Z   MS_SOURCE_REPOSITORY: buster14a/buster
+2026-10-15T10:28:13.0233919Z ##[endgroup]
+2026-10-15T10:28:13.0319248Z MACHINE_SOURCE_IDENTITY_JSON {"schema":{"value":"buster-machine-source-identity-v1","status":"available","reason":""},"collected_at_utc":{"value":"2026-10-15T10:28:13Z","status":"available","reason":""},"workflow":{"value":"Buster CI","status":"available","reason":""},"workflow_ref":{"value":"buster14a/buster/.github/workflows/ci.yml@refs/pull/4275/merge","status":"available","reason":""},"workflow_sha":{"value":"0873e37fefce1f0becd359e5e8c08f08dc3b75a5","status":"available","reason":""},"run_id":{"value":"38720390446","status":"available","reason":""},"run_attempt":{"value":"1","status":"available","reason":""},"job":{"value":"test","status":"available","reason":""},"matrix_index":{"value":"not_applicable","status":"not_applicable","reason":"job has no matrix"},"event_sha":{"value":"0873e37fefce1f0becd359e5e8c08f08dc3b75a5","status":"available","reason":""},"tested_source_sha":{"value":"0873e37fefce1f0becd359e5e8c08f08dc3b75a5","status":"available","reason":""},"requested_runner":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"runner_os":{"value":"Linux","status":"available","reason":""},"runner_arch":{"value":"X64","status":"available","reason":""},"runner_class":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"runner_image":{"value":"ubuntu26","status":"available","reason":""},"runner_image_version":{"value":"20260927.149.1","status":"available","reason":""},"runner_software_version":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"cpu_model":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"cpu_vendor":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"machine_arch":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"process_arch":{"value":"x86_64","status":"available","reason":""},"cpu_physical_cores_os_visible":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"cpu_sockets_os_visible":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"cpu_logical_online":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"cpu_process_available":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"cpu_affinity":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"cpu_cpuset_limit":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"cpu_quota":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"memory_total_bytes":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"memory_available_bytes":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"memory_limit_bytes":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"swap_total_bytes":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"swap_available_bytes":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"commit_limit_bytes":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"os_name":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"os_version":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"os_build":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"kernel_name":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"kernel_release":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"kernel_version":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"execution_context":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"guest_context":{"value":"unknown","status":"unknown","reason":"this report describes executing host; guest identity requires workload evidence"},"workspace_total_bytes":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"workspace_available_bytes":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"workspace_filesystem":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"collection_elapsed_ms":{"value":"unknown","status":"unknown","reason":"not exposed by this OS, unsupported or probe failed"},"source_repository":{"value":"buster14a/buster","status":"available","reason":""}}
+2026-10-15T10:28:13.0341776Z ##[end-action id=__buster14a_buster_2.__run_3;outcome=success;conclusion=success;duration_ms=23]
+2026-10-15T10:28:13.0418222Z ##[start-action display=Actual checkout identity (Windows);id=__buster14a_buster_2.__run_4]
+2026-10-15T10:28:13.0457452Z ##[end-action id=__buster14a_buster_2.__run_4;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:28:13.0530084Z ##[start-action display=Retain safe machine records (Unix);id=__buster14a_buster_2.__run_5]
+2026-10-15T10:28:13.0569525Z ##[end-action id=__buster14a_buster_2.__run_5;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:28:13.0636923Z ##[start-action display=Retain safe machine records (Windows);id=__buster14a_buster_2.__run_6]
+2026-10-15T10:28:13.0675102Z ##[end-action id=__buster14a_buster_2.__run_6;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:28:13.1930737Z ##[group]Run set -euo pipefail
+2026-10-15T10:28:13.1931048Z [36;1mset -euo pipefail[0m
+2026-10-15T10:28:13.1931275Z [36;1mmode='ordinary'[0m
+2026-10-15T10:28:13.1931492Z [36;1mnamespace=''[0m
+2026-10-15T10:28:13.1931760Z [36;1mif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then[0m
+2026-10-15T10:28:13.1932164Z [36;1m  case "$GITHUB_REF" in[0m
+2026-10-15T10:28:13.1932407Z [36;1m    refs/heads/ci-cohort-prime-*)[0m
+2026-10-15T10:28:13.1932668Z [36;1m      mode='prime'[0m
+2026-10-15T10:28:13.1932940Z [36;1m      namespace=${GITHUB_REF#refs/heads/ci-cohort-prime-}[0m
+2026-10-15T10:28:13.1933225Z [36;1m      ;;[0m
+2026-10-15T10:28:13.1933432Z [36;1m    refs/heads/ci-cohort-read-*)[0m
+2026-10-15T10:28:13.1933670Z [36;1m      mode='read'[0m
+2026-10-15T10:28:13.1933927Z [36;1m      namespace=${GITHUB_REF#refs/heads/ci-cohort-read-}[0m
+2026-10-15T10:28:13.1934199Z [36;1m      ;;[0m
+2026-10-15T10:28:13.1934374Z [36;1m  esac[0m
+2026-10-15T10:28:13.1934604Z [36;1mfi[0m
+2026-10-15T10:28:13.1934804Z [36;1mmkdir -p "$RUNNER_TEMP/buster-ci"[0m
+2026-10-15T10:28:13.1935091Z [36;1m"$BUSTER_CI_PYTHON" tools/ci_zig_cache.py resolve \[0m
+2026-10-15T10:28:13.1935397Z [36;1m  --event-name "$GITHUB_EVENT_NAME" \[0m
+2026-10-15T10:28:13.1935648Z [36;1m  --ref "$GITHUB_REF" \[0m
+2026-10-15T10:28:13.1935916Z [36;1m  --default-branch "$ZIG_CACHE_DEFAULT_BRANCH" \[0m
+2026-10-15T10:28:13.1936185Z [36;1m  --mode "$mode" \[0m
+2026-10-15T10:28:13.1936410Z [36;1m  --namespace "$namespace" \[0m
+2026-10-15T10:28:13.1936650Z [36;1m  --runner-label "ubuntu-26.04" \[0m
+2026-10-15T10:28:13.1936902Z [36;1m  --runner-os "$ZIG_CACHE_RUNNER_OS" \[0m
+2026-10-15T10:28:13.1937175Z [36;1m  --runner-arch "$ZIG_CACHE_RUNNER_ARCH" \[0m
+2026-10-15T10:28:13.1937431Z [36;1m  --target "$ZIG_CACHE_TARGET" \[0m
+2026-10-15T10:28:13.1937671Z [36;1m  --manifest .github/zig.json \[0m
+2026-10-15T10:28:13.1937934Z [36;1m  --manifest-hash "$ZIG_CACHE_MANIFEST_HASH" \[0m
+2026-10-15T10:28:13.1938209Z [36;1m  --shard "$BUSTER_MATRIX_SHARD" \[0m
+2026-10-15T10:28:13.1938468Z [36;1m  --repository "$GITHUB_REPOSITORY" \[0m
+2026-10-15T10:28:13.1938727Z [36;1m  --source-sha "$GITHUB_SHA" \[0m
+2026-10-15T10:28:13.1938967Z [36;1m  --run-id "$GITHUB_RUN_ID" \[0m
+2026-10-15T10:28:13.1939218Z [36;1m  --run-attempt "$GITHUB_RUN_ATTEMPT" \[0m
+2026-10-15T10:28:13.1939474Z [36;1m  --output "$GITHUB_OUTPUT" \[0m
+2026-10-15T10:28:13.1939748Z [36;1m  --evidence "$RUNNER_TEMP/buster-ci/zig-cache.json"[0m
+2026-10-15T10:28:13.1973962Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:28:13.1974289Z env:
+2026-10-15T10:28:13.1974585Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:13.1974944Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:13.1975302Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:13.1975577Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:13.1975821Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:13.1976072Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:13.1976306Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:13.1976530Z   ZIG_CACHE_DEFAULT_BRANCH: main
+2026-10-15T10:28:13.1976909Z   ZIG_CACHE_MANIFEST_HASH: cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53
+2026-10-15T10:28:13.1977310Z   ZIG_CACHE_RUNNER_ARCH: X64
+2026-10-15T10:28:13.1977551Z   ZIG_CACHE_RUNNER_OS: Linux
+2026-10-15T10:28:13.1977786Z   ZIG_CACHE_TARGET: x86_64-linux
+2026-10-15T10:28:13.1978011Z ##[endgroup]
+2026-10-15T10:28:13.2652579Z ZIG_CACHE_POLICY mode=ordinary namespace=- key=zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53 save=false require_hit=false
+2026-10-15T10:28:13.3030435Z ##[group]Run set -euo pipefail
+2026-10-15T10:28:13.3030787Z [36;1mset -euo pipefail[0m
+2026-10-15T10:28:13.3031122Z [36;1m# Preserve the wrapper lifecycle guard on every shard, but run its[0m
+2026-10-15T10:28:13.3031553Z [36;1m# expensive regression suite only in its canonical Release owner.[0m
+2026-10-15T10:28:13.3031928Z [36;1mif [[ "$BUSTER_MATRIX_SHARD" != release ]]; then[0m
+2026-10-15T10:28:13.3032289Z [36;1m  printf 'BOOTSTRAP_WRAPPERS owned-by-release-shard\n'[0m
+2026-10-15T10:28:13.3032600Z [36;1m  exit 0[0m
+2026-10-15T10:28:13.3032798Z [36;1mfi[0m
+2026-10-15T10:28:13.3033215Z [36;1m# Hosted Clang bootstraps build.c; native policy builds and qualifies[0m
+2026-10-15T10:28:13.3033638Z [36;1m# the existing case-job helper. Python only receives its path.[0m
+2026-10-15T10:28:13.3033995Z [36;1mmkdir -p "$RUNNER_TEMP/buster-ci"[0m
+2026-10-15T10:28:13.3034383Z [36;1mprocess_owner_driver="$RUNNER_TEMP/buster-ci/bootstrap-wrapper-build.exe"[0m
+2026-10-15T10:28:13.3034859Z [36;1m# Bash 3.2 with nounset requires a nonempty array.[0m
+2026-10-15T10:28:13.3035303Z [36;1mprocess_owner_bootstrap_flags=(-Wall -Werror -Wno-unused-function -Wno-unused-variable)[0m
+2026-10-15T10:28:13.3035733Z [36;1mif [[ "$RUNNER_OS" == Windows ]]; then[0m
+2026-10-15T10:28:13.3036139Z [36;1m  process_owner_bootstrap_flags+=(-Wno-microsoft-enum-forward-reference -lws2_32)[0m
+2026-10-15T10:28:13.3036517Z [36;1mfi[0m
+2026-10-15T10:28:13.3036792Z [36;1mclang -Isrc -fwrapv -fno-strict-aliasing -funsigned-char \[0m
+2026-10-15T10:28:13.3037213Z [36;1m  build.c "${process_owner_bootstrap_flags[@]}" -o "$process_owner_driver"[0m
+2026-10-15T10:28:13.3037805Z [36;1m"$process_owner_driver" bootstrap_process_owner_test | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper-process-owner.log"[0m
+2026-10-15T10:28:13.3038307Z [36;1mwhile IFS= read -r line; do[0m
+2026-10-15T10:28:13.3038559Z [36;1m  line=${line%$'\r'}[0m
+2026-10-15T10:28:13.3038790Z [36;1m  case "$line" in[0m
+2026-10-15T10:28:13.3039195Z [36;1m    'BOOTSTRAP_PROCESS_OWNER '*) export BUSTER_WINDOWS_PROCESS_TREE="${line#BOOTSTRAP_PROCESS_OWNER }" ;;[0m
+2026-10-15T10:28:13.3039613Z [36;1m  esac[0m
+2026-10-15T10:28:13.3040029Z [36;1mdone < "$RUNNER_TEMP/buster-ci/bootstrap-wrapper-process-owner.log"[0m
+2026-10-15T10:28:13.3040403Z [36;1mif [[ "$RUNNER_OS" == Windows ]]; then[0m
+2026-10-15T10:28:13.3040896Z [36;1m  "$BUSTER_CI_PYTHON" tools/bootstrap_wrapper_cases.py --jobs 4 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"[0m
+2026-10-15T10:28:13.3041346Z [36;1melse[0m
+2026-10-15T10:28:13.3041806Z [36;1m  "$BUSTER_CI_PYTHON" tests/bootstrap_wrapper_test.py BootstrapWrapperTests -v 2>&1 | tee "$RUNNER_TEMP/buster-ci/bootstrap-wrapper.log"[0m
+2026-10-15T10:28:13.3042313Z [36;1mfi[0m
+2026-10-15T10:28:13.3078975Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:28:13.3079321Z env:
+2026-10-15T10:28:13.3079643Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:13.3080134Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:13.3080406Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:13.3080679Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:13.3080949Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:13.3081199Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:13.3081448Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:13.3081679Z ##[endgroup]
+2026-10-15T10:28:13.3132350Z BOOTSTRAP_WRAPPERS owned-by-release-shard
+2026-10-15T10:28:13.3310997Z ##[group]Run set -euo pipefail
+2026-10-15T10:28:13.3311302Z [36;1mset -euo pipefail[0m
+2026-10-15T10:28:13.3311550Z [36;1msudo apt-get update[0m
+2026-10-15T10:28:13.3311882Z [36;1msudo apt-get install --no-install-recommends --yes mold[0m
+2026-10-15T10:28:13.3340823Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:28:13.3341147Z env:
+2026-10-15T10:28:13.3341448Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:13.3341818Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:13.3342068Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:13.3342329Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:13.3342571Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:13.3342806Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:13.3343040Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:13.3343260Z ##[endgroup]
+2026-10-15T10:28:13.4026803Z Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist [144 B]
+2026-10-15T10:28:13.4413882Z Hit:2 http://azure.archive.ubuntu.com/ubuntu resolute InRelease
+2026-10-15T10:28:13.4447808Z Get:3 http://azure.archive.ubuntu.com/ubuntu resolute-updates InRelease [137 kB]
+2026-10-15T10:28:13.4534446Z Get:4 http://azure.archive.ubuntu.com/ubuntu resolute-backports InRelease [137 kB]
+2026-10-15T10:28:13.4548182Z Get:5 http://azure.archive.ubuntu.com/ubuntu resolute-security InRelease [137 kB]
+2026-10-15T10:28:13.4549341Z Get:6 https://packages.microsoft.com/ubuntu/26.04/prod resolute InRelease [3964 B]
+2026-10-15T10:28:13.4771076Z Get:7 http://azure.archive.ubuntu.com/ubuntu resolute-updates/main amd64v3 Packages [738 kB]
+2026-10-15T10:28:13.4982805Z Get:8 http://azure.archive.ubuntu.com/ubuntu resolute-updates/main Translation-en [173 kB]
+2026-10-15T10:28:13.5020859Z Get:9 http://azure.archive.ubuntu.com/ubuntu resolute-updates/main amd64 Components [110 kB]
+2026-10-15T10:28:13.5030928Z Get:10 http://azure.archive.ubuntu.com/ubuntu resolute-updates/universe amd64v3 Packages [329 kB]
+2026-10-15T10:28:13.5049326Z Get:11 http://azure.archive.ubuntu.com/ubuntu resolute-updates/universe Translation-en [107 kB]
+2026-10-15T10:28:13.5083123Z Get:12 http://azure.archive.ubuntu.com/ubuntu resolute-updates/universe amd64 Components [201 kB]
+2026-10-15T10:28:13.5095255Z Get:19 https://packages.microsoft.com/ubuntu/26.04/prod resolute/main amd64 Packages [97.4 kB]
+2026-10-15T10:28:13.5151964Z Get:13 http://azure.archive.ubuntu.com/ubuntu resolute-updates/restricted amd64v3 Packages [508 kB]
+2026-10-15T10:28:13.5164073Z Get:14 http://azure.archive.ubuntu.com/ubuntu resolute-updates/restricted Translation-en [101 kB]
+2026-10-15T10:28:13.5180422Z Get:15 http://azure.archive.ubuntu.com/ubuntu resolute-updates/multiverse amd64v3 Packages [21.1 kB]
+2026-10-15T10:28:13.5192433Z Get:16 http://azure.archive.ubuntu.com/ubuntu resolute-updates/multiverse Translation-en [4168 B]
+2026-10-15T10:28:13.5199008Z Get:30 https://packages.microsoft.com/ubuntu/26.04/prod resolute/main armhf Packages [962 B]
+2026-10-15T10:28:13.5244704Z Get:31 https://packages.microsoft.com/ubuntu/26.04/prod resolute/main arm64 Packages [87.7 kB]
+2026-10-15T10:28:13.5611957Z Get:17 http://azure.archive.ubuntu.com/ubuntu resolute-backports/universe amd64v3 Packages [3144 B]
+2026-10-15T10:28:13.5616285Z Get:18 http://azure.archive.ubuntu.com/ubuntu resolute-backports/universe amd64 Components [1056 B]
+2026-10-15T10:28:13.5623524Z Get:20 http://azure.archive.ubuntu.com/ubuntu resolute-security/main amd64v3 Packages [602 kB]
+2026-10-15T10:28:13.5655685Z Get:21 http://azure.archive.ubuntu.com/ubuntu resolute-security/main Translation-en [138 kB]
+2026-10-15T10:28:13.5673257Z Get:22 http://azure.archive.ubuntu.com/ubuntu resolute-security/main amd64 Components [46.7 kB]
+2026-10-15T10:28:13.5684887Z Get:23 http://azure.archive.ubuntu.com/ubuntu resolute-security/universe amd64v3 Packages [202 kB]
+2026-10-15T10:28:13.5701693Z Get:24 http://azure.archive.ubuntu.com/ubuntu resolute-security/universe Translation-en [65.4 kB]
+2026-10-15T10:28:13.5713797Z Get:25 http://azure.archive.ubuntu.com/ubuntu resolute-security/universe amd64 Components [55.6 kB]
+2026-10-15T10:28:13.5725358Z Get:26 http://azure.archive.ubuntu.com/ubuntu resolute-security/restricted amd64v3 Packages [498 kB]
+2026-10-15T10:28:13.5755243Z Get:27 http://azure.archive.ubuntu.com/ubuntu resolute-security/restricted Translation-en [99.6 kB]
+2026-10-15T10:28:13.5781089Z Get:28 http://azure.archive.ubuntu.com/ubuntu resolute-security/multiverse amd64v3 Packages [20.1 kB]
+2026-10-15T10:28:13.5789323Z Get:29 http://azure.archive.ubuntu.com/ubuntu resolute-security/multiverse Translation-en [3728 B]
+2026-10-15T10:28:17.6989291Z Fetched 4630 kB in 0s (10.2 MB/s)
+2026-10-15T10:28:18.2823499Z Reading package lists...
+2026-10-15T10:28:18.3101316Z Reading package lists...
+2026-10-15T10:28:18.4197249Z Building dependency tree...
+2026-10-15T10:28:18.4202293Z Reading state information...
+2026-10-15T10:28:18.4905703Z Solving dependencies...
+2026-10-15T10:28:18.5791796Z The following additional packages will be installed:
+2026-10-15T10:28:18.5796879Z   libhwloc15 libmimalloc3 libtbb12 libtbbbind-2-5 libtbbmalloc2
+2026-10-15T10:28:18.5803449Z Suggested packages:
+2026-10-15T10:28:18.5803765Z   libhwloc-contrib-plugins
+2026-10-15T10:28:18.5804591Z Recommended packages:
+2026-10-15T10:28:18.5804797Z   libhwloc-plugins
+2026-10-15T10:28:18.5965854Z The following NEW packages will be installed:
+2026-10-15T10:28:18.5970741Z   libhwloc15 libmimalloc3 libtbb12 libtbbbind-2-5 libtbbmalloc2 mold
+2026-10-15T10:28:18.6143557Z 0 upgraded, 6 newly installed, 0 to remove and 60 not upgraded.
+2026-10-15T10:28:18.6144022Z Need to get 3037 kB of archives.
+2026-10-15T10:28:18.6144341Z After this operation, 24.3 MB of additional disk space will be used.
+2026-10-15T10:28:18.6144705Z Get:1 file:/etc/apt/apt-mirrors.txt Mirrorlist [144 B]
+2026-10-15T10:28:18.6776889Z Get:2 http://azure.archive.ubuntu.com/ubuntu resolute/universe amd64v3 libhwloc15 amd64 2.13.0-2 [176 kB]
+2026-10-15T10:28:18.7129976Z Get:3 http://azure.archive.ubuntu.com/ubuntu resolute/universe amd64v3 libmimalloc3 amd64 3.2.8+ds-2 [70.0 kB]
+2026-10-15T10:28:18.7534823Z Get:4 http://azure.archive.ubuntu.com/ubuntu resolute/universe amd64v3 libtbbbind-2-5 amd64 2022.3.0-2 [15.4 kB]
+2026-10-15T10:28:18.7940890Z Get:5 http://azure.archive.ubuntu.com/ubuntu resolute/universe amd64v3 libtbbmalloc2 amd64 2022.3.0-2 [54.3 kB]
+2026-10-15T10:28:18.8344928Z Get:6 http://azure.archive.ubuntu.com/ubuntu resolute/universe amd64v3 libtbb12 amd64 2022.3.0-2 [98.6 kB]
+2026-10-15T10:28:18.8830867Z Get:7 http://azure.archive.ubuntu.com/ubuntu resolute/universe amd64v3 mold amd64 2.40.4+dfsg-2.1ubuntu1 [2623 kB]
+2026-10-15T10:28:19.2068755Z Fetched 3037 kB in 0s (10.0 MB/s)
+2026-10-15T10:28:19.2282966Z Selecting previously unselected package libhwloc15:amd64.
+2026-10-15T10:28:19.2521155Z (Reading database ... 
+2026-10-15T10:28:19.2521666Z (Reading database ... 5%
+2026-10-15T10:28:19.2522122Z (Reading database ... 10%
+2026-10-15T10:28:19.2522604Z (Reading database ... 15%
+2026-10-15T10:28:19.2523026Z (Reading database ... 20%
+2026-10-15T10:28:19.2523298Z (Reading database ... 25%
+2026-10-15T10:28:19.2523557Z (Reading database ... 30%
+2026-10-15T10:28:19.2523807Z (Reading database ... 35%
+2026-10-15T10:28:19.2524101Z (Reading database ... 40%
+2026-10-15T10:28:19.2524374Z (Reading database ... 45%
+2026-10-15T10:28:19.2524644Z (Reading database ... 50%
+2026-10-15T10:28:19.3695857Z (Reading database ... 55%
+2026-10-15T10:28:19.5168535Z (Reading database ... 60%
+2026-10-15T10:28:19.7160348Z (Reading database ... 65%
+2026-10-15T10:28:19.8828898Z (Reading database ... 70%
+2026-10-15T10:28:20.0652298Z (Reading database ... 75%
+2026-10-15T10:28:20.2210702Z (Reading database ... 80%
+2026-10-15T10:28:20.3715004Z (Reading database ... 85%
+2026-10-15T10:28:20.5675165Z (Reading database ... 90%
+2026-10-15T10:28:20.7380464Z (Reading database ... 95%
+2026-10-15T10:28:20.7380809Z (Reading database ... 100%
+2026-10-15T10:28:20.7381146Z (Reading database ... 209820 files and directories currently installed.)
+2026-10-15T10:28:20.7425285Z Preparing to unpack .../0-libhwloc15_2.13.0-2_amd64v3.deb ...
+2026-10-15T10:28:20.7451276Z Unpacking libhwloc15:amd64 (2.13.0-2) ...
+2026-10-15T10:28:20.7635030Z Selecting previously unselected package libmimalloc3:amd64.
+2026-10-15T10:28:20.7748655Z Preparing to unpack .../1-libmimalloc3_3.2.8+ds-2_amd64v3.deb ...
+2026-10-15T10:28:20.7758828Z Unpacking libmimalloc3:amd64 (3.2.8+ds-2) ...
+2026-10-15T10:28:20.7919127Z Selecting previously unselected package libtbbbind-2-5:amd64.
+2026-10-15T10:28:20.8031418Z Preparing to unpack .../2-libtbbbind-2-5_2022.3.0-2_amd64v3.deb ...
+2026-10-15T10:28:20.8038355Z Unpacking libtbbbind-2-5:amd64 (2022.3.0-2) ...
+2026-10-15T10:28:20.8208977Z Selecting previously unselected package libtbbmalloc2:amd64.
+2026-10-15T10:28:20.8316045Z Preparing to unpack .../3-libtbbmalloc2_2022.3.0-2_amd64v3.deb ...
+2026-10-15T10:28:20.8321955Z Unpacking libtbbmalloc2:amd64 (2022.3.0-2) ...
+2026-10-15T10:28:20.8485802Z Selecting previously unselected package libtbb12:amd64.
+2026-10-15T10:28:20.8590084Z Preparing to unpack .../4-libtbb12_2022.3.0-2_amd64v3.deb ...
+2026-10-15T10:28:20.8687672Z Unpacking libtbb12:amd64 (2022.3.0-2) ...
+2026-10-15T10:28:20.8834899Z Selecting previously unselected package mold.
+2026-10-15T10:28:20.8938342Z Preparing to unpack .../5-mold_2.40.4+dfsg-2.1ubuntu1_amd64v3.deb ...
+2026-10-15T10:28:20.8944906Z Unpacking mold (2.40.4+dfsg-2.1ubuntu1) ...
+2026-10-15T10:28:21.0917115Z Setting up libtbbmalloc2:amd64 (2022.3.0-2) ...
+2026-10-15T10:28:21.0948995Z Setting up libmimalloc3:amd64 (3.2.8+ds-2) ...
+2026-10-15T10:28:21.0966539Z Setting up libhwloc15:amd64 (2.13.0-2) ...
+2026-10-15T10:28:21.0985903Z Setting up libtbbbind-2-5:amd64 (2022.3.0-2) ...
+2026-10-15T10:28:21.1002257Z Setting up libtbb12:amd64 (2022.3.0-2) ...
+2026-10-15T10:28:21.1019294Z Setting up mold (2.40.4+dfsg-2.1ubuntu1) ...
+2026-10-15T10:28:21.1040264Z Processing triggers for man-db (2.13.1-1build1) ...
+2026-10-15T10:28:21.1059553Z Not building database; man-db/auto-update is not 'true'.
+2026-10-15T10:28:21.1070679Z Processing triggers for libc-bin (2.43-2ubuntu2.4) ...
+2026-10-15T10:28:21.8427622Z 
+2026-10-15T10:28:21.8428514Z Running kernel seems to be up-to-date.
+2026-10-15T10:28:21.8428873Z 
+2026-10-15T10:28:21.8428981Z Restarting services...
+2026-10-15T10:28:21.8498885Z 
+2026-10-15T10:28:21.8499694Z Service restarts being deferred:
+2026-10-15T10:28:21.8502123Z  systemctl restart hosted-compute-agent.service
+2026-10-15T10:28:21.8502469Z 
+2026-10-15T10:28:21.8502911Z No containers need to be restarted.
+2026-10-15T10:28:21.8503157Z 
+2026-10-15T10:28:21.8503333Z No user sessions are running outdated binaries.
+2026-10-15T10:28:21.8503608Z 
+2026-10-15T10:28:21.8503891Z No VM guests are running outdated hypervisor (qemu) binaries on this host.
+2026-10-15T10:28:22.6340861Z ##[group]Run actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+2026-10-15T10:28:22.6341245Z with:
+2026-10-15T10:28:22.6341491Z   path: /home/runner/work/_temp/zig-archive/archive
+2026-10-15T10:28:22.6342014Z   key: zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53
+2026-10-15T10:28:22.6342512Z   enableCrossOsArchive: false
+2026-10-15T10:28:22.6342778Z   fail-on-cache-miss: false
+2026-10-15T10:28:22.6343008Z   lookup-only: false
+2026-10-15T10:28:22.6343217Z env:
+2026-10-15T10:28:22.6343505Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:22.6343869Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:22.6344125Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:22.6344386Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:22.6344627Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:22.6344861Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:22.6345140Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:22.6345358Z ##[endgroup]
+2026-10-15T10:28:22.7288896Z (node:2534) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-10-15T10:28:22.7289710Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-10-15T10:28:22.8821098Z Cache hit for: zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53
+2026-10-15T10:28:22.8907203Z (node:2534) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+2026-10-15T10:28:23.7371831Z Received 55481366 of 55481366 (100.0%), 76.1 MBs/sec
+2026-10-15T10:28:23.7372347Z Cache Size: ~53 MB (55481366 B)
+2026-10-15T10:28:23.7489119Z [command]/usr/bin/tar -xf /home/runner/work/_temp/3a229623-1511-48a4-8e5f-83ade7b81902/cache.tzst -P -C /home/runner/work/buster/buster --use-compress-program unzstd
+2026-10-15T10:28:23.8071077Z Cache restored successfully
+2026-10-15T10:28:23.8158547Z Cache restored from key: zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53
+2026-10-15T10:28:23.8436524Z ##[group]Run set -euo pipefail
+2026-10-15T10:28:23.8437088Z [36;1mset -euo pipefail[0m
+2026-10-15T10:28:23.8437536Z [36;1m"$BUSTER_CI_PYTHON" tools/ci_zig_cache.py check-restore \[0m
+2026-10-15T10:28:23.8438252Z [36;1m  --mode "ordinary" \[0m
+2026-10-15T10:28:23.8439100Z [36;1m  --expected-key "zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53" \[0m
+2026-10-15T10:28:23.8440174Z [36;1m  --cache-hit "$ZIG_CACHE_HIT" \[0m
+2026-10-15T10:28:23.8440654Z [36;1m  --primary-key "$ZIG_CACHE_PRIMARY_KEY" \[0m
+2026-10-15T10:28:23.8441148Z [36;1m  --matched-key "$ZIG_CACHE_MATCHED_KEY"[0m
+2026-10-15T10:28:23.8478782Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:28:23.8479122Z env:
+2026-10-15T10:28:23.8479440Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:23.8479894Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:23.8480219Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:23.8480489Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:23.8480739Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:23.8480984Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:23.8481239Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:23.8481482Z   ZIG_CACHE_HIT: true
+2026-10-15T10:28:23.8482025Z   ZIG_CACHE_MATCHED_KEY: zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53
+2026-10-15T10:28:23.8482828Z   ZIG_CACHE_PRIMARY_KEY: zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53
+2026-10-15T10:28:23.8483345Z ##[endgroup]
+2026-10-15T10:28:23.9138064Z ZIG_CACHE_RESTORE mode=ordinary key=zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53 result=hit
+2026-10-15T10:28:23.9463084Z ##[group]Run set -euo pipefail
+2026-10-15T10:28:23.9463407Z [36;1mset -euo pipefail[0m
+2026-10-15T10:28:23.9463734Z [36;1m# This step also runs without the Release-only preflight steps.[0m
+2026-10-15T10:28:23.9464113Z [36;1mmkdir -p "$RUNNER_TEMP/buster-ci"[0m
+2026-10-15T10:28:23.9464830Z [36;1m"$BUSTER_CI_PYTHON" tools/ci_zig.py --target "$ZIG_TARGET" --cache-directory "$RUNNER_TEMP/zig-archive" --install-directory "$RUNNER_TEMP/zig" 2>&1 | tee "$RUNNER_TEMP/buster-ci/zig.log"[0m
+2026-10-15T10:28:23.9500754Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:28:23.9501100Z env:
+2026-10-15T10:28:23.9501438Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:23.9501830Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:23.9502109Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:23.9502391Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:23.9502665Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:23.9502970Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:23.9503231Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:23.9503484Z   ZIG_TARGET: x86_64-linux
+2026-10-15T10:28:23.9503718Z ##[endgroup]
+2026-10-15T10:28:24.0564834Z ZIG_SETUP_ARCHIVE_VERIFIED attempt=1 sha256=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+2026-10-15T10:28:26.7991861Z ZIG_SETUP source=cache target=x86_64-linux version=0.16.0 sha256=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00 bytes=55478392 seconds=2.788
+2026-10-15T10:28:26.8589036Z ##[group]Run set -euo pipefail
+2026-10-15T10:28:26.8589359Z [36;1mset -euo pipefail[0m
+2026-10-15T10:28:26.8589656Z [36;1m"$BUSTER_CI_PYTHON" tools/ci_zig_cache.py record \[0m
+2026-10-15T10:28:26.8590345Z [36;1m  --evidence "$RUNNER_TEMP/buster-ci/zig-cache.json" \[0m
+2026-10-15T10:28:26.8590686Z [36;1m  --manifest .github/zig.json \[0m
+2026-10-15T10:28:26.8591011Z [36;1m  --cache-directory "$RUNNER_TEMP/zig-archive" \[0m
+2026-10-15T10:28:26.8591336Z [36;1m  --restore-outcome "success" \[0m
+2026-10-15T10:28:26.8591616Z [36;1m  --cache-hit "$ZIG_CACHE_HIT" \[0m
+2026-10-15T10:28:26.8591920Z [36;1m  --primary-key "$ZIG_CACHE_PRIMARY_KEY" \[0m
+2026-10-15T10:28:26.8592235Z [36;1m  --matched-key "$ZIG_CACHE_MATCHED_KEY" \[0m
+2026-10-15T10:28:26.8592536Z [36;1m  --install-outcome "success" \[0m
+2026-10-15T10:28:26.8592812Z [36;1m  --save-outcome "skipped" \[0m
+2026-10-15T10:28:26.8593238Z [36;1m  --proof-restore-outcome "skipped" \[0m
+2026-10-15T10:28:26.8593596Z [36;1m  --proof-cache-hit "$ZIG_CACHE_PROOF_HIT" \[0m
+2026-10-15T10:28:26.8593954Z [36;1m  --proof-primary-key "$ZIG_CACHE_PROOF_PRIMARY_KEY" \[0m
+2026-10-15T10:28:26.8594329Z [36;1m  --proof-matched-key "$ZIG_CACHE_PROOF_MATCHED_KEY" \[0m
+2026-10-15T10:28:26.8594666Z [36;1m  --summary "$GITHUB_STEP_SUMMARY"[0m
+2026-10-15T10:28:26.8632850Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:28:26.8633179Z env:
+2026-10-15T10:28:26.8633485Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:26.8633863Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:26.8634119Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:26.8634385Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:26.8634636Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:26.8634883Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:26.8635130Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:26.8635367Z   ZIG_CACHE_HIT: true
+2026-10-15T10:28:26.8635866Z   ZIG_CACHE_MATCHED_KEY: zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53
+2026-10-15T10:28:26.8636647Z   ZIG_CACHE_PRIMARY_KEY: zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53
+2026-10-15T10:28:26.8637152Z   ZIG_CACHE_PROOF_HIT: 
+2026-10-15T10:28:26.8637381Z   ZIG_CACHE_PROOF_MATCHED_KEY: 
+2026-10-15T10:28:26.8637629Z   ZIG_CACHE_PROOF_PRIMARY_KEY: 
+2026-10-15T10:28:26.8637859Z ##[endgroup]
+2026-10-15T10:28:26.9250912Z ZIG_CACHE_EVIDENCE mode=ordinary namespace=- key=zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53 restore=hit publication=existing-hit-verified usable=true
+2026-10-15T10:28:26.9530223Z ##[group]Run set -euo pipefail
+2026-10-15T10:28:26.9530567Z [36;1mset -euo pipefail[0m
+2026-10-15T10:28:26.9530844Z [36;1mmkdir -p "$RUNNER_TEMP/buster-ci"[0m
+2026-10-15T10:28:26.9531331Z [36;1m"$BUSTER_CI_PYTHON" tools/ci_llvm.py --target "$LLVM_TARGET" --work-directory "$RUNNER_TEMP/llvm" \[0m
+2026-10-15T10:28:26.9531976Z [36;1m  --github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV" 2>&1 | tee "$RUNNER_TEMP/buster-ci/llvm.log"[0m
+2026-10-15T10:28:26.9564442Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:28:26.9564774Z env:
+2026-10-15T10:28:26.9565084Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:26.9565465Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:26.9565727Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:26.9565987Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:26.9566243Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:26.9566496Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:26.9566785Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:26.9569124Z   GH_TOKEN: ***
+2026-10-15T10:28:26.9569362Z   LLVM_TARGET: x86_64-linux
+2026-10-15T10:28:26.9569598Z ##[endgroup]
+2026-10-15T10:28:47.5762198Z LLVM_SELECTED version=23.1.3 asset=LLVM-23.1.3-Linux-X64.tar.zst digest=sha256:14d2f701eb68fb799001bdea6231048f3990690fa2f406d563555ff8f744daba
+2026-10-15T10:28:47.5763350Z LLVM_RUNTIME package=libicu70_70.1-2_amd64.deb size=10581942 digest=sha256:58a154f6307289813da2276f900498ef536ae7c0522d2cf31a3c3c5cf62dfd9a url=https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu70_70.1-2_amd64.deb
+2026-10-15T10:28:47.5764142Z LLVM_TOOL_READY tool=clang path=/home/runner/work/_temp/llvm/llvm-23.1.3/bin/clang
+2026-10-15T10:28:47.5764648Z clang version 23.1.3 (https://github.com/llvm/llvm-project 0d261d1ca552c95a8f007e061c787ac7132fbcbc)
+2026-10-15T10:28:47.5765047Z Target: x86_64-unknown-linux-gnu
+2026-10-15T10:28:47.5765288Z Thread model: posix
+2026-10-15T10:28:47.5765561Z InstalledDir: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:28:47.5765958Z LLVM_TOOL_READY tool=llvm-ar path=/home/runner/work/_temp/llvm/llvm-23.1.3/bin/llvm-ar
+2026-10-15T10:28:47.5766315Z LLVM (http://llvm.org/):
+2026-10-15T10:28:47.5766764Z   LLVM version 23.1.3
+2026-10-15T10:28:47.5766975Z   Optimized build.
+2026-10-15T10:28:47.5767279Z LLVM_TOOL_READY tool=ld.lld path=/home/runner/work/_temp/llvm/llvm-23.1.3/bin/ld.lld
+2026-10-15T10:28:47.5767837Z LLD 23.1.3 (https://github.com/llvm/llvm-project 0d261d1ca552c95a8f007e061c787ac7132fbcbc) (compatible with GNU linkers)
+2026-10-15T10:28:47.5768399Z LLVM_TOOL_READY tool=ld64.lld path=/home/runner/work/_temp/llvm/llvm-23.1.3/bin/ld64.lld
+2026-10-15T10:28:47.5768860Z LLD 23.1.3 (https://github.com/llvm/llvm-project 0d261d1ca552c95a8f007e061c787ac7132fbcbc)
+2026-10-15T10:28:47.5769314Z LLVM_TOOL_READY tool=lld-link path=/home/runner/work/_temp/llvm/llvm-23.1.3/bin/lld-link
+2026-10-15T10:28:47.5769768Z LLD 23.1.3 (https://github.com/llvm/llvm-project 0d261d1ca552c95a8f007e061c787ac7132fbcbc)
+2026-10-15T10:28:47.5770364Z LLVM_TOOL_READY tool=wasm-ld path=/home/runner/work/_temp/llvm/llvm-23.1.3/bin/wasm-ld
+2026-10-15T10:28:47.5770804Z LLD 23.1.3 (https://github.com/llvm/llvm-project 0d261d1ca552c95a8f007e061c787ac7132fbcbc)
+2026-10-15T10:28:47.6090083Z ##[group]Run set -euo pipefail
+2026-10-15T10:28:47.6090383Z [36;1mset -euo pipefail[0m
+2026-10-15T10:28:47.6090610Z [36;1mclang --version[0m
+2026-10-15T10:28:47.6090929Z [36;1m# build.c selects and reports the actual GCC row before configuration.[0m
+2026-10-15T10:28:47.6091256Z [36;1mzig version[0m
+2026-10-15T10:28:47.6125498Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:28:47.6125837Z env:
+2026-10-15T10:28:47.6126153Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:47.6126529Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:47.6126800Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:47.6127064Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:47.6127315Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:47.6127561Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:47.6127810Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:47.6128108Z   BUSTER_CI_LLVM_BIN: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:28:47.6128500Z   BUSTER_CI_LLVM_VERSION: 23.1.3
+2026-10-15T10:28:47.6128743Z ##[endgroup]
+2026-10-15T10:28:47.6225209Z clang version 23.1.3 (https://github.com/llvm/llvm-project 0d261d1ca552c95a8f007e061c787ac7132fbcbc)
+2026-10-15T10:28:47.6225855Z Target: x86_64-unknown-linux-gnu
+2026-10-15T10:28:47.6226187Z Thread model: posix
+2026-10-15T10:28:47.6226564Z InstalledDir: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:28:47.6255743Z 0.16.0
+2026-10-15T10:28:47.6546552Z ##[group]Run set -euo pipefail
+2026-10-15T10:28:47.6546893Z [36;1mset -euo pipefail[0m
+2026-10-15T10:28:47.6547171Z [36;1mmkdir -p build "$RUNNER_TEMP/buster-ci"[0m
+2026-10-15T10:28:47.6547545Z [36;1mexec > >(tee "$RUNNER_TEMP/buster-ci/combinations.log") 2>&1[0m
+2026-10-15T10:28:47.6547980Z [36;1m# #1400: exercise the existing correctness suite with a long base.[0m
+2026-10-15T10:28:47.6548432Z [36;1m# Preserve an externally supplied base, including memory-backed runs.[0m
+2026-10-15T10:28:47.6548893Z [36;1mif [[ "linux-x86_64" == linux-x86_64 && "portability" == release ]]; then[0m
+2026-10-15T10:28:47.6549363Z [36;1m  buster_long_temporary_parent=${BUSTER_TEST_TEMPORARY_BASE:-$RUNNER_TEMP}[0m
+2026-10-15T10:28:47.6550401Z [36;1m  buster_long_temporary_base=$(mktemp -d "$buster_long_temporary_parent/buster-temporary-base-regression-1400-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-0123456789-XXXXXXXXXX")[0m
+2026-10-15T10:28:47.6551298Z [36;1m  trap 'rm -rf -- "$buster_long_temporary_base"' EXIT[0m
+2026-10-15T10:28:47.6551705Z [36;1m  export BUSTER_TEST_TEMPORARY_BASE="$buster_long_temporary_base"[0m
+2026-10-15T10:28:47.6552182Z [36;1m  buster_long_temporary_base_bytes=$(printf '%s' "$BUSTER_TEST_TEMPORARY_BASE" | wc -c)[0m
+2026-10-15T10:28:47.6552642Z [36;1m  [[ "$buster_long_temporary_base_bytes" -ge 87 ]][0m
+2026-10-15T10:28:47.6553152Z [36;1m  printf 'CI_LONG_TEMPORARY_BASE_V1 status=prepared bytes=%s minimum_bytes=87\n' "$buster_long_temporary_base_bytes"[0m
+2026-10-15T10:28:47.6553819Z [36;1mfi[0m
+2026-10-15T10:28:47.6554112Z [36;1m# The superbuild manifest names this exact bootstrap-driver path.[0m
+2026-10-15T10:28:47.6554650Z [36;1mclang -Isrc -Wall -Werror -Wno-unused-function -Wno-unused-variable -g build.c -o build/build[0m
+2026-10-15T10:28:47.6555134Z [36;1m./build/build test_all_combinations_ci --verbose=1[0m
+2026-10-15T10:28:47.6555492Z [36;1mif [[ -n "${buster_long_temporary_base:-}" ]]; then[0m
+2026-10-15T10:28:47.6555887Z [36;1m  # library_tests owns and deletes its children before returning.[0m
+2026-10-15T10:28:47.6556309Z [36;1m  # An unexpected leftover fails the lane before fallback cleanup.[0m
+2026-10-15T10:28:47.6556674Z [36;1m  rmdir -- "$buster_long_temporary_base"[0m
+2026-10-15T10:28:47.6556953Z [36;1m  trap - EXIT[0m
+2026-10-15T10:28:47.6557237Z [36;1m  printf 'CI_LONG_TEMPORARY_BASE_V1 status=cleaned\n'[0m
+2026-10-15T10:28:47.6557532Z [36;1mfi[0m
+2026-10-15T10:28:47.6588499Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:28:47.6588822Z env:
+2026-10-15T10:28:47.6589108Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:28:47.6589462Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:28:47.6589695Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:28:47.6590032Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:28:47.6590267Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:28:47.6590492Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:28:47.6590747Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:28:47.6591050Z   BUSTER_CI_LLVM_BIN: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:28:47.6591398Z   BUSTER_CI_LLVM_VERSION: 23.1.3
+2026-10-15T10:28:47.6591746Z   BUSTER_MATRIX_PHASE_OUTPUT: /home/runner/work/_temp/buster-ci/matrix-phases
+2026-10-15T10:28:47.6592107Z   BUSTER_CI_CHECKS_EVIDENCE: 0
+2026-10-15T10:28:47.6592344Z ##[endgroup]
+2026-10-15T10:28:50.4443075Z Launched [2593]: "/usr/bin/gcc -E -P -x c tests/build_compiler_identity.h"
+2026-10-15T10:28:50.4738174Z Process [2593]: Time (user): 0:4581 s,us, (system): 0:2944 s,us. Max RSS: 10584 KB. PF (soft): 1127, (hard): 63. Block (input): 13568, (output): 0. CTX SW (vol): 74, (invol): 0
+2026-10-15T10:28:50.4740643Z COMPILER_DISCOVERY_QUERY attempt=1/2 result=success retryable=0 elapsed_us=30107 deadline_us=30000000 process_result=success platform_status=0 stdout_observed=26 stdout_captured=26 stderr_observed=0 stderr_captured=0 output_truncated=0 cleanup_failed=0 argv=/usr/bin/gcc -E -P -x c tests/build_compiler_identity.h
+2026-10-15T10:28:50.4742165Z Launched [2595]: "/usr/bin/gcc -dumpmachine"
+2026-10-15T10:28:50.4749188Z Process [2595]: Time (user): 0:812 s,us, (system): 0:0 s,us. Max RSS: 4040 KB. PF (soft): 122, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+2026-10-15T10:28:50.4751015Z COMPILER_DISCOVERY_QUERY attempt=1/2 result=success retryable=0 elapsed_us=1128 deadline_us=30000000 process_result=success platform_status=0 stdout_observed=17 stdout_captured=17 stderr_observed=0 stderr_captured=0 output_truncated=0 cleanup_failed=0 argv=/usr/bin/gcc -dumpmachine
+2026-10-15T10:28:50.4752125Z Launched [2596]: "/usr/bin/gcc --version"
+2026-10-15T10:28:50.4765082Z Process [2596]: Time (user): 0:0 s,us, (system): 0:955 s,us. Max RSS: 4040 KB. PF (soft): 132, (hard): 1. Block (input): 80, (output): 0. CTX SW (vol): 2, (invol): 1
+2026-10-15T10:28:50.4767061Z COMPILER_DISCOVERY_QUERY attempt=1/2 result=success retryable=0 elapsed_us=1606 deadline_us=30000000 process_result=success platform_status=0 stdout_observed=239 stdout_captured=239 stderr_observed=0 stderr_captured=0 output_truncated=0 cleanup_failed=0 argv=/usr/bin/gcc --version
+2026-10-15T10:28:50.4768588Z BUSTER_COMPILER_EXECUTABLE: /usr/bin/gcc
+2026-10-15T10:28:50.4769068Z BUSTER_COMPILER_IDENTITY: BUSTER_BUILD_COMPILER_GNU
+2026-10-15T10:28:50.4769541Z BUSTER_COMPILER_TARGET: x86_64-linux-gnu
+2026-10-15T10:28:50.4770150Z BUSTER_COMPILER_VERSION: gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+2026-10-15T10:28:50.4770688Z Copyright (C) 2025 Free Software Foundation, Inc.
+2026-10-15T10:28:50.4771545Z This is free software; see the source for copying conditions.  There is NO
+2026-10-15T10:28:50.4772272Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+2026-10-15T10:28:50.4780832Z MACHINE_INFO arch=x86_64 cpu="INTEL(R) XEON(R) PLATINUM 8573C" model=emeraldrapids cores=4 ram_mib=15982
+2026-10-15T10:28:50.6261314Z Launched [2597]: "/home/runner/work/_temp/llvm/llvm-23.1.3/bin/clang-23 -E -P -x c tests/build_compiler_identity.h"
+2026-10-15T10:28:50.6332672Z Process [2597]: Time (user): 0:2933 s,us, (system): 0:3911 s,us. Max RSS: 69116 KB. PF (soft): 1353, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 1
+2026-10-15T10:28:50.6334815Z COMPILER_DISCOVERY_QUERY attempt=1/2 result=success retryable=0 elapsed_us=7475 deadline_us=30000000 process_result=success platform_status=0 stdout_observed=28 stdout_captured=28 stderr_observed=0 stderr_captured=0 output_truncated=0 cleanup_failed=0 argv=/home/runner/work/_temp/llvm/llvm-23.1.3/bin/clang-23 -E -P -x c tests/build_compiler_identity.h
+2026-10-15T10:28:50.6336816Z Launched [2598]: "/home/runner/work/_temp/llvm/llvm-23.1.3/bin/clang-23 -dumpmachine"
+2026-10-15T10:28:50.6387738Z Process [2598]: Time (user): 0:3124 s,us, (system): 0:2083 s,us. Max RSS: 61132 KB. PF (soft): 1137, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+2026-10-15T10:28:50.6389552Z COMPILER_DISCOVERY_QUERY attempt=1/2 result=success retryable=0 elapsed_us=5525 deadline_us=30000000 process_result=success platform_status=0 stdout_observed=25 stdout_captured=25 stderr_observed=0 stderr_captured=0 output_truncated=0 cleanup_failed=0 argv=/home/runner/work/_temp/llvm/llvm-23.1.3/bin/clang-23 -dumpmachine
+2026-10-15T10:28:50.6390950Z Launched [2599]: "/home/runner/work/_temp/llvm/llvm-23.1.3/bin/clang-23 --version"
+2026-10-15T10:28:50.6438305Z Process [2599]: Time (user): 0:927 s,us, (system): 0:3708 s,us. Max RSS: 60032 KB. PF (soft): 1137, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+2026-10-15T10:28:50.6440505Z COMPILER_DISCOVERY_QUERY attempt=1/2 result=success retryable=0 elapsed_us=5084 deadline_us=30000000 process_result=success platform_status=0 stdout_observed=213 stdout_captured=213 stderr_observed=0 stderr_captured=0 output_truncated=0 cleanup_failed=0 argv=/home/runner/work/_temp/llvm/llvm-23.1.3/bin/clang-23 --version
+2026-10-15T10:28:50.6441861Z BUSTER_COMPILER_EXECUTABLE: /home/runner/work/_temp/llvm/llvm-23.1.3/bin/clang-23
+2026-10-15T10:28:50.6442804Z BUSTER_COMPILER_IDENTITY: BUSTER_BUILD_COMPILER_CLANG
+2026-10-15T10:28:50.6443507Z BUSTER_COMPILER_TARGET: x86_64-unknown-linux-gnu
+2026-10-15T10:28:50.6444379Z BUSTER_COMPILER_VERSION: clang version 23.1.3 (https://github.com/llvm/llvm-project 0d261d1ca552c95a8f007e061c787ac7132fbcbc)
+2026-10-15T10:28:50.6444888Z Target: x86_64-unknown-linux-gnu
+2026-10-15T10:28:50.6445150Z Thread model: posix
+2026-10-15T10:28:50.6445434Z InstalledDir: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:28:56.1885837Z Launched [2600]: "/usr/bin/x86_64-linux-gnu-gcc-15 -E -P -x c tests/build_compiler_identity.h"
+2026-10-15T10:28:56.1944599Z Process [2600]: Time (user): 0:3489 s,us, (system): 0:2194 s,us. Max RSS: 280088 KB. PF (soft): 1157, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 4, (invol): 0
+2026-10-15T10:28:56.1946181Z COMPILER_DISCOVERY_QUERY attempt=1/2 result=success retryable=0 elapsed_us=6273 deadline_us=30000000 process_result=success platform_status=0 stdout_observed=26 stdout_captured=26 stderr_observed=0 stderr_captured=0 output_truncated=0 cleanup_failed=0 argv=/usr/bin/x86_64-linux-gnu-gcc-15 -E -P -x c tests/build_compiler_identity.h
+2026-10-15T10:28:56.1947565Z Launched [2602]: "/usr/bin/x86_64-linux-gnu-gcc-15 -dumpmachine"
+2026-10-15T10:28:56.1956643Z Process [2602]: Time (user): 0:847 s,us, (system): 0:0 s,us. Max RSS: 280088 KB. PF (soft): 120, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+2026-10-15T10:28:56.1958743Z COMPILER_DISCOVERY_QUERY attempt=1/2 result=success retryable=0 elapsed_us=1200 deadline_us=30000000 process_result=success platform_status=0 stdout_observed=17 stdout_captured=17 stderr_observed=0 stderr_captured=0 output_truncated=0 cleanup_failed=0 argv=/usr/bin/x86_64-linux-gnu-gcc-15 -dumpmachine
+2026-10-15T10:28:56.1960894Z Launched [2603]: "/usr/bin/x86_64-linux-gnu-gcc-15 --version"
+2026-10-15T10:28:56.1968456Z Process [2603]: Time (user): 0:0 s,us, (system): 0:926 s,us. Max RSS: 280088 KB. PF (soft): 131, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+2026-10-15T10:28:56.1970337Z COMPILER_DISCOVERY_QUERY attempt=1/2 result=success retryable=0 elapsed_us=1218 deadline_us=30000000 process_result=success platform_status=0 stdout_observed=259 stdout_captured=259 stderr_observed=0 stderr_captured=0 output_truncated=0 cleanup_failed=0 argv=/usr/bin/x86_64-linux-gnu-gcc-15 --version
+2026-10-15T10:28:56.1971413Z BUSTER_COMPILER_EXECUTABLE: /usr/bin/x86_64-linux-gnu-gcc-15
+2026-10-15T10:28:56.1971777Z BUSTER_COMPILER_IDENTITY: BUSTER_BUILD_COMPILER_GNU
+2026-10-15T10:28:56.1972102Z BUSTER_COMPILER_TARGET: x86_64-linux-gnu
+2026-10-15T10:28:56.1972476Z BUSTER_COMPILER_VERSION: x86_64-linux-gnu-gcc-15 (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+2026-10-15T10:28:56.1972885Z Copyright (C) 2025 Free Software Foundation, Inc.
+2026-10-15T10:28:56.1973265Z This is free software; see the source for copying conditions.  There is NO
+2026-10-15T10:28:56.1973715Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+2026-10-15T10:28:56.2323293Z Launched [2605]: "/home/runner/work/_temp/zig/zig version"
+2026-10-15T10:28:56.2355187Z Process [2605]: Time (user): 0:1077 s,us, (system): 0:2155 s,us. Max RSS: 280088 KB. PF (soft): 867, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+2026-10-15T10:28:56.2356117Z Launched [2606]: "/home/runner/work/_temp/zig/zig cc -dumpmachine"
+2026-10-15T10:28:56.2390568Z Process [2606]: Time (user): 0:0 s,us, (system): 0:3505 s,us. Max RSS: 280088 KB. PF (soft): 1000, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+2026-10-15T10:28:59.6082573Z BUSTER_CI_COVERAGE_MANIFEST: /home/runner/work/_temp/buster-ci/coverage.json
+2026-10-15T10:28:59.6091725Z Launched [2609]: "git rev-parse HEAD^{tree}"
+2026-10-15T10:28:59.6104344Z Process [2609]: Time (user): 0:0 s,us, (system): 0:1522 s,us. Max RSS: 280088 KB. PF (soft): 178, (hard): 0. Block (input): 0, (output): 0. CTX SW (vol): 1, (invol): 0
+2026-10-15T10:28:59.6107226Z BUSTER_BUILD_DIRECTORY: build/build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug
+2026-10-15T10:28:59.6108001Z BUSTER_BUILD_CONFIG: Debug
+2026-10-15T10:28:59.6108351Z BUSTER_CC: clang
+2026-10-15T10:28:59.6108673Z BUSTER_LINKER: MOLD
+2026-10-15T10:28:59.6113413Z + /usr/local/bin/cmake --warn-uninitialized -Werror=dev -B build/build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug -DBUSTER_CI=ON -DCMAKE_C_COMPILER=clang -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=ON -DBUSTER_THREAD_SANITIZE=OFF -DCMAKE_LINKER_TYPE=MOLD -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF -DBUSTER_DEVELOPER_TARGETS=OFF -DBUSTER_BUILD_DRIVER=/home/runner/work/buster/buster/build/build -G Ninja Multi-Config -DCMAKE_DEFAULT_BUILD_TYPE=Debug -DCMAKE_CONFIGURATION_TYPES=Debug -DCMAKE_CROSS_CONFIGS=all -DBUSTER_SINGLE_THREADED=OFF -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DBUSTER_TEST_PROCESS_PARTITIONS=ON -DBUSTER_MATRIX_PHASE_DRIVER=/home/runner/work/buster/buster/build/build -DBUSTER_MATRIX_PHASE_ROOT=/home/runner/work/_temp/buster-ci/matrix-phases -DBUSTER_MATRIX_PHASE_TREE=tree0 -DBUSTER_MATRIX_PHASE_EPOCH=116334675
+2026-10-15T10:28:59.6117091Z BUSTER_BUILD_DIRECTORY: build/build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug
+2026-10-15T10:28:59.6117623Z BUSTER_BUILD_CONFIG: Debug
+2026-10-15T10:28:59.6117885Z BUSTER_CC: /usr/bin/gcc
+2026-10-15T10:28:59.6118127Z BUSTER_LINKER: MOLD
+2026-10-15T10:28:59.6121180Z + /usr/local/bin/cmake --warn-uninitialized -Werror=dev -B build/build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug -DBUSTER_CI=ON -DCMAKE_C_COMPILER=/usr/bin/gcc -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=OFF -DBUSTER_THREAD_SANITIZE=OFF -DCMAKE_LINKER_TYPE=MOLD -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF -DBUSTER_DEVELOPER_TARGETS=OFF -DBUSTER_BUILD_DRIVER=/home/runner/work/buster/buster/build/build -G Ninja Multi-Config -DCMAKE_DEFAULT_BUILD_TYPE=Debug -DCMAKE_CONFIGURATION_TYPES=Debug -DCMAKE_CROSS_CONFIGS=all -DBUSTER_SINGLE_THREADED=OFF -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DBUSTER_MATRIX_PHASE_DRIVER=/home/runner/work/buster/buster/build/build -DBUSTER_MATRIX_PHASE_ROOT=/home/runner/work/_temp/buster-ci/matrix-phases -DBUSTER_MATRIX_PHASE_TREE=tree1 -DBUSTER_MATRIX_PHASE_EPOCH=116334675
+2026-10-15T10:28:59.6124536Z BUSTER_BUILD_DIRECTORY: build/build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug
+2026-10-15T10:28:59.6125091Z BUSTER_BUILD_CONFIG: Debug
+2026-10-15T10:28:59.6125325Z BUSTER_CC: zig
+2026-10-15T10:28:59.6125604Z BUSTER_LINKER: DEFAULT
+2026-10-15T10:28:59.6128736Z + /usr/local/bin/cmake --warn-uninitialized -Werror=dev -B build/build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug -DBUSTER_CI=ON -DCMAKE_C_COMPILER=zig;cc -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=OFF -DBUSTER_THREAD_SANITIZE=OFF -DCMAKE_LINKER_TYPE=DEFAULT -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF -DBUSTER_DEVELOPER_TARGETS=OFF -DBUSTER_BUILD_DRIVER=/home/runner/work/buster/buster/build/build -DCMAKE_C_LINKER_DEPFILE_SUPPORTED=FALSE -DCMAKE_C_LINK_DEPENDS_USE_LINKER=FALSE -G Ninja Multi-Config -DCMAKE_DEFAULT_BUILD_TYPE=Debug -DCMAKE_CONFIGURATION_TYPES=Debug -DCMAKE_CROSS_CONFIGS=all -DBUSTER_SINGLE_THREADED=OFF -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DBUSTER_MATRIX_PHASE_DRIVER=/home/runner/work/buster/buster/build/build -DBUSTER_MATRIX_PHASE_ROOT=/home/runner/work/_temp/buster-ci/matrix-phases -DBUSTER_MATRIX_PHASE_TREE=tree2 -DBUSTER_MATRIX_PHASE_EPOCH=116334675
+2026-10-15T10:28:59.6133508Z BUSTER_MATRIX_PARTITION: shard=portability rows=3/5 trees=3/5 shared_preflight=0
+2026-10-15T10:28:59.6134018Z BUSTER_SUPERBUILD_PARALLELISM: threads=4 trees=3 outer_jobs=3 post_test_jobs=0
+2026-10-15T10:28:59.6134786Z BUSTER_SUPERBUILD_POST_TEST: analyze_jobs=2 memory_mib=15982 beside_self_host=0
+2026-10-15T10:28:59.6135582Z BUSTER_SUPERBUILD_TREE: index=0 configs=1 unity_only=0 tests=0 jobs=2 directory=build/build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug
+2026-10-15T10:28:59.6136671Z BUSTER_SUPERBUILD_TREE: index=1 configs=1 unity_only=0 tests=0 jobs=1 directory=build/build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug
+2026-10-15T10:28:59.6138061Z BUSTER_SUPERBUILD_TREE: index=2 configs=1 unity_only=0 tests=0 jobs=1 directory=build/build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug
+2026-10-15T10:28:59.6142990Z Launched [2612]: "/home/runner/work/buster/buster/build/build matrix_phase_run /home/runner/work/_temp/buster-ci/matrix-phases tree0-configure-all 116334675 0 -- /usr/local/bin/cmake --warn-uninitialized -Werror=dev -B build/build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug -DBUSTER_CI=ON -DCMAKE_C_COMPILER=clang -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=ON -DBUSTER_THREAD_SANITIZE=OFF -DCMAKE_LINKER_TYPE=MOLD -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF -DBUSTER_DEVELOPER_TARGETS=OFF -DBUSTER_BUILD_DRIVER=/home/runner/work/buster/buster/build/build -G Ninja Multi-Config -DCMAKE_DEFAULT_BUILD_TYPE=Debug -DCMAKE_CONFIGURATION_TYPES=Debug -DCMAKE_CROSS_CONFIGS=all -DBUSTER_SINGLE_THREADED=OFF -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DBUSTER_TEST_PROCESS_PARTITIONS=ON -DBUSTER_MATRIX_PHASE_DRIVER=/home/runner/work/buster/buster/build/build -DBUSTER_MATRIX_PHASE_ROOT=/home/runner/work/_temp/buster-ci/matrix-phases -DBUSTER_MATRIX_PHASE_TREE=tree0 -DBUSTER_MATRIX_PHASE_EPOCH=116334675"
+2026-10-15T10:28:59.6154188Z Launched [2613]: "/home/runner/work/buster/buster/build/build matrix_phase_run /home/runner/work/_temp/buster-ci/matrix-phases tree1-configure-all 116334675 0 -- /usr/local/bin/cmake --warn-uninitialized -Werror=dev -B build/build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug -DBUSTER_CI=ON -DCMAKE_C_COMPILER=/usr/bin/gcc -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=OFF -DBUSTER_THREAD_SANITIZE=OFF -DCMAKE_LINKER_TYPE=MOLD -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF -DBUSTER_DEVELOPER_TARGETS=OFF -DBUSTER_BUILD_DRIVER=/home/runner/work/buster/buster/build/build -G Ninja Multi-Config -DCMAKE_DEFAULT_BUILD_TYPE=Debug -DCMAKE_CONFIGURATION_TYPES=Debug -DCMAKE_CROSS_CONFIGS=all -DBUSTER_SINGLE_THREADED=OFF -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DBUSTER_MATRIX_PHASE_DRIVER=/home/runner/work/buster/buster/build/build -DBUSTER_MATRIX_PHASE_ROOT=/home/runner/work/_temp/buster-ci/matrix-phases -DBUSTER_MATRIX_PHASE_TREE=tree1 -DBUSTER_MATRIX_PHASE_EPOCH=116334675"
+2026-10-15T10:28:59.6165438Z Launched [2615]: "/home/runner/work/buster/buster/build/build matrix_phase_run /home/runner/work/_temp/buster-ci/matrix-phases tree2-configure-all 116334675 0 -- /usr/local/bin/cmake --warn-uninitialized -Werror=dev -B build/build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug -DBUSTER_CI=ON -DCMAKE_C_COMPILER=zig;cc -DBUSTER_FUZZ_AVAILABLE=OFF -DBUSTER_SANITIZE=OFF -DBUSTER_THREAD_SANITIZE=OFF -DCMAKE_LINKER_TYPE=DEFAULT -DBUSTER_LTO=OFF -DBUSTER_TIME_TRACE=OFF -DBUSTER_INSTRUMENT=OFF -DBUSTER_INCLUDE_TESTS=ON -DBUSTER_LINK_LIBC=ON -DBUSTER_CHECK_OPTIONAL_WARNINGS=OFF -DBUSTER_DEVELOPER_TARGETS=OFF -DBUSTER_BUILD_DRIVER=/home/runner/work/buster/buster/build/build -DCMAKE_C_LINKER_DEPFILE_SUPPORTED=FALSE -DCMAKE_C_LINK_DEPENDS_USE_LINKER=FALSE -G Ninja Multi-Config -DCMAKE_DEFAULT_BUILD_TYPE=Debug -DCMAKE_CONFIGURATION_TYPES=Debug -DCMAKE_CROSS_CONFIGS=all -DBUSTER_SINGLE_THREADED=OFF -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY -DBUSTER_MATRIX_PHASE_DRIVER=/home/runner/work/buster/buster/build/build -DBUSTER_MATRIX_PHASE_ROOT=/home/runner/work/_temp/buster-ci/matrix-phases -DBUSTER_MATRIX_PHASE_TREE=tree2 -DBUSTER_MATRIX_PHASE_EPOCH=116334675"
+2026-10-15T10:28:59.6208588Z Launched [2618]: "/usr/local/bin/cmake -S cmake/superbuild -B build/build-portability-superbuild-ci_on -G Ninja -DBUSTER_SUPERBUILD_MATRIX_FILE=/home/runner/work/buster/buster/build/build-portability-superbuild-ci_on/matrix.cmake"
+2026-10-15T10:29:00.1175217Z The --warn-uninitialized option is deprecated.  Use -Wuninitialized instead.
+2026-10-15T10:29:00.1176132Z The The --warn-uninitialized option is deprecated.  Use -Wuninitialized--warn-uninitialized instead.
+2026-10-15T10:29:00.1176810Z  option is deprecated.  Use -Wuninitialized instead.
+2026-10-15T10:29:00.1891375Z The The The error=deverror=deverror=dev option is deprecated.  Use  option is deprecated.  Use  option is deprecated.  Use -Werror=author-Werror=author-Werror=author instead.
+2026-10-15T10:29:00.1892019Z  instead.
+2026-10-15T10:29:00.1892228Z  instead.
+2026-10-15T10:29:00.3882671Z -- Configuring done (0.2s)
+2026-10-15T10:29:00.4531648Z -- Generating done (0.1s)
+2026-10-15T10:29:00.4533265Z -- Build files have been written to: /home/runner/work/buster/buster/build/build-portability-superbuild-ci_on
+2026-10-15T10:29:00.5290772Z -- The C compiler identification is Clang 23.1.3
+2026-10-15T10:29:00.5322219Z -- The C compiler identification is Clang 21.1.0
+2026-10-15T10:29:00.5810995Z -- The C compiler identification is GNU 15.2.0
+2026-10-15T10:29:00.5866968Z -- Detecting C compiler ABI info
+2026-10-15T10:29:00.5867848Z -- Detecting C compiler ABI info
+2026-10-15T10:29:00.5899079Z -- Detecting C compiler ABI info
+2026-10-15T10:29:00.6611136Z -- Detecting C compiler ABI info - done
+2026-10-15T10:29:00.6677273Z -- Check for working C compiler: /home/runner/work/_temp/llvm/llvm-23.1.3/bin/clang - skipped
+2026-10-15T10:29:00.6686291Z -- Detecting C compile features
+2026-10-15T10:29:00.6739393Z -- Detecting C compile features - done
+2026-10-15T10:29:00.6765019Z -- Detecting C compiler ABI info - done
+2026-10-15T10:29:00.6847339Z -- Check for working C compiler: /home/runner/work/_temp/zig/zig - skipped
+2026-10-15T10:29:00.6851357Z -- Detecting C compile features
+2026-10-15T10:29:00.6855891Z -- Detecting C compile features - done
+2026-10-15T10:29:00.7394111Z -- BUSTER_VULKAN_SDK: 
+2026-10-15T10:29:00.7394729Z -- BUSTER_SLANGC_EXECUTABLE: BUSTER_SLANGC_EXECUTABLE-NOTFOUND
+2026-10-15T10:29:00.7395267Z -- BUSTER_CI: ON
+2026-10-15T10:29:00.7395588Z -- BUSTER_LINK_LIBC: ON
+2026-10-15T10:29:00.7395942Z -- BUSTER_OPTIMIZE: configuration-derived
+2026-10-15T10:29:00.7397404Z -- BUSTER_UNITY_BUILD: ON
+2026-10-15T10:29:00.7397819Z -- BUSTER_INCLUDE_TESTS: ON
+2026-10-15T10:29:00.7398180Z -- BUSTER_SANITIZE: OFF
+2026-10-15T10:29:00.7398547Z -- BUSTER_THREAD_SANITIZE: OFF
+2026-10-15T10:29:00.7398941Z -- BUSTER_SANITIZER_REDUCED_DEBUG: OFF
+2026-10-15T10:29:00.7399340Z -- BUSTER_DEBUG_INFO: OFF
+2026-10-15T10:29:00.7399695Z -- BUSTER_FRAME_POINTERS: OFF
+2026-10-15T10:29:00.7400238Z -- BUSTER_TIME_TRACE: OFF
+2026-10-15T10:29:00.7400597Z -- BUSTER_INSTRUMENT: OFF
+2026-10-15T10:29:00.7401036Z -- BUSTER_FUZZ_AVAILABLE: OFF
+2026-10-15T10:29:00.7401392Z -- BUSTER_LTO: OFF
+2026-10-15T10:29:00.7401736Z -- BUSTER_PRODUCTION_PROFILE: OFF
+2026-10-15T10:29:00.7402128Z -- BUSTER_PGO_GENERATE: 
+2026-10-15T10:29:00.7402471Z -- BUSTER_PGO_USE: 
+2026-10-15T10:29:00.7402788Z -- BUSTER_PGO_MANIFEST: 
+2026-10-15T10:29:00.7403139Z -- BUSTER_PGO_FINGERPRINT: 
+2026-10-15T10:29:00.7403538Z -- BUSTER_CHECK_OPTIONAL_WARNINGS: OFF
+2026-10-15T10:29:00.7403960Z -- BUSTER_DEVELOPER_TARGETS: OFF
+2026-10-15T10:29:00.7404350Z -- BUSTER_REQUIRE_VULKAN_SDK: ON
+2026-10-15T10:29:00.7404733Z -- BUSTER_COMPILE_SHADERS: OFF
+2026-10-15T10:29:00.7405121Z -- BUSTER_USE_SLANG_SHADERS: OFF
+2026-10-15T10:29:00.7405495Z -- BUSTER_SINGLE_THREADED: OFF
+2026-10-15T10:29:00.7405876Z -- CMAKE_HOST_SYSTEM_PROCESSOR: x86_64
+2026-10-15T10:29:00.7406284Z -- CMAKE_SYSTEM_PROCESSOR: x86_64
+2026-10-15T10:29:00.7406696Z -- CMAKE_GENERATOR: Ninja Multi-Config
+2026-10-15T10:29:00.7407111Z -- CMAKE_CONFIGURATION_TYPES: Debug
+2026-10-15T10:29:00.7407744Z -- CMAKE_DEFAULT_BUILD_TYPE: Debug
+2026-10-15T10:29:00.7408143Z -- CMAKE_BUILD_TYPE: 
+2026-10-15T10:29:00.7408498Z -- CMAKE_C_COMPILER_ID: Clang
+2026-10-15T10:29:00.7408867Z -- CMAKE_LINKER_TYPE: DEFAULT
+2026-10-15T10:29:00.7409241Z -- C_COMPILER_ZIG: ON
+2026-10-15T10:29:00.7409570Z -- BUSTER_USE_VULKAN: OFF
+2026-10-15T10:29:00.7410033Z -- BUSTER_USE_D3D12: OFF
+2026-10-15T10:29:00.7410394Z -- BUSTER_USE_METAL: OFF
+2026-10-15T10:29:00.7410750Z -- CMAKE_COLOR_DIAGNOSTICS: ON
+2026-10-15T10:29:00.7411139Z -- CMAKE_EXPORT_COMPILE_COMMANDS: OFF
+2026-10-15T10:29:00.7448783Z -- ide modules: OS;ENTRY_POINT;ARENA;INTEGER;STRING;FLOAT;TRUETYPE;COMPILER_AARCH64_SYNTAX;IMAGE;COMPILER_C_FRONTEND;COMPILER_AARCH64_ENCODING;COMPILER_AARCH64_EXACT_BRIDGE;COMPILER_AARCH64_CONTROL_SEMANTICS;COMPILER_AARCH64_SYSTEM_REGISTERS;COMPILER_AARCH64_SEMANTICS;COMPILER_AARCH64_SYSTEM_SEMANTICS;COMPILER_AARCH64_SEMANTIC_VM;COMPILER_AARCH64_SIMD_SEMANTICS;COMPILER_AARCH64_DIRECT_SIMD;COMPILER_AARCH64_COMPLEX_SIMD;COMPILER_AARCH64_MEMORY_SEMANTICS;COMPILER_AARCH64_ALIAS_PROJECTION;COMPILER_AARCH64_BASE_ASSEMBLY;COMPILER_ASSEMBLY;COMPILER_ASSEMBLY_UNIT;COMPILER_ASSEMBLY_METADATA;COMPILER_ASSEMBLY_COMPLETION_CENSUS;COMPILER_IR;COMPILER_DIAGNOSTIC;COMPILER_DEBUG;COMPILER_MACHINE;COMPILER_BOOTSTRAP_TRACE;COMPILER_CODEGEN;COMPILER_INVESTIGATION;COMPILER_DWARF;BYTE_WRITER;COMPILER_CODEVIEW;COMPILER_PDB;COMPILER_OBJECT;COMPILER_JIT;COMPILER_LINK;COMPILER_WASM;COMPILER_GPU;COMPILER_LLVM_BITCODE;COMPILER_EBPF;COMPILER_SPIRV;COMPILER_DRIVER;COMPILER_EMBED;SIMD;FILE;TARGET;TIME;HASH
+2026-10-15T10:29:00.7466592Z -- ide files: src/buster/apps/ide/ide.c src/buster/lib/os.c;src/buster/lib/entry_point.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/float.c;src/buster/lib/truetype.c;src/buster/lib/compiler/assembly/aarch64_syntax.c;src/buster/lib/image.c;src/buster/lib/image/png.c;src/buster/lib/image/jpeg.c;src/buster/lib/image/gif.c;src/buster/lib/image/bmp.c;src/buster/lib/image/tga.c;src/buster/lib/image/qoi.c;src/buster/lib/image/pnm.c;src/buster/lib/compiler/frontend/c/c_source.c;src/buster/lib/compiler/frontend/c/c_parse.c;src/buster/lib/compiler/frontend/c/c_ast_types.c;src/buster/lib/compiler/frontend/c/c_ast.c;src/buster/lib/compiler/frontend/c/c_gen.c;src/buster/lib/compiler/assembly/aarch64_encoding.c;src/buster/lib/compiler/assembly/aarch64_exact_bridge.c;src/buster/lib/compiler/assembly/aarch64_control_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_registers.c;src/buster/lib/compiler/assembly/aarch64_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_semantics.c;src/buster/lib/compiler/assembly/aarch64_semantic_vm.c;src/buster/lib/compiler/assembly/aarch64_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_memory_semantics.c;src/buster/lib/compiler/assembly/aarch64_alias_projection.c;src/buster/lib/compiler/assembly/aarch64_base_assembly.c;src/buster/lib/compiler/assembly/assembly.c;src/buster/lib/compiler/assembly/assembly_unit.c;src/buster/lib/compiler/assembly/x86_64_metadata.c;src/buster/lib/compiler/assembly/x86_64_completion_census.c;src/buster/lib/compiler/ir/ir.c;src/buster/lib/compiler/diagnostic.c;src/buster/lib/compiler/debug/debug.c;src/buster/lib/compiler/codegen/machine.c;src/buster/lib/compiler/codegen/bootstrap_trace.c;src/buster/lib/compiler/codegen/codegen.c;src/buster/lib/compiler/codegen/investigation.c;src/buster/lib/compiler/dwarf/dwarf.c;src/buster/lib/byte_writer.c;src/buster/lib/compiler/codeview/codeview.c;src/buster/lib/compiler/pdb/pdb.c;src/buster/lib/compiler/object/object.c;src/buster/lib/compiler/jit/jit.c;src/buster/lib/compiler/link/link.c;src/buster/lib/compiler/wasm/wasm.c;src/buster/lib/compiler/gpu/gpu.c;src/buster/lib/compiler/llvm/bitcode.c;src/buster/lib/compiler/ebpf/ebpf.c;src/buster/lib/compiler/spirv/spirv.c;src/buster/lib/compiler/driver/driver.c;src/buster/lib/compiler/embed/embed.c;src/buster/lib/simd.c;src/buster/lib/file.c;src/buster/lib/target.c;src/buster/lib/time.c;src/buster/lib/hash.c;src/buster/lib/x86_64.c
+2026-10-15T10:29:00.7480732Z -- ui_slider_component_tests modules: OS;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;UI_CORE;UI_BUILDER
+2026-10-15T10:29:00.7482907Z -- ui_slider_component_tests files: src/buster/tests/ui_slider_component_test.c src/buster/lib/os.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/ui_core.c;src/buster/lib/ui_builder.c;src/buster/tests/ui_slider_test.c
+2026-10-15T10:29:00.7501513Z -- ui_utf8_component_tests modules: OS;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;UI_CORE
+2026-10-15T10:29:00.7511809Z -- ui_utf8_component_tests files: src/buster/tests/ui_utf8_component_test.c src/buster/lib/os.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/ui_core.c
+2026-10-15T10:29:00.7513524Z -- ui_scale_component_tests modules: OS;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;UI_CORE
+2026-10-15T10:29:00.7515271Z -- ui_scale_component_tests files: src/buster/tests/ui_scale_component_test.c src/buster/lib/os.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/ui_core.c
+2026-10-15T10:29:00.7516905Z -- clang_analyze target disabled: CMAKE_EXPORT_COMPILE_COMMANDS is OFF
+2026-10-15T10:29:00.7518023Z -- rendering_texture_admission_component_tests files: src/buster/tests/rendering_texture_admission_component_test.c 
+2026-10-15T10:29:00.7518897Z -- rendering_raster_component_tests modules: RENDERING_RASTER
+2026-10-15T10:29:00.7520189Z -- rendering_raster_component_tests files: src/buster/tests/rendering_raster_component_test.c src/buster/lib/rendering_raster.c
+2026-10-15T10:29:00.7521488Z -- BUSTER_LINUX_ASAN_PRELOAD_RUNTIME: /home/runner/work/_temp/llvm/llvm-23.1.3/lib/clang/23/lib/x86_64-unknown-linux-gnu/libclang_rt.asan.so
+2026-10-15T10:29:00.7522370Z -- BUSTER_VULKAN_SDK: 
+2026-10-15T10:29:00.7522821Z -- BUSTER_SLANGC_EXECUTABLE: BUSTER_SLANGC_EXECUTABLE-NOTFOUND
+2026-10-15T10:29:00.7523329Z -- BUSTER_CI: ON
+2026-10-15T10:29:00.7523647Z -- BUSTER_LINK_LIBC: ON
+2026-10-15T10:29:00.7524023Z -- BUSTER_OPTIMIZE: configuration-derived
+2026-10-15T10:29:00.7524452Z -- BUSTER_UNITY_BUILD: ON
+2026-10-15T10:29:00.7524804Z -- BUSTER_INCLUDE_TESTS: ON
+2026-10-15T10:29:00.7525152Z -- BUSTER_SANITIZE: ON
+2026-10-15T10:29:00.7525474Z -- BUSTER_THREAD_SANITIZE: OFF
+2026-10-15T10:29:00.7525841Z -- BUSTER_SANITIZER_REDUCED_DEBUG: ON
+2026-10-15T10:29:00.7526215Z -- BUSTER_DEBUG_INFO: OFF
+2026-10-15T10:29:00.7526561Z -- BUSTER_FRAME_POINTERS: OFF
+2026-10-15T10:29:00.7526913Z -- BUSTER_TIME_TRACE: OFF
+2026-10-15T10:29:00.7527245Z -- BUSTER_INSTRUMENT: OFF
+2026-10-15T10:29:00.7527573Z -- BUSTER_FUZZ_AVAILABLE: OFF
+2026-10-15T10:29:00.7528007Z -- BUSTER_LTO: OFF
+2026-10-15T10:29:00.7528332Z -- BUSTER_PRODUCTION_PROFILE: OFF
+2026-10-15T10:29:00.7528676Z -- BUSTER_PGO_GENERATE: 
+2026-10-15T10:29:00.7528992Z -- BUSTER_PGO_USE: 
+2026-10-15T10:29:00.7529260Z -- BUSTER_PGO_MANIFEST: 
+2026-10-15T10:29:00.7529574Z -- BUSTER_PGO_FINGERPRINT: 
+2026-10-15T10:29:00.7530098Z -- BUSTER_CHECK_OPTIONAL_WARNINGS: OFF
+2026-10-15T10:29:00.7530479Z -- BUSTER_DEVELOPER_TARGETS: OFF
+2026-10-15T10:29:00.7530826Z -- BUSTER_REQUIRE_VULKAN_SDK: ON
+2026-10-15T10:29:00.7531177Z -- BUSTER_COMPILE_SHADERS: OFF
+2026-10-15T10:29:00.7531539Z -- BUSTER_USE_SLANG_SHADERS: OFF
+2026-10-15T10:29:00.7531893Z -- BUSTER_SINGLE_THREADED: OFF
+2026-10-15T10:29:00.7532252Z -- CMAKE_HOST_SYSTEM_PROCESSOR: x86_64
+2026-10-15T10:29:00.7532648Z -- CMAKE_SYSTEM_PROCESSOR: x86_64
+2026-10-15T10:29:00.7533005Z -- CMAKE_GENERATOR: Ninja Multi-Config
+2026-10-15T10:29:00.7533376Z -- CMAKE_CONFIGURATION_TYPES: Debug
+2026-10-15T10:29:00.7533745Z -- CMAKE_DEFAULT_BUILD_TYPE: Debug
+2026-10-15T10:29:00.7534239Z -- CMAKE_BUILD_TYPE: 
+2026-10-15T10:29:00.7534581Z -- CMAKE_C_COMPILER_ID: Clang
+2026-10-15T10:29:00.7534941Z -- CMAKE_LINKER_TYPE: MOLD
+2026-10-15T10:29:00.7535282Z -- C_COMPILER_ZIG: OFF
+2026-10-15T10:29:00.7535609Z -- BUSTER_USE_VULKAN: OFF
+2026-10-15T10:29:00.7535958Z -- BUSTER_USE_D3D12: OFF
+2026-10-15T10:29:00.7536295Z -- BUSTER_USE_METAL: OFF
+2026-10-15T10:29:00.7536633Z -- CMAKE_COLOR_DIAGNOSTICS: ON
+2026-10-15T10:29:00.7536998Z -- CMAKE_EXPORT_COMPILE_COMMANDS: OFF
+2026-10-15T10:29:00.7537738Z -- rendering_texture_format_component_tests modules: OS;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;TARGET;X86_64;RENDERING
+2026-10-15T10:29:00.7540176Z -- rendering_texture_format_component_tests files: src/buster/tests/rendering_texture_format_component_test.c src/buster/lib/os.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/target.c;src/buster/lib/x86_64.c;src/buster/lib/rendering.c
+2026-10-15T10:29:00.7542257Z -- disk_builder modules: OS;ENTRY_POINT;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;TARGET;X86_64
+2026-10-15T10:29:00.7544226Z -- disk_builder files: src/buster/apps/disk_builder.c src/buster/lib/os.c;src/buster/lib/entry_point.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/target.c;src/buster/lib/x86_64.c;src/buster/apps/disk_builder_verification.c
+2026-10-15T10:29:00.7546063Z -- BUSTER_LSAN_POLICY: enabled
+2026-10-15T10:29:00.7546427Z -- Configuring done (0.5s)
+2026-10-15T10:29:00.7546982Z -- BUSTER_LLVM_SYMBOLIZER: /home/runner/work/_temp/llvm/llvm-23.1.3/bin/llvm-symbolizer
+2026-10-15T10:29:00.7549034Z -- BUSTER_SANITIZER_POLICY: fatal; ASAN_OPTIONS=halt_on_error=1:symbolize=1:external_symbolizer_path=/home/runner/work/_temp/llvm/llvm-23.1.3/bin/llvm-symbolizer; UBSAN_OPTIONS=halt_on_error=1:exitcode=87:print_stacktrace=1:external_symbolizer_path=/home/runner/work/_temp/llvm/llvm-23.1.3/bin/llvm-symbolizer; LSAN_OPTIONS=detect_leaks=1:exitcode=86:print_suppressions=1
+2026-10-15T10:29:00.7557079Z -- ide modules: OS;ENTRY_POINT;ARENA;INTEGER;STRING;FLOAT;TRUETYPE;COMPILER_AARCH64_SYNTAX;IMAGE;COMPILER_C_FRONTEND;COMPILER_AARCH64_ENCODING;COMPILER_AARCH64_EXACT_BRIDGE;COMPILER_AARCH64_CONTROL_SEMANTICS;COMPILER_AARCH64_SYSTEM_REGISTERS;COMPILER_AARCH64_SEMANTICS;COMPILER_AARCH64_SYSTEM_SEMANTICS;COMPILER_AARCH64_SEMANTIC_VM;COMPILER_AARCH64_SIMD_SEMANTICS;COMPILER_AARCH64_DIRECT_SIMD;COMPILER_AARCH64_COMPLEX_SIMD;COMPILER_AARCH64_MEMORY_SEMANTICS;COMPILER_AARCH64_ALIAS_PROJECTION;COMPILER_AARCH64_BASE_ASSEMBLY;COMPILER_ASSEMBLY;COMPILER_ASSEMBLY_UNIT;COMPILER_ASSEMBLY_METADATA;COMPILER_ASSEMBLY_COMPLETION_CENSUS;COMPILER_IR;COMPILER_DIAGNOSTIC;COMPILER_DEBUG;COMPILER_MACHINE;COMPILER_BOOTSTRAP_TRACE;COMPILER_CODEGEN;COMPILER_INVESTIGATION;COMPILER_DWARF;BYTE_WRITER;COMPILER_CODEVIEW;COMPILER_PDB;COMPILER_OBJECT;COMPILER_JIT;COMPILER_LINK;COMPILER_WASM;COMPILER_GPU;COMPILER_LLVM_BITCODE;COMPILER_EBPF;COMPILER_SPIRV;COMPILER_DRIVER;COMPILER_EMBED;SIMD;FILE;TARGET;TIME;HASH
+2026-10-15T10:29:00.7574492Z -- ide files: src/buster/apps/ide/ide.c src/buster/lib/os.c;src/buster/lib/entry_point.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/float.c;src/buster/lib/truetype.c;src/buster/lib/compiler/assembly/aarch64_syntax.c;src/buster/lib/image.c;src/buster/lib/image/png.c;src/buster/lib/image/jpeg.c;src/buster/lib/image/gif.c;src/buster/lib/image/bmp.c;src/buster/lib/image/tga.c;src/buster/lib/image/qoi.c;src/buster/lib/image/pnm.c;src/buster/lib/compiler/frontend/c/c_source.c;src/buster/lib/compiler/frontend/c/c_parse.c;src/buster/lib/compiler/frontend/c/c_ast_types.c;src/buster/lib/compiler/frontend/c/c_ast.c;src/buster/lib/compiler/frontend/c/c_gen.c;src/buster/lib/compiler/assembly/aarch64_encoding.c;src/buster/lib/compiler/assembly/aarch64_exact_bridge.c;src/buster/lib/compiler/assembly/aarch64_control_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_registers.c;src/buster/lib/compiler/assembly/aarch64_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_semantics.c;src/buster/lib/compiler/assembly/aarch64_semantic_vm.c;src/buster/lib/compiler/assembly/aarch64_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_memory_semantics.c;src/buster/lib/compiler/assembly/aarch64_alias_projection.c;src/buster/lib/compiler/assembly/aarch64_base_assembly.c;src/buster/lib/compiler/assembly/assembly.c;src/buster/lib/compiler/assembly/assembly_unit.c;src/buster/lib/compiler/assembly/x86_64_metadata.c;src/buster/lib/compiler/assembly/x86_64_completion_census.c;src/buster/lib/compiler/ir/ir.c;src/buster/lib/compiler/diagnostic.c;src/buster/lib/compiler/debug/debug.c;src/buster/lib/compiler/codegen/machine.c;src/buster/lib/compiler/codegen/bootstrap_trace.c;src/buster/lib/compiler/codegen/codegen.c;src/buster/lib/compiler/codegen/investigation.c;src/buster/lib/compiler/dwarf/dwarf.c;src/buster/lib/byte_writer.c;src/buster/lib/compiler/codeview/codeview.c;src/buster/lib/compiler/pdb/pdb.c;src/buster/lib/compiler/object/object.c;src/buster/lib/compiler/jit/jit.c;src/buster/lib/compiler/link/link.c;src/buster/lib/compiler/wasm/wasm.c;src/buster/lib/compiler/gpu/gpu.c;src/buster/lib/compiler/llvm/bitcode.c;src/buster/lib/compiler/ebpf/ebpf.c;src/buster/lib/compiler/spirv/spirv.c;src/buster/lib/compiler/driver/driver.c;src/buster/lib/compiler/embed/embed.c;src/buster/lib/simd.c;src/buster/lib/file.c;src/buster/lib/target.c;src/buster/lib/time.c;src/buster/lib/hash.c;src/buster/lib/x86_64.c
+2026-10-15T10:29:00.7587559Z -- ui_slider_component_tests modules: OS;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;UI_CORE;UI_BUILDER
+2026-10-15T10:29:00.7589571Z -- ui_slider_component_tests files: src/buster/tests/ui_slider_component_test.c src/buster/lib/os.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/ui_core.c;src/buster/lib/ui_builder.c;src/buster/tests/ui_slider_test.c
+2026-10-15T10:29:00.7591598Z -- ui_utf8_component_tests modules: OS;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;UI_CORE
+2026-10-15T10:29:00.7593223Z -- ui_utf8_component_tests files: src/buster/tests/ui_utf8_component_test.c src/buster/lib/os.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/ui_core.c
+2026-10-15T10:29:00.7594842Z -- ui_scale_component_tests modules: OS;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;UI_CORE
+2026-10-15T10:29:00.7596489Z -- ui_scale_component_tests files: src/buster/tests/ui_scale_component_test.c src/buster/lib/os.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/ui_core.c
+2026-10-15T10:29:00.7598239Z -- clang_analyze target disabled: CMAKE_EXPORT_COMPILE_COMMANDS is OFF
+2026-10-15T10:29:00.7599233Z -- rendering_texture_admission_component_tests files: src/buster/tests/rendering_texture_admission_component_test.c 
+2026-10-15T10:29:00.7600366Z -- rendering_raster_component_tests modules: RENDERING_RASTER
+2026-10-15T10:29:00.7601287Z -- rendering_raster_component_tests files: src/buster/tests/rendering_raster_component_test.c src/buster/lib/rendering_raster.c
+2026-10-15T10:29:00.7610304Z -- rendering_texture_format_component_tests modules: OS;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;TARGET;X86_64;RENDERING
+2026-10-15T10:29:00.7613219Z -- rendering_texture_format_component_tests files: src/buster/tests/rendering_texture_format_component_test.c src/buster/lib/os.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/target.c;src/buster/lib/x86_64.c;src/buster/lib/rendering.c
+2026-10-15T10:29:00.7621189Z -- disk_builder modules: OS;ENTRY_POINT;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;TARGET;X86_64
+2026-10-15T10:29:00.7623956Z -- disk_builder files: src/buster/apps/disk_builder.c src/buster/lib/os.c;src/buster/lib/entry_point.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/target.c;src/buster/lib/x86_64.c;src/buster/apps/disk_builder_verification.c
+2026-10-15T10:29:00.7629711Z -- Configuring done (0.5s)
+2026-10-15T10:29:00.7798141Z -- Generating done (0.0s)
+2026-10-15T10:29:00.7821611Z -- Build files have been written to: /home/runner/work/buster/buster/build/build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug
+2026-10-15T10:29:00.7867038Z -- Generating done (0.0s)
+2026-10-15T10:29:00.7870296Z -- Build files have been written to: /home/runner/work/buster/buster/build/build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug
+2026-10-15T10:29:00.7909901Z Process [2612]: Time (user): 0:108931 s,us, (system): 0:74564 s,us. Max RSS: 280088 KB. PF (soft): 18854, (hard): 50. Block (input): 4472, (output): 1920. CTX SW (vol): 513, (invol): 31
+2026-10-15T10:29:01.1944372Z -- Detecting C compiler ABI info - done
+2026-10-15T10:29:01.2018099Z -- Check for working C compiler: /usr/bin/gcc - skipped
+2026-10-15T10:29:01.2021378Z -- Detecting C compile features
+2026-10-15T10:29:01.2024981Z -- Detecting C compile features - done
+2026-10-15T10:29:01.2135569Z -- BUSTER_VULKAN_SDK: 
+2026-10-15T10:29:01.2136109Z -- BUSTER_SLANGC_EXECUTABLE: BUSTER_SLANGC_EXECUTABLE-NOTFOUND
+2026-10-15T10:29:01.2136572Z -- BUSTER_CI: ON
+2026-10-15T10:29:01.2136799Z -- BUSTER_LINK_LIBC: ON
+2026-10-15T10:29:01.2137071Z -- BUSTER_OPTIMIZE: configuration-derived
+2026-10-15T10:29:01.2137364Z -- BUSTER_UNITY_BUILD: ON
+2026-10-15T10:29:01.2137607Z -- BUSTER_INCLUDE_TESTS: ON
+2026-10-15T10:29:01.2137871Z -- BUSTER_SANITIZE: OFF
+2026-10-15T10:29:01.2138108Z -- BUSTER_THREAD_SANITIZE: OFF
+2026-10-15T10:29:01.2138378Z -- BUSTER_SANITIZER_REDUCED_DEBUG: OFF
+2026-10-15T10:29:01.2138646Z -- BUSTER_DEBUG_INFO: OFF
+2026-10-15T10:29:01.2138902Z -- BUSTER_FRAME_POINTERS: OFF
+2026-10-15T10:29:01.2139158Z -- BUSTER_TIME_TRACE: OFF
+2026-10-15T10:29:01.2139389Z -- BUSTER_INSTRUMENT: OFF
+2026-10-15T10:29:01.2139616Z -- BUSTER_FUZZ_AVAILABLE: OFF
+2026-10-15T10:29:01.2140023Z -- BUSTER_LTO: OFF
+2026-10-15T10:29:01.2140261Z -- BUSTER_PRODUCTION_PROFILE: OFF
+2026-10-15T10:29:01.2140540Z -- BUSTER_PGO_GENERATE: 
+2026-10-15T10:29:01.2140768Z -- BUSTER_PGO_USE: 
+2026-10-15T10:29:01.2140983Z -- BUSTER_PGO_MANIFEST: 
+2026-10-15T10:29:01.2141216Z -- BUSTER_PGO_FINGERPRINT: 
+2026-10-15T10:29:01.2141476Z -- BUSTER_CHECK_OPTIONAL_WARNINGS: OFF
+2026-10-15T10:29:01.2141746Z -- BUSTER_DEVELOPER_TARGETS: OFF
+2026-10-15T10:29:01.2141997Z -- BUSTER_REQUIRE_VULKAN_SDK: ON
+2026-10-15T10:29:01.2142242Z -- BUSTER_COMPILE_SHADERS: OFF
+2026-10-15T10:29:01.2142483Z -- BUSTER_USE_SLANG_SHADERS: OFF
+2026-10-15T10:29:01.2142730Z -- BUSTER_SINGLE_THREADED: OFF
+2026-10-15T10:29:01.2142973Z -- CMAKE_HOST_SYSTEM_PROCESSOR: x86_64
+2026-10-15T10:29:01.2143232Z -- CMAKE_SYSTEM_PROCESSOR: x86_64
+2026-10-15T10:29:01.2143486Z -- CMAKE_GENERATOR: Ninja Multi-Config
+2026-10-15T10:29:01.2143760Z -- CMAKE_CONFIGURATION_TYPES: Debug
+2026-10-15T10:29:01.2144021Z -- CMAKE_DEFAULT_BUILD_TYPE: Debug
+2026-10-15T10:29:01.2144338Z -- CMAKE_BUILD_TYPE: 
+2026-10-15T10:29:01.2144661Z -- CMAKE_C_COMPILER_ID: GNU
+2026-10-15T10:29:01.2144909Z -- CMAKE_LINKER_TYPE: MOLD
+2026-10-15T10:29:01.2145135Z -- C_COMPILER_ZIG: OFF
+2026-10-15T10:29:01.2145351Z -- BUSTER_USE_VULKAN: OFF
+2026-10-15T10:29:01.2145573Z -- BUSTER_USE_D3D12: OFF
+2026-10-15T10:29:01.2145796Z -- BUSTER_USE_METAL: OFF
+2026-10-15T10:29:01.2146028Z -- CMAKE_COLOR_DIAGNOSTICS: ON
+2026-10-15T10:29:01.2146272Z -- CMAKE_EXPORT_COMPILE_COMMANDS: OFF
+2026-10-15T10:29:01.2177029Z -- ide modules: OS;ENTRY_POINT;ARENA;INTEGER;STRING;FLOAT;TRUETYPE;COMPILER_AARCH64_SYNTAX;IMAGE;COMPILER_C_FRONTEND;COMPILER_AARCH64_ENCODING;COMPILER_AARCH64_EXACT_BRIDGE;COMPILER_AARCH64_CONTROL_SEMANTICS;COMPILER_AARCH64_SYSTEM_REGISTERS;COMPILER_AARCH64_SEMANTICS;COMPILER_AARCH64_SYSTEM_SEMANTICS;COMPILER_AARCH64_SEMANTIC_VM;COMPILER_AARCH64_SIMD_SEMANTICS;COMPILER_AARCH64_DIRECT_SIMD;COMPILER_AARCH64_COMPLEX_SIMD;COMPILER_AARCH64_MEMORY_SEMANTICS;COMPILER_AARCH64_ALIAS_PROJECTION;COMPILER_AARCH64_BASE_ASSEMBLY;COMPILER_ASSEMBLY;COMPILER_ASSEMBLY_UNIT;COMPILER_ASSEMBLY_METADATA;COMPILER_ASSEMBLY_COMPLETION_CENSUS;COMPILER_IR;COMPILER_DIAGNOSTIC;COMPILER_DEBUG;COMPILER_MACHINE;COMPILER_BOOTSTRAP_TRACE;COMPILER_CODEGEN;COMPILER_INVESTIGATION;COMPILER_DWARF;BYTE_WRITER;COMPILER_CODEVIEW;COMPILER_PDB;COMPILER_OBJECT;COMPILER_JIT;COMPILER_LINK;COMPILER_WASM;COMPILER_GPU;COMPILER_LLVM_BITCODE;COMPILER_EBPF;COMPILER_SPIRV;COMPILER_DRIVER;COMPILER_EMBED;SIMD;FILE;TARGET;TIME;HASH
+2026-10-15T10:29:01.2186957Z -- ide files: src/buster/apps/ide/ide.c src/buster/lib/os.c;src/buster/lib/entry_point.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/float.c;src/buster/lib/truetype.c;src/buster/lib/compiler/assembly/aarch64_syntax.c;src/buster/lib/image.c;src/buster/lib/image/png.c;src/buster/lib/image/jpeg.c;src/buster/lib/image/gif.c;src/buster/lib/image/bmp.c;src/buster/lib/image/tga.c;src/buster/lib/image/qoi.c;src/buster/lib/image/pnm.c;src/buster/lib/compiler/frontend/c/c_source.c;src/buster/lib/compiler/frontend/c/c_parse.c;src/buster/lib/compiler/frontend/c/c_ast_types.c;src/buster/lib/compiler/frontend/c/c_ast.c;src/buster/lib/compiler/frontend/c/c_gen.c;src/buster/lib/compiler/assembly/aarch64_encoding.c;src/buster/lib/compiler/assembly/aarch64_exact_bridge.c;src/buster/lib/compiler/assembly/aarch64_control_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_registers.c;src/buster/lib/compiler/assembly/aarch64_semantics.c;src/buster/lib/compiler/assembly/aarch64_system_semantics.c;src/buster/lib/compiler/assembly/aarch64_semantic_vm.c;src/buster/lib/compiler/assembly/aarch64_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c;src/buster/lib/compiler/assembly/aarch64_memory_semantics.c;src/buster/lib/compiler/assembly/aarch64_alias_projection.c;src/buster/lib/compiler/assembly/aarch64_base_assembly.c;src/buster/lib/compiler/assembly/assembly.c;src/buster/lib/compiler/assembly/assembly_unit.c;src/buster/lib/compiler/assembly/x86_64_metadata.c;src/buster/lib/compiler/assembly/x86_64_completion_census.c;src/buster/lib/compiler/ir/ir.c;src/buster/lib/compiler/diagnostic.c;src/buster/lib/compiler/debug/debug.c;src/buster/lib/compiler/codegen/machine.c;src/buster/lib/compiler/codegen/bootstrap_trace.c;src/buster/lib/compiler/codegen/codegen.c;src/buster/lib/compiler/codegen/investigation.c;src/buster/lib/compiler/dwarf/dwarf.c;src/buster/lib/byte_writer.c;src/buster/lib/compiler/codeview/codeview.c;src/buster/lib/compiler/pdb/pdb.c;src/buster/lib/compiler/object/object.c;src/buster/lib/compiler/jit/jit.c;src/buster/lib/compiler/link/link.c;src/buster/lib/compiler/wasm/wasm.c;src/buster/lib/compiler/gpu/gpu.c;src/buster/lib/compiler/llvm/bitcode.c;src/buster/lib/compiler/ebpf/ebpf.c;src/buster/lib/compiler/spirv/spirv.c;src/buster/lib/compiler/driver/driver.c;src/buster/lib/compiler/embed/embed.c;src/buster/lib/simd.c;src/buster/lib/file.c;src/buster/lib/target.c;src/buster/lib/time.c;src/buster/lib/hash.c;src/buster/lib/x86_64.c
+2026-10-15T10:29:01.2195003Z -- ui_slider_component_tests modules: OS;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;UI_CORE;UI_BUILDER
+2026-10-15T10:29:01.2196770Z -- ui_slider_component_tests files: src/buster/tests/ui_slider_component_test.c src/buster/lib/os.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/ui_core.c;src/buster/lib/ui_builder.c;src/buster/tests/ui_slider_test.c
+2026-10-15T10:29:01.2198049Z -- ui_utf8_component_tests modules: OS;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;UI_CORE
+2026-10-15T10:29:01.2199066Z -- ui_utf8_component_tests files: src/buster/tests/ui_utf8_component_test.c src/buster/lib/os.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/ui_core.c
+2026-10-15T10:29:01.2202626Z -- ui_scale_component_tests modules: OS;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;UI_CORE
+2026-10-15T10:29:01.2203879Z -- ui_scale_component_tests files: src/buster/tests/ui_scale_component_test.c src/buster/lib/os.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/ui_core.c
+2026-10-15T10:29:01.2209470Z -- rendering_texture_admission_component_tests files: src/buster/tests/rendering_texture_admission_component_test.c 
+2026-10-15T10:29:01.2213313Z -- rendering_raster_component_tests modules: RENDERING_RASTER
+2026-10-15T10:29:01.2214034Z -- rendering_raster_component_tests files: src/buster/tests/rendering_raster_component_test.c src/buster/lib/rendering_raster.c
+2026-10-15T10:29:01.2220939Z -- rendering_texture_format_component_tests modules: OS;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;TARGET;X86_64;RENDERING
+2026-10-15T10:29:01.2222348Z -- rendering_texture_format_component_tests files: src/buster/tests/rendering_texture_format_component_test.c src/buster/lib/os.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/target.c;src/buster/lib/x86_64.c;src/buster/lib/rendering.c
+2026-10-15T10:29:01.2229215Z -- disk_builder modules: OS;ENTRY_POINT;ARENA;INTEGER;STRING;FILE;HASH;TIME;FLOAT;TARGET;X86_64
+2026-10-15T10:29:01.2230707Z -- disk_builder files: src/buster/apps/disk_builder.c src/buster/lib/os.c;src/buster/lib/entry_point.c;src/buster/lib/arena.c;src/buster/lib/integer.c;src/buster/lib/string.c;src/buster/lib/file.c;src/buster/lib/hash.c;src/buster/lib/time.c;src/buster/lib/float.c;src/buster/lib/target.c;src/buster/lib/x86_64.c;src/buster/apps/disk_builder_verification.c
+2026-10-15T10:29:01.2235667Z -- Configuring done (1.0s)
+2026-10-15T10:29:01.2456556Z -- Generating done (0.0s)
+2026-10-15T10:29:01.2460699Z -- Build files have been written to: /home/runner/work/buster/buster/build/build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug
+2026-10-15T10:29:01.2493972Z Process [2613]: Time (user): 0:143728 s,us, (system): 0:118895 s,us. Max RSS: 280088 KB. PF (soft): 26929, (hard): 1262. Block (input): 274192, (output): 1600. CTX SW (vol): 1674, (invol): 16
+2026-10-15T10:29:01.2495710Z Process [2615]: Time (user): 0:123446 s,us, (system): 0:75513 s,us. Max RSS: 280088 KB. PF (soft): 21928, (hard): 66. Block (input): 7232, (output): 1944. CTX SW (vol): 525, (invol): 49
+2026-10-15T10:29:01.2496697Z Process [2618]: Time (user): 0:10507 s,us, (system): 0:12707 s,us. Max RSS: 280088 KB. PF (soft): 2286, (hard): 89. Block (input): 7344, (output): 120. CTX SW (vol): 219, (invol): 8
+2026-10-15T10:29:01.2497984Z Launched [2701]: "/home/runner/work/buster/buster/build/build matrix_phase_run /home/runner/work/_temp/buster-ci/matrix-phases matrix-scheduler-all 116334675 0 -- /usr/local/bin/cmake --build build/build-portability-superbuild-ci_on --config Debug --parallel 3 --target buster_matrix"
+2026-10-15T10:29:53.9881954Z [1/3] cd /home/runner/work/buster/buster && /home/runner/work/buster/buster/build/build matrix_phase_run /home/runner/work/_temp/buster-ci/matrix-phases tree1-build-all 116334675 0 -- /usr/local/bin/cmake --build build/build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug --config Debug --target ide:Debug --parallel 1
+2026-10-15T10:29:53.9883724Z FAILED: [code=1] CMakeFiles/buster_compile_1 /home/runner/work/buster/buster/build/build-portability-superbuild-ci_on/CMakeFiles/buster_compile_1 
+2026-10-15T10:29:53.9885511Z cd /home/runner/work/buster/buster && /home/runner/work/buster/buster/build/build matrix_phase_run /home/runner/work/_temp/buster-ci/matrix-phases tree1-build-all 116334675 0 -- /usr/local/bin/cmake --build build/build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug --config Debug --target ide:Debug --parallel 1
+2026-10-15T10:29:53.9886900Z [1/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/apps/ide/ide.c.o
+2026-10-15T10:29:53.9887585Z [2/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/byte_writer_test.c.o
+2026-10-15T10:29:53.9888197Z [3/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/arena_test.c.o
+2026-10-15T10:29:53.9888819Z [4/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/integer_test.c.o
+2026-10-15T10:29:53.9889458Z [5/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/sanitizer_test.c.o
+2026-10-15T10:29:53.9890206Z [6/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/hash_test.c.o
+2026-10-15T10:29:53.9890851Z [7/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/simd_test.c.o
+2026-10-15T10:29:53.9891424Z [8/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/string_test.c.o
+2026-10-15T10:29:53.9892053Z [9/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/os_test.c.o
+2026-10-15T10:29:53.9892667Z [10/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/file_test.c.o
+2026-10-15T10:29:53.9893292Z [11/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/target_test.c.o
+2026-10-15T10:29:53.9894222Z [12/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/truetype_test.c.o
+2026-10-15T10:29:53.9894966Z [13/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/image_test.c.o
+2026-10-15T10:29:53.9895716Z [14/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/disk_builder_test.c.o
+2026-10-15T10:29:53.9896625Z [15/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/metamorphic/metamorphic_test.c.o
+2026-10-15T10:29:53.9897507Z [16/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_test.c.o
+2026-10-15T10:29:53.9898075Z [17/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_ast_test.c.o
+2026-10-15T10:29:53.9898638Z [18/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/once_test.c.o
+2026-10-15T10:29:53.9899219Z [19/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/type_layout_test.c.o
+2026-10-15T10:29:53.9900563Z [20/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/macro_conditional_test.c.o
+2026-10-15T10:29:53.9901610Z [21/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/record_layout_test.c.o
+2026-10-15T10:29:53.9902670Z [22/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_encoding_test.c.o
+2026-10-15T10:29:53.9903629Z [23/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c.o
+2026-10-15T10:29:53.9904698Z [24/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_base_assembly_test.c.o
+2026-10-15T10:29:53.9905742Z [25/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c.o
+2026-10-15T10:29:53.9906732Z [26/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_system_registers_test.c.o
+2026-10-15T10:29:53.9907863Z [27/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_semantics_test.c.o
+2026-10-15T10:29:53.9908951Z [28/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_system_semantics_test.c.o
+2026-10-15T10:29:53.9910176Z [29/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_syntax_test.c.o
+2026-10-15T10:29:53.9911480Z [30/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.c.o
+2026-10-15T10:29:53.9912537Z [31/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c.o
+2026-10-15T10:29:53.9913585Z [32/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_complex_simd_test.c.o
+2026-10-15T10:29:53.9914662Z [33/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_memory_semantics_test.c.o
+2026-10-15T10:29:53.9915757Z [34/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_alias_projection_test.c.o
+2026-10-15T10:29:53.9916775Z [35/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/assembly_test.c.o
+2026-10-15T10:29:53.9917756Z [36/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_forwarding_test.c.o
+2026-10-15T10:29:53.9918763Z [37/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_metadata_test.c.o
+2026-10-15T10:29:53.9919764Z [38/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_tls_test.c.o
+2026-10-15T10:29:53.9920808Z [39/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/padding_test.c.o
+2026-10-15T10:29:53.9921699Z [40/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_got_test.c.o
+2026-10-15T10:29:53.9922880Z [41/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c.o
+2026-10-15T10:29:53.9923900Z [42/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/diagnostic_test.c.o
+2026-10-15T10:29:53.9924823Z [43/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/ir_test.c.o
+2026-10-15T10:29:53.9926017Z FAILED: [code=1] CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/ir_test.c.o 
+2026-10-15T10:29:53.9934784Z /usr/bin/gcc -DBUSTER_BENCH_ALLOCATIONS=0 -DBUSTER_COMPILER_ZIG=0 -DBUSTER_FUZZ_AVAILABLE=0 -DBUSTER_HOST_C_COMPILER=\"/usr/bin/gcc\" -DBUSTER_HOST_C_COMPILER_ARG1=\"\" -DBUSTER_HOST_C_COMPILER_ID=\"GNU\" -DBUSTER_HOST_C_COMPILER_MSVC=0 -DBUSTER_HOST_C_RESOURCE_INCLUDE=\"/home/runner/work/_temp/llvm/llvm-23.1.3/lib/clang/23/include\" -DBUSTER_INCLUDE_TESTS=1 -DBUSTER_INSTRUMENT=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_LSAN_SUPPORTED=0 -DBUSTER_OPTIMIZE=0 -DBUSTER_SANITIZE=0 -DBUSTER_SINGLE_THREADED=0 -DBUSTER_UNITY_BUILD=0 -DBUSTER_USE_D3D12=0 -DBUSTER_USE_METAL=0 -DBUSTER_USE_SLANG_SHADERS=0 -DBUSTER_USE_VULKAN=0 -DCMAKE_INTDIR=\"Debug\" -I/home/runner/work/buster/buster/build/build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug/generated -I/home/runner/work/buster/buster/src -g -fdiagnostics-color=always -fwrapv -fno-strict-aliasing -funsigned-char -fno-exceptions -Werror -Wall -Wextra -Wundef -Wconversion -Wstrict-overflow=5 -Woverflow -Wshift-overflow -Walloca -Wbool-operation -Wdouble-promotion -Wformat -Wimplicit -Wimplicit-fallthrough -Winfinite-recursion -Winvalid-utf8 -Wmain -Wmisleading-indentation -Wmissing-braces -Woverlength-strings -Wpacked -Wparentheses -Wpointer-arith -Wpragmas -Wshadow -Wtautological-compare -Wtype-limits -Wuninitialized -Wno-missing-field-initializers -march=native -MD -MT CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/ir_test.c.o -MF CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/ir_test.c.o.d -o CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/ir_test.c.o -c /home/runner/work/buster/buster/src/buster/tests/compiler/ir/ir_test.c
+2026-10-15T10:29:53.9943263Z In file included from /home/runner/work/buster/buster/src/buster/tests/compiler/ir/ir_test.c:68:
+2026-10-15T10:29:53.9945293Z /home/runner/work/buster/buster/src/buster/tests/compiler/ir/ir_validate_scaling_test.c: In function ‘ir_validate_scale_fixture’:
+2026-10-15T10:29:53.9947312Z /home/runner/work/buster/buster/src/buster/tests/compiler/ir/ir_validate_scaling_test.c:36:48: error: operand of ‘?:’ changes signedness from ‘int’ to ‘u32’ {aka ‘unsigned int’} due to unsignedness of other operand [-Werror=sign-compare]
+2026-10-15T10:29:53.9948517Z    36 |         u32 last = labelled && block ? first : 2 + cast;
+2026-10-15T10:29:53.9948953Z       |                                                ^~~~~~~~
+2026-10-15T10:29:53.9949361Z cc1: all warnings being treated as errors
+2026-10-15T10:29:53.9949729Z ninja: build stopped: subcommand failed.
+2026-10-15T10:29:53.9950332Z error: matrix phase worker or evidence failed
+2026-10-15T10:29:55.2461129Z [2/3] cd /home/runner/work/buster/buster && /home/runner/work/buster/buster/build/build matrix_phase_run /home/runner/work/_temp/buster-ci/matrix-phases tree0-build-all 116334675 0 -- /usr/local/bin/cmake --build build/build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug --config Debug --target ide:Debug --parallel 2
+2026-10-15T10:29:55.2462457Z [1/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/byte_writer_test.c.o
+2026-10-15T10:29:55.2462958Z [2/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/arena_test.c.o
+2026-10-15T10:29:55.2463417Z [3/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/apps/ide/ide.c.o
+2026-10-15T10:29:55.2463883Z [4/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/integer_test.c.o
+2026-10-15T10:29:55.2464346Z [5/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/hash_test.c.o
+2026-10-15T10:29:55.2465101Z [6/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/sanitizer_test.c.o
+2026-10-15T10:29:55.2465735Z [7/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/simd_test.c.o
+2026-10-15T10:29:55.2466185Z [8/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/string_test.c.o
+2026-10-15T10:29:55.2466809Z [9/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/file_test.c.o
+2026-10-15T10:29:55.2467451Z [10/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/os_test.c.o
+2026-10-15T10:29:55.2468085Z [11/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/truetype_test.c.o
+2026-10-15T10:29:55.2468754Z [12/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/target_test.c.o
+2026-10-15T10:29:55.2469407Z [13/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/disk_builder_test.c.o
+2026-10-15T10:29:55.2470150Z [14/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/image_test.c.o
+2026-10-15T10:29:55.2470873Z [15/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/metamorphic/metamorphic_test.c.o
+2026-10-15T10:29:55.2471693Z [16/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_ast_test.c.o
+2026-10-15T10:29:55.2472447Z [17/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/once_test.c.o
+2026-10-15T10:29:55.2473204Z [18/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/type_layout_test.c.o
+2026-10-15T10:29:55.2473998Z [19/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/macro_conditional_test.c.o
+2026-10-15T10:29:55.2474807Z [20/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/record_layout_test.c.o
+2026-10-15T10:29:55.2475583Z [21/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_encoding_test.c.o
+2026-10-15T10:29:55.2476376Z [22/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c.o
+2026-10-15T10:29:55.2477196Z [23/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_base_assembly_test.c.o
+2026-10-15T10:29:55.2478027Z [24/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c.o
+2026-10-15T10:29:55.2478885Z [25/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_system_registers_test.c.o
+2026-10-15T10:29:55.2480258Z [26/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_semantics_test.c.o
+2026-10-15T10:29:55.2481293Z [27/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_system_semantics_test.c.o
+2026-10-15T10:29:55.2482308Z [28/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_syntax_test.c.o
+2026-10-15T10:29:55.2483290Z [29/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.c.o
+2026-10-15T10:29:55.2483987Z [30/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c.o
+2026-10-15T10:29:55.2484626Z [31/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_complex_simd_test.c.o
+2026-10-15T10:29:55.2485283Z [32/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_memory_semantics_test.c.o
+2026-10-15T10:29:55.2485938Z [33/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_alias_projection_test.c.o
+2026-10-15T10:29:55.2486556Z [34/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/assembly_test.c.o
+2026-10-15T10:29:55.2487157Z [35/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_forwarding_test.c.o
+2026-10-15T10:29:55.2487763Z [36/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_metadata_test.c.o
+2026-10-15T10:29:55.2488460Z [37/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_tls_test.c.o
+2026-10-15T10:29:55.2489036Z [38/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/padding_test.c.o
+2026-10-15T10:29:55.2489639Z [39/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_got_test.c.o
+2026-10-15T10:29:55.2490394Z [40/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c.o
+2026-10-15T10:29:55.2491004Z [41/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/diagnostic_test.c.o
+2026-10-15T10:29:55.2491546Z [42/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_test.c.o
+2026-10-15T10:29:55.2492091Z [43/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/ir_oracle_test.c.o
+2026-10-15T10:29:55.2492655Z [44/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/vector_contract_test.c.o
+2026-10-15T10:29:55.2493204Z [45/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/ir_test.c.o
+2026-10-15T10:29:55.2493757Z [46/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/machine_select_test.c.o
+2026-10-15T10:29:55.2494324Z [47/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/llvm/bitcode_test.c.o
+2026-10-15T10:29:55.2494884Z [48/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/codegen_test.c.o
+2026-10-15T10:29:55.2495461Z [49/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/investigation_test.c.o
+2026-10-15T10:29:55.2496054Z [50/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/aarch64_stride_test.c.o
+2026-10-15T10:29:55.2496619Z [51/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/debug/debug_test.c.o
+2026-10-15T10:29:55.2497193Z [52/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/dwarf/dwarf_test.c.o
+2026-10-15T10:29:55.2497753Z [53/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codeview/codeview_test.c.o
+2026-10-15T10:29:55.2498300Z [54/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/pdb/pdb_test.c.o
+2026-10-15T10:29:55.2498916Z [55/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/machine_test.c.o
+2026-10-15T10:29:55.2499449Z [56/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/jit/jit_test.c.o
+2026-10-15T10:29:55.2500350Z [57/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/embed/embed_test.c.o
+2026-10-15T10:29:55.2500949Z [58/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/link/link_test.c.o
+2026-10-15T10:29:55.2501494Z [59/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/object/object_test.c.o
+2026-10-15T10:29:55.2502037Z [60/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/spirv/spirv_test.c.o
+2026-10-15T10:29:55.2502565Z [61/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/gpu/gpu_test.c.o
+2026-10-15T10:29:55.2503129Z [62/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/driver/object_path_test.c.o
+2026-10-15T10:29:55.2503694Z [63/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/apps/disk_builder_verification.c.o
+2026-10-15T10:29:55.2504202Z [64/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/x86_64_test.c.o
+2026-10-15T10:29:55.2504656Z [65/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/test.c.o
+2026-10-15T10:29:55.2505082Z [66/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/os.c.o
+2026-10-15T10:29:55.2505513Z [67/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/entry_point.c.o
+2026-10-15T10:29:55.2505948Z [68/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/arena.c.o
+2026-10-15T10:29:55.2506433Z [69/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/integer.c.o
+2026-10-15T10:29:55.2506859Z [70/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/string.c.o
+2026-10-15T10:29:55.2507305Z [71/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/float.c.o
+2026-10-15T10:29:55.2507734Z [72/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/truetype.c.o
+2026-10-15T10:29:55.2508238Z [73/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_syntax.c.o
+2026-10-15T10:29:55.2508733Z [74/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image.c.o
+2026-10-15T10:29:55.2509164Z [75/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/png.c.o
+2026-10-15T10:29:55.2509606Z [76/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/jpeg.c.o
+2026-10-15T10:29:55.2510322Z [77/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/gif.c.o
+2026-10-15T10:29:55.2510769Z [78/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/bmp.c.o
+2026-10-15T10:29:55.2511198Z [79/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/tga.c.o
+2026-10-15T10:29:55.2511630Z [80/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/qoi.c.o
+2026-10-15T10:29:55.2512064Z [81/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/pnm.c.o
+2026-10-15T10:29:55.2512588Z [82/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_source.c.o
+2026-10-15T10:29:55.2513147Z [83/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/driver/driver_test.c.o
+2026-10-15T10:29:55.2513701Z [84/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_ast_types.c.o
+2026-10-15T10:29:55.2514249Z [85/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_ast.c.o
+2026-10-15T10:29:55.2514781Z [86/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_parse.c.o
+2026-10-15T10:29:55.2515346Z [87/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_encoding.c.o
+2026-10-15T10:29:55.2515946Z [88/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_exact_bridge.c.o
+2026-10-15T10:29:55.2516567Z [89/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_control_semantics.c.o
+2026-10-15T10:29:55.2517261Z [90/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_system_registers.c.o
+2026-10-15T10:29:55.2517859Z [91/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_semantics.c.o
+2026-10-15T10:29:55.2518455Z [92/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_system_semantics.c.o
+2026-10-15T10:29:55.2519078Z [93/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_semantic_vm.c.o
+2026-10-15T10:29:55.2519725Z [94/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_simd_semantics.c.o
+2026-10-15T10:29:55.2520634Z [95/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c.o
+2026-10-15T10:29:55.2521282Z [96/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c.o
+2026-10-15T10:29:55.2521923Z [97/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_memory_semantics.c.o
+2026-10-15T10:29:55.2522569Z [98/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_alias_projection.c.o
+2026-10-15T10:29:55.2523180Z [99/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_base_assembly.c.o
+2026-10-15T10:29:55.2523758Z [100/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/assembly.c.o
+2026-10-15T10:29:55.2524325Z [101/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/assembly_unit.c.o
+2026-10-15T10:29:55.2524972Z [102/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/x86_64_metadata.c.o
+2026-10-15T10:29:55.2525601Z [103/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/x86_64_completion_census.c.o
+2026-10-15T10:29:55.2526185Z [104/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_gen.c.o
+2026-10-15T10:29:55.2526711Z [105/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/diagnostic.c.o
+2026-10-15T10:29:55.2527236Z [106/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/debug/debug.c.o
+2026-10-15T10:29:55.2527753Z [107/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/ir/ir.c.o
+2026-10-15T10:29:55.2528328Z [108/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/bootstrap_trace.c.o
+2026-10-15T10:29:55.2528899Z [109/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/codegen.c.o
+2026-10-15T10:29:55.2529453Z [110/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/investigation.c.o
+2026-10-15T10:29:55.2530093Z [111/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/dwarf/dwarf.c.o
+2026-10-15T10:29:55.2530539Z [112/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/byte_writer.c.o
+2026-10-15T10:29:55.2531002Z [113/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codeview/codeview.c.o
+2026-10-15T10:29:55.2531472Z [114/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/pdb/pdb.c.o
+2026-10-15T10:29:55.2531968Z [115/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/machine.c.o
+2026-10-15T10:29:55.2532435Z [116/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/jit/jit.c.o
+2026-10-15T10:29:55.2532918Z [117/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/object/object.c.o
+2026-10-15T10:29:55.2533385Z [118/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/wasm/wasm.c.o
+2026-10-15T10:29:55.2533846Z [119/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/gpu/gpu.c.o
+2026-10-15T10:29:55.2534316Z [120/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/llvm/bitcode.c.o
+2026-10-15T10:29:55.2534850Z [121/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/link/link.c.o
+2026-10-15T10:29:55.2535314Z [122/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/spirv/spirv.c.o
+2026-10-15T10:29:55.2535776Z [123/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/ebpf/ebpf.c.o
+2026-10-15T10:29:55.2536241Z [124/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/embed/embed.c.o
+2026-10-15T10:29:55.2536671Z [125/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/simd.c.o
+2026-10-15T10:29:55.2537083Z [126/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/file.c.o
+2026-10-15T10:29:55.2537485Z [127/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/target.c.o
+2026-10-15T10:29:55.2537870Z [128/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/time.c.o
+2026-10-15T10:29:55.2538251Z [129/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/hash.c.o
+2026-10-15T10:29:55.2538643Z [130/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/x86_64.c.o
+2026-10-15T10:29:55.2539107Z [131/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/driver/driver.c.o
+2026-10-15T10:29:55.2539477Z [132/132] Linking C executable Debug/ide
+2026-10-15T10:30:20.0069367Z [3/3] cd /home/runner/work/buster/buster && /home/runner/work/buster/buster/build/build matrix_phase_run /home/runner/work/_temp/buster-ci/matrix-phases tree2-build-all 116334675 0 -- /usr/local/bin/cmake --build build/build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug --config Debug --target ide:Debug --parallel 1
+2026-10-15T10:30:20.0071708Z [1/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/apps/ide/ide.c.o
+2026-10-15T10:30:20.0072426Z [2/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/byte_writer_test.c.o
+2026-10-15T10:30:20.0073166Z [3/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/arena_test.c.o
+2026-10-15T10:30:20.0073881Z [4/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/integer_test.c.o
+2026-10-15T10:30:20.0074591Z [5/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/sanitizer_test.c.o
+2026-10-15T10:30:20.0075284Z [6/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/hash_test.c.o
+2026-10-15T10:30:20.0075963Z [7/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/simd_test.c.o
+2026-10-15T10:30:20.0076707Z [8/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/string_test.c.o
+2026-10-15T10:30:20.0077403Z [9/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/os_test.c.o
+2026-10-15T10:30:20.0077882Z [10/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/file_test.c.o
+2026-10-15T10:30:20.0078349Z [11/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/target_test.c.o
+2026-10-15T10:30:20.0078996Z [12/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/truetype_test.c.o
+2026-10-15T10:30:20.0079550Z [13/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/image_test.c.o
+2026-10-15T10:30:20.0080260Z [14/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/disk_builder_test.c.o
+2026-10-15T10:30:20.0081074Z [15/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/metamorphic/metamorphic_test.c.o
+2026-10-15T10:30:20.0081748Z [16/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_test.c.o
+2026-10-15T10:30:20.0082363Z [17/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_ast_test.c.o
+2026-10-15T10:30:20.0082935Z [18/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/once_test.c.o
+2026-10-15T10:30:20.0083521Z [19/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/type_layout_test.c.o
+2026-10-15T10:30:20.0084302Z [20/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/macro_conditional_test.c.o
+2026-10-15T10:30:20.0085446Z [21/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/record_layout_test.c.o
+2026-10-15T10:30:20.0086355Z [22/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_encoding_test.c.o
+2026-10-15T10:30:20.0087344Z [23/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_exact_bridge_test.c.o
+2026-10-15T10:30:20.0088371Z [24/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_base_assembly_test.c.o
+2026-10-15T10:30:20.0089297Z [25/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_control_semantics_test.c.o
+2026-10-15T10:30:20.0090384Z [26/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_system_registers_test.c.o
+2026-10-15T10:30:20.0091331Z [27/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_semantics_test.c.o
+2026-10-15T10:30:20.0092053Z [28/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_system_semantics_test.c.o
+2026-10-15T10:30:20.0092675Z [29/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_syntax_test.c.o
+2026-10-15T10:30:20.0093297Z [30/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.c.o
+2026-10-15T10:30:20.0093922Z [31/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_direct_simd_test.c.o
+2026-10-15T10:30:20.0094674Z [32/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_complex_simd_test.c.o
+2026-10-15T10:30:20.0095337Z [33/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_memory_semantics_test.c.o
+2026-10-15T10:30:20.0096000Z [34/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_alias_projection_test.c.o
+2026-10-15T10:30:20.0096622Z [35/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/assembly_test.c.o
+2026-10-15T10:30:20.0097219Z [36/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_forwarding_test.c.o
+2026-10-15T10:30:20.0097838Z [37/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_metadata_test.c.o
+2026-10-15T10:30:20.0098475Z [38/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_tls_test.c.o
+2026-10-15T10:30:20.0099089Z [39/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/padding_test.c.o
+2026-10-15T10:30:20.0099742Z [40/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_got_test.c.o
+2026-10-15T10:30:20.0100526Z [41/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c.o
+2026-10-15T10:30:20.0101078Z [42/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/diagnostic_test.c.o
+2026-10-15T10:30:20.0101578Z [43/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/ir_test.c.o
+2026-10-15T10:30:20.0102112Z [44/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/ir_oracle_test.c.o
+2026-10-15T10:30:20.0102673Z [45/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/vector_contract_test.c.o
+2026-10-15T10:30:20.0103223Z [46/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/llvm/bitcode_test.c.o
+2026-10-15T10:30:20.0103801Z [47/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/machine_select_test.c.o
+2026-10-15T10:30:20.0104384Z [48/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/machine_test.c.o
+2026-10-15T10:30:20.0104947Z [49/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/codegen_test.c.o
+2026-10-15T10:30:20.0105641Z [50/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/investigation_test.c.o
+2026-10-15T10:30:20.0106255Z [51/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/aarch64_stride_test.c.o
+2026-10-15T10:30:20.0106824Z [52/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/debug/debug_test.c.o
+2026-10-15T10:30:20.0107356Z [53/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/dwarf/dwarf_test.c.o
+2026-10-15T10:30:20.0107925Z [54/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codeview/codeview_test.c.o
+2026-10-15T10:30:20.0108477Z [55/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/pdb/pdb_test.c.o
+2026-10-15T10:30:20.0109019Z [56/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/object/object_test.c.o
+2026-10-15T10:30:20.0109555Z [57/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/jit/jit_test.c.o
+2026-10-15T10:30:20.0110510Z [58/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/embed/embed_test.c.o
+2026-10-15T10:30:20.0111067Z [59/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/link/link_test.c.o
+2026-10-15T10:30:20.0111582Z [60/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/gpu/gpu_test.c.o
+2026-10-15T10:30:20.0112113Z [61/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/spirv/spirv_test.c.o
+2026-10-15T10:30:20.0112651Z [62/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/driver/driver_test.c.o
+2026-10-15T10:30:20.0113281Z [63/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/driver/object_path_test.c.o
+2026-10-15T10:30:20.0113839Z [64/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/apps/disk_builder_verification.c.o
+2026-10-15T10:30:20.0114344Z [65/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/x86_64_test.c.o
+2026-10-15T10:30:20.0114795Z [66/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/tests/test.c.o
+2026-10-15T10:30:20.0115214Z [67/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/os.c.o
+2026-10-15T10:30:20.0115648Z [68/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/entry_point.c.o
+2026-10-15T10:30:20.0116099Z [69/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/arena.c.o
+2026-10-15T10:30:20.0116532Z [70/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/integer.c.o
+2026-10-15T10:30:20.0116970Z [71/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/string.c.o
+2026-10-15T10:30:20.0117408Z [72/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/float.c.o
+2026-10-15T10:30:20.0117849Z [73/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/truetype.c.o
+2026-10-15T10:30:20.0118368Z [74/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_syntax.c.o
+2026-10-15T10:30:20.0118875Z [75/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image.c.o
+2026-10-15T10:30:20.0119332Z [76/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/png.c.o
+2026-10-15T10:30:20.0120095Z [77/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/jpeg.c.o
+2026-10-15T10:30:20.0120611Z [78/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/gif.c.o
+2026-10-15T10:30:20.0121054Z [79/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/bmp.c.o
+2026-10-15T10:30:20.0121509Z [80/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/tga.c.o
+2026-10-15T10:30:20.0121961Z [81/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/qoi.c.o
+2026-10-15T10:30:20.0122407Z [82/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/image/pnm.c.o
+2026-10-15T10:30:20.0122926Z [83/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_source.c.o
+2026-10-15T10:30:20.0123490Z [84/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_parse.c.o
+2026-10-15T10:30:20.0124158Z [85/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_ast_types.c.o
+2026-10-15T10:30:20.0124723Z [86/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_ast.c.o
+2026-10-15T10:30:20.0125283Z [87/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_gen.c.o
+2026-10-15T10:30:20.0125857Z [88/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_encoding.c.o
+2026-10-15T10:30:20.0126478Z [89/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_exact_bridge.c.o
+2026-10-15T10:30:20.0127135Z [90/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_control_semantics.c.o
+2026-10-15T10:30:20.0127800Z [91/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_system_registers.c.o
+2026-10-15T10:30:20.0128435Z [92/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_semantics.c.o
+2026-10-15T10:30:20.0129059Z [93/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_system_semantics.c.o
+2026-10-15T10:30:20.0129697Z [94/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_semantic_vm.c.o
+2026-10-15T10:30:20.0130974Z [95/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_simd_semantics.c.o
+2026-10-15T10:30:20.0131613Z [96/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_direct_simd_semantics.c.o
+2026-10-15T10:30:20.0132374Z [97/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_complex_simd_semantics.c.o
+2026-10-15T10:30:20.0133007Z [98/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_memory_semantics.c.o
+2026-10-15T10:30:20.0133633Z [99/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_alias_projection.c.o
+2026-10-15T10:30:20.0134251Z [100/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/aarch64_base_assembly.c.o
+2026-10-15T10:30:20.0134850Z [101/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/assembly.c.o
+2026-10-15T10:30:20.0135424Z [102/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/assembly_unit.c.o
+2026-10-15T10:30:20.0136018Z [103/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/x86_64_metadata.c.o
+2026-10-15T10:30:20.0136655Z [104/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/x86_64_completion_census.c.o
+2026-10-15T10:30:20.0137294Z [105/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/ir/ir.c.o
+2026-10-15T10:30:20.0137808Z [106/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/diagnostic.c.o
+2026-10-15T10:30:20.0138341Z [107/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/debug/debug.c.o
+2026-10-15T10:30:20.0138885Z [108/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/machine.c.o
+2026-10-15T10:30:20.0139451Z [109/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/bootstrap_trace.c.o
+2026-10-15T10:30:20.0140173Z [110/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/codegen.c.o
+2026-10-15T10:30:20.0140748Z [111/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/investigation.c.o
+2026-10-15T10:30:20.0141308Z [112/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/dwarf/dwarf.c.o
+2026-10-15T10:30:20.0141817Z [113/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/byte_writer.c.o
+2026-10-15T10:30:20.0142334Z [114/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codeview/codeview.c.o
+2026-10-15T10:30:20.0142939Z [115/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/pdb/pdb.c.o
+2026-10-15T10:30:20.0143463Z [116/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/object/object.c.o
+2026-10-15T10:30:20.0143985Z [117/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/jit/jit.c.o
+2026-10-15T10:30:20.0144489Z [118/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/link/link.c.o
+2026-10-15T10:30:20.0145011Z [119/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/wasm/wasm.c.o
+2026-10-15T10:30:20.0145511Z [120/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/gpu/gpu.c.o
+2026-10-15T10:30:20.0146032Z [121/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/llvm/bitcode.c.o
+2026-10-15T10:30:20.0146562Z [122/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/ebpf/ebpf.c.o
+2026-10-15T10:30:20.0147081Z [123/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/spirv/spirv.c.o
+2026-10-15T10:30:20.0147614Z [124/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/driver/driver.c.o
+2026-10-15T10:30:20.0148133Z [125/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/embed/embed.c.o
+2026-10-15T10:30:20.0148618Z [126/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/simd.c.o
+2026-10-15T10:30:20.0149056Z [127/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/file.c.o
+2026-10-15T10:30:20.0149507Z [128/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/target.c.o
+2026-10-15T10:30:20.0150233Z [129/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/time.c.o
+2026-10-15T10:30:20.0150674Z [130/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/hash.c.o
+2026-10-15T10:30:20.0151110Z [131/132] Building C object CMakeFiles/ide.dir/Debug/src/buster/lib/x86_64.c.o
+2026-10-15T10:30:20.0151481Z [132/132] Linking C executable Debug/ide
+2026-10-15T10:30:20.0151771Z ninja: build stopped: subcommand failed.
+2026-10-15T10:30:20.0152083Z error: matrix phase worker or evidence failed
+2026-10-15T10:30:20.0152736Z Process [2701]: Time (user): 206:997284 s,us, (system): 14:261782 s,us. Max RSS: 918448 KB. PF (soft): 5259195, (hard): 343. Block (input): 24304, (output): 936632. CTX SW (vol): 7349, (invol): 45358
+2026-10-15T10:30:20.0153508Z CMake generation (cc=clang, fuzz_available=OFF, sanitize=ON) took 1.179459 seconds (1179459000 nanoseconds)
+2026-10-15T10:30:20.0154133Z CMake generation (cc=/usr/bin/gcc, fuzz_available=OFF, sanitize=OFF) took 1.636065 seconds (1636065000 nanoseconds)
+2026-10-15T10:30:20.0154731Z CMake generation (cc=zig, fuzz_available=OFF, sanitize=OFF) took 1.634471 seconds (1634471000 nanoseconds)
+2026-10-15T10:30:20.0164876Z ##[error]Process completed with exit code 1.
+2026-10-15T10:30:20.0573957Z ##[group]Run set -euo pipefail
+2026-10-15T10:30:20.0574268Z [36;1mset -euo pipefail[0m
+2026-10-15T10:30:20.0574621Z [36;1mreport="$RUNNER_TEMP/buster-ci/backend-capabilities-report.md"[0m
+2026-10-15T10:30:20.0575257Z [36;1mGITHUB_STEP_SUMMARY="$report" "$BUSTER_CI_PYTHON" tools/backend_capabilities.py --ci-report "$RUNNER_TEMP/buster-ci/combinations.log"[0m
+2026-10-15T10:30:20.0575813Z [36;1mcat "$report" >> "$GITHUB_STEP_SUMMARY"[0m
+2026-10-15T10:30:20.0612068Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:30:20.0612410Z env:
+2026-10-15T10:30:20.0612736Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:30:20.0613111Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:30:20.0613379Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:30:20.0613667Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:30:20.0613933Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:30:20.0614189Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:30:20.0614496Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:30:20.0614804Z   BUSTER_CI_LLVM_BIN: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:30:20.0615141Z   BUSTER_CI_LLVM_VERSION: 23.1.3
+2026-10-15T10:30:20.0615394Z ##[endgroup]
+2026-10-15T10:30:23.4812563Z Prepare all required actions
+2026-10-15T10:30:23.4813212Z Getting action download info
+2026-10-15T10:30:23.6943515Z Download action repository 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' (SHA:043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
+2026-10-15T10:30:23.8202727Z ##[group]Run ./.github/actions/native-artifact-upload
+2026-10-15T10:30:23.8203012Z with:
+2026-10-15T10:30:23.8203210Z   label: backend-capability
+2026-10-15T10:30:23.8203438Z   label_title: Backend capability
+2026-10-15T10:30:23.8203777Z   name: backend-capability-evidence-linux-x86_64-portability-38720390446-1
+2026-10-15T10:30:23.8204224Z   path: /home/runner/work/_temp/buster-ci/backend-capabilities-report.md
+2026-10-15T10:30:23.8204547Z   compression-level: 6
+2026-10-15T10:30:23.8204754Z   if-no-files-found: error
+2026-10-15T10:30:23.8204962Z   retention-days: 7
+2026-10-15T10:30:23.8205153Z env:
+2026-10-15T10:30:23.8205457Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:30:23.8205781Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:30:23.8206013Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:30:23.8206248Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:30:23.8206481Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:30:23.8206699Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:30:23.8206919Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:30:23.8207189Z   BUSTER_CI_LLVM_BIN: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:30:23.8207498Z   BUSTER_CI_LLVM_VERSION: 23.1.3
+2026-10-15T10:30:23.8207717Z ##[endgroup]
+2026-10-15T10:30:23.8285432Z ##[start-action display=Retain backend-capability logs;id=__self.artifact_upload]
+2026-10-15T10:30:23.8507001Z ##[group]Run actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+2026-10-15T10:30:23.8507391Z with:
+2026-10-15T10:30:23.8507727Z   name: backend-capability-evidence-linux-x86_64-portability-38720390446-1
+2026-10-15T10:30:23.8508199Z   path: /home/runner/work/_temp/buster-ci/backend-capabilities-report.md
+2026-10-15T10:30:23.8508575Z   compression-level: 6
+2026-10-15T10:30:23.8508814Z   if-no-files-found: error
+2026-10-15T10:30:23.8509048Z   retention-days: 7
+2026-10-15T10:30:23.8509253Z   overwrite: false
+2026-10-15T10:30:23.8509468Z   include-hidden-files: false
+2026-10-15T10:30:23.8509707Z   archive: true
+2026-10-15T10:30:23.8510032Z env:
+2026-10-15T10:30:23.8510322Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:30:23.8510677Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:30:23.8510941Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:30:23.8511211Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:30:23.8511469Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:30:23.8511712Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:30:23.8511955Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:30:23.8512247Z   BUSTER_CI_LLVM_BIN: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:30:23.8512575Z   BUSTER_CI_LLVM_VERSION: 23.1.3
+2026-10-15T10:30:23.8512810Z ##[endgroup]
+2026-10-15T10:30:23.9813679Z With the provided path, there will be 1 file uploaded
+2026-10-15T10:30:23.9814750Z Artifact name is valid!
+2026-10-15T10:30:23.9815790Z Root directory input is valid!
+2026-10-15T10:30:24.2414470Z Uploading artifact: backend-capability-evidence-linux-x86_64-portability-38720390446-1.zip
+2026-10-15T10:30:24.2453296Z Beginning upload of artifact content to blob storage
+2026-10-15T10:30:24.4326873Z Uploaded bytes 3863
+2026-10-15T10:30:24.4819406Z Finished uploading artifact content to blob storage!
+2026-10-15T10:30:24.4820413Z SHA256 digest of uploaded artifact is 857b2e4b80cfc4e2278518be07b6234fb59e6e57192acb13bdf5fe022ccf514b
+2026-10-15T10:30:24.4821110Z Finalizing artifact upload
+2026-10-15T10:30:24.7651616Z Artifact backend-capability-evidence-linux-x86_64-portability-38720390446-1 successfully finalized. Artifact ID 11965105188
+2026-10-15T10:30:24.7652836Z Artifact backend-capability-evidence-linux-x86_64-portability-38720390446-1 has been successfully uploaded! Final size is 3863 bytes. Artifact ID is 11965105188
+2026-10-15T10:30:24.7654198Z Artifact download URL: https://github.com/buster14a/buster/actions/runs/38720390446/artifacts/11965105188
+2026-10-15T10:30:24.7726581Z ##[end-action id=__self.artifact_upload;outcome=success;conclusion=success;duration_ms=944]
+2026-10-15T10:30:24.7802002Z ##[start-action display=Back off before retrying backend-capability log upload;id=__self.__run]
+2026-10-15T10:30:24.7842139Z ##[end-action id=__self.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:24.7912350Z ##[start-action display=Retain backend-capability logs (retry);id=__self.artifact_upload_retry]
+2026-10-15T10:30:24.7998548Z ##[end-action id=__self.artifact_upload_retry;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:24.8074164Z ##[start-action display=Record recovered backend-capability log upload;id=__self.__run_2]
+2026-10-15T10:30:24.8114457Z ##[end-action id=__self.__run_2;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:24.8187763Z ##[start-action display=Record failed backend-capability log upload;id=__self.__run_3]
+2026-10-15T10:30:24.8227458Z ##[end-action id=__self.__run_3;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:24.8576519Z ##[group]Run set -euo pipefail
+2026-10-15T10:30:24.8576837Z [36;1mset -euo pipefail[0m
+2026-10-15T10:30:24.8577452Z [36;1m"$BUSTER_CI_PYTHON" tools/ci_configure_evidence.py --build-root build --output "$RUNNER_TEMP/buster-ci/configure" --profile-requested "$BUSTER_CMAKE_PROFILE"[0m
+2026-10-15T10:30:24.8613913Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:30:24.8614428Z env:
+2026-10-15T10:30:24.8614748Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:30:24.8615146Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:30:24.8615421Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:30:24.8615707Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:30:24.8615971Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:30:24.8616226Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:30:24.8616486Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:30:24.8616799Z   BUSTER_CI_LLVM_BIN: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:30:24.8617183Z   BUSTER_CI_LLVM_VERSION: 23.1.3
+2026-10-15T10:30:24.8617437Z ##[endgroup]
+2026-10-15T10:30:24.9157175Z CMake evidence: 3 trees, 3 configure logs, 0 profiles, 0 collection errors, 3 ninja logs
+2026-10-15T10:30:24.9159513Z NINJA_LOG_SUMMARY tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug output_groups=132 output_group_duration_sum_seconds=107.107 ambiguous_output_groups=0 malformed=0
+2026-10-15T10:30:24.9161818Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=1 seconds=16.980 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_test.c.o
+2026-10-15T10:30:24.9163816Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=2 seconds=10.656 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/driver/driver_test.c.o
+2026-10-15T10:30:24.9165789Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=3 seconds=7.295 output=CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_gen.c.o
+2026-10-15T10:30:24.9167827Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=4 seconds=6.193 output=CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_parse.c.o
+2026-10-15T10:30:24.9169647Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=5 seconds=5.414 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/assembly_test.c.o
+2026-10-15T10:30:24.9171843Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=6 seconds=4.673 output=CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/machine.c.o
+2026-10-15T10:30:24.9174273Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=7 seconds=3.460 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/machine_test.c.o
+2026-10-15T10:30:24.9177156Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=8 seconds=2.639 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/object/object_test.c.o
+2026-10-15T10:30:24.9179384Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=9 seconds=2.595 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_metadata_test.c.o
+2026-10-15T10:30:24.9181870Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=10 seconds=2.282 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/ir_test.c.o
+2026-10-15T10:30:24.9183911Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=11 seconds=2.104 output=CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/ir/ir.c.o
+2026-10-15T10:30:24.9186212Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=12 seconds=1.928 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/link/link_test.c.o
+2026-10-15T10:30:24.9188622Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=13 seconds=1.910 output=CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_source.c.o
+2026-10-15T10:30:24.9191179Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=14 seconds=1.904 output=CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/assembly/x86_64_metadata.c.o
+2026-10-15T10:30:24.9193542Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_clang-sanitize_on-fuzz_available_off-configs_Debug rank=15 seconds=1.822 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_ast_test.c.o
+2026-10-15T10:30:24.9195765Z NINJA_LOG_SUMMARY tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug output_groups=42 output_group_duration_sum_seconds=50.310 ambiguous_output_groups=0 malformed=0
+2026-10-15T10:30:24.9197823Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=1 seconds=17.628 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_test.c.o
+2026-10-15T10:30:24.9200088Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=2 seconds=7.045 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/assembly_test.c.o
+2026-10-15T10:30:24.9202265Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=3 seconds=5.126 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_metadata_test.c.o
+2026-10-15T10:30:24.9204265Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=4 seconds=2.855 output=CMakeFiles/ide.dir/Debug/src/buster/tests/target_test.c.o
+2026-10-15T10:30:24.9206245Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=5 seconds=2.816 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_ast_test.c.o
+2026-10-15T10:30:24.9208585Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=6 seconds=1.464 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_encoding_test.c.o
+2026-10-15T10:30:24.9211121Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=7 seconds=1.425 output=CMakeFiles/ide.dir/Debug/src/buster/tests/image_test.c.o
+2026-10-15T10:30:24.9212974Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=8 seconds=1.340 output=CMakeFiles/ide.dir/Debug/src/buster/tests/os_test.c.o
+2026-10-15T10:30:24.9215086Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=9 seconds=1.141 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_completion_census_test.c.o
+2026-10-15T10:30:24.9217337Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=10 seconds=0.827 output=CMakeFiles/ide.dir/Debug/src/buster/tests/string_test.c.o
+2026-10-15T10:30:24.9219440Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=11 seconds=0.668 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/metamorphic/metamorphic_test.c.o
+2026-10-15T10:30:24.9221868Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=12 seconds=0.512 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/macro_conditional_test.c.o
+2026-10-15T10:30:24.9223784Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=13 seconds=0.511 output=CMakeFiles/ide.dir/Debug/src/buster/apps/ide/ide.c.o
+2026-10-15T10:30:24.9225769Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=14 seconds=0.501 output=CMakeFiles/ide.dir/Debug/src/buster/tests/simd_test.c.o
+2026-10-15T10:30:24.9227462Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_gcc-sanitize_off-fuzz_available_off-configs_Debug rank=15 seconds=0.488 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/aarch64_semantic_vm_test.c.o
+2026-10-15T10:30:24.9229367Z NINJA_LOG_SUMMARY tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug output_groups=132 output_group_duration_sum_seconds=78.734 ambiguous_output_groups=0 malformed=0
+2026-10-15T10:30:24.9231084Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=1 seconds=13.471 output=Debug/ide
+2026-10-15T10:30:24.9232529Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=2 seconds=9.746 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_test.c.o
+2026-10-15T10:30:24.9234175Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=3 seconds=7.142 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/driver/driver_test.c.o
+2026-10-15T10:30:24.9236078Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=4 seconds=3.235 output=CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_parse.c.o
+2026-10-15T10:30:24.9237605Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=5 seconds=2.444 output=CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_gen.c.o
+2026-10-15T10:30:24.9238755Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=6 seconds=2.324 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/machine_test.c.o
+2026-10-15T10:30:24.9240539Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=7 seconds=1.848 output=CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/frontend/c/c_source.c.o
+2026-10-15T10:30:24.9242014Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=8 seconds=1.831 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/assembly_test.c.o
+2026-10-15T10:30:24.9243128Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=9 seconds=1.450 output=CMakeFiles/ide.dir/Debug/src/buster/lib/compiler/codegen/machine.c.o
+2026-10-15T10:30:24.9244227Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=10 seconds=1.449 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/ir/ir_test.c.o
+2026-10-15T10:30:24.9245334Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=11 seconds=1.406 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/frontend/c/c_ast_test.c.o
+2026-10-15T10:30:24.9246482Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=12 seconds=1.372 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/object/object_test.c.o
+2026-10-15T10:30:24.9247588Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=13 seconds=1.356 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/link/link_test.c.o
+2026-10-15T10:30:24.9248753Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=14 seconds=1.311 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/assembly/x86_64_metadata_test.c.o
+2026-10-15T10:30:24.9250098Z NINJA_LOG_EDGE tree=build-portability-ci_on-cc_zig-sanitize_off-fuzz_available_off-configs_Debug rank=15 seconds=1.302 output=CMakeFiles/ide.dir/Debug/src/buster/tests/compiler/codegen/codegen_test.c.o
+2026-10-15T10:30:24.9554287Z ##[group]Run "$BUSTER_CI_PYTHON" tools/ci_summary.py
+2026-10-15T10:30:24.9554635Z [36;1m"$BUSTER_CI_PYTHON" tools/ci_summary.py[0m
+2026-10-15T10:30:24.9587677Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:30:24.9587986Z env:
+2026-10-15T10:30:24.9588286Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:30:24.9588628Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:30:24.9588870Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:30:24.9589120Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:30:24.9589486Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:30:24.9589714Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:30:24.9590043Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:30:24.9590326Z   BUSTER_CI_LLVM_BIN: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:30:24.9590637Z   BUSTER_CI_LLVM_VERSION: 23.1.3
+2026-10-15T10:30:24.9596478Z   BUSTER_CI_STEPS: {
+  "checkout": {
+    "outputs": {
+      "commit": "0873e37fefce1f0becd359e5e8c08f08dc3b75a5",
+      "ref": "refs/pull/4275/merge"
+    },
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "zig_cache_policy": {
+    "outputs": {
+      "mode": "ordinary",
+      "namespace": "",
+      "key": "zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53",
+      "save": "false",
+      "require_hit": "false",
+      "publication_proof_required": "false"
+    },
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "workflow_tools": {
+    "outputs": {},
+    "outcome": "skipped",
+    "conclusion": "skipped"
+  },
+  "bootstrap_wrappers": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "mold": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "zig_cache": {
+    "outputs": {
+      "cache-primary-key": "zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53",
+      "cache-matched-key": "zig-archive-v1-Linux-X64-x86_64-linux-cb79de98ea0d8d213f48beb6a57180bf02deebd124496705f7cd581570182f53",
+      "cache-hit": "true"
+    },
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "zig_cache_gate": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "zig": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "zig_cache_save": {
+    "outputs": {},
+    "outcome": "skipped",
+    "conclusion": "skipped"
+  },
+  "zig_cache_proof_prepare": {
+    "outputs": {},
+    "outcome": "skipped",
+    "conclusion": "skipped"
+  },
+  "zig_cache_publication": {
+    "outputs": {},
+    "outcome": "skipped",
+    "conclusion": "skipped"
+  },
+  "zig_cache_evidence": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "llvm": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "tools_unix": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "checks_resources_start": {
+    "outputs": {},
+    "outcome": "skipped",
+    "conclusion": "skipped"
+  },
+  "combinations_unix": {
+    "outputs": {},
+    "outcome": "failure",
+    "conclusion": "failure"
+  },
+  "combinations_windows": {
+    "outputs": {},
+    "outcome": "skipped",
+    "conclusion": "skipped"
+  },
+  "checks_resources_stop": {
+    "outputs": {},
+    "outcome": "skipped",
+    "conclusion": "skipped"
+  },
+  "backend_capability_report_unix": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  },
+  "backend_capability_report_windows": {
+    "outputs": {},
+    "outcome": "skipped",
+    "conclusion": "skipped"
+  },
+  "configure_evidence": {
+    "outputs": {},
+    "outcome": "success",
+    "conclusion": "success"
+  }
+}
+2026-10-15T10:30:24.9602457Z   BUSTER_CI_RUNNER: ubuntu-26.04
+2026-10-15T10:30:24.9602820Z   BUSTER_CI_REQUIRED: zig_cache_policy zig_cache_gate zig zig_cache_evidence combinations_unix
+2026-10-15T10:30:24.9603824Z   BUSTER_CI_REPRO: Set BUSTER_MATRIX_SHARD=portability and run the matching hosted bootstrap plus test_all_combinations_ci in docs/ci-combination-shards.md. Use BUSTER_MATRIX_SHARD=all for the full local matrix.
+2026-10-15T10:30:24.9604558Z   BUSTER_CI_ZIG_CACHE_HIT: true
+2026-10-15T10:30:24.9604888Z   BUSTER_MATRIX_PHASE_OUTPUT: /home/runner/work/_temp/buster-ci/matrix-phases
+2026-10-15T10:30:24.9605323Z   BUSTER_CI_COVERAGE_OUTPUT: /home/runner/work/_temp/buster-ci/coverage.json
+2026-10-15T10:30:24.9605657Z   BUSTER_CI_COVERAGE_REQUIRED: 1
+2026-10-15T10:30:24.9605903Z   BUSTER_CI_COVERAGE_PLATFORM: linux
+2026-10-15T10:30:24.9606157Z   BUSTER_CI_COVERAGE_ARCH: x86_64
+2026-10-15T10:30:24.9606446Z ##[endgroup]
+2026-10-15T10:30:25.9355816Z MATRIX_PHASE_EVIDENCE_ERROR coverage is incomplete
+2026-10-15T10:30:25.9356597Z CI_SUMMARY failure: combinations_unix, coverage, matrix_phases
+2026-10-15T10:30:25.9521744Z ##[error]Process completed with exit code 1.
+2026-10-15T10:30:25.9889776Z ##[group]Run set -euo pipefail
+2026-10-15T10:30:25.9890234Z [36;1mset -euo pipefail[0m
+2026-10-15T10:30:25.9890610Z [36;1m"$BUSTER_CI_PYTHON" tools/ci_sanitize_logs.py --root "$RUNNER_TEMP/buster-ci"[0m
+2026-10-15T10:30:25.9925262Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:30:25.9925582Z env:
+2026-10-15T10:30:25.9925872Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:30:25.9926221Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:30:25.9926481Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:30:25.9926790Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:30:25.9927043Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:30:25.9927291Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:30:25.9927522Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:30:25.9927812Z   BUSTER_CI_LLVM_BIN: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:30:25.9928130Z   BUSTER_CI_LLVM_VERSION: 23.1.3
+2026-10-15T10:30:25.9928401Z ##[endgroup]
+2026-10-15T10:30:26.0413873Z CI_LOG_SANITIZATION root=/home/runner/work/_temp/buster-ci skipped=0
+2026-10-15T10:30:26.0952421Z ##[group]Run buster14a/buster/.github/actions/machine-specifications@a36422384d0334a53d4be73bc306b97ccdba4768
+2026-10-15T10:30:26.0952912Z with:
+2026-10-15T10:30:26.0953127Z   mode: retain
+2026-10-15T10:30:26.0953415Z   retention-directory: /home/runner/work/_temp/buster-ci
+2026-10-15T10:30:26.0953746Z   source-directory: .
+2026-10-15T10:30:26.0954003Z   source-repository: buster14a/buster
+2026-10-15T10:30:26.0954263Z env:
+2026-10-15T10:30:26.0954562Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:30:26.0954955Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:30:26.0955239Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:30:26.0955519Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:30:26.0955782Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:30:26.0956032Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:30:26.0956290Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:30:26.0956599Z   BUSTER_CI_LLVM_BIN: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:30:26.0956972Z   BUSTER_CI_LLVM_VERSION: 23.1.3
+2026-10-15T10:30:26.0957233Z ##[endgroup]
+2026-10-15T10:30:26.1274673Z ##[start-action display=Machine specifications (Unix);id=__buster14a_buster_3.__run]
+2026-10-15T10:30:26.1311335Z ##[end-action id=__buster14a_buster_3.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:26.1377179Z ##[start-action display=Machine specifications (Windows);id=__buster14a_buster_3.__run_2]
+2026-10-15T10:30:26.1412277Z ##[end-action id=__buster14a_buster_3.__run_2;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:26.1480094Z ##[start-action display=Actual checkout identity (Unix);id=__buster14a_buster_3.__run_3]
+2026-10-15T10:30:26.1514956Z ##[end-action id=__buster14a_buster_3.__run_3;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:26.1586443Z ##[start-action display=Actual checkout identity (Windows);id=__buster14a_buster_3.__run_4]
+2026-10-15T10:30:26.1620907Z ##[end-action id=__buster14a_buster_3.__run_4;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:26.1686510Z ##[start-action display=Retain safe machine records (Unix);id=__buster14a_buster_3.__run_5]
+2026-10-15T10:30:26.1771990Z ##[group]Run set -euo pipefail
+2026-10-15T10:30:26.1772276Z [36;1mset -euo pipefail[0m
+2026-10-15T10:30:26.1772619Z [36;1mif [[ -f "$RUNNER_TEMP/buster-machine-specifications/report.json" ]]; then[0m
+2026-10-15T10:30:26.1773052Z [36;1m  mkdir -p "$MS_RETENTION_DIRECTORY/machine-specifications"[0m
+2026-10-15T10:30:26.1773562Z [36;1m  cp "$RUNNER_TEMP/buster-machine-specifications/report.json" "$MS_RETENTION_DIRECTORY/machine-specifications/"[0m
+2026-10-15T10:30:26.1774252Z [36;1m  if [[ -f "$RUNNER_TEMP/buster-machine-specifications/sources.jsonl" ]]; then[0m
+2026-10-15T10:30:26.1774797Z [36;1m    cp "$RUNNER_TEMP/buster-machine-specifications/sources.jsonl" "$MS_RETENTION_DIRECTORY/machine-specifications/"[0m
+2026-10-15T10:30:26.1775244Z [36;1m  fi[0m
+2026-10-15T10:30:26.1775439Z [36;1mfi[0m
+2026-10-15T10:30:26.1808862Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-10-15T10:30:26.1809171Z env:
+2026-10-15T10:30:26.1809453Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:30:26.1809857Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:30:26.1810113Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:30:26.1810352Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:30:26.1810589Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:30:26.1810814Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:30:26.1811039Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:30:26.1811325Z   BUSTER_CI_LLVM_BIN: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:30:26.1811637Z   BUSTER_CI_LLVM_VERSION: 23.1.3
+2026-10-15T10:30:26.1811919Z   MS_RETENTION_DIRECTORY: /home/runner/work/_temp/buster-ci
+2026-10-15T10:30:26.1812198Z ##[endgroup]
+2026-10-15T10:30:26.1912630Z ##[end-action id=__buster14a_buster_3.__run_5;outcome=success;conclusion=success;duration_ms=22]
+2026-10-15T10:30:26.1979729Z ##[start-action display=Retain safe machine records (Windows);id=__buster14a_buster_3.__run_6]
+2026-10-15T10:30:26.2019247Z ##[end-action id=__buster14a_buster_3.__run_6;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:26.2524446Z Prepare all required actions
+2026-10-15T10:30:26.2525423Z Getting action download info
+2026-10-15T10:30:26.3832224Z ##[group]Run ./.github/actions/native-artifact-upload
+2026-10-15T10:30:26.3832565Z with:
+2026-10-15T10:30:26.3832759Z   label: desktop
+2026-10-15T10:30:26.3832959Z   label_title: Desktop
+2026-10-15T10:30:26.3833197Z   name: desktop-linux-x86_64-portability-38720390446-1
+2026-10-15T10:30:26.3833507Z   path: /home/runner/work/_temp/buster-ci/
+2026-10-15T10:30:26.3833755Z   compression-level: 6
+2026-10-15T10:30:26.3833962Z   if-no-files-found: ignore
+2026-10-15T10:30:26.3834184Z   retention-days: 7
+2026-10-15T10:30:26.3834367Z env:
+2026-10-15T10:30:26.3834626Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:30:26.3834963Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:30:26.3835192Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:30:26.3835433Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:30:26.3835692Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:30:26.3835911Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:30:26.3836127Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:30:26.3836402Z   BUSTER_CI_LLVM_BIN: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:30:26.3836696Z   BUSTER_CI_LLVM_VERSION: 23.1.3
+2026-10-15T10:30:26.3836919Z ##[endgroup]
+2026-10-15T10:30:26.3913294Z ##[start-action display=Retain desktop logs;id=__self_3.artifact_upload]
+2026-10-15T10:30:26.4147731Z ##[group]Run actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+2026-10-15T10:30:26.4148107Z with:
+2026-10-15T10:30:26.4148365Z   name: desktop-linux-x86_64-portability-38720390446-1
+2026-10-15T10:30:26.4148692Z   path: /home/runner/work/_temp/buster-ci/
+2026-10-15T10:30:26.4148983Z   compression-level: 6
+2026-10-15T10:30:26.4149215Z   if-no-files-found: ignore
+2026-10-15T10:30:26.4149461Z   retention-days: 7
+2026-10-15T10:30:26.4149674Z   overwrite: false
+2026-10-15T10:30:26.4150006Z   include-hidden-files: false
+2026-10-15T10:30:26.4150289Z   archive: true
+2026-10-15T10:30:26.4150504Z env:
+2026-10-15T10:30:26.4150803Z   BUSTER_ANDROID_SYSTEM_IMAGE: system-images;android-35;google_apis;x86_64
+2026-10-15T10:30:26.4151181Z   BUSTER_CI_CHECKS_LAYOUT: split
+2026-10-15T10:30:26.4151442Z   BUSTER_CI_CONDITIONS_EVIDENCE: 0
+2026-10-15T10:30:26.4151707Z   BUSTER_MATRIX_SHARD: portability
+2026-10-15T10:30:26.4151972Z   BUSTER_CI_PYTHON: python3
+2026-10-15T10:30:26.4152340Z   BUSTER_CI_CHECKS_RESOURCES: 0
+2026-10-15T10:30:26.4152597Z   BUSTER_CMAKE_PROFILE: 0
+2026-10-15T10:30:26.4152915Z   BUSTER_CI_LLVM_BIN: /home/runner/work/_temp/llvm/llvm-23.1.3/bin
+2026-10-15T10:30:26.4153258Z   BUSTER_CI_LLVM_VERSION: 23.1.3
+2026-10-15T10:30:26.4153514Z ##[endgroup]
+2026-10-15T10:30:26.5548695Z With the provided path, there will be 47 files uploaded
+2026-10-15T10:30:26.5553292Z Artifact name is valid!
+2026-10-15T10:30:26.5553786Z Root directory input is valid!
+2026-10-15T10:30:26.8437530Z Uploading artifact: desktop-linux-x86_64-portability-38720390446-1.zip
+2026-10-15T10:30:26.8472331Z Beginning upload of artifact content to blob storage
+2026-10-15T10:30:27.1709155Z Uploaded bytes 97380
+2026-10-15T10:30:27.2189389Z Finished uploading artifact content to blob storage!
+2026-10-15T10:30:27.2190337Z SHA256 digest of uploaded artifact is 9d4b19342fdce0544b8c74a3a8080f9850f88424232f1ad49de629d738a058ef
+2026-10-15T10:30:27.2190982Z Finalizing artifact upload
+2026-10-15T10:30:27.5246169Z Artifact desktop-linux-x86_64-portability-38720390446-1 successfully finalized. Artifact ID 11964259691
+2026-10-15T10:30:27.5247224Z Artifact desktop-linux-x86_64-portability-38720390446-1 has been successfully uploaded! Final size is 97380 bytes. Artifact ID is 11964259691
+2026-10-15T10:30:27.5249386Z Artifact download URL: https://github.com/buster14a/buster/actions/runs/38720390446/artifacts/11964259691
+2026-10-15T10:30:27.5326385Z ##[end-action id=__self_3.artifact_upload;outcome=success;conclusion=success;duration_ms=1141]
+2026-10-15T10:30:27.5422032Z ##[start-action display=Back off before retrying desktop log upload;id=__self_3.__run]
+2026-10-15T10:30:27.5462930Z ##[end-action id=__self_3.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:27.5534992Z ##[start-action display=Retain desktop logs (retry);id=__self_3.artifact_upload_retry]
+2026-10-15T10:30:27.5575295Z ##[end-action id=__self_3.artifact_upload_retry;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:27.5646027Z ##[start-action display=Record recovered desktop log upload;id=__self_3.__run_2]
+2026-10-15T10:30:27.5683028Z ##[end-action id=__self_3.__run_2;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:27.5753885Z ##[start-action display=Record failed desktop log upload;id=__self_3.__run_3]
+2026-10-15T10:30:27.5793210Z ##[end-action id=__self_3.__run_3;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-10-15T10:30:27.6848582Z Post job cleanup.
+2026-10-15T10:30:27.7621507Z [command]/usr/bin/git version
+2026-10-15T10:30:27.7659245Z git version 2.55.0
+2026-10-15T10:30:27.7693536Z Temporarily overriding HOME='/home/runner/work/_temp/c6484bdc-690f-4876-8f01-c5e6b0f54144' before making global git config changes
+2026-10-15T10:30:27.7694600Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-15T10:30:27.7696999Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/buster/buster
+2026-10-15T10:30:27.8644664Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-15T10:30:27.8678237Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-15T10:30:27.8894332Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-15T10:30:27.8921339Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-15T10:30:27.9434925Z Cleaning up orphan processes
+2026-10-15T10:30:27.9661363Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

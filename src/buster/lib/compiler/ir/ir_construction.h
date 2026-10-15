@@ -126,6 +126,10 @@
     X(VALIDATION_OWNERSHIP_BLOCKS, validation_ownership_blocks) \
     X(VALIDATION_OWNERSHIP_INSTRUCTIONS, validation_ownership_instructions) \
     X(VALIDATION_OWNERSHIP_BYTES_CLEARED, validation_ownership_bytes_cleared) \
+    X(VALIDATION_MARKER_INDEX_WORK, validation_marker_index_work) \
+    X(VALIDATION_VALUE_SWEEP_VISITS, validation_value_sweep_visits) \
+    X(VALIDATION_SPLICE_PARAMETER_BLOCKS, validation_splice_parameter_blocks) \
+    X(VALIDATION_AGGREGATE_FIELD_VISITS, validation_aggregate_field_visits) \
     X(VALIDATION_GLOBALS, validation_globals) \
     X(VALIDATION_GLOBAL_RELOCATIONS, validation_global_relocations) \
     X(VALIDATION_GLOBAL_RELOCATION_PAIRS, validation_global_relocation_pairs) \

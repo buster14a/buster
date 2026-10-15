@@ -197,7 +197,30 @@ and compare independent malformed-input expectations. Whole-compiler timing
 and hosted noise are reported separately; a better scaling bound is not an
 end-to-end throughput measurement.
 
+## Constructor and instruction label sets
+
+Aggregate constructor field indices are range/type checked in one pass.
+Strictly increasing indices need no scratch; arbitrary order uses one bit per
+field to refuse duplicates without changing operands or immediates (#4250).
+The nonempty multi-operand case is a complete struct, so the bitmap is bounded
+by the constructor's 16-bit immediate count; unions have at most one operand.
+
+Label-preserving CAST and INDIRECT_BRANCH operation checks validate their sets
+once, then use the same immutable sorted-view subset query as other provenance
+consumers (#2445 residual). Equal counts and independently proven uniqueness
+make that one-direction subset query exact equality. Branch label bounds and
+all existing storage, conversion and direct-label restrictions remain checked.
+
+Allocation-diagnostic builds add `validation_aggregate_field_visits` for the
+range/type and bitmap visits, `validation_marker_index_work` for old-ID index
+construction and lookup, `validation_value_sweep_visits` for candidate orphan
+values, and `validation_splice_parameter_blocks` for recorded old parameter
+blocks. `validation_ownership_bytes_cleared` counts initialized marker-array
+bytes; it excludes sorted ID copies, radix buckets and the private outside-ID
+sentinel. These count work, not elapsed time or process memory.
+
 ## A certificate describes one input
+
 
 `CIRLowerResult.canonical_ir_certified` describes the successful C producer's
 output. The `input_certified` argument of `ir_prepare_canonical_module` permits
@@ -284,7 +307,10 @@ row that shows it, and each chain must end at the block's recorded tail. A
 row's result value is checked at that row, before the row's own obligations,
 and a parameter value at its parameter; a byte per value records which site
 defined it so a value carried by two parameters, or by a parameter and a row,
-is still refused. The module-scope half (`ir_validate_canonical_scope`) no
+is still refused. Successful definition claims are counted; when they cover
+every value, no orphan-marker sweep is needed. Otherwise the original dense
+sweep still validates every unclaimed value, including permitted aliases of
+an existing definition. The module-scope half (`ir_validate_canonical_scope`) no
 longer runs a module-wide ownership pass; every per-function entry is
 self-contained, which is also what lets promotion attribute a defect to one
 function without a module scan. The predicates are unchanged; only the

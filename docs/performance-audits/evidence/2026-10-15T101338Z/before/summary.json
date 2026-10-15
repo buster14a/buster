@@ -1,0 +1,2572 @@
+{
+  "revision": "ee12c3ef3027ec6cff0b57e7043843d031ace5b5",
+  "compiler": "clang version 23.1.1",
+  "host": "Linux-7.2.9-2-cachyos-x86_64-with-glibc2.44",
+  "cpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           48 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  16\nOn-line CPU(s) list:                     0-15\nVendor ID:                               AuthenticAMD\nModel name:                              AMD Ryzen 9 7940HS w/ Radeon 780M Graphics\nCPU family:                              25\nModel:                                   116\nThread(s) per core:                      2\nCore(s) per socket:                      8\nSocket(s):                               1\nStepping:                                1\nMicrocode version:                       0xa704108\nFrequency boost:                         enabled\nCPU(s) scaling MHz:                      54%\nCPU max MHz:                             5263.0610\nCPU min MHz:                             402.7860\nBogoMIPS:                                7985.79\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good amd_lbr_v2 nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpuid_fault cpb cat_l3 cdp_l3 hw_pstate ssbd mba perfmon_v2 ibrs ibpb stibp ibrs_enhanced vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk avx512_bf16 clzero irperf xsaveerptr rdpru wbnoinvd cppc arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold vgif x2avic v_spec_ctrl vnmi avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid overflow_recov succor smca fsrm flush_l1d amd_lbr_pmc_freeze\nVirtualization:                          AMD-V\nL1d cache:                               256 KiB (8 instances)\nL1i cache:                               256 KiB (8 instances)\nL2 cache:                                8 MiB (8 instances)\nL3 cache:                                16 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-15\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Mitigation; Safe RET\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; STIBP always-on; PBRSB-eIBRS Not affected; BHI Not affected\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Mitigation; Clear CPU buffers\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Mitigation; IBPB before exit to userspace\n",
+  "evidence_class": "LLVM execution-region work counts on synthetic valid canonical IR; instrumented nanoseconds are diagnostic only",
+  "production_changes": false,
+  "license": "Buster first-party license unselected; SPDX NOASSERTION, per LICENSES/README.md",
+  "sha256": {
+    "validate-probe-coverage": "fc20ba136550f5f5bc689b526d17572063fee9c99cf66acab9cdaba727859780",
+    "validate_probe.c": "9ed9eb84d9916c99ad38e828ba3eacb34a7b4139c7460e7a2f37030da7876012",
+    "collect_validation.py": "85f4054e49f790e499035f68fba2b62ef0dbeedacc83e2d5520d02cd4a7864a3",
+    "buster/src/buster/lib/compiler/ir/ir.c": "adc3072553097e489fa18c66468388d09eb7da908a130fba791a6c68b5e470fc"
+  },
+  "cases": [
+    {
+      "shape": "aggregate",
+      "n": 256,
+      "error": 0,
+      "ok": true,
+      "ns": 20990,
+      "rows": 3,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 32640,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            32640,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 0,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 0,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 3,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "aggregate",
+      "n": 512,
+      "error": 0,
+      "ok": true,
+      "ns": 69853,
+      "rows": 3,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 130816,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            130816,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 0,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 0,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 3,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "aggregate",
+      "n": 1024,
+      "error": 0,
+      "ok": true,
+      "ns": 263124,
+      "rows": 3,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 523776,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            523776,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 0,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 0,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 3,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "aggregate",
+      "n": 2048,
+      "error": 0,
+      "ok": true,
+      "ns": 1045241,
+      "rows": 3,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 2096128,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            2096128,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 0,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 0,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 3,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "aggregate",
+      "n": 4096,
+      "error": 0,
+      "ok": true,
+      "ns": 4481898,
+      "rows": 3,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 8386560,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            8386560,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 0,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 0,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 3,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "indirect",
+      "n": 256,
+      "error": 0,
+      "ok": true,
+      "ns": 74743,
+      "rows": 259,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 65536,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            65536,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 65536,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            65536,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 259,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            259,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "indirect",
+      "n": 512,
+      "error": 0,
+      "ok": true,
+      "ns": 256401,
+      "rows": 515,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 262144,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            262144,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 262144,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            262144,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 515,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            515,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "indirect",
+      "n": 1024,
+      "error": 0,
+      "ok": true,
+      "ns": 878331,
+      "rows": 1027,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 1048576,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            1048576,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 1048576,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            1048576,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 1027,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            1027,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "indirect",
+      "n": 2048,
+      "error": 0,
+      "ok": true,
+      "ns": 3305737,
+      "rows": 2051,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 4194304,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            4194304,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 4194304,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            4194304,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 2051,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            2051,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "indirect",
+      "n": 4096,
+      "error": 0,
+      "ok": true,
+      "ns": 13352987,
+      "rows": 4099,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 16777216,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            16777216,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 16777216,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            16777216,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 4099,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            4099,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "cast",
+      "n": 256,
+      "error": 0,
+      "ok": true,
+      "ns": 394856,
+      "rows": 260,
+      "values": 3,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 65536,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            65536,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 65536,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            65536,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 3,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 260,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            260,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 256,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            256,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 32896,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            32896,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "cast",
+      "n": 512,
+      "error": 0,
+      "ok": true,
+      "ns": 801364,
+      "rows": 516,
+      "values": 3,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 262144,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            262144,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 262144,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            262144,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 3,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 516,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            516,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 512,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            512,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 131328,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            131328,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "cast",
+      "n": 1024,
+      "error": 0,
+      "ok": true,
+      "ns": 2230018,
+      "rows": 1028,
+      "values": 3,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 1048576,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            1048576,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 1048576,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            1048576,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 3,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 1028,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            1028,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 1024,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            1024,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 524800,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            524800,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "cast",
+      "n": 2048,
+      "error": 0,
+      "ok": true,
+      "ns": 8602334,
+      "rows": 2052,
+      "values": 3,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 4194304,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            4194304,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 4194304,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            4194304,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 3,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 2052,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            2052,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 2048,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            2048,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 2098176,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            2098176,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "cast",
+      "n": 4096,
+      "error": 0,
+      "ok": true,
+      "ns": 34746191,
+      "rows": 4100,
+      "values": 3,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 16777216,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            16777216,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 16777216,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            16777216,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 3,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 4100,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            4100,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 4096,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            4096,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 8390656,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            8390656,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "splice",
+      "n": 256,
+      "error": 0,
+      "ok": true,
+      "ns": 671,
+      "rows": 258,
+      "values": 256,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 0,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 0,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 256,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            256,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 1,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            1,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "source_derived_marker_initialization_bytes": 514
+    },
+    {
+      "shape": "splice",
+      "n": 512,
+      "error": 0,
+      "ok": true,
+      "ns": 972,
+      "rows": 514,
+      "values": 512,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 0,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 0,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 512,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            512,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 1,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            1,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "source_derived_marker_initialization_bytes": 1026
+    },
+    {
+      "shape": "splice",
+      "n": 1024,
+      "error": 0,
+      "ok": true,
+      "ns": 4329,
+      "rows": 1026,
+      "values": 1024,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 0,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 0,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 1024,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            1024,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 1,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            1,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "source_derived_marker_initialization_bytes": 2050
+    },
+    {
+      "shape": "splice",
+      "n": 2048,
+      "error": 0,
+      "ok": true,
+      "ns": 3247,
+      "rows": 2050,
+      "values": 2048,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 0,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 0,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2048,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2048,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 1,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            1,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "source_derived_marker_initialization_bytes": 4098
+    },
+    {
+      "shape": "splice",
+      "n": 4096,
+      "error": 0,
+      "ok": true,
+      "ns": 2965,
+      "rows": 4098,
+      "values": 4096,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 0,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 0,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 4096,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            4096,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 1,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            1,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "source_derived_marker_initialization_bytes": 8194
+    },
+    {
+      "shape": "aggregate-reversed",
+      "n": 17,
+      "error": 0,
+      "ok": true,
+      "ns": 3997,
+      "rows": 3,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 136,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            136,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 0,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 0,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 3,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "aggregate-bad",
+      "n": 17,
+      "error": 11,
+      "ok": true,
+      "ns": 5210,
+      "rows": 3,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 121,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            121,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 0,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 0,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 0,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 2,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "indirect-reversed",
+      "n": 17,
+      "error": 0,
+      "ok": true,
+      "ns": 7524,
+      "rows": 20,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 289,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            289,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 289,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            289,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 2,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            2,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 20,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            20,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "indirect-bad",
+      "n": 17,
+      "error": 6,
+      "ok": true,
+      "ns": 9618,
+      "rows": 20,
+      "values": 2,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 289,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            289,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 289,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            289,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 0,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 3,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 0,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 0,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "shape": "cast-reversed",
+      "n": 17,
+      "error": 0,
+      "ok": true,
+      "ns": 19447,
+      "rows": 21,
+      "values": 3,
+      "observed": {
+        "aggregate_prior_field_comparisons": {
+          "count": 0,
+          "region": [
+            6678,
+            13,
+            6680,
+            14,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_forward_comparisons": {
+          "count": 289,
+          "region": [
+            6841,
+            13,
+            6843,
+            14,
+            289,
+            0,
+            0,
+            0
+          ]
+        },
+        "indirect_reverse_comparisons": {
+          "count": 289,
+          "region": [
+            6850,
+            13,
+            6852,
+            14,
+            289,
+            0,
+            0,
+            0
+          ]
+        },
+        "value_marker_tests": {
+          "count": 3,
+          "region": [
+            7295,
+            17,
+            7295,
+            67,
+            3,
+            0,
+            0,
+            0
+          ]
+        },
+        "row_validator_calls": {
+          "count": 21,
+          "region": [
+            6909,
+            1,
+            6979,
+            2,
+            21,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_queries": {
+          "count": 17,
+          "region": [
+            3219,
+            1,
+            3232,
+            2,
+            17,
+            0,
+            0,
+            0
+          ]
+        },
+        "cast_membership_linear_comparisons": {
+          "count": 153,
+          "region": [
+            3223,
+            9,
+            3228,
+            10,
+            153,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    }
+  ]
+}

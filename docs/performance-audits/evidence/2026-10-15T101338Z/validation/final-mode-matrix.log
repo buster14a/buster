@@ -1,0 +1,19 @@
+MACHINE_INFO arch=x86_64 cpu="AMD Ryzen 9 7940HS w/ Radeon 780M Graphics" model=znver4 cores=16 ram_mib=47955
+ninja: no work to do.
+MODE_MATRIX_HARNESS ide=/home/david/Documents/Codex/2026-10-15/iden-4/work/buster/build/Release/ide targets=6 modes=2 fixtures=7 qemu=1 wine=0 oracle=1 objcopy=1 controls=available
+MODE_MATRIX_ORACLE_PARSER cases=36 status=pass
+MODE_MATRIX leg=x86_64-linux/fast avenue=native verification=behavioral status=pass fixtures=7 elapsed_us=263919
+MODE_MATRIX leg=x86_64-linux/quality avenue=native verification=behavioral status=pass fixtures=7 elapsed_us=305606
+MODE_MATRIX leg=aarch64-linux/fast avenue=qemu verification=behavioral status=pass fixtures=7 elapsed_us=397014
+MODE_MATRIX leg=aarch64-linux/quality avenue=qemu verification=behavioral status=pass fixtures=7 elapsed_us=386033
+MODE_MATRIX leg=x86_64-windows/fast avenue=oracle verification=structural status=pass fixtures=7 elapsed_us=620016
+MODE_MATRIX leg=x86_64-windows/quality avenue=oracle verification=structural status=pass fixtures=7 elapsed_us=620245
+MODE_MATRIX_ORACLE_CONTROL target=aarch64-windows section=.text pristine_decoded=664 garbage_exit_zero=1 garbage_unknown=664 status=pass
+MODE_MATRIX leg=aarch64-windows/fast avenue=oracle verification=structural status=pass fixtures=7 elapsed_us=678459
+MODE_MATRIX leg=aarch64-windows/quality avenue=oracle verification=structural status=pass fixtures=7 elapsed_us=564280
+MODE_MATRIX leg=x86_64-macos/fast avenue=oracle verification=structural status=pass fixtures=7 elapsed_us=627288
+MODE_MATRIX leg=x86_64-macos/quality avenue=oracle verification=structural status=pass fixtures=7 elapsed_us=549984
+MODE_MATRIX_ORACLE_CONTROL target=aarch64-macos section=__TEXT,__text pristine_decoded=664 garbage_exit_zero=1 garbage_unknown=664 status=pass
+MODE_MATRIX leg=aarch64-macos/fast avenue=oracle verification=structural status=pass fixtures=7 elapsed_us=697447
+MODE_MATRIX leg=aarch64-macos/quality avenue=oracle verification=structural status=pass fixtures=7 elapsed_us=589801
+MODE_MATRIX_RESULT legs=12 executed=4 oracle_checked=8 oracle_controls=2 controls=pass expected_failures=0 failures=0 elapsed_us=6308743 status=pass
