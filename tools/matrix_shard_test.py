@@ -773,7 +773,7 @@ class CompletionGateTests(unittest.TestCase):
                                                      expected_names=github_ci_time.combination_jobs(checks_layout))
 
     def test_all_twenty_one_jobs_and_exact_ten_desktop_shards(self):
-        self.assertEqual(len(github_ci_time.COMBINATION_JOBS), 21)
+        self.assertEqual(len(github_ci_time.COMBINATION_JOBS), 19)
         self.assertEqual(len(github_ci_time.COMBINATION_PLATFORMS), 10)
         self.assertEqual(self.check(self.sample("combined"), checks_layout="combined"), [])
 
@@ -1633,7 +1633,7 @@ class CompletionGateTests(unittest.TestCase):
         self.assertEqual(len(summary["cohorts"]), 4)
         self.assertEqual({row["n"] for row in summary["cohorts"]}, {1})
         self.assertEqual({row["medians"]["runner_seconds"] for row in summary["cohorts"]},
-                         {21 * 60, 27 * 60, 29 * 60, 25 * 60})
+                         {19 * 60, 27 * 60, 29 * 60, 23 * 60})
 
 
 class DraftMacosDeferralTests(unittest.TestCase):
@@ -1770,7 +1770,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 inventory = self.rerun_failed_inventory(attempts)
                 latest = github_ci_time.latest_run_jobs(inventory, 123, attempts, "a" * 40)
                 deferred = [job for job in latest if github_ci_time.deferred_base_name(job["name"])]
-                self.assertEqual(len(deferred), 5)
+                self.assertEqual(len(deferred), 4)
                 self.assertEqual({job["run_attempt"] for job in deferred}, {1})
                 self.assertEqual(self.check(latest, draft=True, attempt=attempts), [])
                 result = self.gate_rerun(inventory, attempts, draft=True)
@@ -1780,7 +1780,7 @@ class DraftMacosDeferralTests(unittest.TestCase):
                 result = self.gate_rerun(inventory, attempts, draft=False)
                 self.assertFalse(result["success"])
                 self.assertEqual(sum("only the first attempt of a draft pull-request run" in error
-                                     for error in result["errors"]), 5)
+                                     for error in result["errors"]), 4)
         # Non-draft control without deferrals: an ordinary partial rerun still passes.
         result = self.gate_rerun(self.rerun_failed_inventory(2, deferred=False), 2, draft=False)
         self.assertTrue(result["success"], result["errors"])

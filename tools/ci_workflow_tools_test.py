@@ -140,6 +140,19 @@ _frozen_actions = frozen_suite("frozen_action_pins", "tests/action_pins_test.py"
 
 
 class CurrentWorkflowPolicyTests(_frozen_ci.WorkflowPolicyTests):
+    def test_all_five_ci_platforms_and_commands_remain(self):
+        text = (ROOT / ".github/workflows/ci.yml").read_text()
+        names = re.findall(r"^          - name: (.+)$", text, re.M)
+        self.assertEqual(sorted(names), sorted(_frozen_ci.github_ci_time.PLATFORMS +
+                                               _frozen_ci.github_ci_time.NATIVE))
+        self.assertIn("fail-fast: false", text)
+        self.assertIn("test_all_combinations_ci --verbose=1", text)
+        self.assertIn("test_mode_matrix --config Release", text)
+        self.assertNotIn("./android/test_ci.sh --all", text)
+        self.assertNotIn("./ios/test_ci.sh --all", text)
+        self.assertNotRegex(text, r"(?m)^\s*continue-on-error:")
+        self.assertNotIn("BUSTER_INCLUDE_TESTS=OFF", text.split("\n  uefi:", 1)[0])
+
     def test_integrity_and_security_policy(self):
         for path in (ROOT / ".github/workflows").glob("*.yml"):
             with self.subTest(path=path.name):

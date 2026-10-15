@@ -101,6 +101,9 @@ MACOS_SPLIT_COMBINATION_PLATFORMS = tuple(
                   if platform in SPLIT_CHECK_PLATFORMS else COMBINATION_SHARDS))
 MACOS_SPLIT_COMBINATION_JOBS = MACOS_SPLIT_COMBINATION_PLATFORMS + MOBILE + NATIVE + UEFI + ANALYZER + (
     "Workflow lint", "CI complete")
+# Timing-only cohorts from before automatic mobile application hosting retired.
+PRE_COMPILER_ONLY_COMBINATION_JOBS = COMBINATION_JOBS + MOBILE
+PRE_COMPILER_ONLY_SPLIT_COMBINATION_JOBS = SPLIT_COMBINATION_JOBS + MOBILE
 # Only these retained Apple jobs may defer on first-attempt draft PRs. Draft
 # pull requests always run the default split layout.
 MACOS_RUNNER_JOBS = tuple(name for name in SPLIT_COMBINATION_PLATFORMS + NATIVE
@@ -232,7 +235,9 @@ def measure(run):
     names = sorted(job.get("name", "") for job in jobs)
     combinations = names in (sorted(LEGACY_COMBINATION_JOBS), sorted(HISTORICAL_COMBINATION_JOBS),
                              sorted(COMBINATION_JOBS), sorted(HISTORICAL_SPLIT_COMBINATION_JOBS),
-                             sorted(MACOS_SPLIT_COMBINATION_JOBS), sorted(SPLIT_COMBINATION_JOBS))
+                             sorted(MACOS_SPLIT_COMBINATION_JOBS), sorted(SPLIT_COMBINATION_JOBS),
+                             sorted(PRE_COMPILER_ONLY_COMBINATION_JOBS),
+                             sorted(PRE_COMPILER_ONLY_SPLIT_COMBINATION_JOBS))
     suites = names in (sorted(LEGACY_PARTITIONED_JOBS), sorted(PARTITIONED_JOBS),
                        sorted(LEGACY_SUITE_JOBS), sorted(SUITE_JOBS)) or combinations
     sharded = names == sorted(SHARDED_JOBS) or suites
