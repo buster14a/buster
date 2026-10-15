@@ -1,0 +1,15 @@
+Build subjects: ./build.sh generate; ./build.sh build --config Release -t ide
+Same owned source/build root for both trusted Clang Release subjects. Baseline frozen before source changes.
+Diagnostic probe (from repository root; adjust probe/output paths only):
+clang -O2 -g -DPROBE_COVERAGE=0 -DBUSTER_BENCH_ALLOCATIONS=1 -ffunction-sections -fdata-sections -Wall -Werror -Wno-unused-function -Wno-unused-variable -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_SINGLE_THREADED=1 -Isrc -fwrapv -fno-strict-aliasing -funsigned-char ../validate_final_probe.c src/buster/lib/arena.c src/buster/lib/os.c src/buster/lib/integer.c src/buster/lib/string.c src/buster/lib/float.c src/buster/lib/time.c -Wl,--gc-sections -lpthread -ldl -lm -o ../validate-final-probe
+python3 collect_fixed_validation.py REPO BINARY FRESH_OUTPUT
+Diagnostic tests: ./build.sh generate --build-directory build/diagnostic -- -DBUSTER_BENCH_ALLOCATIONS=ON
+./build.sh build --build-directory build/diagnostic --config Release -t ide
+build/diagnostic/Release/ide test --module=ir_tests --ci=1 --verbose=0
+Sanitizer: ./build.sh generate --sanitize --build-directory build/sanitize
+./build.sh build --build-directory build/sanitize --config Debug -t ide
+build/sanitize/Debug/ide test --module=ir_tests --ci=1 --verbose=0
+Full Release: ./build.sh build --config Release -t test_all
+Self-host (each subject): ./build.sh test_self_host --config Release
+Modes: ./build.sh test_mode_matrix --config Release
+IR analyzer: clang --analyze -Xanalyzer -analyzer-output=text -DBUSTER_INCLUDE_TESTS=0 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=1 -DBUSTER_SINGLE_THREADED=1 -Isrc -fwrapv -fno-strict-aliasing -funsigned-char src/buster/lib/compiler/ir/ir.c
