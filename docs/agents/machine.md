@@ -182,6 +182,11 @@ hosts execute its independent expected-value fixture.
   switch-case target, even an unused row, because FAST consumes the whole table.
   Keep these checks at the existing verification boundary; selector-certified
   fresh functions continue directly to placement without another verifier pass.
+- Virtual-register compaction preserves opcode and virtual-reference validation
+  for rows, parameters and edge copies before recognizing an already dense
+  register population. That identity case keeps IDs and metadata without
+  allocating or applying a remap; a population with holes retains stable
+  original-ID order and rewrites every virtual-reference family.
 - Debug-enabled production selection publishes canonical-local identity in the
   cold `MachineDebugValue` side table after virtual-register compaction. Its
   source spans remain canonical instruction IDs and its references name final
