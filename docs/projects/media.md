@@ -1,10 +1,10 @@
 # Media components
 
 Status: **preserved, unmaintained source**. This area has no default build,
-compiler-test, fuzz, analyzer or automatic CI coverage. Existing source, tests,
-CMake fragments and earlier procedures below are retained for reference; their
-buildability and behavior are not a current support promise. Reconnecting a
-consumer requires an explicit maintenance decision.
+compiler-test, fuzz, analyzer or automatic CI coverage. The ancillary test
+sources and CMake helpers have been removed; the shared library sources remain.
+Earlier test descriptions are historical references, not runnable current-tree
+commands. Reconnecting a consumer requires an explicit maintenance decision.
 
 [Catalogue](../../PROJECTS.md) · Area: `media` · [Tracking](../project-tracking.md)
 
@@ -177,17 +177,13 @@ must not concurrently mutate either arena.
 
 ## Validation and follow-ups
 
-The registered `image_tests` module covers format recognition, unsupported-format
-classification, exact RGBA fixtures, probe/decode metadata agreement, all eight
-orientation transforms, every strict fixture prefix, configured limits, checksum
-and malformed-stream failures, output-capacity failures and transactional arena
-rollback. The shared fuzz entry sends bounded inputs through `image_decode` when
-fuzzing is enabled. Run the focused suite after building `ide`:
-
-```sh
-./build.sh build --config Release -t ide
-build/Release/ide test --ci=1 --module=image_tests
-```
+The former `image_tests` suite and its encoded fixtures have been removed.
+Their [pre-removal source](https://github.com/buster14a/buster/blob/02a6414e020f5d549122197c3a7c8407df5bed76/src/buster/tests/image_test.c)
+covered recognition, metadata, exact RGBA decoding, orientation, truncation,
+limits, malformed streams, capacity failures and arena rollback. The
+[fixture provenance](../image-test-fixtures.md) retains their byte identities.
+Neither `ide test --module=image_tests` nor compiler fuzzing exercises media in
+the current tree.
 
 New codec coverage should retain fixture provenance and hashes, test probe and
 decode independently, exercise every supported mode plus nearby rejected modes,
@@ -206,10 +202,8 @@ signature recognition is not a commitment to ship those features together.
 
 ## Native application consumer
 
-The separately registered [image browser](image-browser.md) opens files and
-flat directories, loads immutable bounded source copies on a persistent worker,
-and presents decoded RGBA through the XCB CPU raster component. It uses lower
-application byte/work caps and samples reported orientation without allocating
-an oriented copy. The decoder remains an in-memory component; filesystem,
-supersession, result ownership and native lifecycle policy belong to the app.
-This consumer does not add unused media/UI modules to the headless compiler.
+The former [image browser](image-browser.md) used bounded source copies, a
+persistent worker and XCB CPU presentation. That application and its tests are
+removed. The retained decoder is an in-memory component; a new consumer must
+provide filesystem, supersession, result ownership and native lifecycle policy
+without adding unused media/UI modules to the headless compiler.

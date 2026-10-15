@@ -133,6 +133,20 @@ alongside aggregate and nonconstant-tail refusals.
 
 ## Declaration constraints
 
+A block declaration with a parenthesized declarator must name an identifier at
+the declarator position. A later identifier in a malformed group cannot supply
+the name: `T(1, x)` remains invalid even when `x` is in scope. A size or alignment
+type operand whose specifiers leave a parenthesized abstract declarator is read
+through `c_parse_identity_type_name`, including its parameter declarations and
+array suffixes, before semantic-only success. Numeric parameters such as
+`sizeof(T(1, 2))` and `sizeof(int (*)(int, 2))` therefore receive structured
+diagnostics before lowering. Valid grouped declarations, abstract function
+pointer/array types, `_Generic` association types and value names shadowing
+typedefs retain their existing paths. The registered
+`compiler_driver_test_numeric_declarators` matrix checks syntax-only/object
+diagnostic parity and output absence across four dialects, both SSA forms and
+all three AST/query routes (#4301).
+
 Before C23, a `for` initializer declaration may introduce only automatic or
 register objects (C17 6.8.5p3 and WG14 DR277). The local declaration binder
 uses its for-initializer context to reject typedefs, static/extern/thread-local
@@ -470,6 +484,20 @@ reach a layout per item. Each row reaches its pass through an inferred-array
 `sizeof`, and those rows fail with `inferred_bounds_final` disabled.
 A new pass over every type, member or declaration needs a row in that fixture,
 or its own scaling fixture, in addition to single-item correctness cases.
+
+## Typedef names in expressions
+
+Checked expression leaves reject a typedef binding as a value, including a
+name followed by a call argument list. An unsuccessful complete named-call leaf must
+publish the same constraint as a lone identifier rather than returning an
+unknown type without a diagnostic. Type-name operands in casts and sizeof
+remain owned by their type frames; successful value and builtin leaves keep
+their existing path. The registered `compiler_driver_test_typedef_expressions`
+fixture checks syntax-only/object diagnostic identity and absent failed output
+for direct and nested callees, conditions, casts and ordinary typedef-name
+values in C17/GNU17/C23/GNU23, both SSA forms and AST/query/explicit-layout routes.
+Grouped declarations, type operands, indirect calls and values shadowing typedefs
+remain accepted (#4299).
 
 ## Lowering diagnostic inventory
 

@@ -4,7 +4,7 @@
 
 ## Preserved graphics/window reference
 
-The graphics/window/font code and its tests remain in the tree as unmaintained
+The graphics/window/font libraries remain in the tree as unmaintained
 source. These reference contracts are not current automatic CI promises.
 The maintained compiler uses only the OS/process/memory/file services below.
 
@@ -52,23 +52,23 @@ The maintained compiler uses only the OS/process/memory/file services below.
   and instruction-payload ranges are checked. Invalid anchors return an
   all-zero bitmap and roll back their arena allocations. A
   conservative limit of 67,108,864 scanline edge-search steps
-  further bounds raster work. The headless `truetype_tests` module covers these
+  further bounds raster work. The removed `truetype_tests` module covered these
   contracts, including point/XY attachment equivalence, phantom-point
   anchors against an in-memory font with and without `vmtx`, transformed/nested
   unsigned indices, scale-sensitive curve goldens, the subdivision cap and
-  a deterministic malformed-parameter sweep in sanitizer and fuzz-enabled CI
-  configurations.
+  a deterministic malformed-parameter sweep in historical sanitizer and fuzz
+  configurations. Those tests are no longer present or run by CI.
 - The headless `ide` target includes no font or image module, even when tests
-  or fuzzing are enabled. Their source and tests are preserved but unregistered.
-  Mobile
-  lifecycle source is retained without automatic host CI.
+  or fuzzing are enabled. Their library sources remain unregistered; ancillary
+  tests and CMake helpers are removed. Mobile lifecycle source is retained
+  without automatic host CI.
 - TrueType horizontal kerning uses the legacy version-0 `kern` table's
   format-0 subtables. Matching pair values add in subtable order; the override
   coverage bit replaces the accumulated value, and later subtables can add to
   that replacement. Missing pairs leave the accumulation unchanged. Vertical,
   minimum-distance, cross-stream and other-format subtables are ignored by
   this advance-only API. Pair arrays must fit their declared subtable length;
-  malformed arrays contribute nothing. Registered `truetype_tests` cover
+  malformed arrays contribute nothing. The removed `truetype_tests` covered
   additive order, overrides, absent pairs and coverage filtering using
   synthetic font bytes, with no dependency on installed fonts.
 - Renderers consume window-system handles through `WmNativeSurface`; do not

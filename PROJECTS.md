@@ -10,19 +10,21 @@ The **Area ID** is the stable routing key for work. A capability's home is the
 linked project documentation; its implementation tasks belong in GitHub issues.
 An entry establishes where to look, not a blanket support or test-pass claim.
 
-## Maintained compiler and preserved applications
+## Maintained compiler and retired applications
 
 The maintained build and automatic CI cover the headless compiler on Linux,
-Windows and macOS. Application, GUI, image/font and mobile-hosting source is
-preserved without a maintenance or CI-support promise. It is excluded from
-the default build, compiler tests/fuzzing and analyzer database.
+Windows and macOS. Shared GUI, image/font and mobile-hosting source remains
+unmaintained and excluded from the default build, compiler tests/fuzzing and
+analyzer database. The image browser, disk builder, ancillary component tests
+and their CMake helpers have been removed; their catalogue IDs and historical
+references remain below.
 
 
 | Area ID | Project | Existing source | Features and integration boundary |
 |---|---|---|---|
 | `compiler` | C compiler and toolchain | [Compiler modules](src/buster/lib/compiler/) and [headless entry point](src/buster/apps/ide/ide.c) | [Capabilities and contracts](docs/projects/compiler.md). `ide` is headless; C is the active source frontend. |
-| `image-browser` | Native image browser and inspector | [image_browser.c](src/buster/apps/image_browser/image_browser.c) | [Workflow, launch and limits](docs/projects/image-browser.md). Preserved, unmaintained Linux x86-64/XCB source; not registered by the default build or CI. |
-| `disk-tools` | Disk-image tooling | [disk_builder.c](src/buster/apps/disk_builder.c) | [Source scope and limitations](docs/projects/disk-tools.md). Preserved, unmaintained source and CMake fragment; no default target, compile check or CI execution. |
+| `image-browser` | Native image browser and inspector | [Historical source](https://github.com/buster14a/buster/blob/02a6414e020f5d549122197c3a7c8407df5bed76/src/buster/apps/image_browser/image_browser.c) | [Removal and historical reference](docs/projects/image-browser.md). Application, fixtures, component tests and CMake target removed; no current build or launch command. |
+| `disk-tools` | Disk-image tooling | [Historical source](https://github.com/buster14a/buster/blob/02a6414e020f5d549122197c3a7c8407df5bed76/src/buster/apps/disk_builder.c) | [Removal and historical reference](docs/projects/disk-tools.md). Builder, verifier, tests and CMake target removed; no current executable or test module. |
 
 ## Shared components
 

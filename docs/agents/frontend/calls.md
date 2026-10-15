@@ -4,6 +4,16 @@
 
 Read the matching sections; [the frontend index](../frontend.md) lists these notes in their original order. Cross-references such as “above” and “below” follow that order.
 
+## Typedef names and call validation
+
+Named-call arity validation excludes entities bound as typedefs. A
+function-pointer typedef may lead a grouped declarator such as
+`Callback (*table)[16]`; that parenthesis declares an object rather than
+calling the typedef. The candidate walk still visits calls inside declarator
+bounds, and a local value shadowing the typedef keeps its own call constraints.
+`c_test_typedef_call_roles` checks this distinction, real indirect-call arity
+refusals, both canonical SSA forms and native allocator execution (#4296).
+
 ## Array parameter expression types
 
 An identifier denoting a parameter with an unqualified outer array row has its adjusted pointer type in

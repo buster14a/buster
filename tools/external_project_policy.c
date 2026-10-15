@@ -26,10 +26,11 @@ static unsigned count(const char* text, const char* needle)
 static int ffmpeg_owner_valid(const char* text)
 {
     const char* rad_artifact = strstr(text, "- name: Retain rad evidence immediately\n");
+    const char* assembler = strstr(text, "- name: Install FFmpeg external assembler\n");
     const char* checkout = strstr(text, "- name: Checkout pinned FFmpeg 7.1.3 source after existing Linux stages\n");
     const char* identity = strstr(text, "- name: Record pristine FFmpeg source identity\n");
     const char* route = strstr(text, "- name: ffmpeg independent project result\n");
-    const char* artifact = strstr(text, "- name: Retain FFmpeg portable evidence immediately\n");
+    const char* artifact = strstr(text, "- name: Retain FFmpeg profile evidence immediately\n");
     const char* publish = strstr(text, "- name: Publish Linux OS outcomes\n");
     const char* artifact_paths =
         "          path: |\n"
@@ -68,15 +69,94 @@ static int ffmpeg_owner_valid(const char* text)
         "            build/ffmpeg-portable/buster/compiler-actions/*.argv\n"
         "            build/ffmpeg-portable/buster/compiler-actions/*.stdout\n"
         "            build/ffmpeg-portable/buster/compiler-actions/*.stderr\n"
-        "            build/ffmpeg-portable/buster/compiler-actions/*.status\n";
+        "            build/ffmpeg-portable/buster/compiler-actions/*.status\n"
+        "            build/ffmpeg-portable/reference/compiler-actions/*.argv\n"
+        "            build/ffmpeg-portable/reference/compiler-actions/*.stdout\n"
+        "            build/ffmpeg-portable/reference/compiler-actions/*.stderr\n"
+        "            build/ffmpeg-portable/reference/compiler-actions/*.status\n"
+        "            build/ffmpeg-profiles.tsv\n"
+        "            build/ffmpeg-portable-gnu17/receipt.txt\n"
+        "            build/ffmpeg-portable-gnu17/h264-target-actions.tsv\n"
+        "            build/ffmpeg-portable-gnu17/*.argv\n"
+        "            build/ffmpeg-portable-gnu17/*.stdout\n"
+        "            build/ffmpeg-portable-gnu17/*.stderr\n"
+        "            build/ffmpeg-portable-gnu17/*.status\n"
+        "            build/ffmpeg-portable-gnu17/reference/config.h\n"
+        "            build/ffmpeg-portable-gnu17/reference/config_components.h\n"
+        "            build/ffmpeg-portable-gnu17/reference/ffbuild/config.mak\n"
+        "            build/ffmpeg-portable-gnu17/reference/ffbuild/config.log\n"
+        "            build/ffmpeg-portable-gnu17/reference/dialect-manifest.txt\n"
+        "            build/ffmpeg-portable-gnu17/reference/fate-counts.tsv\n"
+        "            build/ffmpeg-portable-gnu17/reference/*.argv\n"
+        "            build/ffmpeg-portable-gnu17/reference/compiler-actions/*.argv\n"
+        "            build/ffmpeg-portable-gnu17/reference/*.stdout\n"
+        "            build/ffmpeg-portable-gnu17/reference/compiler-actions/*.stdout\n"
+        "            build/ffmpeg-portable-gnu17/reference/*.stderr\n"
+        "            build/ffmpeg-portable-gnu17/reference/compiler-actions/*.stderr\n"
+        "            build/ffmpeg-portable-gnu17/reference/*.status\n"
+        "            build/ffmpeg-portable-gnu17/reference/compiler-actions/*.status\n"
+        "            build/ffmpeg-portable-gnu17/buster/config.h\n"
+        "            build/ffmpeg-portable-gnu17/buster/config_components.h\n"
+        "            build/ffmpeg-portable-gnu17/buster/ffbuild/config.mak\n"
+        "            build/ffmpeg-portable-gnu17/buster/ffbuild/config.log\n"
+        "            build/ffmpeg-portable-gnu17/buster/dialect-manifest.txt\n"
+        "            build/ffmpeg-portable-gnu17/buster/fate-counts.tsv\n"
+        "            build/ffmpeg-portable-gnu17/buster/*.argv\n"
+        "            build/ffmpeg-portable-gnu17/buster/compiler-actions/*.argv\n"
+        "            build/ffmpeg-portable-gnu17/buster/*.stdout\n"
+        "            build/ffmpeg-portable-gnu17/buster/compiler-actions/*.stdout\n"
+        "            build/ffmpeg-portable-gnu17/buster/*.stderr\n"
+        "            build/ffmpeg-portable-gnu17/buster/compiler-actions/*.stderr\n"
+        "            build/ffmpeg-portable-gnu17/buster/*.status\n"
+        "            build/ffmpeg-portable-gnu17/buster/compiler-actions/*.status\n"
+        "            build/ffmpeg-optimized-gnu17/receipt.txt\n"
+        "            build/ffmpeg-optimized-gnu17/nasm-provenance.txt\n"
+        "            build/ffmpeg-optimized-gnu17/checkasm-clang-counts.tsv\n"
+        "            build/ffmpeg-optimized-gnu17/checkasm-buster-counts.tsv\n"
+        "            build/ffmpeg-optimized-gnu17/*.argv\n"
+        "            build/ffmpeg-optimized-gnu17/*.stdout\n"
+        "            build/ffmpeg-optimized-gnu17/*.stderr\n"
+        "            build/ffmpeg-optimized-gnu17/*.status\n"
+        "            build/ffmpeg-optimized-gnu17/reference/config.h\n"
+        "            build/ffmpeg-optimized-gnu17/reference/config_components.h\n"
+        "            build/ffmpeg-optimized-gnu17/reference/ffbuild/config.mak\n"
+        "            build/ffmpeg-optimized-gnu17/reference/ffbuild/config.log\n"
+        "            build/ffmpeg-optimized-gnu17/reference/dialect-manifest.txt\n"
+        "            build/ffmpeg-optimized-gnu17/reference/fate-counts.tsv\n"
+        "            build/ffmpeg-optimized-gnu17/reference/config.asm\n"
+        "            build/ffmpeg-optimized-gnu17/reference/feature-manifest.tsv\n"
+        "            build/ffmpeg-optimized-gnu17/reference/*.argv\n"
+        "            build/ffmpeg-optimized-gnu17/reference/compiler-actions/*.argv\n"
+        "            build/ffmpeg-optimized-gnu17/reference/*.stdout\n"
+        "            build/ffmpeg-optimized-gnu17/reference/compiler-actions/*.stdout\n"
+        "            build/ffmpeg-optimized-gnu17/reference/*.stderr\n"
+        "            build/ffmpeg-optimized-gnu17/reference/compiler-actions/*.stderr\n"
+        "            build/ffmpeg-optimized-gnu17/reference/*.status\n"
+        "            build/ffmpeg-optimized-gnu17/reference/compiler-actions/*.status\n"
+        "            build/ffmpeg-optimized-gnu17/buster/config.h\n"
+        "            build/ffmpeg-optimized-gnu17/buster/config_components.h\n"
+        "            build/ffmpeg-optimized-gnu17/buster/ffbuild/config.mak\n"
+        "            build/ffmpeg-optimized-gnu17/buster/ffbuild/config.log\n"
+        "            build/ffmpeg-optimized-gnu17/buster/dialect-manifest.txt\n"
+        "            build/ffmpeg-optimized-gnu17/buster/fate-counts.tsv\n"
+        "            build/ffmpeg-optimized-gnu17/buster/config.asm\n"
+        "            build/ffmpeg-optimized-gnu17/buster/feature-manifest.tsv\n"
+        "            build/ffmpeg-optimized-gnu17/buster/*.argv\n"
+        "            build/ffmpeg-optimized-gnu17/buster/compiler-actions/*.argv\n"
+        "            build/ffmpeg-optimized-gnu17/buster/*.stdout\n"
+        "            build/ffmpeg-optimized-gnu17/buster/compiler-actions/*.stdout\n"
+        "            build/ffmpeg-optimized-gnu17/buster/*.stderr\n"
+        "            build/ffmpeg-optimized-gnu17/buster/compiler-actions/*.stderr\n"
+        "            build/ffmpeg-optimized-gnu17/buster/*.status\n"
+        "            build/ffmpeg-optimized-gnu17/buster/compiler-actions/*.status\n";
     const char* path_begin = artifact ? strstr(artifact, "          path: |\n") : NULL;
     const char* path_end = path_begin ? strstr(path_begin, "          include-hidden-files: true\n") : NULL;
     size_t allowlist_length = strlen(artifact_paths);
     int allowlist_exact = path_begin && path_end &&
         (size_t)(path_end - path_begin) == allowlist_length &&
         !memcmp(path_begin, artifact_paths, allowlist_length);
-    int ordered = rad_artifact && checkout && identity && route && artifact && publish &&
-                  rad_artifact < checkout && checkout < identity && identity < route && route < artifact && artifact < publish;
+    int ordered = rad_artifact && assembler && checkout && identity && route && artifact && publish &&
+                  rad_artifact < assembler && assembler < checkout && checkout < identity && identity < route && route < artifact && artifact < publish;
     int valid = ordered && allowlist_exact &&
         count(text, "          repository: FFmpeg/FFmpeg\n") == 1 &&
         count(text, "ref: f46e514491172d15bd74b4abb1814cd2f05a763e\n") == 1 &&
@@ -89,12 +169,18 @@ static int ffmpeg_owner_valid(const char* text)
         strstr(text, "steps.ffmpeg_input.outcome == 'success'") &&
         strstr(text, "steps.ffmpeg_source_identity.outcome == 'success'") &&
         strstr(text, "steps.ffmpeg_source_verified.outcome == 'success'") &&
-        count(text, "- name: Retain FFmpeg portable evidence immediately\n") == 1 &&
+        count(text, "          sudo apt-get install -y --no-install-recommends nasm\n") == 1 &&
+        count(text, "- name: Retain FFmpeg profile evidence immediately\n") == 1 &&
         count(text, "build/ffmpeg-portable/") == count(artifact_paths, "build/ffmpeg-portable/") &&
         !strstr(text, "            external/ffmpeg/") &&
         !strstr(text, "build/ffmpeg-portable/**") &&
         !strstr(text, "build/ffmpeg-portable/**/*.o") &&
         !strstr(text, "external/ffmpeg/**") && !strstr(text, "external/**");
+    const char* profiles[] = {"build/ffmpeg-portable-gnu17/", "build/ffmpeg-optimized-gnu17/"};
+    for (unsigned i = 0; i < sizeof(profiles) / sizeof(profiles[0]); i += 1)
+    {
+        valid = valid && count(text, profiles[i]) == count(artifact_paths, profiles[i]);
+    }
     return valid;
 }
 
@@ -222,6 +308,12 @@ static int ffmpeg_self_test_route_controls(void)
     const char* optimized =
         "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --optimized /tmp/checkout /tmp/results /tmp/ide /usr/bin/nasm\n"
         "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* portable_gnu17 =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --portable-gnu17 /tmp/checkout /tmp/results /tmp/ide\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
+    const char* optimized_gnu17 =
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --optimized-gnu17 /tmp/checkout /tmp/results /tmp/ide /usr/bin/nasm\n"
+        "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
     const char* checkout_self_test =
         "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --self-test /tmp/checkout\n"
         "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --harness-self-test\n";
@@ -235,7 +327,7 @@ static int ffmpeg_self_test_route_controls(void)
         "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --optimized /tmp/checkout /tmp/results /tmp/ide /usr/bin/nasm\n"
         "      \"$RUNNER_TEMP/external-project-driver\" test_ffmpeg --optimized /tmp/checkout /tmp/results /tmp/ide /usr/bin/nasm\n";
     int passed = other_valid(valid) && !other_valid(wrong_driver) && !other_valid(extra_argument) &&
-                 !other_valid(portable) && !other_valid(optimized) && !other_valid(checkout_self_test) &&
+                 !other_valid(portable) && !other_valid(optimized) && !other_valid(portable_gnu17) && !other_valid(optimized_gnu17) && !other_valid(checkout_self_test) &&
                  !other_valid(chained) && !other_valid(mixed) && !other_valid(duplicate_full_route);
     return passed;
 }
@@ -319,7 +411,10 @@ static int self_test(const char* text)
         !other_valid("run: build external_projects ffmpeg\n") &&
         replace_control(text, "ref: f46e514491172d15bd74b4abb1814cd2f05a763e", "ref: main") &&
         replace_control(text, "repository: FFmpeg/FFmpeg", "repository: FFmpeg/fork") &&
-        replace_control(text, "build/ffmpeg-portable/buster/compiler-actions/*.argv", "build/ffmpeg-portable/**");
+        replace_control(text, "build/ffmpeg-portable/buster/compiler-actions/*.argv", "build/ffmpeg-portable/**") &&
+        replace_control(text, "build/ffmpeg-optimized-gnu17/buster/compiler-actions/*.argv", "build/ffmpeg-optimized-gnu17/**") &&
+        replace_control(text, "build/ffmpeg-portable-gnu17/reference/config.h", "build/ffmpeg-portable-gnu17/reference/*.o") &&
+        replace_control(text, "sudo apt-get install -y --no-install-recommends nasm", "true");
     return passed;
 }
 

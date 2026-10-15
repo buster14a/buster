@@ -6552,7 +6552,10 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
             scope_finger = scope;
             entity = c_parse_lookup_entity_token(analysis, preprocess.spelling_base, scope, &token);
         }
-        if (entity.value < analysis->entity_count && analysis->entities[entity.value].declaration_token_plus_one == index + 1)
+        // A typedef can lead a grouped declarator, e.g. Callback (*table)[2].
+        // Its function-pointer type does not make the type name a callee.
+        if (entity.value < analysis->entity_count && (analysis->entities[entity.value].kind == C_ENTITY_TYPEDEF ||
+                                                     analysis->entities[entity.value].declaration_token_plus_one == index + 1))
         {
             continue;
         }
@@ -10532,6 +10535,24 @@ BUSTER_C_INTERNAL bool c_parse_expression_next_conditional(CParseResult* result,
 
 BUSTER_C_INTERNAL u32 c_parse_identity_separator(CParseResult* result, CPreprocessResult preprocess, u32 start, u32 end, CPunctuator separator);
 
+// A failed expression leaf can still bind a typedef. Type-name operands are
+// consumed by their own frames before reaching this value-only fallback.
+BUSTER_C_INTERNAL void c_parse_expression_leaf_name_constraint(CTypeParseMachine* machine, CParseResult* result,
+    CPreprocessResult preprocess, CScopeId scope, u32 start)
+{
+    u32 use = c_parse_identifier_use_index(result, start);
+    CScopeId lookup_scope = scope.value == C_ID_UNDERLYING_INVALID && result->scope_count
+        ? (CScopeId){.value = 0} : scope;
+    CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
+        : c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[start]);
+    if (entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF)
+    {
+        machine->expression_constraint = c_parse_message(result->arena, S8("typedef name '{S8}' is not an expression"),
+            c_token_spelling(preprocess.spelling_base, preprocess.tokens[start]));
+        machine->expression_constraint_token = start;
+    }
+}
+
 BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTypeParseFrame* frame)
 {
     Arena* arena = frame->arena;
@@ -10743,19 +10764,7 @@ BUSTER_C_INTERNAL void c_type_parse_sizeof_step(CTypeParseMachine* machine, CTyp
                 if (machine->validate_expression_constraints && !machine->expression_constraint.length &&
                     last.value >= result->type_count && first.kind == C_TOKEN_IDENTIFIER)
                 {
-                    // A typedef may be bound in a cast or a type operand, but
-                    // this task is an expression leaf and must name a value.
-                    u32 use = c_parse_identifier_use_index(result, task->start);
-                    CScopeId lookup_scope = scope.value == C_ID_UNDERLYING_INVALID && result->scope_count
-                        ? (CScopeId){.value = 0} : scope;
-                    CEntityId entity = use != C_ID_UNDERLYING_INVALID ? result->identifier_uses[use].entity
-                        : c_parse_lookup_entity_token(result, preprocess.spelling_base, lookup_scope, &preprocess.tokens[task->start]);
-                    if (entity.value < result->entity_count && result->entities[entity.value].kind == C_ENTITY_TYPEDEF)
-                    {
-                        machine->expression_constraint = c_parse_message(result->arena, S8("typedef name '{S8}' is not an expression"),
-                            c_token_spelling(preprocess.spelling_base, first));
-                        machine->expression_constraint_token = task->start;
-                    }
+                    c_parse_expression_leaf_name_constraint(machine, result, preprocess, scope, task->start);
                 }
                 task_count -= 1;
                 continue;
@@ -22799,6 +22808,13 @@ BUSTER_C_INTERNAL void c_type_parse_expression_leaf_step(CTypeParseMachine* mach
         return;
     }
     CTypeId type = c_parse_expression_leaf_without_cast(frame->arena, *frame->preprocess, frame->result, frame->scope, frame->start, frame->end);
+    if (type.value >= frame->result->type_count && machine->validate_expression_constraints && !machine->expression_constraint.length &&
+        frame->start + 1 < frame->end && frame->preprocess->tokens[frame->start].kind == C_TOKEN_IDENTIFIER &&
+        c_token_is_punctuator(&frame->preprocess->tokens[frame->start + 1], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+        c_parse_matching_delimiter_indexed(frame->result, *frame->preprocess, frame->start + 1) + 1 == frame->end)
+    {
+        c_parse_expression_leaf_name_constraint(machine, frame->result, *frame->preprocess, frame->scope, frame->start);
+    }
     c_type_parse_frame_complete(machine, type, frame->end, type.value != C_ID_UNDERLYING_INVALID);
 }
 
@@ -23400,7 +23416,17 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
         // Windows targets get alongside `_MSC_EXTENSIONS`, also makes any
         // complete struct or union named here an anonymous member.
         CType const* base = frame->base_type.value < result->type_count ? &result->types[frame->base_type.value] : 0;
-        if (frame->declarator_start == frame->end && base && (base->kind == C_TYPE_STRUCT || base->kind == C_TYPE_UNION))
+        bool record = base && (base->kind == C_TYPE_STRUCT || base->kind == C_TYPE_UNION);
+        u32 anonymous_end = frame->declarator_start;
+        CAttributeGroup suffix;
+        // The record reader already records GNU suffix attributes on the
+        // type. Do not use the general decoration skipper here: an asm label
+        // still needs a named member, unlike an attribute-only suffix.
+        while (record && c_parse_attribute_group_at(preprocess, anonymous_end, frame->end, &suffix))
+        {
+            anonymous_end = suffix.group_end;
+        }
+        if (record && anonymous_end == frame->end)
         {
             bool defined_in_place = base->definition_start > frame->start && base->definition_start < frame->end;
             CType const* unqualified = base;
@@ -33214,12 +33240,12 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
                 // how SQLite's Unix VFS holds dlsym.
                 name_index = parenthesized_name;
             }
-            else if (preprocess.tokens[close - 1].kind == C_TOKEN_IDENTIFIER)
-            {
-                name_index = close - 1;
-            }
             else
             {
+                // A recognized declaration cannot become an expression when
+                // its grouped declarator has no name (for example T(1, 2)).
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index + 1]),
+                                   C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("expected a declarator name"));
                 return false;
             }
             name = preprocess.tokens[name_index];
@@ -45867,6 +45893,24 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
                 {
                     type = c_parse_pointer_chain(result, preprocess, type, &cursor, close);
                     type = c_parse_array_suffixes(result, preprocess, type, &cursor, close);
+                }
+                // A remaining '(' belongs to an abstract declarator, not
+                // an unchecked expression. Read its complete parameter and
+                // array grammar before granting semantic-only success.
+                if (type.value < result->type_count && cursor < close &&
+                    c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    !c_parse_type_name_operand_names_value(result, preprocess, operand_scope, operand_start))
+                {
+                    u32 diagnostic_start = result->diagnostic_count;
+                    type = c_parse_identity_type_name(machine, result, preprocess, operand_scope, operand_start, close);
+                    if (type.value < result->type_count)
+                    {
+                        cursor = close;
+                    }
+                    else if (result->diagnostic_count == diagnostic_start)
+                    {
+                        diagnostic = (CParseInitializerDiagnostic){.message = S8("invalid size or alignment type operand"), .token = cursor};
+                    }
                 }
                 // A type name here must end at the operand's `)`: `sizeof
                 // (typeof (char) * 2)` answered 4 as if `char` were a value, and

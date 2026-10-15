@@ -298,6 +298,16 @@ class WorkflowTests(unittest.TestCase):
             self.assertIsNotNone(match, step_id)
             self.assertIn("steps.llvm.outcome == 'success'", match.group(1), step_id)
 
+    def test_analyzer_installs_verified_llvm_before_bootstrap_and_skips_reuse(self):
+        analyzer = self.workflow.split("\n  analyzer:\n", 1)[1].split("\n  complete:\n", 1)[0]
+        install = analyzer.split("      - name: Install latest stable LLVM for analysis\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("if: ${{ needs.reuse.outputs.reuse != 'true' }}", install)
+        self.assertIn("tools/ci_llvm.py --target x86_64-linux", install)
+        self.assertIn('--github-path "$GITHUB_PATH" --github-env "$GITHUB_ENV"', install)
+        self.assertNotIn("continue-on-error", install)
+        self.assertLess(analyzer.index("Install latest stable LLVM for analysis"),
+                        analyzer.index("Bootstrap and identify candidate build driver"))
+
     def test_windows_prefers_installed_llvm_over_image_llvm(self):
         self.assertNotIn(r"$env:ProgramFiles\LLVM\bin", self.workflow)
         self.assertEqual(self.workflow.count("-LlvmBin $env:BUSTER_CI_LLVM_BIN"), 2)

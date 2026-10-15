@@ -38953,6 +38953,128 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_attribute_call_roles(UnitTestArguments
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typedef_call_roles(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 path = S8("src/buster/tests/compiler/driver/fixtures/basic_c_typedef_call_roles.c");
+    ByteSlice input = file_read(arguments->arena, path, (FileReadOptions){0});
+    BUSTER_TEST(arguments, input.length != 0);
+    struct
+    {
+        String8 source;
+        String8 message;
+    } cases[] = {
+        {BYTE_SLICE_TO_STRING(8, input), {0}},
+        {S8("typedef void (*Callback)(int, int, int); void probe(void) { Callback (*table)[16]; (void)table; }"), {0}},
+        {S8("typedef void (*Callback)(int, int, int); void bad(Callback *table) { table[0](1, 2); }"),
+         S8("too few arguments in the call to '<function pointer>': it declares 3 parameters")},
+        {S8("typedef void (*Callback)(int, int, int); void bad(Callback *table) { table[0](1, 2, 3, 4); }"),
+         S8("too many arguments in the call to '<function pointer>': it declares 3 parameters")},
+        {S8("typedef void (*Callback)(int, int, int); void bad(void) { Callback Callback = 0; Callback(1, 2); }"),
+         S8("too few arguments in the call to '<function pointer>': it declares 3 parameters")},
+        {S8("typedef void (*Callback)(int, int, int); void bad(Callback value) { ((Callback)value)(1, 2); }"),
+         S8("too few arguments in the call to '<function pointer>': it declares 3 parameters")},
+        {S8("typedef void (*Callback)(int, int, int); int bound(int); void bad(void) { Callback (*table)[sizeof(bound(1, 2))]; }"),
+         S8("too many arguments in the call to 'bound': it declares 1 parameter")},
+    };
+    CPreprocessDialect dialects[] = {C_PREPROCESS_DIALECT_C17, C_PREPROCESS_DIALECT_GNU17,
+                                    C_PREPROCESS_DIALECT_C23, C_PREPROCESS_DIALECT_GNU23};
+    for (u32 target_index = 0; target_index < 6; target_index += 1)
+    {
+        Target target = target_native;
+        target.cpu_arch = target_index & 1 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64;
+        target.os = target_index < 2 ? OPERATING_SYSTEM_LINUX : target_index < 4 ? OPERATING_SYSTEM_WINDOWS : OPERATING_SYSTEM_MACOS;
+        for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
+        {
+            for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(cases); row += 1)
+            {
+                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                CPreprocessResult tokens = c_preprocess(temporary.arena, cases[row].source, (CPreprocessOptions){
+                    .target = target, .data_layout = target_data_layout(target), .dialect = dialects[dialect],
+                });
+                CParserResult syntax = c_parse_ast(temporary.arena, tokens);
+                CAnalysisResult semantic = c_analyze_semantics_only(temporary.arena, tokens, syntax);
+                String8 context = string_format(temporary.arena, S8("typedef call roles target={u32} dialect={u32} row={u32}"),
+                                                target_index, dialect, row);
+                BUSTER_TEST_RAW(arguments, !tokens.diagnostic_count && !syntax.diagnostic_count && semantic.analysis_complete, context);
+                bool refused = cases[row].message.length != 0;
+                BUSTER_TEST_RAW(arguments, semantic.diagnostic_count == (u32)refused, context);
+                if (refused && BUSTER_REQUIRE(arguments, semantic.diagnostic_count == 1))
+                {
+                    BUSTER_STRING_TEST(arguments, semantic.diagnostics[0].message,
+                        string_format(temporary.arena, S8("in function 'bad': {S8}"), cases[row].message));
+                }
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    CIRLowerResult lowered = c_analyze_with_options(temporary.arena, S8("typedef-call-roles.c"), tokens, syntax, target,
+                        (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                    if (refused)
+                    {
+                        BUSTER_TEST_RAW(arguments, lowered.diagnostic_count == 1 && !lowered.canonical_ir_certified, context);
+                        if (semantic.diagnostic_count && lowered.diagnostic_count)
+                        {
+                            BUSTER_STRING_TEST(arguments, lowered.diagnostics[0].message, semantic.diagnostics[0].message);
+                        }
+                    }
+                    else
+                    {
+                        BUSTER_TEST_RAW(arguments, !lowered.diagnostic_count && lowered.program && lowered.canonical_ir_certified, context);
+                        if (lowered.program && lowered.canonical_ir_certified && !lowered.diagnostic_count)
+                        {
+                            BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                        }
+                    }
+                }
+                c_test_scratch_end(temporary);
+            }
+        }
+    }
+#if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
+    String8 standards[] = {S8("-std=c17"), S8("-std=gnu17"), S8("-std=c23"), S8("-std=gnu23")};
+    String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 layouts[] = {S8(""), S8("-fc-ast-pilot=implicit"), S8("-fc-ast-pilot=hybrid"), S8("-fc-ast-pilot=explicit")};
+    for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(standards); dialect += 1)
+    {
+        for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
+        {
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+            {
+                for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(layouts); layout += 1)
+                {
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("typedef-call-roles"), S8(".exe"));
+                    String8 command[] = {layouts[layout], S8("-nostdinc"), standards[dialect], modes[mode],
+                        forms[form], S8("-fverify-codegen"), S8("-o"), output, path};
+                    // The default route omits a layout option rather than passing an empty argument.
+                    u64 layout_offset = layouts[layout].length ? 0 : 1;
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                        (SliceString8){.pointer = command + layout_offset, .length = BUSTER_ARRAY_LENGTH(command) - layout_offset});
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("typedef call roles {S8} {S8} form={u32}: {S8}"),
+                                      standards[dialect], modes[mode], form, compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                    {
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                        }
+                    }
+                    c_test_scratch_end(temporary);
+                }
+            }
+        }
+    }
+#endif
+    return result;
+}
+
 BUSTER_GLOBAL_LOCAL UnitTestResult c_test_call_arity_diagnostics(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
@@ -70679,6 +70801,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_type_self_compatibility);
     C_TEST_FIXTURE(arguments, c_test_type_specifier_diagnostics);
     C_TEST_FIXTURE(arguments, c_test_typed_enum_integer_constants);
+    C_TEST_FIXTURE(arguments, c_test_typedef_call_roles);
     C_TEST_FIXTURE(arguments, c_test_typedef_fallback_lookup);
     C_TEST_FIXTURE(arguments, c_test_typeof_anonymous_aggregate_runtime);
     C_TEST_FIXTURE(arguments, c_test_typeof_cast_prefix_operator);

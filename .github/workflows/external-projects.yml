@@ -746,6 +746,11 @@ jobs:
           include-hidden-files: true
           retention-days: 14
           if-no-files-found: error
+      - name: Install FFmpeg external assembler
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nasm
       - name: Checkout pinned FFmpeg 7.1.3 source after existing Linux stages
         id: ffmpeg_input
         if: ${{ !cancelled() }}
@@ -792,7 +797,7 @@ jobs:
             printf 'result=failed;exit=%s\n' "$status" > evidence/ffmpeg.status
           fi
           exit "$status"
-      - name: Retain FFmpeg portable evidence immediately
+      - name: Retain FFmpeg profile evidence immediately
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -834,6 +839,85 @@ jobs:
             build/ffmpeg-portable/buster/compiler-actions/*.stdout
             build/ffmpeg-portable/buster/compiler-actions/*.stderr
             build/ffmpeg-portable/buster/compiler-actions/*.status
+            build/ffmpeg-portable/reference/compiler-actions/*.argv
+            build/ffmpeg-portable/reference/compiler-actions/*.stdout
+            build/ffmpeg-portable/reference/compiler-actions/*.stderr
+            build/ffmpeg-portable/reference/compiler-actions/*.status
+            build/ffmpeg-profiles.tsv
+            build/ffmpeg-portable-gnu17/receipt.txt
+            build/ffmpeg-portable-gnu17/h264-target-actions.tsv
+            build/ffmpeg-portable-gnu17/*.argv
+            build/ffmpeg-portable-gnu17/*.stdout
+            build/ffmpeg-portable-gnu17/*.stderr
+            build/ffmpeg-portable-gnu17/*.status
+            build/ffmpeg-portable-gnu17/reference/config.h
+            build/ffmpeg-portable-gnu17/reference/config_components.h
+            build/ffmpeg-portable-gnu17/reference/ffbuild/config.mak
+            build/ffmpeg-portable-gnu17/reference/ffbuild/config.log
+            build/ffmpeg-portable-gnu17/reference/dialect-manifest.txt
+            build/ffmpeg-portable-gnu17/reference/fate-counts.tsv
+            build/ffmpeg-portable-gnu17/reference/*.argv
+            build/ffmpeg-portable-gnu17/reference/compiler-actions/*.argv
+            build/ffmpeg-portable-gnu17/reference/*.stdout
+            build/ffmpeg-portable-gnu17/reference/compiler-actions/*.stdout
+            build/ffmpeg-portable-gnu17/reference/*.stderr
+            build/ffmpeg-portable-gnu17/reference/compiler-actions/*.stderr
+            build/ffmpeg-portable-gnu17/reference/*.status
+            build/ffmpeg-portable-gnu17/reference/compiler-actions/*.status
+            build/ffmpeg-portable-gnu17/buster/config.h
+            build/ffmpeg-portable-gnu17/buster/config_components.h
+            build/ffmpeg-portable-gnu17/buster/ffbuild/config.mak
+            build/ffmpeg-portable-gnu17/buster/ffbuild/config.log
+            build/ffmpeg-portable-gnu17/buster/dialect-manifest.txt
+            build/ffmpeg-portable-gnu17/buster/fate-counts.tsv
+            build/ffmpeg-portable-gnu17/buster/*.argv
+            build/ffmpeg-portable-gnu17/buster/compiler-actions/*.argv
+            build/ffmpeg-portable-gnu17/buster/*.stdout
+            build/ffmpeg-portable-gnu17/buster/compiler-actions/*.stdout
+            build/ffmpeg-portable-gnu17/buster/*.stderr
+            build/ffmpeg-portable-gnu17/buster/compiler-actions/*.stderr
+            build/ffmpeg-portable-gnu17/buster/*.status
+            build/ffmpeg-portable-gnu17/buster/compiler-actions/*.status
+            build/ffmpeg-optimized-gnu17/receipt.txt
+            build/ffmpeg-optimized-gnu17/nasm-provenance.txt
+            build/ffmpeg-optimized-gnu17/checkasm-clang-counts.tsv
+            build/ffmpeg-optimized-gnu17/checkasm-buster-counts.tsv
+            build/ffmpeg-optimized-gnu17/*.argv
+            build/ffmpeg-optimized-gnu17/*.stdout
+            build/ffmpeg-optimized-gnu17/*.stderr
+            build/ffmpeg-optimized-gnu17/*.status
+            build/ffmpeg-optimized-gnu17/reference/config.h
+            build/ffmpeg-optimized-gnu17/reference/config_components.h
+            build/ffmpeg-optimized-gnu17/reference/ffbuild/config.mak
+            build/ffmpeg-optimized-gnu17/reference/ffbuild/config.log
+            build/ffmpeg-optimized-gnu17/reference/dialect-manifest.txt
+            build/ffmpeg-optimized-gnu17/reference/fate-counts.tsv
+            build/ffmpeg-optimized-gnu17/reference/config.asm
+            build/ffmpeg-optimized-gnu17/reference/feature-manifest.tsv
+            build/ffmpeg-optimized-gnu17/reference/*.argv
+            build/ffmpeg-optimized-gnu17/reference/compiler-actions/*.argv
+            build/ffmpeg-optimized-gnu17/reference/*.stdout
+            build/ffmpeg-optimized-gnu17/reference/compiler-actions/*.stdout
+            build/ffmpeg-optimized-gnu17/reference/*.stderr
+            build/ffmpeg-optimized-gnu17/reference/compiler-actions/*.stderr
+            build/ffmpeg-optimized-gnu17/reference/*.status
+            build/ffmpeg-optimized-gnu17/reference/compiler-actions/*.status
+            build/ffmpeg-optimized-gnu17/buster/config.h
+            build/ffmpeg-optimized-gnu17/buster/config_components.h
+            build/ffmpeg-optimized-gnu17/buster/ffbuild/config.mak
+            build/ffmpeg-optimized-gnu17/buster/ffbuild/config.log
+            build/ffmpeg-optimized-gnu17/buster/dialect-manifest.txt
+            build/ffmpeg-optimized-gnu17/buster/fate-counts.tsv
+            build/ffmpeg-optimized-gnu17/buster/config.asm
+            build/ffmpeg-optimized-gnu17/buster/feature-manifest.tsv
+            build/ffmpeg-optimized-gnu17/buster/*.argv
+            build/ffmpeg-optimized-gnu17/buster/compiler-actions/*.argv
+            build/ffmpeg-optimized-gnu17/buster/*.stdout
+            build/ffmpeg-optimized-gnu17/buster/compiler-actions/*.stdout
+            build/ffmpeg-optimized-gnu17/buster/*.stderr
+            build/ffmpeg-optimized-gnu17/buster/compiler-actions/*.stderr
+            build/ffmpeg-optimized-gnu17/buster/*.status
+            build/ffmpeg-optimized-gnu17/buster/compiler-actions/*.status
           include-hidden-files: true
           retention-days: 14
           if-no-files-found: error

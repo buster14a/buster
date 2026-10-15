@@ -12,6 +12,11 @@ requires **Clang analyzer shards**, using a Clang Release, unsanitized,
 non-unity tree so the split source graph is actually exercised. This job runs
 independently of the desktop combinations; `CI complete` requires it.
 
+The required job installs the same verified stable upstream Clang selected by
+[native CI](ci-llvm.md) before bootstrapping its driver. The recorded version,
+compiler hash and generated database identify the actual toolchain. Existing
+exact queue-to-main reuse skips installation and retains its analyzer receipt.
+
 ## Reproduction
 
 Bootstrap with `build.sh`/`build.ps1` as usual. Keep a configured tree and all

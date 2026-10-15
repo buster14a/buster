@@ -1,65 +1,27 @@
 # Disk-image tooling
 
-Status: **preserved, unmaintained source**. This area has no default build,
-compiler-test, fuzz, analyzer or automatic CI coverage. Existing source, tests,
-CMake fragments and earlier procedures below are retained for reference; their
-buildability and behavior are not a current support promise. Reconnecting a
-consumer requires an explicit maintenance decision.
+Status: **removed**. The disk builder, verification helpers and private header,
+`disk_builder_tests` suite, and `cmake/DiskBuilder.cmake` are no longer in the
+source tree. There is no `disk_builder` target or registered disk test module.
 
 [Catalogue](../../PROJECTS.md) · Area: `disk-tools` · [Tracking](../project-tracking.md)
 
-## Purpose and existing source
+## Historical scope and limitations
 
-[src/buster/apps/disk_builder.c](../../src/buster/apps/disk_builder.c) is the
-standalone disk-image tool source. It has its own catalogue home rather than being
-classified as a C frontend or compiler-backend feature. The protective MBR layout
-and verification helpers live in
-[src/buster/apps/disk_builder_verification.c](../../src/buster/apps/disk_builder_verification.c)
-and its private header.
+The former tool constructed a 64 MiB disk image from a regular reference file.
+Its verifier checked protective MBR geometry and reserved partitions; it did
+not establish GPT correctness, filesystem validity or bootability. The
+standalone entry point did not call the verifier, and CI did not run the
+image-writing executable.
 
-`disk-tools.images` identifies this source-level capability area. The verifier
-helpers include `verify_disk` and `verify_disk_reserved_partitions_zeroed`. The
-registered `disk_builder_tests` module checks MBR lengths against disk extent,
-including the builder's 64 MiB geometry and 32-bit saturation. This remains a
-helper-level MBR check: the tests do not validate GPT headers or arrays, CRCs,
-filesystems, or bootability, and `entry_point` still does not call `verify_disk`.
+The [last pre-removal guide](https://github.com/buster14a/buster/blob/02a6414e020f5d549122197c3a7c8407df5bed76/docs/projects/disk-tools.md),
+[builder](https://github.com/buster14a/buster/blob/02a6414e020f5d549122197c3a7c8407df5bed76/src/buster/apps/disk_builder.c),
+[verifier](https://github.com/buster14a/buster/blob/02a6414e020f5d549122197c3a7c8407df5bed76/src/buster/apps/disk_builder_verification.c)
+and [tests](https://github.com/buster14a/buster/blob/02a6414e020f5d549122197c3a7c8407df5bed76/src/buster/tests/disk_builder_test.c)
+retain the former behavior and validation details at an immutable revision.
+Their invocations apply to that historical checkout only.
 
-## Integration and validation boundary
-
-`cmake/DiskBuilder.cmake` defines the `disk_builder` target, independent of `ide`
-and its module closure (see the [repository map](../agents/project.md)). The fragment is not included by the default graph. It was formerly a Linux
-default target and a `test_all` dependency; that compile-maintenance obligation
-has been removed.
-Fuzz-enabled trees (the Linux Release and sanitized Release CI shards) skip it,
-because `entry_point.c` then needs the libFuzzer driver that only Buster programs
-link; the Linux portability shard still compiles it. Windows and Apple
-configurations do not build it yet; their compile has never been checked. That only
-establishes that the standalone tool compiles: the tool itself is not run by CI.
-The registered test can be selected with `ide test --module=disk_builder_tests`;
-it exercises the verifier helper without running the image-writing entry point.
-When run from the repository root the standalone tool reads
-`build/minimal_fat32.img` as the reference image, writes `build/mine.img` and
-reports whether the two match; reproduce that with your own reference image
-before treating the output as usable.
-
-The reference must be a regular file of exactly 64 MiB. The builder opens the
-file, checks its size before allocating or reading, reads exactly the bounded
-extent, and checks that the opened file is still regular and exactly that size
-after the read. Missing, empty, short, non-sector-sized, oversized, failed-read,
-and changed-size references are rejected before image construction or output
-publication. The builder's writer, comparison, and output slice all use the
-same fixed 64 MiB extent.
-
-The registered C tests cover missing, empty, 512-byte, 513-byte, and exact-size
-references, a synthetic oversized pre-read stat, injected read and changed-size
-failures, and preservation of an existing output sentinel on invalid input.
-The oversized case uses the existing OS file fault seam so it proves rejection
-before allocation without materializing another 64 MiB image. These are helper
-regressions; they do not run the standalone executable in CI.
-
-When taking up this project, put the supported invocation, image formats, output
-contract, focused tests and limitations here. Record a demonstrated image build,
-independent image inspection and any boot test separately; they are not equivalent
-observations. Do not execute disk-writing experiments against real devices merely
-to populate a feature record. Planned expansion belongs in an owning issue, not
-an unchecked list of promised features in this page.
+The `disk-tools` Area ID remains for historical issue routing. Restoring this
+project requires an explicit owner decision, a build graph and focused tests,
+and independent image validation before making a support claim. Do not run
+disk-writing experiments against real devices merely to populate this record.

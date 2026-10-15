@@ -18,6 +18,7 @@
 #include <buster/lib/compiler/codegen/codegen_internal.h>
 #include <buster/lib/compiler/codegen/machine_frame_internal.h>
 #include <buster/lib/compiler/codegen/machine_parameter_edges_internal.h>
+#include <buster/lib/compiler/codegen/machine_select_internal.h>
 #include <buster/lib/compiler/ir/ir_construction.h>
 #include <buster/lib/compiler/work_ledger.h>
 #include <buster/lib/compiler/codegen/machine_x86_64_emit_registry.h>
@@ -6064,6 +6065,20 @@ MachineSelectResult machine_select_validated_canonical_function(Arena* arena, Ir
 }
 
 #if BUSTER_INCLUDE_TESTS
+MachineSelectResult machine_test_select_work(Arena* arena, IrProgram* program, IrFunction* function, Target target,
+                                             MachineSelectionModule* module, u32 legacy, bool preserve_debug_values)
+{
+    u32 previous = module->test_work_legacy;
+    module->test_work_legacy = legacy;
+    module->test_alias_use_updates = 0;
+    module->test_dead_registers_omitted = 0;
+    module->test_reused_signatures = 0;
+    MachineSelectResult result = machine_select_canonical_function_internal(arena, program, function, target, false, false,
+                                                                           preserve_debug_values, module);
+    module->test_work_legacy = previous;
+    return result;
+}
+
 MachineSelectResult machine_test_select_parameter_edge_layout(Arena* arena, IrProgram* program, IrFunction* function,
                                                               Target target, bool direct_layout, bool preserve_debug_values)
 {

@@ -14,7 +14,8 @@ workflow invalidates every other attestation when main advances.
 
 Map: git helpers; classification helpers (classification_is_bound,
 classification_requires_writer, generated_changed_between); status checks;
-check_pull_request; check_merge_group; source_candidate; invalidate_stale.
+check_pull_request; check_merge_group; source_candidate; generated_blob;
+catch_up_still_admissible; invalidate_stale.
 """
 
 from __future__ import annotations
@@ -525,18 +526,42 @@ class GitHub:
         raise AdmissionError("GitHub pagination limit reached")
 
 
+def generated_blob(api: GitHub, path: str, revision: str) -> str | None:
+    """Blob id of a generated path at revision; None when the path is absent."""
+    try:
+        content = api.request("contents/" + path, ref=revision)
+    except integration.APIReadError as error:
+        if error.status != 404:
+            raise
+        result = None
+    else:
+        if not isinstance(content, dict) or content.get("type") != "file":
+            raise AdmissionError("generated path is not a file: " + path)
+        result = require_hex(content.get("sha"), HEX40, "generated blob " + path)
+    return result
+
+
 def catch_up_still_admissible(api: GitHub, recorded_base: str, new_main: str) -> bool:
-    """Cheap pre-filter only: the gate re-verifies catch-up heads from git."""
+    """Cheap pre-filter only: the gate re-verifies catch-up heads from git.
+
+    A truncated compare (COMPARE_FILE_LIMIT) lists only part of the range, so
+    the generated paths' blobs at both ends decide instead, matching the
+    controller's git diff in catch_up_admissible (#3961).
+    """
     comparison = api.request("compare/" + recorded_base + "..." + new_main)
     files = comparison.get("files")
-    if comparison.get("status") not in ("ahead", "identical") or not isinstance(files, list):
-        return False
-    if len(files) >= COMPARE_FILE_LIMIT:
-        return False
-    return not any(not isinstance(item, dict) or
-                   item.get("filename") in integration.GENERATED_PATHS or
-                   item.get("previous_filename") in integration.GENERATED_PATHS
-                   for item in files)
+    admissible = False
+    if comparison.get("status") in ("ahead", "identical") and isinstance(files, list):
+        if len(files) >= COMPARE_FILE_LIMIT:
+            admissible = all(generated_blob(api, path, recorded_base) ==
+                             generated_blob(api, path, new_main)
+                             for path in sorted(integration.GENERATED_PATHS))
+        else:
+            admissible = not any(not isinstance(item, dict) or
+                                 item.get("filename") in integration.GENERATED_PATHS or
+                                 item.get("previous_filename") in integration.GENERATED_PATHS
+                                 for item in files)
+    return admissible
 
 
 def invalidate_stale(api: GitHub, new_main: str, details_url: str) -> dict:
