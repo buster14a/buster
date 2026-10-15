@@ -4270,12 +4270,12 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_aarch64_android_tls_alignment(UnitT
 
     {
         TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-        u32 text_words[] = {UINT32_C(0xd65f03c0)};
-        ObjectSymbol symbol = {.name = S8("main"), .size = sizeof(text_words), .section = OBJECT_SECTION_TEXT,
+        u32 empty_text_words[] = {UINT32_C(0xd65f03c0)};
+        ObjectSymbol symbol = {.name = S8("main"), .size = sizeof(empty_text_words), .section = OBJECT_SECTION_TEXT,
                                .kind = OBJECT_SYMBOL_FUNCTION, .global = true};
         ObjectFile object = link_test_object_make(
             temporary.arena, (Target){.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_ANDROID},
-            (ByteSlice){.pointer = (u8*)text_words, .length = sizeof(text_words)}, &symbol, 1, 0, 0);
+            (ByteSlice){.pointer = (u8*)empty_text_words, .length = sizeof(empty_text_words)}, &symbol, 1, 0, 0);
         NativeExecutableLinkResult linked = link_native_executable(temporary.arena, &object, (NativeExecutableLinkOptions){
             .entry_symbol = S8("main"),
             .image_kind = (u8)NATIVE_IMAGE_PIE,
