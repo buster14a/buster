@@ -4131,6 +4131,8 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
     // block-scope extern must continue to refer to external storage.
     String8 unreachable_source = string_format_z(arena, S8("{S8}/unreachable-local.c"), root_absolute);
     String8 unreachable_program = S8(
+        "extern int constant_dead_missing(void);\n"
+        "extern int constant_dead_data;\n"
         "static volatile int initializer_calls;\n"
         "int external_value = 9;\n"
         "static int read_external(void)\n"
@@ -4142,6 +4144,17 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
         "}\n"
         "int main(void)\n"
         "{\n"
+        "    int count = 0;\n"
+        "    if (0) count += constant_dead_missing() + constant_dead_data;\n"
+        "    if (1) count += 1; else count += constant_dead_missing();\n"
+        "    if (0 && constant_dead_missing()) count += constant_dead_data;\n"
+        "    if ((initializer_calls += 1, 0)) count += constant_dead_missing();\n"
+        "    if (1 || constant_dead_missing()) count += 2; else count += constant_dead_data;\n"
+        "    goto entered;\n"
+        "    if (0) { count += constant_dead_missing(); entered: count += 4; }\n"
+        "    switch (3) { if (0) { count += constant_dead_missing(); case 3: count += 8; } }\n"
+        "    if (count != 15 || initializer_calls != 1) return 1;\n"
+        "    initializer_calls = 0;\n"
         "    goto live;\n"
         "    int target = (initializer_calls += 1, 5);\n"
         "live:\n"

@@ -18565,6 +18565,8 @@ struct CIrLowerBodyState
     CToken child_name;
     u32 task_count;
     u32 task_capacity;
+    u32 condition_body_count;
+    u32 condition_instruction_begin;
     u32 switch_case_capacity;
     u32 substatement_case_count;
     u32 label_count;
@@ -43191,6 +43193,7 @@ struct CIrBodyTask
     u32 ssa_loop_open;
     u32 ssa_loop_close;
     bool allow_trailing_expression;
+    bool unentered_condition;
     bool restore_before_continuation;
     // A loop body: when a variably modified declaration inside it takes a
     // stack checkpoint, that checkpoint is also what `break` and `continue`
@@ -47621,6 +47624,27 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             }
             return false;
         }
+        if (continuation == C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK && state->condition_body_count)
+        {
+            // Only rows produced by this condition can enter these fresh arm
+            // blocks. A folded arm has no target; use the existing terminated-
+            // statement path so labels inside it can still be entered by jumps.
+            for (u32 arm = 0; arm < state->condition_body_count; arm += 1)
+            {
+                CIrBodyTask* body = tasks + task_count - 1u - arm;
+                bool entered = false;
+                for (u32 row = state->condition_instruction_begin; row < builder->function->instruction_count && !entered; row += 1)
+                {
+                    IrInstruction* instruction = builder->function->instructions + row;
+                    for (u32 target = 0; target < instruction->target_count; target += 1)
+                    {
+                        entered |= instruction->targets[target].value == body->block.value;
+                    }
+                }
+                body->unentered_condition = !entered;
+            }
+            state->condition_body_count = 0;
+        }
         if (continuation == C_IR_LOWER_BODY_CONTINUE_TRAILING_EXPRESSION)
         {
             state->result = builder->lower_machine.child_result.value;
@@ -48005,6 +48029,10 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
             {
                 return false;
             }
+            if (task.unentered_condition)
+            {
+                c_ir_end_block_unreachable(builder, declaration_source);
+            }
             c_ir_ssa_loop_open(builder, task.ssa_loop_open);
             c_ir_ssa_loop_close(builder, task.ssa_loop_close);
             if (task.kind == C_IR_BODY_TASK_CONDITION)
@@ -48271,6 +48299,8 @@ BUSTER_C_INTERNAL bool c_ir_lower_body_advance(CIntegerIrBuilder* builder, CIrLo
                 c_ir_body_task_inherit_control(&tasks[task_count], task);
                 task_count += 1;
                 state->task_count = task_count;
+                state->condition_body_count = has_else ? 2u : 1u;
+                state->condition_instruction_begin = builder->function->instruction_count;
                 state->continuation = C_IR_LOWER_BODY_CONTINUE_CONDITION_TASK;
                 state->temporary_mark = builder->temporary_arena->position;
                 state->yielded = true;

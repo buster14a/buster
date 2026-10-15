@@ -2202,3 +2202,16 @@ The regression validates four target layouts and both frontend forms; native
 execution checks exact effects and values under both allocators. Invalid
 alignments, a declaration-only void tail and a narrow symbolic address cast
 retain diagnostics. No frozen retirement fixture input is changed.
+
+## Constant-dead if arms
+
+After lowering an `if` condition, the statement machine checks only the target
+operands emitted by that condition for each fresh arm entry. An arm with no
+entry target starts terminated, so the existing dead-statement path skips its
+calls, data references and initializers. Named labels and enclosing-switch
+case labels still reopen their own blocks; a constant condition cannot erase
+a legal jump into its body. Condition side effects have already been emitted.
+This rule does not depend on optional FAST passes or the native allocator.
+The registered compiler-driver object-path regression links deliberately
+undefined externs only from dead arms and executes short-circuit, comma-effect,
+then/else, goto-entry and case-entry controls in both frontend SSA forms.
