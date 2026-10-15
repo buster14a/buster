@@ -1,0 +1,5 @@
+gcc -fsyntax-only -Wall -Wextra -Werror -Wsign-compare -Wconversion -Wno-unused-function -Wno-missing-field-initializers -DBUSTER_INCLUDE_TESTS=1 -DBUSTER_LINK_LIBC=1 -DBUSTER_OPTIMIZE=0 -DBUSTER_SINGLE_THREADED=0 -Isrc -Ibuild/generated src/buster/tests/compiler/ir/ir_test.c
+Same command before correction exits 1 with the matching signedness diagnostic; afterward exits 0 with empty output.
+The test TU also passes clang with the same arguments. The production ir.c TU passes gcc with tests disabled.
+./build.sh build --build-directory build/sanitize --config Debug -t ide
+build/sanitize/Debug/ide test --module=ir_tests --ci=1 --verbose=0
