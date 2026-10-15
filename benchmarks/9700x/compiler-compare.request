@@ -195,3 +195,6 @@ request: issues #4009 (home-coloring slice), #351, #1912 and #4257 user-requeste
 
 request: PR #4239 issues #3102 #4058 owner-authorized complete retained-AST retirement acceptance after finished consumer migration and protected RSS/environment repair #4270; current-main baseline and trusted tooling e51b8f63685c19d3ef51c848801c689132f5a1c4; complete default/default physical-9700X end-to-end profile; preserve failed c90/H2 evidence; acceptance hold remains
 profile: ast-retirement-acceptance-v1
+
+request: PR #4239 issues #3102 #4058 owner-authorized complete retained-AST retirement acceptance after bounded analysis-cost repairs and protected main #4267/#4294; actual current-main baseline and expected trusted tooling 02a6414e020f5d549122197c3a7c8407df5bed76; preserve complete adverse d824/e51 and failed c90/H2 evidence; fresh exact-head default/default physical-9700X end-to-end profile; acceptance hold remains
+profile: ast-retirement-acceptance-v1
