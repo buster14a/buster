@@ -220,6 +220,7 @@ struct MachineX64Selector
     IrProgram* program;
     IrFunction* function;
     MachineFunctionBuilder builder;
+    MachineOpcodeRow const* opcode_rows;
     u64 reserved_selection_layout[MACHINE_SELECTION_RESERVED_LAYOUT_WORDS];
     // The side streams rows append to, each through a typed cursor/end pair
     // in the machine_stream_cursor_* shape: the hot append is a pointer bump
@@ -1215,7 +1216,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_operand_register(MachineX64Selector* select
 
 BUSTER_GLOBAL_LOCAL u32 machine_x64_select_row(MachineX64Selector* selector, MachineInstruction instruction)
 {
-    machine_builder_classify_instruction_mutability(&selector->builder, &instruction);
+    machine_builder_classify_instruction_mutability(&selector->builder, selector->opcode_rows, &instruction);
     return machine_builder_instruction(&selector->builder, instruction);
 }
 
@@ -8447,6 +8448,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
         .program = program,
         .function = function,
         .builder = machine_function_builder_begin(arena),
+        .opcode_rows = machine_opcode_row_table(),
         .target = target,
         .vector_registers_supported = module->x64_vector_registers_supported,
         .module = module,

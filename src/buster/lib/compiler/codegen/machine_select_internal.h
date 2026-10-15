@@ -2,7 +2,7 @@
 
 // Private differential controls for selector work reduction. Each context is
 // owned by its calling fixture; production and function lanes share no flags.
-#include <buster/lib/compiler/codegen/machine_select.h>
+#include <buster/lib/compiler/codegen/machine.h>
 
 #if BUSTER_INCLUDE_TESTS
 enum
@@ -17,6 +17,7 @@ BUSTER_F_DECL MachineSelectResult machine_test_select_work(Arena* arena, IrProgr
 BUSTER_F_DECL bool machine_x64_test_prepare_signature(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                      MachineSelectionModule* module);
 BUSTER_F_DECL u32* machine_test_canonical_layout_full(Arena* arena, IrFunction const* function);
+BUSTER_F_DECL void machine_test_classify_instruction_mutability(MachineFunctionBuilder* builder, MachineInstruction const* instruction);
 #else
 #define MACHINE_SELECT_TEST_LEGACY(module, flag) false
 #endif
