@@ -6749,7 +6749,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_typedef_expressions(Unit
     };
     String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17"), S8("-std=c23"), S8("-std=gnu23")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
-    String8 routes[] = {S8("-fc-ast-pilot"), S8("-fno-c-ast-pilot"), S8("-fc-ast-pilot=explicit")};
+    String8 routes[] = {S8(""), S8("-fc-ast-pilot=implicit"), S8("-fc-ast-pilot=hybrid"), S8("-fc-ast-pilot=explicit")};
     for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
     {
         for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
@@ -6765,12 +6765,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_typedef_expressions(Unit
                     bool valid = !cases[index].message.length;
                     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[index].source))))
                     {
-                        String8 syntax_command[] = {S8("-g0"), S8("-nostdinc"), dialects[dialect], forms[form], routes[route], S8("-fsyntax-only"), input};
-                        String8 object_command[] = {S8("-g0"), S8("-nostdinc"), dialects[dialect], forms[form], routes[route], S8("-c"), S8("-o"), output, input};
+                        String8 syntax_command[] = {routes[route], S8("-g0"), S8("-nostdinc"), dialects[dialect], forms[form], S8("-fsyntax-only"), input};
+                        String8 object_command[] = {routes[route], S8("-g0"), S8("-nostdinc"), dialects[dialect], forms[form], S8("-c"), S8("-o"), output, input};
+                        // The default route omits the first selector argument.
+                        u64 layout_offset = routes[route].length ? 0 : 1;
                         CompilerDriverResult syntax = compiler_driver_execute_invocation(
-                            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+                            arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = syntax_command + layout_offset, .length = BUSTER_ARRAY_LENGTH(syntax_command) - layout_offset}));
                         CompilerDriverResult object = compiler_driver_execute_invocation(
-                            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+                            arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = object_command + layout_offset, .length = BUSTER_ARRAY_LENGTH(object_command) - layout_offset}));
                         String8 description = string_format(arena, S8("source={S8}\ndialect={S8} form={S8} route={S8}\nsyntax={S8}\nobject={S8}"),
                             cases[index].source, dialects[dialect], forms[form], routes[route], syntax.diagnostic, object.diagnostic);
                         BUSTER_TEST_RAW(arguments, syntax.error == (valid ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_ANALYSIS), description);
@@ -7885,7 +7887,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_numeric_declarators(Unit
     };
     String8 dialects[] = {S8("-std=c17"), S8("-std=gnu17"), S8("-std=c23"), S8("-std=gnu23")};
     String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
-    String8 routes[] = {S8("-fc-ast-pilot"), S8("-fno-c-ast-pilot"), S8("-fc-ast-pilot=explicit")};
+    String8 routes[] = {S8(""), S8("-fc-ast-pilot=implicit"), S8("-fc-ast-pilot=hybrid"), S8("-fc-ast-pilot=explicit")};
     for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(dialects); dialect += 1)
     {
         for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
@@ -7901,12 +7903,14 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_numeric_declarators(Unit
                     bool valid = !cases[index].message.length;
                     if (BUSTER_REQUIRE(arguments, file_write(input, BUSTER_SLICE_TO_BYTE_SLICE(cases[index].source))))
                     {
-                        String8 syntax_command[] = {S8("-g0"), S8("-nostdinc"), dialects[dialect], forms[form], routes[route], S8("-fsyntax-only"), input};
-                        String8 object_command[] = {S8("-g0"), S8("-nostdinc"), dialects[dialect], forms[form], routes[route], S8("-c"), S8("-o"), output, input};
+                        String8 syntax_command[] = {routes[route], S8("-g0"), S8("-nostdinc"), dialects[dialect], forms[form], S8("-fsyntax-only"), input};
+                        String8 object_command[] = {routes[route], S8("-g0"), S8("-nostdinc"), dialects[dialect], forms[form], S8("-c"), S8("-o"), output, input};
+                        // The default route omits the first selector argument.
+                        u64 layout_offset = routes[route].length ? 0 : 1;
                         CompilerDriverResult syntax = compiler_driver_execute_invocation(
-                            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(syntax_command)));
+                            arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = syntax_command + layout_offset, .length = BUSTER_ARRAY_LENGTH(syntax_command) - layout_offset}));
                         CompilerDriverResult object = compiler_driver_execute_invocation(
-                            arena, compiler_driver_parse_arguments(arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(object_command)));
+                            arena, compiler_driver_parse_arguments(arena, (SliceString8){.pointer = object_command + layout_offset, .length = BUSTER_ARRAY_LENGTH(object_command) - layout_offset}));
                         String8 description = string_format(arena, S8("source={S8}\ndialect={S8} form={S8} route={S8}\nsyntax={S8}\nobject={S8}"),
                             cases[index].source, dialects[dialect], forms[form], routes[route], syntax.diagnostic, object.diagnostic);
                         BUSTER_TEST_RAW(arguments, syntax.error == (valid ? COMPILER_DRIVER_ERROR_NONE : COMPILER_DRIVER_ERROR_ANALYSIS), description);

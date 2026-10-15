@@ -38151,35 +38151,42 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_typedef_call_roles(UnitTestArguments* 
 #if (BUSTER_CPU_ARCH_X86_64 || BUSTER_CPU_ARCH_AARCH64) && !BUSTER_ANDROID && !BUSTER_IOS
     String8 standards[] = {S8("-std=c17"), S8("-std=gnu17"), S8("-std=c23"), S8("-std=gnu23")};
     String8 modes[] = {S8("-fregister-allocator=fast"), S8("-fregister-allocator=quality")};
+    String8 forms[] = {S8("-ffrontend-ssa"), S8("-fno-frontend-ssa")};
+    String8 layouts[] = {S8(""), S8("-fc-ast-pilot=implicit"), S8("-fc-ast-pilot=hybrid"), S8("-fc-ast-pilot=explicit")};
     for (u32 dialect = 0; dialect < BUSTER_ARRAY_LENGTH(standards); dialect += 1)
     {
         for (u32 mode = 0; mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
         {
-            for (u32 form = 0; form < 3; form += 1)
+            for (u32 form = 0; form < BUSTER_ARRAY_LENGTH(forms); form += 1)
             {
-                TemporalArena temporary = scratch_begin(&arguments->arena, 1);
-                String8 output = buster_test_temporary_unique_path(temporary.arena, S8("typedef-call-roles"), S8(".exe"));
-                String8 command[] = {S8("-nostdinc"), standards[dialect], modes[mode],
-                    form == 1 ? S8("-fno-frontend-ssa") : S8("-ffrontend-ssa"),
-                    form == 2 ? S8("-fno-c-ast-pilot") : S8("-fc-ast-pilot"), S8("-fverify-codegen"), S8("-o"), output, path};
-                CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena, (SliceString8)BUSTER_ARRAY_TO_SLICE(command));
-                invocation.reject_machine_fallback = true;
-                CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
-                BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
-                    string_format(temporary.arena, S8("typedef call roles {S8} {S8} form={u32}: {S8}"),
-                                  standards[dialect], modes[mode], form, compiled.diagnostic));
-                if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
+                for (u32 layout = 0; layout < BUSTER_ARRAY_LENGTH(layouts); layout += 1)
                 {
-                    String8 run[] = {output};
-                    ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
-                        (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
-                    if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                    TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+                    String8 output = buster_test_temporary_unique_path(temporary.arena, S8("typedef-call-roles"), S8(".exe"));
+                    String8 command[] = {layouts[layout], S8("-nostdinc"), standards[dialect], modes[mode],
+                        forms[form], S8("-fverify-codegen"), S8("-o"), output, path};
+                    // The default route omits a layout option rather than passing an empty argument.
+                    u64 layout_offset = layouts[layout].length ? 0 : 1;
+                    CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
+                        (SliceString8){.pointer = command + layout_offset, .length = BUSTER_ARRAY_LENGTH(command) - layout_offset});
+                    invocation.reject_machine_fallback = true;
+                    CompilerDriverResult compiled = compiler_driver_execute_invocation(temporary.arena, invocation);
+                    BUSTER_TEST_RAW(arguments, compiled.error == COMPILER_DRIVER_ERROR_NONE,
+                        string_format(temporary.arena, S8("typedef call roles {S8} {S8} form={u32}: {S8}"),
+                                      standards[dialect], modes[mode], form, compiled.diagnostic));
+                    if (compiled.error == COMPILER_DRIVER_ERROR_NONE)
                     {
-                        ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
-                        BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                        String8 run[] = {output};
+                        ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run),
+                            (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = true});
+                        if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                        {
+                            ProcessWaitResult execution = os_process_wait_deadline(temporary.arena, child, 30000000);
+                            BUSTER_TEST(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS);
+                        }
                     }
+                    c_test_scratch_end(temporary);
                 }
-                c_test_scratch_end(temporary);
             }
         }
     }
