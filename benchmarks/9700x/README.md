@@ -251,6 +251,19 @@ the ordinary comparison: the candidate binary without and with the flag on
 `-fsyntax-only` and `-c` cells. Its method, budget and evidence are in
 [benchmarking.md](../../docs/agents/benchmarking.md).
 
+A fresh exact `profile: ast-retirement-acceptance-v1` line, added once
+against every parent, adds #4058's fixed default/default two-compiler profile.
+Both binaries compile the same frozen baseline/current-main unity tree and
+its six unchanged throughput CI sources. Twenty syntax/object cells record
+paired wall time, retired instructions, peak RSS and separate untimed
+tree/fact retained-byte probes. The publisher replays sealed raw pairs,
+source identities, probe logs and reference objects. Unavailable instructions
+leave the required acceptance measurement incomplete. The profile is
+report-only; it adds no adoption budget or owner-hold waiver. Its harness
+dependency must land on trusted `main` before a candidate requests it; the
+request never supplies compiler flags, inputs or sampling counts. See
+[the fixed method](../../docs/agents/benchmarking.md#benchmarking-a-compiler-change-ab).
+
 A fresh exact `profile: constant-reuse-acceptance-v1` line, added once
 against every parent, adds issue #3011's fixed constant-reuse profile. It
 times the candidate binary on the `-g0` unity `-c` compile, without and with
