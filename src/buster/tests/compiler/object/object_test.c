@@ -1621,7 +1621,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_aarch64_text_anchor(UnitTestArgum
             {
                 String8 type = string_format(arguments->arena, S8("\t.type {S8}, "), spelling);
                 String8 size = string_format(arguments->arena, S8("\t.size {S8}, "), spelling);
-                BUSTER_TEST(arguments, object_bytes_contain(bytes, type) == (!suppressed && variant != 12));
+                BUSTER_TEST(arguments, object_bytes_contain(bytes, type) == !suppressed);
                 BUSTER_TEST(arguments, object_bytes_contain(bytes, size) == (!suppressed && variant != 12));
             }
             String8 reference = string_format(arguments->arena, S8("\t.quad {S8}"), target == 6 ?
@@ -1691,7 +1691,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_x86_64_elf_listing_metadata(UnitT
         // Hidden visibility: definitions and an undefined reference, never the visible names.
         BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.hidden hidden_function\n")) == elf);
         BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.hidden hidden_weak\n")) == elf);
-        BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.extern hidden_undefined\n\t.hidden hidden_undefined\n")) == elf);
+        BUSTER_TEST(arguments, object_bytes_contain(bytes, S8("\t.extern hidden_undefined\n\t.type hidden_undefined, @function\n\t.hidden hidden_undefined\n")) == elf);
         BUSTER_TEST(arguments, !object_bytes_contain(bytes, S8("\t.hidden visible_data\n")));
         BUSTER_TEST(arguments, !object_bytes_contain(bytes, S8("\t.hidden tv\n")));
         BUSTER_TEST(arguments, !object_bytes_contain(bytes, S8("\t.hidden __tls_get_addr\n")));
@@ -1788,7 +1788,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_index_order(UnitTestArgu
     ObjectRelocation relocations_before[BUSTER_ARRAY_LENGTH(relocations)];
     memcpy(symbols_before, symbols, sizeof(symbols));
     memcpy(relocations_before, relocations, sizeof(relocations));
-    String8 expected = S8("\t.intel_syntax noprefix\n\t.extern external\n\t.section .data\n"
+    String8 expected = S8("\t.intel_syntax noprefix\n\t.extern external\n\t.type external, @function\n\t.section .data\n"
                           "\t.globl first\n\t.type first, @object\nfirst:\n\t.type alias, @object\nalias:\n"
                           "\t.quad \"external\"\n\t.type second, @object\nsecond:\n\t.quad \"first\" + 3\n"
                           "\t.type end, @object\nend:\n\t.size end, 0\n\t.size second, 8\n\t.size first, 8\n\t.size alias, 8\n"
@@ -1843,7 +1843,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_index_order(UnitTestArgu
     object = (ObjectFile){.target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
                           .sections = &literal_section, .section_count = 1, .symbols = &literal_symbol, .symbol_count = 1,
                           .relocations = literal_relocations, .relocation_count = BUSTER_ARRAY_LENGTH(literal_relocations)};
-    expected = S8("\t.extern external\n\t.text\n.Lbuster_0_0:\n\t.quad external\n"
+    expected = S8("\t.extern external\n\t.type external, @function\n\t.text\n.Lbuster_0_0:\n\t.quad external\n"
                   "\tldr x0, .Lbuster_0_0\n\tldr x1, .Lbuster_0_16\n.Lbuster_0_16:\n\t.quad external + 7\n"
                   "\tldr x2, .Lbuster_0_16\n\t.section .note.GNU-stack,\"\",@progbits\n");
     BUSTER_TEST(arguments, object_assembly_test_index_queries(arguments->arena, &object));
@@ -2312,7 +2312,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult object_test_assembly_interior_internal_labels
         ObjectFile object = {.target = {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
                              .sections = &section, .section_count = 1, .symbols = &symbol, .symbol_count = 1,
                              .relocations = &relocation, .relocation_count = 1};
-        String8 expected = S8("\t.extern external\n\t.text\n\tb .Lbuster_0_8\n\t.quad external\n\t.set .Lbuster_0_8, . - 4\n\tret\n"
+        String8 expected = S8("\t.extern external\n\t.type external, @function\n\t.text\n\tb .Lbuster_0_8\n\t.quad external\n\t.set .Lbuster_0_8, . - 4\n\tret\n"
                               "\t.section .note.GNU-stack,\"\",@progbits\n");
         UnitTestResult one = object_test_assembly_interior_expect(arguments, &object, section.data, expected);
         result.test_count += one.test_count;

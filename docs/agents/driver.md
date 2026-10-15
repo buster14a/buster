@@ -1065,11 +1065,41 @@ general-dynamic TLS access keeps its padding as data (`.byte 0x66` before
 matching those bytes. `-g` and `-fPIC` listings therefore assemble with GNU as
 and Clang to the same section contents, symbol bindings and visibilities, and
 relocations as `-c`; the one difference is that a section symbol an assembler
-supplies replaces `ctor`-style local references to offset 0. Buster's own
-assembler accepts the `-g` listing but still has no `@TLSGD`. The listing is
-always Intel syntax: `-S` with `-masm=att` on a C input is refused ("-masm=att
-is not supported with -S"), while `-masm=att` with `-c` or with an assembly
-input (where it names the dialect the input is read in) is unchanged.
+supplies replaces `ctor`-style local references to offset 0. Buster's standalone assembler now accepts the x86-64 ELF modifiers printed on
+these relocation fields: `@GOTPCREL`, `@TLSGD`, `@TLSLD`, `@GOTTPOFF`,
+`@TPOFF` and `@DTPOFF`. GOTPCREL instruction operands are limited to
+RIP-relative MOV r32/r64, so the opcode and REX prefix determine whether the
+object records GOTPCRELX or REX_GOTPCRELX; other GOTPCREL instruction shapes
+receive a named unsupported-modifier diagnostic. TLSGD/TLSLD/GOTTPOFF require
+a 32-bit PC-relative field; TPOFF requires a 32-bit absolute field, and
+DTPOFF accepts 32- or 64-bit absolute fields. The modifier must name the
+field's sole relocation symbol; repeated modifiers, multiple-symbol integer
+expressions and wrong-width fields are refused with a named diagnostic.
+This support is for x86-64 ELF only. For `@GOTPCREL` instruction operands,
+Buster checks the complete encoded instruction and field offset. It assigns
+GOTPCRELX only to an exact six-byte unprefixed RIP-relative MOV r32 with its
+field at offset 2, and REX_GOTPCRELX only to an exact seven-byte form with one
+REX prefix and the field at offset 3 (MOV r32/r64). Operand-size, address-size,
+segment, lock/repeat and other prefixes receive the named unsupported-modifier
+diagnostic. An integer directive such as
+`.long symbol@GOTPCREL - .` has no instruction boundary, so Buster keeps the
+plain nonrelaxable `R_X86_64_GOTPCREL` kind and the expression's addend; it
+never infers a relaxation promise from preceding data bytes. The registered
+`compiler_driver_x86_elf_modifier_roundtrip` fixture checks these prefix
+refusals, this zero-addend data form, and links and runs a program that reads
+the resulting GOT slot. Its
+object comparison keeps symbol, section, offset and addend exact and permits
+only a different spelling within the GOT relocation family. Undefined ELF
+function, object and TLS-object types are emitted and parsed, preserving
+function/data/TLS identity through reassembly. In the unwind-only `-g0`
+path, producer-created x86-64 ELF text section bases retain the internal code
+kind but serialize as STT_NOTYPE; actual function entries retain STT_FUNC.
+The round-trip fixture covers default and named text bases and the unwind
+relocations that use them. The listing is always Intel
+syntax: `-S` with `-masm=att` on a C input is refused ("-masm=att is not supported
+with -S"), while `-masm=att` with `-c` or with an assembly input (where it names
+the dialect the input is read in) is unchanged.
+
 `compiler_driver_test_assembly_x86_64_object_semantics`,
 `compiler_driver_test_assembly_x86_64_tls_general_dynamic_padding` and
 `object_test_x86_64_elf_listing_metadata` cover this.

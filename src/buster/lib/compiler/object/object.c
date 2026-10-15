@@ -1654,7 +1654,9 @@ BUSTER_GLOBAL_LOCAL void object_assembly_emit_labels(ObjectAssemblyBuffer* buffe
         {
             object_assembly_append_string(buffer, S8("\t.type "));
             object_assembly_append_assembly_symbol(buffer, target, symbol->name);
-            object_assembly_append_string(buffer, symbol->kind == OBJECT_SYMBOL_FUNCTION ? S8(", @function\n") : S8(", @object\n"));
+            object_assembly_append_string(buffer, symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES
+                                                       ? S8(", @tls_object\n")
+                                                       : symbol->kind == OBJECT_SYMBOL_FUNCTION ? S8(", @function\n") : S8(", @object\n"));
         }
         object_assembly_append_assembly_symbol(buffer, target, symbol->name);
         object_assembly_append_string(buffer, S8(":\n"));
@@ -1947,10 +1949,10 @@ BUSTER_GLOBAL_LOCAL bool object_assembly_emit_relocation(ObjectAssemblyBuffer* b
             object_assembly_append_x86_relocation_value(buffer, object, target, relocation, S8("@TLVP"));
             object_assembly_append_string(buffer, S8(" - .\n"));
             return true;
-        // -fPIC's GOT form as a data directive. It is never emitted into a
-        // data section by this compiler -- it names a field inside an
-        // instruction -- but the printer is exhaustive over the vocabulary
-        // and an assembler reading this back needs the modifier.
+        // A GOT relocation may be printed as a raw directive when the
+        // instruction boundary is not retained. The expression preserves its
+        // field addend; reassembly then uses plain nonrelaxable GOTPCREL rather
+        // than inferring an opcode promise from adjacent bytes.
         case OBJECT_RELOCATION_X86_64_GOTPCREL:
         case OBJECT_RELOCATION_X86_64_GOTPCRELX:
         case OBJECT_RELOCATION_X86_64_REX_GOTPCRELX:
@@ -4573,6 +4575,15 @@ String8 object_print_assembly(Arena* arena, ObjectFile* object)
                     object_assembly_append_string(&buffer, symbol->weak && object_assembly_is_x86_64_elf(object->target) ? S8("\t.weak ") : S8("\t.extern "));
                     object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
                     object_assembly_append_string(&buffer, S8("\n"));
+                    if (object_assembly_is_gnu_type_target(object->target) && !symbol->undefined_untyped)
+                    {
+                        object_assembly_append_string(&buffer, S8("\t.type "));
+                        object_assembly_append_assembly_symbol(&buffer, object->target, symbol->name);
+                        object_assembly_append_string(&buffer, symbol->thread_local_state == OBJECT_SYMBOL_THREAD_LOCAL_YES
+                                                                   ? S8(", @tls_object\n")
+                                                                   : symbol->kind == OBJECT_SYMBOL_FUNCTION ? S8(", @function\n")
+                                                                                                             : S8(", @object\n"));
+                    }
                     if (symbol->hidden && object_assembly_is_x86_64_elf(object->target))
                     {
                         object_assembly_append_string(&buffer, S8("\t.hidden "));
@@ -13734,6 +13745,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                     .name = S8(".text"),
                     .section = OBJECT_SECTION_TEXT,
                     .kind = OBJECT_SYMBOL_FUNCTION,
+                    .untyped = object_assembly_is_x86_64_elf(target),
                 };
             }
             cfi_section_symbols[OBJECT_SECTION_TEXT] = cfi_text_symbol;
@@ -13749,6 +13761,7 @@ ObjectFile object_from_canonical_codegen_module(Arena* arena, IrProgram* program
                         .name = named.sections[index].name,
                         .section = OBJECT_SECTION_COUNT + index,
                         .kind = OBJECT_SYMBOL_FUNCTION,
+                        .untyped = object_assembly_is_x86_64_elf(target),
                     };
                 }
             }

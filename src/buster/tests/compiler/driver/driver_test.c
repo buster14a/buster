@@ -11078,7 +11078,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_assembly_x86_64_object_s
             // none of the weak or default-visibility names is hidden.
             BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.hidden object_hidden_value\n")) != BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.hidden object_hidden_function\n")) != BUSTER_STRING_NO_MATCH);
-            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.extern object_hidden_call\n\t.hidden object_hidden_call\n")) != BUSTER_STRING_NO_MATCH);
+            BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.extern object_hidden_call\n\t.type object_hidden_call, @function\n\t.hidden object_hidden_call\n")) != BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.hidden object_entry")) == BUSTER_STRING_NO_MATCH);
             BUSTER_TEST(arguments, string_first_sequence(text, S8("\t.hidden object_weak")) == BUSTER_STRING_NO_MATCH);
             // The assembler owns each section's symbol: a label, `.type` or

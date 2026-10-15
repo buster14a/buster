@@ -8477,9 +8477,21 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_assembly_relocation_kind(Target target,
     bool valid = true;
     bool macho = target.os == OPERATING_SYSTEM_MACOS || target.os == OPERATING_SYSTEM_IOS;
     bool coff = target.os == OPERATING_SYSTEM_WINDOWS;
+    bool x86_elf = target.cpu_arch == CPU_ARCH_X86_64 &&
+                   (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID ||
+                    target.os == OPERATING_SYSTEM_FREESTANDING);
     switch (kind)
     {
     case ASSEMBLY_RELOCATION_X86_PC32: *object_kind = OBJECT_RELOCATION_X86_64_PC32; break;
+    case ASSEMBLY_RELOCATION_X86_64_GOTPCREL: *object_kind = OBJECT_RELOCATION_X86_64_GOTPCREL; valid = x86_elf; break;
+    case ASSEMBLY_RELOCATION_X86_64_GOTPCRELX: *object_kind = OBJECT_RELOCATION_X86_64_GOTPCRELX; valid = x86_elf; break;
+    case ASSEMBLY_RELOCATION_X86_64_REX_GOTPCRELX: *object_kind = OBJECT_RELOCATION_X86_64_REX_GOTPCRELX; valid = x86_elf; break;
+    case ASSEMBLY_RELOCATION_X86_64_TLSGD: *object_kind = OBJECT_RELOCATION_X86_64_TLSGD; valid = x86_elf; break;
+    case ASSEMBLY_RELOCATION_X86_64_TLSLD: *object_kind = OBJECT_RELOCATION_X86_64_TLSLD; valid = x86_elf; break;
+    case ASSEMBLY_RELOCATION_X86_64_GOTTPOFF: *object_kind = OBJECT_RELOCATION_X86_64_GOTTPOFF; valid = x86_elf; break;
+    case ASSEMBLY_RELOCATION_X86_64_TPOFF32: *object_kind = OBJECT_RELOCATION_X86_64_TPOFF32; valid = x86_elf; break;
+    case ASSEMBLY_RELOCATION_X86_64_DTPOFF32: *object_kind = OBJECT_RELOCATION_X86_64_DTPOFF32; valid = x86_elf; break;
+    case ASSEMBLY_RELOCATION_X86_64_DTPOFF64: *object_kind = OBJECT_RELOCATION_X86_64_DTPOFF64; valid = x86_elf; break;
     case ASSEMBLY_RELOCATION_X86_PC64: *object_kind = OBJECT_RELOCATION_X86_64_PC64; break;
     case ASSEMBLY_RELOCATION_AARCH64_PREL32: *object_kind = OBJECT_RELOCATION_AARCH64_PREL32; break;
     case ASSEMBLY_RELOCATION_AARCH64_PREL64: *object_kind = OBJECT_RELOCATION_AARCH64_PREL64; break;
@@ -8632,7 +8644,8 @@ BUSTER_GLOBAL_LOCAL CompilerDriverResult compiler_driver_execute_assembly_source
             .hidden = symbol.hidden,
             .untyped = symbol.untyped,
             .undefined_untyped = !symbol.defined && !symbol.typed,
-            .thread_local_state = symbol.typed ? OBJECT_SYMBOL_THREAD_LOCAL_NO : OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN,
+            .thread_local_state = symbol.is_thread_local ? OBJECT_SYMBOL_THREAD_LOCAL_YES :
+                                  symbol.typed ? OBJECT_SYMBOL_THREAD_LOCAL_NO : OBJECT_SYMBOL_THREAD_LOCAL_UNKNOWN,
         };
     }
     for (u32 index = 0; index < unit.relocation_count; index += 1)

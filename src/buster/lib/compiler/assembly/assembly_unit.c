@@ -96,11 +96,24 @@ typedef enum AssemblyUnitBranchState
     ASSEMBLY_UNIT_BRANCH_LONG,
 } AssemblyUnitBranchState;
 
+typedef enum AssemblyUnitX86Modifier
+{
+    ASSEMBLY_UNIT_X86_MODIFIER_NONE,
+    ASSEMBLY_UNIT_X86_MODIFIER_GOTPCREL,
+    ASSEMBLY_UNIT_X86_MODIFIER_TLSGD,
+    ASSEMBLY_UNIT_X86_MODIFIER_TLSLD,
+    ASSEMBLY_UNIT_X86_MODIFIER_GOTTPOFF,
+    ASSEMBLY_UNIT_X86_MODIFIER_TPOFF,
+    ASSEMBLY_UNIT_X86_MODIFIER_DTPOFF,
+} AssemblyUnitX86Modifier;
+
 typedef struct AssemblyUnitInstruction AssemblyUnitInstruction;
 struct AssemblyUnitInstruction
 {
     AssemblyEncodeResult encoded;
     String8 plt_symbol;
+    String8 modifier_symbol;
+    AssemblyUnitX86Modifier modifier;
     u64 offset;
     u32 relocation_start;
 };
@@ -111,6 +124,8 @@ struct AssemblyUnitInteger
 {
     String8 expression;
     String8 directive;
+    String8 modifier_symbol;
+    AssemblyUnitX86Modifier modifier;
     u64 offset;
     u32 section;
     u32 width;
@@ -561,7 +576,7 @@ bool assembly_unit_test_parse_number(String8 text, u64* value)
 // including its position in a comma-separated list. Names may be quoted, as
 // in the -S printer. At most one positive and one negative symbolic term fit
 // the relocation model; unsupported expressions are diagnosed by the caller.
-BUSTER_GLOBAL_LOCAL bool assembly_unit_evaluate(AssemblyUnitBuilder* builder, String8 text, u64 location, AssemblyUnitValue* value)
+BUSTER_GLOBAL_LOCAL bool assembly_unit_evaluate(AssemblyUnitBuilder* builder, String8 text, u64 location, AssemblyUnitValue* value, bool preserve_symbolic)
 {
     AssemblyUnitValue result = {.symbol = UINT32_MAX, .subtract_symbol = UINT32_MAX};
     u64 index = 0;
@@ -652,7 +667,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_evaluate(AssemblyUnitBuilder* builder, St
         }
     }
     valid = valid && !expect_term;
-    if (valid && result.has_symbol && result.has_subtract_symbol)
+    if (valid && !preserve_symbolic && result.has_symbol && result.has_subtract_symbol)
     {
         AssemblyUnitSymbol positive = result.location ? (AssemblyUnitSymbol){.defined = true, .section = builder->current_section}
                                                      : builder->result.symbols[result.symbol];
@@ -673,7 +688,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_evaluate_absolute(AssemblyUnitBuilder* bu
 {
     AssemblyUnitValue evaluated = {0};
     u64 location = builder->current_section < builder->result.section_count ? builder->section_offsets[builder->current_section] : 0;
-    bool valid = assembly_unit_evaluate(builder, assembly_unit_trim(text), location, &evaluated) &&
+    bool valid = assembly_unit_evaluate(builder, assembly_unit_trim(text), location, &evaluated, false) &&
                  !evaluated.has_symbol && !evaluated.has_subtract_symbol;
     if (valid) *value = evaluated.constant;
     return valid;
@@ -1027,13 +1042,16 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_symbol(AssemblyUnitBuilder* bui
         {
             return false;
         }
-        // `@function` in GNU as, `%function` where `@` starts a comment, and
-        // the spelled-out `STT_FUNC` are the three forms a libc writes.
+        // GNU assemblers accept function, object and TLS-object type names;
+        // `@tls_object` preserves the ELF TLS identity of undefined symbols.
         bool function = string_ends_with_sequence(parts[1], S8("function")) || string_ends_with_sequence(parts[1], S8("STT_FUNC"));
-        bool object = string_ends_with_sequence(parts[1], S8("object")) || string_ends_with_sequence(parts[1], S8("STT_OBJECT"));
+        bool tls_object = string_ends_with_sequence(parts[1], S8("tls_object")) || string_ends_with_sequence(parts[1], S8("STT_TLS"));
+        bool object = !tls_object &&
+                      (string_ends_with_sequence(parts[1], S8("object")) || string_ends_with_sequence(parts[1], S8("STT_OBJECT")));
         record->function = function;
-        record->typed = function || object;
-        return function || object;
+        record->is_thread_local = tls_object;
+        record->typed = function || object || tls_object;
+        return function || object || tls_object;
     }
     if (string_equal(directive, S8(".size")))
     {
@@ -1190,6 +1208,175 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_integer_directive_width(Target target, Str
     return width;
 }
 
+BUSTER_GLOBAL_LOCAL AssemblyUnitX86Modifier assembly_unit_x86_modifier_from_suffix(String8 suffix)
+{
+    AssemblyUnitX86Modifier result = ASSEMBLY_UNIT_X86_MODIFIER_NONE;
+    if (string_equal(suffix, S8("GOTPCREL"))) result = ASSEMBLY_UNIT_X86_MODIFIER_GOTPCREL;
+    else if (string_equal(suffix, S8("TLSGD"))) result = ASSEMBLY_UNIT_X86_MODIFIER_TLSGD;
+    else if (string_equal(suffix, S8("TLSLD"))) result = ASSEMBLY_UNIT_X86_MODIFIER_TLSLD;
+    else if (string_equal(suffix, S8("GOTTPOFF"))) result = ASSEMBLY_UNIT_X86_MODIFIER_GOTTPOFF;
+    else if (string_equal(suffix, S8("TPOFF"))) result = ASSEMBLY_UNIT_X86_MODIFIER_TPOFF;
+    else if (string_equal(suffix, S8("DTPOFF"))) result = ASSEMBLY_UNIT_X86_MODIFIER_DTPOFF;
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL String8 assembly_unit_x86_modifier_name(AssemblyUnitX86Modifier modifier)
+{
+    String8 result = S8("unknown");
+    switch (modifier)
+    {
+    case ASSEMBLY_UNIT_X86_MODIFIER_GOTPCREL: result = S8("GOTPCREL"); break;
+    case ASSEMBLY_UNIT_X86_MODIFIER_TLSGD: result = S8("TLSGD"); break;
+    case ASSEMBLY_UNIT_X86_MODIFIER_TLSLD: result = S8("TLSLD"); break;
+    case ASSEMBLY_UNIT_X86_MODIFIER_GOTTPOFF: result = S8("GOTTPOFF"); break;
+    case ASSEMBLY_UNIT_X86_MODIFIER_TPOFF: result = S8("TPOFF"); break;
+    case ASSEMBLY_UNIT_X86_MODIFIER_DTPOFF: result = S8("DTPOFF"); break;
+    case ASSEMBLY_UNIT_X86_MODIFIER_NONE: break;
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL bool assembly_unit_x86_elf_target(Target target)
+{
+    return target.cpu_arch == CPU_ARCH_X86_64 &&
+           (target.os == OPERATING_SYSTEM_LINUX || target.os == OPERATING_SYSTEM_ANDROID ||
+            target.os == OPERATING_SYSTEM_FREESTANDING);
+}
+
+// Remove one x86-64 ELF symbol modifier from one integer expression while
+// retaining its symbol identity for the relocation authority check.
+BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_integer_modifier(AssemblyUnitBuilder* builder, String8 expression, String8* rewritten,
+                                                                 String8* modifier_symbol, AssemblyUnitX86Modifier* modifier)
+{
+    char8* text = arena_allocate(builder->arena, char8, expression.length + 1);
+    u64 length = 0;
+    bool quoted = false;
+    bool valid = true;
+    bool changed = false;
+    u64 quoted_name_begin = 0;
+    u64 quoted_name_end = 0;
+    *modifier_symbol = (String8){0};
+    *modifier = ASSEMBLY_UNIT_X86_MODIFIER_NONE;
+    for (u64 index = 0; index < expression.length && valid; index += 1)
+    {
+        char8 code_unit = expression.pointer[index];
+        if (quoted && code_unit == '\\' && index + 1 < expression.length)
+        {
+            text[length++] = code_unit;
+            text[length++] = expression.pointer[index + 1];
+            index += 1;
+        }
+        else if (code_unit == '"')
+        {
+            if (quoted) quoted_name_end = index;
+            else quoted_name_begin = index + 1;
+            quoted = !quoted;
+            text[length++] = code_unit;
+        }
+        else if (code_unit != '@' || quoted)
+        {
+            text[length++] = code_unit;
+        }
+        else
+        {
+            u64 suffix_end = index + 1;
+            while (suffix_end < expression.length && assembly_unit_name_character(expression.pointer[suffix_end])) suffix_end += 1;
+            String8 suffix = string_slice(expression, index + 1, suffix_end);
+            AssemblyUnitX86Modifier parsed = assembly_unit_x86_modifier_from_suffix(suffix);
+            u64 name_begin = index;
+            u64 name_end = index;
+            if (index && expression.pointer[index - 1] == '"' && quoted_name_end == index - 1)
+            {
+                name_begin = quoted_name_begin;
+                name_end = quoted_name_end;
+            }
+            else
+            {
+                while (name_begin && assembly_unit_name_character(expression.pointer[name_begin - 1])) name_begin -= 1;
+            }
+            valid = !changed && parsed != ASSEMBLY_UNIT_X86_MODIFIER_NONE && assembly_unit_x86_elf_target(builder->target) && name_begin < name_end;
+            if (valid)
+            {
+                *modifier_symbol = string_slice(expression, name_begin, name_end);
+                *modifier = parsed;
+                changed = true;
+                index = suffix_end - 1;
+            }
+            else
+            {
+                assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                                S8("unsupported symbol modifier '@{S8}' in integer directive"), suffix);
+            }
+        }
+    }
+    if (valid && changed)
+    {
+        *rewritten = (String8){.pointer = text, .length = length};
+    }
+    else
+    {
+        *rewritten = expression;
+    }
+    return valid;
+}
+
+// Only an encoded instruction establishes a relaxation boundary. GOTPCREL
+// integer fields get the plain nonrelaxable kind regardless of adjacent bytes.
+BUSTER_GLOBAL_LOCAL AssemblyRelocationKind assembly_unit_x86_modifier_relocation_kind(AssemblyUnitX86Modifier modifier, u32 width,
+                                                                                      bool pc_relative, bool instruction_boundary,
+                                                                                      ByteSlice bytes, u64 offset)
+{
+    AssemblyRelocationKind result = ASSEMBLY_RELOCATION_COUNT;
+    if (modifier == ASSEMBLY_UNIT_X86_MODIFIER_GOTPCREL && width == 4 && pc_relative)
+    {
+        // Integer directives carry a field, not an instruction boundary. Keep
+        // the ordinary nonrelaxable relocation even when preceding data bytes
+        // happen to look like a MOV opcode.
+        if (!instruction_boundary)
+        {
+            result = ASSEMBLY_RELOCATION_X86_64_GOTPCREL;
+        }
+        else if (bytes.pointer && offset <= bytes.length && width <= bytes.length - offset)
+        {
+            // The field's lookback is not a complete instruction boundary:
+            // prefixes such as 0x66 and FS can make the same trailing bytes a
+            // different MOV shape. Accept only the exact unprefixed and
+            // single-REX envelopes emitted by the supported forms.
+            bool rex_mov = bytes.length == 7 && offset == 3 && bytes.pointer[0] >= 0x40 && bytes.pointer[0] <= 0x4f &&
+                           bytes.pointer[1] == 0x8b && (bytes.pointer[2] & 0xc7) == 0x05;
+            bool mov = bytes.length == 6 && offset == 2 && bytes.pointer[0] == 0x8b &&
+                       (bytes.pointer[1] & 0xc7) == 0x05;
+            if (rex_mov) result = ASSEMBLY_RELOCATION_X86_64_REX_GOTPCRELX;
+            else if (mov) result = ASSEMBLY_RELOCATION_X86_64_GOTPCRELX;
+        }
+    }
+    else if (modifier == ASSEMBLY_UNIT_X86_MODIFIER_TLSGD && width == 4 && pc_relative)
+    {
+        result = ASSEMBLY_RELOCATION_X86_64_TLSGD;
+    }
+    else if (modifier == ASSEMBLY_UNIT_X86_MODIFIER_TLSLD && width == 4 && pc_relative)
+    {
+        result = ASSEMBLY_RELOCATION_X86_64_TLSLD;
+    }
+    else if (modifier == ASSEMBLY_UNIT_X86_MODIFIER_GOTTPOFF && width == 4 && pc_relative)
+    {
+        result = ASSEMBLY_RELOCATION_X86_64_GOTTPOFF;
+    }
+    else if (modifier == ASSEMBLY_UNIT_X86_MODIFIER_TPOFF && width == 4 && !pc_relative)
+    {
+        result = ASSEMBLY_RELOCATION_X86_64_TPOFF32;
+    }
+    else if (modifier == ASSEMBLY_UNIT_X86_MODIFIER_DTPOFF && width == 4 && !pc_relative)
+    {
+        result = ASSEMBLY_RELOCATION_X86_64_DTPOFF32;
+    }
+    else if (modifier == ASSEMBLY_UNIT_X86_MODIFIER_DTPOFF && width == 8 && !pc_relative)
+    {
+        result = ASSEMBLY_RELOCATION_X86_64_DTPOFF64;
+    }
+    return result;
+}
+
 // Retain data expressions until labels and binding directives are complete.
 // Bytes reserve their final positions now; materialization evaluates each
 // expression at its own field offset, so forward differences need no pass
@@ -1197,6 +1384,9 @@ BUSTER_GLOBAL_LOCAL u32 assembly_unit_integer_directive_width(Target target, Str
 BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_integer(AssemblyUnitBuilder* builder, u32 width, String8 directive, String8 operands)
 {
     String8 parts[ASSEMBLY_UNIT_OPERAND_CAPACITY] = {0};
+    String8 expressions[ASSEMBLY_UNIT_OPERAND_CAPACITY] = {0};
+    String8 modifier_symbols[ASSEMBLY_UNIT_OPERAND_CAPACITY] = {0};
+    AssemblyUnitX86Modifier modifiers[ASSEMBLY_UNIT_OPERAND_CAPACITY] = {0};
     u32 count = assembly_unit_split_operands(operands, parts, BUSTER_ARRAY_LENGTH(parts));
     bool valid = count != UINT32_MAX && count && assembly_unit_section_current(builder);
     valid = valid && !assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind) &&
@@ -1207,15 +1397,34 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_integer(AssemblyUnitBuilder* bu
     for (u32 index = 0; index < count && valid; index += 1)
     {
         AssemblyUnitValue value = {0};
-        valid = assembly_unit_evaluate(builder, parts[index], base + (u64)index * width, &value);
+        expressions[index] = parts[index];
+        bool operand_valid = assembly_unit_rewrite_integer_modifier(builder, parts[index], expressions + index, modifier_symbols + index, modifiers + index);
+        if (operand_valid)
+        {
+            operand_valid = assembly_unit_evaluate(builder, expressions[index], base + (u64)index * width, &value,
+                                             modifiers[index] != ASSEMBLY_UNIT_X86_MODIFIER_NONE);
+        }
+        bool relative = value.has_symbol && value.has_subtract_symbol && value.subtract_location && !value.location;
+        if (operand_valid && modifiers[index] != ASSEMBLY_UNIT_X86_MODIFIER_NONE &&
+            value.has_subtract_symbol && !relative)
+        {
+            operand_valid = false;
+        }
+        if (!operand_valid && modifiers[index] != ASSEMBLY_UNIT_X86_MODIFIER_NONE && !builder->result.diagnostic_count)
+        {
+            assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                            S8("unsupported symbol modifier '@{S8}' in integer expression"),
+                                            assembly_unit_x86_modifier_name(modifiers[index]));
+        }
+        valid = valid && operand_valid;
     }
     if (valid)
     {
         for (u32 index = 0; index < count; index += 1)
         {
             builder->integers[builder->integer_count++] = (AssemblyUnitInteger){
-                .expression = parts[index], .directive = directive, .offset = base + (u64)index * width,
-                .section = builder->current_section, .width = width, .line = builder->line, .column = builder->column,
+                .expression = expressions[index], .directive = directive, .modifier_symbol = modifier_symbols[index], .modifier = modifiers[index],
+                .offset = base + (u64)index * width, .section = builder->current_section, .width = width, .line = builder->line, .column = builder->column,
             };
         }
         u64 length = (u64)count * width;
@@ -1272,13 +1481,47 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_materialize_integers(AssemblyUnitBuilder*
         builder->line = integer.line;
         builder->column = integer.column;
         AssemblyUnitValue value = {0};
-        valid = assembly_unit_evaluate(builder, integer.expression, integer.offset, &value);
+        valid = assembly_unit_evaluate(builder, integer.expression, integer.offset, &value,
+                                      integer.modifier != ASSEMBLY_UNIT_X86_MODIFIER_NONE);
         bool relative = value.has_symbol && value.has_subtract_symbol && value.subtract_location && !value.location;
-        valid = valid && (!value.has_subtract_symbol || relative);
+        // Do not let the generic same-section fold erase a modifier's symbol relocation.
+        bool expression_shape_valid = !value.has_subtract_symbol || relative;
+        if (integer.modifier != ASSEMBLY_UNIT_X86_MODIFIER_NONE &&
+            (!valid || !value.has_symbol || !expression_shape_valid))
+        {
+            assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                            S8("unsupported symbol modifier '@{S8}' in integer expression"),
+                                            assembly_unit_x86_modifier_name(integer.modifier));
+            valid = false;
+        }
+        valid = valid && expression_shape_valid;
+        AssemblyRelocationKind modifier_kind = ASSEMBLY_RELOCATION_COUNT;
+        if (valid && integer.modifier != ASSEMBLY_UNIT_X86_MODIFIER_NONE)
+        {
+            bool pc_relative = integer.modifier == ASSEMBLY_UNIT_X86_MODIFIER_GOTPCREL ||
+                               integer.modifier == ASSEMBLY_UNIT_X86_MODIFIER_TLSGD ||
+                               integer.modifier == ASSEMBLY_UNIT_X86_MODIFIER_TLSLD ||
+                               integer.modifier == ASSEMBLY_UNIT_X86_MODIFIER_GOTTPOFF;
+            bool symbol_matches = value.has_symbol && value.symbol < builder->result.symbol_count &&
+                                  string_equal(builder->result.symbols[value.symbol].name, integer.modifier_symbol);
+            valid = symbol_matches && relative == pc_relative;
+            if (valid)
+            {
+                modifier_kind = assembly_unit_x86_modifier_relocation_kind(integer.modifier, integer.width, relative, false,
+                                                                            builder->result.sections[integer.section].data, integer.offset);
+                valid = modifier_kind != ASSEMBLY_RELOCATION_COUNT;
+            }
+            if (!valid)
+            {
+                assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                                S8("unsupported symbol modifier '@{S8}' for this integer field"),
+                                                assembly_unit_x86_modifier_name(integer.modifier));
+            }
+        }
         if (valid && value.has_symbol)
         {
-            AssemblyRelocationKind kind = ASSEMBLY_RELOCATION_COUNT;
-            if (integer.width == 4 || integer.width == 8)
+            AssemblyRelocationKind kind = modifier_kind;
+            if (integer.modifier == ASSEMBLY_UNIT_X86_MODIFIER_NONE && (integer.width == 4 || integer.width == 8))
             {
                 bool aarch64 = builder->target.cpu_arch == CPU_ARCH_AARCH64;
                 kind = relative ? (integer.width == 8 ? (aarch64 ? ASSEMBLY_RELOCATION_AARCH64_PREL64 : ASSEMBLY_RELOCATION_X86_PC64)
@@ -1455,7 +1698,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive_set(AssemblyUnitBuilder* builde
     u32 symbol = valid ? assembly_unit_symbol_intern(builder, assembly_unit_unquote(assembly_unit_word(parts[0], 0))) : UINT32_MAX;
     AssemblyUnitValue value = {0};
     valid = symbol != UINT32_MAX && !builder->result.symbols[symbol].defined &&
-            assembly_unit_evaluate(builder, parts[1], builder->section_offsets[builder->current_section], &value) &&
+            assembly_unit_evaluate(builder, parts[1], builder->section_offsets[builder->current_section], &value, false) &&
             !value.has_subtract_symbol;
     if (valid && !value.has_symbol)
     {
@@ -1567,7 +1810,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_resolve_aliases(AssemblyUnitBuilder* buil
             builder->current_section = alias.section;
             builder->line = alias.line;
             builder->column = alias.column;
-            if (defined->defined || !assembly_unit_evaluate(builder, alias.expression, 0, &value)) continue;
+            if (defined->defined || !assembly_unit_evaluate(builder, alias.expression, 0, &value, false)) continue;
             AssemblyUnitSymbol target = builder->result.symbols[value.symbol];
             if (target.defined)
             {
@@ -1723,8 +1966,11 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_directive(AssemblyUnitBuilder* builder, S
 // spellings the instruction layer below does not read. Both are rewritten
 // here into a plain symbol name in a fresh copy, preserving the PLT request
 // beside the resulting relocation and the original text for diagnostics.
-BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder, String8 line, String8* rewritten, String8* plt_symbol)
+BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder, String8 line, String8* rewritten, String8* plt_symbol,
+                                                     String8* modifier_symbol, AssemblyUnitX86Modifier* modifier)
 {
+    *modifier_symbol = (String8){0};
+    *modifier = ASSEMBLY_UNIT_X86_MODIFIER_NONE;
     bool changed = false;
     bool quoted = false;
     for (u64 index = 0; index < line.length && !changed; index += 1)
@@ -1881,13 +2127,25 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_rewrite_line(AssemblyUnitBuilder* builder
                     name_begin -= 1;
                 }
             }
-            if ((!string_equal(suffix, S8("PLT")) && !string_equal(suffix, S8("plt"))) ||
-                name_begin == name_end || plt_symbol->length)
+            bool plt = string_equal(suffix, S8("PLT")) || string_equal(suffix, S8("plt"));
+            AssemblyUnitX86Modifier parsed = assembly_unit_x86_modifier_from_suffix(suffix);
+            bool duplicate = plt_symbol->length || *modifier != ASSEMBLY_UNIT_X86_MODIFIER_NONE;
+            bool supported = name_begin < name_end && !duplicate &&
+                             (plt || (parsed != ASSEMBLY_UNIT_X86_MODIFIER_NONE && assembly_unit_x86_elf_target(builder->target)));
+            if (!supported)
             {
                 assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE, S8("unsupported symbol modifier '@{S8}'"), suffix);
                 return false;
             }
-            *plt_symbol = string_slice(line, name_begin, name_end);
+            if (plt)
+            {
+                *plt_symbol = string_slice(line, name_begin, name_end);
+            }
+            else
+            {
+                *modifier_symbol = string_slice(line, name_begin, name_end);
+                *modifier = parsed;
+            }
             index = suffix_end;
             continue;
         }
@@ -1942,10 +2200,12 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
     TemporalArena statement = scratch_begin(&builder->arena, 1);
     String8 rewritten = {0};
     String8 plt_symbol = {0};
+    String8 modifier_symbol = {0};
+    AssemblyUnitX86Modifier modifier = ASSEMBLY_UNIT_X86_MODIFIER_NONE;
     bool result = false;
     AssemblyUnitInstruction* cached = builder->instructions ? builder->instructions + builder->statement : 0;
     bool ready = cached && builder->layout_cached && cached->encoded.bytes.pointer;
-    if ((ready || assembly_unit_rewrite_line(builder, line, &rewritten, &plt_symbol)) && assembly_unit_section_current(builder))
+    if ((ready || assembly_unit_rewrite_line(builder, line, &rewritten, &plt_symbol, &modifier_symbol, &modifier)) && assembly_unit_section_current(builder))
     {
         if (assembly_unit_section_kind_is_zero_fill(builder->result.sections[builder->current_section].kind))
         {
@@ -1977,8 +2237,10 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                 if (ready)
                 {
                     plt_symbol = cached->plt_symbol;
+                    modifier_symbol = cached->modifier_symbol;
+                    modifier = cached->modifier;
                 }
-                bool jump = builder->branch_states && !plt_symbol.length && encoded.relocation_count == 1 &&
+                bool jump = builder->branch_states && !plt_symbol.length && modifier == ASSEMBLY_UNIT_X86_MODIFIER_NONE && encoded.relocation_count == 1 &&
                             encoded.relocations[0].kind == ASSEMBLY_RELOCATION_X86_PC32 &&
                             ((encoded.bytes.length == 5 && encoded.bytes.pointer[0] == 0xe9 && encoded.relocations[0].offset == 1) ||
                              (encoded.bytes.length == 6 && encoded.bytes.pointer[0] == 0x0f &&
@@ -1986,7 +2248,14 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                 bool short_jump = jump && builder->branch_states[builder->statement] == ASSEMBLY_UNIT_BRANCH_SHORT;
                 u64 base = builder->section_offsets[builder->current_section];
                 bool plt_matched = !plt_symbol.length;
-                bool valid = true;
+                bool modifier_matched = modifier == ASSEMBLY_UNIT_X86_MODIFIER_NONE;
+                bool valid = modifier == ASSEMBLY_UNIT_X86_MODIFIER_NONE || encoded.relocation_count == 1;
+                if (!valid)
+                {
+                    assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                                    S8("symbol modifier '@{S8}' requires exactly one instruction relocation"),
+                                                    assembly_unit_x86_modifier_name(modifier));
+                }
                 for (u32 index = 0; index < encoded.relocation_count && valid; index += 1)
                 {
                     AssemblyRelocation relocation = encoded.relocations[index];
@@ -2003,10 +2272,47 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                     else
                     {
                         String8 relocation_name = encoded.symbols[relocation.symbol].name;
+                        if (modifier != ASSEMBLY_UNIT_X86_MODIFIER_NONE)
+                        {
+                            bool symbol_matches = string_equal(relocation_name, modifier_symbol);
+                            bool pc_relative = relocation.kind == ASSEMBLY_RELOCATION_X86_PC32 ||
+                                                relocation.kind == ASSEMBLY_RELOCATION_X86_64_GOTPCREL ||
+                                                relocation.kind == ASSEMBLY_RELOCATION_X86_64_GOTPCRELX ||
+                                                relocation.kind == ASSEMBLY_RELOCATION_X86_64_REX_GOTPCRELX ||
+                                                relocation.kind == ASSEMBLY_RELOCATION_X86_64_TLSGD ||
+                                                relocation.kind == ASSEMBLY_RELOCATION_X86_64_TLSLD ||
+                                                relocation.kind == ASSEMBLY_RELOCATION_X86_64_GOTTPOFF;
+                            u32 width = pc_relative || relocation.kind == ASSEMBLY_RELOCATION_X86_32 ||
+                                                relocation.kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_SIGN_EXTENDED ||
+                                                relocation.kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE32_ZERO_EXTENDED ||
+                                                relocation.kind == ASSEMBLY_RELOCATION_X86_64_TPOFF32 ||
+                                                relocation.kind == ASSEMBLY_RELOCATION_X86_64_DTPOFF32
+                                            ? 4
+                                        : relocation.kind == ASSEMBLY_RELOCATION_X86_ABSOLUTE64 ||
+                                                  relocation.kind == ASSEMBLY_RELOCATION_X86_64_DTPOFF64
+                                            ? 8 : 0;
+                            bool addend_matches = !pc_relative || relocation.addend == -4;
+                            AssemblyRelocationKind modifier_kind = symbol_matches && addend_matches
+                                ? assembly_unit_x86_modifier_relocation_kind(modifier, width, pc_relative, true,
+                                                                             encoded.bytes, relocation.offset)
+                                : ASSEMBLY_RELOCATION_COUNT;
+                            if (modifier_kind == ASSEMBLY_RELOCATION_COUNT)
+                            {
+                                assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                                                S8("unsupported symbol modifier '@{S8}' for this instruction field"),
+                                                                assembly_unit_x86_modifier_name(modifier));
+                                valid = false;
+                            }
+                            else
+                            {
+                                relocation.kind = modifier_kind;
+                                modifier_matched = true;
+                            }
+                        }
                         u32 symbol = string_equal(relocation_name, S8("."))
                                          ? assembly_unit_statement_address_symbol(builder, base)
                                          : assembly_unit_symbol_intern_statement(builder, relocation_name);
-                        if (symbol == UINT32_MAX ||
+                        if (!valid || symbol == UINT32_MAX ||
                             !assembly_unit_relocation_append(builder, symbol, base + relocation.offset,
                                                              relocation.addend, relocation.kind))
                         {
@@ -2035,7 +2341,7 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                         }
                     }
                 }
-                if (valid && plt_matched)
+                if (valid && plt_matched && modifier_matched)
                 {
                     u64 length = short_jump ? 2 : encoded.bytes.length;
                     u8* bytes = 0;
@@ -2063,14 +2369,22 @@ BUSTER_GLOBAL_LOCAL bool assembly_unit_instruction(AssemblyUnitBuilder* builder,
                         cached->encoded.bytes = (ByteSlice){.pointer = bytes, .length = length};
                         cached->encoded.relocation_count = encoded.relocation_count;
                         cached->plt_symbol = plt_symbol;
+                        cached->modifier_symbol = modifier_symbol;
+                        cached->modifier = modifier;
                         cached->offset = base;
                         cached->relocation_start = builder->result.relocation_count - encoded.relocation_count;
                     }
                 }
-                else if (valid)
+                else if (valid && modifier == ASSEMBLY_UNIT_X86_MODIFIER_NONE)
                 {
                     assembly_unit_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
                                              S8("@PLT requires a direct x86 call or jump with a 32-bit displacement"));
+                }
+                else if (valid && !modifier_matched)
+                {
+                    assembly_unit_diagnostic_format(builder, ASSEMBLY_DIAGNOSTIC_UNSUPPORTED_FEATURE,
+                                                    S8("symbol modifier '@{S8}' did not name an instruction relocation"),
+                                                    assembly_unit_x86_modifier_name(modifier));
                 }
             }
         }

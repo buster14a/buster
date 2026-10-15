@@ -24,12 +24,29 @@ how many there are, so the three GOT relocations stay three
 | 42 `R_X86_64_REX_GOTPCRELX` | `X86_64_REX_GOTPCRELX` | one REX prefix more | every REX-prefixed row |
 | 43 `R_X86_64_CODE_4_GOTPCRELX` | `X86_64_CODE_4_GOTPCRELX` | REX2, opcode and ModRM | MOV, TEST and ALU rows using r16-r31 |
 
-Collapsing 41 and 42 makes `8b 05` and `48 8b 05` the same site, and the byte
-in front of a non-REX load is then read as a REX prefix it never had. Roughly
-one byte in twenty is in `40..4f`, so that reading rewrites a neighbouring
-instruction rather than failing. `object_relocation_kind_is_x86_got` answers
-the parts that are genuinely shared: one rip-relative 32-bit field, addend -4,
-and a value taken from the slot holding the symbol's address.
+Collapsing `41` and `42` makes `8b 05` and `48 8b 05` the same site, and the
+byte in front of a non-REX load is then read as a REX prefix it never had.
+Roughly one byte in twenty is in `40..4f`, so that reading rewrites a
+neighbouring instruction rather than failing.
+`object_relocation_kind_is_x86_got` identifies the shared GOT-slot field and
+symbol semantics. The addend depends on the source expression: instruction
+fields use `-4` for the next-instruction base, while a data field written as
+`symbol@GOTPCREL - .` has addend `0`. Family membership alone proves neither
+the addend nor an instruction boundary.
+
+The x86-64 ELF standalone assembler also preserves the printer's `@GOTPCREL`
+suffix. It assigns a relaxable kind only when the relocation comes from a
+supported encoded RIP-relative `MOV r32` or `MOV r64` instruction (`8b /r` with
+ModRM `mod=00,r/m=101`); the classifier reads that instruction's own bytes,
+never preceding section data. One REX byte selects type 42 and no REX byte
+selects type 41. These instruction fields require addend -4. Other GOTPCREL
+instruction shapes, including the REX2 and ALU rows above, are refused.
+Integer directives such as `.long symbol@GOTPCREL - .` have no instruction
+boundary and produce plain, nonrelaxable type 9 with addend 0. This fallback
+does not promise an opcode rewrite. The registered controls check the generic
+relocation, its zero addend, and an actual linked read through the GOT slot.
+Round-trip comparison permits only a GOT-family kind difference; it still
+checks the symbol, section, offset and addend exactly.
 
 ## The vocabulary
 

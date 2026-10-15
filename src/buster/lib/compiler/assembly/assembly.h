@@ -100,6 +100,23 @@ typedef enum AssemblyRelocationKind
     ASSEMBLY_RELOCATION_AARCH64_MACH_TLVP_PAGEOFF12,
     ASSEMBLY_RELOCATION_AARCH64_MACH_GOT_PAGE21,
     ASSEMBLY_RELOCATION_AARCH64_MACH_GOT_PAGEOFF12,
+    // x86-64 ELF modifiers retained by standalone assembly units. GOTPCREL
+    // instruction operands accept only the unprefixed six-byte RIP-relative
+    // MOV r32 envelope or the single-REX seven-byte MOV r32/r64 envelope;
+    // integer directive fields use the nonrelaxable plain relocation because
+    // they do not establish an instruction boundary. Other prefix/opcode
+    // families need their own authority.
+    ASSEMBLY_RELOCATION_X86_64_GOTPCRELX,
+    ASSEMBLY_RELOCATION_X86_64_REX_GOTPCRELX,
+    ASSEMBLY_RELOCATION_X86_64_TLSGD,
+    ASSEMBLY_RELOCATION_X86_64_TLSLD,
+    ASSEMBLY_RELOCATION_X86_64_GOTTPOFF,
+    ASSEMBLY_RELOCATION_X86_64_TPOFF32,
+    ASSEMBLY_RELOCATION_X86_64_DTPOFF32,
+    ASSEMBLY_RELOCATION_X86_64_DTPOFF64,
+    // Plain R_X86_64_GOTPCREL carries no opcode-relaxation promise; integer
+    // directive fields use it when their instruction boundary is unknown.
+    ASSEMBLY_RELOCATION_X86_64_GOTPCREL,
     ASSEMBLY_RELOCATION_COUNT,
 } AssemblyRelocationKind;
 
