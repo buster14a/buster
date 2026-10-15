@@ -292,11 +292,15 @@ hosts execute its independent expected-value fixture.
 - Each target selector decodes canonical operands once per function, in its
   first target-order row walk. That walk accumulates value/use,
   local-promotion and direct-call facts and the aliasing/fusion candidate
-  rows, and later prepasses consume those. The classification pass
+  rows, and later prepasses consume those. The fact walk
   keeps use counts for every operand and CFG argument, but alias-only
   use-block and last-use facts are collected only when the initial sparse
   local table has a candidate. Qualification can only remove candidates;
-  an initially empty table can never seed a load alias. The classification pass
+  an initially empty table can never seed a load alias. Fusion and folded-read
+  retirement finish before result registers are created. A shared prospective
+  register-class rule preserves their former register-availability gates;
+  classification still validates every result, and omits register records only
+  for proven fused-dead scalars. The classification pass
   re-reads full rows in layout order. A compact result-row projection that
   removed that re-read was measured with no 9700X gain and was not merged
   ([audit](../performance-audits/2026-10-10T170504Z.md),

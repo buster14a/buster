@@ -1523,12 +1523,82 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_alias_fact_guard(UnitT
     return result;
 }
 
+// The reference allocates before fusion. A prospective register query must
+// preserve that exact decision across scalar, frame, address and wide values;
+// complete final rows, register definitions and debug homes remain identical.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_deferred_registers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "void sink(void*);\n"
+        "long long branch(long long x,long long y) { if(!(x<y))return x+3; return y+7; }\n"
+        "void folds(long long* p) { sink((void*)3LL); sink(&p[3LL]); }\n"
+        "long long shared(long long* p,int flag) { long long n; if(flag) { sink((void*)3LL); sink(&p[3LL]); n=3; } else n=4; return n; }\n"
+        "int floating(long double x) { return x>0 ? 3 : 1; }\n"
+        "long long aligned(long long x) { _Alignas(32) long long y=x; sink(&y); if(y<x)return y; return x; }\n"
+        "__int128 wide(__int128 x,__int128 y) { return x<y ? x/y : y; }\n"
+        "typedef unsigned long long V __attribute__((vector_size(64)));\n"
+        "V vector(V x,V y) { return x+y; }\n");
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS, OPERATING_SYSTEM_ANDROID};
+    u64 mark = c_test_preprocess_unit_mark();
+    u64 omitted = 0;
+    for (u32 direct = 0; direct < 2; direct += 1)
+    {
+        for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+        {
+            c_test_release_preprocess_arenas_since(mark);
+            Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_AMD_ZEN_5, .os = systems[system]};
+            IrProgram* program = machine_selection_test_compile_with_options(arguments->arena, source, target,
+                                                                             (CIRLowerOptions){.disable_direct_ssa = direct == 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (!program || program->module_count != 1) { continue; }
+            program->disable_local_promotion = direct == 0;
+            IrValidationResult prepared = ir_prepare_canonical_module(program, program->modules, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            if (prepared.error != IR_VALIDATION_NONE) { continue; }
+            MachineSelectionModule* context = machine_select_module_prepare(arguments->arena, program, target);
+            for (u32 index = 0; index < program->modules->function_count; index += 1)
+            {
+                IrFunction* function = program->modules->functions + index;
+                if (!function->block_count) { continue; }
+                for (u32 debug = 0; debug < 2; debug += 1)
+                {
+                    MachineSelectResult selected = machine_test_select_work(arguments->arena, program, function, target, context, 0, debug != 0);
+                    omitted += context->test_dead_registers_omitted;
+                    MachineSelectResult reference = machine_test_select_work(arguments->arena, program, function, target, context,
+                                                                              MACHINE_TEST_SELECT_LEGACY_REGISTERS, debug != 0);
+                    BUSTER_TEST_RAW(arguments, selected.supported && reference.supported,
+                                   string_format(arguments->arena, S8("{S8} system={u32} direct={u32} selected={u32}/{u32} rejected={u32}/{u32}"),
+                                                 function->name, system, direct, (u32)selected.supported, (u32)reference.supported,
+                                                 selected.failed_opcode, reference.failed_opcode));
+                    bool equal = machine_selection_test_ordered_rows_equal(&selected, &reference);
+                    BUSTER_TEST(arguments, equal);
+                    BUSTER_TEST(arguments, machine_selection_test_debug_equal(&selected.function, &reference.function));
+                    BUSTER_TEST(arguments, selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                    BUSTER_TEST(arguments, context->test_dead_registers_omitted == 0);
+                    if (equal)
+                    {
+                        BUSTER_TEST(arguments, memory_compare(selected.function.instructions, reference.function.instructions,
+                                                             sizeof(MachineInstruction) * selected.function.instruction_count));
+                        BUSTER_TEST(arguments, memory_compare(selected.function.virtual_registers, reference.function.virtual_registers,
+                                                             sizeof(MachineVirtualRegister) * selected.function.virtual_register_count));
+                    }
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, omitted != 0);
+    c_test_release_preprocess_arenas_since(mark);
+    return result;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     // Each fixture returns every unit it preprocessed; the registry's own
     // arena is reserved once, before the first fixture's reading.
     c_test_unit_registry_prewarm();
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_deferred_registers);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_alias_fact_guard);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_parameter_edge_layout);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_constant_index_fold);
