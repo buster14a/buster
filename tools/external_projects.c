@@ -76,7 +76,7 @@ BUSTER_GLOBAL_LOCAL bool external_projects_ffmpeg_record(Arena* arena, String8* 
 {
     String8 profiles = string_format(arena, S8("profile\tresult\nportable-c17\t{S8}\nportable-gnu17\t{S8}\noptimized-gnu17\t{S8}\n"),
         status[0], status[1], status[2]);
-    bool result = clang_suite_write(arena, S8("build/ffmpeg-profiles.tsv"), profiles);
+    bool result = file_write(S8("build/ffmpeg-profiles.tsv"), BUSTER_SLICE_TO_BYTE_SLICE(profiles));
     return result;
 }
 
