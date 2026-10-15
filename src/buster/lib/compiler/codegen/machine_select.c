@@ -291,7 +291,7 @@ bool machine_selection_assembly_label_target(MachineAssemblyLabelPlan const* pla
     return found;
 }
 
-u32* machine_selection_canonical_layout(Arena* arena, IrFunction const* function)
+BUSTER_GLOBAL_LOCAL u32* machine_selection_canonical_layout_build(Arena* arena, IrFunction const* function)
 {
     IrPublishedCfg const* cfg = function->published_cfg;
     u32 block_count = function->block_count;
@@ -349,6 +349,29 @@ u32* machine_selection_canonical_layout(Arena* arena, IrFunction const* function
     }
     return identity ? 0 : layout;
 }
+
+u32* machine_selection_canonical_layout(Arena* arena, IrFunction const* function)
+{
+    u32* result;
+    if (function->block_count == 1)
+    {
+        // The valid entry is block zero, including a self-loop. Identity is
+        // already known; no traversal or arena workspace can add information.
+        result = 0;
+    }
+    else
+    {
+        result = machine_selection_canonical_layout_build(arena, function);
+    }
+    return result;
+}
+
+#if BUSTER_INCLUDE_TESTS
+u32* machine_test_canonical_layout_full(Arena* arena, IrFunction const* function)
+{
+    return machine_selection_canonical_layout_build(arena, function);
+}
+#endif
 
 bool machine_selection_finish_canonical_edges(Arena* arena, MachineFunction* machine, IrFunction* source,
                                                u32 canonical_edge_offset, u32 const* block_entries,

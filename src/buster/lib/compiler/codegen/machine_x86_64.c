@@ -20,6 +20,9 @@
 // MachineX64ValueUse is the hot value-use projection; MachineX64LocalUse
 // holds sparse local-promotion store and alias state during selection.
 // Sparse local facts prove when load-alias sweeps have no eligible root;
+// an initially empty local table also omits alias-only use lifetime facts.
+// machine_x64_value_will_have_register preserves availability before fusion;
+// machine_x64_classify_values creates only surviving scalar result records.
 // with no aliases, branch fusion needs only each block's final candidate.
 // machine_x64_condition_form_agrees joins retained exact keys with the shared
 // condition identity; serial prewarm refuses mismatched condition bindings.
@@ -6453,6 +6456,22 @@ BUSTER_GLOBAL_LOCAL MachineX64SignaturePlan const* machine_x64_signature_plan(Ma
     return plan;
 }
 
+#if BUSTER_INCLUDE_TESTS
+bool machine_x64_test_prepare_signature(Arena* arena, IrProgram* program, IrFunction* function, Target target, MachineSelectionModule* module)
+{
+    IrType* type = ir_type_from_id(&program->types, function->canonical_type);
+    MachineX64Selector selector = {.arena = arena, .program = program, .target = target, .module = module};
+    bool complete = false;
+    if (type && type->kind == IR_TYPE_FUNCTION && function->canonical_type.value < module->type_count &&
+        module->x64_signature_slots[function->canonical_type.value] < module->x64_signature_plan_count)
+    {
+        MachineX64SignaturePlan const* plan = machine_x64_signature_plan(&selector, function->canonical_type, type);
+        complete = plan->return_supported && plan->arguments_supported;
+    }
+    return complete;
+}
+#endif
+
 // Everything CALL selection resolves before it emits a row: who is called,
 // where each argument travels, and how the result comes back. The shapes
 // and placements are the signature plan's rows; a variadic call's tail is
@@ -8076,6 +8095,274 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_incoming_aggregate_fits(MachineX64ValueShap
     return *parts <= MACHINE_X64_INCOMING_AGGREGATE_PART_LIMIT;
 }
 
+// The register-producing portion of result classification. Both the
+// prospective fusion query and register creation consume this rule;
+// temporary va_list frame images precede the ordinary scalar/address cases.
+BUSTER_GLOBAL_LOCAL u32 machine_x64_result_register_class(MachineX64Selector const* selector, IrInstruction const* instruction,
+                                                         IrTypeId type, MachineTypeClass type_class)
+{
+    u32 result = MACHINE_REGISTER_CLASS_COUNT;
+    bool va_temporary = (instruction->opcode == IR_OPCODE_VA_START || instruction->opcode == IR_OPCODE_VA_COPY) &&
+                        type_class.kind == IR_TYPE_VA_LIST && (type_class.flags & MACHINE_TYPE_CLASS_RESOLVED);
+    if ((type_class.flags & MACHINE_TYPE_CLASS_SCALAR_REGISTER) || machine_x64_opcode_produces_address(instruction->opcode))
+    {
+        result = MACHINE_REGISTER_CLASS_GENERAL;
+    }
+    else if (!va_temporary)
+    {
+        bool float_scalar = !machine_x64_type_is_f128(selector->program, selector->target, type) &&
+                            (type_class.flags & (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR)) ==
+                                (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR);
+        bool windows_va_list = machine_x64_type_is_windows_va_list(ir_type_from_id(&selector->program->types, type), selector->target) &&
+                               (instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
+                                instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL);
+        if (float_scalar || windows_va_list)
+        {
+            result = MACHINE_REGISTER_CLASS_GENERAL;
+        }
+        else if ((type_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER) && selector->vector_registers_supported)
+        {
+            result = MACHINE_REGISTER_CLASS_VECTOR;
+        }
+    }
+    return result;
+}
+
+// Query the same assignment before allocating result records. Block parameters
+// already own registers. A LOCAL owns one only when promoted or represented by
+// an aligned address; every other result uses the shared register-class rule.
+BUSTER_GLOBAL_LOCAL bool machine_x64_value_will_have_register(MachineX64Selector const* selector, MachineX64ValueUse const* uses, u32 value_id)
+{
+    IrFunction* function = selector->function;
+    bool result = false;
+    if (value_id < function->value_count)
+    {
+        result = selector->value_virtual_registers[value_id] != UINT32_MAX;
+        IrValue const* value = function->values + value_id;
+        if (!result && value->definition.value < function->instruction_count)
+        {
+            IrInstruction const* definition = function->instructions + value->definition.value;
+            if (definition->opcode == IR_OPCODE_LOCAL)
+            {
+                IrType const* type = ir_type_from_id(&selector->program->types, value->canonical_type);
+                u32 alignment = BUSTER_MAX(BUSTER_MAX(value->alignment, type ? type->layout.alignment : 0), 8u);
+                if (type && type->kind == IR_TYPE_VECTOR) { alignment = BUSTER_MIN(alignment, 16u); }
+                result = type && type->layout.resolved && type->layout.size <= UINT32_MAX - 7 &&
+                         (uses[value_id].local_use || (alignment > 16 && type->layout.size <= UINT32_MAX - 7 - alignment));
+            }
+            else if (definition->opcode != IR_OPCODE_FUNCTION || uses[value_id].use_count)
+            {
+                result = machine_x64_result_register_class(selector, definition, value->canonical_type,
+                                                            machine_x64_type_class(selector, value->canonical_type)) != MACHINE_REGISTER_CLASS_COUNT;
+            }
+        }
+    }
+    return result;
+}
+
+BUSTER_GLOBAL_LOCAL void machine_x64_classify_values(MachineX64Selector* selector, u32 const* canonical_layout,
+                                                    MachineX64ValueUse const* value_uses, MachineX64LocalUse const* local_uses,
+                                                    u32 const* alias_values, u32 const* load_aliases, u32 alias_count, bool omit_fused_dead)
+{
+    IrProgram* program = selector->program;
+    IrFunction* function = selector->function;
+    // These per-value columns stay fixed for the attempt. Keep their bases
+    // across builder appends instead of reloading selector fields per row.
+    u32* registers = selector->value_virtual_registers;
+    u32* stack_slots = selector->value_stack_slots;
+    u32* indirect_slots = selector->value_indirect_slots;
+    u8* place_kinds = selector->place_kinds;
+    u8 const* fused_dead = selector->fused_dead;
+    // Classification pass: direct locals become stack slots, every other
+    // surviving scalar result becomes a register, in canonical layout order.
+    for (u32 layout_index = 0; layout_index < function->block_count && selector->supported; layout_index += 1)
+    {
+        u32 block_index = machine_x64_canonical_layout_block(canonical_layout, layout_index);
+        IrBlock* block = function->blocks + block_index;
+        u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
+        u32 block_first_row = block->first_instruction.value;
+        for (u32 row_offset = 0; row_offset < block_row_count; row_offset += 1)
+        {
+            IrInstruction* instruction = function->instructions + (block_first_row + row_offset);
+            if (instruction->result.value == IR_ID_UNDERLYING_INVALID || instruction->result.value >= function->value_count)
+            {
+                continue;
+            }
+            IrValue* value = function->values + instruction->result.value;
+            place_kinds[instruction->result.value] = (u8)machine_x64_place_kind_of_opcode(instruction->opcode);
+            if (instruction->opcode == IR_OPCODE_FUNCTION && !value_uses[instruction->result.value].use_count)
+            {
+                continue;
+            }
+            if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->immediate_count && instruction->immediates &&
+                instruction->immediates[0] < selector->parameter_count)
+            {
+                selector->argument_values[instruction->immediates[0]] = instruction->result.value;
+            }
+            if (instruction->opcode == IR_OPCODE_LOCAL)
+            {
+                IrType* local_type = ir_type_from_id(&program->types, value->canonical_type);
+                u32 local_alignment = BUSTER_MAX(BUSTER_MAX(value->alignment, local_type ? local_type->layout.alignment : 0), 8u);
+                // Vector locals clamp to the frame's sixteen-byte contract
+                // exactly like the canonical frame layout: every access is
+                // the unaligned vmovdqu8, so the declared 64-byte alignment
+                // buys correctness nothing here.
+                if (local_type && local_type->kind == IR_TYPE_VECTOR)
+                {
+                    local_alignment = BUSTER_MIN(local_alignment, 16u);
+                }
+                if (!local_type || !local_type->layout.resolved || local_type->layout.size > UINT32_MAX - 7)
+                {
+                    machine_x64_reject(selector, instruction->opcode);
+                    break;
+                }
+                if (value_uses[instruction->result.value].local_use)
+                {
+                    // Promoted: the local is a virtual register for its
+                    // whole life and never owns a frame slot. Its loads
+                    // and stores lower to copies, and its definition point
+                    // is patched at the first store like any other
+                    // classification vreg. Vector locals promote into the
+                    // vector class. Promotion also covers over-aligned
+                    // locals: the scan proved no use needs the address, so
+                    // the declared alignment is unobservable.
+                    registers[instruction->result.value] =
+                        machine_builder_virtual_register(&selector->builder, (MachineVirtualRegister){
+                                                                                .definition_point = MACHINE_POINT_INVALID,
+                                                                                .register_class = local_uses[value_uses[instruction->result.value].local_use].width == 64
+                                                                                                      ? MACHINE_REGISTER_CLASS_VECTOR
+                                                                                                      : MACHINE_REGISTER_CLASS_GENERAL,
+                                                                                .flags = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE,
+                                                                                .typed_origin = instruction->result.value,
+                                                                            });
+                    continue;
+                }
+                if (local_alignment > 16)
+                {
+                    // Over-aligned local, the canonical frame layout's
+                    // shape exactly: a padded raw slot and a pointer
+                    // aligned into it at runtime by the LOCAL's own rows.
+                    // The slot stays out of value_stack_slots so every
+                    // consumer takes the pointer paths a GLOBAL takes.
+                    if (local_type->layout.size > UINT32_MAX - 7 - local_alignment)
+                    {
+                        machine_x64_reject(selector, instruction->opcode);
+                        break;
+                    }
+                    indirect_slots[instruction->result.value] =
+                        machine_x64_append_slot(selector, (u32)((local_type->layout.size + local_alignment - 1 + 7) & ~(u64)7), 8u);
+                    registers[instruction->result.value] =
+                        machine_builder_virtual_register(&selector->builder, (MachineVirtualRegister){
+                                                                                .definition_point = MACHINE_POINT_INVALID,
+                                                                                .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                                                                                .typed_origin = instruction->result.value,
+                                                                            });
+                    continue;
+                }
+                stack_slots[instruction->result.value] =
+                    machine_x64_append_slot(selector, (u32)((local_type->layout.size + 7) & ~(u64)7), local_alignment);
+                continue;
+            }
+            MachineTypeClass value_class = machine_x64_type_class(selector, value->canonical_type);
+            if ((instruction->opcode == IR_OPCODE_VA_START || instruction->opcode == IR_OPCODE_VA_COPY) && value_class.kind == IR_TYPE_VA_LIST &&
+                (value_class.flags & MACHINE_TYPE_CLASS_RESOLVED))
+            {
+                // va_list is a three-word aggregate on SysV. Keep the
+                // temporary in a regular frame slot so STORE/LOAD and
+                // VA_COPY can reuse the existing aggregate copy rows.
+                IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
+                if (value_type->layout.size <= UINT32_MAX - 7)
+                {
+                    stack_slots[instruction->result.value] =
+                        machine_x64_append_slot(selector, (u32)((value_type->layout.size + 7) & ~(u64)7), 8);
+                    continue;
+                }
+            }
+            u32 register_class = machine_x64_result_register_class(selector, instruction, value->canonical_type, value_class);
+            if (register_class == MACHINE_REGISTER_CLASS_GENERAL)
+            {
+                // Fusion and folded-read retirement have already decided
+                // which pure scalar results emit nothing. Keep validation,
+                // but never create a record just for finalization to remove.
+                if (!omit_fused_dead || !fused_dead[instruction->result.value])
+                {
+                    registers[instruction->result.value] =
+                        machine_builder_virtual_register(&selector->builder, (MachineVirtualRegister){
+                            .definition_point = MACHINE_POINT_INVALID,
+                            .register_class = MACHINE_REGISTER_CLASS_GENERAL,
+                            .typed_origin = instruction->result.value,
+                        });
+                }
+#if BUSTER_INCLUDE_TESTS
+                else
+                {
+                    selector->module->test_dead_registers_omitted += 1;
+                }
+#endif
+            }
+            else if (machine_x64_type_is_f80(selector, value->canonical_type) ||
+                     machine_x64_type_is_f128(program, selector->target, value->canonical_type))
+            {
+                stack_slots[instruction->result.value] = machine_x64_append_slot(selector, 16, 16);
+            }
+            else if (register_class == MACHINE_REGISTER_CLASS_VECTOR)
+            {
+                // 64-byte vector values live in ZMM-class virtual
+                // registers; the rows that cannot keep one there reject at
+                // selection and the function falls back whole.
+                registers[instruction->result.value] =
+                    machine_builder_virtual_register(&selector->builder, (MachineVirtualRegister){
+                                                                            .definition_point = MACHINE_POINT_INVALID,
+                                                                            .register_class = MACHINE_REGISTER_CLASS_VECTOR,
+                                                                            .typed_origin = instruction->result.value,
+                                                                        });
+            }
+            else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
+                      instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL ||
+                      instruction->opcode == IR_OPCODE_VA_ARG ||
+                      instruction->opcode == IR_OPCODE_CAST || instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
+                      instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE || instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE ||
+                      instruction->opcode == IR_OPCODE_BINARY ||
+                      (instruction->opcode == IR_OPCODE_UNARY && (instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT ||
+                                                                instruction->unary_operation == IR_UNARY_INTEGER_NEGATE || value_class.kind == IR_TYPE_VECTOR)) ||
+                      // An i128 constant is slot-backed like every other i128
+                      // value; nothing else this opcode produces reaches the
+                      // aggregate kinds below, so the widened list costs one
+                      // compare on a row that already fails them all.
+                      instruction->opcode == IR_OPCODE_CONSTANT_INTEGER) &&
+                     (value_class.flags & MACHINE_TYPE_CLASS_RESOLVED) &&
+                     ((value_class.flags & (MACHINE_TYPE_CLASS_AGGREGATE | MACHINE_TYPE_CLASS_INTEGER128)) || value_class.kind == IR_TYPE_VECTOR ||
+                      ((instruction->opcode == IR_OPCODE_ARRAY || instruction->opcode == IR_OPCODE_LOAD) && value_class.kind == IR_TYPE_ARRAY)))
+            {
+                // Aggregate values own a frame slot like the canonical
+                // path's per-value storage; copies and ABI part transfers
+                // address it directly. The record is fetched for the slot's
+                // byte count.
+                IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
+                if (value_type->layout.size <= UINT32_MAX - 7)
+                {
+                    stack_slots[instruction->result.value] =
+                        machine_x64_append_slot(selector,
+                            (u32)BUSTER_MAX((value_type->layout.size + 7) & ~(u64)7,
+                                selector->value_parts && selector->value_parts[instruction->result.value].count != 0 ? 16u : 8u), 8);
+                }
+            }
+        }
+    }
+    // Aliased load results share their local's virtual register: every use
+    // site then names the local directly and the load emits nothing. The
+    // result's own classification vreg goes unused, which costs an id and
+    // nothing else.
+    for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
+    {
+        u32 value_index = alias_values[alias_index];
+        if (registers[load_aliases[value_index]] != UINT32_MAX)
+        {
+            registers[value_index] = registers[load_aliases[value_index]];
+        }
+    }
+}
+
 MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrProgram* program, IrFunction* function, Target target,
                                                               bool position_independent, bool assume_validated,
                                                               bool preserve_debug_values, MachineSelectionModule* module)
@@ -8097,13 +8384,36 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     result.signature_rejected = true;
     IrType* return_type = ir_type_from_id(&program->types, function_type->return_type);
     bool returns_value = return_type && return_type->kind != IR_TYPE_VOID;
-    MachineX64ValueShape signature_return_shape = {0};
-    if (returns_value && !machine_x64_value_shape(program, function_type->return_type, IR_ABI_USE_RESULT, target, &signature_return_shape))
+    // A call may already have prepared this exact type in the lane's pool.
+    // Only a complete plan is reusable: call-specific rejection can leave a
+    // built plan's parameter rows partial. Definition-only bounds stay below.
+    MachineX64SignaturePlan const* signature_plan = 0;
+    if (module && module->x64_signature_slots && function->canonical_type.value < module->type_count &&
+        !MACHINE_SELECT_TEST_LEGACY(module, MACHINE_TEST_SELECT_LEGACY_SIGNATURE))
+    {
+        u32 slot = module->x64_signature_slots[function->canonical_type.value];
+        if (slot < module->x64_signature_plan_count)
+        {
+            MachineX64SignaturePlan const* prepared = module->x64_signature_plans + slot;
+            if (prepared->built && prepared->return_supported && prepared->arguments_supported)
+            {
+                signature_plan = prepared;
+#if BUSTER_INCLUDE_TESTS
+                module->test_reused_signatures += 1;
+#endif
+            }
+        }
+    }
+    MachineX64ValueShape signature_return_shape = signature_plan ? signature_plan->return_shape : (MachineX64ValueShape){0};
+    if (returns_value && !signature_plan &&
+        !machine_x64_value_shape(program, function_type->return_type, IR_ABI_USE_RESULT, target, &signature_return_shape))
     {
         return result;
     }
-    MachineX64ValueShape* signature_parameter_shapes = arena_allocate(arena, MachineX64ValueShape, function_type->parameter_count);
-    MachineX64ArgumentPlacement* signature_parameter_placements = arena_allocate(arena, MachineX64ArgumentPlacement, function_type->parameter_count);
+    MachineX64ValueShape* signature_parameter_shapes = signature_plan ? signature_plan->argument_shapes
+        : arena_allocate(arena, MachineX64ValueShape, function_type->parameter_count);
+    MachineX64ArgumentPlacement* signature_parameter_placements = signature_plan ? signature_plan->argument_placements
+        : arena_allocate(arena, MachineX64ArgumentPlacement, function_type->parameter_count);
     bool windows_abi = machine_x64_target_is_windows(target);
     u32 signature_integer_count = signature_return_shape.indirect ? 1 : 0;
     u32 signature_float_count = signature_return_shape.indirect && windows_abi ? 1 : 0;
@@ -8111,15 +8421,19 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     u64 signature_aggregate_parts = 0;
     for (u32 parameter_index = 0; parameter_index < function_type->parameter_count; parameter_index += 1)
     {
-        if (!machine_x64_value_shape(program, function_type->parameter_types[parameter_index], IR_ABI_USE_ARGUMENT, target,
-                                     signature_parameter_shapes + parameter_index) ||
-            !machine_x64_argument_area_fits(signature_parameter_shapes + parameter_index, signature_stack_count) ||
+        if ((!signature_plan &&
+             (!machine_x64_value_shape(program, function_type->parameter_types[parameter_index], IR_ABI_USE_ARGUMENT, target,
+                                      signature_parameter_shapes + parameter_index) ||
+              !machine_x64_argument_area_fits(signature_parameter_shapes + parameter_index, signature_stack_count))) ||
             !machine_x64_incoming_aggregate_fits(signature_parameter_shapes + parameter_index, &signature_aggregate_parts))
         {
             return result;
         }
-        machine_x64_place_argument(signature_parameter_shapes + parameter_index, windows_abi, &signature_integer_count, &signature_float_count,
-                                   &signature_stack_count, signature_parameter_placements + parameter_index);
+        if (!signature_plan)
+        {
+            machine_x64_place_argument(signature_parameter_shapes + parameter_index, windows_abi, &signature_integer_count, &signature_float_count,
+                                       &signature_stack_count, signature_parameter_placements + parameter_index);
+        }
     }
     result.signature_rejected = false;
     if (!module)
@@ -8348,6 +8662,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
         }
     }
+    // Qualification only removes entries. An empty sparse table cannot gain
+    // an alias root, so its uses need counts but no alias lifetime facts.
+    bool track_alias_uses = local_use_count > 1 || MACHINE_SELECT_TEST_LEGACY(module, MACHINE_TEST_SELECT_LEGACY_ALIAS_FACTS);
     // Canonical publication owns instruction spans. This pass gathers value
     // facts and candidate rows for aliasing/fusion without rebuilding row order.
     u32* block_candidate_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1);
@@ -8492,15 +8809,21 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 }
                 MachineX64ValueUse* use = value_uses + used;
                 use->use_count += 1;
-                if (use->use_block == 0)
+                if (track_alias_uses)
                 {
-                    use->use_block = block->id.value + 1;
+                    if (use->use_block == 0)
+                    {
+                        use->use_block = block->id.value + 1;
+                    }
+                    else if (use->use_block != block->id.value + 1)
+                    {
+                        use->use_block = MACHINE_SELECTION_MULTIPLE_BLOCKS;
+                    }
+                    use->last_use_ordinal = walk_ordinal;
+#if BUSTER_INCLUDE_TESTS
+                    module->test_alias_use_updates += 1;
+#endif
                 }
-                else if (use->use_block != block->id.value + 1)
-                {
-                    use->use_block = MACHINE_SELECTION_MULTIPLE_BLOCKS;
-                }
-                use->last_use_ordinal = walk_ordinal;
                 if (!use->local_use)
                 {
                     continue;
@@ -8568,8 +8891,14 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         MachineX64ValueUse* use = value_uses + cfg->arguments[index].value;
         use->use_count += 1;
-        use->use_block = MACHINE_SELECTION_MULTIPLE_BLOCKS;
-        use->last_use_ordinal = walk_ordinal;
+        if (track_alias_uses)
+        {
+            use->use_block = MACHINE_SELECTION_MULTIPLE_BLOCKS;
+            use->last_use_ordinal = walk_ordinal;
+#if BUSTER_INCLUDE_TESTS
+            module->test_alias_use_updates += 1;
+#endif
+        }
     }
     // One line mark per selected row, written by the main loop as it reaches
     // the row; the walk just counted the rows, so the array is exact.
@@ -8688,192 +9017,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     }
     selector.call_argument_registers = arena_allocate(arena, u32, selector.call_argument_capacity);
     selector.call_argument_slots = arena_allocate(arena, u32, selector.call_argument_capacity);
-    // Classification pass: direct locals become stack slots, every other
-    // scalar result becomes a virtual register, in stable value-id order.
-    for (u32 layout_index = 0; layout_index < function->block_count && selector.supported; layout_index += 1)
+    bool fused_results = false;
+    bool legacy_registers = MACHINE_SELECT_TEST_LEGACY(module, MACHINE_TEST_SELECT_LEGACY_REGISTERS);
+    if (legacy_registers)
     {
-        u32 block_index = machine_x64_canonical_layout_block(canonical_layout, layout_index);
-        IrBlock* block = function->blocks + block_index;
-        u32 block_row_count = function->published_cfg->blocks[block_index].instruction_count;
-        u32 block_first_row = block->first_instruction.value;
-        for (u32 row_offset = 0; row_offset < block_row_count; row_offset += 1)
-        {
-            IrInstruction* instruction = function->instructions + (block_first_row + row_offset);
-            if (instruction->result.value == IR_ID_UNDERLYING_INVALID || instruction->result.value >= function->value_count)
-            {
-                continue;
-            }
-            IrValue* value = function->values + instruction->result.value;
-            selector.place_kinds[instruction->result.value] = (u8)machine_x64_place_kind_of_opcode(instruction->opcode);
-            if (instruction->opcode == IR_OPCODE_FUNCTION && !value_uses[instruction->result.value].use_count)
-            {
-                continue;
-            }
-            if (instruction->opcode == IR_OPCODE_ARGUMENT && instruction->immediate_count && instruction->immediates &&
-                instruction->immediates[0] < selector.parameter_count)
-            {
-                selector.argument_values[instruction->immediates[0]] = instruction->result.value;
-            }
-            if (instruction->opcode == IR_OPCODE_LOCAL)
-            {
-                IrType* local_type = ir_type_from_id(&program->types, value->canonical_type);
-                u32 local_alignment = BUSTER_MAX(BUSTER_MAX(value->alignment, local_type ? local_type->layout.alignment : 0), 8u);
-                // Vector locals clamp to the frame's sixteen-byte contract
-                // exactly like the canonical frame layout: every access is
-                // the unaligned vmovdqu8, so the declared 64-byte alignment
-                // buys correctness nothing here.
-                if (local_type && local_type->kind == IR_TYPE_VECTOR)
-                {
-                    local_alignment = BUSTER_MIN(local_alignment, 16u);
-                }
-                if (!local_type || !local_type->layout.resolved || local_type->layout.size > UINT32_MAX - 7)
-                {
-                    machine_x64_reject(&selector, instruction->opcode);
-                    break;
-                }
-                if (value_uses[instruction->result.value].local_use)
-                {
-                    // Promoted: the local is a virtual register for its
-                    // whole life and never owns a frame slot. Its loads
-                    // and stores lower to copies, and its definition point
-                    // is patched at the first store like any other
-                    // classification vreg. Vector locals promote into the
-                    // vector class. Promotion also covers over-aligned
-                    // locals: the scan proved no use needs the address, so
-                    // the declared alignment is unobservable.
-                    selector.value_virtual_registers[instruction->result.value] =
-                        machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
-                                                                                .definition_point = MACHINE_POINT_INVALID,
-                                                                                .register_class = local_uses[value_uses[instruction->result.value].local_use].width == 64
-                                                                                                      ? MACHINE_REGISTER_CLASS_VECTOR
-                                                                                                      : MACHINE_REGISTER_CLASS_GENERAL,
-                                                                                .flags = MACHINE_VIRTUAL_REGISTER_FLAG_MUTABLE,
-                                                                                .typed_origin = instruction->result.value,
-                                                                            });
-                    continue;
-                }
-                if (local_alignment > 16)
-                {
-                    // Over-aligned local, the canonical frame layout's
-                    // shape exactly: a padded raw slot and a pointer
-                    // aligned into it at runtime by the LOCAL's own rows.
-                    // The slot stays out of value_stack_slots so every
-                    // consumer takes the pointer paths a GLOBAL takes.
-                    if (local_type->layout.size > UINT32_MAX - 7 - local_alignment)
-                    {
-                        machine_x64_reject(&selector, instruction->opcode);
-                        break;
-                    }
-                    selector.value_indirect_slots[instruction->result.value] =
-                        machine_x64_append_slot(&selector, (u32)((local_type->layout.size + local_alignment - 1 + 7) & ~(u64)7), 8u);
-                    selector.value_virtual_registers[instruction->result.value] =
-                        machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
-                                                                                .definition_point = MACHINE_POINT_INVALID,
-                                                                                .register_class = MACHINE_REGISTER_CLASS_GENERAL,
-                                                                                .typed_origin = instruction->result.value,
-                                                                            });
-                    continue;
-                }
-                selector.value_stack_slots[instruction->result.value] =
-                    machine_x64_append_slot(&selector, (u32)((local_type->layout.size + 7) & ~(u64)7), local_alignment);
-                continue;
-            }
-            MachineTypeClass value_class = machine_x64_type_class(&selector, value->canonical_type);
-            bool windows_va_list = machine_x64_type_is_windows_va_list(ir_type_from_id(&program->types, value->canonical_type), selector.target);
-            if ((instruction->opcode == IR_OPCODE_VA_START || instruction->opcode == IR_OPCODE_VA_COPY) && value_class.kind == IR_TYPE_VA_LIST &&
-                (value_class.flags & MACHINE_TYPE_CLASS_RESOLVED))
-            {
-                // va_list is a three-word aggregate on SysV. Keep the
-                // temporary in a regular frame slot so STORE/LOAD and
-                // VA_COPY can reuse the existing aggregate copy rows.
-                IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
-                if (value_type->layout.size <= UINT32_MAX - 7)
-                {
-                    selector.value_stack_slots[instruction->result.value] =
-                        machine_x64_append_slot(&selector, (u32)((value_type->layout.size + 7) & ~(u64)7), 8);
-                    continue;
-                }
-            }
-            // Address producers hold an 8-byte address in their vreg no
-            // matter what their declared canonical type is, exactly like
-            // the canonical path stores an address in the value's slot.
-            bool float_scalar =
-                !machine_x64_type_is_f128(program, selector.target, value->canonical_type) &&
-                (value_class.flags & (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR)) ==
-                    (MACHINE_TYPE_CLASS_RESOLVED | MACHINE_TYPE_CLASS_FLOAT_SCALAR);
-            bool windows_va_list_register = windows_va_list &&
-                                            (instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
-                                             instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL);
-            if ((value_class.flags & MACHINE_TYPE_CLASS_SCALAR_REGISTER) || float_scalar || windows_va_list_register ||
-                machine_x64_opcode_produces_address(instruction->opcode))
-            {
-                u32 register_index = machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
-                                                                                             .definition_point = MACHINE_POINT_INVALID,
-                                                                                             .register_class = MACHINE_REGISTER_CLASS_GENERAL,
-                                                                                             .typed_origin = instruction->result.value,
-                                                                                         });
-                selector.value_virtual_registers[instruction->result.value] = register_index;
-            }
-            else if (machine_x64_type_is_f80(&selector, value->canonical_type) ||
-                     machine_x64_type_is_f128(program, selector.target, value->canonical_type))
-            {
-                selector.value_stack_slots[instruction->result.value] = machine_x64_append_slot(&selector, 16, 16);
-            }
-            else if ((value_class.flags & MACHINE_TYPE_CLASS_VECTOR_REGISTER) && selector.vector_registers_supported)
-            {
-                // 64-byte vector values live in ZMM-class virtual
-                // registers; the rows that cannot keep one there reject at
-                // selection and the function falls back whole.
-                selector.value_virtual_registers[instruction->result.value] =
-                    machine_builder_virtual_register(&selector.builder, (MachineVirtualRegister){
-                                                                            .definition_point = MACHINE_POINT_INVALID,
-                                                                            .register_class = MACHINE_REGISTER_CLASS_VECTOR,
-                                                                            .typed_origin = instruction->result.value,
-                                                                        });
-            }
-            else if ((instruction->opcode == IR_OPCODE_ARGUMENT || instruction->opcode == IR_OPCODE_LOAD ||
-                      instruction->opcode == IR_OPCODE_ATOMIC_LOAD || instruction->opcode == IR_OPCODE_CALL ||
-                      instruction->opcode == IR_OPCODE_VA_ARG ||
-                      instruction->opcode == IR_OPCODE_CAST || instruction->opcode == IR_OPCODE_AGGREGATE || instruction->opcode == IR_OPCODE_ARRAY ||
-                      instruction->opcode == IR_OPCODE_ATOMIC_READ_MODIFY_WRITE || instruction->opcode == IR_OPCODE_ATOMIC_COMPARE_EXCHANGE ||
-                      instruction->opcode == IR_OPCODE_BINARY ||
-                      (instruction->opcode == IR_OPCODE_UNARY && (instruction->unary_operation == IR_UNARY_INTEGER_BITWISE_NOT ||
-                                                                instruction->unary_operation == IR_UNARY_INTEGER_NEGATE || value_class.kind == IR_TYPE_VECTOR)) ||
-                      // An i128 constant is slot-backed like every other i128
-                      // value; nothing else this opcode produces reaches the
-                      // aggregate kinds below, so the widened list costs one
-                      // compare on a row that already fails them all.
-                      instruction->opcode == IR_OPCODE_CONSTANT_INTEGER) &&
-                     (value_class.flags & MACHINE_TYPE_CLASS_RESOLVED) &&
-                     ((value_class.flags & (MACHINE_TYPE_CLASS_AGGREGATE | MACHINE_TYPE_CLASS_INTEGER128)) || value_class.kind == IR_TYPE_VECTOR ||
-                      ((instruction->opcode == IR_OPCODE_ARRAY || instruction->opcode == IR_OPCODE_LOAD) && value_class.kind == IR_TYPE_ARRAY)))
-            {
-                // Aggregate values own a frame slot like the canonical
-                // path's per-value storage; copies and ABI part transfers
-                // address it directly. The record is fetched for the slot's
-                // byte count.
-                IrType* value_type = ir_type_from_id(&program->types, value->canonical_type);
-                if (value_type->layout.size <= UINT32_MAX - 7)
-                {
-                    selector.value_stack_slots[instruction->result.value] =
-                        machine_x64_append_slot(&selector,
-                            (u32)BUSTER_MAX((value_type->layout.size + 7) & ~(u64)7,
-                                selector.value_parts && selector.value_parts[instruction->result.value].count != 0 ? 16u : 8u), 8);
-                }
-            }
-        }
-    }
-    // Aliased load results share their local's virtual register: every use
-    // site then names the local directly and the load emits nothing. The
-    // result's own classification vreg goes unused, which costs an id and
-    // nothing else.
-    for (u32 alias_index = 0; alias_index < alias_count; alias_index += 1)
-    {
-        u32 value_index = alias_values[alias_index];
-        if (selector.value_virtual_registers[load_aliases[value_index]] != UINT32_MAX)
-        {
-            selector.value_virtual_registers[value_index] = selector.value_virtual_registers[load_aliases[value_index]];
-        }
+        machine_x64_classify_values(&selector, canonical_layout, value_uses, local_uses, alias_values, load_aliases, alias_count, false);
     }
     // Compare/branch fusion. A C loop head lowers its controlling
     // expression as compare → widen → (!= 0) → BRANCH_IF, and each link
@@ -9061,8 +9209,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 read_left = chain_value;
                 condition = MACHINE_X64_CONDITION_NOT_EQUAL ^ negate;
             }
-            bool reads_safe = selector.value_virtual_registers[read_left] != UINT32_MAX &&
-                              (read_right == UINT32_MAX || selector.value_virtual_registers[read_right] != UINT32_MAX);
+            bool reads_safe = legacy_registers
+                                  ? selector.value_virtual_registers[read_left] != UINT32_MAX &&
+                                        (read_right == UINT32_MAX || selector.value_virtual_registers[read_right] != UINT32_MAX)
+                                  : machine_x64_value_will_have_register(&selector, value_uses, read_left) &&
+                                        (read_right == UINT32_MAX || machine_x64_value_will_have_register(&selector, value_uses, read_right));
             for (u32 read_side = 0; read_side < 2 && reads_safe; read_side += 1)
             {
                 u32 read_value = read_side ? read_right : read_left;
@@ -9087,6 +9238,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 .condition = (u8)condition,
                 .wide = wide,
             };
+            fused_results = true;
             for (u32 member_index = 0; member_index < absorbed_count; member_index += 1)
             {
                 selector.fused_dead[absorbed_members[member_index]] = 1;
@@ -9111,8 +9263,11 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         u32 row = candidate_rows[function->instruction_count - 1u - fold_index].row;
         IrInstruction* instruction = function->instructions + row;
+        // A recognized copy CAST has a scalar result, and INDEX always
+        // produces an address register. The recognizers themselves prove
+        // assignment; querying prospective classification here duplicates it.
         bool selected_result = instruction->result.value < function->value_count &&
-                               selector.value_virtual_registers[instruction->result.value] != UINT32_MAX;
+                               (!legacy_registers || selector.value_virtual_registers[instruction->result.value] != UINT32_MAX);
         u32 source = UINT32_MAX;
         if (selected_result && instruction->opcode == IR_OPCODE_CAST && machine_x64_cast_copies_constant(&selector, instruction, &copied_constant))
         {
@@ -9129,8 +9284,13 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             if (!value_uses[source].use_count)
             {
                 selector.fused_dead[source] = 1;
+                fused_results = true;
             }
         }
+    }
+    if (!legacy_registers)
+    {
+        machine_x64_classify_values(&selector, canonical_layout, value_uses, local_uses, alias_values, load_aliases, alias_count, fused_results);
     }
     selector.virtual_register_count = selector.builder.virtual_registers.total_count;
     u32 typed_instruction_count = 0;

@@ -88,10 +88,11 @@ hosts execute its independent expected-value fixture.
   and extra operands on `vzeroupper`, with no partial bytes.
   Matching native hosts execute optional instructions only when supported.
 - Selection emits canonical blocks in reverse postorder from the entry
-  (`machine_selection_canonical_layout`), not in IR creation order. The C
-  frontend creates a `for` step and an `if` join before the nested blocks that
-  reach them, and FAST/QUALITY read any jump to a lower block as a loop back
-  edge. Reverse postorder puts every reachable block after its dominators, so
+  (`machine_selection_canonical_layout`), not in IR creation order. A valid
+  single-block function already has identity layout and needs no traversal
+  workspace. The C frontend creates a `for` step and an `if` join before the
+  nested blocks that reach them, and FAST/QUALITY read any jump to a lower
+  block as a loop back edge. Reverse postorder puts every reachable block after its dominators, so
   only real back edges jump down. A conditional's first target follows its
   source, and unreachable blocks keep canonical order at the end. Asm-goto
   continuations move with their source block's expansion.
@@ -290,9 +291,17 @@ hosts execute its independent expected-value fixture.
   was removed in [#269](https://github.com/buster14a/buster/pull/269), resolving
   [#42](https://github.com/buster14a/buster/issues/42).
 - Each target selector decodes canonical operands once per function, in its
-  first target-order row walk. That walk accumulates value/use,
+  first canonical-row walk. That walk accumulates value/use,
   local-promotion and direct-call facts and the aliasing/fusion candidate
-  rows, and later prepasses consume those. The classification pass
+  rows, and later prepasses consume those. The x86-64 fact walk
+  keeps use counts for every operand and CFG argument, but alias-only
+  use-block and last-use facts are collected only when the initial sparse
+  local table has a candidate. Qualification can only remove candidates;
+  an initially empty table can never seed a load alias. Fusion and folded-read
+  retirement finish before result registers are created. A shared prospective
+  register-class rule preserves their former register-availability gates;
+  classification still validates every result, and omits register records only
+  for proven fused-dead scalars. The classification pass
   re-reads full rows in layout order. A compact result-row projection that
   removed that re-read was measured with no 9700X gain and was not merged
   ([audit](../performance-audits/2026-10-10T170504Z.md),
@@ -317,7 +326,10 @@ hosts execute its independent expected-value fixture.
   parameters, both frontend forms, FAST/QUALITY, Linux/macOS objects and a
   supported 64 KiB control without executing a large native stack.
 - Native signature and call storage is sized from canonical IR counts. Incoming
-  shapes, placements, argument values and normalization rows use arena arrays;
+  shapes and placements borrow an already-built complete plan from the
+  module/lane call-signature pool when available; partial or call-rejected
+  plans keep fresh preparation. The incoming aggregate bound is checked on
+  either path. Argument values and normalization rows use arena arrays;
   the existing value-fact walk sizes one reusable call workspace per function.
   x86-64's per-type signature pool sums parameter counts in 64 bits. Stack
   placements use 32-bit offsets and check the signed frame-displacement bound

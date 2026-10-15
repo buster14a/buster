@@ -8,11 +8,12 @@
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/machine_parameter_edges_internal.h>
+#include <buster/lib/compiler/codegen/machine_select_internal.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/string.h>
 
-BUSTER_GLOBAL_LOCAL IrProgram* machine_selection_test_compile(Arena* arena, String8 source, Target target)
+BUSTER_GLOBAL_LOCAL IrProgram* machine_selection_test_compile_with_options(Arena* arena, String8 source, Target target, CIRLowerOptions options)
 {
     CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){0});
     if (tokens.error_count)
@@ -24,7 +25,7 @@ BUSTER_GLOBAL_LOCAL IrProgram* machine_selection_test_compile(Arena* arena, Stri
     {
         return 0;
     }
-    CIRLowerResult lowered = c_lower_to_ir(arena, S8("machine-selection.c"), tokens, parse, target);
+    CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("machine-selection.c"), tokens, parse, target, options);
     IrProgram* result;
     if (lowered.diagnostic_count)
     {
@@ -36,6 +37,11 @@ BUSTER_GLOBAL_LOCAL IrProgram* machine_selection_test_compile(Arena* arena, Stri
     }
 
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrProgram* machine_selection_test_compile(Arena* arena, String8 source, Target target)
+{
+    return machine_selection_test_compile_with_options(arena, source, target, (CIRLowerOptions){0});
 }
 
 BUSTER_GLOBAL_LOCAL IrFunction* machine_selection_test_find(IrProgram* program, String8 name)
@@ -1442,12 +1448,314 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_parameter_edge_layout(
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_selection_test_debug_equal(MachineFunction const* left, MachineFunction const* right)
+{
+    bool equal = left->line_mark_count == right->line_mark_count && left->debug_value_count == right->debug_value_count;
+    if (equal && left->line_mark_count)
+    {
+        equal = memory_compare(left->line_marks, right->line_marks, sizeof(MachineLineMark) * left->line_mark_count);
+    }
+    if (equal && left->debug_value_count)
+    {
+        equal = memory_compare(left->debug_values, right->debug_values, sizeof(MachineDebugValue) * left->debug_value_count);
+    }
+    return equal;
+}
+
+// The forced reference still gathers alias lifetime facts for every use.
+// Compare complete selected rows and debug homes, including edge readers and
+// late-disqualified, store-free and genuinely promotable locals.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_alias_fact_guard(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int test(int x) { return x * 3 + 1; }"),
+        S8("extern int input; int test(int x) { int local=x+input, old=local; local=input+7; return old+local; }"),
+        S8("void escape(int*); int test(int x) { int local=x; escape(&local); if(local<x)return local; return x; }"),
+        S8("int test(int x) { int y; if(x)y=3; else y=4; return y; }"),
+        S8("int test(int x) { int local; if(x)goto use; return x; use:return local; }"),
+        S8("extern int input; int test(void) { int x=input,c=x<3; x=input+7; if(c)return x; return input; }")
+    };
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
+    u64 mark = c_test_preprocess_unit_mark();
+    u32 empty = 0;
+    u32 qualified = 0;
+    u32 edge_readers = 0;
+    for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+    {
+        for (u32 direct = 0; direct < 2; direct += 1)
+        {
+            for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+            {
+                c_test_release_preprocess_arenas_since(mark);
+                Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = systems[system]};
+                IrProgram* program = machine_selection_test_compile_with_options(arguments->arena, sources[source], target,
+                                                                                 (CIRLowerOptions){.disable_direct_ssa = direct == 0});
+                BUSTER_TEST(arguments, program && program->module_count == 1);
+                if (!program || program->module_count != 1) { continue; }
+                program->disable_local_promotion = direct == 0;
+                program->fast_passes = 0;
+                IrValidationResult prepared = ir_prepare_canonical_module(program, program->modules, false);
+                IrFunction* function = machine_selection_test_find(program, S8("test"));
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && function != 0);
+                if (prepared.error != IR_VALIDATION_NONE || !function) { continue; }
+                MachineSelectionModule* context = machine_select_module_prepare(arguments->arena, program, target);
+                for (u32 debug = 0; debug < 2; debug += 1)
+                {
+                    MachineSelectResult selected = machine_test_select_work(arguments->arena, program, function, target, context, 0, debug != 0);
+                    u64 updates = context->test_alias_use_updates;
+                    MachineSelectResult reference = machine_test_select_work(arguments->arena, program, function, target, context,
+                                                                              MACHINE_TEST_SELECT_LEGACY_ALIAS_FACTS, debug != 0);
+                    BUSTER_TEST(arguments, selected.supported && reference.supported);
+                    BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&selected, &reference));
+                    BUSTER_TEST(arguments, machine_selection_test_debug_equal(&selected.function, &reference.function));
+                    BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                    BUSTER_TEST(arguments, updates == 0 || updates == context->test_alias_use_updates);
+                    empty += updates == 0 && context->test_alias_use_updates != 0;
+                    qualified += updates != 0;
+                    edge_readers += function->published_cfg && function->published_cfg->argument_count != 0;
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, empty != 0 && qualified != 0 && edge_readers != 0);
+    c_test_release_preprocess_arenas_since(mark);
+    return result;
+}
+
+// The reference allocates before fusion. A prospective register query must
+// preserve that exact decision across scalar, frame, address and wide values;
+// complete final rows, register definitions and debug homes remain identical.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_deferred_registers(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "void sink(void*);\n"
+        "long long branch(long long x,long long y) { if(!(x<y))return x+3; return y+7; }\n"
+        "void folds(long long* p) { sink((void*)3LL); sink(&p[3LL]); }\n"
+        "long long shared(long long* p,int flag) { long long n; if(flag) { sink((void*)3LL); sink(&p[3LL]); n=3; } else n=4; return n; }\n"
+        "int floating(long double x) { return x>0 ? 3 : 1; }\n"
+        "long long aligned(long long x) { _Alignas(32) long long y=x; sink(&y); if(y<x)return y; return x; }\n"
+        "__int128 wide(__int128 x,__int128 y) { return x<y ? x/y : y; }\n"
+        "typedef unsigned long long V __attribute__((vector_size(64)));\n"
+        "V vector(V x,V y) { return x+y; }\n");
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS, OPERATING_SYSTEM_ANDROID};
+    u64 mark = c_test_preprocess_unit_mark();
+    u64 omitted = 0;
+    for (u32 direct = 0; direct < 2; direct += 1)
+    {
+        for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+        {
+            c_test_release_preprocess_arenas_since(mark);
+            Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_AMD_ZEN_5, .os = systems[system]};
+            IrProgram* program = machine_selection_test_compile_with_options(arguments->arena, source, target,
+                                                                             (CIRLowerOptions){.disable_direct_ssa = direct == 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (!program || program->module_count != 1) { continue; }
+            program->disable_local_promotion = direct == 0;
+            IrValidationResult prepared = ir_prepare_canonical_module(program, program->modules, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            if (prepared.error != IR_VALIDATION_NONE) { continue; }
+            MachineSelectionModule* context = machine_select_module_prepare(arguments->arena, program, target);
+            for (u32 index = 0; index < program->modules->function_count; index += 1)
+            {
+                IrFunction* function = program->modules->functions + index;
+                if (!function->block_count) { continue; }
+                for (u32 debug = 0; debug < 2; debug += 1)
+                {
+                    MachineSelectResult selected = machine_test_select_work(arguments->arena, program, function, target, context, 0, debug != 0);
+                    omitted += context->test_dead_registers_omitted;
+                    MachineSelectResult reference = machine_test_select_work(arguments->arena, program, function, target, context,
+                                                                              MACHINE_TEST_SELECT_LEGACY_REGISTERS, debug != 0);
+                    BUSTER_TEST_RAW(arguments, selected.supported && reference.supported,
+                                   string_format(arguments->arena, S8("{S8} system={u32} direct={u32} selected={u32}/{u32} rejected={u32}/{u32}"),
+                                                 function->name, system, direct, (u32)selected.supported, (u32)reference.supported,
+                                                 selected.failed_opcode, reference.failed_opcode));
+                    bool equal = machine_selection_test_ordered_rows_equal(&selected, &reference);
+                    BUSTER_TEST(arguments, equal);
+                    BUSTER_TEST(arguments, machine_selection_test_debug_equal(&selected.function, &reference.function));
+                    BUSTER_TEST(arguments, selected.supported && machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                    BUSTER_TEST(arguments, context->test_dead_registers_omitted == 0);
+                    if (equal)
+                    {
+                        BUSTER_TEST(arguments, memory_compare(selected.function.instructions, reference.function.instructions,
+                                                             sizeof(MachineInstruction) * selected.function.instruction_count));
+                        BUSTER_TEST(arguments, memory_compare(selected.function.virtual_registers, reference.function.virtual_registers,
+                                                             sizeof(MachineVirtualRegister) * selected.function.virtual_register_count));
+                    }
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, omitted != 0);
+    c_test_release_preprocess_arenas_since(mark);
+    return result;
+}
+
+// Prime real call plans, including partial SysV variadic-vector plans, then
+// compare definition selection against fresh preparation. Incoming aggregate
+// limits still apply even when the complete call plan accepts its signature.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_incoming_signature_reuse(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8(
+        "struct Pair { double x; int y; };\n"
+        "struct Limit { char data[524296]; }; struct Half { char data[300000]; };\n"
+        "typedef unsigned char V __attribute__((vector_size(64)));\n"
+        "void empty(void) {}\n"
+        "int narrow(unsigned char x,unsigned y) { return x+y; }\n"
+        "struct Pair aggregate(struct Pair x) { return x; }\n"
+        "long double floating(long double x) { return x; }\n"
+        "__int128 wide(__int128 x) { return x; }\n"
+        "V vector(V x) { return x; }\n"
+        "int variadic_vector(V x,...) { return 1; }\n"
+        "int over(struct Limit x) { return 1; }\n"
+        "int combined(struct Half x,struct Half y) { return 1; }\n");
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS, OPERATING_SYSTEM_ANDROID};
+    u64 mark = c_test_preprocess_unit_mark();
+    u32 reused = 0;
+    u32 partial = 0;
+    u32 cached_rejection = 0;
+    for (u32 direct = 0; direct < 2; direct += 1)
+    {
+        for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+        {
+            c_test_release_preprocess_arenas_since(mark);
+            Target target = {.cpu_arch = CPU_ARCH_X86_64, .cpu_model = CPU_MODEL_AMD_ZEN_5, .os = systems[system]};
+            IrProgram* program = machine_selection_test_compile_with_options(arguments->arena, source, target,
+                                                                             (CIRLowerOptions){.disable_direct_ssa = direct == 0});
+            BUSTER_TEST(arguments, program && program->module_count == 1);
+            if (!program || program->module_count != 1) { continue; }
+            IrValidationResult prepared = ir_prepare_canonical_module(program, program->modules, false);
+            BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE);
+            if (prepared.error != IR_VALIDATION_NONE) { continue; }
+            MachineSelectionModule* context = machine_select_module_prepare(arguments->arena, program, target);
+            for (u32 index = 0; index < program->modules->function_count; index += 1)
+            {
+                IrFunction* function = program->modules->functions + index;
+                if (!function->block_count) { continue; }
+                bool complete = machine_x64_test_prepare_signature(arguments->arena, program, function, target, context);
+                bool variadic = string_equal(function->name, S8("variadic_vector"));
+                partial += variadic && !complete;
+                bool large = string_equal(function->name, S8("over")) || string_equal(function->name, S8("combined"));
+                bool supported = !large || systems[system] == OPERATING_SYSTEM_WINDOWS;
+                for (u32 debug = 0; debug < 2; debug += 1)
+                {
+                    MachineSelectResult reference = machine_test_select_work(arguments->arena, program, function, target, context,
+                                                                              MACHINE_TEST_SELECT_LEGACY_SIGNATURE, debug != 0);
+                    BUSTER_TEST(arguments, context->test_reused_signatures == 0);
+                    MachineSelectResult selected = machine_test_select_work(arguments->arena, program, function, target, context, 0, debug != 0);
+                    BUSTER_TEST(arguments, context->test_reused_signatures == (complete ? 1u : 0u));
+                    reused += context->test_reused_signatures;
+                    cached_rejection += complete && !selected.supported;
+                    BUSTER_TEST_RAW(arguments, selected.supported == supported && reference.supported == supported,
+                                   string_format(arguments->arena, S8("{S8} system={u32} complete={u32} selected={u32}/{u32} expected={u32}"),
+                                                 function->name, system, (u32)complete, (u32)selected.supported,
+                                                 (u32)reference.supported, (u32)supported));
+                    BUSTER_TEST(arguments, selected.failed_opcode == reference.failed_opcode &&
+                                          selected.signature_rejected == reference.signature_rejected);
+                    if (supported)
+                    {
+                        BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&selected, &reference));
+                        BUSTER_TEST(arguments, machine_selection_test_debug_equal(&selected.function, &reference.function));
+                        BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                    }
+                    else
+                    {
+                        BUSTER_TEST(arguments, selected.signature_rejected && reference.signature_rejected);
+                    }
+                    MachineSelectionModule* lane = machine_select_module_for_lane(arguments->arena, program, context);
+                    BUSTER_TEST(arguments, lane->type_classes == context->type_classes && lane->x64_signature_plans != context->x64_signature_plans);
+                    MachineSelectResult cold = machine_test_select_work(arguments->arena, program, function, target, lane, 0, debug != 0);
+                    BUSTER_TEST(arguments, lane->test_reused_signatures == 0 && cold.supported == selected.supported &&
+                                          cold.signature_rejected == selected.signature_rejected);
+                    if (supported) { BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&selected, &cold)); }
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, reused != 0 && partial != 0 && cached_rejection != 0);
+    c_test_release_preprocess_arenas_since(mark);
+    return result;
+}
+
+// One-block return, self-loop and duplicate self-targets all have identity
+// layout. The full reference must agree while only the shortcut allocates
+// nothing; multiblock layouts retain the existing general traversal.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_single_block_layout(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 source = S8("_Bool single(void) { return 1; }\n"
+                       "int multiple(int x) { if(x)return x+1; return x-1; }\n");
+    CpuArch arches[] = {CPU_ARCH_X86_64, CPU_ARCH_AARCH64};
+    u64 mark = c_test_preprocess_unit_mark();
+    for (u32 arch = 0; arch < BUSTER_ARRAY_LENGTH(arches); arch += 1)
+    {
+        c_test_release_preprocess_arenas_since(mark);
+        Target target = {.cpu_arch = arches[arch], .os = OPERATING_SYSTEM_LINUX};
+        IrProgram* program = machine_selection_test_compile(arguments->arena, source, target);
+        BUSTER_TEST(arguments, program && program->module_count == 1);
+        if (!program || program->module_count != 1) { continue; }
+        IrValidationResult prepared = ir_prepare_canonical_module(program, program->modules, false);
+        IrFunction* single = machine_selection_test_find(program, S8("single"));
+        IrFunction* multiple = machine_selection_test_find(program, S8("multiple"));
+        BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && single && single->block_count == 1 && multiple && multiple->block_count > 1);
+        if (prepared.error != IR_VALIDATION_NONE || !single || single->block_count != 1 || !multiple) { continue; }
+        IrInstruction* terminator = single->instructions + single->blocks[0].last_instruction.value;
+        IrInstruction saved = *terminator;
+        IrBlockId targets[2] = {{.value = 0}, {.value = 0}};
+        for (u32 variant = 0; variant < 3; variant += 1)
+        {
+            terminator = single->instructions + single->blocks[0].last_instruction.value;
+            *terminator = saved;
+            if (variant)
+            {
+                terminator->opcode = variant == 1 ? IR_OPCODE_BRANCH : IR_OPCODE_BRANCH_IF;
+                terminator->target_count = (u16)variant;
+                terminator->targets = targets;
+                if (variant == 1) { terminator->operand_count = 0; terminator->operands = 0; }
+            }
+            single->opcode_summary = 0;
+            ir_function_invalidate_cfg(single);
+            IrValidationResult published = ir_function_publish_cfg(program->arena, single);
+            IrValidationResult validated = ir_validate_canonical_module(program, program->modules);
+            BUSTER_TEST_RAW(arguments, published.error == IR_VALIDATION_NONE && validated.error == IR_VALIDATION_NONE,
+                           string_format(arguments->arena, S8("arch={u32} variant={u32} publish={u32} validation={u32}"),
+                                         arch, variant, published.error, validated.error));
+            if (published.error != IR_VALIDATION_NONE || validated.error != IR_VALIDATION_NONE) { continue; }
+            // Publication coalesces repeated destinations into one edge.
+            BUSTER_TEST(arguments, single->published_cfg->edge_count == (variant ? 1u : 0u));
+            BUSTER_TEST(arguments, single->instructions[single->blocks[0].last_instruction.value].target_count == variant);
+            u64 before = arguments->arena->position;
+            u32* shortcut = machine_selection_canonical_layout(arguments->arena, single);
+            BUSTER_TEST(arguments, shortcut == 0 && arguments->arena->position == before);
+            u32* full = machine_test_canonical_layout_full(arguments->arena, single);
+            BUSTER_TEST(arguments, full == 0 && arguments->arena->position > before);
+        }
+        terminator = single->instructions + single->blocks[0].last_instruction.value;
+        *terminator = saved;
+        ir_function_invalidate_cfg(single);
+        u32* full = machine_test_canonical_layout_full(arguments->arena, multiple);
+        u32* selected = machine_selection_canonical_layout(arguments->arena, multiple);
+        for (u32 block = 0; block < multiple->block_count; block += 1)
+        {
+            BUSTER_TEST(arguments, (full ? full[block] : block) == (selected ? selected[block] : block));
+        }
+    }
+    c_test_release_preprocess_arenas_since(mark);
+    return result;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     // Each fixture returns every unit it preprocessed; the registry's own
     // arena is reserved once, before the first fixture's reading.
     c_test_unit_registry_prewarm();
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_single_block_layout);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_incoming_signature_reuse);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_deferred_registers);
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_alias_fact_guard);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_parameter_edge_layout);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_constant_index_fold);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_constant_copy_casts);

@@ -210,6 +210,13 @@ struct MachineSelectionModule
     // (IR_SIMD_SPLAT_U8 support). Resolving the target's features costs a
     // feature-set rebuild, so it is answered once per module, not per function.
     bool x64_vector_registers_supported;
+#if BUSTER_INCLUDE_TESTS
+    // Private fixture-owned controls; absent from production module contexts.
+    u32 test_work_legacy;
+    u64 test_alias_use_updates;
+    u64 test_dead_registers_omitted;
+    u32 test_reused_signatures;
+#endif
 };
 
 // The normal compiler pipeline validates canonical IR before selection. The
