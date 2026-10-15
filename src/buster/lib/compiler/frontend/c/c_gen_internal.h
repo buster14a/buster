@@ -40,6 +40,21 @@ struct CIrExt80Big
 };
 
 #if BUSTER_INCLUDE_TESTS
+typedef struct CTestIrSsaWork CTestIrSsaWork;
+struct CTestIrSsaWork
+{
+    u64 simplify_setups;
+    u64 simplify_scratch_bytes;
+    u64 parameter_visits;
+    u64 witness_moves;
+    u64 predecessor_allocations;
+    u64 predecessor_rows;
+    u64 identity_publications;
+    u64 identity_operand_slots;
+};
+BUSTER_F_DECL CTestIrSsaWork c_test_ir_ssa_work(void);
+BUSTER_F_DECL bool c_test_ir_ssa_witness_graph(u32 seed);
+BUSTER_F_DECL bool c_test_ir_ssa_publication(void);
 // Calling-thread root-conditional, comma and assignment operator visits.
 BUSTER_F_DECL u64 c_test_assignment_lower_work(void);
 // Token-free structural groups, replayed row reuse and restored node heads.

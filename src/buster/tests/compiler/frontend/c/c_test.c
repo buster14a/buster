@@ -59509,6 +59509,78 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_controlled_body_extents_linear(UnitTes
     return result;
 }
 
+// Live readers must not move once per intermediate replacement (#4258).
+// The small-to-large witness groups preserve the ordered-sweep oracle; the
+// C cases also exercise the real journal, loop discovery and canonical CFG.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_test_direct_ssa_publication_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 seed = 1; seed <= 2048; seed += 1)
+    {
+        BUSTER_TEST(arguments, c_test_ir_ssa_witness_graph(seed));
+    }
+    BUSTER_TEST(arguments, c_test_ir_ssa_publication());
+    for (u32 depth = 64; depth <= 256; depth *= 4)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        u64 capacity = (u64)depth * 32 + 128;
+        char8* bytes = arena_allocate(temporary.arena, char8, capacity);
+        u64 length = 0;
+        c_test_append_source(bytes, capacity, &length, S8("extern void sink(int);int test(int x,int c){"));
+        for (u32 level = 0; level < depth; level += 1)
+        {
+            c_test_append_source(bytes, capacity, &length, S8("while(c)"));
+        }
+        c_test_append_source(bytes, capacity, &length, S8("{"));
+        for (u32 reader = 0; reader < depth; reader += 1)
+        {
+            c_test_append_source(bytes, capacity, &length, S8("sink(c?x:1);"));
+        }
+        c_test_append_source(bytes, capacity, &length, S8("x=x;}return x;}"));
+        CPreprocessResult tokens = c_preprocess(temporary.arena, (String8){bytes, length}, (CPreprocessOptions){0});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CTestIrSsaWork before = c_test_ir_ssa_work();
+        CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("ssa-live-readers.c"), tokens, parse, target_native);
+        CTestIrSsaWork after = c_test_ir_ssa_work();
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && direct.program && !direct.diagnostic_count);
+        BUSTER_TEST(arguments, after.witness_moves - before.witness_moves <= (u64)depth * 16);
+        BUSTER_TEST(arguments, after.parameter_visits - before.parameter_visits <= (u64)depth * 16);
+        BUSTER_TEST(arguments, after.predecessor_allocations - before.predecessor_allocations == 1);
+        BUSTER_TEST(arguments, after.predecessor_rows - before.predecessor_rows > depth);
+        if (direct.program && !direct.diagnostic_count)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(temporary);
+    }
+    String8 sources[] = {
+        S8("int test(int x){x=x+1;return x;}"),
+        S8("int test(int(*p)(int),int x){return p(x);}"),
+    };
+    for (u32 shape = 0; shape < BUSTER_ARRAY_LENGTH(sources); shape += 1)
+    {
+        TemporalArena temporary = scratch_begin(0, 0);
+        CPreprocessResult tokens = c_preprocess(temporary.arena, sources[shape], (CPreprocessOptions){0});
+        CParseResult parse = c_parse(temporary.arena, tokens);
+        CTestIrSsaWork before = c_test_ir_ssa_work();
+        CIRLowerResult direct = c_lower_to_ir(temporary.arena, S8("ssa-empty-parameters.c"), tokens, parse, target_native);
+        CTestIrSsaWork after = c_test_ir_ssa_work();
+        BUSTER_TEST(arguments, !tokens.diagnostic_count && !parse.diagnostic_count && direct.program && !direct.diagnostic_count);
+        BUSTER_TEST(arguments, after.simplify_setups == before.simplify_setups && after.simplify_scratch_bytes == before.simplify_scratch_bytes);
+        if (shape)
+        {
+            BUSTER_TEST(arguments, after.identity_publications > before.identity_publications);
+            BUSTER_TEST(arguments, after.identity_operand_slots > before.identity_operand_slots);
+        }
+        if (direct.program && !direct.diagnostic_count)
+        {
+            BUSTER_TEST(arguments, ir_validate_canonical_module(direct.program, direct.program->modules).error == IR_VALIDATION_NONE);
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
 // A conditional nested in every false arm opens each join before the deeper
 // one it reads, so every block-order simplification sweep removed only the
 // deepest remaining parameter: quadratic in the nesting depth (#2801). The
@@ -68914,6 +68986,7 @@ UnitTestResult c_frontend_tests(UnitTestArguments* arguments)
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_dead_continuation_edges);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_declaration_definition);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_sparse_finish);
+    C_TEST_FIXTURE(arguments, c_test_direct_ssa_publication_work);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_join_simplify);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_loop_parameters);
     C_TEST_FIXTURE(arguments, c_test_direct_ssa_nested_do_while_work);

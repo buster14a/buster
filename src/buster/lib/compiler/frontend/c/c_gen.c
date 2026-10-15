@@ -21,7 +21,10 @@
 // headers from the loops c_ir_ssa_loop_record noted, drops its shortcut
 // rather than refusing. c_ir_ssa_finish_loop_exits lazily builds the read
 // index and forward-link forest once the general walk overspends its linear
-// budget. The remaining phase/state graph is in
+// budget. c_ir_ssa_simplify_parameters keeps two root witnesses in ranked
+// groups; c_ir_ssa_finish_publish reuses their surviving index, bulk-publishes
+// predecessors and retains old operands when dense numbering is the identity.
+// The remaining phase/state graph is in
 // docs/agents/compiler-phase-state.md.
 // Lowering always has the unit's implicit postorder syntax tree (GitHub
 // #3102 step 1): the caller passes it in CIRLowerOptions.syntax_tree (the
@@ -6460,12 +6463,13 @@ struct CIrSsaParameter
     IrValueId forwarded;
 };
 
-// One incoming row of a retained parameter, filed under the root it reads.
-// c_ir_ssa_simplify_parameters splices a list onto its replacement's list.
+// One of two distinct-root witnesses keeping a parameter nontrivial. Its
+// fixed row index divided by two is the reader's stable simplification order.
 typedef struct CIrSsaUser CIrSsaUser;
 struct CIrSsaUser
 {
-    u32 parameter;
+    u32 root;
+    u32 previous;
     u32 next;
 };
 
@@ -8280,42 +8284,42 @@ BUSTER_C_INTERNAL void c_ir_ssa_finish_parameters(CIntegerIrBuilder* builder, u8
 // The scratch rows the publication step and its helpers carve, sized by the
 // value count the pending walk left behind: replacement and value maps, the
 // pending-parameter and parameter indexes, the initialization worklist and its
-// seen bytes, the memory-restore tails, the simplification user lists, order,
-// retry heap and incoming user rows, and the liveness worklist. Checked before the first
-// carve, in carve order, like the plan in finish step one.
+// seen bytes, memory-restore tails, parameter index, witness groups/order/heap
+// and liveness worklist. The witness scratch expires before liveness. Check
+// both lifetimes before the first carve, like the plan in finish step one.
 BUSTER_C_INTERNAL bool c_ir_ssa_finish_reserve_publish(CIntegerIrBuilder* builder)
 {
     IrFunction* function = builder->function;
     u64 count = function->value_count;
     u64 reserved_size = builder->scratch_arena->reserved_size;
     u64 position = builder->scratch_arena->position;
-    // Simplification files one user row per incoming row, plus the row per
-    // predecessor a closed forwarded cycle gains before it starts.
-    u64 user_rows = 0;
+    u64 parameters = 0;
     for (u32 block = 0; block < function->block_count; block += 1)
     {
-        u32* offsets = builder->direct_ssa ? builder->direct_ssa->predecessor_offsets : 0;
-        u32 predecessor_count = offsets ? offsets[block + 1] - offsets[block] : 1;
-        for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
-        {
-            user_rows += (u64)parameter->incoming_count + BUSTER_MAX(predecessor_count, 1);
-        }
+        parameters += function->blocks[block].parameter_count;
     }
-    bool fits = c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
+    bool fits = parameters <= UINT32_MAX / 2 &&
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrSsaParameter*), count, BUSTER_ALIGN_OF(CIrSsaParameter*)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
                 c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), count, BUSTER_ALIGN_OF(u8)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)function->instruction_count + function->block_count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(IrBlockParameter*), count, BUSTER_ALIGN_OF(IrBlockParameter*)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u64), count, BUSTER_ALIGN_OF(u64)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), count, BUSTER_ALIGN_OF(u8)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrSsaUser), user_rows ? user_rows : 1, BUSTER_ALIGN_OF(CIrSsaUser)) &&
-                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32));
+                c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), (u64)function->instruction_count + function->block_count, BUSTER_ALIGN_OF(u32));
+    if (parameters && fits)
+    {
+        fits = c_ir_arena_reservation_advance(reserved_size, &position, sizeof(IrBlockParameter*), count, BUSTER_ALIGN_OF(IrBlockParameter*));
+        u64 reusable_position = position;
+        fits = fits && c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
+                       c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
+                       c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), count, BUSTER_ALIGN_OF(u32)) &&
+                       c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u8), count, BUSTER_ALIGN_OF(u8)) &&
+                       c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), parameters, BUSTER_ALIGN_OF(u32)) &&
+                       c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u64), parameters, BUSTER_ALIGN_OF(u64)) &&
+                       c_ir_arena_reservation_advance(reserved_size, &position, sizeof(CIrSsaUser), parameters * 2, BUSTER_ALIGN_OF(CIrSsaUser));
+        // The witness groups expire before the live-parameter queue is carved.
+        position = reusable_position;
+        fits = fits && c_ir_arena_reservation_advance(reserved_size, &position, sizeof(u32), parameters, BUSTER_ALIGN_OF(u32));
+    }
     if (!fits)
     {
         c_ir_ssa_refuse(builder, S8("C frontend SSA value capacity exceeds the lowering scratch reservation"));
@@ -8363,197 +8367,249 @@ BUSTER_C_INTERNAL u64 c_ir_ssa_retry_pop(u64* heap, u32* heap_count)
     return result;
 }
 
-// Remove trivial parameters to a fixed point. This is the repeated
-// block-order sweep, minus every evaluation whose incoming roots did not
-// change since the parameter's last one: such a re-evaluation repeats its
-// verdict. A parameter becomes due again only when a root it reads is
-// replaced, at the sweep and position the full sweep would next reach it, so
-// elimination order, replacement representatives and canonical value IDs are
-// unchanged, while N nested joins cost O(N log N) instead of N sweeps.
-// `cursor` holds the parameter-bearing blocks on entry.
-BUSTER_C_INTERNAL void c_ir_ssa_simplify_parameters(CIntegerIrBuilder* builder, u8* memory, u32* replacements,
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestIrSsaWork c_ir_ssa_work_total;
+CTestIrSsaWork c_test_ir_ssa_work(void)
+{
+    return c_ir_ssa_work_total;
+}
+#define C_IR_SSA_WORK(field, count) (c_ir_ssa_work_total.field += (count))
+#else
+#define C_IR_SSA_WORK(field, count) ((void)(count))
+#endif
+
+// Two distinct non-self roots witness that a parameter cannot simplify.
+// Watch their union groups, not each intermediate canonical representative.
+// Union by rank moves each live witness only through logarithmically many
+// groups; requeue only when the witnesses meet or one becomes the reader.
+// Reachable incoming roots decide first; dead roots matter only when no
+// reachable non-self root exists. A self-only cycle keeps its representative.
+BUSTER_C_INTERNAL void c_ir_ssa_unwatch(u32* first, CIrSsaUser* users, u32 reader)
+{
+    for (u32 index = reader * 2; index < reader * 2 + 2; index += 1)
+    {
+        CIrSsaUser* user = users + index;
+        if (user->root != UINT32_MAX)
+        {
+            if (user->previous == UINT32_MAX)
+            {
+                first[user->root] = user->next;
+            }
+            else
+            {
+                users[user->previous].next = user->next;
+            }
+            if (user->next != UINT32_MAX)
+            {
+                users[user->next].previous = user->previous;
+            }
+            user->root = UINT32_MAX;
+        }
+    }
+}
+
+BUSTER_C_INTERNAL void c_ir_ssa_retry_witness(u32* first, CIrSsaUser* users, u64* heap, u32* heap_count,
+                                             u32 reader, u32 here, u64 sweep)
+{
+    c_ir_ssa_unwatch(first, users, reader);
+    u64 due = reader > here ? sweep : sweep + 1;
+    c_ir_ssa_retry_push(heap, heap_count, due << 32 | reader);
+}
+
+BUSTER_C_INTERNAL u32 c_ir_ssa_simplify_parameters(CIntegerIrBuilder* builder, u8* memory, u32* replacements,
                                                     CIrSsaParameter** pending_by_value, IrBlockParameter** parameter_by_value,
                                                     u32* cursor, u32 active_block_count)
 {
     CIrDirectSsa* ssa = builder->direct_ssa;
     IrFunction* function = builder->function;
     u32 count = function->value_count;
-    u32* user_first = arena_allocate(builder->scratch_arena, u32, count);
-    u32* user_last = arena_allocate(builder->scratch_arena, u32, count);
-    u32* order = arena_allocate(builder->scratch_arena, u32, count);
-    u32* position = arena_allocate(builder->scratch_arena, u32, count);
-    u64* heap = arena_allocate(builder->scratch_arena, u64, count);
-    u8* queued = arena_allocate(builder->scratch_arena, u8, count);
-    u64 user_capacity = 0;
+    u32 parameter_count = 0;
     for (u32 active = 0; active < active_block_count; active += 1)
     {
         for (IrBlockParameter* parameter = function->blocks[cursor[active]].first_parameter; parameter; parameter = parameter->next)
         {
-            user_capacity += parameter->incoming_count;
+            CIrSsaParameter* pending = pending_by_value[parameter->value.value];
+            parameter_count += (!pending || !memory[pending->local]) && replacements[parameter->value.value] == parameter->value.value;
         }
     }
-    CIrSsaUser* users = arena_allocate(builder->scratch_arena, CIrSsaUser, user_capacity ? user_capacity : 1);
-    memset(user_first, 0xff, sizeof(*user_first) * count);
-    memset(queued, 0, count);
-    memset(parameter_by_value, 0, sizeof(*parameter_by_value) * count);
-    IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, (sizeof(*user_first) * 4 + sizeof(*heap) + sizeof(*queued)) * (u64)count +
-                                                    sizeof(*users) * user_capacity);
-    IR_CONSTRUCTION_RECORD(SSA_VALUE_CLEAR_BYTES, (sizeof(*user_first) + sizeof(*queued) + sizeof(*parameter_by_value)) * (u64)count);
-    // Number every retained parameter in sweep order, due in sweep zero, and
-    // file each incoming row under the root it currently reads. Ascending
-    // keys already form a valid heap.
-    u32 user_count = 0;
-    u32 heap_count = 0;
-    for (u32 active = 0; active < active_block_count; active += 1)
+    if (parameter_count)
     {
-        for (IrBlockParameter* parameter = function->blocks[cursor[active]].first_parameter; parameter; parameter = parameter->next)
+        C_IR_SSA_WORK(simplify_setups, 1);
+        TemporalArena temporary = {.arena = builder->scratch_arena, .position = builder->scratch_arena->position};
+        u32* first = arena_allocate(builder->scratch_arena, u32, count);
+        u32* groups = arena_allocate(builder->scratch_arena, u32, count);
+        u32* position = arena_allocate(builder->scratch_arena, u32, count);
+        u8* rank = arena_allocate(builder->scratch_arena, u8, count);
+        u32* order = arena_allocate(builder->scratch_arena, u32, parameter_count);
+        u64* heap = arena_allocate(builder->scratch_arena, u64, parameter_count);
+        CIrSsaUser* users = arena_allocate(builder->scratch_arena, CIrSsaUser, (u64)parameter_count * 2);
+        u64 scratch_bytes = (sizeof(*first) + sizeof(*groups) + sizeof(*position) + sizeof(*rank)) * (u64)count +
+                            (sizeof(*order) + sizeof(*heap) + sizeof(*users) * 2) * (u64)parameter_count;
+        C_IR_SSA_WORK(simplify_scratch_bytes, scratch_bytes);
+        IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, scratch_bytes);
+        IR_CONSTRUCTION_RECORD(SSA_VALUE_CLEAR_BYTES, (sizeof(*first) + sizeof(*rank) + sizeof(*parameter_by_value)) * (u64)count);
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_GROUP_ROWS, count);
+        memset(first, 0xff, sizeof(*first) * count);
+        memset(rank, 0, count);
+        memset(parameter_by_value, 0, sizeof(*parameter_by_value) * count);
+        for (u32 value = 0; value < count; value += 1)
         {
-            u32 value = parameter->value.value;
-            CIrSsaParameter* pending = pending_by_value[value];
-            if ((!pending || !memory[pending->local]) && replacements[value] == value)
+            groups[value] = value;
+        }
+        for (u32 index = 0; index < parameter_count * 2; index += 1)
+        {
+            users[index].root = UINT32_MAX;
+        }
+        u32 heap_count = 0;
+        for (u32 active = 0; active < active_block_count; active += 1)
+        {
+            for (IrBlockParameter* parameter = function->blocks[cursor[active]].first_parameter; parameter; parameter = parameter->next)
             {
-                parameter_by_value[value] = parameter;
-                position[value] = heap_count;
-                order[heap_count] = value;
-                heap[heap_count] = heap_count;
-                heap_count += 1;
-                queued[value] = 1;
-                for (IrIncoming* incoming = parameter->first_incoming; incoming; incoming = incoming->next)
+                u32 value = parameter->value.value;
+                CIrSsaParameter* pending = pending_by_value[value];
+                if ((!pending || !memory[pending->local]) && replacements[value] == value)
                 {
-                    u32 root = c_ir_ssa_root(replacements, incoming->value.value);
-                    if (root != value)
-                    {
-                        users[user_count] = (CIrSsaUser){.parameter = value, .next = UINT32_MAX};
-                        if (user_first[root] == UINT32_MAX)
-                        {
-                            user_first[root] = user_count;
-                        }
-                        else
-                        {
-                            users[user_last[root]].next = user_count;
-                        }
-                        user_last[root] = user_count;
-                        user_count += 1;
-                    }
+                    parameter_by_value[value] = parameter;
+                    position[value] = heap_count;
+                    order[heap_count] = value;
+                    heap[heap_count] = heap_count;
+                    heap_count += 1;
                 }
             }
         }
+#if BUSTER_BENCH_ALLOCATIONS
+        u64 sweeps = heap_count != 0;
+#endif
+        while (heap_count)
+        {
+            u64 key = c_ir_ssa_retry_pop(heap, &heap_count);
+            u64 sweep = key >> 32;
+            u32 here = (u32)key;
+            u32 value = order[here];
+#if BUSTER_BENCH_ALLOCATIONS
+            sweeps = BUSTER_MAX(sweeps, sweep + 1);
+#endif
+            IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PARAMETER_VISITS, 1);
+            C_IR_SSA_WORK(parameter_visits, 1);
+            IrBlockParameter* parameter = parameter_by_value[value];
+            u32 same = UINT32_MAX;
+            u32 other = UINT32_MAX;
+            bool trivial = true;
+            u32 dead_same = UINT32_MAX;
+            u32 dead_other = UINT32_MAX;
+            bool dead_trivial = true;
+            for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
+            {
+                IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_INCOMING_VISITS, 1);
+                u32 root = c_ir_ssa_root(replacements, incoming->value.value);
+                bool runs = ssa->reachable[incoming->predecessor.value] != 0;
+                if (root != value && runs)
+                {
+                    if (same == UINT32_MAX)
+                    {
+                        same = root;
+                    }
+                    else if (same != root)
+                    {
+                        trivial = false;
+                        other = root;
+                    }
+                }
+                else if (root != value)
+                {
+                    if (dead_same == UINT32_MAX)
+                    {
+                        dead_same = root;
+                    }
+                    else if (dead_same != root)
+                    {
+                        dead_trivial = false;
+                        dead_other = root;
+                    }
+                }
+            }
+            if (trivial && same == UINT32_MAX)
+            {
+                trivial = dead_trivial;
+                same = dead_same;
+                other = dead_other;
+            }
+            if (trivial && same != UINT32_MAX)
+            {
+                replacements[value] = same;
+                u32 kept = c_ir_ssa_root(groups, value);
+                u32 moved = c_ir_ssa_root(groups, same);
+                BUSTER_CHECK(kept != moved);
+                if (rank[kept] < rank[moved])
+                {
+                    u32 swap = kept;
+                    kept = moved;
+                    moved = swap;
+                }
+                if (rank[kept] == rank[moved])
+                {
+                    rank[kept] += 1;
+                }
+                groups[moved] = kept;
+                while (first[moved] != UINT32_MAX)
+                {
+                    C_IR_SSA_WORK(witness_moves, 1);
+                    IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_USER_VISITS, 1);
+                    u32 user = first[moved];
+                    u32 reader = user / 2;
+                    u32 next = users[user].next;
+                    first[moved] = next;
+                    if (next != UINT32_MAX)
+                    {
+                        users[next].previous = UINT32_MAX;
+                    }
+                    users[user].root = kept;
+                    users[user].previous = UINT32_MAX;
+                    users[user].next = first[kept];
+                    if (first[kept] != UINT32_MAX)
+                    {
+                        users[first[kept]].previous = user;
+                    }
+                    first[kept] = user;
+                    if (c_ir_ssa_root(groups, users[user ^ 1].root) == kept)
+                    {
+                        c_ir_ssa_retry_witness(first, users, heap, &heap_count, reader, here, sweep);
+                    }
+                }
+                // `same` now reads itself if one of its witnesses joined its
+                // own group. It can sit in the kept list, which did not move.
+                if (parameter_by_value[same])
+                {
+                    u32 reader = position[same];
+                    if (users[reader * 2].root != UINT32_MAX &&
+                        (users[reader * 2].root == kept || users[reader * 2 + 1].root == kept))
+                    {
+                        c_ir_ssa_retry_witness(first, users, heap, &heap_count, reader, here, sweep);
+                    }
+                }
+            }
+            else if (!trivial)
+            {
+                u32 roots[2] = {same, other};
+                for (u32 witness = 0; witness < 2; witness += 1)
+                {
+                    u32 root = c_ir_ssa_root(groups, roots[witness]);
+                    u32 user = here * 2 + witness;
+                    users[user] = (CIrSsaUser){.root = root, .previous = UINT32_MAX, .next = first[root]};
+                    if (first[root] != UINT32_MAX)
+                    {
+                        users[first[root]].previous = user;
+                    }
+                    first[root] = user;
+                }
+            }
+        }
+#if BUSTER_BENCH_ALLOCATIONS
+        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PASSES, sweeps);
+#endif
+        scratch_end(temporary);
     }
-#if BUSTER_BENCH_ALLOCATIONS
-    // The census counts the sweeps the full block-order sweep would take.
-    u64 sweeps = heap_count != 0;
-#endif
-    while (heap_count)
-    {
-        u64 key = c_ir_ssa_retry_pop(heap, &heap_count);
-        u64 sweep = key >> 32;
-        u32 here = (u32)key;
-        u32 value = order[here];
-        queued[value] = 0;
-#if BUSTER_BENCH_ALLOCATIONS
-        sweeps = BUSTER_MAX(sweeps, sweep + 1);
-#endif
-        IrBlockParameter* parameter = parameter_by_value[value];
-        IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PARAMETER_VISITS, 1);
-        // An edge out of an unreachable block never runs, so the
-        // value it carries cannot reach the parameter: when every
-        // edge that can run carries one value, the parameter is
-        // that value. A compound statement that ends in `break`,
-        // `goto` or `return` leaves its continuation block without
-        // predecessors, and the next `case` or label still gets an
-        // edge from it, whose value is an unfilled parameter of the
-        // dead block. Counting it would keep a merge of every
-        // variable read after that label -- and of everything
-        // downstream -- alive. With no runnable edge carrying a
-        // value, only the dead ones decide, as they always did:
-        // every dead root must agree, so the first mismatch is
-        // final and a later repeat cannot restore triviality.
-        u32 same = UINT32_MAX;
-        bool trivial = true;
-        u32 dead_same = UINT32_MAX;
-        bool dead_trivial = true;
-        for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
-        {
-            IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_INCOMING_VISITS, 1);
-            u32 root = c_ir_ssa_root(replacements, incoming->value.value);
-            bool runs = ssa->reachable[incoming->predecessor.value] != 0;
-            if (root != value && runs)
-            {
-                trivial = same == UINT32_MAX || root == same;
-                same = root;
-            }
-            else if (root != value)
-            {
-                dead_trivial = dead_trivial && (dead_same == UINT32_MAX || root == dead_same);
-                dead_same = root;
-            }
-        }
-        if (trivial && same == UINT32_MAX)
-        {
-            trivial = dead_trivial;
-            same = dead_same;
-        }
-        if (trivial && same != UINT32_MAX)
-        {
-            replacements[value] = same;
-            // Every parameter reading this one now reads `same`. The full
-            // sweep reaches a later position in this sweep, an earlier one
-            // in the next. Move the rows to `same` for its own replacement,
-            // minus those that can never requeue again: a replaced reader
-            // stays replaced, and `same` now reads itself. Carrying them
-            // would grow each list along a chain of trivial loop-header
-            // parameters, making N nested loops cost N^3 (#3723).
-            u32 kept_first = UINT32_MAX;
-            u32 kept_last = UINT32_MAX;
-            u32 user = user_first[value];
-            while (user != UINT32_MAX)
-            {
-                u32 next = users[user].next;
-                u32 reader = users[user].parameter;
-                if (replacements[reader] == reader)
-                {
-                    if (!queued[reader])
-                    {
-                        queued[reader] = 1;
-                        u64 due = position[reader] > here ? sweep : sweep + 1;
-                        c_ir_ssa_retry_push(heap, &heap_count, due << 32 | position[reader]);
-                    }
-                    if (reader != same)
-                    {
-                        users[user].next = UINT32_MAX;
-                        if (kept_first == UINT32_MAX)
-                        {
-                            kept_first = user;
-                        }
-                        else
-                        {
-                            users[kept_last].next = user;
-                        }
-                        kept_last = user;
-                    }
-                }
-                user = next;
-            }
-            user_first[value] = UINT32_MAX;
-            if (kept_first != UINT32_MAX)
-            {
-                if (user_first[same] == UINT32_MAX)
-                {
-                    user_first[same] = kept_first;
-                }
-                else
-                {
-                    users[user_last[same]].next = kept_first;
-                }
-                user_last[same] = kept_last;
-            }
-        }
-    }
-#if BUSTER_BENCH_ALLOCATIONS
-    IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_PASSES, sweeps);
-#endif
-    // Unlink every replaced or memory-owned parameter in one final sweep, the
-    // one block visit simplification makes; numbering above reads the same rows.
+    u32 retained = 0;
     for (u32 active = 0; active < active_block_count; active += 1)
     {
         IR_CONSTRUCTION_RECORD(SSA_SIMPLIFY_BLOCK_VISITS, 1);
@@ -8566,17 +8622,20 @@ BUSTER_C_INTERNAL void c_ir_ssa_simplify_parameters(CIntegerIrBuilder* builder, 
             CIrSsaParameter* pending = pending_by_value[parameter->value.value];
             if ((pending && memory[pending->local]) || replacements[parameter->value.value] != parameter->value.value)
             {
+                parameter_by_value[parameter->value.value] = 0;
                 *link = parameter->next;
                 destination->parameter_count -= 1;
                 ssa->statistics.parameters_removed += 1;
             }
             else
             {
+                retained += 1;
                 destination->last_parameter = parameter;
                 link = &parameter->next;
             }
         }
     }
+    return retained;
 }
 
 // Finish step three: with every value known, drop provisional parameters,
@@ -8661,27 +8720,17 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
             cursor[active_block_count++] = block;
         }
     }
-    IrBlockParameter** parameter_by_value = arena_allocate(builder->scratch_arena, IrBlockParameter*, count);
-    c_ir_ssa_simplify_parameters(builder, memory, replacements, pending_by_value, parameter_by_value, cursor, active_block_count);
-    // A parenthesized assignment can recover a read's place without ever
-    // consuming its provisional value. Prune such parameters (including
-    // unused cyclic groups), starting only at actual instruction operands.
-    memset(parameter_by_value, 0, sizeof(*parameter_by_value) * count);
-    IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, sizeof(*parameter_by_value) * (u64)count);
-    IR_CONSTRUCTION_RECORD(SSA_VALUE_CLEAR_BYTES, sizeof(*parameter_by_value) * (u64)count);
+    IrBlockParameter** parameter_by_value = active_block_count ? arena_allocate(builder->scratch_arena, IrBlockParameter*, count) : 0;
+    IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, active_block_count ? sizeof(*parameter_by_value) * (u64)count : 0);
+    u32 parameter_count = active_block_count ? c_ir_ssa_simplify_parameters(builder, memory, replacements, pending_by_value, parameter_by_value, cursor, active_block_count) : 0;
+    // The simplifier leaves exactly its surviving parameters in the index.
+    // Mark liveness only when there is a parameter (possibly a dead cycle).
     memset(value_map, 0xff, sizeof(*value_map) * count);
     IR_CONSTRUCTION_RECORD(SSA_VALUE_CLEAR_BYTES, sizeof(*value_map) * (u64)count);
-    u32* work = arena_allocate(builder->scratch_arena, u32, count);
-    IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, sizeof(*work) * (u64)count);
+    u32* work = parameter_count ? arena_allocate(builder->scratch_arena, u32, parameter_count) : 0;
+    IR_CONSTRUCTION_RECORD(SSA_VALUE_SCRATCH_BYTES, sizeof(*work) * (u64)parameter_count);
     u32 work_count = 0;
     u64 operand_count = 0;
-    for (u32 block = 0; block < block_count; block += 1)
-    {
-        for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
-        {
-            parameter_by_value[parameter->value.value] = parameter;
-        }
-    }
     for (u32 index = 0; index < function->instruction_count; index += 1)
     {
         IrInstruction* instruction = function->instructions + index;
@@ -8690,7 +8739,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
         {
             value_map[instruction->result.value] = 0;
         }
-        for (u32 operand = 0; operand < instruction->operand_count; operand += 1)
+        for (u32 operand = 0; parameter_count && operand < instruction->operand_count; operand += 1)
         {
             u32 value = c_ir_ssa_root(replacements, instruction->operands[operand].value);
             if (parameter_by_value[value] && value_map[value] == UINT32_MAX)
@@ -8712,6 +8761,19 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
                 work[work_count++] = value;
             }
         }
+    }
+    u64 predecessor_position = builder->arena->position;
+    u32 predecessor_count = offsets[block_count];
+    bool predecessors_fit = !predecessor_count || c_ir_arena_reservation_advance(builder->arena->reserved_size, &predecessor_position,
+        sizeof(IrPredecessor), predecessor_count, BUSTER_ALIGN_OF(IrPredecessor));
+    IrPredecessor* published_predecessors = predecessors_fit && predecessor_count ? arena_allocate(builder->arena, IrPredecessor, predecessor_count) : 0;
+    C_IR_SSA_WORK(predecessor_allocations, predecessors_fit && predecessor_count != 0);
+    C_IR_SSA_WORK(predecessor_rows, predecessors_fit ? predecessor_count : 0);
+    IR_CONSTRUCTION_RECORD(SSA_PREDECESSOR_ALLOCATIONS, predecessors_fit && predecessor_count != 0);
+    if (!predecessors_fit)
+    {
+        c_ir_ssa_refuse(builder, S8("C frontend SSA predecessor pool exceeds the output arena reservation"));
+        valid = false;
     }
     for (u32 block = 0; block < block_count; block += 1)
     {
@@ -8737,9 +8799,9 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
         // edges. Publish every predecessor, including parameter-free
         // successors, so dominance never sees a partial graph.
         {
-            for (u32 index = offsets[block]; index < offsets[block + 1]; index += 1)
+            for (u32 index = offsets[block]; published_predecessors && index < offsets[block + 1]; index += 1)
             {
-                IrPredecessor* predecessor = arena_allocate(builder->arena, IrPredecessor, 1);
+                IrPredecessor* predecessor = published_predecessors + index;
                 *predecessor = (IrPredecessor){.block = {.value = predecessors[index]}};
                 if (destination->last_predecessor)
                 {
@@ -8782,26 +8844,41 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
     // Dense IDs follow ascending old IDs, so a retained row's destination
     // cannot exceed its source and cannot overwrite a later source row.
     u32 value_count = 0;
-    IR_CONSTRUCTION_RECORD(SSA_REMAP_VALUE_ROWS, (u64)count * 2);
+    bool identity = true;
+    IR_CONSTRUCTION_RECORD(SSA_REMAP_VALUE_ROWS, count);
     for (u32 value = 0; value < count; value += 1)
     {
         if (value_map[value] != UINT32_MAX)
         {
-            value_map[value] = value_count++;
-            if (replacements[value] == value)
+            u32 mapped = value_count++;
+            value_map[value] = mapped;
+            identity = identity && mapped == value && replacements[value] == value;
+            if (replacements[value] == value && mapped != value)
             {
-                function->values[value_map[value]] = function->values[value];
+                function->values[mapped] = function->values[value];
+            }
+        }
+        else
+        {
+            identity = false;
+        }
+    }
+    if (!identity)
+    {
+        IR_CONSTRUCTION_RECORD(SSA_REMAP_VALUE_ROWS, count);
+        for (u32 value = 0; value < count; value += 1)
+        {
+            u32 root = c_ir_ssa_root(replacements, value);
+            if (root != value)
+            {
+                value_map[value] = value_map[root];
             }
         }
     }
-    for (u32 value = 0; value < count; value += 1)
-    {
-        u32 root = c_ir_ssa_root(replacements, value);
-        if (root != value)
-        {
-            value_map[value] = value_map[root];
-        }
-    }
+    C_IR_SSA_WORK(identity_publications, identity);
+    C_IR_SSA_WORK(identity_operand_slots, identity ? operand_count : 0);
+    IR_CONSTRUCTION_RECORD(SSA_IDENTITY_PUBLICATIONS, identity);
+    IR_CONSTRUCTION_RECORD(SSA_IDENTITY_OPERAND_SLOTS, identity ? operand_count : 0);
     // Some canonical rows share operand slices. Write a fresh dense pool
     // so each old ID is remapped exactly once, never through an updated ID.
     function->operand_total = operand_count;
@@ -8810,17 +8887,17 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
     // size is the sum of every row's operands, known only here, so check it
     // before the carve; a refusal skips the remap and fails the function.
     u64 pool_position = builder->arena->position;
-    bool pool_fits = c_ir_arena_reservation_advance(builder->arena->reserved_size, &pool_position, sizeof(IrValueId), operand_count, BUSTER_ALIGN_OF(IrValueId));
-    IrValueId* operands = pool_fits ? arena_allocate(builder->arena, IrValueId, operand_count) : 0;
-    u32 remap_rows = pool_fits ? function->instruction_count : 0;
+    bool pool_fits = identity || c_ir_arena_reservation_advance(builder->arena->reserved_size, &pool_position, sizeof(IrValueId), operand_count, BUSTER_ALIGN_OF(IrValueId));
+    IrValueId* operands = !identity && pool_fits ? arena_allocate(builder->arena, IrValueId, operand_count) : 0;
+    u32 remap_rows = !identity && pool_fits ? function->instruction_count : 0;
     if (!pool_fits)
     {
         c_ir_ssa_refuse(builder, S8("C frontend SSA operand pool exceeds the output arena reservation"));
         valid = false;
     }
     u64 operand_cursor = 0;
-    IR_CONSTRUCTION_RECORD(SSA_REMAP_OPERAND_SLOTS, operand_count);
-    IR_CONSTRUCTION_RECORD(SSA_REMAP_INSTRUCTION_ROWS, function->instruction_count);
+    IR_CONSTRUCTION_RECORD(SSA_REMAP_OPERAND_SLOTS, identity ? 0 : operand_count);
+    IR_CONSTRUCTION_RECORD(SSA_REMAP_INSTRUCTION_ROWS, remap_rows);
     for (u32 index = 0; index < remap_rows; index += 1)
     {
         IrInstruction* instruction = function->instructions + index;
@@ -8840,7 +8917,7 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish_publish(CIntegerIrBuilder* builder, u8* m
             instruction->result.value = value_map[instruction->result.value];
         }
     }
-    for (u32 block = 0; block < block_count; block += 1)
+    for (u32 block = 0; !identity && block < block_count; block += 1)
     {
         for (IrBlockParameter* parameter = function->blocks[block].first_parameter; parameter; parameter = parameter->next)
         {
@@ -8952,6 +9029,228 @@ BUSTER_C_INTERNAL bool c_ir_ssa_finish(CIntegerIrBuilder* builder, CIRDirectSsaS
     IR_CONSTRUCTION_RECORD(FINAL_VALUE_SLOTS, builder->function->value_capacity);
     return valid;
 }
+
+#if BUSTER_INCLUDE_TESTS
+// The repeated ordered sweep is an independent oracle for witness scheduling.
+// It has no user lists, union groups or retry heap.
+BUSTER_C_INTERNAL void c_test_ir_ssa_sweep(CIntegerIrBuilder* builder, u8* memory, u32* replacements,
+                                         CIrSsaParameter** pending)
+{
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (IrBlockParameter* parameter = builder->function->blocks[0].first_parameter; parameter; parameter = parameter->next)
+        {
+            u32 value = parameter->value.value;
+            if ((!pending[value] || !memory[pending[value]->local]) && replacements[value] == value)
+            {
+                u32 same = UINT32_MAX;
+                u32 dead_same = UINT32_MAX;
+                bool trivial = true;
+                bool dead_trivial = true;
+                for (IrIncoming* incoming = parameter->first_incoming; incoming && trivial; incoming = incoming->next)
+                {
+                    u32 root = c_ir_ssa_root(replacements, incoming->value.value);
+                    if (root != value && builder->direct_ssa->reachable[incoming->predecessor.value])
+                    {
+                        trivial = same == UINT32_MAX || same == root;
+                        same = root;
+                    }
+                    else if (root != value)
+                    {
+                        dead_trivial = dead_trivial && (dead_same == UINT32_MAX || dead_same == root);
+                        dead_same = root;
+                    }
+                }
+                if (trivial && same == UINT32_MAX)
+                {
+                    trivial = dead_trivial;
+                    same = dead_same;
+                }
+                if (trivial && same != UINT32_MAX)
+                {
+                    replacements[value] = same;
+                    changed = true;
+                }
+            }
+        }
+    }
+}
+
+BUSTER_C_INTERNAL u32 c_test_ir_ssa_random(u32* state)
+{
+    *state ^= *state << 13;
+    *state ^= *state >> 17;
+    *state ^= *state << 5;
+    return *state;
+}
+
+bool c_test_ir_ssa_witness_graph(u32 seed)
+{
+    u32 state = seed;
+    u32 parameter_count = 1 + c_test_ir_ssa_random(&state) % 24;
+    u32 count = parameter_count + 3;
+    u8 reachable[2] = {(u8)(c_test_ir_ssa_random(&state) & 1), (u8)(c_test_ir_ssa_random(&state) & 1)};
+    u8 memory[24];
+    CIrSsaParameter pending_rows[24];
+    CIrSsaParameter* pending[27] = {0};
+    u32 initial[27];
+    u32 incoming_count[24];
+    u32 incoming_values[24][5];
+    u32 incoming_blocks[24][5];
+    for (u32 value = 0; value < count; value += 1)
+    {
+        initial[value] = value;
+    }
+    for (u32 value = 0; value < parameter_count; value += 1)
+    {
+        memory[value] = (u8)(c_test_ir_ssa_random(&state) % 8 == 0);
+        pending_rows[value] = (CIrSsaParameter){.local = value};
+        pending[value] = c_test_ir_ssa_random(&state) & 1 ? pending_rows + value : 0;
+        if (c_test_ir_ssa_random(&state) % 12 == 0)
+        {
+            initial[value] = parameter_count + c_test_ir_ssa_random(&state) % 3;
+        }
+        incoming_count[value] = c_test_ir_ssa_random(&state) % 6;
+        for (u32 index = 0; index < incoming_count[value]; index += 1)
+        {
+            incoming_values[value][index] = c_test_ir_ssa_random(&state) % count;
+            incoming_blocks[value][index] = c_test_ir_ssa_random(&state) & 1;
+        }
+    }
+    u32 roots[2][27];
+    u32 survivors[2][24];
+    u32 retained[2] = {0};
+    Arena* scratch = arena_create((ArenaCreation){0});
+    for (u32 arm = 0; arm < 2; arm += 1)
+    {
+        arena_set_position(scratch, arena_minimum_position);
+        IrBlockParameter parameters[24] = {0};
+        IrIncoming incoming[24][5] = {0};
+        IrBlockParameter* by_value[27] = {0};
+        u32 replacements[27];
+        memcpy(replacements, initial, sizeof(u32) * count);
+        IrBlock block = {.first_parameter = parameters, .last_parameter = parameters + parameter_count - 1, .parameter_count = parameter_count};
+        IrFunction function = {.blocks = &block, .value_count = count};
+        CIrDirectSsa ssa = {.reachable = reachable};
+        CIntegerIrBuilder builder = {.function = &function, .direct_ssa = &ssa, .scratch_arena = scratch};
+        for (u32 value = 0; value < parameter_count; value += 1)
+        {
+            parameters[value] = (IrBlockParameter){.value = {.value = value}, .incoming_count = incoming_count[value],
+                .next = value + 1 < parameter_count ? parameters + value + 1 : 0,
+                .first_incoming = incoming_count[value] ? incoming[value] : 0,
+                .last_incoming = incoming_count[value] ? incoming[value] + incoming_count[value] - 1 : 0};
+            for (u32 index = 0; index < incoming_count[value]; index += 1)
+            {
+                incoming[value][index] = (IrIncoming){.value = {.value = incoming_values[value][index]},
+                    .predecessor = {.value = incoming_blocks[value][index]},
+                    .next = index + 1 < incoming_count[value] ? incoming[value] + index + 1 : 0};
+            }
+        }
+        if (arm)
+        {
+            c_ir_ssa_simplify_parameters(&builder, memory, replacements, pending, by_value, (u32[]){0}, 1);
+        }
+        else
+        {
+            c_test_ir_ssa_sweep(&builder, memory, replacements, pending);
+        }
+        for (u32 value = 0; value < count; value += 1)
+        {
+            roots[arm][value] = c_ir_ssa_root(replacements, value);
+        }
+        for (IrBlockParameter* parameter = block.first_parameter; parameter; parameter = parameter->next)
+        {
+            u32 value = parameter->value.value;
+            if ((!pending[value] || !memory[pending[value]->local]) && replacements[value] == value)
+            {
+                survivors[arm][retained[arm]++] = value;
+            }
+        }
+    }
+    bool valid = !memcmp(roots[0], roots[1], sizeof(u32) * count) && retained[0] == retained[1] &&
+                 !memcmp(survivors[0], survivors[1], sizeof(u32) * retained[0]);
+    arena_destroy(scratch, 1);
+    return valid;
+}
+
+// Exercise the complete publication boundary with shared old operands, both
+// identity and shifted IDs, parameter-free CFG edges, dirty reuse and refusal.
+bool c_test_ir_ssa_publication(void)
+{
+    Arena* output = arena_create((ArenaCreation){0});
+    Arena* scratch = arena_create((ArenaCreation){0});
+    bool valid = true;
+    for (u32 shape = 0; shape < 5; shape += 1)
+    {
+        arena_set_position(output, arena_minimum_position);
+        arena_set_position(scratch, arena_minimum_position);
+        bool shifted = shape == 1;
+        bool refuse = shape == 3;
+        bool empty = shape == 4;
+        u32 first = shifted ? 1 : 0;
+        IrValue values[4] = {0};
+        IrValueId shared[2] = {{.value = first}, {.value = first}};
+        IrInstruction instructions[3] = {
+            {.result = {.value = first}},
+            {.result = {.value = first + 1}, .operand_count = 2, .operands = shared},
+            {.result = {.value = first + 2}, .operand_count = 2, .operands = shared},
+        };
+        IrBlock blocks[3] = {0};
+        IrValueId local_values[2] = {{.value = first}, {.value = 27}};
+        IrValueId local_places[2] = {{.value = first}, {.value = 27}};
+        blocks[1].local_values = local_values;
+        IrFunction function = {.values = values, .value_count = first + 3, .instructions = instructions,
+            .instruction_count = 3, .blocks = blocks, .block_count = 3, .local_count = 2, .local_places = local_places};
+        u32 offsets[4] = {0, 0, 1, 2};
+        if (empty)
+        {
+            memset(offsets, 0, sizeof(offsets));
+        }
+        u32 predecessors[2] = {0, 1};
+        u32 cursor[3];
+        u8 reachable[3] = {1, 1, 1};
+        CIrDirectSsa ssa = {.predecessor_offsets = offsets, .predecessors = predecessors,
+            .read_blocks = cursor, .reachable = reachable};
+        CIntegerIrBuilder builder = {.function = &function, .direct_ssa = &ssa, .arena = output, .scratch_arena = scratch};
+        CIRDirectSsaStatistics statistics = {0};
+        u64 reservation = output->reserved_size;
+        if (refuse)
+        {
+            output->reserved_size = output->position + sizeof(IrPredecessor) * 2 - 1;
+        }
+        else if (empty)
+        {
+            output->reserved_size = output->position + 1;
+        }
+        bool published = c_ir_ssa_finish_publish(&builder, 0, &statistics);
+        output->reserved_size = reservation;
+        valid = valid && published != refuse && function.value_count == 3 && function.operand_total == 4;
+        valid = valid && local_values[0].value == 0 && local_values[1].value == UINT32_MAX &&
+                local_places[0].value == 0 && local_places[1].value == UINT32_MAX;
+        if (!refuse)
+        {
+            valid = valid && blocks[0].sealed && blocks[1].sealed && blocks[2].sealed;
+            valid = valid && (empty ? !blocks[1].predecessor_count && !blocks[2].predecessor_count :
+                    blocks[1].predecessor_count == 1 && blocks[2].predecessor_count == 1 &&
+                    blocks[1].first_predecessor->block.value == 0 && blocks[2].first_predecessor->block.value == 1 &&
+                    !blocks[1].last_predecessor->next && !blocks[2].last_predecessor->next);
+            valid = valid && instructions[1].operands[0].value == 0 && instructions[2].operands[1].value == 0 && shared[0].value == first;
+            valid = valid && (shifted ? instructions[1].operands != instructions[2].operands
+                                     : instructions[1].operands == shared && instructions[2].operands == shared);
+        }
+        else
+        {
+            valid = valid && ssa.scratch_exhausted && builder.failure_message.length && output->position == arena_minimum_position;
+        }
+    }
+    arena_destroy(scratch, 1);
+    arena_destroy(output, 1);
+    return valid;
+}
+#endif
+
 
 BUSTER_C_INTERNAL void c_ir_mark_local_read_only(CIntegerIrBuilder* builder, CIntegerIrLocal* local)
 {
