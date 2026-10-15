@@ -4730,6 +4730,14 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
     // block-scope extern must continue to refer to external storage.
     String8 unreachable_source = string_format_z(arena, S8("{S8}/unreachable-local.c"), root_absolute);
     String8 unreachable_program = S8(
+        "extern int constant_dead_plain(void);\n"
+        "extern int constant_dead_else(void);\n"
+        "extern int constant_dead_short_rhs(void);\n"
+        "extern int constant_dead_comma(void);\n"
+        "extern int constant_dead_or_rhs(void);\n"
+        "extern int constant_dead_goto_prefix(void);\n"
+        "extern int constant_dead_case_prefix(void);\n"
+        "extern int constant_dead_data;\n"
         "static volatile int initializer_calls;\n"
         "int external_value = 9;\n"
         "static int read_external(void)\n"
@@ -4741,13 +4749,24 @@ UnitTestResult compiler_driver_object_path_tests(UnitTestArguments* arguments)
         "}\n"
         "int main(void)\n"
         "{\n"
+        "    int count = 0;\n"
+        "    if (0) count += constant_dead_plain() + constant_dead_data;\n"
+        "    if (1) count += 1; else count += constant_dead_else();\n"
+        "    if (0 && constant_dead_short_rhs()) count += constant_dead_data;\n"
+        "    if ((initializer_calls += 1, 0)) count += constant_dead_comma();\n"
+        "    if (1 || constant_dead_or_rhs()) count += 2; else count += constant_dead_data;\n"
+        "    goto entered;\n"
+        "    if (0) { count += constant_dead_goto_prefix(); entered: count += 4; }\n"
+        "    switch (3) { case 1: if (0) { count += constant_dead_case_prefix(); case 3: count += 8; } }\n"
+        "    int condition_calls = initializer_calls;\n"
+        "    initializer_calls = 0;\n"
         "    goto live;\n"
         "    int target = (initializer_calls += 1, 5);\n"
         "live:\n"
         "    target = 7;\n"
         "    goto dead;\n"
         "dead:\n"
-        "    return initializer_calls != 0 || target != 7 || read_external() != 9;\n"
+        "    return count != 15 || condition_calls != 1 || initializer_calls != 0 || target != 7 || read_external() != 9;\n"
         "}\n");
     BUSTER_TEST(arguments, file_write(unreachable_source, BUSTER_SLICE_TO_BYTE_SLICE(unreachable_program)));
     String8 allocators[] = {S8("fast"), S8("quality")};
