@@ -1808,7 +1808,7 @@ struct MachineEncodeResult
 // per-row heap allocation and gross contiguous over-reservation, which commits
 // pages under Buster's arenas. Chunk size is a measured default, not a
 // contract.
-#define MACHINE_BUILDER_CHUNK_BYTES BUSTER_KB(16)
+#define MACHINE_BUILDER_CHUNK_BYTES BUSTER_KB(2)
 // Initial slots of the builder's virtual-register chunk index; it doubles.
 #define MACHINE_BUILDER_CHUNK_INDEX_INITIAL_CAPACITY 16
 
