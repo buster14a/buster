@@ -33,7 +33,7 @@ BUSTER_GLOBAL_LOCAL IrValidateScaleFixture* ir_validate_scale_fixture(Arena* are
     for (u32 block = 0; block < function->block_count; block += 1)
     {
         u32 first = labelled && block ? block + 2 + cast : 0;
-        u32 last = labelled && block ? first : 2 + cast;
+        u32 last = labelled && block ? first : 2u + cast;
         function->blocks[block] = (IrBlock){.id = {block}, .first_instruction = {first}, .last_instruction = {last}, .terminated = true, .sealed = true};
     }
     for (u32 row = 0; row < function->instruction_count; row += 1)
