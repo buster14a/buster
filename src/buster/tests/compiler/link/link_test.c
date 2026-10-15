@@ -6618,6 +6618,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_final_text_padding(UnitTestArgument
                     {
                         text[0] = 0xc3;
                         text[7] = 0;
+                        if (imports)
+                        {
+                            text[1] = 0xe8;
+                            memset(text + 2, 0, 4);
+                        }
                     }
                     u8 original_text[sizeof(text)];
                     memcpy(original_text, text, sizeof(text));
@@ -6630,12 +6635,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_final_text_padding(UnitTestArgument
                         {.name = S8("main"), .size = text_length, .section = OBJECT_SECTION_TEXT, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
                         {.name = S8("padding_import"), .section = OBJECT_SECTION_UNDEFINED, .kind = OBJECT_SYMBOL_FUNCTION, .global = true},
                     };
-                    // The stub boundary requires a real import reference:
+                    // The stub boundary requires a real call reference:
                     // a declaration alone must not request an eager dyld bind.
-                    u8 imported_pointer[8] = {0};
                     ObjectRelocation relocations[] = {
                         {.section = OBJECT_SECTION_DATA, .symbol = 0, .kind = OBJECT_RELOCATION_ABSOLUTE64},
-                        {.section = OBJECT_SECTION_READ_ONLY_DATA, .symbol = 1, .kind = OBJECT_RELOCATION_ABSOLUTE64},
+                        {.section = OBJECT_SECTION_TEXT, .offset = 2, .symbol = 1, .addend = -4, .kind = OBJECT_RELOCATION_X86_64_PC32},
                     };
                     Target target = {
                         .cpu_arch = aarch64 ? CPU_ARCH_AARCH64 : CPU_ARCH_X86_64,
@@ -6644,8 +6648,6 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_final_text_padding(UnitTestArgument
                     };
                     ObjectFile object = link_test_object_make(temporary.arena, target, (ByteSlice){.pointer = text, .length = text_length},
                                                               symbols, 1 + imports, relocations, 1 + imports);
-                    object.sections[OBJECT_SECTION_READ_ONLY_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(imported_pointer);
-                    object.sections[OBJECT_SECTION_READ_ONLY_DATA].alignment = 8;
                     object.sections[OBJECT_SECTION_TEXT].alignment = 16;
                     object.sections[OBJECT_SECTION_DATA].data = (ByteSlice)BUSTER_ARRAY_TO_SLICE(data);
                     String8 exports[] = {S8("padding_import")};
@@ -6722,7 +6724,11 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_final_text_padding(UnitTestArgument
                             BUSTER_TEST(arguments, memcmp(image.pointer + data_offset + 8, original_data + 8, 8) == 0);
                             if (main_valid)
                             {
-                                BUSTER_TEST(arguments, memcmp(image.pointer + text_offset + main_offset, original_text, text_length) == 0);
+                                u8* linked_text = image.pointer + text_offset + main_offset;
+                                bool text_valid = imports ? memcmp(linked_text, original_text, 2) == 0 &&
+                                                            memcmp(linked_text + 6, original_text + 6, text_length - 6) == 0
+                                                          : memcmp(linked_text, original_text, text_length) == 0;
+                                BUSTER_TEST(arguments, text_valid);
                                 u64 end = main_offset + text_length;
                                 u64 gap = (16 - (end & 15)) & 15;
                                 bool gap_valid = gap <= text_size - end;
@@ -6743,6 +6749,8 @@ BUSTER_GLOBAL_LOCAL UnitTestResult link_test_final_text_padding(UnitTestArgument
                                             bool stub_valid = 6 <= text_size - end - gap && image.pointer[text_offset + end + gap] == 0xff &&
                                                               image.pointer[text_offset + end + gap + 1] == 0x25;
                                             BUSTER_TEST(arguments, stub_valid);
+                                            s64 call_target = (s64)main_offset + 6 + (s32)link_read_u32(linked_text, 2);
+                                            BUSTER_TEST(arguments, call_target >= 0 && (u64)call_target == end + gap);
                                         }
                                     }
                                 }
