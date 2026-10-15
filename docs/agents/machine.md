@@ -97,6 +97,17 @@ hosts execute its independent expected-value fixture.
   continuations move with their source block's expansion.
   `machine_test_reverse_postorder_layout` checks that every reached block has a
   lower predecessor.
+- Ordinary selectors plan parameter-edge blocks before emitting instructions
+  (`machine_parameter_edge_layout_plan`). A sparse destination map redirects
+  control targets to the first splitting edge in stable successor order;
+  label-address payloads still name the canonical entry. Bodies and inserted
+  branch blocks are emitted in final reverse-postorder layout, and canonical
+  edges publish their final IDs directly. Definitions and debug marks therefore
+  need no later full instruction/block/edge reconstruction or instruction map.
+  No-argument functions avoid the edge scan and map allocation. Expanded i128
+  and inline-assembly functions retain the general remap/split path. The private
+  `machine_selection_test_parameter_edge_layout` differential control compares
+  complete MIR and side tables with that legacy path on both native targets.
 - Selection retains a canonical-block-to-MIR-entry projection when expansion
   or layout changes block IDs. Parameter-edge splitting composes
   that projection through its block renumbering before reclaiming scratch,
