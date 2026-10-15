@@ -25427,7 +25427,11 @@ BUSTER_C_INTERNAL CIrPreparedCallStepResult c_ir_emit_prepared_call_step(CIntege
             u32* starts = arena_allocate(builder->temporary_arena, u32, capacity);
             u32* ends = arena_allocate(builder->temporary_arena, u32, capacity);
             u32 count = 0;
-            if (!c_ir_call_arguments(builder, selected, starts, ends, capacity, &count))
+            // The shared splitter requires a nonempty argument list. A fixed
+            // zero-argument builtin is admitted by its exact CALL children,
+            // then checked against its signature below.
+            if (!c_ir_call_arguments(builder, selected, starts, ends, capacity, &count) &&
+                !(selected->builtin_vendor_target && c_ir_call_argument_count(builder, selected) == 0))
                 return C_IR_PREPARED_CALL_STEP_FAILED;
             CVendorGenericBuiltin generic = c_vendor_generic_builtin(name);
             CVendorBuiltin signature = {0};
