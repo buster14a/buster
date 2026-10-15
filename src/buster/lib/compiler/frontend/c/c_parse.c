@@ -28630,12 +28630,12 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
                 // how SQLite's Unix VFS holds dlsym.
                 name_index = parenthesized_name;
             }
-            else if (preprocess.tokens[close - 1].kind == C_TOKEN_IDENTIFIER)
-            {
-                name_index = close - 1;
-            }
             else
             {
+                // A recognized declaration cannot become an expression when
+                // its grouped declarator has no name (for example T(1, 2)).
+                c_parse_diagnostic(result, c_preprocess_token_location(&preprocess, preprocess.tokens[index + 1]),
+                                   C_DIAGNOSTIC_EXPECTED_DECLARATION, S8("expected a declarator name"));
                 return false;
             }
             name = preprocess.tokens[name_index];
@@ -40382,6 +40382,24 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_sizeof_operands(C
                 {
                     type = c_parse_pointer_chain(result, preprocess, type, &cursor, close);
                     type = c_parse_array_suffixes(result, preprocess, type, &cursor, close);
+                }
+                // A remaining '(' belongs to an abstract declarator, not
+                // an unchecked expression. Read its complete parameter and
+                // array grammar before granting semantic-only success.
+                if (type.value < result->type_count && cursor < close &&
+                    c_token_is_punctuator(&preprocess.tokens[cursor], C_PUNCTUATOR_LEFT_PARENTHESIS) &&
+                    !c_parse_type_name_operand_names_value(result, preprocess, operand_scope, operand_start))
+                {
+                    u32 diagnostic_start = result->diagnostic_count;
+                    type = c_parse_identity_type_name(machine, result, preprocess, operand_scope, operand_start, close);
+                    if (type.value < result->type_count)
+                    {
+                        cursor = close;
+                    }
+                    else if (result->diagnostic_count == diagnostic_start)
+                    {
+                        diagnostic = (CParseInitializerDiagnostic){.message = S8("invalid size or alignment type operand"), .token = cursor};
+                    }
                 }
                 // A type name here must end at the operand's `)`: `sizeof
                 // (typeof (char) * 2)` answered 4 as if `char` were a value, and
