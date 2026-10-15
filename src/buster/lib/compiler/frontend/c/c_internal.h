@@ -430,6 +430,7 @@ BUSTER_C_EXTERN bool c_parse_body_scratch_fits(Arena* arena, u64 size, u64 align
 BUSTER_C_EXTERN bool c_parse_body_scratch_guarded(Arena const* arena);
 BUSTER_C_EXTERN Arena* c_parse_body_scratch_arena(void);
 BUSTER_C_EXTERN void c_parse_body_scratch_refuse(void);
+BUSTER_C_EXTERN bool c_parse_body_scratch_exhausted(void);
 #define C_PARSE_BODY_SCRATCH_ARRAY(arena, T, count) ((T*)c_parse_body_scratch_allocate((arena), sizeof(T), (count), BUSTER_ALIGN_OF(T)))
 
 // One language constraint, not a claim that an expression or translation unit
@@ -1757,6 +1758,19 @@ BUSTER_C_EXTERN bool c_ast_types_facts_identity(CAstFacts* facts, CParseResult c
 BUSTER_C_EXTERN CTypeId c_parse_conditional_expression_type(Arena* arena, CPreprocessResult preprocess, CParseResult* result, CScopeId scope, CTypeId left, CTypeId right, u32 left_start, u32 left_end, u32 right_start, u32 right_end);
 BUSTER_C_EXTERN bool c_ast_types_facts_scalar_arithmetic(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess,
     CAstTypeBody const* region, u32 node, CTypeId* type_out);
+// A temporary, same-region refusal summary for ordinary scalar conditional
+// publication. The prefix counts any-depth loose operators and uncertain
+// type-name probes; zero admits the existing semantic conditional authority.
+typedef struct CAstConditionalFacts CAstConditionalFacts;
+struct CAstConditionalFacts
+{
+    CAstTypeBody const* region;
+    u32* hazards;
+};
+BUSTER_C_EXTERN CAstConditionalFacts c_ast_types_facts_conditional_prepare(CTypeParseMachine* machine, CParseResult* result,
+    CPreprocessResult const* preprocess, CAstTypeBody const* region);
+BUSTER_C_EXTERN bool c_ast_types_facts_scalar_conditional(CTypeParseMachine* machine, CParseResult* result,
+    CPreprocessResult const* preprocess, CAstConditionalFacts const* prepared, CScopeId scope, u32 node, CTypeId* type_out);
 BUSTER_C_EXTERN bool c_ast_types_facts_derive(CTypeParseMachine* machine, CParseResult* result, CPreprocessResult const* preprocess, u32 node, CTypeId* type_out, u32* recipe_out);
 BUSTER_C_EXTERN void c_ast_types_facts_answer(CTypeParseMachine* machine, u32 start, u32 end, CTypeId type, bool nonplace);
 BUSTER_C_EXTERN void c_ast_types_facts_finish(CAstFacts* facts, CAst const* ast, CParseResult const* result, CPreprocessResult const* preprocess);

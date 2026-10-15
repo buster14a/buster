@@ -574,6 +574,12 @@ assertion operand that both producers keep. The fixture also runs the
 `c_test_tall_expression_types` heights (1, 2, 63, 64, 65, 4096 and 10000) with
 the comparison on. That is the sampled sweep the regression already uses; a
 dense 1 to 10,000 sweep would lower about 50 million operands.
+`c_ast_test_conditional_publication_work` separately counts ordinary semantic
+work and the guarded publication summary at geometric sizes for both the
+`sizeof` conditional and `_Generic` controller. Its forced-original completion
+control retains the repeated suffix work. The paired authority fixture checks
+complete model inventories, diagnostics and exact conditional facts, including
+constructor, member-width, loose-operator, projection and refusal neighbors.
 `c_ast_test_sizeof_handoff` runs the comparison over the `c_ast` corpus and
 the hosted frontend sources and enforces floors on both. At `4ed35b59` on
 Linux x86-64 it keeps about 7,230 rows (17 from constant contexts). Of those

@@ -9937,6 +9937,197 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_typeof_arithmetic_authority(UnitTe
     return result;
 }
 
+// Both actual tall-fixture contexts retain their original semantic provider.
+// Only publication reuses finished scalar arms; force the old completion run
+// as a quadratic negative control rather than weakening the original heights.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_conditional_publication_work(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    u32 const depths[] = {64, 1024, 16, 64};
+    u64 previous = 0;
+    for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(depths); sample += 1)
+    {
+        TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+        u32 depth = depths[sample];
+        String8* parts = arena_allocate(temporary.arena, String8, depth + 1);
+        for (u32 index = 0; index < depth; index += 1) parts[index] = S8("c?i:");
+        parts[depth] = S8("(int)u");
+        String8 chain = string_join_arena(temporary.arena, (SliceString8){parts, depth + 1}, false);
+        String8 source = string_format(temporary.arena,
+            S8("int f(int i,unsigned long u,int c){{_Static_assert(sizeof({S8})==sizeof(int),\"conditional\");"
+               "return _Generic({S8},int:0,default:1);}"), chain, chain);
+        CPreprocessResult preprocess = c_ast_test_preprocess(temporary.arena, source, C_PREPROCESS_DIALECT_GNU17);
+        c_test_conditional_facts_work_take();
+        c_test_conditional_facts_query_set(sample >= 2);
+        u64 before = c_test_assignment_chain_work();
+        CAnalysisResult analysis = c_parse_for_lowering(temporary.arena, preprocess);
+        u64 work = c_test_assignment_chain_work() - before;
+        c_test_conditional_facts_query_set(false);
+        CTestConditionalFactsWork publication = c_test_conditional_facts_work_take();
+        string_print(S8("CONDITIONAL_PUBLICATION_WORK original={u32} depth={u32} semantic={u64} visits={u64} words={u64} published={u64}\n"),
+            (u32)(sample >= 2), depth, work, publication.visits, publication.words, publication.published);
+        if (BUSTER_REQUIRE(arguments, analysis.analysis_complete && !analysis.diagnostic_count && analysis.ast && analysis.ast_facts))
+        {
+            if (sample < 2)
+            {
+                BUSTER_TEST(arguments, publication.published >= 2 * depth - 2 && publication.published <= 2 * depth && work <= (u64)depth * 512 + 4096);
+                BUSTER_TEST(arguments, publication.visits + publication.words <= preprocess.token_count * 4 + analysis.ast->node_count * 4);
+                if (sample) BUSTER_TEST(arguments, work <= previous * 16 + 4096);
+            }
+            else
+            {
+                BUSTER_TEST(arguments, !publication.published && work > (u64)depth * depth * 4);
+                if (sample == 3) BUSTER_TEST(arguments, work > previous * 10);
+            }
+            previous = work;
+            u32 found = 0;
+            CAstFacts const* facts = analysis.ast_facts;
+            for (u32 node = 0; node < analysis.ast->node_count; node += 1)
+            {
+                if (analysis.ast->kinds[node] == C_AST_CONDITIONAL)
+                {
+                    found += 1;
+                    BUSTER_TEST(arguments, (facts->flags[node] & C_AST_FACT_TYPED) &&
+                        !(facts->flags[node] & (C_AST_FACT_RECIPE | C_AST_FACT_NONPLACE)) &&
+                        facts->types[node] < analysis.type_count && analysis.types[facts->types[node]].kind == C_TYPE_INT);
+                }
+            }
+            BUSTER_TEST(arguments, found == 2 * depth && !facts->statistics.stale && !facts->statistics.gaps[C_AST_FACT_GAP_APPENDS]);
+            CParserResult syntax = c_parse_ast(temporary.arena, preprocess);
+            syntax.type_interning = true;
+            syntax.reference_tokens = true;
+            CAnalysisResult plain = c_analyze_semantics_only(temporary.arena, preprocess, syntax);
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, &plain, &analysis);
+            difference = difference.length ? difference : c_ast_corpus_model_differ(temporary.arena, &plain, &analysis);
+            BUSTER_TEST_RAW(arguments, !difference.length, difference);
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                CIRLowerResult lowered = c_lower_to_ir_with_options(temporary.arena, S8("conditional-publication.c"), preprocess, analysis, target_native,
+                    (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST(arguments, lowered.program && !lowered.diagnostic_count && lowered.canonical_ir_certified &&
+                    ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+            }
+        }
+        c_test_scratch_end(temporary);
+    }
+    return result;
+}
+
+// Original completion is a publication authority independent of the new helper.
+// Compare every completed conditional's type/recipe and value-category fact,
+// full model inventories and diagnostics, including conservative refusals.
+BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_conditional_publication_authority(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 const cases[] = {
+        S8("int f(int c,int i,unsigned long u){__typeof__(sizeof(c?0:(c?i:(int)u))) y=0;return (int)y;}"),
+        S8("int f(int c,unsigned long u){const volatile unsigned short a=0;__typeof__(sizeof(c?0.0:(c?a:(int)u))) y=0;return (int)y;}"),
+        S8("int f(int c,unsigned long u,double _Complex z){__typeof__(sizeof(c?0.0:(c?(int)u:__real__ z))) y=0;return (int)y;}"),
+        S8("int f(int c,unsigned long u,double _Complex z){__typeof__(sizeof(c?0.0:(c?(int)u:__imag__ z))) y=0;return (int)y;}"),
+        S8("int f(int c){__typeof__(sizeof(c?1,2:3.0f)) y=0;return (int)y;}"),
+        S8("int g(int,int);int f(int c){__typeof__(sizeof(c?g(1,2):3)) y=0;return y;}"),
+        S8("int f(int c){int a=0;__typeof__(sizeof(c?(a=1):3)) y=0;return y;}"),
+        S8("int f(int c){__typeof__(sizeof(c?(enum{V=-1})1:2)) y=0;return y;}"),
+        S8("typedef long L;int f(int c){__typeof__(sizeof(c?(L)1:2)) y=0;return (int)y;}"),
+        S8("int f(int c){__typeof__(sizeof(c?(__typeof__(1.0))1:2)) y=0;return (int)y;}"),
+        S8("int f(int c){__typeof__(sizeof(c?(_Atomic(int))1:2)) y=0;return y;}"),
+        S8("struct S{unsigned int b:1;};int f(int c,struct S s){__typeof__(sizeof(c?s.b:0)) y=0;return (int)y;}"),
+        S8("struct S{unsigned int b:1;};int f(int c,struct S s){__typeof__(sizeof(c?(unsigned int)s.b:0)) y=0;return (int)y;}"),
+        S8("int f(int c){__typeof__(sizeof(c?:1.0f)) y=0;return (int)y;}"),
+        S8("int f(int c,int*p){__typeof__(sizeof(c?p:0)) y=0;return y!=0;}"),
+        S8("typedef int V __attribute__((vector_size(16)));int f(int c,V a){__typeof__(sizeof(sizeof(c?a:a))) y=0;return (int)y;}"),
+        S8("enum E{A=-1};int f(int c,enum E e){_Atomic(int) a=0;__typeof__(sizeof(c?e:a)) y=0;return y;}"),
+        S8("int f(int c){__typeof__(sizeof(c?missing:2)) y=0;return y;}"),
+        S8("int f(int c){__typeof__(sizeof(c?(unsigned signed int)1:2)) y=0;return y;}"),
+        S8("int f(int c){struct S;__typeof__(sizeof(c?(typeof(sizeof(struct S{char a[7];})))1:2)) y=0;_Static_assert(sizeof(struct S)==7,\"complete\");return y;}"),
+        S8("int f(int c){__typeof__(sizeof(c?(int)1:(int)2)) y=0;{double c=0;__typeof__(c?(float)1:(double)2) z=0;_Static_assert(sizeof(z)==sizeof(double),\"scope\");}return y;}"),
+        S8("int f(int c,unsigned long u){_Atomic(int)a=0;__typeof__(sizeof(c?0:(c?a:(int)u)))y=0;return (int)y;}"),
+        S8("int f(int c,unsigned long u){const volatile long double a=0;__typeof__(sizeof(c?0.0L:(c?a:(int)u)))y=0;return (int)y;}"),
+        S8("int f(int c,unsigned long u){_Atomic(double)a=0;__typeof__(sizeof(c?0.0:(c?a:(int)u)))y=0;return (int)y;}"),
+        S8("int f(int c,int i,unsigned __int128 u){__typeof__(sizeof(c?0:(c?u:(int)i)))y=0;return (int)y;}"),
+        S8("int f(int c,unsigned long u){const volatile unsigned short a=0;__typeof__(sizeof(c?0.0:(c?a:(double)u)))y=0;return (int)y;}"),
+    };
+    Target const targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_WINDOWS},
+    };
+    for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        for (u32 sample = 0; sample < BUSTER_ARRAY_LENGTH(cases); sample += 1)
+        {
+            TemporalArena temporary = scratch_begin(&arguments->arena, 1);
+            CPreprocessResult preprocess = c_preprocess(temporary.arena, cases[sample],
+                (CPreprocessOptions){.source_path = S8("conditional-authority.c"), .target = targets[target], .data_layout = target_data_layout(targets[target]),
+                    .dialect = C_PREPROCESS_DIALECT_GNU17});
+            CAnalysisResult models[2] = {0};
+            CTestConditionalFactsWork work[2] = {0};
+            for (u32 mode = 0; mode < 2; mode += 1)
+            {
+                c_test_conditional_facts_query_set(mode != 0);
+                c_test_conditional_facts_work_take();
+                models[mode] = c_parse_for_lowering(temporary.arena, preprocess);
+                work[mode] = c_test_conditional_facts_work_take();
+                c_test_conditional_facts_query_set(false);
+            }
+            String8 difference = c_ast_corpus_analyses_differ(temporary.arena, models, models + 1);
+            difference = difference.length || models[0].diagnostic_count ? difference : c_ast_corpus_model_differ(temporary.arena, models, models + 1);
+            BUSTER_TEST_RAW(arguments, !difference.length, difference);
+            BUSTER_TEST(arguments, models[0].interned_type_count == models[1].interned_type_count &&
+                models[0].interned_qualified_count == models[1].interned_qualified_count &&
+                models[0].enum_member_count == models[1].enum_member_count && models[0].scope_count == models[1].scope_count &&
+                models[0].identifier_use_count == models[1].identifier_use_count &&
+                models[0].aggregate_attribute_count == models[1].aggregate_attribute_count &&
+                models[0].type_identity_query_count == models[1].type_identity_query_count &&
+                models[0].noreturn_function_type_count == models[1].noreturn_function_type_count &&
+                models[0].warning_count == models[1].warning_count &&
+                models[0].deferred_static_assert_count == models[1].deferred_static_assert_count &&
+                models[0].deferred_bit_field_width_diagnostic_count == models[1].deferred_bit_field_width_diagnostic_count &&
+                models[0].bfloat16_builtin_call_count == models[1].bfloat16_builtin_call_count);
+            BUSTER_TEST(arguments, !work[1].published);
+            string_print(S8("CONDITIONAL_AUTHORITY sample={u32} target={u32} attempts={u64} published={u64} diagnostics={u32}\n"),
+                sample, target, work[0].attempts, work[0].published, models[0].diagnostic_count);
+            if (sample < 4 || (sample >= 21 && sample < 25))
+                BUSTER_TEST_RAW(arguments, models[0].analysis_complete && !models[0].diagnostic_count && work[0].published,
+                    string_format(temporary.arena, S8("conditional eligible sample={u32} published={u64}"), sample, work[0].published));
+            else if (sample < 20 || sample == 25) BUSTER_TEST(arguments, !work[0].published);
+            if (!models[0].diagnostic_count && models[0].ast && models[0].ast_facts && models[1].ast && models[1].ast_facts)
+            {
+                CAstFacts const* a = models[0].ast_facts;
+                CAstFacts const* b = models[1].ast_facts;
+                BUSTER_TEST(arguments, a->node_count == b->node_count && a->recipe_count == b->recipe_count && !a->statistics.stale);
+                for (u32 node = 0; node < BUSTER_MIN(a->node_count, b->node_count); node += 1)
+                {
+                    if (models[0].ast->kinds[node] == C_AST_CONDITIONAL || models[0].ast->kinds[node] == C_AST_CONDITIONAL_OMITTED)
+                    {
+                        u32 mask = C_AST_FACT_TYPED | C_AST_FACT_RECIPE | C_AST_FACT_NONPLACE;
+                        BUSTER_TEST_RAW(arguments, (a->flags[node] & mask) == (b->flags[node] & mask) &&
+                            (sample == 17 || sample == 18 || (a->flags[node] & C_AST_FACT_TYPED)) && a->types[node] == b->types[node],
+                            string_format(temporary.arena, S8("conditional exact authority sample={u32} node={u32}"), sample, node));
+                    }
+                }
+                for (u32 form = 0; form < 2; form += 1)
+                {
+                    CIRLowerResult lowered[2] = {0};
+                    for (u32 mode = 0; mode < 2; mode += 1)
+                    {
+                        lowered[mode] = c_lower_to_ir_with_options(temporary.arena, S8("conditional-authority.c"), preprocess, models[mode], targets[target],
+                            (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                        if (sample != 17 && sample != 18)
+                            BUSTER_TEST(arguments, lowered[mode].program && !lowered[mode].diagnostic_count && lowered[mode].canonical_ir_certified &&
+                                ir_validate_canonical_module(lowered[mode].program, lowered[mode].program->modules).error == IR_VALIDATION_NONE);
+                    }
+                    BUSTER_TEST(arguments, !!lowered[0].program == !!lowered[1].program && lowered[0].diagnostic_count == lowered[1].diagnostic_count);
+                    for (u32 diagnostic = 0; diagnostic < BUSTER_MIN(lowered[0].diagnostic_count, lowered[1].diagnostic_count); diagnostic += 1)
+                        BUSTER_TEST(arguments, string_equal(lowered[0].diagnostics[diagnostic].message, lowered[1].diagnostics[diagnostic].message));
+                }
+            }
+            c_test_scratch_end(temporary);
+        }
+    }
+    return result;
+}
+
 // Completed indirection facts compose from their children. Query count is
 // bounded independently of the grouped function designator's input depth.
 BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_test_retained_indirection_work(UnitTestArguments* arguments)
@@ -10165,6 +10356,8 @@ UnitTestResult c_ast_tests(UnitTestArguments* arguments)
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_retained_indirection_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_typeof_arithmetic_work);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_typeof_arithmetic_authority);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_conditional_publication_work);
+    C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_conditional_publication_authority);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_typeof_postfix_calls);
     C_TEST_BOUNDED_FIXTURE(arguments, c_ast_test_enum_scope_scratch_reuse);
 #if !BUSTER_ANDROID && !BUSTER_IOS

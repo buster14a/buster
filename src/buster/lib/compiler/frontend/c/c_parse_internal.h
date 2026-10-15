@@ -67,6 +67,18 @@ struct CTestBodyScratchRequest
 BUSTER_F_DECL void c_test_body_validation_scratch_trace(CTestBodyScratchRequest* entries, u32 capacity);
 BUSTER_F_DECL u32 c_test_body_validation_scratch_trace_count(void);
 
+typedef struct CTestConditionalFactsWork CTestConditionalFactsWork;
+struct CTestConditionalFactsWork
+{
+    u64 visits;
+    u64 words;
+    u64 attempts;
+    u64 published;
+};
+BUSTER_F_DECL CTestConditionalFactsWork c_test_conditional_facts_work_take(void);
+// Retain the original completion query as an independent publication control.
+BUSTER_F_DECL void c_test_conditional_facts_query_set(bool original);
+
 // Actual typed-constant precedence token visits and type-name probes. Reuse
 // counts suffix tasks whose parent already proved no top-level operator;
 // refused counts nonplain type-name probes or probes whose semantic writes

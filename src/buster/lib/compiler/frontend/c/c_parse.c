@@ -1761,7 +1761,7 @@ BUSTER_C_INTERNAL void c_parse_body_scratch_guard_begin(Arena* arena)
     };
 }
 
-BUSTER_C_INTERNAL bool c_parse_body_scratch_exhausted(void)
+BUSTER_C_SHARED bool c_parse_body_scratch_exhausted(void)
 {
     return c_parse_body_scratch_guard.exhausted;
 }
@@ -12052,7 +12052,8 @@ BUSTER_C_INTERNAL void c_parse_ast_storage_half_layout_publish(CTypeParseMachine
 // required unevaluated operands outside them. All transient model changes
 // are captured before the same checkpoint rollback.
 BUSTER_C_INTERNAL void c_parse_retained_fact_complete(CTypeParseMachine* machine, CPreprocessResult preprocess, CParseResult* result,
-                                                       CScopeId node_scope, u32 node, u32 first, u32 end, bool compose, CAstTypeBody const* arithmetic_region)
+                                                       CScopeId node_scope, u32 node, u32 first, u32 end, bool compose, CAstTypeBody const* arithmetic_region,
+                                                       CAstConditionalFacts const* conditional)
 {
     CAstFacts* facts = machine->ast_facts;
     u32 slot = machine->expression_queries && machine->expression_query_result == result && first >= machine->expression_query_start &&
@@ -12070,6 +12071,7 @@ BUSTER_C_INTERNAL void c_parse_retained_fact_complete(CTypeParseMachine* machine
     // Deep indirection chains already have their completed child
     // fact. Re-reading every nested prefix would be quadratic.
     bool derived = arithmetic_region && c_ast_types_facts_scalar_arithmetic(machine, result, &preprocess, arithmetic_region, node, &type);
+    derived = derived || (conditional && c_ast_types_facts_scalar_conditional(machine, result, &preprocess, conditional, node_scope, node, &type));
     derived = derived || ((compose || machine->syntax_tree->kinds[node] == C_AST_DEREFERENCE || machine->syntax_tree->kinds[node] == C_AST_CAST) &&
         c_ast_types_facts_derive(machine, result, &preprocess, node, &type, &derived_recipe));
     bool valid = derived || c_parse_expression_type_query(machine, machine->scratch_arena, preprocess, result, node_scope, first, end, &type);
@@ -12223,6 +12225,17 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
         // arrays below it are still released by their caller.
         u64 scratch_mark = machine->scratch_arena->position;
         u8* typeof_marks = c_parse_typeof_fact_marks(machine, result, region_begin, region_end);
+        CAstConditionalFacts conditional = c_ast_types_facts_conditional_prepare(machine, result, &preprocess, region);
+        if (conditional.region && !conditional.hazards)
+        {
+            c_parse_body_scratch_refuse();
+            if (!c_parse_body_scratch_exhausted())
+            {
+                machine->failed = true;
+                c_parse_diagnostic(result, (CSourceLocation){0}, C_DIAGNOSTIC_SOURCE_TOO_LARGE,
+                    S8("could not reserve conditional fact publication marks"));
+            }
+        }
         u32 node = 0;
         u32 first = 0;
         u32 end = 0;
@@ -12239,7 +12252,8 @@ BUSTER_C_INTERNAL void c_parse_region_facts(CTypeParseMachine* machine, CPreproc
                 u32 kind = machine->syntax_tree->kinds[node];
                 bool scalar_arithmetic = typeof_marks && (typeof_marks[relative / 8] & (1u << (relative % 8))) &&
                     ((kind >= C_AST_MULTIPLY && kind <= C_AST_SUBTRACT) || kind == C_AST_BIT_AND || kind == C_AST_BIT_XOR || kind == C_AST_BIT_OR);
-                c_parse_retained_fact_complete(machine, preprocess, result, node_scope, node, first, end, false, scalar_arithmetic ? region : 0);
+                c_parse_retained_fact_complete(machine, preprocess, result, node_scope, node, first, end, false,
+                    scalar_arithmetic ? region : 0, &conditional);
             }
             if (facts->recipe_failed && !machine->failed)
             {
@@ -12327,7 +12341,7 @@ BUSTER_C_INTERNAL void c_parse_unevaluated_operand_facts(CTypeParseMachine* mach
                     }
                 }
                 if (first != C_AST_SPAN_NONE && first < end && end <= preprocess.token_count)
-                    c_parse_retained_fact_complete(machine, preprocess, result, scope, node, first, end, true, 0);
+                    c_parse_retained_fact_complete(machine, preprocess, result, scope, node, first, end, true, 0, 0);
                 else facts->statistics.gaps[C_AST_FACT_GAP_UNSPANNED] += 1;
                 if (facts->recipe_failed && !machine->failed)
                 {

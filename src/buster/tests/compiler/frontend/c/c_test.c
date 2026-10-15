@@ -569,13 +569,15 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_body_validation_scratch_exhaustion(Uni
     // TYPEOF membership is a real region-sized guarded byte request. The
     // earlier control-validator peak masks a mark-first-refusal cap; test the
     // whole-body boundary and later-body recovery through production instead.
+    for (u32 shape = 0; shape < 2; shape += 1)
     {
         u32 depth = 1024;
         String8* terms = arena_allocate(arguments->arena, String8, depth);
-        for (u32 step = 0; step < depth; step += 1) terms[step] = S8("+i");
+        for (u32 step = 0; step < depth; step += 1) terms[step] = shape ? S8("i?i:") : S8("+i");
         String8 chain = string_join_arena(arguments->arena, (SliceString8){terms, depth}, false);
         String8 source = string_format(arguments->arena,
-            S8("int big(int i){{__typeof__(i{S8}) t=0;return t;}int later(int i){{return i+1;}"), chain);
+            shape ? S8("int big(int i){{__typeof__({S8}(int)i) t=0;return t;}int later(int i){{return i+1;}")
+                  : S8("int big(int i){{__typeof__(i{S8}) t=0;return t;}int later(int i){{return i+1;}"), chain);
         CPreprocessResult preprocess = c_preprocess(arguments->arena, source,
             (CPreprocessOptions){.target = target_native, .data_layout = target_data_layout(target_native),
                                  .dialect = C_PREPROCESS_DIALECT_GNU17});

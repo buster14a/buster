@@ -342,7 +342,16 @@ it publishes and does not parse differently.
    temporary region-sized postorder interval union selects only those
    operands, and successful binary answers clear the projection value-category
    flag. Pointer/vector/recipe operands and file-scope completion retain the
-   existing query path. Nothing a run appends or mutates is kept. A run that appended a
+   existing query path. Ordinary scalar conditional completion likewise reads
+   finished nonrecipe arms through `c_parse_conditional_expression_type`.
+   A guarded region-token prefix refuses every span containing any comma or
+   assignment, even inside a group, and every uncertain type-name probe.
+   Only completed primitive specifier-word type names can certify reuse;
+   typedefs, constructors and declarators retain the original query. Member
+   tails, enums, pointers, vectors and omitted-middle conditionals also retain
+   that path. The prefix view is released with the completion run's scratch;
+   normal semantic queries and TYPE-mode memo restrictions are unchanged.
+   Nothing a run appends or mutates is kept. A run that appended a
    row, bound, alignment record or interned-log entry, or mutated a row, is
    rolled back, including the mutations a valid root commits
    (`CTypeParseMachine.committed_mutation_count`), and the memo slot it may

@@ -261,6 +261,8 @@
 //   c_ast_types_facts_begin, _next, _record,     publication at a region's end,
 //   c_ast_types_facts_answer,                    a top-level query's answer,
 //   c_ast_types_facts_finish                     and the unit's counts
+//   c_ast_types_facts_conditional_prepare,       guarded scalar conditional
+//   c_ast_types_facts_scalar_conditional         publication from finished arms
 //   c_ast_types_verify_*, c_test_*               the differential (tests builds),
 //                                                c_ast_types_verify_hold_replay
 //                                                and the skipped designator probes
@@ -3512,6 +3514,200 @@ BUSTER_C_SHARED bool c_ast_types_facts_scalar_arithmetic(CTypeParseMachine* mach
         // Every binary result clears the projection left by a completed
         // __real__/__imag__ child, exactly as the semantic query does.
         machine->result_nonplace_projection = false;
+    }
+    *type_out = type;
+    return valid;
+}
+
+#if BUSTER_INCLUDE_TESTS
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL CTestConditionalFactsWork c_conditional_facts_work;
+BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL bool c_conditional_facts_original;
+CTestConditionalFactsWork c_test_conditional_facts_work_take(void)
+{
+    CTestConditionalFactsWork result = c_conditional_facts_work;
+    c_conditional_facts_work = (CTestConditionalFactsWork){0};
+    return result;
+}
+void c_test_conditional_facts_query_set(bool original)
+{
+    c_conditional_facts_original = original;
+}
+#endif
+
+// Only completed, row-free primitive word runs certify a skipped type-name
+// probe. Typedefs, tags, constructors and declarators keep the original query.
+// Flat specifier lists are disjoint, so their actual children are visited once.
+BUSTER_GLOBAL_LOCAL bool c_ast_types_facts_plain_name(CAstFacts const* facts, CParseResult const* result, CAst const* ast,
+                                                       CToken const* tokens, u32 node)
+{
+    u32 flags = facts->flags[node];
+    u32 type = (flags & C_AST_FACT_TYPED) ? facts->types[node] : C_AST_FACT_NONE;
+    u32 children = c_ast_child_count(ast, node);
+    u32 specifiers = children == 1 ? c_ast_child_at(ast, node, 0) : node;
+    bool plain = (flags & C_AST_FACT_TYPED) && !(flags & C_AST_FACT_RECIPE) && type < result->type_count &&
+        result->types[type].kind != C_TYPE_ENUM && c_parse_expression_real_kind(result->types[type].kind) &&
+        children == 1 && specifiers < node && ast->kinds[specifiers] == C_AST_DECL_SPECIFIERS;
+    u32 words = plain ? c_ast_child_count(ast, specifiers) : 0;
+    u32 first = ast->tokens[node];
+    u32 end = ast->data[node];
+    plain = plain && words && ast->extents[specifiers] == (u64)words + 1 && (u64)first + words == end;
+    u32 begin = plain ? c_ast_subtree_begin(ast, specifiers) : specifiers;
+    for (u32 child = begin; plain && child < specifiers; child += 1)
+    {
+#if BUSTER_INCLUDE_TESTS
+        c_conditional_facts_work.words += 1;
+#endif
+        u32 token = first + child - begin;
+        plain = ast->kinds[child] == C_AST_SPECIFIER_WORD && c_ast_types_primitive_word(ast->data[child]) &&
+            ast->tokens[child] == token && tokens[token].kind == C_TOKEN_IDENTIFIER;
+    }
+    return plain;
+}
+
+// This is a refusal filter, not another operator parser. No comma/assignment
+// anywhere in the span implies none at the delimiter level the existing
+// c_ast_types_loose_operator checks. Uncertain type probes also refuse reuse.
+BUSTER_C_SHARED CAstConditionalFacts c_ast_types_facts_conditional_prepare(CTypeParseMachine* machine, CParseResult* result,
+    CPreprocessResult const* preprocess, CAstTypeBody const* region)
+{
+    CAstConditionalFacts prepared = {0};
+    CAstFacts const* facts = machine->ast_facts;
+    CAst const* ast = machine->syntax_tree;
+    bool eligible = !machine->failed && !c_parse_body_scratch_exhausted() && region && facts && ast &&
+        facts->flags && facts->types && region->first && region->end && ast == region->ast && facts->node_count == ast->node_count &&
+        region->begin <= region->node && region->node < ast->node_count && result == region->result &&
+        preprocess->tokens && preprocess->tokens == region->tokens && !memcmp(&preprocess->target, &region->target, sizeof(Target)) &&
+        region->token_start < region->token_end && region->token_end <= preprocess->token_count && region->token_total == preprocess->token_count;
+#if BUSTER_INCLUDE_TESTS
+    eligible = eligible && !c_conditional_facts_original;
+#endif
+    bool needed = false;
+    for (u32 node = eligible ? region->begin : 0; eligible && node <= region->node && !needed; node += 1)
+    {
+#if BUSTER_INCLUDE_TESTS
+        c_conditional_facts_work.visits += 1;
+#endif
+        needed = ast->kinds[node] == C_AST_CONDITIONAL && !(facts->flags[node] & C_AST_FACT_TYPED);
+    }
+    if (needed)
+    {
+        prepared.region = region;
+        u64 count = (u64)region->token_end - region->token_start + 1;
+        u64 position = 0;
+        Arena* arena = machine->scratch_arena;
+        bool room = count <= UINT32_MAX && arena && arena_align_position_checked(arena, arena->position, BUSTER_ALIGN_OF(u32), &position) &&
+            position <= arena->reserved_size && count <= (arena->reserved_size - position) / sizeof(u32);
+        prepared.hazards = room ? C_PARSE_BODY_SCRATCH_ARRAY(arena, u32, count) : 0;
+        if (prepared.hazards)
+        {
+            memset(prepared.hazards, 0, count * sizeof(u32));
+            for (u32 node = region->begin; prepared.region && node <= region->node; node += 1)
+            {
+#if BUSTER_INCLUDE_TESTS
+                c_conditional_facts_work.visits += 1;
+#endif
+                if (ast->kinds[node] == C_AST_TYPE_NAME)
+                {
+                    u32 first = ast->tokens[node];
+                    u32 end = ast->data[node];
+                    bool bounded = first >= region->token_start && first < end && end <= region->token_end;
+                    if (!bounded)
+                    {
+                        // A mismatched borrowed view can certify no candidate.
+                        prepared.region = 0;
+                    }
+                    else if (!c_ast_types_facts_plain_name(facts, result, ast, preprocess->tokens, node))
+                    {
+                        prepared.hazards[first - region->token_start] = 1;
+                    }
+                }
+            }
+            u32 total = 0;
+            for (u32 token = region->token_start; prepared.region && token < region->token_end; token += 1)
+            {
+#if BUSTER_INCLUDE_TESTS
+                c_conditional_facts_work.visits += 1;
+#endif
+                u32 relative = token - region->token_start;
+                u32 precedence = c_parse_expression_operator_precedence(preprocess->tokens[token]);
+                bool hazard = prepared.hazards[relative] || (precedence && precedence <= 2);
+                prepared.hazards[relative] = total;
+                total += hazard;
+            }
+            prepared.hazards[count - 1] = total;
+        }
+    }
+    return prepared;
+}
+
+BUSTER_C_SHARED bool c_ast_types_facts_scalar_conditional(CTypeParseMachine* machine, CParseResult* result,
+    CPreprocessResult const* preprocess, CAstConditionalFacts const* prepared, CScopeId scope, u32 node, CTypeId* type_out)
+{
+    CAstTypeBody const* region = prepared ? prepared->region : 0;
+    CAst const* ast = machine->syntax_tree;
+    CAstFacts const* facts = machine->ast_facts;
+    bool eligible = !machine->failed && !c_parse_body_scratch_exhausted() && region && prepared->hazards && facts && ast &&
+        facts->flags && facts->types && facts->node_count == ast->node_count && region->first && region->end &&
+        ast == region->ast && result == region->result && preprocess->tokens && preprocess->tokens == region->tokens &&
+        !memcmp(&preprocess->target, &region->target, sizeof(Target)) &&
+        region->begin <= region->node && region->node < ast->node_count &&
+        region->token_start < region->token_end && region->token_end <= preprocess->token_count && region->token_total == preprocess->token_count &&
+        node >= region->begin && node <= region->node && ast->kinds[node] == C_AST_CONDITIONAL && c_ast_child_count(ast, node) == 3 &&
+        region->scalars_published && result->expression_scalar_types;
+    CTypeId type = C_TYPE_ID_INVALID;
+    if (eligible)
+    {
+#if BUSTER_INCLUDE_TESTS
+        c_conditional_facts_work.attempts += 1;
+#endif
+        u32 relative = node - region->begin;
+        u32 first = region->first[relative];
+        u32 end = region->end[relative];
+        eligible = first >= region->token_start && first < end && end <= region->token_end &&
+            prepared->hazards[first - region->token_start] == prepared->hazards[end - region->token_start];
+        u32 a = c_ast_child_at(ast, node, 1);
+        u32 b = c_ast_child_at(ast, node, 2);
+        bool children = a >= region->begin && a < node && b >= region->begin && b < node;
+        CAstFactTypeReference left = children ? c_ast_types_fact_node(facts, result, a) : (CAstFactTypeReference){0};
+        CAstFactTypeReference right = children ? c_ast_types_fact_node(facts, result, b) : (CAstFactTypeReference){0};
+        u32 a_first = children ? region->first[a - region->begin] : C_AST_TYPE_NONE;
+        u32 a_end = children ? region->end[a - region->begin] : C_AST_TYPE_NONE;
+        u32 b_first = children ? region->first[b - region->begin] : C_AST_TYPE_NONE;
+        u32 b_end = children ? region->end[b - region->begin] : C_AST_TYPE_NONE;
+        eligible = eligible && left.type && right.type && !left.recipe && !right.recipe &&
+            left.type->kind != C_TYPE_ENUM && right.type->kind != C_TYPE_ENUM &&
+            c_parse_expression_real_kind(left.type->kind) && c_parse_expression_real_kind(right.type->kind) &&
+            a_first >= first && a_first < a_end && a_end <= end && b_first >= first && b_first < b_end && b_end <= end &&
+            !c_ast_types_operand_member_tail(region, a) && !c_ast_types_operand_member_tail(region, b);
+        if (eligible)
+        {
+            CParseResult checkpoint = *result;
+            u32 mutations = machine->mutation_count;
+            u32 committed = machine->committed_mutation_count;
+            u64 scratch = machine->scratch_arena->position;
+            type = c_parse_conditional_expression_type(machine->scratch_arena, *preprocess, result, scope,
+                (CTypeId){.value = left.index}, (CTypeId){.value = right.index}, a_first, a_end, b_first, b_end);
+            bool unchanged = result->type_count == checkpoint.type_count && result->interned_type_count == checkpoint.interned_type_count &&
+                result->interned_qualified_count == checkpoint.interned_qualified_count && machine->mutation_count == mutations &&
+                machine->committed_mutation_count == committed;
+            if (type.value >= checkpoint.type_count || !unchanged)
+            {
+                // A declined optimization cannot seed the original query
+                // with tentative rows or interned-log entries of its own.
+                c_type_parse_rollback(machine, result, &checkpoint, mutations);
+                machine->committed_mutation_count = committed;
+                arena_set_position(machine->scratch_arena, scratch);
+                type = C_TYPE_ID_INVALID;
+            }
+        }
+    }
+    bool valid = type.value < result->type_count;
+    if (valid)
+    {
+        machine->result_nonplace_projection = false;
+#if BUSTER_INCLUDE_TESTS
+        c_conditional_facts_work.published += 1;
+#endif
     }
     *type_out = type;
     return valid;
