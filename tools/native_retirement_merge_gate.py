@@ -528,14 +528,13 @@ class GitHub:
 
 def generated_blob(api: GitHub, path: str, revision: str) -> str | None:
     """Blob id of a generated path at revision; None when the path is absent."""
-    result = None
     try:
         content = api.request("contents/" + path, ref=revision)
     except integration.APIReadError as error:
         if error.status != 404:
             raise
-        content = None
-    if content is not None:
+        result = None
+    else:
         if not isinstance(content, dict) or content.get("type") != "file":
             raise AdmissionError("generated path is not a file: " + path)
         result = require_hex(content.get("sha"), HEX40, "generated blob " + path)

@@ -770,6 +770,33 @@ class InvalidationTests(unittest.TestCase):
                 gate.invalidate_stale(api, new, "https://github.com/buster14a/buster/actions/runs/2")
                 self.assertEqual(len(api.posts), posts)
 
+    def test_truncated_compare_rejects_malformed_generated_contents(self):
+        old, new = "1" * 40, "2" * 40
+        comparison = {"status": "ahead",
+                      "files": [{"filename": "src/buster/lib/value.c"}] * gate.COMPARE_FILE_LIMIT}
+        malformed = (None, [], {}, {"type": "dir"}, {"type": "symlink"},
+                     {"type": "file"}, {"type": "file", "sha": "invalid"})
+        for content in malformed:
+            api = gate.GitHub("buster14a/buster", "fixture-token")
+            responses = [comparison] + [content] * (2 * len(gate.integration.GENERATED_PATHS))
+            with self.subTest(content=content), patch.object(api, "request", side_effect=responses):
+                with self.assertRaises(gate.AdmissionError):
+                    gate.catch_up_still_admissible(api, old, new)
+
+    def test_truncated_compare_preserves_non_404_read_failures(self):
+        old, new = "1" * 40, "2" * 40
+        comparison = {"status": "ahead",
+                      "files": [{"filename": "src/buster/lib/value.c"}] * gate.COMPARE_FILE_LIMIT}
+        path = "contents/" + sorted(gate.integration.GENERATED_PATHS)[0]
+        for status in (403, 429, 500, 502):
+            api = gate.GitHub("buster14a/buster", "fixture-token")
+            error = gate.integration.APIReadError(path, status, 4)
+            with self.subTest(status=status), patch.object(api, "request",
+                                                         side_effect=[comparison, error]):
+                with self.assertRaises(gate.integration.APIReadError) as raised:
+                    gate.catch_up_still_admissible(api, old, new)
+                self.assertIs(raised.exception, error)
+
 
 class WorkflowPolicyTests(unittest.TestCase):
     root = Path(__file__).resolve().parents[1]
