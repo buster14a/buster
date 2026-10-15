@@ -20,6 +20,7 @@
 // MachineX64ValueUse is the hot value-use projection; MachineX64LocalUse
 // holds sparse local-promotion store and alias state during selection.
 // Sparse local facts prove when load-alias sweeps have no eligible root;
+// an initially empty local table also omits alias-only use lifetime facts.
 // with no aliases, branch fusion needs only each block's final candidate.
 // machine_x64_condition_form_agrees joins retained exact keys with the shared
 // condition identity; serial prewarm refuses mismatched condition bindings.
@@ -8348,6 +8349,9 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             }
         }
     }
+    // Qualification only removes entries. An empty sparse table cannot gain
+    // an alias root, so its uses need counts but no alias lifetime facts.
+    bool track_alias_uses = local_use_count > 1 || MACHINE_SELECT_TEST_LEGACY(module, MACHINE_TEST_SELECT_LEGACY_ALIAS_FACTS);
     // Canonical publication owns instruction spans. This pass gathers value
     // facts and candidate rows for aliasing/fusion without rebuilding row order.
     u32* block_candidate_counts = arena_allocate(arena, u32, function->block_count ? function->block_count : 1);
@@ -8492,15 +8496,21 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
                 }
                 MachineX64ValueUse* use = value_uses + used;
                 use->use_count += 1;
-                if (use->use_block == 0)
+                if (track_alias_uses)
                 {
-                    use->use_block = block->id.value + 1;
+                    if (use->use_block == 0)
+                    {
+                        use->use_block = block->id.value + 1;
+                    }
+                    else if (use->use_block != block->id.value + 1)
+                    {
+                        use->use_block = MACHINE_SELECTION_MULTIPLE_BLOCKS;
+                    }
+                    use->last_use_ordinal = walk_ordinal;
+#if BUSTER_INCLUDE_TESTS
+                    module->test_alias_use_updates += 1;
+#endif
                 }
-                else if (use->use_block != block->id.value + 1)
-                {
-                    use->use_block = MACHINE_SELECTION_MULTIPLE_BLOCKS;
-                }
-                use->last_use_ordinal = walk_ordinal;
                 if (!use->local_use)
                 {
                     continue;
@@ -8568,8 +8578,14 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
     {
         MachineX64ValueUse* use = value_uses + cfg->arguments[index].value;
         use->use_count += 1;
-        use->use_block = MACHINE_SELECTION_MULTIPLE_BLOCKS;
-        use->last_use_ordinal = walk_ordinal;
+        if (track_alias_uses)
+        {
+            use->use_block = MACHINE_SELECTION_MULTIPLE_BLOCKS;
+            use->last_use_ordinal = walk_ordinal;
+#if BUSTER_INCLUDE_TESTS
+            module->test_alias_use_updates += 1;
+#endif
+        }
     }
     // One line mark per selected row, written by the main loop as it reaches
     // the row; the walk just counted the rows, so the array is exact.

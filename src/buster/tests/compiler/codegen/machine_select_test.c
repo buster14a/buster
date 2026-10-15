@@ -8,11 +8,12 @@
 
 #include <buster/lib/compiler/codegen/machine.h>
 #include <buster/lib/compiler/codegen/machine_parameter_edges_internal.h>
+#include <buster/lib/compiler/codegen/machine_select_internal.h>
 #include <buster/lib/compiler/frontend/c/c.h>
 #include <buster/lib/compiler/frontend/c/c_source_internal.h>
 #include <buster/lib/string.h>
 
-BUSTER_GLOBAL_LOCAL IrProgram* machine_selection_test_compile(Arena* arena, String8 source, Target target)
+BUSTER_GLOBAL_LOCAL IrProgram* machine_selection_test_compile_with_options(Arena* arena, String8 source, Target target, CIRLowerOptions options)
 {
     CPreprocessResult tokens = c_preprocess(arena, source, (CPreprocessOptions){0});
     if (tokens.error_count)
@@ -24,7 +25,7 @@ BUSTER_GLOBAL_LOCAL IrProgram* machine_selection_test_compile(Arena* arena, Stri
     {
         return 0;
     }
-    CIRLowerResult lowered = c_lower_to_ir(arena, S8("machine-selection.c"), tokens, parse, target);
+    CIRLowerResult lowered = c_lower_to_ir_with_options(arena, S8("machine-selection.c"), tokens, parse, target, options);
     IrProgram* result;
     if (lowered.diagnostic_count)
     {
@@ -36,6 +37,11 @@ BUSTER_GLOBAL_LOCAL IrProgram* machine_selection_test_compile(Arena* arena, Stri
     }
 
     return result;
+}
+
+BUSTER_GLOBAL_LOCAL IrProgram* machine_selection_test_compile(Arena* arena, String8 source, Target target)
+{
+    return machine_selection_test_compile_with_options(arena, source, target, (CIRLowerOptions){0});
 }
 
 BUSTER_GLOBAL_LOCAL IrFunction* machine_selection_test_find(IrProgram* program, String8 name)
@@ -1442,12 +1448,88 @@ BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_parameter_edge_layout(
     return result;
 }
 
+BUSTER_GLOBAL_LOCAL bool machine_selection_test_debug_equal(MachineFunction const* left, MachineFunction const* right)
+{
+    bool equal = left->line_mark_count == right->line_mark_count && left->debug_value_count == right->debug_value_count;
+    if (equal && left->line_mark_count)
+    {
+        equal = memory_compare(left->line_marks, right->line_marks, sizeof(MachineLineMark) * left->line_mark_count);
+    }
+    if (equal && left->debug_value_count)
+    {
+        equal = memory_compare(left->debug_values, right->debug_values, sizeof(MachineDebugValue) * left->debug_value_count);
+    }
+    return equal;
+}
+
+// The forced reference still gathers alias lifetime facts for every use.
+// Compare complete selected rows and debug homes, including edge readers and
+// late-disqualified, store-free and genuinely promotable locals.
+BUSTER_GLOBAL_LOCAL UnitTestResult machine_selection_test_alias_fact_guard(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    String8 sources[] = {
+        S8("int test(int x) { return x * 3 + 1; }"),
+        S8("extern int input; int test(int x) { int local=x+input, old=local; local=input+7; return old+local; }"),
+        S8("void escape(int*); int test(int x) { int local=x; escape(&local); if(local<x)return local; return x; }"),
+        S8("int test(int x) { int y; if(x)y=3; else y=4; return y; }"),
+        S8("int test(int x) { int local; if(x)goto use; return x; use:return local; }"),
+        S8("extern int input; int test(void) { int x=input,c=x<3; x=input+7; if(c)return x; return input; }")
+    };
+    OperatingSystem systems[] = {OPERATING_SYSTEM_LINUX, OPERATING_SYSTEM_WINDOWS, OPERATING_SYSTEM_MACOS};
+    u64 mark = c_test_preprocess_unit_mark();
+    u32 empty = 0;
+    u32 qualified = 0;
+    u32 edge_readers = 0;
+    for (u32 source = 0; source < BUSTER_ARRAY_LENGTH(sources); source += 1)
+    {
+        for (u32 direct = 0; direct < 2; direct += 1)
+        {
+            for (u32 system = 0; system < BUSTER_ARRAY_LENGTH(systems); system += 1)
+            {
+                c_test_release_preprocess_arenas_since(mark);
+                Target target = {.cpu_arch = CPU_ARCH_X86_64, .os = systems[system]};
+                IrProgram* program = machine_selection_test_compile_with_options(arguments->arena, sources[source], target,
+                                                                                 (CIRLowerOptions){.disable_direct_ssa = direct == 0});
+                BUSTER_TEST(arguments, program && program->module_count == 1);
+                if (!program || program->module_count != 1) { continue; }
+                program->disable_local_promotion = direct == 0;
+                program->fast_passes = 0;
+                IrValidationResult prepared = ir_prepare_canonical_module(program, program->modules, false);
+                IrFunction* function = machine_selection_test_find(program, S8("test"));
+                BUSTER_TEST(arguments, prepared.error == IR_VALIDATION_NONE && function != 0);
+                if (prepared.error != IR_VALIDATION_NONE || !function) { continue; }
+                MachineSelectionModule* context = machine_select_module_prepare(arguments->arena, program, target);
+                for (u32 debug = 0; debug < 2; debug += 1)
+                {
+                    MachineSelectResult selected = machine_test_select_work(arguments->arena, program, function, target, context, 0, debug != 0);
+                    u64 updates = context->test_alias_use_updates;
+                    MachineSelectResult reference = machine_test_select_work(arguments->arena, program, function, target, context,
+                                                                              MACHINE_TEST_SELECT_LEGACY_ALIAS_FACTS, debug != 0);
+                    BUSTER_TEST(arguments, selected.supported && reference.supported);
+                    BUSTER_TEST(arguments, machine_selection_test_ordered_rows_equal(&selected, &reference));
+                    BUSTER_TEST(arguments, machine_selection_test_debug_equal(&selected.function, &reference.function));
+                    BUSTER_TEST(arguments, machine_verify_function(&selected.function).error == MACHINE_VERIFY_NONE);
+                    BUSTER_TEST(arguments, updates == 0 || updates == context->test_alias_use_updates);
+                    empty += updates == 0 && context->test_alias_use_updates != 0;
+                    qualified += updates != 0;
+                    edge_readers += function->published_cfg && function->published_cfg->argument_count != 0;
+                }
+            }
+        }
+    }
+    BUSTER_TEST(arguments, empty != 0 && qualified != 0 && edge_readers != 0);
+    c_test_release_preprocess_arenas_since(mark);
+    return result;
+}
+
 UnitTestResult machine_selection_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
     // Each fixture returns every unit it preprocessed; the registry's own
     // arena is reserved once, before the first fixture's reading.
     c_test_unit_registry_prewarm();
+    C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_alias_fact_guard);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_parameter_edge_layout);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_constant_index_fold);
     C_TEST_BOUNDED_FIXTURE(arguments, machine_selection_test_constant_copy_casts);
