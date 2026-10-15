@@ -1,0 +1,86 @@
+{
+  "complete": false,
+  "driver_session_exit_code": 143,
+  "comparison_summary_written": false,
+  "cause": "not established; driver and its shell terminated before final summary",
+  "observed_completed_stdout": [
+    {
+      "stdout": "run-A-00.stdout",
+      "last_unit_result": [
+        "6990238",
+        "6990238"
+      ]
+    },
+    {
+      "stdout": "run-A-01.stdout",
+      "last_unit_result": [
+        "6990238",
+        "6990238"
+      ]
+    },
+    {
+      "stdout": "run-A-02.stdout",
+      "last_unit_result": [
+        "6990238",
+        "6990238"
+      ]
+    },
+    {
+      "stdout": "run-A-03.stdout",
+      "last_unit_result": [
+        "6990238",
+        "6990238"
+      ]
+    },
+    {
+      "stdout": "run-A-04.stdout",
+      "last_unit_result": [
+        "6990238",
+        "6990238"
+      ]
+    },
+    {
+      "stdout": "run-B-00.stdout",
+      "last_unit_result": [
+        "6990239",
+        "6990239"
+      ]
+    },
+    {
+      "stdout": "run-B-01.stdout",
+      "last_unit_result": [
+        "6990239",
+        "6990239"
+      ]
+    },
+    {
+      "stdout": "run-B-02.stdout",
+      "last_unit_result": [
+        "6990239",
+        "6990239"
+      ]
+    },
+    {
+      "stdout": "run-B-03.stdout",
+      "last_unit_result": [
+        "6990239",
+        "6990239"
+      ]
+    },
+    {
+      "stdout": "run-B-04.stdout",
+      "last_unit_result": [
+        "6990239",
+        "6990239"
+      ]
+    },
+    {
+      "stdout": "run-B-05.stdout",
+      "last_unit_result": [
+        "6990239",
+        "6990239"
+      ]
+    }
+  ],
+  "use": "correctness observations only; no native timing verdict"
+}

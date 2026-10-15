@@ -103,7 +103,9 @@ NATIVE_ALERT_GATE = ("github.repository == 'buster14a/buster'", "github.ref == '
 PROFILE_ROWS = {
     "uarch_lab:compare@canonical-inline-self-host": "INLINE_ACCEPTANCE_PROFILE",
     "uarch_lab:compare@ast-pilot-acceptance": "AST_PILOT_ACCEPTANCE_PROFILE",
+    "uarch_lab:compare@ast-retirement-acceptance": "AST_RETIREMENT_PROFILE",
     "uarch_lab:compare@constant-reuse-acceptance": "CONSTANT_REUSE_ACCEPTANCE_PROFILE",
+    "uarch_lab:compare@process-floor": "PROCESS_FLOOR_PROFILE",
     "build:bench_throughput@throughput-real-source": "THROUGHPUT_REAL_SOURCE_PROFILE",
     "build:production_profile": "PRODUCTION_PROFILE_PROFILE",
     "tool:fast_ra_scaling.c": "COMPILER_PROBES_PROFILE",

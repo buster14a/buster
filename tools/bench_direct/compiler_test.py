@@ -33,6 +33,7 @@ import compiler_receipt  # noqa: E402
 import inline_acceptance  # noqa: E402
 import ast_pilot_acceptance  # noqa: E402
 import constant_reuse_acceptance  # noqa: E402
+import process_floor_acceptance  # noqa: E402
 import throughput_real_source  # noqa: E402
 import selfhost_inline_compare  # noqa: E402
 
@@ -4828,6 +4829,397 @@ class ConstantReuseAcceptanceTest(unittest.TestCase):
         report = compiler_receipt.render(pull, summary(), "success", [])
         self.assertIn("Issue #3011 constant-reuse arms: complete", report)
         self.assertIn("| intern (-fcanonical-intern-constants) | 0.9900", report)
+
+
+PROCESS_FLOOR_WALL = {"aa": 1.0, "aarch64": 0.7, "syntax-only": 0.65}
+
+
+def process_floor_raw_cell(cell: str, binary: str = "c" * 64, instructions: object = 0.3) -> dict:
+    """One synthetic, complete raw uarch_lab cell of the #1125 process-floor profile."""
+    pairs = compiler_receipt.PROCESS_FLOOR_PROFILE["pairs"]
+    commands = {key: process_floor_acceptance.variant_command(cell, key) for key in ("a", "b")}
+    labs = {key: {"config": {"extra": [], "cpu": 2, "process_floor_cell": cell, "ide": "/bin/ide",
+                             "command": " ".join(["/bin/ide"] + commands[key])}} for key in ("a", "b")}
+    wall = PROCESS_FLOOR_WALL[cell]
+    insn_ratio = 1.0 if cell == "aa" else instructions
+    insn = {"ratio": insn_ratio, "a_median": 1e7 if insn_ratio is not None else None,
+            "b_median": 1e7 * insn_ratio if insn_ratio is not None else None}
+    summary = {"schema": process_floor_acceptance.UARCH_SCHEMA,
+               "plan": {"pairs": pairs, "complete_pairs": pairs, "order": "ABBA", "fresh_copy": True},
+               "baseline": {"sha256": binary, "failed": 0, "deterministic": True, "runs": pairs},
+               "candidate": {"sha256": binary, "failed": 0, "deterministic": True, "runs": pairs},
+               "metrics": {"wall": {"a_median": 0.01, "b_median": 0.01 * wall, "ratio": wall,
+                                    "ci_low": wall - 0.005, "ci_high": wall + 0.004},
+                           "task_clock": {"a_median": 0.008, "b_median": 0.008 * wall, "ratio": wall},
+                           "compiler_wall": {"a_median": 0.006, "b_median": 0.006 * wall, "ratio": wall},
+                           "instructions": insn, "peak_rss": {"a_median": None, "b_median": None, "ratio": None}},
+               "counters": {"perf_stat": instructions is not None,
+                            "reason": "usable" if instructions is not None else "perf_event_paranoid"},
+               "outputs_identical": cell == "aa", "diagnostics_identical": True}
+    meta = {"config": {"process_floor_pair": cell, "extra_by_variant": {"a": [], "b": []},
+                       "command_by_variant": {key: " ".join(["IDE"] + commands[key]) for key in commands},
+                       "command": " ".join(["IDE"] + commands["a"]), "canonical_inline_pair": False,
+                       "pairs": pairs, "warmups": 2, "cpu": 2, "extra": [], "profile_steps": [], "fresh_copy": True}}
+    return {"summary": summary, "meta": meta, "a": labs["a"], "b": labs["b"]}
+
+
+def process_floor_evidence(head: str = "a" * 40, binary: str = "c" * 64) -> tuple[dict, dict, dict]:
+    """(receipt record, raw bundle, acceptance) built through the helper's own record code."""
+    raw = {cell: process_floor_raw_cell(cell, binary) for cell in compiler_receipt.PROCESS_FLOOR_CELLS}
+    cells = {cell: process_floor_acceptance.cell_record(raw[cell]["summary"]) for cell in raw}
+    acceptance = {"schema": compiler_receipt.PROCESS_FLOOR_SCHEMA, "status": "complete", "source_revision": head,
+                  "profile": compiler_receipt.PROCESS_FLOOR_PROFILE,
+                  "candidate_compiler": {"sha256": binary, "size_bytes": 10}, "cells": cells,
+                  "verdict": compiler_receipt.process_floor_verdict(cells)}
+    bundle = {"acceptance": acceptance}
+    for cell, documents in raw.items():
+        for key, value in documents.items():
+            bundle[f"{cell}_{key}"] = value
+    record = {"requested": True, "request_line": compiler_receipt.PROCESS_FLOOR_REQUEST_LINE,
+              "profile": compiler_receipt.PROCESS_FLOOR_PROFILE, "summary": acceptance, "status": "complete", "exit": 0}
+    return json.loads(json.dumps(record)), json.loads(json.dumps(bundle)), json.loads(json.dumps(acceptance))
+
+
+class ProcessFloorTest(unittest.TestCase):
+    def test_profile_is_frozen_and_matches_the_lab_cells(self) -> None:
+        profile = compiler_receipt.PROCESS_FLOOR_PROFILE
+        self.assertEqual(compiler_receipt.PROCESS_FLOOR_REQUEST_LINE, "profile: " + profile["name"])
+        self.assertIs(profile["report_only"], True)
+        self.assertEqual(profile["source_sha256"],
+                         hashlib.sha256(b"int main(void){return 0;}\n").hexdigest())
+        self.assertEqual(profile["cells"], {"aa": "cc -g0 -c tiny.c -o OUT",
+                                            "aarch64": "cc -g0 -target aarch64-unknown-linux -c tiny.c -o OUT",
+                                            "syntax-only": "cc -g0 -fsyntax-only tiny.c"})
+        self.assertEqual(json.loads(json.dumps(profile)), profile)
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        try:
+            import uarch_lab as lab
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(lab.PROCESS_FLOOR_CELLS, compiler_receipt.PROCESS_FLOOR_CELLS)
+        self.assertEqual(lab.PROCESS_FLOOR_OBJECT, compiler_receipt.PROCESS_FLOOR_OBJECT)
+        # Every cell fits the leg's bound, which with the ordinary comparison stays inside the 90-minute job.
+        self.assertGreaterEqual(compiler_compare.PROCESS_FLOOR_TIMEOUT_SECONDS,
+                                len(compiler_receipt.PROCESS_FLOOR_CELLS) * process_floor_acceptance.COMPARE_TIMEOUT_SECONDS)
+        self.assertLessEqual(compiler_compare.PROCESS_FLOOR_TIMEOUT_SECONDS, 75 * 60)
+
+    def test_verdict_applies_the_a_a_stop_rule(self) -> None:
+        unused_record, unused_bundle, acceptance = process_floor_evidence()
+        verdict = acceptance["verdict"]
+        self.assertEqual(verdict["aa_interval"], [0.995, 1.004])
+        self.assertEqual(verdict["aarch64"], {"ci": [0.695, 0.704], "outside_aa": True, "wall_ms": 3.0,
+                                              "task_clock_ms": 2.4})
+        self.assertTrue(verdict["syntax-only"]["outside_aa"])
+        inside = copy.deepcopy(acceptance["cells"])
+        inside["aarch64"]["metrics"]["wall"].update(ci_low=0.998, ci_high=1.002)
+        self.assertFalse(compiler_receipt.process_floor_verdict(inside)["aarch64"]["outside_aa"])
+        overlap = copy.deepcopy(acceptance["cells"])
+        overlap["aarch64"]["metrics"]["wall"].update(ci_high=0.996)
+        self.assertFalse(compiler_receipt.process_floor_verdict(overlap)["aarch64"]["outside_aa"])
+        missing = copy.deepcopy(acceptance["cells"])
+        missing.pop("aa")
+        self.assertEqual(compiler_receipt.process_floor_verdict(missing)["aarch64"]["outside_aa"], False)
+        self.assertIsNone(compiler_receipt.process_floor_verdict({})["syntax-only"]["wall_ms"])
+
+    def test_publisher_revalidates_raw_cells(self) -> None:
+        head, binary = "a" * 40, "c" * 64
+        record, bundle, unused_acceptance = process_floor_evidence(head, binary)
+        self.assertEqual(compiler_publish.validate_process_floor_bundle(record, bundle, head, binary), [])
+
+        def broken(change) -> list[str]:
+            changed = copy.deepcopy(bundle)
+            change(changed)
+            return compiler_publish.validate_process_floor_bundle(record, changed, head, binary)
+        cases = {
+            "B command on A": lambda value: value["aarch64_a"]["config"].update(
+                command=value["aarch64_b"]["config"]["command"]),
+            "recorded variant commands": lambda value: value["syntax-only_meta"]["config"]["command_by_variant"].update(
+                b=value["aarch64_meta"]["config"]["command_by_variant"]["b"]),
+            "extra flags": lambda value: value["aa_meta"]["config"].update(extra_by_variant={"a": [], "b": ["-O1"]}),
+            "cell swap": lambda value: value["aarch64_meta"]["config"].update(process_floor_pair="aa"),
+            "constant reuse pair": lambda value: value["aa_meta"]["config"].update(constant_reuse_pair="intern"),
+            "wrong binary": lambda value: value["aa_summary"]["candidate"].update(sha256="d" * 64),
+            "cpu": lambda value: value["aa_meta"]["config"].update(cpu=3),
+            "pair count": lambda value: value["aarch64_summary"]["plan"].update(pairs=12, complete_pairs=12),
+            "missing cell": lambda value: [value.pop(f"syntax-only_{key}") for key in ("summary", "meta", "a", "b")],
+            "metrics": lambda value: value["aarch64_summary"]["metrics"]["wall"].update(ratio=0.5),
+            "task clock": lambda value: value["aa_summary"]["metrics"]["task_clock"].update(b_median=None),
+            "a/a objects": lambda value: value["aa_summary"].update(outputs_identical=False),
+            "diagnostics": lambda value: value["syntax-only_summary"].update(diagnostics_identical=False),
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(broken(change))
+        self.assertTrue(compiler_publish.validate_process_floor_bundle(dict(record, status="failed"), bundle, head, binary))
+        self.assertTrue(compiler_publish.validate_process_floor_bundle(
+            dict(record, request_line="process-floor"), bundle, head, binary))
+        self.assertTrue(compiler_publish.validate_process_floor_bundle(record, None, head, binary))
+        self.assertTrue(compiler_publish.validate_process_floor_bundle(record, bundle, head, "d" * 64))
+        self.assertEqual(compiler_publish.validate_process_floor_bundle(None, None, head, binary), [])
+
+    def test_receipt_validator_needs_every_cell_the_frozen_profile_and_its_verdict(self) -> None:
+        head, binary = "a" * 40, "c" * 64
+        unused_record, unused_bundle, acceptance = process_floor_evidence(head, binary)
+        self.assertEqual(compiler_receipt.validate_process_floor_acceptance(acceptance, head, binary), [])
+        for name, change in {
+            "profile": lambda value: value["profile"].update(pairs=2),
+            "extra profile key": lambda value: value["profile"].update(flags=["-O3"]),
+            "missing cell": lambda value: value["cells"].pop("syntax-only"),
+            "revision": lambda value: value.update(source_revision="b" * 40),
+            "binary": lambda value: value["candidate_compiler"].update(sha256="d" * 64),
+            "a/a objects": lambda value: value["cells"]["aa"].update(outputs_identical=False),
+            "diagnostics": lambda value: value["cells"]["aarch64"].update(diagnostics_identical=False),
+            "verdict": lambda value: value["verdict"]["aarch64"].update(outside_aa=False),
+            "peak rss": lambda value: value["cells"]["aa"]["metrics"]["peak_rss"].update(a_median=-1),
+            "compiler wall": lambda value: value["cells"]["aa"]["metrics"].pop("compiler_wall"),
+            "huge wall": lambda value: value["cells"]["aa"]["metrics"]["wall"].update(ci_high=10 ** 309),
+        }.items():
+            changed = copy.deepcopy(acceptance)
+            change(changed)
+            with self.subTest(case=name):
+                self.assertTrue(compiler_receipt.validate_process_floor_acceptance(changed, head, binary))
+
+    def test_raw_cell_loader_refuses_wrong_commands_binaries_and_unexplained_na(self) -> None:
+        binary = "c" * 64
+        for cell in compiler_receipt.PROCESS_FLOOR_CELLS:
+            raw = process_floor_raw_cell(cell, binary)
+            documents = (raw["summary"], raw["meta"], {"a": raw["a"], "b": raw["b"]})
+            process_floor_acceptance.validate_documents(cell, *documents, binary)
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "frozen candidate-HEAD"):
+                process_floor_acceptance.validate_documents(cell, *documents, "d" * 64)
+            other = "aarch64" if cell != "aarch64" else "syntax-only"
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "fixed process-floor"):
+                process_floor_acceptance.validate_documents(other, *documents, binary)
+            na = process_floor_raw_cell(cell, binary, instructions=None)
+            na["summary"]["metrics"]["instructions"] = {"ratio": None, "a_median": None, "b_median": None}
+            na_documents = (na["summary"], na["meta"], {"a": na["a"], "b": na["b"]})
+            process_floor_acceptance.validate_documents(cell, *na_documents, binary)
+            na["summary"]["counters"] = {"perf_stat": True, "reason": "usable"}
+            with self.subTest(cell=cell), self.assertRaisesRegex(RuntimeError, "NA without"):
+                process_floor_acceptance.validate_documents(cell, *na_documents, binary)
+        with self.assertRaisesRegex(RuntimeError, "unknown"):
+            process_floor_acceptance.validate_documents("x86", *documents, binary)
+        self.assertEqual(process_floor_acceptance.variant_command("syntax-only", "b"),
+                         ["cc", "-g0", "-fsyntax-only", "tiny.c"])
+        self.assertEqual(process_floor_acceptance.variant_command("syntax-only", "a"),
+                         ["cc", "-g0", "-c", "tiny.c", "-o", "OUT"])
+
+    def test_compare_command_is_fixed_and_uses_one_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for cell in compiler_receipt.PROCESS_FLOOR_CELLS:
+                with mock.patch.object(process_floor_acceptance.subprocess, "run") as run:
+                    process_floor_acceptance.run_compare(root / "uarch_lab.py", root / "ide", root, 2, root / cell,
+                                                         "perf", cell)
+                argv = run.call_args.args[0]
+                self.assertEqual(argv[argv.index("--process-floor-pair") + 1], cell)
+                self.assertEqual(argv[argv.index("--baseline") + 1], argv[argv.index("--candidate") + 1])
+                self.assertEqual(argv[argv.index("--pairs") + 1], "100")
+                self.assertEqual(argv[argv.index("--warmups") + 1], "2")
+                self.assertNotIn("--", argv)
+                self.assertNotIn("--constant-reuse-pair", argv)
+
+    def test_profile_writes_the_source_and_runs_every_cell_in_its_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "ide"
+            candidate.write_bytes(b"candidate compiler")
+            repo = root / "repo"
+            repo.mkdir()
+            lab = root / "trusted-uarch.py"
+            lab.write_bytes(b"trusted test stub")
+            binary = hashlib.sha256(b"candidate compiler").hexdigest()
+            args = argparse.Namespace(lab=lab, repo_root=repo, candidate_ide=candidate, output=root / "profile",
+                                      head_revision="a" * 40, cpu=2, perf="perf")
+            calls = []
+            with mock.patch.object(process_floor_acceptance, "git", return_value="a" * 40), \
+                 mock.patch.object(process_floor_acceptance, "run_compare",
+                                   side_effect=lambda *values: calls.append((values[2], values[-1]))), \
+                 mock.patch.object(process_floor_acceptance, "load_complete",
+                                   side_effect=lambda path, cell, sha: process_floor_raw_cell(cell, sha)["summary"]):
+                result = process_floor_acceptance.execute(args)
+            source = (root / "profile/source").resolve()
+            self.assertEqual(calls, [(source, "aa"), (source, "aarch64"), (source, "syntax-only")])
+            self.assertEqual((source / "tiny.c").read_bytes(), b"int main(void){return 0;}\n")
+            self.assertEqual(compiler_receipt.validate_process_floor_acceptance(result, "a" * 40, binary), [])
+            self.assertTrue(result["verdict"]["aarch64"]["outside_aa"])
+            args.output = root / "stray"
+            with mock.patch.object(process_floor_acceptance, "git", return_value="a" * 40), \
+                 mock.patch.object(process_floor_acceptance, "run_compare",
+                                   side_effect=lambda *values: (values[2] / "tiny.o").write_bytes(b"")), \
+                 mock.patch.object(process_floor_acceptance, "load_complete",
+                                   side_effect=lambda path, cell, sha: process_floor_raw_cell(cell, sha)["summary"]), \
+                 self.assertRaisesRegex(RuntimeError, "source directory changed"):
+                process_floor_acceptance.execute(args)
+            args.cpu = 3
+            args.output = root / "other"
+            with mock.patch.object(process_floor_acceptance, "git", return_value="a" * 40), \
+                 self.assertRaisesRegex(RuntimeError, "pins CPU 2"):
+                process_floor_acceptance.execute(args)
+            args.cpu = 2
+            with mock.patch.object(process_floor_acceptance, "git", return_value="b" * 40), \
+                 self.assertRaisesRegex(RuntimeError, "expected candidate HEAD"):
+                process_floor_acceptance.execute(args)
+
+    def test_selector_must_be_freshly_added_once_at_the_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            def git(*args: str) -> str:
+                return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                                      text=True).stdout.strip()
+            git("init", "-q")
+            git("config", "user.name", "Process Floor Test")
+            git("config", "user.email", "process-floor@example.invalid")
+            request = repo / compiler_receipt.ANALYZER_REQUEST_PATH
+            request.parent.mkdir(parents=True)
+            request.write_text("# request history\n", encoding="utf-8")
+            git("add", compiler_receipt.ANALYZER_REQUEST_PATH)
+            git("commit", "-qm", "seed")
+            line = compiler_receipt.PROCESS_FLOOR_REQUEST_LINE + "\n"
+            for content, expected in ((line, (True, "")), ("# unrelated request\n", (False, "")),
+                                      (line.rstrip("\n") + "-extra\n", (False, ""))):
+                request.write_text(request.read_text(encoding="utf-8") + content, encoding="utf-8")
+                git("commit", "-qam", "request")
+                with self.subTest(content=content):
+                    self.assertEqual(compiler_compare.process_floor_request_selection(repo, git("rev-parse", "HEAD")),
+                                     expected)
+            request.write_text(request.read_text(encoding="utf-8") + line * 2, encoding="utf-8")
+            git("commit", "-qam", "duplicate")
+            requested, problem = compiler_compare.process_floor_request_selection(repo, git("rev-parse", "HEAD"))
+            self.assertFalse(requested)
+            self.assertIn("exactly once", problem)
+
+    def test_publisher_rechecks_selector_freshness_against_every_parent(self) -> None:
+        head, parent = "a" * 40, "b" * 40
+        line = (compiler_receipt.PROCESS_FLOOR_REQUEST_LINE + "\n").encode("utf-8")
+
+        class Api:
+            def __init__(self, head_count: int, parent_count: int):
+                self.counts = {head: head_count, parent: parent_count}
+            def request(self, path: str, data: dict | None = None) -> object:
+                if path == f"/commits/{head}":
+                    return {"sha": head, "parents": [{"sha": parent}]}
+                revision = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("ref", [""])[0]
+                content = line * self.counts[revision]
+                return {"type": "file", "encoding": "base64", "size": len(content),
+                        "content": base64.b64encode(content).decode("ascii")}
+
+        pull = receipt()
+        pull.update(mode="pull", process_floor=process_floor_evidence()[0])
+        expected = {"mode": "pull", "head": head}
+        verify = compiler_publish.verify_analyzer_request_freshness
+        self.assertEqual(verify(Api(1, 0), expected, pull, {}), "")
+        self.assertIn("not freshly added", verify(Api(1, 1), expected, pull, {}))
+        self.assertIn("not freshly added", verify(Api(2, 0), expected, pull, {}))
+        plain = dict(pull)
+        plain.pop("process_floor")
+        self.assertIn("no process-floor record", verify(Api(1, 0), expected, plain, {}))
+        self.assertEqual(verify(Api(1, 1), expected, plain, {}), "")
+
+    def test_decision_needs_pull_mode_the_9700x_and_the_complete_bundle(self) -> None:
+        record, bundle, unused_acceptance = process_floor_evidence("a" * 40, B256)
+        pull = receipt()
+        pull["mode"] = "pull"
+        pull["identity"].update(mode="pull")
+        pull["process_floor"] = record
+        expected = dict(EXPECTED, mode="pull")
+        values = {"expected": expected, "authorized": True, "compare_result": "success", "receipt": pull,
+                  "summary": summary(), "policy_value": "", "throughput": dict(corpus(), process_floor_bundle=bundle)}
+        conclusion, unused_title, reasons = compiler_publish.decide(**values)
+        self.assertEqual((conclusion, reasons), ("success", []))
+        main = copy.deepcopy(pull)
+        main["mode"] = "main"
+        main["identity"].update(mode="main")
+        both = copy.deepcopy(pull)
+        both["constant_reuse_acceptance"] = constant_reuse_evidence("a" * 40, B256)[0]
+        for name, change in {
+            "not the Zen 5 host": {"receipt": dict(pull, host={"cpu_model": "AMD EPYC 7763 64-Core Processor"})},
+            "main mode": {"receipt": main, "expected": dict(EXPECTED)},
+            "missing bundle": {"throughput": corpus()},
+            "missing cell": {"throughput": dict(corpus(), process_floor_bundle={
+                key: value for key, value in bundle.items() if not key.startswith("aarch64_")})},
+            "failed run": {"receipt": dict(pull, process_floor=dict(record, status="failed", exit=1))},
+            "with constant reuse": {"receipt": both, "throughput": dict(
+                corpus(), process_floor_bundle=bundle, constant_reuse_bundle=constant_reuse_evidence("a" * 40, B256)[1])},
+        }.items():
+            with self.subTest(case=name):
+                conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, **change))
+                self.assertEqual(conclusion, "failure", reasons)
+        # main's request history holds the inline selector, so every pull compare carries an inline record.
+        with_inline = copy.deepcopy(pull)
+        with_inline["inline_acceptance"] = {"requested": True, "request_line": compiler_receipt.INLINE_ACCEPTANCE_REQUEST_LINE,
+                                            "profile": compiler_receipt.INLINE_ACCEPTANCE_PROFILE, "status": "complete"}
+        unused_conclusion, unused_title, reasons = compiler_publish.decide(**dict(values, receipt=with_inline))
+        self.assertFalse([reason for reason in reasons if "cannot be combined" in reason], reasons)
+        report = compiler_receipt.render(pull, summary(), "success", [])
+        self.assertIn("Issue #1125 per-process floor: complete", report)
+        self.assertIn("| aarch64 (`cc -g0 -target aarch64-unknown-linux -c tiny.c -o OUT`) | 10.000 / 7.000 | 3.000 "
+                      "| 0.7000 [0.6950, 0.7040] | 8.000 / 5.600 | 10000000 / 3000000 | True |", report)
+        self.assertIn("| aa (`cc -g0 -c tiny.c -o OUT`) | 10.000 / 10.000 | NA | 1.0000 [0.9950, 1.0040]", report)
+        coverage = compiler_receipt.covered_inventory_rows(pull, "success", "pull")
+        self.assertIn("uarch_lab:compare@process-floor", coverage["discharged"])
+        unrequested = compiler_receipt.covered_inventory_rows(receipt(), "success", "pull")
+        self.assertEqual(unrequested["rows"]["uarch_lab:compare@process-floor"], "not discharged: not requested")
+
+    def test_request_with_another_opt_in_leg_fails_before_any_build(self) -> None:
+        for other in ("constant_reuse_requested", "frontend_nesting_requested", "selfhost_inline_requested"):
+            with self.subTest(combined=other), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                candidate, work, evidence, bins = root / "candidate", root / "work", root / "evidence", root / "bins"
+                for directory in (candidate, work, evidence, bins):
+                    directory.mkdir()
+                current = {"state": "pending", "reasons": [], "timings": {}, "binaries": {}, "lab": {}}
+                args = argparse.Namespace(mode="pull", base="b" * 40, head="a" * 40, process_floor_requested=True,
+                                          lab=root / "uarch_lab.py", **{other: True})
+                with mock.patch.object(compiler_compare, "scaling_requested", return_value=False), \
+                        mock.patch.object(compiler_compare, "build") as build, \
+                        mock.patch.object(compiler_compare, "run") as run:
+                    compiler_compare.measure(args, candidate, work, evidence, bins, evidence / "build.log", current, [])
+                self.assertTrue(any("cannot be combined" in reason for reason in current["reasons"]), current["reasons"])
+                self.assertEqual(current["process_floor"]["status"], "failed")
+                build.assert_not_called()
+                run.assert_not_called()
+
+    def test_leg_exports_only_the_required_documents_when_optional_files_are_deferred(self) -> None:
+        record_value, bundle, acceptance = process_floor_evidence("a" * 40, B256)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("work", "evidence", "candidate"):
+                (root / name).mkdir()
+            for key, member in compiler_publish.PROCESS_FLOOR_BUNDLE_FILES.items():
+                path = root / "work/process-floor" / member.split("/", 1)[1]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(bundle[key]), encoding="utf-8")
+            (root / "work/process-floor/aa/pairs").mkdir()
+            (root / "work/process-floor/aa/pairs/0001-a.csv").write_text("optional\n", encoding="utf-8")
+            pull = {"state": "pending", "reasons": [], "timings": {}, "binaries": {"candidate": {"sha256": B256}},
+                    "process_floor": {"requested": True, "status": "pending"}}
+            arguments = argparse.Namespace(lab=root / "uarch_lab.py", head="a" * 40)
+            exported_required = []
+
+            def deferred_export(source: Path, destination: Path, evidence: Path, ignore: tuple, required: tuple):
+                exported_required.append(required)
+                for name in required:
+                    target = destination / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source / name, target)
+                return [], []
+
+            with mock.patch.object(compiler_compare, "run", return_value=0) as run, \
+                    mock.patch.object(compiler_compare, "export_tree", side_effect=deferred_export):
+                compiler_compare.measure_process_floor(arguments, root / "candidate", root / "ide-cand", root / "work",
+                                                       root / "evidence", pull)
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[argv.index("--cpu") + 1], "2")
+            self.assertTrue(argv[2].endswith("process_floor_acceptance.py"))
+            record = pull["process_floor"]
+            self.assertEqual((record["status"], record["errors"]), ("complete", []))
+            self.assertEqual(record["summary"], acceptance)
+            self.assertEqual(sorted(name for names in exported_required for name in names),
+                             sorted(compiler_compare.PROCESS_FLOOR_REQUIRED))
+            self.assertFalse((root / "evidence/process_floor/aa/pairs/0001-a.csv").exists())
+            self.assertEqual(compiler_publish.validate_process_floor_bundle(
+                dict(record_value, summary=record["summary"]), bundle, "a" * 40, B256), [])
 
 def real_source_evidence() -> tuple[dict, dict]:
     """A complete synthetic throughput-real-source-v1 record and its exported bundle on BINARIES."""

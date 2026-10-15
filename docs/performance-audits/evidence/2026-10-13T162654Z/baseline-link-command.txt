@@ -1,0 +1,1 @@
+: && /usr/bin/clang -O3 -DNDEBUG -fuse-ld=mold -Xlinker --dependency-file=CMakeFiles/ide.dir/Release/link.d CMakeFiles/ide.dir/Release/src/buster/apps/ide/ide.c.o -o Release/ide  -lm && :

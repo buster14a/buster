@@ -1,0 +1,28 @@
+{
+  "schema": "type-index-qualification-v1",
+  "implementation_revision": "c24a788bbf410c750d6aee13e215408e7792d76f",
+  "baseline_revision": "c14841ae8e286447cf126de59119a887c13c9e36",
+  "qualified": [
+    "distinct-32",
+    "distinct-128",
+    "distinct-512",
+    "distinct-2048",
+    "early-2048",
+    "same-2048",
+    "hash-llvm"
+  ],
+  "native_controls": [
+    "native-control",
+    "unity-native"
+  ],
+  "excluded": {
+    "unity-llvm": "Baseline and candidate bitcode fail LLVM 23.1.1: Invalid wide integer const record (#4223). Diagnostic counts only."
+  },
+  "other_baseline_failures": {
+    "compiler/object/object.c": "INSERTVAL: Invalid instruction with 0 indices (#4224)",
+    "compiler/llvm/bitcode.c": "INSERTVAL: Invalid instruction with 0 indices (#4224)"
+  },
+  "timing_claim": "none",
+  "zen5_claim": "none",
+  "hash_index_bound": "expected work, not collision-resistant worst-case work"
+}

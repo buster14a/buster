@@ -437,9 +437,9 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_reference(String8 sour
     }
     u64 index = percent_index + 1;
     *width_out = 0;
-    if (source.pointer[index] == 'q')
+    if (source.pointer[index] == 'q' || source.pointer[index] == 'w')
     {
-        *width_out = 8;
+        *width_out = source.pointer[index] == 'q' ? 8 : 2;
         index += 1;
     }
     if (index >= source.length)
@@ -679,7 +679,8 @@ BUSTER_GLOBAL_LOCAL bool codegen_inline_assembly_template_literal_valid(Arena* a
         {
             token_start += 1;
         }
-        if (!escaped && !intel_literal && token_start + 1 < source.length && source.pointer[token_start] == 'q' &&
+        if (!escaped && !intel_literal && token_start + 1 < source.length &&
+            (source.pointer[token_start] == 'q' || source.pointer[token_start] == 'w') &&
             (source.pointer[token_start + 1] == '[' || (source.pointer[token_start + 1] >= '0' && source.pointer[token_start + 1] <= '9')))
         {
             token_start += 1;
@@ -1158,8 +1159,9 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
         IrType* type = ir_type_from_id(&program->types, function->values[value.value].canonical_type);
         u32 type_class = codegen_inline_assembly_type_class(type);
         // A memory operand's register holds an address, so it is always spelled
-        // at pointer width and wrapped in the syntax's memory reference; every
-        // other operand is spelled at the width of its own type.
+        // at pointer width and wrapped in the syntax's memory reference. An
+        // explicit GNU width modifier changes the register view only; the
+        // operand's type still owns its staging and store widths.
         bool memory_operand =
             IR_INLINE_ASSEMBLY_CONSTRAINT_IS_MEMORY(instruction->immediates[operand_index] & IR_INLINE_ASSEMBLY_CONSTRAINT_CLASS_MASK);
         X64Register fixed_register = X64_REGISTER_RAX;
@@ -1171,7 +1173,8 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
         {
             if (reason_out)
             {
-                *reason_out = S8("inline assembly %q requires a scalar general-register operand");
+                *reason_out = reference_width == 2 ? S8("inline assembly %w requires a scalar general-register operand")
+                                                   : S8("inline assembly %q requires a scalar general-register operand");
             }
             return false;
         }
@@ -1182,7 +1185,8 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
         if (!register_name.length)
         {
             register_name = codegen_x64_asm_register_name(registers[operand_index],
-                                                          memory_operand || reference_width ? 8
+                                                          memory_operand ? 8
+                                                          : reference_width ? reference_width
                                                           : type_class == IR_INLINE_ASSEMBLY_OPERAND_CLASS_INVALID ? 0
                                                                                                                     : (u32)type->layout.size);
         }
@@ -1233,7 +1237,8 @@ bool codegen_inline_assembly_resolve_template(Arena* arena, IrProgram* program, 
         String8 register_name = codegen_inline_assembly_vector_register_name(instruction->immediates[operand_index], vector_registers, operand_index);
         if (!register_name.length)
         {
-            register_name = codegen_x64_asm_register_name(registers[operand_index], memory_operand || reference_width ? 8 : (u32)type->layout.size);
+            register_name = codegen_x64_asm_register_name(registers[operand_index],
+                                                          memory_operand ? 8 : reference_width ? reference_width : (u32)type->layout.size);
         }
         if (memory_operand)
         {
@@ -7663,6 +7668,11 @@ BUSTER_GLOBAL_LOCAL CodegenModule codegen_generate_canonical_module_attempt(Aren
                         if (encoded.epilog_count)
                         {
                             memcpy(descriptor->epilog_offsets, encoded.epilog_offsets, sizeof(u32) * encoded.epilog_count);
+                        }
+                        descriptor->epilog_end_offsets = encoded.epilog_count ? arena_allocate(arena, u32, encoded.epilog_count) : 0;
+                        if (encoded.epilog_count)
+                        {
+                            memcpy(descriptor->epilog_end_offsets, encoded.epilog_end_offsets, sizeof(u32) * encoded.epilog_count);
                         }
                         descriptor->epilog_count = encoded.epilog_count;
                         bool machine_relocations_valid = codegen_publish_machine_relocations(program, &result, relocation_capacity,

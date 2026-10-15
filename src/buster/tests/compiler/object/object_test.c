@@ -10070,6 +10070,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
 
     u8 windows_arm64_code[64] = {0};
     u32 windows_arm64_epilog = 48;
+    u32 windows_arm64_epilog_end = sizeof(windows_arm64_code);
     CodegenUnwindAction windows_arm64_actions[] = {
         {.code_offset = 4, .value = 16, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
         {.code_offset = 4, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 29},
@@ -10083,6 +10084,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     CodegenFunctionDescriptor windows_arm64_function = {
         .unwind_actions = windows_arm64_actions,
         .epilog_offsets = &windows_arm64_epilog,
+        .epilog_end_offsets = &windows_arm64_epilog_end,
         .code_size = sizeof(windows_arm64_code),
         .prolog_size = 24,
         .unwind_action_count = BUSTER_ARRAY_LENGTH(windows_arm64_actions),
@@ -10200,6 +10202,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     // starting at SET_FP, including sparse allocator saves in reverse order.
     u8 windows_arm64_machine_code[80] = {0};
     u32 windows_arm64_machine_epilog = 56;
+    u32 windows_arm64_machine_epilog_end = sizeof(windows_arm64_machine_code);
     CodegenUnwindAction windows_arm64_machine_actions[] = {
         {.code_offset = 4, .value = 48, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
         {.code_offset = 4, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 29},
@@ -10215,6 +10218,7 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
     CodegenFunctionDescriptor windows_arm64_machine_function = {
         .unwind_actions = windows_arm64_machine_actions,
         .epilog_offsets = &windows_arm64_machine_epilog,
+        .epilog_end_offsets = &windows_arm64_machine_epilog_end,
         .code_size = sizeof(windows_arm64_machine_code),
         .prolog_size = 32,
         .unwind_action_count = BUSTER_ARRAY_LENGTH(windows_arm64_machine_actions),
@@ -10271,6 +10275,221 @@ UnitTestResult object_tests(UnitTestArguments* arguments)
         invalid_module.functions = &invalid_function;
         ObjectFile invalid_object = object_from_canonical_codegen_module(arguments->arena, &separate_program, &invalid_module, windows_arm64_target);
         BUSTER_TEST(arguments, invalid_object.error != OBJECT_ERROR_NONE);
+    }
+
+    u32 arm64_fragment_limit = 0x000ffffcu;
+    u32 arm64_fragment_epilog = arm64_fragment_limit * 2u - 8u;
+    u32 arm64_fragment_epilog_end = arm64_fragment_epilog + 16u;
+    u64 arm64_large_code_size = (u64)arm64_fragment_limit * 2u + 16u;
+    u8* arm64_large_code = arena_allocate(arguments->arena, u8, arm64_large_code_size);
+    memset(arm64_large_code, 0, arm64_large_code_size);
+    CodegenFunctionDescriptor windows_arm64_fragment_function = windows_arm64_machine_function;
+    windows_arm64_fragment_function.epilog_offsets = &arm64_fragment_epilog;
+    windows_arm64_fragment_function.epilog_end_offsets = &arm64_fragment_epilog_end;
+    windows_arm64_fragment_function.code_size = (u32)arm64_large_code_size;
+    CodegenModule windows_arm64_fragment_module = windows_arm64_machine_module;
+    windows_arm64_fragment_module.code = (ByteSlice){.pointer = arm64_large_code, .length = arm64_large_code_size};
+    windows_arm64_fragment_module.functions = &windows_arm64_fragment_function;
+    ObjectFile windows_arm64_fragment_object =
+        object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_arm64_fragment_module, windows_arm64_target);
+    if (BUSTER_REQUIRE(arguments, windows_arm64_fragment_object.error == OBJECT_ERROR_NONE &&
+                                      windows_arm64_fragment_object.sections != 0 &&
+                                      windows_arm64_fragment_object.section_count > OBJECT_SECTION_WINDOWS_XDATA))
+    {
+        ByteSlice arm64_fragment_pdata = windows_arm64_fragment_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data;
+        ByteSlice arm64_fragment_xdata = windows_arm64_fragment_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+        BUSTER_TEST(arguments, arm64_fragment_pdata.length == 24 && windows_arm64_fragment_object.relocation_count == 6);
+        if (windows_arm64_fragment_object.relocation_count == 6 &&
+            BUSTER_REQUIRE(arguments, arm64_fragment_xdata.pointer != 0 && arm64_fragment_xdata.length >= 24))
+        {
+            u32 expected_code_offsets[] = {0, arm64_fragment_limit, arm64_fragment_epilog};
+            u32 xdata_offsets[3] = {UINT32_MAX, UINT32_MAX, UINT32_MAX};
+            bool xdata_offsets_valid = true;
+            for (u32 fragment_index = 0; fragment_index < 3; fragment_index += 1)
+            {
+                ObjectRelocation start_relocation = windows_arm64_fragment_object.relocations[fragment_index * 2];
+                ObjectRelocation xdata_relocation = windows_arm64_fragment_object.relocations[fragment_index * 2 + 1];
+                BUSTER_TEST(arguments, start_relocation.section == OBJECT_SECTION_WINDOWS_PDATA &&
+                                            start_relocation.offset == (u64)fragment_index * 8 &&
+                                            start_relocation.symbol == 0 &&
+                                            start_relocation.addend == expected_code_offsets[fragment_index]);
+                bool xdata_offset_valid = xdata_relocation.section == OBJECT_SECTION_WINDOWS_PDATA &&
+                                          xdata_relocation.offset == (u64)fragment_index * 8 + 4 &&
+                                          xdata_relocation.symbol == 1 && xdata_relocation.addend >= 0 &&
+                                          (u64)xdata_relocation.addend + sizeof(u32) <= arm64_fragment_xdata.length &&
+                                          (u64)xdata_relocation.addend <= UINT32_MAX;
+                BUSTER_TEST(arguments, xdata_offset_valid);
+                xdata_offsets_valid &= xdata_offset_valid;
+                if (xdata_offset_valid)
+                {
+                    xdata_offsets[fragment_index] = (u32)xdata_relocation.addend;
+                }
+            }
+            if (xdata_offsets_valid && (u64)xdata_offsets[2] + 9 <= arm64_fragment_xdata.length)
+            {
+                u32 first_header = 0;
+                u32 middle_header = 0;
+                u32 final_header = 0;
+                memcpy(&first_header, arm64_fragment_xdata.pointer + xdata_offsets[0], sizeof(first_header));
+                memcpy(&middle_header, arm64_fragment_xdata.pointer + xdata_offsets[1], sizeof(middle_header));
+                memcpy(&final_header, arm64_fragment_xdata.pointer + xdata_offsets[2], sizeof(final_header));
+                BUSTER_TEST(arguments, (first_header & 0x3ffffu) == arm64_fragment_limit / 4u &&
+                                            ((first_header >> 22) & 0x1fu) == 0);
+                BUSTER_TEST(arguments, (middle_header & 0x3ffffu) == (arm64_fragment_limit - 8u) / 4u &&
+                                            ((middle_header >> 21) & 1u) == 1 &&
+                                            ((middle_header >> 22) & 0x1fu) == 0 &&
+                                            ((middle_header >> 27) & 0x1fu) == 4);
+                BUSTER_TEST(arguments, (final_header & 0x3ffffu) == 6u && ((final_header >> 22) & 0x1fu) == 1 &&
+                                            ((final_header >> 27) & 0x1fu) == 4);
+                u32 final_scope = UINT32_MAX;
+                memcpy(&final_scope, arm64_fragment_xdata.pointer + xdata_offsets[2] + 4, sizeof(final_scope));
+                BUSTER_TEST(arguments, final_scope == (4u << 22));
+                u32 middle_code_words = (middle_header >> 27) & 0x1fu;
+                u32 middle_code_start = xdata_offsets[1] + 4;
+                bool middle_codes_valid =
+                    (u64)middle_code_start + (u64)middle_code_words * 4 <= arm64_fragment_xdata.length;
+                bool saw_middle_parent_end = false;
+                for (u32 byte_index = 1; middle_codes_valid && byte_index < middle_code_words * 4; byte_index += 1)
+                {
+                    saw_middle_parent_end |= arm64_fragment_xdata.pointer[middle_code_start + byte_index] == 0xe4;
+                }
+                BUSTER_TEST(arguments, middle_codes_valid && arm64_fragment_xdata.pointer[middle_code_start] == 0xe5 &&
+                                            saw_middle_parent_end);
+                u32 final_code_words = (final_header >> 27) & 0x1fu;
+                u32 final_code_start = xdata_offsets[2] + 8;
+                u32 final_scope_code_index = (final_scope >> 22) & 0x3ffu;
+                bool final_codes_valid = (u64)final_code_start + (u64)final_code_words * 4 <= arm64_fragment_xdata.length &&
+                                         final_scope_code_index < final_code_words * 4u;
+                bool saw_end_chain = false;
+                bool saw_parent_end = false;
+                for (u32 byte_index = 0; final_codes_valid && byte_index < final_code_words * 4u; byte_index += 1)
+                {
+                    u8 opcode = arm64_fragment_xdata.pointer[final_code_start + byte_index];
+                    saw_parent_end |= saw_end_chain && opcode == 0xe4;
+                    saw_end_chain |= opcode == 0xe5;
+                }
+                BUSTER_TEST(arguments, final_codes_valid && arm64_fragment_xdata.pointer[final_code_start] == 0xe5 &&
+                                            arm64_fragment_xdata.pointer[final_code_start + final_scope_code_index] == 0xe1 &&
+                                            saw_end_chain && saw_parent_end);
+            }
+        }
+    }
+
+    CodegenUnwindAction windows_arm64_canonical_actions[] = {
+        {.code_offset = 4, .value = 16, .kind = CODEGEN_UNWIND_ACTION_ALLOCATE_STACK},
+        {.code_offset = 4, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 29},
+        {.code_offset = 4, .value = 8, .kind = CODEGEN_UNWIND_ACTION_SAVE_REGISTER, .register_index = 30},
+        {.code_offset = 8, .kind = CODEGEN_UNWIND_ACTION_SET_FRAME_POINTER, .register_index = 29},
+    };
+    u32 arm64_canonical_epilog = arm64_fragment_limit - 4u;
+    u32 arm64_canonical_epilog_end = arm64_fragment_limit + 4u;
+    CodegenFunctionDescriptor windows_arm64_canonical_fragment_function = {
+        .unwind_actions = windows_arm64_canonical_actions,
+        .epilog_offsets = &arm64_canonical_epilog,
+        .epilog_end_offsets = &arm64_canonical_epilog_end,
+        .code_size = arm64_fragment_limit + 8u,
+        .prolog_size = 8,
+        .unwind_action_count = BUSTER_ARRAY_LENGTH(windows_arm64_canonical_actions),
+        .epilog_count = 1,
+    };
+    CodegenModule windows_arm64_canonical_fragment_module = windows_arm64_machine_module;
+    windows_arm64_canonical_fragment_module.code =
+        (ByteSlice){.pointer = arm64_large_code, .length = windows_arm64_canonical_fragment_function.code_size};
+    windows_arm64_canonical_fragment_module.functions = &windows_arm64_canonical_fragment_function;
+    ObjectFile windows_arm64_canonical_fragment_object =
+        object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_arm64_canonical_fragment_module,
+                                             windows_arm64_target);
+    if (BUSTER_REQUIRE(arguments, windows_arm64_canonical_fragment_object.error == OBJECT_ERROR_NONE &&
+                                      windows_arm64_canonical_fragment_object.relocation_count == 4 &&
+                                      windows_arm64_canonical_fragment_object.sections != 0 &&
+                                      windows_arm64_canonical_fragment_object.section_count > OBJECT_SECTION_WINDOWS_XDATA))
+    {
+        ByteSlice canonical_fragment_xdata =
+            windows_arm64_canonical_fragment_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+        ObjectRelocation start_relocation = windows_arm64_canonical_fragment_object.relocations[2];
+        ObjectRelocation xdata_relocation = windows_arm64_canonical_fragment_object.relocations[3];
+        bool canonical_relocations_valid = start_relocation.offset == 8 && start_relocation.addend == arm64_canonical_epilog &&
+                                           xdata_relocation.offset == 12 && xdata_relocation.symbol == 1 &&
+                                           xdata_relocation.addend >= 0 &&
+                                           (u64)xdata_relocation.addend + 16u <= canonical_fragment_xdata.length;
+        BUSTER_TEST(arguments, canonical_relocations_valid);
+        if (canonical_relocations_valid)
+        {
+            u32 canonical_header = 0;
+            u32 canonical_scope = 0;
+            memcpy(&canonical_header, canonical_fragment_xdata.pointer + xdata_relocation.addend, sizeof(canonical_header));
+            memcpy(&canonical_scope, canonical_fragment_xdata.pointer + xdata_relocation.addend + 4, sizeof(canonical_scope));
+            u8 const* canonical_codes = canonical_fragment_xdata.pointer + xdata_relocation.addend + 8;
+            BUSTER_TEST(arguments, (canonical_header & 0x3ffffu) == 3u &&
+                                        ((canonical_header >> 22) & 0x1fu) == 1u &&
+                                        ((canonical_header >> 27) & 0x1fu) == 2u &&
+                                        canonical_scope == (4u << 22) &&
+                                        canonical_codes[0] == 0xe5 && canonical_codes[3] == 0xe4 &&
+                                        canonical_codes[4] == 0x81 && canonical_codes[5] == 0xe4);
+        }
+    }
+
+    u32 arm64_scope_limit_epilog_count = UINT16_MAX + 1u;
+    u32* arm64_scope_limit_epilogs = arena_allocate(arguments->arena, u32, arm64_scope_limit_epilog_count);
+    u32* arm64_scope_limit_epilog_ends = arena_allocate(arguments->arena, u32, arm64_scope_limit_epilog_count);
+    for (u32 epilog_index = 0; epilog_index < arm64_scope_limit_epilog_count; epilog_index += 1)
+    {
+        arm64_scope_limit_epilogs[epilog_index] = 32u + epilog_index * 4u;
+        arm64_scope_limit_epilog_ends[epilog_index] = arm64_scope_limit_epilogs[epilog_index] + 4u;
+    }
+    CodegenFunctionDescriptor windows_arm64_scope_limit_function = windows_arm64_machine_function;
+    windows_arm64_scope_limit_function.epilog_offsets = arm64_scope_limit_epilogs;
+    windows_arm64_scope_limit_function.epilog_end_offsets = arm64_scope_limit_epilog_ends;
+    windows_arm64_scope_limit_function.epilog_count = arm64_scope_limit_epilog_count;
+    windows_arm64_scope_limit_function.code_size = arm64_fragment_limit + 4u;
+    CodegenModule windows_arm64_scope_limit_module = windows_arm64_machine_module;
+    windows_arm64_scope_limit_module.code =
+        (ByteSlice){.pointer = arm64_large_code, .length = windows_arm64_scope_limit_function.code_size};
+    windows_arm64_scope_limit_module.functions = &windows_arm64_scope_limit_function;
+    ObjectFile windows_arm64_scope_limit_object =
+        object_from_canonical_codegen_module(arguments->arena, &separate_program, &windows_arm64_scope_limit_module,
+                                             windows_arm64_target);
+    if (BUSTER_REQUIRE(arguments, windows_arm64_scope_limit_object.error == OBJECT_ERROR_NONE &&
+                                      windows_arm64_scope_limit_object.relocation_count == 4 &&
+                                      windows_arm64_scope_limit_object.sections != 0 &&
+                                      windows_arm64_scope_limit_object.section_count > OBJECT_SECTION_WINDOWS_XDATA))
+    {
+        ByteSlice scope_limit_pdata = windows_arm64_scope_limit_object.sections[OBJECT_SECTION_WINDOWS_PDATA].data;
+        ByteSlice scope_limit_xdata = windows_arm64_scope_limit_object.sections[OBJECT_SECTION_WINDOWS_XDATA].data;
+        ObjectRelocation first_xdata_relocation = windows_arm64_scope_limit_object.relocations[1];
+        ObjectRelocation second_start_relocation = windows_arm64_scope_limit_object.relocations[2];
+        ObjectRelocation second_xdata_relocation = windows_arm64_scope_limit_object.relocations[3];
+        bool scope_limit_relocations_valid = scope_limit_pdata.length == 16 &&
+                                             first_xdata_relocation.addend == 0 &&
+                                             second_start_relocation.addend == arm64_scope_limit_epilogs[UINT16_MAX] &&
+                                             second_xdata_relocation.addend >= 0 &&
+                                             (u64)second_xdata_relocation.addend + 24u <= scope_limit_xdata.length;
+        BUSTER_TEST(arguments, scope_limit_relocations_valid);
+        if (scope_limit_relocations_valid)
+        {
+            u32 first_header = 0;
+            u32 first_extension = 0;
+            u32 first_scope = 0;
+            u32 second_header = 0;
+            u32 second_scope = 0;
+            memcpy(&first_header, scope_limit_xdata.pointer + first_xdata_relocation.addend, sizeof(first_header));
+            memcpy(&first_extension, scope_limit_xdata.pointer + first_xdata_relocation.addend + 4, sizeof(first_extension));
+            memcpy(&first_scope, scope_limit_xdata.pointer + first_xdata_relocation.addend + 8, sizeof(first_scope));
+            memcpy(&second_header, scope_limit_xdata.pointer + second_xdata_relocation.addend, sizeof(second_header));
+            memcpy(&second_scope, scope_limit_xdata.pointer + second_xdata_relocation.addend + 4, sizeof(second_scope));
+            BUSTER_TEST(arguments, (first_header & 0x3ffffu) == arm64_scope_limit_epilogs[UINT16_MAX] / 4u &&
+                                        ((first_header >> 22) & 0x1fu) == 0 &&
+                                        ((first_header >> 27) & 0x1fu) == 0 &&
+                                        first_extension == (UINT16_MAX | (3u << 16)) &&
+                                        first_scope == ((3u << 22) | (32u / 4u)));
+            BUSTER_TEST(arguments, (second_header & 0x3ffffu) == (windows_arm64_scope_limit_function.code_size -
+                                                                    arm64_scope_limit_epilogs[UINT16_MAX]) /
+                                                                       4u &&
+                                        ((second_header >> 22) & 0x1fu) == 1 &&
+                                        ((second_header >> 27) & 0x1fu) == 4 &&
+                                        second_scope == (4u << 22) &&
+                                        scope_limit_xdata.pointer[second_xdata_relocation.addend + 8] == 0xe5);
+        }
     }
 
     CodegenModule mach_cfi_module = separate_module;

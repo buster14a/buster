@@ -92,12 +92,16 @@ jobs:
           PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_sampling_publication_test.py -v
           PYTHONPATH=tools/bench_direct python3 -B tools/tests/compiler_closure_utility_publication_test.py -v
           python3 -B tools/bench_direct/compiler_test.py
+          python3 -B tools/bench_direct/ast_retirement_test.py
           python3 -B tools/bench_direct/compiler_visibility_test.py
           python3 -B tools/bench_direct/performance_inventory_test.py
           clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/native_timing.c -lm -o "$RUNNER_TEMP/native-timing"
           "$RUNNER_TEMP/native-timing" --self-test
           clang -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/performance_evidence.c -lm -o "$RUNNER_TEMP/performance-evidence"
           "$RUNNER_TEMP/performance-evidence" --self-test
+          gcc --version
+          gcc -std=c11 -Isrc -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/performance_evidence.c -lm -o "$RUNNER_TEMP/performance-evidence-gcc"
+          "$RUNNER_TEMP/performance-evidence-gcc" --self-test
           clang -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-function -fwrapv -fno-strict-aliasing -funsigned-char tools/bench_direct/compiler_probes.c -o "$RUNNER_TEMP/compiler-probes"
           "$RUNNER_TEMP/compiler-probes" --self-test
       - name: Replay micro-architecture lab formats

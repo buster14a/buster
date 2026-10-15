@@ -19,10 +19,12 @@ BUSTER_F_DECL String8 compiler_driver_dependency_path(Arena* arena, String8 obje
 // Lowers the per-input function-record cap so a test can reach it; zero
 // restores COMPILER_DRIVER_INPUT_FUNCTION_LIMIT. Set only between invocations.
 BUSTER_F_DECL void compiler_driver_test_set_function_limit(u32 limit);
-// Replaces COMPILER_DRIVER_LANE_MIN_WORK_BYTES and
-// COMPILER_DRIVER_LANE_INPUT_WORK_BYTES for invocations on the calling thread;
-// a zero minimum always permits lanes. Restore after the invocation.
-BUSTER_F_DECL void compiler_driver_test_set_lane_work(u64 minimum_bytes, u64 per_input_bytes);
+// Replaces COMPILER_DRIVER_LANE_MIN_WORK_BYTES,
+// COMPILER_DRIVER_LANE_INPUT_WORK_BYTES and
+// COMPILER_DRIVER_LANE_WORK_PER_WORKER_BYTES for invocations on the calling
+// thread; a zero minimum always permits lanes and a zero per-worker floor never
+// caps them. Restore after the invocation.
+BUSTER_F_DECL void compiler_driver_test_set_lane_work(u64 minimum_bytes, u64 per_input_bytes, u64 per_worker_bytes);
 BUSTER_F_DECL void compiler_driver_test_restore_lane_work(void);
 // Fail one coordinator-owned TU arena creation, counting only TU creations.
 BUSTER_F_DECL void compiler_driver_test_fail_unit_arena_reservation(u32 ordinal);

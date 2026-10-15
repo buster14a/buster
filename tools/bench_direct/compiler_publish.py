@@ -14,8 +14,8 @@ re-derives validity from the lab's own summary.json and the throughput
 corpus's own summary.json and metadata.json (#2761), and, when the receipt
 names the scaling profile (#424), each scaling bundle's own scaling.json and
 scaling-metadata.json, and, when the receipt holds an opt-in same-candidate
-flag-pair profile (#48 inline, #3397 ast-pilot, #3011 constant-reuse), that profile's raw lab
-documents, and completes the
+flag-pair profile (#48 inline, #3397 ast-pilot, #3011 constant-reuse) or the #1125
+per-process floor, that profile's raw lab documents, and completes the
 attempt's check run named check_name(mode) with external ID attempt_marker(...)
 on the head. The checks are report-only; nothing gates merging on them.
 
@@ -68,11 +68,13 @@ only publication-only recovery of a run whose producer predates sealing
 bytes reported unverified. Anything else fails closed.
 
 Map: validate_inline_bundle, validate_ast_pilot_bundle and validate_constant_reuse_bundle (opt-in flag pairs),
+validate_process_floor_bundle (#1125 per-process floor),
 validate_real_source_bundle, validate_production_profile_bundle,
 validate_compiler_probes_bundle, validate_frontend_selector_bundle,
 validate_frontend_nesting_bundle (#2676 deep nesting) and
 validate_wild_linker_bundle (#2761 opt-in legs), validate_link_tls_bundle (#1915),
 validate_selfhost_inline_bundle (#58),
+validate_ast_retirement_bundle (#4058 two-binary retirement cells and raw replay),
 decide (pure decision), sealed_lab_replay, sealed_corpus_replay,
 verify_evidence_bundle, evidence_bundle_problems and sealing_required (sealed raw
 evidence), lab_raw_inference (shared lab replay), inventory_rows (discharged inventory rows),
@@ -97,6 +99,7 @@ import sys
 import urllib.error
 import urllib.parse
 import zipfile
+import zlib
 from datetime import datetime
 
 from authorize_compiler import verify as verify_main
@@ -106,16 +109,25 @@ from inline_acceptance import metrics as inline_metrics, validate_documents as v
 from selfhost_inline_compare import validate_compare_documents as validate_selfhost_inline_documents
 from ast_pilot_acceptance import (cell_record as ast_pilot_cell_record, validate_documents as validate_ast_pilot_documents,
                                   validate_probe as validate_ast_pilot_probe)
+from ast_retirement_acceptance import (cell_record as ast_retirement_cell_record,
+                                      validate_documents as validate_ast_retirement_documents,
+                                      validate_probe as validate_ast_retirement_probe)
 from compiler_receipt import EVIDENCE_MANIFEST, EVIDENCE_SEAL, evidence_identity, evidence_inventory
 from constant_reuse_acceptance import (cell_record as constant_reuse_cell_record,
                                        validate_documents as validate_constant_reuse_documents)
+from process_floor_acceptance import (cell_record as process_floor_cell_record,
+                                      validate_documents as validate_process_floor_documents)
 from compiler_receipt import (validate_closure, APPROVED_HOST, ANALYZER_PROFILE, ANALYZER_PROFILE_BY_LINE, ANALYZER_REQUIRED_FILES,
                               ANALYZER_REQUEST_LINES, ANALYZER_REQUEST_PATH, DECIMAL, IDENTITY_KEYS,
                               INLINE_ACCEPTANCE_REQUEST_LINE, INLINE_ACCEPTANCE_PROFILE,
                               AST_PILOT_ACCEPTANCE_REQUEST_LINE, AST_PILOT_ACCEPTANCE_PROFILE, AST_PILOT_CELLS,
                               validate_ast_pilot_acceptance,
+                              AST_RETIREMENT_REQUEST_LINE, AST_RETIREMENT_PROFILE, AST_RETIREMENT_CELLS,
+                              validate_ast_retirement_acceptance,
                               CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE, CONSTANT_REUSE_ACCEPTANCE_PROFILE, CONSTANT_REUSE_CELLS,
                               validate_constant_reuse_acceptance,
+                              PROCESS_FLOOR_REQUEST_LINE, PROCESS_FLOOR_PROFILE, PROCESS_FLOOR_CELLS,
+                              validate_process_floor_acceptance,
                               THROUGHPUT_REAL_SOURCE_PROFILE, THROUGHPUT_REAL_SOURCE_REQUEST_LINE,
                               throughput_real_source_digest, validate_throughput_real_source,
                               PRODUCTION_PROFILE_PROFILE, PRODUCTION_PROFILE_REQUEST_LINE, validate_production_profile,
@@ -282,6 +294,190 @@ def validate_ast_pilot_bundle(receipt_ast: object, bundle: object, head: str, ca
     return problems
 
 
+AST_RETIREMENT_BUNDLE_FILES = {
+    "acceptance": "ast_retirement_acceptance/acceptance.json",
+    "source": "ast_retirement_acceptance/source.json",
+    **{f"{cell}_{key}": f"ast_retirement_acceptance/{cell}/{member}" for cell in AST_RETIREMENT_CELLS
+       for key, member in (("summary", "summary.json"), ("meta", "compare.json"), ("a", "a/lab.json"),
+                           ("b", "b/lab.json"), ("reference", "reference.json"))},
+    **{f"{cell}_probe": f"ast_retirement_acceptance/probe/{cell}/probe.json" for cell in AST_RETIREMENT_CELLS},
+}
+
+
+def ast_retirement_reference(cell: str, bundle: dict) -> dict:
+    """Verify the fixed bounded transport of each reference image and its raw diagnostics."""
+    prefix = f"ast_retirement_acceptance/{cell}/"
+    files, manifest = bundle["files"], bundle[f"{cell}_reference"]
+    summary = bundle[f"{cell}_summary"]
+    if not isinstance(manifest, dict) or set(manifest) != {"a", "b"}:
+        raise ValueError(f"{cell} reference image manifest is malformed")
+    if manifest["a"] != manifest["b"]:
+        raise ValueError(f"{cell} compiler arms do not bind one identical shared raw reference")
+    images, diagnostics, decoded_chunks = {}, {}, {}
+    for key in ("a", "b"):
+        image = manifest[key]
+        if not isinstance(image, dict) or set(image) != {"size_bytes", "sha256", "chunks"} or \
+                type(image.get("size_bytes")) is not int or not 0 <= image["size_bytes"] <= ANALYZER_MEMBER_LIMIT * 2 or \
+                not re.fullmatch(r"[0-9a-f]{64}", str(image.get("sha256", ""))) or \
+                not isinstance(image.get("chunks"), list) or len(image["chunks"]) != 2:
+            raise ValueError(f"{cell} {key} reference image identity is malformed")
+        parts = []
+        for index, chunk in enumerate(image["chunks"]):
+            wanted = f"reference.{index:03d}.bin.gz"
+            raw = files.get(prefix + wanted)
+            if not isinstance(chunk, dict) or set(chunk) != {"path", "compression", "size_bytes", "sha256",
+                                                           "stored_size_bytes", "stored_sha256"} or \
+                    chunk.get("path") != wanted or not isinstance(raw, bytes) or \
+                    chunk.get("compression") != "gzip-v1" or type(chunk.get("size_bytes")) is not int or \
+                    chunk["size_bytes"] != min(max(0, image["size_bytes"] - index * ANALYZER_MEMBER_LIMIT), ANALYZER_MEMBER_LIMIT) or \
+                    type(chunk.get("stored_size_bytes")) is not int or chunk["stored_size_bytes"] != len(raw) or \
+                    len(raw) > ANALYZER_MEMBER_LIMIT or chunk.get("stored_sha256") != hashlib.sha256(raw).hexdigest() or \
+                    raw[:10] != b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff":
+                raise ValueError(f"{cell} {key} reference chunk differs from its bounded stored bytes")
+            decoded = decoded_chunks.get(wanted)
+            if decoded is None:
+                try:
+                    decoder = zlib.decompressobj(31)
+                    decoded = decoder.decompress(raw, chunk["size_bytes"] + 1)
+                except zlib.error as error:
+                    raise ValueError(f"{cell} {key} reference gzip is invalid: {error}") from error
+                if len(decoded) != chunk["size_bytes"] or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail or \
+                        chunk.get("sha256") != hashlib.sha256(decoded).hexdigest():
+                    raise ValueError(f"{cell} {key} reference gzip differs from its bounded raw identity")
+                decoded_chunks[wanted] = decoded
+            parts.append(decoded)
+        images[key] = b"".join(parts)
+        if image["size_bytes"] != len(images[key]) or image["sha256"] != hashlib.sha256(images[key]).hexdigest() or \
+                AST_RETIREMENT_CELLS[cell]["operation"] == "object" and not images[key]:
+            raise ValueError(f"{cell} {key} reference image hash or size differs from retained chunks")
+        diagnostics[key] = files.get(prefix + key + "/reference.diagnostics")
+        if not isinstance(diagnostics[key], bytes):
+            raise ValueError(f"{cell} {key} reference diagnostics are missing")
+    if summary.get("outputs_identical") is not (images["a"] == images["b"]):
+        raise ValueError(f"{cell} output identity result differs from the raw reference images")
+    if summary.get("diagnostics_identical") is not (diagnostics["a"] == diagnostics["b"]):
+        raise ValueError(f"{cell} diagnostics identity result differs from the raw transcripts")
+    if summary.get("outputs_identical") is not True or summary.get("diagnostics_identical") is not True:
+        raise ValueError(f"{cell} reference images or diagnostics differ between the two binaries")
+    return manifest
+
+
+def ast_retirement_raw_cell(cell: str, bundle: dict, source: dict, binaries: dict,
+                            cpu_model: str) -> dict:
+    """Replay one fixed cell from the retained pairs, counters and observed variant host records."""
+    from sampling_qualification_receipt import _lab
+    prefix = f"ast_retirement_acceptance/{cell}/"
+    files = bundle["files"]
+    summary, meta = bundle[f"{cell}_summary"], bundle[f"{cell}_meta"]
+    labs = {key: bundle[f"{cell}_{key}"] for key in ("a", "b")}
+    raw = validate_ast_retirement_documents(cell, summary, meta, labs, binaries, source)
+    ast_retirement_reference(cell, bundle)
+    records = sampling_json(files, prefix + "pairs.json", False)
+    if not isinstance(records, list) or len(records) != AST_RETIREMENT_PROFILE["pairs"] * 2:
+        raise ValueError(f"{cell} complete raw pair population is missing")
+    config, plan = meta.get("config"), meta.get("plan")
+    if meta.get("version") != 1 or meta.get("mode") != "compare" or not isinstance(plan, dict) or \
+            not isinstance(config, dict) or summary.get("method") != _lab.COMPARE_METHOD or \
+            summary.get("plan") != dict(plan, seed=config.get("seed"), confidence=_lab.CONFIDENCE,
+                bootstrap_resamples=_lab.BOOTSTRAP_RESAMPLES, complete_pairs=AST_RETIREMENT_PROFILE["pairs"], fresh_copy=True):
+        raise ValueError(f"{cell} saved inference method or complete plan differs from its raw configuration")
+    if summary.get("host", {}).get("cpu_model") != cpu_model or not APPROVED_HOST.search(cpu_model):
+        raise ValueError(f"{cell} raw summary host differs from the approved receipt host")
+    for key, role in (("a", "baseline"), ("b", "candidate")):
+        variant = (meta.get("variants") or {}).get(key)
+        observed, lab_config = summary[role], labs[key]["config"]
+        if not isinstance(variant, dict) or variant.get("role") != role or \
+                variant.get("ide") != lab_config.get("ide") or observed.get("path") != variant.get("ide") or \
+                any(variant.get(field) != binaries[role][field] for field in ("sha256", "size_bytes")) or \
+                observed.get("identical_runs") != AST_RETIREMENT_PROFILE["pairs"]:
+            raise ValueError(f"{cell} {key} raw variant identity or population differs from the prepared binary")
+        environment = sampling_json(files, prefix + key + "/env/env.json")
+        if environment.get("cpu_model") != cpu_model or environment.get("cpu") != AST_RETIREMENT_PROFILE["cpu"] or \
+                environment.get("ide_sha256") != binaries[role]["sha256"] or \
+                environment.get("git_revision") != source["revision"]:
+            raise ValueError(f"{cell} {key} raw observed host, compiler or source differs from the receipt")
+        perf = (labs[key].get("capabilities") or {}).get("perf_stat")
+        collection = labs[key].get("collection")
+        if not isinstance(perf, dict) or perf.get("usable") is not True or not isinstance(perf.get("reason"), str) or \
+                not isinstance(collection, dict) or collection.get("metrics_out") is not False:
+            raise ValueError(f"{cell} {key} has unavailable counters or instrumented timed collection")
+    for index, record in enumerate(records):
+        if not isinstance(record, dict) or not _number(record.get("maxrss_bytes")) or record["maxrss_bytes"] <= 0:
+            raise ValueError(f"{cell} raw pair {index + 1} lacks positive wait4 peak RSS")
+        number, key = index // 2 + 1, ("ab" if index // 2 % 2 == 0 else "ba")[index % 2]
+        csv_bytes = files.get(prefix + f"pairs/{number:04d}-{key}.csv")
+        if not isinstance(csv_bytes, bytes):
+            raise ValueError(f"{cell} raw retired-instruction counter file is missing")
+        counters = [row for row in _lab.parse_stat(csv_bytes.decode("utf-8"))
+                    if _lab.normalize_event(row.get("event", "")) == "instructions"]
+        if len(counters) != 1 or counters[0].get("event") != "instructions:u" or \
+                not _number(counters[0].get("value")) or counters[0]["value"] <= 0:
+            raise ValueError(f"{cell} raw pair {number} {key} lacks positive retired instructions:u")
+    if type(config.get("seed")) is not int or not _number(config.get("min_effect_percent")) or \
+            not 0 <= config["min_effect_percent"] < 100:
+        raise ValueError(f"{cell} raw statistical configuration is malformed")
+    lab_raw_inference(files, prefix, records, labs, summary, meta, config["seed"], config["min_effect_percent"])
+    return raw
+
+
+def validate_ast_retirement_bundle(record: object, bundle: object, base: str, head: str,
+                                   binaries: object, cpu_model: str) -> list[str]:
+    """Re-derive #4058's two-binary cells and retained components from exact sealed raw bytes."""
+    problems: list[str] = []
+    if record is not None:
+        if not isinstance(record, dict) or record.get("requested") is not True:
+            problems.append("receipt ast-retirement record is present but not a request")
+        else:
+            if record.get("status") != "complete" or record.get("exit") != 0:
+                problems.append("receipt issue #4058 ast-retirement run did not complete successfully")
+            if record.get("request_line") != AST_RETIREMENT_REQUEST_LINE:
+                problems.append("receipt ast-retirement request selector is not the exact supported line")
+            if record.get("profile") != AST_RETIREMENT_PROFILE:
+                problems.append("receipt ast-retirement profile is not the frozen profile")
+            if not isinstance(bundle, dict) or set(bundle) != {*AST_RETIREMENT_BUNDLE_FILES, "files"}:
+                problems.append("requested issue #4058 raw evidence bundle is incomplete")
+            elif not isinstance(bundle.get("acceptance"), dict) or not isinstance(bundle.get("files"), dict):
+                problems.append("raw issue #4058 acceptance document or sealed files are missing")
+            else:
+                acceptance = bundle["acceptance"]
+                if record.get("summary") != acceptance:
+                    problems.append("receipt and raw ast-retirement acceptance documents differ")
+                if acceptance.get("cpu_model") != cpu_model:
+                    problems.append("ast-retirement observed CPU differs from the receipt host")
+                problems.extend(validate_ast_retirement_acceptance(acceptance, base, head, binaries))
+                try:
+                    for key, member in AST_RETIREMENT_BUNDLE_FILES.items():
+                        if sampling_json(bundle["files"], member) != bundle[key]:
+                            raise ValueError(f"ast-retirement document differs from retained bytes: {member}")
+                    source = acceptance["source"]
+                    if source != bundle["source"]:
+                        raise ValueError("ast-retirement source binding differs from its raw source document")
+                    for name, identity in (("unity", source["unity"]), *source["corpus"].items()):
+                        data = bundle["files"].get(f"ast_retirement_acceptance/inputs/{name}.c")
+                        if not isinstance(data, bytes) or len(data) != identity["size_bytes"] or \
+                                hashlib.sha256(data).hexdigest() != identity["sha256"]:
+                            raise ValueError(f"ast-retirement {name} source identity differs from retained bytes")
+                    for cell in AST_RETIREMENT_CELLS:
+                        raw = ast_retirement_raw_cell(cell, bundle, source, binaries, cpu_model)
+                        if acceptance["cells"].get(cell) != ast_retirement_cell_record(raw):
+                            raise ValueError(f"{cell} acceptance metrics differ from its raw paired inference")
+                        logs = {key: bundle["files"].get(f"ast_retirement_acceptance/probe/{cell}/{key}.log")
+                                for key in ("a", "b")}
+                        probe = validate_ast_retirement_probe(cell, bundle[f"{cell}_probe"], binaries, source, logs)
+                        for key in ("a", "b"):
+                            row, reference = bundle[f"{cell}_probe"][key], bundle[f"{cell}_reference"][key]
+                            if AST_RETIREMENT_CELLS[cell]["operation"] == "object":
+                                if row.get("output_sha256") != reference["sha256"] or row.get("output_size_bytes") != reference["size_bytes"]:
+                                    raise ValueError(f"{cell} {key} retained-byte probe object differs from the timed reference")
+                            elif row.get("output_sha256") is not None or row.get("output_size_bytes") is not None:
+                                raise ValueError(f"{cell} {key} syntax-only probe unexpectedly produced an object")
+                        if acceptance["probes"].get(cell) != probe:
+                            raise ValueError(f"{cell} retained component record differs from its raw verbose probe")
+                except (RuntimeError, ValueError, UnicodeDecodeError, AttributeError, TypeError, KeyError, ArithmeticError) as error:
+                    problems.append(f"raw issue #4058 profile is incomplete or mismatched: {error}")
+    return problems
+
+
 CONSTANT_REUSE_BUNDLE_FILES = {
     "acceptance": "constant_reuse_acceptance/acceptance.json",
     **{f"{cell}_{key}": f"constant_reuse_acceptance/{cell}/{member}" for cell in CONSTANT_REUSE_CELLS
@@ -319,6 +515,46 @@ def validate_constant_reuse_bundle(receipt_reuse: object, bundle: object, head: 
                 problems.append(f"constant-reuse {cell} acceptance metrics or identity results do not match its raw summary")
     except (RuntimeError, AttributeError, TypeError, KeyError) as error:
         problems.append(f"raw issue #3011 profile is incomplete or mismatched: {error}")
+    return problems
+
+
+PROCESS_FLOOR_BUNDLE_FILES = {
+    "acceptance": "process_floor/acceptance.json",
+    **{f"{cell}_{key}": f"process_floor/{cell}/{member}" for cell in PROCESS_FLOOR_CELLS
+       for key, member in (("summary", "summary.json"), ("meta", "compare.json"), ("a", "a/lab.json"), ("b", "b/lab.json"))},
+}
+
+
+def validate_process_floor_bundle(receipt_floor: object, bundle: object, head: str, candidate_sha: str) -> list[str]:
+    """Re-derive the requested #1125 result from its raw cell summaries and configs."""
+    if receipt_floor is None:
+        return []
+    problems: list[str] = []
+    if not isinstance(receipt_floor, dict) or receipt_floor.get("requested") is not True:
+        return ["receipt process-floor record is present but not a request"]
+    if receipt_floor.get("status") != "complete" or receipt_floor.get("exit") != 0:
+        problems.append("receipt issue #1125 process-floor run did not complete successfully")
+    if receipt_floor.get("request_line") != PROCESS_FLOOR_REQUEST_LINE:
+        problems.append("receipt process-floor request selector is not the exact supported line")
+    if receipt_floor.get("profile") != PROCESS_FLOOR_PROFILE:
+        problems.append("receipt process-floor profile is not the frozen profile")
+    if not isinstance(bundle, dict) or set(bundle) != set(PROCESS_FLOOR_BUNDLE_FILES):
+        return [*problems, "requested issue #1125 raw evidence bundle is incomplete"]
+    acceptance = bundle.get("acceptance")
+    if not isinstance(acceptance, dict):
+        return [*problems, "raw issue #1125 acceptance document is missing"]
+    if receipt_floor.get("summary") != acceptance:
+        problems.append("receipt and raw process-floor acceptance documents differ")
+    problems.extend(validate_process_floor_acceptance(acceptance, head, candidate_sha))
+    try:
+        cells = acceptance.get("cells") if isinstance(acceptance.get("cells"), dict) else {}
+        for cell in PROCESS_FLOOR_CELLS:
+            raw = validate_process_floor_documents(cell, bundle[f"{cell}_summary"], bundle[f"{cell}_meta"],
+                                                   {"a": bundle[f"{cell}_a"], "b": bundle[f"{cell}_b"]}, candidate_sha)
+            if cells.get(cell) != process_floor_cell_record(raw):
+                problems.append(f"process-floor {cell} metrics or identity results do not match its raw summary")
+    except (RuntimeError, AttributeError, TypeError, KeyError) as error:
+        problems.append(f"raw issue #1125 profile is incomplete or mismatched: {error}")
     return problems
 
 
@@ -639,8 +875,12 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.append(f"{selected_profile['name']} cannot be combined with issue #48 self-host acceptance")
                 if receipt.get("ast_pilot_acceptance") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with issue #3397 ast-pilot acceptance")
+                if receipt.get("ast_retirement_acceptance") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with issue #4058 ast-retirement acceptance")
                 if receipt.get("constant_reuse_acceptance") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with issue #3011 constant-reuse acceptance")
+                if receipt.get("process_floor") is not None:
+                    reasons.append(f"{selected_profile['name']} cannot be combined with the issue #1125 process-floor profile")
                 if receipt.get("throughput_real_source") is not None:
                     reasons.append(f"{selected_profile['name']} cannot be combined with real-source throughput")
                 if receipt.get("production_profile") is not None:
@@ -708,6 +948,21 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     candidate = (receipt.get("binaries") or {}).get("candidate") or {}
                     reasons.extend(validate_ast_pilot_bundle(receipt["ast_pilot_acceptance"], corpus.get("ast_pilot_bundle"),
                                                              expected.get("head", ""), candidate.get("sha256", "")))
+                if receipt.get("ast_retirement_acceptance") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("issue #4058 ast-retirement comparison is valid only in pull mode")
+                    if any(receipt.get(key) is not None for key in
+                           ("ast_pilot_acceptance", "constant_reuse_acceptance", "process_floor", "throughput_real_source",
+                            "production_profile", "compiler_probes", "frontend_selector", "frontend_nesting",
+                            "wild_linker", "link_tls", "selfhost_inline")) or "scaling_profile" in receipt:
+                        reasons.append("issue #4058 ast-retirement acceptance cannot be combined with another opt-in leg")
+                    if not isinstance(evidence_bundle, dict) or evidence_bundle.get("state") != "verified":
+                        reasons.append("issue #4058 ast-retirement acceptance requires verified sealed raw evidence")
+                    host = receipt.get("host") if isinstance(receipt.get("host"), dict) else {}
+                    reasons.extend(validate_ast_retirement_bundle(receipt["ast_retirement_acceptance"],
+                        corpus.get("ast_retirement_bundle"), expected.get("base", ""), expected.get("head", ""),
+                        receipt.get("binaries"), host.get("cpu_model", "")))
                 if receipt.get("constant_reuse_acceptance") is not None:
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if expected.get("mode") != "pull":
@@ -724,6 +979,20 @@ def decide(expected: dict, authorized: bool, compare_result: str, receipt: objec
                     reasons.extend(validate_constant_reuse_bundle(receipt["constant_reuse_acceptance"],
                                                                   corpus.get("constant_reuse_bundle"),
                                                                   expected.get("head", ""), candidate.get("sha256", "")))
+                if receipt.get("process_floor") is not None:
+                    corpus = throughput if isinstance(throughput, dict) else {}
+                    if expected.get("mode") != "pull":
+                        reasons.append("the issue #1125 process-floor profile is valid only in pull mode")
+                    # The inline profile rides every pull compare (main's request history holds its line), so it
+                    # is not a competing opt-in leg here.
+                    if any(receipt.get(key) is not None for key in
+                           ("ast_pilot_acceptance", "constant_reuse_acceptance", "throughput_real_source",
+                            "production_profile", "compiler_probes", "frontend_selector", "wild_linker", "link_tls",
+                            "selfhost_inline", "frontend_nesting")):
+                        reasons.append("the issue #1125 process-floor profile cannot be combined with another opt-in leg")
+                    candidate = (receipt.get("binaries") or {}).get("candidate") or {}
+                    reasons.extend(validate_process_floor_bundle(receipt["process_floor"], corpus.get("process_floor_bundle"),
+                                                                 expected.get("head", ""), candidate.get("sha256", "")))
                 if receipt.get("throughput_real_source") is not None:
                     corpus = throughput if isinstance(throughput, dict) else {}
                     if expected.get("mode") != "pull":
@@ -853,7 +1122,8 @@ def sealed_lab_replay(files: dict[str, bytes]) -> int:
             any(config.get(key) != PROFILE[key] for key in ("cpu", "target_minutes", "warmups", "profile_steps")) or \
             config.get("pairs") is not None or type(config.get("seed")) is not int or \
             type(config.get("min_effect_percent")) not in (int, float) or \
-            any(config.get(key) for key in ("ast_pilot_pair", "constant_reuse_pair", "canonical_inline_pair", "sudo")):
+            any(config.get(key) for key in ("ast_pilot_pair", "ast_retirement_cell", "constant_reuse_pair", "process_floor_pair",
+                                            "canonical_inline_pair", "sudo")):
         raise ValueError("lab raw config is not the frozen compiler-compare-v1 profile")
     count = saved.get("pairs") if isinstance(saved, dict) else None
     if type(count) is not int or not 10 <= count <= 1000 or count % 2 or saved.get("order") != "ABBA" or \
@@ -1348,7 +1618,8 @@ def main_owned_files(files: dict[str, bytes], route: dict, *, prefix: str = "",
                         for operation in ("snapshot", "restore", "verify")})
     if receipt.get("throughput_profile") != THROUGHPUT_PROFILE or "scaling_profile" in receipt or \
             not isinstance(receipt.get("inline_acceptance"), dict) or receipt["inline_acceptance"].get("requested") is not False or \
-            "ast_pilot_acceptance" in receipt or "constant_reuse_acceptance" in receipt or \
+            "ast_pilot_acceptance" in receipt or "ast_retirement_acceptance" in receipt or \
+            "constant_reuse_acceptance" in receipt or "process_floor" in receipt or \
             "throughput_real_source" in receipt or "production_profile" in receipt or \
             "compiler_probes" in receipt or "frontend_selector" in receipt or "wild_linker" in receipt or \
             "link_tls" in receipt or "selfhost_inline" in receipt or "frontend_nesting" in receipt:
@@ -1671,6 +1942,26 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         problem = f"evidence member {member} is malformed JSON"
                         break
                 throughput["ast_pilot_bundle"] = bundle if not problem and len(bundle) == len(AST_PILOT_BUNDLE_FILES) else None
+            if isinstance(receipt, dict) and receipt.get("ast_retirement_acceptance") is not None and not problem:
+                bundle = {}
+                for key, member in AST_RETIREMENT_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required issue #4058 evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed JSON"
+                        break
+                if not problem and len(bundle) == len(AST_RETIREMENT_BUNDLE_FILES):
+                    bundle["files"] = throughput.get("sealed_files")
+                    throughput["ast_retirement_bundle"] = bundle
+                else:
+                    throughput["ast_retirement_bundle"] = None
             if isinstance(receipt, dict) and receipt.get("constant_reuse_acceptance") is not None and not problem:
                 bundle = {}
                 for key, member in CONSTANT_REUSE_BUNDLE_FILES.items():
@@ -1687,6 +1978,22 @@ def read_evidence(api: Api, run_id: str, name: str, *, trusted_main_route: dict 
                         problem = f"evidence member {member} is malformed JSON"
                         break
                 throughput["constant_reuse_bundle"] = bundle if not problem and len(bundle) == len(CONSTANT_REUSE_BUNDLE_FILES) else None
+            if isinstance(receipt, dict) and receipt.get("process_floor") is not None and not problem:
+                bundle = {}
+                for key, member in PROCESS_FLOOR_BUNDLE_FILES.items():
+                    info = members.get(member)
+                    if info is None or info.file_size > MEMBER_LIMIT:
+                        problem = f"required issue #1125 evidence member {member} missing or oversized"
+                        break
+                    try:
+                        bundle[key] = json.loads(archive.read(info).decode("utf-8"), object_pairs_hook=unique_object)
+                    except DuplicateKey as error:
+                        problem = f"evidence member {member} has duplicate JSON key {error.args[0]!r}"
+                        break
+                    except (UnicodeDecodeError, ValueError):
+                        problem = f"evidence member {member} is malformed JSON"
+                        break
+                throughput["process_floor_bundle"] = bundle if not problem and len(bundle) == len(PROCESS_FLOOR_BUNDLE_FILES) else None
             if isinstance(receipt, dict) and receipt.get("throughput_real_source") is not None and not problem:
                 bundle = {}
                 for key, member in REAL_SOURCE_BUNDLE_FILES.items():
@@ -1886,7 +2193,9 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     head_counts = {line: head_lines.count(line) for line in ANALYZER_REQUEST_LINES}
     head_inline_count = head_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE)
     head_ast_count = head_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE)
+    head_retirement_count = head_lines.count(AST_RETIREMENT_REQUEST_LINE)
     head_reuse_count = head_lines.count(CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE)
+    head_floor_count = head_lines.count(PROCESS_FLOOR_REQUEST_LINE)
     head_real_count = head_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE)
     head_production_count = head_lines.count(PRODUCTION_PROFILE_REQUEST_LINE)
     head_probes_count = head_lines.count(COMPILER_PROBES_REQUEST_LINE)
@@ -1898,7 +2207,9 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
     parent_analyzer_deltas = {line: [] for line in ANALYZER_REQUEST_LINES}
     parent_inline_counts = []
     ast_deltas = []
+    retirement_deltas = []
     reuse_deltas = []
+    floor_deltas = []
     real_deltas = []
     production_deltas = []
     probes_deltas = []
@@ -1919,7 +2230,9 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
             parent_analyzer_deltas[line].append(head_counts[line] - parent_lines.count(line))
         parent_inline_counts.append(parent_lines.count(INLINE_ACCEPTANCE_REQUEST_LINE))
         ast_deltas.append(head_ast_count - parent_lines.count(AST_PILOT_ACCEPTANCE_REQUEST_LINE))
+        retirement_deltas.append(head_retirement_count - parent_lines.count(AST_RETIREMENT_REQUEST_LINE))
         reuse_deltas.append(head_reuse_count - parent_lines.count(CONSTANT_REUSE_ACCEPTANCE_REQUEST_LINE))
+        floor_deltas.append(head_floor_count - parent_lines.count(PROCESS_FLOOR_REQUEST_LINE))
         real_deltas.append(head_real_count - parent_lines.count(THROUGHPUT_REAL_SOURCE_REQUEST_LINE))
         production_deltas.append(head_production_count - parent_lines.count(PRODUCTION_PROFILE_REQUEST_LINE))
         probes_deltas.append(head_probes_count - parent_lines.count(COMPILER_PROBES_REQUEST_LINE))
@@ -1934,12 +2247,24 @@ def verify_analyzer_request_freshness(api: Api, expected: dict, receipt: object,
                 "append one selector line for each explicit ast-pilot request")
     if ast_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in ast_deltas):
         return "a fresh ast-pilot selector has no ast-pilot acceptance record in the receipt"
+    retirement_record = receipt.get("ast_retirement_acceptance")
+    if retirement_record is not None and not all(delta == 1 for delta in retirement_deltas):
+        return ("the exact ast-retirement selector was not freshly added once at this head relative to every parent; "
+                "append one selector line for each explicit ast-retirement request")
+    if retirement_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in retirement_deltas):
+        return "a fresh ast-retirement selector has no ast-retirement acceptance record in the receipt"
     reuse_record = receipt.get("constant_reuse_acceptance")
     if reuse_record is not None and not all(delta == 1 for delta in reuse_deltas):
         return ("the exact constant-reuse selector was not freshly added once at this head relative to every parent; "
                 "append one selector line for each explicit constant-reuse request")
     if reuse_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in reuse_deltas):
         return "a fresh constant-reuse selector has no constant-reuse acceptance record in the receipt"
+    floor_record = receipt.get("process_floor")
+    if floor_record is not None and not all(delta == 1 for delta in floor_deltas):
+        return ("the exact process-floor selector was not freshly added once at this head relative to every parent; "
+                "append one selector line for each explicit process-floor request")
+    if floor_record is None and receipt.get("state") != "superseded" and any(delta > 0 for delta in floor_deltas):
+        return "a fresh process-floor selector has no process-floor record in the receipt"
     real_record = receipt.get("throughput_real_source")
     if real_record is not None and not all(delta == 1 for delta in real_deltas):
         return ("the exact real-source throughput selector was not freshly added once at this head relative to every "

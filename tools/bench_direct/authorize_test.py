@@ -4,6 +4,10 @@
 from __future__ import annotations
 
 import copy
+import http.client
+import io
+import json
+import urllib.error
 import unittest
 import tempfile
 from unittest import mock
@@ -121,6 +125,115 @@ class AuthorizeTest(unittest.TestCase):
                 failures, base = self.check(run, [pull_request()])
                 self.assertTrue(failures)
                 self.assertEqual(base, "")
+
+
+class FetchTransportTest(unittest.TestCase):
+    """#4145: GET transport retries never retry the authorization decision."""
+
+    @staticmethod
+    def response(value):
+        return io.BytesIO(json.dumps(value).encode())
+
+    def main_responses(self, pulls=None):
+        pull = dict(pull_request(), number=42, changed_files=1)
+        files = [{"filename": "benchmarks/9700x/a.c", "status": "modified"}]
+        records = [request_run(), [pull] if pulls is None else pulls, pull, files,
+                   {"sha": HEAD, "parents": [{"sha": BASE}]},
+                   {"status": "ahead", "base_commit": {"sha": BASE},
+                    "merge_base_commit": {"sha": BASE}, "files": files}]
+        return [self.response(record) for record in records]
+
+    def environment(self, output):
+        return {"BQ_REPOSITORY": REPOSITORY, "BQ_REQUEST_RUN_ID": "91",
+                "BQ_HEAD_COMMIT": HEAD, "BQ_RUN_ATTEMPT": "1",
+                "GH_TOKEN": "offline", "GITHUB_OUTPUT": str(output)}
+
+    def test_transient_failure_then_success_authorizes_the_request(self):
+        errors = [http.client.RemoteDisconnected("closed"), ConnectionResetError("reset"),
+                  TimeoutError("timeout"), urllib.error.URLError("temporary DNS failure"),
+                  urllib.error.HTTPError(authorize.API, 503, "Unavailable", None, None)]
+        for error in errors:
+            if isinstance(error, urllib.error.HTTPError):
+                self.addCleanup(error.close)
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "output"
+                with mock.patch.dict(authorize.os.environ, self.environment(output), clear=True), \
+                        mock.patch.object(authorize.urllib.request, "urlopen",
+                                          side_effect=[error, *self.main_responses()]) as opened, \
+                        mock.patch("time.sleep") as slept:
+                    self.assertEqual(authorize.main(), 0)
+                values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                self.assertEqual(values["request_head"], HEAD)
+                self.assertEqual(values["workloads"], "true")
+                self.assertEqual(values["attempt"], "1")
+                self.assertEqual(values["base"], BASE)
+                self.assertEqual(opened.call_count, 7)
+                slept.assert_called_once_with(1)
+                self.assertEqual(opened.call_args_list[0], opened.call_args_list[1])
+                self.assertEqual(opened.call_args_list[0].args[0].get_method(), "GET")
+
+    def test_persistent_transport_and_server_errors_fail_closed_at_the_fixed_bound(self):
+        for error in (http.client.RemoteDisconnected("closed"),
+                      urllib.error.HTTPError(authorize.API, 502, "Bad Gateway", None, None)):
+            if isinstance(error, urllib.error.HTTPError):
+                self.addCleanup(error.close)
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "output"
+                with mock.patch.dict(authorize.os.environ, self.environment(output), clear=True), \
+                        mock.patch.object(authorize.urllib.request, "urlopen", side_effect=error) as opened, \
+                        mock.patch("time.sleep") as slept:
+                    with self.assertRaises(type(error)):
+                        authorize.main()
+                self.assertFalse(output.exists())
+                self.assertEqual(opened.call_count, 3)
+                self.assertEqual(slept.call_args_list, [mock.call(1), mock.call(2)])
+
+    def test_client_errors_are_not_retried(self):
+        for code in (400, 401, 403, 404, 408, 429, 499):
+            error = urllib.error.HTTPError(authorize.API, code, "Client error", None, None)
+            self.addCleanup(error.close)
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "output"
+                with mock.patch.dict(authorize.os.environ, self.environment(output), clear=True), \
+                        mock.patch.object(authorize.urllib.request, "urlopen", side_effect=error) as opened, \
+                        mock.patch("time.sleep") as slept:
+                    with self.assertRaises(urllib.error.HTTPError):
+                        authorize.main()
+                self.assertFalse(output.exists())
+                self.assertEqual(opened.call_count, 1)
+                slept.assert_not_called()
+
+    def test_authorization_refusal_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            with mock.patch.dict(authorize.os.environ, self.environment(output), clear=True), \
+                    mock.patch.object(authorize.urllib.request, "urlopen",
+                                      side_effect=self.main_responses(pulls=[])) as opened, \
+                    mock.patch("time.sleep") as slept:
+                self.assertEqual(authorize.main(), 1)
+            self.assertFalse(output.exists())
+            self.assertEqual(opened.call_count, 2)
+            slept.assert_not_called()
+
+    def test_interrupted_response_read_is_retried(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.side_effect = http.client.IncompleteRead(b"{", 10)
+        with mock.patch.object(authorize.urllib.request, "urlopen",
+                               side_effect=[response, self.response(request_run())]) as opened, \
+                mock.patch("time.sleep") as slept:
+            self.assertEqual(authorize.fetch("/request", "offline"), request_run())
+        self.assertEqual(opened.call_count, 2)
+        response.__exit__.assert_called_once()
+        slept.assert_called_once_with(1)
+
+    def test_malformed_json_is_not_retried(self):
+        with mock.patch.object(authorize.urllib.request, "urlopen", return_value=io.BytesIO(b"{")) as opened, \
+                mock.patch("time.sleep") as slept:
+            with self.assertRaises(json.JSONDecodeError):
+                authorize.fetch("/request", "offline")
+        self.assertEqual(opened.call_count, 1)
+        slept.assert_not_called()
 
 
 class ExperimentalAttemptTest(unittest.TestCase):

@@ -204,10 +204,34 @@
       }
     },
     {
+      "id": "uarch_lab:compare@ast-retirement-acceptance",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "#4058 fixed ast-retirement-acceptance-v1 on an owner request line: two prepared tests-off Clang Release compilers, default/default, on one frozen baseline/current-main tree and its six unchanged throughput CI sources; two unity syntax/object, six corpus syntax and twelve FAST/QUALITY corpus object cells, each with 20 ABBA pairs after one warmup on CPU 2 with fresh copies and disabled timed phase metrics; wall time with 95% CI, positive retired instructions:u and wait4 peak RSS, untimed AST tree/node-fact retained bytes and separately reported symbol-binding bytes, byte-identical reference objects and diagnostics; independently replayed sealed raw evidence, report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py",
+        "profile": "ast-retirement-acceptance-v1",
+        "request": "one exact fresh line, profile: ast-retirement-acceptance-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
       "id": "uarch_lab:compare@constant-reuse-acceptance",
       "kind": "lab-mode",
       "validation": "performance",
       "measures": "issue #3011 fixed constant-reuse-acceptance-v1: one candidate-HEAD ide on the -g0 unity self-host -c compile, A default and B with -fcanonical-intern-constants (intern cell) or -fcanonical-fast-cse (cse cell), 20 ABBA pairs per cell, wall time with 95% CI, available retired instructions, peak RSS, executable-section code bytes and identical diagnostics; report-only",
+      "zen5": {
+        "route": "pull-compare",
+        "status": "covered",
+        "consumer": "tools/bench_direct/compiler_publish.py"
+      }
+    },
+    {
+      "id": "uarch_lab:compare@process-floor",
+      "kind": "lab-mode",
+      "validation": "performance",
+      "measures": "issue #1125 fixed process-floor-v1: one candidate-HEAD ide in fresh processes on int main(void){return 0;}, A the x86-64 -g0 -c compile and B the same command (A/A), -target aarch64-unknown-linux -c, or -fsyntax-only, 100 ABBA pairs per cell, wall time with 95% CI, task-clock, compiler wall_ns, available retired instructions and peak RSS, byte-identical A/A objects, identical diagnostics and the issue's A/A stop rule; report-only",
       "zen5": {
         "route": "pull-compare",
         "status": "covered",
@@ -338,6 +362,28 @@
         "consumer": "tools/bench_direct/compiler_publish.py",
         "profile": "wild-linker-v1",
         "request": "one exact fresh line, profile: wild-linker-v1, in benchmarks/9700x/compiler-compare.request, added once against every parent"
+      }
+    },
+    {
+      "id": "tool:machine_edge_split_scaling.c",
+      "kind": "tool",
+      "validation": "diagnostic",
+      "measures": "production parameter-edge splitter output records, geometric chain/fanout/duplicate/no-split populations and scoped arena retained/peak bytes; per-call latency is diagnostic only",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "diagnostic only: not a frozen compiler-probes-v1 leg; a performance claim needs an approved Zen 5 route row and matching execution evidence"
+      }
+    },
+    {
+      "id": "tool:machine_edge_split_scaling_coverage.py",
+      "kind": "tool",
+      "validation": "diagnostic",
+      "measures": "actual Clang source-coverage traversal counts for 56 production parameter-edge splitting cells, with source/binary identities and raw LLVM profiles",
+      "zen5": {
+        "route": "none",
+        "status": "not applicable",
+        "reason": "operation-count diagnostics only; source coverage cannot establish wall-time speedup or physical performance acceptance"
       }
     },
     {

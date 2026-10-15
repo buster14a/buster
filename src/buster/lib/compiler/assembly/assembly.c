@@ -13945,7 +13945,8 @@ BUSTER_GLOBAL_LOCAL void assembly_source_parse(AssemblyBuilder* builder, String8
                 }
                 else if (assembly_word_equal(directive, S8(".att_syntax")))
                 {
-                    if (target.cpu_arch != CPU_ARCH_X86_64 || !assembly_word_equal(qualifier, S8("prefix")))
+                    if (target.cpu_arch != CPU_ARCH_X86_64 ||
+                        (qualifier.length != 0 && !assembly_word_equal(qualifier, S8("prefix"))))
                     {
                         assembly_diagnostic(builder, ASSEMBLY_DIAGNOSTIC_INVALID_SYNTAX, line, column, (u32)statement.length,
                                             S8(".att_syntax requires the x86 'prefix' qualifier"));

@@ -1,0 +1,87 @@
+{
+  "root_pid": 1057542,
+  "samples": 28002,
+  "total_sampled_period": 187172208163,
+  "root_process_period": 121091233290,
+  "child_process_period": 66080974873,
+  "child_process_fraction": 0.3530490745477181,
+  "sampled_processes": 2918,
+  "top_commands": [
+    {
+      "comm": "main_thread",
+      "period": 137970790209,
+      "fraction": 0.7371328872117988
+    },
+    {
+      "comm": "lane_worker",
+      "period": 13390658304,
+      "fraction": 0.07154191551952344
+    },
+    {
+      "comm": "clang",
+      "period": 12035247042,
+      "fraction": 0.06430039566300909
+    },
+    {
+      "comm": "ld",
+      "period": 8045581208,
+      "fraction": 0.042984913663002035
+    },
+    {
+      "comm": "clang-23",
+      "period": 7324443905,
+      "fraction": 0.039132112490875066
+    },
+    {
+      "comm": "cc1",
+      "period": 4343848376,
+      "fraction": 0.023207763687957
+    },
+    {
+      "comm": "node-MainThread",
+      "period": 1992236850,
+      "fraction": 0.010643871061589705
+    },
+    {
+      "comm": "buster-half-inl",
+      "period": 627120256,
+      "fraction": 0.0033504987848082058
+    },
+    {
+      "comm": "buster-native-i",
+      "period": 281940849,
+      "fraction": 0.0015063179078085684
+    },
+    {
+      "comm": "sh",
+      "period": 278938881,
+      "fraction": 0.0014902793728708082
+    },
+    {
+      "comm": "node",
+      "period": 194923182,
+      "fraction": 0.0010414109226635293
+    },
+    {
+      "comm": "as",
+      "period": 87105713,
+      "fraction": 0.00046537738617767165
+    },
+    {
+      "comm": "ld.lld",
+      "period": 83973828,
+      "fraction": 0.00044864474712437495
+    },
+    {
+      "comm": "ld.bfd",
+      "period": 63398585,
+      "fraction": 0.00033871794120625523
+    },
+    {
+      "comm": "python3",
+      "period": 56499021,
+      "fraction": 0.00030185582333247627
+    }
+  ],
+  "limitations": "Retained-image run failed the known 22 pointer-sign assertions (#3674); CPU attribution only. cycles:u excludes kernel execution and off-CPU time."
+}

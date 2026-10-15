@@ -1,0 +1,4 @@
+# Source-size acknowledgement; see docs/source-size.md.
+schema buster-source-size-ack-v1
+build 58603
+reason Extend the Linux frontier with verified assembly classification, bound action provenance, mechanism accounting and hosted first-party controls (#4079).

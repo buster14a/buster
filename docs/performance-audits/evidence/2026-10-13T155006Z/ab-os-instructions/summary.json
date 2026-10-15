@@ -1,0 +1,28 @@
+{
+  "schema": "buster-performance-evidence-v1",
+  "claim": "work-reduction",
+  "evidence_class": "work-count",
+  "zen5": "not Zen 5 evidence: never discharges a zen5 inventory row or a Zen 5 claim (#4013)",
+  "tool": "perf-stat",
+  "tool_version": "perf version 7.2.10-1",
+  "complete": false,
+  "a_a_control": false,
+  "result": "incomplete: work change not established",
+  "establishes": "less executed work (instructions, references, operations) for the measured workload and inputs",
+  "does_not_establish": "lower elapsed time; hardware-independent constants; Zen 5 behavior",
+  "problems": "required metric missing: instructions:u",
+  "host": {"cpu_model": "AMD Ryzen 9 7940HS w/ Radeon 780M Graphics", "os": "Linux", "release": "7.2.9-2-cachyos", "machine": "x86_64", "logical_cpus": 16},
+  "baseline": {"path": "/home/david/Documents/Codex/2026-10-13/ana/work/frozen/ide-baseline", "sha256": "3bbbad302908dba2fffe5c43967654f4df1f19d4b4aded7379d1a1cc5df62b60", "revision": "56221853cc5b11acb33e10ceca29484f7560bcf6", "processes": [1, 1, 1, 1, 1, 1]},
+  "candidate": {"path": "/home/david/Documents/Codex/2026-10-13/ana/work/frozen/ide-candidate", "sha256": "471a0139cee568c79f8f66981fe9080cbeb05aa4657d49400fea3438312d1dd7", "revision": "7515c232ea139650d58c320ef843f8fc7c1a46f2", "processes": [1, 1, 1, 1, 1, 1]},
+  "arguments": ["test", "--verbose=0", "--module=os_tests"],
+  "runs": 6,
+  "warmup": 1,
+  "order": "alternating, baseline first on even pairs",
+  "minimum_effect": 0.010000,
+  "cache_sim": false,
+  "branch_sim": false,
+  "model": [],
+  "metrics": [
+    {"name": "instructions:u", "unit": "count", "kind": "paired-observation", "required": true, "multiplexed": false, "verdict": "missing", "missing": "event absent from perf output", "relative_change": 0.000000000, "sign_test_p": 1, "baseline": [], "candidate": []}
+  ]
+}

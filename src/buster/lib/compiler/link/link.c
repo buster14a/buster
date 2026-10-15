@@ -149,11 +149,13 @@
 // references locally or through copy slots and refuse imported function
 // addresses that need a canonical PLT value (#1275).
 //
-// x86-64 instruction bytes come from the metadata encoder. The ELF entry
-// stub, loader-finalizer registration and PLT are built from closed shapes
-// that pin the selector's form keys (link_x86_shape_pins, emitted by
-// link_x86_emit_shape, #1125); the other writers select through
-// link_x86_emit.
+// x86-64 instruction bytes come from the metadata encoder. Every x86-64
+// writer -- the ELF and PE entry stubs, the loader-finalizer registration,
+// the Mach-O destructor runner, the PLT, the PE import thunks and GOT-load
+// rewrite, and the Mach-O import stubs -- is built from closed shapes that
+// pin the selector's form keys (link_x86_shape_pins, emitted by
+// link_x86_emit_shape, #1125); link_x86_shape_pins_test is their selector
+// oracle.
 
 #include <buster/lib/compiler/link/link.h>
 #include <buster/lib/compiler/link/link_internal.h>
@@ -494,49 +496,34 @@ BUSTER_GLOBAL_LOCAL BusterX86MetadataPhysicalOperand link_x86_plt_padding(void)
     return result;
 }
 
-BUSTER_GLOBAL_LOCAL bool link_x86_emit(LinkX86InstructionBuilder* builder, String8 mnemonic,
-                                       BusterX86MetadataPhysicalOperand const* operands, u32 operand_count)
-{
-    if (!builder || builder->count > builder->capacity || (operand_count && !operands) || operand_count > 16) return false;
-    BusterX86MetadataEmitResult result = buster_x86_metadata_encode((BusterX86MetadataEncodeQuery){
-        .physical = link_x86_query(mnemonic, operands, operand_count),
-        .output = builder->bytes + builder->count,
-        .output_capacity = builder->capacity - builder->count,
-    });
-    if (result.status != BUSTER_X86_METADATA_ENCODE_SUCCESS || result.byte_count > builder->capacity - builder->count)
-        return false;
-    builder->count += result.byte_count;
-    return true;
-}
-
-BUSTER_GLOBAL_LOCAL bool link_x86_emit_zero(LinkX86InstructionBuilder* builder, String8 mnemonic)
-{
-    return link_x86_emit(builder, mnemonic, 0, 0);
-}
-
-// The closed x86-64 shapes of the ELF entry stub, the loader-finalizer
-// registration and the PLT.  Every dynamic ELF link writes them, and the
-// generic selector, which normalizes every candidate of a mnemonic on its
-// first query, cost more than the rest of their emission (#1125).  Each shape
-// pins the durable form key the selector picks for it, as the codegen shape
-// cache and the exact recipe rows do, and link_x86_emit_shape emits it with
-// the caller's operands through buster_x86_metadata_emit_form_exact.  A pin
-// names a form, never an opcode or a field, and a stale key fails closed in
-// the key lookup.  link_x86_shape_pins_test runs the selector over every
-// shape and requires it to choose the pinned form and the same bytes.
+// The closed x86-64 shapes every linker writer is built from: the ELF and PE
+// entry stubs, the loader-finalizer registration, the Mach-O destructor
+// runner, the PLT, and the PE and Mach-O import stubs.  Every x86-64 link
+// writes some of them, and the generic selector, which normalizes every
+// candidate of a mnemonic on its first query, cost more than the rest of
+// their emission (#1125).  Each shape pins the durable form key the selector
+// picks for it, as the codegen shape cache and the exact recipe rows do, and
+// link_x86_emit_shape emits it with the caller's operands through
+// buster_x86_metadata_emit_form_exact.  A pin names a form, never an opcode
+// or a field, and a stale key fails closed in the key lookup.
+// link_x86_shape_pins_test runs the selector over every shape and requires it
+// to choose the pinned form and the same bytes.
 typedef enum LinkX86Shape
 {
     LINK_X86_SHAPE_XOR, // r32, r32
     LINK_X86_SHAPE_MOV, // r32/r64, r32/r64
-    LINK_X86_SHAPE_MOV_LOAD, // r64, m64
+    LINK_X86_SHAPE_MOV_LOAD, // r32/r64, m32/m64
+    LINK_X86_SHAPE_MOV_STORE, // m32, r32
     LINK_X86_SHAPE_MOV_IMMEDIATE, // r32, imm32
     LINK_X86_SHAPE_LEA, // r64, m
     LINK_X86_SHAPE_AND_IMMEDIATE, // r64, imm8
     LINK_X86_SHAPE_SUB_IMMEDIATE, // r64, imm8
     LINK_X86_SHAPE_ADD_IMMEDIATE, // r64, imm8
+    LINK_X86_SHAPE_INC, // r32
     LINK_X86_SHAPE_TEST, // r64, r64
     LINK_X86_SHAPE_JZ, // rel32
     LINK_X86_SHAPE_CALL, // rel32
+    LINK_X86_SHAPE_CALL_MEMORY, // m64
     LINK_X86_SHAPE_JMP, // rel32
     LINK_X86_SHAPE_JMP_MEMORY, // m64
     LINK_X86_SHAPE_PUSH_MEMORY, // m64
@@ -544,6 +531,7 @@ typedef enum LinkX86Shape
     LINK_X86_SHAPE_NOP_MEMORY, // m32; see link_x86_plt_padding
     LINK_X86_SHAPE_SYSCALL,
     LINK_X86_SHAPE_HLT,
+    LINK_X86_SHAPE_INT3,
     LINK_X86_SHAPE_RET,
     LINK_X86_SHAPE_COUNT,
 } LinkX86Shape;
@@ -559,14 +547,17 @@ BUSTER_GLOBAL_LOCAL LinkX86ShapePin const link_x86_shape_pins[LINK_X86_SHAPE_COU
     [LINK_X86_SHAPE_XOR] = {S8_INITIALIZER("XOR"), {9701u, UINT64_C(0x915fb23b51f8b7d1)}},
     [LINK_X86_SHAPE_MOV] = {S8_INITIALIZER("MOV"), {9842u, UINT64_C(0x3ab69ab9d0d06329)}},
     [LINK_X86_SHAPE_MOV_LOAD] = {S8_INITIALIZER("MOV"), {9845u, UINT64_C(0xca30e68cfa1406bc)}},
+    [LINK_X86_SHAPE_MOV_STORE] = {S8_INITIALIZER("MOV"), {9841u, UINT64_C(0xa4ef94df2e338694)}},
     [LINK_X86_SHAPE_MOV_IMMEDIATE] = {S8_INITIALIZER("MOV"), {10018u, UINT64_C(0x2a2535c90ada7adc)}},
     [LINK_X86_SHAPE_LEA] = {S8_INITIALIZER("LEA"), {9849u, UINT64_C(0x0b357f27b62f3409)}},
     [LINK_X86_SHAPE_AND_IMMEDIATE] = {S8_INITIALIZER("AND"), {9328u, UINT64_C(0x75fae752db698667)}},
     [LINK_X86_SHAPE_SUB_IMMEDIATE] = {S8_INITIALIZER("SUB"), {9331u, UINT64_C(0xfb2791abf6574a42)}},
     [LINK_X86_SHAPE_ADD_IMMEDIATE] = {S8_INITIALIZER("ADD"), {9316u, UINT64_C(0xc4d75f09ceeb4f69)}},
+    [LINK_X86_SHAPE_INC] = {S8_INITIALIZER("INC"), {9479u, UINT64_C(0x1a15be04d1e053bb)}},
     [LINK_X86_SHAPE_TEST] = {S8_INITIALIZER("TEST"), {9832u, UINT64_C(0x29ceea139128c1a6)}},
     [LINK_X86_SHAPE_JZ] = {S8_INITIALIZER("JZ"), {10249u, UINT64_C(0x5b6e3cd6eb63b76c)}},
     [LINK_X86_SHAPE_CALL] = {S8_INITIALIZER("CALL"), {9486u, UINT64_C(0x96622bbd299ae0ce)}},
+    [LINK_X86_SHAPE_CALL_MEMORY] = {S8_INITIALIZER("CALL"), {9483u, UINT64_C(0xe1130d6a5f43f9bf)}},
     [LINK_X86_SHAPE_JMP] = {S8_INITIALIZER("JMP"), {10060u, UINT64_C(0xab9c4b53fce14f6e)}},
     [LINK_X86_SHAPE_JMP_MEMORY] = {S8_INITIALIZER("JMP"), {9487u, UINT64_C(0x67576d83cf51fab5)}},
     [LINK_X86_SHAPE_PUSH_MEMORY] = {S8_INITIALIZER("PUSH"), {9490u, UINT64_C(0x18f2cf99c5297c27)}},
@@ -574,6 +565,7 @@ BUSTER_GLOBAL_LOCAL LinkX86ShapePin const link_x86_shape_pins[LINK_X86_SHAPE_COU
     [LINK_X86_SHAPE_NOP_MEMORY] = {S8_INITIALIZER("NOP"), {9587u, UINT64_C(0x6870b81ccd7a93a7)}},
     [LINK_X86_SHAPE_SYSCALL] = {S8_INITIALIZER("SYSCALL"), {10081u, UINT64_C(0xd50a17a3a99204ab)}},
     [LINK_X86_SHAPE_HLT] = {S8_INITIALIZER("HLT"), {10069u, UINT64_C(0x55e165834b72d02b)}},
+    [LINK_X86_SHAPE_INT3] = {S8_INITIALIZER("INT3"), {10027u, UINT64_C(0x11eeb10ba44771fd)}},
     [LINK_X86_SHAPE_RET] = {S8_INITIALIZER("RET"), {10020u, UINT64_C(0x3b8bf68c76094aa5)}},
 };
 
@@ -1440,7 +1432,7 @@ BUSTER_GLOBAL_LOCAL bool link_x86_build_pe_entry_stub(u8* bytes, u32 capacity, u
     u32 runner_displacement_field = 0;
     operands[0] = link_x86_register(4, 64);
     operands[1] = link_x86_immediate(0x38, 8);
-    if (!link_x86_emit(&builder, S8("SUB"), operands, 2)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_SUB_IMMEDIATE, operands, 2)) return false;
     if (deferred_destructors)
     {
         // _crt_atexit(runner).  Its one argument rides rcx, and the runner's
@@ -1448,68 +1440,68 @@ BUSTER_GLOBAL_LOCAL bool link_x86_build_pe_entry_stub(u8* bytes, u32 capacity, u
         // bytes of the instruction whatever prefixes precede it.
         operands[0] = link_x86_register(1, 64);
         operands[1] = link_x86_memory_rip(64, 0);
-        if (!link_x86_emit(&builder, S8("LEA"), operands, 2) || builder.count < 4) return false;
+        if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_LEA, operands, 2) || builder.count < 4) return false;
         runner_displacement_field = builder.count - 4;
         BusterX86MetadataPhysicalOperand atexit_indirect = link_x86_memory_rip(64, 0);
         if (atexit_displacement_offset) *atexit_displacement_offset = builder.count + 2;
-        if (!link_x86_emit(&builder, S8("CALL"), &atexit_indirect, 1)) return false;
+        if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_CALL_MEMORY, &atexit_indirect, 1)) return false;
     }
     for (u32 constructor = 0; constructor < constructor_count; constructor += 1)
     {
         if (initializer_displacement_offsets) initializer_displacement_offsets[initializer_index] = builder.count + 1;
         initializer_index += 1;
         operands[0] = link_x86_relative(0, 32);
-        if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+        if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_CALL, operands, 1)) return false;
     }
     operands[0] = link_x86_register(1, 32);
     operands[1] = link_x86_register(1, 32);
-    if (!link_x86_emit(&builder, S8("XOR"), operands, 2)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_XOR, operands, 2)) return false;
     operands[0] = link_x86_register(1, 32);
-    if (!link_x86_emit(&builder, S8("INC"), operands, 1)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_INC, operands, 1)) return false;
     BusterX86MetadataPhysicalOperand indirect = link_x86_memory_rip(64, 0);
     if (startup_displacement_offsets) startup_displacement_offsets[0] = builder.count + 2;
-    if (!link_x86_emit(&builder, S8("CALL"), &indirect, 1)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_CALL_MEMORY, &indirect, 1)) return false;
     if (startup_displacement_offsets) startup_displacement_offsets[1] = builder.count + 2;
-    if (!link_x86_emit(&builder, S8("CALL"), &indirect, 1)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_CALL_MEMORY, &indirect, 1)) return false;
     operands[0] = link_x86_register(0, 32);
     operands[1] = link_x86_memory_base(0, 32, 0);
-    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_MOV_LOAD, operands, 2)) return false;
     operands[0] = link_x86_memory_base(4, 32, 0x20);
     operands[1] = link_x86_register(0, 32);
-    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_MOV_STORE, operands, 2)) return false;
     if (startup_displacement_offsets) startup_displacement_offsets[2] = builder.count + 2;
-    if (!link_x86_emit(&builder, S8("CALL"), &indirect, 1)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_CALL_MEMORY, &indirect, 1)) return false;
     operands[0] = link_x86_register(2, 64);
     operands[1] = link_x86_memory_base(0, 64, 0);
-    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_MOV_LOAD, operands, 2)) return false;
     operands[0] = link_x86_register(1, 32);
     operands[1] = link_x86_memory_base(4, 32, 0x20);
-    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_MOV_LOAD, operands, 2)) return false;
     if (main_displacement_offset) *main_displacement_offset = builder.count + 1;
     operands[0] = link_x86_relative(0, 32);
-    if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_CALL, operands, 1)) return false;
     operands[0] = link_x86_register(1, 32);
     operands[1] = link_x86_register(0, 32);
-    if (!link_x86_emit(&builder, S8("MOV"), operands, 2)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_MOV, operands, 2)) return false;
     if (exit_displacement_offset) *exit_displacement_offset = builder.count + 2;
-    if (!link_x86_emit(&builder, S8("CALL"), &indirect, 1) || !link_x86_emit_zero(&builder, S8("INT3"))) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_CALL_MEMORY, &indirect, 1) || !link_x86_emit_shape(&builder, LINK_X86_SHAPE_INT3, 0, 0)) return false;
     if (deferred_destructors)
     {
         link_write_u32(builder.bytes, runner_displacement_field, (u32)(builder.count - (runner_displacement_field + 4)));
         operands[0] = link_x86_register(4, 64);
         operands[1] = link_x86_immediate(0x38, 8);
-        if (!link_x86_emit(&builder, S8("SUB"), operands, 2)) return false;
+        if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_SUB_IMMEDIATE, operands, 2)) return false;
         for (u32 destructor = 0; destructor < destructor_count; destructor += 1)
         {
             if (initializer_displacement_offsets) initializer_displacement_offsets[initializer_index] = builder.count + 1;
             initializer_index += 1;
             operands[0] = link_x86_relative(0, 32);
-            if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+            if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_CALL, operands, 1)) return false;
         }
         operands[0] = link_x86_register(4, 64);
         operands[1] = link_x86_immediate(0x38, 8);
-        if (!link_x86_emit(&builder, S8("ADD"), operands, 2)) return false;
-        if (!link_x86_emit_zero(&builder, S8("RET"))) return false;
+        if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_ADD_IMMEDIATE, operands, 2)) return false;
+        if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_RET, 0, 0)) return false;
     }
     if (byte_count) *byte_count = builder.count;
     return constructor_count || destructor_count || builder.count == 53;
@@ -11905,7 +11897,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                 {
                     LinkX86InstructionBuilder thunk_builder = {.bytes = bytes + thunk_raw, .capacity = 6};
                     BusterX86MetadataPhysicalOperand thunk_memory = link_x86_memory_rip(64, 0);
-                    if (!link_x86_emit(&thunk_builder, S8("JMP"), &thunk_memory, 1) || thunk_builder.count != 6)
+                    if (!link_x86_emit_shape(&thunk_builder, LINK_X86_SHAPE_JMP_MEMORY, &thunk_memory, 1) || thunk_builder.count != 6)
                     {
                         result.error = LINK_ERROR_RELOCATION;
                     }
@@ -12511,7 +12503,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_pe64(Arena
                         };
                         if (result.error == LINK_ERROR_NONE)
                         {
-                            if (!link_x86_emit(&load_builder, S8("MOV"), load_operands, 2) || load_builder.count != 7)
+                            if (!link_x86_emit_shape(&load_builder, LINK_X86_SHAPE_MOV_LOAD, load_operands, 2) || load_builder.count != 7)
                             {
                                 result.error = LINK_ERROR_RELOCATION;
                                 result.symbol = symbol->name;
@@ -14356,32 +14348,32 @@ BUSTER_GLOBAL_LOCAL bool link_x86_build_mach_destructor_runner(u8* bytes, u32 ca
     // `atexit`; the runner below opens the same way for the same reason.
     operands[0] = link_x86_register(4, 64);
     operands[1] = link_x86_immediate(8, 8);
-    if (!link_x86_emit(&builder, S8("SUB"), operands, 2)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_SUB_IMMEDIATE, operands, 2)) return false;
     operands[0] = link_x86_register(7, 64);
     operands[1] = link_x86_memory_rip(64, 0);
-    if (!link_x86_emit(&builder, S8("LEA"), operands, 2) || builder.count < 4) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_LEA, operands, 2) || builder.count < 4) return false;
     u32 runner_displacement_field = builder.count - 4;
     if (atexit_displacement_offset) *atexit_displacement_offset = builder.count + 1;
     operands[0] = link_x86_relative(0, 32);
-    if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_CALL, operands, 1)) return false;
     operands[0] = link_x86_register(4, 64);
     operands[1] = link_x86_immediate(8, 8);
-    if (!link_x86_emit(&builder, S8("ADD"), operands, 2)) return false;
-    if (!link_x86_emit_zero(&builder, S8("RET"))) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_ADD_IMMEDIATE, operands, 2)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_RET, 0, 0)) return false;
     link_write_u32(builder.bytes, runner_displacement_field, (u32)(builder.count - (runner_displacement_field + 4)));
     operands[0] = link_x86_register(4, 64);
     operands[1] = link_x86_immediate(8, 8);
-    if (!link_x86_emit(&builder, S8("SUB"), operands, 2)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_SUB_IMMEDIATE, operands, 2)) return false;
     for (u32 destructor = 0; destructor < destructor_count; destructor += 1)
     {
         if (destructor_displacement_offsets) destructor_displacement_offsets[destructor] = builder.count + 1;
         operands[0] = link_x86_relative(0, 32);
-        if (!link_x86_emit(&builder, S8("CALL"), operands, 1)) return false;
+        if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_CALL, operands, 1)) return false;
     }
     operands[0] = link_x86_register(4, 64);
     operands[1] = link_x86_immediate(8, 8);
-    if (!link_x86_emit(&builder, S8("ADD"), operands, 2)) return false;
-    if (!link_x86_emit_zero(&builder, S8("RET"))) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_ADD_IMMEDIATE, operands, 2)) return false;
+    if (!link_x86_emit_shape(&builder, LINK_X86_SHAPE_RET, 0, 0)) return false;
     if (byte_count) *byte_count = builder.count;
 
     return true;
@@ -15212,7 +15204,7 @@ BUSTER_GLOBAL_LOCAL NativeExecutableLinkResult link_native_executable_mach_o64(A
                 }
                 LinkX86InstructionBuilder stub_builder = {.bytes = bytes + current_stub_offset, .capacity = 6};
                 BusterX86MetadataPhysicalOperand stub_memory = link_x86_memory_rip(64, 0);
-                if (!link_x86_emit(&stub_builder, S8("JMP"), &stub_memory, 1) || stub_builder.count != 6)
+                if (!link_x86_emit_shape(&stub_builder, LINK_X86_SHAPE_JMP_MEMORY, &stub_memory, 1) || stub_builder.count != 6)
                 {
                     valid = false;
                     break;
@@ -16836,11 +16828,12 @@ BUSTER_GLOBAL_LOCAL bool link_x86_shape_query_agrees(LinkX86ShapeQuery const* qu
     return result;
 }
 
-// Runs every pinned shape through the generic selector, spelled as the stub
-// and PLT writers spell it, with every register in each register, base and
-// index position the writers fill, so no pin rests on the registers they
+// Runs every pinned shape through the generic selector, spelled as the stub,
+// thunk and PLT writers spell it, with every register in each register, base
+// and index position the writers fill, so no pin rests on the registers they
 // happen to use.  PUSH imm32's indexes take values that do not fit in eight
-// bits: those are what select its fixed-envelope form.
+// bits: those are what select its fixed-envelope form.  The PE frame's
+// `sub`/`add rsp, 0x38` is queried with its own immediate.
 u32 link_x86_shape_pins_test(u32* query_count)
 {
     u32 queries = 0;
@@ -16848,6 +16841,7 @@ u32 link_x86_shape_pins_test(u32* query_count)
     LinkX86ShapeQuery fixed[] = {
         {{link_x86_relative(0, 32)}, LINK_X86_SHAPE_JZ, 1},
         {{link_x86_relative(0, 32)}, LINK_X86_SHAPE_CALL, 1},
+        {{link_x86_memory_rip(64, 0)}, LINK_X86_SHAPE_CALL_MEMORY, 1},
         {{link_x86_relative(0, 32)}, LINK_X86_SHAPE_JMP, 1},
         {{link_x86_memory_rip(64, 0)}, LINK_X86_SHAPE_JMP_MEMORY, 1},
         {{link_x86_memory_rip(64, 0)}, LINK_X86_SHAPE_PUSH_MEMORY, 1},
@@ -16856,7 +16850,10 @@ u32 link_x86_shape_pins_test(u32* query_count)
         {{link_x86_plt_padding()}, LINK_X86_SHAPE_NOP_MEMORY, 1},
         {{{0}}, LINK_X86_SHAPE_SYSCALL, 0},
         {{{0}}, LINK_X86_SHAPE_HLT, 0},
+        {{{0}}, LINK_X86_SHAPE_INT3, 0},
         {{{0}}, LINK_X86_SHAPE_RET, 0},
+        {{link_x86_register(4, 64), link_x86_immediate(0x38, 8)}, LINK_X86_SHAPE_SUB_IMMEDIATE, 2},
+        {{link_x86_register(4, 64), link_x86_immediate(0x38, 8)}, LINK_X86_SHAPE_ADD_IMMEDIATE, 2},
     };
     for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(fixed); index += 1)
     {
@@ -16872,6 +16869,9 @@ u32 link_x86_shape_pins_test(u32* query_count)
             {{link_x86_register(reg, 32), link_x86_register(other, 32)}, LINK_X86_SHAPE_MOV, 2},
             {{link_x86_register(reg, 64), link_x86_register(other, 64)}, LINK_X86_SHAPE_MOV, 2},
             {{link_x86_register(reg, 64), link_x86_memory_base(other, 64, 0)}, LINK_X86_SHAPE_MOV_LOAD, 2},
+            {{link_x86_register(reg, 32), link_x86_memory_base(other, 32, 0x20)}, LINK_X86_SHAPE_MOV_LOAD, 2},
+            {{link_x86_register(reg, 64), link_x86_memory_rip(64, 0)}, LINK_X86_SHAPE_MOV_LOAD, 2},
+            {{link_x86_memory_base(other, 32, 0x20), link_x86_register(reg, 32)}, LINK_X86_SHAPE_MOV_STORE, 2},
             {{link_x86_register(reg, 32), link_x86_immediate(60, 32)}, LINK_X86_SHAPE_MOV_IMMEDIATE, 2},
             {{link_x86_register(reg, 64), link_x86_memory_base(other, 64, 8)}, LINK_X86_SHAPE_LEA, 2},
             {{link_x86_register(reg, 64), link_x86_memory_base_index(other, scaled, 8, 64, 8)}, LINK_X86_SHAPE_LEA, 2},
@@ -16879,6 +16879,7 @@ u32 link_x86_shape_pins_test(u32* query_count)
             {{link_x86_register(reg, 64), link_x86_immediate(-16, 8)}, LINK_X86_SHAPE_AND_IMMEDIATE, 2},
             {{link_x86_register(reg, 64), link_x86_immediate(8, 8)}, LINK_X86_SHAPE_SUB_IMMEDIATE, 2},
             {{link_x86_register(reg, 64), link_x86_immediate(8, 8)}, LINK_X86_SHAPE_ADD_IMMEDIATE, 2},
+            {{link_x86_register(reg, 32)}, LINK_X86_SHAPE_INC, 1},
             {{link_x86_register(reg, 64), link_x86_register(reg, 64)}, LINK_X86_SHAPE_TEST, 2},
         };
         for (u32 index = 0; index < BUSTER_ARRAY_LENGTH(registers); index += 1)

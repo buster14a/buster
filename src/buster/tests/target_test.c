@@ -828,9 +828,36 @@ BUSTER_GLOBAL_LOCAL bool target_test_cpu_features_intersect(TargetCpuFeatures le
     return target_cpu_features_any(target_cpu_features_intersection(left, right));
 }
 
+BUSTER_GLOBAL_LOCAL UnitTestResult target_scalar_layout_tests(UnitTestArguments* arguments)
+{
+    UnitTestResult result = {0};
+    for (u32 arch = 0; arch < CPU_ARCH_COUNT; arch += 1)
+    {
+        for (u32 os = 0; os < OPERATING_SYSTEM_COUNT; os += 1)
+        {
+            Target target = {.cpu_arch = (CpuArch)arch, .os = (OperatingSystem)os};
+            TargetDataLayout full = target_data_layout(target);
+            TargetTypeLayout expected[] = {full.boolean, full.plain_char, full.short_integer, full.integer,
+                full.long_integer, full.long_long_integer, full.integer128, full.float16_type, full.bfloat16_type,
+                full.float_type, full.double_type, full.long_double_type, full.pointer, full.va_list};
+            BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(expected) == TARGET_SCALAR_COUNT);
+            for (u32 kind = 0; kind < TARGET_SCALAR_COUNT; kind += 1)
+            {
+                TargetTypeLayout scalar = target_scalar_type_layout(target, (TargetScalarKind)kind);
+                BUSTER_TEST(arguments, scalar.size == expected[kind].size && scalar.alignment == expected[kind].alignment &&
+                                       scalar.bit_width == expected[kind].bit_width);
+            }
+            TargetTypeLayout invalid = target_scalar_type_layout(target, TARGET_SCALAR_COUNT);
+            BUSTER_TEST(arguments, !invalid.size && !invalid.alignment && !invalid.bit_width);
+        }
+    }
+    return result;
+}
+
 UnitTestResult target_tests(UnitTestArguments* arguments)
 {
     UnitTestResult result = {0};
+    BUSTER_TEST_FIXTURE(arguments, target_scalar_layout_tests);
     BUSTER_UNUSED(arguments);
     struct
     {

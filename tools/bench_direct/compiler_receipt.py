@@ -51,6 +51,8 @@ Map (searchable symbols):
         validate_ast_pilot_acceptance                      issue #3397 -fc-ast-pilot pair
     CONSTANT_REUSE_ACCEPTANCE_PROFILE,
         validate_constant_reuse_acceptance                 issue #3011 constant-reuse flag pairs
+    PROCESS_FLOOR_PROFILE, process_floor_verdict,
+        validate_process_floor_acceptance                  issue #1125 per-process floor and its controls
     THROUGHPUT_REAL_SOURCE_PROFILE, validate_throughput_real_source,
         throughput_real_source_digest                      real-source throughput (#2761)
     PRODUCTION_PROFILE_PROFILE, validate_production_profile,
@@ -319,6 +321,51 @@ AST_PILOT_ACCEPTANCE_PROFILE = {
 # every cell: B's median peak RSS above A's by at most retained bytes times
 # (1 + rss_slack).
 AST_PILOT_BUDGET = {"syntax_only_min_gain": 0.01, "rss_slack": 0.05}
+
+# #4058 final default/default migration evidence. The ordinary lab/corpus and
+# historical flag-pair profiles remain immutable. This fixed extra leg compares
+# both prepared binaries on the same current-main source/header population.
+AST_RETIREMENT_REQUEST_LINE = "profile: ast-retirement-acceptance-v1"
+AST_RETIREMENT_SCHEMA = "buster-ast-retirement-acceptance-v1"
+AST_RETIREMENT_CORPUS = tuple(THROUGHPUT_PROFILE["workloads"])
+AST_RETIREMENT_INPUT_DIRECTORY = "work/ast-retirement-inputs"
+AST_RETIREMENT_CELLS = {
+    "unity-syntax-only": {"workload": "unity", "operation": "syntax-only", "allocator": None},
+    "unity-object": {"workload": "unity", "operation": "object", "allocator": None},
+    **{f"{name}-syntax-only": {"workload": name, "operation": "syntax-only", "allocator": None}
+       for name in AST_RETIREMENT_CORPUS},
+    **{f"{name}-object-{mode}": {"workload": name, "operation": "object", "allocator": mode}
+       for name in AST_RETIREMENT_CORPUS for mode in THROUGHPUT_PROFILE["modes"]},
+}
+AST_RETIREMENT_PROFILE = {
+    "name": "ast-retirement-acceptance-v1",
+    "source": "the baseline/current-main tree and generated headers plus its six unchanged throughput CI sources",
+    "compilers": "prepared tests-off Clang Release baseline and candidate ide binaries, default/default",
+    "cells": AST_RETIREMENT_CELLS,
+    "pairs": 20,
+    "warmups": 1,
+    "pairing": "ABBA",
+    "fresh_copy": True,
+    "cpu": 2,
+    "phase_metrics": False,
+    "measurements": ["wall with 95% CI", "instructions:u", "wait4 peak RSS",
+                     "untimed C_AST and C_AST_FACTS retained bytes; separate symbol-binding bytes when reported"],
+    "correctness": "byte-identical object references and diagnostics; deterministic output in every timed run",
+    "report_only": True,
+}
+
+
+def ast_retirement_cell_command(cell: str) -> list[str]:
+    """One fixed command, without the binary or its output path."""
+    record = AST_RETIREMENT_CELLS[cell]
+    if record["workload"] == "unity":
+        command = list(AST_PILOT_COMPILE)
+    else:
+        command = ["cc", "-g0", "-O0", f"{AST_RETIREMENT_INPUT_DIRECTORY}/{record['workload']}.c"]
+    command.append("-fsyntax-only" if record["operation"] == "syntax-only" else "-c")
+    if record["allocator"] is not None:
+        command.append(f"-fregister-allocator={record['allocator']}")
+    return command
 # Issue #3011: the opt-in constant-reuse arms on the pull-compare route. One
 # fresh exact line in ANALYZER_REQUEST_PATH selects it. Each cell times the one
 # frozen candidate binary on the same -g0 unity object compile, A default and
@@ -342,6 +389,41 @@ CONSTANT_REUSE_ACCEPTANCE_PROFILE = {
     "cpu": 2,
     "measurements": ["wall", "instructions:u", "peak RSS", "executable-section code bytes"],
     "correctness": "identical stdout/stderr in every run of both cells; B's object differs from A's by design",
+    "report_only": True,
+}
+# Issue #1125: the per-process floor of `ide cc` on the pull-compare route. One
+# fresh exact line in ANALYZER_REQUEST_PATH selects it. Each cell times the one
+# frozen candidate binary in fresh processes on PROCESS_FLOOR_SOURCE, alone in
+# its directory: A is the native x86-64 object compile and B is the cell's
+# control, the same command (A/A calibration), the AArch64 object compile or
+# -fsyntax-only. The source, commands, pair and warm-up counts are frozen here
+# and nothing in the request can change them. It is report-only.
+PROCESS_FLOOR_REQUEST_LINE = "profile: process-floor-v1"
+PROCESS_FLOOR_SCHEMA = "buster-process-floor-v1"
+PROCESS_FLOOR_SOURCE = "int main(void){return 0;}\n"
+PROCESS_FLOOR_SOURCE_NAME = "tiny.c"
+PROCESS_FLOOR_OBJECT = ["cc", "-g0", "-c", PROCESS_FLOOR_SOURCE_NAME]
+# B's compile per cell; A is always PROCESS_FLOOR_OBJECT. An object compile
+# also passes `-o OUT`.
+PROCESS_FLOOR_CELLS = {
+    "aa": list(PROCESS_FLOOR_OBJECT),
+    "aarch64": ["cc", "-g0", "-target", "aarch64-unknown-linux", "-c", PROCESS_FLOOR_SOURCE_NAME],
+    "syntax-only": ["cc", "-g0", "-fsyntax-only", PROCESS_FLOOR_SOURCE_NAME],
+}
+PROCESS_FLOOR_PROFILE = {
+    "name": "process-floor-v1",
+    "source": "int main(void){return 0;} as tiny.c, alone in the working directory",
+    "source_sha256": hashlib.sha256(PROCESS_FLOOR_SOURCE.encode("utf-8")).hexdigest(),
+    "compiler": "the one frozen candidate-HEAD tests-off Clang Release ide for both variants",
+    "compiler_modes": {"a": " ".join(PROCESS_FLOOR_OBJECT + ["-o", "OUT"]), "b": "the cell's command"},
+    "cells": {cell: " ".join(argv + (["-o", "OUT"] if "-c" in argv else [])) for cell, argv in PROCESS_FLOOR_CELLS.items()},
+    "pairs": 100,
+    "warmups": 2,
+    "pairing": "ABBA",
+    "fresh_copy": True,
+    "cpu": 2,
+    "measurements": ["wall", "task-clock", "compiler wall_ns", "instructions:u", "peak RSS"],
+    "correctness": "byte-identical A/A objects, and identical stdout/stderr in every run of every cell",
     "report_only": True,
 }
 # Issue #2761: the Zen 5 route for real-source throughput. One fresh exact line
@@ -2220,6 +2302,78 @@ def wild_linker_cell_commands(cell: str, argv: str, manifest: str, root: str, li
     return commands, problems
 
 
+def validate_ast_retirement_acceptance(summary: object, base: str, head: str, binaries: dict) -> list[str]:
+    """Validate #4058's fixed two-binary population; the publisher replays raw cells."""
+    label = "issue #4058 AST retirement receipt"
+    if not isinstance(summary, dict) or summary.get("schema") != AST_RETIREMENT_SCHEMA or summary.get("status") != "complete":
+        return [f"{label} is missing or incomplete"]
+    if not isinstance(binaries, dict) or any(not isinstance(binaries.get(role), dict) for role in ("baseline", "candidate")):
+        return [f"{label} prepared compiler identities are missing"]
+    problems = []
+    if summary.get("profile") != AST_RETIREMENT_PROFILE or summary.get("base_revision") != base or summary.get("head_revision") != head:
+        problems.append(f"{label} profile or source revisions differ from the authorized comparison")
+    expected = {role: {key: binaries.get(role, {}).get(key) for key in ("sha256", "size_bytes", "revision")}
+                for role in ("baseline", "candidate")}
+    if any(not SHA256.fullmatch(str(row["sha256"])) or type(row["size_bytes"]) is not int or row["size_bytes"] <= 0 or
+           not isinstance(row["revision"], str) or not SHA.fullmatch(row["revision"]) for row in expected.values()):
+        problems.append(f"{label} prepared binary hash/size/revision is malformed")
+    if summary.get("binaries") != expected or expected["baseline"]["revision"] != base or expected["candidate"]["revision"] != head:
+        problems.append(f"{label} compiler identities differ from the prepared binaries")
+    if not isinstance(summary.get("cpu_model"), str) or not APPROVED_HOST.search(summary["cpu_model"]):
+        problems.append(f"{label} was not measured on the approved Ryzen 7 9700X")
+    source = summary.get("source")
+    if not isinstance(source, dict) or source.get("revision") != base:
+        problems.append(f"{label} source is not the frozen baseline/current-main revision")
+    else:
+        trees = source.get("frozen_input_tree")
+        if not isinstance(trees, dict) or set(trees) != {"src", "build/generated"} or any(
+                not isinstance(row, dict) or not SHA256.fullmatch(str(row.get("sha256", ""))) or
+                type(row.get("files")) is not int or row["files"] <= 0 or type(row.get("bytes")) is not int or row["bytes"] <= 0
+                for row in trees.values()):
+            problems.append(f"{label} frozen source/header tree identities are incomplete")
+        corpus = source.get("corpus")
+        if not isinstance(corpus, dict) or set(corpus) != set(AST_RETIREMENT_CORPUS):
+            problems.append(f"{label} corpus is not the six unchanged CI sources")
+        else:
+            for name, row in corpus.items():
+                if not isinstance(row, dict) or row.get("path") != f"{AST_RETIREMENT_INPUT_DIRECTORY}/{name}.c" or \
+                        not SHA256.fullmatch(str(row.get("sha256", ""))) or type(row.get("size_bytes")) is not int or row["size_bytes"] <= 0:
+                    problems.append(f"{label} corpus identity is malformed for {name}")
+        unity = source.get("unity")
+        if not isinstance(unity, dict) or unity.get("path") != "src/buster/apps/ide/ide.c" or \
+                not SHA256.fullmatch(str(unity.get("sha256", ""))) or type(unity.get("size_bytes")) is not int or unity["size_bytes"] <= 0:
+            problems.append(f"{label} unity source identity is missing")
+        generator = source.get("generator")
+        if not isinstance(generator, dict) or generator.get("revision") != base or \
+                not SHA256.fullmatch(str(generator.get("sha256", ""))) or type(generator.get("size_bytes")) is not int or generator["size_bytes"] <= 0:
+            problems.append(f"{label} baseline generator identity is missing")
+    cells, probes = summary.get("cells"), summary.get("probes")
+    if not isinstance(cells, dict) or set(cells) != set(AST_RETIREMENT_CELLS) or \
+            not isinstance(probes, dict) or set(probes) != set(AST_RETIREMENT_CELLS):
+        problems.append(f"{label} does not contain all twenty cells and retained-byte probes")
+    else:
+        for cell, row in cells.items():
+            metrics = row.get("metrics") if isinstance(row, dict) else None
+            if not isinstance(metrics, dict) or any(not isinstance(metrics.get(name), dict) for name in ("wall", "instructions", "peak_rss")):
+                problems.append(f"{label} has missing metrics for {cell}")
+                continue
+            if any(not _finite_positive(metrics["wall"].get(name)) for name in ("a_median", "b_median", "ratio", "ci_low", "ci_high")) or \
+                    any(not _finite_positive(metrics["instructions"].get(name)) for name in ("a_median", "b_median", "ratio")) or \
+                    any(not _finite_positive(metrics["peak_rss"].get(name)) for name in ("a_median", "b_median")):
+                problems.append(f"{label} required native metrics are unavailable or invalid for {cell}")
+            if row.get("outputs_identical") is not True or row.get("diagnostics_identical") is not True:
+                problems.append(f"{label} object/diagnostic identity failed for {cell}")
+            probe = probes[cell]
+            if not isinstance(probe, dict) or set(probe) != {"baseline", "candidate"}:
+                problems.append(f"{label} retained-byte probe is incomplete for {cell}")
+                continue
+            for role, retained in probe.items():
+                if not isinstance(retained, dict) or type(retained.get("tree_retained_bytes")) is not int or retained["tree_retained_bytes"] <= 0 or \
+                        type(retained.get("fact_retained_bytes")) is not int or retained["fact_retained_bytes"] < 0:
+                    problems.append(f"{label} retained tree/fact measurements are missing for {cell}/{role}")
+    return problems
+
+
 def validate_ast_pilot_acceptance(summary: object, expected_revision: str, expected_candidate_sha: str | None = None) -> list[str]:
     """Validate opt-in #3397 evidence shape and re-derive its budget verdict."""
     label = "issue #3397 ast-pilot receipt"
@@ -2326,6 +2480,90 @@ def validate_constant_reuse_acceptance(summary: object, expected_revision: str, 
             problems.append(f"{label} {cell} retired-instruction counts are invalid")
         if row.get("diagnostics_identical") is not True:
             problems.append(f"{label} {cell} diagnostics differ between the default and flagged compiles")
+    return problems
+
+
+def process_floor_verdict(cells: object) -> dict:
+    """Issue #1125's stop rule over the cells' paired wall ratios (B/A).
+
+    A control resolves the floor only when its ratio's 95% CI lies wholly
+    outside the A/A cell's. Each `*_ms` value is A's median minus the
+    control's, so a positive value is what the x86-64 object compile costs
+    above that control; it is None when either median is missing.
+    """
+    def metric(cell: str, key: str) -> dict:
+        row = cells.get(cell) if isinstance(cells, dict) and isinstance(cells.get(cell), dict) else {}
+        values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        return values.get(key) if isinstance(values.get(key), dict) else {}
+
+    def above(values: dict) -> float | None:
+        a, b = values.get("a_median"), values.get("b_median")
+        return round((a - b) * 1000.0, 6) if _finite_positive(a) and _finite_positive(b) else None
+
+    aa = metric("aa", "wall")
+    aa_low, aa_high = aa.get("ci_low"), aa.get("ci_high")
+    result: dict = {"aa_interval": [aa_low, aa_high]}
+    for cell in ("aarch64", "syntax-only"):
+        wall = metric(cell, "wall")
+        low, high = wall.get("ci_low"), wall.get("ci_high")
+        bounded = all(_finite_positive(value) for value in (low, high, aa_low, aa_high))
+        result[cell] = {"ci": [low, high], "outside_aa": bool(bounded and (high < aa_low or low > aa_high)),
+                        "wall_ms": above(wall), "task_clock_ms": above(metric(cell, "task_clock"))}
+    return result
+
+
+def validate_process_floor_acceptance(summary: object, expected_revision: str,
+                                      expected_candidate_sha: str | None = None) -> list[str]:
+    """Validate #1125 floor evidence: every cell complete and measured, A/A objects identical, verdict re-derived."""
+    label = "issue #1125 process-floor receipt"
+    if not isinstance(summary, dict) or summary.get("schema") != PROCESS_FLOOR_SCHEMA or summary.get("status") != "complete":
+        return [f"{label} has an unexpected or incomplete schema"]
+    problems = []
+    if summary.get("source_revision") != expected_revision:
+        problems.append(f"{label} source revision does not match candidate HEAD")
+    if summary.get("profile") != PROCESS_FLOOR_PROFILE:
+        problems.append(f"{label} profile does not match the fixed profile")
+    candidate = summary.get("candidate_compiler")
+    if not isinstance(candidate, dict) or not SHA256.fullmatch(str(candidate.get("sha256", ""))):
+        problems.append(f"{label} candidate compiler identity is missing")
+    elif expected_candidate_sha and candidate.get("sha256") != expected_candidate_sha:
+        problems.append(f"{label} timed compiler differs from the frozen candidate-HEAD binary")
+    cells = summary.get("cells")
+    if not isinstance(cells, dict) or set(cells) != set(PROCESS_FLOOR_CELLS):
+        return [*problems, f"{label} does not hold exactly the aa, aarch64 and syntax-only cells"]
+    for cell in PROCESS_FLOOR_CELLS:
+        row = cells[cell] if isinstance(cells[cell], dict) else {}
+        values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+        task = values.get("task_clock") if isinstance(values.get("task_clock"), dict) else {}
+        instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else None
+        if not all(_finite_positive(wall.get(key)) for key in ("a_median", "b_median", "ratio", "ci_low", "ci_high")):
+            problems.append(f"{label} {cell} wall-time measurements are missing")
+        if not all(_finite_positive(task.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} task-clock measurements are missing")
+        # Peak RSS is NA when the compiler stays near the perf wrapper's own footprint; the compiler's own wall_ns
+        # is NA when -fmetrics-out is unavailable for either command. A value that is present must be valid.
+        for key in ("peak_rss", "compiler_wall"):
+            optional = values.get(key)
+            if not isinstance(optional, dict) or \
+                    any(optional.get(field) is not None and not _finite_positive(optional.get(field))
+                        for field in ("a_median", "b_median")):
+                problems.append(f"{label} {cell} {key} record is missing or invalid")
+        if instructions is None:
+            problems.append(f"{label} {cell} retired-instruction metric is missing")
+        elif instructions.get("ratio") is None:
+            counters = values.get("counter_availability")
+            if not isinstance(counters, dict) or counters.get("perf_stat") is not False or not counters.get("reason"):
+                problems.append(f"{label} {cell} retired-instruction NA has no unavailable-counter reason")
+        elif not _finite_positive(instructions.get("ratio")) or \
+                not all(_finite_positive(instructions.get(key)) for key in ("a_median", "b_median")):
+            problems.append(f"{label} {cell} retired-instruction counts are invalid")
+        if row.get("diagnostics_identical") is not True:
+            problems.append(f"{label} {cell} diagnostics differ between the two commands")
+        if cell == "aa" and row.get("outputs_identical") is not True:
+            problems.append(f"{label} aa objects differ between two runs of the same command")
+    if summary.get("verdict") != process_floor_verdict(cells):
+        problems.append(f"{label} verdict does not follow from its cells")
     return problems
 
 
@@ -4784,7 +5022,9 @@ INVENTORY_LEGS = {
         "analyzer": ("build:clang_analyze_benchmark", "tool:clang_analyze_benchmark.c"),
         "inline": ("uarch_lab:compare@canonical-inline-self-host",),
         "ast-pilot": ("uarch_lab:compare@ast-pilot-acceptance",),
+        "ast-retirement": ("uarch_lab:compare@ast-retirement-acceptance",),
         "constant-reuse": ("uarch_lab:compare@constant-reuse-acceptance",),
+        "process-floor": ("uarch_lab:compare@process-floor",),
         "real-source": ("build:bench_throughput@throughput-real-source",),
         "production-profile": ("build:production_profile",),
         "compiler-probes": ("tool:fast_ra_scaling.c", "tool:machine_line_mark_scaling.c"),
@@ -4797,8 +5037,8 @@ INVENTORY_LEGS = {
     },
 }
 # Opt-in legs whose receipt record carries its own requested/status fields.
-INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pilot_acceptance",
-                            "constant-reuse": "constant_reuse_acceptance",
+INVENTORY_OPT_IN_RECORDS = {"inline": "inline_acceptance", "ast-pilot": "ast_pilot_acceptance", "ast-retirement": "ast_retirement_acceptance",
+                            "constant-reuse": "constant_reuse_acceptance", "process-floor": "process_floor",
                             "real-source": "throughput_real_source", "production-profile": "production_profile",
                             "compiler-probes": "compiler_probes", "frontend-selector": "frontend_selector",
                             "frontend-nesting": "frontend_nesting",
@@ -5065,6 +5305,32 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                   for name, check in checks.items()]
         if ast.get("exit") not in (None, 0):
             lines.append(f"Issue #3397 profile exit: {ast.get('exit')}.")
+    retirement = receipt.get("ast_retirement_acceptance") if isinstance(receipt, dict) else None
+    if isinstance(retirement, dict) and retirement.get("requested"):
+        shown = retirement.get("summary") if isinstance(retirement.get("summary"), dict) else {}
+        cells = shown.get("cells") if isinstance(shown.get("cells"), dict) else {}
+        probes = shown.get("probes") if isinstance(shown.get("probes"), dict) else {}
+        lines += ["", f"Issue #4058 AST retirement: {retirement.get('status', 'NA')} "
+                  "(20 fixed default/default cells, 20 ABBA pairs each; report-only).",
+                  "Retained bytes below are the published AST tree and semantic node-fact components, "
+                  "measured in separate untimed probes. They are not peak RSS or a whole-frontend arena total. "
+                  "Separate symbol-binding bytes are retained in the raw report when the compiler exposes that counter. "
+                  "Missing instruction measurements leave acceptance incomplete.", "",
+                  "| Cell | Wall B/A [95% CI] | Instructions B/A | Peak RSS A / B | Tree bytes A / B | Fact bytes A / B |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for cell in AST_RETIREMENT_CELLS:
+            row = cells.get(cell) or {}
+            values = row.get("metrics") or {}
+            wall, instructions, rss = (values.get(name) or {} for name in ("wall", "instructions", "peak_rss"))
+            retained = probes.get(cell) or {}
+            a, b = retained.get("baseline") or {}, retained.get("candidate") or {}
+            lines.append("| %s | %s [%s, %s] | %s | %s / %s | %s / %s | %s / %s |" % (
+                cell, number(wall.get("ratio"), "%.4f"), number(wall.get("ci_low"), "%.4f"), number(wall.get("ci_high"), "%.4f"),
+                number(instructions.get("ratio"), "%.4f"), number(rss.get("a_median"), "%.0f"), number(rss.get("b_median"), "%.0f"),
+                number(a.get("tree_retained_bytes"), "%.0f"), number(b.get("tree_retained_bytes"), "%.0f"),
+                number(a.get("fact_retained_bytes"), "%.0f"), number(b.get("fact_retained_bytes"), "%.0f")))
+        if retirement.get("exit") not in (None, 0):
+            lines.append(f"Issue #4058 profile exit: {retirement.get('exit')}; required measurement remains incomplete.")
     reuse = receipt.get("constant_reuse_acceptance") if isinstance(receipt, dict) else None
     if isinstance(reuse, dict) and reuse.get("requested"):
         reuse_summary = reuse.get("summary") if isinstance(reuse.get("summary"), dict) else {}
@@ -5089,6 +5355,39 @@ def render(receipt: dict, summary: object, conclusion: str, notes: list[str]) ->
                 row.get("diagnostics_identical", "NA")))
         if reuse.get("exit") not in (None, 0):
             lines.append(f"Issue #3011 profile exit: {reuse.get('exit')}.")
+    floor = receipt.get("process_floor") if isinstance(receipt, dict) else None
+    if isinstance(floor, dict) and floor.get("requested"):
+        floor_summary = floor.get("summary") if isinstance(floor.get("summary"), dict) else {}
+        lines += ["", f"Issue #1125 per-process floor: {floor.get('status', 'NA')} "
+                  f"({PROCESS_FLOOR_PROFILE['pairs']} ABBA pairs per cell; report-only).",
+                  f"One candidate binary in fresh processes on `{PROCESS_FLOOR_SOURCE.strip()}`: A = "
+                  f"`{PROCESS_FLOOR_PROFILE['compiler_modes']['a']}`, B = the cell's command. Wall is the harness span "
+                  "around the pinned perf wrapper; task-clock is the compiler process alone. A - B is what the "
+                  "x86-64 object compile costs above B. Counters may be NA when the host cannot schedule them.", "",
+                  "| Cell (B) | Wall A / B ms | Wall A - B ms | Wall B/A [95% CI] | Task-clock A / B ms "
+                  "| Instructions A / B | Outside A/A |",
+                  "| --- | --- | --- | --- | --- | --- | --- |"]
+        cells = floor_summary.get("cells") if isinstance(floor_summary.get("cells"), dict) else {}
+        verdict = floor_summary.get("verdict") if isinstance(floor_summary.get("verdict"), dict) else {}
+        for cell, command in PROCESS_FLOOR_PROFILE["cells"].items():
+            row = cells.get(cell) if isinstance(cells.get(cell), dict) else {}
+            values = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            wall = values.get("wall") if isinstance(values.get("wall"), dict) else {}
+            task = values.get("task_clock") if isinstance(values.get("task_clock"), dict) else {}
+            instructions = values.get("instructions") if isinstance(values.get("instructions"), dict) else {}
+            control = verdict.get(cell) if isinstance(verdict.get(cell), dict) else {}
+            milliseconds = [value * 1000.0 if _number(value) else None
+                            for value in (wall.get("a_median"), wall.get("b_median"), task.get("a_median"),
+                                          task.get("b_median"))]
+            lines.append("| %s (`%s`) | %s / %s | %s | %s [%s, %s] | %s / %s | %s / %s | %s |" % (
+                cell, command, number(milliseconds[0], "%.3f"), number(milliseconds[1], "%.3f"),
+                number(control.get("wall_ms") if cell != "aa" else None, "%.3f"),
+                number(wall.get("ratio"), "%.4f"), number(wall.get("ci_low"), "%.4f"),
+                number(wall.get("ci_high"), "%.4f"), number(milliseconds[2], "%.3f"), number(milliseconds[3], "%.3f"),
+                number(instructions.get("a_median"), "%.0f"), number(instructions.get("b_median"), "%.0f"),
+                "A/A" if cell == "aa" else control.get("outside_aa", "NA")))
+        if floor.get("exit") not in (None, 0):
+            lines.append(f"Issue #1125 profile exit: {floor.get('exit')}.")
     real = receipt.get("throughput_real_source") if isinstance(receipt, dict) else None
     if isinstance(real, dict) and real.get("requested"):
         profile = THROUGHPUT_REAL_SOURCE_PROFILE

@@ -1,0 +1,15 @@
+TEST_TEMPORARY_ROOT_PRESERVED status=failed path=/tmp/buster-tests-786224-5-29131589228410
+ownedFailed to poll process pipes: Cannot allocate memory
+Failed to read from process pipe: Bad file descriptor
+Failed to read from process pipe: Bad file descriptor
+PROCESS_TREE_READINESS_V1 phase=negative-control ready=0 polls=2 spawn_handle=1 spawn_group=1 spawn_error=0 result=1 platform_status=9 timed_out=1 termination_requested=1 forcibly_terminated=1 cleanup_failed=0 ready_path=/tmp/buster-tests-786224-6-29131590896824/process-tree-missing-ready-786224.txt release_path= escaped_path= stdout= stderr=
+okTEST_FIXTURE_WATCHDOG_CHILD_V1 duration_ns=1004722362 timed_out=0 platform_status=31744 stdout_bytes=427 stderr_bytes=0
+OS_FATAL_OUTPUT_CHILD_V1 mode=raw-live repetition=0 duration_ns=3043698 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=formatted-live repetition=0 duration_ns=2473105 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=raw-live repetition=1 duration_ns=2117143 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=formatted-live repetition=1 duration_ns=1995480 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=raw-live repetition=2 duration_ns=2191766 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+OS_FATAL_OUTPUT_CHILD_V1 mode=formatted-live repetition=2 duration_ns=2238777 timed_out=0 platform_status=256 stdout_bytes=0 stderr_bytes=52
+[2045/2045] Unit tests (1 of 63 modules selected)
+[1/1] Module tests
+[0/0] External tests
