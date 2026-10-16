@@ -1,10 +1,11 @@
-name: 9700X smoke
+name: 9700X test
 
 # This public repository must not execute unreviewed fork code on the host.
 on:
   push:
     branches: [main]
   workflow_dispatch:
+  pull_request:
 
 permissions:
   contents: read
@@ -15,9 +16,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-and-run:
+  test:
     name: Build and execute on Ryzen 7 9700X
-    if: github.repository == 'buster14a/buster-fast' && github.ref == 'refs/heads/main'
+    if: github.repository == 'buster14a/buster-fast'
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
