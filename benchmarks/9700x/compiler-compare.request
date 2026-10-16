@@ -152,7 +152,7 @@ request: PR #3111 issue #48 per-function inline validation fix (f33940ae) after 
 request: PR #3111 issue #48 per-function inline validation fix (f33940ae) merged with main 65c89701 including the #3539 stage-2 harness repair; fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification
 request: PR #3111 issue #48 tiny inlining made opt-in at every -O level (8f3ac850) and mandatory-graph caller gate (2122d990) after compiler-compare-v1 measured +1.05% at 94b56786; merged main a08f96ff; fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification
 request: PR #3111 issue #48 tiny inlining opt-in at every -O level (8f3ac850) plus mandatory-graph caller prefilter (2122d990) after compiler-compare-v1 measured +1.05% at 94b56786; merged main 5029503f; fresh exact-head compiler-compare-v1 and canonical-inline-self-host-v1 qualification (supersedes the 626e4c91 line, whose head conflicted with main)
-profile: compiler-main-sampling-acquire-v1 packet: 0 freeze: 51ca67f6174bfa55c8e0f37a14bd1368987afaa3
+profile: compiler-main-sampling-pilot-v1 packet: 1 freeze: e801791cc61432a4ec1d0c6696651cb8d4c91560
 
 request: issue #47 PR #3171 native O0 optional-pass policy; explicit-O0 throughput corpus plus unchanged default recipe; base 521b791421a962a085a0a9685357b6ea5ca790ef
 
