@@ -824,11 +824,20 @@ rebuilt once after the caller's last splice. Planning charges a site the increas
 in that reservation's bytes and work, plus the callee payload, instead of the
 caller-wide widening per site. Other repeated splice work stays charged per site. Predecessor work uses original and projected target
 counts rather than unrelated instruction/value payload counts; call membership
-checks stop when they reach the call. Growing table storage is charged from the caller's actual
-capacities through projected appends, including geometric growth floors and
-alignment; that charge is an upper bound, because before a caller's first splice
+checks stop when they reach the call. Before a caller's first splice,
 `ir_inline_cfg_reserve_tables` grows its block, instruction, value and extra
-tables once to the planned final counts instead of doubling them. Relocating a
+tables once to the planned final counts. Required admission charges the exact
+reserved row bytes plus one maximum alignment padding per allocated array;
+successive sites pay only the increase in that one reservation. Its table work
+counts existing rows copied once and the final source-range rows cleared.
+Optional admission retains its geometric-growth upper bound and original work
+charge. Required batches also retain their historical geometric contribution
+in the storage ledger consumed by optional selection; correcting required
+admission therefore does not enlarge the optional phase's allowance. `ir_test_inline_required_table_budget`
+checks telescoping charges, actual arena bytes, copied rows, empty/non-power-of-two
+tables, spare capacity, and allocation-free appends through every reserved slot.
+A mixed required/tiny caller straddles the storage cap and keeps its optional
+call, proving the two phases preserve that historical accounting boundary. Relocating a
 touched caller's exactly sized frontend tables still retains the old copy in the
 arena: on the unity self-host source, tiny inlining touches 809 callers whose
 tables total 65.5 MB, which is most of its peak-RSS cost (#48). At the default

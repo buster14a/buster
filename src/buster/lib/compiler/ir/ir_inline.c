@@ -855,6 +855,8 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                 u64 total_work = module->inlining.visits;
                 u64 total_copies = 0;
                 u32* function_growth_used = arena_allocate(arena, u32, count ? count : 1u);
+                // Persist the historical storage view consumed by optional
+                // selection; required admission uses its local exact total.
                 u64* function_storage_used = arena_allocate(arena, u64, count ? count : 1u);
                 u32* function_sites_used = arena_allocate(arena, u32, count ? count : 1u);
                 u8* strict = arena_allocate_zeroed(arena, u8, count ? count : 1u);
@@ -899,13 +901,13 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                 caller->block_count, (u64)caller->block_count + 1u,
                                 caller->instruction_count, (u64)caller->instruction_count + 1u,
                                 caller->value_count, (u64)caller->value_count + 1u,
-                                caller->extra_count, (u64)caller->extra_count + 1u));
+                                caller->extra_count, (u64)caller->extra_count + 1u, true));
                         relocation_bytes = ir_inline_storage_add(relocation_bytes,
                             ir_inline_cfg_table_growth_bytes(caller,
                                 caller->block_count, (u64)caller->block_count + 1u,
                                 caller->instruction_count, (u64)caller->instruction_count + 1u,
                                 caller->value_count, (u64)caller->value_count + 1u,
-                                caller->extra_count, (u64)caller->extra_count + 1u));
+                                caller->extra_count, (u64)caller->extra_count + 1u, true));
                         caller_work_limit = ir_inline_storage_add(caller_work_limit, relocation_work);
                         caller_storage_limit = ir_inline_storage_add(caller_storage_limit, relocation_bytes);
                     }
@@ -1112,6 +1114,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     }
                     u32 function_growth = function_growth_used[caller_index];
                     u64 function_storage = function_storage_used[caller_index];
+                    u64 optional_storage = function_storage;
                     u64 module_growth_before = module_growth;
                     u64 total_copies_before = total_copies;
                     u64 function_projected_units = 0;
@@ -1517,7 +1520,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                                                  table_blocks_before, table_blocks_after,
                                                                                  table_instructions_before, table_instructions_after,
                                                                                  table_values_before, table_values_after,
-                                                                                 table_extras_before, table_extras_after);
+                                                                                 table_extras_before, table_extras_after, phase == 0);
                             u64 table_work_with_caller_rows = ir_inline_storage_add(total_work, caller_rows_remaining);
                             if (table_work > caller_work_limit -
                                                  BUSTER_MIN(table_work_with_caller_rows, (u64)caller_work_limit))
@@ -1537,7 +1540,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                                                                                 table_blocks_before, table_blocks_after,
                                                                                 table_instructions_before, table_instructions_after,
                                                                                 table_values_before, table_values_after,
-                                                                                table_extras_before, table_extras_after);
+                                                                                table_extras_before, table_extras_after, phase == 0);
                             storage = ir_inline_storage_add(storage, table_growth);
                             u64 reserve_bytes_before = ir_inline_reserve_bytes(caller, caller_snapshot_blocks, function_projected_blocks,
                                                                                function_projected_snapshots, function_projected_locals,
@@ -1701,6 +1704,17 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                             function_sites += 1;
                             function_growth += growth;
                             function_storage += storage;
+                            if (phase == 0 && options.tiny)
+                            {
+                                // Keep the optional phase's historical budget
+                                // view of required table growth. The required
+                                // guard above uses the actual reservation.
+                                u64 optional_tables = ir_inline_cfg_table_growth_bytes(caller,
+                                    table_blocks_before, table_blocks_after, table_instructions_before, table_instructions_after,
+                                    table_values_before, table_values_after, table_extras_before, table_extras_after, false);
+                                u64 optional_site = ir_inline_storage_add(storage - table_growth, optional_tables);
+                                optional_storage = ir_inline_storage_add(optional_storage, optional_site);
+                            }
                             function_projected_units = ir_inline_storage_add(function_projected_units, projected_units);
                             function_projected_blocks = ir_inline_storage_add(function_projected_blocks, (u64)callee->block_count + 1u);
                             function_projected_locals = ir_inline_storage_add(function_projected_locals,
@@ -1759,10 +1773,10 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                     if (function_sites != function_sites_used[caller_index])
                     {
                         if (proof_base) region = ir_inline_splice_region(function_arena, caller, planned_heads, original_blocks);
-                        // One growth per table, to exactly the counts admission
-                        // charged (as geometric growth from the current capacity),
-                        // so no table is reallocated when its final count still
-                        // fits. A splice adds exactly its planned rows.
+                        // Required admission charges this exact one-shot
+                        // reservation; optional admission retains its geometric
+                        // upper bound. Planned counts cover every splice append,
+                        // including values that formal arguments reuse.
                         ir_inline_cfg_reserve_tables(program->arena, caller,
                             ir_inline_storage_add(caller->block_count, function_projected_blocks),
                             ir_inline_storage_add(caller->instruction_count, function_projected_instructions),
@@ -1836,7 +1850,7 @@ BUSTER_GLOBAL_LOCAL IrValidationResult ir_inline_module(IrProgram* program, IrMo
                         module->fast = (IrFastStatistics){0};
                     }
                     function_growth_used[caller_index] = function_growth;
-                    function_storage_used[caller_index] = function_storage;
+                    function_storage_used[caller_index] = phase == 0 && options.tiny ? optional_storage : function_storage;
                     function_sites_used[caller_index] = function_sites;
                     scratch_end(function_scratch);
                     }
@@ -1872,5 +1886,26 @@ IrValidationResult ir_test_inline_module(IrProgram* program, IrModule* module, I
 {
     IrValidationResult result = ir_inline_module(program, module, fault);
     return result;
+}
+
+IrInlineTableCharge ir_test_inline_table_charge(IrFunction const* caller, IrInlineTableCounts before,
+                                                IrInlineTableCounts after)
+{
+    IrInlineTableCharge result = {
+        .required_bytes = ir_inline_cfg_table_growth_bytes(caller, before.blocks, after.blocks,
+            before.instructions, after.instructions, before.values, after.values, before.extras, after.extras, true),
+        .required_work = ir_inline_cfg_table_growth_work(caller, before.blocks, after.blocks,
+            before.instructions, after.instructions, before.values, after.values, before.extras, after.extras, true),
+        .optional_bytes = ir_inline_cfg_table_growth_bytes(caller, before.blocks, after.blocks,
+            before.instructions, after.instructions, before.values, after.values, before.extras, after.extras, false),
+        .optional_work = ir_inline_cfg_table_growth_work(caller, before.blocks, after.blocks,
+            before.instructions, after.instructions, before.values, after.values, before.extras, after.extras, false),
+    };
+    return result;
+}
+
+void ir_test_inline_reserve_tables(Arena* arena, IrFunction* caller, IrInlineTableCounts counts)
+{
+    ir_inline_cfg_reserve_tables(arena, caller, counts.blocks, counts.instructions, counts.values, counts.extras, 0);
 }
 #endif
