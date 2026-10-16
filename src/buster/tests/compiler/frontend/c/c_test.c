@@ -42459,6 +42459,139 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_test_type_name_prototype_parameter_names(Un
         BUSTER_TEST(arguments, rejected_parse.diagnostic_count == 1);
         BUSTER_TEST(arguments, rejected_parse.diagnostic_count && rejected_parse.diagnostics[0].kind == C_DIAGNOSTIC_UNDECLARED_IDENTIFIER);
     }
+
+    struct
+    {
+        String8 cast_parameter;
+        String8 definition_parameter;
+        String8 read;
+        String8 argument;
+    } array_parameters[] = {
+        {S8("int[]"), S8("int *a"), S8("a[0] + a[1]"), S8("values[0]")},
+        {S8("int a[]"), S8("int *a"), S8("a[0] + a[1]"), S8("values[0]")},
+        {S8("int[2]"), S8("int *a"), S8("a[0] + a[1]"), S8("values[0]")},
+        {S8("int a[2]"), S8("int *a"), S8("a[0] + a[1]"), S8("values[0]")},
+        {S8("int[static 2]"), S8("int *a"), S8("a[0] + a[1]"), S8("values[0]")},
+        {S8("int a[static 2]"), S8("int *a"), S8("a[0] + a[1]"), S8("values[0]")},
+        {S8("int[const restrict 2]"), S8("int *a"), S8("a[0] + a[1]"), S8("values[0]")},
+        {S8("int a[restrict static 2]"), S8("int *a"), S8("a[0] + a[1]"), S8("values[0]")},
+        {S8("const int a[const static 2]"), S8("const int *a"), S8("a[0] + a[1]"), S8("values[0]")},
+        {S8("int[][2]"), S8("int a[][2]"), S8("a[0][0] + a[0][1]"), S8("values")},
+        {S8("int a[][2]"), S8("int a[][2]"), S8("a[0][0] + a[0][1]"), S8("values")},
+        {S8("int a[bound()]"), S8("int *a"), S8("a[0] + a[1]"), S8("values[0]")},
+    };
+    Target targets[] = {
+        {.cpu_arch = CPU_ARCH_X86_64, .os = OPERATING_SYSTEM_LINUX},
+        {.cpu_arch = CPU_ARCH_AARCH64, .os = OPERATING_SYSTEM_LINUX},
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(array_parameters); row += 1)
+    {
+        TemporalArena control = scratch_begin(&temporary.arena, 1);
+        String8 source = string_format(control.arena,
+            S8("static int seen; static int bound_effects;"
+               " static int bound(void) {{ bound_effects += 1; return 2; }}"
+               " static void take({S8}) {{ seen = {S8}; }}"
+               " _Static_assert(sizeof(void (*)({S8})) == sizeof(void *), \"parameter size\");"
+               " int main(void) {{ int values[2][2] = {{{{3, 4}}, {{5, 6}}}};"
+               " ((void (*)({S8}))take)({S8}); return seen != 7 || bound_effects != 0; }}"),
+            array_parameters[row].definition_parameter, array_parameters[row].read,
+            array_parameters[row].cast_parameter, array_parameters[row].cast_parameter, array_parameters[row].argument);
+        for (u32 target = 0; target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+        {
+            for (u32 form = 0; form < 2; form += 1)
+            {
+                CPreprocessResult preprocessed = c_preprocess(control.arena, source,
+                    (CPreprocessOptions){.target = targets[target], .data_layout = target_data_layout(targets[target]),
+                                         .dialect = C_PREPROCESS_DIALECT_GNU17});
+                CParserResult syntax = c_parse_ast(control.arena, preprocessed);
+                CAnalysisResult semantic = c_analyze_semantics_only(control.arena, preprocessed, syntax);
+                BUSTER_TEST_RAW(arguments, !preprocessed.diagnostic_count && !syntax.diagnostic_count && !semantic.diagnostic_count, source);
+                CIRLowerResult lowered = c_analyze_with_options(control.arena, S8("type-name-array-parameter.c"), preprocessed,
+                    syntax, targets[target], (CIRLowerOptions){.disable_direct_ssa = form != 0});
+                BUSTER_TEST_RAW(arguments, lowered.canonical_ir_certified && !lowered.diagnostic_count && lowered.program,
+                    lowered.diagnostic_count ? lowered.diagnostics[0].message : source);
+                if (lowered.program && !lowered.diagnostic_count)
+                {
+                    BUSTER_TEST(arguments, ir_validate_canonical_module(lowered.program, lowered.program->modules).error == IR_VALIDATION_NONE);
+                    IrFunction* main_function = c_test_find_ir_function(lowered.program->modules, S8("main"));
+                    if (BUSTER_REQUIRE(arguments, main_function != 0))
+                    {
+                        u32 calls = 0;
+                        for (u32 instruction = 0; instruction < main_function->instruction_count; instruction += 1)
+                        {
+                            calls += main_function->instructions[instruction].opcode == IR_OPCODE_CALL;
+                        }
+                        // Prototype bounds are unevaluated; the indirect take call is the only call.
+                        BUSTER_TEST(arguments, calls == 1);
+                    }
+                }
+            }
+        }
+#if BUSTER_LINUX && !BUSTER_ANDROID
+        String8 path = buster_test_temporary_path(control.arena, S8("type-name-array-parameter"), S8(".c"));
+        if (BUSTER_REQUIRE(arguments, file_write(path, BUSTER_SLICE_TO_BYTE_SLICE(source))))
+        {
+            String8 references[] = {S8("gcc"), S8("clang")};
+            for (u32 reference = 0; reference < BUSTER_ARRAY_LENGTH(references); reference += 1)
+            {
+                String8 compiler = executable_resolve_in_path(control.arena, references[reference]);
+                String8 output = buster_test_temporary_path(control.arena, S8("type-name-array-reference"), S8(".exe"));
+                if (BUSTER_REQUIRE(arguments, compiler.length != 0))
+                {
+                    String8 command[] = {compiler, S8("-std=gnu17"), S8("-nostdinc"), S8("-O0"), S8("-o"), output, path};
+                    ProcessSpawnResult build = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(command), (SliceString8){0}, (SliceString8){0},
+                        (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true,
+                            .capture = ((u64)1 << STANDARD_STREAM_OUTPUT) | ((u64)1 << STANDARD_STREAM_ERROR),
+                            .capture_limits = {.per_stream = {[STANDARD_STREAM_OUTPUT] = BUSTER_KB(64), [STANDARD_STREAM_ERROR] = BUSTER_KB(64)},
+                                               .total = BUSTER_KB(128)}, .capture_overflow_policy = PROCESS_CAPTURE_OVERFLOW_FAIL});
+                    if (BUSTER_REQUIRE(arguments, build.handle != 0))
+                    {
+                        ProcessWaitResult compilation = os_process_wait_deadline(control.arena, build, 30000000);
+                        bool built = !compilation.timed_out && compilation.result == PROCESS_RESULT_SUCCESS &&
+                            !compilation.capture_failed && !compilation.output_truncated && !compilation.capture_limit_exceeded &&
+                            !compilation.process_tree_cleanup_failed && !compilation.process_group_reservation_retained &&
+                            !compilation.process_group_ownership_lost;
+                        BUSTER_TEST_RAW(arguments, built, BYTE_SLICE_TO_STRING(8, compilation.streams[STANDARD_STREAM_ERROR]));
+                        if (built)
+                        {
+                            String8 run[] = {output};
+                            ProcessSpawnResult child = os_process_spawn((SliceString8)BUSTER_ARRAY_TO_SLICE(run), (SliceString8){0}, (SliceString8){0},
+                                (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true});
+                            if (BUSTER_REQUIRE(arguments, child.handle != 0))
+                            {
+                                ProcessWaitResult execution = os_process_wait_deadline(control.arena, child, 30000000);
+                                BUSTER_TEST_RAW(arguments, !execution.timed_out && execution.result == PROCESS_RESULT_SUCCESS &&
+                                    !execution.process_tree_cleanup_failed && !execution.process_group_reservation_retained &&
+                                    !execution.process_group_ownership_lost, array_parameters[row].cast_parameter);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+#endif
+        c_test_scratch_end(control);
+    }
+    String8 invalid_arrays[] = {
+        S8("void[]"), S8("int[2][]"), S8("int[static]"),
+        S8("int[-1]"), S8("int[1.5]"), S8("int[missing]"), S8("int[1 +]"),
+    };
+    for (u32 row = 0; row < BUSTER_ARRAY_LENGTH(invalid_arrays); row += 1)
+    {
+        TemporalArena control = scratch_begin(&temporary.arena, 1);
+        String8 source = string_format(control.arena, S8("void f(void *p) {{ ((void (*)({S8}))p)(0); }}"), invalid_arrays[row]);
+        CPreprocessResult preprocessed = c_preprocess(control.arena, source, (CPreprocessOptions){.dialect = C_PREPROCESS_DIALECT_GNU17});
+        CParserResult syntax = c_parse_ast(control.arena, preprocessed);
+        CAnalysisResult semantic = c_analyze_semantics_only(control.arena, preprocessed, syntax);
+        BUSTER_TEST_RAW(arguments, preprocessed.diagnostic_count || syntax.diagnostic_count || semantic.diagnostic_count, source);
+        for (u32 form = 0; form < 2; form += 1)
+        {
+            CIRLowerResult lowered = c_analyze_with_options(control.arena, S8("type-name-array-invalid.c"), preprocessed,
+                syntax, target_native, (CIRLowerOptions){.disable_direct_ssa = form != 0});
+            BUSTER_TEST_RAW(arguments, lowered.diagnostic_count && !lowered.canonical_ir_certified, source);
+        }
+        c_test_scratch_end(control);
+    }
     c_test_scratch_end(temporary);
     return result;
 }
