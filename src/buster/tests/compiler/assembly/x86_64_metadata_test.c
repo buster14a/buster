@@ -742,7 +742,7 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_lookup_stress(u32 reque
     OsThreadHandle* threads[X86_64_METADATA_TEST_MAX_THREAD_COUNT] = {0};
     u32 thread_count = 0;
     bool created = true;
-    BUSTER_CHECK(requested_thread_count && requested_thread_count <= BUSTER_ARRAY_LENGTH(threads));
+    BUSTER_RT_CHECK(requested_thread_count && requested_thread_count <= BUSTER_ARRAY_LENGTH(threads));
     for (u32 index = 0; index < requested_thread_count; index += 1)
     {
         threads[index] = os_thread_create((ThreadCreateOptions){
@@ -859,7 +859,7 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_exact_emit_stress(u32 r
     OsThreadHandle* threads[X86_64_METADATA_TEST_MAX_THREAD_COUNT] = {0};
     u32 thread_count = 0;
     bool created = true;
-    BUSTER_CHECK(requested_thread_count && requested_thread_count <= BUSTER_ARRAY_LENGTH(threads));
+    BUSTER_RT_CHECK(requested_thread_count && requested_thread_count <= BUSTER_ARRAY_LENGTH(threads));
     for (u32 index = 0; index < requested_thread_count; index += 1)
     {
         threads[index] = os_thread_create((ThreadCreateOptions){
@@ -911,7 +911,7 @@ BUSTER_GLOBAL_LOCAL bool x86_64_metadata_test_concurrent_exact_emit_stress_case(
     OsThreadHandle* threads[X86_64_METADATA_TEST_MAX_THREAD_COUNT] = {0};
     u32 thread_count = 0;
     bool created = true;
-    BUSTER_CHECK(requested_thread_count && requested_thread_count <= BUSTER_ARRAY_LENGTH(threads));
+    BUSTER_RT_CHECK(requested_thread_count && requested_thread_count <= BUSTER_ARRAY_LENGTH(threads));
     for (u32 index = 0; index < requested_thread_count; index += 1)
     {
         threads[index] = os_thread_create((ThreadCreateOptions){

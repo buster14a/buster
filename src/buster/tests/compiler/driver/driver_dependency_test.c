@@ -35,7 +35,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_dependency_test_change_directory(String
     bool result = SetCurrentDirectoryW(wide_path.pointer) != 0;
     scratch_end(scratch);
 #else
-    BUSTER_CHECK(path.pointer != 0 && path.pointer[path.length] == 0);
+    BUSTER_RT_CHECK(path.pointer != 0 && path.pointer[path.length] == 0);
     bool result = chdir((const char*)path.pointer) == 0;
 #endif
     return result;

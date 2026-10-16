@@ -39,7 +39,7 @@ BUSTER_GLOBAL_LOCAL MachineFastLiveSets* machine_fast_live_sets_create(Arena* ar
     {
         sets->height += 1;
     }
-    BUSTER_CHECK(sets->height < MACHINE_FAST_LIVE_DEPTH_LIMIT);
+    BUSTER_RT_CHECK(sets->height < MACHINE_FAST_LIVE_DEPTH_LIMIT);
     sets->pages = arena_allocate(arena, MachineFastLiveNode**, MACHINE_FAST_LIVE_PAGE_SIZE);
     memset(sets->pages, 0, (u64)MACHINE_FAST_LIVE_PAGE_SIZE * sizeof(*sets->pages));
     sets->in = arena_allocate(arena, u32, (u64)block_count * 2u);
@@ -68,7 +68,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_fast_live_append(MachineFastLiveSets* sets, Mach
         u32 index = sets->node_count++;
         u32 outer = index >> (2u * MACHINE_FAST_LIVE_PAGE_BITS);
         u32 page = (index >> MACHINE_FAST_LIVE_PAGE_BITS) & MACHINE_FAST_LIVE_PAGE_MASK;
-        BUSTER_CHECK(outer < MACHINE_FAST_LIVE_PAGE_SIZE);
+        BUSTER_RT_CHECK(outer < MACHINE_FAST_LIVE_PAGE_SIZE);
         if (!sets->pages[outer])
         {
             sets->pages[outer] = arena_allocate(sets->arena, MachineFastLiveNode*, MACHINE_FAST_LIVE_PAGE_SIZE);

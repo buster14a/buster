@@ -303,7 +303,7 @@ WmWindowHandle* wm_window_create(WmHandle* windowing, WmWindowCreate create)
 {
     WmWindowHandle* result = {0};
     BUSTER_UNUSED(windowing);
-    BUSTER_CHECK(buster_apple_window_count < BUSTER_APPLE_MAX_WINDOW_COUNT);
+    BUSTER_RT_CHECK(buster_apple_window_count < BUSTER_APPLE_MAX_WINDOW_COUNT);
     id window_class = (id)objc_getClass("NSWindow");
     id window = buster_msg_id(window_class, "alloc");
     BusterCGRect content_rect = {

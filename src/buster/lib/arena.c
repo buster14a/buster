@@ -200,12 +200,12 @@ BUSTER_GLOBAL_LOCAL ArenaCommitAttempt arena_commit_attempt(void* address, u64 s
 BUSTER_GLOBAL_LOCAL u64 arena_os_position_after_commit(u64 requested_end, u64 reserved_size)
 {
     u64 page_size = os_get_page_size();
-    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
+    BUSTER_RT_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
     // Commit APIs round the end of a page-aligned request up to a native
     // page. Track that usable boundary so a later incremental commit also
     // starts page-aligned. A sub-page logical reservation ends at its exact
     // bound and cannot grow again, so clamping it is both accurate and safe.
-    // arena_allocate_commit validates requested_end against a reservation
+    // arena_allocate_commit assumes requested_end is inside a reservation
     // capped at ARENA_MAX_RESERVATION, which proves the rounding add cannot
     // overflow here.
     return BUSTER_MIN(align_forward_unchecked(requested_end, page_size), reserved_size);
@@ -216,19 +216,16 @@ void arena_allocation_overflow(void)
     os_fail_message(S8("arena allocation size overflowed"));
 }
 
-// Arenas created with count > 1 share one reservation, so committing past
-// reserved_size would land on the next arena's pages and corrupt it silently;
-// fail loudly instead. Callers never check for null, so allocation must not
-// return one.
-//
-// The inline bump validates its live cursor before rounding, then validates
-// the rounded offset and remaining capacity before publishing a new position.
-// That subtraction form keeps `aligned_offset + size` within the reservation
-// even for a final partial granule; the commit path below handles granularity
-// rounding without adding any of that state to the hot bump.
+// Arenas created with count > 1 share one reservation, so callers must keep
+// allocations inside reserved_size. The inline bump states its cursor,
+// alignment and capacity preconditions with BUSTER_RT_CHECK; ordinary Release
+// assumes them, while Debug/sanitized builds diagnose violations.
+// The subtraction form bounds `aligned_offset + size` even for a final partial
+// granule. This outlined path rounds commits and explicitly reports OS commit
+// failure in every build; allocation never returns a null pointer.
 void arena_allocate_commit(Arena* arena, u64 aligned_size_after)
 {
-    BUSTER_VALIDATE(aligned_size_after <= arena->reserved_size);
+    BUSTER_RT_CHECK(aligned_size_after <= arena->reserved_size);
     u64 os_position = arena->os_position;
     u64 target_committed_size = aligned_size_after;
     u64 remainder = target_committed_size & (arena->granularity - 1);
@@ -259,7 +256,7 @@ u8* arena_get_byte_pointer_at_position(Arena* arena, u64 position)
 u8* arena_get_byte_pointer_at_position_check_aligned(Arena* arena, u64 position, u64 alignment)
 {
     u8* result = arena_get_byte_pointer_at_position(arena, position);
-    BUSTER_CHECK(is_aligned((u64)result, alignment));
+    BUSTER_RT_CHECK(is_aligned((u64)result, alignment));
     return result;
 }
 
@@ -273,10 +270,13 @@ u64 arena_dirty_position(Arena* arena)
 
 u8* arena_get_byte_pointer_align(Arena* arena, u64 position, u64 alignment)
 {
-    BUSTER_VALIDATE(arena && position <= arena->reserved_size);
-    u64 aligned_position;
-    BUSTER_VALIDATE(arena_align_position_checked(arena, position, alignment, &aligned_position));
-    BUSTER_VALIDATE(aligned_position <= arena->reserved_size);
+    BUSTER_RT_CHECK(arena && position <= arena->reserved_size);
+    BUSTER_RT_CHECK(BUSTER_IS_POWER_OF_TWO(alignment));
+    BUSTER_RT_CHECK((u64)arena <= UINT64_MAX - position);
+    u64 address = (u64)arena + position;
+    BUSTER_RT_CHECK(address <= UINT64_MAX - (alignment - 1));
+    u64 aligned_position = align_forward_unchecked(address, alignment) - (u64)arena;
+    BUSTER_RT_CHECK(aligned_position <= arena->reserved_size);
     u8* result = arena_get_byte_pointer_at_position(arena, aligned_position);
     return result;
 }
@@ -288,7 +288,7 @@ void arena_reset_to_start(Arena* arena)
 
 void arena_set_position(Arena* arena, u64 position)
 {
-    BUSTER_VALIDATE(arena && position >= arena_minimum_position && position <= arena->reserved_size);
+    BUSTER_RT_CHECK(arena && position >= arena_minimum_position && position <= arena->reserved_size);
     arena_set_position_unchecked(arena, position);
 }
 
@@ -301,10 +301,10 @@ BUSTER_GLOBAL_LOCAL void arena_set_position_unchecked(Arena* arena, u64 position
 
 bool arena_set_position_and_decommit(Arena* arena, u64 position)
 {
-    BUSTER_VALIDATE(arena && arena->position <= arena->reserved_size && position >= arena_minimum_position && position <= arena->position);
+    BUSTER_RT_CHECK(arena && arena->position <= arena->reserved_size && position >= arena_minimum_position && position <= arena->position);
     arena->high_water = BUSTER_MAX(arena->high_water, arena->position);
     u64 page_size = os_get_page_size();
-    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
+    BUSTER_RT_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
     // Arena granularities may legally be smaller than a native page. Start at
     // the next boundary that satisfies both contracts, and stop before any
     // partial native page at the old high-water mark. If no complete page is
@@ -362,7 +362,7 @@ bool arena_set_position_and_decommit(Arena* arena, u64 position)
 
 u64 arena_release_to_position(Arena* arena, u64 position)
 {
-    BUSTER_VALIDATE(arena && position >= arena_minimum_position && position <= arena->position);
+    BUSTER_RT_CHECK(arena && position >= arena_minimum_position && position <= arena->position);
     u64 result = arena->position - position;
 #if BUSTER_INCLUDE_TESTS
     if (arena_test_release_fill)
@@ -380,7 +380,7 @@ u64 arena_release_to_position(Arena* arena, u64 position)
 
 u64 arena_release_unwritten_tail(Arena* arena, u64 position, u64 written_end)
 {
-    BUSTER_VALIDATE(arena && position >= arena_minimum_position && position <= written_end && written_end <= arena->position);
+    BUSTER_RT_CHECK(arena && position >= arena_minimum_position && position <= written_end && written_end <= arena->position);
     u64 result = arena->position - position;
 #if BUSTER_INCLUDE_TESTS
     if (arena_test_release_fill)
@@ -399,7 +399,7 @@ u64 arena_release_unwritten_tail(Arena* arena, u64 position, u64 written_end)
 
 void arena_retire(Arena* arena, u64 retained_size)
 {
-    BUSTER_VALIDATE(retained_size <= arena->reserved_size - arena_minimum_position);
+    BUSTER_RT_CHECK(retained_size <= arena->reserved_size - arena_minimum_position);
     u64 retained = arena_minimum_position + retained_size;
     if (arena->os_position > retained)
     {
@@ -407,10 +407,10 @@ void arena_retire(Arena* arena, u64 retained_size)
         // retained edge first and returns to the start afterwards; the dirty
         // mark still covers any undiscarded partial tail page.
         arena_set_position(arena, retained);
-        BUSTER_VALIDATE(arena_set_position_and_decommit(arena, retained));
+        BUSTER_RT_CHECK(arena_set_position_and_decommit(arena, retained));
     }
     arena_set_position(arena, arena_minimum_position);
-    BUSTER_VALIDATE(arena_destroy(arena, 1));
+    BUSTER_RT_CHECK(arena_destroy(arena, 1));
 }
 
 BUSTER_GLOBAL_LOCAL ArenaCreation arena_creation_parameters(ArenaCreation original)
@@ -476,7 +476,7 @@ u64 arena_pool_release_thread(void)
         u64 reserved_size = pooled->reserved_size;
         // This runs after an OS worker has cleared its ThreadContext, so the
         // raw reporter is the only failure path that does not need scratch.
-        BUSTER_CHECK_RAW(arena_destroy_extended(pooled, 1, reserved_size));
+        BUSTER_RT_CHECK_RAW(arena_destroy_extended(pooled, 1, reserved_size));
         pooled = next;
         result += 1;
     }
@@ -545,7 +545,7 @@ bool arena_destroy(Arena* arena, u64 count)
 Arena* arena_create(ArenaCreation original_creation)
 {
     ArenaCreation creation = arena_creation_parameters(original_creation);
-    BUSTER_VALIDATE(creation.flags.huge_pages <= ARENA_HUGE_PAGES_ENABLED);
+    BUSTER_RT_CHECK(creation.flags.huge_pages <= ARENA_HUGE_PAGES_ENABLED);
     if (creation.flags.huge_pages == ARENA_HUGE_PAGES_DEFAULT)
     {
         creation.flags.huge_pages = arena_default_huge_pages ? ARENA_HUGE_PAGES_ENABLED : ARENA_HUGE_PAGES_DISABLED;
@@ -555,13 +555,13 @@ Arena* arena_create(ArenaCreation original_creation)
     // The ceiling is what lets every later allocation reason about `position`
     // and `reserved_size` as small numbers: with both under 2^48 no sum or
     // alignment round-up in arena_allocate_bytes can reach 2^64.
-    BUSTER_VALIDATE(individual_reserved_size <= ARENA_MAX_RESERVATION);
-    BUSTER_VALIDATE(count <= UINT64_MAX / individual_reserved_size);
+    BUSTER_RT_CHECK(individual_reserved_size <= ARENA_MAX_RESERVATION);
+    BUSTER_RT_CHECK(count <= UINT64_MAX / individual_reserved_size);
     u64 total_reserved_size = individual_reserved_size * count;
 
-    BUSTER_VALIDATE(BUSTER_IS_POWER_OF_TWO(creation.granularity));
-    BUSTER_VALIDATE(creation.initial_size >= arena_minimum_position);
-    BUSTER_VALIDATE(creation.initial_size <= individual_reserved_size);
+    BUSTER_RT_CHECK(BUSTER_IS_POWER_OF_TWO(creation.granularity));
+    BUSTER_RT_CHECK(creation.initial_size >= arena_minimum_position);
+    BUSTER_RT_CHECK(creation.initial_size <= individual_reserved_size);
 
     // A pooled arena short-circuits the fresh reservation below; `reused` is how
     // that decision reaches the single exit without a second return.
@@ -653,7 +653,7 @@ Arena* arena_create(ArenaCreation original_creation)
                 {
                     bool destroy_result = arena_destroy_extended((Arena*)result, count, individual_reserved_size);
                     result = 0;
-                    BUSTER_VALIDATE(destroy_result);
+                    BUSTER_RT_CHECK(destroy_result);
                     break;
                 }
             }
@@ -680,7 +680,7 @@ TemporalArena scratch_begin(Arena** conflicts, u64 count)
     Arena* arena = thread_context_get_scratch(conflicts, count);
     // Null means every scratch arena conflicted with the caller's arenas;
     // fail here instead of dereferencing null in arena_begin_temporal.
-    BUSTER_VALIDATE(arena);
+    BUSTER_RT_CHECK(arena);
     return arena_begin_temporal(arena);
 }
 
@@ -826,7 +826,7 @@ void arena_benchmark_event(ArenaBenchmarkKind kind, String8 file, String8 functi
 
 ArenaBenchmarkCounters arena_benchmark_kind_counters(ArenaBenchmarkKind kind)
 {
-    BUSTER_CHECK_RAW((u32)kind < ARENA_BENCHMARK_KIND_COUNT);
+    BUSTER_RT_CHECK_RAW((u32)kind < ARENA_BENCHMARK_KIND_COUNT);
     return arena_benchmark_totals[kind];
 }
 
@@ -860,7 +860,7 @@ void* arena_benchmark_allocate(Arena* arena, u64 size, u64 alignment, bool zeroe
 
 void arena_benchmark_report_enable(bool enabled)
 {
-    BUSTER_CHECK_RAW(os_is_only_live_thread());
+    BUSTER_RT_CHECK_RAW(os_is_only_live_thread());
     arena_benchmark_report_enabled = enabled;
 }
 

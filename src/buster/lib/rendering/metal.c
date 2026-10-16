@@ -572,7 +572,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
 #if BUSTER_IOS
     // On iOS the window handle already exposes a CAMetalLayer (the UIView's
     // backing layer); use it directly instead of creating and attaching one.
-    BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_METAL_LAYER);
+    BUSTER_RT_CHECK(native_surface.kind == WM_NATIVE_SURFACE_METAL_LAYER);
     result->ns_window = 0;
     result->content_view = 0;
     result->layer = (id)native_surface.window;
@@ -582,7 +582,7 @@ RenderingWindowHandle* rendering_window_initialize(Arena* arena, WmHandle* windo
     metal_msg_void_bool(result->layer, "setFramebufferOnly:", false);
     BUSTER_RENDERING_TRACE(S8("Metal render window initialization: platform=ios, layer={u64:x}, frame_count={u32}\n"), (u64)result->layer, result->frame_count);
 #else
-    BUSTER_CHECK(native_surface.kind == WM_NATIVE_SURFACE_APPKIT);
+    BUSTER_RT_CHECK(native_surface.kind == WM_NATIVE_SURFACE_APPKIT);
     result->ns_window = (id)native_surface.window;
     result->content_view = metal_msg_id(result->ns_window, "contentView");
     BUSTER_RENDERING_TRACE(S8("Metal render window initialization: ns_window={u64:x}, content_view={u64:x}, frame_count={u32}\n"), (u64)result->ns_window,
@@ -635,8 +635,8 @@ void rendering_window_rect_texture_update_begin(RenderingWindowHandle* window)
 
 void rendering_window_queue_rect_texture_update(RenderingHandle* rendering, RenderingWindowHandle* window, RectTextureSlot slot, TextureIndex texture_index)
 {
-    BUSTER_CHECK(slot < RECT_TEXTURE_SLOT_COUNT);
-    BUSTER_CHECK(texture_index.value < rendering->texture_count);
+    BUSTER_RT_CHECK(slot < RECT_TEXTURE_SLOT_COUNT);
+    BUSTER_RT_CHECK(texture_index.value < rendering->texture_count);
     window->rect_textures[(u32)slot] = texture_index;
     rendering_command_stream_set_texture_binding(rendering_window_command_stream(window), (u32)slot, texture_index);
 }
@@ -691,8 +691,8 @@ RenderingTextureFormatBackendProbe rendering_texture_format_backend_probe_for_te
 
 TextureIndex rendering_texture_create(RenderingHandle* rendering, TextureMemory texture_memory)
 {
-    BUSTER_CHECK(texture_memory.depth == 1);
-    BUSTER_CHECK(rendering->texture_count < MAX_METAL_TEXTURE_COUNT);
+    BUSTER_RT_CHECK(texture_memory.depth == 1);
+    BUSTER_RT_CHECK(rendering->texture_count < MAX_METAL_TEXTURE_COUNT);
     u32 texture_index = rendering->texture_count;
     rendering->texture_count += 1;
     MetalTexture* texture = &rendering->textures[texture_index];

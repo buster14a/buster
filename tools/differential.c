@@ -1790,13 +1790,13 @@ BUSTER_GLOBAL_LOCAL u32 d_gen_below(DGen* g, u32 bound)
 
 BUSTER_GLOBAL_LOCAL void d_gen_emit(DGen* g, String8 text)
 {
-    BUSTER_CHECK(g->part_count < D_GEN_PART_CAPACITY);
+    BUSTER_RT_CHECK(g->part_count < D_GEN_PART_CAPACITY);
     g->parts[g->part_count++] = text;
 }
 
 BUSTER_GLOBAL_LOCAL void d_gen_name(DGen* g, String8 name, u32 type, bool writable)
 {
-    BUSTER_CHECK(g->name_count < D_GEN_NAME_CAPACITY);
+    BUSTER_RT_CHECK(g->name_count < D_GEN_NAME_CAPACITY);
     g->names[g->name_count] = name;
     g->types[g->name_count] = type;
     g->writable[g->name_count] = writable;
@@ -2368,7 +2368,7 @@ BUSTER_GLOBAL_LOCAL void d_cancellation_self_test_lane(void* argument)
                      S8("--self-test-index"), index_text, S8("--self-test-count"), count_text};
     work->observations[index] = d_observe(&settings, (SliceString8)BUSTER_ARRAY_TO_SLICE(argv),
         string_format(settings.arena, S8("{S8}.{u32}.observation"), work->marker, index));
-    BUSTER_CHECK(arena_destroy(settings.arena, 1));
+    BUSTER_RT_CHECK(arena_destroy(settings.arena, 1));
 }
 
 BUSTER_GLOBAL_LOCAL bool d_jobs(u32 requested, u32 cpus, String8 quota_text, u32* jobs);
@@ -2687,7 +2687,7 @@ BUSTER_GLOBAL_LOCAL void d_case_lane(void* argument)
             os_mutex_unlock(work->settings.spawn_mutex);
         }
     }
-    BUSTER_CHECK(arena_destroy(arena, 1));
+    BUSTER_RT_CHECK(arena_destroy(arena, 1));
     if (work->self_test)
     {
         os_mutex_lock(work->settings.spawn_mutex);

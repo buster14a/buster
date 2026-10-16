@@ -2766,7 +2766,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice object_test_elf_semantic_input(Arena* arena, Strin
     object_test_write_u16(bytes, 62, 4);
     String8 metadata_names = S8("\0.symtab\0.strtab\0.shstrtab\0");
     String8 symbol_name = S8("\0semantic_symbol\0");
-    BUSTER_CHECK(section_name.length + 1 + metadata_names.length <= TABLE - SECTION_STRINGS);
+    BUSTER_RT_CHECK(section_name.length + 1 + metadata_names.length <= TABLE - SECTION_STRINGS);
     memcpy(bytes.pointer + SECTION_STRINGS + 1, section_name.pointer, section_name.length);
     memcpy(bytes.pointer + SECTION_STRINGS + 1 + section_name.length, metadata_names.pointer, metadata_names.length);
     memcpy(bytes.pointer + STRINGS, symbol_name.pointer, symbol_name.length);

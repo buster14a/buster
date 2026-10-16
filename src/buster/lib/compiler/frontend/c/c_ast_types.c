@@ -702,7 +702,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE CAstSpanInput c_ast_types_span_input(CAstTypeB
 // accepted.
 BUSTER_GLOBAL_LOCAL bool c_ast_types_span(CAstTypeBody const* body, u32 node, u32 relative, u32* first_out, u32* end_out)
 {
-    BUSTER_CHECK(node - body->begin == relative);
+    BUSTER_RT_CHECK(node - body->begin == relative);
     CAstSpanInput input = c_ast_types_span_input(body);
     return c_ast_span_rule(&input, node, first_out, end_out);
 }
@@ -3360,7 +3360,7 @@ BUSTER_GLOBAL_LOCAL CAstTypeRecipe* c_ast_types_recipes_append(CAstFacts* facts,
     if (appended)
     {
         facts->recipes = facts->recipes ? facts->recipes : appended;
-        BUSTER_CHECK(appended == facts->recipes + facts->recipe_count);
+        BUSTER_RT_CHECK(appended == facts->recipes + facts->recipe_count);
         facts->recipe_count += count;
     }
     facts->recipe_failed = facts->recipe_failed || !appended;

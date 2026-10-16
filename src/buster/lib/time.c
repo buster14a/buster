@@ -7,7 +7,7 @@ TimeDataType timestamp_take(void)
 #if defined(__linux__) || defined(__APPLE__)
     struct timespec ts;
     int result = clock_gettime(CLOCK_MONOTONIC, &ts);
-    BUSTER_CHECK(result == 0);
+    BUSTER_RT_CHECK(result == 0);
     BUSTER_CT_CHECK(sizeof(TimeDataType) >= sizeof(struct timespec));
     TimeDataType timestamp = {0};
     memcpy(&timestamp, &ts, sizeof(ts));
@@ -15,7 +15,7 @@ TimeDataType timestamp_take(void)
 #elif defined(_WIN32)
     LARGE_INTEGER c;
     BOOL result = QueryPerformanceCounter(&c);
-    BUSTER_CHECK(result);
+    BUSTER_RT_CHECK(result);
     return (TimeDataType)c.QuadPart;
 #endif
 }

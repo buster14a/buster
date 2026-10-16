@@ -797,27 +797,22 @@ BUSTER_NORETURN BUSTER_COLD BUSTER_F_DECL void os_fail_raw(u32 line, String8 fun
 #define os_fail_message_raw(message)                                                                                                                           \
     (((void)(is_debugger_present() ? (BUSTER_BREAKPOINT(), 0) : 0)), os_fail_raw((u32)__LINE__, BUSTER_FUNCTION, S8(__FILE__), message))
 #define os_fail() os_fail_message(S8("internal error"))
-#define BUSTER_CHECK_RAW(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message_raw(S8("assertion failed")), 0) : 0))
-// Invariants may become optimizer assumptions in Release. Validation may not:
-// anything derived from source text, object bytes, file sizes, system calls or
-// other fallible inputs must retain its branch and failure in every build.
-// BUSTER_CHECK states a proven invariant and may become an optimizer
-// assumption. BUSTER_ASSERT is diagnostic only and disappears in optimized
-// builds. BUSTER_VALIDATE retains both its branch and defined failure in every
-// build, so resource and input failures must use it (or return an error).
-//
-// Only optimized unsanitized builds take the assumption/unevaluated forms.
-// Sanitized builds keep both diagnostics at every optimization level, so a
-// sanitized Release run reports a false invariant as "assertion failed"
-// instead of compiling it into undefined behavior. Operands still must not
-// carry required work: ordinary Release never evaluates a BUSTER_ASSERT.
-#define BUSTER_VALIDATE(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("validation failed")), 0) : 0))
+
+// The raw check retains an allocation-free diagnostic in every build, including
+// context setup and teardown where a formatted failure cannot obtain scratch.
+#define BUSTER_RT_CHECK_RAW(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message_raw(S8("assertion failed")), 0) : 0))
+
+// BUSTER_RT_CHECK evaluates its operand once in every build. Debug and every
+// sanitized build report a false condition as "assertion failed"; optimized
+// unsanitized builds treat it as an optimizer assumption, so a false condition
+// is undefined behavior. There is no separate unevaluated assertion macro or
+// always-on validation macro. Use explicit error handling for fallible inputs
+// and system calls whose failures must remain defined in every configuration.
+// BUSTER_CHECK_SERIAL_INITIALIZATION below also retains its diagnostic.
 #if BUSTER_OPTIMIZE && !BUSTER_SANITIZE
-#define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
-#define BUSTER_ASSERT(ok) ((void)sizeof(!!(ok)))
+#define BUSTER_RT_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (BUSTER_UNREACHABLE(), 0) : 0))
 #else
-#define BUSTER_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
-#define BUSTER_ASSERT(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
+#define BUSTER_RT_CHECK(ok) ((void)(BUSTER_UNLIKELY(!(ok)) ? (os_fail_message(S8("assertion failed")), 0) : 0))
 #endif
 // Stated by every global table that is still built on first use. Those builds
 // are unsynchronized on purpose: they run once and every later read is a plain

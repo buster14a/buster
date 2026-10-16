@@ -802,7 +802,7 @@ BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult production_profile_command(
 // Pre-evidence queries: unrecorded, with no evidence files.
 BUSTER_GLOBAL_LOCAL ProductionProfileCommandResult production_profile_capture(ProductionProfileContext* context, SliceString8 arguments)
 {
-    BUSTER_CHECK(!context->ledger && !context->evidence.length);
+    BUSTER_RT_CHECK(!context->ledger && !context->evidence.length);
     return production_profile_command(context, context->arena, arguments, (SliceString8){0}, (SliceString8){0},
         (ProductionProfilePhaseSpec){0}, 120, true);
 }
@@ -1028,8 +1028,8 @@ BUSTER_GLOBAL_LOCAL String8 production_profile_binary(Arena* arena, String8 buil
 BUSTER_GLOBAL_LOCAL bool production_profile_build_variant(ProductionProfileContext* context, Arena* arena, ProductionProfileVariant variant)
 {
     ProductionProfileTraining* training = variant.training;
-    BUSTER_CHECK((variant.generate || variant.use) == (training != 0));
-    BUSTER_CHECK(!training || training->lto == variant.lto);
+    BUSTER_RT_CHECK((variant.generate || variant.use) == (training != 0));
+    BUSTER_RT_CHECK(!training || training->lto == variant.lto);
     String8 directory = path_join(arena, context->output, variant.name);
     String8 raw = variant.generate ? path_join(arena, training->directory, S8("raw")) : S8("");
     String8 profile = variant.use ? training->profile : S8("");
@@ -1384,7 +1384,7 @@ BUSTER_GLOBAL_LOCAL void production_profile_task_lane(void* argument)
             production_profile_cancel(context);
         }
     }
-    BUSTER_CHECK(arena_destroy(arena, 1));
+    BUSTER_RT_CHECK(arena_destroy(arena, 1));
 }
 
 // Runs every task on context->build_lanes lanes and reports whether all of
@@ -1597,7 +1597,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceStr
     for (u64 index = 0; index < BUSTER_ARRAY_LENGTH(trainings); index += 1)
     {
         ProductionProfileTraining* training = trainings + index;
-        BUSTER_CHECK(training->lto == (index != 0));
+        BUSTER_RT_CHECK(training->lto == (index != 0));
         String8 contract = production_profile_training_contract(arena, shared_contract, training->lto);
         training->fingerprint = production_profile_sha256_text(arena, contract);
         training->profile = path_join(arena, training->directory, S8("merged.profdata"));
@@ -1637,7 +1637,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_main(Arena* arena, SliceStr
         {.steps = {{.kind = PRODUCTION_PROFILE_STEP_BUILD, .variant = {.name = S8("g0"),
             .slot = BUSTER_PRODUCTION_PROFILE_SLOT_G0}}}, .step_count = 1},
     };
-    BUSTER_CHECK(BUSTER_ARRAY_LENGTH(tasks) == BUSTER_PRODUCTION_PROFILE_TASK_COUNT);
+    BUSTER_RT_CHECK(BUSTER_ARRAY_LENGTH(tasks) == BUSTER_PRODUCTION_PROFILE_TASK_COUNT);
     if (!production_profile_tasks_run(&context, tasks, BUSTER_ARRAY_LENGTH(tasks)))
     {
         string_print(S8("error: production-profile build lanes failed; see evidence/phases.md\n"));
@@ -1952,7 +1952,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult production_profile_self_test(Arena* arena)
     Arena* lane_arena = arena_create((ArenaCreation){0});
     ProductionProfilePhase lane_phase = {.label = string_format(lane_arena, S8("lane-label-{u64}"), 7ull), .kind = S8("build"), .success = true};
     failures += !production_profile_ledger_record(arena, &owned, 0, lane_phase);
-    BUSTER_CHECK(arena_destroy(lane_arena, 1));
+    BUSTER_RT_CHECK(arena_destroy(lane_arena, 1));
     failures += !production_profile_contains(production_profile_ledger_tsv(arena, &owned), S8("\n1\tlane-label-7\tbuild\t"));
     ProductionProfilePhase cancelled = {.cancelled = true};
     failures += !string_equal(production_profile_phase_outcome(&cancelled), S8("cancelled"));

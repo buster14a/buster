@@ -571,7 +571,7 @@ FileReadResult file_read_checked(Arena* arena, String8 path, FileReadOptions opt
                             allocation_size = align_forward(capacity + options.start_padding + options.end_padding, options.end_alignment);
                             allocation_size = BUSTER_MAX(allocation_size, 1);
                             u8* grown_buffer = (u8*)arena_allocate_bytes(arena, allocation_size, allocation_alignment);
-                            BUSTER_CHECK(grown_buffer == file_buffer);
+                            BUSTER_RT_CHECK(grown_buffer == file_buffer);
                             file_buffer = grown_buffer;
                         }
                     }

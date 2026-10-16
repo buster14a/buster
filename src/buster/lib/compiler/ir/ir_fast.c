@@ -879,7 +879,7 @@ void ir_construction_fold_census_end(IrProgram* program, IrFunction* function, I
                     u32 value = row->operands[operand].value;
                     if (value != replacement && ir_fold_census_literal(function, value))
                     {
-                        BUSTER_CHECK(uses[value] != 0);
+                        BUSTER_RT_CHECK(uses[value] != 0);
                         uses[value] -= 1;
                         IR_CONSTRUCTION_RECORD(FOLD_NET_LITERAL_USES, 1);
                     }
@@ -998,7 +998,7 @@ BUSTER_GLOBAL_LOCAL void ir_fast_dce(IrProgram* program, IrFunction* function, u
         for (u32 operand = 0; operand < row->operand_count; operand += 1)
         {
             u32 value = ir_promote_root(replacements, row->operands[operand].value);
-            BUSTER_CHECK(uses[value] != 0);
+            BUSTER_RT_CHECK(uses[value] != 0);
             uses[value] -= 1;
             statistics->visits += 1;
             u32 definition = function->values[value].definition.value;

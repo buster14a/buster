@@ -19,7 +19,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_object_path_test_change_directory(Strin
     scratch_end(scratch);
     return result;
 #else
-    BUSTER_CHECK(path.pointer != 0 && path.pointer[path.length] == 0);
+    BUSTER_RT_CHECK(path.pointer != 0 && path.pointer[path.length] == 0);
     return chdir((const char*)path.pointer) == 0;
 #endif
 }
@@ -30,7 +30,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_object_path_test_file_exists(String8 pa
     bool result = file != 0;
     if (file)
     {
-        BUSTER_CHECK(os_file_close(file));
+        BUSTER_RT_CHECK(os_file_close(file));
     }
     return result;
 }
@@ -71,7 +71,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverError compiler_driver_object_path_test_compile
             compiler_driver_object_path_test_report(arguments, arena, command_line, compiled);
         }
         result = compiled.error;
-        BUSTER_CHECK(arena_destroy(arena, 1));
+        BUSTER_RT_CHECK(arena_destroy(arena, 1));
     }
     else
     {
@@ -199,7 +199,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_empty_host(UnitTestArguments* argum
     u32 count = 1;
     String8 first = S8(BUSTER_HOST_C_COMPILER_ARG1);
     if (first.length) command[count++] = first;
-    BUSTER_CHECK(options.length <= BUSTER_ARRAY_LENGTH(command) - count);
+    BUSTER_RT_CHECK(options.length <= BUSTER_ARRAY_LENGTH(command) - count);
     for (u64 index = 0; index < options.length; index += 1) command[count++] = options.pointer[index];
     ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0},
         (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true,
@@ -379,7 +379,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_tls_export_host(UnitTestArguments* argu
     u32 count = 1;
     String8 argument = S8(BUSTER_HOST_C_COMPILER_ARG1);
     if (argument.length) command[count++] = argument;
-    BUSTER_CHECK(options.length <= BUSTER_ARRAY_LENGTH(command) - count);
+    BUSTER_RT_CHECK(options.length <= BUSTER_ARRAY_LENGTH(command) - count);
     for (u64 index = 0; index < options.length; index += 1) command[count++] = options.pointer[index];
     ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0},
         (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true,
@@ -1764,7 +1764,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_semantic_host(UnitTestArguments* ar
     u32 count = 1;
     String8 argument = S8(BUSTER_HOST_C_COMPILER_ARG1);
     if (argument.length) command[count++] = argument;
-    BUSTER_CHECK(options.length <= BUSTER_ARRAY_LENGTH(command) - count);
+    BUSTER_RT_CHECK(options.length <= BUSTER_ARRAY_LENGTH(command) - count);
     for (u64 index = 0; index < options.length; index += 1) command[count++] = options.pointer[index];
     ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count}, (SliceString8){0}, (SliceString8){0},
         (ProcessSpawnOptions){.use_process_environment = true, .new_process_group = true, .search_path = true,
@@ -1805,7 +1805,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_elf_semantic_archive(Arena* arena,
     bytes.pointer[8 + 34] = '0';
     memcpy(bytes.pointer + 8 + 40, "644", 3);
     String8 size = string_format(arena, S8("{u64}"), member.length);
-    BUSTER_CHECK(size.length <= 10);
+    BUSTER_RT_CHECK(size.length <= 10);
     memcpy(bytes.pointer + 8 + 48, size.pointer, size.length);
     memcpy(bytes.pointer + 8 + 58, "`\n", 2);
     memcpy(bytes.pointer + 68, member.pointer, member.length);
@@ -1844,7 +1844,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_elf_modifier_rejection(String8 source, 
         CompilerDriverResult compiled = compiler_driver_execute_invocation(compile_arena, invocation);
         result = compiled.error != COMPILER_DRIVER_ERROR_NONE &&
                  compiler_driver_elf_string_contains(compiled.diagnostic, diagnostic);
-        BUSTER_CHECK(arena_destroy(compile_arena, 1));
+        BUSTER_RT_CHECK(arena_destroy(compile_arena, 1));
     }
     else
     {
@@ -3117,7 +3117,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_elf_cpu_runtime_archive(Arena* are
     memcpy(bytes.pointer, "!<arch>\n", 8);
     u64 cursor = 8;
     u64 member_offsets[2];
-    BUSTER_CHECK(count <= BUSTER_ARRAY_LENGTH(member_offsets));
+    BUSTER_RT_CHECK(count <= BUSTER_ARRAY_LENGTH(member_offsets));
     u64 offset = 8 + 60 + index_length + (index_length & 1);
     for (u32 index = 0; index < count; index += 1)
     {
@@ -3131,7 +3131,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_elf_cpu_runtime_archive(Arena* are
         u64 member_length = index ? members[index - 1].length : index_length;
         String8 name = index ? string_format(arena, S8("m{u32}.o/"), index - 1) : S8("/");
         String8 size = string_format(arena, S8("{u64}"), member_length);
-        BUSTER_CHECK(name.length <= 16 && size.length <= 10);
+        BUSTER_RT_CHECK(name.length <= 16 && size.length <= 10);
         memcpy(header, name.pointer, name.length);
         header[16] = '0';
         header[28] = '0';
@@ -3174,7 +3174,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_elf_cpu_runtime_archive(Arena* are
         }
         if (member_length & 1) bytes.pointer[cursor++] = '\n';
     }
-    BUSTER_CHECK(cursor == length);
+    BUSTER_RT_CHECK(cursor == length);
     return bytes;
 }
 

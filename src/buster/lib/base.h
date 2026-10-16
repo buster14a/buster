@@ -370,18 +370,10 @@
 #endif
 
 #if BUSTER_COMPILER_MSVC
-#define BUSTER_RAW_UNREACHABLE() __assume(0)
-#elif BUSTER_COMPILER_CLANG || BUSTER_COMPILER_GCC
-#define BUSTER_RAW_UNREACHABLE() __builtin_unreachable()
-#else
-#define BUSTER_RAW_UNREACHABLE() BUSTER_TRAP()
-#endif
-
-#if BUSTER_COMPILER_MSVC
 #define BUSTER_ASSUME(x) __assume(x)
 #elif __has_builtin(__builtin_assume)
 #define BUSTER_ASSUME(x) __builtin_assume(x)
-#elif BUSTER_COMPILER_CLANG || BUSTER_COMPILER_GCC
+#elif __has_builtin(__builtin_unreachable)
 #define BUSTER_ASSUME(x)                                                                                                                                       \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
@@ -391,19 +383,28 @@
 #else
 #define BUSTER_ASSUME(x) BUSTER_UNUSED(x)
 #endif
-// BUSTER_RAW_UNREACHABLE and BUSTER_ASSUME are raw optimizer escape hatches in
+
+#if BUSTER_COMPILER_MSVC
+#define BUSTER_UNREACHABLE_RAW() BUSTER_ASSUME(0)
+#elif BUSTER_COMPILER_CLANG || BUSTER_COMPILER_GCC
+#define BUSTER_UNREACHABLE_RAW() __builtin_unreachable()
+#else
+#define BUSTER_UNREACHABLE_RAW() BUSTER_TRAP()
+#endif
+
+// BUSTER_UNREACHABLE_RAW and BUSTER_ASSUME are raw optimizer escape hatches in
 // every configuration, sanitized ones included: reaching them is undefined
 // behavior. BUSTER_UNREACHABLE is the checked form. It becomes the raw hint
 // only in optimized unsanitized builds; Debug and every sanitized build,
 // optimized or not, trap first so a sanitized Release run diagnoses the path.
 #if BUSTER_OPTIMIZE && !BUSTER_SANITIZE
-#define BUSTER_UNREACHABLE() BUSTER_RAW_UNREACHABLE()
+#define BUSTER_UNREACHABLE() BUSTER_UNREACHABLE_RAW()
 #else
 #define BUSTER_UNREACHABLE()                                                                                                                                   \
     do                                                                                                                                                         \
     {                                                                                                                                                          \
         BUSTER_TRAP();                                                                                                                                         \
-        BUSTER_RAW_UNREACHABLE();                                                                                                                              \
+        BUSTER_UNREACHABLE_RAW();                                                                                                                              \
     } while (0)
 #endif
 

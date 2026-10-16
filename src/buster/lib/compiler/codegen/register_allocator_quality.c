@@ -14,7 +14,14 @@ MachineQualityCensus machine_quality_census_snapshot(void)
     return machine_quality_census_totals;
 }
 
-#define BUSTER_QUALITY_COUNT(name, amount) BUSTER_VALIDATE(machine_quality_census_try_add(&machine_quality_census_totals.name, (u64)(amount)))
+#define BUSTER_QUALITY_COUNT(name, amount)                                                                                                                      \
+    do                                                                                                                                                         \
+    {                                                                                                                                                          \
+        if (!machine_quality_census_try_add(&machine_quality_census_totals.name, (u64)(amount)))                                                                  \
+        {                                                                                                                                                      \
+            os_fail_message(S8("quality census counter overflowed"));                                                                                           \
+        }                                                                                                                                                      \
+    } while (0)
 #else
 // Arguments are not evaluated in ordinary or self-hosted builds.
 #define BUSTER_QUALITY_COUNT(name, amount) ((void)0)

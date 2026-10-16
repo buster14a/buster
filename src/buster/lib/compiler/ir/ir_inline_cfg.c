@@ -601,10 +601,10 @@ BUSTER_GLOBAL_LOCAL void ir_inline_cfg_rebuild_predecessors(Arena* arena, IrFunc
         IrBlock* source = function->blocks + block;
         IrInstruction const* tail = source->last_instruction.value < function->instruction_count
                                         ? function->instructions + source->last_instruction.value : 0;
-        BUSTER_CHECK(tail && ir_instruction_is_terminator(tail));
+        BUSTER_RT_CHECK(tail && ir_instruction_is_terminator(tail));
         if (tail) maximum += tail->target_count;
     }
-    BUSTER_CHECK(maximum <= UINT32_MAX);
+    BUSTER_RT_CHECK(maximum <= UINT32_MAX);
     IrPredecessor* rows = arena_allocate_zeroed(arena, IrPredecessor, (u32)maximum);
     Arena* conflicts[] = {arena};
     TemporalArena scratch = scratch_begin(conflicts, BUSTER_ARRAY_LENGTH(conflicts));
@@ -617,7 +617,7 @@ BUSTER_GLOBAL_LOCAL void ir_inline_cfg_rebuild_predecessors(Arena* arena, IrFunc
         for (u32 i = 0; i < tail->target_count; i += 1)
         {
             u32 target = tail->targets[i].value;
-            BUSTER_CHECK(target < function->block_count);
+            BUSTER_RT_CHECK(target < function->block_count);
             if (target >= function->block_count || seen[target] == source_id + 1) continue;
             seen[target] = source_id + 1;
             IrBlock* destination = function->blocks + target;

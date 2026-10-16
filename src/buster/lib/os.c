@@ -429,13 +429,13 @@ BUSTER_GLOBAL_LOCAL int os_posix_map_flags(MapFlags flags)
 // collide with the null pointer, which means "no descriptor" everywhere.
 BUSTER_GLOBAL_LOCAL OsFileDescriptor* posix_fd_to_generic_fd(int fd)
 {
-    BUSTER_VALIDATE(fd >= 0);
+    BUSTER_RT_CHECK(fd >= 0);
     return (OsFileDescriptor*)((u64)fd + 1);
 }
 
 int generic_fd_to_posix(OsFileDescriptor* fd)
 {
-    BUSTER_CHECK(fd);
+    BUSTER_RT_CHECK(fd);
     return (int)((u64)fd - 1);
 }
 #elif defined(_WIN32)
@@ -510,7 +510,7 @@ BUSTER_GLOBAL_LOCAL DWORD os_windows_allocation_flags(MapFlags flags)
 
 BUSTER_GLOBAL_LOCAL void* generic_fd_to_windows(OsFileDescriptor* fd)
 {
-    BUSTER_CHECK(fd);
+    BUSTER_RT_CHECK(fd);
     return (void*)fd;
 }
 #endif
@@ -543,7 +543,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsResourceTestFailure
 
 void os_resource_test_fail_on_call(OsResourceTestOperation operation, u64 call_index)
 {
-    BUSTER_VALIDATE((u64)operation < (u64)OS_RESOURCE_TEST_OPERATION_COUNT);
+    BUSTER_RT_CHECK((u64)operation < (u64)OS_RESOURCE_TEST_OPERATION_COUNT);
     os_resource_test_failures[(u64)operation] = (OsResourceTestFailure){
         .calls_before_failure = call_index,
         .armed = true,
@@ -557,7 +557,7 @@ void os_resource_test_clear(void)
 
 BUSTER_GLOBAL_LOCAL bool os_resource_test_should_fail(OsResourceTestOperation operation)
 {
-    BUSTER_VALIDATE((u64)operation < (u64)OS_RESOURCE_TEST_OPERATION_COUNT);
+    BUSTER_RT_CHECK((u64)operation < (u64)OS_RESOURCE_TEST_OPERATION_COUNT);
     OsResourceTestFailure* failure = &os_resource_test_failures[(u64)operation];
     bool result = false;
     if (failure->armed)
@@ -753,8 +753,8 @@ bool os_protect(void* address, u64 size, ProtectionFlags protection)
 bool os_decommit(void* address, u64 size)
 {
     u64 page_size = os_get_page_size();
-    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
-    BUSTER_CHECK(size && is_aligned((u64)address, page_size) && is_aligned(size, page_size));
+    BUSTER_RT_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
+    BUSTER_RT_CHECK(size && is_aligned((u64)address, page_size) && is_aligned(size, page_size));
     bool result = true;
 #if defined(__linux__) || defined(__APPLE__)
     // The reservation is already mapped for its lifetime. One syscall keeps
@@ -780,7 +780,7 @@ bool os_decommit(void* address, u64 size)
 u64 os_discard(void* address, u64 size)
 {
     u64 page_size = os_get_page_size();
-    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
+    BUSTER_RT_CHECK(BUSTER_IS_POWER_OF_TWO(page_size));
     u64 start = ((u64)address + page_size - 1u) & ~(page_size - 1u);
     u64 end = ((u64)address + size) & ~(page_size - 1u);
     u64 result = 0;
@@ -1127,7 +1127,7 @@ void os_mutex_destroy(OsMutexHandle* handle)
 #if !BUSTER_SINGLE_THREADED
 OsBarrierHandle* os_barrier_create(u32 thread_count)
 {
-    BUSTER_CHECK(thread_count >= 1);
+    BUSTER_RT_CHECK(thread_count >= 1);
     OsEntity* result = 0;
     bool create_barrier = true;
 #if BUSTER_INCLUDE_TESTS
@@ -1710,7 +1710,7 @@ String8 os_path_absolute(Arena* arena, String8 relative_file_path, bool null_ter
             if (syscall_result)
             {
                 result = string_from_pointer(syscall_result);
-                BUSTER_VALIDATE(result.length <= length);
+                BUSTER_RT_CHECK(result.length <= length);
             }
 
             arena_set_position(arena, position + result.length + null_terminate);
@@ -3072,7 +3072,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsFileTestState os_file_test_state;
 
 void os_file_test_begin(String8 path, const OsFileTestStep* steps, u32 count)
 {
-    BUSTER_VALIDATE(!os_file_test_state.path.length && path.length && count <= 16);
+    BUSTER_RT_CHECK(!os_file_test_state.path.length && path.length && count <= 16);
     os_file_test_state = (OsFileTestState){.path = path, .steps = steps, .count = count};
 }
 
@@ -3363,7 +3363,10 @@ bool os_file_write_attempt(OsFileDescriptor* file_descriptor, ByteSlice buffer)
 void os_file_write(OsFileDescriptor* file_descriptor, ByteSlice buffer)
 {
     bool success = os_file_write_attempt(file_descriptor, buffer);
-    BUSTER_VALIDATE(success);
+    if (!success)
+    {
+        os_fail_message(S8("file write failed"));
+    }
 }
 
 OsFileReadResult os_file_read_some(OsFileDescriptor* file_descriptor, ByteSlice buffer)
@@ -4659,7 +4662,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL OsProcessSpawnTestState os_process_
 
 void os_process_spawn_test_fail_on_call(OsProcessSpawnTestOperation operation, u64 call_index)
 {
-    BUSTER_VALIDATE(operation < OS_PROCESS_SPAWN_TEST_OPERATION_COUNT);
+    BUSTER_RT_CHECK(operation < OS_PROCESS_SPAWN_TEST_OPERATION_COUNT);
     os_process_spawn_test_state = (OsProcessSpawnTestState){
         .fail_call = call_index,
         .operation = operation,
@@ -5109,7 +5112,7 @@ bool os_early_exit_arm(void)
 #if BUSTER_INCLUDE_TESTS
         if (injected)
         {
-            BUSTER_VALIDATE(os_process_spawn_test_end() && !created);
+            BUSTER_RT_CHECK(os_process_spawn_test_end() && !created);
         }
 #endif
     }
@@ -5972,7 +5975,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_THREAD_LOCAL_DECL u32 os_process_capture_test_calls_r
 
 void os_process_capture_test_fail_on_call(OsProcessCaptureEvent event, u32 call_index)
 {
-    BUSTER_VALIDATE(os_process_capture_test_failure == OS_PROCESS_CAPTURE_EVENT_COUNT &&
+    BUSTER_RT_CHECK(os_process_capture_test_failure == OS_PROCESS_CAPTURE_EVENT_COUNT &&
         call_index < 16 &&
         (event == OS_PROCESS_CAPTURE_WAIT_FAILED || event == OS_PROCESS_CAPTURE_READ_FAILED || event == OS_PROCESS_CAPTURE_CLOSE_FAILED));
     os_process_capture_test_failure = event;
@@ -6022,9 +6025,9 @@ BUSTER_GLOBAL_LOCAL bool os_process_capture_close(int* descriptor, OsProcessCapt
     {
         if (state->phase != OS_PROCESS_CAPTURE_CLOSING)
         {
-            BUSTER_CHECK(os_process_capture_step(state, OS_PROCESS_CAPTURE_STOP, 0));
+            BUSTER_RT_CHECK(os_process_capture_step(state, OS_PROCESS_CAPTURE_STOP, 0));
         }
-        BUSTER_CHECK(os_process_capture_step(state, close_result ? OS_PROCESS_CAPTURE_CLOSE_FAILED : OS_PROCESS_CAPTURE_CLOSE_OK, 0));
+        BUSTER_RT_CHECK(os_process_capture_step(state, close_result ? OS_PROCESS_CAPTURE_CLOSE_FAILED : OS_PROCESS_CAPTURE_CLOSE_OK, 0));
     }
     return close_result == 0;
 }
@@ -6039,7 +6042,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice pipe_capture_flatten(Arena* arena, PipeCapture* ca
         memcpy(pointer + offset, chunk->data, chunk->length);
         offset += chunk->length;
     }
-    BUSTER_CHECK(offset == capture->total_length);
+    BUSTER_RT_CHECK(offset == capture->total_length);
     return (ByteSlice){pointer, capture->total_length};
 }
 
@@ -6054,8 +6057,8 @@ OsProcessCaptureTestResult os_process_capture_test_collect(Arena* arena, Process
     for (u64 index = 0; index < input_count; index += 1)
     {
         OsProcessCaptureTestInput const* input = inputs + index;
-        BUSTER_VALIDATE(input->stream == STANDARD_STREAM_OUTPUT || input->stream == STANDARD_STREAM_ERROR);
-        BUSTER_VALIDATE(!input->bytes.length || input->bytes.pointer);
+        BUSTER_RT_CHECK(input->stream == STANDARD_STREAM_OUTPUT || input->stream == STANDARD_STREAM_ERROR);
+        BUSTER_RT_CHECK(!input->bytes.length || input->bytes.pointer);
         u64 offset = 0;
         do
         {
@@ -7302,7 +7305,7 @@ BUSTER_GLOBAL_LOCAL OsProcessGroupCleanupResult os_process_group_terminate_and_p
     enum {OS_PROCESS_GROUP_CLEANUP_ATTEMPTS = 101};
     OsProcessGroupCleanupResult result = OS_PROCESS_GROUP_CLEANUP_RETRY;
 #if BUSTER_LINUX || BUSTER_MACOS
-    BUSTER_CHECK(arena != 0);
+    BUSTER_RT_CHECK(arena != 0);
     u64 arena_position = arena->position;
 #else
     BUSTER_UNUSED(arena);
@@ -8088,7 +8091,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                     {
                         for (nfds_t index = 0; index < poll_count; index += 1)
                         {
-                            BUSTER_CHECK(os_process_capture_step(capture_states + poll_streams[index], OS_PROCESS_CAPTURE_WAIT_INTERRUPTED, 0));
+                            BUSTER_RT_CHECK(os_process_capture_step(capture_states + poll_streams[index], OS_PROCESS_CAPTURE_WAIT_INTERRUPTED, 0));
                         }
                     }
                     continue;
@@ -8098,7 +8101,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 {
                     for (nfds_t index = 0; index < poll_count; index += 1)
                     {
-                        BUSTER_CHECK(os_process_capture_step(capture_states + poll_streams[index], OS_PROCESS_CAPTURE_WAIT_FAILED, 0));
+                        BUSTER_RT_CHECK(os_process_capture_step(capture_states + poll_streams[index], OS_PROCESS_CAPTURE_WAIT_FAILED, 0));
                     }
                 }
                 errno = poll_error;
@@ -8111,11 +8114,11 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                 OsProcessCaptureState* capture_state = spawn.process_group ? 0 : capture_states + stream;
                 if (!(poll_fds[poll_index].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
                 {
-                    if (capture_state) { BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_WAIT_IDLE, 0)); }
+                    if (capture_state) { BUSTER_RT_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_WAIT_IDLE, 0)); }
                     continue;
                 }
 
-                if (capture_state) { BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_WAIT_READY, 0)); }
+                if (capture_state) { BUSTER_RT_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_WAIT_READY, 0)); }
                 u8 buffer[OS_PROCESS_CAPTURE_READ_LIMIT];
                 ssize_t read_result;
 #if BUSTER_INCLUDE_TESTS && (BUSTER_LINUX || BUSTER_MACOS)
@@ -8133,7 +8136,7 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
 
                 if (read_result > 0)
                 {
-                    if (capture_state) { BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_READ_BYTES, (u64)read_result)); }
+                    if (capture_state) { BUSTER_RT_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_READ_BYTES, (u64)read_result)); }
                     pipe_capture_append(scratch.arena, &captures[stream], spawn, &result, (StandardStream)stream, buffer, (u64)read_result);
                 }
                 else
@@ -8148,14 +8151,14 @@ ProcessWaitResult os_process_wait_deadline(Arena* arena, ProcessSpawnResult spaw
                     {
                         if (capture_state)
                         {
-                            BUSTER_CHECK(os_process_capture_step(capture_state, read_result ? OS_PROCESS_CAPTURE_READ_FAILED : OS_PROCESS_CAPTURE_READ_EOF, 0));
+                            BUSTER_RT_CHECK(os_process_capture_step(capture_state, read_result ? OS_PROCESS_CAPTURE_READ_FAILED : OS_PROCESS_CAPTURE_READ_EOF, 0));
                         }
                         capture_failed = !os_process_capture_close(read_pipes + stream, capture_state) || capture_failed;
                         open_pipe_count -= 1;
                     }
                     else if (capture_state)
                     {
-                        BUSTER_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_READ_INTERRUPTED, 0));
+                        BUSTER_RT_CHECK(os_process_capture_step(capture_state, OS_PROCESS_CAPTURE_READ_INTERRUPTED, 0));
                     }
                 }
             }
@@ -8996,7 +8999,7 @@ ThreadContext* thread_context_allocate(void)
     for (u64 i = 0; i < SCRATCH_ARENA_COUNT; i += 1)
     {
         arenas[i] = arena_create((ArenaCreation){0});
-        BUSTER_CHECK_RAW(arenas[i] != 0);
+        BUSTER_RT_CHECK_RAW(arenas[i] != 0);
     }
 
     ThreadContext* result = arena_allocate(arenas[0], ThreadContext, 1);
@@ -9024,7 +9027,7 @@ void thread_context_release(ThreadContext* thread_context)
         // The context owns the scratch arenas that contain it. TLS must stop
         // referring to that storage before any arena is unmapped. Reported
         // without scratch: there is deliberately no selected context here.
-        BUSTER_CHECK_RAW(thread_context_selected() == 0);
+        BUSTER_RT_CHECK_RAW(thread_context_selected() == 0);
     }
     Arena* arenas[BUSTER_ARRAY_LENGTH(thread_context->arenas)];
     memcpy(arenas, thread_context->arenas, sizeof(arenas));
@@ -9055,7 +9058,7 @@ Arena* thread_context_get_scratch(Arena** conflicts, u64 count)
     // must select another context before using any scratch-backed operation.
     // The raw reporter is required: the formatted one allocates from the
     // scratch arena this call is failing to produce.
-    BUSTER_CHECK_RAW(thread_context != 0);
+    BUSTER_RT_CHECK_RAW(thread_context != 0);
     Arena** arena_pointer = thread_context->arenas;
 
     Arena* result = 0;
@@ -9112,8 +9115,8 @@ void lane_sync(void)
 void lane_broadcast(void* value_pointer, u64 value_size, u64 source_lane_index)
 {
     LaneContext* lane_context = &thread_context_selected()->lane_context;
-    BUSTER_CHECK(value_size >= 1 && value_size <= sizeof(*lane_context->broadcast_memory));
-    BUSTER_CHECK(source_lane_index < lane_context->lane_count);
+    BUSTER_RT_CHECK(value_size >= 1 && value_size <= sizeof(*lane_context->broadcast_memory));
+    BUSTER_RT_CHECK(source_lane_index < lane_context->lane_count);
 #if !BUSTER_SINGLE_THREADED
     if (lane_context->lane_count > 1)
     {
@@ -9227,7 +9230,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType lane_persistent_worker_entry_point(void* ar
                     {
                         // arenas[0] owns ThreadContext itself, so preserve its
                         // stable prefix and decommit only the unused tail.
-                        BUSTER_VALIDATE(arena_set_position_and_decommit(scratch, saved_arena_positions[arena_index]));
+                        BUSTER_RT_CHECK(arena_set_position_and_decommit(scratch, saved_arena_positions[arena_index]));
                     }
                     else
                     {
@@ -9242,9 +9245,9 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType lane_persistent_worker_entry_point(void* ar
 
 BUSTER_GLOBAL_LOCAL LaneGang* lane_gang_create(ThreadContext* owner, u64 count)
 {
-    BUSTER_CHECK(owner != 0);
-    BUSTER_CHECK(count > 1 && count <= UINT32_MAX);
-    BUSTER_CHECK(owner->lane_gang == 0 && owner->lane_arena == 0);
+    BUSTER_RT_CHECK(owner != 0);
+    BUSTER_RT_CHECK(count > 1 && count <= UINT32_MAX);
+    BUSTER_RT_CHECK(owner->lane_gang == 0 && owner->lane_arena == 0);
 
     LaneGang* result = 0;
     Arena* arena = arena_create((ArenaCreation){0});
@@ -9298,19 +9301,22 @@ BUSTER_GLOBAL_LOCAL LaneGang* lane_gang_create(ThreadContext* owner, u64 count)
             {
                 for (u64 lane = 1; lane < next_lane; lane += 1)
                 {
-                    BUSTER_VALIDATE(os_thread_join(gang->handles[lane]));
+                    if (!os_thread_join(gang->handles[lane]))
+                    {
+                        os_fail_message(S8("thread join failed"));
+                    }
                 }
                 if (gang->dispatch_barrier)
                 {
                     os_barrier_destroy(gang->dispatch_barrier);
                 }
                 os_mutex_destroy(gang->startup.mutex);
-                BUSTER_VALIDATE(arena_destroy(arena, 1));
+                BUSTER_RT_CHECK(arena_destroy(arena, 1));
             }
         }
         else
         {
-            BUSTER_VALIDATE(arena_destroy(arena, 1));
+            BUSTER_RT_CHECK(arena_destroy(arena, 1));
         }
     }
     return result;
@@ -9322,12 +9328,15 @@ BUSTER_GLOBAL_LOCAL void lane_gang_destroy(LaneGang* gang)
     {
         return;
     }
-    BUSTER_CHECK(!gang->running);
+    BUSTER_RT_CHECK(!gang->running);
     gang->shutdown = true;
     os_barrier_wait(gang->dispatch_barrier);
     for (u64 lane = 1; lane < gang->capacity; lane += 1)
     {
-        BUSTER_VALIDATE(os_thread_join(gang->handles[lane]));
+        if (!os_thread_join(gang->handles[lane]))
+        {
+            os_fail_message(S8("thread join failed"));
+        }
     }
     if (gang->active_barrier)
     {
@@ -9345,18 +9354,21 @@ void lane_gang_release(ThreadContext* thread_context)
         thread_context->lane_gang = 0;
         Arena* lane_arena = thread_context->lane_arena;
         thread_context->lane_arena = 0;
-        BUSTER_VALIDATE(arena_destroy(lane_arena, 1));
+        BUSTER_RT_CHECK(arena_destroy(lane_arena, 1));
     }
 }
 
 BUSTER_GLOBAL_LOCAL void lane_gang_dispatch(ThreadContext* thread_context, LaneGang* gang, u64 count, ThreadCallback* callback, void* argument)
 {
-    BUSTER_CHECK(thread_context != 0 && gang != 0 && !gang->running);
-    BUSTER_CHECK(count > 1 && count <= gang->capacity);
+    BUSTER_RT_CHECK(thread_context != 0 && gang != 0 && !gang->running);
+    BUSTER_RT_CHECK(count > 1 && count <= gang->capacity);
     if (!gang->active_barrier || gang->active_count != count)
     {
         OsBarrierHandle* replacement = os_barrier_create((u32)count);
-        BUSTER_VALIDATE(replacement != 0);
+        if (!replacement)
+        {
+            os_fail_message(S8("lane barrier creation failed"));
+        }
         if (gang->active_barrier)
         {
             os_barrier_destroy(gang->active_barrier);
@@ -9477,7 +9489,10 @@ BUSTER_GLOBAL_LOCAL bool lane_run_fresh(ThreadContext* thread_context, u64 count
             callback(argument);
             for (u64 lane = 1; lane < count; lane += 1)
             {
-                BUSTER_VALIDATE(os_thread_join(handles[lane]));
+                if (!os_thread_join(handles[lane]))
+                {
+                    os_fail_message(S8("thread join failed"));
+                }
             }
             thread_context->lane_context = saved;
             result = true;
@@ -9486,7 +9501,10 @@ BUSTER_GLOBAL_LOCAL bool lane_run_fresh(ThreadContext* thread_context, u64 count
         {
             for (u64 lane = 1; lane < next_lane; lane += 1)
             {
-                BUSTER_VALIDATE(os_thread_join(handles[lane]));
+                if (!os_thread_join(handles[lane]))
+                {
+                    os_fail_message(S8("thread join failed"));
+                }
             }
         }
 
@@ -9563,15 +9581,15 @@ bool os_resource_failure_self_test(void)
 void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument)
 {
     ThreadContext* thread_context = thread_context_selected();
-    BUSTER_CHECK(thread_context != 0);
-    BUSTER_CHECK(callback != 0);
+    BUSTER_RT_CHECK(thread_context != 0);
+    BUSTER_RT_CHECK(callback != 0);
 
 #if BUSTER_SINGLE_THREADED
     BUSTER_UNUSED(lane_count_requested);
     u64 count = 1;
 #else
     u64 count = lane_count_requested ? lane_count_requested : os_get_logical_thread_count();
-    BUSTER_CHECK(count <= UINT32_MAX);
+    BUSTER_RT_CHECK(count <= UINT32_MAX);
 #endif
 
     LaneContext saved = thread_context->lane_context;
@@ -9593,14 +9611,20 @@ void lane_run(u64 lane_count_requested, ThreadCallback* callback, void* argument
     // region and would break the documented nested-gang behavior.
     else if (saved.lane_count > 1 || (thread_context->lane_gang && thread_context->lane_gang->running))
     {
-        BUSTER_VALIDATE(lane_run_fresh(thread_context, count, callback, argument));
+        if (!lane_run_fresh(thread_context, count, callback, argument))
+        {
+            os_fail_message(S8("lane gang creation failed"));
+        }
     }
     else
     {
         if (!thread_context->lane_gang || thread_context->lane_gang->capacity < count)
         {
             lane_gang_release(thread_context);
-            BUSTER_VALIDATE(lane_gang_create(thread_context, count) != 0);
+            if (!lane_gang_create(thread_context, count))
+            {
+                os_fail_message(S8("lane gang creation failed"));
+            }
         }
         lane_gang_dispatch(thread_context, thread_context->lane_gang, count, callback, argument);
     }
@@ -9611,11 +9635,11 @@ void lane_release(void)
 {
 #if !BUSTER_SINGLE_THREADED
     ThreadContext* thread_context = thread_context_selected();
-    BUSTER_CHECK(thread_context != 0);
+    BUSTER_RT_CHECK(thread_context != 0);
     // Releasing from inside a region would join workers that are still
     // running this caller's callback.
-    BUSTER_CHECK(thread_context->lane_context.lane_count == 1);
-    BUSTER_CHECK(!thread_context->lane_gang || !thread_context->lane_gang->running);
+    BUSTER_RT_CHECK(thread_context->lane_context.lane_count == 1);
+    BUSTER_RT_CHECK(!thread_context->lane_gang || !thread_context->lane_gang->running);
     lane_gang_release(thread_context);
 #endif
 }
@@ -9630,7 +9654,10 @@ u64 os_performance_counter_frequency(void)
     {
         LARGE_INTEGER native_frequency;
         BOOL success = QueryPerformanceFrequency(&native_frequency);
-        BUSTER_VALIDATE(success && native_frequency.QuadPart > 0);
+        if (!success || native_frequency.QuadPart <= 0)
+        {
+            os_fail_message(S8("performance counter frequency query failed"));
+        }
         frequency = (u64)native_frequency.QuadPart;
     }
     return frequency;
@@ -9663,7 +9690,7 @@ u64 os_now_microseconds(void)
 
 void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_value)
 {
-    BUSTER_CHECK(flag_index < flag_count);
+    BUSTER_RT_CHECK(flag_index < flag_count);
     u64 bits_per_element = sizeof(*flag_pointer) * 8;
     u64 element_index = flag_index / bits_per_element;
     u64 bit_index = flag_index % bits_per_element;
@@ -9672,7 +9699,7 @@ void flag_set_ex(u64* flag_pointer, u64 flag_count, u64 flag_index, bool flag_va
 
 bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index)
 {
-    BUSTER_CHECK(flag_index < flag_count);
+    BUSTER_RT_CHECK(flag_index < flag_count);
     u64 bits_per_element = sizeof(*flag_pointer) * 8;
     u64 element_index = flag_index / bits_per_element;
     u64 bit_index = flag_index % bits_per_element;
@@ -9682,7 +9709,7 @@ bool flag_get_ex(u64* flag_pointer, u64 flag_count, u64 flag_index)
 BooleanArgumentProcessResult boolean_argument_process(String8* flag_string_start_pointer, u64 flag_string_start_count, u64* flag_pointer, u64 flag_count,
                                                       String8 argument)
 {
-    BUSTER_CHECK(flag_string_start_count == flag_count);
+    BUSTER_RT_CHECK(flag_string_start_count == flag_count);
 
     BooleanArgumentProcessResult result = {0};
 

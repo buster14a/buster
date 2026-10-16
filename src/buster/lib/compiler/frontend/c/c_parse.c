@@ -1573,7 +1573,7 @@ BUSTER_C_INTERNAL bool c_parse_declaration_keyword_at(CParseResult* result, CPre
 BUSTER_C_SHARED void c_parse_diagnostic(CParseResult* result, CSourceLocation location, CDiagnosticKind kind, String8 message)
 {
     IR_DIAGNOSTIC_CENSUS_RECORD(C_DIAGNOSTICS_RECORDED, 1);
-    BUSTER_VALIDATE(result->diagnostic_count < result->diagnostic_capacity);
+    BUSTER_RT_CHECK(result->diagnostic_count < result->diagnostic_capacity);
     result->diagnostics[result->diagnostic_count++] = (CDiagnostic){
         .message = message,
         .location = location,
@@ -1951,19 +1951,19 @@ BUSTER_C_INTERNAL CParseResult* c_type_parse_frame_checkpoint_acquire(CTypeParse
 BUSTER_C_INTERNAL void c_type_parse_frame_storage_pop(CTypeParseMachine* machine)
 {
     CTypeParseFrame* frame = c_type_parse_frame_top(machine);
-    BUSTER_CHECK(frame);
+    BUSTER_RT_CHECK(frame);
     if (machine->frame_storage_arena)
     {
         if (frame->checkpoint)
         {
             u32 slot = frame->checkpoint_slot;
-            BUSTER_CHECK(slot < machine->frame_checkpoint_capacity);
+            BUSTER_RT_CHECK(slot < machine->frame_checkpoint_capacity);
             machine->frame_checkpoint_free_next[slot] = machine->frame_checkpoint_free_head;
             machine->frame_checkpoint_free_head = slot;
             frame->checkpoint = 0;
         }
         CTypeParseFrameBlock* block = machine->frame_block_active;
-        BUSTER_CHECK(block && block->count);
+        BUSTER_RT_CHECK(block && block->count);
         block->count -= 1;
         if (!block->count)
         {
@@ -2046,7 +2046,7 @@ BUSTER_C_INTERNAL bool c_type_parse_frame_push(CTypeParseMachine* machine, CType
 
 BUSTER_C_INTERNAL void c_type_parse_frame_complete(CTypeParseMachine* machine, CTypeId type, u32 index, bool valid)
 {
-    BUSTER_CHECK(machine->frame_count);
+    BUSTER_RT_CHECK(machine->frame_count);
     CTypeParseFrame* frame = c_type_parse_frame_top(machine);
     CTypeParseFrameKind kind = frame->kind;
     bool result_nonplace_projection = kind == C_TYPE_PARSE_FRAME_SIZEOF && frame->expression_nonplace_projection;
@@ -2683,7 +2683,7 @@ BUSTER_C_INTERNAL void c_parse_finalize_flexible_array_members(CTypeParseMachine
                         machine->failed = true;
                         break;
                     }
-                    BUSTER_VALIDATE(stack_count < capacity);
+                    BUSTER_RT_CHECK(stack_count < capacity);
                     visited[child_id.value] = generation;
                     stack[stack_count++] = (CParsePromotedMemberWork){.type = child_id};
                     work_count += 1;
@@ -3914,7 +3914,7 @@ BUSTER_C_INTERNAL void c_parse_layout_agenda_publish(CParseLayoutContext* contex
 {
     CParseLayoutAgenda* agenda = context->agenda;
     CParseLayoutEntry* published = agenda->entries + agenda->current;
-    BUSTER_CHECK(published->type_index == type_index);
+    BUSTER_RT_CHECK(published->type_index == type_index);
     published->size = size;
     published->alignment = alignment;
     published->provisional = provisional;
@@ -6315,7 +6315,7 @@ BUSTER_C_INTERNAL BUSTER_INLINE void c_parse_type_identity_prepare(CTypeParseMac
     bool absent = positions && positions->built &&
                   (!count || positions->type_identity_positions[count - 1] < start || positions->type_identity_positions[0] >= end);
 #if BUSTER_REFERENCE_CHECKS
-    BUSTER_CHECK(!absent || c_parse_position_lower_bound(positions->type_identity_positions, count, start) >=
+    BUSTER_RT_CHECK(!absent || c_parse_position_lower_bound(positions->type_identity_positions, count, start) >=
                                 c_parse_position_lower_bound(positions->type_identity_positions, count, end));
 #endif
     if (!absent) c_parse_type_identity_settle(machine, arena, preprocess, result, scope, start, end);
@@ -6605,7 +6605,7 @@ BUSTER_C_INTERNAL CCallArityDiagnostic c_semantic_check_named_call_arities_core(
     }
     if (attribute_arena)
     {
-        BUSTER_VALIDATE(arena_destroy(attribute_arena, 1));
+        BUSTER_RT_CHECK(arena_destroy(attribute_arena, 1));
     }
     return result;
 }
@@ -9314,7 +9314,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_constant_range(CIrExt80Fold* fold, u32 st
                     frame->colon = colon;
                     frame->omitted = colon == question + 1;
                     frame->stage = 1;
-                    BUSTER_CHECK(frame_count < capacity);
+                    BUSTER_RT_CHECK(frame_count < capacity);
                     frames[frame_count++] = (CIrExt80ConditionalFrame){.start = expression_start, .end = question,
                                                                         .type_only = frame->type_only};
                 }
@@ -9330,7 +9330,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_constant_range(CIrExt80Fold* fold, u32 st
                     {
                         frame->selected_value = frame->condition;
                         frame->stage = 3;
-                        BUSTER_CHECK(frame_count < capacity);
+                        BUSTER_RT_CHECK(frame_count < capacity);
                         frames[frame_count++] = (CIrExt80ConditionalFrame){.start = frame->colon + 1, .end = frame->end, .type_only = true};
                     }
                     else
@@ -9338,7 +9338,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_constant_range(CIrExt80Fold* fold, u32 st
                         frame->stage = 2;
                         u32 selected_start = frame->omitted || !frame->selected_is_true ? frame->colon + 1 : frame->question + 1;
                         u32 selected_end = frame->omitted || !frame->selected_is_true ? frame->end : frame->colon;
-                        BUSTER_CHECK(frame_count < capacity);
+                        BUSTER_RT_CHECK(frame_count < capacity);
                         frames[frame_count++] = (CIrExt80ConditionalFrame){.start = selected_start, .end = selected_end,
                                                                             .type_only = frame->type_only};
                     }
@@ -9360,7 +9360,7 @@ BUSTER_C_INTERNAL bool c_ir_ext80_fold_constant_range(CIrExt80Fold* fold, u32 st
                         frame->stage = 3;
                         u32 other_start = frame->selected_is_true ? frame->colon + 1 : frame->question + 1;
                         u32 other_end = frame->selected_is_true ? frame->end : frame->colon;
-                        BUSTER_CHECK(frame_count < capacity);
+                        BUSTER_RT_CHECK(frame_count < capacity);
                         frames[frame_count++] = (CIrExt80ConditionalFrame){.start = other_start, .end = other_end, .type_only = true};
                     }
                 }
@@ -17397,7 +17397,7 @@ BUSTER_C_INTERNAL bool c_parse_promoted_member_workspace(CTypeParseMachine* mach
             u32* visited = arena_allocate_zeroed(workspace, u32, capacity);
             if (machine->promoted_member_arena)
             {
-                BUSTER_VALIDATE(arena_destroy(machine->promoted_member_arena, 1));
+                BUSTER_RT_CHECK(arena_destroy(machine->promoted_member_arena, 1));
             }
             machine->promoted_member_arena = workspace;
             machine->promoted_member_work = work;
@@ -17418,7 +17418,7 @@ BUSTER_C_INTERNAL void c_parse_promoted_member_workspace_release(CTypeParseMachi
 {
     if (machine->promoted_member_arena)
     {
-        BUSTER_VALIDATE(arena_destroy(machine->promoted_member_arena, 1));
+        BUSTER_RT_CHECK(arena_destroy(machine->promoted_member_arena, 1));
         machine->promoted_member_arena = 0;
     }
 }
@@ -18314,7 +18314,7 @@ BUSTER_C_INTERNAL u32 c_parse_initializer_brace_close(CParseResult* result, CPre
         close = open < preprocess.token_count ? positions->matching_delimiters_plus_one[open] - 1 : UINT32_MAX;
         close = close < end ? close : end;
 #if BUSTER_REFERENCE_CHECKS
-        BUSTER_CHECK(close == c_parse_matching_delimiter(preprocess, open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE));
+        BUSTER_RT_CHECK(close == c_parse_matching_delimiter(preprocess, open, end, C_PUNCTUATOR_LEFT_BRACE, C_PUNCTUATOR_RIGHT_BRACE));
 #endif
     }
     else
@@ -18627,7 +18627,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
         if (aggregate && c_token_is_punctuator(&preprocess.tokens[designator.value_start], C_PUNCTUATOR_LEFT_BRACE))
         {
 #if BUSTER_REFERENCE_CHECKS
-            BUSTER_CHECK(c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit) > designator.value_start);
+            BUSTER_RT_CHECK(c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit) > designator.value_start);
 #endif
             u32 close = c_parse_initializer_brace_close(result, preprocess, designator.value_start, frame->limit);
             if (close >= frame->limit)
@@ -18686,7 +18686,7 @@ BUSTER_C_INTERNAL bool c_parse_infer_initializer_array_count_core(CTypeParseMach
                       (single_end == frame->limit || c_token_is_punctuator(&preprocess.tokens[single_end], C_PUNCTUATOR_COMMA));
         u32 value_end = single ? single_end : c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit);
 #if BUSTER_REFERENCE_CHECKS
-        BUSTER_CHECK(value_end == c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit));
+        BUSTER_RT_CHECK(value_end == c_parse_initializer_value_end(preprocess, designator.value_start, frame->limit));
 #endif
         if (value_end <= designator.value_start)
         {
@@ -21951,7 +21951,7 @@ BUSTER_C_INTERNAL CIntegerConstant c_parse_microsoft_enum_value(CParseResult* re
     value = c_parse_enum_value_type(result, target, value, type);
     if (value.valid)
     {
-        BUSTER_CHECK(value.bit_width == 32 && value.is_signed);
+        BUSTER_RT_CHECK(value.bit_width == 32 && value.is_signed);
         u32 image = (u32)value.magnitude;
         if (value.is_negative) image = 0u - image;
         value.is_negative = (image >> 31) != 0;
@@ -23437,7 +23437,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
             bool microsoft_anonymous = preprocess.target.os == OPERATING_SYSTEM_WINDOWS && (defined_in_place || unqualified->is_complete);
             if ((defined_in_place && !base->tag.length) || microsoft_anonymous)
             {
-                BUSTER_VALIDATE(result->member_count < result->member_capacity);
+                BUSTER_RT_CHECK(result->member_count < result->member_capacity);
                 result->members[result->member_count++] = (CMember){
                     .location = c_preprocess_token_site(frame->preprocess, frame->first),
                     .type = frame->base_type,
@@ -23822,7 +23822,7 @@ BUSTER_C_INTERNAL void c_type_parse_aggregate_segment_step(CTypeParseMachine* ma
                           member_record->definition_start + member_record->definition_token_count <= frame->start;
     bool has_incomplete_type = member_record && (member_record->kind == C_TYPE_STRUCT || member_record->kind == C_TYPE_UNION) &&
                                !member_record->is_complete && !defined_in_place && !defined_before;
-    BUSTER_VALIDATE(result->member_count < result->member_capacity);
+    BUSTER_RT_CHECK(result->member_count < result->member_capacity);
     result->members[result->member_count++] = (CMember){
         .name = c_token_spelling(preprocess.spelling_base, name),
         .location = c_preprocess_token_site(&preprocess, name),
@@ -27542,7 +27542,7 @@ BUSTER_C_INTERNAL CTypeId c_parse_scalar_type_core_begin(CTypeParseMachine* mach
             {
                 declaration_type = c_parse_expression_scalar_type(result, C_TYPE_INT);
             }
-            BUSTER_VALIDATE(result->enum_member_count < result->enum_member_capacity);
+            BUSTER_RT_CHECK(result->enum_member_count < result->enum_member_capacity);
             result->enum_members[result->enum_member_count++] = (CEnumMember){
                 .name = c_token_spelling(preprocess.spelling_base, name),
                 .location = c_preprocess_token_site(&preprocess, name),
@@ -28542,7 +28542,7 @@ BUSTER_C_INTERNAL bool c_parse_parameter_segment(CTypeParseMachine* machine, CPa
         result->array_bounds[bound].is_parameter_declarator = true;
     c_parse_type_fact_parameter_write(machine, result->parameter_count, type);
     type = c_parse_adjust_parameter_type(result, type);
-    BUSTER_VALIDATE(result->parameter_count < result->parameter_capacity);
+    BUSTER_RT_CHECK(result->parameter_count < result->parameter_capacity);
     result->parameters[result->parameter_count++] = (CParameter){
         .name = c_token_spelling(preprocess.spelling_base, name),
         .location = c_preprocess_token_site(&preprocess, name),
@@ -28985,7 +28985,7 @@ BUSTER_C_INTERNAL void c_parse_declaration_type_derive(CTypeParseMachine* machin
                         {
                             break;
                         }
-                        BUSTER_VALIDATE(result->parameter_count < result->parameter_capacity);
+                        BUSTER_RT_CHECK(result->parameter_count < result->parameter_capacity);
                         result->parameters[result->parameter_count++] = (CParameter){
                             .name = spelling,
                             .location = c_preprocess_token_site(&preprocess, name),
@@ -30355,7 +30355,7 @@ BUSTER_C_INTERNAL u32 c_parse_binding_bind(CParseResult* result, CScopeId scope,
         {
             if (scope.value)
             {
-                BUSTER_VALIDATE(result->binding_undo_count < result->binding_undo_capacity);
+                BUSTER_RT_CHECK(result->binding_undo_count < result->binding_undo_capacity);
                 result->binding_undo[result->binding_undo_count++] = (CParseBindingUndo){
                     .symbol = symbol,
                     .previous = result->binding_by_symbol[symbol],
@@ -30522,7 +30522,7 @@ BUSTER_C_INTERNAL bool c_parse_scope_cursor_seek(CParseResult* result, CParseSco
                     if (symbol && symbol < cursor->symbol_capacity && entity.value < cursor->entity_capacity &&
                         result->entities[entity.value].scope.value == pushed.value)
                     {
-                        BUSTER_VALIDATE(cursor->stack_count < cursor->entity_capacity);
+                        BUSTER_RT_CHECK(cursor->stack_count < cursor->entity_capacity);
                         cursor->shadowed[entity.value] = cursor->by_symbol[symbol];
                         cursor->stack[cursor->stack_count++] = entity;
                         cursor->by_symbol[symbol] = entity;
@@ -30575,12 +30575,12 @@ BUSTER_C_SHARED void c_parse_scope_add_entity(CParseResult* result, CScopeId sco
     value->last_entity = entity;
     value->entity_count += 1;
 
-    BUSTER_CHECK(result->entity_lookup_bucket_count != 0);
+    BUSTER_RT_CHECK(result->entity_lookup_bucket_count != 0);
     CEntity* added = &result->entities[entity.value];
 #if BUSTER_REFERENCE_CHECKS
     // The token-kind gate of c_parse_lookup_entity_token relies on this: a
     // name is an identifier's spelling, never a punctuator's or a literal's.
-    BUSTER_CHECK(!added->name.length || added->name.pointer[0] == '_' || added->name.pointer[0] == '$' ||
+    BUSTER_RT_CHECK(!added->name.length || added->name.pointer[0] == '_' || added->name.pointer[0] == '$' ||
                  (u32)((added->name.pointer[0] | 0x20) - 'a') < 26 || (u8)added->name.pointer[0] >= 0x80);
 #endif
     added->symbol = c_parse_symbol_or_intern(result, symbol, added->name);
@@ -30684,13 +30684,13 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_symbol(CParseResult* result, C
     {
         found = result->binding_by_symbol[symbol];
 #if BUSTER_REFERENCE_CHECKS
-        BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name, &hops).value);
+        BUSTER_RT_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name, &hops).value);
 #endif
     }
     else if (result->scope_cursor && c_parse_scope_cursor_lookup(result, scope, symbol, name, &found))
     {
 #if BUSTER_REFERENCE_CHECKS
-        BUSTER_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name, &hops).value);
+        BUSTER_RT_CHECK(found.value == c_parse_lookup_entity_chain(result, scope, symbol, name, &hops).value);
 #endif
     }
     else
@@ -30760,14 +30760,14 @@ BUSTER_C_INTERNAL CEntityId c_parse_lookup_entity_in_scope(CParseResult* result,
         found = innermost.value != C_ID_UNDERLYING_INVALID && result->entities[innermost.value].scope.value == scope.value ? innermost
                                                                                                                           : C_ENTITY_ID_INVALID;
 #if BUSTER_REFERENCE_CHECKS
-        BUSTER_CHECK(found.value == c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name).value);
+        BUSTER_RT_CHECK(found.value == c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name).value);
 #endif
     }
     else if (result->scope_cursor && c_parse_scope_cursor_lookup(result, scope, symbol, name, &found))
     {
         found = found.value != C_ID_UNDERLYING_INVALID && result->entities[found.value].scope.value == scope.value ? found : C_ENTITY_ID_INVALID;
 #if BUSTER_REFERENCE_CHECKS
-        BUSTER_CHECK(found.value == c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name).value);
+        BUSTER_RT_CHECK(found.value == c_parse_lookup_entity_in_scope_chain(result, scope, symbol, name).value);
 #endif
     }
     else
@@ -31448,7 +31448,7 @@ BUSTER_C_INTERNAL void c_parse_bind_identifier_entity(Arena* arena, CParseResult
         entity = C_ENTITY_ID_INVALID;
     }
     bool first_use = token_index < result->identifier_use_by_token_capacity && !result->identifier_use_by_token_plus_one[token_index];
-    BUSTER_VALIDATE(result->identifier_use_count < result->identifier_use_capacity);
+    BUSTER_RT_CHECK(result->identifier_use_count < result->identifier_use_capacity);
     u32 use_index = result->identifier_use_count++;
     result->identifier_uses[use_index] = (CIdentifierUse){
         .token_index = token_index,
@@ -32583,7 +32583,7 @@ BUSTER_C_INTERNAL void c_parse_bind_statement_expression_body(CTypeParseMachine*
                                                                 CPreprocessResult preprocess, CScopeId scope, u32 declaration_index,
                                                                 u32 body_start, u32 body_end)
 {
-    BUSTER_VALIDATE(result->scope_count < result->scope_capacity);
+    BUSTER_RT_CHECK(result->scope_count < result->scope_capacity);
     CScopeId child = {
         .value = result->scope_count,
     };
@@ -32756,7 +32756,7 @@ BUSTER_GLOBAL_LOCAL void c_parse_enumerator_redefinition(CParseResult* result, A
 // an enum a controlling expression or direct expression type name defines.
 BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPreprocessResult preprocess, CScopeId scope, u32 declaration_index, u32 member_start, u32 member_end)
 {
-    BUSTER_VALIDATE(member_start <= member_end && member_end <= result->enum_member_count);
+    BUSTER_RT_CHECK(member_start <= member_end && member_end <= result->enum_member_count);
     for (u32 member_index = member_start; member_index < member_end; member_index += 1)
     {
         CEnumMember* member = &result->enum_members[member_index];
@@ -32773,7 +32773,7 @@ BUSTER_C_INTERNAL void c_parse_publish_enum_members(CParseResult* result, CPrepr
         CEntityId entity = {
             .value = result->entity_count,
         };
-        BUSTER_VALIDATE(result->entity_count < result->entity_capacity);
+        BUSTER_RT_CHECK(result->entity_count < result->entity_capacity);
         result->entities[result->entity_count++] = (CEntity){
             .name = member->name,
             .location = member->location,
@@ -33564,7 +33564,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool c_parse_local_declarations_split(CTypePar
         CEntityId entity = {
             .value = result->entity_count,
         };
-        BUSTER_VALIDATE(result->entity_count < result->entity_capacity);
+        BUSTER_RT_CHECK(result->entity_count < result->entity_capacity);
         result->entities[result->entity_count++] = (CEntity){
             .name = c_token_spelling(preprocess.spelling_base, name),
             .location = c_preprocess_token_site(&preprocess, name),
@@ -34831,7 +34831,7 @@ BUSTER_C_INTERNAL CParsePendingTypeofDeclaration* c_parse_pending_typeof_grow(Ar
     if (count == *capacity)
     {
         u32 next_capacity = *capacity ? (*capacity > maximum / 2 ? maximum : *capacity * 2) : BUSTER_MIN(maximum, 4u);
-        BUSTER_VALIDATE(next_capacity > count && next_capacity <= maximum);
+        BUSTER_RT_CHECK(next_capacity > count && next_capacity <= maximum);
         CParsePendingTypeofDeclaration* next = arena_allocate(arena, CParsePendingTypeofDeclaration, next_capacity);
         if (*frames)
         {
@@ -36344,7 +36344,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
                 CScopeId statement_scope = {
                     .value = result->scope_count,
                 };
-                BUSTER_VALIDATE(result->scope_count < result->scope_capacity);
+                BUSTER_RT_CHECK(result->scope_count < result->scope_capacity);
                 result->scopes[result->scope_count++] = (CScope){
                     .parent = scope_stack[scope_count - 1],
                     .first_entity = C_ENTITY_ID_INVALID,
@@ -36406,7 +36406,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
             CScopeId child = {
                 .value = result->scope_count,
             };
-            BUSTER_VALIDATE(result->scope_count < result->scope_capacity);
+            BUSTER_RT_CHECK(result->scope_count < result->scope_capacity);
             result->scopes[result->scope_count++] = (CScope){
                 .parent = parent,
                 .first_entity = C_ENTITY_ID_INVALID,
@@ -36523,7 +36523,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
                     CScopeId loop_scope = {
                         .value = result->scope_count,
                     };
-                    BUSTER_VALIDATE(result->scope_count < result->scope_capacity);
+                    BUSTER_RT_CHECK(result->scope_count < result->scope_capacity);
                     result->scopes[result->scope_count++] = (CScope){
                         .parent = parent,
                         .first_entity = C_ENTITY_ID_INVALID,
@@ -36546,7 +36546,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
                                                                   &typeof_operand_end, &typeof_body_start, &typeof_body_end,
                                                                   &typeof_group_end))
                     {
-                        BUSTER_VALIDATE(pending_typeof_count < body_token_count + 1);
+                        BUSTER_RT_CHECK(pending_typeof_count < body_token_count + 1);
                         *c_parse_pending_typeof_grow(temporary.arena, &pending_typeof, &pending_typeof_capacity,
                                                      pending_typeof_count, body_token_count + 1) = (CParsePendingTypeofDeclaration){
                             .scope = loop_scope,
@@ -36642,7 +36642,7 @@ BUSTER_GLOBAL_LOCAL BUSTER_INLINE void c_parse_bind_block_walk(CTypeParseMachine
                 c_parse_typeof_statement_expression_after(result, preprocess, index, end, index, &typeof_operand_end, &typeof_body_start,
                                                           &typeof_body_end, &typeof_group_end))
             {
-                BUSTER_VALIDATE(pending_typeof_count < body_token_count + 1);
+                BUSTER_RT_CHECK(pending_typeof_count < body_token_count + 1);
                 *c_parse_pending_typeof_grow(temporary.arena, &pending_typeof, &pending_typeof_capacity,
                                              pending_typeof_count, body_token_count + 1) = (CParsePendingTypeofDeclaration){
                     .scope = scope_stack[scope_count - 1],
@@ -38181,7 +38181,7 @@ BUSTER_C_INTERNAL void c_parser_parse_function_body(Arena* arena, CPreprocessRes
         }
         if (!frame->parenthesis_depth && !frame->bracket_depth && c_token_is_punctuator(&token, C_PUNCTUATOR_LEFT_BRACE))
         {
-            BUSTER_VALIDATE(frame_count < declaration->body_token_count + 1);
+            BUSTER_RT_CHECK(frame_count < declaration->body_token_count + 1);
             if (frame_count == body_frames->capacity)
             {
                 c_parser_body_frames_reserve(arena, body_frames, frame_count);
@@ -40714,10 +40714,10 @@ BUSTER_C_INTERNAL void c_parse_token_census(CPreprocessResult preprocess, u32 to
     for (u32 token_index = 0; token_index < token_count; token_index += 1)
     {
         bool candidate = c_parse_declaration_range_candidate(preprocess.tokens[token_index]);
-        BUSTER_CHECK(((declaration_range_words[token_index >> 6] >> (token_index & 63)) & 1) == (u64)candidate);
+        BUSTER_RT_CHECK(((declaration_range_words[token_index >> 6] >> (token_index & 63)) & 1) == (u64)candidate);
     }
     c_parse_token_census_reference(preprocess, token_count, &reference_census, declaration_range_words);
-    BUSTER_CHECK(memcmp(&reference_census, census, sizeof(reference_census)) == 0);
+    BUSTER_RT_CHECK(memcmp(&reference_census, census, sizeof(reference_census)) == 0);
 #endif
 #else
     c_parse_token_census_reference(preprocess, token_count, census, declaration_range_words);
@@ -42949,7 +42949,7 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
         {
             c_parse_body_scratch_refuse();
             bool fixed_buffers_destroyed = arena_destroy(fixed_buffer_arena, 1);
-            BUSTER_VALIDATE(fixed_buffers_destroyed);
+            BUSTER_RT_CHECK(fixed_buffers_destroyed);
             fixed_buffer_arena = 0;
         }
         if (fixed_buffer_arena)
@@ -43162,10 +43162,10 @@ BUSTER_GLOBAL_LOCAL CIntegerConstant c_parse_type_integer_constant_query_core(Ar
             if (model_private)
             {
                 bool model_destroyed = arena_destroy(model_private, 1);
-                BUSTER_VALIDATE(model_destroyed);
+                BUSTER_RT_CHECK(model_destroyed);
             }
             bool fixed_buffers_destroyed = arena_destroy(fixed_buffer_arena, 1);
-            BUSTER_VALIDATE(fixed_buffers_destroyed);
+            BUSTER_RT_CHECK(fixed_buffers_destroyed);
         }
     }
     if (array_answers && !constant.valid) array_answers->count = 0;
@@ -44213,8 +44213,8 @@ BUSTER_C_INTERNAL bool c_parse_incompatible_checked_value(CTypeParseMachine* mac
         String8 reference_message = {0};
         bool reference = c_parse_incompatible_aggregate_value(machine, result, preprocess, scope, destination, start, end,
                                                               simple_value_conversion, message_out ? &reference_message : 0);
-        BUSTER_CHECK(reference == incompatible);
-        BUSTER_CHECK(!message_out || string_equal(reference_message, *message_out));
+        BUSTER_RT_CHECK(reference == incompatible);
+        BUSTER_RT_CHECK(!message_out || string_equal(reference_message, *message_out));
     }
 #endif
     return incompatible;
@@ -45300,12 +45300,12 @@ BUSTER_C_INTERNAL CParseInitializerDiagnostic c_parse_validate_initializer_shape
                 machine->initializer_log = &check;
                 bool walked = c_parse_infer_initializer_array_count_core(machine, result->arena, machine->scratch_arena, preprocess, result, scope,
                                                                          value.element_type, start, end, &count, aggregate, &unused);
-                BUSTER_CHECK(walked && !unused.message.length && check.count == replay->element_count);
+                BUSTER_RT_CHECK(walked && !unused.message.length && check.count == replay->element_count);
                 for (u32 index = 0; index < check.count && index < replay->element_count; index += 1)
                 {
                     CParseInitializerElement walked_element = check.elements[index];
                     CParseInitializerElement replayed = replay->elements[index];
-                    BUSTER_CHECK(walked_element.type.value == replayed.type.value && walked_element.start == replayed.start && walked_element.end == replayed.end);
+                    BUSTER_RT_CHECK(walked_element.type.value == replayed.type.value && walked_element.start == replayed.start && walked_element.end == replayed.end);
                 }
 #endif
             }
@@ -48060,7 +48060,7 @@ BUSTER_C_INTERNAL void c_parse_validate_members(CTypeParseMachine* machine, Aren
             {
                 deferred_width_index += 1;
             }
-            BUSTER_CHECK(deferred_width_index >= result->deferred_bit_field_width_diagnostic_count ||
+            BUSTER_RT_CHECK(deferred_width_index >= result->deferred_bit_field_width_diagnostic_count ||
                          result->deferred_bit_field_width_diagnostics[deferred_width_index].member_index >= index);
             if (invalid_declaration && deferred_width_index < result->deferred_bit_field_width_diagnostic_count &&
                 !result->deferred_bit_field_width_diagnostics[deferred_width_index].is_query_diagnostic &&
@@ -48095,7 +48095,7 @@ BUSTER_C_INTERNAL void c_parse_validate_members(CTypeParseMachine* machine, Aren
     {
         deferred_width_index += 1;
     }
-    BUSTER_CHECK(deferred_width_index == result->deferred_bit_field_width_diagnostic_count);
+    BUSTER_RT_CHECK(deferred_width_index == result->deferred_bit_field_width_diagnostic_count);
     c_parse_publish_deferred_bit_field_width_diagnostics(arena, result, preprocess);
     c_parse_validate_member_names(machine, arena, result, preprocess);
 }
@@ -52344,7 +52344,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
         // machine's independent capacity-failure reporting path.
         c_analysis_failure(&result, S8("could not reserve the retained C semantic analysis node index"));
     }
-    BUSTER_VALIDATE(result.scope_count < result.scope_capacity);
+    BUSTER_RT_CHECK(result.scope_count < result.scope_capacity);
     result.scopes[result.scope_count++] = (CScope){
         .parent = C_SCOPE_ID_INVALID,
         .first_entity = C_ENTITY_ID_INVALID,
@@ -52404,7 +52404,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                 }
             }
         }
-        BUSTER_VALIDATE(result.declaration_count < result.declaration_capacity);
+        BUSTER_RT_CHECK(result.declaration_count < result.declaration_capacity);
         CDeclaration* declaration = &result.declarations[result.declaration_count++];
         *declaration = (CDeclaration){
             .name = name,
@@ -52594,7 +52594,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             declares_extern |= c_token_is_well_known(preprocess.spelling_base, preprocess.tokens[token_index], C_SYMBOL_WELL_KNOWN_EXTERN);
         }
 #if BUSTER_REFERENCE_CHECKS
-        BUSTER_CHECK(declaration_name_token >= token_count ||
+        BUSTER_RT_CHECK(declaration_name_token >= token_count ||
                      string_equal(c_token_spelling(preprocess.spelling_base, preprocess.tokens[declaration_name_token]), declaration->name));
 #endif
         u32 name_bucket = (u32)c_parse_name_hash(declaration_symbol, declaration->name) & (result.entity_lookup_bucket_count - 1);
@@ -52801,7 +52801,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                                              declaration->name));
         }
         declaration->entity = entity;
-        BUSTER_VALIDATE(result.entity_count < result.entity_capacity);
+        BUSTER_RT_CHECK(result.entity_count < result.entity_capacity);
         result.entities[result.entity_count++] = (CEntity){
             .name = declaration->name,
             .location = declaration->location,
@@ -52863,7 +52863,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             CEntityId entity = {
                 .value = result.entity_count,
             };
-            BUSTER_VALIDATE(result.entity_count < result.entity_capacity);
+            BUSTER_RT_CHECK(result.entity_count < result.entity_capacity);
             result.entities[result.entity_count++] = (CEntity){
                 .name = member->name,
                 .location = member->location,
@@ -52980,7 +52980,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
             .value = result.scope_count,
         };
         declaration->scope = scope;
-        BUSTER_VALIDATE(result.scope_count < result.scope_capacity);
+        BUSTER_RT_CHECK(result.scope_count < result.scope_capacity);
         CScope* function_scope = &result.scopes[result.scope_count++];
         *function_scope = (CScope){
             .parent =
@@ -53046,7 +53046,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
                 .value = result.entity_count,
             };
             parameter->entity = entity;
-            BUSTER_VALIDATE(result.entity_count < result.entity_capacity);
+            BUSTER_RT_CHECK(result.entity_count < result.entity_capacity);
             result.entities[result.entity_count++] = (CEntity){
                 .name = parameter->name,
                 .location = parameter->location,
@@ -53127,7 +53127,7 @@ BUSTER_C_INTERNAL CAnalysisResult c_analyze_semantics_core(Arena* arena, CPrepro
     // and never records.
     scratch_end(machine_temporary);
     c_parse_promoted_member_workspace_release(&machine);
-    BUSTER_VALIDATE(arena_destroy(machine_buffer_arena, 1));
+    BUSTER_RT_CHECK(arena_destroy(machine_buffer_arena, 1));
     if (phase_arena)
     {
         result.phase_released_bytes = machine.phase_released_bytes + arena_release_to_position(phase_arena, phase_start);

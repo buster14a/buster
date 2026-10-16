@@ -523,7 +523,7 @@ void buster_test_arena_end(UnitTestArguments* arguments, TestArenaScope scope, b
         {
             ends[slot] = mark.arena->position;
             peaks[slot] = BUSTER_MAX(mark.arena->high_water, ends[slot]);
-            BUSTER_VALIDATE(ends[slot] >= mark.start);
+            BUSTER_RT_CHECK(ends[slot] >= mark.start);
         }
     }
     if (rewind)
@@ -830,7 +830,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult test_os_with_fatal_child_isolation(UnitTestAr
     UnitTestResult watchdog = test_fixture_watchdog_child(arguments);
     result.succeeded_test_count += watchdog.succeeded_test_count;
     result.test_count += watchdog.test_count;
-    BUSTER_VALIDATE(test_parallel_crash_child_self_test(arguments));
+    BUSTER_RT_CHECK(test_parallel_crash_child_self_test(arguments));
 #if (BUSTER_LINUX || BUSTER_MACOS || BUSTER_WINDOWS) && !BUSTER_ANDROID && !BUSTER_IOS
     enum { TEST_FATAL_CHILD_REPETITIONS = 3, TEST_FATAL_CHILD_TIMEOUT_US = 30000000 };
     Arena* arena = arguments->arena;
@@ -1124,7 +1124,7 @@ BUSTER_GLOBAL_LOCAL bool test_watchdog_start(UnitTestArguments* arguments, u64 s
     }
     String8 status = S8("unsupported");
 #if BUSTER_TEST_WATCHDOG_SUPPORTED
-    BUSTER_CHECK(slot_count <= BUSTER_ARRAY_LENGTH(test_watch_slots) && !test_watchdog.thread);
+    BUSTER_RT_CHECK(slot_count <= BUSTER_ARRAY_LENGTH(test_watch_slots) && !test_watchdog.thread);
     status = S8("disabled");
     if (deadline.seconds && is_debugger_present())
     {
@@ -2498,7 +2498,7 @@ BUSTER_GLOBAL_LOCAL bool test_process_failure_report_self_test(void)
 {
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
     Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
-    BUSTER_CHECK(arena != 0 && output != 0);
+    BUSTER_RT_CHECK(arena != 0 && output != 0);
     TestParallelArguments arguments = {
         .base = {.arena = arena, .show = &test_parallel_show},
         .output_arena = output,
@@ -2848,7 +2848,7 @@ BUSTER_GLOBAL_LOCAL bool test_parallel_gang_report_self_test(void)
 {
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
     Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
-    BUSTER_CHECK(arena != 0 && output != 0);
+    BUSTER_RT_CHECK(arena != 0 && output != 0);
     TestParallelArguments arguments = {
         .base = {.arena = arena, .show = &test_parallel_show, .memory_report = true},
         .output_arena = output,
@@ -2897,7 +2897,7 @@ BUSTER_GLOBAL_LOCAL bool test_arena_self_test(void)
 {
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
     Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
-    BUSTER_CHECK(arena != 0 && output != 0);
+    BUSTER_RT_CHECK(arena != 0 && output != 0);
     TestParallelArguments arguments = {
         .base = {.arena = arena, .show = &test_parallel_show, .memory_module = S8("arena_self_test"), .memory_report = true},
         .output_arena = output,
@@ -2971,7 +2971,7 @@ BUSTER_GLOBAL_LOCAL bool test_fixture_timing_self_test(void)
                   test_fixture_timing_selected(S8("all"), S8("other"));
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
     Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
-    BUSTER_CHECK(arena != 0 && output != 0);
+    BUSTER_RT_CHECK(arena != 0 && output != 0);
     TestParallelArguments arguments = {
         .base = {.arena = arena, .show = &test_parallel_show, .memory_module = S8("timing_self_test")},
         .output_arena = output,
@@ -3036,7 +3036,7 @@ BUSTER_GLOBAL_LOCAL bool test_fixture_watchdog_self_test(void)
 
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
     Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64), .flags = {.no_pool = 1}});
-    BUSTER_CHECK(arena != 0 && output != 0);
+    BUSTER_RT_CHECK(arena != 0 && output != 0);
     TestWatchSlot slot = {0};
     TestParallelArguments arguments = {
         .base = {.arena = arena, .show = &test_parallel_show, .memory_module = S8("watchdog_self_test"), .memory_report = true, .watch_slot = &slot},
@@ -3175,7 +3175,7 @@ BUSTER_GLOBAL_LOCAL bool test_require_self_test(void)
 {
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
     Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
-    BUSTER_CHECK(arena != 0 && output != 0);
+    BUSTER_RT_CHECK(arena != 0 && output != 0);
     TestParallelArguments arguments = {
         .base = {.arena = arena, .show = &test_parallel_show},
         .output_arena = output,
@@ -3233,7 +3233,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType test_parallel_lane(void* argument)
         // logical retention; this is capacity, not an RSS measurement or budget.
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(512), .initial_size = BUSTER_KB(64)});
         Arena* output_arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .initial_size = BUSTER_KB(64)});
-        BUSTER_CHECK(arena != 0 && output_arena != 0);
+        BUSTER_RT_CHECK(arena != 0 && output_arena != 0);
         TestParallelArguments arguments = {
             .base = {.arena = arena, .show = &test_parallel_show, .memory_module = descriptor.name, .memory_report = state->memory_report,
                      .fixture_timing_report = test_fixture_timing_selected(os_get_environment_variable(S8("BUSTER_TEST_FIXTURE_TIMING")), descriptor.name),
@@ -3255,7 +3255,7 @@ BUSTER_GLOBAL_LOCAL ThreadReturnType test_parallel_lane(void* argument)
         record->output_length = arena_buffer_size(output_arena);
         record->output_arena = output_arena;
         record->completed = true;
-        BUSTER_CHECK(arena_destroy(arena, 1));
+        BUSTER_RT_CHECK(arena_destroy(arena, 1));
     }
 }
 
@@ -3365,7 +3365,7 @@ BUSTER_GLOBAL_LOCAL String8 buster_test_temporary_base(void)
 BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_make_directory(String8 path)
 {
 #if defined(__linux__) || defined(__APPLE__)
-    BUSTER_CHECK(!path.pointer[path.length]);
+    BUSTER_RT_CHECK(!path.pointer[path.length]);
     return mkdir((const char*)path.pointer, 0700) == 0;
 #elif defined(_WIN32)
     TemporalArena scratch = scratch_begin(0, 0);
@@ -3422,7 +3422,7 @@ BUSTER_GLOBAL_LOCAL bool buster_test_temporary_root_create(void)
     String8 probe_path = string_format_z(arena, S8("{S8}/.root-probe"), buster_test_temporary_root);
     bool probe_contained = string_starts_with_sequence(probe_path, buster_test_temporary_root) && probe_path.length > buster_test_temporary_root.length &&
                            probe_path.pointer[buster_test_temporary_root.length] == '/';
-    BUSTER_CHECK(probe_contained);
+    BUSTER_RT_CHECK(probe_contained);
     OsFileDescriptor* probe = os_file_open(
         probe_path,
         (OpenFlags){ .create = 1 },
@@ -3512,12 +3512,12 @@ String8 buster_test_temporary_path(Arena* arena, String8 name, String8 suffix)
         return (String8){0};
     }
 
-    BUSTER_CHECK(buster_test_temporary_component_is_safe(name));
-    BUSTER_CHECK(buster_test_temporary_component_is_safe(suffix));
+    BUSTER_RT_CHECK(buster_test_temporary_component_is_safe(name));
+    BUSTER_RT_CHECK(buster_test_temporary_component_is_safe(suffix));
     String8 result = string_format_z(arena, S8("{S8}/{S8}-{u64}{S8}"), buster_test_temporary_root, name, os_get_current_process_id(), suffix);
     bool root_contained = string_starts_with_sequence(result, buster_test_temporary_root) && result.length > buster_test_temporary_root.length &&
                           (result.pointer[buster_test_temporary_root.length] == '/' || result.pointer[buster_test_temporary_root.length] == '\\');
-    BUSTER_CHECK(root_contained);
+    BUSTER_RT_CHECK(root_contained);
     return result;
 }
 
@@ -3659,7 +3659,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_descriptors(UnitTestArgument
         arguments->memory_fixture_index = 0;
         arguments->fixture_timing_report = test_fixture_timing_selected(os_get_environment_variable(S8("BUSTER_TEST_FIXTURE_TIMING")), descriptor.name);
         // Indexed like the parallel lanes', by the descriptor's table position.
-        BUSTER_CHECK(!test_watchdog.slots || descriptor_index_base + i < test_watchdog.slot_count);
+        BUSTER_RT_CHECK(!test_watchdog.slots || descriptor_index_base + i < test_watchdog.slot_count);
         arguments->watch_slot = test_watchdog.slots ? test_watchdog.slots + descriptor_index_base + i : 0;
         TestArenaScope module_scope = buster_test_arena_begin(arguments, arguments->arena, S8("body"), true);
         if (timing_enabled)
@@ -3725,7 +3725,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
         if (index < group_end)
         {
             // The initial lane is one contiguous, side-effect-free group.
-            BUSTER_CHECK(descriptors[index].parallel_kind != TEST_DESCRIPTOR_PARALLEL_NONE);
+            BUSTER_RT_CHECK(descriptors[index].parallel_kind != TEST_DESCRIPTOR_PARALLEL_NONE);
             if (runs)
             {
                 eligible_indices[eligible_count++] = index;
@@ -3792,7 +3792,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
     for (u64 work_index = 0; work_index < eligible_count; work_index += 1)
     {
         TestParallelRecord* record = &records[eligible_indices[work_index]];
-        BUSTER_CHECK(record->completed);
+        BUSTER_RT_CHECK(record->completed);
         consume_unit_tests(&result, record->timing.result);
         if (record->output_length)
         {
@@ -3803,7 +3803,7 @@ BUSTER_GLOBAL_LOCAL BatchTestResult buster_test_run_parallel_descriptors(UnitTes
             test_timing_report(arguments, record->timing);
             *timing_record_count += 1;
         }
-        BUSTER_CHECK(arena_destroy(record->output_arena, 1));
+        BUSTER_RT_CHECK(arena_destroy(record->output_arena, 1));
     }
     test_parallel_gang_report(arguments, S8("completed"), descriptors, eligible_indices, eligible_count);
 
@@ -3882,7 +3882,7 @@ BUSTER_GLOBAL_LOCAL bool test_module_selection_self_test(void)
 
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
     Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
-    BUSTER_CHECK(arena != 0 && output != 0);
+    BUSTER_RT_CHECK(arena != 0 && output != 0);
     TestParallelArguments arguments = {
         .base = {.arena = arena, .show = &test_parallel_show},
         .output_arena = output,
@@ -4039,7 +4039,7 @@ BUSTER_GLOBAL_LOCAL bool test_module_group_self_test(void)
     test_module_group_apply(synthetic_primary, BUSTER_ARRAY_LENGTH(original), TEST_MODULE_GROUP_PRIMARY, true);
     Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
     Arena* output = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1), .flags = {.no_pool = true}});
-    BUSTER_CHECK(arena != 0 && output != 0);
+    BUSTER_RT_CHECK(arena != 0 && output != 0);
     TestParallelArguments arguments = {.base = {.arena = arena, .show = &test_parallel_show}, .output_arena = output};
     u64 timing_record_count = 0;
     BatchTestResult batch = buster_test_run_descriptors(&arguments.base, synthetic_primary, BUSTER_ARRAY_LENGTH(original), true,
@@ -4241,7 +4241,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
 #if BUSTER_IOS
     buster_ios_launch_trace(S8("prewarm-ready"));
 #endif
-    BUSTER_CHECK(c_test_lex_compact_tables_ready());
+    BUSTER_RT_CHECK(c_test_lex_compact_tables_ready());
     // Keep the root path outside the per-descriptor arena rewind points. A
     // child that exits before requesting a path therefore owns no filesystem
     // root, while a parent run keeps its root alive until teardown.
@@ -4263,19 +4263,19 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
         return result;
     }
 
-    BUSTER_CHECK(buster_test_temporary_root_failure_self_test(arguments));
-    BUSTER_CHECK(buster_test_temporary_root_preservation_self_test(arguments));
-    BUSTER_CHECK(buster_test_image_retention_self_test(arguments));
-    BUSTER_VALIDATE(test_debugger_failure_self_test());
-    BUSTER_VALIDATE(test_arena_self_test());
-    BUSTER_VALIDATE(test_require_self_test());
-    BUSTER_CHECK(test_fixture_timing_self_test());
-    BUSTER_CHECK(test_fixture_watchdog_self_test());
-    BUSTER_CHECK(test_watch_contention_self_test());
-    BUSTER_CHECK(test_module_selection_self_test());
-    BUSTER_CHECK(test_module_group_self_test());
-    BUSTER_VALIDATE(test_parallel_gang_report_self_test());
-    BUSTER_VALIDATE(test_process_failure_report_self_test());
+    BUSTER_RT_CHECK(buster_test_temporary_root_failure_self_test(arguments));
+    BUSTER_RT_CHECK(buster_test_temporary_root_preservation_self_test(arguments));
+    BUSTER_RT_CHECK(buster_test_image_retention_self_test(arguments));
+    BUSTER_RT_CHECK(test_debugger_failure_self_test());
+    BUSTER_RT_CHECK(test_arena_self_test());
+    BUSTER_RT_CHECK(test_require_self_test());
+    BUSTER_RT_CHECK(test_fixture_timing_self_test());
+    BUSTER_RT_CHECK(test_fixture_watchdog_self_test());
+    BUSTER_RT_CHECK(test_watch_contention_self_test());
+    BUSTER_RT_CHECK(test_module_selection_self_test());
+    BUSTER_RT_CHECK(test_module_group_self_test());
+    BUSTER_RT_CHECK(test_parallel_gang_report_self_test());
+    BUSTER_RT_CHECK(test_process_failure_report_self_test());
 
     String8 module_group_name = os_get_environment_variable(S8("BUSTER_TEST_MODULE_GROUP"));
     TestModuleGroup module_group = test_module_group_resolve(module_group_name);
@@ -4284,7 +4284,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     arguments->memory_report = program_state != 0 && (timing_enabled || program_flag_get(PROGRAM_FLAG_CI));
     if (timing_enabled)
     {
-        BUSTER_CHECK(test_timing_self_test(arguments));
+        BUSTER_RT_CHECK(test_timing_self_test(arguments));
     }
 
     String8 image_retention_setting = os_get_environment_variable(S8("BUSTER_TEST_RETAIN_IMAGES"));
@@ -4370,7 +4370,7 @@ BatchTestResult library_tests(UnitTestArguments* arguments)
     {
         expected_timing_records += buster_test_descriptor_runs(descriptors[index]);
     }
-    BUSTER_CHECK(!timing_enabled || buster_test_temporary_root_failed || timing_record_count == expected_timing_records);
+    BUSTER_RT_CHECK(!timing_enabled || buster_test_temporary_root_failed || timing_record_count == expected_timing_records);
     if (grouped || arguments->module_selection.length)
     {
         result.selected_module_count = selected_module_count;

@@ -27,7 +27,7 @@ BUSTER_GLOBAL_LOCAL void compiler_driver_archive_test_header(u8* bytes, String8 
         number[length++] = (u8)('0' + size % 10);
         size /= 10;
     } while (size);
-    BUSTER_CHECK(length <= 10);
+    BUSTER_RT_CHECK(length <= 10);
     for (u32 digit = 0; digit < length; digit += 1) bytes[48 + digit] = number[length - digit - 1];
     bytes[58] = '`';
     bytes[59] = '\n';
@@ -46,7 +46,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_test_bytes(Arena* arena, O
         ObjectFile* object = &objects[member];
         ObjectFormat format = object_format_for_target(object->target);
         artifacts[member] = object_write(arena, object, format);
-        BUSTER_CHECK(artifacts[member].error == OBJECT_ERROR_NONE);
+        BUSTER_RT_CHECK(artifacts[member].error == OBJECT_ERROR_NONE);
         size += 60 + artifacts[member].bytes.length + (artifacts[member].bytes.length & 1);
         for (u32 index = 0; index < object->symbol_count; index += 1)
         {
@@ -118,7 +118,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_test_bytes(Arena* arena, O
             }
         }
     }
-    BUSTER_CHECK(cursor == result.length);
+    BUSTER_RT_CHECK(cursor == result.length);
     return result;
 }
 
@@ -126,7 +126,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_refusal_elf(Arena* arena, 
 {
     // Independently specified ELF64 little-endian ET_REL: fixed raw offsets,
     // six section headers and two global symbols. Never call object_write.
-    BUSTER_CHECK(definition.length <= 14);
+    BUSTER_RT_CHECK(definition.length <= 14);
     ByteSlice result = {.pointer = arena_allocate_zeroed(arena, u8, 632), .length = 632};
     u8* bytes = result.pointer;
     memcpy(bytes, "\x7f" "ELF", 4);
@@ -190,7 +190,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_refusal_elf(Arena* arena, 
 
 BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_refusal_bytes(Arena* arena, u32 type, u32 instruction, u32 count, bool gnu_index)
 {
-    BUSTER_CHECK(count >= 2 && count <= 9);
+    BUSTER_RT_CHECK(count >= 2 && count <= 9);
     ByteSlice members[9] = {0};
     String8 definitions[9] = {S8("safe"), S8("entry")};
     u64 names_size = 0;
@@ -229,7 +229,7 @@ BUSTER_GLOBAL_LOCAL ByteSlice compiler_driver_archive_refusal_bytes(Arena* arena
         memcpy(result.pointer + cursor + 60, members[member].pointer, members[member].length);
         cursor += 60 + members[member].length;
     }
-    BUSTER_CHECK(cursor == result.length);
+    BUSTER_RT_CHECK(cursor == result.length);
     return result;
 }
 
@@ -706,7 +706,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_library_order_exists(String8 path)
 {
     OsFileDescriptor* file = os_file_open(path, (OpenFlags){0}, (OsFileAccess){.read = 1}, (OsFileCreateMode){0}, (OsFileShareFlags){0});
     bool result = file != 0;
-    if (file) BUSTER_CHECK(os_file_close(file));
+    if (file) BUSTER_RT_CHECK(os_file_close(file));
     return result;
 }
 
@@ -833,7 +833,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_library_order_host(UnitTestArguments* a
     u32 count = 1;
     String8 first_argument = S8(BUSTER_HOST_C_COMPILER_ARG1);
     if (first_argument.length) command[count++] = first_argument;
-    BUSTER_CHECK(options.length <= BUSTER_ARRAY_LENGTH(command) - count);
+    BUSTER_RT_CHECK(options.length <= BUSTER_ARRAY_LENGTH(command) - count);
     for (u64 index = 0; index < options.length; index += 1) command[count++] = options.pointer[index];
     bool result = compiler_driver_library_order_process(arguments, arena, (SliceString8){command, count},
                                                         expected, diagnostic, stage, case_name);

@@ -11,10 +11,10 @@ enum
     SANITIZER_TEST_ALLOCATION_SIZE = 4096,
 };
 
-// Debug and every sanitized build keep BUSTER_CHECK, BUSTER_ASSERT and
-// BUSTER_UNREACHABLE as diagnostics. Only optimized unsanitized builds turn
-// them into optimizer assumptions or unevaluated expressions (os.h, base.h),
-// and a false raw assumption is undefined behavior, never a test oracle.
+// Debug and every sanitized build keep BUSTER_RT_CHECK and BUSTER_UNREACHABLE
+// as diagnostics. Optimized unsanitized builds turn them into optimizer
+// assumptions (os.h, base.h). BUSTER_RT_CHECK_RAW retains its allocation-free
+// diagnostic in every build. Never execute a false optimizer assumption.
 #define SANITIZER_TEST_CHECKED_CONTRACTS (!BUSTER_OPTIMIZE || BUSTER_SANITIZE)
 // Mobile test payloads run inside an app and cannot relaunch themselves as
 // `<argv0> test`, so the false-operand children run on desktop targets only.
@@ -165,15 +165,15 @@ ProcessResult sanitizer_test_canary_run(String8 mode)
     {
         u32 count = 0;
         string_print(S8("SANITIZER_CANARY kind=contract-check-false status=reached\n"));
-        BUSTER_CHECK(sanitizer_test_count_operand(&count, false));
+        BUSTER_RT_CHECK(sanitizer_test_count_operand(&count, false));
         string_print(S8("SANITIZER_CANARY kind=contract-check-false status=survived count={u32}\n"), count);
     }
-    else if (string_equal(mode, S8("contract-assert-false")))
+    else if (string_equal(mode, S8("contract-raw-check-false")))
     {
         u32 count = 0;
-        string_print(S8("SANITIZER_CANARY kind=contract-assert-false status=reached\n"));
-        BUSTER_ASSERT(sanitizer_test_count_operand(&count, false));
-        string_print(S8("SANITIZER_CANARY kind=contract-assert-false status=survived count={u32}\n"), count);
+        string_print(S8("SANITIZER_CANARY kind=contract-raw-check-false status=reached\n"));
+        BUSTER_RT_CHECK_RAW(sanitizer_test_count_operand(&count, false));
+        string_print(S8("SANITIZER_CANARY kind=contract-raw-check-false status=survived count={u32}\n"), count);
     }
     else if (string_equal(mode, S8("contract-unreachable")))
     {
@@ -322,26 +322,22 @@ BUSTER_GLOBAL_LOCAL void sanitizer_test_check_contracts(UnitTestArguments* argum
     BUSTER_TEST(arguments, BUSTER_REFERENCE_CHECKS == SANITIZER_TEST_CHECKED_CONTRACTS);
 
     u32 check_count = 0;
-    BUSTER_CHECK(sanitizer_test_count_operand(&check_count, true));
+    BUSTER_RT_CHECK(sanitizer_test_count_operand(&check_count, true));
     BUSTER_TEST(arguments, check_count == 1);
 
-    u32 assert_count = 0;
-    BUSTER_ASSERT(sanitizer_test_count_operand(&assert_count, true));
+    u32 raw_check_count = 0;
+    BUSTER_RT_CHECK_RAW(sanitizer_test_count_operand(&raw_check_count, true));
+    BUSTER_TEST(arguments, raw_check_count == 1);
 #if SANITIZER_TEST_CHECKED_CONTRACTS
-    BUSTER_TEST(arguments, assert_count == 1);
 #if SANITIZER_TEST_CONTRACT_CHILDREN
     sanitizer_test_check_contract_failure(arguments, &result, S8("check"));
-    sanitizer_test_check_contract_failure(arguments, &result, S8("assert"));
+    sanitizer_test_check_contract_failure(arguments, &result, S8("raw-check"));
 #if !BUSTER_WINDOWS
     sanitizer_test_check_contract_unreachable(arguments, &result);
 #endif
 #else
     arguments->show(arguments, S8("CONTRACT_CANARY kind=false-operand-children status=unsupported reason=mobile-payload\n"));
 #endif
-#else
-    // Optimized unsanitized builds never evaluate an assertion operand, so an
-    // operand must not carry work the program needs.
-    BUSTER_TEST(arguments, assert_count == 0);
 #endif
     result_pointer->test_count += result.test_count;
     result_pointer->succeeded_test_count += result.succeeded_test_count;

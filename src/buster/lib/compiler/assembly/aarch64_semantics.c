@@ -378,7 +378,7 @@ void buster_aarch64_semantics_prewarm(void)
                 decoded = buster_a64_semantic_ensure_block(cache, block) && decoded;
             }
         }
-        BUSTER_CHECK(decoded);
+        BUSTER_RT_CHECK(decoded);
         buster_a64_semantic_bytes_ready = decoded;
     }
 }

@@ -26,9 +26,9 @@ BUSTER_CT_CHECK(sizeof(va_list) == sizeof(void*));
 BUSTER_GLOBAL_LOCAL void string_format_va_prepare(va_list* variable_arguments, u32* gp_register_slots_remaining, u64 size,
                                                   u64 alignment)
 {
-    BUSTER_CHECK(*gp_register_slots_remaining <= STRING_FORMAT_VA_GP_REGISTER_COUNT);
-    BUSTER_CHECK(size != 0 && size <= 2 * sizeof(u64));
-    BUSTER_CHECK(BUSTER_IS_POWER_OF_TWO(alignment) && alignment <= 2 * sizeof(u64));
+    BUSTER_RT_CHECK(*gp_register_slots_remaining <= STRING_FORMAT_VA_GP_REGISTER_COUNT);
+    BUSTER_RT_CHECK(size != 0 && size <= 2 * sizeof(u64));
+    BUSTER_RT_CHECK(BUSTER_IS_POWER_OF_TWO(alignment) && alignment <= 2 * sizeof(u64));
 
     if (alignment < sizeof(u64))
     {
@@ -477,7 +477,7 @@ BUSTER_GLOBAL_LOCAL bool string_format_u128_parts_is_zero(StringFormatU128Parts 
 
 BUSTER_GLOBAL_LOCAL u64 string_format_u128_parts_divide(StringFormatU128Parts* value, u64 divisor)
 {
-    BUSTER_CHECK(divisor >= 2 && divisor <= 16);
+    BUSTER_RT_CHECK(divisor >= 2 && divisor <= 16);
 
     u64 remainder;
     if (!value->high)
@@ -557,7 +557,7 @@ BUSTER_GLOBAL_LOCAL StringFormatU128Parts string_format_u128_parts_negate(String
 
 BUSTER_GLOBAL_LOCAL StringFormatU128Parts string_format_u128_parts_mask(StringFormatU128Parts value, u64 bit_width)
 {
-    BUSTER_CHECK(bit_width != 0 && bit_width <= 128);
+    BUSTER_RT_CHECK(bit_width != 0 && bit_width <= 128);
 
     if (bit_width < 64)
     {
@@ -578,7 +578,7 @@ BUSTER_GLOBAL_LOCAL StringFormatU128Parts string_format_u128_parts_mask(StringFo
 
 BUSTER_GLOBAL_LOCAL String8 string_format_u128_parts_radix(String8 buffer, StringFormatU128Parts value, u64 radix, bool upper)
 {
-    BUSTER_CHECK(radix == 2 || radix == 8 || radix == 10 || radix == 16);
+    BUSTER_RT_CHECK(radix == 2 || radix == 8 || radix == 10 || radix == 16);
 
     u64 length = 0;
     do
@@ -586,7 +586,7 @@ BUSTER_GLOBAL_LOCAL String8 string_format_u128_parts_radix(String8 buffer, Strin
         u64 digit = string_format_u128_parts_divide(&value, radix);
         char8 alpha_start = upper ? 'A' : 'a';
         char8 character = (char8)(digit > 9 ? digit - 10 + alpha_start : digit + '0');
-        BUSTER_CHECK(length < buffer.length);
+        BUSTER_RT_CHECK(length < buffer.length);
         buffer.pointer[length] = character;
         length += 1;
     } while (!string_format_u128_parts_is_zero(value));
@@ -1782,7 +1782,7 @@ String16 string16_from_pointer(const char16* pointer)
 PosixStringList posix_string_list_from_slice_string(Arena* arena, SliceString8 parts)
 {
     u64 list_count;
-    BUSTER_VALIDATE(u64_add_checked(parts.length, 1, &list_count));
+    BUSTER_RT_CHECK(u64_add_checked(parts.length, 1, &list_count));
     PosixChar** list = arena_allocate(arena, PosixChar*, list_count);
 
     for (u64 i = 0; i < parts.length; i += 1)
@@ -1797,10 +1797,10 @@ PosixStringList posix_string_list_from_slice_string(Arena* arena, SliceString8 p
 
 PosixStringList posix_environment_from_keys_and_values(Arena* arena, SliceString8 keys, SliceString8 values)
 {
-    BUSTER_CHECK(keys.length == values.length);
+    BUSTER_RT_CHECK(keys.length == values.length);
 
     u64 environment_count;
-    BUSTER_VALIDATE(u64_add_checked(keys.length, 1, &environment_count));
+    BUSTER_RT_CHECK(u64_add_checked(keys.length, 1, &environment_count));
     // Always return a valid NULL-terminated array, even for zero keys: a NULL PosixStringList
     // (as opposed to an array containing just the terminator) is not a valid execve()/posix_spawn() envp.
     PosixStringList result = arena_allocate(arena, char8*, environment_count);
@@ -1826,7 +1826,7 @@ PosixStringList posix_environment_from_keys_and_values(Arena* arena, SliceString
 
 WindowsStringList windows_environment_from_keys_and_values(Arena* arena, SliceString8 keys, SliceString8 values)
 {
-    BUSTER_VALIDATE(keys.length == values.length);
+    BUSTER_RT_CHECK(keys.length == values.length);
     // Always return a valid, non-NULL environment block, even for zero keys: passing a NULL
     // lpEnvironment to CreateProcessW means "inherit the caller's full environment", which is
     // the opposite of an explicitly empty environment.
@@ -1886,7 +1886,7 @@ SliceString8 slice_string_from_windows_string_list(Arena* arena, WindowsStringLi
     {
         u64 command_line_length = string16_length(command_line);
         u64 command_line_capacity;
-        BUSTER_VALIDATE(u64_add_checked(command_line_length, 1, &command_line_capacity));
+        BUSTER_RT_CHECK(u64_add_checked(command_line_length, 1, &command_line_capacity));
         String8* strings = arena_allocate(arena, String8, command_line_capacity);
         // Decoding never expands UTF-16. Reuse one buffer for every argument;
         // each UTF-8 conversion copies its result into independent storage.
@@ -1987,7 +1987,7 @@ String16 string16_from_string8(Arena* arena, String8 string, bool null_terminate
     // except in a well-formed four-byte sequence, which produces two from
     // four. The UTF-8 byte count is therefore a valid upper bound (#106).
     u64 code_unit_capacity;
-    BUSTER_VALIDATE(u64_add_checked(string.length, null_terminate, &code_unit_capacity));
+    BUSTER_RT_CHECK(u64_add_checked(string.length, null_terminate, &code_unit_capacity));
     char16* pointer = arena_allocate(arena, char16, code_unit_capacity);
     u64 result_length = 0;
 
@@ -2137,7 +2137,7 @@ WindowsStringList windows_environment_block_from_slice_string(Arena* arena, Slic
 char** slice_string8_to_null_terminated_array_char(Arena* arena, SliceString8 strings)
 {
     u64 list_count;
-    BUSTER_VALIDATE(u64_add_checked(strings.length, 1, &list_count));
+    BUSTER_RT_CHECK(u64_add_checked(strings.length, 1, &list_count));
     char** result = arena_allocate(arena, char*, list_count);
     for (u64 i = 0; i < strings.length; i += 1)
     {
@@ -2173,7 +2173,7 @@ SliceString8 os_argument_builder_flush(OsArgumentBuilder* const builder)
     u64 original_position = builder->position;
     u64 current_position = builder->arena->position;
     u64 byte_count = current_position - original_position;
-    BUSTER_CHECK(byte_count % sizeof(String8) == 0);
+    BUSTER_RT_CHECK(byte_count % sizeof(String8) == 0);
     u64 argument_count = byte_count / sizeof(String8);
     String8* pointer = arena_get_pointer_at_position_align(builder->arena, String8, builder->position);
     SliceString8 result = {.pointer = pointer, .length = argument_count};

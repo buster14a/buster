@@ -3790,7 +3790,7 @@ BUSTER_GLOBAL_LOCAL bool compiler_driver_test_response_file_change_directory(Str
     c_test_scratch_end(scratch);
     return result;
 #else
-    BUSTER_CHECK(path.pointer != 0 && path.pointer[path.length] == 0);
+    BUSTER_RT_CHECK(path.pointer != 0 && path.pointer[path.length] == 0);
     return chdir((const char*)path.pointer) == 0;
 #endif
 }
@@ -15186,7 +15186,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverTestCompileCell* compiler_driver_test_compile_
     CompilerDriverTestCompileCell* result = 0;
     if (batch->compiled)
     {
-        BUSTER_CHECK(batch->cursor < batch->count);
+        BUSTER_RT_CHECK(batch->cursor < batch->count);
         result = batch->cells + batch->cursor;
         batch->cursor += 1;
     }
@@ -15194,7 +15194,7 @@ BUSTER_GLOBAL_LOCAL CompilerDriverTestCompileCell* compiler_driver_test_compile_
     {
         result = arena_allocate_zeroed(batch->cell_arena, CompilerDriverTestCompileCell, 1);
         if (!batch->cells) { batch->cells = result; }
-        BUSTER_CHECK(result == batch->cells + batch->count);
+        BUSTER_RT_CHECK(result == batch->cells + batch->count);
         String8* copy = arena_allocate(arena, String8, command.length);
         memcpy(copy, command.pointer, command.length * sizeof(String8));
         result->command = (SliceString8){.pointer = copy, .length = command.length};
@@ -21680,7 +21680,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_scalar_argument_boundari
             command[count++] = sources[source == 2 ? 0 : source];
             command[count++] = S8("-o");
             command[count++] = host_objects[optimization][source];
-            BUSTER_CHECK(count <= BUSTER_ARRAY_LENGTH(command));
+            BUSTER_RT_CHECK(count <= BUSTER_ARRAY_LENGTH(command));
             ProcessSpawnResult spawned = os_process_spawn((SliceString8){.pointer = command, .length = count},
                 (SliceString8){0}, (SliceString8){0}, spawn_options);
             ProcessWaitResult waited = spawned.handle ? os_process_wait_deadline(arguments->arena, spawned, 30000000) : (ProcessWaitResult){0};
@@ -21712,7 +21712,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_scalar_argument_boundari
                 command[count++] = host_objects[optimization][1];
                 command[count++] = S8("-o");
                 command[count++] = executable;
-                BUSTER_CHECK(count <= BUSTER_ARRAY_LENGTH(command));
+                BUSTER_RT_CHECK(count <= BUSTER_ARRAY_LENGTH(command));
                 ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = command, .length = count},
                     (SliceString8){0}, (SliceString8){0}, spawn_options);
                 ProcessWaitResult link_wait = linked.handle ? os_process_wait_deadline(arguments->arena, linked, 30000000) : (ProcessWaitResult){0};
@@ -21781,7 +21781,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_scalar_argument_boundari
                     command[count++] = sources[source == 2 ? 0 : source];
                     command[count++] = S8("-o");
                     command[count++] = objects[source];
-                    BUSTER_CHECK(count <= BUSTER_ARRAY_LENGTH(command));
+                    BUSTER_RT_CHECK(count <= BUSTER_ARRAY_LENGTH(command));
                     CompilerDriverInvocation invocation = compiler_driver_parse_arguments(temporary.arena,
                         (SliceString8){.pointer = command, .length = count});
                     BUSTER_TEST(arguments, invocation.register_allocator_explicit && invocation.register_allocator == allocators[mode]);
@@ -21847,7 +21847,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult compiler_driver_test_scalar_argument_boundari
                                 command[count++] = direction ? objects[1] : host_objects[optimization][1];
                                 command[count++] = S8("-o");
                                 command[count++] = executable;
-                                BUSTER_CHECK(count <= BUSTER_ARRAY_LENGTH(command));
+                                BUSTER_RT_CHECK(count <= BUSTER_ARRAY_LENGTH(command));
                                 ProcessSpawnResult linked = os_process_spawn((SliceString8){.pointer = command, .length = count},
                                     (SliceString8){0}, (SliceString8){0}, spawn_options);
                                 ProcessWaitResult link_wait = linked.handle ? os_process_wait_deadline(temporary.arena, linked, 30000000) : (ProcessWaitResult){0};
@@ -29996,7 +29996,7 @@ BUSTER_GLOBAL_LOCAL SliceString8 compiler_driver_test_pic_arguments(Arena* arena
         result.pointer[result.length++] = S8("-o");
         result.pointer[result.length++] = output;
         result.pointer[result.length++] = S8("tests/basic_c_pic.c");
-        BUSTER_CHECK(result.length <= PIC_ARGUMENT_CAPACITY);
+        BUSTER_RT_CHECK(result.length <= PIC_ARGUMENT_CAPACITY);
     }
     return result;
 }

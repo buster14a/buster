@@ -305,7 +305,7 @@ BUSTER_GLOBAL_LOCAL MachineStackPlacement machine_predicate_placement_build(Aren
                             if (reg == UINT32_MAX)
                             {
                                 reg = machine_predicate_pick(&state, before, reserved);
-                                BUSTER_CHECK(reg != UINT32_MAX);
+                                BUSTER_RT_CHECK(reg != UINT32_MAX);
                                 state.owner[reg] = value;
                                 state.locations[value] = reg;
                                 state.held |= (u8)(1u << reg);

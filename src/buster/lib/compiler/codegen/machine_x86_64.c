@@ -4975,13 +4975,13 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
 
                 if (select_and_define)
                 {
-                    BUSTER_CHECK(loaded_class.flags & MACHINE_TYPE_CLASS_RESOLVED);
+                    BUSTER_RT_CHECK(loaded_class.flags & MACHINE_TYPE_CLASS_RESOLVED);
                     // The class carries the size only when it is a power of two.
-                    BUSTER_CHECK(loaded_class.size_log2 != MACHINE_TYPE_CLASS_NO_LOG2);
+                    BUSTER_RT_CHECK(loaded_class.size_log2 != MACHINE_TYPE_CLASS_NO_LOG2);
 
                     u32 size_log2 = loaded_class.size_log2;
                     u16 scalar_load_opcode = (u16)(MACHINE_X64_LOAD_PTR8 + size_log2);
-                    BUSTER_CHECK(is_vector_load || (scalar_load_opcode >= MACHINE_X64_LOAD_PTR8 && scalar_load_opcode <= MACHINE_X64_LOAD_PTR64));
+                    BUSTER_RT_CHECK(is_vector_load || (scalar_load_opcode >= MACHINE_X64_LOAD_PTR8 && scalar_load_opcode <= MACHINE_X64_LOAD_PTR64));
                     u16 pointer_opcode = is_vector_load ? MACHINE_X64_VLOAD_PTR : scalar_load_opcode;
                     u16 local_opcode = is_vector_load ? MACHINE_X64_VLOAD_FRAME : MACHINE_X64_LOAD_FRAME;
                     u16 promoted_opcode = is_vector_load ? MACHINE_X64_VMOV_RR : MACHINE_X64_MOV_RR;
@@ -5030,7 +5030,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                 // loaded value's. The sized pointer load zero-extends, so
                 // the full-slot store leaves the value's padding zero
                 // exactly like the canonical path.
-                BUSTER_CHECK(loaded_class.kind != IR_TYPE_COUNT);
+                BUSTER_RT_CHECK(loaded_class.kind != IR_TYPE_COUNT);
                 IrType* place_type = ir_type_from_id(&program->types, function->values[index].canonical_type);
                 u64 atomic_width = place_type && place_type->layout.resolved ? place_type->layout.size : 0;
                 u32 width_index = atomic_width == 1 ? 0 : atomic_width == 2 ? 1 : atomic_width == 4 ? 2 : atomic_width == 8 ? 3 : UINT32_MAX;
@@ -5081,7 +5081,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_select_load(MachineX64Selector* selector, I
                 // from a direct local's slot or through an address vreg. The
                 // record is fetched here for the copy's byte count.
                 IrType* loaded_type = ir_type_from_id(&program->types, instruction->canonical_type);
-                BUSTER_CHECK(loaded_type);
+                BUSTER_RT_CHECK(loaded_type);
                 bool zero_record = loaded_type->layout.size == 0 &&
                                    (loaded_type->kind == IR_TYPE_STRUCT || loaded_type->kind == IR_TYPE_UNION);
                 bool aggregate_supported = loaded_type->layout.resolved & (loaded_type->layout.size <= UINT32_MAX) &
@@ -8880,7 +8880,7 @@ MachineSelectResult machine_select_canonical_function_x86_64(Arena* arena, IrPro
             selector.block_exits[block_index] = next_block + block_width - 1u;
             next_block += block_width;
         }
-        BUSTER_CHECK(next_block == expanded_blocks);
+        BUSTER_RT_CHECK(next_block == expanded_blocks);
     }
     selector.parameter_edges = machine_parameter_edge_layout_plan(arena, function, canonical_layout, expanded_blocks,
                                                                    &selector.block_entries, &selector.block_exits);
@@ -14693,7 +14693,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_form(MachineX64Encoder* encoder,
     BusterX86MetadataPhysicalOperand rebased_operands[4];
     if (encoder->frame_base_offset)
     {
-        BUSTER_CHECK(operand_count <= BUSTER_ARRAY_LENGTH(rebased_operands));
+        BUSTER_RT_CHECK(operand_count <= BUSTER_ARRAY_LENGTH(rebased_operands));
         for (u32 index = 0; index < operand_count; index += 1)
         {
             rebased_operands[index] = operands[index];
@@ -15633,7 +15633,7 @@ BUSTER_GLOBAL_LOCAL bool machine_x64_emit_exact_frame_address(MachineX64Encoder*
 {
     MachinePoint definition_point = function->virtual_registers[virtual_register].definition_point;
     MachineInstruction const* definition = function->instructions + machine_point_instruction(definition_point);
-    BUSTER_CHECK(definition_point != MACHINE_POINT_INVALID && definition->opcode == MACHINE_X64_LEA_FRAME);
+    BUSTER_RT_CHECK(definition_point != MACHINE_POINT_INVALID && definition->opcode == MACHINE_X64_LEA_FRAME);
     MachineX64PreparedExactOpcode const* entry = machine_x64_exact_opcode_for_opcode(MACHINE_X64_LEA_FRAME);
     u8 operand_registers[4] = {(u8)reg, 0, 0, 0};
     bool result = reg < 16 && entry &&

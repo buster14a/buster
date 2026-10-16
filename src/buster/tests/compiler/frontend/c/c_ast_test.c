@@ -3741,7 +3741,7 @@ BUSTER_GLOBAL_LOCAL UnitTestResult c_ast_sizeof_handoff_unit(UnitTestArguments* 
             }
         }
         c_preprocess_release(&preprocess);
-        BUSTER_VALIDATE(arena_destroy(arena, 1));
+        BUSTER_RT_CHECK(arena_destroy(arena, 1));
     }
     return result;
 }
@@ -4984,7 +4984,7 @@ BUSTER_GLOBAL_LOCAL CAstTypeCase const c_ast_type_cases[] = {
     // leaf. A checked cast skips its conversion rule over them, and a
     // conditional its scalar-condition rule, so both are answered with
     // constraint checks too. A void builtin called with no arguments is the
-    // void row. The last case is BUSTER_CHECK's shape.
+    // void row. The last case is BUSTER_RT_CHECK's shape.
     {S8_INITIALIZER("char* f(void) { return (char*)__func__; }"), S8_INITIALIZER("("), 1, 5, C_TEST_AST_TYPE_PROBE_ANSWER, C_TYPE_POINTER},
     {S8_INITIALIZER("char* f(void) { return (char*)(__PRETTY_FUNCTION__); }"), S8_INITIALIZER("("), 1, 7, C_TEST_AST_TYPE_PROBE_ANSWER,
      C_TYPE_POINTER},

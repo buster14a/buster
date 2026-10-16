@@ -5230,7 +5230,7 @@ bool ir_function_may_contain_opcodes(IrFunction* function, u64 mask)
 {
     // Querying an opcode the summary never records would read as a
     // confident absence; the tracked list is the contract.
-    BUSTER_CHECK((mask & ~(u64)IR_OPCODE_SUMMARY_TRACKED) == 0);
+    BUSTER_RT_CHECK((mask & ~(u64)IR_OPCODE_SUMMARY_TRACKED) == 0);
     return !function || !(function->opcode_summary & IR_OPCODE_SUMMARY_KNOWN) || (function->opcode_summary & mask) != 0;
 }
 

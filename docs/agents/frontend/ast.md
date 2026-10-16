@@ -897,7 +897,7 @@ unchanged.
   `C_AST_TYPE_FLAG_FAILS`. The machine's checked cast tests its conversion
   only when the operand has a type, and its conditional tests the condition
   only when that has a type. So a cast over a failing operand is safe, and so
-  is a conditional with a failing condition, such as `BUSTER_CHECK`'s
+  is a conditional with a failing condition, such as `BUSTER_RT_CHECK`'s
   `(void)(__builtin_expect(!(ok), 0) ? (…, 0) : 0)`. The query repeats the
   name's lookup in its own scope (`c_ast_types_lookups_agree`), and that
   lookup must find nothing.

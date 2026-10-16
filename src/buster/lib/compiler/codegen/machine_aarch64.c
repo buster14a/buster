@@ -6596,7 +6596,7 @@ MachineSelectResult machine_select_canonical_function_aarch64(Arena* arena, IrPr
                 selector.block_exits[block_index] = next_block + block_width - 1u;
                 next_block += block_width;
             }
-            BUSTER_CHECK(next_block == expanded_blocks);
+            BUSTER_RT_CHECK(next_block == expanded_blocks);
         }
         selector.parameter_edges = machine_parameter_edge_layout_plan(arena, function, canonical_layout, expanded_blocks,
                                                                        &selector.block_entries, &selector.block_exits);
@@ -8592,7 +8592,7 @@ BUSTER_GLOBAL_LOCAL void machine_a64_emit_frame_address_rematerialization(Machin
 {
     MachinePoint definition_point = function->virtual_registers[virtual_register].definition_point;
     MachineInstruction const* definition = function->instructions + machine_point_instruction(definition_point);
-    BUSTER_CHECK(definition_point != MACHINE_POINT_INVALID && definition->opcode == MACHINE_A64_LEA_FRAME);
+    BUSTER_RT_CHECK(definition_point != MACHINE_POINT_INVALID && definition->opcode == MACHINE_A64_LEA_FRAME);
     machine_a64_emit_frame_address(encoder, placement, frame_area, definition, destination);
 }
 

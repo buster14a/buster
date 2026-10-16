@@ -789,7 +789,7 @@ struct CSymbolTable
 // field the token already carries, in place of materializing the spelling
 // through c_token_length's oversized guard and running string_equal.
 // C_SYMBOL_WELL_KNOWN_NONE is 0 so it coincides with the uninterned marker,
-// and the create-time BUSTER_CHECK holds the enum and the table together.
+// and the create-time BUSTER_RT_CHECK holds the enum and the table together.
 typedef enum CSymbolWellKnown
 {
     C_SYMBOL_WELL_KNOWN_NONE,

@@ -30,8 +30,8 @@
 
 MachineRef machine_ref_make(MachineRefKind kind, u32 payload)
 {
-    BUSTER_CHECK(kind < MACHINE_REF_KIND_COUNT);
-    BUSTER_CHECK(payload < MACHINE_REF_PAYLOAD_LIMIT);
+    BUSTER_RT_CHECK(kind < MACHINE_REF_KIND_COUNT);
+    BUSTER_RT_CHECK(payload < MACHINE_REF_PAYLOAD_LIMIT);
     return ((u32)kind << MACHINE_REF_PAYLOAD_BITS) | payload;
 }
 
@@ -47,8 +47,8 @@ u32 machine_ref_payload(MachineRef ref)
 
 MachinePoint machine_point_make(u32 instruction_index, MachinePointPhase phase)
 {
-    BUSTER_CHECK(instruction_index < MACHINE_POINT_INSTRUCTION_LIMIT);
-    BUSTER_CHECK(phase < MACHINE_POINT_PHASE_COUNT);
+    BUSTER_RT_CHECK(instruction_index < MACHINE_POINT_INSTRUCTION_LIMIT);
+    BUSTER_RT_CHECK(phase < MACHINE_POINT_PHASE_COUNT);
     return (instruction_index << MACHINE_POINT_PHASE_BITS) | (u32)phase;
 }
 
@@ -1638,7 +1638,7 @@ BUSTER_GLOBAL_LOCAL void machine_opcode_rows_once(void)
     {
         MachineOpcodeInfo const* info = machine_opcode_infos + opcode;
         u32 operand_count = info->operand_count;
-        BUSTER_CHECK(operand_count <= BUSTER_ARRAY_LENGTH(info->operand_info));
+        BUSTER_RT_CHECK(operand_count <= BUSTER_ARRAY_LENGTH(info->operand_info));
         operand_count = operand_count <= BUSTER_ARRAY_LENGTH(info->operand_info) ? operand_count : BUSTER_ARRAY_LENGTH(info->operand_info);
         u32 role_lanes = 0;
         for (u32 slot = 0; slot < operand_count; slot += 1)
@@ -2080,7 +2080,7 @@ void machine_test_classify_instruction_mutability(MachineFunctionBuilder* builde
 
 u32 machine_builder_block_begin(MachineFunctionBuilder* builder)
 {
-    BUSTER_CHECK(!builder->block_is_open);
+    BUSTER_RT_CHECK(!builder->block_is_open);
     builder->block_is_open = true;
     builder->open_block = builder->blocks.total_count;
     builder->open_block_first_instruction = builder->instructions.total_count;
@@ -2089,7 +2089,7 @@ u32 machine_builder_block_begin(MachineFunctionBuilder* builder)
 
 u32 machine_builder_instruction(MachineFunctionBuilder* builder, MachineInstruction instruction)
 {
-    BUSTER_CHECK(builder->block_is_open);
+    BUSTER_RT_CHECK(builder->block_is_open);
     u32 index = builder->instructions.total_count;
     MachineInstruction* row = builder->instruction_cursor;
     if (row == builder->instruction_end)
@@ -2105,7 +2105,7 @@ u32 machine_builder_instruction(MachineFunctionBuilder* builder, MachineInstruct
 
 void machine_builder_block_end(MachineFunctionBuilder* builder, MachineBlock block)
 {
-    BUSTER_CHECK(builder->block_is_open);
+    BUSTER_RT_CHECK(builder->block_is_open);
     block.first_instruction = builder->open_block_first_instruction;
     block.instruction_count = builder->instructions.total_count - builder->open_block_first_instruction;
     MachineBlock* row = builder->block_cursor;
@@ -2290,7 +2290,7 @@ BUSTER_GLOBAL_LOCAL MachineParameterEdgeLayout machine_parameter_edge_layout_pla
                     }
                 }
             }
-            BUSTER_CHECK(next_block == function->block_count + result.split_count);
+            BUSTER_RT_CHECK(next_block == function->block_count + result.split_count);
         }
     }
     return result;
@@ -2330,7 +2330,7 @@ BUSTER_GLOBAL_LOCAL void machine_parameter_edge_layout_end(MachineFunctionBuilde
             if (layout->split_blocks[edge_index] != UINT32_MAX)
             {
                 u32 split = machine_builder_block_begin(builder);
-                BUSTER_CHECK(split == layout->split_blocks[edge_index]);
+                BUSTER_RT_CHECK(split == layout->split_blocks[edge_index]);
                 machine_builder_instruction(builder, (MachineInstruction){
                     .operands = {machine_ref_make(MACHINE_REF_BLOCK, block_entries[destination])},
                     .opcode = target->unconditional_branch_opcode,
@@ -2393,10 +2393,10 @@ BUSTER_GLOBAL_LOCAL bool machine_builder_canonical_edges(MachineFunctionBuilder*
 
 MachineFunction machine_function_builder_finish(Arena* arena, MachineFunctionBuilder* builder)
 {
-    BUSTER_CHECK(!builder->block_is_open);
-    BUSTER_CHECK(builder->edges.total_count == 0 || builder->edges.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
-    BUSTER_CHECK(builder->block_parameters.total_count == 0 || builder->block_parameters.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
-    BUSTER_CHECK(builder->edge_copy_sources.total_count == 0 || builder->edge_copy_sources.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
+    BUSTER_RT_CHECK(!builder->block_is_open);
+    BUSTER_RT_CHECK(builder->edges.total_count == 0 || builder->edges.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
+    BUSTER_RT_CHECK(builder->block_parameters.total_count == 0 || builder->block_parameters.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
+    BUSTER_RT_CHECK(builder->edge_copy_sources.total_count == 0 || builder->edge_copy_sources.total_count <= MACHINE_REF_PAYLOAD_LIMIT);
     machine_stream_cursor_close(&builder->instructions, builder->instruction_cursor);
     machine_stream_cursor_close(&builder->virtual_registers, builder->virtual_register_cursor);
     machine_stream_cursor_close(&builder->blocks, builder->block_cursor);
@@ -3723,7 +3723,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_debug_initialized_ranges(IrFunction* function, M
                 u32 first = block->first_instruction;
                 if (partial)
                 {
-                    BUSTER_CHECK(partial_index < initialized->partial_offsets[tracked + 1u] &&
+                    BUSTER_RT_CHECK(partial_index < initialized->partial_offsets[tracked + 1u] &&
                                  initialized->partial_starts[partial_index].position == position);
                     first = initialized->partial_starts[partial_index++].after;
                 }
@@ -5021,7 +5021,7 @@ BUSTER_GLOBAL_LOCAL u32 machine_verify_dominance_postorder(u32 block_count, u32*
             }
         }
     }
-    BUSTER_CHECK(postorder_count == block_count);
+    BUSTER_RT_CHECK(postorder_count == block_count);
     return root_count;
 }
 

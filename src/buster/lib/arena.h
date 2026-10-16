@@ -92,7 +92,7 @@ BUSTER_CT_CHECK(sizeof(Arena) == 64);
 // After the struct, not beside base.h: os.h declares entry points taking
 // `Arena*` and includes nothing itself, so it needs the typedef above to have
 // been read. It is included at all because the inline bump at the bottom of
-// this header states BUSTER_CHECK, which os.h owns.
+// this header states BUSTER_RT_CHECK, which os.h owns.
 #include <buster/lib/os.h>
 
 typedef struct ArenaCreation ArenaCreation;
@@ -256,11 +256,12 @@ BUSTER_F_DECL void arena_benchmark_flush(bool final);
 #define arena_allocate_zeroed_bytes arena_benchmark_allocate_zeroed_bytes_raw
 #endif
 
-// The bump is inline and the commit is not. The valid allocation path checks
-// the cursor, checked alignment rounding, and remaining capacity before it
-// adds the size, tests the committed high-water mark, and publishes the new
-// position. The checked alignment helper is header-inline, while commit-only
-// work and its reservation-bound validation remain outlined in arena.c.
+// The bump is inline and the commit is not. Cursor bounds, alignment and
+// remaining capacity are caller preconditions: BUSTER_RT_CHECK diagnoses them
+// in Debug/sanitized builds and makes them assumptions in ordinary Release.
+// Alignment calculation still evaluates once in every build. The bump adds
+// the size, tests the committed high-water mark and publishes the position;
+// commit-only work remains outlined in arena.c.
 BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool arena_align_position_checked(Arena const* arena, u64 position, u64 alignment, u64* result)
 {
     // Mappings guarantee native page alignment, which can be smaller than an
@@ -286,12 +287,15 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE bool arena_align_position_c
 
 BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(Arena* arena, u64 size, u64 alignment)
 {
-    BUSTER_VALIDATE(size <= ARENA_MAX_RESERVATION);
-    BUSTER_VALIDATE(arena->position >= arena_minimum_position && arena->position <= arena->reserved_size);
-    u64 aligned_offset;
-    BUSTER_VALIDATE(arena_align_position_checked(arena, arena->position, alignment, &aligned_offset));
-    BUSTER_VALIDATE(aligned_offset <= arena->reserved_size);
-    BUSTER_VALIDATE(size <= arena->reserved_size - aligned_offset);
+    BUSTER_RT_CHECK(size <= ARENA_MAX_RESERVATION);
+    BUSTER_RT_CHECK(arena->position >= arena_minimum_position && arena->position <= arena->reserved_size);
+    BUSTER_RT_CHECK(BUSTER_IS_POWER_OF_TWO(alignment));
+    BUSTER_RT_CHECK((u64)arena <= UINT64_MAX - arena->position);
+    u64 address = (u64)arena + arena->position;
+    BUSTER_RT_CHECK(address <= UINT64_MAX - (alignment - 1));
+    u64 aligned_offset = align_forward_unchecked(address, alignment) - (u64)arena;
+    BUSTER_RT_CHECK(aligned_offset <= arena->reserved_size);
+    BUSTER_RT_CHECK(size <= arena->reserved_size - aligned_offset);
     u64 aligned_size_after = aligned_offset + size;
     if (BUSTER_UNLIKELY(aligned_size_after > arena->os_position))
     {
@@ -299,7 +303,7 @@ BUSTER_UNUSED_DECL BUSTER_GLOBAL_LOCAL BUSTER_INLINE void* arena_allocate_bytes(
     }
     void* result = (u8*)arena + aligned_offset;
     arena->position = aligned_size_after;
-    BUSTER_CHECK(arena->position <= arena->os_position);
+    BUSTER_RT_CHECK(arena->position <= arena->os_position);
     BUSTER_ARENA_UNPOISON(result, size);
     return result;
 }

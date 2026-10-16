@@ -435,7 +435,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult compiler_run_tests(void)
 
             ThreadContext* application_context = thread_context_selected();
             ThreadContext* test_context = thread_context_allocate();
-            BUSTER_CHECK(application_context != 0 && test_context != 0);
+            BUSTER_RT_CHECK(application_context != 0 && test_context != 0);
             thread_context_select(test_context);
 
             u64 position = arena->position;
@@ -582,7 +582,7 @@ s32 buster_fuzz_test_input(const u8* pointer, size_t size)
                 for (u32 module_index = 0; module_index < lower.program->module_count; module_index += 1)
                 {
                     IrValidationResult validation = ir_validate_canonical_module(lower.program, &lower.program->modules[module_index]);
-                    BUSTER_CHECK(validation.error == IR_VALIDATION_NONE);
+                    BUSTER_RT_CHECK(validation.error == IR_VALIDATION_NONE);
                 }
             }
             if (preprocess.recovery && preprocess.recovery->spelling_arena)
@@ -2407,7 +2407,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult run_c_compiler(void)
         void* function_address = 0;                                                                                                      \
         BUSTER_CT_CHECK(sizeof(function_pointer) == sizeof(function_address));                                                          \
         memcpy(&function_address, &function_pointer, sizeof(function_address));                                                          \
-        BUSTER_CHECK(binding_count < BUSTER_ARRAY_LENGTH(bindings));                                                                     \
+        BUSTER_RT_CHECK(binding_count < BUSTER_ARRAY_LENGTH(bindings));                                                                     \
         bindings[binding_count++] = (JitHostBinding){.name = S8(#function), .address = function_address, .kind = OBJECT_SYMBOL_FUNCTION}; \
     } while (0)
 #endif

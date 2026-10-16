@@ -379,9 +379,9 @@ BUSTER_GLOBAL_LOCAL ProcessSpawnResult clang_analyze_spawn(Arena* arena, SliceSt
         result = os_process_spawn(command, (SliceString8){0}, (SliceString8){0}, (ProcessSpawnOptions){.use_process_environment = 1, .search_path = 1,
                                   .capture = (1u << STANDARD_STREAM_OUTPUT) | (1u << STANDARD_STREAM_ERROR)});
 #if BUSTER_WINDOWS
-        BUSTER_CHECK(SetCurrentDirectoryW(previous));
+        BUSTER_RT_CHECK(SetCurrentDirectoryW(previous));
 #else
-        BUSTER_CHECK(chdir(previous) == 0);
+        BUSTER_RT_CHECK(chdir(previous) == 0);
 #endif
     }
     return result;
@@ -1246,7 +1246,7 @@ BUSTER_GLOBAL_LOCAL u64 clang_analyze_schedule_shard(u64 shards, u64 ordinal)
     // This is launch priority only: FNV ownership and the manifest stay unchanged.
     // Other cardinalities retain numeric order; no prior result skips any work.
     const u64 priority[] = {2, 7, 3, 0, 6, 5, 1, 4};
-    BUSTER_CHECK(ordinal < shards);
+    BUSTER_RT_CHECK(ordinal < shards);
     u64 result = ordinal;
     if (shards == BUSTER_ARRAY_LENGTH(priority))
     {

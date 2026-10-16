@@ -1596,7 +1596,7 @@ BUSTER_GLOBAL_LOCAL void make_directory_recursive(Arena* arena, String8 path)
             {
                 String8 part = string_duplicate_arena(arena, string_slice(path, 0, i), true);
                 OsDirectoryCreateResult directory = os_make_directory(part);
-                BUSTER_CHECK(!directory.error.v && (directory.created || directory.existing_directory));
+                BUSTER_RT_CHECK(!directory.error.v && (directory.created || directory.existing_directory));
             }
         }
     }
@@ -6800,7 +6800,7 @@ BUSTER_GLOBAL_LOCAL SliceString8 shell_split(Arena* arena, String8 command, bool
 
 BUSTER_GLOBAL_LOCAL bool clang_analyze_skip_option(SliceString8 arguments, u64 argument_index, u64* skip_count)
 {
-    BUSTER_CHECK(argument_index < arguments.length);
+    BUSTER_RT_CHECK(argument_index < arguments.length);
     String8 argument = arguments.pointer[argument_index];
     String8 next_argument = argument_index + 1 < arguments.length ? arguments.pointer[argument_index + 1] : (String8){0};
     String8 drop_options[] = {
@@ -6890,7 +6890,7 @@ BUSTER_GLOBAL_LOCAL SliceString8 clang_analyzer_command(Arena* arena, SliceStrin
                 result.pointer[out++] = compile_arguments.pointer[i++];
             }
         }
-        BUSTER_CHECK(out == count);
+        BUSTER_RT_CHECK(out == count);
     }
     return result;
 }
@@ -27883,7 +27883,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         }
         ProcessResult time_trace_self_test_result = time_trace_summary_self_test(time_trace_self_test_arena);
         bool time_trace_arena_destroyed = arena_destroy(time_trace_self_test_arena, 1);
-        BUSTER_CHECK(time_trace_arena_destroyed);
+        BUSTER_RT_CHECK(time_trace_arena_destroyed);
         if (time_trace_self_test_result != PROCESS_RESULT_SUCCESS)
         {
             return time_trace_self_test_result;
@@ -27897,7 +27897,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
         }
         ProcessResult test_timing_self_test_result = test_timing_summary_self_test(test_timing_self_test_arena);
         bool test_timing_arena_destroyed = arena_destroy(test_timing_self_test_arena, 1);
-        BUSTER_CHECK(test_timing_arena_destroyed);
+        BUSTER_RT_CHECK(test_timing_arena_destroyed);
         if (test_timing_self_test_result != PROCESS_RESULT_SUCCESS)
         {
             return test_timing_self_test_result;
@@ -28430,7 +28430,7 @@ BUSTER_GLOBAL_LOCAL ProcessResult test_all(Arena* arena, bool ci, CmakeBuildOpti
     }
     if (coverage_obligations.self_host_scheduled)
     {
-        BUSTER_CHECK(fanout != 0);
+        BUSTER_RT_CHECK(fanout != 0);
         ProcessResult fanout_result = self_host_from_existing_add(arena, fanout);
         if (fanout_result != PROCESS_RESULT_SUCCESS)
         {

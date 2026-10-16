@@ -404,7 +404,7 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
             .initial_size = BUSTER_KB(64),
             .flags = {.no_pool = 1, .prefault_pages = prefaulting_mode},
         });
-        BUSTER_VALIDATE(arena != 0);
+        BUSTER_RT_CHECK(arena != 0);
         if (string_equal(failure_mode, S8("commit")) || prefaulting_mode)
         {
             arena_test_fail_next_commit();
@@ -412,8 +412,8 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
         }
         else if (string_equal(failure_mode, S8("bound")))
         {
-            // This is caller-derived validation, not an invariant. It must
-            // still fail in an optimized build rather than becoming UB.
+            // Deliberately violate the allocation precondition. The parent
+            // launches this mode only where runtime checks are diagnostic.
             arena_allocate_bytes(arena, arena->reserved_size, 1);
         }
         else if (string_equal(failure_mode, S8("alignment_zero")))
@@ -498,8 +498,8 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
 
     // Companion to the reserved_size bound: filling an arena up to its
     // reservation stays within bounds and keeps working. Requests past
-    // reserved_size abort via BUSTER_VALIDATE, so they cannot be observed
-    // in-process.
+    // reserved_size violate a BUSTER_RT_CHECK precondition; checked builds
+    // test that diagnostic in a child process.
     {
         Arena* arena = arena_create((ArenaCreation){.reserved_size = BUSTER_MB(1)});
         BUSTER_TEST(arguments, arena != 0);
@@ -887,19 +887,26 @@ UnitTestResult arena_tests(UnitTestArguments* arguments)
     // A failed recommit is reported at the allocation site instead of
     // returning a pointer into inaccessible memory. Run the fatal path in a
     // child so both Debug and Release can assert the diagnostic and exit.
+    // Invalid caller preconditions are tested only in checked configurations:
+    // a false Release assumption is undefined behavior, not a failure oracle.
     {
         String8 child_arguments[] = {
             program_state->input.arguments.pointer[0],
             S8("test"),
         };
         String8 modes[] = {
-            S8("commit"), S8("commit_prefault"), S8("bound"), S8("alignment_zero"), S8("alignment_three"),
-            S8("alignment_huge"), S8("cursor_low"), S8("cursor_high"), S8("decommit_low"), S8("decommit_high"),
+            S8("commit"), S8("commit_prefault"),
+#if !BUSTER_OPTIMIZE || BUSTER_SANITIZE
+            S8("bound"), S8("alignment_zero"), S8("alignment_three"), S8("alignment_huge"),
+            S8("cursor_low"), S8("cursor_high"), S8("decommit_low"), S8("decommit_high"),
+#endif
         };
         String8 diagnostics[] = {
-            S8("arena commit failed"), S8("arena commit failed"), S8("validation failed"), S8("validation failed"),
-            S8("validation failed"), S8("validation failed"), S8("validation failed"), S8("validation failed"),
-            S8("validation failed"), S8("validation failed"),
+            S8("arena commit failed"), S8("arena commit failed"),
+#if !BUSTER_OPTIMIZE || BUSTER_SANITIZE
+            S8("assertion failed"), S8("assertion failed"), S8("assertion failed"), S8("assertion failed"),
+            S8("assertion failed"), S8("assertion failed"), S8("assertion failed"), S8("assertion failed"),
+#endif
         };
         BUSTER_CT_CHECK(BUSTER_ARRAY_LENGTH(modes) == BUSTER_ARRAY_LENGTH(diagnostics));
         for (u32 mode_index = 0; mode_index < BUSTER_ARRAY_LENGTH(modes); mode_index += 1)
