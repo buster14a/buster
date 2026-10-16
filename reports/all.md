@@ -6,16 +6,16 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 
 | Job / matrix | OS / actual CPU | Event / branch | Successful samples | Missing context | History |
 |---|---|---|---:|---:|---|
-| Report required job step changes / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | schedule / main | 4 | 4 | [series](series-563c049b07bb1501.md) |
+| Report required job step changes / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | schedule / main | 5 | 5 | [series](series-563c049b07bb1501.md) |
 | Collect terminal Actions executions / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 0 | 5 | [series](series-0109083458cb9d60.md) |
-| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 31 | [series](series-f666f9001ca74394.md) |
-| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 31 | [series](series-e460ad260f8a45e8.md) |
+| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 32 | [series](series-f666f9001ca74394.md) |
+| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 32 | [series](series-e460ad260f8a45e8.md) |
 | Publish advisory CI history / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V45 96-Core Processor | schedule / main | 3 | 3 | [series](series-6a4898acd94420e1.md) |
 | watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 6 | 6 | [series](series-b3d270346cdad83d.md) |
-| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 14 | 14 | [series](series-33ea968a7c5f4ce4.md) |
-| Open the native-retirement catch-up request / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 6 | 6 | [series](series-9d03e2991bd3143d.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 15 | 15 | [series](series-33ea968a7c5f4ce4.md) |
+| Open the native-retirement catch-up request / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 7 | 7 | [series](series-9d03e2991bd3143d.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 2 | 2 | [series](series-9e5432b30abe97dc.md) |
-| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 4 | 4 | [series](series-c1ede1978aed2092.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 5 | 5 | [series](series-c1ede1978aed2092.md) |
 | Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | workflow&#95;run / main | 2 | 2 | [series](series-ae6b998d63154457.md) |
 | Open the native-retirement catch-up request / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | schedule / main | 3 | 3 | [series](series-d872b912a5d76106.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / codex/4019-recover-inconsistent-inventories | 0 | 1 | [series](series-3787135d6d838047.md) |
@@ -64,9 +64,9 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Publish one lease-guarded PR integration head /  | unknown OS / unknown CPU | workflow&#95;dispatch / main | 0 | 2 | [series](series-8c39fbc1b8e7fdc7.md) |
 | Native retirement automation outcome /  | unknown OS / unknown CPU | workflow&#95;dispatch / main | 0 | 1 | [series](series-6f610c6f5e903285.md) |
 | Reconcile the exact completed benchmark attempt / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 1 | 1 | [series](series-c6301b4a7de02f31.md) |
-| No-code plan /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 40 | [series](series-310307db3edca5aa.md) |
+| No-code plan /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 42 | [series](series-310307db3edca5aa.md) |
 | Exact merge-tree preflight /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 1 | [series](series-0d688dc851cb654e.md) |
-| No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / codex/4314-lower-x86-emms | 0 | 5 | [series](series-ecbf7aa2c2ed768d.md) |
+| No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / codex/4314-lower-x86-emms | 0 | 7 | [series](series-ecbf7aa2c2ed768d.md) |
 | Preflight regression tests / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / codex/4314-lower-x86-emms | 3 | 4 | [series](series-e90b3d56785a5224.md) |
 | report /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 17 | [series](series-b8f3ac1473919e5b.md) |
 | Reconcile the exact completed benchmark attempt /  | unknown OS / unknown CPU | workflow&#95;run / main | 0 | 14 | [series](series-a9120f798a82407d.md) |
