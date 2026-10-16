@@ -1,0 +1,48 @@
+name: 9700X test
+
+# This public repository must not execute unreviewed fork code on the host.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Repository-local serialization, not cross-repository benchmark isolation.
+concurrency:
+  group: buster-fast-9700x
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Build and execute on Ryzen 7 9700X
+    if: github.repository == 'buster14a/buster-fast'
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Verify host and bootstrap compiler
+        run: |
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
+          grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
+          clang --version
+
+      - name: Check out triggering commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Execute compiler
+        run: ./build/compiler
