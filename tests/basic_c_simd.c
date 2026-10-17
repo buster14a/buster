@@ -35,23 +35,23 @@ typedef u64 Mask64;
 #define simd512_load_masked(address, mask) __builtin_buster_simd_load_masked((address), (mask))
 #define simd512_store(address, value) __builtin_buster_simd_store((address), (value))
 #define simd512_store_masked(address, mask, value) __builtin_buster_simd_store_masked((address), (mask), (value))
-#define simd512_splat(byte) __builtin_buster_simd_splat_byte(byte)
+#define simd512_splat(byte) __builtin_buster_simd_splat_u8(byte)
 #define simd512_zero() simd512_splat(0)
-#define simd512_equal_byte(left, right) __builtin_buster_simd_equal_byte((left), (right))
-#define simd512_less_byte(left, right) __builtin_buster_simd_less_byte((left), (right))
-#define simd512_sign_byte(value) __builtin_buster_simd_sign_byte(value)
-#define simd512_test_byte(left, right) __builtin_buster_simd_test_byte((left), (right))
-#define simd512_permute2_byte(mask, low, indices, high) __builtin_buster_simd_permute2_byte((mask), (low), (indices), (high))
-#define simd512_compress_byte(mask, value) __builtin_buster_simd_compress_byte((mask), (value))
-#define simd512_compress_store_byte(address, mask, value) __builtin_buster_simd_compress_store_byte((address), (mask), (value))
-#define simd512_widen_byte(value, quarter) __builtin_buster_simd_widen_byte((value), (quarter))
-#define simd512_shift_left_word(value, count) __builtin_buster_simd_shift_left_word((value), (count))
-#define simd512_ternary_word(a, b, c, table) __builtin_buster_simd_ternary_word((a), (b), (c), (table))
-#define simd512_equal_word(left, right) __builtin_buster_simd_equal_word((left), (right))
-#define simd512_splat_word(value) __builtin_buster_simd_splat_word(value)
-#define simd512_less_word(left, right) __builtin_buster_simd_less_word((left), (right))
-#define simd512_compress_word(mask, value) __builtin_buster_simd_compress_word((mask), (value))
-#define simd512_add_byte(left, right) ((Simd512)((left) + (right)))
+#define simd512_equal_u8(left, right) __builtin_buster_simd_equal_u8((left), (right))
+#define simd512_less_u8(left, right) __builtin_buster_simd_less_u8((left), (right))
+#define simd512_sign_u8(value) __builtin_buster_simd_sign_u8(value)
+#define simd512_test_u8(left, right) __builtin_buster_simd_test_u8((left), (right))
+#define simd512_permute2_u8(mask, low, indices, high) __builtin_buster_simd_permute2_u8((mask), (low), (indices), (high))
+#define simd512_compress_u8(mask, value) __builtin_buster_simd_compress_u8((mask), (value))
+#define simd512_compress_store_u8(address, mask, value) __builtin_buster_simd_compress_store_u8((address), (mask), (value))
+#define simd512_widen_u8(value, quarter) __builtin_buster_simd_widen_u8((value), (quarter))
+#define simd512_shift_left_u32(value, count) __builtin_buster_simd_shift_left_u32((value), (count))
+#define simd512_ternary_u32(a, b, c, table) __builtin_buster_simd_ternary_u32((a), (b), (c), (table))
+#define simd512_equal_u32(left, right) __builtin_buster_simd_equal_u32((left), (right))
+#define simd512_splat_u32(value) __builtin_buster_simd_splat_u32(value)
+#define simd512_less_u32(left, right) __builtin_buster_simd_less_u32((left), (right))
+#define simd512_compress_u32(mask, value) __builtin_buster_simd_compress_u32((mask), (value))
+#define simd512_add_u8(left, right) ((Simd512)((left) + (right)))
 
 #define mask64_prefix(count) ((count) >= 64 ? ~(Mask64)0 : (((Mask64)1 << (count)) - 1))
 #define mask64_shift_left(mask, count) ((Mask64)(mask) << (count))
@@ -102,7 +102,7 @@ static Simd512 vector_ninth(Simd512 a, Simd512 b, Simd512 c, Simd512 d, Simd512 
 // Interleaved with integers so both register files have to advance together.
 static Simd512 vector_mixed(int first, Simd512 value, long long second, Simd512 other, int third)
 {
-    return simd512_add_byte(simd512_add_byte(value, other), simd512_splat((u8)(first + second + third)));
+    return simd512_add_u8(simd512_add_u8(value, other), simd512_splat((u8)(first + second + third)));
 }
 
 static u8 source_bytes[64];
@@ -262,48 +262,48 @@ int main(void)
 
     // Comparisons. Byte `lane` equals 7 only at lane 7, and is below 7 in the
     // seven lanes under it.
-    if (simd512_equal_byte(value, simd512_splat(7)) != ((Mask64)1 << 7))
+    if (simd512_equal_u8(value, simd512_splat(7)) != ((Mask64)1 << 7))
     {
         return 20;
     }
-    if (simd512_less_byte(value, simd512_splat(7)) != 0x7F)
+    if (simd512_less_u8(value, simd512_splat(7)) != 0x7F)
     {
         return 21;
     }
-    if (simd512_equal_byte(value, value) != ~(Mask64)0)
+    if (simd512_equal_u8(value, value) != ~(Mask64)0)
     {
         return 22;
     }
-    if (simd512_less_byte(value, value) != 0)
+    if (simd512_less_u8(value, value) != 0)
     {
         return 23;
     }
     // 128..255 are the high-bit bytes, and an unsigned compare has to agree.
-    if (simd512_sign_byte(simd512_load(sign_bytes)) != 0xAAAAAAAAAAAAAAAAULL)
+    if (simd512_sign_u8(simd512_load(sign_bytes)) != 0xAAAAAAAAAAAAAAAAULL)
     {
         return 24;
     }
-    if (simd512_sign_byte(value) != 0)
+    if (simd512_sign_u8(value) != 0)
     {
         return 25;
     }
-    if (simd512_sign_byte(simd512_load(high_bytes)) != ~(Mask64)0)
+    if (simd512_sign_u8(simd512_load(high_bytes)) != ~(Mask64)0)
     {
         return 26;
     }
     // lane & 3 is non-zero for three lanes in every four.
-    if (simd512_test_byte(value, simd512_splat(3)) != 0xEEEEEEEEEEEEEEEEULL)
+    if (simd512_test_u8(value, simd512_splat(3)) != 0xEEEEEEEEEEEEEEEEULL)
     {
         return 27;
     }
-    if (simd512_test_byte(value, simd512_zero()) != 0)
+    if (simd512_test_u8(value, simd512_zero()) != 0)
     {
         return 28;
     }
 
     // vpermt2b indexes a 128-byte table split across two vectors. index_bytes
     // counts down from 127, so lane 0 selects the last byte of the high half.
-    probe.vector = simd512_permute2_byte(~(Mask64)0, value, simd512_load(index_bytes), simd512_load(high_bytes));
+    probe.vector = simd512_permute2_u8(~(Mask64)0, value, simd512_load(index_bytes), simd512_load(high_bytes));
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         u32 index = 127 - lane;
@@ -313,7 +313,7 @@ int main(void)
             return 29;
         }
     }
-    probe.vector = simd512_permute2_byte(0x07, value, simd512_load(index_bytes), simd512_load(high_bytes));
+    probe.vector = simd512_permute2_u8(0x07, value, simd512_load(index_bytes), simd512_load(high_bytes));
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         if (probe.bytes[lane] != (lane < 3 ? high_bytes[63 - lane] : 0))
@@ -323,7 +323,7 @@ int main(void)
     }
 
     // vpcompressb packs the selected lanes down and zeroes the rest.
-    probe.vector = simd512_compress_byte(0x5555555555555555ULL, value);
+    probe.vector = simd512_compress_u8(0x5555555555555555ULL, value);
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         if (probe.bytes[lane] != (lane < 32 ? (u8)(lane * 2) : 0))
@@ -331,7 +331,7 @@ int main(void)
             return 31;
         }
     }
-    probe.vector = simd512_compress_byte(0, value);
+    probe.vector = simd512_compress_u8(0, value);
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         if (probe.bytes[lane] != 0)
@@ -339,7 +339,7 @@ int main(void)
             return 32;
         }
     }
-    probe.vector = simd512_compress_byte(~(Mask64)0, value);
+    probe.vector = simd512_compress_u8(~(Mask64)0, value);
     for (u32 lane = 0; lane < 64; lane += 1)
     {
         if (probe.bytes[lane] != (u8)lane)
@@ -354,7 +354,7 @@ int main(void)
     {
         written[lane] = 0xCD;
     }
-    simd512_compress_store_byte(written, 0x55, value);
+    simd512_compress_store_u8(written, 0x55, value);
     for (u32 lane = 0; lane < 4; lane += 1)
     {
         if (written[lane] != (u8)(lane * 2))
@@ -370,14 +370,14 @@ int main(void)
     {
         written[lane] = 0xCD;
     }
-    simd512_compress_store_byte(written, 0, value);
+    simd512_compress_store_u8(written, 0, value);
     if (written[0] != 0xCD)
     {
         return 36;
     }
 
     // vpmovzxbd, one quarter at a time.
-    probe.vector = simd512_widen_byte(value, 0);
+    probe.vector = simd512_widen_u8(value, 0);
     for (u32 word = 0; word < 16; word += 1)
     {
         if (probe.words[word] != word)
@@ -385,7 +385,7 @@ int main(void)
             return 37;
         }
     }
-    probe.vector = simd512_widen_byte(value, 1);
+    probe.vector = simd512_widen_u8(value, 1);
     for (u32 word = 0; word < 16; word += 1)
     {
         if (probe.words[word] != word + 16)
@@ -393,7 +393,7 @@ int main(void)
             return 38;
         }
     }
-    probe.vector = simd512_widen_byte(value, 2);
+    probe.vector = simd512_widen_u8(value, 2);
     for (u32 word = 0; word < 16; word += 1)
     {
         if (probe.words[word] != word + 32)
@@ -401,7 +401,7 @@ int main(void)
             return 39;
         }
     }
-    probe.vector = simd512_widen_byte(value, 3);
+    probe.vector = simd512_widen_u8(value, 3);
     for (u32 word = 0; word < 16; word += 1)
     {
         if (probe.words[word] != word + 48)
@@ -410,7 +410,7 @@ int main(void)
         }
     }
     // The high bytes must zero-extend rather than sign-extend.
-    probe.vector = simd512_widen_byte(simd512_load(high_bytes), 3);
+    probe.vector = simd512_widen_u8(simd512_load(high_bytes), 3);
     for (u32 word = 0; word < 16; word += 1)
     {
         if (probe.words[word] != (u32)high_bytes[48 + word])
@@ -419,7 +419,7 @@ int main(void)
         }
     }
 
-    probe.vector = simd512_shift_left_word(simd512_widen_byte(value, 1), 8);
+    probe.vector = simd512_shift_left_u32(simd512_widen_u8(value, 1), 8);
     for (u32 word = 0; word < 16; word += 1)
     {
         if (probe.words[word] != (word + 16) << 8)
@@ -427,7 +427,7 @@ int main(void)
             return 42;
         }
     }
-    probe.vector = simd512_shift_left_word(simd512_widen_byte(value, 1), 0);
+    probe.vector = simd512_shift_left_u32(simd512_widen_u8(value, 1), 0);
     for (u32 word = 0; word < 16; word += 1)
     {
         if (probe.words[word] != word + 16)
@@ -435,7 +435,7 @@ int main(void)
             return 43;
         }
     }
-    probe.vector = simd512_shift_left_word(simd512_widen_byte(value, 0), 31);
+    probe.vector = simd512_shift_left_u32(simd512_widen_u8(value, 0), 31);
     for (u32 word = 0; word < 16; word += 1)
     {
         if (probe.words[word] != ((word & 1) ? 0x80000000u : 0u))
@@ -444,7 +444,7 @@ int main(void)
         }
     }
     // The token-stream shape the tokenizer builds: kind | (length << 8).
-    probe.vector = simd512_ternary_word(simd512_widen_byte(value, 0), simd512_shift_left_word(simd512_widen_byte(value, 1), 8), simd512_zero(), 0xFE);
+    probe.vector = simd512_ternary_u32(simd512_widen_u8(value, 0), simd512_shift_left_u32(simd512_widen_u8(value, 1), 8), simd512_zero(), 0xFE);
     for (u32 word = 0; word < 16; word += 1)
     {
         if (probe.words[word] != (word | ((word + 16) << 8)))
@@ -458,39 +458,39 @@ int main(void)
     Simd512 a = simd512_splat(0xF0);
     Simd512 b = simd512_splat(0xCC);
     Simd512 c = simd512_splat(0xAA);
-    probe.vector = simd512_ternary_word(a, b, c, 0xFE);
+    probe.vector = simd512_ternary_u32(a, b, c, 0xFE);
     if (probe.bytes[0] != (0xF0 | 0xCC | 0xAA) || probe.bytes[63] != (0xF0 | 0xCC | 0xAA))
     {
         return 46;
     }
-    probe.vector = simd512_ternary_word(a, b, c, 0x80);
+    probe.vector = simd512_ternary_u32(a, b, c, 0x80);
     if (probe.bytes[0] != (0xF0 & 0xCC & 0xAA))
     {
         return 47;
     }
-    probe.vector = simd512_ternary_word(a, b, c, 0x96);
+    probe.vector = simd512_ternary_u32(a, b, c, 0x96);
     if (probe.bytes[0] != (0xF0 ^ 0xCC ^ 0xAA))
     {
         return 48;
     }
-    probe.vector = simd512_ternary_word(a, b, c, 0x00);
+    probe.vector = simd512_ternary_u32(a, b, c, 0x00);
     if (probe.bytes[0] != 0 || probe.bytes[63] != 0)
     {
         return 49;
     }
     // The identity table 0xF0 selects `a` untouched, which catches an operand
     // order that happens to work for the symmetric tables above.
-    probe.vector = simd512_ternary_word(a, b, c, 0xF0);
+    probe.vector = simd512_ternary_u32(a, b, c, 0xF0);
     if (probe.bytes[0] != 0xF0)
     {
         return 50;
     }
-    probe.vector = simd512_ternary_word(a, b, c, 0xCC);
+    probe.vector = simd512_ternary_u32(a, b, c, 0xCC);
     if (probe.bytes[0] != 0xCC)
     {
         return 51;
     }
-    probe.vector = simd512_ternary_word(a, b, c, 0xAA);
+    probe.vector = simd512_ternary_u32(a, b, c, 0xAA);
     if (probe.bytes[0] != 0xAA)
     {
         return 52;
@@ -509,7 +509,7 @@ int main(void)
         text[lane] = (u8)(lane % 8 < 3 ? 'a' : ' ');
     }
     Simd512 chunk = simd512_load(text);
-    Mask64 letters = simd512_equal_byte(chunk, simd512_splat('a'));
+    Mask64 letters = simd512_equal_u8(chunk, simd512_splat('a'));
     Mask64 starts = mask64_run_starts(letters);
     Mask64 ends = mask64_run_ends(letters);
     if (mask64_count(letters) != 24 || mask64_count(starts) != 8 || mask64_count(ends) != 8)
@@ -518,8 +518,8 @@ int main(void)
     }
     Lanes start_positions;
     Lanes end_positions;
-    start_positions.vector = simd512_compress_byte(starts, simd512_load(iota));
-    end_positions.vector = simd512_compress_byte(ends, simd512_load(iota));
+    start_positions.vector = simd512_compress_u8(starts, simd512_load(iota));
+    end_positions.vector = simd512_compress_u8(ends, simd512_load(iota));
     for (u32 run = 0; run < 8; run += 1)
     {
         if (start_positions.bytes[run] != (u8)(run * 8))
@@ -577,14 +577,14 @@ int main(void)
     // zeroes the rest; a lane differing in one byte must not match, and the
     // all-ones sentinel is the byte splat because the pattern is
     // width-agnostic.
-    if (simd512_equal_word(value, value) != 0xFFFF)
+    if (simd512_equal_u32(value, value) != 0xFFFF)
     {
         return 61;
     }
     Lanes word_probe;
     word_probe.vector = value;
     word_probe.bytes[4 * 5] ^= 1;
-    if (simd512_equal_word(value, word_probe.vector) != (0xFFFF & ~((Mask64)1 << 5)))
+    if (simd512_equal_u32(value, word_probe.vector) != (0xFFFF & ~((Mask64)1 << 5)))
     {
         return 62;
     }
@@ -593,7 +593,7 @@ int main(void)
     {
         free_file.words[word] = word & 1 ? 0xFFFFFFFFu : word;
     }
-    if (simd512_equal_word(free_file.vector, simd512_splat(255)) != 0xAAAA)
+    if (simd512_equal_u32(free_file.vector, simd512_splat(255)) != 0xAAAA)
     {
         return 63;
     }
@@ -601,7 +601,7 @@ int main(void)
     // can spell, and the unsigned compare is strict and does not sign-extend:
     // 0x80000000 is above, not below, every small value.
     Lanes splat_probe;
-    splat_probe.vector = simd512_splat_word(0x01020304u);
+    splat_probe.vector = simd512_splat_u32(0x01020304u);
     for (u32 word = 0; word < 16; word += 1)
     {
         if (splat_probe.words[word] != 0x01020304u)
@@ -614,11 +614,11 @@ int main(void)
     {
         ascending.words[word] = word;
     }
-    if (simd512_less_word(ascending.vector, simd512_splat_word(5)) != 0x001F)
+    if (simd512_less_u32(ascending.vector, simd512_splat_u32(5)) != 0x001F)
     {
         return 65;
     }
-    if (simd512_less_word(ascending.vector, ascending.vector) != 0)
+    if (simd512_less_u32(ascending.vector, ascending.vector) != 0)
     {
         return 66;
     }
@@ -627,11 +627,11 @@ int main(void)
     {
         high_bit.words[word] = 0x80000000u;
     }
-    if (simd512_less_word(high_bit.vector, simd512_splat_word(1)) != 0)
+    if (simd512_less_u32(high_bit.vector, simd512_splat_u32(1)) != 0)
     {
         return 67;
     }
-    if (simd512_less_word(simd512_splat_word(1), high_bit.vector) != 0xFFFF)
+    if (simd512_less_u32(simd512_splat_u32(1), high_bit.vector) != 0xFFFF)
     {
         return 68;
     }
@@ -639,7 +639,7 @@ int main(void)
     // pairing it with a full store and a popcount cursor advance is the
     // compaction idiom the register-form-only rule prescribes.
     Lanes compacted;
-    compacted.vector = simd512_compress_word(0xAAAAu, ascending.vector);
+    compacted.vector = simd512_compress_u32(0xAAAAu, ascending.vector);
     for (u32 word = 0; word < 16; word += 1)
     {
         u32 expected_word = word < 8 ? word * 2 + 1 : 0;
@@ -648,7 +648,7 @@ int main(void)
             return 69;
         }
     }
-    compacted.vector = simd512_compress_word(0, ascending.vector);
+    compacted.vector = simd512_compress_u32(0, ascending.vector);
     for (u32 word = 0; word < 16; word += 1)
     {
         if (compacted.words[word] != 0)
@@ -656,7 +656,7 @@ int main(void)
             return 70;
         }
     }
-    compacted.vector = simd512_compress_word(0xFFFFu, ascending.vector);
+    compacted.vector = simd512_compress_u32(0xFFFFu, ascending.vector);
     for (u32 word = 0; word < 16; word += 1)
     {
         if (compacted.words[word] != word)
@@ -665,7 +665,7 @@ int main(void)
         }
     }
     // Only the low sixteen mask bits participate: bit 16 selects nothing.
-    compacted.vector = simd512_compress_word(0x10001u, ascending.vector);
+    compacted.vector = simd512_compress_u32(0x10001u, ascending.vector);
     if (compacted.words[0] != 0 || compacted.words[1] != 0)
     {
         return 72;
