@@ -17,6 +17,8 @@
 // CPU architecture dependent includes
 #include <immintrin.h>
 
+#include "buster/compiler/c_lexer.c"
+
 typedef struct String8 String8;
 struct String8
 {
