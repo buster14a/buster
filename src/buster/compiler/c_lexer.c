@@ -1,9 +1,10 @@
 // Single-file amalgamation of the C lexer (preprocessing tokenizer) from Accelerated-Zig-Parser:
 //   https://github.com/davidgmbb/Accelerated-Zig-Parser (c/c_tokenizer.h, c/c_tokenizer_tables.h,
 //   c/c_tokenizer_unicode.h, c/c_tokenizer_scalar.c, c/c_tokenizer.c at commit f4482e2dd53413522d75d8c254b9a824021238ce).
-// The sections below are the original files in that order, with their local #includes removed and
-// c_tokenize_scalar_range made static. The tables are generated upstream by c/gen_c_tokenizer_tables.py and
-// c/gen_c_tokenizer_unicode.py; regenerate there rather than editing them here.
+// The sections below are the original files in that order, with their local #includes removed and every
+// function made static (the API prototypes are marked unused until the compiler calls them). The tables are
+// generated upstream by c/gen_c_tokenizer_tables.py and c/gen_c_tokenizer_unicode.py; regenerate there rather than
+// editing them here.
 //
 // Upstream license (MIT):
 //
@@ -164,18 +165,18 @@ typedef enum CTokenizerError
 // Tokenizes `length` bytes of C source. Token `i` is `source[starts[i] .. ends[i]]`, of kind `kinds[i] &
 // ~C_TOKEN_START_OF_LINE` (a `CTokenKind`). Returns the number of tokens, or a negative `CTokenizerError`. `source`
 // needs no padding or terminator, and `kinds`, `starts` and `ends` need `C_TOKENIZER_CAPACITY(length)` entries.
-int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
+static __attribute__((unused)) int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
 
 // c_tokenize without the scalar lexer: returns C_TOKENIZER_ERROR_NEEDS_SCALAR for the rare inputs that need it for a
 // part (see c_tokenizer.c), with the output arrays clobbered. For testing and benchmarking.
-int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
+static __attribute__((unused)) int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
 
 // The same tokenization by a straightforward scalar lexer (which `c_tokenize` uses for the rare parts of a source
 // that its vectorized path doesn't handle). It writes exactly the returned number of tokens.
-int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
+static __attribute__((unused)) int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
 
 // The clang name of a token kind (without the start-of-line bit), e.g. "raw_identifier" or "plusequal".
-const char* c_token_kind_name(uint8_t kind);
+static __attribute__((unused)) const char* c_token_kind_name(uint8_t kind);
 
 #ifdef __cplusplus
 }
@@ -1507,7 +1508,7 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
     return output.count;
 }
 
-int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
+static int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
     if (length > UINT32_MAX - 128)
     {
@@ -1561,7 +1562,7 @@ static const char* const c_token_kind_names[C_TOKEN_KIND_COUNT] =
 #undef C_TOKEN_NAME
 };
 
-const char* c_token_kind_name(uint8_t kind)
+static const char* c_token_kind_name(uint8_t kind)
 {
     uint8_t k = kind & (uint8_t)~C_TOKEN_START_OF_LINE;
     return k < C_TOKEN_KIND_COUNT ? c_token_kind_names[k] : "<invalid kind>";
@@ -2776,7 +2777,7 @@ __attribute__((noinline)) static int64_t tokenize_cpp(const uint8_t* source, uin
     return tokenize_chunks(true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
-int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
+static int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
     int64_t result;
     if (length > UINT32_MAX - 128)
@@ -2803,7 +2804,7 @@ int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* k
     return result;
 }
 
-int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
+static int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
     if (length > UINT32_MAX - 128)
     {
