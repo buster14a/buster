@@ -2,13 +2,13 @@
 
 Operational Actions observations; advisory. Compiler performance acceptance and the qualified 9700X dashboard are separate.
 
-Collected at 2026-10-17T12:59:48Z. Policy hosted-ci-cohort-v1. 156 active observations, 2642 unknown hardware, 2 API/ingestion gaps, 1 incomplete runs, 70 aliases, 1504 unresolved cost intervals.
+Collected at 2026-10-17T16:28:06Z. Policy hosted-ci-cohort-v1. 138 active observations, 2643 unknown hardware, 0 API/ingestion gaps, 0 incomplete runs, 70 aliases, 1503 unresolved cost intervals.
 
-Observed hosted runner-seconds: 683271; observed unsuccessful-job runner-seconds: 83319 (242 jobs). These exclude unknown-hosting and missing intervals; they are neither billed minutes nor process CPU time. Dependency/deployment waits and required-CI critical-path attribution remain unavailable.
+Observed hosted runner-seconds: 683952; observed unsuccessful-job runner-seconds: 83546 (243 jobs). These exclude unknown-hosting and missing intervals; they are neither billed minutes nor process CPU time. Dependency/deployment waits and required-CI critical-path attribution remain unavailable.
 
-Reporting bounds: 30 observation-date shards / 32768 rows / 96 rendered series; 5041 rows outside the rendered series bound remain in exports. Raw history is retained separately from these bounded derived reports.
+Reporting bounds: 30 observation-date shards / 32768 rows / 96 rendered series; 5044 rows outside the rendered series bound remain in exports. Raw history is retained separately from these bounded derived reports.
 
-Bounded view omitted 0 older shards and 5521 older loaded rows; their raw records remain on the data branch.
+Bounded view omitted 0 older shards and 5549 older loaded rows; their raw records remain on the data branch.
 
 [JSON export](recent.jsonl) · [CSV export](recent.csv) · [Collector policy](https://github.com/buster14a/buster/blob/main/docs/ci-timing-history.md)
 
@@ -24,4 +24,4 @@ Ordered by absolute median seconds per physical execution; candidate frequency i
 | Series | Median change s | Change % | Candidate executions | State |
 |---|---:|---:|---:|---|
 
-Last selected execution completed: 2026-10-17T12:28:39Z; collection lag 1869 s. Pending runs: 2; reverse-sweep cursor 2026-10-08T17:36:47Z. The cursor measures discovery progress, not evidence of complete historical coverage.
+Last selected execution completed: 2026-10-17T15:52:52Z; collection lag 2114 s. Pending runs: 1; reverse-sweep cursor 2026-10-08T17:19:59Z. The cursor measures discovery progress, not evidence of complete historical coverage.

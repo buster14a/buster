@@ -7,13 +7,13 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | Job / matrix | OS / actual CPU | Event / branch | Successful samples | Missing context | History |
 |---|---|---|---:|---:|---|
 | Report required job step changes / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 3 | 3 | [series](series-e1aa0159099025c2.md) |
-| Collect terminal Actions executions / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 0 | 7 | [series](series-0109083458cb9d60.md) |
-| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 36 | [series](series-e460ad260f8a45e8.md) |
-| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 36 | [series](series-f666f9001ca74394.md) |
+| Collect terminal Actions executions / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 0 | 8 | [series](series-0109083458cb9d60.md) |
+| Native CI history controls /  | unknown OS / unknown CPU | schedule / main | 0 | 37 | [series](series-e460ad260f8a45e8.md) |
+| Authentic desktop architecture execution joins /  | unknown OS / unknown CPU | schedule / main | 0 | 37 | [series](series-f666f9001ca74394.md) |
 | Publish advisory CI history / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | schedule / main | 3 | 3 | [series](series-c76b1beb08b7806c.md) |
-| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 7 | 7 | [series](series-c1ede1978aed2092.md) |
-| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 9 | 9 | [series](series-b3d270346cdad83d.md) |
-| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 20 | 20 | [series](series-33ea968a7c5f4ce4.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 8 | 8 | [series](series-c1ede1978aed2092.md) |
+| watch-merge-group / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 10 | 10 | [series](series-b3d270346cdad83d.md) |
+| Reconcile trusted retirement requests / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | workflow&#95;run / main | 21 | 21 | [series](series-33ea968a7c5f4ce4.md) |
 | Open the native-retirement catch-up request / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 10 | 10 | [series](series-9d03e2991bd3143d.md) |
 | Reconcile exact-group admission / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 7763 64-Core Processor | schedule / main | 5 | 5 | [series](series-9e5432b30abe97dc.md) |
 | Exact merge-tree preflight / non-matrix | Ubuntu 24.04.5 LTS / AMD EPYC 9V45 96-Core Processor | workflow&#95;run / main | 3 | 3 | [series](series-e2334d04533bab00.md) |
@@ -60,7 +60,7 @@ PR, queue, manual and main contexts retain distinct histories. Unknown context r
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / codex/4314-lower-x86-emms | 0 | 7 | [series](series-fd4cd15e8d548d96.md) |
 | Reconstruct candidate closure ephemerally / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | pull&#95;request / codex/4314-lower-x86-emms | 2 | 2 | [series](series-03e93aa8433ab737.md) |
 | Rebind unit &#40;macos-26&#41; / unavailable-dynamic-or-reusable-matrix | macOS / Apple M1 &#40;Virtual&#41; | pull&#95;request / codex/4314-lower-x86-emms | 4 | 4 | [series](series-9353520f57faac97.md) |
-| Rebind unit &#40;ubuntu-26.04&#41; / unavailable-dynamic-or-reusable-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / codex/4314-lower-x86-emms | 5 | 5 | [series](series-ab98c19e8afc85a0.md) |
+| Rebind unit &#40;ubuntu-26.04&#41; / unavailable-dynamic-or-reusable-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 7763 64-Core Processor | pull&#95;request / codex/4314-lower-x86-emms | 6 | 6 | [series](series-ab98c19e8afc85a0.md) |
 | No-code plan / Classify no-code changes /  | unknown OS / unknown CPU | pull&#95;request / codex/4314-lower-x86-emms | 0 | 6 | [series](series-afdfbb93623674d7.md) |
 | GPU Linux consumers / non-matrix | Ubuntu 26.04.1 LTS / AMD EPYC 9V74 80-Core Processor | pull&#95;request / codex/4314-lower-x86-emms | 1 | 1 | [series](series-b97b9be25f7a39ec.md) |
 | GPU Metal consumer /  | unknown OS / unknown CPU | pull&#95;request / codex/4314-lower-x86-emms | 0 | 6 | [series](series-8fdcfd41442e4346.md) |
