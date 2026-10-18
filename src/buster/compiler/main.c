@@ -152,6 +152,9 @@ static CompileResult compile(String8 path, CompileOptions options)
     return result;
 }
 
+// The lexer benchmark is a separate translation unit, linked into the compiler executable.
+int run_c_lexer_benchmark(int argc, char** argv);
+
 // The lexer tests, for the test-lexer command.
 #include "buster/compiler/c_lexer_test.c"
 
@@ -161,6 +164,10 @@ int main(int argc, char** argv)
     if (argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
     {
         result = run_c_lexer_tests(argv[0], argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-lexer") == 0)
+    {
+        result = run_c_lexer_benchmark(argc - 1, argv + 1);
     }
     else
     {

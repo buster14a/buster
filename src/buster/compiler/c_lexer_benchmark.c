@@ -3,7 +3,7 @@
 // https://github.com/davidgmbb/Accelerated-Zig-Parser (commit f4482e2dd53413522d75d8c254b9a824021238ce, which
 // c_lexer.c also comes from) and prints the same lines for them, so its numbers compare directly with upstream's.
 //
-// Usage: build/c_lexer_benchmark [--cplusplus] path...
+// Usage: build/compiler benchmark-lexer [--cplusplus] path...
 //
 // Paths are files or directories. Directories are searched for .c and .h files, or with --cplusplus for C++ sources
 // and headers (including extensionless text files like <vector>), and --cplusplus tokenizes the corpus as C++. Run it
@@ -20,7 +20,7 @@
 //   - The benchmark: open_counter, sample_now, tokenize_corpus and benchmark, which runs a warm-up pass and then
 //     BUSTER_BENCHMARK_PASSES passes with c_tokenize and c_tokenize_scalar taking turns, each with its own output
 //     arrays, and reports the medians of wall time and of user-space cycles and instructions (perf_event_open).
-//   - main.
+//   - run_c_lexer_benchmark, called by main.c.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -634,7 +634,7 @@ static void benchmark(const Corpus* corpus, TokenArrays* outputs, uint32_t flags
     }
 }
 
-int main(int argc, char** argv)
+int run_c_lexer_benchmark(int argc, char** argv)
 {
     int result = 1;
     CorpusLoader loader = {0};
