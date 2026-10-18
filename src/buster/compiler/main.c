@@ -13,6 +13,9 @@
 // OS-dependent includes
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 // CPU architecture dependent includes
 #include <immintrin.h>
@@ -44,13 +47,100 @@ struct CompileResult
     bool success;
 };
 
+static uint64_t compute_maximum_token_count(String8 chunk)
+{
+    return chunk.length;
+}
+
+typedef struct PrimitiveTokenizeResult PrimitiveTokenizeResult;
+struct PrimitiveTokenizeResult
+{
+    String8 content;
+    uint8_t* kinds;
+    uint32_t* starts;
+    uint32_t* ends;
+    int file_descriptor;
+    bool error;
+};
+
+static PrimitiveTokenizeResult primitive_tokenize_chunk(String8 chunk)
+{
+    uint64_t maximum_token_length = compute_maximum_token_count(chunk);
+    (void)maximum_token_length;
+    uint8_t* kinds = mmap(0, maximum_token_length * sizeof(*kinds), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint32_t* starts = mmap(0, maximum_token_length * sizeof(*starts), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint32_t* ends = mmap(0, maximum_token_length * sizeof(*ends), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint32_t flags = 0;
+    int64_t tokenize_result = c_tokenize((const uint8_t*)chunk.pointer, chunk.length, kinds, starts, ends, flags);
+
+    PrimitiveTokenizeResult result = {0};
+    result.content = chunk;
+    result.error = tokenize_result < 0;
+
+    if (!result.error)
+    {
+        result.kinds = kinds;
+        result.starts = starts;
+        result.ends = ends;
+    }
+    else
+    {
+        munmap(kinds, maximum_token_length * sizeof(*kinds));
+        munmap(starts, maximum_token_length * sizeof(*starts));
+        munmap(ends, maximum_token_length * sizeof(*ends));
+    }
+
+    return result;
+}
+
+static PrimitiveTokenizeResult primitive_tokenize_file(String8 path)
+{
+    PrimitiveTokenizeResult result = {0};
+
+    int fd = open(path.pointer, O_RDONLY | O_CLOEXEC, 0644);
+    if (fd != -1)
+    {
+        struct stat file_stats;
+        if (fstat(fd, &file_stats) == 0)
+        {
+            uint64_t length = (uint64_t)file_stats.st_size;
+            void* mapped = mmap(0, length, PROT_READ, MAP_PRIVATE, fd, 0);
+            if (mapped != MAP_FAILED)
+            {
+                String8 chunk = { .pointer = (char*)mapped, .length = length };
+                result = primitive_tokenize_chunk(chunk);
+                result.file_descriptor = fd;
+            }
+        }
+    }
+
+    return result;
+}
+
+static bool parse_compile_unit(String8 path)
+{
+    bool result = false;
+
+    String8 current_file_path = path;
+
+    while (true)
+    {
+        PrimitiveTokenizeResult result = primitive_tokenize_file(current_file_path);
+        (void)result;
+        break;
+    }
+
+    return result;
+}
+
 static CompileResult compile(String8 path, CompileOptions options)
 {
     CompileResult result = {0};
     printf("Compiling ");
     string_printf(path);
     printf("...\n");
-    result.success = true;
+    bool parse_result = parse_compile_unit(path);
+    result.success = parse_result;
     return result;
 }
 
