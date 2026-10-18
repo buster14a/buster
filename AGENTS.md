@@ -151,6 +151,8 @@ instructions per loop iteration) and the template gather and output store
 alternatives that lost. Decide them, and any other performance question, with
 measurements on the 9700X (not Zen 4, and not llvm-mca, whose predictions are
 well off), using uops.info's Zen 5 port data to explain them;
-`docs/x86-64-encoder.md` has the current numbers. The default 9700X job runs it
-after the tests, pinned to one allowed CPU; like the lexer's, its measurements
-are informational.
+`docs/x86-64-encoder.md` has the current numbers. Clang's code for the loop
+changes a lot with small source changes, so compare every width after changing
+the encoder, and profile which loop the samples land in. The default 9700X job
+runs it after the tests, pinned to one allowed CPU; like the lexer's, its
+measurements are informational.
