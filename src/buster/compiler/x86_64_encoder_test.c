@@ -987,7 +987,7 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction)
     const X86FormDescription* form = &x86_form_descriptions[instruction->form];
     const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0;
     bool result = true;
-    switch (x86_random_below(state, 10))
+    switch (x86_random_below(state, 12))
     {
         case 0:
             // A high byte register with an extended register (and so a REX prefix).
@@ -1070,6 +1070,34 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction)
             if (form->encoding != BUSTER_X86_ENCODING_R)
             {
                 instruction->reg = (uint8_t)(1 + x86_random_below(state, 15));
+            }
+            else
+            {
+                result = false;
+            }
+            break;
+        case 9:
+            // A memory operand in a form whose rm can't be one: a register-only rm, or none (whose rm stays 0). The
+            // base is one any register class has, so that only the operand's kind is wrong.
+            if (!(form->rm & BUSTER_X86_OPERAND_MEMORY))
+            {
+                instruction->mode = BUSTER_X86_MEMORY_BASE;
+                instruction->rm = form->rm == BUSTER_X86_OPERAND_NONE ? 0 : (uint8_t)x86_random_below(state, 8);
+                instruction->index = 0;
+            }
+            else
+            {
+                result = false;
+            }
+            break;
+        case 10:
+            // A register in a form whose rm can only be memory.
+            if ((form->rm & BUSTER_X86_OPERAND_MEMORY) && !(form->rm & BUSTER_X86_OPERAND_REGISTER))
+            {
+                instruction->mode = BUSTER_X86_REGISTER_DIRECT;
+                instruction->rm = (uint8_t)x86_random_below(state, 8);
+                instruction->index = 0;
+                instruction->displacement = 0;
             }
             else
             {
