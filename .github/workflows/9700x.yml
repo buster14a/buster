@@ -46,3 +46,8 @@ jobs:
 
       - name: Execute compiler
         run: ./build/compiler
+
+      - name: Test the C lexer
+        run: |
+          ./build/c_lexer_test
+          ./build/c_lexer_test --cplusplus
