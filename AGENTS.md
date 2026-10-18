@@ -65,7 +65,17 @@ with the scalar lexer token by token on:
 - 200,000 random inputs made of weighted C pieces. `--fuzz N` sets how many,
   and `--seed N` picks another sequence (the same inputs as upstream's
   `--seed N`). The first inputs that differ are saved as `fuzz_failure_N.c` in
-  the current directory.
+  the current directory;
+- page edges: every length from 0 to 1,099 bytes, cut as a prefix and as a
+  suffix from the repeated snippet and from four strings of random inputs
+  (which continue the random sequence), placed to end exactly at the end of a
+  readable page and to start exactly at the start of one, between `PROT_NONE`
+  guard pages: 22,000 inputs. These also compare `c_tokenize_vectorized`, and
+  a read outside the source faults; the command then names the input and exits
+  with status 1. Length 0 at a page end points at the guard page itself. The
+  vectorized path loads aligned 64-byte lanes, so only a lane wholly outside
+  the source can fault; an over-read within the source's last lane stays on a
+  readable page and is not caught.
 
 `--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces. The
 command prints each check's counts and first differences, and exits with status
