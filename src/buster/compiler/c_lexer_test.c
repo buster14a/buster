@@ -14,6 +14,13 @@
 //   - Random inputs: N of them (BUSTER_TEST_DEFAULT_RANDOM_INPUTS by default) from fuzz_input, which strings
 //     fuzz_pieces together with a xorshift sequence. --seed N picks another sequence: the one upstream's --seed N
 //     picks. The first inputs that differ are saved in the current directory as fuzz_failure_0.c, fuzz_failure_1.c...
+//   - Page edges: inputs of 0 to BUSTER_TEST_PAGE_EDGE_LENGTHS - 1 bytes that end exactly at the end of a readable
+//     page, or start exactly at the start of one, in a mapping with a PROT_NONE guard page on either side. Each one is
+//     a prefix or a suffix of a template: the snippet repeated, or BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES strings of
+//     random inputs that continue the random check's sequence. Besides comparing c_tokenize, c_tokenize_vectorized
+//     and c_tokenize_scalar as the other checks do, it catches a read outside of the source, which the other checks'
+//     buffers can't: that faults, and the fault handler names the input and exits with status 1. Length 0 ends at a
+//     page end too, so its source pointer is the first byte of the guard page.
 //
 // --cplusplus tokenizes everything as C++, with boundary_snippet_cpp instead and the fuzz_pieces_cpp pieces too. The
 // results go to stdout, with the first differences of each check. The exit status is 1 if the arguments are invalid
@@ -24,12 +31,16 @@
 //   - The snippet: boundary_snippet, boundary_snippet_cpp and check_snippet.
 //   - Random inputs: random_next, fuzz_pieces, fuzz_pieces_cpp, has_backslash, fuzz_input, save_failure and
 //     check_random.
+//   - Page edges: page_edge_input, report_fault, page_edge_template and check_page_edges.
 //   - main, with parse_u64.
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/mman.h>
 
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
 #define BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) (BUSTER_ARRAY_LENGTH(strlit) - 1)
@@ -53,6 +64,11 @@
 #define BUSTER_TEST_RUN_ODDS 16
 #define BUSTER_TEST_RUN_LIMIT 200
 #define BUSTER_TEST_RANDOM_INPUT_BYTES 8000
+// The page edge check places inputs of 0 to BUSTER_TEST_PAGE_EDGE_LENGTHS - 1 bytes, which cover the 64-byte vector
+// and 512-byte chunk boundaries (and the chunk-ahead lane 8 past the second chunk), cut from the snippet template and
+// this many random templates.
+#define BUSTER_TEST_PAGE_EDGE_LENGTHS 1100
+#define BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES 4
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_TEST_GOLDEN_RATIO + 1), as upstream does.
 #define BUSTER_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -413,6 +429,120 @@ static CheckCounts check_random(Random* random, uint64_t count, TokenArrays* vec
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Page edges
+
+// The name of the input being compared, for report_fault.
+static char page_edge_input[128];
+static int page_edge_input_length;
+
+// The SIGSEGV handler while check_page_edges runs: a lexer read a guard page, outside of the input in page_edge_input.
+// It only makes async-signal-safe calls.
+static void report_fault(int signal_number)
+{
+    static const char prefix[] = "page edges: ";
+    static const char suffix[] = " faults: a lexer reads outside the source\n";
+    ssize_t written = write(STDOUT_FILENO, prefix, BUSTER_COMPILE_TIME_STRING_LENGTH(prefix));
+    written += write(STDOUT_FILENO, page_edge_input, (size_t)page_edge_input_length);
+    written += write(STDOUT_FILENO, suffix, BUSTER_COMPILE_TIME_STRING_LENGTH(suffix));
+    (void)written;
+    (void)signal_number;
+    _exit(1);
+}
+
+// Writes template `index` (BUSTER_TEST_PAGE_EDGE_LENGTHS bytes) to `buffer`: for index 0 the snippet repeated, and
+// otherwise random inputs one after the other. A random input in a buffer this big has at least one byte, so each one
+// adds to the template.
+static void page_edge_template(Random* random, uint64_t index, uint8_t* buffer, bool cplusplus)
+{
+    const char* snippet = cplusplus ? boundary_snippet_cpp : boundary_snippet;
+    const uint64_t snippet_length =
+        cplusplus ? BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet_cpp) : BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet);
+    uint64_t length = 0;
+    while (length < BUSTER_TEST_PAGE_EDGE_LENGTHS)
+    {
+        if (index == 0)
+        {
+            const uint64_t copied = snippet_length < BUSTER_TEST_PAGE_EDGE_LENGTHS - length ? snippet_length : BUSTER_TEST_PAGE_EDGE_LENGTHS - length;
+            memcpy(buffer + length, snippet, copied);
+            length += copied;
+        }
+        else
+        {
+            length += fuzz_input(random, buffer + length, BUSTER_TEST_RANDOM_INPUT_BYTES, cplusplus).length;
+        }
+    }
+}
+
+_Static_assert(BUSTER_TEST_PAGE_EDGE_LENGTHS <= BUSTER_TEST_MAX_INPUT_BYTES, "a page edge input doesn't fit in the output arrays");
+
+// Compares the paths on every prefix and suffix of each template, ending at the end of a readable page and starting at
+// the start of one, and prints the counts. The first inputs that differ are printed too. A read outside of an input
+// faults, and report_fault ends the program.
+static CheckCounts check_page_edges(Random* random, TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
+{
+    // A template, with room for the last random input to run past BUSTER_TEST_PAGE_EDGE_LENGTHS.
+    uint8_t template[BUSTER_TEST_PAGE_EDGE_LENGTHS + BUSTER_TEST_RANDOM_INPUT_BYTES];
+    const bool cplusplus = (flags & C_TOKENIZER_CPLUSPLUS) != 0;
+    const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
+    CheckCounts counts = {0};
+    // A guard page, the readable page and another guard page.
+    uint8_t* mapping = mmap(0, 3 * page_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* page = mapping + page_bytes;
+    struct sigaction action = { .sa_handler = report_fault };
+    // Lines printed so far must not be lost if report_fault ends the program.
+    fflush(stdout);
+    if (mapping == MAP_FAILED || page_bytes < BUSTER_TEST_PAGE_EDGE_LENGTHS || mprotect(page, page_bytes, PROT_READ | PROT_WRITE) != 0 ||
+        sigaction(SIGSEGV, &action, 0) != 0)
+    {
+        fprintf(stderr, "page edges: can't set up the guard pages\n");
+        counts.different = 1;
+    }
+    else
+    {
+        for (uint64_t index = 0; index < 1 + BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES; index += 1)
+        {
+            page_edge_template(random, index, template, cplusplus);
+            for (uint64_t length = 0; length < BUSTER_TEST_PAGE_EDGE_LENGTHS; length += 1)
+            {
+                for (uint64_t suffix = 0; suffix < 2; suffix += 1)
+                {
+                    const uint8_t* content = suffix ? template + BUSTER_TEST_PAGE_EDGE_LENGTHS - length : template;
+                    for (uint64_t at_start = 0; at_start < 2; at_start += 1)
+                    {
+                        // Zeros around every input, so that it only depends on its content and position.
+                        const uint64_t offset = at_start ? 0 : page_bytes - length;
+                        memset(page, 0, page_bytes);
+                        memcpy(page + offset, content, length);
+                        const String8 input = { .pointer = (char*)page + offset, .length = length };
+                        page_edge_input_length = snprintf(page_edge_input, sizeof(page_edge_input), "%s of %lu bytes of template %lu %s",
+                                                          suffix ? "suffix" : "prefix", (unsigned long)length, (unsigned long)index,
+                                                          at_start ? "at a page start" : "at a page end");
+                        const bool reported = counts.different < BUSTER_TEST_REPORTED_INPUTS;
+                        Comparison comparison = compare(input, vectorized, scalar, flags, reported ? page_edge_input : 0);
+                        if (comparison == COMPARISON_DIFFERENT && reported)
+                        {
+                            fflush(stdout);
+                        }
+                        counts.different += comparison == COMPARISON_DIFFERENT;
+                        counts.fell_back += comparison == COMPARISON_FELL_BACK;
+                    }
+                }
+            }
+        }
+        action.sa_handler = SIG_DFL;
+        sigaction(SIGSEGV, &action, 0);
+        printf("page edges: %lu of %lu inputs differ, %lu need the scalar lexer for a part\n", (unsigned long)counts.different,
+               (unsigned long)((1 + BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES) * BUSTER_TEST_PAGE_EDGE_LENGTHS * 4), (unsigned long)counts.fell_back);
+    }
+
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 3 * page_bytes);
+    }
+    return counts;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // main
 
 // Parses a decimal number of up to 64 bits into `value`. Returns false if `text` isn't one.
@@ -472,9 +602,11 @@ int main(int argc, char** argv)
     {
         const CheckCounts snippet = check_snippet(&vectorized, &scalar, flags);
         const CheckCounts random_inputs = check_random(&random, random_count, &vectorized, &scalar, flags);
-        // Random inputs are meant to need the scalar lexer at times, but the snippet is meant to stay on the vectorized
-        // path.
-        result = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 ? 0 : 1;
+        // The page edge inputs continue the random sequence, so that the random check's inputs stay upstream's.
+        const CheckCounts page_edges = check_page_edges(&random, &vectorized, &scalar, flags);
+        // Random inputs and cut templates are meant to need the scalar lexer at times, but the snippet is meant to stay
+        // on the vectorized path.
+        result = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 ? 0 : 1;
     }
     return result;
 }
