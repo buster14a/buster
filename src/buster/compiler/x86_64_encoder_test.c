@@ -59,7 +59,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0x106adf3308c83950ull
+#define BUSTER_X86_TEST_DIGEST 0x3cf027ddc16d5e32ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -211,6 +211,16 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
     }
     // PUSH and POP of a register are 50+r and 58+r.
     if (legacy && register_direct && (opcode == 0xff || opcode == 0x8f) && (form->encoding == BUSTER_X86_ENCODING_D6 || opcode == 0x8f))
+    {
+        result = true;
+    }
+    // XCHG EAX, EAX with 90 would be NOP (which doesn't clear the upper half), so it's 87 C0; XCHG RAX, RAX is NOP.
+    if ((instruction->form == X86_FORM_XCHG_R32_EAX || instruction->form == X86_FORM_XCHG_R64_RAX) && instruction->rm == 0)
+    {
+        result = true;
+    }
+    // PREFETCHIT0 and PREFETCHIT1 take only RIP-relative addresses (with others, they're NOPs, which GNU as warns about).
+    if ((instruction->form == X86_FORM_PREFETCHIT0_M8 || instruction->form == X86_FORM_PREFETCHIT1_M8) && !(instruction->mode & BUSTER_X86_MODE_RIP))
     {
         result = true;
     }
@@ -387,10 +397,11 @@ static const char* x86_accumulator_name(uint32_t bytes)
 static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint32_t operand_bytes)
 {
     const uint8_t mode = instruction->mode;
-    // The x87 environment and state areas (14, 28, 94 and 108 bytes) have no size keyword.
-    const char* size = operand_bytes == 1 ? "byte ptr " : operand_bytes == 2 ? "word ptr " : operand_bytes == 4 ? "dword ptr " : operand_bytes == 8 ? "qword ptr " :
-                       operand_bytes == 10 ? "tbyte ptr " : operand_bytes == 16 ? "xmmword ptr " : operand_bytes == 32 ? "ymmword ptr " :
-                       operand_bytes == 64 ? "zmmword ptr " : "";
+    // A far pointer of 6 bytes is an fword; the x87 environment and state areas (14, 28, 94 and 108 bytes) and MOVDIR64B's
+    // 64 bytes (0 in its row) have no size keyword.
+    const char* size = operand_bytes == 1 ? "byte ptr " : operand_bytes == 2 ? "word ptr " : operand_bytes == 4 ? "dword ptr " : operand_bytes == 6 ? "fword ptr " :
+                       operand_bytes == 8 ? "qword ptr " : operand_bytes == 10 ? "tbyte ptr " : operand_bytes == 16 ? "xmmword ptr " :
+                       operand_bytes == 32 ? "ymmword ptr " : operand_bytes == 64 ? "zmmword ptr " : "";
     if ((mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX | BUSTER_X86_MODE_RIP)) == 0)
     {
         fprintf(file, "%sds:%d", size, instruction->displacement);
@@ -451,6 +462,8 @@ static const char* x86_syntax_operands(uint8_t syntax)
         case X86_SYNTAX_ST_RM: result = "sm"; break;
         case X86_SYNTAX_RM_ST: result = "ms"; break;
         case X86_SYNTAX_ACC: result = "a"; break;
+        case X86_SYNTAX_RM_ACC: result = "ma"; break;
+        case X86_SYNTAX_RM_REG_VVVV: result = "mrv"; break;
         default: break;
     }
     return result;
@@ -762,6 +775,46 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_FWAIT }, 1, { 0x9b } },
     { { .form = X86_FORM_FLD1 }, 2, { 0xd9, 0xe8 } },
     { { .form = X86_FORM_FSINCOS }, 2, { 0xd9, 0xfb } },
+    // lock add word ptr [rax], cx; lock add qword ptr [rax], 0x12; lock btc word ptr [rax], cx; lock cmpxchg8b qword
+    // ptr [rax]
+    { { .form = X86_FORM_LOCK_ADD_M16_R16, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x66, 0xf0, 0x01, 0x08 } },
+    { { .form = X86_FORM_LOCK_ADD_M64_IMM8, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 0x12 }, 5, { 0xf0, 0x48, 0x83, 0x00, 0x12 } },
+    { { .form = X86_FORM_LOCK_BTC_M16_R16, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x66, 0xf0, 0x0f, 0xbb, 0x08 } },
+    { { .form = X86_FORM_LOCK_CMPXCHG8B_M64, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0xf0, 0x0f, 0xc7, 0x08 } },
+    // movsb; cmpsd; rep movsw; rep movsq; repne scasq
+    { { .form = X86_FORM_MOVS_B }, 1, { 0xa4 } },
+    { { .form = X86_FORM_CMPS_D }, 1, { 0xa7 } },
+    { { .form = X86_FORM_REP_MOVS_W }, 3, { 0x66, 0xf3, 0xa5 } },
+    { { .form = X86_FORM_REP_MOVS_Q }, 3, { 0xf3, 0x48, 0xa5 } },
+    { { .form = X86_FORM_REPNE_SCAS_Q }, 3, { 0xf2, 0x48, 0xaf } },
+    // xchg cx, ax; xchg rcx, rax; movabs ax, ds:0x1122334455667788; loop .+0x10; push ax; pushw 0x1234
+    { { .form = X86_FORM_XCHG_R16_AX, .rm = X86_REGISTER_RCX }, 2, { 0x66, 0x91 } },
+    { { .form = X86_FORM_XCHG_R64_RAX, .rm = X86_REGISTER_RCX }, 2, { 0x48, 0x91 } },
+    { { .form = X86_FORM_MOVABS_AX_MOFFS, .immediate = 0x55667788, .displacement = 0x11223344 },
+      10,
+      { 0x66, 0xa1, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11 } },
+    { { .form = X86_FORM_LOOP_REL8, .displacement = 0x0e }, 2, { 0xe2, 0x0e } },
+    { { .form = X86_FORM_PUSH_R16, .rm = X86_REGISTER_RAX }, 2, { 0x66, 0x50 } },
+    { { .form = X86_FORM_PUSHW_IMM16, .immediate = 0x1234 }, 4, { 0x66, 0x68, 0x34, 0x12 } },
+    // rcl eax, 5; tzcnt ax, cx; adcx rax, qword ptr [rcx]; cmpbexadd dword ptr [rax], ecx, edx
+    { { .form = X86_FORM_RCL_RM32_IMM8, .rm = X86_REGISTER_RAX, .immediate = 5 }, 3, { 0xc1, 0xd0, 0x05 } },
+    { { .form = X86_FORM_TZCNT_R16_RM16, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 5, { 0x66, 0xf3, 0x0f, 0xbc, 0xc1 } },
+    { { .form = X86_FORM_ADCX_R64_RM64, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x66, 0x48, 0x0f, 0x38, 0xf6, 0x01 } },
+    { { .form = X86_FORM_CMPBEXADD_M32_R32_R32, .reg = X86_REGISTER_RCX, .vvvv = X86_REGISTER_RDX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE },
+      5,
+      { 0xc4, 0xe2, 0x69, 0xe6, 0x08 } },
+    // call fword ptr [rax+r9*4+0x10]; rex.w call fword ptr [r9]; rex.w lss r15d, fword ptr [r13+8]; retfq 8
+    { { .form = X86_FORM_CALL_FAR_M48, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_R9, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = 0x10 },
+      5,
+      { 0x42, 0xff, 0x5c, 0x88, 0x10 } },
+    { { .form = X86_FORM_CALL_FAR_M80, .rm = X86_REGISTER_R9, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x49, 0xff, 0x19 } },
+    { { .form = X86_FORM_LSS_R64_M80, .reg = X86_REGISTER_R15, .rm = X86_REGISTER_R13, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 }, 5, { 0x4d, 0x0f, 0xb2, 0x7d, 0x08 } },
+    { { .form = X86_FORM_RETFQ_IMM16, .immediate = 8 }, 4, { 0x48, 0xca, 0x08, 0x00 } },
+    // xbegin .+0x100; prefetchit0 byte ptr [rip+0x10]; movdir64b rax, [rcx]; rdpid rax
+    { { .form = X86_FORM_XBEGIN_REL32, .displacement = 0xfa }, 6, { 0xc7, 0xf8, 0xfa, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_PREFETCHIT0_M8, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x10 }, 7, { 0x0f, 0x18, 0x3d, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_MOVDIR64B_R64_M512, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x66, 0x0f, 0x38, 0xf8, 0x01 } },
+    { { .form = X86_FORM_RDPID_R64, .rm = X86_REGISTER_RAX }, 4, { 0xf3, 0x0f, 0xc7, 0xf8 } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.
