@@ -1,0 +1,621 @@
+// The x86-64 encoder benchmark: times x86_encode at each batch width (instructions per loop iteration) and output
+// store, and a one-instruction-at-a-time scalar loop, on a synthetic instruction stream, after checking that they all
+// produce the same bytes and offsets.
+//
+// Usage: build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform] [--offsets] [--seed N] [--only NAME]
+//
+// The stream has --count instructions (BUSTER_X86_BENCHMARK_DEFAULT_COUNT by default): a mix shaped like compiler
+// output (x86_benchmark_patterns: register moves, stack loads and stores, calls, branches, arithmetic, some SSE), or
+// with --uniform, random instructions of every form. --section N encodes it in calls of N instructions, each
+// appending to the same output, like a compiler encoding a function at a time; otherwise one call encodes it all.
+// --offsets has every call store each instruction's offset too, and --only times just the implementation NAME (for
+// perf stat, say). Run it pinned to one CPU (taskset -c 2 ...). The exit
+// status is 1 if the arguments are invalid or an implementation's output differs from the scalar loop's.
+//
+// Layout, in this order:
+//   - The stream: x86_benchmark_patterns, pattern_instruction and make_stream (x86_64_encoder_test.c's generator
+//     isn't in this translation unit, so the uniform stream has its own copy, uniform_instruction).
+//   - The implementations: encode_scalar_loop and x86_benchmark_implementations.
+//   - Timing: the perf counters, encode_stream and run_x86_encoder_benchmark, which runs a warm-up pass and then
+//     BUSTER_X86_BENCHMARK_PASSES passes with the implementations taking turns, and reports medians.
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+// OS-dependent includes
+#include <time.h>
+#include <unistd.h>
+#include <linux/perf_event.h>
+#include <sys/syscall.h>
+
+#include "buster/compiler/x86_64_encoder.c"
+
+#define BUSTER_X86_BENCHMARK_DEFAULT_COUNT 16384
+#define BUSTER_X86_BENCHMARK_PASSES 21
+// Each pass encodes the stream as many times as it takes to encode at least this many instructions, so that a pass
+// is long next to the timer and counter reads.
+#define BUSTER_X86_BENCHMARK_PASS_INSTRUCTIONS (4u << 20)
+#define BUSTER_X86_BENCHMARK_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The stream
+
+typedef enum X86BenchmarkOperands
+{
+    // Register operands (or none).
+    X86_BENCHMARK_REGISTERS,
+    // [rsp + disp8] or [rbp + disp8]: a stack slot.
+    X86_BENCHMARK_STACK,
+    // [base + disp], with an 8- or 32-bit displacement.
+    X86_BENCHMARK_BASE,
+    // [base + index * scale + disp]
+    X86_BENCHMARK_BASE_INDEX,
+    // [rip + disp32]
+    X86_BENCHMARK_RIP,
+} X86BenchmarkOperands;
+
+typedef struct X86BenchmarkPattern X86BenchmarkPattern;
+struct X86BenchmarkPattern
+{
+    uint16_t form;
+    uint8_t operands;
+    uint16_t weight;
+};
+
+// A mix of forms and operands shaped like compiler output. The weights are per mille.
+static const X86BenchmarkPattern x86_benchmark_patterns[] = {
+    { X86_FORM_MOV_RM64_R64, X86_BENCHMARK_REGISTERS, 100 },
+    { X86_FORM_MOV_RM32_R32, X86_BENCHMARK_REGISTERS, 30 },
+    { X86_FORM_MOV_R64_RM64, X86_BENCHMARK_STACK, 80 },
+    { X86_FORM_MOV_RM64_R64, X86_BENCHMARK_STACK, 60 },
+    { X86_FORM_MOV_R32_RM32, X86_BENCHMARK_BASE, 30 },
+    { X86_FORM_MOV_R32_RM32, X86_BENCHMARK_BASE_INDEX, 20 },
+    { X86_FORM_MOV_RM32_R32, X86_BENCHMARK_BASE, 20 },
+    { X86_FORM_MOV_R32_IMM32, X86_BENCHMARK_REGISTERS, 40 },
+    { X86_FORM_MOV_R64_IMM64, X86_BENCHMARK_REGISTERS, 5 },
+    { X86_FORM_MOV_RM32_IMM32, X86_BENCHMARK_STACK, 10 },
+    { X86_FORM_LEA_R64_M, X86_BENCHMARK_BASE, 30 },
+    { X86_FORM_LEA_R64_M, X86_BENCHMARK_BASE_INDEX, 10 },
+    { X86_FORM_LEA_R64_M, X86_BENCHMARK_RIP, 20 },
+    { X86_FORM_ADD_RM64_IMM8, X86_BENCHMARK_REGISTERS, 30 },
+    { X86_FORM_SUB_RM64_IMM8, X86_BENCHMARK_REGISTERS, 30 },
+    { X86_FORM_ADD_RM64_R64, X86_BENCHMARK_REGISTERS, 20 },
+    { X86_FORM_SUB_RM32_R32, X86_BENCHMARK_REGISTERS, 10 },
+    { X86_FORM_AND_RM32_IMM8, X86_BENCHMARK_REGISTERS, 5 },
+    { X86_FORM_OR_RM32_R32, X86_BENCHMARK_REGISTERS, 5 },
+    { X86_FORM_XOR_RM32_R32, X86_BENCHMARK_REGISTERS, 15 },
+    { X86_FORM_ADD_RM32_IMM32, X86_BENCHMARK_REGISTERS, 10 },
+    { X86_FORM_CMP_RM64_R64, X86_BENCHMARK_REGISTERS, 20 },
+    { X86_FORM_CMP_RM32_IMM8, X86_BENCHMARK_REGISTERS, 25 },
+    { X86_FORM_CMP_RM64_IMM8, X86_BENCHMARK_STACK, 5 },
+    { X86_FORM_TEST_RM64_R64, X86_BENCHMARK_REGISTERS, 25 },
+    { X86_FORM_TEST_RM8_R8, X86_BENCHMARK_REGISTERS, 10 },
+    { X86_FORM_JE_REL8, X86_BENCHMARK_REGISTERS, 15 },
+    { X86_FORM_JNE_REL8, X86_BENCHMARK_REGISTERS, 15 },
+    { X86_FORM_JL_REL8, X86_BENCHMARK_REGISTERS, 5 },
+    { X86_FORM_JG_REL8, X86_BENCHMARK_REGISTERS, 5 },
+    { X86_FORM_JB_REL8, X86_BENCHMARK_REGISTERS, 5 },
+    { X86_FORM_JAE_REL8, X86_BENCHMARK_REGISTERS, 5 },
+    { X86_FORM_JE_REL32, X86_BENCHMARK_REGISTERS, 8 },
+    { X86_FORM_JNE_REL32, X86_BENCHMARK_REGISTERS, 8 },
+    { X86_FORM_JMP_REL8, X86_BENCHMARK_REGISTERS, 20 },
+    { X86_FORM_JMP_REL32, X86_BENCHMARK_REGISTERS, 10 },
+    { X86_FORM_CALL_REL32, X86_BENCHMARK_REGISTERS, 40 },
+    { X86_FORM_CALL_RM64, X86_BENCHMARK_BASE, 3 },
+    { X86_FORM_RET, X86_BENCHMARK_REGISTERS, 15 },
+    { X86_FORM_PUSH_R64, X86_BENCHMARK_REGISTERS, 20 },
+    { X86_FORM_POP_R64, X86_BENCHMARK_REGISTERS, 20 },
+    { X86_FORM_MOVZX_R32_RM8, X86_BENCHMARK_REGISTERS, 10 },
+    { X86_FORM_MOVZX_R32_RM8, X86_BENCHMARK_BASE, 10 },
+    { X86_FORM_MOVSX_R64_RM8, X86_BENCHMARK_BASE, 3 },
+    { X86_FORM_MOVSXD_R64_RM32, X86_BENCHMARK_REGISTERS, 10 },
+    { X86_FORM_IMUL_R64_RM64, X86_BENCHMARK_REGISTERS, 10 },
+    { X86_FORM_SHL_RM64_IMM8, X86_BENCHMARK_REGISTERS, 8 },
+    { X86_FORM_SHR_RM32_IMM8, X86_BENCHMARK_REGISTERS, 6 },
+    { X86_FORM_SAR_RM64_IMM8, X86_BENCHMARK_REGISTERS, 4 },
+    { X86_FORM_SETE_RM8, X86_BENCHMARK_REGISTERS, 5 },
+    { X86_FORM_SETL_RM8, X86_BENCHMARK_REGISTERS, 3 },
+    { X86_FORM_CMOVE_R64_RM64, X86_BENCHMARK_REGISTERS, 5 },
+    { X86_FORM_CMOVL_R32_RM32, X86_BENCHMARK_REGISTERS, 3 },
+    { X86_FORM_MOVSD_X_XM64, X86_BENCHMARK_STACK, 10 },
+    { X86_FORM_MOVSD_XM64_X, X86_BENCHMARK_STACK, 8 },
+    { X86_FORM_MOVSS_X_XM32, X86_BENCHMARK_BASE, 5 },
+    { X86_FORM_ADDSD_X_XM64, X86_BENCHMARK_REGISTERS, 8 },
+    { X86_FORM_MULSD_X_XM64, X86_BENCHMARK_REGISTERS, 6 },
+    { X86_FORM_SUBSD_X_XM64, X86_BENCHMARK_REGISTERS, 3 },
+    { X86_FORM_CVTSI2SD_X_RM32, X86_BENCHMARK_REGISTERS, 3 },
+    { X86_FORM_UCOMISD_X_XM64, X86_BENCHMARK_REGISTERS, 3 },
+    { X86_FORM_MOVAPS_X_XM, X86_BENCHMARK_REGISTERS, 6 },
+    { X86_FORM_PXOR_X_XM128, X86_BENCHMARK_REGISTERS, 3 },
+    { X86_FORM_MOVUPS_X_XM, X86_BENCHMARK_BASE, 3 },
+    { X86_FORM_MOVUPS_XM_X, X86_BENCHMARK_BASE, 3 },
+    { X86_FORM_NOP, X86_BENCHMARK_REGISTERS, 2 },
+    { X86_FORM_ENDBR64, X86_BENCHMARK_REGISTERS, 3 },
+    { X86_FORM_LEAVE, X86_BENCHMARK_REGISTERS, 3 },
+    { X86_FORM_CQO, X86_BENCHMARK_REGISTERS, 1 },
+    { X86_FORM_IDIV_RM64, X86_BENCHMARK_REGISTERS, 1 },
+};
+
+// xorshift64*.
+static uint64_t x86_benchmark_random(uint64_t* state)
+{
+    uint64_t x = *state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    *state = x;
+    return x * 0x2545F4914F6CDD1Dull;
+}
+
+static uint32_t x86_benchmark_below(uint64_t* state, uint32_t bound)
+{
+    return (uint32_t)((x86_benchmark_random(state) >> 32) * bound >> 32);
+}
+
+// A register for the operand, without the high byte registers.
+static uint8_t x86_benchmark_register(uint64_t* state)
+{
+    return (uint8_t)x86_benchmark_below(state, 16);
+}
+
+// An immediate for the form: small, as most are.
+static int32_t x86_benchmark_immediate(uint64_t* state, const X86FormDescription* form)
+{
+    int32_t result = 0;
+    if (form->immediate_bytes == 1)
+    {
+        result = (int32_t)x86_benchmark_below(state, 128);
+    }
+    else if (form->immediate_bytes >= 2)
+    {
+        result = (int32_t)x86_benchmark_below(state, form->immediate_bytes == 2 ? 30000 : 100000);
+    }
+    return result;
+}
+
+static X86Instruction pattern_instruction(uint64_t* state, const X86BenchmarkPattern* pattern)
+{
+    const X86FormDescription* form = &x86_form_descriptions[pattern->form];
+    X86Instruction result = { .form = pattern->form };
+    if (form->encoding == BUSTER_X86_ENCODING_R)
+    {
+        result.reg = x86_benchmark_register(state);
+    }
+    if (form->rm != BUSTER_X86_OPERAND_NONE)
+    {
+        switch (pattern->operands)
+        {
+            case X86_BENCHMARK_REGISTERS:
+                result.rm = x86_benchmark_register(state);
+                break;
+            case X86_BENCHMARK_STACK:
+                result.mode = BUSTER_X86_MEMORY_BASE;
+                result.rm = x86_benchmark_below(state, 2) ? X86_REGISTER_RBP : X86_REGISTER_RSP;
+                result.displacement = result.rm == X86_REGISTER_RBP ? -8 * (int32_t)(1 + x86_benchmark_below(state, 15)) : 8 * (int32_t)x86_benchmark_below(state, 15);
+                break;
+            case X86_BENCHMARK_BASE:
+                result.mode = BUSTER_X86_MEMORY_BASE;
+                result.rm = x86_benchmark_register(state);
+                result.displacement = x86_benchmark_below(state, 4) ? (int32_t)x86_benchmark_below(state, 128) : (int32_t)x86_benchmark_below(state, 1 << 20);
+                break;
+            case X86_BENCHMARK_BASE_INDEX:
+                result.mode = BUSTER_X86_MEMORY_BASE_INDEX(x86_benchmark_below(state, 4));
+                result.rm = x86_benchmark_register(state);
+                result.index = x86_benchmark_register(state);
+                result.index = result.index == X86_REGISTER_RSP ? X86_REGISTER_RAX : result.index;
+                result.displacement = (int32_t)x86_benchmark_below(state, 64);
+                break;
+            default:
+                result.mode = BUSTER_X86_MEMORY_RIP;
+                result.displacement = (int32_t)x86_benchmark_below(state, 1 << 24);
+                break;
+        }
+    }
+    result.immediate = x86_benchmark_immediate(state, form);
+    if (form->immediate_bytes == 8)
+    {
+        result.displacement = (int32_t)x86_benchmark_below(state, 1 << 16);
+    }
+    if (form->relative_bytes == 1)
+    {
+        result.displacement = (int32_t)x86_benchmark_below(state, 256) - 128;
+    }
+    else if (form->relative_bytes == 4)
+    {
+        result.displacement = (int32_t)x86_benchmark_below(state, 1 << 20) - (1 << 19);
+    }
+    return result;
+}
+
+// A random valid instruction of any form, operands of every kind (as the tests make them).
+static X86Instruction uniform_instruction(uint64_t* state)
+{
+    X86Instruction result;
+    bool valid = false;
+    while (!valid)
+    {
+        const uint16_t form_index = (uint16_t)(1 + x86_benchmark_below(state, X86_FORM_COUNT - 1));
+        const X86FormDescription* form = &x86_form_descriptions[form_index];
+        result = (X86Instruction){ .form = form_index };
+        if (form->encoding == BUSTER_X86_ENCODING_R)
+        {
+            result.reg = x86_benchmark_register(state);
+        }
+        if (form->rm != BUSTER_X86_OPERAND_NONE)
+        {
+            const bool can_register = (form->rm & BUSTER_X86_OPERAND_REGISTER) != 0;
+            if (can_register && ((form->rm & BUSTER_X86_OPERAND_MEMORY) == 0 || x86_benchmark_below(state, 2)))
+            {
+                result.rm = x86_benchmark_register(state);
+            }
+            else
+            {
+                static const uint8_t modes[] = { BUSTER_X86_MEMORY_BASE, BUSTER_X86_MEMORY_BASE_INDEX(2), BUSTER_X86_MEMORY_INDEX(3), BUSTER_X86_MEMORY_ABSOLUTE,
+                                                 BUSTER_X86_MEMORY_RIP };
+                result.mode = modes[x86_benchmark_below(state, BUSTER_ARRAY_LENGTH(modes))];
+                result.rm = (result.mode & BUSTER_X86_MODE_BASE) ? x86_benchmark_register(state) : 0;
+                result.index = (result.mode & BUSTER_X86_MODE_INDEX) ? (uint8_t)(x86_benchmark_below(state, 2) ? x86_benchmark_below(state, 4) : 5 + x86_benchmark_below(state, 11)) : 0;
+                result.displacement = x86_benchmark_below(state, 2) ? (int32_t)x86_benchmark_below(state, 256) - 128 : (int32_t)(uint32_t)x86_benchmark_random(state);
+            }
+        }
+        result.immediate = x86_benchmark_immediate(state, form);
+        if (form->immediate_bytes == 8)
+        {
+            result.displacement = (int32_t)(uint32_t)x86_benchmark_random(state);
+        }
+        if (form->relative_bytes == 1)
+        {
+            result.displacement = (int32_t)x86_benchmark_below(state, 256) - 128;
+        }
+        else if (form->relative_bytes == 4)
+        {
+            result.displacement = (int32_t)(uint32_t)x86_benchmark_random(state);
+        }
+        valid = x86_instruction_is_valid(&result);
+    }
+    return result;
+}
+
+// Fills `instructions` with the stream. Returns false if a pattern makes an invalid instruction (a broken table).
+static bool make_stream(X86Instruction* instructions, uint64_t count, bool uniform, uint64_t seed)
+{
+    uint32_t total_weight = 0;
+    for (uint64_t p = 0; p < BUSTER_ARRAY_LENGTH(x86_benchmark_patterns); p += 1)
+    {
+        total_weight += x86_benchmark_patterns[p].weight;
+    }
+    uint64_t state = seed * BUSTER_X86_BENCHMARK_GOLDEN_RATIO + 1;
+    bool result = true;
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        if (uniform)
+        {
+            instructions[i] = uniform_instruction(&state);
+        }
+        else
+        {
+            uint32_t pick = x86_benchmark_below(&state, total_weight);
+            uint64_t p = 0;
+            while (pick >= x86_benchmark_patterns[p].weight)
+            {
+                pick -= x86_benchmark_patterns[p].weight;
+                p += 1;
+            }
+            instructions[i] = pattern_instruction(&state, &x86_benchmark_patterns[p]);
+            result = result && x86_instruction_is_valid(&instructions[i]);
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The implementations
+
+// The scalar encoder's loop without its checks: what one instruction at a time costs.
+__attribute__((noinline)) static int64_t encode_scalar_loop(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets)
+{
+    uint64_t length = 0;
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        if (offsets != 0)
+        {
+            offsets[i] = (uint32_t)length;
+        }
+        length += encode_one(&instructions[i], output + length);
+    }
+    return (int64_t)length;
+}
+
+typedef int64_t X86BenchmarkFunction(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets);
+
+typedef struct X86BenchmarkImplementation X86BenchmarkImplementation;
+struct X86BenchmarkImplementation
+{
+    const char* name;
+    X86BenchmarkFunction* encode;
+};
+
+// The scalar loop first: the others are checked against it.
+static const X86BenchmarkImplementation x86_benchmark_implementations[] = {
+    { "scalar", encode_scalar_loop },
+    { "x86_encode_4", x86_encode_4 },
+    { "x86_encode_8", x86_encode_8 },
+    { "x86_encode_16", x86_encode_16 },
+    { "x86_encode_32", x86_encode_32 },
+    { "x86_encode_64", x86_encode_64 },
+    { "x86_encode_16_forms_from_records", x86_encode_16_forms_from_records },
+    { "x86_encode_16_masked_loads", x86_encode_16_masked_loads },
+    { "x86_encode_16_masked_stores", x86_encode_16_masked_stores },
+    { "x86_encode_16_compress_stores", x86_encode_16_compress_stores },
+};
+#define BUSTER_X86_BENCHMARK_IMPLEMENTATIONS BUSTER_ARRAY_LENGTH(x86_benchmark_implementations)
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Timing
+
+typedef struct X86BenchmarkSample X86BenchmarkSample;
+struct X86BenchmarkSample
+{
+    uint64_t nanoseconds;
+    uint64_t cycles;
+    uint64_t instructions;
+};
+
+// A counter of this thread's user-space hardware events, or -1 if perf_event_open fails.
+static int x86_benchmark_open_counter(uint64_t config)
+{
+    struct perf_event_attr attributes;
+    memset(&attributes, 0, sizeof(attributes));
+    attributes.size = sizeof(attributes);
+    attributes.type = PERF_TYPE_HARDWARE;
+    attributes.config = config;
+    attributes.exclude_kernel = 1;
+    attributes.exclude_hv = 1;
+    return (int)syscall(SYS_perf_event_open, &attributes, 0, -1, -1, PERF_FLAG_FD_CLOEXEC);
+}
+
+static uint64_t x86_benchmark_read_counter(int fd)
+{
+    uint64_t value = 0;
+    if (fd >= 0 && read(fd, &value, sizeof(value)) != sizeof(value))
+    {
+        value = 0;
+    }
+    return value;
+}
+
+static X86BenchmarkSample x86_benchmark_now(int cycles_fd, int instructions_fd)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    X86BenchmarkSample result = {
+        .nanoseconds = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec,
+        .cycles = x86_benchmark_read_counter(cycles_fd),
+        .instructions = x86_benchmark_read_counter(instructions_fd),
+    };
+    return result;
+}
+
+static void x86_benchmark_sort(uint64_t* values, uint64_t count)
+{
+    for (uint64_t i = 1; i < count; i += 1)
+    {
+        const uint64_t value = values[i];
+        uint64_t j = i;
+        while (j > 0 && values[j - 1] > value)
+        {
+            values[j] = values[j - 1];
+            j -= 1;
+        }
+        values[j] = value;
+    }
+}
+
+// Encodes the stream in calls of `section` instructions, appending to `output`. Returns the number of bytes, or a
+// negative error.
+static int64_t encode_stream(const X86BenchmarkImplementation* implementation, const X86Instruction* instructions, uint64_t count, uint64_t section, uint8_t* output,
+                             uint32_t* offsets)
+{
+    int64_t result = 0;
+    for (uint64_t start = 0; result >= 0 && start < count; start += section)
+    {
+        const uint64_t n = count - start < section ? count - start : section;
+        const int64_t length = implementation->encode(instructions + start, n, output + result, offsets != 0 ? offsets + start : 0);
+        result = length < 0 ? length : result + length;
+    }
+    return result;
+}
+
+static bool x86_benchmark_parse(const char* text, uint64_t* value)
+{
+    char* end = 0;
+    const unsigned long long parsed = strtoull(text, &end, 10);
+    const bool result = text[0] >= '0' && text[0] <= '9' && end != text && *end == 0;
+    *value = result ? (uint64_t)parsed : 0;
+    return result;
+}
+
+int run_x86_encoder_benchmark(int argc, char** argv)
+{
+    uint64_t count = BUSTER_X86_BENCHMARK_DEFAULT_COUNT;
+    uint64_t section = 0;
+    uint64_t seed = 1;
+    bool uniform = false;
+    bool with_offsets = false;
+    const char* only = 0;
+    bool valid = true;
+    for (int i = 1; i < argc; i += 1)
+    {
+        if (strcmp(argv[i], "--count") == 0 && i + 1 < argc)
+        {
+            valid = valid && x86_benchmark_parse(argv[i + 1], &count);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--section") == 0 && i + 1 < argc)
+        {
+            valid = valid && x86_benchmark_parse(argv[i + 1], &section);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc)
+        {
+            valid = valid && x86_benchmark_parse(argv[i + 1], &seed);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--uniform") == 0)
+        {
+            uniform = true;
+        }
+        else if (strcmp(argv[i], "--offsets") == 0)
+        {
+            with_offsets = true;
+        }
+        else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
+        {
+            only = argv[i + 1];
+            i += 1;
+        }
+        else
+        {
+            valid = false;
+        }
+    }
+    section = section == 0 ? count : section;
+
+    int result = 1;
+    X86Instruction* instructions = 0;
+    uint8_t* outputs[BUSTER_X86_BENCHMARK_IMPLEMENTATIONS] = { 0 };
+    uint32_t* offsets[BUSTER_X86_BENCHMARK_IMPLEMENTATIONS] = { 0 };
+    if (!valid || count == 0 || count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
+    {
+        fprintf(stderr, "usage: %s [--count N] [--section N] [--uniform] [--offsets] [--seed N] [--only NAME]\n", argv[0]);
+    }
+    else if (!x86_encoder_initialize())
+    {
+        fprintf(stderr, "a form doesn't fit in a template\n");
+    }
+    else
+    {
+        bool allocated = (instructions = aligned_alloc(64, (count * sizeof(X86Instruction) + 63) / 64 * 64)) != 0;
+        for (uint64_t i = 0; allocated && i < BUSTER_X86_BENCHMARK_IMPLEMENTATIONS; i += 1)
+        {
+            const uint64_t output_bytes = (BUSTER_X86_ENCODER_CAPACITY(count) + 63) / 64 * 64;
+            outputs[i] = aligned_alloc(64, output_bytes);
+            offsets[i] = aligned_alloc(64, (count * sizeof(uint32_t) + 63) / 64 * 64);
+            allocated = outputs[i] != 0 && offsets[i] != 0;
+        }
+
+        if (!allocated)
+        {
+            fprintf(stderr, "out of memory\n");
+        }
+        else if (!make_stream(instructions, count, uniform, seed))
+        {
+            fprintf(stderr, "a benchmark pattern makes an invalid instruction\n");
+        }
+        else
+        {
+            // Check every implementation against the scalar loop (with offsets, whether or not the timed runs have them).
+            int64_t lengths[BUSTER_X86_BENCHMARK_IMPLEMENTATIONS];
+            uint64_t different = 0;
+            for (uint64_t i = 0; i < BUSTER_X86_BENCHMARK_IMPLEMENTATIONS; i += 1)
+            {
+                lengths[i] = encode_stream(&x86_benchmark_implementations[i], instructions, count, section, outputs[i], offsets[i]);
+                const bool same = lengths[i] == lengths[0] && lengths[i] >= 0 && memcmp(outputs[i], outputs[0], (uint64_t)lengths[0]) == 0 &&
+                                  memcmp(offsets[i], offsets[0], count * sizeof(uint32_t)) == 0;
+                if (!same)
+                {
+                    fprintf(stderr, "%s's output differs from the scalar loop's\n", x86_benchmark_implementations[i].name);
+                    different += 1;
+                }
+            }
+            // The implementations to time: all of them, or the one --only names.
+            bool selected[BUSTER_X86_BENCHMARK_IMPLEMENTATIONS];
+            for (uint64_t i = 0; i < BUSTER_X86_BENCHMARK_IMPLEMENTATIONS; i += 1)
+            {
+                selected[i] = only == 0 || strcmp(only, x86_benchmark_implementations[i].name) == 0;
+            }
+            const uint64_t repeat = (BUSTER_X86_BENCHMARK_PASS_INSTRUCTIONS + count - 1) / count;
+            const int cycles_fd = x86_benchmark_open_counter(PERF_COUNT_HW_CPU_CYCLES);
+            const int instructions_fd = x86_benchmark_open_counter(PERF_COUNT_HW_INSTRUCTIONS);
+            if (cycles_fd < 0 || instructions_fd < 0)
+            {
+                fprintf(stderr, "perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0\n");
+            }
+
+            static X86BenchmarkSample samples[BUSTER_X86_BENCHMARK_IMPLEMENTATIONS][BUSTER_X86_BENCHMARK_PASSES];
+            for (uint64_t pass = 0; pass <= BUSTER_X86_BENCHMARK_PASSES; pass += 1)
+            {
+                for (uint64_t i = 0; i < BUSTER_X86_BENCHMARK_IMPLEMENTATIONS; i += 1)
+                {
+                    if (selected[i])
+                    {
+                        const X86BenchmarkSample before = x86_benchmark_now(cycles_fd, instructions_fd);
+                        for (uint64_t r = 0; r < repeat; r += 1)
+                        {
+                            encode_stream(&x86_benchmark_implementations[i], instructions, count, section, outputs[i], with_offsets ? offsets[i] : 0);
+                        }
+                        const X86BenchmarkSample after = x86_benchmark_now(cycles_fd, instructions_fd);
+                        if (pass > 0)
+                        {
+                            samples[i][pass - 1] = (X86BenchmarkSample){
+                                .nanoseconds = after.nanoseconds - before.nanoseconds,
+                                .cycles = after.cycles - before.cycles,
+                                .instructions = after.instructions - before.instructions,
+                            };
+                        }
+                    }
+                }
+            }
+
+            const double encoded = (double)count * (double)repeat;
+            printf("%lu %s instructions, %lld bytes (%.2f per instruction), in calls of %lu%s; %d interleaved passes of %lu runs, medians (cycles also min-max):\n",
+                   (unsigned long)count, uniform ? "uniform" : "mixed", (long long)lengths[0], (double)lengths[0] / (double)count, (unsigned long)section,
+                   with_offsets ? ", with offsets" : "", BUSTER_X86_BENCHMARK_PASSES, (unsigned long)repeat);
+            for (uint64_t i = 0; i < BUSTER_X86_BENCHMARK_IMPLEMENTATIONS; i += 1)
+            {
+                if (selected[i])
+                {
+                    uint64_t nanoseconds[BUSTER_X86_BENCHMARK_PASSES];
+                    uint64_t cycles[BUSTER_X86_BENCHMARK_PASSES];
+                    uint64_t retired[BUSTER_X86_BENCHMARK_PASSES];
+                    for (uint64_t pass = 0; pass < BUSTER_X86_BENCHMARK_PASSES; pass += 1)
+                    {
+                        nanoseconds[pass] = samples[i][pass].nanoseconds;
+                        cycles[pass] = samples[i][pass].cycles;
+                        retired[pass] = samples[i][pass].instructions;
+                    }
+                    x86_benchmark_sort(nanoseconds, BUSTER_X86_BENCHMARK_PASSES);
+                    x86_benchmark_sort(cycles, BUSTER_X86_BENCHMARK_PASSES);
+                    x86_benchmark_sort(retired, BUSTER_X86_BENCHMARK_PASSES);
+                    const double median_nanoseconds = (double)nanoseconds[BUSTER_X86_BENCHMARK_PASSES / 2];
+                    const double median_cycles = (double)cycles[BUSTER_X86_BENCHMARK_PASSES / 2];
+                    const double median_retired = (double)retired[BUSTER_X86_BENCHMARK_PASSES / 2];
+                    printf("  %-32s %7.3f ns  %8.1f M/s  %6.2f GB/s  %6.2f cycles [%.2f-%.2f]  %6.2f instructions  IPC %.2f\n", x86_benchmark_implementations[i].name,
+                           median_nanoseconds / encoded, encoded / median_nanoseconds * 1e3, (double)lengths[0] * (double)repeat / median_nanoseconds,
+                           median_cycles / encoded, (double)cycles[0] / encoded, (double)cycles[BUSTER_X86_BENCHMARK_PASSES - 1] / encoded, median_retired / encoded,
+                           median_cycles != 0 ? median_retired / median_cycles : 0.0);
+                }
+            }
+            printf("  (per encoded instruction; GB/s of machine code)\n");
+            if (cycles_fd >= 0)
+            {
+                close(cycles_fd);
+            }
+            if (instructions_fd >= 0)
+            {
+                close(instructions_fd);
+            }
+            result = different == 0 ? 0 : 1;
+        }
+    }
+    free(instructions);
+    for (uint64_t i = 0; i < BUSTER_X86_BENCHMARK_IMPLEMENTATIONS; i += 1)
+    {
+        free(outputs[i]);
+        free(offsets[i]);
+    }
+    return result;
+}

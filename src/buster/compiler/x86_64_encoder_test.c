@@ -1,0 +1,1141 @@
+// The x86-64 encoder tests. The compiler runs them as a command:
+//
+//   build/compiler test-x86-encoder [--count N] [--seed N]
+//   build/compiler test-x86-encoder --print-assembly N [--seed N]
+//   build/compiler test-x86-encoder --compare-binary text lengths N [--seed N]
+//
+// main.c includes this file after x86_64_encoder.c and calls run_x86_encoder_tests for the command. The checks, in this
+// order:
+//   - The templates: every form's longest encoding fits in a slot.
+//   - Known encodings: x86_encode_scalar and x86_encode on x86_known_encodings, instructions on the paths most worth
+//     pinning down (REX, SIB, RBP and R13 bases, RSP and R12 bases, RIP, absolute and index-only addresses,
+//     displacement sizes, byte registers, prefixes, opcode maps), with bytes from GNU as.
+//   - The reference digest: a hash of x86_encode_scalar's output for BUSTER_X86_TEST_DIGEST_INSTRUCTIONS random
+//     instructions (from the stream --print-assembly prints with --seed BUSTER_X86_TEST_DIGEST_SEED), recorded when
+//     GNU as encoded the same stream to the same bytes. A change to the form table or the scalar encoder changes it;
+//     cross-check the new output with GNU as (as AGENTS.md shows) before recording the new value.
+//   - Random streams: x86_encode at every batch width (x86_encode_4 ... x86_encode_64) and the gather and store
+//     variants against x86_encode_scalar, byte for byte and offset for offset, on random instructions of every form
+//     (with empty X86_FORM_NONE instructions among them): every count from 0 to BUSTER_X86_TEST_SHORT_COUNTS - 1, then
+//     N instructions (BUSTER_X86_TEST_DEFAULT_COUNT by default) at once.
+//   - Page edges: instructions that end exactly at the end of a readable page, and an output capacity (or, for the
+//     variants that write only the instructions' bytes, the machine code) and offsets that end exactly at the end of
+//     a writable one, with a PROT_NONE page after them, for every count from 0 to BUSTER_X86_TEST_SHORT_COUNTS - 1. A
+//     read or write past the end faults, and the fault handler names the count and exits with status 1.
+//   - Invalid instructions: random valid instructions with one operand broken in ways x86_encode checks (a high byte
+//     register with a REX prefix, RSP as an index, RIP with a base, unknown register or mode bits): x86_encode must
+//     reject them and x86_validate must find them.
+//
+// --print-assembly prints N random instructions in GNU as Intel syntax, each with its bytes from x86_encode_scalar in
+// a comment, choosing operands GNU as encodes with the same form, and has GNU as record each one's length in a .lengths
+// section; --compare-binary compares the .text and .lengths sections of the object GNU as makes of that (as objcopy
+// extracts them) with x86_encode_scalar's bytes for the same instructions. The exit status is 1 if the arguments are
+// invalid or a check fails.
+//
+// Layout, in this order:
+//   - Random instructions: x86_test_random, x86_random_register, x86_random_displacement, x86_random_immediate and
+//     x86_random_instruction.
+//   - Printing: register names, x86_print_memory and x86_print_instruction.
+//   - The checks: x86_check_templates, x86_known_encodings and x86_check_known, x86_check_digest, x86_compare_encoders and
+//     x86_check_random, the page-edge check (x86_test_report_fault and x86_check_page_edges), and x86_check_invalid.
+//   - The cross-check modes (x86_print_assembly and x86_compare_binary) and run_x86_encoder_tests.
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+
+// Random streams: every count below BUSTER_X86_TEST_SHORT_COUNTS, then this many instructions at once.
+#define BUSTER_X86_TEST_SHORT_COUNTS 200
+#define BUSTER_X86_TEST_DEFAULT_COUNT 300000
+// The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
+#define BUSTER_X86_TEST_DIGEST_SEED 1
+#define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
+#define BUSTER_X86_TEST_DIGEST 0x8932a5517bb50aebull
+// 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
+// into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
+#define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
+// Each check prints the first differences of this many inputs.
+#define BUSTER_X86_TEST_REPORTED 3
+// Broken copies of each random instruction in the invalid-instruction check.
+#define BUSTER_X86_TEST_INVALID_INSTRUCTIONS 20000
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Random instructions
+
+// xorshift64*.
+static uint64_t x86_test_random(uint64_t* state)
+{
+    uint64_t x = *state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    *state = x;
+    return x * 0x2545F4914F6CDD1Dull;
+}
+
+static uint32_t x86_random_below(uint64_t* state, uint32_t bound)
+{
+    return (uint32_t)((x86_test_random(state) >> 32) * bound >> 32);
+}
+
+// A register of the class, more often one of the numbers with special encodings (4, 5, 12 and 13) and, for a byte
+// register, sometimes AH to BH.
+static uint8_t x86_random_register(uint64_t* state, uint8_t operand)
+{
+    static const uint8_t special[] = { 4, 5, 12, 13 };
+    uint8_t result = x86_random_below(state, 4) == 0 ? special[x86_random_below(state, 4)] : (uint8_t)x86_random_below(state, 16);
+    if ((operand & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_GPR8 && x86_random_below(state, 6) == 0)
+    {
+        result = (uint8_t)((4 + x86_random_below(state, 4)) | BUSTER_X86_REGISTER_HIGH_BYTE);
+    }
+    return result;
+}
+
+// Mostly the values at the edges of each displacement size.
+static int32_t x86_random_displacement(uint64_t* state)
+{
+    static const int32_t edges[] = { 0, 1, -1, 127, 128, -128, -129, 255, 256, 32767, -32768, 0x7fffffff, (int32_t)0x80000000 };
+    int32_t result;
+    switch (x86_random_below(state, 4))
+    {
+        case 0: result = edges[x86_random_below(state, BUSTER_ARRAY_LENGTH(edges))]; break;
+        case 1: result = (int32_t)x86_random_below(state, 256) - 128; break;
+        case 2: result = (int32_t)x86_random_below(state, 65536) - 32768; break;
+        default: result = (int32_t)(uint32_t)x86_test_random(state); break;
+    }
+    return result;
+}
+
+// An immediate of `bytes` bytes (as X86Instruction.immediate holds it), in the range a sign-extended one has if
+// `sign_extended`.
+static int32_t x86_random_immediate(uint64_t* state, uint32_t bytes, bool sign_extended)
+{
+    int32_t result = 0;
+    switch (bytes)
+    {
+        case 1: result = sign_extended ? (int32_t)x86_random_below(state, 256) - 128 : (int32_t)x86_random_below(state, 256); break;
+        case 2: result = sign_extended ? (int32_t)x86_random_below(state, 65536) - 32768 : (int32_t)x86_random_below(state, 65536); break;
+        case 3: result = (int32_t)x86_random_below(state, 1u << 24); break;
+        case 4: result = x86_random_below(state, 3) == 0 ? (int32_t)x86_random_below(state, 256) - 128 : (int32_t)(uint32_t)x86_test_random(state); break;
+        case 8: result = (int32_t)(uint32_t)x86_test_random(state); break;
+        default: break;
+    }
+    return result;
+}
+
+static bool x86_fits_int8(int32_t value)
+{
+    return value >= -128 && value <= 127;
+}
+
+// A form's opcode, without its prefixes, as one number (for the forms GNU as encodes differently).
+static uint32_t x86_form_opcode(const X86FormDescription* form)
+{
+    return form->opcode_bytes == 1 ? form->opcode : 0x10000 | form->opcode;
+}
+
+// Whether GNU as would encode the instruction with another form of the same mnemonic (a shorter one, usually), so
+// that --print-assembly avoids it.
+static bool x86_assembler_prefers_another_form(const X86Instruction* instruction)
+{
+    const X86FormDescription* form = &x86_form_descriptions[instruction->form];
+    const bool register_direct = instruction->mode == 0 && form->rm != BUSTER_X86_OPERAND_NONE;
+    const uint32_t opcode = x86_form_opcode(form);
+    // The immediate as the operand's size makes it: 65499 is -37 for a 16-bit operand.
+    const int32_t immediate = form->immediate_bytes == 1 ? (int8_t)instruction->immediate : form->immediate_bytes == 2 ? (int16_t)instruction->immediate
+                                                                                                                       : instruction->immediate;
+    bool result = false;
+    // MOVQ between an XMM register and memory is F3 0F 7E or 66 0F D6, not the REX.W forms of MOVD.
+    if (!register_direct && (instruction->form == X86_FORM_MOVQ_X_RM64 || instruction->form == X86_FORM_MOVQ_RM64_X))
+    {
+        result = true;
+    }
+    // 80 and 81 /n, F6 and F7 /0 (test), C6 and C7 /0 (mov) and 87 (xchg) have shorter accumulator forms.
+    if (register_direct && instruction->rm == 0 && (opcode == 0x80 || opcode == 0x81 || ((opcode == 0xf6 || opcode == 0xf7) && form->encoding == BUSTER_X86_ENCODING_D0)))
+    {
+        result = true;
+    }
+    if (register_direct && opcode == 0x87 && (instruction->rm == 0 || instruction->reg == 0))
+    {
+        result = true;
+    }
+    // MOV r/m, imm into a register is B0+r or B8+r, except in 64-bit forms.
+    if (register_direct && (opcode == 0xc6 || opcode == 0xc7) && !form->rex_w)
+    {
+        result = true;
+    }
+    // Immediates that fit in a sign-extended byte take the imm8 forms, also instead of the AX, EAX and RAX forms of
+    // the arithmetic instructions (05, 0D ... 3D).
+    if ((opcode == 0x81 || opcode == 0x69 || opcode == 0x68) && form->immediate_bytes != 1 && x86_fits_int8(immediate))
+    {
+        result = true;
+    }
+    if ((opcode & 0xc7) == 0x05 && form->syntax == X86_SYNTAX_ACC_IMM && x86_fits_int8(immediate))
+    {
+        result = true;
+    }
+    // A shift by 1 is D0/D1, and INT 3 is INT3.
+    if ((opcode == 0xc0 || opcode == 0xc1) && instruction->immediate == 1)
+    {
+        result = true;
+    }
+    if (opcode == 0xcd && instruction->immediate == 3)
+    {
+        result = true;
+    }
+    // PUSH and POP of a register are 50+r and 58+r.
+    if (register_direct && (opcode == 0xff || opcode == 0x8f) && (form->encoding == BUSTER_X86_ENCODING_D6 || opcode == 0x8f))
+    {
+        result = true;
+    }
+    // An index scaled by 1 without a base becomes the base.
+    if ((instruction->mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX)) == BUSTER_X86_MODE_INDEX && (instruction->mode & BUSTER_X86_MODE_SCALE) == 0)
+    {
+        result = true;
+    }
+    return result;
+}
+
+// A random valid instruction of the form. For --print-assembly (`for_assembler`), one GNU as encodes with this form.
+static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_index, bool for_assembler)
+{
+    const X86FormDescription* form = &x86_form_descriptions[form_index];
+    X86Instruction result;
+    bool done = false;
+    while (!done)
+    {
+        result = (X86Instruction){ .form = form_index };
+        if (form->encoding == BUSTER_X86_ENCODING_R)
+        {
+            result.reg = x86_random_register(state, form->reg);
+        }
+        if (form->rm != BUSTER_X86_OPERAND_NONE)
+        {
+            const bool can_register = (form->rm & BUSTER_X86_OPERAND_REGISTER) != 0;
+            const bool can_memory = (form->rm & BUSTER_X86_OPERAND_MEMORY) != 0;
+            if (can_register && (!can_memory || x86_random_below(state, 2) == 0))
+            {
+                result.rm = x86_random_register(state, form->rm);
+            }
+            else
+            {
+                const uint8_t scale = (uint8_t)x86_random_below(state, 4);
+                switch (x86_random_below(state, 20))
+                {
+                    case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7:
+                        result.mode = BUSTER_X86_MEMORY_BASE;
+                        break;
+                    case 8: case 9: case 10: case 11: case 12:
+                        result.mode = BUSTER_X86_MEMORY_BASE_INDEX(scale);
+                        break;
+                    case 13: case 14:
+                        result.mode = BUSTER_X86_MEMORY_INDEX(scale);
+                        break;
+                    case 15: case 16:
+                        result.mode = BUSTER_X86_MEMORY_ABSOLUTE;
+                        break;
+                    default:
+                        result.mode = BUSTER_X86_MEMORY_RIP;
+                        break;
+                }
+                if (result.mode & BUSTER_X86_MODE_BASE)
+                {
+                    result.rm = x86_random_register(state, BUSTER_X86_OPERAND_GQ);
+                }
+                if (result.mode & BUSTER_X86_MODE_INDEX)
+                {
+                    result.index = x86_random_register(state, BUSTER_X86_OPERAND_GQ);
+                }
+                result.displacement = x86_random_displacement(state);
+            }
+        }
+        const uint32_t opcode = x86_form_opcode(form);
+        const bool sign_extended = opcode == 0x83 || opcode == 0x6b || opcode == 0x6a;
+        result.immediate = x86_random_immediate(state, form->immediate_bytes, sign_extended || (for_assembler && form->immediate_bytes == 4));
+        if (form->immediate_bytes == 8)
+        {
+            result.displacement = (int32_t)(uint32_t)x86_test_random(state);
+        }
+        if (form->relative_bytes == 1)
+        {
+            result.displacement = (int32_t)x86_random_below(state, 256) - 128;
+        }
+        else if (form->relative_bytes == 4)
+        {
+            result.displacement = x86_random_displacement(state);
+        }
+        done = x86_instruction_is_valid(&result) && !(for_assembler && x86_assembler_prefers_another_form(&result));
+    }
+    return result;
+}
+
+// A random form other than X86_FORM_NONE, or with `with_none`, X86_FORM_NONE one time in 16.
+static uint16_t x86_random_form(uint64_t* state, bool with_none)
+{
+    uint16_t result = (uint16_t)(1 + x86_random_below(state, X86_FORM_COUNT - 1));
+    if (with_none && x86_random_below(state, 16) == 0)
+    {
+        result = X86_FORM_NONE;
+    }
+    return result;
+}
+
+static void x86_random_instructions(uint64_t* state, X86Instruction* instructions, uint64_t count, bool with_none, bool for_assembler)
+{
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        instructions[i] = x86_random_instruction(state, x86_random_form(state, with_none), for_assembler);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Printing, in GNU as Intel syntax
+
+static const char* const x86_gpr8_names[16] = { "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b" };
+static const char* const x86_gpr8_high_names[4] = { "ah", "ch", "dh", "bh" };
+static const char* const x86_gpr16_names[16] = { "ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w" };
+static const char* const x86_gpr32_names[16] = { "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d" };
+static const char* const x86_gpr64_names[16] = { "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" };
+static const char* const x86_xmm_names[16] = { "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+                                           "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15" };
+
+static const char* x86_register_name(uint8_t value, uint8_t operand)
+{
+    const uint8_t number = value & BUSTER_X86_REGISTER_NUMBER;
+    const char* result;
+    switch (operand & BUSTER_X86_OPERAND_CLASS)
+    {
+        case BUSTER_X86_CLASS_GPR8: result = (value & BUSTER_X86_REGISTER_HIGH_BYTE) ? x86_gpr8_high_names[number - 4] : x86_gpr8_names[number]; break;
+        case BUSTER_X86_CLASS_GPR16: result = x86_gpr16_names[number]; break;
+        case BUSTER_X86_CLASS_GPR32: result = x86_gpr32_names[number]; break;
+        case BUSTER_X86_CLASS_GPR64: result = x86_gpr64_names[number]; break;
+        default: result = x86_xmm_names[number]; break;
+    }
+    return result;
+}
+
+static const char* x86_accumulator_name(uint32_t bytes)
+{
+    return bytes == 1 ? "al" : bytes == 2 ? "ax" : bytes == 4 ? "eax" : "rax";
+}
+
+static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint32_t operand_bytes)
+{
+    const uint8_t mode = instruction->mode;
+    const char* size = operand_bytes == 1 ? "byte ptr " : operand_bytes == 2 ? "word ptr " : operand_bytes == 4 ? "dword ptr " : operand_bytes == 8 ? "qword ptr " :
+                       operand_bytes == 16 ? "xmmword ptr " : "";
+    if ((mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX | BUSTER_X86_MODE_RIP)) == 0)
+    {
+        fprintf(file, "%sds:%d", size, instruction->displacement);
+    }
+    else
+    {
+        fprintf(file, "%s[", size);
+        if (mode & BUSTER_X86_MODE_RIP)
+        {
+            fprintf(file, "rip");
+        }
+        if (mode & BUSTER_X86_MODE_BASE)
+        {
+            fprintf(file, "%s", x86_gpr64_names[instruction->rm]);
+        }
+        if (mode & BUSTER_X86_MODE_INDEX)
+        {
+            fprintf(file, "%s%s*%d", (mode & BUSTER_X86_MODE_BASE) ? "+" : "", x86_gpr64_names[instruction->index], 1 << (mode & BUSTER_X86_MODE_SCALE));
+        }
+        fprintf(file, "%+d]", instruction->displacement);
+    }
+}
+
+static void x86_print_rm(FILE* file, const X86Instruction* instruction, const X86FormDescription* form)
+{
+    if (instruction->mode != 0)
+    {
+        x86_print_memory(file, instruction, form->operand_bytes);
+    }
+    else
+    {
+        fprintf(file, "%s", x86_register_name(instruction->rm, form->rm));
+    }
+}
+
+// Prints the instruction in GNU as Intel syntax. A register-to-register move or arithmetic instruction gets {load} or
+// {store}, which picks the form with ModRM.reg as the destination or the source.
+static void x86_print_instruction(FILE* file, const X86Instruction* instruction)
+{
+    const X86FormDescription* form = &x86_form_descriptions[instruction->form];
+    const bool register_direct = instruction->mode == 0 && form->rm != BUSTER_X86_OPERAND_NONE;
+    const char* reg = form->reg != BUSTER_X86_OPERAND_NONE ? x86_register_name(instruction->reg, form->reg) : "";
+    const int64_t immediate = form->immediate_bytes == 8 ? (int64_t)((uint64_t)(uint32_t)instruction->immediate | ((uint64_t)(uint32_t)instruction->displacement << 32))
+                                                         : instruction->immediate;
+    if (register_direct && form->reg != BUSTER_X86_OPERAND_NONE && (form->syntax == X86_SYNTAX_RM_REG || form->syntax == X86_SYNTAX_REG_RM))
+    {
+        fprintf(file, "%s ", form->syntax == X86_SYNTAX_RM_REG ? "{store}" : "{load}");
+    }
+    if (form->syntax == X86_SYNTAX_REL && form->relative_bytes == 4 && form->opcode != 0xe8)
+    {
+        fprintf(file, "{disp32} ");
+    }
+    fprintf(file, "%s", form->mnemonic);
+    switch (form->syntax)
+    {
+        case X86_SYNTAX_NONE:
+            break;
+        case X86_SYNTAX_RM:
+            fprintf(file, " ");
+            x86_print_rm(file, instruction, form);
+            break;
+        case X86_SYNTAX_RM_REG:
+            fprintf(file, " ");
+            x86_print_rm(file, instruction, form);
+            fprintf(file, ", %s", reg);
+            break;
+        case X86_SYNTAX_REG_RM:
+            fprintf(file, " %s, ", reg);
+            x86_print_rm(file, instruction, form);
+            break;
+        case X86_SYNTAX_RM_IMM:
+            fprintf(file, " ");
+            x86_print_rm(file, instruction, form);
+            fprintf(file, ", %lld", (long long)immediate);
+            break;
+        case X86_SYNTAX_REG_RM_IMM:
+            fprintf(file, " %s, ", reg);
+            x86_print_rm(file, instruction, form);
+            fprintf(file, ", %lld", (long long)immediate);
+            break;
+        case X86_SYNTAX_RM_REG_IMM:
+            fprintf(file, " ");
+            x86_print_rm(file, instruction, form);
+            fprintf(file, ", %s, %lld", reg, (long long)immediate);
+            break;
+        case X86_SYNTAX_RM_REG_CL:
+            fprintf(file, " ");
+            x86_print_rm(file, instruction, form);
+            fprintf(file, ", %s, cl", reg);
+            break;
+        case X86_SYNTAX_RM_ONE:
+            fprintf(file, " ");
+            x86_print_rm(file, instruction, form);
+            fprintf(file, ", 1");
+            break;
+        case X86_SYNTAX_RM_CL:
+            fprintf(file, " ");
+            x86_print_rm(file, instruction, form);
+            fprintf(file, ", cl");
+            break;
+        case X86_SYNTAX_IMM:
+            fprintf(file, " %lld", (long long)immediate);
+            break;
+        case X86_SYNTAX_IMM_IMM:
+            fprintf(file, " %d, %d", instruction->immediate & 0xffff, (instruction->immediate >> 16) & 0xff);
+            break;
+        case X86_SYNTAX_REL:
+            // `.` is the start of the instruction, and the displacement counts from its end.
+            fprintf(file, " .%+lld", (long long)instruction->displacement + form->opcode_bytes + form->relative_bytes);
+            break;
+        case X86_SYNTAX_ACC_IMM:
+            fprintf(file, " %s, %lld", x86_accumulator_name(form->operand_bytes), (long long)immediate);
+            break;
+        case X86_SYNTAX_ACC_MOFFS:
+            fprintf(file, " %s, ds:0x%llx", x86_accumulator_name(form->operand_bytes), (unsigned long long)immediate);
+            break;
+        case X86_SYNTAX_MOFFS_ACC:
+            fprintf(file, " ds:0x%llx, %s", (unsigned long long)immediate, x86_accumulator_name(form->operand_bytes));
+            break;
+    }
+}
+
+static void x86_print_bytes(const uint8_t* bytes, uint64_t length)
+{
+    for (uint64_t i = 0; i < length; i += 1)
+    {
+        printf("%s%02x", i == 0 ? "" : " ", bytes[i]);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The checks
+
+static bool x86_check_templates(void)
+{
+    const bool result = x86_encoder_initialize();
+    printf("templates: %u forms, %s\n", (unsigned)X86_FORM_COUNT, result ? "all fit" : "SOME DON'T FIT");
+    if (!result)
+    {
+        for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
+        {
+            X86Template template;
+            if (!build_template(&x86_form_descriptions[form], &template))
+            {
+                printf("  form %u (%s) doesn't fit\n", form, x86_form_descriptions[form].mnemonic);
+            }
+        }
+    }
+    return result;
+}
+
+typedef struct KnownEncoding KnownEncoding;
+struct KnownEncoding
+{
+    X86Instruction instruction;
+    uint8_t length;
+    uint8_t bytes[BUSTER_X86_MAX_INSTRUCTION_BYTES];
+};
+
+// Instructions on the paths most worth pinning down, with their bytes from GNU as.
+static const KnownEncoding x86_known_encodings[] = {
+    // mov eax, ebx; {load} mov eax, ebx; mov r12, rax; mov spl, al; mov ah, bl
+    { { .form = X86_FORM_MOV_RM32_R32, .rm = X86_REGISTER_RAX, .reg = X86_REGISTER_RBX }, 2, { 0x89, 0xd8 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RBX }, 2, { 0x8b, 0xc3 } },
+    { { .form = X86_FORM_MOV_RM64_R64, .rm = X86_REGISTER_R12, .reg = X86_REGISTER_RAX }, 3, { 0x49, 0x89, 0xc4 } },
+    { { .form = X86_FORM_MOV_RM8_R8, .rm = X86_REGISTER_RSP, .reg = X86_REGISTER_RAX }, 3, { 0x40, 0x88, 0xc4 } },
+    { { .form = X86_FORM_MOV_RM8_R8, .rm = X86_REGISTER_AH, .reg = X86_REGISTER_RBX }, 2, { 0x88, 0xdc } },
+    // mov eax, [rbx]; [rbp]; [r13]; [rsp]; [r12]; [rbx+0x10]; [rbx-0x80]; [rbx+0x80]
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE }, 2, { 0x8b, 0x03 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RBP, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x8b, 0x45, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_R13, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x41, 0x8b, 0x45, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x8b, 0x04, 0x24 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_R12, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x41, 0x8b, 0x04, 0x24 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x10 }, 3, { 0x8b, 0x43, 0x10 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -0x80 }, 3, { 0x8b, 0x43, 0x80 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x80 }, 6, { 0x8b, 0x83, 0x80, 0x00, 0x00, 0x00 } },
+    // mov r9, [r10+r11*8+0x12345678]; mov eax, [rbp+rcx*4]; mov eax, [rcx*4+0x10]; mov eax, ds:0x1000; mov eax, [rip+0x100]
+    { { .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_R9, .rm = X86_REGISTER_R10, .index = X86_REGISTER_R11, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = 0x12345678 },
+      8, { 0x4f, 0x8b, 0x8c, 0xda, 0x78, 0x56, 0x34, 0x12 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RBP, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2) }, 4, { 0x8b, 0x44, 0x8d, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_INDEX(2), .displacement = 0x10 }, 7, { 0x8b, 0x04, 0x8d, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .mode = BUSTER_X86_MEMORY_ABSOLUTE, .displacement = 0x1000 }, 7, { 0x8b, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x100 }, 6, { 0x8b, 0x05, 0x00, 0x01, 0x00, 0x00 } },
+    // add dword ptr ds:0x1000, eax (the historical encoder made this [rax+0x1000])
+    { { .form = X86_FORM_ADD_RM32_R32, .mode = BUSTER_X86_MEMORY_ABSOLUTE, .displacement = 0x1000 }, 7, { 0x01, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00 } },
+    // mov byte ptr [r12+rbx*4+0x12], 5; mov qword ptr [rsp+0x12345678], 0x11223344
+    { { .form = X86_FORM_MOV_RM8_IMM8, .rm = X86_REGISTER_R12, .index = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = 0x12, .immediate = 5 },
+      6, { 0x41, 0xc6, 0x44, 0x9c, 0x12, 0x05 } },
+    { { .form = X86_FORM_MOV_RM64_IMM32, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x12345678, .immediate = 0x11223344 },
+      12, { 0x48, 0xc7, 0x84, 0x24, 0x78, 0x56, 0x34, 0x12, 0x44, 0x33, 0x22, 0x11 } },
+    // movabs rax, 0x1122334455667788; mov r15d, 1; mov r8b, -1; movabs al, ds:0x1122334455667788
+    { { .form = X86_FORM_MOV_R64_IMM64, .rm = X86_REGISTER_RAX, .immediate = 0x55667788, .displacement = 0x11223344 },
+      10, { 0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11 } },
+    { { .form = X86_FORM_MOV_R32_IMM32, .rm = X86_REGISTER_R15, .immediate = 1 }, 6, { 0x41, 0xbf, 0x01, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_MOV_R8_IMM8, .rm = X86_REGISTER_R8, .immediate = 255 }, 3, { 0x41, 0xb0, 0xff } },
+    { { .form = X86_FORM_MOVABS_AL_MOFFS, .immediate = 0x55667788, .displacement = 0x11223344 }, 9, { 0xa0, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11 } },
+    // add eax, 1 (83); add ecx, 1000 (81); add eax, 1000 (05); add rax, -1; add ax, 0x1234; add al, 200
+    { { .form = X86_FORM_ADD_RM32_IMM8, .rm = X86_REGISTER_RAX, .immediate = 1 }, 3, { 0x83, 0xc0, 0x01 } },
+    { { .form = X86_FORM_ADD_RM32_IMM32, .rm = X86_REGISTER_RCX, .immediate = 1000 }, 6, { 0x81, 0xc1, 0xe8, 0x03, 0x00, 0x00 } },
+    { { .form = X86_FORM_ADD_EAX_IMM32, .immediate = 1000 }, 5, { 0x05, 0xe8, 0x03, 0x00, 0x00 } },
+    { { .form = X86_FORM_ADD_RM64_IMM8, .rm = X86_REGISTER_RAX, .immediate = -1 }, 4, { 0x48, 0x83, 0xc0, 0xff } },
+    { { .form = X86_FORM_ADD_AX_IMM16, .immediate = 0x1234 }, 4, { 0x66, 0x05, 0x34, 0x12 } },
+    { { .form = X86_FORM_ADD_AL_IMM8, .immediate = 200 }, 2, { 0x04, 0xc8 } },
+    // movzx eax, sil; movzx r8, ah is invalid, so movzx ecx, ah; movsxd rax, ecx; lea rax, [rip+0x10]; lea eax, [rax+rax*1]
+    { { .form = X86_FORM_MOVZX_R32_RM8, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSI }, 4, { 0x40, 0x0f, 0xb6, 0xc6 } },
+    { { .form = X86_FORM_MOVZX_R32_RM8, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_AH }, 3, { 0x0f, 0xb6, 0xcc } },
+    { { .form = X86_FORM_MOVSXD_R64_RM32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 3, { 0x48, 0x63, 0xc1 } },
+    { { .form = X86_FORM_LEA_R64_M, .reg = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x10 }, 7, { 0x48, 0x8d, 0x05, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_LEA_R32_M, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0) }, 3, { 0x8d, 0x04, 0x00 } },
+    // shl r9, 1; sar eax, cl; rol word ptr [rax], 3; imul r10, r11, 100; imul eax, ecx, 1000
+    { { .form = X86_FORM_SHL_RM64_1, .rm = X86_REGISTER_R9 }, 3, { 0x49, 0xd1, 0xe1 } },
+    { { .form = X86_FORM_SAR_RM32_CL, .rm = X86_REGISTER_RAX }, 2, { 0xd3, 0xf8 } },
+    { { .form = X86_FORM_ROL_RM16_IMM8, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 }, 4, { 0x66, 0xc1, 0x00, 0x03 } },
+    { { .form = X86_FORM_IMUL_R64_RM64_IMM8, .reg = X86_REGISTER_R10, .rm = X86_REGISTER_R11, .immediate = 100 }, 4, { 0x4d, 0x6b, 0xd3, 0x64 } },
+    { { .form = X86_FORM_IMUL_R32_RM32_IMM32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .immediate = 1000 }, 6, { 0x69, 0xc1, 0xe8, 0x03, 0x00, 0x00 } },
+    // push r12; pop rbx; push 1000; call .+0x105 (rel32 0x100); jmp .+0x12 (rel8 0x10); jne .+0x106 (rel32 0x100); ret; ret 8
+    { { .form = X86_FORM_PUSH_R64, .rm = X86_REGISTER_R12 }, 2, { 0x41, 0x54 } },
+    { { .form = X86_FORM_POP_R64, .rm = X86_REGISTER_RBX }, 1, { 0x5b } },
+    { { .form = X86_FORM_PUSH_IMM32, .immediate = 1000 }, 5, { 0x68, 0xe8, 0x03, 0x00, 0x00 } },
+    { { .form = X86_FORM_CALL_REL32, .displacement = 0x100 }, 5, { 0xe8, 0x00, 0x01, 0x00, 0x00 } },
+    { { .form = X86_FORM_JMP_REL8, .displacement = 0x10 }, 2, { 0xeb, 0x10 } },
+    { { .form = X86_FORM_JNE_REL32, .displacement = 0x100 }, 6, { 0x0f, 0x85, 0x00, 0x01, 0x00, 0x00 } },
+    { { .form = X86_FORM_RET }, 1, { 0xc3 } },
+    { { .form = X86_FORM_RET_IMM16, .immediate = 8 }, 3, { 0xc2, 0x08, 0x00 } },
+    // call qword ptr [rax+8]; jmp r11; sete r10b; cmovl r8, qword ptr [rsp+8]
+    { { .form = X86_FORM_CALL_RM64, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 }, 3, { 0xff, 0x50, 0x08 } },
+    { { .form = X86_FORM_JMP_RM64, .rm = X86_REGISTER_R11 }, 3, { 0x41, 0xff, 0xe3 } },
+    { { .form = X86_FORM_SETE_RM8, .rm = X86_REGISTER_R10 }, 4, { 0x41, 0x0f, 0x94, 0xc2 } },
+    { { .form = X86_FORM_CMOVL_R64_RM64, .reg = X86_REGISTER_R8, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 },
+      6, { 0x4c, 0x0f, 0x4c, 0x44, 0x24, 0x08 } },
+    // enter 16, 2; endbr64; lock cmpxchg word ptr [rax], cx; crc32 eax, word ptr [rax]; lock cmpxchg16b xmmword ptr [r8]
+    { { .form = X86_FORM_ENTER, .immediate = 16 | (2 << 16) }, 4, { 0xc8, 0x10, 0x00, 0x02 } },
+    { { .form = X86_FORM_ENDBR64 }, 4, { 0xf3, 0x0f, 0x1e, 0xfa } },
+    { { .form = X86_FORM_LOCK_CMPXCHG_M16_R16, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x66, 0xf0, 0x0f, 0xb1, 0x08 } },
+    { { .form = X86_FORM_CRC32_R32_RM16, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x66, 0xf2, 0x0f, 0x38, 0xf1, 0x00 } },
+    { { .form = X86_FORM_LOCK_CMPXCHG16B_M128, .rm = X86_REGISTER_R8, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xf0, 0x49, 0x0f, 0xc7, 0x08 } },
+    // movss xmm9, dword ptr [rbp-8]; movsd qword ptr [rsp], xmm15; cvtsi2sd xmm1, rax; palignr xmm1, xmmword ptr [rsp], 3; pextrq r9, xmm10, 1
+    { { .form = X86_FORM_MOVSS_X_XM32, .reg = 9, .rm = X86_REGISTER_RBP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -8 }, 6, { 0xf3, 0x44, 0x0f, 0x10, 0x4d, 0xf8 } },
+    { { .form = X86_FORM_MOVSD_XM64_X, .reg = 15, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0xf2, 0x44, 0x0f, 0x11, 0x3c, 0x24 } },
+    { { .form = X86_FORM_CVTSI2SD_X_RM64, .reg = 1, .rm = X86_REGISTER_RAX }, 5, { 0xf2, 0x48, 0x0f, 0x2a, 0xc8 } },
+    { { .form = X86_FORM_PALIGNR_X_XM128_IMM8, .reg = 1, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 },
+      7, { 0x66, 0x0f, 0x3a, 0x0f, 0x0c, 0x24, 0x03 } },
+    { { .form = X86_FORM_PEXTRQ_RM64_X_IMM8, .reg = 10, .rm = X86_REGISTER_R9, .immediate = 1 }, 7, { 0x66, 0x4d, 0x0f, 0x3a, 0x16, 0xd1, 0x01 } },
+};
+
+// Checks one encoder on the known encodings, encoding each alone and all of them at once.
+static uint64_t x86_check_known_with(const char* name, bool vectorized)
+{
+    static uint8_t output[BUSTER_ARRAY_LENGTH(x86_known_encodings) * BUSTER_X86_MAX_INSTRUCTION_BYTES];
+    uint64_t failures = 0;
+    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_known_encodings); i += 1)
+    {
+        const KnownEncoding* known = &x86_known_encodings[i];
+        const int64_t length = vectorized ? x86_encode(&known->instruction, 1, output, sizeof(output), 0) : x86_encode_scalar(&known->instruction, 1, output, sizeof(output), 0);
+        if (length != known->length || memcmp(output, known->bytes, known->length) != 0)
+        {
+            if (failures < BUSTER_X86_TEST_REPORTED)
+            {
+                printf("  %s: ", name);
+                x86_print_instruction(stdout, &known->instruction);
+                printf(": got ");
+                x86_print_bytes(output, length > 0 ? (uint64_t)length : 0);
+                printf(" (%lld bytes), expected ", (long long)length);
+                x86_print_bytes(known->bytes, known->length);
+                printf("\n");
+            }
+            failures += 1;
+        }
+    }
+    return failures;
+}
+
+static bool x86_check_known(void)
+{
+    const uint64_t scalar = x86_check_known_with("x86_encode_scalar", false);
+    const uint64_t vectorized = x86_check_known_with("x86_encode", true);
+    printf("known encodings: %lu instructions, %lu wrong (scalar), %lu wrong (vectorized)\n", (unsigned long)BUSTER_ARRAY_LENGTH(x86_known_encodings), (unsigned long)scalar,
+           (unsigned long)vectorized);
+    return scalar == 0 && vectorized == 0;
+}
+
+static uint64_t x86_fnv1a(const uint8_t* bytes, uint64_t length)
+{
+    uint64_t hash = 0xcbf29ce484222325ull;
+    for (uint64_t i = 0; i < length; i += 1)
+    {
+        hash = (hash ^ bytes[i]) * 0x100000001b3ull;
+    }
+    return hash;
+}
+
+static bool x86_check_digest(X86Instruction* instructions, uint8_t* output)
+{
+    uint64_t state = BUSTER_X86_TEST_DIGEST_SEED * BUSTER_X86_TEST_GOLDEN_RATIO + 1;
+    x86_random_instructions(&state, instructions, BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, false, true);
+    const int64_t length = x86_encode_scalar(instructions, BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, output, BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_DIGEST_INSTRUCTIONS), 0);
+    const uint64_t digest = length >= 0 ? x86_fnv1a(output, (uint64_t)length) : 0;
+    const bool result = digest == BUSTER_X86_TEST_DIGEST;
+    printf("reference digest: %d instructions, %lld bytes, 0x%016llx (%s)\n", BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, (long long)length, (unsigned long long)digest,
+           result ? "matches the one GNU as checked" : "DIFFERENT FROM THE ONE GNU AS CHECKED");
+    return result;
+}
+
+typedef int64_t X86EncodeFunction(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets);
+
+typedef struct X86Variant X86Variant;
+struct X86Variant
+{
+    const char* name;
+    X86EncodeFunction* encode;
+    // Writes nothing past the instructions' bytes (rather than nothing past the capacity).
+    bool exact;
+};
+
+static const X86Variant x86_test_variants[] = {
+    { "x86_encode_4", x86_encode_4, false },
+    { "x86_encode_8", x86_encode_8, false },
+    { "x86_encode_16", x86_encode_16, false },
+    { "x86_encode_32", x86_encode_32, false },
+    { "x86_encode_64", x86_encode_64, false },
+    { "x86_encode_16_forms_from_records", x86_encode_16_forms_from_records, false },
+    { "x86_encode_16_masked_loads", x86_encode_16_masked_loads, false },
+    { "x86_encode_16_masked_stores", x86_encode_16_masked_stores, true },
+    { "x86_encode_16_compress_stores", x86_encode_16_compress_stores, true },
+};
+
+typedef struct X86Buffers X86Buffers;
+struct X86Buffers
+{
+    uint8_t* expected;
+    uint8_t* output;
+    uint32_t* expected_offsets;
+    uint32_t* offsets;
+};
+
+// Compares a variant with x86_encode_scalar on `count` instructions. Prints the first difference if `report`.
+static bool x86_compare_encoders(const X86Variant* variant, const X86Instruction* instructions, uint64_t count, X86Buffers* buffers, bool report)
+{
+    const int64_t expected = x86_encode_scalar(instructions, count, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(count), buffers->expected_offsets);
+    const int64_t length = variant->encode(instructions, count, buffers->output, buffers->offsets);
+    bool result = expected >= 0 && length == expected && memcmp(buffers->output, buffers->expected, (uint64_t)expected) == 0 &&
+                  memcmp(buffers->offsets, buffers->expected_offsets, count * sizeof(uint32_t)) == 0;
+    if (!result && report)
+    {
+        printf("  %s on %lu instructions: %lld bytes, expected %lld\n", variant->name, (unsigned long)count, (long long)length, (long long)expected);
+        // The first instruction whose offset or bytes differ.
+        uint64_t i = 0;
+        bool same = length >= 0 && expected >= 0;
+        while (same && i < count)
+        {
+            const uint32_t start = buffers->expected_offsets[i];
+            const uint32_t end = i + 1 < count ? buffers->expected_offsets[i + 1] : (uint32_t)expected;
+            same = buffers->offsets[i] == start && (uint64_t)length >= end && memcmp(buffers->output + start, buffers->expected + start, end - start) == 0;
+            i += same;
+        }
+        if (length >= 0 && expected >= 0 && i < count)
+        {
+            const uint32_t start = buffers->expected_offsets[i];
+            const uint32_t end = i + 1 < count ? buffers->expected_offsets[i + 1] : (uint32_t)expected;
+            printf("    instruction %lu: ", (unsigned long)i);
+            x86_print_instruction(stdout, &instructions[i]);
+            printf("\n    expected at %u: ", start);
+            x86_print_bytes(buffers->expected + start, end - start);
+            printf("\n    got at %u:      ", buffers->offsets[i]);
+            x86_print_bytes(buffers->output + start, (uint64_t)length >= end ? end - start : 0);
+            printf("\n");
+        }
+    }
+    return result;
+}
+
+static bool x86_check_random(uint64_t* state, uint64_t count, X86Instruction* instructions, X86Buffers* buffers)
+{
+    bool result = true;
+    for (uint64_t v = 0; v < BUSTER_ARRAY_LENGTH(x86_test_variants); v += 1)
+    {
+        const X86Variant* variant = &x86_test_variants[v];
+        uint64_t failures = 0;
+        for (uint64_t n = 0; n < BUSTER_X86_TEST_SHORT_COUNTS; n += 1)
+        {
+            x86_random_instructions(state, instructions, n, true, false);
+            failures += !x86_compare_encoders(variant, instructions, n, buffers, failures < BUSTER_X86_TEST_REPORTED);
+        }
+        x86_random_instructions(state, instructions, count, true, false);
+        failures += !x86_compare_encoders(variant, instructions, count, buffers, failures < BUSTER_X86_TEST_REPORTED);
+        printf("random: %-28s %d short streams and %lu instructions, %lu differ\n", variant->name, BUSTER_X86_TEST_SHORT_COUNTS, (unsigned long)count,
+               (unsigned long)failures);
+        result = result && failures == 0;
+    }
+    return result;
+}
+
+// The page-edge check's input, for the fault handler.
+static volatile uint64_t x86_test_page_edge_count;
+static volatile const char* x86_test_page_edge_variant;
+
+static void x86_test_report_fault(int signal_number)
+{
+    (void)signal_number;
+    char message[160];
+    const int length = snprintf(message, sizeof(message), "page edges: %s faulted on %lu instructions\n", x86_test_page_edge_variant,
+                                (unsigned long)x86_test_page_edge_count);
+    if (length > 0 && write(STDOUT_FILENO, message, (size_t)length) < 0)
+    {
+        _exit(1);
+    }
+    _exit(1);
+}
+
+// Maps `bytes` rounded up to whole pages between two PROT_NONE pages, and returns the end of the readable part.
+static uint8_t* x86_map_guarded(uint64_t bytes, uint64_t page, uint64_t* mapped_bytes)
+{
+    const uint64_t pages = (bytes + page - 1) / page;
+    const uint64_t total = (pages + 2) * page;
+    uint8_t* base = mmap(0, total, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* result = 0;
+    if (base != MAP_FAILED && (pages == 0 || mprotect(base + page, pages * page, PROT_READ | PROT_WRITE) == 0))
+    {
+        result = base + page + pages * page;
+        *mapped_bytes = total;
+    }
+    return result;
+}
+
+static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Buffers* buffers)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint64_t input_mapped = 0;
+    uint64_t output_mapped = 0;
+    uint64_t offsets_mapped = 0;
+    uint8_t* input_end = x86_map_guarded(BUSTER_X86_TEST_SHORT_COUNTS * sizeof(X86Instruction), page, &input_mapped);
+    uint8_t* output_end = x86_map_guarded(BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_SHORT_COUNTS), page, &output_mapped);
+    uint8_t* offsets_end = x86_map_guarded(BUSTER_X86_TEST_SHORT_COUNTS * sizeof(uint32_t), page, &offsets_mapped);
+    uint64_t failures = 0;
+    bool result = input_end != 0 && output_end != 0 && offsets_end != 0;
+    if (!result)
+    {
+        printf("page edges: can't map the guarded buffers\n");
+    }
+    else
+    {
+        struct sigaction action;
+        struct sigaction previous_segv;
+        struct sigaction previous_bus;
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = x86_test_report_fault;
+        sigaction(SIGSEGV, &action, &previous_segv);
+        sigaction(SIGBUS, &action, &previous_bus);
+        for (uint64_t v = 0; v < BUSTER_ARRAY_LENGTH(x86_test_variants); v += 1)
+        {
+            const X86Variant* variant = &x86_test_variants[v];
+            {
+                x86_test_page_edge_variant = variant->name;
+                for (uint64_t n = 0; n < BUSTER_X86_TEST_SHORT_COUNTS; n += 1)
+                {
+                    x86_test_page_edge_count = n;
+                    x86_random_instructions(state, scratch, n, true, false);
+                    X86Instruction* instructions = (X86Instruction*)(input_end - n * sizeof(X86Instruction));
+                    memcpy(instructions, scratch, n * sizeof(X86Instruction));
+                    const int64_t expected = x86_encode_scalar(instructions, n, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(n), buffers->expected_offsets);
+                    // The output ends where the instructions do (for an exact variant) or where its capacity does.
+                    uint8_t* output = output_end - (variant->exact ? (uint64_t)(expected > 0 ? expected : 0) : BUSTER_X86_ENCODER_CAPACITY(n));
+                    uint32_t* offsets = (uint32_t*)(offsets_end - n * sizeof(uint32_t));
+                    const int64_t length = variant->encode(instructions, n, output, offsets);
+                    const bool same = length == expected && memcmp(output, buffers->expected, (uint64_t)(expected > 0 ? expected : 0)) == 0 &&
+                                      memcmp(offsets, buffers->expected_offsets, n * sizeof(uint32_t)) == 0;
+                    if (!same && failures < BUSTER_X86_TEST_REPORTED)
+                    {
+                        printf("  %s on %lu instructions at page edges: %lld bytes, expected %lld\n", variant->name, (unsigned long)n, (long long)length,
+                               (long long)expected);
+                    }
+                    failures += !same;
+                }
+            }
+        }
+        sigaction(SIGSEGV, &previous_segv, 0);
+        sigaction(SIGBUS, &previous_bus, 0);
+        printf("page edges: 0 to %d instructions ending at a page end, machine code (or its capacity) and offsets too, %lu differ\n", BUSTER_X86_TEST_SHORT_COUNTS - 1,
+               (unsigned long)failures);
+        result = failures == 0;
+    }
+    if (input_end != 0)
+    {
+        munmap(input_end - (input_mapped - 2 * page) - page, input_mapped);
+    }
+    if (output_end != 0)
+    {
+        munmap(output_end - (output_mapped - 2 * page) - page, output_mapped);
+    }
+    if (offsets_end != 0)
+    {
+        munmap(offsets_end - (offsets_mapped - 2 * page) - page, offsets_mapped);
+    }
+    return result;
+}
+
+// Breaks one operand of a valid instruction in one of the ways x86_encode checks. Returns false if this instruction
+// can't be broken that way.
+static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction)
+{
+    const X86FormDescription* form = &x86_form_descriptions[instruction->form];
+    const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0;
+    bool result = true;
+    switch (x86_random_below(state, 6))
+    {
+        case 0:
+            // A high byte register with an extended register (and so a REX prefix).
+            if ((form->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_GPR8 && form->encoding == BUSTER_X86_ENCODING_R &&
+                (form->rm & BUSTER_X86_OPERAND_REGISTER) && !memory)
+            {
+                instruction->reg = X86_REGISTER_AH;
+                instruction->rm = (uint8_t)(8 + x86_random_below(state, 8));
+            }
+            else
+            {
+                result = false;
+            }
+            break;
+        case 1:
+            // RSP as an index.
+            if (memory && (instruction->mode & BUSTER_X86_MODE_INDEX))
+            {
+                instruction->index = X86_REGISTER_RSP;
+            }
+            else
+            {
+                result = false;
+            }
+            break;
+        case 2:
+            // RIP with a base.
+            if (memory)
+            {
+                instruction->mode = BUSTER_X86_MEMORY_RIP | BUSTER_X86_MODE_BASE;
+            }
+            else
+            {
+                result = false;
+            }
+            break;
+        case 3:
+            // A register number past 15.
+            if (form->encoding == BUSTER_X86_ENCODING_R)
+            {
+                instruction->reg |= 0x10;
+            }
+            else
+            {
+                result = false;
+            }
+            break;
+        case 4:
+            // Unknown mode bits.
+            if (form->rm != BUSTER_X86_OPERAND_NONE)
+            {
+                instruction->mode |= 0x80;
+            }
+            else
+            {
+                result = false;
+            }
+            break;
+        default:
+            // Memory parts without a memory operand.
+            if (form->rm != BUSTER_X86_OPERAND_NONE && !memory)
+            {
+                instruction->mode = BUSTER_X86_MODE_BASE;
+            }
+            else
+            {
+                result = false;
+            }
+            break;
+    }
+    return result;
+}
+
+static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86Buffers* buffers)
+{
+    uint64_t broken = 0;
+    uint64_t failures = 0;
+    for (uint64_t trial = 0; trial < BUSTER_X86_TEST_INVALID_INSTRUCTIONS; trial += 1)
+    {
+        // A short stream with one broken instruction somewhere in it.
+        const uint64_t count = 1 + x86_random_below(state, 40);
+        x86_random_instructions(state, instructions, count, true, false);
+        const uint64_t victim = x86_random_below(state, (uint32_t)count);
+        if (x86_break_instruction(state, &instructions[victim]))
+        {
+            broken += 1;
+            const bool validated = x86_validate(instructions, count) == victim;
+            bool rejected = true;
+            for (uint64_t v = 0; v < BUSTER_ARRAY_LENGTH(x86_test_variants); v += 1)
+            {
+                rejected = rejected && x86_test_variants[v].encode(instructions, count, buffers->output, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
+            }
+            if (!(validated && rejected))
+            {
+                if (failures < BUSTER_X86_TEST_REPORTED)
+                {
+                    printf("  instruction %lu of %lu (form %s, reg 0x%02x, rm 0x%02x, index 0x%02x, mode 0x%02x): %s%s\n", (unsigned long)victim,
+                           (unsigned long)count, x86_form_descriptions[instructions[victim].form].mnemonic, instructions[victim].reg, instructions[victim].rm,
+                           instructions[victim].index, instructions[victim].mode, validated ? "" : "x86_validate missed it ",
+                           rejected ? "" : "x86_encode accepted it");
+                }
+                failures += 1;
+            }
+        }
+    }
+    printf("invalid instructions: %lu broken, %lu not caught\n", (unsigned long)broken, (unsigned long)failures);
+    return failures == 0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The cross-check modes, and the command
+
+// Prints the instructions for GNU as, each with its bytes from x86_encode_scalar in a comment, and GNU as's length
+// for each one in a .lengths section, a byte per instruction, so that --compare-binary can find each instruction
+// in GNU as's output even after one whose length differs.
+static bool x86_print_assembly(uint64_t* state, uint64_t count, X86Instruction* instructions, uint8_t* output)
+{
+    x86_random_instructions(state, instructions, count, false, true);
+    printf(".intel_syntax noprefix\n.text\n");
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        const int64_t length = x86_encode_scalar(&instructions[i], 1, output, BUSTER_X86_MAX_INSTRUCTION_BYTES, 0);
+        printf("0: ");
+        x86_print_instruction(stdout, &instructions[i]);
+        printf("\n1: .pushsection .lengths, \"a\"; .byte 1b - 0b; .popsection # ");
+        x86_print_bytes(output, length > 0 ? (uint64_t)length : 0);
+        printf("\n");
+    }
+    return true;
+}
+
+// The bytes of a file, or null (malloc'd; the caller frees them).
+static uint8_t* x86_read_file(const char* path, uint64_t* length)
+{
+    uint8_t* result = 0;
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat file_stats;
+    if (fd != -1 && fstat(fd, &file_stats) == 0)
+    {
+        *length = (uint64_t)file_stats.st_size;
+        result = malloc(*length + 1);
+        if (result != 0 && read(fd, result, *length) != (ssize_t)*length)
+        {
+            free(result);
+            result = 0;
+        }
+    }
+    if (result == 0)
+    {
+        fprintf(stderr, "can't read %s\n", path);
+    }
+    if (fd != -1)
+    {
+        close(fd);
+    }
+    return result;
+}
+
+// Compares x86_encode_scalar's bytes with GNU as's for the instructions --print-assembly printed: `text_path` is
+// GNU as's .text section and `lengths_path` its .lengths section.
+static bool x86_compare_binary(uint64_t* state, const char* text_path, const char* lengths_path, uint64_t count, X86Instruction* instructions, uint8_t* output,
+                               uint32_t* offsets)
+{
+    bool result = false;
+    x86_random_instructions(state, instructions, count, false, true);
+    const int64_t length = x86_encode_scalar(instructions, count, output, BUSTER_X86_ENCODER_CAPACITY(count), offsets);
+    uint64_t text_length = 0;
+    uint64_t lengths_length = 0;
+    uint8_t* text = x86_read_file(text_path, &text_length);
+    uint8_t* lengths = x86_read_file(lengths_path, &lengths_length);
+    if (text != 0 && lengths != 0 && lengths_length != count)
+    {
+        fprintf(stderr, "%s has %lu lengths for %lu instructions\n", lengths_path, (unsigned long)lengths_length, (unsigned long)count);
+    }
+    else if (text != 0 && lengths != 0)
+    {
+        uint64_t differences = 0;
+        uint64_t assembled = 0;
+        for (uint64_t i = 0; i < count; i += 1)
+        {
+            const uint32_t start = offsets[i];
+            const uint32_t end = i + 1 < count ? offsets[i + 1] : (uint32_t)length;
+            const bool same = assembled + lengths[i] <= text_length && lengths[i] == end - start && memcmp(text + assembled, output + start, end - start) == 0;
+            if (!same)
+            {
+                if (differences < 40)
+                {
+                    printf("instruction %lu: ", (unsigned long)i);
+                    x86_print_instruction(stdout, &instructions[i]);
+                    printf("\n  x86_encode_scalar: ");
+                    x86_print_bytes(output + start, end - start);
+                    printf("\n  GNU as:            ");
+                    x86_print_bytes(text + assembled, assembled + lengths[i] <= text_length ? lengths[i] : 0);
+                    printf("\n");
+                }
+                differences += 1;
+            }
+            assembled += lengths[i];
+        }
+        printf("compared %lu instructions (%lld bytes, GNU as %lu): %lu differ\n", (unsigned long)count, (long long)length, (unsigned long)text_length,
+               (unsigned long)differences);
+        result = differences == 0 && text_length == (uint64_t)length;
+    }
+    free(text);
+    free(lengths);
+    return result;
+}
+
+static bool x86_parse_u64(const char* text, uint64_t* value)
+{
+    char* end = 0;
+    const unsigned long long parsed = strtoull(text, &end, 10);
+    const bool result = text[0] >= '0' && text[0] <= '9' && end != text && *end == 0;
+    *value = result ? (uint64_t)parsed : 0;
+    return result;
+}
+
+static int run_x86_encoder_tests(int argc, char** argv)
+{
+    uint64_t count = BUSTER_X86_TEST_DEFAULT_COUNT;
+    uint64_t seed = 0;
+    uint64_t print_count = 0;
+    uint64_t compare_count = 0;
+    const char* compare_path = 0;
+    const char* compare_lengths_path = 0;
+    bool valid = true;
+    for (int i = 0; i < argc; i += 1)
+    {
+        if (strcmp(argv[i], "--count") == 0 && i + 1 < argc)
+        {
+            valid = valid && x86_parse_u64(argv[i + 1], &count);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc)
+        {
+            valid = valid && x86_parse_u64(argv[i + 1], &seed);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--print-assembly") == 0 && i + 1 < argc)
+        {
+            valid = valid && x86_parse_u64(argv[i + 1], &print_count);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--compare-binary") == 0 && i + 3 < argc)
+        {
+            compare_path = argv[i + 1];
+            compare_lengths_path = argv[i + 2];
+            valid = valid && x86_parse_u64(argv[i + 3], &compare_count);
+            i += 3;
+        }
+        else
+        {
+            valid = false;
+        }
+    }
+
+    const uint64_t largest = count > BUSTER_X86_TEST_DIGEST_INSTRUCTIONS ? count : BUSTER_X86_TEST_DIGEST_INSTRUCTIONS;
+    const uint64_t capacity = largest > print_count ? (largest > compare_count ? largest : compare_count) : (print_count > compare_count ? print_count : compare_count);
+    X86Instruction* instructions = malloc(capacity * sizeof(X86Instruction));
+    X86Buffers buffers = {
+        .expected = malloc(BUSTER_X86_ENCODER_CAPACITY(capacity)),
+        .output = malloc(BUSTER_X86_ENCODER_CAPACITY(capacity)),
+        .expected_offsets = malloc(capacity * sizeof(uint32_t)),
+        .offsets = malloc(capacity * sizeof(uint32_t)),
+    };
+    uint64_t state = (seed == 0 ? BUSTER_X86_TEST_DIGEST_SEED : seed) * BUSTER_X86_TEST_GOLDEN_RATIO + 1;
+    int result = 1;
+    if (!valid || count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
+    {
+        fprintf(stderr, "usage: test-x86-encoder [--count N] [--seed N] [--print-assembly N | --compare-binary text lengths N]\n");
+    }
+    else if (instructions == 0 || buffers.expected == 0 || buffers.output == 0 || buffers.expected_offsets == 0 || buffers.offsets == 0)
+    {
+        fprintf(stderr, "out of memory\n");
+    }
+    else if (!x86_encoder_initialize())
+    {
+        x86_check_templates();
+    }
+    else if (print_count != 0)
+    {
+        result = x86_print_assembly(&state, print_count, instructions, buffers.output) ? 0 : 1;
+    }
+    else if (compare_path != 0)
+    {
+        result = x86_compare_binary(&state, compare_path, compare_lengths_path, compare_count, instructions, buffers.output, buffers.offsets) ? 0 : 1;
+    }
+    else
+    {
+        bool passed = x86_check_templates();
+        passed = x86_check_known() && passed;
+        passed = x86_check_digest(instructions, buffers.output) && passed;
+        passed = x86_check_random(&state, count, instructions, &buffers) && passed;
+        passed = x86_check_page_edges(&state, instructions, &buffers) && passed;
+        passed = x86_check_invalid(&state, instructions, &buffers) && passed;
+        result = passed ? 0 : 1;
+    }
+    free(instructions);
+    free(buffers.expected);
+    free(buffers.output);
+    free(buffers.expected_offsets);
+    free(buffers.offsets);
+    return result;
+}
