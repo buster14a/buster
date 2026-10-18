@@ -152,9 +152,20 @@ static CompileResult compile(String8 path, CompileOptions options)
     return result;
 }
 
-int main(void)
+// The lexer tests, for the test-lexer command.
+#include "buster/compiler/c_lexer_test.c"
+
+int main(int argc, char** argv)
 {
-    printf("Hello world\n");
-    compile(BUSTER_S8(__FILE__), (CompileOptions){0});
-    return 0;
+    int result = 0;
+    if (argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
+    {
+        result = run_c_lexer_tests(argv[0], argc - 2, argv + 2);
+    }
+    else
+    {
+        printf("Hello world\n");
+        compile(BUSTER_S8(__FILE__), (CompileOptions){0});
+    }
+    return result;
 }
