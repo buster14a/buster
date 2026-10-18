@@ -1260,9 +1260,13 @@ static uint8_t x86_prefix_pp(const X86FormDescription* form)
 // ModRM.reg or the rm register is a byte register, so 4 to 7 are SPL to DIL (with a REX prefix) or AH to BH.
 #define BUSTER_X86_TEMPLATE_BYTE_REG 0x100000
 #define BUSTER_X86_TEMPLATE_BYTE_RM 0x200000
-// An EVEX form's log2 of N, which its 8-bit displacements are counted in (0 for the other forms), in bits 22-24:
-// rotations take a count's low 5 bits, and bits 25-26 are clear, so that a shift down by 22 makes it a count.
-#define BUSTER_X86_TEMPLATE_DISP8_SCALE 22
+// The kinds of rm operand the form can't have: a memory operand (bit 26, where the operands dword has a memory mode's
+// BUSTER_X86_MODE_MEMORY), which a form without an rm operand can't have either, and a register (bit 27).
+#define BUSTER_X86_TEMPLATE_NO_MEMORY 0x04000000
+#define BUSTER_X86_TEMPLATE_NO_REGISTER 0x08000000
+// An EVEX form's log2 of N, which its 8-bit displacements are counted in (0 for the other forms), in bits 29-31, so
+// that a shift down by 29 makes it a rotation count.
+#define BUSTER_X86_TEMPLATE_DISP8_SCALE 29
 
 // A form's template. Positions follow the instruction's order: prefixes, REX (or the VEX or EVEX prefix), opcode,
 // ModRM, SIB, displacement, immediate. A position's byte is bytes[position] ^ canonical[layout[position]] (or just
@@ -1450,6 +1454,8 @@ static bool build_template(const X86FormDescription* form, X86Template* template
     flags |= (form->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_GPR8 ? BUSTER_X86_TEMPLATE_BYTE_REG : 0;
     flags |= (form->rm & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_GPR8 ? BUSTER_X86_TEMPLATE_BYTE_RM : 0;
     flags |= form->relative_bytes != 0 || form->immediate_bytes > 4 ? BUSTER_X86_TEMPLATE_STATIC_DISPLACEMENT : 0;
+    flags |= (form->rm & BUSTER_X86_OPERAND_MEMORY) ? 0 : BUSTER_X86_TEMPLATE_NO_MEMORY;
+    flags |= form->rm != BUSTER_X86_OPERAND_NONE && !(form->rm & BUSTER_X86_OPERAND_REGISTER) ? BUSTER_X86_TEMPLATE_NO_REGISTER : 0;
     const uint32_t checks = x86_template_checks(form);
     memcpy(&template->bytes[BUSTER_X86_TEMPLATE_CHECKS_OFFSET], &checks, sizeof(checks));
     memcpy(&template->bytes[BUSTER_X86_TEMPLATE_FLAGS_OFFSET], &flags, sizeof(flags));
@@ -2054,6 +2060,9 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     presence = _mm512_ternarylogic_epi32(presence, displacement8, BUSTER_X86_SPLAT(0x10), BUSTER_X86_A_OR_B_AND_C);
     presence = _mm512_ternarylogic_epi32(presence, base_displacement32, BUSTER_X86_SPLAT(0xf0), BUSTER_X86_A_OR_B_AND_C);
     presence = _mm512_or_epi32(presence, rex_presence);
+    // The flags' last use (but the length's, with offsets): bit 26 is set if the rm operand is of a kind the form can't
+    // have (see the invalid operands below).
+    const __m512i wrong_kind = _mm512_ternarylogic_epi32(flags, _mm512_srli_epi32(flags, 1), operands, BUSTER_X86_C_SELECTS_A_OVER_B);
 
     // The length: the form's static bytes, the displacement, SIB and REX bytes the operands add, and one less for VEX2.
     const __m512i dynamic = _mm512_ternarylogic_epi32(presence, flags, BUSTER_X86_SPLAT(0x6f0), BUSTER_X86_A_AND_NOT_B_AND_C);
@@ -2064,8 +2073,10 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     // decorations (put together in one dword), the mode's (an invalid mode's own bits; a memory operand's rm bits 4 and
     // 6), an index register's bits 4-7 and unknown mode bits; RSP as an index (zero in rsp_index: the index's low
     // nibble ^ 4, or'ed with the index field's absence; below 2^31, so that rsp_index - 1 has the sign bit only then);
-    // and a high byte register (bit 6 of reg or rm, which only a legacy byte form allows) with a REX prefix. The loop
-    // ORs them together for one test at the end.
+    // a high byte register (bit 6 of reg or rm, which only a legacy byte form allows) with a REX prefix; and a memory
+    // operand in a form that can't have one, or a register in a form whose rm can only be memory, the flag that the
+    // memory mode's bit picks (NO_REGISTER shifted to NO_MEMORY's bit). The loop ORs them together for one test at the
+    // end.
     const __m512i forbidden = _mm512_ternarylogic_epi32(mode_presence, BUSTER_X86_SPLAT(BUSTER_X86_MODE_TABLE_INVALID | BUSTER_X86_MODE_TABLE_MEMORY),
                                                         BUSTER_X86_SPLAT(0xc0f00000), BUSTER_X86_A_AND_B_OR_C);
     const __m512i registers = _mm512_ternarylogic_epi32(extension, operands, BUSTER_X86_SPLAT(0xffff0000), BUSTER_X86_C_SELECTS_A_OVER_B);
@@ -2080,7 +2091,8 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     result.presence = presence;
     result.length = length;
     const __m512i bad_or_rsp_index = _mm512_ternarylogic_epi32(bad, _mm512_sub_epi32(rsp_index, one), BUSTER_X86_SPLAT(0x80000000), BUSTER_X86_A_OR_B_AND_C);
-    result.invalid = _mm512_ternarylogic_epi32(bad_or_rsp_index, rex, _mm512_and_epi32(operands, BUSTER_X86_SPLAT(0x4040)), BUSTER_X86_A_OR_B_AND_C);
+    const __m512i bad_high_byte = _mm512_ternarylogic_epi32(bad_or_rsp_index, rex, _mm512_and_epi32(operands, BUSTER_X86_SPLAT(0x4040)), BUSTER_X86_A_OR_B_AND_C);
+    result.invalid = _mm512_ternarylogic_epi32(bad_high_byte, wrong_kind, BUSTER_X86_SPLAT(BUSTER_X86_TEMPLATE_NO_MEMORY), BUSTER_X86_A_OR_B_AND_C);
     return result;
 }
 

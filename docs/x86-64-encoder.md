@@ -100,8 +100,9 @@ form always has (prefixes and REX's `0x40 | W`, or the VEX or EVEX prefix;
 opcode; the ModRM `/digit`) at their positions in a 16-byte slot, checks (the
 bits of reg, rm, vvvv and the decorations that must be zero for the form),
 flags (static length, a static displacement's presence, byte operands, REX.W,
-VEX2, EVEX's N), and a layout: for each of the 15 positions, which byte of the
-instruction's *canonical slot* goes there.
+VEX2, EVEX's N, the kinds of rm operand the form can't have), and a layout: for
+each of the 15 positions, which byte of the instruction's *canonical slot* goes
+there.
 
 The canonical slot is the same for every form: immediate in bytes 0–3,
 displacement in 4–7 (an EVEX 8-bit displacement divided by N), then ModRM, SIB,
@@ -140,9 +141,11 @@ x86_encode also checks what its encoding can't represent, with one test: the
 template's checks against the record's reg, rm, vvvv and decorations (a
 register past its class's last, an operand or decoration the form doesn't
 have), the addressing mode's (a base or index past 15, an invalid combination),
-RSP as an index, and a high byte register with REX. Rules that depend on more
-than one field (zeroing without an opmask, zeroing into memory) only
-x86_validate checks.
+RSP as an index, a high byte register with REX, and an rm operand of a kind the
+form can't have (a memory operand where it has a register or no rm operand, a
+register where it takes only memory: the memory mode's bit picks one of two
+flags). Rules that depend on more than one field (zeroing without an opmask,
+zeroing into memory) only x86_validate checks.
 
 ### The loop
 
@@ -373,8 +376,9 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   capacity (or the exact output) and the offsets;
 - that invalid operands (a high byte register with REX, RSP as an index, RIP
   with a base, a register past its class's last, vvvv or reg in a form without
-  them, decorations the form can't have, unknown mode bits) are rejected by
-  `x86_encode` and found by `x86_validate`.
+  them, decorations the form can't have, unknown mode bits, a memory operand in
+  a form without one, a register in a form that takes only memory) are
+  rejected by `x86_encode` and found by `x86_validate`.
 
 `--print-assembly` and `--compare-binary` cross-check the scalar encoder
 against GNU as for any seed (AGENTS.md has the commands): 1.7 million random
@@ -388,7 +392,10 @@ order, store margin) and ten of its VEX and EVEX parts (VEX2's conditions, P0's
 bits, the compressibility's rotation, V', OR instead of XOR, register limits,
 the displacement's division, an inverted field, a base's bit 4) all fail the
 tests; the last one needed a test of its own (a memory operand's base or index
-past 15).
+past 15). So did the rm operand's kind: until its two tests, `x86_encode`
+encoded `lea rax, rcx` as `48 8d c1` and a memory operand in register-only
+forms (510 of the test's broken instructions), which `x86_validate` rejected.
+The check costs about 1% on Zen 5.
 
 ## Next steps
 
