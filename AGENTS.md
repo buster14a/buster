@@ -35,8 +35,10 @@ or infrastructure machinery merely to match its style.
 ## Current repository and exact smoke commands
 
 - `src/buster/compiler/main.c` is the executable entry point
-- `build.sh` invokes Clang and produces `build/compiler`. It currently uses
-  `-O3 -march=native`, so the machine executing the build determines the host ISA.
+- `build.sh` invokes Clang and produces **only** `build/compiler`, using
+  `-march=native`, so the machine executing the build determines the host ISA.
+- `src/buster/compiler/c_lexer_benchmark.c` is retained as standalone benchmark
+  source, but is not built by `build.sh` or executed by the default CI.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -45,3 +47,11 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build.sh
 ./build/compiler
 ```
+
+## Lexer benchmark source
+
+`src/buster/compiler/c_lexer_benchmark.c` remains available as source for
+corpus comparison and performance experiments, but it is **not** a build target.
+Keep the default build limited to the compiler executable. If the benchmark is
+integrated into the normal build in the future, expose it as a compiler command
+rather than adding another executable.

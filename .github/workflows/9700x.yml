@@ -41,8 +41,11 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Build
-        run: ./build.sh
+      - name: Build only the compiler executable
+        run: |
+          ./build.sh
+          test -x build/compiler
+          test "$(find build -type f -executable | wc -l)" -eq 1
 
       - name: Execute compiler
         run: ./build/compiler
