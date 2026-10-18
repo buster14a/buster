@@ -13,22 +13,22 @@ measurements behind each choice, and what comes next.
 
 On the Ryzen 7 9700X (Zen 5, clang 23, `build.sh`'s `-O3 -march=native`),
 pinned to one CPU, `x86_encode` encodes a compiler-like instruction mix at
-**0.64 ns per instruction** (1.56 G instructions/s, 6.2 GB/s of machine code,
-3.45 cycles per instruction), and a vectorized-code mix of AVX-512, AVX2 and
-BMI at 0.65 ns (9.3 GB/s). That is:
+**0.64 ns per instruction** (1.58 G instructions/s, 6.3 GB/s of machine code,
+3.46 cycles per instruction), and a vectorized-code mix of AVX-512, AVX2 and
+BMI at 0.64 ns (9.4 GB/s). That is:
 
 - **17×** a plain one-instruction-at-a-time scalar encoder on the compiler mix
-  (10.84 ns), 19× on the vector mix and 29× on a uniform mix of every form
-  (19.97 ns), where the scalar encoder's branches mispredict;
+  (10.60 ns), 19× on the vector mix and 29× on a uniform mix of every form
+  (19.53 ns), where the scalar encoder's branches mispredict;
 - **7.5–9.6×** the historical `encode_wide` (with its defects fixed) on the
   subset of instructions it can encode: 0.63 ns against 4.8–6.1 ns, for
   byte-identical output (measured before VEX and EVEX support, whose first
   version cost 6–9% on long streams, which the loop's changes won back; the
-  checks and forms added since, segment overrides among them, cost about 3%:
+  checks and forms added since cost about 3%, and segment overrides nothing:
   see "Evaluation");
 - byte-identical to GNU as 2.47 on 1.7 million random instructions covering
   all 1,679 forms (1,041 legacy, 137 of them x87, 320 VEX and 318 EVEX), one
-  in twenty of them with an FS or GS override.
+  in sixteen of them with an FS or GS override.
 
 ## The historical encoder
 
@@ -73,9 +73,10 @@ An instruction is an `X86Instruction` of 16 bytes, so a ZMM register holds 4:
 the immediate (4 bytes; a 64-bit one continues in the displacement), the
 displacement (memory, or a branch's relative one), `reg`, `rm` (or the base, or
 the `+r` register), `index`, `mode` (register direct, or a memory operand with
-base/index/RIP flags, the scale and an FS or GS override), the form, `vvvv`
-(VEX.vvvv and EVEX.V'vvvv's register) and `decorations` (EVEX's opmask, zeroing
-and rounding mode, in the bits EVEX's last byte has them). Registers are
+base/index/RIP flags and the scale), the form (plus `BUSTER_X86_FORM_FS` or
+`BUSTER_X86_FORM_GS` for a segment override), `vvvv` (VEX.vvvv and
+EVEX.V'vvvv's register) and `decorations` (EVEX's opmask, zeroing and rounding
+mode, in the bits EVEX's last byte has them). Registers are
 numbers by class: 0–15, 0–31 for an EVEX form's vector registers, 0–7 for
 opmasks. Operands a form doesn't use are zero, which is also what pads a group:
 form 0, `X86_FORM_NONE`, encodes to nothing.
@@ -114,21 +115,25 @@ there.
 
 The canonical slot is the same for every form: immediate in bytes 0–3,
 displacement in 4–7 (an EVEX 8-bit displacement divided by N), then ModRM, SIB,
-REX.RXB and the segment override prefix in 8–11, and what a VEX or EVEX prefix
-takes from the operands in 12–15. A template's bytes are XOR'ed in, not OR'ed,
-so the prefixes' inverted fields (VEX's R̄X̄B̄ and vvvv̄, EVEX's R̄', V̄' and
-the rest) are ones in the template and the operands' bits flip them; for every
-other byte the two never overlap, but for a `+r` form's opcode byte, which
-takes the register from ModRM's: its template byte has ModRM.mod's 11 (always
-there for a register) XOR'ed in, so the XOR leaves the opcode plus the
-register. A memory form's layout starts with the segment override's position,
-as GNU as puts it before every other prefix. Every operand-dependent decision
-is about which canonical bytes are present (REX, SIB, no/8-bit/32-bit
-displacement, the segment override, VEX2's missing byte); every form-dependent
-decision (byte order, widths, which fields exist, the prefix's map, pp, W and
-L) is in the template. So one code path encodes every form, and the template
-builder checks that each form's longest encoding fits in 15 bytes (the longest
-EVEX one is 12).
+REX.RXB and the `+r` register in 8–11, and what a VEX or EVEX prefix takes from
+the operands in 12–15. A template's bytes are XOR'ed in, not OR'ed, so the
+prefixes' inverted fields (VEX's R̄X̄B̄ and vvvv̄, EVEX's R̄', V̄' and the rest)
+are ones in the template and the operands' bits flip them; for every other byte
+the two never overlap. Every operand-dependent decision is about which canonical
+bytes are present (REX, SIB, no/8-bit/32-bit displacement, VEX2's missing byte);
+every form-dependent decision (byte order, widths, which fields exist, the
+prefix's map, pp, W and L) is in the template. So one code path encodes every
+form, and the template builder checks that each form's longest encoding fits in
+15 bytes (the longest EVEX one is 12).
+
+A segment override is the form's too, as `lock` and `rep` are: the form number
+plus `BUSTER_X86_FORM_FS` or `BUSTER_X86_FORM_GS` (1,680 or twice that) names a
+template of its own, which starts with the prefix as a static byte (64 or 65,
+before the other prefixes, as GNU as puts it). `x86_encoder_initialize` builds
+every form's template three times, 161 KB in all, of which a stream touches its
+own forms'; a form without a memory operand gets copies that take no operand at
+all. So x86_encode does nothing for an override that it doesn't do for every
+form, and its loop is the same code with them as without.
 
 ### VEX and EVEX
 
@@ -154,14 +159,12 @@ x86_encode also checks what its encoding can't represent, with one test: the
 template's checks against the record's reg, rm, vvvv and decorations (a
 register past its class's last, an operand or decoration the form doesn't
 have), the addressing mode's (a base or index past 15, an index register or a
-scale without an index, an invalid combination, a segment override on a
-register or a RIP-relative address), RSP as an index, a high byte register with
-REX, and an rm operand of a kind the form can't have (a memory operand where it
-has a register or no rm operand, a register where it takes only memory: the
-memory mode's bit picks one of two flags). Rules that depend on more than one
-field (zeroing without an opmask, zeroing into memory) only x86_validate checks,
-and so does GS's bit without the segment override's, which x86_encode ignores
-in a memory operand.
+scale without an index, an invalid combination), RSP as an index, a high byte
+register with REX, and an rm operand of a kind the form can't have (a memory
+operand where it has a register or no rm operand, a register where it takes
+only memory, or anything but memory with a segment override: the memory mode's
+bit picks one of two flags). Rules that depend on more than one field (zeroing
+without an opmask, zeroing into memory) only x86_validate checks.
 
 ### The loop
 
@@ -176,16 +179,13 @@ outer loop (the loop over them stays rolled: see "Zen 5's costs"):
 2. **Compute**, 16 instructions per operation. The addressing mode's 4 bits
    index three 16-entry tables (`vpermd`): which canonical bits come from the
    operands, which are fixed (mod 11 for a register, rm 100 for a SIB byte or
-   101 for RIP, SIB base 101 or index 100 for none, a memory operand's segment
-   override byte, FS's 64), and which canonical bytes the mode always has (and
-   which operand bits it forbids). Three `vpmultishiftqb` put every register
-   field where it goes in the canonical dword, and GS's bit in the override's
-   byte, which makes it 65; the override's presence bit is the mode's segment
-   bit, shifted. What depends on values (RBP and R13 bases, RSP and R12 bases,
-   the displacement's size, REX for SPL–DIL, VEX2) are masks built with
-   arithmetic any vector pipe runs. The result is each instruction's canonical
-   bytes, the presence bits of its canonical slot, its length and whether it's
-   valid.
+   101 for RIP, SIB base 101 or index 100 for none), and which canonical bytes
+   the mode always has (and which operand bits it forbids). Three
+   `vpmultishiftqb` put every register field where it goes in the canonical
+   dword. What depends on values (RBP and R13 bases, RSP and R12 bases, the
+   displacement's size, REX for SPL–DIL, VEX2) are masks built with arithmetic
+   any vector pipe runs. The result is each instruction's canonical bytes, the
+   presence bits of its canonical slot, its length and whether it's valid.
 3. **Assemble**, 4 instructions per ZMM register: `vpshufb` puts each canonical
    byte at its position, a `vpternlogd` XORs the template's bytes in,
    `vpshufbitqmb` picks the presence bit of each position by the layout, and
@@ -330,27 +330,20 @@ per group, the same cycles: it moves work to FP1 and FP2), and telling VEX2
 forms from their numbers rather than their templates (about 1.5% faster, but it
 needs the form table ordered by an encoding property).
 
-Segment overrides (#39) add a canonical byte (11, which `+r` forms no longer
-need for their register), its presence bit and two checks: no override on a
-register or a RIP-relative address. The first version gave FS and GS a bit each
-and mapped the mode's six bits to the tables' index with a `vpermb`, 5 more
-cycles in front of every table lookup, and `x86_encode_16` was 3–5% slower. Now
-the tables keep their 4-bit index: the presence bit is the mode's segment bit,
-shifted (two operations), and GS's bit reaches the prefix byte through the
-spare byte of the rm `vpmultishiftqb`, which turns FS's 64 into 65. For a
-register or RIP-relative operand, the presence table forbids operand bits 30
-and 31 in its own bits 30 and 31, which no layout may then look at, so absent
-positions read presence bit 20 rather than 31. With FS and GS as two
-independent bits, rejecting both at once took two more operations and
-measured 2–3% slower again; so GS is the segment bit plus another, and that
-other bit alone in a memory operand, which x86_encode ignores, is left to
-x86_validate. After the change clang unrolled
-64's loop over groups, which a pragma now prevents. Of the six designs
-measured, this one is the fastest. Its loop has 0.6 fewer instructions per
-encoded instruction than before, but 4 more stack accesses (clang's register
-allocation), and it is about 2% slower (0.03–0.1 cycles per instruction) on the
-compiler mix and on calls of 16 to 256 instructions, give or take the 2% that
-runs vary by; with offsets it is within that noise either way.
+Segment overrides (#39) were first a canonical byte (11, with the `+r`
+register moved to ModRM's), a presence bit and checks in Phase II. Of the six
+designs of that kind measured, the best was about 1% slower on the compiler mix
+and 2–3% slower on calls of 16 and with offsets, and the others 2–9% slower on
+the compiler mix. Mapping the mode's six bits (FS and GS one each) to the
+tables' index with a `vpermb` put 5 cycles in front of every table lookup, 3–5%
+at 16 per iteration. Without the remap, the presence bit and EVEX's R' and X
+(which the override's byte pushed out of the canonical dword) held registers
+through Phase II, and clang made room by spilling two more of Phase I's
+template vectors; merging the presence bit where it holds one register less
+made the loop 6% slower instead, with fewer spills: the schedule as a whole
+again. As template copies (see "Templates and the canonical slot"), the
+overrides cost nothing in the loop, whose code is instruction for instruction
+the same as without them.
 
 ## Evaluation
 
@@ -361,24 +354,25 @@ the changes above (32 per iteration) for comparison:
 
 | Stream | 4 | 8 | 16 | 32 | **64** | scalar | before |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,024 instructions (L1) | 1.50 | 0.99 | 0.65 | 0.68 | **0.66** | 5.13* | 0.63 |
-| 16,384 mixed (L2) | 1.50 | 1.16 | 0.65 | 0.64 | **0.64** | 10.84 | 0.66 |
-| 16,384 vector | 1.49 | 1.15 | 0.65 | 0.65 | **0.65** | 12.51 | 0.65 |
-| 16,384 uniform | 1.50 | 1.16 | 0.68 | 0.68 | **0.68** | 19.97 | 0.67 |
-| 16,384, with offsets | 1.75 | 1.21 | 0.74 | 0.73 | **0.71** | 10.90 | 0.76 |
-| calls of 16 | 1.57 | 1.13 | 0.73 | 0.73 | **0.73** | 11.56 | 0.74 |
-| calls of 64 | 1.52 | 1.18 | 0.68 | 0.68 | **0.69** | 11.09 | 0.68 |
-| calls of 256 | 1.51 | 1.15 | 0.67 | 0.67 | **0.66** | 10.98 | 0.67 |
-| 262,144 mixed | 1.50 | 1.16 | 0.66 | 0.66 | **0.65** | 12.57 | 0.66 |
+| 1,024 instructions (L1) | 1.46 | 0.95 | 0.69 | 0.64 | **0.69** | 5.08* | 0.67 |
+| 16,384 mixed (L2) | 1.46 | 1.11 | 0.67 | 0.65 | **0.64** | 10.60 | 0.66 |
+| 16,384 vector | 1.46 | 1.09 | 0.66 | 0.66 | **0.64** | 11.94 | 0.65 |
+| 16,384 uniform | 1.47 | 1.13 | 0.66 | 0.68 | **0.66** | 19.53 | 0.67 |
+| 16,384, with offsets | 1.69 | 1.26 | 0.71 | 0.73 | **0.72** | 10.54 | 0.75 |
+| calls of 16 | 1.53 | 1.15 | 0.71 | 0.71 | **0.70** | 11.20 | 0.73 |
+| calls of 64 | 1.48 | 1.11 | 0.67 | 0.68 | **0.66** | 10.74 | 0.68 |
+| calls of 256 | 1.47 | 1.08 | 0.67 | 0.67 | **0.66** | 10.57 | 0.66 |
+| 262,144 mixed | 1.46 | 1.10 | 0.67 | 0.66 | **0.64** | 12.47 | 0.66 |
 
 The column is instructions per iteration of the outer loop. The mixed streams
 have only legacy forms, and the uniform one is a different sample in each
 build (its random forms depend on how many there are). In cycles, 64 per
-iteration takes 3.45 per instruction of the compiler mix, against 3.58 for the
+iteration takes 3.46 per instruction of the compiler mix, against 3.56 for the
 loop before the changes above, which had none of the checks and forms added
-since: the changes measured 3.36 when they were made, the rm kind check and
-the forms of #18 and #29 brought that to 3.42, and segment overrides to 3.45.
-*The scalar encoder's 5.13 ns on 1,024 instructions is flattering: the same
+since: the changes measured 3.36 when they were made, and the rm kind check
+and the forms of #18 and #29 brought that to 3.43, which segment overrides
+don't change (the same code, within the runs' noise).
+*The scalar encoder's 5.08 ns on 1,024 instructions is flattering: the same
 short stream repeated thousands of times lets the branch predictor learn it;
 and that row varies by about 10% between runs (where the buffers land), the
 others by about 3%, and a build by up to 4% when other code moves (the scalar
@@ -387,18 +381,18 @@ encoder's, which these changes don't touch, did).
 Below 16, Phase II's 16 lanes are partly empty (4 and 8 per iteration use a
 quarter and a half of them), so the fixed cost per group dominates. 16, 32 and
 64 run the same one-group loop with different code (see "Zen 5's costs"), and
-64's is the fastest or within 0.01 ns of it everywhere, so `x86_encode` uses
-64.
+64's is the fastest or within 0.01 ns of it everywhere but the noisy L1 row, so
+`x86_encode` uses 64.
 
 The variants that lost (all at 16 per iteration, 16,384 mixed):
 
 | Variant | ns |
 | --- | ---: |
-| templates by `vinserti64x4` and form loads (`x86_encode_16`) | 0.65 |
-| forms taken from the records' vector registers | 0.77 |
-| templates by merge-masked loads, 16 bytes per lane | 0.79 |
-| masked stores everywhere (exact output) | 0.67 |
-| compressing straight to memory | 0.86 |
+| templates by `vinserti64x4` and form loads (`x86_encode_16`) | 0.67 |
+| forms taken from the records' vector registers | 0.81 |
+| templates by merge-masked loads, 16 bytes per lane | 0.77 |
+| masked stores everywhere (exact output) | 0.69 |
+| compressing straight to memory | 0.83 |
 
 On Zen 4 (Ryzen 9 7940HS) everything ZMM costs about twice as much, memory
 `vpcompressb` is microcoded (about 170 cycles), and merge-masked ZMM loads are
@@ -409,12 +403,12 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
 `./build/compiler test-x86-encoder` (about 0.3 s) checks:
 
 - that every form's template fits;
-- 156 known encodings from GNU as, on the paths most worth pinning down (VEX2
+- 157 known encodings from GNU as, on the paths most worth pinning down (VEX2
   and VEX3, BMI, opmasks, EVEX's opmasks, zeroing, broadcasts, rounding,
   compressed displacements, registers 16–31, x87's register forms and memory
   sizes, `lock`, `rep`, far pointers and 16-bit forms, and segment overrides on
-  legacy, x87, VEX and EVEX forms, with `66` and `lock` too, among them), with
-  both encoders;
+  legacy, x87, VEX and EVEX forms, RIP-relative addresses and with `66` and
+  `lock` too, among them), with both encoders;
 - a digest of the scalar encoder's output for 100,000 random instructions,
   recorded when GNU as encoded the same stream to the same bytes;
 - every batch width and variant against the scalar encoder, byte for byte and
@@ -424,12 +418,10 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   capacity (or the exact output) and the offsets;
 - that invalid operands (a high byte register with REX, RSP as an index, RIP
   with a base, a register past its class's last, vvvv or reg in a form without
-  them, decorations the form can't have, an index register or a scale without
-  an index, a segment override (or GS's bit alone) on a register or a
-  RIP-relative address, a memory operand in a form without one, a register in
-  a form that takes only memory) are rejected by `x86_encode` and found by
-  `x86_validate`, and that `x86_validate` finds GS's bit alone in another
-  memory operand.
+  them, decorations the form can't have, unknown mode bits, an index register
+  or a scale without an index, a memory operand in a form without one, a
+  register in a form that takes only memory, a segment override without a
+  memory operand) are rejected by `x86_encode` and found by `x86_validate`.
 
 `--print-assembly` and `--compare-binary` cross-check the scalar encoder against
 GNU as for any seed (AGENTS.md has the commands): 1.7 million random
@@ -437,8 +429,9 @@ instructions over all forms (seeds 1, 7 and 99), 0 differences. The streams have
 every family in proportion to its forms: of 200,000 instructions, 38,000 EVEX
 (18,000 with an opmask, 7,900 zeroing, 10,000 broadcasts, 3,400 rounding or
 suppressed exceptions, 27,000 with registers 16–31), 12,000 VEX2, 26,000 VEX3,
-16,000 x87, 15,000 with `lock`, 7,000 string instructions and 10,300 with an FS
-or GS override (1,500 of them with `lock`, 4,000 vector ones). The printed
+16,000 x87, 15,000 with `lock`, 7,000 string instructions and 12,300 with an FS
+or GS override (1,900 of them with `lock`, 4,700 vector ones and 2,000
+RIP-relative). The printed
 streams leave out encodings GNU as writes another way: `fop st(0), st` (DC) is
 `fop st, st(0)` (D8), `xchg eax, eax` is 87 C0 and `xchg rax, rax` is NOP, and
 `prefetchit0` and `prefetchit1` take only RIP-relative addresses; and LEA
@@ -453,10 +446,10 @@ the last one needed a test of its own (a memory operand's base or index past
 `lea rax, rcx` as `48 8d c1` and a memory operand in register-only forms (510 of
 the test's broken instructions), which `x86_validate` rejected. The check costs
 about 1% on Zen 5. A copy that lets an x87 register go past ST(7) fails the
-tests too, and so do twelve of the segment overrides' (each check the tables
-add, GS's `vpmultishiftqb` window, the presence bit's shift, its count in the
-length, the absent positions' bit, FS's byte, and `x86_validate`'s rule for
-GS's bit alone).
+tests too, and so do nine of the segment overrides' (the prefix's byte and
+presence in the templates and in the scalar encoder, an override on an operand
+that isn't memory in either encoder, an index without an index, and the gather
+that takes the forms from the records).
 
 ## Next steps
 
@@ -465,12 +458,12 @@ GS's bit alone).
   immediates, AVX-512 FP16 and the forms of VL lengths the table lacks fit the
   same template; APX's REX2 and its EVEX extensions would need a register's
   bit 4 in legacy forms. Of #39's prefixes, these are left: `67` (32-bit
-  addresses, for the x32 ABI; another canonical byte, and 32-bit registers in
-  the memory operand), the CS, DS, ES and SS overrides (which 64-bit mode
-  ignores; padding can use the multi-byte NOPs), branch hints and `bnd`
-  (#38), `notrack` through memory, 16-bit near branches (which Intel and AMD
-  decode differently in 64-bit mode), HLE's `xacquire` and `xrelease`, and FS
-  or GS with a RIP-relative address, which thread-local storage doesn't use.
+  addresses, for the x32 ABI: template copies of the memory forms, as the
+  segment overrides are, and 32-bit registers in the memory operand), the CS,
+  DS, ES and SS overrides (which 64-bit mode ignores; padding can use the
+  multi-byte NOPs), branch hints and `bnd` (#38), `notrack` through memory,
+  16-bit near branches (which Intel and AMD decode differently in 64-bit mode),
+  and HLE's `xacquire` and `xrelease`.
 - **Relocations and labels.** The offsets output gives every instruction's
   start; a relocation field's offset is its start plus the position of
   canonical byte 4 (or 0) after compaction, which the presence bits and layout
