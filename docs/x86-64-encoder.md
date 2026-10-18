@@ -1,12 +1,12 @@
 # The x86-64 encoder
 
 `src/buster/compiler/x86_64_encoder.c` turns a section (or a chunk of one) of
-selected machine instructions into machine code: legacy and REX forms, VEX
-forms (AVX, AVX2, FMA, BMI1 and BMI2, the opmask instructions) and EVEX forms
-(AVX-512 with opmasks, zeroing, broadcasts, embedded rounding and registers 16
-to 31). This document records why it is built the way it is: the review of the
-historical `encode_wide` that it replaces, the design, the Zen 5 measurements
-behind each choice, and what comes next.
+selected machine instructions into machine code: legacy and REX forms (x87 among
+them), VEX forms (AVX, AVX2, FMA, BMI1 and BMI2, the opmask instructions) and
+EVEX forms (AVX-512 with opmasks, zeroing, broadcasts, embedded rounding and
+registers 16 to 31). This document records why it is built the way it is: the
+review of the historical `encode_wide` that it replaces, the design, the Zen 5
+measurements behind each choice, and what comes next.
 
 ## Results
 
@@ -25,7 +25,7 @@ BMI at 0.63 ns (9.6 GB/s). That is:
   version cost 6–9% on long streams; `x86_encode` is back to the speed it had
   before them, 3.36 cycles per instruction: see "Evaluation");
 - byte-identical to GNU as 2.47 on 1.7 million random instructions covering
-  all 1,174 forms (568 legacy, 288 VEX and 318 EVEX).
+  all 1,311 forms (705 legacy, 137 of them x87, 288 VEX and 318 EVEX).
 
 ## The historical encoder
 
@@ -77,10 +77,11 @@ mode, in the bits EVEX's last byte has them). Registers are numbers by class:
 form doesn't use are zero, which is also what pads a group: form 0,
 `X86_FORM_NONE`, encodes to nothing.
 
-The forms are X-macro tables. The legacy one has 568 rows (integer arithmetic
+The forms are X-macro tables. The legacy one has 705 rows (integer arithmetic
 and moves, all the addressing modes, shifts, multiplies and divides, branches,
-`setcc`, `cmovcc`, atomics with `lock`, `crc32`, bit tests and counts, and the
-scalar and packed SSE moves and arithmetic a C compiler emits); a row gives the
+`setcc`, `cmovcc`, atomics with `lock`, `crc32`, bit tests and counts, the
+scalar and packed SSE moves and arithmetic a C compiler emits, and all of x87,
+whose ST(i) registers are a register class of 8 in ModRM.rm); a row gives the
 prefixes, the opcode bytes, how ModRM is used (`/r`, `/digit`, `+r` or none),
 the immediate and relative widths, REX.W and the operand classes. The VEX and
 EVEX one has 606 (moves, broadcasts, inserts and extracts, integer and floating
@@ -363,10 +364,10 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
 `./build/compiler test-x86-encoder` (about 0.3 s) checks:
 
 - that every form's template fits;
-- 99 known encodings from GNU as, on the paths most worth pinning down (VEX2
+- 120 known encodings from GNU as, on the paths most worth pinning down (VEX2
   and VEX3, BMI, opmasks, EVEX's opmasks, zeroing, broadcasts, rounding,
-  compressed displacements and registers 16–31 among them), with both
-  encoders;
+  compressed displacements, registers 16–31, and x87's register forms and
+  memory sizes among them), with both encoders;
 - a digest of the scalar encoder's output for 100,000 random instructions,
   recorded when GNU as encoded the same stream to the same bytes;
 - every batch width and variant against the scalar encoder, byte for byte and
@@ -380,22 +381,24 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   a form without one, a register in a form that takes only memory) are
   rejected by `x86_encode` and found by `x86_validate`.
 
-`--print-assembly` and `--compare-binary` cross-check the scalar encoder
-against GNU as for any seed (AGENTS.md has the commands): 1.7 million random
-instructions over all forms (seeds 1, 7 and 99), 0 differences. The streams
-have every family in proportion to its forms: of 200,000 instructions, 54,000
-EVEX (26,000 with an opmask, 11,000 zeroing, 15,000 broadcasts, 5,000 rounding
-or suppressed exceptions, 39,000 with registers 16–31), 18,000 VEX2 and 32,000
-VEX3. Eleven deliberately broken copies of the legacy encoder (wrong table
-entries, multishift windows, RBP and RSP checks, displacement bounds, lane
-order, store margin) and ten of its VEX and EVEX parts (VEX2's conditions, P0's
-bits, the compressibility's rotation, V', OR instead of XOR, register limits,
-the displacement's division, an inverted field, a base's bit 4) all fail the
-tests; the last one needed a test of its own (a memory operand's base or index
-past 15). So did the rm operand's kind: until its two tests, `x86_encode`
-encoded `lea rax, rcx` as `48 8d c1` and a memory operand in register-only
-forms (510 of the test's broken instructions), which `x86_validate` rejected.
-The check costs about 1% on Zen 5.
+`--print-assembly` and `--compare-binary` cross-check the scalar encoder against
+GNU as for any seed (AGENTS.md has the commands): 1.7 million random
+instructions over all forms (seeds 1, 7 and 99), 0 differences. The streams have
+every family in proportion to its forms: of 200,000 instructions, 48,000 EVEX
+(23,000 with an opmask, 10,000 zeroing, 13,000 broadcasts, 4,600 rounding or
+suppressed exceptions, 34,000 with registers 16–31), 16,000 VEX2, 28,000 VEX3
+and 21,000 x87 (GNU as encodes `fop st(0), st`, which is `fop st, st(0)`, with
+D8 rather than DC, so the printed streams leave it out). Eleven deliberately
+broken copies of the legacy encoder (wrong table entries, multishift windows,
+RBP and RSP checks, displacement bounds, lane order, store margin) and ten of
+its VEX and EVEX parts (VEX2's conditions, P0's bits, the compressibility's
+rotation, V', OR instead of XOR, register limits, the displacement's division,
+an inverted field, a base's bit 4) all fail the tests; the last one needed a
+test of its own (a memory operand's base or index past 15). So did the rm
+operand's kind: until its two tests, `x86_encode` encoded `lea rax, rcx` as
+`48 8d c1` and a memory operand in register-only forms (510 of the test's broken
+instructions), which `x86_validate` rejected. The check costs about 1% on Zen 5.
+A copy that lets an x87 register go past ST(7) fails the tests too.
 
 ## Next steps
 

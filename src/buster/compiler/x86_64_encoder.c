@@ -2,8 +2,8 @@
 // (X86Instruction, 16 bytes) is a form (X86Form: the opcode, prefixes, operand roles and field widths) and its
 // operands in their encoding roles: the ModRM.reg and ModRM.rm registers, the memory operand's base, index, scale and
 // displacement, the VEX.vvvv register, EVEX's opmask, zeroing and rounding, and the immediate. Forms are legacy (with
-// REX), VEX (AVX, AVX2, FMA, BMI and the mask register instructions) or EVEX (AVX-512). Files that use it include it
-// directly; every function in it is static.
+// REX; x87 among them), VEX (AVX, AVX2, FMA, BMI and the mask register instructions) or EVEX (AVX-512). Files that use
+// it include it directly; every function in it is static.
 //
 // Entry points: x86_encoder_initialize (builds the templates; call it once before encoding), x86_encode (the
 // vectorized encoder), x86_encode_scalar (a plain reference encoder, for testing), x86_validate and
@@ -69,7 +69,8 @@
 #define BUSTER_X86_ENCODER_MAX_INSTRUCTIONS (UINT32_MAX / BUSTER_X86_MAX_INSTRUCTION_BYTES)
 
 // A register operand is the register's number (general purpose: RAX = 0 ... R15 = 15; vector: XMM0 = 0 ... XMM15 = 15,
-// or XMM31 = 31 in an EVEX form, and the same for YMM and ZMM; opmask: K0 = 0 ... K7 = 7) or, for AH, CH, DH and BH, 4
+// or XMM31 = 31 in an EVEX form, and the same for YMM and ZMM; opmask: K0 = 0 ... K7 = 7; x87: ST(0) = 0 ... ST(7) =
+// 7) or, for AH, CH, DH and BH, 4
 // to 7 with BUSTER_X86_REGISTER_HIGH_BYTE. With a byte form, 4 to 7 alone are SPL, BPL, SIL and DIL, which need a REX
 // prefix; the high byte registers can't have one.
 #define BUSTER_X86_REGISTER_NUMBER 0x1f
@@ -167,8 +168,9 @@ typedef enum X86EncoderError
 // The form table's operand roles: a register class, and for ModRM.rm whether it can be a register, memory, or both
 // (as Intel's opcode maps write them: G a general register in ModRM.reg, E a general register or memory in
 // ModRM.rm, V an XMM register, XM an XMM register or memory, M only memory; and Y, YM, Z and ZM for YMM and ZMM, K
-// for the opmask registers). For a +r form, the register is the rm operand. An opmask or memory operand would need
-// checks that depend on the mode (k8 to k15 don't exist, but a base can be R8 to R15), so those are two forms.
+// for the opmask registers, ST for the x87 registers). For a +r form, the register is the rm operand. An opmask or
+// memory operand would need checks that depend on the mode (k8 to k15 don't exist, but a base can be R8 to R15), so
+// those are two forms.
 #define BUSTER_X86_OPERAND_CLASS 0x0f
 #define BUSTER_X86_CLASS_NONE 0
 #define BUSTER_X86_CLASS_GPR8 1
@@ -179,6 +181,7 @@ typedef enum X86EncoderError
 #define BUSTER_X86_CLASS_YMM 6
 #define BUSTER_X86_CLASS_ZMM 7
 #define BUSTER_X86_CLASS_OPMASK 8
+#define BUSTER_X86_CLASS_ST 9
 #define BUSTER_X86_OPERAND_REGISTER 0x10
 #define BUSTER_X86_OPERAND_MEMORY 0x20
 #define BUSTER_X86_OPERAND_NONE 0
@@ -197,6 +200,7 @@ typedef enum X86EncoderError
 #define BUSTER_X86_OPERAND_Z (BUSTER_X86_CLASS_ZMM | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_ZM (BUSTER_X86_OPERAND_Z | BUSTER_X86_OPERAND_MEMORY)
 #define BUSTER_X86_OPERAND_K (BUSTER_X86_CLASS_OPMASK | BUSTER_X86_OPERAND_REGISTER)
+#define BUSTER_X86_OPERAND_ST (BUSTER_X86_CLASS_ST | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_M BUSTER_X86_OPERAND_MEMORY
 
 // How the form uses ModRM: none (NO), a register in ModRM.reg (R, /r), an opcode extension in ModRM.reg (D0-D7,
@@ -238,7 +242,8 @@ typedef enum X86EncoderError
 #define BUSTER_X86_EVEX_B (BUSTER_X86_EVEX_BROADCAST | BUSTER_X86_EVEX_ROUNDING | BUSTER_X86_EVEX_SAE)
 
 // The order of a form's operands in Intel syntax, with its implicit ones (for printing and tests; the encoding
-// doesn't depend on it). ACC is AL, AX, EAX or RAX; MOFFS is a 64-bit absolute address; VVVV is the VEX.vvvv register.
+// doesn't depend on it). ACC is AL, AX, EAX or RAX; MOFFS is a 64-bit absolute address; VVVV is the VEX.vvvv register;
+// ST is the x87 register ST(0), where the rm operand is ST(i).
 typedef enum X86Syntax
 {
     X86_SYNTAX_NONE,
@@ -262,6 +267,9 @@ typedef enum X86Syntax
     X86_SYNTAX_REG_RM_VVVV,
     X86_SYNTAX_VVVV_RM,
     X86_SYNTAX_VVVV_RM_IMM,
+    X86_SYNTAX_ST_RM,
+    X86_SYNTAX_RM_ST,
+    X86_SYNTAX_ACC,
 } X86Syntax;
 
 // The form table. Each row is X(name, mnemonic, prefixes, opcode bytes, opcode, encoding, immediate bytes, relative
@@ -357,6 +365,28 @@ typedef enum X86Syntax
 #define BUSTER_X86_SSE_MOVE_FORMS(X, N, m, prefixes, load, store, bytes) \
     X(N##_X_XM, m, prefixes, 2, load, R, 0, 0, 0, V, XM, bytes, REG_RM) \
     X(N##_XM_X, m, prefixes, 2, store, R, 0, 0, 0, V, XM, bytes, RM_REG)
+
+// x87 arithmetic, with K the ModRM digit: ST(0) and a 32-bit (D8) or 64-bit (DC) float in memory, or ST(i) (D8 with
+// mod 11); and ST(i) as the destination (DC) or with a pop (DE), whose digit KD swaps subtraction and division with
+// their reversed forms.
+#define BUSTER_X86_X87_ARITHMETIC_FORMS(X, N, m, K, KD) \
+    X(N##_M32, m, 0, 1, 0xd8, D##K, 0, 0, 0, NONE, M, 4, RM) \
+    X(N##_M64, m, 0, 1, 0xdc, D##K, 0, 0, 0, NONE, M, 8, RM) \
+    X(N##_ST0_ST, m, 0, 1, 0xd8, D##K, 0, 0, 0, NONE, ST, 0, ST_RM) \
+    X(N##_ST_ST0, m, 0, 1, 0xdc, D##KD, 0, 0, 0, NONE, ST, 0, RM_ST) \
+    X(N##P_ST_ST0, m "p", 0, 1, 0xde, D##KD, 0, 0, 0, NONE, ST, 0, RM_ST)
+
+// x87 arithmetic and compares with a 16-bit (DE) or 32-bit (DA) integer in memory.
+#define BUSTER_X86_X87_INTEGER_FORMS(X, N, m, K) \
+    X(N##_M16, m, 0, 1, 0xde, D##K, 0, 0, 0, NONE, M, 2, RM) \
+    X(N##_M32, m, 0, 1, 0xda, D##K, 0, 0, 0, NONE, M, 4, RM)
+
+// FCMOVcc ST(0), ST(i): DA or DB /K with mod 11.
+#define BUSTER_X86_X87_FCMOV_FORM(X, N, m, opcode, K) \
+    X(N##_ST0_ST, m, 0, 1, opcode, D##K, 0, 0, 0, NONE, ST, 0, ST_RM)
+
+// An x87 instruction without operands: two opcode bytes (the second a ModRM byte with mod 11, in effect).
+#define BUSTER_X86_X87_FORM(X, N, m, opcode) X(N, m, 0, 2, opcode, NO, 0, 0, 0, NONE, NONE, 0, NONE)
 
 // The VEX and EVEX forms. Each row is XV(name, mnemonic, family, prefixes, opcode bytes, opcode, encoding, immediate
 // bytes, W, L, reg operand, vvvv operand, rm operand, operand bytes, disp8 scale, decorations, syntax):
@@ -1102,6 +1132,111 @@ typedef enum X86Syntax
     X(PINSRB_X_RM32_IMM8, "pinsrb", 0x66, 3, 0x0f3a20, R, 1, 0, 0, V, ED, 1, REG_RM_IMM) \
     X(PINSRD_X_RM32_IMM8, "pinsrd", 0x66, 3, 0x0f3a22, R, 1, 0, 0, V, ED, 4, REG_RM_IMM) \
     X(PINSRQ_X_RM64_IMM8, "pinsrq", 0x66, 3, 0x0f3a22, R, 1, 0, 1, V, EQ, 8, REG_RM_IMM) \
+    BUSTER_X86_X87_ARITHMETIC_FORMS(X, FADD, "fadd", 0, 0) \
+    BUSTER_X86_X87_ARITHMETIC_FORMS(X, FMUL, "fmul", 1, 1) \
+    BUSTER_X86_X87_ARITHMETIC_FORMS(X, FSUB, "fsub", 4, 5) \
+    BUSTER_X86_X87_ARITHMETIC_FORMS(X, FSUBR, "fsubr", 5, 4) \
+    BUSTER_X86_X87_ARITHMETIC_FORMS(X, FDIV, "fdiv", 6, 7) \
+    BUSTER_X86_X87_ARITHMETIC_FORMS(X, FDIVR, "fdivr", 7, 6) \
+    X(FCOM_M32, "fcom", 0, 1, 0xd8, D2, 0, 0, 0, NONE, M, 4, RM) \
+    X(FCOM_M64, "fcom", 0, 1, 0xdc, D2, 0, 0, 0, NONE, M, 8, RM) \
+    X(FCOM_ST, "fcom", 0, 1, 0xd8, D2, 0, 0, 0, NONE, ST, 0, RM) \
+    X(FCOMP_M32, "fcomp", 0, 1, 0xd8, D3, 0, 0, 0, NONE, M, 4, RM) \
+    X(FCOMP_M64, "fcomp", 0, 1, 0xdc, D3, 0, 0, 0, NONE, M, 8, RM) \
+    X(FCOMP_ST, "fcomp", 0, 1, 0xd8, D3, 0, 0, 0, NONE, ST, 0, RM) \
+    BUSTER_X86_X87_FORM(X, FCOMPP, "fcompp", 0xded9) \
+    BUSTER_X86_X87_INTEGER_FORMS(X, FIADD, "fiadd", 0) \
+    BUSTER_X86_X87_INTEGER_FORMS(X, FIMUL, "fimul", 1) \
+    BUSTER_X86_X87_INTEGER_FORMS(X, FICOM, "ficom", 2) \
+    BUSTER_X86_X87_INTEGER_FORMS(X, FICOMP, "ficomp", 3) \
+    BUSTER_X86_X87_INTEGER_FORMS(X, FISUB, "fisub", 4) \
+    BUSTER_X86_X87_INTEGER_FORMS(X, FISUBR, "fisubr", 5) \
+    BUSTER_X86_X87_INTEGER_FORMS(X, FIDIV, "fidiv", 6) \
+    BUSTER_X86_X87_INTEGER_FORMS(X, FIDIVR, "fidivr", 7) \
+    X(FLD_M32, "fld", 0, 1, 0xd9, D0, 0, 0, 0, NONE, M, 4, RM) \
+    X(FLD_M64, "fld", 0, 1, 0xdd, D0, 0, 0, 0, NONE, M, 8, RM) \
+    X(FLD_M80, "fld", 0, 1, 0xdb, D5, 0, 0, 0, NONE, M, 10, RM) \
+    X(FLD_ST, "fld", 0, 1, 0xd9, D0, 0, 0, 0, NONE, ST, 0, RM) \
+    X(FST_M32, "fst", 0, 1, 0xd9, D2, 0, 0, 0, NONE, M, 4, RM) \
+    X(FST_M64, "fst", 0, 1, 0xdd, D2, 0, 0, 0, NONE, M, 8, RM) \
+    X(FST_ST, "fst", 0, 1, 0xdd, D2, 0, 0, 0, NONE, ST, 0, RM) \
+    X(FSTP_M32, "fstp", 0, 1, 0xd9, D3, 0, 0, 0, NONE, M, 4, RM) \
+    X(FSTP_M64, "fstp", 0, 1, 0xdd, D3, 0, 0, 0, NONE, M, 8, RM) \
+    X(FSTP_M80, "fstp", 0, 1, 0xdb, D7, 0, 0, 0, NONE, M, 10, RM) \
+    X(FSTP_ST, "fstp", 0, 1, 0xdd, D3, 0, 0, 0, NONE, ST, 0, RM) \
+    X(FILD_M16, "fild", 0, 1, 0xdf, D0, 0, 0, 0, NONE, M, 2, RM) \
+    X(FILD_M32, "fild", 0, 1, 0xdb, D0, 0, 0, 0, NONE, M, 4, RM) \
+    X(FILD_M64, "fild", 0, 1, 0xdf, D5, 0, 0, 0, NONE, M, 8, RM) \
+    X(FIST_M16, "fist", 0, 1, 0xdf, D2, 0, 0, 0, NONE, M, 2, RM) \
+    X(FIST_M32, "fist", 0, 1, 0xdb, D2, 0, 0, 0, NONE, M, 4, RM) \
+    X(FISTP_M16, "fistp", 0, 1, 0xdf, D3, 0, 0, 0, NONE, M, 2, RM) \
+    X(FISTP_M32, "fistp", 0, 1, 0xdb, D3, 0, 0, 0, NONE, M, 4, RM) \
+    X(FISTP_M64, "fistp", 0, 1, 0xdf, D7, 0, 0, 0, NONE, M, 8, RM) \
+    X(FISTTP_M16, "fisttp", 0, 1, 0xdf, D1, 0, 0, 0, NONE, M, 2, RM) \
+    X(FISTTP_M32, "fisttp", 0, 1, 0xdb, D1, 0, 0, 0, NONE, M, 4, RM) \
+    X(FISTTP_M64, "fisttp", 0, 1, 0xdd, D1, 0, 0, 0, NONE, M, 8, RM) \
+    X(FBLD_M80, "fbld", 0, 1, 0xdf, D4, 0, 0, 0, NONE, M, 10, RM) \
+    X(FBSTP_M80, "fbstp", 0, 1, 0xdf, D6, 0, 0, 0, NONE, M, 10, RM) \
+    X(FXCH_ST, "fxch", 0, 1, 0xd9, D1, 0, 0, 0, NONE, ST, 0, RM) \
+    BUSTER_X86_X87_FCMOV_FORM(X, FCMOVB, "fcmovb", 0xda, 0) \
+    BUSTER_X86_X87_FCMOV_FORM(X, FCMOVE, "fcmove", 0xda, 1) \
+    BUSTER_X86_X87_FCMOV_FORM(X, FCMOVBE, "fcmovbe", 0xda, 2) \
+    BUSTER_X86_X87_FCMOV_FORM(X, FCMOVU, "fcmovu", 0xda, 3) \
+    BUSTER_X86_X87_FCMOV_FORM(X, FCMOVNB, "fcmovnb", 0xdb, 0) \
+    BUSTER_X86_X87_FCMOV_FORM(X, FCMOVNE, "fcmovne", 0xdb, 1) \
+    BUSTER_X86_X87_FCMOV_FORM(X, FCMOVNBE, "fcmovnbe", 0xdb, 2) \
+    BUSTER_X86_X87_FCMOV_FORM(X, FCMOVNU, "fcmovnu", 0xdb, 3) \
+    X(FCOMI_ST0_ST, "fcomi", 0, 1, 0xdb, D6, 0, 0, 0, NONE, ST, 0, ST_RM) \
+    X(FCOMIP_ST0_ST, "fcomip", 0, 1, 0xdf, D6, 0, 0, 0, NONE, ST, 0, ST_RM) \
+    X(FUCOMI_ST0_ST, "fucomi", 0, 1, 0xdb, D5, 0, 0, 0, NONE, ST, 0, ST_RM) \
+    X(FUCOMIP_ST0_ST, "fucomip", 0, 1, 0xdf, D5, 0, 0, 0, NONE, ST, 0, ST_RM) \
+    X(FUCOM_ST, "fucom", 0, 1, 0xdd, D4, 0, 0, 0, NONE, ST, 0, RM) \
+    X(FUCOMP_ST, "fucomp", 0, 1, 0xdd, D5, 0, 0, 0, NONE, ST, 0, RM) \
+    BUSTER_X86_X87_FORM(X, FUCOMPP, "fucompp", 0xdae9) \
+    X(FFREE_ST, "ffree", 0, 1, 0xdd, D0, 0, 0, 0, NONE, ST, 0, RM) \
+    X(FLDCW_M16, "fldcw", 0, 1, 0xd9, D5, 0, 0, 0, NONE, M, 2, RM) \
+    X(FNSTCW_M16, "fnstcw", 0, 1, 0xd9, D7, 0, 0, 0, NONE, M, 2, RM) \
+    X(FNSTSW_M16, "fnstsw", 0, 1, 0xdd, D7, 0, 0, 0, NONE, M, 2, RM) \
+    X(FNSTSW_AX, "fnstsw", 0, 2, 0xdfe0, NO, 0, 0, 0, NONE, NONE, 2, ACC) \
+    X(FLDENV_M28, "fldenv", 0, 1, 0xd9, D4, 0, 0, 0, NONE, M, 28, RM) \
+    X(FLDENVW_M14, "fldenvw", 0x66, 1, 0xd9, D4, 0, 0, 0, NONE, M, 14, RM) \
+    X(FNSTENV_M28, "fnstenv", 0, 1, 0xd9, D6, 0, 0, 0, NONE, M, 28, RM) \
+    X(FNSTENVW_M14, "fnstenvw", 0x66, 1, 0xd9, D6, 0, 0, 0, NONE, M, 14, RM) \
+    X(FRSTOR_M108, "frstor", 0, 1, 0xdd, D4, 0, 0, 0, NONE, M, 108, RM) \
+    X(FRSTORW_M94, "frstorw", 0x66, 1, 0xdd, D4, 0, 0, 0, NONE, M, 94, RM) \
+    X(FNSAVE_M108, "fnsave", 0, 1, 0xdd, D6, 0, 0, 0, NONE, M, 108, RM) \
+    X(FNSAVEW_M94, "fnsavew", 0x66, 1, 0xdd, D6, 0, 0, 0, NONE, M, 94, RM) \
+    BUSTER_X86_X87_FORM(X, FNINIT, "fninit", 0xdbe3) \
+    BUSTER_X86_X87_FORM(X, FNCLEX, "fnclex", 0xdbe2) \
+    X(FWAIT, "fwait", 0, 1, 0x9b, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    BUSTER_X86_X87_FORM(X, FNOP, "fnop", 0xd9d0) \
+    BUSTER_X86_X87_FORM(X, FDECSTP, "fdecstp", 0xd9f6) \
+    BUSTER_X86_X87_FORM(X, FINCSTP, "fincstp", 0xd9f7) \
+    BUSTER_X86_X87_FORM(X, FCHS, "fchs", 0xd9e0) \
+    BUSTER_X86_X87_FORM(X, FABS, "fabs", 0xd9e1) \
+    BUSTER_X86_X87_FORM(X, FTST, "ftst", 0xd9e4) \
+    BUSTER_X86_X87_FORM(X, FXAM, "fxam", 0xd9e5) \
+    BUSTER_X86_X87_FORM(X, FLD1, "fld1", 0xd9e8) \
+    BUSTER_X86_X87_FORM(X, FLDL2T, "fldl2t", 0xd9e9) \
+    BUSTER_X86_X87_FORM(X, FLDL2E, "fldl2e", 0xd9ea) \
+    BUSTER_X86_X87_FORM(X, FLDPI, "fldpi", 0xd9eb) \
+    BUSTER_X86_X87_FORM(X, FLDLG2, "fldlg2", 0xd9ec) \
+    BUSTER_X86_X87_FORM(X, FLDLN2, "fldln2", 0xd9ed) \
+    BUSTER_X86_X87_FORM(X, FLDZ, "fldz", 0xd9ee) \
+    BUSTER_X86_X87_FORM(X, F2XM1, "f2xm1", 0xd9f0) \
+    BUSTER_X86_X87_FORM(X, FYL2X, "fyl2x", 0xd9f1) \
+    BUSTER_X86_X87_FORM(X, FPTAN, "fptan", 0xd9f2) \
+    BUSTER_X86_X87_FORM(X, FPATAN, "fpatan", 0xd9f3) \
+    BUSTER_X86_X87_FORM(X, FXTRACT, "fxtract", 0xd9f4) \
+    BUSTER_X86_X87_FORM(X, FPREM1, "fprem1", 0xd9f5) \
+    BUSTER_X86_X87_FORM(X, FPREM, "fprem", 0xd9f8) \
+    BUSTER_X86_X87_FORM(X, FYL2XP1, "fyl2xp1", 0xd9f9) \
+    BUSTER_X86_X87_FORM(X, FSQRT, "fsqrt", 0xd9fa) \
+    BUSTER_X86_X87_FORM(X, FSINCOS, "fsincos", 0xd9fb) \
+    BUSTER_X86_X87_FORM(X, FRNDINT, "frndint", 0xd9fc) \
+    BUSTER_X86_X87_FORM(X, FSCALE, "fscale", 0xd9fd) \
+    BUSTER_X86_X87_FORM(X, FSIN, "fsin", 0xd9fe) \
+    BUSTER_X86_X87_FORM(X, FCOS, "fcos", 0xd9ff) \
     BUSTER_X86_VECTOR_FORMS(XV)
 
 #define BUSTER_X86_FORM_ENUM(name, ...) X86_FORM_##name,
@@ -1287,8 +1422,8 @@ static X86Template* const x86_templates = x86_template_storage + BUSTER_X86_TEMP
 static bool x86_encoder_initialized;
 
 // The bits of a register operand of the class that must be zero: registers past the class's last (15 for general
-// registers and VEX's vector registers, 31 for EVEX's, 7 for opmasks) and the high byte flag, which only a legacy
-// byte register can have; all of them for no operand.
+// registers and VEX's vector registers, 31 for EVEX's, 7 for opmasks and x87 registers) and the high byte flag, which
+// only a legacy byte register can have; all of them for no operand.
 static uint8_t x86_forbidden_register_bits(uint8_t operand, uint8_t family)
 {
     const uint8_t class = operand & BUSTER_X86_OPERAND_CLASS;
@@ -1305,7 +1440,7 @@ static uint8_t x86_forbidden_register_bits(uint8_t operand, uint8_t family)
     {
         result = 0xe0;
     }
-    else if (class == BUSTER_X86_CLASS_OPMASK)
+    else if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST)
     {
         result = 0xf8;
     }
