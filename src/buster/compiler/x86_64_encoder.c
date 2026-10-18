@@ -270,6 +270,8 @@ typedef enum X86Syntax
     X86_SYNTAX_ST_RM,
     X86_SYNTAX_RM_ST,
     X86_SYNTAX_ACC,
+    X86_SYNTAX_RM_ACC,
+    X86_SYNTAX_RM_REG_VVVV,
 } X86Syntax;
 
 // The form table. Each row is X(name, mnemonic, prefixes, opcode bytes, opcode, encoding, immediate bytes, relative
@@ -327,17 +329,21 @@ typedef enum X86Syntax
     X(J##CC##_REL8, "j" cc, 0, 1, 0x70 + K, NO, 0, 1, 0, NONE, NONE, 0, REL) \
     X(J##CC##_REL32, "j" cc, 0, 2, 0x0f80 + K, NO, 0, 4, 0, NONE, NONE, 0, REL) \
     X(SET##CC##_RM8, "set" cc, 0, 2, 0x0f90 + K, D0, 0, 0, 0, NONE, EB, 1, RM) \
+    X(CMOV##CC##_R16_RM16, "cmov" cc, 0x66, 2, 0x0f40 + K, R, 0, 0, 0, GW, EW, 2, REG_RM) \
     X(CMOV##CC##_R32_RM32, "cmov" cc, 0, 2, 0x0f40 + K, R, 0, 0, 0, GD, ED, 4, REG_RM) \
     X(CMOV##CC##_R64_RM64, "cmov" cc, 0, 2, 0x0f40 + K, R, 0, 0, 1, GQ, EQ, 8, REG_RM)
 
 #define BUSTER_X86_BIT_TEST_FORMS(X, N, m, opcode, K) \
+    X(N##_RM16_R16, m, 0x66, 2, 0x0f00 + opcode, R, 0, 0, 0, GW, EW, 2, RM_REG) \
+    X(N##_RM16_IMM8, m, 0x66, 2, 0x0fba, D##K, 1, 0, 0, NONE, EW, 2, RM_IMM) \
     X(N##_RM32_R32, m, 0, 2, 0x0f00 + opcode, R, 0, 0, 0, GD, ED, 4, RM_REG) \
     X(N##_RM64_R64, m, 0, 2, 0x0f00 + opcode, R, 0, 0, 1, GQ, EQ, 8, RM_REG) \
     X(N##_RM32_IMM8, m, 0, 2, 0x0fba, D##K, 1, 0, 0, NONE, ED, 4, RM_IMM) \
     X(N##_RM64_IMM8, m, 0, 2, 0x0fba, D##K, 1, 0, 1, NONE, EQ, 8, RM_IMM)
 
-// A general register from r/m, in 32- and 64-bit forms.
+// A general register from r/m, in 16-, 32- and 64-bit forms (66 comes before a mandatory prefix, as GNU as puts it).
 #define BUSTER_X86_R_RM_FORMS(X, N, m, prefixes, opcode) \
+    X(N##_R16_RM16, m, (prefixes) << 8 | 0x66, 2, opcode, R, 0, 0, 0, GW, EW, 2, REG_RM) \
     X(N##_R32_RM32, m, prefixes, 2, opcode, R, 0, 0, 0, GD, ED, 4, REG_RM) \
     X(N##_R64_RM64, m, prefixes, 2, opcode, R, 0, 0, 1, GQ, EQ, 8, REG_RM)
 
@@ -351,6 +357,42 @@ typedef enum X86Syntax
     X(LOCK_##N##_M16_R16, "lock " m, 0xf066, 2, opcode, R, 0, 0, 0, GW, M, 2, RM_REG) \
     X(LOCK_##N##_M32_R32, "lock " m, 0xf0, 2, opcode, R, 0, 0, 0, GD, M, 4, RM_REG) \
     X(LOCK_##N##_M64_R64, "lock " m, 0xf0, 2, opcode, R, 0, 0, 1, GQ, M, 8, RM_REG)
+
+// The arithmetic instructions with a LOCK prefix: a memory destination, and a register or immediate source.
+#define BUSTER_X86_LOCK_ARITHMETIC_FORMS(X, N, m, K) \
+    X(LOCK_##N##_M8_R8, "lock " m, 0xf0, 1, 0x00 + 8 * K, R, 0, 0, 0, GB, M, 1, RM_REG) \
+    X(LOCK_##N##_M16_R16, "lock " m, 0xf066, 1, 0x01 + 8 * K, R, 0, 0, 0, GW, M, 2, RM_REG) \
+    X(LOCK_##N##_M32_R32, "lock " m, 0xf0, 1, 0x01 + 8 * K, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(LOCK_##N##_M64_R64, "lock " m, 0xf0, 1, 0x01 + 8 * K, R, 0, 0, 1, GQ, M, 8, RM_REG) \
+    X(LOCK_##N##_M8_IMM8, "lock " m, 0xf0, 1, 0x80, D##K, 1, 0, 0, NONE, M, 1, RM_IMM) \
+    X(LOCK_##N##_M16_IMM16, "lock " m, 0xf066, 1, 0x81, D##K, 2, 0, 0, NONE, M, 2, RM_IMM) \
+    X(LOCK_##N##_M32_IMM32, "lock " m, 0xf0, 1, 0x81, D##K, 4, 0, 0, NONE, M, 4, RM_IMM) \
+    X(LOCK_##N##_M64_IMM32, "lock " m, 0xf0, 1, 0x81, D##K, 4, 0, 1, NONE, M, 8, RM_IMM) \
+    X(LOCK_##N##_M16_IMM8, "lock " m, 0xf066, 1, 0x83, D##K, 1, 0, 0, NONE, M, 2, RM_IMM) \
+    X(LOCK_##N##_M32_IMM8, "lock " m, 0xf0, 1, 0x83, D##K, 1, 0, 0, NONE, M, 4, RM_IMM) \
+    X(LOCK_##N##_M64_IMM8, "lock " m, 0xf0, 1, 0x83, D##K, 1, 0, 1, NONE, M, 8, RM_IMM)
+
+#define BUSTER_X86_LOCK_UNARY_FORMS(X, N, m, opcode8, opcode, K) \
+    X(LOCK_##N##_M8, "lock " m, 0xf0, 1, opcode8, D##K, 0, 0, 0, NONE, M, 1, RM) \
+    X(LOCK_##N##_M16, "lock " m, 0xf066, 1, opcode, D##K, 0, 0, 0, NONE, M, 2, RM) \
+    X(LOCK_##N##_M32, "lock " m, 0xf0, 1, opcode, D##K, 0, 0, 0, NONE, M, 4, RM) \
+    X(LOCK_##N##_M64, "lock " m, 0xf0, 1, opcode, D##K, 0, 0, 1, NONE, M, 8, RM)
+
+#define BUSTER_X86_LOCK_BIT_TEST_FORMS(X, N, m, opcode, K) \
+    X(LOCK_##N##_M16_R16, "lock " m, 0xf066, 2, 0x0f00 + opcode, R, 0, 0, 0, GW, M, 2, RM_REG) \
+    X(LOCK_##N##_M32_R32, "lock " m, 0xf0, 2, 0x0f00 + opcode, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(LOCK_##N##_M64_R64, "lock " m, 0xf0, 2, 0x0f00 + opcode, R, 0, 0, 1, GQ, M, 8, RM_REG) \
+    X(LOCK_##N##_M16_IMM8, "lock " m, 0xf066, 2, 0x0fba, D##K, 1, 0, 0, NONE, M, 2, RM_IMM) \
+    X(LOCK_##N##_M32_IMM8, "lock " m, 0xf0, 2, 0x0fba, D##K, 1, 0, 0, NONE, M, 4, RM_IMM) \
+    X(LOCK_##N##_M64_IMM8, "lock " m, 0xf0, 2, 0x0fba, D##K, 1, 0, 1, NONE, M, 8, RM_IMM)
+
+// A string instruction at each operand size (its implicit operands: AL to RAX and [RSI] or [RDI]), with `prefixes`
+// (none, REP, REPE or REPNE): b (opcode8), w (66, opcode), d (opcode) and q (REX.W, opcode).
+#define BUSTER_X86_STRING_FORMS(X, N, m, prefixes, opcode8, opcode) \
+    X(N##_B, m "b", prefixes, 1, opcode8, NO, 0, 0, 0, NONE, NONE, 1, NONE) \
+    X(N##_W, m "w", (prefixes) << 8 | 0x66, 1, opcode, NO, 0, 0, 0, NONE, NONE, 2, NONE) \
+    X(N##_D, m "d", prefixes, 1, opcode, NO, 0, 0, 0, NONE, NONE, 4, NONE) \
+    X(N##_Q, m "q", prefixes, 1, opcode, NO, 0, 0, 1, NONE, NONE, 8, NONE)
 
 // Scalar SSE arithmetic: single precision (F3) and double precision (F2).
 #define BUSTER_X86_SSE_SCALAR_FORMS(X, N, m, opcode) \
@@ -491,6 +533,12 @@ typedef enum X86Syntax
     XV(N##_Z_M##bits##BCST_IMM8, m, EVEX, 0x66, 2, 0x0f00 + opcode, D##K, 1, w, 2, NONE, Z, M, bits / 8, bits / 8, KZ_BCST, VVVV_RM_IMM)
 
 // Scalar arithmetic with an opmask, and with embedded rounding.
+// CMPccXADD: compare a 32- or 64-bit memory operand with reg, add vvvv to it if the condition (K) holds, and return
+// its old value in reg (VEX.128.66.0F38 E0+K).
+#define BUSTER_X86_CMPCCXADD_FORMS(XV, CC, cc, K) \
+    XV(CMP##CC##XADD_M32_R32_R32, "cmp" cc "xadd", VEX, 0x66, 3, 0x0f38e0 + K, R, 0, 0, 0, GD, GD, M, 4, 1, NONE, RM_REG_VVVV) \
+    XV(CMP##CC##XADD_M64_R64_R64, "cmp" cc "xadd", VEX, 0x66, 3, 0x0f38e0 + K, R, 0, 1, 0, GQ, GQ, M, 8, 1, NONE, RM_REG_VVVV)
+
 #define BUSTER_X86_AVX512_SCALAR_FORMS(XV, N, m, opcode) \
     XV(N##SS_X_X_XM32_EVEX, m "ss", EVEX, 0xf3, 2, 0x0f00 + opcode, R, 0, 0, 0, V, V, XM, 4, 4, KZ, REG_VVVV_RM) \
     XV(N##SS_X_X_X_ER, m "ss", EVEX, 0xf3, 2, 0x0f00 + opcode, R, 0, 0, 0, V, V, V, 4, 4, KZ_ER, REG_VVVV_RM) \
@@ -891,7 +939,23 @@ typedef enum X86Syntax
     XV(VPXORD_X_X_XM128, "vpxord", EVEX, 0x66, 2, 0x0fef, R, 0, 0, 0, V, V, XM, 16, 16, KZ, REG_VVVV_RM) \
     XV(VPSHUFB_Y_Y_YM256_EVEX, "vpshufb", EVEX, 0x66, 3, 0x0f3800, R, 0, 0, 1, Y, Y, YM, 32, 32, KZ, REG_VVVV_RM) \
     XV(VPERMB_Y_Y_YM256, "vpermb", EVEX, 0x66, 3, 0x0f388d, R, 0, 0, 1, Y, Y, YM, 32, 32, KZ, REG_VVVV_RM) \
-    XV(VPTERNLOGD_Y_Y_YM256_IMM8, "vpternlogd", EVEX, 0x66, 3, 0x0f3a25, R, 1, 0, 1, Y, Y, YM, 32, 32, KZ, REG_VVVV_RM_IMM)
+    XV(VPTERNLOGD_Y_Y_YM256_IMM8, "vpternlogd", EVEX, 0x66, 3, 0x0f3a25, R, 1, 0, 1, Y, Y, YM, 32, 32, KZ, REG_VVVV_RM_IMM) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, O, "o", 0) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, NO, "no", 1) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, B, "b", 2) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, NB, "nb", 3) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, Z, "z", 4) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, NZ, "nz", 5) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, BE, "be", 6) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, NBE, "nbe", 7) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, S, "s", 8) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, NS, "ns", 9) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, P, "p", 10) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, NP, "np", 11) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, L, "l", 12) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, NL, "nl", 13) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, LE, "le", 14) \
+    BUSTER_X86_CMPCCXADD_FORMS(XV, NLE, "nle", 15)
 
 #define BUSTER_X86_FORMS(X, XV) \
     X(NONE, "", 0, 0, 0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
@@ -977,6 +1041,12 @@ typedef enum X86Syntax
     BUSTER_X86_SHIFT_FORMS(X, SHL, "shl", 4) \
     BUSTER_X86_SHIFT_FORMS(X, SHR, "shr", 5) \
     BUSTER_X86_SHIFT_FORMS(X, SAR, "sar", 7) \
+    BUSTER_X86_SHIFT_FORMS(X, RCL, "rcl", 2) \
+    BUSTER_X86_SHIFT_FORMS(X, RCR, "rcr", 3) \
+    X(SHLD_RM16_R16_IMM8, "shld", 0x66, 2, 0x0fa4, R, 1, 0, 0, GW, EW, 2, RM_REG_IMM) \
+    X(SHLD_RM16_R16_CL, "shld", 0x66, 2, 0x0fa5, R, 0, 0, 0, GW, EW, 2, RM_REG_CL) \
+    X(SHRD_RM16_R16_IMM8, "shrd", 0x66, 2, 0x0fac, R, 1, 0, 0, GW, EW, 2, RM_REG_IMM) \
+    X(SHRD_RM16_R16_CL, "shrd", 0x66, 2, 0x0fad, R, 0, 0, 0, GW, EW, 2, RM_REG_CL) \
     X(SHLD_RM32_R32_IMM8, "shld", 0, 2, 0x0fa4, R, 1, 0, 0, GD, ED, 4, RM_REG_IMM) \
     X(SHLD_RM64_R64_IMM8, "shld", 0, 2, 0x0fa4, R, 1, 0, 1, GQ, EQ, 8, RM_REG_IMM) \
     X(SHLD_RM32_R32_CL, "shld", 0, 2, 0x0fa5, R, 0, 0, 0, GD, ED, 4, RM_REG_CL) \
@@ -991,11 +1061,22 @@ typedef enum X86Syntax
     X(POP_RM64, "pop", 0, 1, 0x8f, D0, 0, 0, 0, NONE, EQ, 8, RM) \
     X(PUSH_IMM8, "push", 0, 1, 0x6a, NO, 1, 0, 0, NONE, NONE, 8, IMM) \
     X(PUSH_IMM32, "push", 0, 1, 0x68, NO, 4, 0, 0, NONE, NONE, 8, IMM) \
+    X(PUSH_R16, "push", 0x66, 1, 0x50, PR, 0, 0, 0, NONE, GW, 2, RM) \
+    X(POP_R16, "pop", 0x66, 1, 0x58, PR, 0, 0, 0, NONE, GW, 2, RM) \
+    X(PUSH_RM16, "push", 0x66, 1, 0xff, D6, 0, 0, 0, NONE, EW, 2, RM) \
+    X(POP_RM16, "pop", 0x66, 1, 0x8f, D0, 0, 0, 0, NONE, EW, 2, RM) \
+    X(PUSHW_IMM16, "pushw", 0x66, 1, 0x68, NO, 2, 0, 0, NONE, NONE, 2, IMM) \
     X(CALL_REL32, "call", 0, 1, 0xe8, NO, 0, 4, 0, NONE, NONE, 0, REL) \
     X(CALL_RM64, "call", 0, 1, 0xff, D2, 0, 0, 0, NONE, EQ, 8, RM) \
     X(JMP_REL8, "jmp", 0, 1, 0xeb, NO, 0, 1, 0, NONE, NONE, 0, REL) \
     X(JMP_REL32, "jmp", 0, 1, 0xe9, NO, 0, 4, 0, NONE, NONE, 0, REL) \
     X(JMP_RM64, "jmp", 0, 1, 0xff, D4, 0, 0, 0, NONE, EQ, 8, RM) \
+    X(CALL_FAR_M32, "call", 0x66, 1, 0xff, D3, 0, 0, 0, NONE, M, 4, RM) \
+    X(CALL_FAR_M48, "call", 0, 1, 0xff, D3, 0, 0, 0, NONE, M, 6, RM) \
+    X(CALL_FAR_M80, "rex.w call", 0, 1, 0xff, D3, 0, 0, 1, NONE, M, 6, RM) \
+    X(JMP_FAR_M32, "jmp", 0x66, 1, 0xff, D5, 0, 0, 0, NONE, M, 4, RM) \
+    X(JMP_FAR_M48, "jmp", 0, 1, 0xff, D5, 0, 0, 0, NONE, M, 6, RM) \
+    X(JMP_FAR_M80, "rex.w jmp", 0, 1, 0xff, D5, 0, 0, 1, NONE, M, 6, RM) \
     BUSTER_X86_CONDITION_FORMS(X, O, "o", 0) \
     BUSTER_X86_CONDITION_FORMS(X, NO, "no", 1) \
     BUSTER_X86_CONDITION_FORMS(X, B, "b", 2) \
@@ -1052,6 +1133,22 @@ typedef enum X86Syntax
     BUSTER_X86_ATOMIC_FORMS(X, XADD, "xadd", 0x0fc0, 0x0fc1) \
     X(CMPXCHG16B_M128, "cmpxchg16b", 0, 2, 0x0fc7, D1, 0, 0, 1, NONE, M, 16, RM) \
     X(LOCK_CMPXCHG16B_M128, "lock cmpxchg16b", 0xf0, 2, 0x0fc7, D1, 0, 0, 1, NONE, M, 16, RM) \
+    X(CMPXCHG8B_M64, "cmpxchg8b", 0, 2, 0x0fc7, D1, 0, 0, 0, NONE, M, 8, RM) \
+    X(LOCK_CMPXCHG8B_M64, "lock cmpxchg8b", 0xf0, 2, 0x0fc7, D1, 0, 0, 0, NONE, M, 8, RM) \
+    BUSTER_X86_LOCK_ARITHMETIC_FORMS(X, ADD, "add", 0) \
+    BUSTER_X86_LOCK_ARITHMETIC_FORMS(X, OR, "or", 1) \
+    BUSTER_X86_LOCK_ARITHMETIC_FORMS(X, ADC, "adc", 2) \
+    BUSTER_X86_LOCK_ARITHMETIC_FORMS(X, SBB, "sbb", 3) \
+    BUSTER_X86_LOCK_ARITHMETIC_FORMS(X, AND, "and", 4) \
+    BUSTER_X86_LOCK_ARITHMETIC_FORMS(X, SUB, "sub", 5) \
+    BUSTER_X86_LOCK_ARITHMETIC_FORMS(X, XOR, "xor", 6) \
+    BUSTER_X86_LOCK_UNARY_FORMS(X, INC, "inc", 0xfe, 0xff, 0) \
+    BUSTER_X86_LOCK_UNARY_FORMS(X, DEC, "dec", 0xfe, 0xff, 1) \
+    BUSTER_X86_LOCK_UNARY_FORMS(X, NOT, "not", 0xf6, 0xf7, 2) \
+    BUSTER_X86_LOCK_UNARY_FORMS(X, NEG, "neg", 0xf6, 0xf7, 3) \
+    BUSTER_X86_LOCK_BIT_TEST_FORMS(X, BTS, "bts", 0xab, 5) \
+    BUSTER_X86_LOCK_BIT_TEST_FORMS(X, BTR, "btr", 0xb3, 6) \
+    BUSTER_X86_LOCK_BIT_TEST_FORMS(X, BTC, "btc", 0xbb, 7) \
     X(CRC32_R32_RM8, "crc32", 0xf2, 3, 0x0f38f0, R, 0, 0, 0, GD, EB, 1, REG_RM) \
     X(CRC32_R32_RM16, "crc32", 0xf266, 3, 0x0f38f1, R, 0, 0, 0, GD, EW, 2, REG_RM) \
     X(CRC32_R32_RM32, "crc32", 0xf2, 3, 0x0f38f1, R, 0, 0, 0, GD, ED, 4, REG_RM) \
@@ -1132,6 +1229,117 @@ typedef enum X86Syntax
     X(PINSRB_X_RM32_IMM8, "pinsrb", 0x66, 3, 0x0f3a20, R, 1, 0, 0, V, ED, 1, REG_RM_IMM) \
     X(PINSRD_X_RM32_IMM8, "pinsrd", 0x66, 3, 0x0f3a22, R, 1, 0, 0, V, ED, 4, REG_RM_IMM) \
     X(PINSRQ_X_RM64_IMM8, "pinsrq", 0x66, 3, 0x0f3a22, R, 1, 0, 1, V, EQ, 8, REG_RM_IMM) \
+    BUSTER_X86_STRING_FORMS(X, MOVS, "movs", 0, 0xa4, 0xa5) \
+    BUSTER_X86_STRING_FORMS(X, REP_MOVS, "rep movs", 0xf3, 0xa4, 0xa5) \
+    BUSTER_X86_STRING_FORMS(X, REPNE_MOVS, "repne movs", 0xf2, 0xa4, 0xa5) \
+    BUSTER_X86_STRING_FORMS(X, STOS, "stos", 0, 0xaa, 0xab) \
+    BUSTER_X86_STRING_FORMS(X, REP_STOS, "rep stos", 0xf3, 0xaa, 0xab) \
+    BUSTER_X86_STRING_FORMS(X, REPNE_STOS, "repne stos", 0xf2, 0xaa, 0xab) \
+    BUSTER_X86_STRING_FORMS(X, LODS, "lods", 0, 0xac, 0xad) \
+    BUSTER_X86_STRING_FORMS(X, REP_LODS, "rep lods", 0xf3, 0xac, 0xad) \
+    BUSTER_X86_STRING_FORMS(X, REPNE_LODS, "repne lods", 0xf2, 0xac, 0xad) \
+    BUSTER_X86_STRING_FORMS(X, CMPS, "cmps", 0, 0xa6, 0xa7) \
+    BUSTER_X86_STRING_FORMS(X, REPE_CMPS, "repe cmps", 0xf3, 0xa6, 0xa7) \
+    BUSTER_X86_STRING_FORMS(X, REPNE_CMPS, "repne cmps", 0xf2, 0xa6, 0xa7) \
+    BUSTER_X86_STRING_FORMS(X, SCAS, "scas", 0, 0xae, 0xaf) \
+    BUSTER_X86_STRING_FORMS(X, REPE_SCAS, "repe scas", 0xf3, 0xae, 0xaf) \
+    BUSTER_X86_STRING_FORMS(X, REPNE_SCAS, "repne scas", 0xf2, 0xae, 0xaf) \
+    X(XLATB, "xlatb", 0, 1, 0xd7, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(CLC, "clc", 0, 1, 0xf8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(STC, "stc", 0, 1, 0xf9, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(CMC, "cmc", 0, 1, 0xf5, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(CLD, "cld", 0, 1, 0xfc, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(STD, "std", 0, 1, 0xfd, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(LAHF, "lahf", 0, 1, 0x9f, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(SAHF, "sahf", 0, 1, 0x9e, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(PUSHFW, "pushfw", 0x66, 1, 0x9c, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(PUSHFQ, "pushfq", 0, 1, 0x9c, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(POPFW, "popfw", 0x66, 1, 0x9d, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(POPFQ, "popfq", 0, 1, 0x9d, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(LOOP_REL8, "loop", 0, 1, 0xe2, NO, 0, 1, 0, NONE, NONE, 0, REL) \
+    X(LOOPE_REL8, "loope", 0, 1, 0xe1, NO, 0, 1, 0, NONE, NONE, 0, REL) \
+    X(LOOPNE_REL8, "loopne", 0, 1, 0xe0, NO, 0, 1, 0, NONE, NONE, 0, REL) \
+    X(JRCXZ_REL8, "jrcxz", 0, 1, 0xe3, NO, 0, 1, 0, NONE, NONE, 0, REL) \
+    X(XCHG_R16_AX, "xchg", 0x66, 1, 0x90, PR, 0, 0, 0, NONE, GW, 2, RM_ACC) \
+    X(XCHG_R32_EAX, "xchg", 0, 1, 0x90, PR, 0, 0, 0, NONE, GD, 4, RM_ACC) \
+    X(XCHG_R64_RAX, "xchg", 0, 1, 0x90, PR, 0, 0, 1, NONE, GQ, 8, RM_ACC) \
+    X(MOVABS_AX_MOFFS, "movabs", 0x66, 1, 0xa1, NO, 8, 0, 0, NONE, NONE, 2, ACC_MOFFS) \
+    X(MOVABS_MOFFS_AX, "movabs", 0x66, 1, 0xa3, NO, 8, 0, 0, NONE, NONE, 2, MOFFS_ACC) \
+    X(RETFD, "retfd", 0, 1, 0xcb, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(RETFD_IMM16, "retfd", 0, 1, 0xca, NO, 2, 0, 0, NONE, NONE, 0, IMM) \
+    X(RETFQ, "retfq", 0, 1, 0xcb, NO, 0, 0, 1, NONE, NONE, 0, NONE) \
+    X(RETFQ_IMM16, "retfq", 0, 1, 0xca, NO, 2, 0, 1, NONE, NONE, 0, IMM) \
+    X(RETFW, "retfw", 0x66, 1, 0xcb, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(RETFW_IMM16, "retfw", 0x66, 1, 0xca, NO, 2, 0, 0, NONE, NONE, 0, IMM) \
+    /* GNU as only takes the 64-bit LFS, LGS and LSS as rex.w with a 32-bit register name. */ \
+    X(LFS_R16_M32, "lfs", 0x66, 2, 0x0fb4, R, 0, 0, 0, GW, M, 4, REG_RM) \
+    X(LFS_R32_M48, "lfs", 0, 2, 0x0fb4, R, 0, 0, 0, GD, M, 6, REG_RM) \
+    X(LFS_R64_M80, "rex.w lfs", 0, 2, 0x0fb4, R, 0, 0, 1, GD, M, 6, REG_RM) \
+    X(LGS_R16_M32, "lgs", 0x66, 2, 0x0fb5, R, 0, 0, 0, GW, M, 4, REG_RM) \
+    X(LGS_R32_M48, "lgs", 0, 2, 0x0fb5, R, 0, 0, 0, GD, M, 6, REG_RM) \
+    X(LGS_R64_M80, "rex.w lgs", 0, 2, 0x0fb5, R, 0, 0, 1, GD, M, 6, REG_RM) \
+    X(LSS_R16_M32, "lss", 0x66, 2, 0x0fb2, R, 0, 0, 0, GW, M, 4, REG_RM) \
+    X(LSS_R32_M48, "lss", 0, 2, 0x0fb2, R, 0, 0, 0, GD, M, 6, REG_RM) \
+    X(LSS_R64_M80, "rex.w lss", 0, 2, 0x0fb2, R, 0, 0, 1, GD, M, 6, REG_RM) \
+    X(ADCX_R32_RM32, "adcx", 0x66, 3, 0x0f38f6, R, 0, 0, 0, GD, ED, 4, REG_RM) \
+    X(ADCX_R64_RM64, "adcx", 0x66, 3, 0x0f38f6, R, 0, 0, 1, GQ, EQ, 8, REG_RM) \
+    X(ADOX_R32_RM32, "adox", 0xf3, 3, 0x0f38f6, R, 0, 0, 0, GD, ED, 4, REG_RM) \
+    X(ADOX_R64_RM64, "adox", 0xf3, 3, 0x0f38f6, R, 0, 0, 1, GQ, EQ, 8, REG_RM) \
+    X(AADD_M32_R32, "aadd", 0, 3, 0x0f38fc, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(AADD_M64_R64, "aadd", 0, 3, 0x0f38fc, R, 0, 0, 1, GQ, M, 8, RM_REG) \
+    X(AAND_M32_R32, "aand", 0x66, 3, 0x0f38fc, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(AAND_M64_R64, "aand", 0x66, 3, 0x0f38fc, R, 0, 0, 1, GQ, M, 8, RM_REG) \
+    X(AOR_M32_R32, "aor", 0xf2, 3, 0x0f38fc, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(AOR_M64_R64, "aor", 0xf2, 3, 0x0f38fc, R, 0, 0, 1, GQ, M, 8, RM_REG) \
+    X(AXOR_M32_R32, "axor", 0xf3, 3, 0x0f38fc, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(AXOR_M64_R64, "axor", 0xf3, 3, 0x0f38fc, R, 0, 0, 1, GQ, M, 8, RM_REG) \
+    X(MOVBE_R16_M16, "movbe", 0x66, 3, 0x0f38f0, R, 0, 0, 0, GW, M, 2, REG_RM) \
+    X(MOVBE_R32_M32, "movbe", 0, 3, 0x0f38f0, R, 0, 0, 0, GD, M, 4, REG_RM) \
+    X(MOVBE_R64_M64, "movbe", 0, 3, 0x0f38f0, R, 0, 0, 1, GQ, M, 8, REG_RM) \
+    X(MOVBE_M16_R16, "movbe", 0x66, 3, 0x0f38f1, R, 0, 0, 0, GW, M, 2, RM_REG) \
+    X(MOVBE_M32_R32, "movbe", 0, 3, 0x0f38f1, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(MOVBE_M64_R64, "movbe", 0, 3, 0x0f38f1, R, 0, 0, 1, GQ, M, 8, RM_REG) \
+    X(MOVRS_R8_M8, "movrs", 0, 3, 0x0f388a, R, 0, 0, 0, GB, M, 1, REG_RM) \
+    X(MOVRS_R16_M16, "movrs", 0x66, 3, 0x0f388b, R, 0, 0, 0, GW, M, 2, REG_RM) \
+    X(MOVRS_R32_M32, "movrs", 0, 3, 0x0f388b, R, 0, 0, 0, GD, M, 4, REG_RM) \
+    X(MOVRS_R64_M64, "movrs", 0, 3, 0x0f388b, R, 0, 0, 1, GQ, M, 8, REG_RM) \
+    X(MOVDIRI_M32_R32, "movdiri", 0, 3, 0x0f38f9, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(MOVDIRI_M64_R64, "movdiri", 0, 3, 0x0f38f9, R, 0, 0, 1, GQ, M, 8, RM_REG) \
+    /* A 64-byte memory operand, which GNU as takes without a size. */ \
+    X(MOVDIR64B_R64_M512, "movdir64b", 0x66, 3, 0x0f38f8, R, 0, 0, 0, GQ, M, 0, REG_RM) \
+    X(XBEGIN_REL32, "xbegin", 0, 2, 0xc7f8, NO, 0, 4, 0, NONE, NONE, 0, REL) \
+    X(XABORT_IMM8, "xabort", 0, 2, 0xc6f8, NO, 1, 0, 0, NONE, NONE, 0, IMM) \
+    X(XEND, "xend", 0, 3, 0x0f01d5, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(XTEST, "xtest", 0, 3, 0x0f01d6, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(XSUSLDTRK, "xsusldtrk", 0xf2, 3, 0x0f01e8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(XRESLDTRK, "xresldtrk", 0xf2, 3, 0x0f01e9, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(PTWRITE_RM32, "ptwrite", 0xf3, 2, 0x0fae, D4, 0, 0, 0, NONE, ED, 4, RM) \
+    X(PTWRITE_RM64, "ptwrite", 0xf3, 2, 0x0fae, D4, 0, 0, 1, NONE, EQ, 8, RM) \
+    X(RDRAND_R16, "rdrand", 0x66, 2, 0x0fc7, D6, 0, 0, 0, NONE, GW, 2, RM) \
+    X(RDRAND_R32, "rdrand", 0, 2, 0x0fc7, D6, 0, 0, 0, NONE, GD, 4, RM) \
+    X(RDRAND_R64, "rdrand", 0, 2, 0x0fc7, D6, 0, 0, 1, NONE, GQ, 8, RM) \
+    X(RDSEED_R16, "rdseed", 0x66, 2, 0x0fc7, D7, 0, 0, 0, NONE, GW, 2, RM) \
+    X(RDSEED_R32, "rdseed", 0, 2, 0x0fc7, D7, 0, 0, 0, NONE, GD, 4, RM) \
+    X(RDSEED_R64, "rdseed", 0, 2, 0x0fc7, D7, 0, 0, 1, NONE, GQ, 8, RM) \
+    X(RDPID_R64, "rdpid", 0xf3, 2, 0x0fc7, D7, 0, 0, 0, NONE, GQ, 8, RM) \
+    X(TPAUSE_R32, "tpause", 0x66, 2, 0x0fae, D6, 0, 0, 0, NONE, GD, 4, RM) \
+    X(UMONITOR_R64, "umonitor", 0xf3, 2, 0x0fae, D6, 0, 0, 0, NONE, GQ, 8, RM) \
+    X(UMWAIT_R32, "umwait", 0xf2, 2, 0x0fae, D6, 0, 0, 0, NONE, GD, 4, RM) \
+    X(NOP_RM64, "nop", 0, 2, 0x0f1f, D0, 0, 0, 1, NONE, EQ, 8, RM) \
+    X(PREFETCH_M8, "prefetch", 0, 2, 0x0f0d, D0, 0, 0, 0, NONE, M, 1, RM) \
+    X(PREFETCHW_M8, "prefetchw", 0, 2, 0x0f0d, D1, 0, 0, 0, NONE, M, 1, RM) \
+    X(PREFETCHWT1_M8, "prefetchwt1", 0, 2, 0x0f0d, D2, 0, 0, 0, NONE, M, 1, RM) \
+    X(PREFETCHRST2_M8, "prefetchrst2", 0, 2, 0x0f18, D4, 0, 0, 0, NONE, M, 1, RM) \
+    /* RIP-relative addresses only: with another, they're NOPs. */ \
+    X(PREFETCHIT0_M8, "prefetchit0", 0, 2, 0x0f18, D7, 0, 0, 0, NONE, M, 1, RM) \
+    X(PREFETCHIT1_M8, "prefetchit1", 0, 2, 0x0f18, D6, 0, 0, 0, NONE, M, 1, RM) \
+    X(CLFLUSH_M8, "clflush", 0, 2, 0x0fae, D7, 0, 0, 0, NONE, M, 1, RM) \
+    X(CLFLUSHOPT_M8, "clflushopt", 0x66, 2, 0x0fae, D7, 0, 0, 0, NONE, M, 1, RM) \
+    X(CLWB_M8, "clwb", 0x66, 2, 0x0fae, D6, 0, 0, 0, NONE, M, 1, RM) \
+    X(CLDEMOTE_M8, "cldemote", 0, 2, 0x0f1c, D0, 0, 0, 0, NONE, M, 1, RM) \
+    X(CLZERO, "clzero", 0, 3, 0x0f01fc, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(MONITORX, "monitorx", 0, 3, 0x0f01fa, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(MWAITX, "mwaitx", 0, 3, 0x0f01fb, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     BUSTER_X86_X87_ARITHMETIC_FORMS(X, FADD, "fadd", 0, 0) \
     BUSTER_X86_X87_ARITHMETIC_FORMS(X, FMUL, "fmul", 1, 1) \
     BUSTER_X86_X87_ARITHMETIC_FORMS(X, FSUB, "fsub", 4, 5) \
