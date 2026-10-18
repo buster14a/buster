@@ -60,3 +60,11 @@ jobs:
           # Pin to one permitted CPU to avoid migration noise in throughput measurements.
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-lexer src
+
+      - name: Test the x86-64 encoder
+        run: ./build/compiler test-x86-encoder
+
+      - name: Benchmark the x86-64 encoder
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-x86-encoder
