@@ -54,3 +54,9 @@ jobs:
         run: |
           ./build/compiler test-lexer
           ./build/compiler test-lexer --cplusplus
+
+      - name: Benchmark the C lexer on the repository sources
+        run: |
+          # Pin to one permitted CPU to avoid migration noise in throughput measurements.
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-lexer src
