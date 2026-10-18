@@ -12,18 +12,18 @@ behind each choice, and what comes next.
 
 On the Ryzen 7 9700X (Zen 5, clang 23, `build.sh`'s `-O3 -march=native`),
 pinned to one CPU, `x86_encode` encodes a compiler-like instruction mix at
-**0.66 ns per instruction** (1.5 G instructions/s, 6.0 GB/s of machine code,
-about 3.6 cycles per instruction), and a vectorized-code mix of AVX-512, AVX2
-and BMI at 0.65 ns (9.3 GB/s). That is:
+**0.62 ns per instruction** (1.6 G instructions/s, 6.4 GB/s of machine code,
+3.36 cycles per instruction), and a vectorized-code mix of AVX-512, AVX2 and
+BMI at 0.63 ns (9.6 GB/s). That is:
 
-- **16.4×** a plain one-instruction-at-a-time scalar encoder on the compiler
-  mix (10.83 ns), 18.6× on the vector mix and 29× on a uniform mix of every
-  form (19.31 ns), where the scalar encoder's branches mispredict;
+- **17.6×** a plain one-instruction-at-a-time scalar encoder on the compiler
+  mix (10.93 ns), 19.5× on the vector mix and 30× on a uniform mix of every
+  form (19.38 ns), where the scalar encoder's branches mispredict;
 - **7.5–9.6×** the historical `encode_wide` (with its defects fixed) on the
   subset of instructions it can encode: 0.63 ns against 4.8–6.1 ns, for
-  byte-identical output (measured before VEX and EVEX support, which costs
-  6–9% on long streams of the compiler mix, 0.61–0.62 ns before, and more on
-  short calls and with offsets: see "Evaluation");
+  byte-identical output (measured before VEX and EVEX support, whose first
+  version cost 6–9% on long streams; `x86_encode` is back to the speed it had
+  before them, 3.36 cycles per instruction: see "Evaluation");
 - byte-identical to GNU as 2.47 on 1.7 million random instructions covering
   all 1,174 forms (568 legacy, 288 VEX and 318 EVEX).
 
@@ -146,7 +146,8 @@ x86_validate checks.
 
 ### The loop
 
-`x86_encode` works on groups of 16 instructions, two per iteration:
+`x86_encode` works on groups of 16 instructions, four per iteration of its
+outer loop (the loop over them stays rolled: see "Zen 5's costs"):
 
 1. **Load.** Four records per ZMM register, and each form's template (a YMM
    load and `vinserti64x4` per two, `vshufi64x2` to split bytes from layouts).
@@ -160,9 +161,9 @@ x86_validate checks.
    the mode always has (and which operand bits it forbids). Three
    `vpmultishiftqb` put every register field where it goes in the canonical
    dword. What depends on values (RBP and R13 bases, RSP and R12 bases, the
-   displacement's size, REX for SPL–DIL, VEX2) are masks built with one-cycle
-   arithmetic. The result is each instruction's canonical bytes, the presence
-   bits of its canonical slot, its length and whether it's valid.
+   displacement's size, REX for SPL–DIL, VEX2) are masks built with arithmetic
+   any vector pipe runs. The result is each instruction's canonical bytes, the
+   presence bits of its canonical slot, its length and whether it's valid.
 3. **Assemble**, 4 instructions per ZMM register: `vpshufb` puts each canonical
    byte at its position, a `vpternlogd` XORs the template's bytes in,
    `vpshufbitqmb` picks the presence bit of each position by the layout, and
@@ -170,13 +171,16 @@ x86_validate checks.
    one after the other, stored with one 64-byte store and appended by the
    popcount of the mask.
 
-Every 64-byte store stays inside the output's capacity
-(`BUSTER_X86_ENCODER_CAPACITY(count)`, 15 bytes per instruction): a quad's
-store starts after at most 15 bytes per earlier instruction, so it ends by
-`15 * (i - 4) + 64 < 15 * count` bytes in while `i < count`. The last iteration
-uses masked stores, and the last partial group goes through a zeroed copy, so
-no load reads past the input. The page-edge test places inputs, outputs and
-offsets against `PROT_NONE` pages to check both.
+Every store is a full 64-byte one, inside the output's capacity
+(`BUSTER_X86_ENCODER_CAPACITY(count)`: 15 bytes per instruction, and 64 more):
+a quad's store starts after at most 15 bytes per earlier instruction (a zeroed
+copy's padding adds none), so it ends by `15 * count + 64` bytes in. With a
+capacity of 15 bytes per instruction alone, only the last quad's store could
+pass it, but the last two groups took masked stores (a `kmovq k, r` and a
+masked store per quad), which made calls of 16 instructions about 5% slower.
+The last partial group goes through a zeroed copy, so no load reads past the
+input. The page-edge test places inputs, outputs and offsets against
+`PROT_NONE` pages to check both.
 
 ### What Niles Salter's tokenizer suggested
 
@@ -208,33 +212,58 @@ Facile (Abel and Reineke's tools, Intel-only) come within about 1% (the
 uops.info's measured Zen 5 data and from the 9700X itself.
 
 What uops.info shows for Zen 5's four vector pipes (FP0–FP3) matters more than
-instruction counts:
+instruction counts. Microbenchmarks on the 9700X (blocks of independent
+instructions, alone and mixed with ones of known pipes) confirm it, except that
+broadcasts from memory take no vector pipe:
 
 | Pipes | Instructions (ZMM) |
 | --- | --- |
-| FP1, FP2 only | cross-lane permutes (`vpermd`, `vpermt2d`, `vshufi64x2`, `valignd`), `vpshufb`, `vpshufbitqmb`, `vinserti64x4`, compares into mask registers (`vpcmpd`, `vptestmd`, latency 6), broadcasts from memory, `vpcompressb` (2 µops), a mask register from a general one (`kmovq k, r`: 2 µops) |
-| FP0–FP3 | `vpternlogd`, `vpandd`, `vpaddd`, masked moves, `vpmovm2d`, in-lane `vpshufd` and `vpunpck*`, merge-masked loads |
-| FP2, FP3 | shifts |
-| FP0, FP1 | `vpmultishiftqb` |
-| FP0, FP3 | mask register logic (`kandw`, `korw`) |
+| FP1, FP2 only | cross-lane permutes (`vpermd`, `vpermt2d`, `vshufi64x2`, `valignd`), `vpshufb`, `vpshufbitqmb`, `vinserti64x4` (from memory too), compares into mask registers (`vpcmpd`, `vptestmd`), `vpcompressb` (2 µops), a mask register from a general one (`kmovq k, r`, one per cycle) |
+| FP0–FP3 | `vpternlogd`, `vpandd`, `vpaddd`, `vpminud`, masked moves, `vpmovm2d`, in-lane `vpshufd` and `vpunpck*`, merge-masked loads |
+| FP2, FP3 | shifts, variable ones too |
+| FP0, FP1 | `vpmultishiftqb`, rotates |
+| FP0, FP3 | `vpopcntd`, `vplzcntd`, mask register logic (`kandw`, `korw`) |
+| none | loads, two per cycle at any width, broadcasts and `{1to16}` operands among them; a general register from a mask register (`kmovq r, k`) |
+
+A 64-byte store takes a cycle (two 32-byte ones take one), and stores slow
+`vpternlogd` down: four of each take 5.25 cycles, where the stores alone take
+4. Latencies, from chains of dependent instructions (a chain of scalar adds
+takes a cycle per add), are what the loop's dependency chains are made of:
+
+| Cycles | Instructions |
+| ---: | --- |
+| 2 | `vpaddd` (XMM, YMM and ZMM alike), `vpternlogd`, `vpandd`, `vpminud`, shifts, rotates, `vplzcntd`, `vpopcntd`, `vpunpck*`, `vpshufd`, `vpshufb`, `vinserti64x4` from a register |
+| 3 | `vpmultishiftqb` |
+| 5 | `vpermd`, `vpermt2d`, `vshufi64x2`, `valignd`, `vpcompressb` |
+| 8 | `vptestmd` then `vpmovm2d`; `vpshufbitqmb` then `vpmovm2b` |
+| 10 | `kmovq r, k`, `popcnt`, `kmovq k, r` |
+| 11 | a 64-byte store and the load it forwards to |
 
 The first version spent about 94 µops per 16 instructions on FP1 and FP2, a
 floor of 47 cycles, against 72 measured. Moving the transposes to in-lane
 unpacks, the addressing mode logic to tables, the register fields to
 `vpmultishiftqb`, and the masks to arithmetic (a zero test of a small value is
-`(x - 1) >> 31`, two one-cycle operations, where a compare and `vpmovm2d`
-take eight cycles on FP1/FP2) brought that to 48. Clang needed steering: it
-turns two-input shuffles into `vpermt2d` and masked moves of constants into
-masked broadcasts, both FP1/FP2 µops, and spills mask registers it has too
-many of (a reload is 2 more).
+`(x - 1) >> 31`, two operations of two cycles on any pipe, where a compare and
+`vpmovm2d` take eight cycles on FP1/FP2) brought that to 48. Clang needed
+steering: it turns two-input shuffles into `vpermt2d` and masked moves of
+constants into masked broadcasts, both FP1/FP2 µops, and spills mask registers
+it has too many of (a reload is 2 more). It also sees that each of Phase III's
+unpacks of the immediate takes half of it and merges one with the record
+unpack it came from into a `vpermt2d` with a loaded index, a 5-cycle FP1/FP2
+µop on Phase III's path, which an empty `asm` statement on the immediate
+prevents.
 
-Past that, `perf stat` on the 9700X shows that throughput is limited by how
-much of a group's long dependency chain (template load, compares, presence,
-`vpshufbitqmb`, popcount, store address: about 50 cycles) the out-of-order
-window can overlap: dispatch stalls on the load queue for 39% of cycles. Taking
-the forms from the records already in registers (16 fewer loads per group)
-cuts those to 12%, but stalls on the FP scheduler rise from 7% to 42%, and it
-is slower. Shortening that chain is where the next gains are.
+Past that, throughput is limited by how much of a group's dependency chain the
+out-of-order window can overlap. The chain is about 50 cycles: the form, the
+template (an insert, `vshufi64x2` and two unpacks) and its flags take about 25,
+and from the flags to the store about 12 two-cycle operations, `vpshufbitqmb`
+and `vpcompressb` take about 25 more. While the window holds about two groups,
+dispatch stalls on the FP scheduler (23% of cycles) and the load queue. Adding 8
+broadcast loads or 8 register operations per group costs the same 2–3%, so
+neither is the limit by itself. Taking the forms from the records already in
+registers (16 fewer loads per group) cut the load-queue stalls from 39% of
+cycles to 12% before VEX and EVEX, but stalls on the FP scheduler rose from 7%
+to 42%, and it is slower. Shortening that chain is where the next gains are.
 
 VEX and EVEX added about 20 operations per group (the prefix bytes, the
 compressibility bitmask, the second template dword), but what first cost the
@@ -244,63 +273,87 @@ canonical dword, which made the compiler mix 18% slower (0.77 ns), with FP
 scheduler stalls doubled. Computing REX and the prefix from the register fields
 before ModRM.mod, the compressibility for every scale before the template, and
 the presence bits with the latest terms last brought it to 0.66–0.67 ns, so
-that only a few operations wait for the template. The difference that remains
-is in the two-groups-per-iteration loop: one group per iteration is as fast as
-it was (3.56 against 3.59 cycles per instruction), but interleaving a second
-group no longer gains the 5–10% it did. That loop has 415 instructions per 32
-encoded against 386, at the same IPC, and about 45 distinct constants, so more
-of them are memory broadcast operands: load-queue stalls rose (71 to 84 million
-cycles in a run) as FP scheduler stalls fell (46 to 29 million). Two attempts
-didn't help: looking rm's base properties up in a constant with
-`vpmultishiftqb` (6 operations fewer per group, the same cycles: it moves work
-to FP1 and FP2), and telling VEX2 forms from their numbers rather than their
-templates (about 1.5% faster, but it needs the form table ordered by an
-encoding property).
+that only a few operations wait for the template.
+
+The 6–9% that remained came from how clang compiled the loop. With the bigger
+group, clang no longer unrolls the loop over an iteration's groups, so every
+width ran a one-group loop (`perf record` puts 99% of the samples there; the
+two-group loop earlier measurements counted is a colder one). Unrolling it by
+force makes 32 per iteration 14% slower: two groups' code spills (19 stack
+references in 517 instructions). What recovered it:
+
+- **Full stores only**: the capacity's 64 more bytes (see "The loop"), so that
+  the last groups don't take masked stores; calls of 16 instructions are 4–6%
+  faster.
+- **A loop with offsets and one without**: once the masked-store loop was gone,
+  the test for offsets in each group made clang rotate 17 vector registers
+  through copies every iteration in the loop with offsets (34 more `vmovdqa64`
+  per group); each loop specialized for its case has none.
+- **No `vpermt2d` in Phase III** (the `asm` statement above).
+- **Invalid lanes OR'ed into a vector** and tested once at the end, rather than
+  a compare into a mask register and a `kmovd` per group, and each quad's
+  presence bits copied with one `vpshufd`, rather than an unpack and a
+  `vpshufd`.
+
+The widths still compile differently. Clang's code for 64's loop (and 32's)
+broadcasts constants into registers where 16's folds them into operations as
+`{1to16}` operands: it has 16% more instructions, and it is 9% faster, with
+dispatch stalled on the load queue 3.9% of cycles against 19.5%, and on the FP
+scheduler 23% against 26%. Folded constants alone aren't slower (a
+microbenchmark of operations waiting for a late value shows the opposite), so
+it's the schedule as a whole. Small changes to the source move clang's choices,
+which is why the benchmark keeps every width. Two attempts didn't help: looking
+rm's base properties up in a constant with `vpmultishiftqb` (6 operations fewer
+per group, the same cycles: it moves work to FP1 and FP2), and telling VEX2
+forms from their numbers rather than their templates (about 1.5% faster, but it
+needs the form table ordered by an encoding property).
 
 ## Evaluation
 
 `./build/compiler benchmark-x86-encoder` on the 9700X, `taskset -c 2`,
-nanoseconds per encoded instruction (the median of three runs, each the median
-of 21 passes over at least 4 million instructions), with 32 per iteration
-before VEX and EVEX for comparison:
+nanoseconds per encoded instruction (the median of five runs, each the median
+of 21 passes over at least 4 million instructions), with `x86_encode` before
+the changes above (32 per iteration) for comparison:
 
-| Stream | 4 | 8 | 16 | **32** | 64 | scalar | 32, before |
+| Stream | 4 | 8 | 16 | 32 | **64** | scalar | before |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,024 instructions (L1) | 1.48 | 0.98 | 0.70 | **0.69** | 0.64 | 5.15* | 0.57 |
-| 16,384 mixed (L2) | 1.49 | 1.16 | 0.65 | **0.66** | 0.67 | 10.83 | 0.61 |
-| 16,384 vector | 1.49 | 1.13 | 0.65 | **0.65** | 0.64 | 12.09 | |
-| 16,384 uniform | 1.49 | 1.19 | 0.68 | **0.67** | 0.67 | 19.31 | 0.64† |
-| 16,384, with offsets | 1.71 | 1.30 | 0.74 | **0.75** | 0.75 | 10.72 | 0.64 |
-| calls of 16 | 1.57 | 1.11 | 0.75 | **0.73** | 0.73 | 11.56 | 0.65 |
-| calls of 64 | 1.51 | 1.12 | 0.67 | **0.68** | 0.70 | 11.07 | 0.61 |
-| calls of 256 | 1.50 | 1.15 | 0.66 | **0.67** | 0.67 | 10.90 | 0.62 |
-| 262,144 mixed | 1.50 | 1.17 | 0.66 | **0.66** | 0.66 | 12.63 | 0.62 |
+| 1,024 instructions (L1) | 1.45 | 1.02 | 0.64 | 0.61 | **0.65** | 5.12* | 0.67 |
+| 16,384 mixed (L2) | 1.46 | 1.10 | 0.68 | 0.64 | **0.62** | 10.93 | 0.66 |
+| 16,384 vector | 1.45 | 1.08 | 0.70 | 0.65 | **0.63** | 12.27 | 0.65 |
+| 16,384 uniform | 1.45 | 1.12 | 0.68 | 0.66 | **0.64** | 19.38 | 0.68 |
+| 16,384, with offsets | 1.67 | 1.28 | 0.70 | 0.70 | **0.69** | 10.85 | 0.75 |
+| calls of 16 | 1.53 | 1.12 | 0.70 | 0.70 | **0.70** | 11.50 | 0.73 |
+| calls of 64 | 1.48 | 1.10 | 0.67 | 0.65 | **0.65** | 11.08 | 0.68 |
+| calls of 256 | 1.47 | 1.09 | 0.68 | 0.63 | **0.63** | 10.98 | 0.67 |
+| 262,144 mixed | 1.46 | 1.09 | 0.68 | 0.65 | **0.63** | 12.71 | 0.66 |
 
-The column is instructions per loop iteration. The mixed streams have only
-legacy forms, as the "before" column does. *The scalar encoder's 5.15 ns on
-1,024 instructions is flattering: the same short stream repeated thousands of
-times lets the branch predictor learn it; and that row varies by about 10%
-between runs (where the buffers land), the others by about 3%. †Over the 568
-forms of then.
+The column is instructions per iteration of the outer loop. The mixed streams
+have only legacy forms. In cycles, 64 per iteration takes 3.36 per instruction
+of the compiler mix, as 32 per iteration did before VEX and EVEX, against 3.59
+before the changes above. *The scalar encoder's 5.12 ns on 1,024 instructions
+is flattering: the same short stream repeated thousands of times lets the
+branch predictor learn it; and that row varies by about 10% between runs (where
+the buffers land), the others by about 3%, and a build by up to 4% when other
+code moves (the scalar encoder's, which these changes don't touch, did).
 
 Below 16, Phase II's 16 lanes are partly empty (4 and 8 per iteration use a
 quarter and a half of them), so the fixed cost per group dominates. 16, 32 and
-64 are now within 2% of each other everywhere but the noisy L1 row (see "Zen 5's
-costs" for why a second group no longer helps), so `x86_encode` keeps 32.
+64 run the same one-group loop with different code (see "Zen 5's costs"), and
+64's is the fastest everywhere but the noisy L1 row, so `x86_encode` uses 64.
 
 The variants that lost (all at 16 per iteration, 16,384 mixed):
 
 | Variant | ns |
 | --- | ---: |
-| templates by `vinserti64x4` and form loads (`x86_encode_16`) | 0.65 |
-| forms taken from the records' vector registers | 0.79 |
-| templates by merge-masked loads, 16 bytes per lane | 0.79 |
+| templates by `vinserti64x4` and form loads (`x86_encode_16`) | 0.68 |
+| forms taken from the records' vector registers | 0.78 |
+| templates by merge-masked loads, 16 bytes per lane | 0.75 |
 | masked stores everywhere (exact output) | 0.68 |
-| compressing straight to memory | 0.85 |
+| compressing straight to memory | 0.81 |
 
 On Zen 4 (Ryzen 9 7940HS) everything ZMM costs about twice as much, memory
 `vpcompressb` is microcoded (about 170 cycles), and merge-masked ZMM loads are
-half-rate: 32 per iteration runs at about 1.1 ns there.
+half-rate: 64 per iteration runs at about 1.2 ns there.
 
 ## Correctness
 
@@ -339,20 +392,22 @@ past 15).
 
 ## Next steps
 
-- **More VEX and EVEX forms, and REX2.** Rows are data: gathers and scatters
-  (VSIB, with V' in the index), `/is4` register immediates, AVX-512 FP16 and
-  the forms of VL lengths the table lacks fit the same template; APX's REX2 and
-  its EVEX extensions would need a register's bit 4 in legacy forms.
+- **Every x86-64 instruction** (#17, with an issue per family, #18–#39). Rows
+  are data: gathers and scatters (VSIB, with V' in the index), `/is4` register
+  immediates, AVX-512 FP16 and the forms of VL lengths the table lacks fit the
+  same template; APX's REX2 and its EVEX extensions would need a register's
+  bit 4 in legacy forms.
 - **Relocations and labels.** The offsets output gives every instruction's
   start; a relocation field's offset is its start plus the position of
   canonical byte 4 (or 0) after compaction, which the presence bits and layout
   determine. Branch relaxation chooses forms before encoding, and Phase II's
   length alone is a cheap length-only pass for it.
-- **The full form table.** Generate the rows offline from the original Buster
-  catalogue's normalized forms; the template builder already rejects any that
-  don't fit.
 - **Threads.** Sections are independent: encode them in parallel into
   separate buffers.
-- **Speed.** Shortening each group's dependency chain (see "Zen 5's costs"), so
-  that the load queue and FP scheduler hold more groups at once; and fewer
-  constants and live vectors, so that two groups per iteration gain again.
+- **Speed.** Shortening each group's dependency chain (see "Zen 5's costs"),
+  so that the FP scheduler and the load queue hold more groups at once: the
+  flags arrive about 25 cycles into a group, after a 5-cycle `vshufi64x2`, so
+  templates loaded such that the flags need only in-lane shuffles, and fewer
+  operations between the flags and the store, are where to look. Clang's code
+  for the loop moves with small source changes, so check every width after
+  one.
