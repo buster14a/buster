@@ -59,7 +59,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0x3cf027ddc16d5e32ull
+#define BUSTER_X86_TEST_DIGEST 0xb8199356704f5df9ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -224,6 +224,11 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
     {
         result = true;
     }
+    // GNU as warns about a segment override on LEA, where it does nothing.
+    if (legacy && opcode == 0x8d && (instruction->mode & BUSTER_X86_MODE_SEGMENT))
+    {
+        result = true;
+    }
     // An x87 operation on ST(0) and ST(0) as fop st(0), st (DC) is the same as fop st, st(0), which is D8.
     if (legacy && register_direct && opcode == 0xdc && instruction->rm == 0)
     {
@@ -290,6 +295,11 @@ static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_inde
                 if (result.mode & BUSTER_X86_MODE_INDEX)
                 {
                     result.index = x86_random_register(state, BUSTER_X86_OPERAND_GQ, BUSTER_X86_FAMILY_LEGACY);
+                }
+                // An FS or GS segment override one time in eight (not with RIP).
+                if (!(result.mode & BUSTER_X86_MODE_RIP) && x86_random_below(state, 8) == 0)
+                {
+                    result.mode |= x86_random_below(state, 2) == 0 ? BUSTER_X86_MODE_FS : BUSTER_X86_MODE_GS;
                 }
                 result.displacement = x86_random_displacement(state, form->disp8_scale);
             }
@@ -397,6 +407,7 @@ static const char* x86_accumulator_name(uint32_t bytes)
 static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint32_t operand_bytes)
 {
     const uint8_t mode = instruction->mode;
+    const char* segment = (mode & BUSTER_X86_MODE_SEGMENT) == 0 ? "" : (mode & BUSTER_X86_MODE_SEGMENT_GS) ? "gs:" : "fs:";
     // A far pointer of 6 bytes is an fword; the x87 environment and state areas (14, 28, 94 and 108 bytes) and MOVDIR64B's
     // 64 bytes (0 in its row) have no size keyword.
     const char* size = operand_bytes == 1 ? "byte ptr " : operand_bytes == 2 ? "word ptr " : operand_bytes == 4 ? "dword ptr " : operand_bytes == 6 ? "fword ptr " :
@@ -404,11 +415,11 @@ static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint
                        operand_bytes == 32 ? "ymmword ptr " : operand_bytes == 64 ? "zmmword ptr " : "";
     if ((mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX | BUSTER_X86_MODE_RIP)) == 0)
     {
-        fprintf(file, "%sds:%d", size, instruction->displacement);
+        fprintf(file, "%s%s%d", size, *segment != 0 ? segment : "ds:", instruction->displacement);
     }
     else
     {
-        fprintf(file, "%s[", size);
+        fprintf(file, "%s%s[", size, segment);
         if (mode & BUSTER_X86_MODE_RIP)
         {
             fprintf(file, "rip");
@@ -815,6 +826,22 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_PREFETCHIT0_M8, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x10 }, 7, { 0x0f, 0x18, 0x3d, 0x10, 0x00, 0x00, 0x00 } },
     { { .form = X86_FORM_MOVDIR64B_R64_M512, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x66, 0x0f, 0x38, 0xf8, 0x01 } },
     { { .form = X86_FORM_RDPID_R64, .rm = X86_REGISTER_RAX }, 4, { 0xf3, 0x0f, 0xc7, 0xf8 } },
+    // Segment overrides: mov rax, qword ptr fs:[rax]; mov rax, qword ptr fs:0; lock add word ptr fs:[rax], cx; inc byte
+    // ptr fs:[rax]; push qword ptr gs:[rax]; fld tbyte ptr fs:[rax]; vmovdqu ymm0, ymmword ptr fs:[rax]; vmovdqu64 zmm0,
+    // zmmword ptr gs:[r9+rax*8+0x40]; and notrack jmp rax
+    { { .form = X86_FORM_MOV_R64_RM64, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_FS }, 4, { 0x64, 0x48, 0x8b, 0x00 } },
+    { { .form = X86_FORM_MOV_R64_RM64, .mode = BUSTER_X86_MEMORY_ABSOLUTE | BUSTER_X86_MODE_FS }, 9, { 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_LOCK_ADD_M16_R16, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_FS },
+      5,
+      { 0x64, 0x66, 0xf0, 0x01, 0x08 } },
+    { { .form = X86_FORM_INC_RM8, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_FS }, 3, { 0x64, 0xfe, 0x00 } },
+    { { .form = X86_FORM_PUSH_RM64, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_GS }, 3, { 0x65, 0xff, 0x30 } },
+    { { .form = X86_FORM_FLD_M80, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_FS }, 3, { 0x64, 0xdb, 0x28 } },
+    { { .form = X86_FORM_VMOVDQU_Y_YM256, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_FS }, 5, { 0x64, 0xc5, 0xfe, 0x6f, 0x00 } },
+    { { .form = X86_FORM_VMOVDQU64_Z_ZM512, .rm = X86_REGISTER_R9, .index = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3) | BUSTER_X86_MODE_GS, .displacement = 0x40 },
+      9,
+      { 0x65, 0x62, 0xd1, 0xfe, 0x48, 0x6f, 0x44, 0xc1, 0x01 } },
+    { { .form = X86_FORM_NOTRACK_JMP_R64, .rm = X86_REGISTER_RAX }, 3, { 0x3e, 0xff, 0xe0 } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.
@@ -1084,14 +1111,14 @@ static uint8_t x86_past_last_register(uint8_t operand, uint8_t family)
     return result;
 }
 
-// Breaks one operand of a valid instruction in one of the ways x86_encode checks. Returns false if this instruction
-// can't be broken that way.
-static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction)
+// Breaks one operand of a valid instruction in one of the ways x86_encode checks, or that only x86_validate checks
+// (and then sets *validate_only). Returns false if this instruction can't be broken that way.
+static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, bool* validate_only)
 {
     const X86FormDescription* form = &x86_form_descriptions[instruction->form];
     const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0;
     bool result = true;
-    switch (x86_random_below(state, 12))
+    switch (x86_random_below(state, 13))
     {
         case 0:
             // A high byte register with an extended register (and so a REX prefix).
@@ -1210,10 +1237,31 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction)
             }
             break;
         case 4:
-            // Unknown mode bits.
-            if (form->rm != BUSTER_X86_OPERAND_NONE)
+            // A segment override (or GS's bit alone) without a memory operand or with RIP; or in another memory
+            // operand, GS's bit alone, which x86_encode ignores.
+            if (!memory || (instruction->mode & BUSTER_X86_MODE_RIP))
             {
-                instruction->mode |= 0x80;
+                const uint8_t segments[] = { BUSTER_X86_MODE_FS, BUSTER_X86_MODE_GS, BUSTER_X86_MODE_SEGMENT_GS };
+                instruction->mode |= segments[x86_random_below(state, BUSTER_ARRAY_LENGTH(segments))];
+            }
+            else
+            {
+                instruction->mode = (uint8_t)((instruction->mode & ~BUSTER_X86_MODE_SEGMENT) | BUSTER_X86_MODE_SEGMENT_GS);
+                *validate_only = true;
+            }
+            break;
+        case 11:
+            // An index register or a scale without an index.
+            if (form->rm != BUSTER_X86_OPERAND_NONE && !(instruction->mode & BUSTER_X86_MODE_INDEX))
+            {
+                if (x86_random_below(state, 2) == 0)
+                {
+                    instruction->index = (uint8_t)(1 + x86_random_below(state, 15));
+                }
+                else
+                {
+                    instruction->mode |= (uint8_t)(1 + x86_random_below(state, 3));
+                }
             }
             else
             {
@@ -1238,6 +1286,7 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction)
 static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86Buffers* buffers)
 {
     uint64_t broken = 0;
+    uint64_t broken_for_validate = 0;
     uint64_t failures = 0;
     for (uint64_t trial = 0; trial < BUSTER_X86_TEST_INVALID_INSTRUCTIONS; trial += 1)
     {
@@ -1245,12 +1294,14 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
         const uint64_t count = 1 + x86_random_below(state, 40);
         x86_random_instructions(state, instructions, count, true, false);
         const uint64_t victim = x86_random_below(state, (uint32_t)count);
-        if (x86_break_instruction(state, &instructions[victim]))
+        bool validate_only = false;
+        if (x86_break_instruction(state, &instructions[victim], &validate_only))
         {
             broken += 1;
+            broken_for_validate += validate_only;
             const bool validated = x86_validate(instructions, count) == victim;
             bool rejected = true;
-            for (uint64_t v = 0; v < BUSTER_ARRAY_LENGTH(x86_test_variants); v += 1)
+            for (uint64_t v = 0; v < BUSTER_ARRAY_LENGTH(x86_test_variants) && !validate_only; v += 1)
             {
                 rejected = rejected && x86_test_variants[v].encode(instructions, count, buffers->output, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
             }
@@ -1267,7 +1318,8 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
             }
         }
     }
-    printf("invalid instructions: %lu broken, %lu not caught\n", (unsigned long)broken, (unsigned long)failures);
+    printf("invalid instructions: %lu broken (%lu in a way only x86_validate checks), %lu not caught\n", (unsigned long)broken,
+           (unsigned long)broken_for_validate, (unsigned long)failures);
     return failures == 0;
 }
 
