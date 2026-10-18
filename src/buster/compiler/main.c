@@ -158,6 +158,11 @@ int run_c_lexer_benchmark(int argc, char** argv);
 // The lexer tests, for the test-lexer command.
 #include "buster/compiler/c_lexer_test.c"
 
+// The x86-64 encoder and its tests, for the test-x86-encoder command. Its benchmark is another translation unit.
+#include "buster/compiler/x86_64_encoder.c"
+#include "buster/compiler/x86_64_encoder_test.c"
+int run_x86_encoder_benchmark(int argc, char** argv);
+
 int main(int argc, char** argv)
 {
     int result = 0;
@@ -168,6 +173,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-lexer") == 0)
     {
         result = run_c_lexer_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-x86-encoder") == 0)
+    {
+        result = run_x86_encoder_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-encoder") == 0)
+    {
+        result = run_x86_encoder_benchmark(argc - 1, argv + 1);
     }
     else
     {

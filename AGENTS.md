@@ -42,6 +42,11 @@ or infrastructure machinery merely to match its style.
   it, and `./build/compiler test-lexer` runs them.
 - `src/buster/compiler/c_lexer_benchmark.c` provides the `benchmark-lexer`
   command. The 9700X CI workflow runs it on the repository's C sources by default.
+- `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table,
+  the scalar reference and the AVX-512 encoder); `docs/x86-64-encoder.md`
+  explains its design and measurements. `x86_64_encoder_test.c` holds its tests
+  (`main.c` includes it; `./build/compiler test-x86-encoder` runs them) and
+  `x86_64_encoder_benchmark.c` provides `benchmark-x86-encoder`.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -52,6 +57,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-lexer
 ./build/compiler test-lexer --cplusplus
 ./build/compiler benchmark-lexer src
+./build/compiler test-x86-encoder
+./build/compiler benchmark-x86-encoder
 ```
 
 ## Lexer tests
@@ -99,3 +106,45 @@ selects C++ source/header extensions. The default 9700X job runs
 `benchmark-lexer src` after the tests, pinned to one allowed CPU. Measurements
 are informational: correctness failures fail CI, but throughput values are not
 yet compared against a performance baseline. Keep just one compiler executable.
+
+## x86-64 encoder tests
+
+`./build/compiler test-x86-encoder` (about 0.2 s) checks that every form fits a
+template, both encoders on 63 known encodings from GNU as, a digest of the
+scalar encoder's output for 100,000 random instructions, every batch width and
+variant of `x86_encode` against the scalar encoder (bytes and offsets) on every
+count from 0 to 199 and on 300,000 random instructions, the same between
+`PROT_NONE` guard pages, and that invalid operands are rejected. `--count N` and
+`--seed N` change the random streams.
+
+The digest was recorded when GNU as encoded the same stream to the same bytes.
+After changing the form table or the scalar encoder, cross-check with GNU as
+(binutils 2.47 for the recorded digest), then record the digest the test prints:
+
+```sh
+./build/compiler test-x86-encoder --print-assembly 400000 --seed 1 > build/x86.s
+as build/x86.s -o build/x86.o
+objcopy -O binary -j .text build/x86.o build/x86.text
+objcopy -O binary -j .lengths build/x86.o build/x86.lengths
+./build/compiler test-x86-encoder --compare-binary build/x86.text build/x86.lengths 400000 --seed 1
+```
+
+The printed assembly uses only operands GNU as encodes with the same form
+(`{load}`/`{store}`, immediates outside the imm8 range for imm32 forms, and so
+on), so any difference is a bug in one of them.
+
+## x86-64 encoder benchmark
+
+`./build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform]
+[--offsets] [--only NAME]` checks every implementation against the scalar loop,
+then reports 21 interleaved-pass medians per encoded instruction (time, cycles,
+instructions, IPC). The stream is a compiler-like mix of 16,384 instructions by
+default, or random instructions of every form with `--uniform`; `--section N`
+encodes it N instructions per call. The variants are the batch widths
+(`x86_encode_4` to `x86_encode_64`, instructions per loop iteration) and the
+template gather and output store alternatives that lost. Decide them, and any
+other performance question, with measurements on the 9700X (not Zen 4, and not
+llvm-mca, whose predictions are well off), using uops.info's Zen 5 port data to
+explain them; `docs/x86-64-encoder.md` has the current numbers. The default
+9700X job runs it after the tests, pinned to one allowed CPU; like the lexer's,
+its measurements are informational.
