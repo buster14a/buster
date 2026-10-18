@@ -49,5 +49,5 @@ jobs:
 
       - name: Test the C lexer
         run: |
-          ./build/c_lexer_test
-          ./build/c_lexer_test --cplusplus
+          ./build/compiler test-lexer
+          ./build/compiler test-lexer --cplusplus

@@ -37,9 +37,8 @@ or infrastructure machinery merely to match its style.
 - `src/buster/compiler/main.c` is the executable entry point
 - `build.sh` invokes Clang and produces `build/compiler`. It currently uses
   `-O3 -march=native`, so the machine executing the build determines the host ISA.
-- `src/buster/compiler/c_lexer_test.c` checks `c_tokenize` against the scalar
-  lexer on generated inputs. `build.sh` builds it as `build/c_lexer_test`,
-  always with `-O3`.
+- `src/buster/compiler/c_lexer_test.c` holds the lexer tests. `main.c` includes
+  it, and `./build/compiler test-lexer` runs them.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -47,15 +46,16 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ```sh
 ./build.sh
 ./build/compiler
-./build/c_lexer_test
-./build/c_lexer_test --cplusplus
+./build/compiler test-lexer
+./build/compiler test-lexer --cplusplus
 ```
 
 ## Lexer tests
 
-`build/c_lexer_test` needs no corpus. It ports the snippet and random-input
-checks of `c/c_tokenizer_test.c` in Accelerated-Zig-Parser, where the lexer
-comes from, and compares `c_tokenize` with the scalar lexer token by token on:
+`./build/compiler test-lexer` needs no corpus. Its checks are ports of the
+snippet and random-input checks of `c/c_tokenizer_test.c` in
+Accelerated-Zig-Parser, where the lexer comes from. They compare `c_tokenize`
+with the scalar lexer token by token on:
 
 - the boundary snippet after 0 to 1,099 bytes of padding at each of the 64
   misalignments from a cache line: 70,400 placements, none of which may need
@@ -66,11 +66,11 @@ comes from, and compares `c_tokenize` with the scalar lexer token by token on:
   the current directory.
 
 `--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces. The
-program prints each check's counts and first differences, and exits with status
+command prints each check's counts and first differences, and exits with status
 1 if anything fails. The 9700X job runs both modes after the build. On that
-machine the C and C++ runs take about 2.1 s and 2.3 s of CPU time. For a longer
-run:
+machine, with `build.sh`'s unoptimized build, the C and C++ runs take about
+5.7 s and 6.1 s. For a longer run:
 
 ```sh
-./build/c_lexer_test --cplusplus --seed 7 --fuzz 2000000
+./build/compiler test-lexer --cplusplus --seed 7 --fuzz 2000000
 ```

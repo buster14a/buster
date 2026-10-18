@@ -1,10 +1,14 @@
-// The C lexer test: checks that c_tokenize (c_lexer.c) agrees with its scalar lexer, token by token, on inputs that
-// move tricky C across the vectorized path's 64-byte vector and 512-byte chunk boundaries. It is a port of the snippet
-// and random-input checks of c/c_tokenizer_test.c in https://github.com/davidgmbb/Accelerated-Zig-Parser (commit
-// f4482e2dd53413522d75d8c254b9a824021238ce, which c_lexer.c also comes from). It makes the same inputs and prints the
-// same lines for them, but also fails if the snippet needs the scalar lexer, which upstream only counts.
+// The C lexer tests: they check that c_tokenize (c_lexer.c) agrees with its scalar lexer, token by token, on inputs
+// that move tricky C across the vectorized path's 64-byte vector and 512-byte chunk boundaries. The compiler runs them
+// as a command:
 //
-// Usage: build/c_lexer_test [--cplusplus] [--fuzz N] [--seed N]
+//   build/compiler test-lexer [--cplusplus] [--fuzz N] [--seed N]
+//
+// main.c includes this file after c_lexer.c, String8, BUSTER_ARRAY_LENGTH and BUSTER_COMPILE_TIME_STRING_LENGTH, and
+// calls run_c_lexer_tests for that command. The tests are a port of the snippet and random-input checks of
+// c/c_tokenizer_test.c in https://github.com/davidgmbb/Accelerated-Zig-Parser (commit
+// f4482e2dd53413522d75d8c254b9a824021238ce, which c_lexer.c also comes from). They make the same inputs and print the
+// same lines for them, but also fail if the snippet needs the scalar lexer, which upstream only counts.
 //
 // The checks, in this order:
 //   - The snippet: boundary_snippet, tricky C that the vectorized path tokenizes by itself, after 0 to
@@ -24,17 +28,12 @@
 //   - The snippet: boundary_snippet, boundary_snippet_cpp and check_snippet.
 //   - Random inputs: random_next, fuzz_pieces, fuzz_pieces_cpp, has_backslash, fuzz_input, save_failure and
 //     check_random.
-//   - main, with parse_u64.
+//   - run_c_lexer_tests, with parse_u64.
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
-
-#define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
-#define BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) (BUSTER_ARRAY_LENGTH(strlit) - 1)
-
-#include "buster/compiler/c_lexer.c"
 
 // The input buffers are aligned to a cache line (which is also a vector), and inputs start at every misalignment
 // from one.
@@ -61,13 +60,6 @@
 #define BUSTER_TEST_REPORTED_INPUTS 3
 #define BUSTER_TEST_CONTEXT_TOKENS 2
 #define BUSTER_TEST_TOKEN_PREVIEW_BYTES 40
-
-typedef struct String8 String8;
-struct String8
-{
-    char* pointer;
-    uint64_t length;
-};
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The comparison
@@ -413,7 +405,7 @@ static CheckCounts check_random(Random* random, uint64_t count, TokenArrays* vec
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// main
+// run_c_lexer_tests
 
 // Parses a decimal number of up to 64 bits into `value`. Returns false if `text` isn't one.
 static bool parse_u64(const char* text, uint64_t* value)
@@ -430,7 +422,9 @@ static bool parse_u64(const char* text, uint64_t* value)
     return valid;
 }
 
-int main(int argc, char** argv)
+// Runs the tests with the `arguments` that follow "test-lexer" on the command line of `program`, and returns the exit
+// status for it.
+static int run_c_lexer_tests(const char* program, int argument_count, char** arguments)
 {
     // The output arrays for every input: static rather than 150 KB of stack.
     static TokenArrays vectorized;
@@ -440,22 +434,22 @@ int main(int argc, char** argv)
     uint64_t random_count = BUSTER_TEST_DEFAULT_RANDOM_INPUTS;
     Random random = { .state = BUSTER_TEST_GOLDEN_RATIO };
     bool valid_arguments = true;
-    for (int i = 1; valid_arguments && i < argc; i += 1)
+    for (int i = 0; valid_arguments && i < argument_count; i += 1)
     {
-        if (strcmp(argv[i], "--cplusplus") == 0)
+        if (strcmp(arguments[i], "--cplusplus") == 0)
         {
             flags = C_TOKENIZER_CPLUSPLUS;
         }
-        else if (strcmp(argv[i], "--fuzz") == 0 && i + 1 < argc)
+        else if (strcmp(arguments[i], "--fuzz") == 0 && i + 1 < argument_count)
         {
             i += 1;
-            valid_arguments = parse_u64(argv[i], &random_count);
+            valid_arguments = parse_u64(arguments[i], &random_count);
         }
-        else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc)
+        else if (strcmp(arguments[i], "--seed") == 0 && i + 1 < argument_count)
         {
             uint64_t seed;
             i += 1;
-            valid_arguments = parse_u64(argv[i], &seed);
+            valid_arguments = parse_u64(arguments[i], &seed);
             random.state = seed * BUSTER_TEST_GOLDEN_RATIO + 1;
         }
         else
@@ -466,7 +460,7 @@ int main(int argc, char** argv)
 
     if (!valid_arguments)
     {
-        fprintf(stderr, "usage: %s [--cplusplus] [--fuzz N] [--seed N]\n", argv[0]);
+        fprintf(stderr, "usage: %s test-lexer [--cplusplus] [--fuzz N] [--seed N]\n", program);
     }
     else
     {
