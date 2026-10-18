@@ -2,8 +2,9 @@
 // (X86Instruction, 16 bytes) is a form (X86Form: the opcode, prefixes, operand roles and field widths) and its
 // operands in their encoding roles: the ModRM.reg and ModRM.rm registers, the memory operand's base, index, scale and
 // displacement, the VEX.vvvv register, EVEX's opmask, zeroing and rounding, and the immediate. Forms are legacy (with
-// REX; x87 among them), VEX (AVX, AVX2, FMA, BMI and the mask register instructions) or EVEX (AVX-512). Files that use
-// it include it directly; every function in it is static.
+// REX; x87 among them), VEX (AVX, AVX2, FMA, BMI and the mask register instructions) or EVEX (AVX-512), and each one
+// with a memory operand also comes with an FS or GS segment override (thread-local storage). Files that use it include
+// it directly; every function in it is static.
 //
 // Entry points: x86_encoder_initialize (builds the templates; call it once before encoding), x86_encode (the
 // vectorized encoder), x86_encode_scalar (a plain reference encoder, for testing), x86_validate and
@@ -35,8 +36,8 @@
 // Layout, in this order:
 //   - API: registers and addressing modes (BUSTER_X86_MODE_*), X86Instruction and its decorations
 //     (BUSTER_X86_DECORATION_*), X86EncoderError, the operand, encoding, family and syntax constants of the form
-//     table, BUSTER_X86_VECTOR_FORMS (the VEX and EVEX forms) and BUSTER_X86_FORMS (the form table), X86Form and the
-//     entry points' prototypes.
+//     table, BUSTER_X86_VECTOR_FORMS (the VEX and EVEX forms) and BUSTER_X86_FORMS (the form table), X86Form, the
+//     segment overrides (BUSTER_X86_FORM_FS and BUSTER_X86_FORM_GS) and the entry points' prototypes.
 //   - Templates: the canonical slot (BUSTER_X86_CANONICAL_*), the layout, checks and flags constants, X86Template,
 //     build_template and x86_encoder_initialize.
 //   - Validation: x86_instruction_is_valid and x86_validate.
@@ -101,20 +102,12 @@ typedef enum X86Register
 } X86Register;
 
 // X86Instruction.mode: how ModRM.rm is addressed. 0 is the register `rm`; a memory operand has
-// BUSTER_X86_MODE_MEMORY and the parts it's made of, the scale of its index (log2, 0 to 3) in the low bits, and for
-// thread-local storage, a segment override (BUSTER_X86_MODE_FS or BUSTER_X86_MODE_GS), which a RIP-relative address
-// can't have.
+// BUSTER_X86_MODE_MEMORY and the parts it's made of, and the scale of its index (log2, 0 to 3) in the low bits.
 #define BUSTER_X86_MODE_SCALE 0x03
 #define BUSTER_X86_MODE_MEMORY 0x04
 #define BUSTER_X86_MODE_BASE 0x08
 #define BUSTER_X86_MODE_INDEX 0x10
 #define BUSTER_X86_MODE_RIP 0x20
-// A segment override: FS's, or with BUSTER_X86_MODE_SEGMENT_GS, GS's. That bit alone x86_validate rejects, and
-// x86_encode ignores in a memory operand.
-#define BUSTER_X86_MODE_SEGMENT 0x40
-#define BUSTER_X86_MODE_SEGMENT_GS 0x80
-#define BUSTER_X86_MODE_FS BUSTER_X86_MODE_SEGMENT
-#define BUSTER_X86_MODE_GS (BUSTER_X86_MODE_SEGMENT | BUSTER_X86_MODE_SEGMENT_GS)
 // The addressing modes:
 #define BUSTER_X86_REGISTER_DIRECT 0
 // [rm + displacement]
@@ -145,7 +138,7 @@ struct X86Instruction
     uint8_t index;
     // BUSTER_X86_REGISTER_DIRECT or a BUSTER_X86_MEMORY_* addressing mode.
     uint8_t mode;
-    // An X86Form.
+    // An X86Form, plus BUSTER_X86_FORM_FS or BUSTER_X86_FORM_GS for a segment override.
     uint16_t form;
     // The register in VEX.vvvv (EVEX.V'vvvv): a VEX or EVEX form's operand that isn't in ModRM.
     uint8_t vvvv;
@@ -1509,6 +1502,40 @@ static const X86FormDescription x86_form_descriptions[X86_FORM_COUNT] = { BUSTER
 #undef BUSTER_X86_VECTOR_FORM_DESCRIPTION
 #undef BUSTER_X86_FORM_DESCRIPTION
 
+// A segment override (thread-local storage) on a form's memory operand, RIP-relative too: the form plus one of these.
+// As a lock or rep prefix is, the override is part of the form, whose template has it as a static byte, FS's 64 or
+// GS's 65 (before the other prefixes, where GNU as puts it): x86_encoder_initialize builds three templates per form, so
+// that the vectorized encoder does no more for an override than for any other form. A form without a memory operand
+// takes no operands with one.
+#define BUSTER_X86_FORM_FS X86_FORM_COUNT
+#define BUSTER_X86_FORM_GS (2 * X86_FORM_COUNT)
+// The forms with the segment overrides': an instruction's form is below this.
+#define BUSTER_X86_FORM_TEMPLATES (3 * X86_FORM_COUNT)
+_Static_assert(BUSTER_X86_FORM_TEMPLATES <= 65536, "a form with a segment override fits in X86Instruction.form");
+
+// A form's segment override: 0 for none, 1 for FS and 2 for GS. These two are branches on the rare overrides, so
+// that the scalar encoder pays a compare for them.
+static uint32_t x86_form_segment(uint32_t form)
+{
+    uint32_t result = 0;
+    if (BUSTER_UNLIKELY(form >= BUSTER_X86_FORM_FS))
+    {
+        result = form >= BUSTER_X86_FORM_GS ? 2 : 1;
+    }
+    return result;
+}
+
+// The form table's row of a form, with or without a segment override.
+static const X86FormDescription* x86_form_description(uint32_t form)
+{
+    uint32_t row = form;
+    if (BUSTER_UNLIKELY(row >= BUSTER_X86_FORM_FS))
+    {
+        row -= row >= BUSTER_X86_FORM_GS ? BUSTER_X86_FORM_GS : BUSTER_X86_FORM_FS;
+    }
+    return &x86_form_descriptions[row];
+}
+
 // Builds the templates. Returns false if a form doesn't fit in one (a broken form table).
 static __attribute__((unused)) bool x86_encoder_initialize(void);
 // Encodes the instructions into `output`, which has room for `capacity` bytes (at least
@@ -1560,14 +1587,12 @@ static uint8_t x86_prefix_pp(const X86FormDescription* form)
 // makes the rest. A template's layout picks from these.
 #define BUSTER_X86_CANONICAL_IMMEDIATE 0
 #define BUSTER_X86_CANONICAL_DISPLACEMENT 4
-// ModRM. A +r form's register comes from it too: its template's opcode byte has the 11 of ModRM.mod, which a
-// register rm always has, XOR'ed in, so the XOR leaves the opcode and the register.
 #define BUSTER_X86_CANONICAL_MODRM 8
 #define BUSTER_X86_CANONICAL_SIB 9
 // REX.R, REX.X and REX.B; the template has the rest of the REX byte.
 #define BUSTER_X86_CANONICAL_REX 10
-// A segment override prefix (64 for FS, 65 for GS), which comes first.
-#define BUSTER_X86_CANONICAL_SEGMENT 11
+// The rm register's low 3 bits, which a +r form adds to its last opcode byte.
+#define BUSTER_X86_CANONICAL_OPCODE_REGISTER 11
 // What a VEX or EVEX prefix's bytes take from the operands; the template has the rest, with the inverted fields as
 // ones (as they are for registers below 8), and the canonical byte's ones flip them. 12 is VEX's first byte, which
 // VEX2 turns from C4 into C5; 13 is P0 (R, X, B and EVEX's R'), which VEX2 doesn't have; 14 is P1 (vvvv, and VEX2's
@@ -1579,17 +1604,17 @@ static uint8_t x86_prefix_pp(const X86FormDescription* form)
 // The layout of a position that only has the template's byte: vpshufb makes it zero (bit 7), and its vpshufbitqmb
 // index is presence bit 0 (the first immediate byte's, always set).
 #define BUSTER_X86_LAYOUT_STATIC 0x80
-// The layout of a position that isn't part of the instruction: its vpshufbitqmb index is presence bit 20 (always
+// The layout of a position that isn't part of the instruction: its vpshufbitqmb index is presence bit 63 (always
 // clear), and what vpshufb puts there doesn't matter.
-#define BUSTER_X86_LAYOUT_ABSENT 0x14
-// The canonical bytes that every instruction whose layout uses them has: the immediate and ModRM (and from the
-// template's flags, the prefix bytes but VEX's P0). Whether the displacement, SIB, REX, the segment override and VEX's
-// P0 are there depends on the operands.
-#define BUSTER_X86_CANONICAL_ALWAYS_PRESENT 0x010f
+#define BUSTER_X86_LAYOUT_ABSENT 0x3f
+// The canonical bytes that every instruction whose layout uses them has: the immediate, ModRM and the opcode
+// register (and from the template's flags, the prefix bytes but VEX's P0). Whether the displacement, SIB, REX and
+// VEX's P0 are there depends on the operands.
+#define BUSTER_X86_CANONICAL_ALWAYS_PRESENT 0x090f
 
 // A template's checks and flags: the third and fourth dwords of its bytes (bytes[8-11] and bytes[12-15]). A form's
-// own bytes all come before position 8 (a segment override, prefixes, REX or the VEX or EVEX prefix, the opcode and a
-// ModRM /digit end by position 7), and Phase III only takes the template's bytes there.
+// own bytes all come before position 8 (a segment override, prefixes, REX or the VEX or EVEX prefix, opcode and ModRM
+// end by position 7), and Phase III only takes the template's bytes there.
 #define BUSTER_X86_TEMPLATE_CHECKS_OFFSET 8
 #define BUSTER_X86_TEMPLATE_FLAGS_OFFSET 12
 #define BUSTER_X86_TEMPLATE_STATIC_POSITIONS 8
@@ -1638,7 +1663,7 @@ _Static_assert(sizeof(X86Template) == 32, "a template is one YMM load");
 // The templates, with BUSTER_X86_TEMPLATE_PADDING unused templates on either side: the vectorized encoder loads 16 bytes
 // of a template into a lane of a ZMM register with a masked load that spans up to 48 bytes on either side of them.
 #define BUSTER_X86_TEMPLATE_PADDING 2
-static X86Template x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + X86_FORM_COUNT + BUSTER_X86_TEMPLATE_PADDING] __attribute__((aligned(64)));
+static X86Template x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING] __attribute__((aligned(64)));
 static X86Template* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_PADDING;
 static bool x86_encoder_initialized;
 
@@ -1682,9 +1707,9 @@ static uint32_t x86_template_checks(const X86FormDescription* form)
            ((uint32_t)x86_forbidden_register_bits(form->vvvv, form->family) << 16) | ((uint32_t)(uint8_t)~decorations << 24);
 }
 
-// Builds a form's template. Returns false if its longest encoding wouldn't fit in a slot (15 bytes), or the form
-// table's row is one the encoders can't encode.
-static bool build_template(const X86FormDescription* form, X86Template* template)
+// Builds the template of a form with a segment override (x86_form_segment's) or none. Returns false if its longest
+// encoding wouldn't fit in a slot (15 bytes), or the form table's row is one the encoders can't encode.
+static bool build_template(const X86FormDescription* form, uint32_t segment, X86Template* template)
 {
     uint32_t position = 0;
     uint32_t static_length = 0;
@@ -1692,13 +1717,16 @@ static bool build_template(const X86FormDescription* form, X86Template* template
     uint32_t last_static = 0;
     uint32_t flags = BUSTER_X86_TEMPLATE_PREFIX_PRESENT;
     bool valid = true;
+    const bool memory = (form->rm & BUSTER_X86_OPERAND_MEMORY) != 0;
     memset(template->bytes, 0, sizeof(template->bytes));
     memset(template->layout, BUSTER_X86_LAYOUT_ABSENT, sizeof(template->layout));
-    // A segment override comes before everything else (other prefixes and VEX's and EVEX's), as GNU as puts it.
-    if (form->opcode_bytes != 0 && (form->rm & BUSTER_X86_OPERAND_MEMORY))
+    if (segment != 0 && memory)
     {
-        template->layout[position] = BUSTER_X86_CANONICAL_SEGMENT;
+        template->bytes[position] = (uint8_t)(0x63 + segment);
+        template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
         position += 1;
+        static_length += 1;
+        last_static = position;
     }
     if (form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY)
     {
@@ -1717,9 +1745,9 @@ static bool build_template(const X86FormDescription* form, X86Template* template
 
         for (uint32_t i = 0; i < form->opcode_bytes; i += 1)
         {
-            const bool register_opcode = i + 1 == form->opcode_bytes && form->encoding == BUSTER_X86_ENCODING_PR;
-            template->bytes[position] = (uint8_t)(x86_opcode_byte(form, i) ^ (register_opcode ? 0xc0 : 0));
-            template->layout[position] = register_opcode ? BUSTER_X86_CANONICAL_MODRM : BUSTER_X86_LAYOUT_STATIC;
+            const bool last = i + 1 == form->opcode_bytes;
+            template->bytes[position] = x86_opcode_byte(form, i);
+            template->layout[position] = last && form->encoding == BUSTER_X86_ENCODING_PR ? BUSTER_X86_CANONICAL_OPCODE_REGISTER : BUSTER_X86_LAYOUT_STATIC;
             position += 1;
             static_length += 1;
             last_static = position;
@@ -1740,7 +1768,7 @@ static bool build_template(const X86FormDescription* form, X86Template* template
             template->bytes[position + 2] = (uint8_t)((form->w << 7) | 0x78 | (form->vector_length << 2) | pp);
             template->layout[position + 2] = BUSTER_X86_CANONICAL_PREFIX_P1;
             position += 3;
-            static_length = 3;
+            static_length += 3;
             flags |= map == 1 && !form->w ? BUSTER_X86_TEMPLATE_VEX2 : 0;
             valid = form->vector_length <= 1 && form->disp8_scale == 1 && form->evex == BUSTER_X86_EVEX_NONE;
         }
@@ -1759,7 +1787,7 @@ static bool build_template(const X86FormDescription* form, X86Template* template
             template->bytes[position + 3] = (uint8_t)(((rounding ? 0 : form->vector_length) << 5) | (b << 4) | 0x08);
             template->layout[position + 3] = BUSTER_X86_CANONICAL_PREFIX_P2;
             position += 4;
-            static_length = 4;
+            static_length += 4;
             valid = form->vector_length <= 2 && form->disp8_scale != 0 && form->disp8_scale <= 64 && (form->disp8_scale & (form->disp8_scale - 1)) == 0;
             flags |= valid ? (uint32_t)__builtin_ctz(form->disp8_scale) << BUSTER_X86_TEMPLATE_DISP8_SCALE : 0;
         }
@@ -1783,8 +1811,7 @@ static bool build_template(const X86FormDescription* form, X86Template* template
             template->layout[position] = BUSTER_X86_CANONICAL_MODRM;
             position += 1;
             static_length += 1;
-            // Only a /digit is the template's.
-            last_static = (form->encoding & BUSTER_X86_ENCODING_DIGIT) ? position : last_static;
+            last_static = position;
             if (form->rm & BUSTER_X86_OPERAND_MEMORY)
             {
                 template->layout[position] = BUSTER_X86_CANONICAL_SIB;
@@ -1817,14 +1844,15 @@ static bool build_template(const X86FormDescription* form, X86Template* template
     flags |= (form->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_GPR8 ? BUSTER_X86_TEMPLATE_BYTE_REG : 0;
     flags |= (form->rm & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_GPR8 ? BUSTER_X86_TEMPLATE_BYTE_RM : 0;
     flags |= form->relative_bytes != 0 || form->immediate_bytes > 4 ? BUSTER_X86_TEMPLATE_STATIC_DISPLACEMENT : 0;
-    flags |= (form->rm & BUSTER_X86_OPERAND_MEMORY) ? 0 : BUSTER_X86_TEMPLATE_NO_MEMORY;
-    flags |= form->rm != BUSTER_X86_OPERAND_NONE && !(form->rm & BUSTER_X86_OPERAND_REGISTER) ? BUSTER_X86_TEMPLATE_NO_REGISTER : 0;
+    flags |= memory ? 0 : BUSTER_X86_TEMPLATE_NO_MEMORY;
+    // A segment override's form takes only a memory operand (and without one in its row, nothing).
+    flags |= segment != 0 || (form->rm != BUSTER_X86_OPERAND_NONE && !(form->rm & BUSTER_X86_OPERAND_REGISTER)) ? BUSTER_X86_TEMPLATE_NO_REGISTER : 0;
     const uint32_t checks = x86_template_checks(form);
     memcpy(&template->bytes[BUSTER_X86_TEMPLATE_CHECKS_OFFSET], &checks, sizeof(checks));
     memcpy(&template->bytes[BUSTER_X86_TEMPLATE_FLAGS_OFFSET], &flags, sizeof(flags));
     // A static displacement shares the displacement field with a memory operand's, and the form's own bytes have to
     // come before the checks.
-    const bool static_displacement_conflict = (flags & BUSTER_X86_TEMPLATE_STATIC_DISPLACEMENT) && (form->rm & BUSTER_X86_OPERAND_MEMORY);
+    const bool static_displacement_conflict = (flags & BUSTER_X86_TEMPLATE_STATIC_DISPLACEMENT) && memory;
     return valid && position <= BUSTER_X86_MAX_INSTRUCTION_BYTES && static_length <= BUSTER_X86_TEMPLATE_STATIC_LENGTH && !static_displacement_conflict &&
            last_static <= BUSTER_X86_TEMPLATE_STATIC_POSITIONS;
 }
@@ -1832,9 +1860,9 @@ static bool build_template(const X86FormDescription* form, X86Template* template
 static bool x86_encoder_initialize(void)
 {
     bool result = true;
-    for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
+    for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
     {
-        result = build_template(&x86_form_descriptions[form], &x86_templates[form]) && result;
+        result = build_template(x86_form_description(form), x86_form_segment(form), &x86_templates[form]) && result;
     }
     x86_encoder_initialized = result;
     return result;
@@ -1861,10 +1889,10 @@ static bool register_is_valid(uint8_t value, uint8_t operand, uint8_t family, bo
 // mode, decorations the form can have, and immediates and relative displacements that fit their fields.
 static bool x86_instruction_is_valid(const X86Instruction* instruction)
 {
-    bool result = instruction->form < X86_FORM_COUNT;
+    bool result = instruction->form < BUSTER_X86_FORM_TEMPLATES;
     if (result)
     {
-        const X86FormDescription* form = &x86_form_descriptions[instruction->form];
+        const X86FormDescription* form = x86_form_description(instruction->form);
         const uint8_t mode = instruction->mode;
         const bool memory = (mode & BUSTER_X86_MODE_MEMORY) != 0;
         const bool base = (mode & BUSTER_X86_MODE_BASE) != 0;
@@ -1885,21 +1913,18 @@ static bool x86_instruction_is_valid(const X86Instruction* instruction)
         // ModRM.rm or the +r register, and the addressing mode.
         if (form->rm == BUSTER_X86_OPERAND_NONE)
         {
-            result = result && instruction->rm == 0 && instruction->index == 0 && mode == 0;
+            result = result && instruction->rm == 0 && instruction->index == 0 && mode == 0 && x86_form_segment(instruction->form) == 0;
         }
         else if (!memory)
         {
-            result = result && mode == 0 && instruction->index == 0 && (form->rm & BUSTER_X86_OPERAND_REGISTER);
+            result = result && mode == 0 && instruction->index == 0 && (form->rm & BUSTER_X86_OPERAND_REGISTER) && x86_form_segment(instruction->form) == 0;
             result = result && register_is_valid(instruction->rm, form->rm, form->family, false);
         }
         else
         {
             result = result && has_modrm && (form->rm & BUSTER_X86_OPERAND_MEMORY);
-            result = result && (mode & ~(BUSTER_X86_MODE_SCALE | BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX | BUSTER_X86_MODE_RIP |
-                                         BUSTER_X86_MODE_SEGMENT | BUSTER_X86_MODE_SEGMENT_GS)) == 0;
+            result = result && (mode & ~(BUSTER_X86_MODE_SCALE | BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX | BUSTER_X86_MODE_RIP)) == 0;
             result = result && !(rip && (base || index));
-            // GS's bit only with a segment override, which RIP can't have.
-            result = result && ((mode & BUSTER_X86_MODE_SEGMENT) || !(mode & BUSTER_X86_MODE_SEGMENT_GS)) && !(rip && (mode & BUSTER_X86_MODE_SEGMENT));
             result = result && (index || (mode & BUSTER_X86_MODE_SCALE) == 0);
             result = result && (base ? register_is_valid(instruction->rm, BUSTER_X86_OPERAND_GQ, BUSTER_X86_FAMILY_LEGACY, true) : instruction->rm == 0);
             // RSP can't be an index: its SIB index field means "none".
@@ -1965,7 +1990,8 @@ static uint64_t x86_validate(const X86Instruction* instructions, uint64_t count)
 // Encodes a valid instruction at `out` and returns its length.
 static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out)
 {
-    const X86FormDescription* form = &x86_form_descriptions[instruction->form];
+    const X86FormDescription* form = x86_form_description(instruction->form);
+    const uint32_t segment = x86_form_segment(instruction->form);
     const uint8_t mode = instruction->mode;
     const bool memory = (mode & BUSTER_X86_MODE_MEMORY) != 0;
     const bool base = (mode & BUSTER_X86_MODE_BASE) != 0;
@@ -1984,9 +2010,9 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out)
     uint32_t length = 0;
 
     // A segment override comes first, as GNU as puts it.
-    if (mode & BUSTER_X86_MODE_SEGMENT)
+    if (segment != 0)
     {
-        out[length] = (mode & BUSTER_X86_MODE_SEGMENT_GS) ? 0x65 : 0x64;
+        out[length] = (uint8_t)(0x63 + segment);
         length += 1;
     }
     if (form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY)
@@ -2233,8 +2259,7 @@ struct X86Fields
 #define BUSTER_X86_SPLAT(value) _mm512_set1_epi32((int)(value))
 
 // The canonical dword's fields (Phase II builds them where they go: ModRM in bits 0-7, SIB in 8-15, REX.RXB in 16-18
-// and the segment override in 24-31, of which the operands give GS's bit), as masks. Before the mode's, the operands'
-// fields also have EVEX's bit 4 of reg in bit 28 and of a register rm in bit 30, for the prefix.
+// and the opcode register in 24-26, with EVEX's bit 4 of reg in 28 and of a register rm in 30), as masks.
 #define BUSTER_X86_FIELD_RM 0x00000007
 #define BUSTER_X86_FIELD_REG 0x00000038
 #define BUSTER_X86_FIELD_BASE 0x00000700
@@ -2243,47 +2268,42 @@ struct X86Fields
 #define BUSTER_X86_FIELD_REX_B 0x00010000
 #define BUSTER_X86_FIELD_REX_X 0x00020000
 #define BUSTER_X86_FIELD_REX_R 0x00040000
+#define BUSTER_X86_FIELD_OPCODE_REGISTER 0x07000000
 #define BUSTER_X86_FIELD_REG_HIGH 0x10000000
 #define BUSTER_X86_FIELD_RM_HIGH 0x40000000
-#define BUSTER_X86_FIELD_SEGMENT_GS 0x01000000
-#define BUSTER_X86_FIELDS_ALWAYS (BUSTER_X86_FIELD_REG | BUSTER_X86_FIELD_REX_R)
-// The presence table's operand bits that must be zero, in places no layout looks at: a memory operand's rm bits 4 and
-// 6 (its base is a general register, and not a high byte one), without an index, the index register and the scale, an
-// invalid mode's own mode bits (operands bits 26-29, of which it has some), and the segment override's bits (30 and
-// 31) in a register or a RIP-relative address.
+#define BUSTER_X86_FIELDS_ALWAYS \
+    (BUSTER_X86_FIELD_REG | BUSTER_X86_FIELD_REX_R | BUSTER_X86_FIELD_OPCODE_REGISTER | BUSTER_X86_FIELD_REG_HIGH | BUSTER_X86_FIELD_RM_HIGH)
+// The presence table's operand bits that must be zero, in places no layout looks at: an invalid mode's own mode bits
+// (operands bits 26-29, of which it has some), a memory operand's rm bits 4 and 6 (its base is a general register, and
+// not a high byte one), and without an index, the index register and the scale.
+#define BUSTER_X86_MODE_TABLE_INVALID 0x3c000000u
 #define BUSTER_X86_MODE_TABLE_MEMORY 0x00005000u
 #define BUSTER_X86_MODE_TABLE_NO_INDEX 0x030f0000u
-#define BUSTER_X86_MODE_TABLE_INVALID 0x3c000000u
-#define BUSTER_X86_MODE_TABLE_NO_SEGMENT 0xc0000000u
-// A memory operand's segment override byte (canonical byte 11, if it has one): FS's prefix, which GS's bit makes 65.
-#define BUSTER_X86_MODE_TABLE_SEGMENT (0x64u << 24)
 
 // What each addressing mode decides, indexed (by vpermd) with its memory, base, index and RIP bits: operands >> 26.
 // x86_mode_fields says which canonical bits come from the operands; x86_mode_constants, which bits are fixed (mod 11
-// for a register, rm 100 for a SIB byte or 101 for RIP, a SIB base of 101 or index of 100 for none, the segment
-// override's byte); and x86_mode_presence, the canonical bytes the mode always has (a SIB byte, a 32-bit displacement)
-// and the operand bits it forbids. A mode with a base also has a displacement and maybe a SIB byte that depend on the
-// operands, which compute_fields works out, as it does whether there's a segment override. The other combinations of
-// the bits are invalid.
+// for a register, rm 100 for a SIB byte or 101 for RIP, a SIB base of 101 or index of 100 for none); and
+// x86_mode_presence, the canonical bytes the mode always has (a SIB byte, a 32-bit displacement) and the operand bits
+// it forbids. A mode with a base also has a displacement and maybe a SIB byte that depend on the operands, which
+// compute_fields works out. The other combinations of the bits are invalid.
 static const uint32_t x86_mode_fields[16] __attribute__((aligned(64))) = {
     [0] = BUSTER_X86_FIELDS_ALWAYS | BUSTER_X86_FIELD_RM | BUSTER_X86_FIELD_REX_B,
-    [1] = BUSTER_X86_FIELDS_ALWAYS | BUSTER_X86_FIELD_SEGMENT_GS,
-    [3] = BUSTER_X86_FIELDS_ALWAYS | BUSTER_X86_FIELD_RM | BUSTER_X86_FIELD_BASE | BUSTER_X86_FIELD_REX_B | BUSTER_X86_FIELD_SEGMENT_GS,
-    [5] = BUSTER_X86_FIELDS_ALWAYS | BUSTER_X86_FIELD_INDEX | BUSTER_X86_FIELD_SCALE | BUSTER_X86_FIELD_REX_X | BUSTER_X86_FIELD_SEGMENT_GS,
-    [7] = BUSTER_X86_FIELDS_ALWAYS | BUSTER_X86_FIELD_BASE | BUSTER_X86_FIELD_INDEX | BUSTER_X86_FIELD_SCALE | BUSTER_X86_FIELD_REX_B | BUSTER_X86_FIELD_REX_X |
-          BUSTER_X86_FIELD_SEGMENT_GS,
+    [1] = BUSTER_X86_FIELDS_ALWAYS,
+    [3] = BUSTER_X86_FIELDS_ALWAYS | BUSTER_X86_FIELD_RM | BUSTER_X86_FIELD_BASE | BUSTER_X86_FIELD_REX_B,
+    [5] = BUSTER_X86_FIELDS_ALWAYS | BUSTER_X86_FIELD_INDEX | BUSTER_X86_FIELD_SCALE | BUSTER_X86_FIELD_REX_X,
+    [7] = BUSTER_X86_FIELDS_ALWAYS | BUSTER_X86_FIELD_BASE | BUSTER_X86_FIELD_INDEX | BUSTER_X86_FIELD_SCALE | BUSTER_X86_FIELD_REX_B | BUSTER_X86_FIELD_REX_X,
     [9] = BUSTER_X86_FIELDS_ALWAYS,
 };
 static const uint32_t x86_mode_constants[16] __attribute__((aligned(64))) = {
     [0] = 0xc0,
-    [1] = 0x04 | (5 << 8) | (4 << 11) | BUSTER_X86_MODE_TABLE_SEGMENT,
-    [3] = (4 << 11) | BUSTER_X86_MODE_TABLE_SEGMENT,
-    [5] = 0x04 | (5 << 8) | BUSTER_X86_MODE_TABLE_SEGMENT,
-    [7] = 0x04 | BUSTER_X86_MODE_TABLE_SEGMENT,
+    [1] = 0x04 | (5 << 8) | (4 << 11),
+    [3] = 4 << 11,
+    [5] = 0x04 | (5 << 8),
+    [7] = 0x04,
     [9] = 0x05,
 };
 static const uint32_t x86_mode_presence[16] __attribute__((aligned(64))) = {
-    [0] = BUSTER_X86_CANONICAL_ALWAYS_PRESENT | BUSTER_X86_MODE_TABLE_NO_INDEX | BUSTER_X86_MODE_TABLE_NO_SEGMENT,
+    [0] = BUSTER_X86_CANONICAL_ALWAYS_PRESENT | BUSTER_X86_MODE_TABLE_NO_INDEX,
     [1] = BUSTER_X86_CANONICAL_ALWAYS_PRESENT | 0x2f0 | BUSTER_X86_MODE_TABLE_MEMORY | BUSTER_X86_MODE_TABLE_NO_INDEX,
     [2] = BUSTER_X86_MODE_TABLE_INVALID,
     [3] = BUSTER_X86_CANONICAL_ALWAYS_PRESENT | BUSTER_X86_MODE_TABLE_MEMORY | BUSTER_X86_MODE_TABLE_NO_INDEX,
@@ -2292,7 +2312,7 @@ static const uint32_t x86_mode_presence[16] __attribute__((aligned(64))) = {
     [6] = BUSTER_X86_MODE_TABLE_INVALID,
     [7] = BUSTER_X86_CANONICAL_ALWAYS_PRESENT | 0x200 | BUSTER_X86_MODE_TABLE_MEMORY,
     [8] = BUSTER_X86_MODE_TABLE_INVALID,
-    [9] = BUSTER_X86_CANONICAL_ALWAYS_PRESENT | 0xf0 | BUSTER_X86_MODE_TABLE_MEMORY | BUSTER_X86_MODE_TABLE_NO_INDEX | BUSTER_X86_MODE_TABLE_NO_SEGMENT,
+    [9] = BUSTER_X86_CANONICAL_ALWAYS_PRESENT | 0xf0 | BUSTER_X86_MODE_TABLE_MEMORY | BUSTER_X86_MODE_TABLE_NO_INDEX,
     [10] = BUSTER_X86_MODE_TABLE_INVALID,
     [11] = BUSTER_X86_MODE_TABLE_INVALID,
     [12] = BUSTER_X86_MODE_TABLE_INVALID,
@@ -2303,14 +2323,14 @@ static const uint32_t x86_mode_presence[16] __attribute__((aligned(64))) = {
 
 // vpmultishiftqb controls that put the operands' register fields where they go in the canonical dword: each byte of
 // the result is the 8 bits of its quadword (two instructions' operands) starting at the control byte's offset. The
-// first puts rm's low bits in ModRM.rm and SIB.base, rm's bit 3 in REX.B and the mode's GS bit in bit 24; the second,
-// reg's low bits in ModRM.reg (from bit 61 for the low dword: bits 61-63 wrap around below them), the index's low bits
-// in SIB.index and its bit 3 in REX.X, and reg's bit 4 in bit 28; the third, the scale in SIB.scale, reg's bit 3 in
+// first puts rm's low bits in ModRM.rm, SIB.base and the opcode register, and rm's bit 3 in REX.B; the second, reg's
+// low bits in ModRM.reg (from bit 61 for the low dword: bits 61-63 wrap around below them), the index's low bits in
+// SIB.index and its bit 3 in REX.X, and reg's bit 4 in bit 28; the third, the scale in SIB.scale, reg's bit 3 in
 // REX.R and rm's bit 4 in bit 30.
-#define BUSTER_X86_FIELDS_RM_CONTROL 0x3f2b28281f0b0808ll
+#define BUSTER_X86_FIELDS_RM_CONTROL 0x282b2828080b0808ll
 #define BUSTER_X86_FIELDS_REG_INDEX_CONTROL 0x20322d1d00120d3dll
 #define BUSTER_X86_FIELDS_SCALE_REX_R_CONTROL 0x2621320006011200ll
-#define BUSTER_X86_FIELDS_FROM_RM (BUSTER_X86_FIELD_RM | BUSTER_X86_FIELD_BASE | BUSTER_X86_FIELD_REX_B | BUSTER_X86_FIELD_SEGMENT_GS)
+#define BUSTER_X86_FIELDS_FROM_RM (BUSTER_X86_FIELD_RM | BUSTER_X86_FIELD_BASE | BUSTER_X86_FIELD_REX_B | BUSTER_X86_FIELD_OPCODE_REGISTER)
 #define BUSTER_X86_FIELDS_FROM_SCALE_REX_R (BUSTER_X86_FIELD_SCALE | BUSTER_X86_FIELD_REX_R | BUSTER_X86_FIELD_RM_HIGH)
 // A vpmultishiftqb control that puts each record's fourth dword (form | vvvv << 16 | decorations << 24) where a
 // prefix wants it: vvvv's low bits in P1's bits 6-3 (bits 13-20, in byte 14), the decorations as they are (byte 15).
@@ -2350,13 +2370,10 @@ static const uint32_t x86_mode_presence[16] __attribute__((aligned(64))) = {
 BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, __m512i extension, __m512i flags, __m512i checks)
 {
     const __m512i one = BUSTER_X86_SPLAT(1);
-    // vpermd takes the low 4 bits of each index: the mode's memory, base, index and RIP bits.
     const __m512i mode = _mm512_srli_epi32(operands, 26);
     const __m512i mode_fields = _mm512_permutexvar_epi32(mode, _mm512_load_si512(x86_mode_fields));
     const __m512i mode_constants = _mm512_permutexvar_epi32(mode, _mm512_load_si512(x86_mode_constants));
     const __m512i mode_presence = _mm512_permutexvar_epi32(mode, _mm512_load_si512(x86_mode_presence));
-    // The segment override's presence bit (11): the mode's segment bit (operands bit 30), shifted there.
-    const __m512i segment = _mm512_and_epi32(_mm512_srli_epi32(operands, 30 - 11), BUSTER_X86_SPLAT(0x800));
 
     // All the register fields in place, then those the mode takes, and its constants: the canonical dword but for
     // ModRM.mod's displacement bits.
@@ -2418,10 +2435,9 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     const __m512i rex = _mm512_srai_epi32(rex_needed, 31);
 
     // A VEX or EVEX prefix's operand bits (canonical bytes 12-15), which flip the template's: R, X and B (REX's,
-    // canonical bits 18-16) in P0's bits 7-5, with EVEX's R' (bit 28 of the fields, before the mode's segment
-    // override's byte took those bits) in its bit 4 and EVEX's X of a register rm (bit 30) in its bit 6, which
-    // shifting down by 3 and 16 puts there (and nothing in bits 16-31).
-    const __m512i p0 = _mm512_ternarylogic_epi32(_mm512_srli_epi32(fields, 16), _mm512_srli_epi32(register_fields, 3), BUSTER_X86_SPLAT(0xe000),
+    // canonical bits 18-16) in P0's bits 7-5, with EVEX's R' (bit 28) in its bit 4 and EVEX's X of a register rm (bit
+    // 30) in its bit 6, which shifting down by 3 and 16 puts there (and nothing in bits 16-31).
+    const __m512i p0 = _mm512_ternarylogic_epi32(_mm512_srli_epi32(register_fields, 16), _mm512_srli_epi32(register_fields, 3), BUSTER_X86_SPLAT(0xe000),
                                                  BUSTER_X86_A_OR_B_AND_C);
     // VEX2, if the form can be (BUSTER_X86_TEMPLATE_VEX2, bit 13) and there's no X or B (bits 14 and 13; the flags'
     // bit 14 is always set): C4 becomes C5 (bit 0), R moves to P1's bit 7, and P0 isn't there.
@@ -2442,27 +2458,27 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     presence = _mm512_ternarylogic_epi32(presence, vex2, BUSTER_X86_SPLAT(0x2000), BUSTER_X86_A_OR_NOT_B_AND_C);
     presence = _mm512_ternarylogic_epi32(presence, displacement8, BUSTER_X86_SPLAT(0x10), BUSTER_X86_A_OR_B_AND_C);
     presence = _mm512_ternarylogic_epi32(presence, base_displacement32, BUSTER_X86_SPLAT(0xf0), BUSTER_X86_A_OR_B_AND_C);
-    presence = _mm512_ternarylogic_epi32(presence, rex_presence, segment, BUSTER_X86_A_OR_B_OR_C);
+    presence = _mm512_or_epi32(presence, rex_presence);
     // The flags' last use (but the length's, with offsets): bit 26 is set if the rm operand is of a kind the form can't
     // have (see the invalid operands below).
     const __m512i wrong_kind = _mm512_ternarylogic_epi32(flags, _mm512_srli_epi32(flags, 1), operands, BUSTER_X86_C_SELECTS_A_OVER_B);
 
-    // The length: the form's static bytes, the displacement, SIB, REX and segment override bytes the operands add, and
-    // one less for VEX2.
-    const __m512i dynamic = _mm512_ternarylogic_epi32(presence, flags, BUSTER_X86_SPLAT(0xef0), BUSTER_X86_A_AND_NOT_B_AND_C);
+    // The length: the form's static bytes, the displacement, SIB and REX bytes the operands add, and one less for VEX2.
+    const __m512i dynamic = _mm512_ternarylogic_epi32(presence, flags, BUSTER_X86_SPLAT(0x6f0), BUSTER_X86_A_AND_NOT_B_AND_C);
     const __m512i length = _mm512_add_epi32(_mm512_add_epi32(_mm512_popcnt_epi32(dynamic), _mm512_and_epi32(flags, BUSTER_X86_SPLAT(BUSTER_X86_TEMPLATE_STATIC_LENGTH))),
                                             vex2);
 
     // Operands the encoding can't represent: bits that must be zero, the template's checks of reg, rm, vvvv and the
-    // decorations (put together in one dword), the mode's (see the tables) and an index register's bits 4-7; RSP as an
-    // index (zero in rsp_index: the index's low nibble ^ 4, or'ed with the index field's absence; below 2^31, so that
-    // rsp_index - 1 has the sign bit only then); a high byte register (bit 6 of reg or rm, which only a legacy byte form
-    // allows) with a REX prefix; and a memory operand in a form that can't have one, or a register in a form whose rm
-    // can only be memory, the flag that the memory mode's bit picks (NO_REGISTER shifted to NO_MEMORY's bit). The loop
-    // ORs them together for one test at the end.
+    // decorations (put together in one dword), the mode's (see the tables), an index register's bits 4-7 and unknown
+    // mode bits; RSP as an index (zero in rsp_index: the index's low
+    // nibble ^ 4, or'ed with the index field's absence; below 2^31, so that rsp_index - 1 has the sign bit only then);
+    // a high byte register (bit 6 of reg or rm, which only a legacy byte form allows) with a REX prefix; and a memory
+    // operand in a form that can't have one, or a register in a form whose rm can only be memory, the flag that the
+    // memory mode's bit picks (NO_REGISTER shifted to NO_MEMORY's bit). The loop ORs them together for one test at the
+    // end.
     const __m512i forbidden = _mm512_ternarylogic_epi32(
-        mode_presence, BUSTER_X86_SPLAT(BUSTER_X86_MODE_TABLE_MEMORY | BUSTER_X86_MODE_TABLE_NO_INDEX | BUSTER_X86_MODE_TABLE_INVALID | BUSTER_X86_MODE_TABLE_NO_SEGMENT),
-        BUSTER_X86_SPLAT(0x00f00000), BUSTER_X86_A_AND_B_OR_C);
+        mode_presence, BUSTER_X86_SPLAT(BUSTER_X86_MODE_TABLE_INVALID | BUSTER_X86_MODE_TABLE_MEMORY | BUSTER_X86_MODE_TABLE_NO_INDEX), BUSTER_X86_SPLAT(0xc0f00000),
+        BUSTER_X86_A_AND_B_OR_C);
     const __m512i registers = _mm512_ternarylogic_epi32(extension, operands, BUSTER_X86_SPLAT(0xffff0000), BUSTER_X86_C_SELECTS_A_OVER_B);
     const __m512i bad = _mm512_ternarylogic_epi32(registers, checks, _mm512_and_epi32(operands, forbidden), BUSTER_X86_A_AND_B_OR_C);
     const __m512i rsp_index = _mm512_ternarylogic_epi32(_mm512_xor_epi32(_mm512_and_epi32(operands, BUSTER_X86_SPLAT(0xf0000)), BUSTER_X86_SPLAT(0x40000)),
@@ -2526,16 +2542,16 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
     const __m512i operands = _mm512_unpacklo_epi64(high01, high23);
     const __m512i extension = _mm512_unpackhi_epi64(high01, high23);
 
-    // With X86_GATHER_INSERTS_FORMS_FROM_RECORDS, each template's offset in x86_templates (form * 32, which fits in 16
-    // bits) as words in lane order, four to a general register: slot j's for quads 0-3.
-    uint64_t slot_offsets[4] = { 0 };
+    // With X86_GATHER_INSERTS_FORMS_FROM_RECORDS, the forms as words in lane order, four to a general register: slot
+    // j's for quads 0-3.
+    uint64_t slot_forms[4] = { 0 };
     if (gather == X86_GATHER_INSERTS_FORMS_FROM_RECORDS)
     {
-        const __m256i template_offsets = _mm512_cvtepi32_epi16(_mm512_slli_epi32(extension, 5));
-        slot_offsets[0] = (uint64_t)_mm256_extract_epi64(template_offsets, 0);
-        slot_offsets[1] = (uint64_t)_mm256_extract_epi64(template_offsets, 1);
-        slot_offsets[2] = (uint64_t)_mm256_extract_epi64(template_offsets, 2);
-        slot_offsets[3] = (uint64_t)_mm256_extract_epi64(template_offsets, 3);
+        const __m256i forms = _mm512_cvtepi32_epi16(extension);
+        slot_forms[0] = (uint64_t)_mm256_extract_epi64(forms, 0);
+        slot_forms[1] = (uint64_t)_mm256_extract_epi64(forms, 1);
+        slot_forms[2] = (uint64_t)_mm256_extract_epi64(forms, 2);
+        slot_forms[3] = (uint64_t)_mm256_extract_epi64(forms, 3);
     }
 
     for (uint32_t q = 0; q < quads; q += 1)
@@ -2544,8 +2560,7 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
         const uint8_t* t[BUSTER_X86_QUAD_INSTRUCTIONS];
         for (uint32_t j = 0; j < BUSTER_X86_QUAD_INSTRUCTIONS; j += 1)
         {
-            t[j] = gather == X86_GATHER_INSERTS_FORMS_FROM_RECORDS ? (const uint8_t*)x86_templates + (uint16_t)(slot_offsets[j] >> (16 * q))
-                                                                   : (const uint8_t*)&x86_templates[quad[j].form];
+            t[j] = (const uint8_t*)&x86_templates[gather == X86_GATHER_INSERTS_FORMS_FROM_RECORDS ? (uint16_t)(slot_forms[j] >> (16 * q)) : quad[j].form];
         }
         if (gather == X86_GATHER_MASKED_LOADS)
         {
@@ -2588,7 +2603,7 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
 
     // III. Each quad's canonical slots: the immediate, the displacement, canonical bytes 8-11 and the prefix bytes
     // 12-15. And its presence bits, in every dword of each slot, for vpshufbitqmb to pick from by the layout: an
-    // absent position picks bit 20, which no presence has.
+    // absent position picks bit 63, the second dword's bit 31, which no presence has.
     const __m512i immediate_displacement_low = _mm512_unpacklo_epi32(immediate, fields.displacement);
     const __m512i immediate_displacement_high = _mm512_unpackhi_epi32(immediate, fields.displacement);
     const __m512i canonical_low = _mm512_unpacklo_epi32(fields.canonical, fields.prefix);
@@ -2652,9 +2667,8 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
     uint64_t i = 0;
     while (i + iteration_instructions <= count)
     {
-        // Rolled: a group's code takes most of the vector registers, and two groups' together spill (unrolled, it's
-        // 14% slower on Zen 5). Clang unrolls it on its own after some changes to the group's code.
-#pragma clang loop unroll(disable)
+        // clang keeps this loop rolled: a group's code takes most of the vector registers, and two groups' together
+        // spill (unrolled, it's 14% slower on Zen 5).
         for (uint32_t g = 0; g < groups; g += 1)
         {
             out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, gather, store, &invalid);
