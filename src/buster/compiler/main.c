@@ -49,7 +49,7 @@ struct CompileResult
 
 static uint64_t compute_maximum_token_count(String8 chunk)
 {
-    return chunk.length;
+    return BUSTER_C_TOKENIZER_CAPACITY(chunk.length);
 }
 
 typedef struct PrimitiveTokenizeResult PrimitiveTokenizeResult;
@@ -59,23 +59,30 @@ struct PrimitiveTokenizeResult
     uint8_t* kinds;
     uint32_t* starts;
     uint32_t* ends;
+    uint64_t token_count;
     int file_descriptor;
     bool error;
 };
 
 static PrimitiveTokenizeResult primitive_tokenize_chunk(String8 chunk)
 {
+    PrimitiveTokenizeResult result = {0};
     uint64_t maximum_token_length = compute_maximum_token_count(chunk);
     (void)maximum_token_length;
     uint8_t* kinds = mmap(0, maximum_token_length * sizeof(*kinds), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint32_t* starts = mmap(0, maximum_token_length * sizeof(*starts), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint32_t* ends = mmap(0, maximum_token_length * sizeof(*ends), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     uint32_t flags = 0;
-    int64_t tokenize_result = c_tokenize((const uint8_t*)chunk.pointer, chunk.length, kinds, starts, ends, flags);
 
-    PrimitiveTokenizeResult result = {0};
+    int64_t tokenize_result = -1;
+    if (kinds != MAP_FAILED && starts != MAP_FAILED && starts != MAP_FAILED)
+    {
+        tokenize_result = c_tokenize((const uint8_t*)chunk.pointer, chunk.length, kinds, starts, ends, flags);
+    }
+
     result.content = chunk;
     result.error = tokenize_result < 0;
+    result.token_count = (uint64_t)tokenize_result;
 
     if (!result.error)
     {
@@ -97,6 +104,7 @@ static PrimitiveTokenizeResult primitive_tokenize_file(String8 path)
 {
     PrimitiveTokenizeResult result = {0};
 
+    assert(strlen(path.pointer) == path.length && path.pointer[path.length] == 0);
     int fd = open(path.pointer, O_RDONLY | O_CLOEXEC, 0644);
     if (fd != -1)
     {
