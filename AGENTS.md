@@ -37,6 +37,9 @@ or infrastructure machinery merely to match its style.
 - `src/buster/compiler/main.c` is the executable entry point
 - `build.sh` invokes Clang and produces `build/compiler`. It currently uses
   `-O3 -march=native`, so the machine executing the build determines the host ISA.
+- `src/buster/compiler/c_lexer_benchmark.c` checks `c_tokenize` against the
+  scalar lexer on a corpus of sources and times both. `build.sh` builds it as
+  `build/c_lexer_benchmark`, always with `-O3`.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -45,3 +48,22 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build.sh
 ./build/compiler
 ```
+
+## Lexer benchmark
+
+`build/c_lexer_benchmark` takes files and directories of C sources (`.c`, `.h`)
+or, with `--cplusplus`, C++ sources. It prints the corpus check and benchmark
+lines of `c/c_tokenizer_test.c` in Accelerated-Zig-Parser, where the lexer comes
+from: medians of 21 interleaved passes in ms, GB/s, cycles/B and
+instructions/B. Pin it to one CPU:
+
+```sh
+taskset -c 2 ./build/c_lexer_benchmark <zig-0.14.1>/lib/libc
+taskset -c 2 ./build/c_lexer_benchmark --cplusplus <c++ header directories>...
+```
+
+At the import (upstream commit f4482e2), on the 9700X, `c_tokenize` ran at
+about 1.21 cycles/B (4.55 GB/s) on Zig 0.14.1's `lib/libc` and 1.38 cycles/B
+(4.0 GB/s) on the libc++, libc++abi, libstdc++, LLVM, clang and Qt headers, the
+same as upstream. Compare cycles/B and instructions/B rather than GB/s across
+machines.
