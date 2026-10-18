@@ -26,7 +26,7 @@
 //        in II. One byte shuffle per 4 instructions moves every canonical byte to its position in the instruction and
 //        a vpternlogd XORs the template's bytes in. Compressing those 4 slots by the bytes the instructions have
 //        (vpcompressb) leaves the 4 instructions' machine code, one after the other, which a 64-byte store appends to
-//        the output (a masked one, near the end).
+//        the output.
 // The form decides everything the bytes' positions depend on, so instructions with different forms (legacy, VEX or
 // EVEX) take the same path, and a form with no bytes (X86_FORM_NONE, which zeroed records have) is how a group is
 // padded. The choices are Zen 5's: docs/x86-64-encoder.md has the measurements behind them (encode_group's and
@@ -61,7 +61,10 @@
 
 // The architectural limit: longer instructions fault.
 #define BUSTER_X86_MAX_INSTRUCTION_BYTES 15
-#define BUSTER_X86_ENCODER_CAPACITY(count) ((uint64_t)(count) * BUSTER_X86_MAX_INSTRUCTION_BYTES)
+// x86_encode stores 64 bytes at a time, each at most 15 bytes per earlier instruction into the output, so the last
+// store ends at most 64 bytes past the instructions' upper bound.
+#define BUSTER_X86_ENCODER_STORE_BYTES 64
+#define BUSTER_X86_ENCODER_CAPACITY(count) ((uint64_t)(count) * BUSTER_X86_MAX_INSTRUCTION_BYTES + BUSTER_X86_ENCODER_STORE_BYTES)
 // Offsets are 32-bit, so a call encodes at most this many instructions.
 #define BUSTER_X86_ENCODER_MAX_INSTRUCTIONS (UINT32_MAX / BUSTER_X86_MAX_INSTRUCTION_BYTES)
 
@@ -1845,8 +1848,8 @@ struct X86Fields
     // Bit c is set if the instruction has canonical byte c (when its layout uses it).
     __m512i presence;
     __m512i length;
-    // The instructions whose operands the encoding can't represent.
-    __mmask16 invalid;
+    // Nonzero in the lanes of the instructions whose operands the encoding can't represent.
+    __m512i invalid;
 };
 
 #define BUSTER_X86_SPLAT(value) _mm512_set1_epi32((int)(value))
@@ -1979,8 +1982,8 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     // After a base, the displacement is none if it's zero (except after RBP and R13, whose ModRM.mod 00 means
     // something else, so they take an 8-bit zero), 8-bit if it fits and 32-bit otherwise; and RSP and R12 need a SIB
     // byte. All ones where each holds: the base bit, shifted to the top and back; and zero tests, which for a value x
-    // below 2^31 are (x - 1) >> 31, and otherwise ~(x | -x) >> 31. Each takes up to four operations of a cycle, where
-    // a compare and vpmovm2d would take eight cycles on the shuffle pipes.
+    // below 2^31 are (x - 1) >> 31, and otherwise ~(x | -x) >> 31. Each takes up to four operations that any vector
+    // pipe runs, two cycles each on Zen 5, where a compare and vpmovm2d take eight cycles on the shuffle pipes.
     const __m512i base = _mm512_srai_epi32(_mm512_slli_epi32(operands, 31 - 26 - 1), 31);
     const __m512i rm_bits = _mm512_and_epi32(operands, BUSTER_X86_SPLAT(0x700));
     const __m512i rm_4 = _mm512_srai_epi32(_mm512_sub_epi32(_mm512_xor_epi32(rm_bits, BUSTER_X86_SPLAT(4 << 8)), one), 31);
@@ -2010,9 +2013,9 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     // in a byte operand. low_reg and low_rm are zero for those: (register & 0xfc) ^ 4, or'ed with the byte form flag's
     // absence, and for rm, with the memory flag (bit 26, at 18 after the shift).
     //
-    // Both are zero tests of values below 2^31, which (x - 1) >> 31 does in two operations of a cycle each (a compare
-    // into a mask register takes six, on the busier pipes): rex_needed's bit 31 is set if rex_bits isn't zero or
-    // low_byte is.
+    // Both are zero tests of values below 2^31, which (x - 1) >> 31 does in two operations of two cycles each (a
+    // compare into a mask register takes six, on the busier pipes): rex_needed's bit 31 is set if rex_bits isn't zero
+    // or low_byte is.
     const __m512i rex_bits = _mm512_ternarylogic_epi32(register_fields, flags, BUSTER_X86_SPLAT(0xf0000), BUSTER_X86_A_OR_B_THEN_AND_C);
     const __m512i low_reg = _mm512_ternarylogic_epi32(_mm512_xor_epi32(_mm512_and_epi32(operands, BUSTER_X86_SPLAT(0xfc)), BUSTER_X86_SPLAT(4)), flags,
                                                       BUSTER_X86_SPLAT(BUSTER_X86_TEMPLATE_BYTE_REG), BUSTER_X86_A_OR_NOT_B_AND_C);
@@ -2061,8 +2064,8 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     // decorations (put together in one dword), the mode's (an invalid mode's own bits; a memory operand's rm bits 4 and
     // 6), an index register's bits 4-7 and unknown mode bits; RSP as an index (zero in rsp_index: the index's low
     // nibble ^ 4, or'ed with the index field's absence; below 2^31, so that rsp_index - 1 has the sign bit only then);
-    // and a high byte register (bit 6 of reg or rm, which only a legacy byte form allows) with a REX prefix. One
-    // compare into a mask register tests them all.
+    // and a high byte register (bit 6 of reg or rm, which only a legacy byte form allows) with a REX prefix. The loop
+    // ORs them together for one test at the end.
     const __m512i forbidden = _mm512_ternarylogic_epi32(mode_presence, BUSTER_X86_SPLAT(BUSTER_X86_MODE_TABLE_INVALID | BUSTER_X86_MODE_TABLE_MEMORY),
                                                         BUSTER_X86_SPLAT(0xc0f00000), BUSTER_X86_A_AND_B_OR_C);
     const __m512i registers = _mm512_ternarylogic_epi32(extension, operands, BUSTER_X86_SPLAT(0xffff0000), BUSTER_X86_C_SELECTS_A_OVER_B);
@@ -2077,8 +2080,7 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     result.presence = presence;
     result.length = length;
     const __m512i bad_or_rsp_index = _mm512_ternarylogic_epi32(bad, _mm512_sub_epi32(rsp_index, one), BUSTER_X86_SPLAT(0x80000000), BUSTER_X86_A_OR_B_AND_C);
-    const __m512i invalid = _mm512_ternarylogic_epi32(bad_or_rsp_index, rex, _mm512_and_epi32(operands, BUSTER_X86_SPLAT(0x4040)), BUSTER_X86_A_OR_B_AND_C);
-    result.invalid = _mm512_test_epi32_mask(invalid, invalid);
+    result.invalid = _mm512_ternarylogic_epi32(bad_or_rsp_index, rex, _mm512_and_epi32(operands, BUSTER_X86_SPLAT(0x4040)), BUSTER_X86_A_OR_B_AND_C);
     return result;
 }
 
@@ -2094,14 +2096,14 @@ BUSTER_INLINE __m512i x86_load_lane(__m512i vector, uint32_t lane, const uint8_t
 
 // Encodes the 4 * `quads` instructions at `instructions` (quads is 1, 2 or 4, and a constant), appending their
 // machine code at `out`, and returns where it ends. If `offsets` isn't null, stores the offsets (from `output`) of
-// the instructions of `offset_lanes` (a bit per instruction). Adds the invalid instructions to `*invalid`.
+// the instructions of `offset_lanes` (a bit per instruction). ORs the invalid instructions' lanes into `*invalid`.
 //
 // Phase II works on instruction 4q + j (quad q, slot j) in dword lane 4j + q, so that moving its fields between a
 // quad's records and the group's lanes is a 4x4 transpose of dwords inside each 128-bit lane, both ways: unpacks,
 // which on Zen 5 run on any of the four vector pipes (uops.info), where cross-lane permutes would take two of them
 // from Phase III's shuffles and compressions.
 BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t quads, uint8_t* out, const uint8_t* output, uint32_t* offsets,
-                                    uint32_t offset_lanes, X86Gather gather, X86Store store, __mmask16* invalid)
+                                    uint32_t offset_lanes, X86Gather gather, X86Store store, __m512i* invalid)
 {
     // I. Records and templates (zero for the quads past `quads`).
     __m512i records[4];
@@ -2120,7 +2122,10 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
     const __m512i low23 = _mm512_unpacklo_epi32(records[2], records[3]);
     const __m512i high01 = _mm512_unpackhi_epi32(records[0], records[1]);
     const __m512i high23 = _mm512_unpackhi_epi32(records[2], records[3]);
-    const __m512i immediate = _mm512_unpacklo_epi64(low01, low23);
+    __m512i immediate = _mm512_unpacklo_epi64(low01, low23);
+    // Opaque to clang, which otherwise sees that each of Phase III's unpacks of it takes half and merges one with
+    // low23 into a vpermt2d: a µop on FP1 and FP2, with an index to load, on Phase III's path.
+    __asm__("" : "+v"(immediate));
     const __m512i displacement = _mm512_unpackhi_epi64(low01, low23);
     const __m512i operands = _mm512_unpacklo_epi64(high01, high23);
     const __m512i extension = _mm512_unpackhi_epi64(high01, high23);
@@ -2168,10 +2173,9 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
     const __m512i checks = _mm512_unpacklo_epi64(template_high01, template_high23);
     const __m512i flags = _mm512_unpackhi_epi64(template_high01, template_high23);
 
-    // II. The lanes of the quads past `quads` hold zeros, which are valid; they're left out anyway.
+    // II. The lanes of the quads past `quads` hold zeros, which are valid, as are a zeroed copy's padding.
     const X86Fields fields = compute_fields(operands, displacement, extension, flags, checks);
-    const __mmask16 active = quads == 4 ? 0xffff : quads == 2 ? 0x3333 : 0x1111;
-    *invalid |= (__mmask16)(fields.invalid & active);
+    *invalid = _mm512_or_epi32(*invalid, fields.invalid);
 
     if (offsets != 0)
     {
@@ -2187,13 +2191,12 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
     }
 
     // III. Each quad's canonical slots: the immediate, the displacement, canonical bytes 8-11 and the prefix bytes
-    // 12-15. And its presence bits, in both quadwords of each slot, for vpshufbitqmb to pick from by the layout.
+    // 12-15. And its presence bits, in every dword of each slot, for vpshufbitqmb to pick from by the layout: an
+    // absent position picks bit 63, the second dword's bit 31, which no presence has.
     const __m512i immediate_displacement_low = _mm512_unpacklo_epi32(immediate, fields.displacement);
     const __m512i immediate_displacement_high = _mm512_unpackhi_epi32(immediate, fields.displacement);
     const __m512i canonical_low = _mm512_unpacklo_epi32(fields.canonical, fields.prefix);
     const __m512i canonical_high = _mm512_unpackhi_epi32(fields.canonical, fields.prefix);
-    const __m512i presence_low = _mm512_unpacklo_epi32(fields.presence, _mm512_setzero_si512());
-    const __m512i presence_high = _mm512_unpackhi_epi32(fields.presence, _mm512_setzero_si512());
     const __m512i canonicals[4] = {
         _mm512_unpacklo_epi64(immediate_displacement_low, canonical_low),
         _mm512_unpackhi_epi64(immediate_displacement_low, canonical_low),
@@ -2201,10 +2204,10 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
         _mm512_unpackhi_epi64(immediate_displacement_high, canonical_high),
     };
     const __m512i presences[4] = {
-        _mm512_unpacklo_epi64(presence_low, presence_low),
-        _mm512_unpackhi_epi64(presence_low, presence_low),
-        _mm512_unpacklo_epi64(presence_high, presence_high),
-        _mm512_unpackhi_epi64(presence_high, presence_high),
+        _mm512_shuffle_epi32(fields.presence, _MM_PERM_AAAA),
+        _mm512_shuffle_epi32(fields.presence, _MM_PERM_BBBB),
+        _mm512_shuffle_epi32(fields.presence, _MM_PERM_CCCC),
+        _mm512_shuffle_epi32(fields.presence, _MM_PERM_DDDD),
     };
     for (uint32_t q = 0; q < quads; q += 1)
     {
@@ -2234,26 +2237,27 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
 #undef BUSTER_X86_SHIFT_LANES_UP
 #undef BUSTER_X86_SPLAT
 
-// The vectorized encoder's loop: `groups` groups of 4 * `quads` instructions per iteration (all constants), storing
-// with `store` while instructions remain after the iteration; then whole groups with masked stores; then the last
-// partial group from a zeroed copy, so that no load reads past the instructions. Returns the number of bytes, or
-// X86_ENCODER_ERROR_INVALID_INSTRUCTION. Writes nothing past output + BUSTER_X86_ENCODER_CAPACITY(count), but may write
-// past the instructions' bytes.
+// The vectorized encoder's loop: `groups` groups of 4 * `quads` instructions per iteration (all constants), then the
+// whole groups left, then the last partial group from a zeroed copy, so that no load reads past the instructions.
+// Returns the number of bytes, or X86_ENCODER_ERROR_INVALID_INSTRUCTION. Writes nothing past
+// output + BUSTER_X86_ENCODER_CAPACITY(count), but may write past the instructions' bytes.
 //
-// Why a full 64-byte store stays inside that capacity: a store of quad q is at most 15 bytes per instruction before
-// it, so it ends by 15 * (i' - 4) + 64 bytes into the output, where i' counts the instructions up to the end of the
-// quad; with i' < count, that's at most 15 * (count - 5) + 64 < 15 * count.
+// Why a full 64-byte store stays inside that capacity: a quad's store starts after the bytes of the instructions
+// before it, at most 15 for each of the first `count` (the zeroed copy's padding adds none), so it ends by
+// 15 * count + 64.
 BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t quads,
                                      uint32_t groups, X86Gather gather, X86Store store)
 {
     const uint64_t group_instructions = BUSTER_X86_QUAD_INSTRUCTIONS * quads;
     const uint64_t iteration_instructions = group_instructions * groups;
     const uint32_t group_lanes = (uint32_t)((1ull << group_instructions) - 1);
-    __mmask16 invalid = 0;
+    __m512i invalid = _mm512_setzero_si512();
     uint8_t* out = output;
     uint64_t i = 0;
-    while (i + iteration_instructions < count)
+    while (i + iteration_instructions <= count)
     {
+        // clang keeps this loop rolled: a group's code takes most of the vector registers, and two groups' together
+        // spill (unrolled, it's 14% slower on Zen 5).
         for (uint32_t g = 0; g < groups; g += 1)
         {
             out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, gather, store, &invalid);
@@ -2262,24 +2266,26 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
     }
     while (i + group_instructions <= count)
     {
-        out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, gather, X86_STORE_MASKED, &invalid);
+        out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, gather, store, &invalid);
         i += group_instructions;
     }
     if (i < count)
     {
         X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
         memcpy(tail, instructions + i, (count - i) * sizeof(X86Instruction));
-        out = encode_group(tail, quads, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)((1ull << (count - i)) - 1), gather, X86_STORE_MASKED, &invalid);
+        out = encode_group(tail, quads, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)((1ull << (count - i)) - 1), gather, store, &invalid);
     }
-    return invalid != 0 ? X86_ENCODER_ERROR_INVALID_INSTRUCTION : (int64_t)(out - output);
+    return _mm512_test_epi32_mask(invalid, invalid) != 0 ? X86_ENCODER_ERROR_INVALID_INSTRUCTION : (int64_t)(out - output);
 }
 
 // The instantiations, by instructions per iteration, and for the benchmark, with the other gathers and stores. All of
-// them need room for BUSTER_X86_ENCODER_CAPACITY(count) bytes.
+// them need room for BUSTER_X86_ENCODER_CAPACITY(count) bytes. Each has a loop with offsets and one without, so that
+// neither tests for them per group.
 #define BUSTER_X86_ENCODE_VARIANT(name, quads, groups, gather, store) \
     __attribute__((noinline)) static int64_t name(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets) \
     { \
-        return encode_batches(instructions, count, output, offsets, quads, groups, gather, store); \
+        return offsets != 0 ? encode_batches(instructions, count, output, offsets, quads, groups, gather, store) \
+                            : encode_batches(instructions, count, output, 0, quads, groups, gather, store); \
     }
 BUSTER_X86_ENCODE_VARIANT(x86_encode_4, 1, 1, X86_GATHER_INSERTS, X86_STORE_FULL)
 BUSTER_X86_ENCODE_VARIANT(x86_encode_8, 2, 1, X86_GATHER_INSERTS, X86_STORE_FULL)
@@ -2292,7 +2298,7 @@ BUSTER_X86_ENCODE_VARIANT(x86_encode_16_masked_stores, 4, 1, X86_GATHER_INSERTS,
 BUSTER_X86_ENCODE_VARIANT(x86_encode_16_compress_stores, 4, 1, X86_GATHER_INSERTS, X86_STORE_COMPRESS)
 #undef BUSTER_X86_ENCODE_VARIANT
 
-// The production entry point: 32 instructions per iteration, which the Zen 5 benchmark found the fastest
+// The production entry point: 64 instructions per iteration, which the Zen 5 benchmark found the fastest
 // (docs/x86-64-encoder.md has the numbers).
 static int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets)
 {
@@ -2307,7 +2313,7 @@ static int64_t x86_encode(const X86Instruction* instructions, uint64_t count, ui
     }
     else
     {
-        result = x86_encode_32(instructions, count, output, offsets);
+        result = x86_encode_64(instructions, count, output, offsets);
     }
     return result;
 }

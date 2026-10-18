@@ -725,7 +725,7 @@ static const KnownEncoding x86_known_encodings[] = {
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.
 static uint64_t x86_check_known_with(const char* name, bool vectorized)
 {
-    static uint8_t output[BUSTER_ARRAY_LENGTH(x86_known_encodings) * BUSTER_X86_MAX_INSTRUCTION_BYTES];
+    static uint8_t output[BUSTER_X86_ENCODER_CAPACITY(BUSTER_ARRAY_LENGTH(x86_known_encodings))];
     uint64_t failures = 0;
     for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_known_encodings); i += 1)
     {
@@ -1150,7 +1150,7 @@ static bool x86_print_assembly(uint64_t* state, uint64_t count, X86Instruction* 
     printf(".intel_syntax noprefix\n.text\n");
     for (uint64_t i = 0; i < count; i += 1)
     {
-        const int64_t length = x86_encode_scalar(&instructions[i], 1, output, BUSTER_X86_MAX_INSTRUCTION_BYTES, 0);
+        const int64_t length = x86_encode_scalar(&instructions[i], 1, output, BUSTER_X86_ENCODER_CAPACITY(1), 0);
         printf("0: ");
         x86_print_instruction(stdout, &instructions[i]);
         printf("\n1: .pushsection .lengths, \"a\"; .byte 1b - 0b; .popsection # ");
