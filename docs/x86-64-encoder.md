@@ -198,7 +198,9 @@ before the other prefixes, as GNU as puts it). `x86_encoder_initialize` builds
 every form's template three times, 583 KB in all, of which a stream touches its
 own forms'; a form without a memory operand gets copies that take no operand at
 all. So x86_encode does nothing for an override that it doesn't do for every
-form, and its loop is the same code with them as without.
+form, and its loop is the same code with them as without. The fixup flag works
+the same way (see "Fixups"): the templates are copied again at the flag's
+index, 583 KB more.
 
 ### VEX and EVEX
 
@@ -346,9 +348,13 @@ fourth dwords: a `vpermb` puts each form's high byte in instruction order and
 lengths. A `vpcompressd` by it keeps the marked instructions' ends, which a
 64-byte store appends to the fixup ends (their capacity has 16 more than the
 marked instructions, `BUSTER_X86_ENCODER_FIXUP_CAPACITY`), advanced by the
-mask's popcount; the zeroed copy's padding isn't marked. Phase I takes the flag
-off the form before looking its template up (an AND per instruction, which
-measured no slower; see "Evaluation").
+mask's popcount; the zeroed copy's padding isn't marked. A marked form's
+template is a copy at its own index: `x86_encoder_initialize` copies the 18,201
+templates to `BUSTER_X86_FORM_FIXUP` and up (the pages between stay unmapped),
+so Phase I looks a form up as the record has it, and the loop without offsets
+and fixup ends is the same code as before. Taking the flag off each form with
+an AND instead cost the compiler mix 2.4% (15 interleaved rounds, after #35's
+changes; it had measured no slower before them).
 
 The other way to have the ends is the offsets: the caller picks the marked
 instructions' and takes the next instruction's start. Both are in the benchmark
@@ -550,9 +556,6 @@ ends took their flags from the lengths' dwords at first (a `vpmovb2m` and a
 `kshiftrq` after the `vpermb`, the longest path to the compress); taking them
 from the records instead, with a `vpermb` of their own, took another 3% off
 (the reorder buffer full 8.6% of cycles), which made them as fast as offsets.
-Taking the flag off the forms in Phase I made clang take the masked-loads
-variant's forms out of the records' vector registers with `vpextrw` (20%
-slower), until an empty `asm` statement on its record pointer stopped it.
 
 ## Evaluation
 
