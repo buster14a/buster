@@ -59,7 +59,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0x3cd8cf99af2373d0ull
+#define BUSTER_X86_TEST_DIGEST 0x105ec56388e2b4acull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -909,6 +909,15 @@ static const KnownEncoding x86_known_encodings[] = {
       7,
       { 0xc4, 0x02, 0x2d, 0x3f, 0x4c, 0x5d, 0x08 } },
     { { .form = X86_FORM_VMOVNTDQ_M256_Y + BUSTER_X86_FORM_GS, .reg = 9, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x65, 0xc5, 0x7d, 0xe7, 0x08 } },
+    // FMA3: vfmadd132ps ymm1, ymm2, ymm3; vfmsub213pd xmm9, xmm10, xmmword ptr [r13] (W1, R and B, an 8-bit zero
+    // displacement); vfnmsub231sd xmm1, xmm2, qword ptr [rax]; vfmaddsub132ps xmm1, xmm2, xmm3; vfmsubadd231pd ymm1,
+    // ymm2, ymmword ptr [rax]; and vfnmadd213ss xmm1, xmm2, dword ptr [rax]
+    { { .form = X86_FORM_VFMADD132PS_Y_Y_YM256, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0xc4, 0xe2, 0x6d, 0x98, 0xcb } },
+    { { .form = X86_FORM_VFMSUB213PD_X_X_XM128, .reg = 9, .vvvv = 10, .rm = X86_REGISTER_R13, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0xc4, 0x42, 0xa9, 0xaa, 0x4d, 0x00 } },
+    { { .form = X86_FORM_VFNMSUB231SD_X_X_XM64, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xc4, 0xe2, 0xe9, 0xbf, 0x08 } },
+    { { .form = X86_FORM_VFMADDSUB132PS_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0xc4, 0xe2, 0x69, 0x96, 0xcb } },
+    { { .form = X86_FORM_VFMSUBADD231PD_Y_Y_YM256, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xc4, 0xe2, 0xed, 0xb7, 0x08 } },
+    { { .form = X86_FORM_VFNMADD213SS_X_X_XM32, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xc4, 0xe2, 0x69, 0xad, 0x08 } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.

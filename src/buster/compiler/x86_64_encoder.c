@@ -511,6 +511,26 @@ typedef enum X86Syntax
     XV(N##_X_X_IMM8, m, VEX, 0x66, 2, 0x0f00 + opcode, D##K, 1, 0, 0, NONE, V, V, 16, 1, NONE, VVVV_RM_IMM) \
     XV(N##_Y_Y_IMM8, m, VEX, 0x66, 2, 0x0f00 + opcode, D##K, 1, 0, 1, NONE, Y, Y, 32, 1, NONE, VVVV_RM_IMM)
 
+// FMA3: an operation in its 132, 213 and 231 orders (which operands the product and the sum take: 1 the destination, 2
+// VEX.vvvv and 3 ModRM.rm), from the 132 order's opcode (213's adds 0x10 and 231's 0x20); packed, single precision with
+// W0 and double precision with W1, at both widths.
+#define BUSTER_X86_FMA_PACKED_FORMS(XV, N, m, opcode) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, N##132PS, m "132ps", 0x66, 3, 0x0f3800 + opcode, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, N##132PD, m "132pd", 0x66, 3, 0x0f3800 + opcode, 1) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, N##213PS, m "213ps", 0x66, 3, 0x0f3810 + opcode, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, N##213PD, m "213pd", 0x66, 3, 0x0f3810 + opcode, 1) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, N##231PS, m "231ps", 0x66, 3, 0x0f3820 + opcode, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, N##231PD, m "231pd", 0x66, 3, 0x0f3820 + opcode, 1)
+
+// The same in scalar, at the next opcode.
+#define BUSTER_X86_FMA_SCALAR_FORMS(XV, N, m, opcode) \
+    XV(N##132SS_X_X_XM32, m "132ss", VEX, 0x66, 3, 0x0f3801 + opcode, R, 0, 0, 0, V, V, XM, 4, 1, NONE, REG_VVVV_RM) \
+    XV(N##132SD_X_X_XM64, m "132sd", VEX, 0x66, 3, 0x0f3801 + opcode, R, 0, 1, 0, V, V, XM, 8, 1, NONE, REG_VVVV_RM) \
+    XV(N##213SS_X_X_XM32, m "213ss", VEX, 0x66, 3, 0x0f3811 + opcode, R, 0, 0, 0, V, V, XM, 4, 1, NONE, REG_VVVV_RM) \
+    XV(N##213SD_X_X_XM64, m "213sd", VEX, 0x66, 3, 0x0f3811 + opcode, R, 0, 1, 0, V, V, XM, 8, 1, NONE, REG_VVVV_RM) \
+    XV(N##231SS_X_X_XM32, m "231ss", VEX, 0x66, 3, 0x0f3821 + opcode, R, 0, 0, 0, V, V, XM, 4, 1, NONE, REG_VVVV_RM) \
+    XV(N##231SD_X_X_XM64, m "231sd", VEX, 0x66, 3, 0x0f3821 + opcode, R, 0, 1, 0, V, V, XM, 8, 1, NONE, REG_VVVV_RM)
+
 // Shifts by the low quadword of an XMM register or 128-bit memory operand, at both widths.
 #define BUSTER_X86_AVX_SHIFT_COUNT_FORMS(XV, N, m, opcode) \
     XV(N##_X_X_XM128, m, VEX, 0x66, 2, 0x0f00 + opcode, R, 0, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM) \
@@ -736,12 +756,16 @@ typedef enum X86Syntax
     BUSTER_X86_AVX_PACKED_FORMS(XV, VPSRAVD, "vpsravd", 0x66, 3, 0x0f3846, 0) \
     BUSTER_X86_AVX_PACKED_FORMS(XV, VPSLLVD, "vpsllvd", 0x66, 3, 0x0f3847, 0) \
     BUSTER_X86_AVX_PACKED_FORMS(XV, VPSLLVQ, "vpsllvq", 0x66, 3, 0x0f3847, 1) \
-    BUSTER_X86_AVX_PACKED_FORMS(XV, VFMADD231PS, "vfmadd231ps", 0x66, 3, 0x0f38b8, 0) \
-    BUSTER_X86_AVX_PACKED_FORMS(XV, VFMADD231PD, "vfmadd231pd", 0x66, 3, 0x0f38b8, 1) \
-    BUSTER_X86_AVX_PACKED_FORMS(XV, VFMADD213PS, "vfmadd213ps", 0x66, 3, 0x0f38a8, 0) \
-    BUSTER_X86_AVX_PACKED_FORMS(XV, VFNMADD231PS, "vfnmadd231ps", 0x66, 3, 0x0f38bc, 0) \
-    XV(VFMADD231SS_X_X_XM32, "vfmadd231ss", VEX, 0x66, 3, 0x0f38b9, R, 0, 0, 0, V, V, XM, 4, 1, NONE, REG_VVVV_RM) \
-    XV(VFMADD231SD_X_X_XM64, "vfmadd231sd", VEX, 0x66, 3, 0x0f38b9, R, 0, 1, 0, V, V, XM, 8, 1, NONE, REG_VVVV_RM) \
+    BUSTER_X86_FMA_PACKED_FORMS(XV, VFMADDSUB, "vfmaddsub", 0x96) \
+    BUSTER_X86_FMA_PACKED_FORMS(XV, VFMSUBADD, "vfmsubadd", 0x97) \
+    BUSTER_X86_FMA_PACKED_FORMS(XV, VFMADD, "vfmadd", 0x98) \
+    BUSTER_X86_FMA_SCALAR_FORMS(XV, VFMADD, "vfmadd", 0x98) \
+    BUSTER_X86_FMA_PACKED_FORMS(XV, VFMSUB, "vfmsub", 0x9a) \
+    BUSTER_X86_FMA_SCALAR_FORMS(XV, VFMSUB, "vfmsub", 0x9a) \
+    BUSTER_X86_FMA_PACKED_FORMS(XV, VFNMADD, "vfnmadd", 0x9c) \
+    BUSTER_X86_FMA_SCALAR_FORMS(XV, VFNMADD, "vfnmadd", 0x9c) \
+    BUSTER_X86_FMA_PACKED_FORMS(XV, VFNMSUB, "vfnmsub", 0x9e) \
+    BUSTER_X86_FMA_SCALAR_FORMS(XV, VFNMSUB, "vfnmsub", 0x9e) \
     BUSTER_X86_AVX_SHIFT_FORMS(XV, VPSLLD, "vpslld", 0x72, 6) \
     BUSTER_X86_AVX_SHIFT_FORMS(XV, VPSRLD, "vpsrld", 0x72, 2) \
     BUSTER_X86_AVX_SHIFT_FORMS(XV, VPSRAD, "vpsrad", 0x72, 4) \
