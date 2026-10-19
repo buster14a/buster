@@ -103,10 +103,10 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0x4a9855411fa0f8b3ull
+#define BUSTER_X86_TEST_DIGEST 0xdc83e6f14ddeb42dull
 // The same for the stream with 32-bit addresses (--address32), and for the one with APX's registers (--apx).
-#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0xf1439b8f58609681ull
-#define BUSTER_X86_TEST_DIGEST_APX 0xe7c3fe175c6a6e47ull
+#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0x51405d64b9504a27ull
+#define BUSTER_X86_TEST_DIGEST_APX 0xd96706d74a3fe196ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -1373,6 +1373,12 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_PUSH2P_R64_R64, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RBX }, 6, { 0x62, 0xf4, 0xfc, 0x18, 0xff, 0xf3 } },
     { { .form = X86_FORM_PUSH2_R64_R64, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0xff, 0xf0 } },
     { { .form = X86_FORM_POP2_R64_R64, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RBX }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0x8f, 0xc3 } },
+    // And those that always have REX2, whose payload is REX's place here: pushp rax and pushp r8 (W, the hint, and B3);
+    // popp r15; and jmpabs 0x123456789abcdef0 (W0)
+    { { .form = X86_FORM_PUSHP_R64, .rm = X86_REGISTER_RAX }, 3, { 0xd5, 0x08, 0x50 } },
+    { { .form = X86_FORM_PUSHP_R64, .rm = X86_REGISTER_R8 }, 3, { 0xd5, 0x09, 0x50 } },
+    { { .form = X86_FORM_POPP_R64, .rm = X86_REGISTER_R15 }, 3, { 0xd5, 0x09, 0x5f } },
+    { { .form = X86_FORM_JMPABS_IMM64, .immediate = (int32_t)0x9abcdef0, .displacement = 0x12345678 }, 11, { 0xd5, 0x00, 0xa1, 0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12 } },
     // EVEX: vaddps zmm1{k1}{z}, zmm2, zmm3; vaddps zmm1, zmm2, zmmword ptr [rax+64] (8-bit 1 in units of 64); vaddps
     // zmm1, zmm2, dword ptr [rax+64]{1to16} (16 in units of 4); vaddps zmm1, zmm2, zmm3, {rz-sae}; vmaxps zmm1, zmm2,
     // zmm3, {sae}; vaddsd xmm1{k1}{z}, xmm2, xmm3, {rz-sae}
@@ -2514,6 +2520,13 @@ static const KnownEncoding x86_known_encodings_apx[] = {
     { { .form = X86_FORM_PUSH2_R64_R64, .vvvv = 30, .rm = 31 }, 6, { 0x62, 0xdc, 0x0c, 0x10, 0xff, 0xf7 } },
     { { .form = X86_FORM_POP2_R64_R64, .vvvv = 31, .rm = 30 }, 6, { 0x62, 0xdc, 0x04, 0x10, 0x8f, 0xc6 } },
     { { .form = X86_FORM_POP2P_R64_R64, .vvvv = 16, .rm = 17 }, 6, { 0x62, 0xfc, 0xfc, 0x10, 0x8f, 0xc1 } },
+    // And those that always have REX2, here REX's position's D5 and map 0's payload: pushp r16 and r31 (B4 and B3),
+    // popp r20 and popp rax (REX2 without registers 16 to 31), and jmpabs 0x123456789abcdef0
+    { { .form = X86_FORM_PUSHP_R64, .rm = 16 }, 3, { 0xd5, 0x18, 0x50 } },
+    { { .form = X86_FORM_PUSHP_R64, .rm = 31 }, 3, { 0xd5, 0x19, 0x57 } },
+    { { .form = X86_FORM_POPP_R64, .rm = 20 }, 3, { 0xd5, 0x18, 0x5c } },
+    { { .form = X86_FORM_POPP_R64, .rm = X86_REGISTER_RAX }, 3, { 0xd5, 0x08, 0x58 } },
+    { { .form = X86_FORM_JMPABS_IMM64, .immediate = (int32_t)0x9abcdef0, .displacement = 0x12345678 }, 11, { 0xd5, 0x00, 0xa1, 0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12 } },
     // Without registers 16 to 31, as for x86_encode: REX's add rax, r8; VEX and EVEX; map 2's crc32; xsave [r15]
     { { .form = X86_FORM_ADD_RM64_R64, .reg = 8 }, 3, { 0x4c, 0x01, 0xc0 } },
     { { .form = X86_FORM_VADDPS_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 4, { 0xc5, 0xe8, 0x58, 0xcb } },
@@ -2715,9 +2728,10 @@ static const KnownFixup x86_known_fixups[] = {
       X86_FIXUP_DISPLACEMENT, 2, 6 },
     { { .form = X86_FORM_MOV_R32_RM32 | BUSTER_X86_FORM_FIXUP, .mode = BUSTER_X86_MEMORY_ABSOLUTE }, X86_FIXUP_DISPLACEMENT, 3, 7 },
     { { .form = X86_FORM_MOV_R32_RM32 | BUSTER_X86_FORM_FIXUP, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_INDEX(2) }, X86_FIXUP_DISPLACEMENT, 3, 7 },
-    // movabs rax, offset y; movabs al, ds:y (R_X86_64_64 y)
+    // movabs rax, offset y; movabs al, ds:y; jmpabs y (REX2 always) (R_X86_64_64 y)
     { { .form = X86_FORM_MOV_R64_IMM64 | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_IMMEDIATE, 2, 10 },
     { { .form = X86_FORM_MOVABS_AL_MOFFS | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_IMMEDIATE, 1, 9 },
+    { { .form = X86_FORM_JMPABS_IMM64 | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_IMMEDIATE, 3, 11 },
     // push offset y; add rcx, offset y (R_X86_64_32S y); mov eax, offset y (R_X86_64_32 y)
     { { .form = X86_FORM_PUSH_IMM32 | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_IMMEDIATE, 1, 5 },
     { { .form = X86_FORM_ADD_RM64_IMM32 | BUSTER_X86_FORM_FIXUP, .rm = X86_REGISTER_RCX }, X86_FIXUP_IMMEDIATE, 3, 7 },

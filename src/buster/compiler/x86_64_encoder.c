@@ -3654,6 +3654,9 @@ typedef enum X86Syntax
     X(SHRD_RM64_R64_CL, "shrd", 0, 2, 0x0fad, R, 0, 0, 1, GQ, EQ, 8, RM_REG_CL) \
     X(PUSH_R64, "push", 0, 1, 0x50, PR, 0, 0, 0, NONE, GQ, 8, RM) \
     X(POP_R64, "pop", 0, 1, 0x58, PR, 0, 0, 0, NONE, GQ, 8, RM) \
+    /* APX's push and pop with a hint that the pop pops what a push pushed (PPX, REX2's W), which always have REX2: its D5 is their prefix. */ \
+    X(PUSHP_R64, "pushp", 0xd5, 1, 0x50, PR, 0, 0, 1, NONE, GQ, 8, RM) \
+    X(POPP_R64, "popp", 0xd5, 1, 0x58, PR, 0, 0, 1, NONE, GQ, 8, RM) \
     X(PUSH_RM64, "push", 0, 1, 0xff, D6, 0, 0, 0, NONE, EQ, 8, RM) \
     X(POP_RM64, "pop", 0, 1, 0x8f, D0, 0, 0, 0, NONE, EQ, 8, RM) \
     X(PUSH_IMM8, "push", 0, 1, 0x6a, NO, 1, 0, 0, NONE, NONE, 8, IMM) \
@@ -3668,6 +3671,8 @@ typedef enum X86Syntax
     X(JMP_REL8, "jmp", 0, 1, 0xeb, NO, 0, 1, 0, NONE, NONE, 0, REL) \
     X(JMP_REL32, "jmp", 0, 1, 0xe9, NO, 0, 4, 0, NONE, NONE, 0, REL) \
     X(JMP_RM64, "jmp", 0, 1, 0xff, D4, 0, 0, 0, NONE, EQ, 8, RM) \
+    /* APX's jump to a 64-bit absolute address: A1 with REX2 (W0, map 0). */ \
+    X(JMPABS_IMM64, "jmpabs", 0xd5, 1, 0xa1, NO, 8, 0, 0, NONE, NONE, 8, IMM) \
     X(CALL_FAR_M32, "call", 0x66, 1, 0xff, D3, 0, 0, 0, NONE, M, 4, RM) \
     X(CALL_FAR_M48, "call", 0, 1, 0xff, D3, 0, 0, 0, NONE, M, 6, RM) \
     X(CALL_FAR_M80, "rex.w call", 0, 1, 0xff, D3, 0, 0, 1, NONE, M, 6, RM) \
@@ -4787,8 +4792,8 @@ static __attribute__((unused)) uint64_t x86_validate_address32(const X86Instruct
 // x86_encode. The forms whose template has no room for REX2's payload take registers 0 to 15 alone, as do the XSAVE
 // family (with which REX2 is #UD), maps 2 and 3 and VEX: APX gives their instructions with general registers EVEX forms
 // for that (the EVEX forms of BMI, kmov, CMPccXADD, AMX's loads and stores, and the legacy ones in map 4, with ND, NF
-// and ZU). APX's new instructions ccmp, ctest, cfcmov, push2 and pop2 are EVEX forms too, but pushp, popp and jmpabs,
-// which always have REX2, are still to come (#36).
+// and ZU). APX's new instructions ccmp, ctest, cfcmov, push2 and pop2 are EVEX forms too, and pushp, popp and jmpabs
+// always have REX2 (which the other entry points encode with registers 0 to 15).
 static __attribute__((unused)) bool x86_encoder_initialize_apx(void);
 static __attribute__((unused)) int64_t x86_encode_apx(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
                                                       uint32_t* fixup_ends);
@@ -5107,6 +5112,11 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     // For APX, an EVEX form's general registers, base and general index can be 16 to 31 too: EVEX's R', V', B4 and X4.
     const bool evex_extended = encoder == X86_ENCODER_MODE_APX && form->family == BUSTER_X86_FAMILY_EVEX;
     const bool extended = rex2 || evex_extended;
+    // A form that always has REX2 (its row's last prefix is REX2's D5) always has REX too (REX_ALWAYS, whatever W is),
+    // whose presence is REX2's: with REX2's positions, D5 is a static byte in REX's position, present with REX, and the
+    // payload's position is always there; without them, D5 is a static byte before REX's position, which is the
+    // payload, whose R3, X3 and B3 are REX's R, X and B (and M0, R4, X4 and B4 zero, as registers 0 to 15 have them).
+    const bool always_rex2 = form->family == BUSTER_X86_FAMILY_LEGACY && x86_form_has_prefix(form, 0xd5);
     uint32_t position = 0;
     uint32_t static_length = 0;
     // The position after the last of the form's own bytes in the template.
@@ -5147,7 +5157,7 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     }
     if (form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY)
     {
-        for (; prefixes != 0; prefixes >>= 8)
+        for (; prefixes != 0 && !(rex2 && (uint8_t)prefixes == 0xd5); prefixes >>= 8)
         {
             template->bytes[position] = (uint8_t)prefixes;
             template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
@@ -5156,17 +5166,19 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
             last_static = position;
         }
 
-        // REX, or REX2's D5.
-        template->bytes[position] = (uint8_t)(0x40 | (form->w << 3));
-        template->layout[position] = BUSTER_X86_CANONICAL_REX;
+        // REX, or REX2's D5 (in a form that always has REX2, the static D5, or the payload after one).
+        template->bytes[position] = always_rex2 && rex2 ? 0xd5 : (uint8_t)((always_rex2 ? 0 : 0x40) | (form->w << 3));
+        template->layout[position] = always_rex2 && rex2 ? BUSTER_X86_LAYOUT_STATIC | BUSTER_X86_CANONICAL_REX : BUSTER_X86_CANONICAL_REX;
         position += 1;
-        // REX2's payload, after D5: in map 0 a position of its own, present with REX2 alone, whose template byte is W.
-        // Like REX's, it comes before the opcode, the last of the form's own bytes.
+        // REX2's payload, after D5: in map 0 a position of its own, present with REX2 alone (but always, in a form that
+        // always has REX2), whose template byte is W. Like REX's, it comes before the opcode, the last of the form's
+        // own bytes.
         if (rex2 && !rex2_map1)
         {
             template->bytes[position] = (uint8_t)(form->w << 3);
             template->layout[position] = BUSTER_X86_CANONICAL_REX2_PAYLOAD;
             position += 1;
+            static_length += always_rex2 ? 1 : 0;
         }
 
         // 3DNow!'s operation byte is the immediate's. With REX2, map 1's 0F is the payload's position.
@@ -5182,7 +5194,7 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
             static_length += 1;
             last_static = position;
         }
-        flags |= form->w ? BUSTER_X86_TEMPLATE_REX_ALWAYS : 0;
+        flags |= form->w || always_rex2 ? BUSTER_X86_TEMPLATE_REX_ALWAYS : 0;
     }
     else if (form->opcode_bytes != 0)
     {
@@ -5296,11 +5308,12 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     // 4 is none.
     flags |= vsib || sib ? 0 : BUSTER_X86_TEMPLATE_GENERAL_INDEX;
     flags |= (vsib && form->family == BUSTER_X86_FAMILY_EVEX) || extended ? 0 : BUSTER_X86_TEMPLATE_NO_HIGH_INDEX;
-    // REX2: map 0's payload (canonical byte 15) is present with REX2 alone, and counts in the length. A vector register
-    // rm can't be 16 to 31 where a base can. In an EVEX form, a general register rm's bit 4 is B4, and a general
-    // index's X4. In x86_encode_apx's loop, a form without REX2 or EVEX can't have a base past 15 either.
+    // REX2: map 0's payload (canonical byte 15) is present with REX2 alone, and counts in the length (but in a form
+    // that always has REX2, it's always present, in the static length). A vector register rm can't be 16 to 31 where a
+    // base can. In an EVEX form, a general register rm's bit 4 is B4, and a general index's X4. In x86_encode_apx's
+    // loop, a form without REX2 or EVEX can't have a base past 15 either.
     flags |= rex2 ? BUSTER_X86_TEMPLATE_REX2 : 0;
-    flags &= rex2 && !rex2_map1 ? ~(uint32_t)0x8000 : ~(uint32_t)0;
+    flags &= rex2 && !rex2_map1 && !always_rex2 ? ~(uint32_t)0x8000 : ~(uint32_t)0;
     flags |= rex2 && (form->rm & BUSTER_X86_OPERAND_MEMORY) && (form->rm & BUSTER_X86_OPERAND_REGISTER) && !x86_operand_is_general(form->rm)
                  ? BUSTER_X86_TEMPLATE_NO_HIGH_RM_REGISTER
                  : 0;
@@ -5723,21 +5736,23 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out, X86E
     }
     if (form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY)
     {
-        for (; prefixes != 0; prefixes >>= 8)
+        // A form that always has REX2 has its D5 as its last prefix, which REX2 writes.
+        const bool always_rex2 = x86_form_has_prefix(form, 0xd5);
+        for (; prefixes != 0 && (uint8_t)prefixes != 0xd5; prefixes >>= 8)
         {
             out[length] = (uint8_t)prefixes;
             length += 1;
         }
 
-        // REX: W, R, X and B (whose X is the index's alone); and for SPL, BPL, SIL and DIL. Or with APX's general registers
-        // 16 to 31, REX2: D5, then M0 (map 1, whose 0F it replaces), R4, X4, B4 (the same registers' bit 4), W, R, X and
-        // B.
+        // REX: W, R, X and B (whose X is the index's alone); and for SPL, BPL, SIL and DIL. Or with APX's general
+        // registers 16 to 31, or in a form that always has it, REX2: D5, then M0 (map 1, whose 0F it replaces), R4, X4,
+        // B4 (the same registers' bit 4), W, R, X and B.
         const bool legacy_x = memory && index && (index_register & 8);
         const uint8_t rex = (uint8_t)(0x40 | (form->w << 3) | (r << 2) | (legacy_x << 1) | b);
         const bool r4 = (reg & 16) != 0;
         const bool x4 = memory && index && (index_register & 16);
         const bool b4 = (!memory || base) && (rm & 16);
-        const bool rex2 = encoder == X86_ENCODER_MODE_APX && (r4 || x4 || b4);
+        const bool rex2 = always_rex2 || (encoder == X86_ENCODER_MODE_APX && (r4 || x4 || b4));
         const bool map1 = x86_legacy_map(form) == 1;
         bool needs_rex = rex != 0x40;
         if ((form->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_GPR8 && instruction->reg >= 4 && instruction->reg <= 7)
