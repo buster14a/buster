@@ -77,7 +77,8 @@
 // or XMM31 = 31 in an EVEX form, and the same for YMM and ZMM; opmask: K0 = 0 ... K7 = 7, and a pair of them (an even
 // one and the next) as the even one's number; x87: ST(0) = 0 ... ST(7) = 7; MMX: MM0 = 0 ... MM7 = 7, which REX
 // doesn't extend; control: CR0 = 0 ... CR8 = 8, of which CR0, CR2 to CR4 and CR8 exist; debug: DR0 = 0 ... DR7 = 7;
-// segment: ES = 0, CS = 1, SS = 2, DS = 3, FS = 4 and GS = 5) or, for AH, CH, DH and BH, 4 to 7 with
+// segment: ES = 0, CS = 1, SS = 2, DS = 3, FS = 4 and GS = 5; tile: TMM0 = 0 ... TMM7 = 7, and a pair of them as the
+// even one's number, as for opmasks) or, for AH, CH, DH and BH, 4 to 7 with
 // BUSTER_X86_REGISTER_HIGH_BYTE. With a byte form, 4 to 7 alone are SPL, BPL, SIL and DIL, which need a REX prefix;
 // the high byte registers can't have one.
 #define BUSTER_X86_REGISTER_NUMBER 0x1f
@@ -181,11 +182,12 @@ typedef enum X86EncoderError
 // The form table's operand roles: a register class, and for ModRM.rm whether it can be a register, memory, or both
 // (as Intel's opcode maps write them: G a general register in ModRM.reg, E a general register or memory in
 // ModRM.rm, V an XMM register, XM an XMM register or memory, M only memory; and Y, YM, Z and ZM for YMM and ZMM, K
-// for the opmask registers, ST for the x87 registers, MM for the MMX registers, and CR, DR and SREG for the control,
-// debug and segment registers; VSIBX, VSIBY and VSIBZ are a gather's or scatter's VSIB memory operand, whose index is
-// an XMM, YMM or ZMM register, Intel's vm32x and the rest). For a +r form, the register is the rm operand. An rm operand
-// that's an opmask or MMX register, or memory, would need checks that depend on the mode (k8 to k15 and mm8 to mm15
-// don't exist, but a base can be R8 to R15), so those are two forms.
+// for the opmask registers, ST for the x87 registers, MM for the MMX registers, CR, DR and SREG for the control,
+// debug and segment registers, and TMM for AMX's tiles; VSIBX, VSIBY and VSIBZ are a gather's or scatter's VSIB memory
+// operand, whose index is an XMM, YMM or ZMM register, Intel's vm32x and the rest, and SIBMEM AMX's memory operand,
+// which always has a SIB byte, Intel's sibmem). For a +r form, the register is the rm operand. An rm operand that's an
+// opmask or MMX register, or memory, would need checks that depend on the mode (k8 to k15 and mm8 to mm15 don't exist,
+// but a base can be R8 to R15), so those are two forms.
 #define BUSTER_X86_OPERAND_CLASS 0x0f
 #define BUSTER_X86_CLASS_NONE 0
 #define BUSTER_X86_CLASS_GPR8 1
@@ -202,10 +204,14 @@ typedef enum X86EncoderError
 #define BUSTER_X86_CLASS_CONTROL 12
 #define BUSTER_X86_CLASS_DEBUG 13
 #define BUSTER_X86_CLASS_SEGMENT 14
+#define BUSTER_X86_CLASS_TILE 15
 #define BUSTER_X86_OPERAND_REGISTER 0x10
 #define BUSTER_X86_OPERAND_MEMORY 0x20
 // A VSIB memory operand: its index (which it always has) is a vector register of the class.
 #define BUSTER_X86_OPERAND_VSIB 0x40
+// A memory operand that always has a SIB byte: an index, whose 4 is SIB's none (the stride of AMX's loads and stores),
+// or no base, and never RIP.
+#define BUSTER_X86_OPERAND_SIB 0x80
 #define BUSTER_X86_OPERAND_NONE 0
 #define BUSTER_X86_OPERAND_GB (BUSTER_X86_CLASS_GPR8 | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_GW (BUSTER_X86_CLASS_GPR16 | BUSTER_X86_OPERAND_REGISTER)
@@ -228,10 +234,12 @@ typedef enum X86EncoderError
 #define BUSTER_X86_OPERAND_CR (BUSTER_X86_CLASS_CONTROL | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_DR (BUSTER_X86_CLASS_DEBUG | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_SREG (BUSTER_X86_CLASS_SEGMENT | BUSTER_X86_OPERAND_REGISTER)
+#define BUSTER_X86_OPERAND_TMM (BUSTER_X86_CLASS_TILE | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_M BUSTER_X86_OPERAND_MEMORY
 #define BUSTER_X86_OPERAND_VSIBX (BUSTER_X86_CLASS_XMM | BUSTER_X86_OPERAND_MEMORY | BUSTER_X86_OPERAND_VSIB)
 #define BUSTER_X86_OPERAND_VSIBY (BUSTER_X86_CLASS_YMM | BUSTER_X86_OPERAND_MEMORY | BUSTER_X86_OPERAND_VSIB)
 #define BUSTER_X86_OPERAND_VSIBZ (BUSTER_X86_CLASS_ZMM | BUSTER_X86_OPERAND_MEMORY | BUSTER_X86_OPERAND_VSIB)
+#define BUSTER_X86_OPERAND_SIBMEM (BUSTER_X86_OPERAND_MEMORY | BUSTER_X86_OPERAND_SIB)
 
 // How the form uses ModRM: none (NO), a register in ModRM.reg (R, /r), an opcode extension in ModRM.reg (D0-D7,
 // /0-/7), or none, with the rm register added to the last opcode byte (PR, +r).
@@ -319,6 +327,7 @@ typedef enum X86Syntax
     X86_SYNTAX_DX_ACC,
     X86_SYNTAX_IMM_ACC,
     X86_SYNTAX_IMM_RM,
+    X86_SYNTAX_REG,
 } X86Syntax;
 
 // The form table. Each row is X(name, mnemonic, prefixes, opcode bytes, opcode, encoding, immediate bytes, relative
@@ -569,8 +578,9 @@ typedef enum X86Syntax
 // bytes, W, L, reg operand, vvvv operand, rm operand, operand bytes, disp8 scale, decorations, syntax):
 //   - family: VEX or EVEX; prefixes: the legacy prefix the form implies (66, F3 or F2, which become VEX.pp and
 //     EVEX.pp), or 0; opcode: as for the legacy forms, with its escape bytes (0F, 0F 38 or 0F 3A: the opcode map),
-//     or for the maps without escape bytes, EVEX's 5 and 6, VEX's 7, and XOP's 8, 9 and 0A (VEX rows, whose prefix
-//     is then XOP's: 8F in place of C4), the map's number in the escape's place (0x0558: map 5's 58);
+//     or for the maps without escape bytes, 5 and 6 (EVEX's, and VEX's 5 for AMX-FP8), VEX's 7, and XOP's 8, 9 and
+//     0A (VEX rows, whose prefix is then XOP's: 8F in place of C4), the map's number in the escape's place (0x0558: map
+//     5's 58);
 //   - W: VEX.W or EVEX.W (0 where it's ignored, as GNU as encodes those); L: VEX.L or EVEX.L'L, 0 (128-bit, scalar
 //     or no vector length), 1 (256-bit) or 2 (512-bit);
 //   - vvvv operand: the register in VEX.vvvv or EVEX.V'vvvv, or NONE;
@@ -849,6 +859,22 @@ typedef enum X86Syntax
     XV(N##_VM64Z_Y, m, EVEX, 0x66, 3, opcode, R, 0, 0, 2, Y, NONE, VSIBZ, 4, 4, K, RM_REG) \
     XV(N##_VM64X_X, m, EVEX, 0x66, 3, opcode, R, 0, 0, 0, V, NONE, VSIBX, 4, 4, K, RM_REG) \
     XV(N##_VM64Y_X, m, EVEX, 0x66, 3, opcode, R, 0, 0, 1, V, NONE, VSIBY, 4, 4, K, RM_REG)
+
+// An AMX tile load: into ModRM.reg's tile (or AMX-TRANSPOSE's pair of them, an even tile and the next), through a SIB
+// memory operand.
+#define BUSTER_X86_AMX_LOAD_FORM(XV, N, m, prefixes, opcode_bytes, opcode) \
+    XV(N##_TMM_SIBMEM, m, VEX, prefixes, opcode_bytes, opcode, R, 0, 0, 0, TMM, NONE, SIBMEM, 0, 1, NONE, REG_RM)
+
+// An AMX product of tiles (a dot product, or a complex or TF32 multiplication): into ModRM.reg's tile, of ModRM.rm's
+// and VEX.vvvv's.
+#define BUSTER_X86_AMX_TILE_FORM(XV, N, m, prefixes, opcode_bytes, opcode) \
+    XV(N##_TMM_TMM_TMM, m, VEX, prefixes, opcode_bytes, opcode, R, 0, 0, 0, TMM, TMM, TMM, 0, 1, NONE, REG_RM_VVVV)
+
+// AMX-AVX512: a tile's row (in ModRM.rm) into a ZMM register, the row's number an 8-bit immediate (in map 3) or in a
+// 32-bit register in EVEX.vvvv (in map 2), without an opmask.
+#define BUSTER_X86_AMX_ROW_FORMS(XV, N, m, immediate_prefixes, immediate_opcode, register_prefixes, register_opcode) \
+    XV(N##_Z_TMM_IMM8, m, EVEX, immediate_prefixes, 3, immediate_opcode, R, 1, 0, 2, Z, NONE, TMM, 64, 1, NONE, REG_RM_IMM) \
+    XV(N##_Z_TMM_R32, m, EVEX, register_prefixes, 3, register_opcode, R, 0, 0, 2, Z, GD, TMM, 64, 1, NONE, REG_RM_VVVV)
 
 // An XMM register's low or high quadword (two single-precision elements, or with W1 a double-precision one) from
 // memory, with the other from EVEX.V'vvvv, and to memory (the next opcode), as the VEX forms.
@@ -1789,6 +1815,45 @@ typedef enum X86Syntax
     BUSTER_X86_FMA4_FORMS(XV, VFMSUB, "vfmsub", 0x0f3a6c) \
     BUSTER_X86_FMA4_FORMS(XV, VFNMADD, "vfnmadd", 0x0f3a78) \
     BUSTER_X86_FMA4_FORMS(XV, VFNMSUB, "vfnmsub", 0x0f3a7c) \
+    /* AMX: the tile configuration (64 bytes, which GNU as takes without a size), loads and stores through a SIB memory operand (whose index is the stride), AMX-TRANSPOSE's loads of a pair of tiles and transposes, and products of tiles (FP8's and the read-shared pair loads in VEX map 5). */ \
+    XV(LDTILECFG_M512, "ldtilecfg", VEX, 0, 3, 0x0f3849, D0, 0, 0, 0, NONE, NONE, M, 0, 1, NONE, RM) \
+    XV(STTILECFG_M512, "sttilecfg", VEX, 0x66, 3, 0x0f3849, D0, 0, 0, 0, NONE, NONE, M, 0, 1, NONE, RM) \
+    XV(TILERELEASE, "tilerelease", VEX, 0, 3, 0x0f3849, D0, 0, 0, 0, NONE, NONE, NONE, 0, 1, NONE, NONE) \
+    XV(TILEZERO_TMM, "tilezero", VEX, 0xf2, 3, 0x0f3849, R, 0, 0, 0, TMM, NONE, NONE, 0, 1, NONE, REG) \
+    BUSTER_X86_AMX_LOAD_FORM(XV, TILELOADD, "tileloadd", 0xf2, 3, 0x0f384b) \
+    BUSTER_X86_AMX_LOAD_FORM(XV, TILELOADDT1, "tileloaddt1", 0x66, 3, 0x0f384b) \
+    XV(TILESTORED_SIBMEM_TMM, "tilestored", VEX, 0xf3, 3, 0x0f384b, R, 0, 0, 0, TMM, NONE, SIBMEM, 0, 1, NONE, RM_REG) \
+    BUSTER_X86_AMX_LOAD_FORM(XV, TILELOADDRS, "tileloaddrs", 0xf2, 3, 0x0f384a) \
+    BUSTER_X86_AMX_LOAD_FORM(XV, TILELOADDRST1, "tileloaddrst1", 0x66, 3, 0x0f384a) \
+    BUSTER_X86_AMX_LOAD_FORM(XV, T2RPNTLVWZ0, "t2rpntlvwz0", 0, 3, 0x0f386e) \
+    BUSTER_X86_AMX_LOAD_FORM(XV, T2RPNTLVWZ0T1, "t2rpntlvwz0t1", 0, 3, 0x0f386f) \
+    BUSTER_X86_AMX_LOAD_FORM(XV, T2RPNTLVWZ1, "t2rpntlvwz1", 0x66, 3, 0x0f386e) \
+    BUSTER_X86_AMX_LOAD_FORM(XV, T2RPNTLVWZ1T1, "t2rpntlvwz1t1", 0x66, 3, 0x0f386f) \
+    BUSTER_X86_AMX_LOAD_FORM(XV, T2RPNTLVWZ0RS, "t2rpntlvwz0rs", 0, 2, 0x05f8) \
+    BUSTER_X86_AMX_LOAD_FORM(XV, T2RPNTLVWZ0RST1, "t2rpntlvwz0rst1", 0, 2, 0x05f9) \
+    BUSTER_X86_AMX_LOAD_FORM(XV, T2RPNTLVWZ1RS, "t2rpntlvwz1rs", 0x66, 2, 0x05f8) \
+    BUSTER_X86_AMX_LOAD_FORM(XV, T2RPNTLVWZ1RST1, "t2rpntlvwz1rst1", 0x66, 2, 0x05f9) \
+    XV(TTRANSPOSED_TMM_TMM, "ttransposed", VEX, 0xf3, 3, 0x0f385f, R, 0, 0, 0, TMM, NONE, TMM, 0, 1, NONE, REG_RM) \
+    XV(TCONJTFP16_TMM_TMM, "tconjtfp16", VEX, 0x66, 3, 0x0f386b, R, 0, 0, 0, TMM, NONE, TMM, 0, 1, NONE, REG_RM) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TDPBSSD, "tdpbssd", 0xf2, 3, 0x0f385e) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TDPBSUD, "tdpbsud", 0xf3, 3, 0x0f385e) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TDPBUSD, "tdpbusd", 0x66, 3, 0x0f385e) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TDPBUUD, "tdpbuud", 0, 3, 0x0f385e) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TDPBF16PS, "tdpbf16ps", 0xf3, 3, 0x0f385c) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TDPFP16PS, "tdpfp16ps", 0xf2, 3, 0x0f385c) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TCMMIMFP16PS, "tcmmimfp16ps", 0x66, 3, 0x0f386c) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TCMMRLFP16PS, "tcmmrlfp16ps", 0, 3, 0x0f386c) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TCONJTCMMIMFP16PS, "tconjtcmmimfp16ps", 0, 3, 0x0f386b) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TTCMMIMFP16PS, "ttcmmimfp16ps", 0xf2, 3, 0x0f386b) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TTCMMRLFP16PS, "ttcmmrlfp16ps", 0xf3, 3, 0x0f386b) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TTDPBF16PS, "ttdpbf16ps", 0xf3, 3, 0x0f386c) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TTDPFP16PS, "ttdpfp16ps", 0xf2, 3, 0x0f386c) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TMMULTF32PS, "tmmultf32ps", 0x66, 3, 0x0f3848) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TTMMULTF32PS, "ttmmultf32ps", 0, 3, 0x0f3848) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TDPBF8PS, "tdpbf8ps", 0, 2, 0x05fd) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TDPBHF8PS, "tdpbhf8ps", 0xf2, 2, 0x05fd) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TDPHBF8PS, "tdphbf8ps", 0xf3, 2, 0x05fd) \
+    BUSTER_X86_AMX_TILE_FORM(XV, TDPHF8PS, "tdphf8ps", 0x66, 2, 0x05fd) \
     /* The MSR instructions with an immediate MSR index, in VEX map 7 (its number in the escape's place). */ \
     XV(RDMSR_R64_IMM32, "rdmsr", VEX, 0xf2, 2, 0x07f6, D0, 4, 0, 0, NONE, NONE, GQ, 8, 1, NONE, RM_IMM) \
     XV(WRMSRNS_IMM32_R64, "wrmsrns", VEX, 0xf3, 2, 0x07f6, D0, 4, 0, 0, NONE, NONE, GQ, 8, 1, NONE, IMM_RM) \
@@ -2059,6 +2124,12 @@ typedef enum X86Syntax
     BUSTER_X86_AVX512_WIDENING_SCATTER_FORMS(XV, VSCATTERDPD, "vscatterdpd", 0x0f38a2) \
     BUSTER_X86_AVX512_NARROWING_SCATTER_FORMS(XV, VSCATTERQPS, "vscatterqps", 0x0f38a3) \
     BUSTER_X86_AVX512_SCATTER_FORMS(XV, VSCATTERQPD, "vscatterqpd", 0x0f38a3, 1, 64) \
+    BUSTER_X86_AMX_ROW_FORMS(XV, TCVTROWD2PS, "tcvtrowd2ps", 0xf3, 0x0f3a07, 0xf3, 0x0f384a) \
+    BUSTER_X86_AMX_ROW_FORMS(XV, TCVTROWPS2BF16H, "tcvtrowps2bf16h", 0xf2, 0x0f3a07, 0xf2, 0x0f386d) \
+    BUSTER_X86_AMX_ROW_FORMS(XV, TCVTROWPS2BF16L, "tcvtrowps2bf16l", 0xf3, 0x0f3a77, 0xf3, 0x0f386d) \
+    BUSTER_X86_AMX_ROW_FORMS(XV, TCVTROWPS2PHH, "tcvtrowps2phh", 0, 0x0f3a07, 0, 0x0f386d) \
+    BUSTER_X86_AMX_ROW_FORMS(XV, TCVTROWPS2PHL, "tcvtrowps2phl", 0xf2, 0x0f3a77, 0x66, 0x0f386d) \
+    BUSTER_X86_AMX_ROW_FORMS(XV, TILEMOVROW, "tilemovrow", 0x66, 0x0f3a07, 0x66, 0x0f384a) \
     BUSTER_X86_AVX512_NARROWING_MOVE_FORMS(XV, VPMOV, "vpmov", 0x0f3830) \
     BUSTER_X86_AVX512VL_NARROWING_MOVE_FORMS(XV, VPMOV, "vpmov", 0x0f3830) \
     BUSTER_X86_AVX512_NARROWING_MOVE_FORMS(XV, VPMOVS, "vpmovs", 0x0f3820) \
@@ -4082,9 +4153,11 @@ static __attribute__((unused)) bool x86_encoder_initialize(void);
 // bytes, or a negative X86EncoderError. Requires x86_encoder_initialize. It rejects the operands its encoding can't
 // represent, but not those only x86_validate does: an immediate or rel8 outside its field's range (it writes the
 // field's low bytes), an /is4 immediate that isn't a register's number times 16 (plus a selector), a control or
-// segment register that doesn't exist, MOV to CS, a complex multiplication into one of its sources, zeroing without an
-// opmask or into memory, a VSIB operand without an index, an EVEX gather or scatter without an opmask, a gather whose
-// destination, index and mask aren't different registers, and fields the form doesn't have (which it ignores).
+// segment register that doesn't exist, MOV to CS, a complex multiplication into one of its sources, an AMX product of
+// tiles with one twice, zeroing without an opmask or into memory, a VSIB operand without an index, an EVEX gather or
+// scatter without an opmask, a gather whose destination, index and mask aren't different registers, a SIB operand
+// without a SIB byte (a base alone, or RIP) or with SIB's none and a scale, and fields the form doesn't have (which it
+// ignores).
 static __attribute__((unused)) int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
                                                   uint32_t* fixup_ends);
 // The same, one instruction at a time from the form table, after x86_validate: the reference for testing. Its fixup
@@ -4100,8 +4173,8 @@ static uint8_t x86_opcode_byte(const X86FormDescription* form, uint32_t i)
 }
 
 // A VEX or EVEX form's opcode map (VEX.mmmmm, EVEX.mmm): 1 for 0F, 2 for 0F 38 and 3 for 0F 3A, from the escape bytes
-// of its opcode, and EVEX's maps 5 and 6, VEX's 7 and XOP's 8 to 0A from the number in the escape's place; 0 if
-// they're none of those.
+// of its opcode, and maps 5 and 6 (EVEX's, and VEX's 5), VEX's 7 and XOP's 8 to 0A from the number in the escape's
+// place; 0 if they're none of those.
 static uint8_t x86_opcode_map(const X86FormDescription* form)
 {
     uint8_t result = 0;
@@ -4114,7 +4187,7 @@ static uint8_t x86_opcode_map(const X86FormDescription* form)
     {
         result = first;
     }
-    else if (form->opcode_bytes == 2 && form->family == BUSTER_X86_FAMILY_VEX && first >= 7 && first <= 10)
+    else if (form->opcode_bytes == 2 && form->family == BUSTER_X86_FAMILY_VEX && first >= 5 && first <= 10)
     {
         result = first;
     }
@@ -4235,8 +4308,8 @@ static X86Template* const x86_templates = x86_template_storage + BUSTER_X86_TEMP
 static bool x86_encoder_initialized;
 
 // The bits of a register operand of the class that must be zero: registers past the class's last (15 for general
-// registers, VEX's vector registers and control registers, 31 for EVEX's, 7 for opmasks, x87, MMX, debug and segment
-// registers, of which register_is_valid finds the ones that don't exist), an opmask pair's odd bit
+// registers, VEX's vector registers and control registers, 31 for EVEX's, 7 for opmasks, x87, MMX, debug, segment and
+// tile registers, of which register_is_valid finds the ones that don't exist), an opmask pair's odd bit
 // (which the processor ignores) and the high byte flag, which only a legacy byte register can have; all of them for no
 // operand.
 static uint8_t x86_forbidden_register_bits(uint8_t operand, uint8_t family)
@@ -4256,7 +4329,7 @@ static uint8_t x86_forbidden_register_bits(uint8_t operand, uint8_t family)
         result = 0xe0;
     }
     else if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST || class == BUSTER_X86_CLASS_MMX || class == BUSTER_X86_CLASS_DEBUG ||
-             class == BUSTER_X86_CLASS_SEGMENT)
+             class == BUSTER_X86_CLASS_SEGMENT || class == BUSTER_X86_CLASS_TILE)
     {
         result = 0xf8;
     }
@@ -4267,17 +4340,27 @@ static uint8_t x86_forbidden_register_bits(uint8_t operand, uint8_t family)
     return result;
 }
 
-// A form's checks (BUSTER_X86_TEMPLATE_CHECKS_OFFSET): reg's, rm's (as a register, or a memory operand's base: one of
-// the general registers), vvvv's and the decorations' bits that must be zero.
+// Whether the form's ModRM.reg is a pair of tiles, an even tile and the next (AMX-TRANSPOSE's t2rpntlvwz0 and the rest:
+// 6E and 6F in map 2, and F8 and F9 in map 5), whose odd bit the processor ignores, as it does an opmask pair's.
+static bool x86_form_has_tile_pair(const X86FormDescription* form)
+{
+    const uint8_t opcode = (uint8_t)form->opcode;
+    const uint8_t map = x86_opcode_map(form);
+    return form->reg == BUSTER_X86_OPERAND_TMM && ((map == 2 && (opcode == 0x6e || opcode == 0x6f)) || (map == 5 && (opcode == 0xf8 || opcode == 0xf9)));
+}
+
+// A form's checks (BUSTER_X86_TEMPLATE_CHECKS_OFFSET): reg's (and a tile pair's odd bit), rm's (as a register, or a
+// memory operand's base: one of the general registers), vvvv's and the decorations' bits that must be zero.
 static uint32_t x86_template_checks(const X86FormDescription* form)
 {
+    const uint8_t reg = (uint8_t)(x86_forbidden_register_bits(form->reg, form->family) | (x86_form_has_tile_pair(form) ? 1 : 0));
     const uint8_t rm_register = (form->rm & BUSTER_X86_OPERAND_REGISTER) ? x86_forbidden_register_bits(form->rm, form->family) : 0xff;
     const uint8_t rm = (form->rm & BUSTER_X86_OPERAND_MEMORY) ? (uint8_t)(rm_register & 0xf0) : rm_register;
     uint8_t decorations = 0;
     decorations |= (form->evex & BUSTER_X86_EVEX_MASK) ? BUSTER_X86_DECORATION_MASK : 0;
     decorations |= (form->evex & BUSTER_X86_EVEX_ZEROING) ? BUSTER_X86_DECORATION_ZEROING : 0;
     decorations |= (form->evex & BUSTER_X86_EVEX_ROUNDING) ? BUSTER_X86_DECORATION_ROUNDING : 0;
-    return (uint32_t)x86_forbidden_register_bits(form->reg, form->family) | ((uint32_t)rm << 8) |
+    return (uint32_t)reg | ((uint32_t)rm << 8) |
            ((uint32_t)x86_forbidden_register_bits(form->vvvv, form->family) << 16) | ((uint32_t)(uint8_t)~decorations << 24);
 }
 
@@ -4293,6 +4376,7 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     bool valid = true;
     const bool memory = (form->rm & BUSTER_X86_OPERAND_MEMORY) != 0;
     const bool vsib = (form->rm & BUSTER_X86_OPERAND_VSIB) != 0;
+    const bool sib = (form->rm & BUSTER_X86_OPERAND_SIB) != 0;
     memset(template->bytes, 0, sizeof(template->bytes));
     memset(template->layout, BUSTER_X86_LAYOUT_ABSENT, sizeof(template->layout));
     if (segment != 0 && memory)
@@ -4424,8 +4508,9 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     flags |= memory ? 0 : BUSTER_X86_TEMPLATE_NO_MEMORY;
     // A segment override's form takes only a memory operand (and without one in its row, nothing).
     flags |= segment != 0 || (form->rm != BUSTER_X86_OPERAND_NONE && !(form->rm & BUSTER_X86_OPERAND_REGISTER)) ? BUSTER_X86_TEMPLATE_NO_REGISTER : 0;
-    // A VSIB operand's index is a vector register, which can be 16 to 31 with EVEX (EVEX.V').
-    flags |= vsib ? 0 : BUSTER_X86_TEMPLATE_GENERAL_INDEX;
+    // A VSIB operand's index is a vector register, which can be 16 to 31 with EVEX (EVEX.V'), and a SIB operand's index
+    // 4 is none.
+    flags |= vsib || sib ? 0 : BUSTER_X86_TEMPLATE_GENERAL_INDEX;
     flags |= vsib && form->family == BUSTER_X86_FAMILY_EVEX ? 0 : BUSTER_X86_TEMPLATE_NO_HIGH_INDEX;
     const uint32_t checks = x86_template_checks(form);
     memcpy(&template->bytes[BUSTER_X86_TEMPLATE_CHECKS_OFFSET], &checks, sizeof(checks));
@@ -4487,6 +4572,13 @@ static bool x86_form_has_distinct_destination(const X86FormDescription* form)
            (opcode == 0x56 || opcode == 0x57 || opcode == 0xd6 || opcode == 0xd7);
 }
 
+// Whether the form's three tiles must be different registers: AMX's products of tiles (dot products and
+// multiplications), which are #UD otherwise.
+static bool x86_form_has_distinct_tiles(const X86FormDescription* form)
+{
+    return form->reg == BUSTER_X86_OPERAND_TMM && form->vvvv == BUSTER_X86_OPERAND_TMM && form->rm == BUSTER_X86_OPERAND_TMM;
+}
+
 // Whether the form's immediate has a 4-bit selector in bits 3 to 0 below an /is4 register (vpermil2ps's and
 // vpermil2pd's).
 static bool x86_form_has_is4_selector(const X86FormDescription* form)
@@ -4515,11 +4607,12 @@ static bool x86_instruction_is_valid(const X86Instruction* instruction)
         const bool rip = (mode & BUSTER_X86_MODE_RIP) != 0;
         const bool has_modrm = form->encoding == BUSTER_X86_ENCODING_R || (form->encoding & BUSTER_X86_ENCODING_DIGIT);
         const bool vsib = (form->rm & BUSTER_X86_OPERAND_VSIB) != 0;
+        const bool sib = (form->rm & BUSTER_X86_OPERAND_SIB) != 0;
 
-        // ModRM.reg
+        // ModRM.reg, and a tile pair's even tile.
         if (form->encoding == BUSTER_X86_ENCODING_R)
         {
-            result = result && register_is_valid(instruction->reg, form->reg, form->family, false);
+            result = result && register_is_valid(instruction->reg, form->reg, form->family, false) && !(x86_form_has_tile_pair(form) && (instruction->reg & 1));
         }
         else
         {
@@ -4548,6 +4641,14 @@ static bool x86_instruction_is_valid(const X86Instruction* instruction)
                 // A VSIB operand always has an index, a vector register of its class, which can be XMM4.
                 result = result && index && register_is_valid(instruction->index, form->rm, form->family, true);
             }
+            else if (sib)
+            {
+                // A SIB operand always has a SIB byte: an index (a general register, whose 4 is none and takes no
+                // scale) or no base, and never RIP.
+                const bool scaled_none = instruction->index == X86_REGISTER_RSP && (mode & BUSTER_X86_MODE_SCALE) != 0;
+                result = result && (index || !base) && !rip && !scaled_none;
+                result = result && (index ? register_is_valid(instruction->index, BUSTER_X86_OPERAND_GQ, BUSTER_X86_FAMILY_LEGACY, true) : instruction->index == 0);
+            }
             else
             {
                 // RSP can't be a general index: its SIB index field means "none".
@@ -4564,8 +4665,10 @@ static bool x86_instruction_is_valid(const X86Instruction* instruction)
         result = result && (decorations & (x86_template_checks(form) >> 24)) == 0;
         result = result && !((decorations & BUSTER_X86_DECORATION_ZEROING) && ((decorations & BUSTER_X86_DECORATION_MASK) == 0 || memory_destination));
 
-        // A complex multiplication's destination can't be one of its sources.
+        // A complex multiplication's destination can't be one of its sources, and an AMX product's three tiles must be
+        // different registers.
         result = result && !(x86_form_has_distinct_destination(form) && (instruction->reg == instruction->vvvv || (!memory && instruction->reg == instruction->rm)));
+        result = result && !(x86_form_has_distinct_tiles(form) && (instruction->reg == instruction->vvvv || instruction->reg == instruction->rm || instruction->vvvv == instruction->rm));
 
         // An EVEX gather or scatter needs an opmask (K0 is #UD), and a gather's destination, index and mask (AVX2's, in
         // vvvv) must be different registers.
