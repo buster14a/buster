@@ -26,7 +26,8 @@
 //   - Invalid instructions: random valid instructions with one operand broken in ways x86_encode checks (a high byte
 //     register with a REX prefix, RSP as an index, RIP with a base, a register past its class's last, vvvv or reg in
 //     a form without them, decorations the form can't have, unknown mode bits): x86_encode must reject them and
-//     x86_validate must find them.
+//     x86_validate must find them. And with an immediate or rel8 just outside its field's range, which only
+//     x86_validate checks: it must find them.
 //
 // --print-assembly prints N random instructions in GNU as Intel syntax, each with its bytes from x86_encode_scalar in
 // a comment, choosing operands GNU as encodes with the same form (with {load}, {store} and {evex} where GNU as would
@@ -1347,14 +1348,21 @@ static uint8_t x86_past_last_register(uint8_t operand, uint8_t family)
     return result;
 }
 
-// Breaks one operand of a valid instruction in one of the ways x86_encode checks. Returns false if this instruction
-// can't be broken that way.
-static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction)
+// The field with a range that a form has: 1, 2 or 3 for an immediate of that many bytes, 4 for a rel8, and 0 for none
+// (imm32, a 64-bit immediate and rel32 take any value).
+static uint32_t x86_range_kind(const X86FormDescription* form)
+{
+    return form->relative_bytes == 1 ? 4 : form->immediate_bytes <= 3 ? form->immediate_bytes : 0;
+}
+
+// Breaks one operand of a valid instruction in one of the ways x86_encode checks, or in one that only x86_validate
+// checks (and then sets *validate_only). Returns false if this instruction can't be broken that way.
+static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, bool* validate_only)
 {
     const X86FormDescription* form = x86_form_description(instruction->form);
     const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0;
     bool result = true;
-    switch (x86_random_below(state, 14))
+    switch (x86_random_below(state, 15))
     {
         case 0:
             // A high byte register with an extended register (and so a REX prefix).
@@ -1512,6 +1520,31 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction)
                 result = false;
             }
             break;
+        case 14:
+        {
+            // An immediate or a relative displacement just outside its field's range, above or below: imm8's [-128,
+            // 255], imm16's [-32768, 65535], ENTER's [0, 2^24) or rel8's [-128, 127] (imm32, a 64-bit immediate and
+            // rel32 take any value). x86_encode writes the field's low bytes, so only x86_validate checks this. In a
+            // new instruction of a random form with such a field, each kind of field as often, as only one form (ENTER)
+            // has the third and few have a rel8.
+            const uint32_t kind = 1 + x86_random_below(state, 4);
+            uint16_t form_index = x86_random_form(state, false);
+            while (x86_range_kind(&x86_form_descriptions[form_index]) != kind)
+            {
+                form_index = x86_random_form(state, false);
+            }
+            *instruction = x86_random_instruction(state, form_index, false);
+            const bool above = x86_random_below(state, 2) == 0;
+            switch (kind)
+            {
+                case 1: instruction->immediate = above ? 256 : -129; break;
+                case 2: instruction->immediate = above ? 65536 : -32769; break;
+                case 3: instruction->immediate = above ? 1 << 24 : -1; break;
+                default: instruction->displacement = above ? 128 : -129; break;
+            }
+            *validate_only = true;
+            break;
+        }
         default:
             // Memory parts without a memory operand.
             if (form->rm != BUSTER_X86_OPERAND_NONE && !memory)
@@ -1530,6 +1563,7 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction)
 static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86Buffers* buffers)
 {
     uint64_t broken = 0;
+    uint64_t broken_for_validate = 0;
     uint64_t failures = 0;
     for (uint64_t trial = 0; trial < BUSTER_X86_TEST_INVALID_INSTRUCTIONS; trial += 1)
     {
@@ -1537,12 +1571,14 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
         const uint64_t count = 1 + x86_random_below(state, 40);
         x86_random_instructions(state, instructions, count, true, false);
         const uint64_t victim = x86_random_below(state, (uint32_t)count);
-        if (x86_break_instruction(state, &instructions[victim]))
+        bool validate_only = false;
+        if (x86_break_instruction(state, &instructions[victim], &validate_only))
         {
             broken += 1;
+            broken_for_validate += validate_only;
             const bool validated = x86_validate(instructions, count) == victim;
             bool rejected = true;
-            for (uint64_t v = 0; v < BUSTER_ARRAY_LENGTH(x86_test_variants); v += 1)
+            for (uint64_t v = 0; v < BUSTER_ARRAY_LENGTH(x86_test_variants) && !validate_only; v += 1)
             {
                 rejected = rejected && x86_test_variants[v].encode(instructions, count, buffers->output, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
             }
@@ -1559,7 +1595,8 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
             }
         }
     }
-    printf("invalid instructions: %lu broken, %lu not caught\n", (unsigned long)broken, (unsigned long)failures);
+    printf("invalid instructions: %lu broken (%lu in a way only x86_validate checks), %lu not caught\n", (unsigned long)broken,
+           (unsigned long)broken_for_validate, (unsigned long)failures);
     return failures == 0;
 }
 
