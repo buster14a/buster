@@ -414,8 +414,9 @@ typedef enum ExecutableTestField
 } ExecutableTestField;
 
 // A symbol's value as the program sees it, from its atom's address and the file's headers: its address, or a TLS
-// symbol's offset from the thread pointer (in the TLS segment, less its memory size rounded up to its alignment), or
-// 0 for a weak symbol defined nowhere, or for one of the linker's the start or end of its array, from the array's
+// symbol's offset from the thread pointer (in the TLS segment, less align_up(p_memsz + f, p_align) - f, f being
+// p_vaddr modulo p_align, as glibc places the block and GNU ld and lld compute TPOFF), or 0 for a weak symbol defined
+// nowhere, or for one of the linker's the start or end of its array, from the array's
 // section header. Returns false for an array that is empty, which has no section header to say where it is.
 static bool executable_test_symbol_value(const Link* link, const ExecutableTestImage* image, SymbolId symbol, uint64_t* value)
 {
@@ -425,7 +426,9 @@ static bool executable_test_symbol_value(const Link* link, const ExecutableTestI
     {
         const Elf64_Phdr* tls = executable_test_segment(image, PT_TLS);
         result = tls != 0;
-        *value = result ? BUSTER_EXECUTABLE_BASE + link->atoms.address[atom] + link->symbols.value[symbol] - tls->p_vaddr - executable_align(tls->p_memsz, tls->p_align) : 0;
+        const uint64_t remainder = result ? tls->p_vaddr % tls->p_align : 0;
+        const uint64_t block = result ? executable_align(tls->p_memsz + remainder, tls->p_align) - remainder : 0;
+        *value = result ? BUSTER_EXECUTABLE_BASE + link->atoms.address[atom] + link->symbols.value[symbol] - tls->p_vaddr - block : 0;
     }
     else if (atom != 0)
     {

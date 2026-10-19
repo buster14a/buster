@@ -24,8 +24,9 @@
 //
 // The columns it writes are the linker's: atoms' address (an image offset, the address less the base) and symbols'
 // reference and got_slot. A symbol's reference is its image offset, or a TLS symbol's offset from the thread pointer
-// (variant II: from the end of the TLS block, which is the TLS segment's memory size rounded up to its alignment), or
-// for a weak symbol defined nowhere the image offset of address 0. Every fixup's field is patched in place, in its
+// (variant II: from the end of the TLS block, which is the TLS segment's memory size rounded up to its alignment, since
+// the segment starts on a multiple of its alignment), or for a weak symbol defined nowhere the image offset of address
+// 0. Every fixup's field is patched in place, in its
 // atom's bytes.
 //
 // Patching and writing go a chunk at a time (BUSTER_EXECUTABLE_CHUNK_BYTES, about 256 KB, a quarter of Zen 5's L2), in
@@ -957,7 +958,9 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
     }
     section_alignment[EXECUTABLE_SECTION_TEXT] = section_alignment[EXECUTABLE_SECTION_TEXT] < 16 ? 16 : section_alignment[EXECUTABLE_SECTION_TEXT];
     // The TLS segment starts at its whole alignment, so that offsets in it are offsets in the TLS block, whose start the
-    // program aligns to it.
+    // program aligns to it: its p_vaddr is a multiple of p_align, and the block's distance below the thread pointer,
+    // align_up(p_memsz + f, p_align) - f for p_vaddr's remainder f (docs/object-writer-and-linker.md, "Layout"), is
+    // p_memsz rounded up.
     layout->tls_alignment = section_alignment[EXECUTABLE_SECTION_TDATA] > section_alignment[EXECUTABLE_SECTION_TBSS] ? section_alignment[EXECUTABLE_SECTION_TDATA]
                                                                                                                       : section_alignment[EXECUTABLE_SECTION_TBSS];
     section_alignment[EXECUTABLE_SECTION_TDATA] = layout->tls_alignment;

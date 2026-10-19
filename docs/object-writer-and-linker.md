@@ -978,8 +978,10 @@ writes them from the representation, at GNU ld's fixed base, 0x400000:
   compiled program's references to its own symbols are direct.
 - **Symbols:** `reference` is the image offset (the address less the base); a
   TLS symbol's is its offset from the thread pointer (variant II: from the end
-  of the TLS block, the segment's memory size rounded up to its alignment); a
-  weak symbol defined nowhere gets address 0's. The linker defines
+  of the TLS block). The writer starts the TLS segment on a multiple of its
+  alignment, `.tdata` taking `.tbss`'s when that is larger, so f is 0 in
+  "Layout"'s formula and the block's end is the segment's memory size rounded
+  up to its alignment. A weak symbol defined nowhere gets address 0's. The linker defines
   `__init_array_start`, `__init_array_end`, `__fini_array_start` and
   `__fini_array_end`. Any other symbol defined nowhere fails the link, naming
   it, even when nothing refers to it, and so does an import from a shared
