@@ -72,8 +72,10 @@
 // A register operand is the register's number (general purpose: RAX = 0 ... R15 = 15; vector: XMM0 = 0 ... XMM15 = 15,
 // or XMM31 = 31 in an EVEX form, and the same for YMM and ZMM; opmask: K0 = 0 ... K7 = 7, and a pair of them (an even
 // one and the next) as the even one's number; x87: ST(0) = 0 ... ST(7) = 7; MMX: MM0 = 0 ... MM7 = 7, which REX
-// doesn't extend) or, for AH, CH, DH and BH, 4 to 7 with BUSTER_X86_REGISTER_HIGH_BYTE. With a byte form, 4 to 7
-// alone are SPL, BPL, SIL and DIL, which need a REX prefix; the high byte registers can't have one.
+// doesn't extend; control: CR0 = 0 ... CR8 = 8, of which CR0, CR2 to CR4 and CR8 exist; debug: DR0 = 0 ... DR7 = 7;
+// segment: ES = 0, CS = 1, SS = 2, DS = 3, FS = 4 and GS = 5) or, for AH, CH, DH and BH, 4 to 7 with
+// BUSTER_X86_REGISTER_HIGH_BYTE. With a byte form, 4 to 7 alone are SPL, BPL, SIL and DIL, which need a REX prefix;
+// the high byte registers can't have one.
 #define BUSTER_X86_REGISTER_NUMBER 0x1f
 #define BUSTER_X86_REGISTER_HIGH_BYTE 0x40
 
@@ -172,9 +174,10 @@ typedef enum X86EncoderError
 // The form table's operand roles: a register class, and for ModRM.rm whether it can be a register, memory, or both
 // (as Intel's opcode maps write them: G a general register in ModRM.reg, E a general register or memory in
 // ModRM.rm, V an XMM register, XM an XMM register or memory, M only memory; and Y, YM, Z and ZM for YMM and ZMM, K
-// for the opmask registers, ST for the x87 registers, MM for the MMX registers). For a +r form, the register is the
-// rm operand. An rm operand that's an opmask or MMX register, or memory, would need checks that depend on the mode
-// (k8 to k15 and mm8 to mm15 don't exist, but a base can be R8 to R15), so those are two forms.
+// for the opmask registers, ST for the x87 registers, MM for the MMX registers, and CR, DR and SREG for the control,
+// debug and segment registers). For a +r form, the register is the rm operand. An rm operand that's an opmask or MMX
+// register, or memory, would need checks that depend on the mode (k8 to k15 and mm8 to mm15 don't exist, but a base
+// can be R8 to R15), so those are two forms.
 #define BUSTER_X86_OPERAND_CLASS 0x0f
 #define BUSTER_X86_CLASS_NONE 0
 #define BUSTER_X86_CLASS_GPR8 1
@@ -188,6 +191,9 @@ typedef enum X86EncoderError
 #define BUSTER_X86_CLASS_ST 9
 #define BUSTER_X86_CLASS_OPMASK_PAIR 10
 #define BUSTER_X86_CLASS_MMX 11
+#define BUSTER_X86_CLASS_CONTROL 12
+#define BUSTER_X86_CLASS_DEBUG 13
+#define BUSTER_X86_CLASS_SEGMENT 14
 #define BUSTER_X86_OPERAND_REGISTER 0x10
 #define BUSTER_X86_OPERAND_MEMORY 0x20
 #define BUSTER_X86_OPERAND_NONE 0
@@ -209,6 +215,9 @@ typedef enum X86EncoderError
 #define BUSTER_X86_OPERAND_ST (BUSTER_X86_CLASS_ST | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_KP (BUSTER_X86_CLASS_OPMASK_PAIR | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_MM (BUSTER_X86_CLASS_MMX | BUSTER_X86_OPERAND_REGISTER)
+#define BUSTER_X86_OPERAND_CR (BUSTER_X86_CLASS_CONTROL | BUSTER_X86_OPERAND_REGISTER)
+#define BUSTER_X86_OPERAND_DR (BUSTER_X86_CLASS_DEBUG | BUSTER_X86_OPERAND_REGISTER)
+#define BUSTER_X86_OPERAND_SREG (BUSTER_X86_CLASS_SEGMENT | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_M BUSTER_X86_OPERAND_MEMORY
 
 // How the form uses ModRM: none (NO), a register in ModRM.reg (R, /r), an opcode extension in ModRM.reg (D0-D7,
@@ -2942,6 +2951,25 @@ typedef enum X86Syntax
     X(LSS_R16_M32, "lss", 0x66, 2, 0x0fb2, R, 0, 0, 0, GW, M, 4, REG_RM) \
     X(LSS_R32_M48, "lss", 0, 2, 0x0fb2, R, 0, 0, 0, GD, M, 6, REG_RM) \
     X(LSS_R64_M80, "rex.w lss", 0, 2, 0x0fb2, R, 0, 0, 1, GD, M, 6, REG_RM) \
+    /* Segment registers: from one to 16 bits of memory or any register (rex.w for GNU as's 64-bit one), and to one. */ \
+    X(MOV_M16_SREG, "mov", 0, 1, 0x8c, R, 0, 0, 0, SREG, M, 2, RM_REG) \
+    X(MOV_R16_SREG, "mov", 0x66, 1, 0x8c, R, 0, 0, 0, SREG, GW, 2, RM_REG) \
+    X(MOV_R32_SREG, "mov", 0, 1, 0x8c, R, 0, 0, 0, SREG, GD, 4, RM_REG) \
+    X(MOV_R64_SREG, "rex.w mov", 0, 1, 0x8c, R, 0, 0, 1, SREG, GQ, 8, RM_REG) \
+    X(MOV_SREG_RM16, "mov", 0, 1, 0x8e, R, 0, 0, 0, SREG, EW, 2, REG_RM) \
+    X(PUSH_FS, "push fs", 0, 2, 0x0fa0, NO, 0, 0, 0, NONE, NONE, 8, NONE) \
+    X(PUSH_GS, "push gs", 0, 2, 0x0fa8, NO, 0, 0, 0, NONE, NONE, 8, NONE) \
+    X(PUSHW_FS, "pushw fs", 0x66, 2, 0x0fa0, NO, 0, 0, 0, NONE, NONE, 2, NONE) \
+    X(PUSHW_GS, "pushw gs", 0x66, 2, 0x0fa8, NO, 0, 0, 0, NONE, NONE, 2, NONE) \
+    X(POP_FS, "pop fs", 0, 2, 0x0fa1, NO, 0, 0, 0, NONE, NONE, 8, NONE) \
+    X(POP_GS, "pop gs", 0, 2, 0x0fa9, NO, 0, 0, 0, NONE, NONE, 8, NONE) \
+    X(POPW_FS, "popw fs", 0x66, 2, 0x0fa1, NO, 0, 0, 0, NONE, NONE, 2, NONE) \
+    X(POPW_GS, "popw gs", 0x66, 2, 0x0fa9, NO, 0, 0, 0, NONE, NONE, 2, NONE) \
+    /* Control and debug registers, from and to a 64-bit register (REX.R selects CR8). */ \
+    X(MOV_CR_R64, "mov", 0, 2, 0x0f22, R, 0, 0, 0, CR, GQ, 8, REG_RM) \
+    X(MOV_R64_CR, "mov", 0, 2, 0x0f20, R, 0, 0, 0, CR, GQ, 8, RM_REG) \
+    X(MOV_DR_R64, "mov", 0, 2, 0x0f23, R, 0, 0, 0, DR, GQ, 8, REG_RM) \
+    X(MOV_R64_DR, "mov", 0, 2, 0x0f21, R, 0, 0, 0, DR, GQ, 8, RM_REG) \
     X(ADCX_R32_RM32, "adcx", 0x66, 3, 0x0f38f6, R, 0, 0, 0, GD, ED, 4, REG_RM) \
     X(ADCX_R64_RM64, "adcx", 0x66, 3, 0x0f38f6, R, 0, 0, 1, GQ, EQ, 8, REG_RM) \
     X(ADOX_R32_RM32, "adox", 0xf3, 3, 0x0f38f6, R, 0, 0, 0, GD, ED, 4, REG_RM) \
@@ -3332,7 +3360,8 @@ static X86Template* const x86_templates = x86_template_storage + BUSTER_X86_TEMP
 static bool x86_encoder_initialized;
 
 // The bits of a register operand of the class that must be zero: registers past the class's last (15 for general
-// registers and VEX's vector registers, 31 for EVEX's, 7 for opmasks, x87 and MMX registers), an opmask pair's odd bit
+// registers, VEX's vector registers and control registers, 31 for EVEX's, 7 for opmasks, x87, MMX, debug and segment
+// registers, of which register_is_valid finds the ones that don't exist), an opmask pair's odd bit
 // (which the processor ignores) and the high byte flag, which only a legacy byte register can have; all of them for no
 // operand.
 static uint8_t x86_forbidden_register_bits(uint8_t operand, uint8_t family)
@@ -3351,7 +3380,8 @@ static uint8_t x86_forbidden_register_bits(uint8_t operand, uint8_t family)
     {
         result = 0xe0;
     }
-    else if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST || class == BUSTER_X86_CLASS_MMX)
+    else if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST || class == BUSTER_X86_CLASS_MMX || class == BUSTER_X86_CLASS_DEBUG ||
+             class == BUSTER_X86_CLASS_SEGMENT)
     {
         result = 0xf8;
     }
@@ -3541,15 +3571,25 @@ static bool x86_encoder_initialize(void)
 // Validation
 
 // Whether a register operand of the class can be `value` (in a form of the family): no bits past the class's last
-// register, and the high byte flag only for AH to BH, in a legacy byte register outside a memory operand.
+// register, the high byte flag only for AH to BH, in a legacy byte register outside a memory operand, and a control or
+// segment register that exists (CR0, CR2 to CR4 and CR8; ES to GS), whose numbers have gaps the bits don't show.
 static bool register_is_valid(uint8_t value, uint8_t operand, uint8_t family, bool memory_part)
 {
     const bool high_byte = (value & BUSTER_X86_REGISTER_HIGH_BYTE) != 0;
     const uint8_t number = value & BUSTER_X86_REGISTER_NUMBER;
+    const uint8_t class = operand & BUSTER_X86_OPERAND_CLASS;
     bool result = (value & x86_forbidden_register_bits(operand, family)) == 0;
     if (high_byte)
     {
         result = result && !memory_part && number >= 4 && number <= 7;
+    }
+    if (class == BUSTER_X86_CLASS_CONTROL)
+    {
+        result = result && (value == 0 || (value >= 2 && value <= 4) || value == 8);
+    }
+    else if (class == BUSTER_X86_CLASS_SEGMENT)
+    {
+        result = result && value <= 5;
     }
     return result;
 }
@@ -3614,6 +3654,9 @@ static bool x86_instruction_is_valid(const X86Instruction* instruction)
         const bool memory_destination = memory && (form->syntax == X86_SYNTAX_RM_REG || form->syntax == X86_SYNTAX_RM_REG_IMM);
         result = result && (decorations & (x86_template_checks(form) >> 24)) == 0;
         result = result && !((decorations & BUSTER_X86_DECORATION_ZEROING) && ((decorations & BUSTER_X86_DECORATION_MASK) == 0 || memory_destination));
+
+        // MOV to CS (8E with CS in ModRM.reg) doesn't exist: it's #UD.
+        result = result && !(form->opcode_bytes == 1 && form->opcode == 0x8e && instruction->reg == 1);
 
         // A high byte register can't be in an instruction with a REX prefix.
         const uint8_t rm_register = memory ? 0 : instruction->rm;

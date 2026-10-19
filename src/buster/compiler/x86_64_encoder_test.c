@@ -26,8 +26,9 @@
 //   - Invalid instructions: random valid instructions with one operand broken in ways x86_encode checks (a high byte
 //     register with a REX prefix, RSP as an index, RIP with a base, a register past its class's last, vvvv or reg in
 //     a form without them, decorations the form can't have, unknown mode bits): x86_encode must reject them and
-//     x86_validate must find them. And with an immediate or rel8 just outside its field's range, or an /is4 register
-//     outside its bits, which only x86_validate checks: it must find them.
+//     x86_validate must find them. And with an immediate or rel8 just outside its field's range, an /is4 register
+//     outside its bits, a control or segment register that doesn't exist or MOV to CS, which only x86_validate
+//     checks: it must find them.
 //
 // --print-assembly prints N random instructions in GNU as Intel syntax, each with its bytes from x86_encode_scalar in
 // a comment, choosing operands GNU as encodes with the same form (with {load}, {store}, {vex} and {evex} where GNU as
@@ -60,7 +61,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0xf0d109305606528aull
+#define BUSTER_X86_TEST_DIGEST 0x0b4fe4201b75e8d7ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -90,10 +91,11 @@ static uint32_t x86_random_below(uint64_t* state, uint32_t bound)
 
 // A register of the class (in a form of the family), more often one of the numbers with special encodings (4, 5, 12
 // and 13, and in half of an EVEX form's vector registers, 16 to 31) and, for a legacy byte register, sometimes AH to
-// BH.
+// BH; for a control or segment register, one that exists.
 static uint8_t x86_random_register(uint64_t* state, uint8_t operand, uint8_t family)
 {
     static const uint8_t special[] = { 4, 5, 12, 13 };
+    static const uint8_t control[] = { 0, 2, 3, 4, 8 };
     const uint8_t class = operand & BUSTER_X86_OPERAND_CLASS;
     uint8_t result = x86_random_below(state, 4) == 0 ? special[x86_random_below(state, 4)] : (uint8_t)x86_random_below(state, 16);
     if (class == BUSTER_X86_CLASS_GPR8 && family == BUSTER_X86_FAMILY_LEGACY && x86_random_below(state, 6) == 0)
@@ -104,13 +106,21 @@ static uint8_t x86_random_register(uint64_t* state, uint8_t operand, uint8_t fam
     {
         result |= 16;
     }
-    else if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST || class == BUSTER_X86_CLASS_MMX)
+    else if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST || class == BUSTER_X86_CLASS_MMX || class == BUSTER_X86_CLASS_DEBUG)
     {
         result &= 7;
     }
     else if (class == BUSTER_X86_CLASS_OPMASK_PAIR)
     {
         result &= 6;
+    }
+    else if (class == BUSTER_X86_CLASS_CONTROL)
+    {
+        result = control[x86_random_below(state, BUSTER_ARRAY_LENGTH(control))];
+    }
+    else if (class == BUSTER_X86_CLASS_SEGMENT)
+    {
+        result = (uint8_t)x86_random_below(state, 6);
     }
     return result;
 }
@@ -396,6 +406,11 @@ static const char* const x86_zmm_names[32] = { "zmm0",  "zmm1",  "zmm2",  "zmm3"
 static const char* const x86_opmask_names[8] = { "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7" };
 static const char* const x86_st_names[8] = { "st(0)", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)" };
 static const char* const x86_mmx_names[8] = { "mm0", "mm1", "mm2", "mm3", "mm4", "mm5", "mm6", "mm7" };
+static const char* const x86_control_names[16] = { "cr0", "cr1", "cr2", "cr3", "cr4", "cr5", "cr6", "cr7",
+                                                   "cr8", "cr9", "cr10", "cr11", "cr12", "cr13", "cr14", "cr15" };
+static const char* const x86_debug_names[8] = { "dr0", "dr1", "dr2", "dr3", "dr4", "dr5", "dr6", "dr7" };
+// The segment registers, and the two numbers past GS that x86_validate rejects.
+static const char* const x86_segment_names[8] = { "es", "cs", "ss", "ds", "fs", "gs", "sreg6", "sreg7" };
 // The rounding modes (BUSTER_X86_DECORATION_ROUNDING), as GNU as writes them.
 static const char* const x86_rounding_names[4] = { "{rn-sae}", "{rd-sae}", "{ru-sae}", "{rz-sae}" };
 
@@ -416,6 +431,9 @@ static const char* x86_register_name(uint8_t value, uint8_t operand)
         case BUSTER_X86_CLASS_OPMASK_PAIR: result = x86_opmask_names[number & 7]; break;
         case BUSTER_X86_CLASS_ST: result = x86_st_names[number & 7]; break;
         case BUSTER_X86_CLASS_MMX: result = x86_mmx_names[number & 7]; break;
+        case BUSTER_X86_CLASS_CONTROL: result = x86_control_names[number & 15]; break;
+        case BUSTER_X86_CLASS_DEBUG: result = x86_debug_names[number & 7]; break;
+        case BUSTER_X86_CLASS_SEGMENT: result = x86_segment_names[number & 7]; break;
         default: result = x86_xmm_names[number]; break;
     }
     return result;
@@ -1303,6 +1321,33 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_VFMADDSUBPS_Y_Y_Y_YM256, .reg = 1, .vvvv = 2, .rm = 4, .immediate = 3 << 4 }, 6, { 0xc4, 0xe3, 0xed, 0x5c, 0xcc, 0x30 } },
     { { .form = X86_FORM_VFMADDPS_X_X_XM128_X, .reg = 1, .vvvv = 2, .rm = 3, .immediate = 4 << 4 }, 6, { 0xc4, 0xe3, 0x69, 0x68, 0xcb, 0x40 } },
     { { .form = X86_FORM_VFMADDSD_X_X_XM64_X, .reg = 1, .vvvv = 2, .rm = 3, .immediate = 12 << 4 }, 6, { 0xc4, 0xe3, 0x69, 0x6b, 0xcb, 0xc0 } },
+    // Segment registers: mov word ptr [rax], es (no 66); mov word ptr gs:[r9+rax*2+8], ds; mov ax, es (66); mov r9d,
+    // gs; rex.w mov r9, gs; mov ss, r9w (no 66); mov ds, word ptr fs:[rax]; push fs; pushw gs; popw fs; and pop gs
+    { { .form = X86_FORM_MOV_M16_SREG, .reg = 0, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 2, { 0x8c, 0x00 } },
+    { { .form = X86_FORM_MOV_M16_SREG + BUSTER_X86_FORM_GS,
+        .reg = 3,
+        .rm = X86_REGISTER_R9,
+        .index = X86_REGISTER_RAX,
+        .mode = BUSTER_X86_MEMORY_BASE_INDEX(1),
+        .displacement = 8 },
+      6,
+      { 0x65, 0x41, 0x8c, 0x5c, 0x41, 0x08 } },
+    { { .form = X86_FORM_MOV_R16_SREG, .reg = 0, .rm = X86_REGISTER_RAX }, 3, { 0x66, 0x8c, 0xc0 } },
+    { { .form = X86_FORM_MOV_R32_SREG, .reg = 5, .rm = X86_REGISTER_R9 }, 3, { 0x41, 0x8c, 0xe9 } },
+    { { .form = X86_FORM_MOV_R64_SREG, .reg = 5, .rm = X86_REGISTER_R9 }, 3, { 0x49, 0x8c, 0xe9 } },
+    { { .form = X86_FORM_MOV_SREG_RM16, .reg = 2, .rm = X86_REGISTER_R9 }, 3, { 0x41, 0x8e, 0xd1 } },
+    { { .form = X86_FORM_MOV_SREG_RM16 + BUSTER_X86_FORM_FS, .reg = 3, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x64, 0x8e, 0x18 } },
+    { { .form = X86_FORM_PUSH_FS }, 2, { 0x0f, 0xa0 } },
+    { { .form = X86_FORM_PUSHW_GS }, 3, { 0x66, 0x0f, 0xa8 } },
+    { { .form = X86_FORM_POPW_FS }, 3, { 0x66, 0x0f, 0xa1 } },
+    { { .form = X86_FORM_POP_GS }, 2, { 0x0f, 0xa9 } },
+    // Control and debug registers: mov cr0, rax; mov rax, cr8 (REX.R); mov cr8, r9 (REX.R and B); mov dr0, rax; and
+    // mov r9, dr7
+    { { .form = X86_FORM_MOV_CR_R64, .reg = 0, .rm = X86_REGISTER_RAX }, 3, { 0x0f, 0x22, 0xc0 } },
+    { { .form = X86_FORM_MOV_R64_CR, .reg = 8, .rm = X86_REGISTER_RAX }, 4, { 0x44, 0x0f, 0x20, 0xc0 } },
+    { { .form = X86_FORM_MOV_CR_R64, .reg = 8, .rm = X86_REGISTER_R9 }, 4, { 0x45, 0x0f, 0x22, 0xc1 } },
+    { { .form = X86_FORM_MOV_DR_R64, .reg = 0, .rm = X86_REGISTER_RAX }, 3, { 0x0f, 0x23, 0xc0 } },
+    { { .form = X86_FORM_MOV_R64_DR, .reg = 7, .rm = X86_REGISTER_R9 }, 4, { 0x41, 0x0f, 0x21, 0xf9 } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.
@@ -1557,12 +1602,13 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
 }
 
 // The lowest bit of a register operand of the class (in a form of the family) past its last register, or for an opmask
-// pair, its odd bit.
+// pair, its odd bit (for control registers, past CR15: x86_validate alone finds the numbers below without a register).
 static uint8_t x86_past_last_register(uint8_t operand, uint8_t family)
 {
     const uint8_t class = operand & BUSTER_X86_OPERAND_CLASS;
     uint8_t result = 0x10;
-    if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST || class == BUSTER_X86_CLASS_MMX)
+    if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST || class == BUSTER_X86_CLASS_MMX || class == BUSTER_X86_CLASS_DEBUG ||
+        class == BUSTER_X86_CLASS_SEGMENT)
     {
         result = 0x08;
     }
@@ -1591,7 +1637,7 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
     const X86FormDescription* form = x86_form_description(instruction->form);
     const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0;
     bool result = true;
-    switch (x86_random_below(state, 15))
+    switch (x86_random_below(state, 16))
     {
         case 0:
             // A high byte register with an extended register (and so a REX prefix).
@@ -1630,8 +1676,8 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
             break;
         case 3:
             // A register number past the class's last (15, or 31 for an EVEX form's vector registers, or 7 for an
-            // opmask or an x87 register), in reg, in a register rm, or in a memory operand's base or index (general
-            // registers, so 15).
+            // opmask or an x87, MMX, debug or segment register), in reg, in a register rm, or in a memory operand's base
+            // or index (general registers, so 15).
             if (form->encoding == BUSTER_X86_ENCODING_R && x86_random_below(state, 2) == 0)
             {
                 instruction->reg |= x86_past_last_register(form->reg, form->family);
@@ -1771,6 +1817,30 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
                 case 3: instruction->immediate = above ? 1 << 24 : -1; break;
                 case 5: instruction->immediate = above ? 16 << 4 : instruction->immediate | (int32_t)(1 + x86_random_below(state, 15)); break;
                 default: instruction->displacement = above ? 128 : -129; break;
+            }
+            *validate_only = true;
+            break;
+        }
+        case 15:
+        {
+            // A control register that doesn't exist (CR1, CR5 to CR7 or CR9 to CR15), a segment register past GS (6 or
+            // 7), or CS as MOV's destination: numbers the encoding has, which only x86_validate checks. In a new
+            // instruction of a form with a control or segment register in ModRM.reg.
+            static const uint16_t forms[] = { X86_FORM_MOV_CR_R64, X86_FORM_MOV_R64_CR, X86_FORM_MOV_SREG_RM16, X86_FORM_MOV_R32_SREG };
+            static const uint8_t missing_control[] = { 1, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15 };
+            const uint16_t form_index = forms[x86_random_below(state, BUSTER_ARRAY_LENGTH(forms))];
+            *instruction = x86_random_instruction(state, form_index, false);
+            if ((x86_form_descriptions[form_index].reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_CONTROL)
+            {
+                instruction->reg = missing_control[x86_random_below(state, BUSTER_ARRAY_LENGTH(missing_control))];
+            }
+            else if (form_index == X86_FORM_MOV_SREG_RM16 && x86_random_below(state, 2) == 0)
+            {
+                instruction->reg = 1;
+            }
+            else
+            {
+                instruction->reg = (uint8_t)(6 + x86_random_below(state, 2));
             }
             *validate_only = true;
             break;
