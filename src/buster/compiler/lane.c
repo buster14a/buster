@@ -387,20 +387,24 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
         _mm_pause();
         current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
     }
-    const uint64_t begin = __rdtsc();
-    uint64_t waited = 0;
-    while ((current & ~1u) == value && waited < BUSTER_LANE_MWAITX_TICKS)
+    // A wait that ended while spinning, as at most syncs, doesn't read the clock (rdtsc is 27 µops on Zen 5).
+    if ((current & ~1u) == value)
     {
-        // The monitor is armed before the read, so a write after the read ends the wait. The wait also ends on an
-        // interrupt, or when the timer runs out the rest of the ticks.
-        _mm_monitorx(word, 0, 0);
-        current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
-        if ((current & ~1u) == value)
+        const uint64_t begin = __rdtsc();
+        uint64_t waited = 0;
+        while ((current & ~1u) == value && waited < BUSTER_LANE_MWAITX_TICKS)
         {
-            _mm_mwaitx(BUSTER_LANE_MWAITX_TIMER, BUSTER_LANE_MWAITX_C1, (uint32_t)(BUSTER_LANE_MWAITX_TICKS - waited));
+            // The monitor is armed before the read, so a write after the read ends the wait. The wait also ends on an
+            // interrupt, or when the timer runs out the rest of the ticks.
+            _mm_monitorx(word, 0, 0);
             current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+            if ((current & ~1u) == value)
+            {
+                _mm_mwaitx(BUSTER_LANE_MWAITX_TIMER, BUSTER_LANE_MWAITX_C1, (uint32_t)(BUSTER_LANE_MWAITX_TICKS - waited));
+                current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+            }
+            waited = __rdtsc() - begin;
         }
-        waited = __rdtsc() - begin;
     }
     while ((current & ~1u) == value)
     {
