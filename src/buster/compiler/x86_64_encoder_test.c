@@ -49,10 +49,11 @@
 // operand in a form without room for the 67, which x86_encode_address32 rejects too. --address32 runs only this pass.
 // And again for APX, but the known fixups, which is all --apx runs: x86_encode_apx and x86_encode_scalar_apx on
 // x86_known_encodings_apx, the instructions of x86_known_invalid_apx, which they and x86_validate_apx must reject (as GNU
-// as does), a digest of their own (BUSTER_X86_TEST_DIGEST_APX), x86_encode_64_apx on the random streams (in which three
-// forms in four have REX2, whose general registers, bases and indexes are 16 to 31 half the time) and at page edges,
-// and the invalid instructions, with three more breaks: a high byte register with REX2, a general register, base or
-// index from 16 to 31 in a form without REX2, and a vector register rm from 16 to 31 in a form with it.
+// as does), a digest of their own (BUSTER_X86_TEST_DIGEST_APX), x86_encode_64_apx on the random streams (in which half
+// the forms have REX2 and a quarter are EVEX ones, whose general registers, bases and general indexes are 16 to 31 half
+// the time) and at page edges, and the invalid instructions, with three more breaks: a high byte register with REX2, a
+// general register, base or index from 16 to 31 in a form without REX2 or EVEX, and a vector register rm from 16 to 31
+// in a form with REX2.
 //
 // --print-assembly prints N random instructions in GNU as Intel syntax, each with its bytes from x86_encode_scalar in
 // a comment, choosing operands GNU as encodes with the same form (with {load}, {store}, {vex} and {evex} where GNU as
@@ -105,7 +106,7 @@
 #define BUSTER_X86_TEST_DIGEST 0xc0164ca1b67b83a6ull
 // The same for the stream with 32-bit addresses (--address32), and for the one with APX's registers (--apx).
 #define BUSTER_X86_TEST_DIGEST_ADDRESS32 0x15c0faabe6d4d45full
-#define BUSTER_X86_TEST_DIGEST_APX 0x909e5ee155475cc9ull
+#define BUSTER_X86_TEST_DIGEST_APX 0xeb807a6754940823ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -390,14 +391,14 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
 }
 
 // A random valid instruction of the form. For --print-assembly (`for_assembler`), one GNU as encodes with this form.
-// With APX, a form with REX2 has general registers, bases and indexes from 16 to 31 half the time (and with a segment
-// override, maybe one that has no REX2, which the loop tries again).
+// With APX, a form with REX2 or an EVEX form has general registers, bases and general indexes from 16 to 31 half the
+// time (and with a segment override, maybe one that has no REX2, which the loop tries again).
 static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_index, bool for_assembler)
 {
     const X86FormDescription* form = &x86_form_descriptions[form_index];
     const bool vsib = (form->rm & BUSTER_X86_OPERAND_VSIB) != 0;
     const bool sib = (form->rm & BUSTER_X86_OPERAND_SIB) != 0;
-    const bool extended = x86_test_mode == X86_ENCODER_MODE_APX && x86_form_has_rex2(form_index);
+    const bool extended = x86_test_mode == X86_ENCODER_MODE_APX && x86_form_has_apx_registers(form_index);
     X86Instruction result;
     bool done = false;
     while (!done)
@@ -409,7 +410,7 @@ static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_inde
         }
         if (form->vvvv != BUSTER_X86_OPERAND_NONE)
         {
-            result.vvvv = x86_random_register(state, form->vvvv, form->family, false);
+            result.vvvv = x86_random_register(state, form->vvvv, form->family, extended);
         }
         if (form->rm != BUSTER_X86_OPERAND_NONE)
         {
@@ -518,7 +519,8 @@ static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_inde
 }
 
 // A random form other than X86_FORM_NONE, or with `with_none`, X86_FORM_NONE one time in 16. With 32-bit addresses, one
-// that has instructions with them; with APX, three times in four, one with REX2 (which the others mostly lack).
+// that has instructions with them; with APX, half the time one with REX2 and a quarter of the time an EVEX one, whose
+// general registers can be 16 to 31 (the others' can't, and REX2's forms are a third of them).
 static uint16_t x86_random_form(uint64_t* state, bool with_none)
 {
     uint16_t result = (uint16_t)(1 + x86_random_below(state, X86_FORM_COUNT - 1));
@@ -526,8 +528,8 @@ static uint16_t x86_random_form(uint64_t* state, bool with_none)
     {
         result = (uint16_t)(1 + x86_random_below(state, X86_FORM_COUNT - 1));
     }
-    const bool rex2 = x86_test_mode == X86_ENCODER_MODE_APX && x86_random_below(state, 4) != 0;
-    while (rex2 && !x86_form_has_rex2(result))
+    const uint32_t kind = x86_test_mode == X86_ENCODER_MODE_APX ? x86_random_below(state, 4) : 3;
+    while ((kind <= 1 && !x86_form_has_rex2(result)) || (kind == 2 && x86_form_description(result)->family != BUSTER_X86_FAMILY_EVEX))
     {
         result = (uint16_t)(1 + x86_random_below(state, X86_FORM_COUNT - 1));
     }
@@ -2195,6 +2197,29 @@ static const KnownEncoding x86_known_encodings_apx[] = {
     { { .form = X86_FORM_LOCK_CMPXCHG_M32_R32, .reg = 17, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xf0, 0xd5, 0xd0, 0xb1, 0x08 } },
     { { .form = X86_FORM_TZCNT_R64_RM64, .reg = 16, .rm = 17 }, 5, { 0xf3, 0xd5, 0xd8, 0xbc, 0xc1 } },
     { { .form = X86_FORM_POPCNT_R64_RM64, .reg = 16, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xf3, 0xd5, 0xc8, 0xb8, 0x00 } },
+    // EVEX: B4 (P0's bit 3) for a base, X4 (P1's bit 2, inverted) for a general index, both, a SIB byte for R20, R20 as an
+    // index (not SIB's none), R', V', X, B, B4 and X4 at once; a general register rm (B4, not X), reg (R') and vvvv (V',
+    // in AMX-AVX512's tcvtrowd2ps); VSIB with B4, and with V' for its index; and FS before 62
+    { { .form = X86_FORM_VADDPS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf9, 0x6c, 0x48, 0x58, 0x08 } },
+    { { .form = X86_FORM_VADDPS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .index = 17, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2) }, 7, { 0x62, 0xf1, 0x68, 0x48, 0x58, 0x0c, 0x88 } },
+    { { .form = X86_FORM_VADDPS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 16, .index = 17, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = 64 }, 8, { 0x62, 0xf9, 0x68, 0x48, 0x58, 0x4c, 0x88, 0x01 } },
+    { { .form = X86_FORM_VADDPS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 20, .mode = BUSTER_X86_MEMORY_BASE }, 7, { 0x62, 0xf9, 0x6c, 0x48, 0x58, 0x0c, 0x24 } },
+    { { .form = X86_FORM_VADDPS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .index = 20, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0) }, 7, { 0x62, 0xf1, 0x68, 0x48, 0x58, 0x0c, 0x20 } },
+    { { .form = X86_FORM_VADDPS_Z_Z_ZM512, .reg = 17, .vvvv = 18, .rm = 31, .index = 30, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3) }, 7, { 0x62, 0x89, 0x68, 0x40, 0x58, 0x0c, 0xf7 } },
+    { { .form = X86_FORM_VMOVD_X_RM32_EVEX, .reg = 1, .rm = 16 }, 6, { 0x62, 0xf9, 0x7d, 0x08, 0x6e, 0xc8 } },
+    { { .form = X86_FORM_VMOVD_RM32_X_EVEX, .reg = 1, .rm = 16 }, 6, { 0x62, 0xf9, 0x7d, 0x08, 0x7e, 0xc8 } },
+    { { .form = X86_FORM_VMOVQ_X_RM64_EVEX, .reg = 17, .rm = 31 }, 6, { 0x62, 0xc9, 0xfd, 0x08, 0x6e, 0xcf } },
+    { { .form = X86_FORM_VPBROADCASTD_Z_R32, .reg = 1, .rm = 16 }, 6, { 0x62, 0xfa, 0x7d, 0x48, 0x7c, 0xc8 } },
+    { { .form = X86_FORM_VCVTSI2SS_X_X_RM32_EVEX, .reg = 1, .vvvv = 2, .rm = 16 }, 6, { 0x62, 0xf9, 0x6e, 0x08, 0x2a, 0xc8 } },
+    { { .form = X86_FORM_VPINSRD_X_X_RM32_IMM8_EVEX, .reg = 1, .vvvv = 2, .rm = 16, .immediate = 1 }, 7, { 0x62, 0xfb, 0x6d, 0x08, 0x22, 0xc8, 0x01 } },
+    { { .form = X86_FORM_VPEXTRD_RM32_X_IMM8_EVEX, .reg = 1, .rm = 16, .immediate = 1 }, 7, { 0x62, 0xfb, 0x7d, 0x08, 0x16, 0xc8, 0x01 } },
+    { { .form = X86_FORM_VCVTTSS2SI_R64_XM32_EVEX, .reg = 16, .rm = 1 }, 6, { 0x62, 0xe1, 0xfe, 0x08, 0x2c, 0xc1 } },
+    { { .form = X86_FORM_VCVTTSS2SI_R64_XM32_EVEX, .reg = 31, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0x69, 0xfe, 0x08, 0x2c, 0x38 } },
+    { { .form = X86_FORM_TCVTROWD2PS_Z_TMM_R32, .reg = 1, .rm = 2, .vvvv = 16 }, 6, { 0x62, 0xf2, 0x7e, 0x40, 0x4a, 0xca } },
+    { { .form = X86_FORM_VGATHERDPS_Z_VM32Z, .reg = 1, .rm = 16, .index = 2, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 }, 7, { 0x62, 0xfa, 0x7d, 0x49, 0x92, 0x0c, 0x90 } },
+    { { .form = X86_FORM_VGATHERDPS_Z_VM32Z, .reg = 1, .rm = 31, .index = 18, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 }, 7, { 0x62, 0xda, 0x7d, 0x41, 0x92, 0x0c, 0x97 } },
+    { { .form = X86_FORM_VPSCATTERDD_VM32Z_Z, .reg = 1, .rm = 16, .index = 2, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 }, 7, { 0x62, 0xfa, 0x7d, 0x49, 0xa0, 0x0c, 0x90 } },
+    { { .form = X86_FORM_VADDPS_Z_Z_ZM512 + BUSTER_X86_FORM_FS, .reg = 1, .vvvv = 2, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE }, 7, { 0x64, 0x62, 0xf9, 0x6c, 0x48, 0x58, 0x08 } },
     // Without registers 16 to 31, as for x86_encode: REX's add rax, r8; VEX and EVEX; map 2's crc32; xsave [r15]
     { { .form = X86_FORM_ADD_RM64_R64, .reg = 8 }, 3, { 0x4c, 0x01, 0xc0 } },
     { { .form = X86_FORM_VADDPS_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 4, { 0xc5, 0xe8, 0x58, 0xcb } },
@@ -2271,8 +2296,8 @@ static bool x86_check_known(void)
 }
 
 // Instructions that x86_encode_apx, x86_encode_scalar_apx and x86_validate_apx must reject, as GNU as does: the XSAVE
-// family with a base or index from 16 to 31 (REX2 is #UD with it), a high byte register with REX2, and XMM16 to XMM31
-// in SSE's forms (which only EVEX has).
+// family with a base or index from 16 to 31 (REX2 is #UD with it), a high byte register with REX2, XMM16 to XMM31 in
+// SSE's forms (which only EVEX has), and registers 16 to 31 in VEX forms that have no EVEX one.
 static const X86Instruction x86_known_invalid_apx[] = {
     // xsave [r16]; xrstor64 [rax + r17]; xsaveopt [r31 + 8]; xsavec64 [r20]; xsaves [r16]; xrstors64 [rbx + r29*8]
     { .form = X86_FORM_XSAVE_M, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE },
@@ -2292,6 +2317,14 @@ static const X86Instruction x86_known_invalid_apx[] = {
     { .form = X86_FORM_MOVAPS_X_XM, .rm = 16 },
     { .form = X86_FORM_MOVAPS_X_XM, .reg = 16, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE },
     { .form = X86_FORM_MOVD_X_RM32, .reg = 16 },
+    // VEX forms without an EVEX one, so with no way to registers 16 to 31: vtestps xmm1, xmmword ptr [r16]; vpblendvb
+    // xmm1, xmm2, xmmword ptr [r16], xmm3; vldmxcsr dword ptr [r16]; vpgatherdd xmm1, [rax + xmm2*4 + 0], xmm3 with r16
+    // as its base; XOP's vpcmov xmm1, xmm2, xmm3, xmmword ptr [r17]
+    { .form = X86_FORM_VTESTPS_X_XM128, .reg = 1, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE },
+    { .form = X86_FORM_VPBLENDVB_X_X_XM128_X, .reg = 1, .vvvv = 2, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 << 4 },
+    { .form = X86_FORM_VLDMXCSR_M32, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE },
+    { .form = X86_FORM_VPGATHERDD_X_VM32X_X, .reg = 1, .vvvv = 3, .rm = 16, .index = 2, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2) },
+    { .form = X86_FORM_VPCMOV_X_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 17, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 << 4 },
 };
 
 static bool x86_check_known_invalid_apx(void)
@@ -2761,8 +2794,8 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
     const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0;
     const bool vsib = (form->rm & BUSTER_X86_OPERAND_VSIB) != 0;
     const bool sib = (form->rm & BUSTER_X86_OPERAND_SIB) != 0;
-    // With APX, a form whose general registers, base and index can be 16 to 31.
-    const bool extended = x86_test_mode == X86_ENCODER_MODE_APX && x86_form_has_rex2(instruction->form);
+    // With APX, a form whose general registers, base and general index can be 16 to 31.
+    const bool extended = x86_test_mode == X86_ENCODER_MODE_APX && x86_form_has_apx_registers(instruction->form);
     bool result = true;
     // The ways after the first 23 are for one mode alone, so that the 64-bit pass breaks the instructions it did before
     // them: 23 and 24 for 32-bit addresses, and 25 to 27 for APX.
@@ -2832,7 +2865,7 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
             break;
         case 6:
             // vvvv past the class's last, or in a form without it.
-            instruction->vvvv = form->vvvv != BUSTER_X86_OPERAND_NONE ? (uint8_t)(instruction->vvvv | x86_past_last_register(form->vvvv, form->family, false))
+            instruction->vvvv = form->vvvv != BUSTER_X86_OPERAND_NONE ? (uint8_t)(instruction->vvvv | x86_past_last_register(form->vvvv, form->family, extended))
                                                                      : (uint8_t)(1 + x86_random_below(state, 31));
             break;
         case 7:
@@ -3259,9 +3292,9 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
         }
         case 26:
         {
-            // With APX, a general register, base or general index from 16 to 31 in a form without REX2 (the XSAVE family,
-            // maps 2 and 3, VEX and EVEX, and HLE's locked arithmetic by an imm32 with a segment override, which has no
-            // room for the payload): in a new instruction of one with any of those, the first of them from a random
+            // With APX, a general register, base or general index from 16 to 31 in a form without REX2 or EVEX (the XSAVE
+            // family, maps 2 and 3, VEX, and HLE's locked arithmetic by an imm32 with a segment override, which has no
+            // room for REX2's payload): in a new instruction of one with any of those, the first of them from a random
             // one, in the order reg, vvvv, a register rm, the base and the index.
             uint32_t chosen = 5;
             while (chosen == 5)
@@ -3277,7 +3310,7 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
                     memory_operand && (instruction->mode & BUSTER_X86_MODE_INDEX) && !(candidate->rm & BUSTER_X86_OPERAND_VSIB),
                 };
                 const uint32_t first = x86_random_below(state, 5);
-                for (uint32_t k = 0; k < 5 && !x86_form_has_rex2(instruction->form); k += 1)
+                for (uint32_t k = 0; k < 5 && !x86_form_has_apx_registers(instruction->form); k += 1)
                 {
                     chosen = chosen == 5 && parts[(first + k) % 5] ? (first + k) % 5 : chosen;
                 }

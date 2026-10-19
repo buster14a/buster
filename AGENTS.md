@@ -54,7 +54,8 @@ or infrastructure machinery merely to match its style.
   symbolic operand, `x86_encode` reports each marked instruction's end, and
   `x86_fixup_distance` gives its fields' offsets and addends from that; and
   `x86_encode_address32` and `x86_encode_apx`, the same for 32-bit addresses and
-  for APX's general registers 16 to 31 (REX2), each with templates of its own);
+  for APX's general registers 16 to 31 (REX2, and EVEX's B4 and X4), each with
+  templates of its own);
   `docs/x86-64-encoder.md` explains its design and measurements.
   `x86_64_encoder_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-x86-encoder` runs them) and
@@ -189,12 +190,12 @@ checks again with 32-bit addresses, but the known fixups: 33 known encodings, a
 digest of their own, `x86_encode_64_address32` against the scalar encoder on the
 random streams and at page edges, and invalid operands, among them MPX memory
 operands and memory operands in the 80 FS and GS forms without room for the
-`67`. And again for APX, but the known fixups: 62 known encodings, 15 known
+`67`. And again for APX, but the known fixups: 82 known encodings, 20 known
 invalid instructions (as GNU as rejects them), a digest of their own,
-`x86_encode_64_apx` against the scalar encoder on random streams in which three
-forms in four have REX2, and at page edges, and invalid operands, among them a
-high byte register with REX2, registers 16 to 31 in forms without REX2 and
-XMM16 to XMM31 in SSE's forms. `--address32` and `--apx` run only their pass,
+`x86_encode_64_apx` against the scalar encoder on random streams in which half
+the forms have REX2 and a quarter are EVEX ones, and at page edges, and invalid
+operands, among them a high byte register with REX2, registers 16 to 31 in
+forms without REX2 or EVEX and XMM16 to XMM31 in SSE's forms. `--address32` and `--apx` run only their pass,
 and `--count N` and `--seed N` change the random streams.
 
 The digests were recorded when GNU as encoded the same streams to the same
@@ -229,7 +230,7 @@ general register gives the address size, and the relocations of displacements
 other than RIP-relative ones are R_X86_64_32; with `--apx`, it names registers
 16 to 31 `r16` to `r31` (`r16d`, `r16w`, `r16b`). Cross-check more than one seed
 after changing forms (1.7 million instructions over seeds 1, 7 and 99 were last
-checked for each entry point, with 199,441, 201,280 and 195,711 relocations).
+checked for each entry point, with 199,441, 201,280 and 200,117 relocations).
 
 ## x86-64 encoder benchmark
 
