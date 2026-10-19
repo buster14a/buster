@@ -580,6 +580,27 @@ typedef enum X86Syntax
     XV(N##_M128_X, m, VEX, prefixes, 2, opcode, R, 0, 0, 0, V, NONE, M, 16, 1, NONE, RM_REG) \
     XV(N##_M256_Y, m, VEX, prefixes, 2, opcode, R, 0, 0, 1, Y, NONE, M, 32, 1, NONE, RM_REG)
 
+// The opmask instructions at their four widths: bytes (66, W0), words (W0), doublewords (66, W1) and quadwords
+// (W1). Two sources (VEX.L1, the first in VEX.vvvv) or one (VEX.L0); the shifts by an immediate are 66 0F 3A, at
+// `opcode` for bytes and words and the next opcode for doublewords and quadwords.
+#define BUSTER_X86_MASK_BINARY_FORMS(XV, N, m, opcode) \
+    XV(N##B_K_K_K, m "b", VEX, 0x66, 2, opcode, R, 0, 0, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
+    XV(N##W_K_K_K, m "w", VEX, 0, 2, opcode, R, 0, 0, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
+    XV(N##D_K_K_K, m "d", VEX, 0x66, 2, opcode, R, 0, 1, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
+    XV(N##Q_K_K_K, m "q", VEX, 0, 2, opcode, R, 0, 1, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM)
+
+#define BUSTER_X86_MASK_UNARY_FORMS(XV, N, m, opcode) \
+    XV(N##B_K_K, m "b", VEX, 0x66, 2, opcode, R, 0, 0, 0, K, NONE, K, 0, 1, NONE, REG_RM) \
+    XV(N##W_K_K, m "w", VEX, 0, 2, opcode, R, 0, 0, 0, K, NONE, K, 0, 1, NONE, REG_RM) \
+    XV(N##D_K_K, m "d", VEX, 0x66, 2, opcode, R, 0, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM) \
+    XV(N##Q_K_K, m "q", VEX, 0, 2, opcode, R, 0, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM)
+
+#define BUSTER_X86_MASK_SHIFT_FORMS(XV, N, m, opcode) \
+    XV(N##B_K_K_IMM8, m "b", VEX, 0x66, 3, opcode, R, 1, 0, 0, K, NONE, K, 0, 1, NONE, REG_RM_IMM) \
+    XV(N##W_K_K_IMM8, m "w", VEX, 0x66, 3, opcode, R, 1, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM_IMM) \
+    XV(N##D_K_K_IMM8, m "d", VEX, 0x66, 3, opcode + 1, R, 1, 0, 0, K, NONE, K, 0, 1, NONE, REG_RM_IMM) \
+    XV(N##Q_K_K_IMM8, m "q", VEX, 0x66, 3, opcode + 1, R, 1, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM_IMM)
+
 // CMPccXADD: compare a 32- or 64-bit memory operand with reg, add vvvv to it if the condition (K) holds, and return
 // its old value in reg (VEX.128.66.0F38 E0+K).
 #define BUSTER_X86_CMPCCXADD_FORMS(XV, CC, cc, K) \
@@ -1401,26 +1422,20 @@ typedef enum X86Syntax
     XV(KMOVQ_M64_K, "kmovq", VEX, 0, 2, 0x0f91, R, 0, 1, 0, K, NONE, M, 8, 1, NONE, RM_REG) \
     XV(KMOVQ_K_R64, "kmovq", VEX, 0xf2, 2, 0x0f92, R, 0, 1, 0, K, NONE, GQ, 8, 1, NONE, REG_RM) \
     XV(KMOVQ_R64_K, "kmovq", VEX, 0xf2, 2, 0x0f93, R, 0, 1, 0, GQ, NONE, K, 8, 1, NONE, REG_RM) \
-    XV(KANDW_K_K_K, "kandw", VEX, 0, 2, 0x0f41, R, 0, 0, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
-    XV(KANDNW_K_K_K, "kandnw", VEX, 0, 2, 0x0f42, R, 0, 0, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
-    XV(KORW_K_K_K, "korw", VEX, 0, 2, 0x0f45, R, 0, 0, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
-    XV(KXORW_K_K_K, "kxorw", VEX, 0, 2, 0x0f47, R, 0, 0, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
-    XV(KANDQ_K_K_K, "kandq", VEX, 0, 2, 0x0f41, R, 0, 1, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
-    XV(KORQ_K_K_K, "korq", VEX, 0, 2, 0x0f45, R, 0, 1, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
-    XV(KXORQ_K_K_K, "kxorq", VEX, 0, 2, 0x0f47, R, 0, 1, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
-    XV(KADDQ_K_K_K, "kaddq", VEX, 0, 2, 0x0f4a, R, 0, 1, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
+    BUSTER_X86_MASK_BINARY_FORMS(XV, KAND, "kand", 0x0f41) \
+    BUSTER_X86_MASK_BINARY_FORMS(XV, KANDN, "kandn", 0x0f42) \
+    BUSTER_X86_MASK_BINARY_FORMS(XV, KOR, "kor", 0x0f45) \
+    BUSTER_X86_MASK_BINARY_FORMS(XV, KXNOR, "kxnor", 0x0f46) \
+    BUSTER_X86_MASK_BINARY_FORMS(XV, KXOR, "kxor", 0x0f47) \
+    BUSTER_X86_MASK_BINARY_FORMS(XV, KADD, "kadd", 0x0f4a) \
     XV(KUNPCKBW_K_K_K, "kunpckbw", VEX, 0x66, 2, 0x0f4b, R, 0, 0, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
     XV(KUNPCKWD_K_K_K, "kunpckwd", VEX, 0, 2, 0x0f4b, R, 0, 0, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
     XV(KUNPCKDQ_K_K_K, "kunpckdq", VEX, 0, 2, 0x0f4b, R, 0, 1, 1, K, K, K, 0, 1, NONE, REG_VVVV_RM) \
-    XV(KNOTW_K_K, "knotw", VEX, 0, 2, 0x0f44, R, 0, 0, 0, K, NONE, K, 0, 1, NONE, REG_RM) \
-    XV(KNOTQ_K_K, "knotq", VEX, 0, 2, 0x0f44, R, 0, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM) \
-    XV(KORTESTW_K_K, "kortestw", VEX, 0, 2, 0x0f98, R, 0, 0, 0, K, NONE, K, 0, 1, NONE, REG_RM) \
-    XV(KORTESTQ_K_K, "kortestq", VEX, 0, 2, 0x0f98, R, 0, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM) \
-    XV(KTESTQ_K_K, "ktestq", VEX, 0, 2, 0x0f99, R, 0, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM) \
-    XV(KSHIFTRW_K_K_IMM8, "kshiftrw", VEX, 0x66, 3, 0x0f3a30, R, 1, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM_IMM) \
-    XV(KSHIFTRQ_K_K_IMM8, "kshiftrq", VEX, 0x66, 3, 0x0f3a31, R, 1, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM_IMM) \
-    XV(KSHIFTLW_K_K_IMM8, "kshiftlw", VEX, 0x66, 3, 0x0f3a32, R, 1, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM_IMM) \
-    XV(KSHIFTLQ_K_K_IMM8, "kshiftlq", VEX, 0x66, 3, 0x0f3a33, R, 1, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM_IMM) \
+    BUSTER_X86_MASK_UNARY_FORMS(XV, KNOT, "knot", 0x0f44) \
+    BUSTER_X86_MASK_UNARY_FORMS(XV, KORTEST, "kortest", 0x0f98) \
+    BUSTER_X86_MASK_UNARY_FORMS(XV, KTEST, "ktest", 0x0f99) \
+    BUSTER_X86_MASK_SHIFT_FORMS(XV, KSHIFTR, "kshiftr", 0x0f3a30) \
+    BUSTER_X86_MASK_SHIFT_FORMS(XV, KSHIFTL, "kshiftl", 0x0f3a32) \
     BUSTER_X86_AVX512_MOVE_FORMS(XV, VMOVUPS, "vmovups", 0, 0, 0x0f10, 0x0f11) \
     BUSTER_X86_AVX512VL_MOVE_FORMS(XV, VMOVUPS, "vmovups", 0, 0, 0x0f10, 0x0f11, _EVEX) \
     BUSTER_X86_AVX512_MOVE_FORMS(XV, VMOVUPD, "vmovupd", 0x66, 1, 0x0f10, 0x0f11) \

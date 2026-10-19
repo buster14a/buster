@@ -60,7 +60,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0xfc8a60330d6b458bull
+#define BUSTER_X86_TEST_DIGEST 0x3b1631b4ddd8931full
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -1121,6 +1121,17 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_VAESENC_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40 }, 7, { 0x62, 0xf2, 0x6d, 0x48, 0xdc, 0x48, 0x01 } },
     { { .form = X86_FORM_VAESDECLAST_X_X_XM128_EVEX, .reg = 17, .vvvv = 18, .rm = 19 }, 6, { 0x62, 0xa2, 0x6d, 0x00, 0xdf, 0xcb } },
     { { .form = X86_FORM_VPCLMULQDQ_Y_Y_YM256_IMM8_EVEX, .reg = 17, .vvvv = 18, .rm = 19, .immediate = 0x11 }, 7, { 0x62, 0xa3, 0x6d, 0x20, 0x44, 0xcb, 0x11 } },
+    // The opmask instructions at each width: kandb k1, k2, k3 (VEX2 with 66); kaddd k1, k2, k3 (W1, VEX3); knotb k1, k2;
+    // kortestd k1, k2; ktestw k1, k2; kshiftrb k1, k2, 3 and kshiftld k1, k2, 3 (the next opcode, W0); and kxnorq k1, k2,
+    // k3
+    { { .form = X86_FORM_KANDB_K_K_K, .reg = 1, .vvvv = 2, .rm = 3 }, 4, { 0xc5, 0xed, 0x41, 0xcb } },
+    { { .form = X86_FORM_KADDD_K_K_K, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0xc4, 0xe1, 0xed, 0x4a, 0xcb } },
+    { { .form = X86_FORM_KNOTB_K_K, .reg = 1, .rm = 2 }, 4, { 0xc5, 0xf9, 0x44, 0xca } },
+    { { .form = X86_FORM_KORTESTD_K_K, .reg = 1, .rm = 2 }, 5, { 0xc4, 0xe1, 0xf9, 0x98, 0xca } },
+    { { .form = X86_FORM_KTESTW_K_K, .reg = 1, .rm = 2 }, 4, { 0xc5, 0xf8, 0x99, 0xca } },
+    { { .form = X86_FORM_KSHIFTRB_K_K_IMM8, .reg = 1, .rm = 2, .immediate = 3 }, 6, { 0xc4, 0xe3, 0x79, 0x30, 0xca, 0x03 } },
+    { { .form = X86_FORM_KSHIFTLD_K_K_IMM8, .reg = 1, .rm = 2, .immediate = 3 }, 6, { 0xc4, 0xe3, 0x79, 0x33, 0xca, 0x03 } },
+    { { .form = X86_FORM_KXNORQ_K_K_K, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0xc4, 0xe1, 0xec, 0x46, 0xcb } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.
