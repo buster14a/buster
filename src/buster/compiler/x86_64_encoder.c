@@ -587,9 +587,23 @@ typedef enum X86Syntax
     XV(N##_Z_ZM512, m, EVEX, prefixes, 2, load, R, 0, w, 2, Z, NONE, ZM, 64, 64, KZ, REG_RM) \
     XV(N##_ZM512_Z, m, EVEX, prefixes, 2, store, R, 0, w, 2, Z, NONE, ZM, 64, 64, KZ, RM_REG)
 
-// Non-temporal stores of 512 bits.
-#define BUSTER_X86_AVX512_STREAM_FORM(XV, N, m, prefixes, opcode, w) \
-    XV(N##_M512_Z, m, EVEX, prefixes, 2, opcode, R, 0, w, 2, Z, NONE, M, 64, 64, NONE, RM_REG)
+// Non-temporal stores of 512, 128 and 256 bits (whose VEX forms have the names without _EVEX).
+#define BUSTER_X86_AVX512_STREAM_FORMS(XV, N, m, prefixes, opcode, w) \
+    XV(N##_M512_Z, m, EVEX, prefixes, 2, opcode, R, 0, w, 2, Z, NONE, M, 64, 64, NONE, RM_REG) \
+    XV(N##_M128_X_EVEX, m, EVEX, prefixes, 2, opcode, R, 0, w, 0, V, NONE, M, 16, 16, NONE, RM_REG) \
+    XV(N##_M256_Y_EVEX, m, EVEX, prefixes, 2, opcode, R, 0, w, 1, Y, NONE, M, 32, 32, NONE, RM_REG)
+
+// Compresses (into a register or memory) and expands of 32-bit or 64-bit (W1) elements, at 512, 128 and 256 bits;
+// N is the element's.
+#define BUSTER_X86_AVX512_COMPRESS_FORMS(XV, N, m, opcode, w, bits) \
+    XV(N##_ZM512_Z, m, EVEX, 0x66, 3, opcode, R, 0, w, 2, Z, NONE, ZM, 64, bits / 8, KZ, RM_REG) \
+    XV(N##_XM128_X, m, EVEX, 0x66, 3, opcode, R, 0, w, 0, V, NONE, XM, 16, bits / 8, KZ, RM_REG) \
+    XV(N##_YM256_Y, m, EVEX, 0x66, 3, opcode, R, 0, w, 1, Y, NONE, YM, 32, bits / 8, KZ, RM_REG)
+
+#define BUSTER_X86_AVX512_EXPAND_FORMS(XV, N, m, opcode, w, bits) \
+    XV(N##_Z_ZM512, m, EVEX, 0x66, 3, opcode, R, 0, w, 2, Z, NONE, ZM, 64, bits / 8, KZ, REG_RM) \
+    XV(N##_X_XM128, m, EVEX, 0x66, 3, opcode, R, 0, w, 0, V, NONE, XM, 16, bits / 8, KZ, REG_RM) \
+    XV(N##_Y_YM256, m, EVEX, 0x66, 3, opcode, R, 0, w, 1, Y, NONE, YM, 32, bits / 8, KZ, REG_RM)
 
 // An XMM register's low or high quadword (two single-precision elements, or with W1 a double-precision one) from
 // memory, with the other from EVEX.V'vvvv, and to memory (the next opcode), as the VEX forms.
@@ -597,11 +611,13 @@ typedef enum X86Syntax
     XV(N##_X_X_M64_EVEX, m, EVEX, prefixes, 2, load, R, 0, w, 0, V, V, M, 8, 8, NONE, REG_VVVV_RM) \
     XV(N##_M64_X_EVEX, m, EVEX, prefixes, 2, load + 1, R, 0, w, 0, V, NONE, M, 8, 8, NONE, RM_REG)
 
-// Inserts into and extracts from a ZMM register of 128 bits (32x4) and 256 bits (64x4, W1): T is F for the
-// floating-point ones and I for the integer ones, whose opcodes are 0x20 more.
+// Inserts into and extracts from a ZMM register of 128 bits (32x4, a YMM register's too) and 256 bits (64x4, W1): T
+// is F for the floating-point ones and I for the integer ones, whose opcodes are 0x20 more.
 #define BUSTER_X86_AVX512_INSERT_EXTRACT_FORMS(XV, T, t, opcode) \
     XV(VINSERT##T##32X4_Z_Z_XM128_IMM8, "vinsert" t "32x4", EVEX, 0x66, 3, opcode, R, 1, 0, 2, Z, Z, XM, 16, 16, KZ, REG_VVVV_RM_IMM) \
     XV(VEXTRACT##T##32X4_XM128_Z_IMM8, "vextract" t "32x4", EVEX, 0x66, 3, opcode + 1, R, 1, 0, 2, Z, NONE, XM, 16, 16, KZ, RM_REG_IMM) \
+    XV(VINSERT##T##32X4_Y_Y_XM128_IMM8, "vinsert" t "32x4", EVEX, 0x66, 3, opcode, R, 1, 0, 1, Y, Y, XM, 16, 16, KZ, REG_VVVV_RM_IMM) \
+    XV(VEXTRACT##T##32X4_XM128_Y_IMM8, "vextract" t "32x4", EVEX, 0x66, 3, opcode + 1, R, 1, 0, 1, Y, NONE, XM, 16, 16, KZ, RM_REG_IMM) \
     XV(VINSERT##T##64X4_Z_Z_YM256_IMM8, "vinsert" t "64x4", EVEX, 0x66, 3, opcode + 2, R, 1, 1, 2, Z, Z, YM, 32, 32, KZ, REG_VVVV_RM_IMM) \
     XV(VEXTRACT##T##64X4_YM256_Z_IMM8, "vextract" t "64x4", EVEX, 0x66, 3, opcode + 3, R, 1, 1, 2, Z, NONE, YM, 32, 32, KZ, RM_REG_IMM)
 
@@ -721,6 +737,130 @@ typedef enum X86Syntax
 // Shifts by the low quadword of an XMM register or 128-bit memory operand.
 #define BUSTER_X86_AVX512_SHIFT_COUNT_FORM(XV, N, m, opcode, w) \
     XV(N##_Z_Z_XM128, m, EVEX, 0x66, 2, 0x0f00 + opcode, R, 0, w, 2, Z, Z, XM, 16, 16, KZ, REG_VVVV_RM)
+
+// AVX512VL: the forms above at 128 and 256 bits (L0 and L1), on XMM and YMM registers (16 to 31 too), with N of the
+// narrower vector. Embedded rounding and suppressed exceptions take L'L's place, so they're only at 512 bits.
+// `suffix` is _EVEX for an instruction whose VEX forms have the names, and empty otherwise.
+#define BUSTER_X86_AVX512VL_MOVE_FORMS(XV, N, m, prefixes, w, load, store, suffix) \
+    XV(N##_X_XM128##suffix, m, EVEX, prefixes, 2, load, R, 0, w, 0, V, NONE, XM, 16, 16, KZ, REG_RM) \
+    XV(N##_XM128_X##suffix, m, EVEX, prefixes, 2, store, R, 0, w, 0, V, NONE, XM, 16, 16, KZ, RM_REG) \
+    XV(N##_Y_YM256##suffix, m, EVEX, prefixes, 2, load, R, 0, w, 1, Y, NONE, YM, 32, 32, KZ, REG_RM) \
+    XV(N##_YM256_Y##suffix, m, EVEX, prefixes, 2, store, R, 0, w, 1, Y, NONE, YM, 32, 32, KZ, RM_REG)
+
+// The destination, the first source in EVEX.V'vvvv and the second in ModRM.rm, or a broadcast element of `bits` bits;
+// at 256 bits only (the _256_ families) for the permutes and shuffles across 128-bit lanes.
+#define BUSTER_X86_AVX512VL_256_BROADCAST_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, bits, suffix) \
+    XV(N##_Y_Y_YM256##suffix, m, EVEX, prefixes, opcode_bytes, opcode, R, 0, w, 1, Y, Y, YM, 32, 32, KZ, REG_VVVV_RM) \
+    XV(N##_Y_Y_M##bits##BCST, m, EVEX, prefixes, opcode_bytes, opcode, R, 0, w, 1, Y, Y, M, 32, bits / 8, KZ_BCST, REG_VVVV_RM)
+
+#define BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, bits, suffix) \
+    XV(N##_X_X_XM128##suffix, m, EVEX, prefixes, opcode_bytes, opcode, R, 0, w, 0, V, V, XM, 16, 16, KZ, REG_VVVV_RM) \
+    XV(N##_X_X_M##bits##BCST, m, EVEX, prefixes, opcode_bytes, opcode, R, 0, w, 0, V, V, M, 16, bits / 8, KZ_BCST, REG_VVVV_RM) \
+    BUSTER_X86_AVX512VL_256_BROADCAST_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, bits, suffix)
+
+#define BUSTER_X86_AVX512VL_256_IMMEDIATE_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, bits, suffix) \
+    XV(N##_Y_Y_YM256_IMM8##suffix, m, EVEX, prefixes, opcode_bytes, opcode, R, 1, w, 1, Y, Y, YM, 32, 32, KZ, REG_VVVV_RM_IMM) \
+    XV(N##_Y_Y_M##bits##BCST_IMM8, m, EVEX, prefixes, opcode_bytes, opcode, R, 1, w, 1, Y, Y, M, 32, bits / 8, KZ_BCST, REG_VVVV_RM_IMM)
+
+#define BUSTER_X86_AVX512VL_IMMEDIATE_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, bits, suffix) \
+    XV(N##_X_X_XM128_IMM8##suffix, m, EVEX, prefixes, opcode_bytes, opcode, R, 1, w, 0, V, V, XM, 16, 16, KZ, REG_VVVV_RM_IMM) \
+    XV(N##_X_X_M##bits##BCST_IMM8, m, EVEX, prefixes, opcode_bytes, opcode, R, 1, w, 0, V, V, M, 16, bits / 8, KZ_BCST, REG_VVVV_RM_IMM) \
+    BUSTER_X86_AVX512VL_256_IMMEDIATE_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, bits, suffix)
+
+// FMA3, whose VEX forms have the names.
+#define BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(XV, N, m, opcode) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, N##132PS, m "132ps", 0x66, 3, 0x0f3800 + opcode, 0, 32, _EVEX) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, N##132PD, m "132pd", 0x66, 3, 0x0f3800 + opcode, 1, 64, _EVEX) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, N##213PS, m "213ps", 0x66, 3, 0x0f3810 + opcode, 0, 32, _EVEX) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, N##213PD, m "213pd", 0x66, 3, 0x0f3810 + opcode, 1, 64, _EVEX) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, N##231PS, m "231ps", 0x66, 3, 0x0f3820 + opcode, 0, 32, _EVEX) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, N##231PD, m "231pd", 0x66, 3, 0x0f3820 + opcode, 1, 64, _EVEX)
+
+// The destination and one source.
+#define BUSTER_X86_AVX512VL_UNARY_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, suffix) \
+    XV(N##_X_XM128##suffix, m, EVEX, prefixes, opcode_bytes, opcode, R, 0, w, 0, V, NONE, XM, 16, 16, KZ, REG_RM) \
+    XV(N##_Y_YM256##suffix, m, EVEX, prefixes, opcode_bytes, opcode, R, 0, w, 1, Y, NONE, YM, 32, 32, KZ, REG_RM)
+
+#define BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, bits, suffix) \
+    BUSTER_X86_AVX512VL_UNARY_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, suffix) \
+    XV(N##_X_M##bits##BCST, m, EVEX, prefixes, opcode_bytes, opcode, R, 0, w, 0, V, NONE, M, 16, bits / 8, KZ_BCST, REG_RM) \
+    XV(N##_Y_M##bits##BCST, m, EVEX, prefixes, opcode_bytes, opcode, R, 0, w, 1, Y, NONE, M, 32, bits / 8, KZ_BCST, REG_RM)
+
+#define BUSTER_X86_AVX512VL_256_UNARY_IMMEDIATE_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, bits, suffix) \
+    XV(N##_Y_YM256_IMM8##suffix, m, EVEX, prefixes, opcode_bytes, opcode, R, 1, w, 1, Y, NONE, YM, 32, 32, KZ, REG_RM_IMM) \
+    XV(N##_Y_M##bits##BCST_IMM8, m, EVEX, prefixes, opcode_bytes, opcode, R, 1, w, 1, Y, NONE, M, 32, bits / 8, KZ_BCST, REG_RM_IMM)
+
+#define BUSTER_X86_AVX512VL_UNARY_IMMEDIATE_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, bits, suffix) \
+    XV(N##_X_XM128_IMM8##suffix, m, EVEX, prefixes, opcode_bytes, opcode, R, 1, w, 0, V, NONE, XM, 16, 16, KZ, REG_RM_IMM) \
+    XV(N##_X_M##bits##BCST_IMM8, m, EVEX, prefixes, opcode_bytes, opcode, R, 1, w, 0, V, NONE, M, 16, bits / 8, KZ_BCST, REG_RM_IMM) \
+    BUSTER_X86_AVX512VL_256_UNARY_IMMEDIATE_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, bits, suffix)
+
+// Conversions of 32-bit elements to elements twice as wide: into an XMM register from 64 bits (an XMM register's
+// low half, or memory) or a broadcast of 2 elements, and into a YMM register from 128 bits or a broadcast of 4.
+#define BUSTER_X86_AVX512VL_WIDENING_FORMS(XV, N, m, prefixes, opcode, suffix) \
+    XV(N##_X_XM64##suffix, m, EVEX, prefixes, 2, opcode, R, 0, 0, 0, V, NONE, XM, 8, 8, KZ, REG_RM) \
+    XV(N##_X_M32BCST, m, EVEX, prefixes, 2, opcode, R, 0, 0, 0, V, NONE, M, 8, 4, KZ_BCST, REG_RM) \
+    XV(N##_Y_XM128##suffix, m, EVEX, prefixes, 2, opcode, R, 0, 0, 1, Y, NONE, XM, 16, 16, KZ, REG_RM) \
+    XV(N##_Y_M32BCST, m, EVEX, prefixes, 2, opcode, R, 0, 0, 1, Y, NONE, M, 16, 4, KZ_BCST, REG_RM)
+
+// Conversions of 64-bit elements to elements half as wide, into an XMM register from 128 bits (L0) or 256 bits
+// (L1): the broadcasts' names give their element counts, their operands being the same.
+#define BUSTER_X86_AVX512VL_NARROWING_FORMS(XV, N, m, prefixes, opcode, suffix) \
+    XV(N##_X_XM128##suffix, m, EVEX, prefixes, 2, opcode, R, 0, 1, 0, V, NONE, XM, 16, 16, KZ, REG_RM) \
+    XV(N##_X_M64BCST2, m, EVEX, prefixes, 2, opcode, R, 0, 1, 0, V, NONE, M, 16, 8, KZ_BCST, REG_RM) \
+    XV(N##_X_YM256##suffix, m, EVEX, prefixes, 2, opcode, R, 0, 1, 1, V, NONE, YM, 32, 32, KZ, REG_RM) \
+    XV(N##_X_M64BCST4, m, EVEX, prefixes, 2, opcode, R, 0, 1, 1, V, NONE, M, 32, 8, KZ_BCST, REG_RM)
+
+// Compares into an opmask register (whose names no VEX form has).
+#define BUSTER_X86_AVX512VL_COMPARE_BROADCAST_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, bits) \
+    XV(N##_K_X_XM128, m, EVEX, prefixes, opcode_bytes, opcode, R, 0, w, 0, K, V, XM, 16, 16, K, REG_VVVV_RM) \
+    XV(N##_K_X_M##bits##BCST, m, EVEX, prefixes, opcode_bytes, opcode, R, 0, w, 0, K, V, M, 16, bits / 8, K_BCST, REG_VVVV_RM) \
+    XV(N##_K_Y_YM256, m, EVEX, prefixes, opcode_bytes, opcode, R, 0, w, 1, K, Y, YM, 32, 32, K, REG_VVVV_RM) \
+    XV(N##_K_Y_M##bits##BCST, m, EVEX, prefixes, opcode_bytes, opcode, R, 0, w, 1, K, Y, M, 32, bits / 8, K_BCST, REG_VVVV_RM)
+
+#define BUSTER_X86_AVX512VL_COMPARE_IMMEDIATE_FORMS(XV, N, m, prefixes, opcode_bytes, opcode, w, bits) \
+    XV(N##_K_X_XM128_IMM8, m, EVEX, prefixes, opcode_bytes, opcode, R, 1, w, 0, K, V, XM, 16, 16, K, REG_VVVV_RM_IMM) \
+    XV(N##_K_X_M##bits##BCST_IMM8, m, EVEX, prefixes, opcode_bytes, opcode, R, 1, w, 0, K, V, M, 16, bits / 8, K_BCST, REG_VVVV_RM_IMM) \
+    XV(N##_K_Y_YM256_IMM8, m, EVEX, prefixes, opcode_bytes, opcode, R, 1, w, 1, K, Y, YM, 32, 32, K, REG_VVVV_RM_IMM) \
+    XV(N##_K_Y_M##bits##BCST_IMM8, m, EVEX, prefixes, opcode_bytes, opcode, R, 1, w, 1, K, Y, M, 32, bits / 8, K_BCST, REG_VVVV_RM_IMM)
+
+// Shifts and rotates by an immediate (into EVEX.V'vvvv, of a register or memory operand: the VEX forms take only a
+// register, and have other names), and shifts by the low quadword of an XMM register or 128-bit memory operand.
+#define BUSTER_X86_AVX512VL_SHIFT_FORMS(XV, N, m, opcode, w, K, bits) \
+    XV(N##_X_XM128_IMM8, m, EVEX, 0x66, 2, 0x0f00 + opcode, D##K, 1, w, 0, NONE, V, XM, 16, 16, KZ, VVVV_RM_IMM) \
+    XV(N##_X_M##bits##BCST_IMM8, m, EVEX, 0x66, 2, 0x0f00 + opcode, D##K, 1, w, 0, NONE, V, M, 16, bits / 8, KZ_BCST, VVVV_RM_IMM) \
+    XV(N##_Y_YM256_IMM8, m, EVEX, 0x66, 2, 0x0f00 + opcode, D##K, 1, w, 1, NONE, Y, YM, 32, 32, KZ, VVVV_RM_IMM) \
+    XV(N##_Y_M##bits##BCST_IMM8, m, EVEX, 0x66, 2, 0x0f00 + opcode, D##K, 1, w, 1, NONE, Y, M, 32, bits / 8, KZ_BCST, VVVV_RM_IMM)
+
+#define BUSTER_X86_AVX512VL_SHIFT_COUNT_FORMS(XV, N, m, opcode, w, suffix) \
+    XV(N##_X_X_XM128##suffix, m, EVEX, 0x66, 2, 0x0f00 + opcode, R, 0, w, 0, V, V, XM, 16, 16, KZ, REG_VVVV_RM) \
+    XV(N##_Y_Y_XM128##suffix, m, EVEX, 0x66, 2, 0x0f00 + opcode, R, 0, w, 1, Y, Y, XM, 16, 16, KZ, REG_VVVV_RM)
+
+// Narrowing moves (BUSTER_X86_AVX512_NARROWING_MOVE_FORMS) from XMM and YMM registers.
+#define BUSTER_X86_AVX512VL_NARROWING_MOVE_FORMS(XV, N, m, opcode) \
+    XV(N##DB_XM32_X, m "db", EVEX, 0xf3, 3, opcode + 1, R, 0, 0, 0, V, NONE, XM, 4, 4, KZ, RM_REG) \
+    XV(N##DB_XM64_Y, m "db", EVEX, 0xf3, 3, opcode + 1, R, 0, 0, 1, Y, NONE, XM, 8, 8, KZ, RM_REG) \
+    XV(N##QB_XM16_X, m "qb", EVEX, 0xf3, 3, opcode + 2, R, 0, 0, 0, V, NONE, XM, 2, 2, KZ, RM_REG) \
+    XV(N##QB_XM32_Y, m "qb", EVEX, 0xf3, 3, opcode + 2, R, 0, 0, 1, Y, NONE, XM, 4, 4, KZ, RM_REG) \
+    XV(N##DW_XM64_X, m "dw", EVEX, 0xf3, 3, opcode + 3, R, 0, 0, 0, V, NONE, XM, 8, 8, KZ, RM_REG) \
+    XV(N##DW_XM128_Y, m "dw", EVEX, 0xf3, 3, opcode + 3, R, 0, 0, 1, Y, NONE, XM, 16, 16, KZ, RM_REG) \
+    XV(N##QW_XM32_X, m "qw", EVEX, 0xf3, 3, opcode + 4, R, 0, 0, 0, V, NONE, XM, 4, 4, KZ, RM_REG) \
+    XV(N##QW_XM64_Y, m "qw", EVEX, 0xf3, 3, opcode + 4, R, 0, 0, 1, Y, NONE, XM, 8, 8, KZ, RM_REG) \
+    XV(N##QD_XM64_X, m "qd", EVEX, 0xf3, 3, opcode + 5, R, 0, 0, 0, V, NONE, XM, 8, 8, KZ, RM_REG) \
+    XV(N##QD_XM128_Y, m "qd", EVEX, 0xf3, 3, opcode + 5, R, 0, 0, 1, Y, NONE, XM, 16, 16, KZ, RM_REG)
+
+// Sign or zero extensions (BUSTER_X86_AVX512_EXTEND_FORMS) into XMM and YMM registers, whose VEX forms have the names.
+#define BUSTER_X86_AVX512VL_EXTEND_FORMS(XV, N, m, opcode) \
+    XV(N##BD_X_XM32_EVEX, m "bd", EVEX, 0x66, 3, opcode + 1, R, 0, 0, 0, V, NONE, XM, 4, 4, KZ, REG_RM) \
+    XV(N##BQ_X_XM16_EVEX, m "bq", EVEX, 0x66, 3, opcode + 2, R, 0, 0, 0, V, NONE, XM, 2, 2, KZ, REG_RM) \
+    XV(N##WD_X_XM64_EVEX, m "wd", EVEX, 0x66, 3, opcode + 3, R, 0, 0, 0, V, NONE, XM, 8, 8, KZ, REG_RM) \
+    XV(N##WQ_X_XM32_EVEX, m "wq", EVEX, 0x66, 3, opcode + 4, R, 0, 0, 0, V, NONE, XM, 4, 4, KZ, REG_RM) \
+    XV(N##DQ_X_XM64_EVEX, m "dq", EVEX, 0x66, 3, opcode + 5, R, 0, 0, 0, V, NONE, XM, 8, 8, KZ, REG_RM) \
+    XV(N##BD_Y_XM64_EVEX, m "bd", EVEX, 0x66, 3, opcode + 1, R, 0, 0, 1, Y, NONE, XM, 8, 8, KZ, REG_RM) \
+    XV(N##BQ_Y_XM32_EVEX, m "bq", EVEX, 0x66, 3, opcode + 2, R, 0, 0, 1, Y, NONE, XM, 4, 4, KZ, REG_RM) \
+    XV(N##WD_Y_XM128_EVEX, m "wd", EVEX, 0x66, 3, opcode + 3, R, 0, 0, 1, Y, NONE, XM, 16, 16, KZ, REG_RM) \
+    XV(N##WQ_Y_XM64_EVEX, m "wq", EVEX, 0x66, 3, opcode + 4, R, 0, 0, 1, Y, NONE, XM, 8, 8, KZ, REG_RM) \
+    XV(N##DQ_Y_XM128_EVEX, m "dq", EVEX, 0x66, 3, opcode + 5, R, 0, 0, 1, Y, NONE, XM, 16, 16, KZ, REG_RM)
 
 // Scalar arithmetic (single precision with F3, double precision with F2 and W1) with an opmask, and with embedded
 // rounding or suppressed exceptions (K: ER or SAE).
@@ -1171,32 +1311,38 @@ typedef enum X86Syntax
     XV(KSHIFTLW_K_K_IMM8, "kshiftlw", VEX, 0x66, 3, 0x0f3a32, R, 1, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM_IMM) \
     XV(KSHIFTLQ_K_K_IMM8, "kshiftlq", VEX, 0x66, 3, 0x0f3a33, R, 1, 1, 0, K, NONE, K, 0, 1, NONE, REG_RM_IMM) \
     BUSTER_X86_AVX512_MOVE_FORMS(XV, VMOVUPS, "vmovups", 0, 0, 0x0f10, 0x0f11) \
+    BUSTER_X86_AVX512VL_MOVE_FORMS(XV, VMOVUPS, "vmovups", 0, 0, 0x0f10, 0x0f11, _EVEX) \
     BUSTER_X86_AVX512_MOVE_FORMS(XV, VMOVUPD, "vmovupd", 0x66, 1, 0x0f10, 0x0f11) \
+    BUSTER_X86_AVX512VL_MOVE_FORMS(XV, VMOVUPD, "vmovupd", 0x66, 1, 0x0f10, 0x0f11, _EVEX) \
     BUSTER_X86_AVX512_MOVE_FORMS(XV, VMOVAPS, "vmovaps", 0, 0, 0x0f28, 0x0f29) \
+    BUSTER_X86_AVX512VL_MOVE_FORMS(XV, VMOVAPS, "vmovaps", 0, 0, 0x0f28, 0x0f29, _EVEX) \
     BUSTER_X86_AVX512_MOVE_FORMS(XV, VMOVAPD, "vmovapd", 0x66, 1, 0x0f28, 0x0f29) \
+    BUSTER_X86_AVX512VL_MOVE_FORMS(XV, VMOVAPD, "vmovapd", 0x66, 1, 0x0f28, 0x0f29, _EVEX) \
     BUSTER_X86_AVX512_MOVE_FORMS(XV, VMOVDQA32, "vmovdqa32", 0x66, 0, 0x0f6f, 0x0f7f) \
+    BUSTER_X86_AVX512VL_MOVE_FORMS(XV, VMOVDQA32, "vmovdqa32", 0x66, 0, 0x0f6f, 0x0f7f, ) \
     BUSTER_X86_AVX512_MOVE_FORMS(XV, VMOVDQA64, "vmovdqa64", 0x66, 1, 0x0f6f, 0x0f7f) \
+    BUSTER_X86_AVX512VL_MOVE_FORMS(XV, VMOVDQA64, "vmovdqa64", 0x66, 1, 0x0f6f, 0x0f7f, ) \
     BUSTER_X86_AVX512_MOVE_FORMS(XV, VMOVDQU8, "vmovdqu8", 0xf2, 0, 0x0f6f, 0x0f7f) \
     BUSTER_X86_AVX512_MOVE_FORMS(XV, VMOVDQU16, "vmovdqu16", 0xf2, 1, 0x0f6f, 0x0f7f) \
     BUSTER_X86_AVX512_MOVE_FORMS(XV, VMOVDQU32, "vmovdqu32", 0xf3, 0, 0x0f6f, 0x0f7f) \
+    BUSTER_X86_AVX512VL_MOVE_FORMS(XV, VMOVDQU32, "vmovdqu32", 0xf3, 0, 0x0f6f, 0x0f7f, ) \
     BUSTER_X86_AVX512_MOVE_FORMS(XV, VMOVDQU64, "vmovdqu64", 0xf3, 1, 0x0f6f, 0x0f7f) \
-    BUSTER_X86_AVX512_STREAM_FORM(XV, VMOVNTPS, "vmovntps", 0, 0x0f2b, 0) \
-    BUSTER_X86_AVX512_STREAM_FORM(XV, VMOVNTPD, "vmovntpd", 0x66, 0x0f2b, 1) \
-    BUSTER_X86_AVX512_STREAM_FORM(XV, VMOVNTDQ, "vmovntdq", 0x66, 0x0fe7, 0) \
+    BUSTER_X86_AVX512VL_MOVE_FORMS(XV, VMOVDQU64, "vmovdqu64", 0xf3, 1, 0x0f6f, 0x0f7f, ) \
+    BUSTER_X86_AVX512_STREAM_FORMS(XV, VMOVNTPS, "vmovntps", 0, 0x0f2b, 0) \
+    BUSTER_X86_AVX512_STREAM_FORMS(XV, VMOVNTPD, "vmovntpd", 0x66, 0x0f2b, 1) \
+    BUSTER_X86_AVX512_STREAM_FORMS(XV, VMOVNTDQ, "vmovntdq", 0x66, 0x0fe7, 0) \
     XV(VMOVNTDQA_Z_M512, "vmovntdqa", EVEX, 0x66, 3, 0x0f382a, R, 0, 0, 2, Z, NONE, M, 64, 64, NONE, REG_RM) \
+    XV(VMOVNTDQA_X_M128_EVEX, "vmovntdqa", EVEX, 0x66, 3, 0x0f382a, R, 0, 0, 0, V, NONE, M, 16, 16, NONE, REG_RM) \
+    XV(VMOVNTDQA_Y_M256_EVEX, "vmovntdqa", EVEX, 0x66, 3, 0x0f382a, R, 0, 0, 1, Y, NONE, M, 32, 32, NONE, REG_RM) \
     BUSTER_X86_AVX512_UNARY_FORM(XV, VMOVSLDUP, "vmovsldup", 0xf3, 2, 0x0f12, 0) \
+    BUSTER_X86_AVX512VL_UNARY_FORMS(XV, VMOVSLDUP, "vmovsldup", 0xf3, 2, 0x0f12, 0, _EVEX) \
     BUSTER_X86_AVX512_UNARY_FORM(XV, VMOVSHDUP, "vmovshdup", 0xf3, 2, 0x0f16, 0) \
+    BUSTER_X86_AVX512VL_UNARY_FORMS(XV, VMOVSHDUP, "vmovshdup", 0xf3, 2, 0x0f16, 0, _EVEX) \
     BUSTER_X86_AVX512_UNARY_FORM(XV, VMOVDDUP, "vmovddup", 0xf2, 2, 0x0f12, 1) \
-    XV(VMOVDQU32_X_XM128, "vmovdqu32", EVEX, 0xf3, 2, 0x0f6f, R, 0, 0, 0, V, NONE, XM, 16, 16, KZ, REG_RM) \
-    XV(VMOVDQU32_XM128_X, "vmovdqu32", EVEX, 0xf3, 2, 0x0f7f, R, 0, 0, 0, V, NONE, XM, 16, 16, KZ, RM_REG) \
-    XV(VMOVDQU32_Y_YM256, "vmovdqu32", EVEX, 0xf3, 2, 0x0f6f, R, 0, 0, 1, Y, NONE, YM, 32, 32, KZ, REG_RM) \
-    XV(VMOVDQU32_YM256_Y, "vmovdqu32", EVEX, 0xf3, 2, 0x0f7f, R, 0, 0, 1, Y, NONE, YM, 32, 32, KZ, RM_REG) \
+    XV(VMOVDDUP_X_XM64_EVEX, "vmovddup", EVEX, 0xf2, 2, 0x0f12, R, 0, 1, 0, V, NONE, XM, 8, 8, KZ, REG_RM) \
+    XV(VMOVDDUP_Y_YM256_EVEX, "vmovddup", EVEX, 0xf2, 2, 0x0f12, R, 0, 1, 1, Y, NONE, YM, 32, 32, KZ, REG_RM) \
     XV(VMOVDQU8_Y_YM256, "vmovdqu8", EVEX, 0xf2, 2, 0x0f6f, R, 0, 0, 1, Y, NONE, YM, 32, 32, KZ, REG_RM) \
     XV(VMOVDQU8_YM256_Y, "vmovdqu8", EVEX, 0xf2, 2, 0x0f7f, R, 0, 0, 1, Y, NONE, YM, 32, 32, KZ, RM_REG) \
-    XV(VMOVUPS_X_XM128_EVEX, "vmovups", EVEX, 0, 2, 0x0f10, R, 0, 0, 0, V, NONE, XM, 16, 16, KZ, REG_RM) \
-    XV(VMOVUPS_XM128_X_EVEX, "vmovups", EVEX, 0, 2, 0x0f11, R, 0, 0, 0, V, NONE, XM, 16, 16, KZ, RM_REG) \
-    XV(VMOVUPS_Y_YM256_EVEX, "vmovups", EVEX, 0, 2, 0x0f10, R, 0, 0, 1, Y, NONE, YM, 32, 32, KZ, REG_RM) \
-    XV(VMOVUPS_YM256_Y_EVEX, "vmovups", EVEX, 0, 2, 0x0f11, R, 0, 0, 1, Y, NONE, YM, 32, 32, KZ, RM_REG) \
     XV(VMOVD_X_RM32_EVEX, "vmovd", EVEX, 0x66, 2, 0x0f6e, R, 0, 0, 0, V, NONE, ED, 4, 4, NONE, REG_RM) \
     XV(VMOVD_RM32_X_EVEX, "vmovd", EVEX, 0x66, 2, 0x0f7e, R, 0, 0, 0, V, NONE, ED, 4, 4, NONE, RM_REG) \
     XV(VMOVQ_X_RM64_EVEX, "vmovq", EVEX, 0x66, 2, 0x0f6e, R, 0, 1, 0, V, NONE, EQ, 8, 8, NONE, REG_RM) \
@@ -1219,120 +1365,211 @@ typedef enum X86Syntax
     XV(VPBROADCASTW_Z_XM16, "vpbroadcastw", EVEX, 0x66, 3, 0x0f3879, R, 0, 0, 2, Z, NONE, XM, 2, 2, KZ, REG_RM) \
     XV(VPBROADCASTD_Z_XM32, "vpbroadcastd", EVEX, 0x66, 3, 0x0f3858, R, 0, 0, 2, Z, NONE, XM, 4, 4, KZ, REG_RM) \
     XV(VPBROADCASTQ_Z_XM64, "vpbroadcastq", EVEX, 0x66, 3, 0x0f3859, R, 0, 1, 2, Z, NONE, XM, 8, 8, KZ, REG_RM) \
+    XV(VPBROADCASTD_X_XM32_EVEX, "vpbroadcastd", EVEX, 0x66, 3, 0x0f3858, R, 0, 0, 0, V, NONE, XM, 4, 4, KZ, REG_RM) \
+    XV(VPBROADCASTD_Y_XM32_EVEX, "vpbroadcastd", EVEX, 0x66, 3, 0x0f3858, R, 0, 0, 1, Y, NONE, XM, 4, 4, KZ, REG_RM) \
+    XV(VPBROADCASTQ_X_XM64_EVEX, "vpbroadcastq", EVEX, 0x66, 3, 0x0f3859, R, 0, 1, 0, V, NONE, XM, 8, 8, KZ, REG_RM) \
+    XV(VPBROADCASTQ_Y_XM64_EVEX, "vpbroadcastq", EVEX, 0x66, 3, 0x0f3859, R, 0, 1, 1, Y, NONE, XM, 8, 8, KZ, REG_RM) \
     XV(VPBROADCASTB_Z_R32, "vpbroadcastb", EVEX, 0x66, 3, 0x0f387a, R, 0, 0, 2, Z, NONE, GD, 4, 1, KZ, REG_RM) \
     XV(VPBROADCASTD_Z_R32, "vpbroadcastd", EVEX, 0x66, 3, 0x0f387c, R, 0, 0, 2, Z, NONE, GD, 4, 1, KZ, REG_RM) \
     XV(VPBROADCASTQ_Z_R64, "vpbroadcastq", EVEX, 0x66, 3, 0x0f387c, R, 0, 1, 2, Z, NONE, GQ, 8, 1, KZ, REG_RM) \
+    XV(VPBROADCASTD_X_R32, "vpbroadcastd", EVEX, 0x66, 3, 0x0f387c, R, 0, 0, 0, V, NONE, GD, 4, 1, KZ, REG_RM) \
+    XV(VPBROADCASTD_Y_R32, "vpbroadcastd", EVEX, 0x66, 3, 0x0f387c, R, 0, 0, 1, Y, NONE, GD, 4, 1, KZ, REG_RM) \
+    XV(VPBROADCASTQ_X_R64, "vpbroadcastq", EVEX, 0x66, 3, 0x0f387c, R, 0, 1, 0, V, NONE, GQ, 8, 1, KZ, REG_RM) \
+    XV(VPBROADCASTQ_Y_R64, "vpbroadcastq", EVEX, 0x66, 3, 0x0f387c, R, 0, 1, 1, Y, NONE, GQ, 8, 1, KZ, REG_RM) \
     XV(VBROADCASTSS_Z_XM32, "vbroadcastss", EVEX, 0x66, 3, 0x0f3818, R, 0, 0, 2, Z, NONE, XM, 4, 4, KZ, REG_RM) \
     XV(VBROADCASTSD_Z_XM64, "vbroadcastsd", EVEX, 0x66, 3, 0x0f3819, R, 0, 1, 2, Z, NONE, XM, 8, 8, KZ, REG_RM) \
+    XV(VBROADCASTSS_X_XM32_EVEX, "vbroadcastss", EVEX, 0x66, 3, 0x0f3818, R, 0, 0, 0, V, NONE, XM, 4, 4, KZ, REG_RM) \
+    XV(VBROADCASTSS_Y_XM32_EVEX, "vbroadcastss", EVEX, 0x66, 3, 0x0f3818, R, 0, 0, 1, Y, NONE, XM, 4, 4, KZ, REG_RM) \
+    XV(VBROADCASTSD_Y_XM64_EVEX, "vbroadcastsd", EVEX, 0x66, 3, 0x0f3819, R, 0, 1, 1, Y, NONE, XM, 8, 8, KZ, REG_RM) \
     XV(VBROADCASTI32X4_Z_M128, "vbroadcasti32x4", EVEX, 0x66, 3, 0x0f385a, R, 0, 0, 2, Z, NONE, M, 16, 16, KZ, REG_RM) \
     XV(VBROADCASTI64X4_Z_M256, "vbroadcasti64x4", EVEX, 0x66, 3, 0x0f385b, R, 0, 1, 2, Z, NONE, M, 32, 32, KZ, REG_RM) \
+    XV(VBROADCASTI32X4_Y_M128, "vbroadcasti32x4", EVEX, 0x66, 3, 0x0f385a, R, 0, 0, 1, Y, NONE, M, 16, 16, KZ, REG_RM) \
     XV(VBROADCASTF32X4_Z_M128, "vbroadcastf32x4", EVEX, 0x66, 3, 0x0f381a, R, 0, 0, 2, Z, NONE, M, 16, 16, KZ, REG_RM) \
     XV(VBROADCASTF64X4_Z_M256, "vbroadcastf64x4", EVEX, 0x66, 3, 0x0f381b, R, 0, 1, 2, Z, NONE, M, 32, 32, KZ, REG_RM) \
+    XV(VBROADCASTF32X4_Y_M128, "vbroadcastf32x4", EVEX, 0x66, 3, 0x0f381a, R, 0, 0, 1, Y, NONE, M, 16, 16, KZ, REG_RM) \
     BUSTER_X86_AVX512_INSERT_EXTRACT_FORMS(XV, I, "i", 0x0f3a38) \
     BUSTER_X86_AVX512_INSERT_EXTRACT_FORMS(XV, F, "f", 0x0f3a18) \
     XV(VINSERTPS_X_X_XM32_IMM8_EVEX, "vinsertps", EVEX, 0x66, 3, 0x0f3a21, R, 1, 0, 0, V, V, XM, 4, 4, NONE, REG_VVVV_RM_IMM) \
     XV(VEXTRACTPS_RM32_X_IMM8_EVEX, "vextractps", EVEX, 0x66, 3, 0x0f3a17, R, 1, 0, 0, V, NONE, ED, 4, 4, NONE, RM_REG_IMM) \
     XV(VPCOMPRESSB_ZM512_Z, "vpcompressb", EVEX, 0x66, 3, 0x0f3863, R, 0, 0, 2, Z, NONE, ZM, 64, 1, KZ, RM_REG) \
-    XV(VPCOMPRESSD_ZM512_Z, "vpcompressd", EVEX, 0x66, 3, 0x0f388b, R, 0, 0, 2, Z, NONE, ZM, 64, 4, KZ, RM_REG) \
-    XV(VPCOMPRESSQ_ZM512_Z, "vpcompressq", EVEX, 0x66, 3, 0x0f388b, R, 0, 1, 2, Z, NONE, ZM, 64, 8, KZ, RM_REG) \
+    BUSTER_X86_AVX512_COMPRESS_FORMS(XV, VPCOMPRESSD, "vpcompressd", 0x0f388b, 0, 32) \
+    BUSTER_X86_AVX512_COMPRESS_FORMS(XV, VPCOMPRESSQ, "vpcompressq", 0x0f388b, 1, 64) \
     XV(VPCOMPRESSB_YM256_Y, "vpcompressb", EVEX, 0x66, 3, 0x0f3863, R, 0, 0, 1, Y, NONE, YM, 32, 1, KZ, RM_REG) \
     XV(VPEXPANDB_Z_ZM512, "vpexpandb", EVEX, 0x66, 3, 0x0f3862, R, 0, 0, 2, Z, NONE, ZM, 64, 1, KZ, REG_RM) \
-    XV(VPEXPANDD_Z_ZM512, "vpexpandd", EVEX, 0x66, 3, 0x0f3889, R, 0, 0, 2, Z, NONE, ZM, 64, 4, KZ, REG_RM) \
-    XV(VPEXPANDQ_Z_ZM512, "vpexpandq", EVEX, 0x66, 3, 0x0f3889, R, 0, 1, 2, Z, NONE, ZM, 64, 8, KZ, REG_RM) \
-    XV(VCOMPRESSPS_ZM512_Z, "vcompressps", EVEX, 0x66, 3, 0x0f388a, R, 0, 0, 2, Z, NONE, ZM, 64, 4, KZ, RM_REG) \
-    XV(VCOMPRESSPD_ZM512_Z, "vcompresspd", EVEX, 0x66, 3, 0x0f388a, R, 0, 1, 2, Z, NONE, ZM, 64, 8, KZ, RM_REG) \
-    XV(VEXPANDPS_Z_ZM512, "vexpandps", EVEX, 0x66, 3, 0x0f3888, R, 0, 0, 2, Z, NONE, ZM, 64, 4, KZ, REG_RM) \
-    XV(VEXPANDPD_Z_ZM512, "vexpandpd", EVEX, 0x66, 3, 0x0f3888, R, 0, 1, 2, Z, NONE, ZM, 64, 8, KZ, REG_RM) \
+    BUSTER_X86_AVX512_EXPAND_FORMS(XV, VPEXPANDD, "vpexpandd", 0x0f3889, 0, 32) \
+    BUSTER_X86_AVX512_EXPAND_FORMS(XV, VPEXPANDQ, "vpexpandq", 0x0f3889, 1, 64) \
+    BUSTER_X86_AVX512_COMPRESS_FORMS(XV, VCOMPRESSPS, "vcompressps", 0x0f388a, 0, 32) \
+    BUSTER_X86_AVX512_COMPRESS_FORMS(XV, VCOMPRESSPD, "vcompresspd", 0x0f388a, 1, 64) \
+    BUSTER_X86_AVX512_EXPAND_FORMS(XV, VEXPANDPS, "vexpandps", 0x0f3888, 0, 32) \
+    BUSTER_X86_AVX512_EXPAND_FORMS(XV, VEXPANDPD, "vexpandpd", 0x0f3888, 1, 64) \
     BUSTER_X86_AVX512_NARROWING_MOVE_FORMS(XV, VPMOV, "vpmov", 0x0f3830) \
+    BUSTER_X86_AVX512VL_NARROWING_MOVE_FORMS(XV, VPMOV, "vpmov", 0x0f3830) \
     BUSTER_X86_AVX512_NARROWING_MOVE_FORMS(XV, VPMOVS, "vpmovs", 0x0f3820) \
+    BUSTER_X86_AVX512VL_NARROWING_MOVE_FORMS(XV, VPMOVS, "vpmovs", 0x0f3820) \
     BUSTER_X86_AVX512_NARROWING_MOVE_FORMS(XV, VPMOVUS, "vpmovus", 0x0f3810) \
+    BUSTER_X86_AVX512VL_NARROWING_MOVE_FORMS(XV, VPMOVUS, "vpmovus", 0x0f3810) \
     XV(VPMOVZXBW_Z_YM256, "vpmovzxbw", EVEX, 0x66, 3, 0x0f3830, R, 0, 0, 2, Z, NONE, YM, 32, 32, KZ, REG_RM) \
     BUSTER_X86_AVX512_EXTEND_FORMS(XV, VPMOVSX, "vpmovsx", 0x0f3820) \
+    BUSTER_X86_AVX512VL_EXTEND_FORMS(XV, VPMOVSX, "vpmovsx", 0x0f3820) \
     BUSTER_X86_AVX512_EXTEND_FORMS(XV, VPMOVZX, "vpmovzx", 0x0f3830) \
+    BUSTER_X86_AVX512VL_EXTEND_FORMS(XV, VPMOVZX, "vpmovzx", 0x0f3830) \
     XV(VPMOVM2B_Z_K, "vpmovm2b", EVEX, 0xf3, 3, 0x0f3828, R, 0, 0, 2, Z, NONE, K, 0, 1, NONE, REG_RM) \
     XV(VPMOVM2D_Z_K, "vpmovm2d", EVEX, 0xf3, 3, 0x0f3838, R, 0, 0, 2, Z, NONE, K, 0, 1, NONE, REG_RM) \
     XV(VPMOVB2M_K_Z, "vpmovb2m", EVEX, 0xf3, 3, 0x0f3829, R, 0, 0, 2, K, NONE, Z, 0, 1, NONE, REG_RM) \
     XV(VPMOVD2M_K_Z, "vpmovd2m", EVEX, 0xf3, 3, 0x0f3839, R, 0, 0, 2, K, NONE, Z, 0, 1, NONE, REG_RM) \
     XV(VPMOVQ2M_K_Z, "vpmovq2m", EVEX, 0xf3, 3, 0x0f3839, R, 0, 1, 2, K, NONE, Z, 0, 1, NONE, REG_RM) \
     BUSTER_X86_AVX512_ROUNDING_FORMS(XV, VADDPS, "vaddps", 0, 2, 0x0f58, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VADDPS, "vaddps", 0, 2, 0x0f58, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_ROUNDING_FORMS(XV, VADDPD, "vaddpd", 0x66, 2, 0x0f58, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VADDPD, "vaddpd", 0x66, 2, 0x0f58, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_ROUNDING_FORMS(XV, VSUBPS, "vsubps", 0, 2, 0x0f5c, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VSUBPS, "vsubps", 0, 2, 0x0f5c, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_ROUNDING_FORMS(XV, VSUBPD, "vsubpd", 0x66, 2, 0x0f5c, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VSUBPD, "vsubpd", 0x66, 2, 0x0f5c, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_ROUNDING_FORMS(XV, VMULPS, "vmulps", 0, 2, 0x0f59, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VMULPS, "vmulps", 0, 2, 0x0f59, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_ROUNDING_FORMS(XV, VMULPD, "vmulpd", 0x66, 2, 0x0f59, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VMULPD, "vmulpd", 0x66, 2, 0x0f59, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_ROUNDING_FORMS(XV, VDIVPS, "vdivps", 0, 2, 0x0f5e, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VDIVPS, "vdivps", 0, 2, 0x0f5e, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_ROUNDING_FORMS(XV, VDIVPD, "vdivpd", 0x66, 2, 0x0f5e, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VDIVPD, "vdivpd", 0x66, 2, 0x0f5e, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_ROUNDING_FORMS(XV, VSCALEFPS, "vscalefps", 0x66, 3, 0x0f382c, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VSCALEFPS, "vscalefps", 0x66, 3, 0x0f382c, 0, 32, ) \
     BUSTER_X86_AVX512_ROUNDING_FORMS(XV, VSCALEFPD, "vscalefpd", 0x66, 3, 0x0f382c, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VSCALEFPD, "vscalefpd", 0x66, 3, 0x0f382c, 1, 64, ) \
     BUSTER_X86_AVX512_SAE_FORMS(XV, VMINPS, "vminps", 0, 2, 0x0f5d, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VMINPS, "vminps", 0, 2, 0x0f5d, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_SAE_FORMS(XV, VMAXPS, "vmaxps", 0, 2, 0x0f5f, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VMAXPS, "vmaxps", 0, 2, 0x0f5f, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_SAE_FORMS(XV, VMINPD, "vminpd", 0x66, 2, 0x0f5d, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VMINPD, "vminpd", 0x66, 2, 0x0f5d, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_SAE_FORMS(XV, VMAXPD, "vmaxpd", 0x66, 2, 0x0f5f, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VMAXPD, "vmaxpd", 0x66, 2, 0x0f5f, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VANDPS, "vandps", 0, 2, 0x0f54, 0, 32) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VANDNPS, "vandnps", 0, 2, 0x0f55, 0, 32) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VORPS, "vorps", 0, 2, 0x0f56, 0, 32) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VXORPS, "vxorps", 0, 2, 0x0f57, 0, 32) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VXORPD, "vxorpd", 0x66, 2, 0x0f57, 1, 64) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VUNPCKLPS, "vunpcklps", 0, 2, 0x0f14, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VUNPCKLPS, "vunpcklps", 0, 2, 0x0f14, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VUNPCKLPD, "vunpcklpd", 0x66, 2, 0x0f14, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VUNPCKLPD, "vunpcklpd", 0x66, 2, 0x0f14, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VUNPCKHPS, "vunpckhps", 0, 2, 0x0f15, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VUNPCKHPS, "vunpckhps", 0, 2, 0x0f15, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VUNPCKHPD, "vunpckhpd", 0x66, 2, 0x0f15, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VUNPCKHPD, "vunpckhpd", 0x66, 2, 0x0f15, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_IMMEDIATE_FORMS(XV, VSHUFPS, "vshufps", 0, 2, 0x0fc6, 0, 32) \
+    BUSTER_X86_AVX512VL_IMMEDIATE_FORMS(XV, VSHUFPS, "vshufps", 0, 2, 0x0fc6, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_IMMEDIATE_FORMS(XV, VSHUFPD, "vshufpd", 0x66, 2, 0x0fc6, 1, 64) \
+    BUSTER_X86_AVX512VL_IMMEDIATE_FORMS(XV, VSHUFPD, "vshufpd", 0x66, 2, 0x0fc6, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_IMMEDIATE_FORMS(XV, VSHUFF32X4, "vshuff32x4", 0x66, 3, 0x0f3a23, 0, 32) \
+    BUSTER_X86_AVX512VL_256_IMMEDIATE_FORMS(XV, VSHUFF32X4, "vshuff32x4", 0x66, 3, 0x0f3a23, 0, 32, ) \
     BUSTER_X86_AVX512_IMMEDIATE_FORMS(XV, VSHUFF64X2, "vshuff64x2", 0x66, 3, 0x0f3a23, 1, 64) \
+    BUSTER_X86_AVX512VL_256_IMMEDIATE_FORMS(XV, VSHUFF64X2, "vshuff64x2", 0x66, 3, 0x0f3a23, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VBLENDMPS, "vblendmps", 0x66, 3, 0x0f3865, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VBLENDMPS, "vblendmps", 0x66, 3, 0x0f3865, 0, 32, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VBLENDMPD, "vblendmpd", 0x66, 3, 0x0f3865, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VBLENDMPD, "vblendmpd", 0x66, 3, 0x0f3865, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMILPS, "vpermilps", 0x66, 3, 0x0f380c, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPERMILPS, "vpermilps", 0x66, 3, 0x0f380c, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMILPD, "vpermilpd", 0x66, 3, 0x0f380d, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPERMILPD, "vpermilpd", 0x66, 3, 0x0f380d, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_UNARY_IMMEDIATE_FORMS(XV, VPERMILPS, "vpermilps", 0x66, 3, 0x0f3a04, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_IMMEDIATE_FORMS(XV, VPERMILPS, "vpermilps", 0x66, 3, 0x0f3a04, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_UNARY_IMMEDIATE_FORMS(XV, VPERMILPD, "vpermilpd", 0x66, 3, 0x0f3a05, 1, 64) \
+    BUSTER_X86_AVX512VL_UNARY_IMMEDIATE_FORMS(XV, VPERMILPD, "vpermilpd", 0x66, 3, 0x0f3a05, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMPS, "vpermps", 0x66, 3, 0x0f3816, 0, 32) \
+    BUSTER_X86_AVX512VL_256_BROADCAST_FORMS(XV, VPERMPS, "vpermps", 0x66, 3, 0x0f3816, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMPD, "vpermpd", 0x66, 3, 0x0f3816, 1, 64) \
+    BUSTER_X86_AVX512VL_256_BROADCAST_FORMS(XV, VPERMPD, "vpermpd", 0x66, 3, 0x0f3816, 1, 64, ) \
     BUSTER_X86_AVX512_UNARY_IMMEDIATE_FORMS(XV, VPERMPD, "vpermpd", 0x66, 3, 0x0f3a01, 1, 64) \
+    BUSTER_X86_AVX512VL_256_UNARY_IMMEDIATE_FORMS(XV, VPERMPD, "vpermpd", 0x66, 3, 0x0f3a01, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMI2PS, "vpermi2ps", 0x66, 3, 0x0f3877, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPERMI2PS, "vpermi2ps", 0x66, 3, 0x0f3877, 0, 32, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMI2PD, "vpermi2pd", 0x66, 3, 0x0f3877, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPERMI2PD, "vpermi2pd", 0x66, 3, 0x0f3877, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMT2PS, "vpermt2ps", 0x66, 3, 0x0f387f, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPERMT2PS, "vpermt2ps", 0x66, 3, 0x0f387f, 0, 32, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMT2PD, "vpermt2pd", 0x66, 3, 0x0f387f, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPERMT2PD, "vpermt2pd", 0x66, 3, 0x0f387f, 1, 64, ) \
     BUSTER_X86_AVX512_FMA_PACKED_FORMS(XV, VFMADDSUB, "vfmaddsub", 0x96) \
+    BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(XV, VFMADDSUB, "vfmaddsub", 0x96) \
     BUSTER_X86_AVX512_FMA_PACKED_FORMS(XV, VFMSUBADD, "vfmsubadd", 0x97) \
+    BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(XV, VFMSUBADD, "vfmsubadd", 0x97) \
     BUSTER_X86_AVX512_FMA_PACKED_FORMS(XV, VFMADD, "vfmadd", 0x98) \
+    BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(XV, VFMADD, "vfmadd", 0x98) \
     BUSTER_X86_AVX512_FMA_PACKED_FORMS(XV, VFMSUB, "vfmsub", 0x9a) \
+    BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(XV, VFMSUB, "vfmsub", 0x9a) \
     BUSTER_X86_AVX512_FMA_PACKED_FORMS(XV, VFNMADD, "vfnmadd", 0x9c) \
+    BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(XV, VFNMADD, "vfnmadd", 0x9c) \
     BUSTER_X86_AVX512_FMA_PACKED_FORMS(XV, VFNMSUB, "vfnmsub", 0x9e) \
+    BUSTER_X86_AVX512VL_FMA_PACKED_FORMS(XV, VFNMSUB, "vfnmsub", 0x9e) \
     BUSTER_X86_AVX512_UNARY_ROUNDING_FORMS(XV, VSQRTPS, "vsqrtps", 0, 2, 0x0f51, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VSQRTPS, "vsqrtps", 0, 2, 0x0f51, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_UNARY_ROUNDING_FORMS(XV, VSQRTPD, "vsqrtpd", 0x66, 2, 0x0f51, 1, 64) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VSQRTPD, "vsqrtpd", 0x66, 2, 0x0f51, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_UNARY_BROADCAST_FORMS(XV, VRCP14PS, "vrcp14ps", 0x66, 3, 0x0f384c, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VRCP14PS, "vrcp14ps", 0x66, 3, 0x0f384c, 0, 32, ) \
     BUSTER_X86_AVX512_UNARY_BROADCAST_FORMS(XV, VRCP14PD, "vrcp14pd", 0x66, 3, 0x0f384c, 1, 64) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VRCP14PD, "vrcp14pd", 0x66, 3, 0x0f384c, 1, 64, ) \
     BUSTER_X86_AVX512_UNARY_BROADCAST_FORMS(XV, VRSQRT14PS, "vrsqrt14ps", 0x66, 3, 0x0f384e, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VRSQRT14PS, "vrsqrt14ps", 0x66, 3, 0x0f384e, 0, 32, ) \
     BUSTER_X86_AVX512_UNARY_BROADCAST_FORMS(XV, VRSQRT14PD, "vrsqrt14pd", 0x66, 3, 0x0f384e, 1, 64) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VRSQRT14PD, "vrsqrt14pd", 0x66, 3, 0x0f384e, 1, 64, ) \
     BUSTER_X86_AVX512_UNARY_SAE_FORMS(XV, VGETEXPPS, "vgetexpps", 0x66, 3, 0x0f3842, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VGETEXPPS, "vgetexpps", 0x66, 3, 0x0f3842, 0, 32, ) \
     BUSTER_X86_AVX512_UNARY_SAE_FORMS(XV, VGETEXPPD, "vgetexppd", 0x66, 3, 0x0f3842, 1, 64) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VGETEXPPD, "vgetexppd", 0x66, 3, 0x0f3842, 1, 64, ) \
     BUSTER_X86_AVX512_UNARY_IMMEDIATE_SAE_FORMS(XV, VGETMANTPS, "vgetmantps", 0x66, 3, 0x0f3a26, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_IMMEDIATE_FORMS(XV, VGETMANTPS, "vgetmantps", 0x66, 3, 0x0f3a26, 0, 32, ) \
     BUSTER_X86_AVX512_UNARY_IMMEDIATE_SAE_FORMS(XV, VGETMANTPD, "vgetmantpd", 0x66, 3, 0x0f3a26, 1, 64) \
+    BUSTER_X86_AVX512VL_UNARY_IMMEDIATE_FORMS(XV, VGETMANTPD, "vgetmantpd", 0x66, 3, 0x0f3a26, 1, 64, ) \
     BUSTER_X86_AVX512_UNARY_IMMEDIATE_SAE_FORMS(XV, VRNDSCALEPS, "vrndscaleps", 0x66, 3, 0x0f3a08, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_IMMEDIATE_FORMS(XV, VRNDSCALEPS, "vrndscaleps", 0x66, 3, 0x0f3a08, 0, 32, ) \
     BUSTER_X86_AVX512_UNARY_IMMEDIATE_SAE_FORMS(XV, VRNDSCALEPD, "vrndscalepd", 0x66, 3, 0x0f3a09, 1, 64) \
+    BUSTER_X86_AVX512VL_UNARY_IMMEDIATE_FORMS(XV, VRNDSCALEPD, "vrndscalepd", 0x66, 3, 0x0f3a09, 1, 64, ) \
     BUSTER_X86_AVX512_IMMEDIATE_SAE_FORMS(XV, VFIXUPIMMPS, "vfixupimmps", 0x66, 3, 0x0f3a54, 0, 32) \
+    BUSTER_X86_AVX512VL_IMMEDIATE_FORMS(XV, VFIXUPIMMPS, "vfixupimmps", 0x66, 3, 0x0f3a54, 0, 32, ) \
     BUSTER_X86_AVX512_IMMEDIATE_SAE_FORMS(XV, VFIXUPIMMPD, "vfixupimmpd", 0x66, 3, 0x0f3a54, 1, 64) \
+    BUSTER_X86_AVX512VL_IMMEDIATE_FORMS(XV, VFIXUPIMMPD, "vfixupimmpd", 0x66, 3, 0x0f3a54, 1, 64, ) \
     BUSTER_X86_AVX512_UNARY_ROUNDING_FORMS(XV, VCVTDQ2PS, "vcvtdq2ps", 0, 2, 0x0f5b, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VCVTDQ2PS, "vcvtdq2ps", 0, 2, 0x0f5b, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_UNARY_ROUNDING_FORMS(XV, VCVTPS2DQ, "vcvtps2dq", 0x66, 2, 0x0f5b, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VCVTPS2DQ, "vcvtps2dq", 0x66, 2, 0x0f5b, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_UNARY_SAE_FORMS(XV, VCVTTPS2DQ, "vcvttps2dq", 0xf3, 2, 0x0f5b, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VCVTTPS2DQ, "vcvttps2dq", 0xf3, 2, 0x0f5b, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_UNARY_ROUNDING_FORMS(XV, VCVTUDQ2PS, "vcvtudq2ps", 0xf2, 2, 0x0f7a, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VCVTUDQ2PS, "vcvtudq2ps", 0xf2, 2, 0x0f7a, 0, 32, ) \
     BUSTER_X86_AVX512_UNARY_ROUNDING_FORMS(XV, VCVTPS2UDQ, "vcvtps2udq", 0, 2, 0x0f79, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VCVTPS2UDQ, "vcvtps2udq", 0, 2, 0x0f79, 0, 32, ) \
     BUSTER_X86_AVX512_UNARY_SAE_FORMS(XV, VCVTTPS2UDQ, "vcvttps2udq", 0, 2, 0x0f78, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VCVTTPS2UDQ, "vcvttps2udq", 0, 2, 0x0f78, 0, 32, ) \
     BUSTER_X86_AVX512_WIDENING_FORMS(XV, VCVTDQ2PD, "vcvtdq2pd", 0xf3, 0x0fe6) \
+    BUSTER_X86_AVX512VL_WIDENING_FORMS(XV, VCVTDQ2PD, "vcvtdq2pd", 0xf3, 0x0fe6, _EVEX) \
     BUSTER_X86_AVX512_WIDENING_FORMS(XV, VCVTUDQ2PD, "vcvtudq2pd", 0xf3, 0x0f7a) \
+    BUSTER_X86_AVX512VL_WIDENING_FORMS(XV, VCVTUDQ2PD, "vcvtudq2pd", 0xf3, 0x0f7a, ) \
     BUSTER_X86_AVX512_WIDENING_FORMS(XV, VCVTPS2PD, "vcvtps2pd", 0, 0x0f5a) \
+    BUSTER_X86_AVX512VL_WIDENING_FORMS(XV, VCVTPS2PD, "vcvtps2pd", 0, 0x0f5a, _EVEX) \
     XV(VCVTPS2PD_Z_Y_SAE, "vcvtps2pd", EVEX, 0, 2, 0x0f5a, R, 0, 0, 2, Z, NONE, Y, 32, 32, KZ_SAE, REG_RM) \
     BUSTER_X86_AVX512_NARROWING_FORMS(XV, VCVTPD2DQ, "vcvtpd2dq", 0xf2, 0x0fe6, ER) \
+    BUSTER_X86_AVX512VL_NARROWING_FORMS(XV, VCVTPD2DQ, "vcvtpd2dq", 0xf2, 0x0fe6, _EVEX) \
     BUSTER_X86_AVX512_NARROWING_FORMS(XV, VCVTTPD2DQ, "vcvttpd2dq", 0x66, 0x0fe6, SAE) \
+    BUSTER_X86_AVX512VL_NARROWING_FORMS(XV, VCVTTPD2DQ, "vcvttpd2dq", 0x66, 0x0fe6, _EVEX) \
     BUSTER_X86_AVX512_NARROWING_FORMS(XV, VCVTPD2UDQ, "vcvtpd2udq", 0, 0x0f79, ER) \
+    BUSTER_X86_AVX512VL_NARROWING_FORMS(XV, VCVTPD2UDQ, "vcvtpd2udq", 0, 0x0f79, ) \
     BUSTER_X86_AVX512_NARROWING_FORMS(XV, VCVTTPD2UDQ, "vcvttpd2udq", 0, 0x0f78, SAE) \
+    BUSTER_X86_AVX512VL_NARROWING_FORMS(XV, VCVTTPD2UDQ, "vcvttpd2udq", 0, 0x0f78, ) \
     BUSTER_X86_AVX512_NARROWING_FORMS(XV, VCVTPD2PS, "vcvtpd2ps", 0x66, 0x0f5a, ER) \
+    BUSTER_X86_AVX512VL_NARROWING_FORMS(XV, VCVTPD2PS, "vcvtpd2ps", 0x66, 0x0f5a, _EVEX) \
     XV(VCVTPH2PS_Z_YM256, "vcvtph2ps", EVEX, 0x66, 3, 0x0f3813, R, 0, 0, 2, Z, NONE, YM, 32, 32, KZ, REG_RM) \
     XV(VCVTPH2PS_Z_Y_SAE, "vcvtph2ps", EVEX, 0x66, 3, 0x0f3813, R, 0, 0, 2, Z, NONE, Y, 32, 32, KZ_SAE, REG_RM) \
+    XV(VCVTPH2PS_X_XM64_EVEX, "vcvtph2ps", EVEX, 0x66, 3, 0x0f3813, R, 0, 0, 0, V, NONE, XM, 8, 8, KZ, REG_RM) \
+    XV(VCVTPH2PS_Y_XM128_EVEX, "vcvtph2ps", EVEX, 0x66, 3, 0x0f3813, R, 0, 0, 1, Y, NONE, XM, 16, 16, KZ, REG_RM) \
     XV(VCVTPS2PH_YM256_Z_IMM8, "vcvtps2ph", EVEX, 0x66, 3, 0x0f3a1d, R, 1, 0, 2, Z, NONE, YM, 32, 32, KZ, RM_REG_IMM) \
     XV(VCVTPS2PH_Y_Z_SAE_IMM8, "vcvtps2ph", EVEX, 0x66, 3, 0x0f3a1d, R, 1, 0, 2, Z, NONE, Y, 32, 32, KZ_SAE, RM_REG_IMM) \
+    XV(VCVTPS2PH_XM64_X_IMM8_EVEX, "vcvtps2ph", EVEX, 0x66, 3, 0x0f3a1d, R, 1, 0, 0, V, NONE, XM, 8, 8, KZ, RM_REG_IMM) \
+    XV(VCVTPS2PH_XM128_Y_IMM8_EVEX, "vcvtps2ph", EVEX, 0x66, 3, 0x0f3a1d, R, 1, 0, 1, Y, NONE, XM, 16, 16, KZ, RM_REG_IMM) \
     BUSTER_X86_AVX512_SCALAR_FORMS(XV, VADD, "vadd", 0x58, ER) \
     BUSTER_X86_AVX512_SCALAR_FORMS(XV, VMUL, "vmul", 0x59, ER) \
     BUSTER_X86_AVX512_SCALAR_FORMS(XV, VSUB, "vsub", 0x5c, ER) \
@@ -1383,99 +1620,172 @@ typedef enum X86Syntax
     XV(VCMPSD_K_X_XM64_IMM8, "vcmpsd", EVEX, 0xf2, 2, 0x0fc2, R, 1, 1, 0, K, V, XM, 8, 8, K, REG_VVVV_RM_IMM) \
     XV(VCMPSD_K_X_X_SAE_IMM8, "vcmpsd", EVEX, 0xf2, 2, 0x0fc2, R, 1, 1, 0, K, V, V, 8, 8, K_SAE, REG_VVVV_RM_IMM) \
     BUSTER_X86_AVX512_COMPARE_SAE_FORMS(XV, VCMPPS, "vcmpps", 0, 0, 32) \
+    BUSTER_X86_AVX512VL_COMPARE_IMMEDIATE_FORMS(XV, VCMPPS, "vcmpps", 0, 2, 0x0fc2, 0, 32) \
     BUSTER_X86_AVX512_COMPARE_SAE_FORMS(XV, VCMPPD, "vcmppd", 0x66, 1, 64) \
+    BUSTER_X86_AVX512VL_COMPARE_IMMEDIATE_FORMS(XV, VCMPPD, "vcmppd", 0x66, 2, 0x0fc2, 1, 64) \
     BUSTER_X86_AVX512_PACKED_FORM(XV, VPADDB, "vpaddb", 0x66, 2, 0x0ffc, 0) \
     BUSTER_X86_AVX512_PACKED_FORM(XV, VPADDW, "vpaddw", 0x66, 2, 0x0ffd, 0) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPADDD, "vpaddd", 0x66, 2, 0x0ffe, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPADDD, "vpaddd", 0x66, 2, 0x0ffe, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPADDQ, "vpaddq", 0x66, 2, 0x0fd4, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPADDQ, "vpaddq", 0x66, 2, 0x0fd4, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_PACKED_FORM(XV, VPSUBB, "vpsubb", 0x66, 2, 0x0ff8, 0) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPSUBD, "vpsubd", 0x66, 2, 0x0ffa, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPSUBD, "vpsubd", 0x66, 2, 0x0ffa, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPSUBQ, "vpsubq", 0x66, 2, 0x0ffb, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPSUBQ, "vpsubq", 0x66, 2, 0x0ffb, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPANDD, "vpandd", 0x66, 2, 0x0fdb, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPANDD, "vpandd", 0x66, 2, 0x0fdb, 0, 32, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPANDQ, "vpandq", 0x66, 2, 0x0fdb, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPANDQ, "vpandq", 0x66, 2, 0x0fdb, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPANDND, "vpandnd", 0x66, 2, 0x0fdf, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPANDND, "vpandnd", 0x66, 2, 0x0fdf, 0, 32, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPANDNQ, "vpandnq", 0x66, 2, 0x0fdf, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPANDNQ, "vpandnq", 0x66, 2, 0x0fdf, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPORD, "vpord", 0x66, 2, 0x0feb, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPORD, "vpord", 0x66, 2, 0x0feb, 0, 32, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPORQ, "vporq", 0x66, 2, 0x0feb, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPORQ, "vporq", 0x66, 2, 0x0feb, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPXORD, "vpxord", 0x66, 2, 0x0fef, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPXORD, "vpxord", 0x66, 2, 0x0fef, 0, 32, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPXORQ, "vpxorq", 0x66, 2, 0x0fef, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPXORQ, "vpxorq", 0x66, 2, 0x0fef, 1, 64, ) \
     BUSTER_X86_AVX512_PACKED_FORM(XV, VPMINUB, "vpminub", 0x66, 2, 0x0fda, 0) \
     BUSTER_X86_AVX512_PACKED_FORM(XV, VPMAXUB, "vpmaxub", 0x66, 2, 0x0fde, 0) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMINUD, "vpminud", 0x66, 3, 0x0f383b, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPMINUD, "vpminud", 0x66, 3, 0x0f383b, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMAXUD, "vpmaxud", 0x66, 3, 0x0f383f, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPMAXUD, "vpmaxud", 0x66, 3, 0x0f383f, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMINSD, "vpminsd", 0x66, 3, 0x0f3839, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPMINSD, "vpminsd", 0x66, 3, 0x0f3839, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMAXSD, "vpmaxsd", 0x66, 3, 0x0f383d, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPMAXSD, "vpmaxsd", 0x66, 3, 0x0f383d, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMINUQ, "vpminuq", 0x66, 3, 0x0f383b, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPMINUQ, "vpminuq", 0x66, 3, 0x0f383b, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMAXUQ, "vpmaxuq", 0x66, 3, 0x0f383f, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPMAXUQ, "vpmaxuq", 0x66, 3, 0x0f383f, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMINSQ, "vpminsq", 0x66, 3, 0x0f3839, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPMINSQ, "vpminsq", 0x66, 3, 0x0f3839, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMAXSQ, "vpmaxsq", 0x66, 3, 0x0f383d, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPMAXSQ, "vpmaxsq", 0x66, 3, 0x0f383d, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMULLD, "vpmulld", 0x66, 3, 0x0f3840, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPMULLD, "vpmulld", 0x66, 3, 0x0f3840, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMULLQ, "vpmullq", 0x66, 3, 0x0f3840, 1, 64) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMULUDQ, "vpmuludq", 0x66, 2, 0x0ff4, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPMULUDQ, "vpmuludq", 0x66, 2, 0x0ff4, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMULDQ, "vpmuldq", 0x66, 3, 0x0f3828, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPMULDQ, "vpmuldq", 0x66, 3, 0x0f3828, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPDPBUSD, "vpdpbusd", 0x66, 3, 0x0f3850, 0, 32) \
     BUSTER_X86_AVX512_PACKED_FORM(XV, VPSHUFB, "vpshufb", 0x66, 3, 0x0f3800, 0) \
     BUSTER_X86_AVX512_PACKED_FORM(XV, VPERMB, "vpermb", 0x66, 3, 0x0f388d, 0) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMD, "vpermd", 0x66, 3, 0x0f3836, 0, 32) \
+    BUSTER_X86_AVX512VL_256_BROADCAST_FORMS(XV, VPERMD, "vpermd", 0x66, 3, 0x0f3836, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMQ, "vpermq", 0x66, 3, 0x0f3836, 1, 64) \
+    BUSTER_X86_AVX512VL_256_BROADCAST_FORMS(XV, VPERMQ, "vpermq", 0x66, 3, 0x0f3836, 1, 64, ) \
     BUSTER_X86_AVX512_UNARY_IMMEDIATE_FORMS(XV, VPERMQ, "vpermq", 0x66, 3, 0x0f3a00, 1, 64) \
+    BUSTER_X86_AVX512VL_256_UNARY_IMMEDIATE_FORMS(XV, VPERMQ, "vpermq", 0x66, 3, 0x0f3a00, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMT2D, "vpermt2d", 0x66, 3, 0x0f387e, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPERMT2D, "vpermt2d", 0x66, 3, 0x0f387e, 0, 32, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMT2Q, "vpermt2q", 0x66, 3, 0x0f387e, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPERMT2Q, "vpermt2q", 0x66, 3, 0x0f387e, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMI2D, "vpermi2d", 0x66, 3, 0x0f3876, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPERMI2D, "vpermi2d", 0x66, 3, 0x0f3876, 0, 32, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPERMI2Q, "vpermi2q", 0x66, 3, 0x0f3876, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPERMI2Q, "vpermi2q", 0x66, 3, 0x0f3876, 1, 64, ) \
     BUSTER_X86_AVX512_PACKED_FORM(XV, VPERMT2B, "vpermt2b", 0x66, 3, 0x0f387d, 0) \
     BUSTER_X86_AVX512_PACKED_FORM(XV, VPERMT2W, "vpermt2w", 0x66, 3, 0x0f387d, 1) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPMULTISHIFTQB, "vpmultishiftqb", 0x66, 3, 0x0f3883, 1, 64) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPSRLVD, "vpsrlvd", 0x66, 3, 0x0f3845, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPSRLVD, "vpsrlvd", 0x66, 3, 0x0f3845, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPSRAVD, "vpsravd", 0x66, 3, 0x0f3846, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPSRAVD, "vpsravd", 0x66, 3, 0x0f3846, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPSLLVD, "vpsllvd", 0x66, 3, 0x0f3847, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPSLLVD, "vpsllvd", 0x66, 3, 0x0f3847, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPSRLVQ, "vpsrlvq", 0x66, 3, 0x0f3845, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPSRLVQ, "vpsrlvq", 0x66, 3, 0x0f3845, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPSRAVQ, "vpsravq", 0x66, 3, 0x0f3846, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPSRAVQ, "vpsravq", 0x66, 3, 0x0f3846, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPSLLVQ, "vpsllvq", 0x66, 3, 0x0f3847, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPSLLVQ, "vpsllvq", 0x66, 3, 0x0f3847, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPROLVD, "vprolvd", 0x66, 3, 0x0f3815, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPROLVD, "vprolvd", 0x66, 3, 0x0f3815, 0, 32, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPROLVQ, "vprolvq", 0x66, 3, 0x0f3815, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPROLVQ, "vprolvq", 0x66, 3, 0x0f3815, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPRORVD, "vprorvd", 0x66, 3, 0x0f3814, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPRORVD, "vprorvd", 0x66, 3, 0x0f3814, 0, 32, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPRORVQ, "vprorvq", 0x66, 3, 0x0f3814, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPRORVQ, "vprorvq", 0x66, 3, 0x0f3814, 1, 64, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPBLENDMD, "vpblendmd", 0x66, 3, 0x0f3864, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPBLENDMD, "vpblendmd", 0x66, 3, 0x0f3864, 0, 32, ) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPBLENDMQ, "vpblendmq", 0x66, 3, 0x0f3864, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPBLENDMQ, "vpblendmq", 0x66, 3, 0x0f3864, 1, 64, ) \
     BUSTER_X86_AVX512_PACKED_FORM(XV, VPBLENDMB, "vpblendmb", 0x66, 3, 0x0f3866, 0) \
     BUSTER_X86_AVX512_PACKED_FORM(XV, VPUNPCKLBW, "vpunpcklbw", 0x66, 2, 0x0f60, 0) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPUNPCKLDQ, "vpunpckldq", 0x66, 2, 0x0f62, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPUNPCKLDQ, "vpunpckldq", 0x66, 2, 0x0f62, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPUNPCKLQDQ, "vpunpcklqdq", 0x66, 2, 0x0f6c, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPUNPCKLQDQ, "vpunpcklqdq", 0x66, 2, 0x0f6c, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPUNPCKHDQ, "vpunpckhdq", 0x66, 2, 0x0f6a, 0, 32) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPUNPCKHDQ, "vpunpckhdq", 0x66, 2, 0x0f6a, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_BROADCAST_FORMS(XV, VPUNPCKHQDQ, "vpunpckhqdq", 0x66, 2, 0x0f6d, 1, 64) \
+    BUSTER_X86_AVX512VL_BROADCAST_FORMS(XV, VPUNPCKHQDQ, "vpunpckhqdq", 0x66, 2, 0x0f6d, 1, 64, _EVEX) \
     BUSTER_X86_AVX512_PACKED_FORM(XV, VPACKUSWB, "vpackuswb", 0x66, 2, 0x0f67, 0) \
     XV(VPSADBW_Z_Z_ZM512, "vpsadbw", EVEX, 0x66, 2, 0x0ff6, R, 0, 0, 2, Z, Z, ZM, 64, 64, NONE, REG_VVVV_RM) \
     BUSTER_X86_AVX512_SHIFT_COUNT_FORM(XV, VPSLLD, "vpslld", 0xf2, 0) \
+    BUSTER_X86_AVX512VL_SHIFT_COUNT_FORMS(XV, VPSLLD, "vpslld", 0xf2, 0, _EVEX) \
     BUSTER_X86_AVX512_SHIFT_COUNT_FORM(XV, VPSRLD, "vpsrld", 0xd2, 0) \
+    BUSTER_X86_AVX512VL_SHIFT_COUNT_FORMS(XV, VPSRLD, "vpsrld", 0xd2, 0, _EVEX) \
     BUSTER_X86_AVX512_SHIFT_COUNT_FORM(XV, VPSRAD, "vpsrad", 0xe2, 0) \
+    BUSTER_X86_AVX512VL_SHIFT_COUNT_FORMS(XV, VPSRAD, "vpsrad", 0xe2, 0, _EVEX) \
     BUSTER_X86_AVX512_SHIFT_COUNT_FORM(XV, VPSLLQ, "vpsllq", 0xf3, 1) \
+    BUSTER_X86_AVX512VL_SHIFT_COUNT_FORMS(XV, VPSLLQ, "vpsllq", 0xf3, 1, _EVEX) \
     BUSTER_X86_AVX512_SHIFT_COUNT_FORM(XV, VPSRLQ, "vpsrlq", 0xd3, 1) \
+    BUSTER_X86_AVX512VL_SHIFT_COUNT_FORMS(XV, VPSRLQ, "vpsrlq", 0xd3, 1, _EVEX) \
     BUSTER_X86_AVX512_SHIFT_COUNT_FORM(XV, VPSRAQ, "vpsraq", 0xe2, 1) \
+    BUSTER_X86_AVX512VL_SHIFT_COUNT_FORMS(XV, VPSRAQ, "vpsraq", 0xe2, 1, ) \
     BUSTER_X86_AVX512_UNARY_BROADCAST_FORMS(XV, VPOPCNTD, "vpopcntd", 0x66, 3, 0x0f3855, 0, 32) \
     BUSTER_X86_AVX512_UNARY_BROADCAST_FORMS(XV, VPOPCNTQ, "vpopcntq", 0x66, 3, 0x0f3855, 1, 64) \
     BUSTER_X86_AVX512_UNARY_FORM(XV, VPOPCNTB, "vpopcntb", 0x66, 3, 0x0f3854, 0) \
     BUSTER_X86_AVX512_UNARY_BROADCAST_FORMS(XV, VPLZCNTD, "vplzcntd", 0x66, 3, 0x0f3844, 0, 32) \
     BUSTER_X86_AVX512_UNARY_BROADCAST_FORMS(XV, VPABSD, "vpabsd", 0x66, 3, 0x0f381e, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VPABSD, "vpabsd", 0x66, 3, 0x0f381e, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_UNARY_BROADCAST_FORMS(XV, VPABSQ, "vpabsq", 0x66, 3, 0x0f381f, 1, 64) \
+    BUSTER_X86_AVX512VL_UNARY_BROADCAST_FORMS(XV, VPABSQ, "vpabsq", 0x66, 3, 0x0f381f, 1, 64, ) \
     BUSTER_X86_AVX512_IMMEDIATE_FORMS(XV, VPTERNLOGD, "vpternlogd", 0x66, 3, 0x0f3a25, 0, 32) \
+    BUSTER_X86_AVX512VL_IMMEDIATE_FORMS(XV, VPTERNLOGD, "vpternlogd", 0x66, 3, 0x0f3a25, 0, 32, ) \
     BUSTER_X86_AVX512_IMMEDIATE_FORMS(XV, VPTERNLOGQ, "vpternlogq", 0x66, 3, 0x0f3a25, 1, 64) \
+    BUSTER_X86_AVX512VL_IMMEDIATE_FORMS(XV, VPTERNLOGQ, "vpternlogq", 0x66, 3, 0x0f3a25, 1, 64, ) \
     BUSTER_X86_AVX512_IMMEDIATE_FORMS(XV, VALIGND, "valignd", 0x66, 3, 0x0f3a03, 0, 32) \
+    BUSTER_X86_AVX512VL_IMMEDIATE_FORMS(XV, VALIGND, "valignd", 0x66, 3, 0x0f3a03, 0, 32, ) \
     BUSTER_X86_AVX512_IMMEDIATE_FORMS(XV, VALIGNQ, "valignq", 0x66, 3, 0x0f3a03, 1, 64) \
+    BUSTER_X86_AVX512VL_IMMEDIATE_FORMS(XV, VALIGNQ, "valignq", 0x66, 3, 0x0f3a03, 1, 64, ) \
     BUSTER_X86_AVX512_IMMEDIATE_FORMS(XV, VSHUFI32X4, "vshufi32x4", 0x66, 3, 0x0f3a43, 0, 32) \
+    BUSTER_X86_AVX512VL_256_IMMEDIATE_FORMS(XV, VSHUFI32X4, "vshufi32x4", 0x66, 3, 0x0f3a43, 0, 32, ) \
     BUSTER_X86_AVX512_IMMEDIATE_FORMS(XV, VSHUFI64X2, "vshufi64x2", 0x66, 3, 0x0f3a43, 1, 64) \
+    BUSTER_X86_AVX512VL_256_IMMEDIATE_FORMS(XV, VSHUFI64X2, "vshufi64x2", 0x66, 3, 0x0f3a43, 1, 64, ) \
     XV(VPALIGNR_Z_Z_ZM512_IMM8, "vpalignr", EVEX, 0x66, 3, 0x0f3a0f, R, 1, 0, 2, Z, Z, ZM, 64, 64, KZ, REG_VVVV_RM_IMM) \
     BUSTER_X86_AVX512_UNARY_IMMEDIATE_FORMS(XV, VPSHUFD, "vpshufd", 0x66, 2, 0x0f70, 0, 32) \
+    BUSTER_X86_AVX512VL_UNARY_IMMEDIATE_FORMS(XV, VPSHUFD, "vpshufd", 0x66, 2, 0x0f70, 0, 32, _EVEX) \
     BUSTER_X86_AVX512_SHIFT_FORMS(XV, VPSLLD, "vpslld", 0x72, 0, 6, 32) \
+    BUSTER_X86_AVX512VL_SHIFT_FORMS(XV, VPSLLD, "vpslld", 0x72, 0, 6, 32) \
     BUSTER_X86_AVX512_SHIFT_FORMS(XV, VPSRLD, "vpsrld", 0x72, 0, 2, 32) \
+    BUSTER_X86_AVX512VL_SHIFT_FORMS(XV, VPSRLD, "vpsrld", 0x72, 0, 2, 32) \
     BUSTER_X86_AVX512_SHIFT_FORMS(XV, VPSRAD, "vpsrad", 0x72, 0, 4, 32) \
+    BUSTER_X86_AVX512VL_SHIFT_FORMS(XV, VPSRAD, "vpsrad", 0x72, 0, 4, 32) \
     BUSTER_X86_AVX512_SHIFT_FORMS(XV, VPSLLQ, "vpsllq", 0x73, 1, 6, 64) \
+    BUSTER_X86_AVX512VL_SHIFT_FORMS(XV, VPSLLQ, "vpsllq", 0x73, 1, 6, 64) \
     BUSTER_X86_AVX512_SHIFT_FORMS(XV, VPSRLQ, "vpsrlq", 0x73, 1, 2, 64) \
+    BUSTER_X86_AVX512VL_SHIFT_FORMS(XV, VPSRLQ, "vpsrlq", 0x73, 1, 2, 64) \
     BUSTER_X86_AVX512_SHIFT_FORMS(XV, VPSRAQ, "vpsraq", 0x72, 1, 4, 64) \
+    BUSTER_X86_AVX512VL_SHIFT_FORMS(XV, VPSRAQ, "vpsraq", 0x72, 1, 4, 64) \
     BUSTER_X86_AVX512_SHIFT_FORMS(XV, VPROLD, "vprold", 0x72, 0, 1, 32) \
+    BUSTER_X86_AVX512VL_SHIFT_FORMS(XV, VPROLD, "vprold", 0x72, 0, 1, 32) \
     BUSTER_X86_AVX512_SHIFT_FORMS(XV, VPROLQ, "vprolq", 0x72, 1, 1, 64) \
+    BUSTER_X86_AVX512VL_SHIFT_FORMS(XV, VPROLQ, "vprolq", 0x72, 1, 1, 64) \
     BUSTER_X86_AVX512_SHIFT_FORMS(XV, VPRORD, "vprord", 0x72, 0, 0, 32) \
+    BUSTER_X86_AVX512VL_SHIFT_FORMS(XV, VPRORD, "vprord", 0x72, 0, 0, 32) \
     BUSTER_X86_AVX512_SHIFT_FORMS(XV, VPRORQ, "vprorq", 0x72, 1, 0, 64) \
+    BUSTER_X86_AVX512VL_SHIFT_FORMS(XV, VPRORQ, "vprorq", 0x72, 1, 0, 64) \
     XV(VPSLLW_Z_ZM512_IMM8, "vpsllw", EVEX, 0x66, 2, 0x0f71, D6, 1, 0, 2, NONE, Z, ZM, 64, 64, KZ, VVVV_RM_IMM) \
     XV(VPSRLW_Z_ZM512_IMM8, "vpsrlw", EVEX, 0x66, 2, 0x0f71, D2, 1, 0, 2, NONE, Z, ZM, 64, 64, KZ, VVVV_RM_IMM) \
     XV(VPSLLDQ_Z_ZM512_IMM8, "vpslldq", EVEX, 0x66, 2, 0x0f73, D7, 1, 0, 2, NONE, Z, ZM, 64, 64, NONE, VVVV_RM_IMM) \
@@ -1483,30 +1793,36 @@ typedef enum X86Syntax
     XV(VPCMPEQB_K_Z_ZM512, "vpcmpeqb", EVEX, 0x66, 2, 0x0f74, R, 0, 0, 2, K, Z, ZM, 64, 64, K, REG_VVVV_RM) \
     XV(VPCMPGTB_K_Z_ZM512, "vpcmpgtb", EVEX, 0x66, 2, 0x0f64, R, 0, 0, 2, K, Z, ZM, 64, 64, K, REG_VVVV_RM) \
     BUSTER_X86_AVX512_COMPARE_BROADCAST_FORMS(XV, VPCMPEQD, "vpcmpeqd", 0x66, 2, 0x0f76, 0, 32) \
+    BUSTER_X86_AVX512VL_COMPARE_BROADCAST_FORMS(XV, VPCMPEQD, "vpcmpeqd", 0x66, 2, 0x0f76, 0, 32) \
     BUSTER_X86_AVX512_COMPARE_BROADCAST_FORMS(XV, VPCMPGTD, "vpcmpgtd", 0x66, 2, 0x0f66, 0, 32) \
+    BUSTER_X86_AVX512VL_COMPARE_BROADCAST_FORMS(XV, VPCMPGTD, "vpcmpgtd", 0x66, 2, 0x0f66, 0, 32) \
     BUSTER_X86_AVX512_COMPARE_BROADCAST_FORMS(XV, VPCMPEQQ, "vpcmpeqq", 0x66, 3, 0x0f3829, 1, 64) \
+    BUSTER_X86_AVX512VL_COMPARE_BROADCAST_FORMS(XV, VPCMPEQQ, "vpcmpeqq", 0x66, 3, 0x0f3829, 1, 64) \
     BUSTER_X86_AVX512_COMPARE_BROADCAST_FORMS(XV, VPCMPGTQ, "vpcmpgtq", 0x66, 3, 0x0f3837, 1, 64) \
+    BUSTER_X86_AVX512VL_COMPARE_BROADCAST_FORMS(XV, VPCMPGTQ, "vpcmpgtq", 0x66, 3, 0x0f3837, 1, 64) \
     BUSTER_X86_AVX512_COMPARE_BROADCAST_FORMS(XV, VPTESTMD, "vptestmd", 0x66, 3, 0x0f3827, 0, 32) \
+    BUSTER_X86_AVX512VL_COMPARE_BROADCAST_FORMS(XV, VPTESTMD, "vptestmd", 0x66, 3, 0x0f3827, 0, 32) \
     BUSTER_X86_AVX512_COMPARE_BROADCAST_FORMS(XV, VPTESTNMD, "vptestnmd", 0xf3, 3, 0x0f3827, 0, 32) \
+    BUSTER_X86_AVX512VL_COMPARE_BROADCAST_FORMS(XV, VPTESTNMD, "vptestnmd", 0xf3, 3, 0x0f3827, 0, 32) \
     BUSTER_X86_AVX512_COMPARE_BROADCAST_FORMS(XV, VPTESTMQ, "vptestmq", 0x66, 3, 0x0f3827, 1, 64) \
+    BUSTER_X86_AVX512VL_COMPARE_BROADCAST_FORMS(XV, VPTESTMQ, "vptestmq", 0x66, 3, 0x0f3827, 1, 64) \
     BUSTER_X86_AVX512_COMPARE_BROADCAST_FORMS(XV, VPTESTNMQ, "vptestnmq", 0xf3, 3, 0x0f3827, 1, 64) \
+    BUSTER_X86_AVX512VL_COMPARE_BROADCAST_FORMS(XV, VPTESTNMQ, "vptestnmq", 0xf3, 3, 0x0f3827, 1, 64) \
     BUSTER_X86_AVX512_COMPARE_FORM(XV, VPTESTMB, "vptestmb", 0x66, 3, 0x0f3826, 0) \
     BUSTER_X86_AVX512_COMPARE_FORM(XV, VPTESTNMB, "vptestnmb", 0xf3, 3, 0x0f3826, 0) \
     BUSTER_X86_AVX512_COMPARE_FORM(XV, VPSHUFBITQMB, "vpshufbitqmb", 0x66, 3, 0x0f388f, 0) \
     BUSTER_X86_AVX512_COMPARE_IMMEDIATE_FORMS(XV, VPCMPD, "vpcmpd", 0x0f3a1f, 0, 32) \
+    BUSTER_X86_AVX512VL_COMPARE_IMMEDIATE_FORMS(XV, VPCMPD, "vpcmpd", 0x66, 3, 0x0f3a1f, 0, 32) \
     BUSTER_X86_AVX512_COMPARE_IMMEDIATE_FORMS(XV, VPCMPUD, "vpcmpud", 0x0f3a1e, 0, 32) \
+    BUSTER_X86_AVX512VL_COMPARE_IMMEDIATE_FORMS(XV, VPCMPUD, "vpcmpud", 0x66, 3, 0x0f3a1e, 0, 32) \
     BUSTER_X86_AVX512_COMPARE_IMMEDIATE_FORMS(XV, VPCMPQ, "vpcmpq", 0x0f3a1f, 1, 64) \
+    BUSTER_X86_AVX512VL_COMPARE_IMMEDIATE_FORMS(XV, VPCMPQ, "vpcmpq", 0x66, 3, 0x0f3a1f, 1, 64) \
     BUSTER_X86_AVX512_COMPARE_IMMEDIATE_FORMS(XV, VPCMPUQ, "vpcmpuq", 0x0f3a1e, 1, 64) \
+    BUSTER_X86_AVX512VL_COMPARE_IMMEDIATE_FORMS(XV, VPCMPUQ, "vpcmpuq", 0x66, 3, 0x0f3a1e, 1, 64) \
     XV(VPCMPUB_K_Z_ZM512_IMM8, "vpcmpub", EVEX, 0x66, 3, 0x0f3a3e, R, 1, 0, 2, K, Z, ZM, 64, 64, K, REG_VVVV_RM_IMM) \
     XV(VPCMPB_K_Z_ZM512_IMM8, "vpcmpb", EVEX, 0x66, 3, 0x0f3a3f, R, 1, 0, 2, K, Z, ZM, 64, 64, K, REG_VVVV_RM_IMM) \
-    XV(VPCMPEQD_K_Y_YM256, "vpcmpeqd", EVEX, 0x66, 2, 0x0f76, R, 0, 0, 1, K, Y, YM, 32, 32, K, REG_VVVV_RM) \
-    XV(VPADDD_X_X_XM128_EVEX, "vpaddd", EVEX, 0x66, 2, 0x0ffe, R, 0, 0, 0, V, V, XM, 16, 16, KZ, REG_VVVV_RM) \
-    XV(VPADDD_Y_Y_YM256_EVEX, "vpaddd", EVEX, 0x66, 2, 0x0ffe, R, 0, 0, 1, Y, Y, YM, 32, 32, KZ, REG_VVVV_RM) \
-    XV(VPADDD_Y_Y_M32BCST, "vpaddd", EVEX, 0x66, 2, 0x0ffe, R, 0, 0, 1, Y, Y, M, 32, 4, KZ_BCST, REG_VVVV_RM) \
-    XV(VPXORD_X_X_XM128, "vpxord", EVEX, 0x66, 2, 0x0fef, R, 0, 0, 0, V, V, XM, 16, 16, KZ, REG_VVVV_RM) \
     XV(VPSHUFB_Y_Y_YM256_EVEX, "vpshufb", EVEX, 0x66, 3, 0x0f3800, R, 0, 0, 1, Y, Y, YM, 32, 32, KZ, REG_VVVV_RM) \
     XV(VPERMB_Y_Y_YM256, "vpermb", EVEX, 0x66, 3, 0x0f388d, R, 0, 0, 1, Y, Y, YM, 32, 32, KZ, REG_VVVV_RM) \
-    XV(VPTERNLOGD_Y_Y_YM256_IMM8, "vpternlogd", EVEX, 0x66, 3, 0x0f3a25, R, 1, 0, 1, Y, Y, YM, 32, 32, KZ, REG_VVVV_RM_IMM) \
     BUSTER_X86_CMPCCXADD_FORMS(XV, O, "o", 0) \
     BUSTER_X86_CMPCCXADD_FORMS(XV, NO, "no", 1) \
     BUSTER_X86_CMPCCXADD_FORMS(XV, B, "b", 2) \
