@@ -343,7 +343,9 @@ informational.
   kernel) and run in a child process. A program that calls libc gets
   stand-ins for `write`, `strlen`, `environ` and `__errno_location`, and the
   child does what the C runtime does around `main`. Each must exit with status
-  0 having printed the output the generator's model predicts. Every set with
+  0 having printed the output the generator's model predicts, and again with
+  its TLS segment starting half its alignment past a multiple of it, as a
+  linker may start `.tdata` when `.tbss` is more aligned. Every set with
   two thread-locals, an init function and a fini function must have every
   class and every kind its options allow, and a copy of the defaults' program
   with the hexadecimal digits' fixup one byte off must print something else.
@@ -377,7 +379,9 @@ The same with `ld.lld`, `mold` or, for the `*-no-sizes` sets, `wild` for
 for `cc`. On the 9700X, GNU ld 2.47, lld 23.1.1 and mold 3.0.0 linked every
 set and wild 0.10.0 the `*-no-sizes` ones, 37 links per seed, for seeds 1, 2,
 3, 7, 99 and 1,000, and for seed 5 with 100,000 workers; every program printed
-what its model predicts.
+what its model predicts. GNU ld and lld (with `-z norelro`) also start the TLS
+segment off its alignment when told where: seed 1's `static-defaults` with
+`--section-start=.tdata=0x500008 --section-start=.tbss=0x500030`.
 
 ## Direct executable tests
 

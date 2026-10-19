@@ -23,12 +23,13 @@
 // atoms the object writer puts in one object:
 //   - _start (GLOBAL, unit 0, without libc) calls buster_main with the initial stack. buster_main finds the program
 //     headers through the auxiliary vector, sets up the TLS block from PT_TLS in buster_tls_area (variant II: the
-//     block ends at the thread pointer, aligned to p_align, which points at itself) and sets FS with arch_prctl, calls
-//     the entries from __init_array_start to __init_array_end, calls every worker through buster_functions with depth
-//     1 and folds each result into the checksum with buster_mix, calls the entries from __fini_array_start to
-//     __fini_array_end, folds the values that buster_globals and buster_far point at and the values that
-//     link_program_emit_kinds and link_program_emit_imports read, writes the checksum with buster_write_hex and exits
-//     with exit_group.
+//     block ends at the thread pointer, aligned to p_align, which points at itself, and its start keeps p_vaddr's
+//     remainder modulo p_align, which isn't 0 when a linker starts .tdata off .tbss's larger alignment) and sets FS
+//     with arch_prctl, calls the entries from __init_array_start to __init_array_end, calls every worker through
+//     buster_functions with depth 1 and folds each result into the checksum with buster_mix, calls the entries from
+//     __fini_array_start to __fini_array_end, folds the values that buster_globals and buster_far point at and the
+//     values that link_program_emit_kinds and link_program_emit_imports read, writes the checksum with
+//     buster_write_hex and exits with exit_group.
 //   - main (GLOBAL, unit 0, with libc) does the same from the workers on, but for the fini functions, and returns 0.
 //     Before the workers, it stores a value from the plan in errno, a thread-local of libc's (through
 //     __errno_location), and link_program_emit_imports reads it back after them: if the program's TLS block overlapped
@@ -1086,18 +1087,25 @@ static void link_program_emit_runtime(LinkProgramBuilder* builder)
     link_program_add(code, link_program_registers(X86_FORM_TEST_RM64_R64, X86_REGISTER_RDX, X86_REGISTER_RDX));
     link_program_jump(code, X86_FORM_JE_REL32, tls_done);
 
-    // The TLS block: rcx the alignment (at least 1), rax the block's size (p_memsz rounded up to it), r8 the thread
-    // pointer (the area's end less the control block, aligned down), rdi the block's start; then p_filesz bytes of the
-    // image (p_vaddr plus the bias), a byte at a time. The rest of the block is .bss, so already zero.
+    // The TLS block: rcx the alignment (at least 1), r9 the offset of the image's first byte from it (p_vaddr modulo
+    // the alignment, which the block's start keeps), rax the block's start's distance below the thread pointer (p_memsz
+    // plus that offset, rounded up to the alignment, less the offset, as glibc and the linkers compute it), r8 the
+    // thread pointer (the area's end less the control block, aligned down), rdi the block's start; then p_filesz bytes
+    // of the image (p_vaddr plus the bias), a byte at a time. The rest of the block is .bss, so already zero.
     link_program_add(code, link_program_memory(X86_FORM_MOV_R64_RM64, X86_REGISTER_RCX, X86_REGISTER_RDX, 48));
     link_program_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RAX, 1));
     link_program_add(code, link_program_registers(X86_FORM_TEST_RM64_R64, X86_REGISTER_RCX, X86_REGISTER_RCX));
     link_program_add(code, link_program_registers(X86_FORM_CMOVE_R64_RM64, X86_REGISTER_RCX, X86_REGISTER_RAX));
+    link_program_add(code, link_program_memory(X86_FORM_LEA_R64_M, X86_REGISTER_R10, X86_REGISTER_RCX, -1));
+    link_program_add(code, link_program_memory(X86_FORM_MOV_R64_RM64, X86_REGISTER_R9, X86_REGISTER_RDX, 16));
+    link_program_add(code, link_program_registers(X86_FORM_AND_R64_RM64, X86_REGISTER_R9, X86_REGISTER_R10));
     link_program_add(code, link_program_memory(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RDX, 40));
-    link_program_add(code, link_program_indexed(X86_FORM_LEA_R64_M, X86_REGISTER_RAX, X86_REGISTER_RAX, X86_REGISTER_RCX, 0, -1));
+    link_program_add(code, link_program_registers(X86_FORM_ADD_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_R9));
+    link_program_add(code, link_program_registers(X86_FORM_ADD_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_R10));
     link_program_add(code, link_program_registers(X86_FORM_MOV_R64_RM64, X86_REGISTER_RSI, X86_REGISTER_RCX));
     link_program_add(code, link_program_immediate(X86_FORM_NEG_RM64, X86_REGISTER_RSI, 0));
     link_program_add(code, link_program_registers(X86_FORM_AND_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RSI));
+    link_program_add(code, link_program_registers(X86_FORM_SUB_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_R9));
     link_program_refer(code, link_program_rip(X86_FORM_LEA_R64_M, X86_REGISTER_R8), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_PC32, builder->tls_area,
                        plan->tls_area_bytes - BUSTER_LINK_PROGRAM_TCB_BYTES);
     link_program_add(code, link_program_registers(X86_FORM_AND_R64_RM64, X86_REGISTER_R8, X86_REGISTER_RSI));
