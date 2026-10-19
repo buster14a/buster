@@ -103,10 +103,10 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0xc0164ca1b67b83a6ull
+#define BUSTER_X86_TEST_DIGEST 0x7566af7a457ced89ull
 // The same for the stream with 32-bit addresses (--address32), and for the one with APX's registers (--apx).
-#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0x15c0faabe6d4d45full
-#define BUSTER_X86_TEST_DIGEST_APX 0xeb807a6754940823ull
+#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0xcaefa1844530c3f5ull
+#define BUSTER_X86_TEST_DIGEST_APX 0xba7c4fbbd19e90e1ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -269,7 +269,15 @@ static const char* x86_test_mode_words(void)
 static bool x86_form_has_address_register(uint32_t form_index)
 {
     const uint32_t row = (form_index & BUSTER_X86_FORM_NUMBER) % X86_FORM_COUNT;
-    return row == X86_FORM_MOVDIR64B_R64_M512 || row == X86_FORM_ENQCMD_R64_M512 || row == X86_FORM_ENQCMDS_R64_M512;
+    return row == X86_FORM_MOVDIR64B_R64_M512 || row == X86_FORM_ENQCMD_R64_M512 || row == X86_FORM_ENQCMDS_R64_M512 || row == X86_FORM_MOVDIR64B_R64_M512_EVEX ||
+           row == X86_FORM_ENQCMD_R64_M512_EVEX || row == X86_FORM_ENQCMDS_R64_M512_EVEX;
+}
+
+// Whether the form's immediate is an MSR index: map 7's (VEX's, and APX's EVEX forms), unsigned (GNU as rejects a
+// negative one).
+static bool x86_form_has_msr_index(const X86FormDescription* form)
+{
+    return form->family != BUSTER_X86_FAMILY_LEGACY && x86_opcode_map(form) == 7;
 }
 
 // Whether an MPX form takes only memory, so that it has no instruction with a 32-bit address.
@@ -794,6 +802,7 @@ static const char* x86_syntax_operands(uint8_t syntax)
         case X86_SYNTAX_REG_VVVV_IS4_RM_IMM: result = "rv4mz"; break;
         case X86_SYNTAX_IMM_RM: result = "im"; break;
         case X86_SYNTAX_REG: result = "r"; break;
+        case X86_SYNTAX_VVVV_REG_RM: result = "vrm"; break;
         default: break;
     }
     return result;
@@ -826,23 +835,24 @@ static bool x86_vex_form_shares_mnemonic(uint32_t form)
 // Prints the instruction in GNU as Intel syntax. A register-to-register move or arithmetic instruction gets {load} or
 // {store}, which picks the form with ModRM.reg as the destination or the source (and keeps GNU as from swapping a VEX
 // move's operands to make it VEX2, and picks XOP's W1 shifts). An EVEX form gets {evex}, which GNU as otherwise only
-// picks when the operands need it, and a VEX form whose mnemonic an EVEX form has gets {vex}: GNU as picks EVEX for
-// some of those (vpdpbusd, vpmadd52luq and vcvtneps2bf16, whose AVX-512 forms came first). The opmask and zeroing
-// follow the first operand, a broadcast follows the memory operand, and embedded rounding or suppressed exceptions come
-// after the registers. The fields in `symbolic` are symbols plus the fields' values: dsym for the displacement (a memory
-// operand's or a branch's target) and offset isym for the immediate (or ds:isym for a 64-bit address).
+// picks when the operands need it (and an APX NF form {nf} too), and a VEX form whose mnemonic an EVEX form has gets
+// {vex}: GNU as picks EVEX for some of those (vpdpbusd, vpmadd52luq and vcvtneps2bf16, whose AVX-512 forms came first).
+// The opmask and zeroing follow the first operand, a broadcast follows the memory operand, and embedded rounding or
+// suppressed exceptions come after the registers. The fields in `symbolic` are symbols plus the fields' values: dsym
+// for the displacement (a memory operand's or a branch's target) and offset isym for the immediate (or ds:isym for a
+// 64-bit address).
 static void x86_print_instruction(FILE* file, const X86Instruction* instruction, uint32_t symbolic)
 {
     const X86FormDescription* form = x86_form_description(instruction->form);
     const bool symbolic_immediate = (symbolic & BUSTER_X86_TEST_SYMBOLIC_IMMEDIATE) != 0;
     const bool register_direct = instruction->mode == 0 && form->rm != BUSTER_X86_OPERAND_NONE;
     const uint8_t decorations = instruction->decorations;
-    // A 64-bit immediate continues in the displacement, and map 7's MSR index is unsigned (GNU as rejects a negative one).
-    const bool msr_index = form->family == BUSTER_X86_FAMILY_VEX && x86_opcode_map(form) == 7;
+    // A 64-bit immediate continues in the displacement, and an MSR index is unsigned.
+    const bool msr_index = x86_form_has_msr_index(form);
     const int64_t immediate = form->immediate_bytes == 8 ? (int64_t)((uint64_t)(uint32_t)instruction->immediate | ((uint64_t)(uint32_t)instruction->displacement << 32)) : msr_index ? (int64_t)(uint32_t)instruction->immediate : instruction->immediate;
     if (form->family == BUSTER_X86_FAMILY_EVEX)
     {
-        fprintf(file, "{evex} ");
+        fprintf(file, (form->evex & BUSTER_X86_EVEX_NF) ? "{evex} {nf} " : "{evex} ");
     }
     if (form->family == BUSTER_X86_FAMILY_VEX && x86_vex_form_shares_mnemonic(instruction->form))
     {
@@ -1162,6 +1172,45 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_KMOVQ_K_R64, .reg = 1, .rm = X86_REGISTER_RAX }, 5, { 0xc4, 0xe1, 0xfb, 0x92, 0xc8 } },
     { { .form = X86_FORM_KANDW_K_K_K, .reg = 1, .vvvv = 2, .rm = 3 }, 4, { 0xc5, 0xec, 0x41, 0xcb } },
     { { .form = X86_FORM_KSHIFTLW_K_K_IMM8, .reg = 1, .rm = 2, .immediate = 3 }, 6, { 0xc4, 0xe3, 0xf9, 0x32, 0xca, 0x03 } },
+    // APX's EVEX forms, here with registers 0 to 15: {evex} andn eax, ebx, dword ptr [rax+64] (an 8-bit 64: N is 1);
+    // {nf} andn eax, ebx, ecx and {nf} blsr eax, ecx (NF: P2's bit 2); pdep rax, rbx, qword ptr [rcx]; rorx eax, dword
+    // ptr [rcx+64], 3; in map 4, tzcnt ax, word ptr [rcx+64] (66), {nf} tzcnt rax, rcx and {nf} popcnt ax, cx; adcx
+    // eax, ebx, dword ptr [rcx+64] (ND: the destination in vvvv), adcx rax, rcx and adox r9, r10; kmovq k1, rax, kmovd
+    // k1, dword ptr [rax+64] and kmovb k1, k2; cmpbexadd dword ptr [rax+64], ecx, edx; tileloadd tmm1, [rax+rcx*1+64]
+    // and t2rpntlvwz1rs tmm2, [rax+rcx*1] (map 5); urdmsr rax, 0x12345678 and wrmsrns 0x12345678, r9 (map 7), and
+    // urdmsr rax, rcx (map 4); crc32 eax, spl and crc32 rax, qword ptr [rcx]; {store} movbe eax, ecx (a register) and
+    // movbe word ptr [rcx], ax; movdir64b rax, [rcx+64]; enqcmds r9, [r10]; invept rax, [rcx]; wrussq qword ptr [rcx],
+    // rax; aor dword ptr [rcx], eax; and movrs sil, byte ptr [rax]
+    { { .form = X86_FORM_ANDN_R32_R32_RM32_EVEX, .reg = X86_REGISTER_RAX, .vvvv = X86_REGISTER_RBX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64 }, 7, { 0x62, 0xf2, 0x64, 0x08, 0xf2, 0x40, 0x40 } },
+    { { .form = X86_FORM_ANDN_R32_R32_RM32_NF, .reg = X86_REGISTER_RAX, .vvvv = X86_REGISTER_RBX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf2, 0x64, 0x0c, 0xf2, 0xc1 } },
+    { { .form = X86_FORM_BLSR_R32_RM32_NF, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf2, 0x7c, 0x0c, 0xf3, 0xc9 } },
+    { { .form = X86_FORM_PDEP_R64_R64_RM64_EVEX, .reg = X86_REGISTER_RAX, .vvvv = X86_REGISTER_RBX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf2, 0xe7, 0x08, 0xf5, 0x01 } },
+    { { .form = X86_FORM_RORX_R32_RM32_IMM8_EVEX, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64, .immediate = 3 }, 8, { 0x62, 0xf3, 0x7f, 0x08, 0xf0, 0x41, 0x40, 0x03 } },
+    { { .form = X86_FORM_TZCNT_R16_RM16_EVEX, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64 }, 7, { 0x62, 0xf4, 0x7d, 0x08, 0xf4, 0x41, 0x40 } },
+    { { .form = X86_FORM_TZCNT_R64_RM64_NF, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0xfc, 0x0c, 0xf4, 0xc1 } },
+    { { .form = X86_FORM_POPCNT_R16_RM16_NF, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7d, 0x0c, 0x88, 0xc1 } },
+    { { .form = X86_FORM_ADCX_R32_R32_RM32, .vvvv = X86_REGISTER_RAX, .reg = X86_REGISTER_RBX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64 }, 7, { 0x62, 0xf4, 0x7d, 0x18, 0x66, 0x59, 0x40 } },
+    { { .form = X86_FORM_ADCX_R64_RM64_EVEX, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0xfd, 0x08, 0x66, 0xc1 } },
+    { { .form = X86_FORM_ADOX_R64_RM64_EVEX, .reg = X86_REGISTER_R9, .rm = X86_REGISTER_R10 }, 6, { 0x62, 0x54, 0xfe, 0x08, 0x66, 0xca } },
+    { { .form = X86_FORM_KMOVQ_K_R64_EVEX, .reg = 1, .rm = X86_REGISTER_RAX }, 6, { 0x62, 0xf1, 0xff, 0x08, 0x92, 0xc8 } },
+    { { .form = X86_FORM_KMOVD_K_M32_EVEX, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64 }, 7, { 0x62, 0xf1, 0xfd, 0x08, 0x90, 0x48, 0x40 } },
+    { { .form = X86_FORM_KMOVB_K_K_EVEX, .reg = 1, .rm = 2 }, 6, { 0x62, 0xf1, 0x7d, 0x08, 0x90, 0xca } },
+    { { .form = X86_FORM_CMPBEXADD_M32_R32_R32_EVEX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64, .reg = X86_REGISTER_RCX, .vvvv = X86_REGISTER_RDX }, 7, { 0x62, 0xf2, 0x6d, 0x08, 0xe6, 0x48, 0x40 } },
+    { { .form = X86_FORM_TILELOADD_TMM_SIBMEM_EVEX, .reg = 1, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .displacement = 64 }, 8, { 0x62, 0xf2, 0x7f, 0x08, 0x4b, 0x4c, 0x08, 0x40 } },
+    { { .form = X86_FORM_T2RPNTLVWZ1RS_TMM_SIBMEM_EVEX, .reg = 2, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0) }, 7, { 0x62, 0xf5, 0x7d, 0x08, 0xf8, 0x14, 0x08 } },
+    { { .form = X86_FORM_URDMSR_R64_IMM32_EVEX, .rm = X86_REGISTER_RAX, .immediate = 0x12345678 }, 10, { 0x62, 0xf7, 0x7f, 0x08, 0xf8, 0xc0, 0x78, 0x56, 0x34, 0x12 } },
+    { { .form = X86_FORM_WRMSRNS_IMM32_R64_EVEX, .rm = X86_REGISTER_R9, .immediate = 0x12345678 }, 10, { 0x62, 0xd7, 0x7e, 0x08, 0xf6, 0xc1, 0x78, 0x56, 0x34, 0x12 } },
+    { { .form = X86_FORM_URDMSR_R64_R64_EVEX, .rm = X86_REGISTER_RAX, .reg = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7f, 0x08, 0xf8, 0xc8 } },
+    { { .form = X86_FORM_CRC32_R32_RM8_EVEX, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP }, 6, { 0x62, 0xf4, 0x7c, 0x08, 0xf0, 0xc4 } },
+    { { .form = X86_FORM_CRC32_R64_RM64_EVEX, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf4, 0xfc, 0x08, 0xf1, 0x01 } },
+    { { .form = X86_FORM_MOVBE_RM32_R32, .rm = X86_REGISTER_RAX, .reg = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7c, 0x08, 0x61, 0xc8 } },
+    { { .form = X86_FORM_MOVBE_RM16_R16, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE, .reg = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0x7d, 0x08, 0x61, 0x01 } },
+    { { .form = X86_FORM_MOVDIR64B_R64_M512_EVEX, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64 }, 7, { 0x62, 0xf4, 0x7d, 0x08, 0xf8, 0x41, 0x40 } },
+    { { .form = X86_FORM_ENQCMDS_R64_M512_EVEX, .reg = X86_REGISTER_R9, .rm = X86_REGISTER_R10, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0x54, 0x7e, 0x08, 0xf8, 0x0a } },
+    { { .form = X86_FORM_INVEPT_R64_M128_EVEX, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf4, 0x7e, 0x08, 0xf0, 0x01 } },
+    { { .form = X86_FORM_WRUSSQ_M64_R64_EVEX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE, .reg = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0xfd, 0x08, 0x65, 0x01 } },
+    { { .form = X86_FORM_AOR_M32_R32_EVEX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE, .reg = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0x7f, 0x08, 0xfc, 0x01 } },
+    { { .form = X86_FORM_MOVRS_R8_M8_EVEX, .reg = X86_REGISTER_RSI, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf4, 0x7c, 0x08, 0x8a, 0x30 } },
     // EVEX: vaddps zmm1{k1}{z}, zmm2, zmm3; vaddps zmm1, zmm2, zmmword ptr [rax+64] (8-bit 1 in units of 64); vaddps
     // zmm1, zmm2, dword ptr [rax+64]{1to16} (16 in units of 4); vaddps zmm1, zmm2, zmm3, {rz-sae}; vmaxps zmm1, zmm2,
     // zmm3, {sae}; vaddsd xmm1{k1}{z}, xmm2, xmm3, {rz-sae}
@@ -2220,6 +2269,48 @@ static const KnownEncoding x86_known_encodings_apx[] = {
     { { .form = X86_FORM_VGATHERDPS_Z_VM32Z, .reg = 1, .rm = 31, .index = 18, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 }, 7, { 0x62, 0xda, 0x7d, 0x41, 0x92, 0x0c, 0x97 } },
     { { .form = X86_FORM_VPSCATTERDD_VM32Z_Z, .reg = 1, .rm = 16, .index = 2, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 }, 7, { 0x62, 0xfa, 0x7d, 0x49, 0xa0, 0x0c, 0x90 } },
     { { .form = X86_FORM_VADDPS_Z_Z_ZM512 + BUSTER_X86_FORM_FS, .reg = 1, .vvvv = 2, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE }, 7, { 0x64, 0x62, 0xf9, 0x6c, 0x48, 0x58, 0x08 } },
+    // APX's EVEX forms of general register instructions: andn r16d, eax, ecx (R'); blsi r16d, ecx (V'); blsi ecx, r17d
+    // (B4); {nf} blsi ecx, dword ptr [r17+r18*4+0x1000] (B4 and X4); bextr eax, r20d, r21d; shlx r16, r17, r18; rorx
+    // r16d, ecx, 7; kmovw k1, r16d; kmovq r31, k7; kmovb k1, byte ptr [r16]; crc32 eax, r16b and crc32 r16d, eax; adox
+    // r16, rcx; adcx r16, r17, qword ptr [r18+r19*8] (ND); {nf} popcnt r16w, r17w; lzcnt r31, qword ptr [r20]; invpcid
+    // r16, [r17]; movdir64b r16, [r17]; movbe r16d, dword ptr [rax] and movbe r17, r16; movrs r16b, byte ptr [rax];
+    // cmpbexadd dword ptr [r16+r17], r18d, r19d; tileloadd tmm1, [r16+r17*2+0x100] and [rax+r17*1+64] (X4 for a SIB
+    // operand's index), [rax+r20*1] (R20, not SIB's none) and [r20] (SIB's none after R20); t2rpntlvwz0rs tmm2,
+    // [r16+rcx*1+64]; ldtilecfg [r16+64]; urdmsr r16, 0x12345678 and urdmsr r16, r17; aadd qword ptr [r16+r17], r18;
+    // wrssd dword ptr [r16], r17d; and movdiri qword ptr [r31], r30
+    { { .form = X86_FORM_ANDN_R32_R32_RM32_EVEX, .reg = 16, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xe2, 0x7c, 0x08, 0xf2, 0xc1 } },
+    { { .form = X86_FORM_BLSI_R32_RM32_EVEX, .vvvv = 16, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf2, 0x7c, 0x00, 0xf3, 0xd9 } },
+    { { .form = X86_FORM_BLSI_R32_RM32_EVEX, .vvvv = X86_REGISTER_RCX, .rm = 17 }, 6, { 0x62, 0xfa, 0x74, 0x08, 0xf3, 0xd9 } },
+    { { .form = X86_FORM_BLSI_R32_RM32_NF, .vvvv = X86_REGISTER_RCX, .rm = 17, .index = 18, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = 0x1000 }, 11, { 0x62, 0xfa, 0x70, 0x0c, 0xf3, 0x9c, 0x91, 0x00, 0x10, 0x00, 0x00 } },
+    { { .form = X86_FORM_BEXTR_R32_RM32_R32_EVEX, .reg = X86_REGISTER_RAX, .rm = 20, .vvvv = 21 }, 6, { 0x62, 0xfa, 0x54, 0x00, 0xf7, 0xc4 } },
+    { { .form = X86_FORM_SHLX_R64_RM64_R64_EVEX, .reg = 16, .rm = 17, .vvvv = 18 }, 6, { 0x62, 0xea, 0xed, 0x00, 0xf7, 0xc1 } },
+    { { .form = X86_FORM_RORX_R32_RM32_IMM8_EVEX, .reg = 16, .rm = X86_REGISTER_RCX, .immediate = 7 }, 7, { 0x62, 0xe3, 0x7f, 0x08, 0xf0, 0xc1, 0x07 } },
+    { { .form = X86_FORM_KMOVW_K_R32_EVEX, .reg = 1, .rm = 16 }, 6, { 0x62, 0xf9, 0x7c, 0x08, 0x92, 0xc8 } },
+    { { .form = X86_FORM_KMOVQ_R64_K_EVEX, .reg = 31, .rm = 7 }, 6, { 0x62, 0x61, 0xff, 0x08, 0x93, 0xff } },
+    { { .form = X86_FORM_KMOVB_K_M8_EVEX, .reg = 1, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf9, 0x7d, 0x08, 0x90, 0x08 } },
+    { { .form = X86_FORM_CRC32_R32_RM8_EVEX, .reg = X86_REGISTER_RAX, .rm = 16 }, 6, { 0x62, 0xfc, 0x7c, 0x08, 0xf0, 0xc0 } },
+    { { .form = X86_FORM_CRC32_R32_RM32_EVEX, .reg = 16, .rm = X86_REGISTER_RAX }, 6, { 0x62, 0xe4, 0x7c, 0x08, 0xf1, 0xc0 } },
+    { { .form = X86_FORM_ADOX_R64_RM64_EVEX, .reg = 16, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xe4, 0xfe, 0x08, 0x66, 0xc1 } },
+    { { .form = X86_FORM_ADCX_R64_R64_RM64, .vvvv = 16, .reg = 17, .rm = 18, .index = 19, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3) }, 7, { 0x62, 0xec, 0xf9, 0x10, 0x66, 0x0c, 0xda } },
+    { { .form = X86_FORM_POPCNT_R16_RM16_NF, .reg = 16, .rm = 17 }, 6, { 0x62, 0xec, 0x7d, 0x0c, 0x88, 0xc1 } },
+    { { .form = X86_FORM_LZCNT_R64_RM64_EVEX, .reg = 31, .rm = 20, .mode = BUSTER_X86_MEMORY_BASE }, 7, { 0x62, 0x6c, 0xfc, 0x08, 0xf5, 0x3c, 0x24 } },
+    { { .form = X86_FORM_INVPCID_R64_M128_EVEX, .reg = 16, .rm = 17, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xec, 0x7e, 0x08, 0xf2, 0x01 } },
+    { { .form = X86_FORM_MOVDIR64B_R64_M512_EVEX, .reg = 16, .rm = 17, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xec, 0x7d, 0x08, 0xf8, 0x01 } },
+    { { .form = X86_FORM_MOVBE_R32_RM32, .reg = 16, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xe4, 0x7c, 0x08, 0x60, 0x00 } },
+    { { .form = X86_FORM_MOVBE_R64_RM64, .reg = 17, .rm = 16 }, 6, { 0x62, 0xec, 0xfc, 0x08, 0x60, 0xc8 } },
+    { { .form = X86_FORM_MOVRS_R8_M8_EVEX, .reg = 16, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xe4, 0x7c, 0x08, 0x8a, 0x00 } },
+    { { .form = X86_FORM_CMPBEXADD_M32_R32_R32_EVEX, .rm = 16, .index = 17, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .reg = 18, .vvvv = 19 }, 7, { 0x62, 0xea, 0x61, 0x00, 0xe6, 0x14, 0x08 } },
+    { { .form = X86_FORM_TILELOADD_TMM_SIBMEM_EVEX, .reg = 1, .rm = 16, .index = 17, .mode = BUSTER_X86_MEMORY_BASE_INDEX(1), .displacement = 0x100 }, 11, { 0x62, 0xfa, 0x7b, 0x08, 0x4b, 0x8c, 0x48, 0x00, 0x01, 0x00, 0x00 } },
+    { { .form = X86_FORM_TILELOADD_TMM_SIBMEM_EVEX, .reg = 1, .rm = X86_REGISTER_RAX, .index = 17, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .displacement = 64 }, 8, { 0x62, 0xf2, 0x7b, 0x08, 0x4b, 0x4c, 0x08, 0x40 } },
+    { { .form = X86_FORM_TILELOADD_TMM_SIBMEM_EVEX, .reg = 1, .rm = X86_REGISTER_RAX, .index = 20, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0) }, 7, { 0x62, 0xf2, 0x7b, 0x08, 0x4b, 0x0c, 0x20 } },
+    { { .form = X86_FORM_TILELOADD_TMM_SIBMEM_EVEX, .reg = 1, .rm = 20, .index = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0) }, 7, { 0x62, 0xfa, 0x7f, 0x08, 0x4b, 0x0c, 0x24 } },
+    { { .form = X86_FORM_T2RPNTLVWZ0RS_TMM_SIBMEM_EVEX, .reg = 2, .rm = 16, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .displacement = 64 }, 8, { 0x62, 0xfd, 0x7c, 0x08, 0xf8, 0x54, 0x08, 0x40 } },
+    { { .form = X86_FORM_LDTILECFG_M512_EVEX, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64 }, 7, { 0x62, 0xfa, 0x7c, 0x08, 0x49, 0x40, 0x40 } },
+    { { .form = X86_FORM_URDMSR_R64_IMM32_EVEX, .rm = 16, .immediate = 0x12345678 }, 10, { 0x62, 0xff, 0x7f, 0x08, 0xf8, 0xc0, 0x78, 0x56, 0x34, 0x12 } },
+    { { .form = X86_FORM_URDMSR_R64_R64_EVEX, .rm = 16, .reg = 17 }, 6, { 0x62, 0xec, 0x7f, 0x08, 0xf8, 0xc8 } },
+    { { .form = X86_FORM_AADD_M64_R64_EVEX, .rm = 16, .index = 17, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .reg = 18 }, 7, { 0x62, 0xec, 0xf8, 0x08, 0xfc, 0x14, 0x08 } },
+    { { .form = X86_FORM_WRSSD_M32_R32_EVEX, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE, .reg = 17 }, 6, { 0x62, 0xec, 0x7c, 0x08, 0x66, 0x08 } },
+    { { .form = X86_FORM_MOVDIRI_M64_R64_EVEX, .rm = 31, .mode = BUSTER_X86_MEMORY_BASE, .reg = 30 }, 6, { 0x62, 0x4c, 0xfc, 0x08, 0xf9, 0x37 } },
     // Without registers 16 to 31, as for x86_encode: REX's add rax, r8; VEX and EVEX; map 2's crc32; xsave [r15]
     { { .form = X86_FORM_ADD_RM64_R64, .reg = 8 }, 3, { 0x4c, 0x01, 0xc0 } },
     { { .form = X86_FORM_VADDPS_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 4, { 0xc5, 0xe8, 0x58, 0xcb } },
@@ -2325,6 +2416,12 @@ static const X86Instruction x86_known_invalid_apx[] = {
     { .form = X86_FORM_VLDMXCSR_M32, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE },
     { .form = X86_FORM_VPGATHERDD_X_VM32X_X, .reg = 1, .vvvv = 3, .rm = 16, .index = 2, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2) },
     { .form = X86_FORM_VPCMOV_X_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 17, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 << 4 },
+    // The VEX and legacy map 2 forms of instructions with an APX EVEX form, which takes registers 16 to 31 instead:
+    // andn r16d, eax, ecx; kmovw k1, r16d; crc32 eax, r16b; movbe r16d, dword ptr [rax]
+    { .form = X86_FORM_ANDN_R32_R32_RM32, .reg = 16, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX },
+    { .form = X86_FORM_KMOVW_K_R32, .reg = 1, .rm = 16 },
+    { .form = X86_FORM_CRC32_R32_RM8, .reg = X86_REGISTER_RAX, .rm = 16 },
+    { .form = X86_FORM_MOVBE_R32_M32, .reg = 16, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE },
 };
 
 static bool x86_check_known_invalid_apx(void)
@@ -3523,7 +3620,7 @@ static X86Relocation x86_expected_relocation(const X86Instruction* instruction, 
     else
     {
         // A 64-bit immediate or address continues in the displacement.
-        const bool msr_index = form->family == BUSTER_X86_FAMILY_VEX && x86_opcode_map(form) == 7;
+        const bool msr_index = x86_form_has_msr_index(form);
         result.addend = form->immediate_bytes == 8 ? (int64_t)((uint64_t)(uint32_t)instruction->immediate | ((uint64_t)(uint32_t)instruction->displacement << 32))
                         : msr_index                ? (int64_t)(uint32_t)instruction->immediate
                                                    : instruction->immediate;
