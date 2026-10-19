@@ -227,7 +227,7 @@ static uint32_t x86_benchmark_below(uint64_t* state, uint32_t bound)
 
 // A register of the class (in a form of the family), without the high byte registers: 0 to 15, or 31 for an EVEX
 // form's vector registers, or 7 for an opmask.
-static uint8_t x86_benchmark_register(uint64_t* state, uint8_t operand, uint8_t family)
+static uint8_t x86_benchmark_register(uint64_t* state, uint16_t operand, uint8_t family)
 {
     const uint8_t class = operand & BUSTER_X86_OPERAND_CLASS;
     const uint32_t count = class == BUSTER_X86_CLASS_OPMASK ? 8 : class >= BUSTER_X86_CLASS_XMM && class <= BUSTER_X86_CLASS_ZMM && family == BUSTER_X86_FAMILY_EVEX ? 32 : 16;

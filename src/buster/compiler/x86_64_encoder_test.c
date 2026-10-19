@@ -82,7 +82,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0x4db322da9a46137full
+#define BUSTER_X86_TEST_DIGEST 0xae44b3224cac2e06ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -112,8 +112,8 @@ static uint32_t x86_random_below(uint64_t* state, uint32_t bound)
 
 // A register of the class (in a form of the family), more often one of the numbers with special encodings (4, 5, 12
 // and 13, and in half of an EVEX form's vector registers, 16 to 31) and, for a legacy byte register, sometimes AH to
-// BH; for a control or segment register, one that exists.
-static uint8_t x86_random_register(uint64_t* state, uint8_t operand, uint8_t family)
+// BH; for a control or segment register, one that exists; and for a group, its first register.
+static uint8_t x86_random_register(uint64_t* state, uint16_t operand, uint8_t family)
 {
     static const uint8_t special[] = { 4, 5, 12, 13 };
     static const uint8_t control[] = { 0, 2, 3, 4, 8 };
@@ -131,9 +131,9 @@ static uint8_t x86_random_register(uint64_t* state, uint8_t operand, uint8_t fam
     {
         result &= 7;
     }
-    else if (class == BUSTER_X86_CLASS_OPMASK_PAIR)
+    else if (class == BUSTER_X86_CLASS_BND)
     {
-        result &= 6;
+        result &= 3;
     }
     else if (class == BUSTER_X86_CLASS_CONTROL)
     {
@@ -143,6 +143,8 @@ static uint8_t x86_random_register(uint64_t* state, uint8_t operand, uint8_t fam
     {
         result = (uint8_t)x86_random_below(state, 6);
     }
+    result &= (operand & BUSTER_X86_OPERAND_PAIR) ? 0xfe : 0xff;
+    result &= (operand & BUSTER_X86_OPERAND_BLOCK) ? 0xfc : 0xff;
     return result;
 }
 
@@ -286,9 +288,10 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
     {
         result = true;
     }
-    // A general index scaled by 1 without a base becomes the base (a VSIB one can't, and GNU as keeps a SIB one's).
+    // A general index scaled by 1 without a base becomes the base (a VSIB one can't, and GNU as keeps a SIB one's and
+    // MPX's, as bndmk's lower bound is its base).
     if ((instruction->mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX)) == BUSTER_X86_MODE_INDEX && (instruction->mode & BUSTER_X86_MODE_SCALE) == 0 &&
-        !(form->rm & (BUSTER_X86_OPERAND_VSIB | BUSTER_X86_OPERAND_SIB)))
+        !(form->rm & (BUSTER_X86_OPERAND_VSIB | BUSTER_X86_OPERAND_SIB)) && (form->reg & BUSTER_X86_OPERAND_CLASS) != BUSTER_X86_CLASS_BND)
     {
         result = true;
     }
@@ -324,7 +327,7 @@ static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_inde
             }
             else
             {
-                const uint8_t scale = (uint8_t)x86_random_below(state, 4);
+                const uint8_t scale = (uint8_t)(x86_random_below(state, 4) & ((form->rm & BUSTER_X86_OPERAND_UNSCALED) ? 0 : 3));
                 switch (x86_random_below(state, 20))
                 {
                     case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7:
@@ -389,6 +392,10 @@ static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_inde
         const uint32_t opcode = x86_form_opcode(form);
         const bool sign_extended = opcode == 0x83 || opcode == 0x6b || opcode == 0x6a;
         result.immediate = x86_random_immediate(state, form->immediate_bytes, sign_extended || (for_assembler && form->immediate_bytes == 4));
+        if (x86_form_has_operation_byte(form))
+        {
+            result.immediate = (int32_t)(form->opcode & 0xff);
+        }
         if (x86_form_has_is4(form))
         {
             result.immediate = x86_random_register(state, form->reg, form->family) << 4;
@@ -528,13 +535,14 @@ static const char* const x86_control_names[16] = { "cr0", "cr1", "cr2", "cr3", "
                                                    "cr8", "cr9", "cr10", "cr11", "cr12", "cr13", "cr14", "cr15" };
 static const char* const x86_debug_names[8] = { "dr0", "dr1", "dr2", "dr3", "dr4", "dr5", "dr6", "dr7" };
 static const char* const x86_tile_names[8] = { "tmm0", "tmm1", "tmm2", "tmm3", "tmm4", "tmm5", "tmm6", "tmm7" };
+static const char* const x86_bound_names[4] = { "bnd0", "bnd1", "bnd2", "bnd3" };
 // The segment registers, and the two numbers past GS that x86_validate rejects.
 static const char* const x86_segment_names[8] = { "es", "cs", "ss", "ds", "fs", "gs", "sreg6", "sreg7" };
 // The rounding modes (BUSTER_X86_DECORATION_ROUNDING), as GNU as writes them.
 static const char* const x86_rounding_names[4] = { "{rn-sae}", "{rd-sae}", "{ru-sae}", "{rz-sae}" };
 
 // A register's name (an invalid one's, too: the numbers wrap around).
-static const char* x86_register_name(uint8_t value, uint8_t operand)
+static const char* x86_register_name(uint8_t value, uint16_t operand)
 {
     const uint8_t number = value & BUSTER_X86_REGISTER_NUMBER;
     const char* result;
@@ -547,7 +555,7 @@ static const char* x86_register_name(uint8_t value, uint8_t operand)
         case BUSTER_X86_CLASS_YMM: result = x86_ymm_names[number]; break;
         case BUSTER_X86_CLASS_ZMM: result = x86_zmm_names[number]; break;
         case BUSTER_X86_CLASS_OPMASK: result = x86_opmask_names[number & 7]; break;
-        case BUSTER_X86_CLASS_OPMASK_PAIR: result = x86_opmask_names[number & 7]; break;
+        case BUSTER_X86_CLASS_BND: result = x86_bound_names[number & 3]; break;
         case BUSTER_X86_CLASS_ST: result = x86_st_names[number & 7]; break;
         case BUSTER_X86_CLASS_MMX: result = x86_mmx_names[number & 7]; break;
         case BUSTER_X86_CLASS_CONTROL: result = x86_control_names[number & 15]; break;
@@ -569,7 +577,7 @@ static const char* x86_accumulator_name(uint32_t bytes)
 // displacement is dsym plus the field's value.
 static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint32_t operand_bytes, uint32_t symbolic)
 {
-    const uint8_t rm = x86_form_description(instruction->form)->rm;
+    const uint16_t rm = x86_form_description(instruction->form)->rm;
     const bool none = (rm & BUSTER_X86_OPERAND_SIB) && instruction->index == X86_REGISTER_RSP;
     const uint8_t mode = none ? (uint8_t)(instruction->mode & ~BUSTER_X86_MODE_INDEX) : instruction->mode;
     const char* index = (rm & BUSTER_X86_OPERAND_VSIB) ? x86_register_name(instruction->index, rm) : x86_gpr64_names[instruction->index & 15];
@@ -1792,6 +1800,59 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_TTDPFP16PS_TMM_TMM_TMM, .reg = 1, .rm = 2, .vvvv = 3 }, 5, { 0xc4, 0xe2, 0x63, 0x6c, 0xca } },
     { { .form = X86_FORM_TMMULTF32PS_TMM_TMM_TMM, .reg = 1, .rm = 2, .vvvv = 3 }, 5, { 0xc4, 0xe2, 0x61, 0x48, 0xca } },
     { { .form = X86_FORM_TTMMULTF32PS_TMM_TMM_TMM, .reg = 1, .rm = 2, .vvvv = 3 }, 5, { 0xc4, 0xe2, 0x60, 0x48, 0xca } },
+    // MPX: bndmk [rax], and with a scaled index and with an index but no base (which GNU as keeps, as bndmk's lower
+    // bound is its base); bndcl with RAX and R9 (REX.B after F3), memory and RIP; bndcu, bndcn and bndmov between bound
+    // registers, from memory and to memory with FS; bndldx through a MIB operand, without an index, with R12 and R13 (B
+    // and X) and without a base, and bndstx. 3DNow!: femms, and pfadd's operation byte after a register, memory and
+    // RIP's displacement, pavgusb's after an 8-bit one, pswapd, pi2fw after a SIB byte and a 32-bit displacement with
+    // REX, and pfrcpit1 with FS. Xeon Phi: vexp2ps, vexp2pd with a broadcast, an opmask and zeroing, vrcp28ps zmm30 (R
+    // and R') with suppressed exceptions, vrsqrt28pd with N = 64, vrcp28ss and vrsqrt28sd; the prefetching gathers and
+    // scatters by ZMM1, ZMM17 (V'), YMM1 (vgatherpf0dpd), with N = 4 and ZMM31 after R9 (X, B and V') under K7; and
+    // v4fmaddps from ZMM4 and ZMM28 (V') with an opmask, zeroing and N = 16, v4fnmaddss, vp4dpwssds and v4fmaddss into
+    // XMM17 (R')
+    { { .form = X86_FORM_BNDMK_BND_M64, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0xf3, 0x0f, 0x1b, 0x00 } },
+    { { .form = X86_FORM_BNDMK_BND_M64, .reg = 1, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = 0x100 }, 9, { 0xf3, 0x0f, 0x1b, 0x8c, 0xc8, 0x00, 0x01, 0x00, 0x00 } },
+    { { .form = X86_FORM_BNDMK_BND_M64, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_INDEX(0), .displacement = 0x10 }, 9, { 0xf3, 0x0f, 0x1b, 0x04, 0x0d, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_BNDCL_BND_RM64, .reg = 1, .rm = X86_REGISTER_RAX }, 4, { 0xf3, 0x0f, 0x1a, 0xc8 } },
+    { { .form = X86_FORM_BNDCL_BND_RM64, .rm = X86_REGISTER_R9 }, 5, { 0xf3, 0x41, 0x0f, 0x1a, 0xc1 } },
+    { { .form = X86_FORM_BNDCL_BND_RM64, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0xf3, 0x0f, 0x1a, 0x08 } },
+    { { .form = X86_FORM_BNDCL_BND_RM64, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 16 }, 8, { 0xf3, 0x0f, 0x1a, 0x05, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_BNDCU_BND_RM64, .reg = 2, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = 8 }, 6, { 0xf2, 0x0f, 0x1a, 0x54, 0x88, 0x08 } },
+    { { .form = X86_FORM_BNDCN_BND_RM64, .reg = 3, .rm = X86_REGISTER_RCX }, 4, { 0xf2, 0x0f, 0x1b, 0xd9 } },
+    { { .form = X86_FORM_BNDMOV_BND_BND, .rm = 1 }, 4, { 0x66, 0x0f, 0x1a, 0xc1 } },
+    { { .form = X86_FORM_BNDMOV_BND_M128, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x66, 0x0f, 0x1a, 0x00 } },
+    { { .form = X86_FORM_BNDMOV_M128_BND + BUSTER_X86_FORM_FS, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x64, 0x66, 0x0f, 0x1b, 0x08 } },
+    { { .form = X86_FORM_BNDLDX_BND_MIB, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0) }, 4, { 0x0f, 0x1a, 0x04, 0x08 } },
+    { { .form = X86_FORM_BNDLDX_BND_MIB, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x0f, 0x1a, 0x00 } },
+    { { .form = X86_FORM_BNDLDX_BND_MIB, .rm = X86_REGISTER_R12, .index = X86_REGISTER_R13, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0) }, 5, { 0x43, 0x0f, 0x1a, 0x04, 0x2c } },
+    { { .form = X86_FORM_BNDSTX_MIB_BND, .reg = 3, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .displacement = 0x80 }, 8, { 0x0f, 0x1b, 0x9c, 0x08, 0x80, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_BNDLDX_BND_MIB, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_INDEX(0), .displacement = 16 }, 8, { 0x0f, 0x1a, 0x04, 0x0d, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_FEMMS }, 2, { 0x0f, 0x0e } },
+    { { .form = X86_FORM_PFADD_MM_MM, .rm = 1, .immediate = 0x9e }, 4, { 0x0f, 0x0f, 0xc1, 0x9e } },
+    { { .form = X86_FORM_PFADD_MM_M64, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 0x9e }, 4, { 0x0f, 0x0f, 0x00, 0x9e } },
+    { { .form = X86_FORM_PAVGUSB_MM_M64, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8, .immediate = 0xbf }, 5, { 0x0f, 0x0f, 0x40, 0x08, 0xbf } },
+    { { .form = X86_FORM_PSWAPD_MM_MM, .reg = 2, .rm = 3, .immediate = 0xbb }, 4, { 0x0f, 0x0f, 0xd3, 0xbb } },
+    { { .form = X86_FORM_PFADD_MM_M64, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 16, .immediate = 0x9e }, 8, { 0x0f, 0x0f, 0x05, 0x10, 0x00, 0x00, 0x00, 0x9e } },
+    { { .form = X86_FORM_PI2FW_MM_M64, .reg = 1, .rm = X86_REGISTER_R9, .index = X86_REGISTER_R10, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = 0x100, .immediate = 0x0c }, 10, { 0x43, 0x0f, 0x0f, 0x8c, 0xd1, 0x00, 0x01, 0x00, 0x00, 0x0c } },
+    { { .form = X86_FORM_PFRCPIT1_MM_M64 + BUSTER_X86_FORM_FS, .reg = 7, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 0xa6 }, 5, { 0x64, 0x0f, 0x0f, 0x38, 0xa6 } },
+    { { .form = X86_FORM_VEXP2PS_Z_ZM512, .reg = 1, .rm = 2 }, 6, { 0x62, 0xf2, 0x7d, 0x48, 0xc8, 0xca } },
+    { { .form = X86_FORM_VEXP2PD_Z_M64BCST, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .decorations = 1 | BUSTER_X86_DECORATION_ZEROING }, 6, { 0x62, 0xf2, 0xfd, 0xd9, 0xc8, 0x08 } },
+    { { .form = X86_FORM_VRCP28PS_Z_Z_SAE, .reg = 30, .rm = 2 }, 6, { 0x62, 0x62, 0x7d, 0x18, 0xca, 0xf2 } },
+    { { .form = X86_FORM_VRSQRT28PD_Z_ZM512, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40 }, 7, { 0x62, 0xf2, 0xfd, 0x48, 0xcc, 0x48, 0x01 } },
+    { { .form = X86_FORM_VRCP28SS_X_X_X_SAE, .reg = 1, .vvvv = 2, .rm = 3 }, 6, { 0x62, 0xf2, 0x6d, 0x18, 0xcb, 0xcb } },
+    { { .form = X86_FORM_VRSQRT28SD_X_X_XM64, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .decorations = 1 }, 6, { 0x62, 0xf2, 0xed, 0x09, 0xcd, 0x08 } },
+    { { .form = X86_FORM_VGATHERPF0DPS_VM32Z, .rm = X86_REGISTER_RAX, .index = 1, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 }, 7, { 0x62, 0xf2, 0x7d, 0x49, 0xc6, 0x0c, 0x88 } },
+    { { .form = X86_FORM_VGATHERPF0DPS_VM32Z, .rm = X86_REGISTER_RAX, .index = 17, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 }, 7, { 0x62, 0xf2, 0x7d, 0x41, 0xc6, 0x0c, 0x88 } },
+    { { .form = X86_FORM_VSCATTERPF1QPD_VM64Z, .rm = X86_REGISTER_RAX, .index = 2, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .decorations = 2 }, 7, { 0x62, 0xf2, 0xfd, 0x4a, 0xc7, 0x34, 0xd0 } },
+    { { .form = X86_FORM_VGATHERPF0DPD_VM32Y, .rm = X86_REGISTER_RAX, .index = 1, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .decorations = 1 }, 7, { 0x62, 0xf2, 0xfd, 0x49, 0xc6, 0x0c, 0xc8 } },
+    { { .form = X86_FORM_VGATHERPF1QPS_VM64Z, .rm = X86_REGISTER_RAX, .index = 1, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = 0x40, .decorations = 1 }, 8, { 0x62, 0xf2, 0x7d, 0x49, 0xc7, 0x54, 0x88, 0x10 } },
+    { { .form = X86_FORM_VSCATTERPF0DPS_VM32Z, .rm = X86_REGISTER_R9, .index = 31, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = -0x200, .decorations = 7 }, 8, { 0x62, 0x92, 0x7d, 0x47, 0xc6, 0x6c, 0xb9, 0x80 } },
+    { { .form = X86_FORM_V4FMADDPS_Z_Z_M128, .reg = 1, .vvvv = 4, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf2, 0x5f, 0x48, 0x9a, 0x08 } },
+    { { .form = X86_FORM_V4FMADDPS_Z_Z_M128, .reg = 1, .vvvv = 28, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf2, 0x1f, 0x40, 0x9a, 0x08 } },
+    { { .form = X86_FORM_V4FMADDPS_Z_Z_M128, .reg = 1, .vvvv = 4, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x10, .decorations = 1 | BUSTER_X86_DECORATION_ZEROING }, 7, { 0x62, 0xf2, 0x5f, 0xc9, 0x9a, 0x48, 0x01 } },
+    { { .form = X86_FORM_V4FNMADDSS_X_X_M128, .reg = 1, .vvvv = 4, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf2, 0x5f, 0x08, 0xab, 0x08 } },
+    { { .form = X86_FORM_VP4DPWSSDS_Z_Z_M128, .reg = 1, .vvvv = 8, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16, .decorations = 1 | BUSTER_X86_DECORATION_ZEROING }, 7, { 0x62, 0xf2, 0x3f, 0xc9, 0x53, 0x48, 0x01 } },
+    { { .form = X86_FORM_V4FMADDSS_X_X_M128, .reg = 17, .vvvv = 8, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xe2, 0x3f, 0x08, 0x9b, 0x08 } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone, and again with the fixup flag, whose end it must
@@ -2213,9 +2274,9 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
     return result;
 }
 
-// The lowest bit of a register operand of the class (in a form of the family) past its last register, or for an opmask
-// pair, its odd bit (for control registers, past CR15: x86_validate alone finds the numbers below without a register).
-static uint8_t x86_past_last_register(uint8_t operand, uint8_t family)
+// The lowest bit of a register operand of the class (in a form of the family) past its last register, or for a group,
+// its low bit (for control registers, past CR15: x86_validate alone finds the numbers below without a register).
+static uint8_t x86_past_last_register(uint16_t operand, uint8_t family)
 {
     const uint8_t class = operand & BUSTER_X86_OPERAND_CLASS;
     uint8_t result = 0x10;
@@ -2224,14 +2285,15 @@ static uint8_t x86_past_last_register(uint8_t operand, uint8_t family)
     {
         result = 0x08;
     }
-    else if (class == BUSTER_X86_CLASS_OPMASK_PAIR)
+    else if (class == BUSTER_X86_CLASS_BND)
     {
-        result = 0x01;
+        result = 0x04;
     }
     else if (class >= BUSTER_X86_CLASS_XMM && class <= BUSTER_X86_CLASS_ZMM && family == BUSTER_X86_FAMILY_EVEX)
     {
         result = 0x20;
     }
+    result = (operand & (BUSTER_X86_OPERAND_PAIR | BUSTER_X86_OPERAND_BLOCK)) ? 0x01 : result;
     return result;
 }
 
@@ -2251,7 +2313,7 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
     const bool vsib = (form->rm & BUSTER_X86_OPERAND_VSIB) != 0;
     const bool sib = (form->rm & BUSTER_X86_OPERAND_SIB) != 0;
     bool result = true;
-    switch (x86_random_below(state, 20))
+    switch (x86_random_below(state, 22))
     {
         case 0:
             // A high byte register with an extended register (and so a REX prefix).
@@ -2504,9 +2566,10 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
             }
             const X86FormDescription* vsib_form = &x86_form_descriptions[form_index];
             const bool evex = vsib_form->family == BUSTER_X86_FAMILY_EVEX;
-            const bool gather = vsib_form->syntax != X86_SYNTAX_RM_REG;
+            const bool gather = vsib_form->encoding == BUSTER_X86_ENCODING_R && vsib_form->syntax != X86_SYNTAX_RM_REG;
             *instruction = x86_random_instruction(state, form_index, false);
-            // AVX2's forms are all gathers, without an opmask; a scatter's registers can be the same.
+            // AVX2's forms are all gathers, without an opmask; a scatter's registers can be the same, and a prefetching
+            // gather has no destination.
             uint32_t kind = x86_random_below(state, 3);
             kind = kind == 1 && !evex ? 2 : kind == 2 && !gather ? 1 : kind;
             if (kind == 0)
@@ -2572,15 +2635,65 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
         }
         case 19:
         {
-            // A tile pair's odd tile (AMX-TRANSPOSE's t2rpntlvwz0 and the rest), which x86_encode rejects as it does an
-            // opmask pair's: in a new instruction of a form with one.
+            // A group's register that isn't a multiple of its size (an opmask or tile pair's odd one, or a block of four's
+            // with either low bit), which x86_encode rejects: in a new instruction of a form with one, in ModRM.reg or
+            // VEX.vvvv.
+            const uint16_t groups = BUSTER_X86_OPERAND_PAIR | BUSTER_X86_OPERAND_BLOCK;
             uint16_t form_index = x86_random_form(state, false);
-            while (!x86_form_has_tile_pair(&x86_form_descriptions[form_index]))
+            while (!((x86_form_descriptions[form_index].reg | x86_form_descriptions[form_index].vvvv) & groups))
+            {
+                form_index = x86_random_form(state, false);
+            }
+            const X86FormDescription* group_form = &x86_form_descriptions[form_index];
+            *instruction = x86_random_instruction(state, form_index, false);
+            const uint16_t group = (group_form->reg & groups) ? group_form->reg : group_form->vvvv;
+            const uint8_t low = (uint8_t)(1 + x86_random_below(state, (group & BUSTER_X86_OPERAND_BLOCK) ? 3 : 1));
+            if (group_form->reg & groups)
+            {
+                instruction->reg |= low;
+            }
+            else
+            {
+                instruction->vvvv |= low;
+            }
+            break;
+        }
+        case 20:
+        {
+            // A RIP-relative operand of MPX's bndmk or a MIB operand, or a MIB operand's scaled index, which only
+            // x86_validate checks: in a new instruction of a form with one.
+            uint16_t form_index = x86_random_form(state, false);
+            while (!(x86_form_descriptions[form_index].rm & BUSTER_X86_OPERAND_NO_RIP) || (x86_form_descriptions[form_index].rm & BUSTER_X86_OPERAND_SIB))
             {
                 form_index = x86_random_form(state, false);
             }
             *instruction = x86_random_instruction(state, form_index, false);
-            instruction->reg |= 1;
+            if ((x86_form_descriptions[form_index].rm & BUSTER_X86_OPERAND_UNSCALED) && x86_random_below(state, 2) == 0)
+            {
+                instruction->index = (instruction->mode & BUSTER_X86_MODE_INDEX) ? instruction->index : X86_REGISTER_RCX;
+                instruction->mode = (uint8_t)((instruction->mode & BUSTER_X86_MODE_BASE) | BUSTER_X86_MEMORY_INDEX(1 + x86_random_below(state, 3)));
+            }
+            else
+            {
+                instruction->mode = BUSTER_X86_MEMORY_RIP;
+                instruction->rm = 0;
+                instruction->index = 0;
+            }
+            *validate_only = true;
+            break;
+        }
+        case 21:
+        {
+            // A 3DNow! form's immediate other than its operation byte, which only x86_validate checks: in a new instruction
+            // of such a form.
+            uint16_t form_index = x86_random_form(state, false);
+            while (!x86_form_has_operation_byte(&x86_form_descriptions[form_index]))
+            {
+                form_index = x86_random_form(state, false);
+            }
+            *instruction = x86_random_instruction(state, form_index, false);
+            instruction->immediate ^= (int32_t)(1 + x86_random_below(state, 255));
+            *validate_only = true;
             break;
         }
         default:
@@ -2651,8 +2764,8 @@ static bool x86_print_assembly(uint64_t seed, uint64_t* state, uint64_t count, X
 {
     x86_random_instructions(state, instructions, count, false, true);
     x86_mark_symbolic(seed, instructions, count, symbolic);
-    // AMX-TRANSPOSE and AMX-TF32 aren't in GNU as's default architecture.
-    printf(".intel_syntax noprefix\n.arch .amx_transpose\n.arch .amx_tf32\n.text\n");
+    // MPX, AMX-TRANSPOSE and AMX-TF32 aren't in GNU as's default architecture.
+    printf(".intel_syntax noprefix\n.arch .mpx\n.arch .amx_transpose\n.arch .amx_tf32\n.text\n");
     for (uint64_t i = 0; i < count; i += 1)
     {
         const int64_t length = x86_encode_scalar(&instructions[i], 1, output, BUSTER_X86_ENCODER_CAPACITY(1), 0, 0);
