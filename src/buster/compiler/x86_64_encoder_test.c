@@ -103,10 +103,10 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0xdc83e6f14ddeb42dull
+#define BUSTER_X86_TEST_DIGEST 0xf0b33adc74a14fb9ull
 // The same for the stream with 32-bit addresses (--address32), and for the one with APX's registers (--apx).
-#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0x51405d64b9504a27ull
-#define BUSTER_X86_TEST_DIGEST_APX 0xd96706d74a3fe196ull
+#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0x89d61221b2e298c7ull
+#define BUSTER_X86_TEST_DIGEST_APX 0x9417f9289e033f50ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -958,6 +958,9 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction,
         case X86_SYNTAX_DX_ACC:
             fprintf(file, " dx, %s", x86_accumulator_name(form->operand_bytes));
             break;
+        case X86_SYNTAX_MEMORY_RCX_ACC:
+            fprintf(file, " [rcx], %s", x86_accumulator_name(form->operand_bytes));
+            break;
         case X86_SYNTAX_ACC_MOFFS:
             if (symbolic_immediate)
             {
@@ -1209,9 +1212,20 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_SETE_RM8, .rm = X86_REGISTER_R10 }, 4, { 0x41, 0x0f, 0x94, 0xc2 } },
     { { .form = X86_FORM_CMOVL_R64_RM64, .reg = X86_REGISTER_R8, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 },
       6, { 0x4c, 0x0f, 0x4c, 0x44, 0x24, 0x08 } },
-    // enter 16, 2; endbr64; lock cmpxchg word ptr [rax], cx; crc32 eax, word ptr [rax]; lock cmpxchg16b xmmword ptr [r8]
+    // enter 16, 2 and enterw 0x1234, 5 (66); leavew; endbr64; lock cmpxchg word ptr [rax], cx; crc32 eax, word ptr
+    // [rax]; lock cmpxchg16b xmmword ptr [r8]
     { { .form = X86_FORM_ENTER, .immediate = 16 | (2 << 16) }, 4, { 0xc8, 0x10, 0x00, 0x02 } },
+    { { .form = X86_FORM_ENTERW, .immediate = 0x1234 | (5 << 16) }, 5, { 0x66, 0xc8, 0x34, 0x12, 0x05 } },
+    { { .form = X86_FORM_LEAVEW }, 2, { 0x66, 0xc9 } },
     { { .form = X86_FORM_ENDBR64 }, 4, { 0xf3, 0x0f, 0x1e, 0xfa } },
+    // ud0 and ud1 (without ModRM); ud0 eax, ebx; {load} ud1 r9, r10; ud1 ax, word ptr [rbx]; udb; int1
+    { { .form = X86_FORM_UD0 }, 2, { 0x0f, 0xff } },
+    { { .form = X86_FORM_UD1 }, 2, { 0x0f, 0xb9 } },
+    { { .form = X86_FORM_UD0_R32_RM32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RBX }, 3, { 0x0f, 0xff, 0xc3 } },
+    { { .form = X86_FORM_UD1_R64_RM64, .reg = X86_REGISTER_R9, .rm = X86_REGISTER_R10 }, 4, { 0x4d, 0x0f, 0xb9, 0xca } },
+    { { .form = X86_FORM_UD1_R16_RM16, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x66, 0x0f, 0xb9, 0x03 } },
+    { { .form = X86_FORM_UDB }, 1, { 0xd6 } },
+    { { .form = X86_FORM_INT1 }, 1, { 0xf1 } },
     { { .form = X86_FORM_LOCK_CMPXCHG_M16_R16, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x66, 0xf0, 0x0f, 0xb1, 0x08 } },
     { { .form = X86_FORM_CRC32_R32_RM16, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x66, 0xf2, 0x0f, 0x38, 0xf1, 0x00 } },
     { { .form = X86_FORM_LOCK_CMPXCHG16B_M128, .rm = X86_REGISTER_R8, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xf0, 0x49, 0x0f, 0xc7, 0x08 } },
@@ -1444,6 +1458,28 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_FWAIT }, 1, { 0x9b } },
     { { .form = X86_FORM_FLD1 }, 2, { 0xd9, 0xe8 } },
     { { .form = X86_FORM_FSINCOS }, 2, { 0xd9, 0xfb } },
+    // ffreep st(3); fneni, fndisi, fnsetpm and frstpm; the waiting forms (9B first): finit, fclex, feni, fdisi, fsetpm,
+    // fstsw ax, fstcw word ptr [rax], fstsw word ptr fs:[rax], fstenv gs:[r8+r9*2+0x100], fstenvw [rax], fsave
+    // fs:[rax] and fsavew [rax] (9B before 66)
+    { { .form = X86_FORM_FFREEP_ST, .rm = 3 }, 2, { 0xdf, 0xc3 } },
+    { { .form = X86_FORM_FNENI }, 2, { 0xdb, 0xe0 } },
+    { { .form = X86_FORM_FNDISI }, 2, { 0xdb, 0xe1 } },
+    { { .form = X86_FORM_FNSETPM }, 2, { 0xdb, 0xe4 } },
+    { { .form = X86_FORM_FRSTPM }, 2, { 0xdb, 0xe5 } },
+    { { .form = X86_FORM_FINIT }, 3, { 0x9b, 0xdb, 0xe3 } },
+    { { .form = X86_FORM_FCLEX }, 3, { 0x9b, 0xdb, 0xe2 } },
+    { { .form = X86_FORM_FENI }, 3, { 0x9b, 0xdb, 0xe0 } },
+    { { .form = X86_FORM_FDISI }, 3, { 0x9b, 0xdb, 0xe1 } },
+    { { .form = X86_FORM_FSETPM }, 3, { 0x9b, 0xdb, 0xe4 } },
+    { { .form = X86_FORM_FSTSW_AX }, 3, { 0x9b, 0xdf, 0xe0 } },
+    { { .form = X86_FORM_FSTCW_M16, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x9b, 0xd9, 0x38 } },
+    { { .form = X86_FORM_FSTSW_M16 + BUSTER_X86_FORM_FS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x9b, 0x64, 0xdd, 0x38 } },
+    { { .form = X86_FORM_FSTENV_M28 + BUSTER_X86_FORM_GS, .rm = X86_REGISTER_R8, .index = X86_REGISTER_R9, .mode = BUSTER_X86_MEMORY_BASE_INDEX(1), .displacement = 0x100 },
+      10,
+      { 0x9b, 0x65, 0x43, 0xd9, 0xb4, 0x48, 0x00, 0x01, 0x00, 0x00 } },
+    { { .form = X86_FORM_FSTENVW_M14, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x9b, 0x66, 0xd9, 0x30 } },
+    { { .form = X86_FORM_FSAVE_M108 + BUSTER_X86_FORM_FS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x9b, 0x64, 0xdd, 0x30 } },
+    { { .form = X86_FORM_FSAVEW_M94, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x9b, 0x66, 0xdd, 0x30 } },
     // lock add word ptr [rax], cx; lock add qword ptr [rax], 0x12; lock btc word ptr [rax], cx; lock cmpxchg8b qword
     // ptr [rax]
     { { .form = X86_FORM_LOCK_ADD_M16_R16, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x66, 0xf0, 0x01, 0x08 } },
@@ -1465,6 +1501,7 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_LOOP_REL8, .displacement = 0x0e }, 2, { 0xe2, 0x0e } },
     { { .form = X86_FORM_PUSH_R16, .rm = X86_REGISTER_RAX }, 2, { 0x66, 0x50 } },
     { { .form = X86_FORM_PUSHW_IMM16, .immediate = 0x1234 }, 4, { 0x66, 0x68, 0x34, 0x12 } },
+    { { .form = X86_FORM_PUSHW_IMM8, .immediate = -5 }, 3, { 0x66, 0x6a, 0xfb } },
     // rcl eax, 5; tzcnt ax, cx; adcx rax, qword ptr [rcx]; cmpbexadd dword ptr [rax], ecx, edx
     { { .form = X86_FORM_RCL_RM32_IMM8, .rm = X86_REGISTER_RAX, .immediate = 5 }, 3, { 0xc1, 0xd0, 0x05 } },
     { { .form = X86_FORM_TZCNT_R16_RM16, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 5, { 0x66, 0xf3, 0x0f, 0xbc, 0xc1 } },
@@ -1479,8 +1516,9 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_CALL_FAR_M80, .rm = X86_REGISTER_R9, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x49, 0xff, 0x19 } },
     { { .form = X86_FORM_LSS_R64_M80, .reg = X86_REGISTER_R15, .rm = X86_REGISTER_R13, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 }, 5, { 0x4d, 0x0f, 0xb2, 0x7d, 0x08 } },
     { { .form = X86_FORM_RETFQ_IMM16, .immediate = 8 }, 4, { 0x48, 0xca, 0x08, 0x00 } },
-    // xbegin .+0x100; prefetchit0 byte ptr [rip+0x10]; movdir64b rax, [rcx]; rdpid rax
+    // xbegin .+0x100 and data16 xbegin .+20 (a rel16); prefetchit0 byte ptr [rip+0x10]; movdir64b rax, [rcx]; rdpid rax
     { { .form = X86_FORM_XBEGIN_REL32, .displacement = 0xfa }, 6, { 0xc7, 0xf8, 0xfa, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_XBEGIN_REL16, .displacement = 15 }, 5, { 0x66, 0xc7, 0xf8, 0x0f, 0x00 } },
     { { .form = X86_FORM_PREFETCHIT0_M8, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x10 }, 7, { 0x0f, 0x18, 0x3d, 0x10, 0x00, 0x00, 0x00 } },
     { { .form = X86_FORM_MOVDIR64B_R64_M512, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x66, 0x0f, 0x38, 0xf8, 0x01 } },
     { { .form = X86_FORM_RDPID_R64, .rm = X86_REGISTER_RAX }, 4, { 0xf3, 0x0f, 0xc7, 0xf8 } },
@@ -1747,6 +1785,13 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_VPEXPANDB_X_XM128, .reg = 1, .rm = 2, .decorations = 1 | BUSTER_X86_DECORATION_ZEROING }, 6, { 0x62, 0xf2, 0x7d, 0x89, 0x62, 0xca } },
     { { .form = X86_FORM_VPOPCNTW_Y_YM256, .reg = 1, .rm = 2 }, 6, { 0x62, 0xf2, 0xfd, 0x28, 0x54, 0xca } },
     { { .form = X86_FORM_VPSHUFBITQMB_K_Y_YM256, .reg = 1, .vvvv = 2, .rm = 3, .decorations = 2 }, 6, { 0x62, 0xf2, 0x6d, 0x2a, 0x8f, 0xcb } },
+    // AVX512_BMM (map 6): vbitrevb zmm1{k1}{z}, zmm2; vbitrevb zmm1, [rax+0x40] and ymm17{k7}, [r9+0x20] (N = 64 and
+    // 32); vbmacxor16x16x16 zmm1, zmm2, zmm3 (W1); vbmacor16x16x16 ymm1, ymm2, [rax+0x20]
+    { { .form = X86_FORM_VBITREVB_Z_ZM512, .reg = 1, .rm = 2, .decorations = 1 | BUSTER_X86_DECORATION_ZEROING }, 6, { 0x62, 0xf6, 0x7c, 0xc9, 0x81, 0xca } },
+    { { .form = X86_FORM_VBITREVB_Z_ZM512, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40 }, 7, { 0x62, 0xf6, 0x7c, 0x48, 0x81, 0x48, 0x01 } },
+    { { .form = X86_FORM_VBITREVB_Y_YM256, .reg = 17, .rm = X86_REGISTER_R9, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x20, .decorations = 7 }, 7, { 0x62, 0xc6, 0x7c, 0x2f, 0x81, 0x49, 0x01 } },
+    { { .form = X86_FORM_VBMACXOR16X16X16_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 3 }, 6, { 0x62, 0xf6, 0xec, 0x48, 0x80, 0xcb } },
+    { { .form = X86_FORM_VBMACOR16X16X16_Y_Y_YM256, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x20 }, 7, { 0x62, 0xf6, 0x6c, 0x28, 0x80, 0x48, 0x01 } },
     { { .form = X86_FORM_VPERMI2B_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 6, { 0x62, 0xf2, 0x6d, 0x08, 0x75, 0xcb } },
     { { .form = X86_FORM_VPDPWSSDS_Y_Y_M32BCST, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf2, 0x6d, 0x38, 0x53, 0x08 } },
     { { .form = X86_FORM_VPMADD52HUQ_X_X_XM128_EVEX, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40 },
@@ -1794,6 +1839,15 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_XSTORE }, 3, { 0x0f, 0xa7, 0xc0 } },
     { { .form = X86_FORM_REP_XCRYPTCBC }, 4, { 0xf3, 0x0f, 0xa7, 0xd0 } },
     { { .form = X86_FORM_REP_XSHA256 }, 4, { 0xf3, 0x0f, 0xa6, 0xd0 } },
+    // Zhaoxin's: xrng2, xsha384, xsha512, montmul2, xmodexp, sm2 (F2), sm3 and sm4
+    { { .form = X86_FORM_XRNG2 }, 4, { 0xf3, 0x0f, 0xa7, 0xf8 } },
+    { { .form = X86_FORM_XSHA384 }, 4, { 0xf3, 0x0f, 0xa6, 0xd8 } },
+    { { .form = X86_FORM_XSHA512 }, 4, { 0xf3, 0x0f, 0xa6, 0xe0 } },
+    { { .form = X86_FORM_MONTMUL2 }, 4, { 0xf3, 0x0f, 0xa6, 0xf0 } },
+    { { .form = X86_FORM_XMODEXP }, 4, { 0xf3, 0x0f, 0xa6, 0xf8 } },
+    { { .form = X86_FORM_SM2 }, 4, { 0xf2, 0x0f, 0xa6, 0xc0 } },
+    { { .form = X86_FORM_SM3 }, 4, { 0xf3, 0x0f, 0xa6, 0xe8 } },
+    { { .form = X86_FORM_SM4 }, 4, { 0xf3, 0x0f, 0xa7, 0xf0 } },
     // VEX: vpdpbusd xmm1, xmm2, xmm3 (AVX-VNNI's, which GNU as takes with {vex}); vpmadd52luq ymm1, ymm2, ymmword ptr
     // [rax] (W1); vcvtneps2bf16 xmm1, ymmword ptr [rax] (L1 into an XMM register); vaesenc ymm9, ymm10, ymm11 (VAES,
     // with inverted R, vvvv and B); vaesimc xmm1, xmm2; vaeskeygenassist xmm1, xmmword ptr [rax], 3; vpclmulqdq ymm1,
@@ -2115,12 +2169,12 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_VSCATTERDPS_VM32Y_Y + BUSTER_X86_FORM_FS, .reg = 6, .rm = X86_REGISTER_RAX, .index = 5, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 },
       8,
       { 0x64, 0x62, 0xf2, 0x7d, 0x29, 0xa2, 0x34, 0xa8 } },
-    // System instructions: lar ax, cx (66) and rex.w lar r9d, r10d (REX.W with R and B); lsl eax, word ptr [rax];
-    // sldt r9w (66 and REX.B) and sldt to memory (no 66); rex.w str rax; smsw r9 (REX.W from GNU as itself); lgdt tbyte
-    // ptr fs:[rax]; in ax, 0x10 and out dx, eax; rep insw (66 before F3) and repne outsd; iretw, sysretq and sysexitd;
-    // xsave64 [rax]; incsspq r9 (F3 before REX.W); wrussq (66, REX.W and 0F 38); vmread r9, r10 (no REX.W); invpcid r9,
-    // xmmword ptr [r10]; urdmsr r9, 0x80 and wrmsrns 0x12345678, rax (VEX map 7, with a 32-bit immediate); hreset 255
-    // (its ModRM byte in the opcode); enqcmd r9, [r10]; uwrmsr r9, r10; and pvalidate
+    // System instructions: lar ax, cx (66) and rex.w lar r9d, r10d (REX.W with R and B); lsl eax, word ptr [rax]; sldt
+    // r9w (66 and REX.B) and sldt to memory (no 66); rex.w str rax; smsw r9 (REX.W from GNU as itself); lgdt tbyte ptr
+    // fs:[rax]; in ax, 0x10 and out dx, eax; rep insw (66 before F3) and repne outsd; iretw, sysretq, sysexitd and
+    // sysexitq; xsave64 [rax]; incsspq r9 (F3 before REX.W); wrussq (66, REX.W and 0F 38); vmread r9, r10 (no REX.W);
+    // invpcid r9, xmmword ptr [r10]; urdmsr r9, 0x80 and wrmsrns 0x12345678, rax (VEX map 7, with a 32-bit immediate);
+    // hreset 255 (its ModRM byte in the opcode); enqcmd r9, [r10]; uwrmsr r9, r10; and pvalidate
     { { .form = X86_FORM_LAR_R16_RM16, .rm = X86_REGISTER_RCX }, 4, { 0x66, 0x0f, 0x02, 0xc1 } },
     { { .form = X86_FORM_LAR_R64_R64, .reg = X86_REGISTER_R9, .rm = X86_REGISTER_R10 }, 4, { 0x4d, 0x0f, 0x02, 0xca } },
     { { .form = X86_FORM_LSL_R32_M16, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x0f, 0x03, 0x00 } },
@@ -2136,6 +2190,7 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_IRET }, 2, { 0x66, 0xcf } },
     { { .form = X86_FORM_SYSRET64 }, 3, { 0x48, 0x0f, 0x07 } },
     { { .form = X86_FORM_SYSEXIT }, 2, { 0x0f, 0x35 } },
+    { { .form = X86_FORM_SYSEXITQ }, 3, { 0x48, 0x0f, 0x35 } },
     { { .form = X86_FORM_XSAVE64_M, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x48, 0x0f, 0xae, 0x20 } },
     { { .form = X86_FORM_INCSSPQ_R64, .rm = X86_REGISTER_R9 }, 5, { 0xf3, 0x49, 0x0f, 0xae, 0xe9 } },
     { { .form = X86_FORM_WRUSSQ_M64_R64, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x66, 0x48, 0x0f, 0x38, 0xf5, 0x08 } },
@@ -2147,6 +2202,12 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_ENQCMD_R64_M512, .reg = X86_REGISTER_R9, .rm = X86_REGISTER_R10, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0xf2, 0x45, 0x0f, 0x38, 0xf8, 0x0a } },
     { { .form = X86_FORM_UWRMSR_R64_R64, .reg = X86_REGISTER_R9, .rm = X86_REGISTER_R10 }, 6, { 0xf3, 0x45, 0x0f, 0x38, 0xf8, 0xca } },
     { { .form = X86_FORM_PVALIDATE_RAX_ECX_EDX }, 4, { 0xf2, 0x0f, 0x01, 0xff } },
+    // sysretd; enclv; vmgexit (vmmcall's F3); rmpquery; rmpread [rcx], rax
+    { { .form = X86_FORM_SYSRET }, 2, { 0x0f, 0x07 } },
+    { { .form = X86_FORM_ENCLV }, 3, { 0x0f, 0x01, 0xc0 } },
+    { { .form = X86_FORM_VMGEXIT }, 4, { 0xf3, 0x0f, 0x01, 0xd9 } },
+    { { .form = X86_FORM_RMPQUERY_RAX_RCX_RDX }, 4, { 0xf3, 0x0f, 0x01, 0xfd } },
+    { { .form = X86_FORM_RMPREAD_RAX_RCX }, 4, { 0xf2, 0x0f, 0x01, 0xfd } },
     // AMX: ldtilecfg [rax] and sttilecfg [r9] (VEX.B); tilerelease; tilezero tmm7 (ModRM.reg); tileloadd tmm1,
     // [rax+rcx*1] and its SIB operand with none for the index (RSP's: [rax], [rbp] with an 8-bit zero and [r12]) or
     // without a base ([rcx*1+0x10], which GNU as keeps, [rcx*2+0x10] and ds:0x10); tileloadd tmm7, [r9+r10*8-0x80] (X
@@ -2306,8 +2367,8 @@ static const KnownEncoding x86_known_encodings_address32[] = {
     // tileloadd with an index and without (SIB's none); xacquire lock add with 66 and FS (64 67 66 F2 F0); pfadd; call
     // and a far jmp through memory; notrack (3E before 67) and notrack bnd (3E 67 F2); lock cmpxchg16b with GS and REX;
     // crc32 of a word with FS (64 67 66 F2); movdir64b eax; prefetchit0 [eip+0x10] and mov eax, gs:[eip+0x10]; bndcl
-    // bnd1, rax (no memory, no 67); an absolute address in EVEX (a 32-bit displacement); and the longest, 15 bytes:
-    // lock add qword ptr fs:[eax+ecx*4+0x12345678], 0x12345678
+    // bnd1, rax (no memory, no 67); an absolute address in EVEX (a 32-bit displacement); fsave [eax] (9B before 67);
+    // and the longest, 15 bytes: lock add qword ptr fs:[eax+ecx*4+0x12345678], 0x12345678
     { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x67, 0x8b, 0x00 } },
     { { .form = X86_FORM_MOV_R64_RM64, .rm = X86_REGISTER_R9, .index = X86_REGISTER_R10, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = -0x80 }, 6, { 0x67, 0x4b, 0x8b, 0x44, 0xd1, 0x80 } },
     { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RBP, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x67, 0x8b, 0x45, 0x00 } },
@@ -2340,6 +2401,7 @@ static const KnownEncoding x86_known_encodings_address32[] = {
     { { .form = X86_FORM_MOV_R32_RM32 + BUSTER_X86_FORM_GS, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x10 }, 8, { 0x65, 0x67, 0x8b, 0x05, 0x10, 0x00, 0x00, 0x00 } },
     { { .form = X86_FORM_BNDCL_BND_RM64, .reg = 1, .rm = X86_REGISTER_RAX }, 4, { 0xf3, 0x0f, 0x1a, 0xc8 } },
     { { .form = X86_FORM_VADDPS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .mode = BUSTER_X86_MEMORY_ABSOLUTE, .displacement = -0x40 }, 12, { 0x67, 0x62, 0xf1, 0x6c, 0x48, 0x58, 0x0c, 0x25, 0xc0, 0xff, 0xff, 0xff } },
+    { { .form = X86_FORM_FSAVE_M108, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x9b, 0x67, 0xdd, 0x30 } },
     { { .form = X86_FORM_LOCK_ADD_M64_IMM32 + BUSTER_X86_FORM_FS, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = 0x12345678, .immediate = 0x12345678 }, 15, { 0x64, 0x67, 0xf0, 0x48, 0x81, 0x84, 0x88, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12 } },
 };
 
@@ -2378,12 +2440,13 @@ static const KnownEncoding x86_known_encodings_apx[] = {
     { { .form = X86_FORM_MOV_R32_RM32 + BUSTER_X86_FORM_FS, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x64, 0xd5, 0x10, 0x8b, 0x00 } },
     { { .form = X86_FORM_LOCK_ADD_M32_R32, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xf0, 0xd5, 0x10, 0x01, 0x00 } },
     { { .form = X86_FORM_LOCK_ADD_M64_IMM32 + BUSTER_X86_FORM_FS, .rm = 16, .index = 17, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = 0x12345678, .immediate = 0x12345678 }, 15, { 0x64, 0xf0, 0xd5, 0x38, 0x81, 0x84, 0x88, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12 } },
-    // call r16; jmp [r16 + 8]; notrack jmp [r16] (3E before D5); fld dword ptr [r16]; imul r16, r17, 100; shl r16, 1;
-    // movsxd r16, r17d; mov qword ptr [r31 + r30*8 + 0x12345678], 0x12345678
+    // call r16; jmp [r16 + 8]; notrack jmp [r16] (3E before D5); fld dword ptr [r16]; fsave [r16] (9B before D5); imul
+    // r16, r17, 100; shl r16, 1; movsxd r16, r17d; mov qword ptr [r31 + r30*8 + 0x12345678], 0x12345678
     { { .form = X86_FORM_CALL_RM64, .rm = 16 }, 4, { 0xd5, 0x10, 0xff, 0xd0 } },
     { { .form = X86_FORM_JMP_RM64, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8 }, 5, { 0xd5, 0x10, 0xff, 0x60, 0x08 } },
     { { .form = X86_FORM_NOTRACK_JMP_M64, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x3e, 0xd5, 0x10, 0xff, 0x20 } },
     { { .form = X86_FORM_FLD_M32, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0xd5, 0x10, 0xd9, 0x00 } },
+    { { .form = X86_FORM_FSAVE_M108, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x9b, 0xd5, 0x10, 0xdd, 0x30 } },
     { { .form = X86_FORM_IMUL_R64_RM64_IMM8, .reg = 16, .rm = 17, .immediate = 100 }, 5, { 0xd5, 0x58, 0x6b, 0xc1, 0x64 } },
     { { .form = X86_FORM_SHL_RM64_1, .rm = 16 }, 4, { 0xd5, 0x18, 0xd1, 0xe0 } },
     { { .form = X86_FORM_MOVSXD_R64_RM32, .reg = 16, .rm = 17 }, 4, { 0xd5, 0x58, 0x63, 0xc1 } },

@@ -329,8 +329,9 @@ typedef enum X86EncoderError
 // the x87 register ST(0), where the rm operand is ST(i); XMM0 is the variable blends' implicit mask register; IMM8_IMM8
 // is two 8-bit immediates (SSE4a's extrq and insertq), the immediate's low byte first; RM_VVVV_REG is a masked store's
 // memory, mask and source; IS4 is the register in the immediate's bits 7 to 4, of the reg operand's class; and
-// IS4_..._IMM has a 4-bit selector in bits 3 to 0 too (vpermil2ps's and vpermil2pd's). A default flags value in vvvv
-// (BUSTER_X86_OPERAND_DFV) isn't one of them: GNU as writes it after the mnemonic, as {dfv=of, sf, zf, cf}.
+// IS4_..._IMM has a 4-bit selector in bits 3 to 0 too (vpermil2ps's and vpermil2pd's); and MEMORY_RCX is [rcx] (rmpread's
+// implicit memory operand). A default flags value in vvvv (BUSTER_X86_OPERAND_DFV) isn't one of them: GNU as writes it
+// after the mnemonic, as {dfv=of, sf, zf, cf}.
 typedef enum X86Syntax
 {
     X86_SYNTAX_NONE,
@@ -378,11 +379,13 @@ typedef enum X86Syntax
     X86_SYNTAX_VVVV_RM_CL,
     X86_SYNTAX_VVVV_RM_REG_IMM,
     X86_SYNTAX_VVVV_RM_REG_CL,
+    X86_SYNTAX_MEMORY_RCX_ACC,
 } X86Syntax;
 
 // The form table. Each row is X(name, mnemonic, prefixes, opcode bytes, opcode, encoding, immediate bytes, relative
 // bytes, REX.W, reg operand, rm operand, operand bytes, syntax):
-//   - prefixes: up to two legacy prefixes, the first in the low byte (0x66, 0xF266 for 66 F2), or 0;
+//   - prefixes: up to two legacy prefixes, the first in the low byte (0x66, 0xF266 for 66 F2), or 0; FWAIT's 9B, as the
+//     first, makes the waiting form of an x87 control instruction, before any segment override and 67;
 //   - opcode: the opcode's bytes (with any 0F, 0F 38 or 0F 3A escape) as one number, the first byte in its high
 //     byte, and how many there are;
 //   - immediate bytes: 0, 1, 2, 3 (ENTER), 4 or 8 (a 64-bit immediate or address); relative bytes: 0, 1 or 4, for a
@@ -3116,6 +3119,12 @@ typedef enum X86Syntax
     BUSTER_X86_AVX512BW_COMPARE_FORMS(XV, VPTESTNMB, "vptestnmb", 0xf3, 3, 0x0f3826, 0) \
     BUSTER_X86_AVX512BW_COMPARE_FORMS(XV, VPTESTNMW, "vptestnmw", 0xf3, 3, 0x0f3826, 1) \
     BUSTER_X86_AVX512BW_COMPARE_FORMS(XV, VPSHUFBITQMB, "vpshufbitqmb", 0x66, 3, 0x0f388f, 0) \
+    /* AMD's AVX512_BMM: 16x16 bit matrix multiplications accumulated with OR and XOR, at 256 and 512 bits and without an opmask, and the bits of each byte reversed. */ \
+    XV(VBMACOR16X16X16_Y_Y_YM256, "vbmacor16x16x16", EVEX, 0, 2, 0x0680, R, 0, 0, 1, Y, Y, YM, 32, 32, NONE, REG_VVVV_RM) \
+    XV(VBMACOR16X16X16_Z_Z_ZM512, "vbmacor16x16x16", EVEX, 0, 2, 0x0680, R, 0, 0, 2, Z, Z, ZM, 64, 64, NONE, REG_VVVV_RM) \
+    XV(VBMACXOR16X16X16_Y_Y_YM256, "vbmacxor16x16x16", EVEX, 0, 2, 0x0680, R, 0, 1, 1, Y, Y, YM, 32, 32, NONE, REG_VVVV_RM) \
+    XV(VBMACXOR16X16X16_Z_Z_ZM512, "vbmacxor16x16x16", EVEX, 0, 2, 0x0680, R, 0, 1, 2, Z, Z, ZM, 64, 64, NONE, REG_VVVV_RM) \
+    BUSTER_X86_AVX512BW_UNARY_FORMS(XV, VBITREVB, "vbitrevb", 0, 2, 0x0681, 0, ) \
     BUSTER_X86_AVX512_COMPARE_IMMEDIATE_FORMS(XV, VPCMPD, "vpcmpd", 0x0f3a1f, 0, 32) \
     BUSTER_X86_AVX512VL_COMPARE_IMMEDIATE_FORMS(XV, VPCMPD, "vpcmpd", 0x66, 3, 0x0f3a1f, 0, 32) \
     BUSTER_X86_AVX512_COMPARE_IMMEDIATE_FORMS(XV, VPCMPUD, "vpcmpud", 0x0f3a1e, 0, 32) \
@@ -3666,6 +3675,7 @@ typedef enum X86Syntax
     X(PUSH_RM16, "push", 0x66, 1, 0xff, D6, 0, 0, 0, NONE, EW, 2, RM) \
     X(POP_RM16, "pop", 0x66, 1, 0x8f, D0, 0, 0, 0, NONE, EW, 2, RM) \
     X(PUSHW_IMM16, "pushw", 0x66, 1, 0x68, NO, 2, 0, 0, NONE, NONE, 2, IMM) \
+    X(PUSHW_IMM8, "pushw", 0x66, 1, 0x6a, NO, 1, 0, 0, NONE, NONE, 2, IMM) \
     X(CALL_REL32, "call", 0, 1, 0xe8, NO, 0, 4, 0, NONE, NONE, 0, REL) \
     X(CALL_RM64, "call", 0, 1, 0xff, D2, 0, 0, 0, NONE, EQ, 8, RM) \
     X(JMP_REL8, "jmp", 0, 1, 0xeb, NO, 0, 1, 0, NONE, NONE, 0, REL) \
@@ -3739,8 +3749,17 @@ typedef enum X86Syntax
     X(INT3, "int3", 0, 1, 0xcc, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(INT_IMM8, "int", 0, 1, 0xcd, NO, 1, 0, 0, NONE, NONE, 0, IMM) \
     X(UD2, "ud2", 0, 2, 0x0f0b, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    /* The other undefined instructions: ud0 and ud1 without ModRM (as older AMD processors take them, and GNU as without operands) and with it (as Intel's take them), D6's udb (64-bit mode's alone), and int1. */ \
+    X(UD0, "ud0", 0, 2, 0x0fff, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    BUSTER_X86_R_RM_FORMS(X, UD0, "ud0", 0, 0x0fff) \
+    X(UD1, "ud1", 0, 2, 0x0fb9, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    BUSTER_X86_R_RM_FORMS(X, UD1, "ud1", 0, 0x0fb9) \
+    X(UDB, "udb", 0, 1, 0xd6, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(INT1, "int1", 0, 1, 0xf1, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(LEAVE, "leave", 0, 1, 0xc9, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(ENTER, "enter", 0, 1, 0xc8, NO, 3, 0, 0, NONE, NONE, 0, IMM_IMM) \
+    X(LEAVEW, "leavew", 0x66, 1, 0xc9, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(ENTERW, "enterw", 0x66, 1, 0xc8, NO, 3, 0, 0, NONE, NONE, 0, IMM_IMM) \
     X(CBW, "cbw", 0x66, 1, 0x98, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(CWDE, "cwde", 0, 1, 0x98, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(CDQE, "cdqe", 0, 1, 0x98, NO, 0, 0, 1, NONE, NONE, 0, NONE) \
@@ -4088,6 +4107,15 @@ typedef enum X86Syntax
     X(REP_XCRYPTOFB, "rep xcryptofb", 0xf3, 3, 0x0fa7e8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(REP_XSHA1, "rep xsha1", 0xf3, 3, 0x0fa6c8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(REP_XSHA256, "rep xsha256", 0xf3, 3, 0x0fa6d0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    /* Zhaoxin's PadLock and GMI instructions, which GNU as names without their F3 (or sm2's F2). */ \
+    X(XRNG2, "xrng2", 0xf3, 3, 0x0fa7f8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(XSHA384, "xsha384", 0xf3, 3, 0x0fa6d8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(XSHA512, "xsha512", 0xf3, 3, 0x0fa6e0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(MONTMUL2, "montmul2", 0xf3, 3, 0x0fa6f0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(XMODEXP, "xmodexp", 0xf3, 3, 0x0fa6f8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(SM2, "sm2", 0xf2, 3, 0x0fa6c0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(SM3, "sm3", 0xf3, 3, 0x0fa6e8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(SM4, "sm4", 0xf3, 3, 0x0fa7f0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     /* MMX, and the MMX register forms of SSE, SSE2 and SSSE3. */ \
     X(EMMS, "emms", 0, 2, 0x0f77, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(MOVD_MM_RM32, "movd", 0, 2, 0x0f6e, R, 0, 0, 0, MM, ED, 4, REG_RM) \
@@ -4341,12 +4369,14 @@ typedef enum X86Syntax
     X(MONITOR, "monitor", 0, 3, 0x0f01c8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(MWAIT, "mwait", 0, 3, 0x0f01c9, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(RSM, "rsm", 0, 2, 0x0faa, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
-    /* System calls and returns: GNU as names the 16-bit iret iretw, the 32-bit sysexit sysexitd and the 64-bit sysret sysretq. */ \
+    /* System calls and returns: GNU as names the 16-bit iret iretw, the 32-bit sysexit and sysret sysexitd and sysretd, and the 64-bit ones sysexitq and sysretq. */ \
     X(IRET, "iretw", 0x66, 1, 0xcf, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(IRETD, "iretd", 0, 1, 0xcf, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(IRETQ, "iretq", 0, 1, 0xcf, NO, 0, 0, 1, NONE, NONE, 0, NONE) \
     X(SYSENTER, "sysenter", 0, 2, 0x0f34, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(SYSEXIT, "sysexitd", 0, 2, 0x0f35, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(SYSEXITQ, "sysexitq", 0, 2, 0x0f35, NO, 0, 0, 1, NONE, NONE, 0, NONE) \
+    X(SYSRET, "sysretd", 0, 2, 0x0f07, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(SYSRET64, "sysretq", 0, 2, 0x0f07, NO, 0, 0, 1, NONE, NONE, 0, NONE) \
     X(SWAPGS, "swapgs", 0, 3, 0x0f01f8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(ERETS, "erets", 0xf2, 3, 0x0f01ca, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
@@ -4399,9 +4429,10 @@ typedef enum X86Syntax
     X(CLRSSBSY_M64, "clrssbsy", 0xf3, 2, 0x0fae, D6, 0, 0, 0, NONE, M, 8, RM) \
     X(RSTORSSP_M64, "rstorssp", 0xf3, 2, 0x0f01, D5, 0, 0, 0, NONE, M, 8, RM) \
     X(SAVEPREVSSP, "saveprevssp", 0xf3, 3, 0x0f01ea, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
-    /* Virtualization and confidential computing: AMD's SVM (with an address in RAX) and SEV-SNP, Intel's VMX, TDX, SGX and SMX, and the rest. */ \
+    /* Virtualization and confidential computing: AMD's SVM (with an address in RAX), SEV-ES's vmgexit and SEV-SNP (rmpread reads [rcx] into rax), Intel's VMX, TDX, SGX and SMX, and the rest. */ \
     X(VMRUN_RAX, "vmrun", 0, 3, 0x0f01d8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(VMMCALL, "vmmcall", 0, 3, 0x0f01d9, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(VMGEXIT, "vmgexit", 0xf3, 3, 0x0f01d9, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(VMLOAD_RAX, "vmload", 0, 3, 0x0f01da, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(VMSAVE, "vmsave", 0, 3, 0x0f01db, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(STGI, "stgi", 0, 3, 0x0f01dc, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
@@ -4412,6 +4443,8 @@ typedef enum X86Syntax
     X(PVALIDATE_RAX_ECX_EDX, "pvalidate", 0xf2, 3, 0x0f01ff, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(RMPADJUST_RAX_RCX_RDX, "rmpadjust", 0xf3, 3, 0x0f01fe, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(RMPUPDATE_RAX_RCX, "rmpupdate", 0xf2, 3, 0x0f01fe, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(RMPQUERY_RAX_RCX_RDX, "rmpquery", 0xf3, 3, 0x0f01fd, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(RMPREAD_RAX_RCX, "rmpread", 0xf2, 3, 0x0f01fd, NO, 0, 0, 0, NONE, NONE, 8, MEMORY_RCX_ACC) \
     X(VMCALL, "vmcall", 0, 3, 0x0f01c1, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(VMLAUNCH, "vmlaunch", 0, 3, 0x0f01c2, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(VMRESUME, "vmresume", 0, 3, 0x0f01c3, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
@@ -4431,6 +4464,7 @@ typedef enum X86Syntax
     X(SEAMCALL, "seamcall", 0x66, 3, 0x0f01cf, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(ENCLS, "encls", 0, 3, 0x0f01cf, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(ENCLU, "enclu", 0, 3, 0x0f01d7, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(ENCLV, "enclv", 0, 3, 0x0f01c0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(GETSEC, "getsec", 0, 2, 0x0f37, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(PCONFIG, "pconfig", 0, 3, 0x0f01c5, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(PBNDKB, "pbndkb", 0, 3, 0x0f01c7, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
@@ -4473,6 +4507,8 @@ typedef enum X86Syntax
     /* A 64-byte memory operand, which GNU as takes without a size. */ \
     X(MOVDIR64B_R64_M512, "movdir64b", 0x66, 3, 0x0f38f8, R, 0, 0, 0, GQ, M, 0, REG_RM) \
     X(XBEGIN_REL32, "xbegin", 0, 2, 0xc7f8, NO, 0, 4, 0, NONE, NONE, 0, REL) \
+    /* A 16-bit fallback address (66 and a rel16), as the 16-bit near branches have. */ \
+    X(XBEGIN_REL16, "data16 xbegin", 0x66, 2, 0xc7f8, NO, 0, 2, 0, NONE, NONE, 0, REL) \
     X(XABORT_IMM8, "xabort", 0, 2, 0xc6f8, NO, 1, 0, 0, NONE, NONE, 0, IMM) \
     X(XEND, "xend", 0, 3, 0x0f01d5, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(XTEST, "xtest", 0, 3, 0x0f01d6, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
@@ -4571,6 +4607,7 @@ typedef enum X86Syntax
     X(FUCOMP_ST, "fucomp", 0, 1, 0xdd, D5, 0, 0, 0, NONE, ST, 0, RM) \
     BUSTER_X86_X87_FORM(X, FUCOMPP, "fucompp", 0xdae9) \
     X(FFREE_ST, "ffree", 0, 1, 0xdd, D0, 0, 0, 0, NONE, ST, 0, RM) \
+    X(FFREEP_ST, "ffreep", 0, 1, 0xdf, D0, 0, 0, 0, NONE, ST, 0, RM) \
     X(FLDCW_M16, "fldcw", 0, 1, 0xd9, D5, 0, 0, 0, NONE, M, 2, RM) \
     X(FNSTCW_M16, "fnstcw", 0, 1, 0xd9, D7, 0, 0, 0, NONE, M, 2, RM) \
     X(FNSTSW_M16, "fnstsw", 0, 1, 0xdd, D7, 0, 0, 0, NONE, M, 2, RM) \
@@ -4585,7 +4622,25 @@ typedef enum X86Syntax
     X(FNSAVEW_M94, "fnsavew", 0x66, 1, 0xdd, D6, 0, 0, 0, NONE, M, 94, RM) \
     BUSTER_X86_X87_FORM(X, FNINIT, "fninit", 0xdbe3) \
     BUSTER_X86_X87_FORM(X, FNCLEX, "fnclex", 0xdbe2) \
+    /* The 8087's and 287's control instructions (which later processors take as NOPs, but the 287XL's frstpm). */ \
+    BUSTER_X86_X87_FORM(X, FNENI, "fneni", 0xdbe0) \
+    BUSTER_X86_X87_FORM(X, FNDISI, "fndisi", 0xdbe1) \
+    BUSTER_X86_X87_FORM(X, FNSETPM, "fnsetpm", 0xdbe4) \
+    BUSTER_X86_X87_FORM(X, FRSTPM, "frstpm", 0xdbe5) \
     X(FWAIT, "fwait", 0, 1, 0x9b, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    /* The waiting forms of the control instructions: fwait and the no-wait form as one instruction, whose 9B comes first (before a segment override and a 67). */ \
+    X(FINIT, "finit", 0x9b, 2, 0xdbe3, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(FCLEX, "fclex", 0x9b, 2, 0xdbe2, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(FENI, "feni", 0x9b, 2, 0xdbe0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(FDISI, "fdisi", 0x9b, 2, 0xdbe1, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(FSETPM, "fsetpm", 0x9b, 2, 0xdbe4, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(FSTCW_M16, "fstcw", 0x9b, 1, 0xd9, D7, 0, 0, 0, NONE, M, 2, RM) \
+    X(FSTSW_M16, "fstsw", 0x9b, 1, 0xdd, D7, 0, 0, 0, NONE, M, 2, RM) \
+    X(FSTSW_AX, "fstsw", 0x9b, 2, 0xdfe0, NO, 0, 0, 0, NONE, NONE, 2, ACC) \
+    X(FSTENV_M28, "fstenv", 0x9b, 1, 0xd9, D6, 0, 0, 0, NONE, M, 28, RM) \
+    X(FSTENVW_M14, "fstenvw", 0x669b, 1, 0xd9, D6, 0, 0, 0, NONE, M, 14, RM) \
+    X(FSAVE_M108, "fsave", 0x9b, 1, 0xdd, D6, 0, 0, 0, NONE, M, 108, RM) \
+    X(FSAVEW_M94, "fsavew", 0x669b, 1, 0xdd, D6, 0, 0, 0, NONE, M, 94, RM) \
     BUSTER_X86_X87_FORM(X, FNOP, "fnop", 0xd9d0) \
     BUSTER_X86_X87_FORM(X, FDECSTP, "fdecstp", 0xd9f6) \
     BUSTER_X86_X87_FORM(X, FINCSTP, "fincstp", 0xd9f7) \
@@ -5128,6 +5183,17 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     const bool sib = (form->rm & BUSTER_X86_OPERAND_SIB) != 0;
     memset(template->bytes, 0, sizeof(template->bytes));
     memset(template->layout, BUSTER_X86_LAYOUT_ABSENT, sizeof(template->layout));
+    // FWAIT's 9B first (a waiting x87 control instruction is FWAIT and the no-wait form), then a segment override.
+    uint32_t prefixes = form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY ? form->prefixes : 0;
+    if ((prefixes & 0xff) == 0x9b)
+    {
+        template->bytes[position] = 0x9b;
+        template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
+        position += 1;
+        static_length += 1;
+        last_static = position;
+        prefixes >>= 8;
+    }
     if (segment != 0 && memory)
     {
         template->bytes[position] = (uint8_t)(0x63 + segment);
@@ -5138,7 +5204,6 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     }
     // NOTRACK's 3E, which GNU as puts with the segment overrides, and then a 32-bit address's 67, present with a
     // memory operand.
-    uint32_t prefixes = form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY ? form->prefixes : 0;
     while ((prefixes & 0xff) == 0x3e)
     {
         template->bytes[position] = 0x3e;
@@ -5715,14 +5780,20 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out, X86E
     const bool b = (!memory || base) && (rm & 8);
     uint32_t length = 0;
 
-    // A segment override comes first, as GNU as puts it.
+    // FWAIT's 9B comes first, then a segment override, as GNU as puts them.
+    uint32_t prefixes = form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY ? form->prefixes : 0;
+    if ((prefixes & 0xff) == 0x9b)
+    {
+        out[length] = 0x9b;
+        length += 1;
+        prefixes >>= 8;
+    }
     if (segment != 0)
     {
         out[length] = (uint8_t)(0x63 + segment);
         length += 1;
     }
     // Then NOTRACK's 3E, another segment override for GNU as, and a 32-bit address's 67.
-    uint32_t prefixes = form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY ? form->prefixes : 0;
     while ((prefixes & 0xff) == 0x3e)
     {
         out[length] = 0x3e;
