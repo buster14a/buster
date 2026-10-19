@@ -1148,9 +1148,9 @@ static bool executable_test_pause(ExecutableTestLink* test, SymbolId* start)
     return result && *start != 0 && executable_test_code(test, 16, &code, 1, *start) != 0 && link_check(&test->link) == LINK_ERROR_NONE;
 }
 
-// A program that exits 0, with one more fixup: an ABS32 in a table to _start plus `addend`, or (without an addend) a
-// call to `undefined`, defined nowhere.
-static bool executable_test_failing(ExecutableTestLink* test, SymbolId* start, int64_t addend, bool undefined)
+// A program that exits 0, with one more fixup: one of `kind` (ABS32 or PC32) in a table after the code, to _start plus
+// `addend`, and with `undefined` a call to "nowhere", defined nowhere.
+static bool executable_test_failing(ExecutableTestLink* test, SymbolId* start, uint8_t kind, int64_t addend, bool undefined)
 {
     bool result = executable_test_link_begin(test, BUSTER_EXECUTABLE_PAGE_BYTES);
     Link* link = &test->link;
@@ -1166,7 +1166,7 @@ static bool executable_test_failing(ExecutableTestLink* test, SymbolId* start, i
     executable_test_exit(&code, 0);
     result = result && *start != 0 && executable_test_code(test, 32, &code, 1, *start) != 0;
     const AtomId table = result ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 2, 4, 0, 0) : 0;
-    result = result && table != 0 && link_add_fixup(link, table, 0, BUSTER_LINK_FIXUP_ABS32, *start, addend) != 0;
+    result = result && table != 0 && link_add_fixup(link, table, 0, kind, *start, addend) != 0;
     return result && link_check(link) == LINK_ERROR_NONE;
 }
 
@@ -1290,22 +1290,29 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         const String8 kept = executable_test_read(scratch.arena, path.pointer);
         ExecutableTestLink failing;
         SymbolId failing_start = 0;
-        bool built = executable_test_failing(&failing, &failing_start, 0, true);
+        bool built = executable_test_failing(&failing, &failing_start, BUSTER_LINK_FIXUP_ABS32, 0, true);
         written = built && executable_test_write(&failing.link, failing_start, path, 1, &result, 0, 0);
         executable_test_expect(&tally, built && !written && result.error == EXECUTABLE_ERROR_UNDEFINED && executable_named(&failing.link, result.symbol, "nowhere"),
                                "an undefined symbol, named", 0);
         executable_test_expect(&tally, built && executable_test_same_file(scratch.arena, path.pointer, kept), "the output left alone", 0);
         executable_test_link_end(&failing);
         const int64_t below_zero = -(int64_t)BUSTER_EXECUTABLE_BASE - 0x10000;
-        built = executable_test_failing(&failing, &failing_start, below_zero, false);
+        built = executable_test_failing(&failing, &failing_start, BUSTER_LINK_FIXUP_ABS32, below_zero, false);
         written = built && executable_test_write(&failing.link, failing_start, path, 3, &result, 0, 0);
         executable_test_expect(&tally, built && !written && result.error == EXECUTABLE_ERROR_FIXUP && result.fixup != 0, "an ABS32 below 0", 0);
         executable_test_expect(&tally, built && access(path.pointer, F_OK) != 0, "the output removed", 0);
         executable_test_link_end(&failing);
         // The same fixup, fitting: the program runs.
-        built = executable_test_failing(&failing, &failing_start, 0, false);
+        built = executable_test_failing(&failing, &failing_start, BUSTER_LINK_FIXUP_ABS32, 0, false);
         written = built && executable_test_write(&failing.link, failing_start, path, 1, &result, 0, 0);
         executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_CREATED && executable_test_runs(path.pointer, (const uint8_t*)"", 0), "the fitting one", 0);
+        executable_test_link_end(&failing);
+        // A PC32 from the table back to _start with INT32_MIN for its addend: S - P is negative, so S + A - P is below
+        // int32's range, which only the checked path sees, since the addend's magnitude rules the fast path out.
+        built = executable_test_failing(&failing, &failing_start, BUSTER_LINK_FIXUP_PC32, INT32_MIN, false);
+        written = built && executable_test_write(&failing.link, failing_start, path, 2, &result, 0, 0);
+        executable_test_expect(&tally, built && !written && result.error == EXECUTABLE_ERROR_FIXUP && result.fixup != 0 && access(path.pointer, F_OK) != 0,
+                               "a PC32 outside int32, and the output removed", 0);
         executable_test_link_end(&failing);
     }
     if (!directory->keep)

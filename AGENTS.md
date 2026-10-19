@@ -410,7 +410,8 @@ what its model predicts.
   when it has another link (which keeps its bytes), when it is a symbolic link,
   and when a process runs it (which runs on). A link with an undefined symbol
   fails, naming it, and leaves the output alone; one whose `ABS32` falls below
-  0 removes it;
+  0 removes it, and so does one whose `PC32` leaves int32's range, which only
+  the checked path sees;
 - the patch kernel: the fast path against the checked one, on random fixups
   of every kind with wide addends, at every count from 0 to 199 from four
   starts, with the kind column ending at a `PROT_NONE` page.
