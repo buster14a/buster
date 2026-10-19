@@ -60,7 +60,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0x6e73cb6d5ea8187bull
+#define BUSTER_X86_TEST_DIGEST 0x3c07bfee3198039bull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -104,7 +104,7 @@ static uint8_t x86_random_register(uint64_t* state, uint8_t operand, uint8_t fam
     {
         result |= 16;
     }
-    else if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST)
+    else if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST || class == BUSTER_X86_CLASS_MMX)
     {
         result &= 7;
     }
@@ -176,9 +176,10 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
     const bool legacy = form->family == BUSTER_X86_FAMILY_LEGACY;
     bool result = false;
     // MOVQ (and VEX's VMOVQ) between an XMM register and memory is F3 0F 7E or 66 0F D6, not the W1 forms of MOVD; and
-    // EVEX's the other way around.
+    // EVEX's the other way around. Between an MMX register and memory, it's 0F 6F or 0F 7F.
     if (!register_direct && (row == X86_FORM_MOVQ_X_RM64 || row == X86_FORM_MOVQ_RM64_X || row == X86_FORM_VMOVQ_X_RM64 || row == X86_FORM_VMOVQ_RM64_X ||
-                             row == X86_FORM_VMOVQ_X_XM64_EVEX || row == X86_FORM_VMOVQ_XM64_X_EVEX))
+                             row == X86_FORM_VMOVQ_X_XM64_EVEX || row == X86_FORM_VMOVQ_XM64_X_EVEX || row == X86_FORM_MOVQ_MM_RM64 ||
+                             row == X86_FORM_MOVQ_RM64_MM))
     {
         result = true;
     }
@@ -384,6 +385,7 @@ static const char* const x86_zmm_names[32] = { "zmm0",  "zmm1",  "zmm2",  "zmm3"
                                            "zmm22", "zmm23", "zmm24", "zmm25", "zmm26", "zmm27", "zmm28", "zmm29", "zmm30", "zmm31" };
 static const char* const x86_opmask_names[8] = { "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7" };
 static const char* const x86_st_names[8] = { "st(0)", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)" };
+static const char* const x86_mmx_names[8] = { "mm0", "mm1", "mm2", "mm3", "mm4", "mm5", "mm6", "mm7" };
 // The rounding modes (BUSTER_X86_DECORATION_ROUNDING), as GNU as writes them.
 static const char* const x86_rounding_names[4] = { "{rn-sae}", "{rd-sae}", "{ru-sae}", "{rz-sae}" };
 
@@ -403,6 +405,7 @@ static const char* x86_register_name(uint8_t value, uint8_t operand)
         case BUSTER_X86_CLASS_OPMASK: result = x86_opmask_names[number & 7]; break;
         case BUSTER_X86_CLASS_OPMASK_PAIR: result = x86_opmask_names[number & 7]; break;
         case BUSTER_X86_CLASS_ST: result = x86_st_names[number & 7]; break;
+        case BUSTER_X86_CLASS_MMX: result = x86_mmx_names[number & 7]; break;
         default: result = x86_xmm_names[number]; break;
     }
     return result;
@@ -1211,6 +1214,39 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_VSM3MSG1_X_X_XM128, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xc4, 0xe2, 0x68, 0xda, 0x08 } },
     { { .form = X86_FORM_VSM3RNDS2_X_X_XM128_IMM8, .reg = 1, .vvvv = 2, .rm = 3, .immediate = 5 }, 6, { 0xc4, 0xe3, 0x69, 0xde, 0xcb, 0x05 } },
     { { .form = X86_FORM_VSM4RNDS4_Y_Y_YM256, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0xc4, 0xe2, 0x6f, 0xda, 0xcb } },
+    // MMX: emms; movd mm1, eax and movd r9d, mm1 (REX.B for the general register); movq mm0, rax (REX.W); movq mm1, mm2
+    // (0F 6F) and {store} movq mm1, mm2 (0F 7F, ModRM.rm the destination); movq qword ptr [rax], mm1; paddb mm1, qword
+    // ptr [r9] (REX.B for the base); paddq mm1, qword ptr fs:[rax]; psllw mm1, 3 (/6); psrad mm7, mm0; punpcklbw mm1,
+    // dword ptr [rax] (32 bits); pshufw mm1, mm2, 3; pinsrw mm1, word ptr [rax], 3; pextrw r9d, mm1, 3 (REX.R);
+    // pmovmskb eax, mm1; maskmovq mm1, mm2; and movntq qword ptr [rax], mm1
+    { { .form = X86_FORM_EMMS }, 2, { 0x0f, 0x77 } },
+    { { .form = X86_FORM_MOVD_MM_RM32, .reg = 1, .rm = X86_REGISTER_RAX }, 3, { 0x0f, 0x6e, 0xc8 } },
+    { { .form = X86_FORM_MOVD_RM32_MM, .reg = 1, .rm = X86_REGISTER_R9 }, 4, { 0x41, 0x0f, 0x7e, 0xc9 } },
+    { { .form = X86_FORM_MOVQ_MM_RM64, .reg = 0, .rm = X86_REGISTER_RAX }, 4, { 0x48, 0x0f, 0x6e, 0xc0 } },
+    { { .form = X86_FORM_MOVQ_MM_MM, .reg = 1, .rm = 2 }, 3, { 0x0f, 0x6f, 0xca } },
+    { { .form = X86_FORM_MOVQ_MM_MM_STORE, .reg = 2, .rm = 1 }, 3, { 0x0f, 0x7f, 0xd1 } },
+    { { .form = X86_FORM_MOVQ_M64_MM, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x0f, 0x7f, 0x08 } },
+    { { .form = X86_FORM_PADDB_MM_M64, .reg = 1, .rm = X86_REGISTER_R9, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x41, 0x0f, 0xfc, 0x09 } },
+    { { .form = X86_FORM_PADDQ_MM_M64 + BUSTER_X86_FORM_FS, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x64, 0x0f, 0xd4, 0x08 } },
+    { { .form = X86_FORM_PSLLW_MM_IMM8, .rm = 1, .immediate = 3 }, 4, { 0x0f, 0x71, 0xf1, 0x03 } },
+    { { .form = X86_FORM_PSRAD_MM_MM, .reg = 7, .rm = 0 }, 3, { 0x0f, 0xe2, 0xf8 } },
+    { { .form = X86_FORM_PUNPCKLBW_MM_M32, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x0f, 0x60, 0x08 } },
+    { { .form = X86_FORM_PSHUFW_MM_MM_IMM8, .reg = 1, .rm = 2, .immediate = 3 }, 4, { 0x0f, 0x70, 0xca, 0x03 } },
+    { { .form = X86_FORM_PINSRW_MM_RM32_IMM8, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 }, 4, { 0x0f, 0xc4, 0x08, 0x03 } },
+    { { .form = X86_FORM_PEXTRW_R32_MM_IMM8, .reg = X86_REGISTER_R9, .rm = 1, .immediate = 3 }, 5, { 0x44, 0x0f, 0xc5, 0xc9, 0x03 } },
+    { { .form = X86_FORM_PMOVMSKB_R32_MM, .reg = X86_REGISTER_RAX, .rm = 1 }, 3, { 0x0f, 0xd7, 0xc1 } },
+    { { .form = X86_FORM_MASKMOVQ_MM_MM, .reg = 1, .rm = 2 }, 3, { 0x0f, 0xf7, 0xca } },
+    { { .form = X86_FORM_MOVNTQ_M64_MM, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x0f, 0xe7, 0x08 } },
+    // MMX's SSSE3 forms and conversions: pshufb mm1, mm2 (0F 38); palignr mm1, qword ptr [rax], 3 (0F 3A); cvtpi2ps
+    // xmm9, mm2 (REX.R for the XMM register); cvttps2pi mm1, xmm9 (REX.B); cvtpd2pi mm1, xmmword ptr [rax] (66);
+    // movdq2q mm1, xmm9 (F2, REX.B); and movq2dq xmm9, mm2 (F3, REX.R)
+    { { .form = X86_FORM_PSHUFB_MM_MM, .reg = 1, .rm = 2 }, 4, { 0x0f, 0x38, 0x00, 0xca } },
+    { { .form = X86_FORM_PALIGNR_MM_M64_IMM8, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 }, 5, { 0x0f, 0x3a, 0x0f, 0x08, 0x03 } },
+    { { .form = X86_FORM_CVTPI2PS_X_MM, .reg = 9, .rm = 2 }, 4, { 0x44, 0x0f, 0x2a, 0xca } },
+    { { .form = X86_FORM_CVTTPS2PI_MM_XM64, .reg = 1, .rm = 9 }, 4, { 0x41, 0x0f, 0x2c, 0xc9 } },
+    { { .form = X86_FORM_CVTPD2PI_MM_XM128, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x66, 0x0f, 0x2d, 0x08 } },
+    { { .form = X86_FORM_MOVDQ2Q_MM_X, .reg = 1, .rm = 9 }, 5, { 0xf2, 0x41, 0x0f, 0xd6, 0xc9 } },
+    { { .form = X86_FORM_MOVQ2DQ_X_MM, .reg = 9, .rm = 2 }, 5, { 0xf3, 0x44, 0x0f, 0xd6, 0xca } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.
@@ -1470,7 +1506,7 @@ static uint8_t x86_past_last_register(uint8_t operand, uint8_t family)
 {
     const uint8_t class = operand & BUSTER_X86_OPERAND_CLASS;
     uint8_t result = 0x10;
-    if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST)
+    if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST || class == BUSTER_X86_CLASS_MMX)
     {
         result = 0x08;
     }
