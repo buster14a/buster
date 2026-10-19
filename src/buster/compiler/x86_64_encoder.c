@@ -12,7 +12,9 @@
 // BUSTER_X86_ENCODER_CAPACITY(count) bytes; x86_encode writes nothing past that, but may write past the instructions'
 // bytes (its 64-byte stores). Besides the machine code, x86_encode can store each instruction's offset, and the end of
 // each instruction marked with BUSTER_X86_FORM_FIXUP (one with a symbolic operand), from which x86_fixup_distance
-// locates the fields a fixup patches without decoding the machine code again.
+// locates the fields a fixup patches without decoding the machine code again. x86_encoder_initialize_address32,
+// x86_encode_address32, x86_encode_scalar_address32 and x86_validate_address32 are the same for 32-bit addresses (a
+// 67 on every memory operand), with templates of their own, so that the 64-bit loop does nothing for them.
 //
 // How x86_encode works, a group of BUSTER_X86_GROUP_INSTRUCTIONS (16) instructions at a time:
 //   I.   Load. Four instructions fill a ZMM register. Each one's form has a 32-byte template (X86Template, built from
@@ -42,14 +44,17 @@
 //     table, BUSTER_X86_VECTOR_FORMS (the VEX and EVEX forms) and BUSTER_X86_FORMS (the form table), X86Form, the
 //     segment overrides (BUSTER_X86_FORM_FS and BUSTER_X86_FORM_GS), the fixup flag (BUSTER_X86_FORM_FIXUP),
 //     X86FixupField and x86_fixup_distance, and the entry points' prototypes.
-//   - Templates: the canonical slot (BUSTER_X86_CANONICAL_*), the layout, checks and flags constants, X86Template,
-//     build_template and x86_encoder_initialize.
-//   - Validation: x86_instruction_is_valid and x86_validate.
-//   - The scalar encoder: encode_one and x86_encode_scalar.
+//   - Templates: the canonical slot (BUSTER_X86_CANONICAL_*), the layout, checks and flags constants, X86Template, the
+//     two tables (x86_templates, and x86_templates_address32 for 32-bit addresses), build_template,
+//     x86_encoder_initialize and x86_encoder_initialize_address32.
+//   - Validation: x86_form_lacks_address32_template, instruction_is_valid (x86_instruction_is_valid and
+//     x86_instruction_is_valid_address32) and x86_validate (and x86_validate_address32).
+//   - The scalar encoder: encode_one, and x86_encode_scalar and x86_encode_scalar_address32.
 //   - The vectorized encoder: X86Gather, X86Store and X86FixupStore (the variants the benchmark compares), X86Fields,
 //     the addressing mode tables (x86_mode_fields, x86_mode_constants, x86_mode_presence), compute_fields (II), the
 //     running sum's tables (x86_length_bytes and the others), encode_group (I-III), encode_batches (the loop, with the
-//     instructions per iteration as a parameter), the x86_encode_N instantiations and x86_encode.
+//     instructions per iteration and the address size as parameters), the x86_encode_N instantiations (and
+//     x86_encode_64_address32), x86_encode and x86_encode_address32.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -4347,10 +4352,10 @@ static __attribute__((unused)) int64_t x86_encode_scalar(const X86Instruction* i
 static __attribute__((unused)) uint64_t x86_validate(const X86Instruction* instructions, uint64_t count);
 
 // The same three for 32-bit addresses (the x32 ABI's), with templates of their own, which x86_encoder_initialize_address32
-// builds (and the encoders require): each memory operand has a 67, and its base and index are 32-bit registers (and RIP
-// is EIP). Instructions without a memory operand encode as for 64-bit addresses. x86_validate_address32 rejects too
-// MPX's instructions with a memory operand, which are #UD with 67 in 64-bit mode, and the forms whose template has no
-// room for the 67 (see x86_form_lacks_address32_template).
+// builds (and all three require, validation too): each memory operand has a 67, and its base and index are 32-bit
+// registers (and RIP is EIP). Instructions without a memory operand encode as for 64-bit addresses.
+// x86_validate_address32 rejects too MPX's instructions with a memory operand, which are #UD with 67 in 64-bit mode,
+// and the forms whose template has no room for the 67 (see x86_form_lacks_address32_template).
 static __attribute__((unused)) bool x86_encoder_initialize_address32(void);
 static __attribute__((unused)) int64_t x86_encode_address32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity,
                                                             uint32_t* offsets, uint32_t* fixup_ends);
@@ -4857,7 +4862,8 @@ static bool x86_form_has_is4(const X86FormDescription* form)
 // x86_encoder_initialize_address32 marks as taking no operand: those whose longest instruction would be 16 bytes, past
 // x86's 15 (with a segment override, a 32-bit displacement and an imm32: HLE's arithmetic, TBM's bextr and LWP's), or
 // whose own bytes would run past the template's 8 (with a segment override, HLE's bit tests of a word by an
-// immediate). Requires x86_encoder_initialize_address32.
+// immediate). A segment override's form without a memory operand in its row takes no operand either, so only a
+// memory operand's form asks. Requires x86_encoder_initialize_address32.
 static bool x86_form_lacks_address32_template(uint32_t form)
 {
     uint32_t flags;
