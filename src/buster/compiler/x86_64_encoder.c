@@ -5371,39 +5371,8 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
     const X86Fields fields = compute_fields(operands, displacement, extension, flags, checks);
     *invalid = _mm512_or_epi32(*invalid, fields.invalid);
 
-    if (offsets != 0 || fixup_ends != 0)
-    {
-        // Each instruction's end in the group, the running sum of the lengths (at most 240): as bytes in instruction
-        // order (a vpermb), a multiplication by 0x0101010101010101 sums each qword's bytes up to each one (eight lengths
-        // of at most 15, so nothing carries), and a vpshufb adds the first qword's total to the second's. About 12 cycles
-        // on Zen 5, where the shifts and adds of dwords that this replaced took about 30 and held up the retirement of
-        // the group's Phase III: the reorder buffer was full 17% of the time with offsets and 27% with fixup ends.
-        const __m512i lengths = _mm512_permutexvar_epi8(_mm512_load_si512(x86_length_bytes), fields.length);
-        const __m512i qword_sums = _mm512_mullo_epi64(lengths, _mm512_set1_epi64(0x0101010101010101ll));
-        const __m512i ends = _mm512_add_epi8(qword_sums, _mm512_shuffle_epi8(qword_sums, _mm512_load_si512(x86_first_qword_total)));
-        const __m512i group_start = BUSTER_X86_SPLAT(out - output);
-        if (offsets != 0)
-        {
-            const __m512i starts = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_sub_epi8(ends, lengths)));
-            _mm512_mask_storeu_epi32(offsets, (__mmask16)offset_lanes, _mm512_add_epi32(starts, group_start));
-        }
-        if (fixup_ends != 0)
-        {
-            // The marked instructions' ends, compressed, by the fixup flags of the forms, which the records had long
-            // before the lengths. The zeroed copy's padding isn't marked.
-            const __mmask16 marked = (__mmask16)_mm512_movepi8_mask(_mm512_permutexvar_epi8(_mm512_load_si512(x86_form_high_bytes), extension));
-            const __m512i marked_ends = _mm512_add_epi32(_mm512_cvtepu8_epi32(_mm512_castsi512_si128(ends)), group_start);
-            if (fixup_store == X86_FIXUP_STORE_COMPRESS)
-            {
-                _mm512_mask_compressstoreu_epi32(*fixup_ends, marked, marked_ends);
-            }
-            else
-            {
-                _mm512_storeu_si512(*fixup_ends, _mm512_maskz_compress_epi32(marked, marked_ends));
-            }
-            *fixup_ends += __builtin_popcount(marked);
-        }
-    }
+    // Where the group's machine code starts, for its offsets and fixup ends.
+    uint8_t* const group_out = out;
 
     // III. Each quad's canonical slots: the immediate, the displacement, canonical bytes 8-11 and the prefix bytes
     // 12-15. And its presence bits, in every dword of each slot, for vpshufbitqmb to pick from by the layout: an
@@ -5445,6 +5414,46 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
             _mm512_mask_storeu_epi8(out, _cvtu64_mask64(_bzhi_u64(~0ull, length)), _mm512_maskz_compress_epi8(present, data));
         }
         out += length;
+    }
+
+    if (offsets != 0 || fixup_ends != 0)
+    {
+        // After Phase III, so that these wait for the lengths behind its operations rather than ahead of them in the FP
+        // scheduler. Each instruction's end in the group, the running sum of the lengths (at most 240): as bytes in
+        // instruction order (a vpermb), a multiplication by 0x0101010101010101 sums each qword's bytes up to each one
+        // (eight lengths of at most 15, so nothing carries), and a vpshufb adds the first qword's total to the second's.
+        // About 12 cycles on Zen 5, where the shifts and adds of dwords that this replaced took about 30 and held up the
+        // retirement of the group's Phase III: the reorder buffer was full 17% of the time with offsets and 27% with
+        // fixup ends.
+        const __m512i lengths = _mm512_permutexvar_epi8(_mm512_load_si512(x86_length_bytes), fields.length);
+        const __m512i qword_sums = _mm512_mullo_epi64(lengths, _mm512_set1_epi64(0x0101010101010101ll));
+        const __m512i ends = _mm512_add_epi8(qword_sums, _mm512_shuffle_epi8(qword_sums, _mm512_load_si512(x86_first_qword_total)));
+        // The group's offset in the output, broadcast from memory: a load, where a broadcast from a general register
+        // takes FP1 or FP2 too.
+        uint32_t group_offset = (uint32_t)(group_out - output);
+        __asm__("" : "+m"(group_offset));
+        const __m512i group_start = BUSTER_X86_SPLAT(group_offset);
+        if (offsets != 0)
+        {
+            const __m512i starts = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_sub_epi8(ends, lengths)));
+            _mm512_mask_storeu_epi32(offsets, (__mmask16)offset_lanes, _mm512_add_epi32(starts, group_start));
+        }
+        if (fixup_ends != 0)
+        {
+            // The marked instructions' ends, compressed, by the fixup flags of the forms, which the records had long
+            // before the lengths. The zeroed copy's padding isn't marked.
+            const __mmask16 marked = (__mmask16)_mm512_movepi8_mask(_mm512_permutexvar_epi8(_mm512_load_si512(x86_form_high_bytes), extension));
+            const __m512i marked_ends = _mm512_add_epi32(_mm512_cvtepu8_epi32(_mm512_castsi512_si128(ends)), group_start);
+            if (fixup_store == X86_FIXUP_STORE_COMPRESS)
+            {
+                _mm512_mask_compressstoreu_epi32(*fixup_ends, marked, marked_ends);
+            }
+            else
+            {
+                _mm512_storeu_si512(*fixup_ends, _mm512_maskz_compress_epi32(marked, marked_ends));
+            }
+            *fixup_ends += __builtin_popcount(marked);
+        }
     }
     return out;
 }
