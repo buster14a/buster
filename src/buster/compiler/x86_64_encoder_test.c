@@ -59,7 +59,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0xc3614ad6c5518e94ull
+#define BUSTER_X86_TEST_DIGEST 0xd800f65c2819889cull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -1026,6 +1026,58 @@ static const KnownEncoding x86_known_encodings[] = {
       8,
       { 0x62, 0xf1, 0x75, 0x08, 0x72, 0x60, 0x04, 0x03 } },
     { { .form = X86_FORM_VPSRAQ_Y_Y_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 6, { 0x62, 0xf1, 0xed, 0x28, 0xe2, 0xcb } },
+    // AVX512BW: vpaddusb xmm17{k1}{z}, xmm18, xmm19; vpmulhrsw zmm1, zmm2, zmmword ptr [rax+0x40] (N 64); vpcmpgtw
+    // k1{k2}, xmm2, xmmword ptr [rax+0x40] (N 16); vpcmpuw k1, ymm2, ymm3, 5; vdbpsadbw xmm1, xmm2, xmm3, 5; vpshufhw
+    // xmm1{k1}, xmm2, 5; vpabsw ymm1, ymm2; vpsraw zmm1{k1}, zmmword ptr [rax+0x40], 3 (into vvvv); vpslldq xmm1, xmm2,
+    // 3 (without an opmask); vpsllw ymm1, ymm2, xmm3; vpmovwb qword ptr [rax+0x40], xmm1 (N 8); vpmovm2w xmm1, k1 and
+    // vpmovw2m k1, ymm1; vpbroadcastw zmm1, eax; vpextrb byte ptr [rax+0x40], xmm17, 3 (N 1); vpextrw eax, xmm1, 3 (0F
+    // C5); and vpinsrw xmm1, xmm2, word ptr [rax+0x40], 3 (N 2)
+    { { .form = X86_FORM_VPADDUSB_X_X_XM128_EVEX, .reg = 17, .vvvv = 18, .rm = 19, .decorations = 1 | BUSTER_X86_DECORATION_ZEROING }, 6, { 0x62, 0xa1, 0x6d, 0x81, 0xdc, 0xcb } },
+    { { .form = X86_FORM_VPMULHRSW_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40 }, 7, { 0x62, 0xf2, 0x6d, 0x48, 0x0b, 0x48, 0x01 } },
+    { { .form = X86_FORM_VPCMPGTW_K_X_XM128, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40, .decorations = 2 },
+      7,
+      { 0x62, 0xf1, 0x6d, 0x0a, 0x65, 0x48, 0x04 } },
+    { { .form = X86_FORM_VPCMPUW_K_Y_YM256_IMM8, .reg = 1, .vvvv = 2, .rm = 3, .immediate = 5 }, 7, { 0x62, 0xf3, 0xed, 0x28, 0x3e, 0xcb, 0x05 } },
+    { { .form = X86_FORM_VDBPSADBW_X_X_XM128_IMM8, .reg = 1, .vvvv = 2, .rm = 3, .immediate = 5 }, 7, { 0x62, 0xf3, 0x6d, 0x08, 0x42, 0xcb, 0x05 } },
+    { { .form = X86_FORM_VPSHUFHW_X_XM128_IMM8_EVEX, .reg = 1, .rm = 2, .immediate = 5, .decorations = 1 }, 7, { 0x62, 0xf1, 0x7e, 0x09, 0x70, 0xca, 0x05 } },
+    { { .form = X86_FORM_VPABSW_Y_YM256_EVEX, .reg = 1, .rm = 2 }, 6, { 0x62, 0xf2, 0x7d, 0x28, 0x1d, 0xca } },
+    { { .form = X86_FORM_VPSRAW_Z_ZM512_IMM8, .vvvv = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40, .immediate = 3, .decorations = 1 },
+      8,
+      { 0x62, 0xf1, 0x75, 0x49, 0x71, 0x60, 0x01, 0x03 } },
+    { { .form = X86_FORM_VPSLLDQ_X_XM128_IMM8, .vvvv = 1, .rm = 2, .immediate = 3 }, 7, { 0x62, 0xf1, 0x75, 0x08, 0x73, 0xfa, 0x03 } },
+    { { .form = X86_FORM_VPSLLW_Y_Y_XM128_EVEX, .reg = 1, .vvvv = 2, .rm = 3 }, 6, { 0x62, 0xf1, 0x6d, 0x28, 0xf1, 0xcb } },
+    { { .form = X86_FORM_VPMOVWB_XM64_X, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40 }, 7, { 0x62, 0xf2, 0x7e, 0x08, 0x30, 0x48, 0x08 } },
+    { { .form = X86_FORM_VPMOVM2W_X_K, .reg = 1, .rm = 1 }, 6, { 0x62, 0xf2, 0xfe, 0x08, 0x28, 0xc9 } },
+    { { .form = X86_FORM_VPMOVW2M_K_Y, .reg = 1, .rm = 1 }, 6, { 0x62, 0xf2, 0xfe, 0x28, 0x29, 0xc9 } },
+    { { .form = X86_FORM_VPBROADCASTW_Z_R32, .reg = 1, .rm = X86_REGISTER_RAX }, 6, { 0x62, 0xf2, 0x7d, 0x48, 0x7b, 0xc8 } },
+    { { .form = X86_FORM_VPEXTRB_RM32_X_IMM8_EVEX, .reg = 17, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40, .immediate = 3 },
+      8,
+      { 0x62, 0xe3, 0x7d, 0x08, 0x14, 0x48, 0x40, 0x03 } },
+    { { .form = X86_FORM_VPEXTRW_R32_X_IMM8_EVEX, .reg = X86_REGISTER_RAX, .rm = 1, .immediate = 3 }, 7, { 0x62, 0xf1, 0x7d, 0x08, 0xc5, 0xc1, 0x03 } },
+    { { .form = X86_FORM_VPINSRW_X_X_RM32_IMM8_EVEX, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40, .immediate = 3 },
+      8,
+      { 0x62, 0xf1, 0x6d, 0x08, 0xc4, 0x48, 0x20, 0x03 } },
+    // AVX512DQ and CD: vandpd xmm1, xmm2, qword ptr [rax]{1to2}; vfpclassps k1, dword ptr [rax]{1to4}, 5 and vfpclasssd
+    // k1, qword ptr [rax+0x40], 5; vbroadcastf32x2 ymm1, qword ptr [rax+0x40] (N 8) and vbroadcasti32x8 zmm1, ymmword
+    // ptr [rax+0x40] (N 32); vcvtqq2ps xmm1, qword ptr [rax]{1to4}; vcvtps2qq zmm1, ymm2, {rn-sae}; vreduceps zmm1,
+    // zmm2, {sae}, 3; vextractf64x2 xmm1, ymm2, 1; vinsertf32x8 zmm1, zmm2, ymmword ptr [rax+0x40], 1 (N 32);
+    // vpconflictq ymm1, qword ptr [rax]{1to4}; and vpbroadcastmb2q xmm1, k1
+    { { .form = X86_FORM_VANDPD_X_X_M64BCST, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf1, 0xed, 0x18, 0x54, 0x08 } },
+    { { .form = X86_FORM_VFPCLASSPS_K_M32BCST4_IMM8, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 5 }, 7, { 0x62, 0xf3, 0x7d, 0x18, 0x66, 0x08, 0x05 } },
+    { { .form = X86_FORM_VFPCLASSSD_K_XM64_IMM8, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40, .immediate = 5 },
+      8,
+      { 0x62, 0xf3, 0xfd, 0x08, 0x67, 0x48, 0x08, 0x05 } },
+    { { .form = X86_FORM_VBROADCASTF32X2_Y_XM64, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40 }, 7, { 0x62, 0xf2, 0x7d, 0x28, 0x19, 0x48, 0x08 } },
+    { { .form = X86_FORM_VBROADCASTI32X8_Z_M256, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40 }, 7, { 0x62, 0xf2, 0x7d, 0x48, 0x5b, 0x48, 0x02 } },
+    { { .form = X86_FORM_VCVTQQ2PS_X_M64BCST4, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf1, 0xfc, 0x38, 0x5b, 0x08 } },
+    { { .form = X86_FORM_VCVTPS2QQ_Z_Y_ER, .reg = 1, .rm = 2, .decorations = BUSTER_X86_ROUND_NEAREST }, 6, { 0x62, 0xf1, 0x7d, 0x18, 0x7b, 0xca } },
+    { { .form = X86_FORM_VREDUCEPS_Z_Z_SAE_IMM8, .reg = 1, .rm = 2, .immediate = 3 }, 7, { 0x62, 0xf3, 0x7d, 0x18, 0x56, 0xca, 0x03 } },
+    { { .form = X86_FORM_VEXTRACTF64X2_XM128_Y_IMM8, .rm = 1, .reg = 2, .immediate = 1 }, 7, { 0x62, 0xf3, 0xfd, 0x28, 0x19, 0xd1, 0x01 } },
+    { { .form = X86_FORM_VINSERTF32X8_Z_Z_YM256_IMM8, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40, .immediate = 1 },
+      8,
+      { 0x62, 0xf3, 0x6d, 0x48, 0x1a, 0x48, 0x02, 0x01 } },
+    { { .form = X86_FORM_VPCONFLICTQ_Y_M64BCST, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf2, 0xfd, 0x38, 0xc4, 0x08 } },
+    { { .form = X86_FORM_VPBROADCASTMB2Q_X_K, .reg = 1, .rm = 1 }, 6, { 0x62, 0xf2, 0xfe, 0x08, 0x2a, 0xc9 } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.
