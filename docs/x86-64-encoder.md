@@ -8,9 +8,11 @@ extensions, the variable blends and FMA4 with a register in the immediate, and
 AMD's XOP, TBM and LWP) and EVEX forms (AVX-512 with opmasks, zeroing,
 broadcasts, embedded rounding and registers 16 to 31, AVX512-FP16 and AVX10.2),
 with FS and GS segment overrides on any memory operand (thread-local storage).
-This document records why it is built the way it is: the review of the
-historical `encode_wide` that it replaces, the design, the Zen 5 measurements
-behind each choice, and what comes next.
+For the instructions with a symbolic operand it reports where each one ends,
+which locates the fields their fixups patch (see "Fixups"). This document
+records why it is built the way it is: the review of the historical
+`encode_wide` that it replaces, the design, the Zen 5 measurements behind each
+choice, and what comes next.
 
 ## Results
 
@@ -32,7 +34,14 @@ BMI at 0.64 ns (9.4 GB/s). That is:
 - byte-identical to GNU as 2.47 on 1.7 million random instructions covering
   all 5,821 forms (1,470 legacy, 137 of them x87, 1,007 VEX, 103 of them XOP,
   and 3,344 EVEX), one
-  in sixteen of them with an FS or GS override.
+  in sixteen of them with an FS or GS override;
+- with the ends of the instructions that have symbolic operands (the 6% of the
+  compiler mix that are calls and RIP-relative operands), **0.69 ns**: as fast
+  as every instruction's offset (0.69 ns, and 0.71 before the running sum they
+  share was redone for them), and where GNU as 2.47 puts its relocations
+  (offset, type, addend and symbol) for all 195,000 symbolic fields of those 1.7
+  million instructions, on every form whose symbolic fields GNU as encodes the
+  same way.
 
 ## The historical encoder
 
@@ -78,7 +87,8 @@ the immediate (4 bytes; a 64-bit one continues in the displacement), the
 displacement (memory, or a branch's relative one), `reg`, `rm` (or the base, or
 the `+r` register), `index`, `mode` (register direct, or a memory operand with
 base/index/RIP flags and the scale), the form (plus `BUSTER_X86_FORM_FS` or
-`BUSTER_X86_FORM_GS` for a segment override), `vvvv` (VEX.vvvv and
+`BUSTER_X86_FORM_GS` for a segment override, and `BUSTER_X86_FORM_FIXUP` for an
+instruction with a symbolic operand: see "Fixups"), `vvvv` (VEX.vvvv and
 EVEX.V'vvvv's register) and `decorations` (EVEX's opmask, zeroing and rounding
 mode, in the bits EVEX's last byte has them). An /is4 operand, the register that
 `vblendvps` and FMA4 take in the immediate's bits 7 to 4, is the immediate as
@@ -257,8 +267,75 @@ capacity of 15 bytes per instruction alone, only the last quad's store could
 pass it, but the last two groups took masked stores (a `kmovq k, r` and a
 masked store per quad), which made calls of 16 instructions about 5% slower.
 The last partial group goes through a zeroed copy, so no load reads past the
-input. The page-edge test places inputs, outputs and offsets against
-`PROT_NONE` pages to check both.
+input. The page-edge test places inputs, outputs, offsets and fixup ends
+against `PROT_NONE` pages to check both.
+
+With offsets or fixup ends, Phase II's lengths are summed in each group: a
+`vpermb` puts them in instruction order as bytes, a multiplication by
+0x0101010101010101 (`vpmullq`) sums each qword's bytes up to each one (eight
+lengths of at most 15, so nothing carries), and a `vpshufb` and an add carry the
+first qword's total into the second. That is each instruction's end in the group
+(at most 240), and minus its length, its start; `vpmovzxbd` widens them and the
+group's offset in the output is added (see "Zen 5's costs" for why bytes).
+
+### Fixups
+
+The code generator binds names before instruction selection, so most operands
+are numbers by the time an instruction is encoded. What only layout can fill in
+are fields: a call's rel32, a RIP-relative displacement to a global, an imm32
+or imm64 with a symbol's address. The code generator marks those instructions
+with `BUSTER_X86_FORM_FIXUP`, bit 15 of the form (the last form with a segment
+override is 17,465), and puts a placeholder in the field. The encoders encode
+the form without the flag, and with `fixup_ends`, `x86_encode` stores each
+marked instruction's end offset, in order: one per marked instruction, however
+many of its fields are symbolic.
+
+The end is enough to find the fields without decoding anything, because the
+displacement and the immediate are an instruction's last fields, in that order,
+and the form has their widths. `x86_fixup_distance(form, field)` is how far
+before the end each one starts:
+
+- the displacement (`X86_FIXUP_DISPLACEMENT`, a memory operand's or a relative
+  branch's): the immediate's bytes plus 4, or plus the rel8's or rel32's bytes;
+- the immediate (`X86_FIXUP_IMMEDIATE`): the immediate's bytes (8 for a 64-bit
+  immediate or MOVABS's address).
+
+The processor measures a PC-relative field from the end of the instruction, so
+a PC-relative fixup's addend relative to its field is the symbol's addend minus
+that same distance:
+
+| Instruction | Field | Distance | Addend from the field |
+| --- | --- | ---: | ---: |
+| `call f` | rel32 | 4 | −4 |
+| `lea rax, [rip + x]` | displacement | 4 | −4 |
+| `cmp byte ptr [rip + x], 1` | displacement | 5 | −5 |
+| `mov dword ptr [rip + x], 0x12345678` | displacement | 8 | −8 |
+| `vpternlogd zmm0, zmm1, [rip + x], 5` | displacement | 5 | −5 |
+| `mov dword ptr [rip + x], offset y` | displacement, immediate | 8, 4 | −8, y's |
+| `movabs rax, offset y` | immediate | 8 | y's |
+
+A displacement field is 32-bit when the memory operand is RIP-relative,
+absolute or index-only. After a base, the encoder makes small values 8-bit or
+leaves them out, as GNU as does with numbers (but not with symbols), so a
+symbolic displacement there needs a placeholder that doesn't fit in 8 bits in
+units of the form's N, such as INT32_MIN, which the fixup overwrites.
+
+In the loop, the fixup ends are the offsets' running sum, compressed. The
+flags come from the forms, which Phase I has in lane order with the records'
+fourth dwords: a `vpermb` puts each form's high byte in instruction order and
+`vpmovb2m` takes their bit 7, so that the mask is ready long before the
+lengths. A `vpcompressd` by it keeps the marked instructions' ends, which a
+64-byte store appends to the fixup ends (their capacity has 16 more than the
+marked instructions, `BUSTER_X86_ENCODER_FIXUP_CAPACITY`), advanced by the
+mask's popcount; the zeroed copy's padding isn't marked. Phase I takes the flag
+off the form before looking its template up (an AND per instruction, which
+measured no slower; see "Evaluation").
+
+The other way to have the ends is the offsets: the caller picks the marked
+instructions' and takes the next instruction's start. Both are in the benchmark
+(`x86_encode_64` with `--fixups`, and `x86_encode_64_offsets_then_pick`, which
+picks from the list of marked instructions a code generator has); see
+"Evaluation".
 
 ### What Niles Salter's tokenizer suggested
 
@@ -418,6 +495,29 @@ into the mask, sharing the constants, an empty `asm` statement on the mask, and
 computing the mask first or last were all within the ±1.5% that one build
 varies between runs: 10 operations cost about what 8 did before (2–3%).
 
+Offsets and fixup ends cost what the latency of their running sum does. Fixup
+ends first summed the lengths as the offsets did: a `vpermd` to instruction
+order and four shifts (`valignd`) and adds, 29 cycles from the lengths, at the
+end of each group's Phase II. The reorder buffer filled up behind that chain
+(dispatch stalled on retire tokens 17% of cycles with offsets and 27% with
+fixup ends, against 1.6% with neither, while the FP scheduler's stalls fell),
+and fixup ends took 0.76 ns per instruction against 0.71–0.72 for offsets.
+Storing each group's ends with the next group's code, when its lengths were
+long ready, brought fixup ends to 0.69 ns and offsets to 0.68–0.70, but made
+calls of 16 instructions 12–14% slower: each call stored an empty group before
+its first, and a flag that skipped it made long streams 9% slower again.
+Summing bytes shortens the chain instead: `vpermb` (4 cycles on Zen 5,
+uops.info), `vpmullq` (2), `vpshufb` (1) and an add (2), then `vpmovzxbd` (3)
+to dwords, 12 cycles, with two fewer µops on FP1 and FP2. With it, offsets got
+2–5% faster than before, with the reorder buffer full 5.6% of cycles. Fixup
+ends took their flags from the lengths' dwords at first (a `vpmovb2m` and a
+`kshiftrq` after the `vpermb`, the longest path to the compress); taking them
+from the records instead, with a `vpermb` of their own, took another 3% off
+(the reorder buffer full 8.6% of cycles), which made them as fast as offsets.
+Taking the flag off the forms in Phase I made clang take the masked-loads
+variant's forms out of the records' vector registers with `vpextrw` (20%
+slower), until an empty `asm` statement on its record pointer stopped it.
+
 ## Evaluation
 
 `./build/compiler benchmark-x86-encoder` on the 9700X, `taskset -c 2`,
@@ -431,8 +531,10 @@ the changes above (32 per iteration) for comparison:
 | 16,384 mixed (L2) | 1.46 | 1.11 | 0.67 | 0.65 | **0.64** | 10.60 | 0.66 |
 | 16,384 vector | 1.46 | 1.09 | 0.66 | 0.66 | **0.64** | 11.94 | 0.65 |
 | 16,384 uniform | 1.47 | 1.13 | 0.66 | 0.68 | **0.66** | 19.53 | 0.67 |
-| 16,384, with offsets | 1.69 | 1.26 | 0.71 | 0.73 | **0.72** | 10.54 | 0.75 |
+| 16,384, with offsets | 1.77 | 1.27 | 0.68 | 0.70 | **0.69** | 11.14 | 0.75 |
+| 16,384, with fixup ends | 1.77 | 1.26 | 0.72 | 0.70 | **0.69** | 11.33 | — |
 | calls of 16 | 1.53 | 1.15 | 0.71 | 0.71 | **0.70** | 11.20 | 0.73 |
+| calls of 16, with fixup ends | 1.84 | 1.20 | 0.80 | 0.80 | **0.81** | 12.02 | — |
 | calls of 64 | 1.48 | 1.11 | 0.67 | 0.68 | **0.66** | 10.74 | 0.68 |
 | calls of 256 | 1.47 | 1.08 | 0.67 | 0.67 | **0.66** | 10.57 | 0.66 |
 | 262,144 mixed | 1.46 | 1.10 | 0.67 | 0.66 | **0.64** | 12.47 | 0.66 |
@@ -457,6 +559,40 @@ quarter and a half of them), so the fixed cost per group dominates. 16, 32 and
 64's is the fastest or within 0.01 ns of it everywhere but the noisy L1 row, so
 `x86_encode` uses 64.
 
+The rows with offsets and fixup ends are from the fixup interface's changes,
+the others from before them. Against the code before them, in 15
+interleaved rounds of `x86_encode_64`: without offsets or fixup ends, −2.1% to
++0.9% on the compiler, vector and uniform mixes and in calls of 16, 64 and 256,
+and +0.2% and +0.5% on the compiler and vector mixes with both copies of the
+function aligned to 64 bytes (the AND that takes the fixup flag off each form);
+with offsets, 1.8–5.4% faster (the running sum in bytes), and 4% slower at 4
+per iteration.
+
+The fixup ends' two designs and two stores, `x86_encode_64`, nanoseconds per
+instruction (medians of five runs; `--fixups` marks the calls and the
+RIP-relative operands, 6% of the compiler mix, 2% of the vector mix and 12% of
+the uniform one):
+
+| Stream | neither | offsets | **fixup ends** | compressed to memory | offsets, then picked |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 16,384 mixed | 0.63 | 0.69 | **0.69** | 0.70 | 0.71 |
+| 16,384 vector | 0.64 | 0.69 | **0.69** | 0.69 | 0.69 |
+| 16,384 uniform | 0.67 | 0.72 | **0.72** | 0.72 | 0.75 |
+| 262,144 mixed | 0.64 | 0.70 | **0.70** | 0.70 | 0.72 |
+| calls of 16 | 0.70 | 0.77 | **0.81** | 0.82 | 0.84 |
+| calls of 64 | 0.66 | 0.72 | **0.73** | 0.75 | 0.76 |
+| calls of 256 | 0.66 | 0.70 | **0.71** | 0.70 | 0.72 |
+
+"Offsets, then picked" is the other design: every offset, then the ends of the
+marked instructions picked from the list of them a code generator keeps (the
+next instruction's start); it costs 1–4% more than fixup ends. Before these
+changes, offsets took 0.70–0.71 ns on the long streams and 0.80 in calls of 16,
+so fixup ends cost no more than offsets did except in calls of 16 (1% more).
+Compressing the ends straight to memory (`vpcompressd` to memory, 8 µops and a
+store every 3 cycles on Zen 5, where Zen 4 takes 72 cycles) is as fast or within
+3% (calls of 64), off the loop's critical path; the 64-byte store of the
+compressed register stays, as it does for the machine code.
+
 The variants that lost (all at 16 per iteration, 16,384 mixed):
 
 | Variant | ns |
@@ -473,7 +609,7 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
 
 ## Correctness
 
-`./build/compiler test-x86-encoder` (about 0.3 s) checks:
+`./build/compiler test-x86-encoder` (about 0.6 s) checks:
 
 - that every form's template fits;
 - 452 known encodings from GNU as, on the paths most worth pinning down (VEX2
@@ -503,14 +639,19 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   6, with word broadcasts, compressed displacements of 2 and the conversions'
   N, and XOP's prefix in maps 8 to 0A with its sources swapped by W (vpcmov's
   W1 between registers from objdump, as GNU as writes W0 there), vpermil2ps's
-  selector and TBM's and LWP's 32-bit immediates), with both encoders;
+  selector and TBM's and LWP's 32-bit immediates), with both encoders, and
+  each again with the fixup flag, whose end both must report;
 - a digest of the scalar encoder's output for 100,000 random instructions,
   recorded when GNU as encoded the same stream to the same bytes;
-- every batch width and variant against the scalar encoder, byte for byte and
-  offset for offset, on every count from 0 to 199 and on 300,000 random
-  instructions of all forms, with empty instructions mixed in;
+- every batch width and variant against the scalar encoder, byte for byte,
+  offset for offset and fixup end for fixup end, in each of its four loops (with
+  neither, either or both of offsets and fixup ends), on every count from 0 to
+  199 and on 300,000 random instructions of all forms, with empty instructions
+  mixed in and one in eight marked with the fixup flag;
 - the same at page edges, with `PROT_NONE` pages after the input, the output's
-  capacity (or the exact output) and the offsets;
+  capacity (or the exact output), the offsets and the fixup ends' capacity (or
+  the marked instructions' ends, for the variant that compresses them straight
+  to memory);
 - that invalid operands (a high byte register with REX, RSP as an index, RIP
   with a base, a register past its class's last, an odd opmask pair, vvvv or
   reg in a form without them, decorations the form can't have, unknown mode
@@ -525,7 +666,7 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   registers past GS, MOV to CS and complex multiplications into one of their
   sources are found by `x86_validate`.
 
-`--print-assembly` and `--compare-binary` cross-check the scalar encoder against
+`--print-assembly` and `--compare-object` cross-check the scalar encoder against
 GNU as for any seed (AGENTS.md has the commands): 1.7 million random
 instructions over all forms (seeds 1, 7 and 99), 0 differences. The streams have
 every family in proportion to its forms: of 200,000 instructions, 115,000 EVEX
@@ -583,6 +724,38 @@ multiplication's destination be one of its sources (1,147) and one without the
 /is4 rule for vpermil2ps's and vpermil2pd's selector (11), and two that leave
 out the last value of imm8 or rel8 change the reference digest.
 
+The same streams cross-check the fixups. `x86_mark_symbolic` marks a quarter of
+the fields that GNU as encodes the same way with a symbol in them (32-bit
+displacements, which GNU as always gives a symbol even after a base, rel32s,
+the rel8s of `loop`, `loope`, `loopne` and `jrcxz`, imm32s, 64-bit immediates
+and MOVABS's addresses; GNU as makes `jmp` and `jcc` to a symbol rel32), with a
+random sequence of its own, so that the instructions and the digest stay the
+same. `--print-assembly` prints those fields as `dsym` or `offset isym` plus the
+field's value, and GNU as writes zeros and a relocation for each.
+`--compare-object` zeroes the fields where the scalar encoder's fixup ends and
+`x86_fixup_distance` put them before comparing the bytes, and checks GNU as's
+relocations (offset, type, addend and symbol, matched by offset, since GNU as
+emits a relaxed branch's late) against the ones they give, with GNU as's types:
+R_X86_64_PLT32 for a branch without an addend and R_X86_64_PC32 with one, PC8
+for a rel8, PC32 for RIP-relative operands, 32S for other addresses but 32 for
+LEA into a 16- or 32-bit register, 32S or 32 for an imm32 by whether its operand
+is 64-bit, and 64 for a 64-bit immediate or address. Over seeds 1, 7 and 99:
+194,957 relocations (39,560 PC32, 34 PLT32, 272 PC8, 152,058 32S, 2,400 32 and
+633 64), 0 different, on all 4,939 forms whose memory operand or branch target
+the streams print (of 4,947 that have one: the other 8 are the MOVQ memory forms
+GNU as encodes otherwise) and all 71 with an imm32 or a 64-bit immediate, and
+`x86_encode`'s fixup ends the same as the scalar encoder's. `test-x86-encoder`
+has 28 known fixups from GNU as too, so that the regular tests check
+`x86_fixup_distance` and the reported ends without GNU as. Twelve broken copies
+fail the tests: the vectorized loop's byte order of the lengths, the byte that
+carries the first qword's total, the flags' byte, the multiplier, the compress
+mask and the cursor's advance (92 to 200 of each width's 201 random streams
+differ), a fixup capacity one short (a page-edge fault), the template lookup
+and the scalar form's row with the flag left in (both fault), the scalar
+encoder's end off by one (all 28 known fixups, and the random streams), and
+`x86_fixup_distance` without the immediate's bytes or without a branch's own
+width (16 and 4 known fixups wrong, and the GNU as cross-check).
+
 ## Next steps
 
 - **Every x86-64 instruction** (#17, with an issue per family, #18–#39). Rows
@@ -597,11 +770,13 @@ out the last value of imm8 or rel8 change the reference digest.
   multi-byte NOPs), branch hints and `bnd` (#38), `notrack` through memory,
   16-bit near branches (which Intel and AMD decode differently in 64-bit mode),
   and HLE's `xacquire` and `xrelease`.
-- **Relocations and labels.** The offsets output gives every instruction's
-  start; a relocation field's offset is its start plus the position of
-  canonical byte 4 (or 0) after compaction, which the presence bits and layout
-  determine. Branch relaxation chooses forms before encoding, and Phase II's
-  length alone is a cheap length-only pass for it.
+- **Labels.** Fixups are done (see "Fixups"); branches inside a function are
+  resolved before encoding, with forms that branch relaxation chooses, and
+  Phase II's length alone is a cheap length-only pass for it. A symbolic
+  displacement after a base needs a placeholder that doesn't fit in 8 bits;
+  forcing 32 bits there instead would take a free bit of the record (the mode's
+  bit 6, say) and an operation or two on Phase II's displacement path, not
+  measured yet.
 - **Threads.** Sections are independent: encode them in parallel into
   separate buffers.
 - **Speed.** Shortening each group's dependency chain (see "Zen 5's costs"),
