@@ -52,8 +52,9 @@ or infrastructure machinery merely to match its style.
   of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder,
   and the fixup interface: `BUSTER_X86_FORM_FIXUP` marks an instruction with a
   symbolic operand, `x86_encode` reports each marked instruction's end, and
-  `x86_fixup_distance` gives its fields' offsets and addends from that);
-  `docs/x86-64-encoder.md` explains its design and measurements.
+  `x86_fixup_distance` gives its fields' offsets and addends from that; and
+  `x86_encode_address32`, the same for 32-bit addresses, with templates of its
+  own); `docs/x86-64-encoder.md` explains its design and measurements.
   `x86_64_encoder_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-x86-encoder` runs them) and
   `x86_64_encoder_benchmark.c` provides `benchmark-x86-encoder`.
@@ -171,7 +172,7 @@ yet compared against a performance baseline. Keep just one compiler executable.
 
 ## x86-64 encoder tests
 
-`./build/compiler test-x86-encoder` (about 0.6 s) checks that every form fits a
+`./build/compiler test-x86-encoder` (about 0.7 s) checks that every form fits a
 template, both encoders on 612 known encodings from GNU as (each also with the
 fixup flag, whose end they must report), a digest of the scalar encoder's output
 for 100,000 random instructions, every batch width and variant of `x86_encode`
@@ -182,18 +183,26 @@ and MMX, VEX and EVEX, with opmasks, broadcasts, rounding, registers 16-31,
 gathers and scatters, FS and GS segment overrides, and one in eight marked with
 the fixup flag), the same between `PROT_NONE` guard pages, and that invalid
 operands are rejected (immediates and rel8s outside their fields' ranges by
-`x86_validate` alone: `x86_encode` writes their low bytes). `--count N` and
-`--seed N` change the random streams.
+`x86_validate` alone: `x86_encode` writes their low bytes). Then it runs those
+checks again with 32-bit addresses, but the known fixups: 33 known encodings, a
+digest of their own, `x86_encode_64_address32` against the scalar encoder on the
+random streams and at page edges, and invalid operands, among them MPX memory
+operands and memory operands in the 80 FS and GS forms without room for the
+`67`. `--address32` runs only that pass, and `--count N` and `--seed N` change
+the random streams.
 
-The digest was recorded when GNU as encoded the same stream to the same bytes.
-After changing the form table, the scalar encoder or the fixup interface,
-cross-check with GNU as (binutils 2.47 for the recorded digest), then record the
-digest the test prints:
+The digests were recorded when GNU as encoded the same streams to the same
+bytes. After changing the form table, the scalar encoder or the fixup interface,
+cross-check with GNU as (binutils 2.47 for the recorded digests) for both
+address sizes, then record the digests the test prints:
 
 ```sh
 ./build/compiler test-x86-encoder --print-assembly 400000 --seed 1 > build/x86.s
 as build/x86.s -o build/x86.o
 ./build/compiler test-x86-encoder --compare-object build/x86.o 400000 --seed 1
+./build/compiler test-x86-encoder --print-assembly 400000 --seed 1 --address32 > build/x86_32.s
+as build/x86_32.s -o build/x86_32.o
+./build/compiler test-x86-encoder --compare-object build/x86_32.o 400000 --seed 1 --address32
 ```
 
 (`build.sh` deletes `build/`, so run these after building.) The printed
@@ -206,9 +215,11 @@ zeros and a relocation for them, and `--compare-object` reads `.text`,
 `.lengths` and `.rela.text` from its object and compares the bytes (with those
 fields zeroed where the reported fixup ends put them) and each relocation's
 offset, type, addend and symbol with the ones the fixup ends and
-`x86_fixup_distance` give. Cross-check more than one seed after changing forms
-(1.7 million instructions over seeds 1, 7 and 99 were last checked, with 199,400
-relocations).
+`x86_fixup_distance` give. With `--address32`, the printer adds `addr32` where no
+general register gives the address size, and the relocations of displacements
+other than RIP-relative ones are R_X86_64_32. Cross-check more than one seed
+after changing forms (1.7 million instructions over seeds 1, 7 and 99 were last
+checked at each address size, with 199,441 relocations and with 201,280).
 
 ## x86-64 encoder benchmark
 
