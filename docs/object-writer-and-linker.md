@@ -1064,25 +1064,27 @@ The lane lives in a thread-local context with the thread's scratch arenas, as
 `TCTX` holds the RAD Debugger's `LaneCtx`. A thread that has to run a phase
 alone, while the others do something else, makes itself a group of one (index
 0, count 1, no barrier) with `lane_alone` and restores its group afterwards.
-The barrier is a counter and a generation word: it spins briefly, then waits on
-a futex. Its atomics are the only ones the linker has.
+The barrier is a counter and a generation word: it spins briefly, waits in
+`mwaitx`, then sleeps on a futex. Its atomics are the only ones the linker has.
 
 Three things differ from the RAD Debugger, each measured below:
 
 - **The calling thread is lane 0.** radbin's main thread waits for its lanes;
   here it is one of them, so a group of one starts no thread. A program starts
   its group once, with all of its phases in the entry point, since starting
-  threads costs as much as 130 to 190 syncs.
+  threads costs as much as 180 to 220 syncs.
 - **A broadcast is one barrier.** `lane_sync_u64` copies the value in, waits,
   copies it out and waits again. Here the source offers its value on the
   barrier's arrival line, which it writes anyway as it arrives; the last lane to
   arrive copies it next to the generation word, and a waiting lane reads both
   together.
-- **The barrier spins before it sleeps.** On Linux the RAD Debugger's barrier
+- **The barrier waits before it sleeps.** On Linux the RAD Debugger's barrier
   is `pthread_barrier_wait`, which sleeps in the kernel at every wait. Here a
-  waiting lane spins for 2,048 pauses (24 µs on the 9700X) before it sleeps,
-  and it sets a bit in the generation word first, so a sync at which no lane
-  slept makes no system call.
+  waiting lane spins for 128 pauses (1.5 µs on the 9700X), then waits in
+  `mwaitx` for the generation word's line to be written, for up to 1 ms,
+  before it sleeps ("How long to wait before sleeping" below). It sets a bit
+  in the generation word first, so a sync at which no lane slept makes no
+  system call.
 
 The RAD Debugger's PDB converter balances uneven work with atomic counters that
 lanes take tasks from. Rule 1 below balances with `lane_range_by_cost` instead,
@@ -1152,30 +1154,37 @@ lanes help is measured, as is everything else:
 CPU i (CPUs 0 to 7 are its eight cores). Each figure is the median of three
 runs, each of them the median of 21 passes:
 
-| Lanes | `lane_sync` | `lane_broadcast` | `pthread_barrier_wait` | Waking sleeping lanes | Starting the group |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 0.0 ns | 0.3 ns | 48 ns | — | — |
-| 2 | 35 ns | 43 ns | 1.32 µs | 2.0–13 µs | 6.5 µs |
-| 3 | 71 ns | 73 ns | 1.56 µs | 2.1 µs | 9.3 µs |
-| 4 | 101 ns | 100 ns | 1.73 µs | 2.5 µs | 14 µs |
-| 5 | 123 ns | 129 ns | 1.79 µs | 2.7 µs | 17 µs |
-| 6 | 146 ns | 158 ns | 1.80 µs | 3.0 µs | 26 µs |
-| 7 | 176 ns | 187 ns | 1.82 µs | 3.2 µs | 31 µs |
-| 8 | 193 ns | 212 ns | 1.86 µs | 3.4–15 µs | 37 µs |
+| Lanes | `lane_sync` | `lane_broadcast` | `pthread_barrier_wait` | Waking from `mwaitx` | Waking from the futex | Starting the group |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.0 ns | 0.4 ns | 48 ns | — | — | — |
+| 2 | 43 ns | 28 ns | 1.47 µs | 0.30 µs | 9.5 µs | 9.4 µs |
+| 3 | 79 ns | 84 ns | 1.53 µs | 0.31 µs | 14 µs | 9.7 µs |
+| 4 | 109 ns | 104 ns | 1.76 µs | 0.29 µs | 14 µs | 14 µs |
+| 5 | 139 ns | 134 ns | 1.81 µs | 0.30 µs | 14 µs | 17 µs |
+| 6 | 164 ns | 164 ns | 1.72 µs | 0.39 µs | 14 µs | 25 µs |
+| 7 | 191 ns | 192 ns | 1.81 µs | 0.40 µs | 15 µs | 31 µs |
+| 8 | 216 ns | 212 ns | 1.74 µs | 0.34 µs | 15 µs | 38 µs |
 
 - **Sync and broadcast:** back-to-back calls, every lane arriving at once. Each
-  lane adds about 26 ns, the cost of its atomic add moving the arrival line
-  between cores. A broadcast costs what a sync does.
+  lane adds about 29 ns, the cost of its atomic add moving the arrival line
+  between cores. A broadcast costs what a sync does. The barrier before
+  `mwaitx`, which spun 2,048 pauses before it slept, measured the same within
+  8% either way, in runs alternating with these.
 - **`pthread_barrier_wait`:** the RAD Debugger's barrier on Linux, in the same
-  loop. It costs 10 to 38 times as much with 2 to 8 lanes.
-- **Waking:** lane 0 arrives 1 ms late, after the others have spun and gone to
-  sleep. The time is from lane 0's arrival until the last lane has left. In
-  some runs it was 10–15 µs: a core had gone into a deeper idle state, and C2
-  declares 18 µs to exit. The 24 µs spin is longer than that dearest wake-up,
-  so a lane sleeps only when its wait is already longer.
+  loop. It costs 8 to 35 times as much with 2 to 8 lanes.
+- **Waking:** lane 0 arrives late, and the time is from its arrival until the
+  last lane has left. 200 µs late, the others are waiting in `mwaitx`; 3 ms
+  late, they are asleep on the futex. This table had 2.0–3.4 µs for the
+  futex before (10–15 µs in some runs), from lanes that had done nothing but
+  sync before they slept 1 ms. Lanes that worked before they slept, as in
+  "How long to wait before sleeping", took 10–15 µs to wake on the cores with
+  the powersave governor, and 1.4–2.4 µs on CPU 2, whose governor is
+  performance (see the appendix).
 - **Starting:** `lane_run` of an entry point that returns at once, without
-  pinning, from the call until it returns. That is what 130 to 190 syncs cost,
-  hence one group per program.
+  pinning, from the call until it returns. That is what 180 to 220 syncs cost,
+  hence one group per program. It costs 0.5 to 3 µs more than with the barrier
+  before `mwaitx`: its passes now follow the ones in which the lanes sleep for
+  3 ms.
 
 Where the broadcast's value goes decided its cost (`benchmark-lanes`, medians
 of four or five rotating runs of each layout):
@@ -1189,6 +1198,89 @@ of four or five rotating runs of each layout):
 
 Writing a slot on the generation line makes the lanes spinning on it read the
 line again, and putting the counter there too makes every arrival do so.
+
+**How long to wait before sleeping.** A lane that waited long enough at a sync
+runs slower afterwards, which costs every phase that follows a narrow section
+or an unbalanced one. On the 9700X its clock drops to half, 2.77 GHz from
+5.5, about 0.1 to 0.2 ms after it resumes, and comes back about 1 ms later, so
+its next millisecond of work takes 25 to 60% longer. On CPU 2, the one core
+with the performance governor, the clock drops to 3.77 GHz instead. What
+counts is how long the core sat idle, not how the lane waited:
+
+- lanes that spun never slowed down;
+- lanes that waited in `mwaitx` didn't up to 1.5 ms, and did from 2 ms on;
+- lanes that slept on the futex did from 0.7 ms on.
+
+A harness measured it (`~/buster-fast-bench/lane-wake` on the 9700X). Eight
+lanes pinned to CPUs 0–7 work for 2 ms. Then one lane, which rotates, works
+alone for the wait while the others wait at a sync, in the way being tested.
+Then they all work for 5 ms more, timing every 3 µs of work and reading APERF
+and MPERF with `rdpru`. Each cell has two figures, medians over 48 trials of
+the seven cores with the powersave governor:
+
+- how much longer than at full speed their first millisecond of work after the
+  wait took. Spinning lanes never slow down, so their 1.3–1.6% is the
+  measurement's floor;
+- how long after the late lane arrived they left.
+
+| Wait | Futex after 2,048 pauses (before) | Spinning | `mwaitx` | `lane.c`: 128 pauses, `mwaitx` up to 1 ms, futex |
+| ---: | ---: | ---: | ---: | ---: |
+| 200 µs | 0.8%, 10 µs | 1.3%, 0.05 µs | 1.7%, 0.23 µs | 1.4%, 0.30 µs |
+| 500 µs | 1.3%, 10 µs | 1.5%, 0.03 µs | 1.7%, 0.23 µs | 1.7%, 0.30 µs |
+| 700 µs | 45%, 11 µs | 1.6%, 0.06 µs | 1.5%, 0.22 µs | 1.5%, 0.31 µs |
+| 1 ms | 32%, 14 µs | 1.6%, 0.05 µs | 1.5%, 0.22 µs | 1.5%, 1.6 µs |
+| 1.5 ms | 44%, 15 µs | 1.6%, 0.03 µs | 1.5%, 0.23 µs | 1.7%, 10 µs |
+| 2 ms | 36%, 15 µs | 1.6%, 0.06 µs | 25%, 0.29 µs | 46%, 14 µs |
+| 5 ms | 37%, 14 µs | 1.5%, 0.06 µs | 33%, 0.32 µs | 41%, 15 µs |
+| 10 ms | 58%, 15 µs | 1.5%, 0.07 µs | 56%, 0.30 µs | 60%, 15 µs |
+
+What the waiting costs meanwhile: the package's power while one lane works
+and the others wait, back to back for 200 ms, and the median waiting core's
+(RAPL's `energy-pkg` and `energy-core`, through perf). With every core idle
+the package draws 20 W, and with all eight working 67 W:
+
+| Wait | Futex (before) | Spinning | `mwaitx` | `lane.c` |
+| ---: | ---: | ---: | ---: | ---: |
+| 200 µs | 47 W, 2.4 W a core | 59 W, 4.2 W | 42 W, 2.0 W | 43 W, 2.1 W |
+| 1 ms | 43 W, 2.0 W | 57 W, 4.0 W | 42 W, 2.0 W | 42 W, 2.0 W |
+| 2 ms | 29 W, 0.13 W | 57 W, 4.0 W | 43 W, 2.0 W | 43 W, 1.9 W |
+| 5 ms | 30 W, 0.09 W | 57 W, 4.0 W | 43 W, 2.0 W | 33 W, 0.59 W |
+| 10 ms | 28 W, 0.07 W | 57 W, 4.0 W | 44 W, 2.2 W | 29 W, 0.17 W |
+
+For waits up to 2 ms, the lane working alone ran at 5.45–5.48 GHz while the
+others spun or waited in `mwaitx`, against 5.48–5.52 GHz while they slept:
+they cost it about 1% of its clock.
+
+So `lane.c` spins for 128 pauses, which a sync at which every lane arrives at
+once never gets past, then waits in `mwaitx` for up to 1 ms, then sleeps on
+the futex:
+
+- **Waits up to 1.5 ms leave the lanes at full speed,** where the barrier
+  before slowed them by 32–45% from 0.7 ms on. The linker's phases should
+  wait less than that: the whole link of the 46 MB program is to take 4 to
+  10 ms on one lane.
+- **The lanes wake in 0.3 µs** rather than 10 to 15 µs.
+- **Waiting in `mwaitx` draws what sleeping does for such waits,** 2 W a core,
+  half what spinning does, and costs the lane working alone as much as
+  spinning does.
+- **Past 1 ms the lane sleeps.** From 2 ms on, every way of waiting but
+  spinning slows the lanes afterwards, and spinning costs 4 W a core and holds
+  cores the rest of the machine could use. So the futex saves the power, and
+  by 10 ms a waiting core draws 0.17 W.
+- **`monitorx` and `mwaitx` work in user mode** on Zen, and `mwaitx`'s timer
+  bounds each wait. Its C1 hint wakes as fast as C0's (`0xf0`) and draws a
+  little less.
+
+`benchmark-lanes` ends with the same measurement for its largest group: lane 0
+works alone for the wait, then every lane works for 1 ms. Medians of three
+runs, against full speed, with the wake as in the table above:
+
+| Wait | Wake | Lane 0 alone | Slowest lane after | Median lane after |
+| ---: | ---: | ---: | ---: | ---: |
+| 200 µs | 0.42 µs | +0.1% | +0.3% | +0.3% |
+| 1 ms | 0.42 µs | 0.0% | +0.1% | +0.1% |
+| 2 ms | 11 µs | −0.2% | +42% | +42% |
+| 5 ms | 15 µs | −0.8% | +36% | +36% |
 
 ### SIMD: what pays
 
@@ -1393,7 +1485,10 @@ and with this document updated with what was measured:
 6.18.50-2-lts:
 
 - 15 CPUs online (CPU 10, CPU 2's SMT sibling, is offline);
-- the performance governor;
+- amd-pstate-epp in active mode with the performance governor for the link
+  measurements. For the lanes' (2026-10-19), only CPU 2 had it, and the others
+  ran the powersave governor with the energy preference
+  `balance_performance`;
 - tmpfs at `/tmp` and btrfs (zstd:3) at `/home`;
 - glibc 2.44, GCC 16.2.1's crt files and libgcc, clang 23.1.1;
 - GNU ld 2.47, lld 23.1.1, mold 3.0.0 and wild 0.10.0.

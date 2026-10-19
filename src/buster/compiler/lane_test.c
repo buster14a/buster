@@ -16,10 +16,10 @@
 //     the total cost holds the item's midpoint, which keeps each part within the largest cost of an equal share.
 //   - Syncs: --rounds rounds (BUSTER_LANE_TEST_DEFAULT_ROUNDS by default) in which each lane writes its slot, syncs and
 //     reads every lane's slot, and then gets a broadcast from a different lane each round. Once every
-//     BUSTER_LANE_TEST_STALL_INTERVAL rounds a lane comes to the sync, or the next time to the broadcast, late enough
-//     that the others sleep on the futex; with more than one lane, some must have. Then as many broadcasts back to
-//     back, from changing lanes, with no sync between them, and narrow tasks spread over the lanes by
-//     lane_from_task_index, each result broadcast from its task's lane.
+//     BUSTER_LANE_TEST_STALL_INTERVAL rounds a lane comes late, in turn to the sync and to the broadcast, and in turn
+//     late enough that the others sleep on the futex and only so late that they wait in mwaitx; with more than one
+//     lane, some must have slept. Then as many broadcasts back to back, from changing lanes, with no sync between them,
+//     and narrow tasks spread over the lanes by lane_from_task_index, each result broadcast from its task's lane.
 //   - Alone: the last lane makes itself a group of one, in which it syncs with no one, broadcasts to itself and gets
 //     whole ranges, and then rejoins its group, which goes on broadcasting.
 //   - Scratch: the scratch arenas of all lanes are distinct, a conflict with one gets the other, and scratch_end frees
@@ -53,11 +53,13 @@
 // Ranges: every count up to this, and the cost patterns of lane_test_cost.
 #define BUSTER_LANE_TEST_MAX_RANGE 1000
 #define BUSTER_LANE_TEST_COST_PATTERNS 7
-// Syncs: rounds by default, and a late lane once every BUSTER_LANE_TEST_STALL_INTERVAL rounds. Its delay is far past
-// the BUSTER_LANE_SPINS pauses (24 µs on the 9700X) that the lanes waiting for it spin before they sleep.
+// Syncs: rounds by default, and a late lane once every BUSTER_LANE_TEST_STALL_INTERVAL rounds. Its delay is in turn far
+// past the BUSTER_LANE_MWAITX_TICKS (1 ms on the 9700X) that the lanes waiting for it spend in mwaitx before they sleep,
+// and well within them.
 #define BUSTER_LANE_TEST_DEFAULT_ROUNDS 10000
 #define BUSTER_LANE_TEST_STALL_INTERVAL 1000
-#define BUSTER_LANE_TEST_STALL_NANOSECONDS 2000000
+#define BUSTER_LANE_TEST_STALL_NANOSECONDS 3000000
+#define BUSTER_LANE_TEST_SHORT_STALL_NANOSECONDS 100000
 // Exchange: the top bits of a record's hash pick its partition.
 #define BUSTER_LANE_TEST_PARTITION_BITS 6
 #define BUSTER_LANE_TEST_PARTITIONS (1u << BUSTER_LANE_TEST_PARTITION_BITS)
@@ -396,11 +398,11 @@ static uint64_t lane_test_value(uint64_t round, uint64_t lane)
     return lane_test_mix(round * BUSTER_LANE_TEST_MAX_LANES + lane + 1);
 }
 
-static void lane_test_stall(void)
+static void lane_test_stall(uint64_t nanoseconds)
 {
     const struct timespec duration = {
         .tv_sec = 0,
-        .tv_nsec = BUSTER_LANE_TEST_STALL_NANOSECONDS,
+        .tv_nsec = (long)nanoseconds,
     };
     nanosleep(&duration, 0);
 }
@@ -413,12 +415,14 @@ static uint64_t lane_test_syncs(LaneTest* test)
     for (uint64_t round = 0; round < test->rounds; round += 1)
     {
         // A slot is written again two rounds later, after the broadcast in between has made sure that every lane has
-        // read it.
+        // read it. The stalls take turns: long to the sync, long to the broadcast, short to the sync, short to the
+        // broadcast.
         const uint64_t stall = round / BUSTER_LANE_TEST_STALL_INTERVAL;
         const bool late = lanes > 1 && round % BUSTER_LANE_TEST_STALL_INTERVAL == BUSTER_LANE_TEST_STALL_INTERVAL / 2 && index == stall % lanes;
+        const uint64_t stall_nanoseconds = stall % 4 < 2 ? BUSTER_LANE_TEST_STALL_NANOSECONDS : BUSTER_LANE_TEST_SHORT_STALL_NANOSECONDS;
         if (late && stall % 2 == 0)
         {
-            lane_test_stall();
+            lane_test_stall(stall_nanoseconds);
         }
         test->slots[round % 2][index] = lane_test_value(round, index);
         lane_sync();
@@ -428,7 +432,7 @@ static uint64_t lane_test_syncs(LaneTest* test)
         }
         if (late && stall % 2 == 1)
         {
-            lane_test_stall();
+            lane_test_stall(stall_nanoseconds);
         }
         // The other lanes offer values of their own, which the broadcast must ignore.
         const uint32_t source = (uint32_t)(round % lanes);

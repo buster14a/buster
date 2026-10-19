@@ -249,8 +249,9 @@ reference:
   seven cost patterns: the parts must cover the items in lane order, and each
   item must go to the lane whose share of the total cost holds its midpoint;
 - 10,000 rounds of a sync and a broadcast, with a lane arriving late every
-  1,000 rounds so that the others sleep on the futex, then as many broadcasts
-  back to back, and narrow tasks spread by `lane_from_task_index`;
+  1,000 rounds, by turns so late that the others sleep on the futex and only
+  so late that they wait in `mwaitx`, then as many broadcasts back to back,
+  and narrow tasks spread by `lane_from_task_index`;
 - a lane that makes itself a group of one and rejoins, and the scratch arenas;
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
   partition, placed, filled and resolved by partition, byte-identical to the
@@ -267,8 +268,10 @@ lane i of groups of 1 to 8 lanes to the i-th CPU of `--cpus` (by default the
 allowed CPUs in order: 0 to 7 on the 9700X, one per core) and reports
 21-pass medians of a sync and a broadcast when every lane arrives at once, of
 `pthread_barrier_wait` (the RAD Debugger's barrier on Linux) in the same loop,
-of waking lanes that sleep on the futex, and of starting a group, then what an
-arena's reservation and first touches cost. Run it under the 9700X's lock
+of waking lanes that wait in `mwaitx` and that sleep on the futex, and of
+starting a group. Then, on the largest group, how much slower lanes run after
+waiting 0.2 to 5 ms for a lane that works alone, and what an arena's
+reservation and first touches cost. Run it under the 9700X's lock
 without `taskset`, since it pins its lanes itself.
 `docs/object-writer-and-linker.md` ("Lanes") has the numbers. The default 9700X
 job runs it after the tests; like the others, its measurements are

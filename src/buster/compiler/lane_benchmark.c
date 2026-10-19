@@ -1,5 +1,5 @@
 // The lane benchmark: what lane_sync, lane_broadcast and lane_run cost on groups of 1 to 8 lanes, each lane on a CPU of
-// its own, and what an arena's first touches cost.
+// its own, how fast lanes run after waiting at a sync, and what an arena's first touches cost.
 //
 // Usage: build/compiler benchmark-lanes [--lanes N] [--cpus LIST] [--rounds N]
 //
@@ -12,10 +12,17 @@
 //   - broadcast: the same for lane_broadcast from lane 0;
 //   - pthread: the same for pthread_barrier_wait, the RAD Debugger's barrier on Linux, over a sixteenth of the rounds
 //     (BUSTER_LANE_BENCHMARK_PTHREAD_SHARE): it sleeps at every wait, so its rounds take far longer;
-//   - wake: a sync at which lane 0 arrives BUSTER_LANE_BENCHMARK_LATE_NANOSECONDS after the others, which have gone to
-//     sleep on the futex by then, from lane 0's arrival until the last lane has left; and how many times the lanes
-//     slept per pass;
+//   - wake: a sync at which lane 0 arrives late, from its arrival until the last lane has left: first
+//     BUSTER_LANE_BENCHMARK_MWAITX_LATE_NANOSECONDS late, while the others wait in mwaitx, then
+//     BUSTER_LANE_BENCHMARK_FUTEX_LATE_NANOSECONDS late, once they sleep on the futex; and how many times the lanes slept
+//     per pass of the second;
 //   - start: lane_run of an entry point that returns at once, without pinning, from the call until it returns.
+// Then, on the largest group, what waiting costs afterwards. Each lane first measures its full speed at a busy loop (a
+// dependent multiply and add per iteration) while every lane runs it. Then for each of lane_benchmark_waits, every pass,
+// after every lane has worked for BUSTER_LANE_BENCHMARK_SETTLE_NANOSECONDS: lane 0 works alone for the wait while the
+// others wait for it at a sync, and then every lane does BUSTER_LANE_BENCHMARK_WORK_NANOSECONDS of full-speed work. The
+// figures are the wake, as above, lane 0's speed while alone, and how much longer than at full speed the slowest and the
+// median waiting lane took for their work.
 // Then, on the first CPU, the arenas: reserving and releasing a scratch arena's 64 GB, and in fresh arenas the first
 // touch of the page at the start, of all the base pages before BUSTER_ARENA_SMALL_BYTES, and of the first huge page
 // after them. The exit status is 1 if the arguments are invalid, a group can't be started or pinned, or a broadcast
@@ -40,8 +47,28 @@
 #define BUSTER_LANE_BENCHMARK_PASSES 21
 // The pthread barrier's passes have rounds / BUSTER_LANE_BENCHMARK_PTHREAD_SHARE rounds.
 #define BUSTER_LANE_BENCHMARK_PTHREAD_SHARE 16
-// How late lane 0 comes to the wake passes' sync: far past the BUSTER_LANE_SPINS pauses the other lanes spin first.
-#define BUSTER_LANE_BENCHMARK_LATE_NANOSECONDS 1000000
+// How late lane 0 comes to the wake passes' syncs: well within the BUSTER_LANE_MWAITX_TICKS (1 ms on the 9700X) that
+// the other lanes wait in mwaitx, and well past them, once they sleep on the futex.
+#define BUSTER_LANE_BENCHMARK_MWAITX_LATE_NANOSECONDS 200000
+#define BUSTER_LANE_BENCHMARK_FUTEX_LATE_NANOSECONDS 3000000
+// After a wait: how long every lane works before each pass, so that it starts at full speed, and how much full-speed
+// work each does after the wait.
+#define BUSTER_LANE_BENCHMARK_SETTLE_NANOSECONDS 2000000
+#define BUSTER_LANE_BENCHMARK_WORK_NANOSECONDS 1000000
+// The busy loop's full speed: each lane works this long with every lane working, then takes the best of
+// BUSTER_LANE_BENCHMARK_CALIBRATION_RUNS runs of BUSTER_LANE_BENCHMARK_CALIBRATION_ITERATIONS iterations (0.7 ms on
+// the 9700X).
+#define BUSTER_LANE_BENCHMARK_CALIBRATION_NANOSECONDS 20000000
+#define BUSTER_LANE_BENCHMARK_CALIBRATION_RUNS 8
+#define BUSTER_LANE_BENCHMARK_CALIBRATION_ITERATIONS 1000000
+// The busy loop's iteration: an LCG step, a multiply and an add that depend on the last.
+#define BUSTER_LANE_BENCHMARK_LCG_MULTIPLIER 6364136223846793005ull
+#define BUSTER_LANE_BENCHMARK_LCG_INCREMENT 1442695040888963407ull
+
+// How long lane 0 works alone in the passes after a wait while the other lanes wait for it, in nanoseconds: within the
+// mwaitx time, around it, and past it.
+static const uint64_t lane_benchmark_waits[] = { 200000, 1000000, 2000000, 5000000 };
+#define BUSTER_LANE_BENCHMARK_WAIT_COUNT (sizeof(lane_benchmark_waits) / sizeof(lane_benchmark_waits[0]))
 
 typedef struct LaneBenchmark LaneBenchmark;
 struct LaneBenchmark
@@ -52,12 +79,29 @@ struct LaneBenchmark
     uint64_t sync[BUSTER_LANE_BENCHMARK_PASSES];
     uint64_t broadcast[BUSTER_LANE_BENCHMARK_PASSES];
     uint64_t pthread[BUSTER_LANE_BENCHMARK_PASSES];
-    uint64_t wake[BUSTER_LANE_BENCHMARK_PASSES];
+    uint64_t wake_mwaitx[BUSTER_LANE_BENCHMARK_PASSES];
+    uint64_t wake_futex[BUSTER_LANE_BENCHMARK_PASSES];
     // When each lane left the late sync, how many times each slept in the wake passes and how many wrong values each
     // got from broadcasts; each written by its lane.
     uint64_t left[BUSTER_LANE_BENCHMARK_MAX_LANES];
     uint64_t sleeps[BUSTER_LANE_BENCHMARK_MAX_LANES];
     uint64_t wrong[BUSTER_LANE_BENCHMARK_MAX_LANES];
+};
+
+// What waiting costs afterwards, on the largest group: per wait and pass, the wake, lane 0's time alone, and the slowest
+// and median waiting lane's time for their work, each against its time at full speed (in thousandths, 1000 being full
+// speed).
+typedef struct LaneBenchmarkAfter LaneBenchmarkAfter;
+struct LaneBenchmarkAfter
+{
+    uint64_t wake[BUSTER_LANE_BENCHMARK_WAIT_COUNT][BUSTER_LANE_BENCHMARK_PASSES];
+    uint64_t alone[BUSTER_LANE_BENCHMARK_WAIT_COUNT][BUSTER_LANE_BENCHMARK_PASSES];
+    uint64_t slowest[BUSTER_LANE_BENCHMARK_WAIT_COUNT][BUSTER_LANE_BENCHMARK_PASSES];
+    uint64_t median[BUSTER_LANE_BENCHMARK_WAIT_COUNT][BUSTER_LANE_BENCHMARK_PASSES];
+    // Each lane's, written by its lane: when it arrived (lane 0) or left the sync, and its work's time against full speed.
+    uint64_t arrival;
+    uint64_t left[BUSTER_LANE_BENCHMARK_MAX_LANES];
+    uint64_t work[BUSTER_LANE_BENCHMARK_MAX_LANES];
 };
 
 typedef struct LaneBenchmarkArenas LaneBenchmarkArenas;
@@ -152,37 +196,125 @@ static void lane_benchmark_main(void* argument)
     }
 
     uint64_t sleeps = 0;
-    for (uint64_t pass = 0; pass <= BUSTER_LANE_BENCHMARK_PASSES; pass += 1)
+    for (uint32_t futex = 0; futex < 2; futex += 1)
     {
-        lane_sync();
-        uint64_t arrival = 0;
-        if (index == 0)
+        const uint64_t late = futex != 0 ? BUSTER_LANE_BENCHMARK_FUTEX_LATE_NANOSECONDS : BUSTER_LANE_BENCHMARK_MWAITX_LATE_NANOSECONDS;
+        for (uint64_t pass = 0; pass <= BUSTER_LANE_BENCHMARK_PASSES; pass += 1)
         {
-            // Lane 0 spins rather than sleeps, so that it arrives on time.
-            const uint64_t until = lane_benchmark_now() + BUSTER_LANE_BENCHMARK_LATE_NANOSECONDS;
-            while (lane_benchmark_now() < until)
+            lane_sync();
+            uint64_t arrival = 0;
+            if (index == 0)
             {
-                _mm_pause();
+                // Lane 0 spins rather than sleeps, so that it arrives on time.
+                const uint64_t until = lane_benchmark_now() + late;
+                while (lane_benchmark_now() < until)
+                {
+                    _mm_pause();
+                }
+                arrival = lane_benchmark_now();
             }
-            arrival = lane_benchmark_now();
-        }
-        const uint64_t slept = thread_context.sleeps;
-        lane_sync();
-        benchmark->left[index] = lane_benchmark_now();
-        sleeps += pass > 0 ? thread_context.sleeps - slept : 0;
-        lane_sync();
-        if (index == 0 && pass > 0)
-        {
-            uint64_t last = 0;
-            for (uint32_t lane = 0; lane < lanes; lane += 1)
+            const uint64_t slept = thread_context.sleeps;
+            lane_sync();
+            benchmark->left[index] = lane_benchmark_now();
+            sleeps += pass > 0 && futex != 0 ? thread_context.sleeps - slept : 0;
+            lane_sync();
+            if (index == 0 && pass > 0)
             {
-                last = benchmark->left[lane] > last ? benchmark->left[lane] : last;
+                uint64_t last = 0;
+                for (uint32_t lane = 0; lane < lanes; lane += 1)
+                {
+                    last = benchmark->left[lane] > last ? benchmark->left[lane] : last;
+                }
+                uint64_t* wake = futex != 0 ? benchmark->wake_futex : benchmark->wake_mwaitx;
+                wake[pass - 1] = last - arrival;
             }
-            benchmark->wake[pass - 1] = last - arrival;
         }
     }
     benchmark->sleeps[index] = sleeps;
     benchmark->wrong[index] = wrong;
+}
+
+// `iterations` steps of the busy loop. The empty asm keeps Clang from folding or vectorizing the chain.
+static uint64_t lane_benchmark_work(uint64_t x, uint64_t iterations)
+{
+    for (uint64_t i = 0; i < iterations; i += 1)
+    {
+        x = x * BUSTER_LANE_BENCHMARK_LCG_MULTIPLIER + BUSTER_LANE_BENCHMARK_LCG_INCREMENT;
+        __asm__("" : "+r"(x));
+    }
+    return x;
+}
+
+// The busy loop until `until`, in steps of about 30 us.
+static uint64_t lane_benchmark_work_until(uint64_t x, uint64_t until)
+{
+    while (lane_benchmark_now() < until)
+    {
+        x = lane_benchmark_work(x, 1u << 15);
+    }
+    return x;
+}
+
+// The entry point of the passes after a wait.
+static void lane_benchmark_after_wait(void* argument)
+{
+    LaneBenchmarkAfter* after = argument;
+    const uint32_t index = lane_index();
+    const uint32_t lanes = lane_count();
+    uint64_t x = index + 1;
+    lane_sync();
+    x = lane_benchmark_work_until(x, lane_benchmark_now() + BUSTER_LANE_BENCHMARK_CALIBRATION_NANOSECONDS);
+    uint64_t best = UINT64_MAX;
+    for (uint32_t run = 0; run < BUSTER_LANE_BENCHMARK_CALIBRATION_RUNS; run += 1)
+    {
+        const uint64_t begin = lane_benchmark_now();
+        x = lane_benchmark_work(x, BUSTER_LANE_BENCHMARK_CALIBRATION_ITERATIONS);
+        const uint64_t end = lane_benchmark_now();
+        best = end - begin < best ? end - begin : best;
+    }
+    const double nanoseconds_per_iteration = (double)best / BUSTER_LANE_BENCHMARK_CALIBRATION_ITERATIONS;
+    const uint64_t work_iterations = (uint64_t)(BUSTER_LANE_BENCHMARK_WORK_NANOSECONDS / nanoseconds_per_iteration);
+    const double work_nanoseconds = (double)work_iterations * nanoseconds_per_iteration;
+    for (uint32_t wait = 0; wait < BUSTER_LANE_BENCHMARK_WAIT_COUNT; wait += 1)
+    {
+        const uint64_t alone_iterations = (uint64_t)((double)lane_benchmark_waits[wait] / nanoseconds_per_iteration);
+        for (uint64_t pass = 0; pass <= BUSTER_LANE_BENCHMARK_PASSES; pass += 1)
+        {
+            lane_sync();
+            x = lane_benchmark_work_until(x, lane_benchmark_now() + BUSTER_LANE_BENCHMARK_SETTLE_NANOSECONDS);
+            lane_sync();
+            uint64_t alone = 0;
+            if (index == 0)
+            {
+                const uint64_t begin = lane_benchmark_now();
+                x = lane_benchmark_work(x, alone_iterations);
+                after->arrival = lane_benchmark_now();
+                alone = (uint64_t)(1000.0 * (double)(after->arrival - begin) / ((double)alone_iterations * nanoseconds_per_iteration));
+            }
+            lane_sync();
+            const uint64_t left = lane_benchmark_now();
+            x = lane_benchmark_work(x, work_iterations);
+            const uint64_t done = lane_benchmark_now();
+            after->left[index] = left;
+            after->work[index] = (uint64_t)(1000.0 * (double)(done - left) / work_nanoseconds);
+            lane_sync();
+            if (index == 0 && pass > 0)
+            {
+                uint64_t last = 0;
+                uint64_t works[BUSTER_LANE_BENCHMARK_MAX_LANES];
+                for (uint32_t lane = 1; lane < lanes; lane += 1)
+                {
+                    last = after->left[lane] > last ? after->left[lane] : last;
+                    works[lane - 1] = after->work[lane];
+                }
+                lane_benchmark_sort(works, lanes - 1);
+                after->wake[wait][pass - 1] = last - after->arrival;
+                after->alone[wait][pass - 1] = alone;
+                after->slowest[wait][pass - 1] = works[lanes - 2];
+                after->median[wait][pass - 1] = works[(lanes - 2) / 2];
+            }
+        }
+    }
 }
 
 static void lane_benchmark_empty(void* argument)
@@ -343,9 +475,11 @@ int run_lane_benchmark(int argc, char** argv)
         {
             printf(" %u", cpus[i]);
         }
-        printf(" in order; medians of %d passes, of %lu rounds for sync and broadcast and %lu for pthread:\n", BUSTER_LANE_BENCHMARK_PASSES, (unsigned long)rounds,
-               (unsigned long)(rounds / BUSTER_LANE_BENCHMARK_PTHREAD_SHARE));
-        printf("  lanes        sync   broadcast     pthread        wake  slept       start\n");
+        printf(" in order; medians of %d passes, of %lu rounds for sync and broadcast and %lu for pthread, and of waking from mwaitx (%lu us late) and the futex "
+               "(%lu us late):\n",
+               BUSTER_LANE_BENCHMARK_PASSES, (unsigned long)rounds, (unsigned long)(rounds / BUSTER_LANE_BENCHMARK_PTHREAD_SHARE),
+               (unsigned long)(BUSTER_LANE_BENCHMARK_MWAITX_LATE_NANOSECONDS / 1000), (unsigned long)(BUSTER_LANE_BENCHMARK_FUTEX_LATE_NANOSECONDS / 1000));
+        printf("  lanes        sync   broadcast     pthread   wake mwaitx   wake futex  slept       start\n");
         static LaneBenchmark benchmark;
         bool passed = true;
         for (uint32_t count = 1; passed && count <= lanes; count += 1)
@@ -383,10 +517,34 @@ int run_lane_benchmark(int argc, char** argv)
             }
             else
             {
-                printf("  %5u  %7.1f ns  %7.1f ns  %7.1f ns  %7.1f us  %5.1f  %7.1f us\n", count, lane_benchmark_median(benchmark.sync) / (double)rounds,
+                printf("  %5u  %7.1f ns  %7.1f ns  %7.1f ns  %9.2f us  %8.2f us  %5.1f  %7.1f us\n", count, lane_benchmark_median(benchmark.sync) / (double)rounds,
                        lane_benchmark_median(benchmark.broadcast) / (double)rounds,
-                       lane_benchmark_median(benchmark.pthread) / (double)(rounds / BUSTER_LANE_BENCHMARK_PTHREAD_SHARE), lane_benchmark_median(benchmark.wake) / 1e3,
-                       (double)sleeps / BUSTER_LANE_BENCHMARK_PASSES, lane_benchmark_median(start) / 1e3);
+                       lane_benchmark_median(benchmark.pthread) / (double)(rounds / BUSTER_LANE_BENCHMARK_PTHREAD_SHARE), lane_benchmark_median(benchmark.wake_mwaitx) / 1e3,
+                       lane_benchmark_median(benchmark.wake_futex) / 1e3, (double)sleeps / BUSTER_LANE_BENCHMARK_PASSES, lane_benchmark_median(start) / 1e3);
+            }
+            fflush(stdout);
+        }
+
+        static LaneBenchmarkAfter after;
+        if (passed && lanes > 1)
+        {
+            passed = lane_run((uint32_t)lanes, lane_benchmark_after_wait, &after, cpus);
+            if (!passed)
+            {
+                fprintf(stderr, "a group of %lu lanes couldn't be started or pinned\n", (unsigned long)lanes);
+            }
+        }
+        if (passed && lanes > 1)
+        {
+            printf("after waiting, %lu lanes: lane 0 works alone for the wait while the others wait for it, then every lane works for %lu us; medians of %d passes, "
+                   "against full speed:\n",
+                   (unsigned long)lanes, (unsigned long)(BUSTER_LANE_BENCHMARK_WORK_NANOSECONDS / 1000), BUSTER_LANE_BENCHMARK_PASSES);
+            printf("      wait       wake  lane 0 alone  slowest after  median after\n");
+            for (uint32_t wait = 0; wait < BUSTER_LANE_BENCHMARK_WAIT_COUNT; wait += 1)
+            {
+                printf("  %5lu us  %6.2f us  %11.1f%%  %12.1f%%  %11.1f%%\n", (unsigned long)(lane_benchmark_waits[wait] / 1000), lane_benchmark_median(after.wake[wait]) / 1e3,
+                       lane_benchmark_median(after.alone[wait]) / 10.0 - 100.0, lane_benchmark_median(after.slowest[wait]) / 10.0 - 100.0,
+                       lane_benchmark_median(after.median[wait]) / 10.0 - 100.0);
             }
             fflush(stdout);
         }

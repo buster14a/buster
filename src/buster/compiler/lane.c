@@ -8,8 +8,8 @@
 // The interface is the RAD Debugger's, as its base layer has it today (base_thread_context.h, and radbin, which starts
 // its lanes once and runs the whole program on them), in this repository's style. Three things differ, each measured
 // by benchmark-lanes: the calling thread is lane 0 rather than waiting for the others, so one lane starts no thread; a
-// broadcast is one barrier rather than two (see LaneGroup); and the barrier spins before it sleeps on a futex, where the
-// RAD Debugger's on Linux is pthread_barrier_wait, which sleeps at every wait.
+// broadcast is one barrier rather than two (see LaneGroup); and the barrier spins and then waits in mwaitx before it
+// sleeps on a futex, where the RAD Debugger's on Linux is pthread_barrier_wait, which sleeps at every wait.
 //
 // main.c includes this file, and lane_benchmark.c includes its own copy. Each part declares its interface first, then
 // defines it. In this order:
@@ -24,8 +24,9 @@
 //
 // The barrier is the only code with atomics. In lane_arrive, each lane counts itself in, and the last one advances the
 // group's generation word with lane_publish while the others wait for it in lane_wait. A waiting lane spins for
-// BUSTER_LANE_SPINS pauses and then sleeps on the word with a futex, setting its bit 0 first so that the lane that
-// advances it knows to wake the sleepers: a sync at which no lane slept makes no system call.
+// BUSTER_LANE_SPINS pauses, waits in mwaitx for the word's line to be written for up to BUSTER_LANE_MWAITX_TICKS, and
+// then sleeps on the word with a futex, setting its bit 0 first so that the lane that advances it knows to wake the
+// sleepers: a sync at which no lane slept makes no system call.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -40,8 +41,8 @@
 #include <sys/syscall.h>
 #include <linux/futex.h>
 
-// CPU architecture dependent includes
-#include <immintrin.h>
+// CPU architecture dependent includes: x86intrin.h has AMD's monitorx and mwaitx besides immintrin.h.
+#include <x86intrin.h>
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Arenas
@@ -254,9 +255,20 @@ static void scratch_release(void)
 // Lanes
 
 // How many times a waiting lane reads the generation word, with a pause between reads (11.7 ns on the 9700X), before it
-// sleeps on a futex: 24 µs, longer than waking a sleeping lane costs there (2 to 15 µs, from how deeply its core went
-// idle), so a lane sleeps only once its wait is already longer than that.
-#define BUSTER_LANE_SPINS 2048
+// waits in mwaitx: 1.5 µs, far longer than a sync at which every lane arrives at once takes (35 to 200 ns with 2 to 8
+// lanes), so such a sync never waits in mwaitx.
+#define BUSTER_LANE_SPINS 128
+// How long a lane then waits in mwaitx before it sleeps on a futex, in TSC ticks: 1 ms at the 9700X's 3.79 GHz. Woken
+// from mwaitx, a lane there leaves 0.2 to 0.3 µs after the word changes, against 10 to 14 µs from the futex, and a core
+// waiting either way draws about 2 W, half what a spinning one does. What a long wait costs comes after it: a core that
+// waited longer than 0.6 ms on the futex, or 1.5 ms in mwaitx, has its clock halved and loses 25 to 50% of the next
+// millisecond's work (docs/object-writer-and-linker.md, "Lanes"). Past 1 ms the lane sleeps, since the waits that slow
+// it down do so whichever way it waits, and on the futex its core can go into its deepest idle state, at 0.07 W.
+#define BUSTER_LANE_MWAITX_TICKS 3800000
+// mwaitx's arguments: bit 1 of its extensions enables its timer, and its hint asks for C1, which on the 9700X wakes as
+// fast as C0's (0xf0) and draws a little less.
+#define BUSTER_LANE_MWAITX_TIMER 2u
+#define BUSTER_LANE_MWAITX_C1 0u
 #define BUSTER_LANE_CACHE_LINE_BYTES 64
 
 typedef struct Range64 Range64;
@@ -322,8 +334,8 @@ static uint32_t lane_count(void)
     return thread_context.lane.count;
 }
 
-// Waits while *word, but for its bit 0, is `value`, and returns its new value without bit 0. Spins first; then sets bit
-// 0, so that whoever changes the word wakes it, and sleeps on a futex while the word is unchanged.
+// Waits while *word, but for its bit 0, is `value`, and returns its new value without bit 0. Spins first, then waits in
+// mwaitx; then sets bit 0, so that whoever changes the word wakes it, and sleeps on a futex while the word is unchanged.
 static uint32_t lane_wait(uint32_t* word, uint32_t value)
 {
     uint32_t current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
@@ -331,6 +343,21 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
     {
         _mm_pause();
         current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+    }
+    const uint64_t begin = __rdtsc();
+    uint64_t waited = 0;
+    while ((current & ~1u) == value && waited < BUSTER_LANE_MWAITX_TICKS)
+    {
+        // The monitor is armed before the read, so a write after the read ends the wait. The wait also ends on an
+        // interrupt, or when the timer runs out the rest of the ticks.
+        _mm_monitorx(word, 0, 0);
+        current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+        if ((current & ~1u) == value)
+        {
+            _mm_mwaitx(BUSTER_LANE_MWAITX_TIMER, BUSTER_LANE_MWAITX_C1, (uint32_t)(BUSTER_LANE_MWAITX_TICKS - waited));
+            current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+        }
+        waited = __rdtsc() - begin;
     }
     while ((current & ~1u) == value)
     {
