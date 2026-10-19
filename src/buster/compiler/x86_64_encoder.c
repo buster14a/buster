@@ -4009,8 +4009,9 @@ _Static_assert(BUSTER_X86_FORM_TEMPLATES <= 65536, "a form with a segment overri
 
 // A marked instruction: one with a symbolic operand, a field (its displacement, its immediate, or both) that the code
 // generator can't fill in before layout. The form, with or without a segment override, plus this flag. The encoders
-// encode the form as it is without the flag, and report where each marked instruction ends (x86_encode's
-// `fixup_ends`), which locates its fields without decoding anything (x86_fixup_distance).
+// encode the form as it is without the flag (the vectorized one with a copy of its template), and report where each
+// marked instruction ends (x86_encode's `fixup_ends`), which locates its fields without decoding anything
+// (x86_fixup_distance).
 #define BUSTER_X86_FORM_FIXUP 0x8000
 // The bits of X86Instruction.form below the flag: the form and its segment override.
 #define BUSTER_X86_FORM_NUMBER (BUSTER_X86_FORM_FIXUP - 1)
@@ -4223,9 +4224,13 @@ struct X86Template
 _Static_assert(sizeof(X86Template) == 32, "a template is one YMM load");
 
 // The templates, with BUSTER_X86_TEMPLATE_PADDING unused templates on either side: the vectorized encoder loads 16 bytes
-// of a template into a lane of a ZMM register with a masked load that spans up to 48 bytes on either side of them.
+// of a template into a lane of a ZMM register with a masked load that spans up to 48 bytes on either side of them. A
+// marked form's are a copy at BUSTER_X86_FORM_FIXUP and up, so that the vectorized encoder looks the form up as the
+// record has it: taking the flag off each form cost the loop 2.4% on Zen 5. Between the two, the pages nothing touches
+// stay unmapped.
 #define BUSTER_X86_TEMPLATE_PADDING 2
-static X86Template x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING] __attribute__((aligned(64)));
+static X86Template x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
+    __attribute__((aligned(64)));
 static X86Template* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_PADDING;
 static bool x86_encoder_initialized;
 
@@ -4440,6 +4445,7 @@ static bool x86_encoder_initialize(void)
     {
         result = build_template(x86_form_description(form), x86_form_segment(form), &x86_templates[form]) && result;
     }
+    memcpy(&x86_templates[BUSTER_X86_FORM_FIXUP], &x86_templates[0], BUSTER_X86_FORM_TEMPLATES * sizeof(X86Template));
     x86_encoder_initialized = result;
     return result;
 }
@@ -5234,15 +5240,7 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
         const uint8_t* t[BUSTER_X86_QUAD_INSTRUCTIONS];
         for (uint32_t j = 0; j < BUSTER_X86_QUAD_INSTRUCTIONS; j += 1)
         {
-            const X86Instruction* record = &quad[j];
-            if (gather == X86_GATHER_MASKED_LOADS)
-            {
-                // Opaque to clang, which otherwise takes these forms out of the records' vector registers with vpextrw
-                // (two µops and up to 8 cycles each on Zen 5) for the AND below, rather than loading them: 20% slower.
-                __asm__("" : "+r"(record));
-            }
-            const uint32_t form = gather == X86_GATHER_INSERTS_FORMS_FROM_RECORDS ? (uint16_t)(slot_forms[j] >> (16 * q)) : record->form;
-            t[j] = (const uint8_t*)&x86_templates[form & BUSTER_X86_FORM_NUMBER];
+            t[j] = (const uint8_t*)&x86_templates[gather == X86_GATHER_INSERTS_FORMS_FROM_RECORDS ? (uint16_t)(slot_forms[j] >> (16 * q)) : quad[j].form];
         }
         if (gather == X86_GATHER_MASKED_LOADS)
         {
