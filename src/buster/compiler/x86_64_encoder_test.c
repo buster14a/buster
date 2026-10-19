@@ -59,7 +59,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0x80bb6c9e9d57070full
+#define BUSTER_X86_TEST_DIGEST 0xb18868353f2b3fe0ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -477,6 +477,9 @@ static const char* x86_syntax_operands(uint8_t syntax)
         case X86_SYNTAX_ACC: result = "a"; break;
         case X86_SYNTAX_RM_ACC: result = "ma"; break;
         case X86_SYNTAX_RM_REG_VVVV: result = "mrv"; break;
+        case X86_SYNTAX_REG_RM_XMM0: result = "rmx"; break;
+        case X86_SYNTAX_RM_IMM8_IMM8: result = "mjk"; break;
+        case X86_SYNTAX_REG_RM_IMM8_IMM8: result = "rmjk"; break;
         default: break;
     }
     return result;
@@ -552,6 +555,9 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction)
                         }
                         break;
                     case 'i': fprintf(file, "%lld", (long long)immediate); break;
+                    case 'j': fprintf(file, "%d", instruction->immediate & 0xff); break;
+                    case 'k': fprintf(file, "%d", (instruction->immediate >> 8) & 0xff); break;
+                    case 'x': fprintf(file, "xmm0"); break;
                     case 'c': fprintf(file, "cl"); break;
                     case 's': fprintf(file, "st"); break;
                     case 'a': fprintf(file, "%s", x86_accumulator_name(form->operand_bytes)); break;
@@ -845,6 +851,31 @@ static const KnownEncoding x86_known_encodings[] = {
       9,
       { 0x65, 0x62, 0xd1, 0xfe, 0x48, 0x6f, 0x44, 0xc1, 0x01 } },
     { { .form = X86_FORM_NOTRACK_JMP_R64, .rm = X86_REGISTER_RAX }, 3, { 0x3e, 0xff, 0xe0 } },
+    // SSE to SSE4.2: psllw xmm9, 3 (a /digit with REX.B); pslldq xmm1, 4; pextrw eax, xmm1, 3 and pextrw word ptr [rax],
+    // xmm1, 3 (SSE2's register and SSE4.1's memory form); pinsrw xmm1, word ptr [rax], 3; extrq xmm1, 3, 4 and insertq
+    // xmm1, xmm2, 3, 4 (two immediates); blendvpd xmm9, xmmword ptr [rax], xmm0; pcmpestriq xmm0, xmm1, 5 (66, then
+    // REX.W); movnti qword ptr [rax], r9; cvtsd2si r10, xmm3; pmovsxbq xmm1, word ptr [rax]; fxsave64 [rax]; ldmxcsr
+    // dword ptr [rax]; cmpsd xmm1, qword ptr [rax], 3; movhps qword ptr [rax], xmm1; maskmovdqu xmm1, xmm2; phminposuw
+    // xmm12, xmm1; and pmovzxbd xmm1, dword ptr fs:[rax]
+    { { .form = X86_FORM_PSLLW_X_IMM8, .rm = 9, .immediate = 3 }, 6, { 0x66, 0x41, 0x0f, 0x71, 0xf1, 0x03 } },
+    { { .form = X86_FORM_PSLLDQ_X_IMM8, .rm = 1, .immediate = 4 }, 5, { 0x66, 0x0f, 0x73, 0xf9, 0x04 } },
+    { { .form = X86_FORM_PEXTRW_R32_X_IMM8, .reg = X86_REGISTER_RAX, .rm = 1, .immediate = 3 }, 5, { 0x66, 0x0f, 0xc5, 0xc1, 0x03 } },
+    { { .form = X86_FORM_PEXTRW_M16_X_IMM8, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 }, 6, { 0x66, 0x0f, 0x3a, 0x15, 0x08, 0x03 } },
+    { { .form = X86_FORM_PINSRW_X_RM32_IMM8, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 }, 5, { 0x66, 0x0f, 0xc4, 0x08, 0x03 } },
+    { { .form = X86_FORM_EXTRQ_X_IMM8_IMM8, .rm = 1, .immediate = 3 | 4 << 8 }, 6, { 0x66, 0x0f, 0x78, 0xc1, 0x03, 0x04 } },
+    { { .form = X86_FORM_INSERTQ_X_X_IMM8_IMM8, .reg = 1, .rm = 2, .immediate = 3 | 4 << 8 }, 6, { 0xf2, 0x0f, 0x78, 0xca, 0x03, 0x04 } },
+    { { .form = X86_FORM_BLENDVPD_X_XM128_XMM0, .reg = 9, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x66, 0x44, 0x0f, 0x38, 0x15, 0x08 } },
+    { { .form = X86_FORM_PCMPESTRIQ_X_XM128_IMM8, .reg = 0, .rm = 1, .immediate = 5 }, 7, { 0x66, 0x48, 0x0f, 0x3a, 0x61, 0xc1, 0x05 } },
+    { { .form = X86_FORM_MOVNTI_M64_R64, .reg = X86_REGISTER_R9, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x4c, 0x0f, 0xc3, 0x08 } },
+    { { .form = X86_FORM_CVTSD2SI_R64_XM64, .reg = X86_REGISTER_R10, .rm = 3 }, 5, { 0xf2, 0x4c, 0x0f, 0x2d, 0xd3 } },
+    { { .form = X86_FORM_PMOVSXBQ_X_XM16, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x66, 0x0f, 0x38, 0x22, 0x08 } },
+    { { .form = X86_FORM_FXSAVE64_M, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x48, 0x0f, 0xae, 0x00 } },
+    { { .form = X86_FORM_LDMXCSR_M32, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x0f, 0xae, 0x10 } },
+    { { .form = X86_FORM_CMPSD_X_XM64_IMM8, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 }, 5, { 0xf2, 0x0f, 0xc2, 0x08, 0x03 } },
+    { { .form = X86_FORM_MOVHPS_M64_X, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x0f, 0x17, 0x08 } },
+    { { .form = X86_FORM_MASKMOVDQU_X_X, .reg = 1, .rm = 2 }, 4, { 0x66, 0x0f, 0xf7, 0xca } },
+    { { .form = X86_FORM_PHMINPOSUW_X_XM128, .reg = 12, .rm = 1 }, 6, { 0x66, 0x44, 0x0f, 0x38, 0x41, 0xe1 } },
+    { { .form = X86_FORM_PMOVZXBD_X_XM32 + BUSTER_X86_FORM_FS, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x64, 0x66, 0x0f, 0x38, 0x31, 0x08 } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.
