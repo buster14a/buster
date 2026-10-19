@@ -10,7 +10,8 @@ on:
 permissions:
   contents: read
 
-# Repository-local serialization, not cross-repository benchmark isolation.
+# Repository-local serialization. The runner's job hooks also take the host's benchmark lock, which other
+# repositories' jobs and interactive benchmark sessions share (see AGENTS.md).
 concurrency:
   group: buster-fast-9700x
   cancel-in-progress: false

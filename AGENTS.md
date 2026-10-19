@@ -62,6 +62,21 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler benchmark-x86-encoder
 ```
 
+## Sharing the 9700X
+
+Agent sessions and CI share the 9700X: the buster14a org's self-hosted runner
+runs on the same machine. Its timings only mean something when one thing runs
+there at a time, so everything takes one lock:
+
+- Run every build, test, benchmark and perf run there through
+  `EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh COMMAND...`.
+- The runner's job hooks take the same lock for every CI job, and a waiting CI
+  job goes first.
+- Hold the lock per run, never around a series of runs: a CI job waits for it
+  and times out after 10 minutes.
+- `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
+  to undo it.
+
 ## Lexer tests
 
 `./build/compiler test-lexer` needs no corpus. Its checks are ports of the
