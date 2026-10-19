@@ -59,7 +59,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0x3cf027ddc16d5e32ull
+#define BUSTER_X86_TEST_DIGEST 0x80bb6c9e9d57070full
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -160,7 +160,9 @@ static uint32_t x86_form_opcode(const X86FormDescription* form)
 // that --print-assembly avoids it.
 static bool x86_assembler_prefers_another_form(const X86Instruction* instruction)
 {
-    const X86FormDescription* form = &x86_form_descriptions[instruction->form];
+    const X86FormDescription* form = x86_form_description(instruction->form);
+    // The form without its segment override.
+    const uint32_t row = instruction->form % X86_FORM_COUNT;
     const bool register_direct = instruction->mode == 0 && form->rm != BUSTER_X86_OPERAND_NONE;
     const uint32_t opcode = x86_form_opcode(form);
     // The immediate as the operand's size makes it: 65499 is -37 for a 16-bit operand.
@@ -169,8 +171,7 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
     const bool legacy = form->family == BUSTER_X86_FAMILY_LEGACY;
     bool result = false;
     // MOVQ (and VEX's VMOVQ) between an XMM register and memory is F3 0F 7E or 66 0F D6, not the W1 forms of MOVD.
-    if (!register_direct && (instruction->form == X86_FORM_MOVQ_X_RM64 || instruction->form == X86_FORM_MOVQ_RM64_X ||
-                             instruction->form == X86_FORM_VMOVQ_X_RM64 || instruction->form == X86_FORM_VMOVQ_RM64_X))
+    if (!register_direct && (row == X86_FORM_MOVQ_X_RM64 || row == X86_FORM_MOVQ_RM64_X || row == X86_FORM_VMOVQ_X_RM64 || row == X86_FORM_VMOVQ_RM64_X))
     {
         result = true;
     }
@@ -215,12 +216,17 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
         result = true;
     }
     // XCHG EAX, EAX with 90 would be NOP (which doesn't clear the upper half), so it's 87 C0; XCHG RAX, RAX is NOP.
-    if ((instruction->form == X86_FORM_XCHG_R32_EAX || instruction->form == X86_FORM_XCHG_R64_RAX) && instruction->rm == 0)
+    if ((row == X86_FORM_XCHG_R32_EAX || row == X86_FORM_XCHG_R64_RAX) && instruction->rm == 0)
     {
         result = true;
     }
     // PREFETCHIT0 and PREFETCHIT1 take only RIP-relative addresses (with others, they're NOPs, which GNU as warns about).
-    if ((instruction->form == X86_FORM_PREFETCHIT0_M8 || instruction->form == X86_FORM_PREFETCHIT1_M8) && !(instruction->mode & BUSTER_X86_MODE_RIP))
+    if ((row == X86_FORM_PREFETCHIT0_M8 || row == X86_FORM_PREFETCHIT1_M8) && !(instruction->mode & BUSTER_X86_MODE_RIP))
+    {
+        result = true;
+    }
+    // GNU as warns about a segment override on LEA, where it does nothing.
+    if (legacy && opcode == 0x8d && x86_form_segment(instruction->form) != 0)
     {
         result = true;
     }
@@ -290,6 +296,11 @@ static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_inde
                 if (result.mode & BUSTER_X86_MODE_INDEX)
                 {
                     result.index = x86_random_register(state, BUSTER_X86_OPERAND_GQ, BUSTER_X86_FAMILY_LEGACY);
+                }
+                // An FS or GS segment override one time in eight.
+                if (x86_random_below(state, 8) == 0)
+                {
+                    result.form = (uint16_t)(result.form + (x86_random_below(state, 2) == 0 ? BUSTER_X86_FORM_FS : BUSTER_X86_FORM_GS));
                 }
                 result.displacement = x86_random_displacement(state, form->disp8_scale);
             }
@@ -397,6 +408,8 @@ static const char* x86_accumulator_name(uint32_t bytes)
 static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint32_t operand_bytes)
 {
     const uint8_t mode = instruction->mode;
+    const uint32_t override = x86_form_segment(instruction->form);
+    const char* segment = override == 0 ? "" : override == 1 ? "fs:" : "gs:";
     // A far pointer of 6 bytes is an fword; the x87 environment and state areas (14, 28, 94 and 108 bytes) and MOVDIR64B's
     // 64 bytes (0 in its row) have no size keyword.
     const char* size = operand_bytes == 1 ? "byte ptr " : operand_bytes == 2 ? "word ptr " : operand_bytes == 4 ? "dword ptr " : operand_bytes == 6 ? "fword ptr " :
@@ -404,11 +417,11 @@ static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint
                        operand_bytes == 32 ? "ymmword ptr " : operand_bytes == 64 ? "zmmword ptr " : "";
     if ((mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX | BUSTER_X86_MODE_RIP)) == 0)
     {
-        fprintf(file, "%sds:%d", size, instruction->displacement);
+        fprintf(file, "%s%s%d", size, *segment != 0 ? segment : "ds:", instruction->displacement);
     }
     else
     {
-        fprintf(file, "%s[", size);
+        fprintf(file, "%s%s[", size, segment);
         if (mode & BUSTER_X86_MODE_RIP)
         {
             fprintf(file, "rip");
@@ -476,7 +489,7 @@ static const char* x86_syntax_operands(uint8_t syntax)
 // rounding or suppressed exceptions come after the registers.
 static void x86_print_instruction(FILE* file, const X86Instruction* instruction)
 {
-    const X86FormDescription* form = &x86_form_descriptions[instruction->form];
+    const X86FormDescription* form = x86_form_description(instruction->form);
     const bool register_direct = instruction->mode == 0 && form->rm != BUSTER_X86_OPERAND_NONE;
     const uint8_t decorations = instruction->decorations;
     const int64_t immediate = form->immediate_bytes == 8 ? (int64_t)((uint64_t)(uint32_t)instruction->immediate | ((uint64_t)(uint32_t)instruction->displacement << 32))
@@ -576,15 +589,15 @@ static void x86_print_bytes(const uint8_t* bytes, uint64_t length)
 static bool x86_check_templates(void)
 {
     const bool result = x86_encoder_initialize();
-    printf("templates: %u forms, %s\n", (unsigned)X86_FORM_COUNT, result ? "all fit" : "SOME DON'T FIT");
+    printf("templates: %u forms, and each with FS and GS, %s\n", (unsigned)X86_FORM_COUNT, result ? "all fit" : "SOME DON'T FIT");
     if (!result)
     {
-        for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
+        for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
         {
             X86Template template;
-            if (!build_template(&x86_form_descriptions[form], &template))
+            if (!build_template(x86_form_description(form), x86_form_segment(form), &template))
             {
-                printf("  form %u (%s) doesn't fit\n", form, x86_form_descriptions[form].mnemonic);
+                printf("  form %u (%s, segment override %u) doesn't fit\n", form, x86_form_description(form)->mnemonic, x86_form_segment(form));
             }
         }
     }
@@ -815,6 +828,23 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_PREFETCHIT0_M8, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x10 }, 7, { 0x0f, 0x18, 0x3d, 0x10, 0x00, 0x00, 0x00 } },
     { { .form = X86_FORM_MOVDIR64B_R64_M512, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x66, 0x0f, 0x38, 0xf8, 0x01 } },
     { { .form = X86_FORM_RDPID_R64, .rm = X86_REGISTER_RAX }, 4, { 0xf3, 0x0f, 0xc7, 0xf8 } },
+    // Segment overrides: mov rax, qword ptr fs:[rax]; mov rax, qword ptr fs:0; mov rax, qword ptr fs:[rip+0x10]; lock
+    // add word ptr fs:[rax], cx; inc byte ptr fs:[rax]; push qword ptr gs:[rax]; fld tbyte ptr fs:[rax]; vmovdqu ymm0,
+    // ymmword ptr fs:[rax]; vmovdqu64 zmm0, zmmword ptr gs:[r9+rax*8+0x40]; and notrack jmp rax
+    { { .form = X86_FORM_MOV_R64_RM64 + BUSTER_X86_FORM_FS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x64, 0x48, 0x8b, 0x00 } },
+    { { .form = X86_FORM_MOV_R64_RM64 + BUSTER_X86_FORM_FS, .mode = BUSTER_X86_MEMORY_ABSOLUTE }, 9, { 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_MOV_R64_RM64 + BUSTER_X86_FORM_FS, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x10 }, 8, { 0x64, 0x48, 0x8b, 0x05, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_LOCK_ADD_M16_R16 + BUSTER_X86_FORM_FS, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE },
+      5,
+      { 0x64, 0x66, 0xf0, 0x01, 0x08 } },
+    { { .form = X86_FORM_INC_RM8 + BUSTER_X86_FORM_FS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x64, 0xfe, 0x00 } },
+    { { .form = X86_FORM_PUSH_RM64 + BUSTER_X86_FORM_GS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x65, 0xff, 0x30 } },
+    { { .form = X86_FORM_FLD_M80 + BUSTER_X86_FORM_FS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x64, 0xdb, 0x28 } },
+    { { .form = X86_FORM_VMOVDQU_Y_YM256 + BUSTER_X86_FORM_FS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x64, 0xc5, 0xfe, 0x6f, 0x00 } },
+    { { .form = X86_FORM_VMOVDQU64_Z_ZM512 + BUSTER_X86_FORM_GS, .rm = X86_REGISTER_R9, .index = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = 0x40 },
+      9,
+      { 0x65, 0x62, 0xd1, 0xfe, 0x48, 0x6f, 0x44, 0xc1, 0x01 } },
+    { { .form = X86_FORM_NOTRACK_JMP_R64, .rm = X86_REGISTER_RAX }, 3, { 0x3e, 0xff, 0xe0 } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.
@@ -1088,10 +1118,10 @@ static uint8_t x86_past_last_register(uint8_t operand, uint8_t family)
 // can't be broken that way.
 static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction)
 {
-    const X86FormDescription* form = &x86_form_descriptions[instruction->form];
+    const X86FormDescription* form = x86_form_description(instruction->form);
     const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0;
     bool result = true;
-    switch (x86_random_below(state, 12))
+    switch (x86_random_below(state, 14))
     {
         case 0:
             // A high byte register with an extended register (and so a REX prefix).
@@ -1210,10 +1240,39 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction)
             }
             break;
         case 4:
+            // A segment override's form with an operand that isn't memory (a register, or none).
+            if (!memory)
+            {
+                instruction->form = (uint16_t)(instruction->form + (x86_random_below(state, 2) == 0 ? BUSTER_X86_FORM_FS : BUSTER_X86_FORM_GS));
+            }
+            else
+            {
+                result = false;
+            }
+            break;
+        case 12:
             // Unknown mode bits.
             if (form->rm != BUSTER_X86_OPERAND_NONE)
             {
-                instruction->mode |= 0x80;
+                instruction->mode |= x86_random_below(state, 2) == 0 ? 0x40 : 0x80;
+            }
+            else
+            {
+                result = false;
+            }
+            break;
+        case 11:
+            // An index register or a scale without an index.
+            if (form->rm != BUSTER_X86_OPERAND_NONE && !(instruction->mode & BUSTER_X86_MODE_INDEX))
+            {
+                if (x86_random_below(state, 2) == 0)
+                {
+                    instruction->index = (uint8_t)(1 + x86_random_below(state, 15));
+                }
+                else
+                {
+                    instruction->mode |= (uint8_t)(1 + x86_random_below(state, 3));
+                }
             }
             else
             {
@@ -1259,7 +1318,7 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
                 if (failures < BUSTER_X86_TEST_REPORTED)
                 {
                     printf("  instruction %lu of %lu (form %s, reg 0x%02x, rm 0x%02x, index 0x%02x, mode 0x%02x): %s%s\n", (unsigned long)victim,
-                           (unsigned long)count, x86_form_descriptions[instructions[victim].form].mnemonic, instructions[victim].reg, instructions[victim].rm,
+                           (unsigned long)count, x86_form_description(instructions[victim].form)->mnemonic, instructions[victim].reg, instructions[victim].rm,
                            instructions[victim].index, instructions[victim].mode, validated ? "" : "x86_validate missed it ",
                            rejected ? "" : "x86_encode accepted it");
                 }
