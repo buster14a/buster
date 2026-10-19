@@ -47,7 +47,10 @@ or infrastructure machinery merely to match its style.
   `docs/c-lexer.md` records the GFNI classifier, the leading-comment skip, branch-free chunk state, the
   pipelined write-out, table-driven punctuator kinds, the delimiter scan and their 9700X measurements.
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
-  of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder);
+  of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder,
+  and the fixup interface: `BUSTER_X86_FORM_FIXUP` marks an instruction with a
+  symbolic operand, `x86_encode` reports each marked instruction's end, and
+  `x86_fixup_distance` gives its fields' offsets and addends from that);
   `docs/x86-64-encoder.md` explains its design and measurements.
   `x86_64_encoder_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-x86-encoder` runs them) and
@@ -135,50 +138,63 @@ yet compared against a performance baseline. Keep just one compiler executable.
 
 ## x86-64 encoder tests
 
-`./build/compiler test-x86-encoder` (about 0.3 s) checks that every form fits a
-template, both encoders on 534 known encodings from GNU as, a digest of the
-scalar encoder's output for 100,000 random instructions, every batch width and
-variant of `x86_encode` against the scalar encoder (bytes and offsets) on every
-count from 0 to 199 and on 300,000 random instructions of every form (legacy
-with x87 and MMX, VEX and EVEX, with opmasks, broadcasts, rounding, registers
-16-31, gathers and scatters, and FS and GS segment overrides),
-the same between `PROT_NONE` guard pages, and that invalid operands are
-rejected (immediates and rel8s outside their fields' ranges by `x86_validate`
-alone: `x86_encode` writes their low bytes). `--count N` and `--seed N` change
-the random streams.
+`./build/compiler test-x86-encoder` (about 0.6 s) checks that every form fits a
+template, both encoders on 534 known encodings from GNU as (each also with the
+fixup flag, whose end they must report), a digest of the scalar encoder's output
+for 100,000 random instructions, every batch width and variant of `x86_encode`
+against the scalar encoder (bytes, offsets and fixup ends, in each of the four
+loops: with neither, either or both of offsets and fixup ends) on every count
+from 0 to 199 and on 300,000 random instructions of every form (legacy with x87
+and MMX, VEX and EVEX, with opmasks, broadcasts, rounding, registers 16-31,
+gathers and scatters, FS and GS segment overrides, and one in eight marked with
+the fixup flag), the same between `PROT_NONE` guard pages, and that invalid
+operands are rejected (immediates and rel8s outside their fields' ranges by
+`x86_validate` alone: `x86_encode` writes their low bytes). `--count N` and
+`--seed N` change the random streams.
 
 The digest was recorded when GNU as encoded the same stream to the same bytes.
-After changing the form table or the scalar encoder, cross-check with GNU as
-(binutils 2.47 for the recorded digest), then record the digest the test prints:
+After changing the form table, the scalar encoder or the fixup interface,
+cross-check with GNU as (binutils 2.47 for the recorded digest), then record the
+digest the test prints:
 
 ```sh
 ./build/compiler test-x86-encoder --print-assembly 400000 --seed 1 > build/x86.s
 as build/x86.s -o build/x86.o
-objcopy -O binary -j .text build/x86.o build/x86.text
-objcopy -O binary -j .lengths build/x86.o build/x86.lengths
-./build/compiler test-x86-encoder --compare-binary build/x86.text build/x86.lengths 400000 --seed 1
+./build/compiler test-x86-encoder --compare-object build/x86.o 400000 --seed 1
 ```
 
-The printed assembly uses only operands GNU as encodes with the same form
+(`build.sh` deletes `build/`, so run these after building.) The printed
+assembly uses only operands GNU as encodes with the same form
 (`{load}`/`{store}`, `{vex}` and `{evex}`, immediates outside the imm8 range for
-imm32 forms, and so on), so any difference is a bug in one of them. Cross-check
-more than one seed after changing forms (1.7 million instructions over seeds 1,
-7 and 99 were last checked).
+imm32 forms, and so on), so any difference is a bug in one of them. A quarter of the fields that can
+be symbolic (32-bit displacements, rel32s, `loop`'s and `jrcxz`'s rel8s, imm32s
+and 64-bit immediates) are printed as symbols plus their values; GNU as writes
+zeros and a relocation for them, and `--compare-object` reads `.text`,
+`.lengths` and `.rela.text` from its object and compares the bytes (with those
+fields zeroed where the reported fixup ends put them) and each relocation's
+offset, type, addend and symbol with the ones the fixup ends and
+`x86_fixup_distance` give. Cross-check more than one seed after changing forms
+(1.7 million instructions over seeds 1, 7 and 99 were last checked, with 192,000
+relocations).
 
 ## x86-64 encoder benchmark
 
 `./build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform |
---vector] [--offsets] [--only NAME]` checks every implementation against the
-scalar loop, then reports 21 interleaved-pass medians per encoded instruction
-(time, cycles, instructions, IPC). The stream is a compiler-like mix of 16,384
-legacy instructions by default (comparable with older measurements), a mix like
-vectorized code (AVX-512, AVX2, BMI) with `--vector`, or random instructions of
-every form with `--uniform`; `--section N` encodes it N instructions per call.
+--vector] [--offsets] [--fixups] [--only NAME]` checks every implementation
+against the scalar loop, then reports 21 interleaved-pass medians per encoded
+instruction (time, cycles, instructions, IPC). The stream is a compiler-like mix
+of 16,384 legacy instructions by default (comparable with older measurements), a
+mix like vectorized code (AVX-512, AVX2, BMI) with `--vector`, or random
+instructions of every form with `--uniform`; `--section N` encodes it N
+instructions per call, `--offsets` stores every instruction's offset, and
+`--fixups` marks the calls and RIP-relative operands and reports their ends.
 The variants are the batch widths (`x86_encode_4` to `x86_encode_64`,
-instructions per loop iteration) and the template gather and output store
-alternatives that lost. Decide them, and any other performance question, with
-measurements on the 9700X (not Zen 4, and not llvm-mca, whose predictions are
-well off), using uops.info's Zen 5 port data to explain them;
+instructions per loop iteration), the template gather, output store and fixup
+store alternatives that lost, and `x86_encode_64_offsets_then_pick`, the other
+way to have fixup ends (every offset, then the caller picks the marked ones).
+Decide them, and any other performance question, with measurements on the 9700X
+(not Zen 4, and not llvm-mca, whose predictions are well off), using uops.info's
+Zen 5 port data to explain them;
 `docs/x86-64-encoder.md` has the current numbers. Clang's code for the loop
 changes a lot with small source changes, so compare every width after changing
 the encoder, and profile which loop the samples land in. The default 9700X job

@@ -2,7 +2,7 @@
 //
 //   build/compiler test-x86-encoder [--count N] [--seed N]
 //   build/compiler test-x86-encoder --print-assembly N [--seed N]
-//   build/compiler test-x86-encoder --compare-binary text lengths N [--seed N]
+//   build/compiler test-x86-encoder --compare-object object N [--seed N]
 //
 // main.c includes this file after x86_64_encoder.c and calls run_x86_encoder_tests for the command. The checks, in this
 // order:
@@ -10,19 +10,25 @@
 //   - Known encodings: x86_encode_scalar and x86_encode on x86_known_encodings, instructions on the paths most worth
 //     pinning down (REX, SIB, RBP and R13 bases, RSP and R12 bases, RIP, absolute and index-only addresses,
 //     displacement sizes, byte registers, prefixes, opcode maps; VEX2 and VEX3, BMI, opmasks, EVEX's opmasks,
-//     zeroing, broadcasts, rounding, compressed displacements and registers 16 to 31), with bytes from GNU as.
+//     zeroing, broadcasts, rounding, compressed displacements and registers 16 to 31), with bytes from GNU as, and each
+//     again with the fixup flag, whose end both must report.
+//   - Known fixups: x86_known_fixups, marked instructions with a symbolic field (branches, RIP-relative, absolute,
+//     index-only and base operands, with and without an immediate after them, imm32s and 64-bit immediates), where
+//     the reported end minus x86_fixup_distance must be where GNU as puts the field's relocation.
 //   - The reference digest: a hash of x86_encode_scalar's output for BUSTER_X86_TEST_DIGEST_INSTRUCTIONS random
 //     instructions (from the stream --print-assembly prints with --seed BUSTER_X86_TEST_DIGEST_SEED), recorded when
 //     GNU as encoded the same stream to the same bytes. A change to the form table or the scalar encoder changes it;
 //     cross-check the new output with GNU as (as AGENTS.md shows) before recording the new value.
 //   - Random streams: x86_encode at every batch width (x86_encode_4 ... x86_encode_64) and the gather and store
-//     variants against x86_encode_scalar, byte for byte and offset for offset, on random instructions of every form
-//     (with empty X86_FORM_NONE instructions among them): every count from 0 to BUSTER_X86_TEST_SHORT_COUNTS - 1, then
-//     N instructions (BUSTER_X86_TEST_DEFAULT_COUNT by default) at once.
+//     variants against x86_encode_scalar, byte for byte, offset for offset and fixup end for fixup end, with and without
+//     each of the offsets and the fixup ends, on random instructions of every form (with empty X86_FORM_NONE
+//     instructions among them, and one in BUSTER_X86_TEST_MARKED marked with the fixup flag): every count from 0 to
+//     BUSTER_X86_TEST_SHORT_COUNTS - 1, then N instructions (BUSTER_X86_TEST_DEFAULT_COUNT by default) at once.
 //   - Page edges: instructions that end exactly at the end of a readable page, and an output capacity (or, for the
-//     variants that write only the instructions' bytes, the machine code) and offsets that end exactly at the end of
-//     a writable one, with a PROT_NONE page after them, for every count from 0 to BUSTER_X86_TEST_SHORT_COUNTS - 1. A
-//     read or write past the end faults, and the fault handler names the count and exits with status 1.
+//     variants that write only the instructions' bytes, the machine code), offsets and fixup ends (or their capacity)
+//     that end exactly at the end of a writable one, with a PROT_NONE page after them, for every count from 0 to
+//     BUSTER_X86_TEST_SHORT_COUNTS - 1. A read or write past the end faults, and the fault handler names the count and
+//     exits with status 1.
 //   - Invalid instructions: random valid instructions with one operand broken in ways x86_encode checks (a high byte
 //     register with a REX prefix, RSP as an index, RIP with a base, a register past its class's last, a tile pair's odd
 //     tile, vvvv or reg in a form without them, decorations the form can't have, unknown mode bits): x86_encode must
@@ -35,17 +41,24 @@
 //
 // --print-assembly prints N random instructions in GNU as Intel syntax, each with its bytes from x86_encode_scalar in
 // a comment, choosing operands GNU as encodes with the same form (with {load}, {store}, {vex} and {evex} where GNU as
-// would pick another), and has GNU as record each one's length in a .lengths section; --compare-binary compares the
-// .text and .lengths sections of the object GNU as makes of that (as objcopy extracts them) with x86_encode_scalar's
-// bytes for the same instructions. The exit status is 1 if the arguments are invalid or a check fails.
+// would pick another), and has GNU as record each one's length in a .lengths section. Some instructions are marked
+// (x86_mark_symbolic, with a random sequence of their own, so the instructions are the same ones either way), and their
+// fields that GNU as would encode the same way with a symbol (32-bit displacements, a rel32 or loop's and jrcxz's rel8,
+// imm32 and 64-bit immediates) are printed as symbols plus the field's value, for which GNU as writes zeros and a
+// relocation. --compare-object reads the .text, .lengths and .rela.text sections of the object GNU as makes of that
+// and compares them with x86_encode_scalar's bytes, with the symbolic fields zeroed where its fixup ends put them, and
+// with the relocations the fixup ends and x86_fixup_distance give: offset, type, addend and symbol. The exit status is
+// 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order:
-//   - Random instructions: x86_test_random, x86_random_register, x86_random_displacement, x86_random_immediate and
-//     x86_random_instruction.
+//   - Random instructions: x86_test_random, x86_random_register, x86_random_displacement, x86_random_immediate,
+//     x86_random_instruction and x86_mark_random; the symbolic fields, x86_symbolic_fields and x86_mark_symbolic.
 //   - Printing: register names, x86_print_memory and x86_print_instruction.
-//   - The checks: x86_check_templates, x86_known_encodings and x86_check_known, x86_check_digest, x86_compare_encoders and
+//   - The checks: x86_check_templates, x86_known_encodings and x86_check_known, x86_known_fixups and
+//     x86_check_known_fixups, x86_check_digest, x86_compare_encoders and
 //     x86_check_random, the page-edge check (x86_test_report_fault and x86_check_page_edges), and x86_check_invalid.
-//   - The cross-check modes (x86_print_assembly and x86_compare_binary) and run_x86_encoder_tests.
+//   - The cross-check modes (x86_print_assembly, the object reader x86_elf_section and x86_compare_object) and
+//     run_x86_encoder_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -55,12 +68,17 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <elf.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 
 // Random streams: every count below BUSTER_X86_TEST_SHORT_COUNTS, then this many instructions at once.
 #define BUSTER_X86_TEST_SHORT_COUNTS 200
 #define BUSTER_X86_TEST_DEFAULT_COUNT 300000
+// One instruction in this many of the random streams has the fixup flag.
+#define BUSTER_X86_TEST_MARKED 8
+// --print-assembly prints one field in this many of those that can be symbolic as a symbol.
+#define BUSTER_X86_TEST_SYMBOLIC 4
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
@@ -179,8 +197,8 @@ static uint32_t x86_form_opcode(const X86FormDescription* form)
 static bool x86_assembler_prefers_another_form(const X86Instruction* instruction)
 {
     const X86FormDescription* form = x86_form_description(instruction->form);
-    // The form without its segment override.
-    const uint32_t row = instruction->form % X86_FORM_COUNT;
+    // The form without its segment override (or the fixup flag).
+    const uint32_t row = (instruction->form & BUSTER_X86_FORM_NUMBER) % X86_FORM_COUNT;
     const bool register_direct = instruction->mode == 0 && form->rm != BUSTER_X86_OPERAND_NONE;
     const uint32_t opcode = x86_form_opcode(form);
     // The immediate as the operand's size makes it: 65499 is -37 for a 16-bit operand.
@@ -412,6 +430,80 @@ static void x86_random_instructions(uint64_t* state, X86Instruction* instruction
     }
 }
 
+// Marks one instruction in BUSTER_X86_TEST_MARKED with the fixup flag, whatever its form (empty ones too): the encoders
+// report the end of any marked instruction.
+static void x86_mark_random(uint64_t* state, X86Instruction* instructions, uint64_t count)
+{
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        instructions[i].form |= x86_random_below(state, BUSTER_X86_TEST_MARKED) == 0 ? BUSTER_X86_FORM_FIXUP : 0;
+    }
+}
+
+static uint64_t x86_count_marked(const X86Instruction* instructions, uint64_t count)
+{
+    uint64_t result = 0;
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        result += (instructions[i].form & BUSTER_X86_FORM_FIXUP) != 0;
+    }
+    return result;
+}
+
+// The fields of an instruction that --print-assembly prints as symbols (a bit per X86FixupField).
+#define BUSTER_X86_TEST_SYMBOLIC_DISPLACEMENT (1u << X86_FIXUP_DISPLACEMENT)
+#define BUSTER_X86_TEST_SYMBOLIC_IMMEDIATE (1u << X86_FIXUP_IMMEDIATE)
+
+// Whether the instruction's memory operand has a 32-bit displacement: always without a base, and after one unless the
+// displacement is zero (but after RBP or R13) or a multiple of the form's N whose quotient fits in 8 bits.
+static bool x86_displacement_is_32bit(const X86Instruction* instruction)
+{
+    const X86FormDescription* form = x86_form_description(instruction->form);
+    const int32_t displacement = instruction->displacement;
+    const int32_t scale = form->disp8_scale;
+    const bool none = displacement == 0 && (instruction->rm & 7) != 5;
+    const bool fits8 = displacement % scale == 0 && displacement / scale >= -128 && displacement / scale <= 127;
+    return (instruction->mode & BUSTER_X86_MODE_MEMORY) && (!(instruction->mode & BUSTER_X86_MODE_BASE) || (!none && !fits8));
+}
+
+// The fields of the instruction that GNU as encodes the same way with a symbol in them (emitting a relocation for it):
+// a 32-bit displacement (which GNU as always gives a symbol, even after a base), a rel32, or the rel8 of loop, loope,
+// loopne and jrcxz (GNU as makes jmp and jcc to a symbol rel32), and an imm32, a 64-bit immediate or a 64-bit address.
+static uint32_t x86_symbolic_fields(const X86Instruction* instruction)
+{
+    const X86FormDescription* form = x86_form_description(instruction->form);
+    const uint32_t opcode = x86_form_opcode(form);
+    uint32_t result = 0;
+    if (form->relative_bytes == 4 || (form->relative_bytes == 1 && opcode >= 0xe0 && opcode <= 0xe3) || x86_displacement_is_32bit(instruction))
+    {
+        result |= BUSTER_X86_TEST_SYMBOLIC_DISPLACEMENT;
+    }
+    if ((form->immediate_bytes == 4 && !x86_form_has_is4(form)) || form->immediate_bytes == 8)
+    {
+        result |= BUSTER_X86_TEST_SYMBOLIC_IMMEDIATE;
+    }
+    return result;
+}
+
+// Chooses one in BUSTER_X86_TEST_SYMBOLIC of the instructions' fields that can be symbolic, `symbolic` a byte of them per
+// instruction, and marks the instructions with any. With a random sequence of its own (from the seed), so that the
+// instructions, and so their bytes, are the ones --print-assembly makes without marks.
+static void x86_mark_symbolic(uint64_t seed, X86Instruction* instructions, uint64_t count, uint8_t* symbolic)
+{
+    uint64_t state = ~(seed * BUSTER_X86_TEST_GOLDEN_RATIO + 1);
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        const uint32_t fields = x86_symbolic_fields(&instructions[i]);
+        uint32_t chosen = 0;
+        for (uint32_t field = X86_FIXUP_DISPLACEMENT; field <= X86_FIXUP_IMMEDIATE; field += 1)
+        {
+            chosen |= (fields & (1u << field)) && x86_random_below(&state, BUSTER_X86_TEST_SYMBOLIC) == 0 ? 1u << field : 0;
+        }
+        symbolic[i] = (uint8_t)chosen;
+        instructions[i].form |= chosen != 0 ? BUSTER_X86_FORM_FIXUP : 0;
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Printing, in GNU as Intel syntax
 
@@ -473,8 +565,9 @@ static const char* x86_accumulator_name(uint32_t bytes)
 }
 
 // A memory operand; a VSIB one's index is a vector register of the rm operand's class, and a SIB one's index 4 is none,
-// which isn't printed (GNU as reads riz as a symbol in Intel syntax).
-static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint32_t operand_bytes)
+// which isn't printed (GNU as reads riz as a symbol in Intel syntax). With a symbolic displacement (`symbolic`), the
+// displacement is dsym plus the field's value.
+static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint32_t operand_bytes, uint32_t symbolic)
 {
     const uint8_t rm = x86_form_description(instruction->form)->rm;
     const bool none = (rm & BUSTER_X86_OPERAND_SIB) && instruction->index == X86_REGISTER_RSP;
@@ -482,6 +575,7 @@ static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint
     const char* index = (rm & BUSTER_X86_OPERAND_VSIB) ? x86_register_name(instruction->index, rm) : x86_gpr64_names[instruction->index & 15];
     const uint32_t override = x86_form_segment(instruction->form);
     const char* segment = override == 0 ? "" : override == 1 ? "fs:" : "gs:";
+    const char* symbol = (symbolic & BUSTER_X86_TEST_SYMBOLIC_DISPLACEMENT) ? "dsym" : "";
     // A far pointer of 6 bytes is an fword; the x87 environment and state areas (14, 28, 94 and 108 bytes) and MOVDIR64B's
     // 64 bytes (0 in its row) have no size keyword.
     const char* size = operand_bytes == 1 ? "byte ptr " : operand_bytes == 2 ? "word ptr " : operand_bytes == 4 ? "dword ptr " : operand_bytes == 6 ? "fword ptr " :
@@ -489,7 +583,7 @@ static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint
                        operand_bytes == 32 ? "ymmword ptr " : operand_bytes == 64 ? "zmmword ptr " : "";
     if ((mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX | BUSTER_X86_MODE_RIP)) == 0)
     {
-        fprintf(file, "%s%s%d", size, *segment != 0 ? segment : "ds:", instruction->displacement);
+        fprintf(file, *symbol != 0 ? "%s%s%s%+d" : "%s%s%s%d", size, *segment != 0 ? segment : "ds:", symbol, instruction->displacement);
     }
     else
     {
@@ -506,16 +600,16 @@ static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint
         {
             fprintf(file, "%s%s*%d", (mode & BUSTER_X86_MODE_BASE) ? "+" : "", index, 1 << (mode & BUSTER_X86_MODE_SCALE));
         }
-        fprintf(file, "%+d]", instruction->displacement);
+        fprintf(file, "%s%s%+d]", *symbol != 0 ? "+" : "", symbol, instruction->displacement);
     }
 }
 
 // A broadcast's memory operand is its element, whose size is the disp8 scale.
-static void x86_print_rm(FILE* file, const X86Instruction* instruction, const X86FormDescription* form)
+static void x86_print_rm(FILE* file, const X86Instruction* instruction, const X86FormDescription* form, uint32_t symbolic)
 {
     if (instruction->mode != 0)
     {
-        x86_print_memory(file, instruction, (form->evex & BUSTER_X86_EVEX_BROADCAST) ? form->disp8_scale : form->operand_bytes);
+        x86_print_memory(file, instruction, (form->evex & BUSTER_X86_EVEX_BROADCAST) ? form->disp8_scale : form->operand_bytes, symbolic);
     }
     else
     {
@@ -587,7 +681,7 @@ static bool x86_vex_form_shares_mnemonic(uint32_t form)
         }
         filled = true;
     }
-    return shares[form % X86_FORM_COUNT];
+    return shares[(form & BUSTER_X86_FORM_NUMBER) % X86_FORM_COUNT];
 }
 
 // Prints the instruction in GNU as Intel syntax. A register-to-register move or arithmetic instruction gets {load} or
@@ -596,10 +690,12 @@ static bool x86_vex_form_shares_mnemonic(uint32_t form)
 // picks when the operands need it, and a VEX form whose mnemonic an EVEX form has gets {vex}: GNU as picks EVEX for
 // some of those (vpdpbusd, vpmadd52luq and vcvtneps2bf16, whose AVX-512 forms came first). The opmask and zeroing
 // follow the first operand, a broadcast follows the memory operand, and embedded rounding or suppressed exceptions come
-// after the registers.
-static void x86_print_instruction(FILE* file, const X86Instruction* instruction)
+// after the registers. The fields in `symbolic` are symbols plus the fields' values: dsym for the displacement (a memory
+// operand's or a branch's target) and offset isym for the immediate (or ds:isym for a 64-bit address).
+static void x86_print_instruction(FILE* file, const X86Instruction* instruction, uint32_t symbolic)
 {
     const X86FormDescription* form = x86_form_description(instruction->form);
+    const bool symbolic_immediate = (symbolic & BUSTER_X86_TEST_SYMBOLIC_IMMEDIATE) != 0;
     const bool register_direct = instruction->mode == 0 && form->rm != BUSTER_X86_OPERAND_NONE;
     const uint8_t decorations = instruction->decorations;
     // A 64-bit immediate continues in the displacement, and map 7's MSR index is unsigned (GNU as rejects a negative one).
@@ -632,10 +728,17 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction)
             break;
         case X86_SYNTAX_REL:
             // `.` is the start of the instruction, and the displacement counts from its end.
-            fprintf(file, " .%+lld", (long long)instruction->displacement + form->opcode_bytes + form->relative_bytes);
+            if (symbolic & BUSTER_X86_TEST_SYMBOLIC_DISPLACEMENT)
+            {
+                fprintf(file, " dsym%+d", instruction->displacement);
+            }
+            else
+            {
+                fprintf(file, " .%+lld", (long long)instruction->displacement + form->opcode_bytes + form->relative_bytes);
+            }
             break;
         case X86_SYNTAX_ACC_IMM:
-            fprintf(file, " %s, %lld", x86_accumulator_name(form->operand_bytes), (long long)immediate);
+            fprintf(file, symbolic_immediate ? " %s, offset isym%+lld" : " %s, %lld", x86_accumulator_name(form->operand_bytes), (long long)immediate);
             break;
         case X86_SYNTAX_IMM_ACC:
             fprintf(file, " %lld, %s", (long long)immediate, x86_accumulator_name(form->operand_bytes));
@@ -647,10 +750,24 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction)
             fprintf(file, " dx, %s", x86_accumulator_name(form->operand_bytes));
             break;
         case X86_SYNTAX_ACC_MOFFS:
-            fprintf(file, " %s, ds:0x%llx", x86_accumulator_name(form->operand_bytes), (unsigned long long)immediate);
+            if (symbolic_immediate)
+            {
+                fprintf(file, " %s, ds:isym%+lld", x86_accumulator_name(form->operand_bytes), (long long)immediate);
+            }
+            else
+            {
+                fprintf(file, " %s, ds:0x%llx", x86_accumulator_name(form->operand_bytes), (unsigned long long)immediate);
+            }
             break;
         case X86_SYNTAX_MOFFS_ACC:
-            fprintf(file, " ds:0x%llx, %s", (unsigned long long)immediate, x86_accumulator_name(form->operand_bytes));
+            if (symbolic_immediate)
+            {
+                fprintf(file, " ds:isym%+lld, %s", (long long)immediate, x86_accumulator_name(form->operand_bytes));
+            }
+            else
+            {
+                fprintf(file, " ds:0x%llx, %s", (unsigned long long)immediate, x86_accumulator_name(form->operand_bytes));
+            }
             break;
         default:
         {
@@ -671,13 +788,13 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction)
                     case 'r': fprintf(file, "%s", x86_register_name(instruction->reg, form->reg)); break;
                     case 'v': fprintf(file, "%s", x86_register_name(instruction->vvvv, form->vvvv)); break;
                     case 'm':
-                        x86_print_rm(file, instruction, form);
+                        x86_print_rm(file, instruction, form, symbolic);
                         if (instruction->mode != 0 && (form->evex & BUSTER_X86_EVEX_BROADCAST))
                         {
                             fprintf(file, "{1to%u}", (uint32_t)form->operand_bytes / form->disp8_scale);
                         }
                         break;
-                    case 'i': fprintf(file, "%lld", (long long)immediate); break;
+                    case 'i': fprintf(file, symbolic_immediate ? "offset isym%+lld" : "%lld", (long long)immediate); break;
                     case 'j': fprintf(file, "%d", instruction->immediate & 0xff); break;
                     case 'k': fprintf(file, "%d", (instruction->immediate >> 8) & 0xff); break;
                     case 'x': fprintf(file, "xmm0"); break;
@@ -1677,28 +1794,42 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_TTMMULTF32PS_TMM_TMM_TMM, .reg = 1, .rm = 2, .vvvv = 3 }, 5, { 0xc4, 0xe2, 0x60, 0x48, 0xca } },
 };
 
-// Checks one encoder on the known encodings, encoding each alone and all of them at once.
+// Checks one encoder on the known encodings, encoding each alone, and again with the fixup flag, whose end it must
+// report.
 static uint64_t x86_check_known_with(const char* name, bool vectorized)
 {
     static uint8_t output[BUSTER_X86_ENCODER_CAPACITY(BUSTER_ARRAY_LENGTH(x86_known_encodings))];
+    uint32_t fixup_ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)];
     uint64_t failures = 0;
     for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_known_encodings); i += 1)
     {
         const KnownEncoding* known = &x86_known_encodings[i];
-        const int64_t length = vectorized ? x86_encode(&known->instruction, 1, output, sizeof(output), 0) : x86_encode_scalar(&known->instruction, 1, output, sizeof(output), 0);
-        if (length != known->length || memcmp(output, known->bytes, known->length) != 0)
+        for (uint32_t marked = 0; marked < 2; marked += 1)
         {
-            if (failures < BUSTER_X86_TEST_REPORTED)
+            X86Instruction instruction = known->instruction;
+            instruction.form |= marked ? BUSTER_X86_FORM_FIXUP : 0;
+            fixup_ends[0] = UINT32_MAX;
+            const int64_t length = vectorized ? x86_encode(&instruction, 1, output, sizeof(output), 0, fixup_ends)
+                                              : x86_encode_scalar(&instruction, 1, output, sizeof(output), 0, fixup_ends);
+            if (length != known->length || memcmp(output, known->bytes, known->length) != 0 || (marked && fixup_ends[0] != known->length))
             {
-                printf("  %s: ", name);
-                x86_print_instruction(stdout, &known->instruction);
-                printf(": got ");
-                x86_print_bytes(output, length > 0 ? (uint64_t)length : 0);
-                printf(" (%lld bytes), expected ", (long long)length);
-                x86_print_bytes(known->bytes, known->length);
-                printf("\n");
+                if (failures < BUSTER_X86_TEST_REPORTED)
+                {
+                    printf("  %s: ", name);
+                    x86_print_instruction(stdout, &instruction, 0);
+                    printf(": got ");
+                    x86_print_bytes(output, length > 0 ? (uint64_t)length : 0);
+                    printf(" (%lld bytes", (long long)length);
+                    if (marked)
+                    {
+                        printf(", fixup end %u", fixup_ends[0]);
+                    }
+                    printf("), expected ");
+                    x86_print_bytes(known->bytes, known->length);
+                    printf("\n");
+                }
+                failures += 1;
             }
-            failures += 1;
         }
     }
     return failures;
@@ -1711,6 +1842,101 @@ static bool x86_check_known(void)
     printf("known encodings: %lu instructions, %lu wrong (scalar), %lu wrong (vectorized)\n", (unsigned long)BUSTER_ARRAY_LENGTH(x86_known_encodings), (unsigned long)scalar,
            (unsigned long)vectorized);
     return scalar == 0 && vectorized == 0;
+}
+
+typedef struct KnownFixup KnownFixup;
+struct KnownFixup
+{
+    X86Instruction instruction;
+    X86FixupField field;
+    // Where GNU as puts the field's relocation, from the instruction's start, and the instruction's length.
+    uint8_t offset;
+    uint8_t length;
+};
+
+// Marked instructions with a symbolic field, and where GNU as puts its relocation, so that the tests check
+// x86_fixup_distance and the reported ends without GNU as. The comments are GNU as's relocations (a PC-relative field's
+// addend from the field is the symbol's minus the distance from the end).
+static const KnownFixup x86_known_fixups[] = {
+    // call f; jmp f; je f; xbegin f (R_X86_64_PLT32 f-4)
+    { { .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_DISPLACEMENT, 1, 5 },
+    { { .form = X86_FORM_JMP_REL32 | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_DISPLACEMENT, 1, 5 },
+    { { .form = X86_FORM_JE_REL32 | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_DISPLACEMENT, 2, 6 },
+    { { .form = X86_FORM_XBEGIN_REL32 | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_DISPLACEMENT, 2, 6 },
+    // loop f; jrcxz f (R_X86_64_PC8 f-1)
+    { { .form = X86_FORM_LOOP_REL8 | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_DISPLACEMENT, 1, 2 },
+    { { .form = X86_FORM_JRCXZ_REL8 | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_DISPLACEMENT, 1, 2 },
+    // lea rax, [rip + x]; lea r12, [rip + x] (R_X86_64_PC32 x-4)
+    { { .form = X86_FORM_LEA_R64_M | BUSTER_X86_FORM_FIXUP, .reg = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_RIP }, X86_FIXUP_DISPLACEMENT, 3, 7 },
+    { { .form = X86_FORM_LEA_R64_M | BUSTER_X86_FORM_FIXUP, .reg = X86_REGISTER_R12, .mode = BUSTER_X86_MEMORY_RIP }, X86_FIXUP_DISPLACEMENT, 3, 7 },
+    // cmp byte ptr [rip + x], 1 (x-5)
+    { { .form = X86_FORM_CMP_RM8_IMM8 | BUSTER_X86_FORM_FIXUP, .mode = BUSTER_X86_MEMORY_RIP, .immediate = 1 }, X86_FIXUP_DISPLACEMENT, 2, 7 },
+    // mov dword ptr [rip + x], 0x12345678 (x-8)
+    { { .form = X86_FORM_MOV_RM32_IMM32 | BUSTER_X86_FORM_FIXUP, .mode = BUSTER_X86_MEMORY_RIP, .immediate = 0x12345678 }, X86_FIXUP_DISPLACEMENT, 2, 10 },
+    // mov dword ptr [rip + x], offset y (x-8, and R_X86_64_32 y); mov qword ptr [rip + x], offset y (x-8, R_X86_64_32S y)
+    { { .form = X86_FORM_MOV_RM32_IMM32 | BUSTER_X86_FORM_FIXUP, .mode = BUSTER_X86_MEMORY_RIP }, X86_FIXUP_DISPLACEMENT, 2, 10 },
+    { { .form = X86_FORM_MOV_RM32_IMM32 | BUSTER_X86_FORM_FIXUP, .mode = BUSTER_X86_MEMORY_RIP }, X86_FIXUP_IMMEDIATE, 6, 10 },
+    { { .form = X86_FORM_MOV_RM64_IMM32 | BUSTER_X86_FORM_FIXUP, .mode = BUSTER_X86_MEMORY_RIP }, X86_FIXUP_DISPLACEMENT, 3, 11 },
+    { { .form = X86_FORM_MOV_RM64_IMM32 | BUSTER_X86_FORM_FIXUP, .mode = BUSTER_X86_MEMORY_RIP }, X86_FIXUP_IMMEDIATE, 7, 11 },
+    // mov word ptr [rip + x], 0x1234 (x-6)
+    { { .form = X86_FORM_MOV_RM16_IMM16 | BUSTER_X86_FORM_FIXUP, .mode = BUSTER_X86_MEMORY_RIP, .immediate = 0x1234 }, X86_FIXUP_DISPLACEMENT, 3, 9 },
+    // mov eax, dword ptr gs:[rip + x] (x-4)
+    { { .form = (X86_FORM_MOV_R32_RM32 + BUSTER_X86_FORM_GS) | BUSTER_X86_FORM_FIXUP, .mode = BUSTER_X86_MEMORY_RIP }, X86_FIXUP_DISPLACEMENT, 3, 7 },
+    // vpternlogd zmm0, zmm1, zmmword ptr [rip + x], 5 (x-5)
+    { { .form = X86_FORM_VPTERNLOGD_Z_Z_ZM512_IMM8 | BUSTER_X86_FORM_FIXUP, .vvvv = 1, .mode = BUSTER_X86_MEMORY_RIP, .immediate = 5 }, X86_FIXUP_DISPLACEMENT, 6,
+      11 },
+    // vpblendvb xmm1, xmm2, xmmword ptr [rip + x], xmm3 (x-5)
+    { { .form = X86_FORM_VPBLENDVB_X_X_XM128_X | BUSTER_X86_FORM_FIXUP, .reg = 1, .vvvv = 2, .mode = BUSTER_X86_MEMORY_RIP, .immediate = 3 << 4 },
+      X86_FIXUP_DISPLACEMENT, 5, 10 },
+    // bextr rax, qword ptr [rip + x], offset y (x-8, and R_X86_64_32S y)
+    { { .form = X86_FORM_BEXTR_R64_RM64_IMM32 | BUSTER_X86_FORM_FIXUP, .mode = BUSTER_X86_MEMORY_RIP }, X86_FIXUP_DISPLACEMENT, 5, 13 },
+    { { .form = X86_FORM_BEXTR_R64_RM64_IMM32 | BUSTER_X86_FORM_FIXUP, .mode = BUSTER_X86_MEMORY_RIP }, X86_FIXUP_IMMEDIATE, 9, 13 },
+    // mov eax, dword ptr [rbx + x], with a placeholder that doesn't fit in 8 bits; mov eax, dword ptr ds:x;
+    // mov eax, dword ptr [x + rcx*4] (R_X86_64_32S x)
+    { { .form = X86_FORM_MOV_R32_RM32 | BUSTER_X86_FORM_FIXUP, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = INT32_MIN },
+      X86_FIXUP_DISPLACEMENT, 2, 6 },
+    { { .form = X86_FORM_MOV_R32_RM32 | BUSTER_X86_FORM_FIXUP, .mode = BUSTER_X86_MEMORY_ABSOLUTE }, X86_FIXUP_DISPLACEMENT, 3, 7 },
+    { { .form = X86_FORM_MOV_R32_RM32 | BUSTER_X86_FORM_FIXUP, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_INDEX(2) }, X86_FIXUP_DISPLACEMENT, 3, 7 },
+    // movabs rax, offset y; movabs al, ds:y (R_X86_64_64 y)
+    { { .form = X86_FORM_MOV_R64_IMM64 | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_IMMEDIATE, 2, 10 },
+    { { .form = X86_FORM_MOVABS_AL_MOFFS | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_IMMEDIATE, 1, 9 },
+    // push offset y; add rcx, offset y (R_X86_64_32S y); mov eax, offset y (R_X86_64_32 y)
+    { { .form = X86_FORM_PUSH_IMM32 | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_IMMEDIATE, 1, 5 },
+    { { .form = X86_FORM_ADD_RM64_IMM32 | BUSTER_X86_FORM_FIXUP, .rm = X86_REGISTER_RCX }, X86_FIXUP_IMMEDIATE, 3, 7 },
+    { { .form = X86_FORM_MOV_R32_IMM32 | BUSTER_X86_FORM_FIXUP }, X86_FIXUP_IMMEDIATE, 1, 5 },
+};
+
+// Checks both encoders' fixup ends and x86_fixup_distance on the known fixups: the reported end minus the distance
+// must be where GNU as puts the relocation.
+static bool x86_check_known_fixups(void)
+{
+    uint8_t output[BUSTER_X86_ENCODER_CAPACITY(1)];
+    uint32_t fixup_ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)];
+    uint64_t failures = 0;
+    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_known_fixups); i += 1)
+    {
+        const KnownFixup* known = &x86_known_fixups[i];
+        for (uint32_t vectorized = 0; vectorized < 2; vectorized += 1)
+        {
+            fixup_ends[0] = UINT32_MAX;
+            const int64_t length = vectorized ? x86_encode(&known->instruction, 1, output, sizeof(output), 0, fixup_ends)
+                                              : x86_encode_scalar(&known->instruction, 1, output, sizeof(output), 0, fixup_ends);
+            const uint32_t distance = x86_fixup_distance(known->instruction.form, known->field);
+            if (length != known->length || fixup_ends[0] != known->length || fixup_ends[0] - distance != known->offset)
+            {
+                if (failures < BUSTER_X86_TEST_REPORTED)
+                {
+                    printf("  %s: ", vectorized ? "x86_encode" : "x86_encode_scalar");
+                    x86_print_instruction(stdout, &known->instruction, 1u << known->field);
+                    printf(": %lld bytes, end %u, field at %d; expected %u bytes, field at %u\n", (long long)length, fixup_ends[0],
+                           (int)fixup_ends[0] - (int)distance, known->length, known->offset);
+                }
+                failures += 1;
+            }
+        }
+    }
+    printf("known fixups: %lu fields, %lu wrong\n", (unsigned long)BUSTER_ARRAY_LENGTH(x86_known_fixups), (unsigned long)failures);
+    return failures == 0;
 }
 
 static uint64_t x86_fnv1a(const uint8_t* bytes, uint64_t length)
@@ -1727,7 +1953,7 @@ static bool x86_check_digest(X86Instruction* instructions, uint8_t* output)
 {
     uint64_t state = BUSTER_X86_TEST_DIGEST_SEED * BUSTER_X86_TEST_GOLDEN_RATIO + 1;
     x86_random_instructions(&state, instructions, BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, false, true);
-    const int64_t length = x86_encode_scalar(instructions, BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, output, BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_DIGEST_INSTRUCTIONS), 0);
+    const int64_t length = x86_encode_scalar(instructions, BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, output, BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_DIGEST_INSTRUCTIONS), 0, 0);
     const uint64_t digest = length >= 0 ? x86_fnv1a(output, (uint64_t)length) : 0;
     const bool result = digest == BUSTER_X86_TEST_DIGEST;
     printf("reference digest: %d instructions, %lld bytes, 0x%016llx (%s)\n", BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, (long long)length, (unsigned long long)digest,
@@ -1735,7 +1961,7 @@ static bool x86_check_digest(X86Instruction* instructions, uint8_t* output)
     return result;
 }
 
-typedef int64_t X86EncodeFunction(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets);
+typedef int64_t X86EncodeFunction(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t* fixup_ends);
 
 typedef struct X86Variant X86Variant;
 struct X86Variant
@@ -1744,19 +1970,27 @@ struct X86Variant
     X86EncodeFunction* encode;
     // Writes nothing past the instructions' bytes (rather than nothing past the capacity).
     bool exact;
+    // Writes nothing past the marked instructions' fixup ends (rather than nothing past their capacity).
+    bool exact_fixups;
 };
 
 static const X86Variant x86_test_variants[] = {
-    { "x86_encode_4", x86_encode_4, false },
-    { "x86_encode_8", x86_encode_8, false },
-    { "x86_encode_16", x86_encode_16, false },
-    { "x86_encode_32", x86_encode_32, false },
-    { "x86_encode_64", x86_encode_64, false },
-    { "x86_encode_16_forms_from_records", x86_encode_16_forms_from_records, false },
-    { "x86_encode_16_masked_loads", x86_encode_16_masked_loads, false },
-    { "x86_encode_16_masked_stores", x86_encode_16_masked_stores, true },
-    { "x86_encode_16_compress_stores", x86_encode_16_compress_stores, true },
+    { "x86_encode_4", x86_encode_4, false, false },
+    { "x86_encode_8", x86_encode_8, false, false },
+    { "x86_encode_16", x86_encode_16, false, false },
+    { "x86_encode_32", x86_encode_32, false, false },
+    { "x86_encode_64", x86_encode_64, false, false },
+    { "x86_encode_16_forms_from_records", x86_encode_16_forms_from_records, false, false },
+    { "x86_encode_16_masked_loads", x86_encode_16_masked_loads, false, false },
+    { "x86_encode_16_masked_stores", x86_encode_16_masked_stores, true, false },
+    { "x86_encode_16_compress_stores", x86_encode_16_compress_stores, true, false },
+    { "x86_encode_64_fixup_compress_stores", x86_encode_64_fixup_compress_stores, false, true },
 };
+
+// Each variant runs with each of its loops: without offsets or fixup ends, with each of them, and with both.
+#define BUSTER_X86_TEST_WITH_OFFSETS 1u
+#define BUSTER_X86_TEST_WITH_FIXUP_ENDS 2u
+#define BUSTER_X86_TEST_OUTPUT_COMBINATIONS 4u
 
 typedef struct X86Buffers X86Buffers;
 struct X86Buffers
@@ -1765,40 +1999,66 @@ struct X86Buffers
     uint8_t* output;
     uint32_t* expected_offsets;
     uint32_t* offsets;
+    uint32_t* expected_fixup_ends;
+    uint32_t* fixup_ends;
 };
 
-// Compares a variant with x86_encode_scalar on `count` instructions. Prints the first difference if `report`.
+// Compares a variant with x86_encode_scalar on `count` instructions, with each combination of offsets and fixup ends.
+// Prints the first difference if `report`.
 static bool x86_compare_encoders(const X86Variant* variant, const X86Instruction* instructions, uint64_t count, X86Buffers* buffers, bool report)
 {
-    const int64_t expected = x86_encode_scalar(instructions, count, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(count), buffers->expected_offsets);
-    const int64_t length = variant->encode(instructions, count, buffers->output, buffers->offsets);
-    bool result = expected >= 0 && length == expected && memcmp(buffers->output, buffers->expected, (uint64_t)expected) == 0 &&
-                  memcmp(buffers->offsets, buffers->expected_offsets, count * sizeof(uint32_t)) == 0;
-    if (!result && report)
+    const int64_t expected = x86_encode_scalar(instructions, count, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(count), buffers->expected_offsets,
+                                               buffers->expected_fixup_ends);
+    const uint64_t marked = x86_count_marked(instructions, count);
+    bool result = expected >= 0;
+    for (uint32_t outputs = 0; outputs < BUSTER_X86_TEST_OUTPUT_COMBINATIONS; outputs += 1)
     {
-        printf("  %s on %lu instructions: %lld bytes, expected %lld\n", variant->name, (unsigned long)count, (long long)length, (long long)expected);
-        // The first instruction whose offset or bytes differ.
-        uint64_t i = 0;
-        bool same = length >= 0 && expected >= 0;
-        while (same && i < count)
+        const bool with_offsets = (outputs & BUSTER_X86_TEST_WITH_OFFSETS) != 0;
+        const bool with_fixup_ends = (outputs & BUSTER_X86_TEST_WITH_FIXUP_ENDS) != 0;
+        const int64_t length = variant->encode(instructions, count, buffers->output, with_offsets ? buffers->offsets : 0, with_fixup_ends ? buffers->fixup_ends : 0);
+        const bool same = expected >= 0 && length == expected && memcmp(buffers->output, buffers->expected, (uint64_t)expected) == 0 &&
+                          (!with_offsets || memcmp(buffers->offsets, buffers->expected_offsets, count * sizeof(uint32_t)) == 0) &&
+                          (!with_fixup_ends || memcmp(buffers->fixup_ends, buffers->expected_fixup_ends, marked * sizeof(uint32_t)) == 0);
+        if (!same && report)
         {
-            const uint32_t start = buffers->expected_offsets[i];
-            const uint32_t end = i + 1 < count ? buffers->expected_offsets[i + 1] : (uint32_t)expected;
-            same = buffers->offsets[i] == start && (uint64_t)length >= end && memcmp(buffers->output + start, buffers->expected + start, end - start) == 0;
-            i += same;
+            printf("  %s%s%s on %lu instructions: %lld bytes, expected %lld\n", variant->name, with_offsets ? " with offsets" : "",
+                   with_fixup_ends ? " with fixup ends" : "", (unsigned long)count, (long long)length, (long long)expected);
+            // The first instruction whose offset or bytes differ (where the expected offsets put it).
+            uint64_t i = 0;
+            bool same_instruction = length >= 0 && expected >= 0;
+            while (same_instruction && i < count)
+            {
+                const uint32_t start = buffers->expected_offsets[i];
+                const uint32_t end = i + 1 < count ? buffers->expected_offsets[i + 1] : (uint32_t)expected;
+                same_instruction = (!with_offsets || buffers->offsets[i] == start) && (uint64_t)length >= end &&
+                                   memcmp(buffers->output + start, buffers->expected + start, end - start) == 0;
+                i += same_instruction;
+            }
+            if (length >= 0 && expected >= 0 && i < count)
+            {
+                const uint32_t start = buffers->expected_offsets[i];
+                const uint32_t end = i + 1 < count ? buffers->expected_offsets[i + 1] : (uint32_t)expected;
+                printf("    instruction %lu: ", (unsigned long)i);
+                x86_print_instruction(stdout, &instructions[i], 0);
+                printf("\n    expected at %u: ", start);
+                x86_print_bytes(buffers->expected + start, end - start);
+                printf("\n    got at %u:      ", with_offsets ? buffers->offsets[i] : start);
+                x86_print_bytes(buffers->output + start, (uint64_t)length >= end ? end - start : 0);
+                printf("\n");
+            }
+            // The first fixup end that differs.
+            uint64_t k = 0;
+            while (with_fixup_ends && k < marked && buffers->fixup_ends[k] == buffers->expected_fixup_ends[k])
+            {
+                k += 1;
+            }
+            if (with_fixup_ends && k < marked)
+            {
+                printf("    fixup end %lu of %lu: %u, expected %u\n", (unsigned long)k, (unsigned long)marked, buffers->fixup_ends[k],
+                       buffers->expected_fixup_ends[k]);
+            }
         }
-        if (length >= 0 && expected >= 0 && i < count)
-        {
-            const uint32_t start = buffers->expected_offsets[i];
-            const uint32_t end = i + 1 < count ? buffers->expected_offsets[i + 1] : (uint32_t)expected;
-            printf("    instruction %lu: ", (unsigned long)i);
-            x86_print_instruction(stdout, &instructions[i]);
-            printf("\n    expected at %u: ", start);
-            x86_print_bytes(buffers->expected + start, end - start);
-            printf("\n    got at %u:      ", buffers->offsets[i]);
-            x86_print_bytes(buffers->output + start, (uint64_t)length >= end ? end - start : 0);
-            printf("\n");
-        }
+        result = result && same;
     }
     return result;
 }
@@ -1810,15 +2070,20 @@ static bool x86_check_random(uint64_t* state, uint64_t count, X86Instruction* in
     {
         const X86Variant* variant = &x86_test_variants[v];
         uint64_t failures = 0;
+        uint64_t marked = 0;
         for (uint64_t n = 0; n < BUSTER_X86_TEST_SHORT_COUNTS; n += 1)
         {
             x86_random_instructions(state, instructions, n, true, false);
+            x86_mark_random(state, instructions, n);
+            marked += x86_count_marked(instructions, n);
             failures += !x86_compare_encoders(variant, instructions, n, buffers, failures < BUSTER_X86_TEST_REPORTED);
         }
         x86_random_instructions(state, instructions, count, true, false);
+        x86_mark_random(state, instructions, count);
+        marked += x86_count_marked(instructions, count);
         failures += !x86_compare_encoders(variant, instructions, count, buffers, failures < BUSTER_X86_TEST_REPORTED);
-        printf("random: %-28s %d short streams and %lu instructions, %lu differ\n", variant->name, BUSTER_X86_TEST_SHORT_COUNTS, (unsigned long)count,
-               (unsigned long)failures);
+        printf("random: %-35s %d short streams and %lu instructions (%lu marked), %lu differ\n", variant->name, BUSTER_X86_TEST_SHORT_COUNTS,
+               (unsigned long)count, (unsigned long)marked, (unsigned long)failures);
         result = result && failures == 0;
     }
     return result;
@@ -1826,13 +2091,16 @@ static bool x86_check_random(uint64_t* state, uint64_t count, X86Instruction* in
 
 // The page-edge check's input, for the fault handler.
 static volatile uint64_t x86_test_page_edge_count;
+static volatile uint32_t x86_test_page_edge_outputs;
 static volatile const char* x86_test_page_edge_variant;
 
 static void x86_test_report_fault(int signal_number)
 {
     (void)signal_number;
-    char message[160];
-    const int length = snprintf(message, sizeof(message), "page edges: %s faulted on %lu instructions\n", x86_test_page_edge_variant,
+    char message[200];
+    const uint32_t outputs = x86_test_page_edge_outputs;
+    const int length = snprintf(message, sizeof(message), "page edges: %s%s%s faulted on %lu instructions\n", x86_test_page_edge_variant,
+                                (outputs & BUSTER_X86_TEST_WITH_OFFSETS) ? " with offsets" : "", (outputs & BUSTER_X86_TEST_WITH_FIXUP_ENDS) ? " with fixup ends" : "",
                                 (unsigned long)x86_test_page_edge_count);
     if (length > 0 && write(STDOUT_FILENO, message, (size_t)length) < 0)
     {
@@ -1862,11 +2130,13 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
     uint64_t input_mapped = 0;
     uint64_t output_mapped = 0;
     uint64_t offsets_mapped = 0;
+    uint64_t fixup_ends_mapped = 0;
     uint8_t* input_end = x86_map_guarded(BUSTER_X86_TEST_SHORT_COUNTS * sizeof(X86Instruction), page, &input_mapped);
     uint8_t* output_end = x86_map_guarded(BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_SHORT_COUNTS), page, &output_mapped);
     uint8_t* offsets_end = x86_map_guarded(BUSTER_X86_TEST_SHORT_COUNTS * sizeof(uint32_t), page, &offsets_mapped);
+    uint8_t* fixup_ends_end = x86_map_guarded(BUSTER_X86_ENCODER_FIXUP_CAPACITY(BUSTER_X86_TEST_SHORT_COUNTS) * sizeof(uint32_t), page, &fixup_ends_mapped);
     uint64_t failures = 0;
-    bool result = input_end != 0 && output_end != 0 && offsets_end != 0;
+    bool result = input_end != 0 && output_end != 0 && offsets_end != 0 && fixup_ends_end != 0;
     if (!result)
     {
         printf("page edges: can't map the guarded buffers\n");
@@ -1883,25 +2153,35 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
         for (uint64_t v = 0; v < BUSTER_ARRAY_LENGTH(x86_test_variants); v += 1)
         {
             const X86Variant* variant = &x86_test_variants[v];
+            x86_test_page_edge_variant = variant->name;
+            for (uint32_t outputs = 0; outputs < BUSTER_X86_TEST_OUTPUT_COMBINATIONS; outputs += 1)
             {
-                x86_test_page_edge_variant = variant->name;
+                const bool with_offsets = (outputs & BUSTER_X86_TEST_WITH_OFFSETS) != 0;
+                const bool with_fixup_ends = (outputs & BUSTER_X86_TEST_WITH_FIXUP_ENDS) != 0;
+                x86_test_page_edge_outputs = outputs;
                 for (uint64_t n = 0; n < BUSTER_X86_TEST_SHORT_COUNTS; n += 1)
                 {
                     x86_test_page_edge_count = n;
                     x86_random_instructions(state, scratch, n, true, false);
+                    x86_mark_random(state, scratch, n);
                     X86Instruction* instructions = (X86Instruction*)(input_end - n * sizeof(X86Instruction));
                     memcpy(instructions, scratch, n * sizeof(X86Instruction));
-                    const int64_t expected = x86_encode_scalar(instructions, n, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(n), buffers->expected_offsets);
-                    // The output ends where the instructions do (for an exact variant) or where its capacity does.
+                    const int64_t expected = x86_encode_scalar(instructions, n, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(n), buffers->expected_offsets,
+                                                               buffers->expected_fixup_ends);
+                    const uint64_t marked = x86_count_marked(instructions, n);
+                    // The output ends where the instructions do (for an exact variant) or where its capacity does, and
+                    // the fixup ends where the marked instructions' do or where their capacity does.
                     uint8_t* output = output_end - (variant->exact ? (uint64_t)(expected > 0 ? expected : 0) : BUSTER_X86_ENCODER_CAPACITY(n));
                     uint32_t* offsets = (uint32_t*)(offsets_end - n * sizeof(uint32_t));
-                    const int64_t length = variant->encode(instructions, n, output, offsets);
+                    uint32_t* fixup_ends = (uint32_t*)(fixup_ends_end - (variant->exact_fixups ? marked : BUSTER_X86_ENCODER_FIXUP_CAPACITY(marked)) * sizeof(uint32_t));
+                    const int64_t length = variant->encode(instructions, n, output, with_offsets ? offsets : 0, with_fixup_ends ? fixup_ends : 0);
                     const bool same = length == expected && memcmp(output, buffers->expected, (uint64_t)(expected > 0 ? expected : 0)) == 0 &&
-                                      memcmp(offsets, buffers->expected_offsets, n * sizeof(uint32_t)) == 0;
+                                      (!with_offsets || memcmp(offsets, buffers->expected_offsets, n * sizeof(uint32_t)) == 0) &&
+                                      (!with_fixup_ends || memcmp(fixup_ends, buffers->expected_fixup_ends, marked * sizeof(uint32_t)) == 0);
                     if (!same && failures < BUSTER_X86_TEST_REPORTED)
                     {
-                        printf("  %s on %lu instructions at page edges: %lld bytes, expected %lld\n", variant->name, (unsigned long)n, (long long)length,
-                               (long long)expected);
+                        printf("  %s%s%s on %lu instructions at page edges: %lld bytes, expected %lld\n", variant->name, with_offsets ? " with offsets" : "",
+                               with_fixup_ends ? " with fixup ends" : "", (unsigned long)n, (long long)length, (long long)expected);
                     }
                     failures += !same;
                 }
@@ -1909,8 +2189,9 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
         }
         sigaction(SIGSEGV, &previous_segv, 0);
         sigaction(SIGBUS, &previous_bus, 0);
-        printf("page edges: 0 to %d instructions ending at a page end, machine code (or its capacity) and offsets too, %lu differ\n", BUSTER_X86_TEST_SHORT_COUNTS - 1,
-               (unsigned long)failures);
+        printf("page edges: 0 to %d instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, %lu "
+               "differ\n",
+               BUSTER_X86_TEST_SHORT_COUNTS - 1, (unsigned long)failures);
         result = failures == 0;
     }
     if (input_end != 0)
@@ -1924,6 +2205,10 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
     if (offsets_end != 0)
     {
         munmap(offsets_end - (offsets_mapped - 2 * page) - page, offsets_mapped);
+    }
+    if (fixup_ends_end != 0)
+    {
+        munmap(fixup_ends_end - (fixup_ends_mapped - 2 * page) - page, fixup_ends_mapped);
     }
     return result;
 }
@@ -2320,9 +2605,10 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
     uint64_t failures = 0;
     for (uint64_t trial = 0; trial < BUSTER_X86_TEST_INVALID_INSTRUCTIONS; trial += 1)
     {
-        // A short stream with one broken instruction somewhere in it.
+        // A short stream with one broken instruction somewhere in it, and some marked ones.
         const uint64_t count = 1 + x86_random_below(state, 40);
         x86_random_instructions(state, instructions, count, true, false);
+        x86_mark_random(state, instructions, count);
         const uint64_t victim = x86_random_below(state, (uint32_t)count);
         bool validate_only = false;
         if (x86_break_instruction(state, &instructions[victim], &validate_only))
@@ -2333,7 +2619,8 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
             bool rejected = true;
             for (uint64_t v = 0; v < BUSTER_ARRAY_LENGTH(x86_test_variants) && !validate_only; v += 1)
             {
-                rejected = rejected && x86_test_variants[v].encode(instructions, count, buffers->output, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
+                rejected = rejected && x86_test_variants[v].encode(instructions, count, buffers->output, 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION &&
+                           x86_test_variants[v].encode(instructions, count, buffers->output, 0, buffers->fixup_ends) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
             }
             if (!(validated && rejected))
             {
@@ -2357,18 +2644,20 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
 // The cross-check modes, and the command
 
 // Prints the instructions for GNU as, each with its bytes from x86_encode_scalar in a comment, and GNU as's length
-// for each one in a .lengths section, a byte per instruction, so that --compare-binary can find each instruction
-// in GNU as's output even after one whose length differs.
-static bool x86_print_assembly(uint64_t* state, uint64_t count, X86Instruction* instructions, uint8_t* output)
+// for each one in a .lengths section, a byte per instruction, so that --compare-object can find each instruction
+// in GNU as's output even after one whose length differs. The marked instructions' symbolic fields are symbols plus
+// the fields' values (see x86_mark_symbolic).
+static bool x86_print_assembly(uint64_t seed, uint64_t* state, uint64_t count, X86Instruction* instructions, uint8_t* symbolic, uint8_t* output)
 {
     x86_random_instructions(state, instructions, count, false, true);
+    x86_mark_symbolic(seed, instructions, count, symbolic);
     // AMX-TRANSPOSE and AMX-TF32 aren't in GNU as's default architecture.
     printf(".intel_syntax noprefix\n.arch .amx_transpose\n.arch .amx_tf32\n.text\n");
     for (uint64_t i = 0; i < count; i += 1)
     {
-        const int64_t length = x86_encode_scalar(&instructions[i], 1, output, BUSTER_X86_ENCODER_CAPACITY(1), 0);
+        const int64_t length = x86_encode_scalar(&instructions[i], 1, output, BUSTER_X86_ENCODER_CAPACITY(1), 0, 0);
         printf("0: ");
-        x86_print_instruction(stdout, &instructions[i]);
+        x86_print_instruction(stdout, &instructions[i], symbolic[i]);
         printf("\n1: .pushsection .lengths, \"a\"; .byte 1b - 0b; .popsection # ");
         x86_print_bytes(output, length > 0 ? (uint64_t)length : 0);
         printf("\n");
@@ -2403,53 +2692,297 @@ static uint8_t* x86_read_file(const char* path, uint64_t* length)
     return result;
 }
 
-// Compares x86_encode_scalar's bytes with GNU as's for the instructions --print-assembly printed: `text_path` is
-// GNU as's .text section and `lengths_path` its .lengths section.
-static bool x86_compare_binary(uint64_t* state, const char* text_path, const char* lengths_path, uint64_t count, X86Instruction* instructions, uint8_t* output,
-                               uint32_t* offsets)
+// An ELF object's section, by type and name: its contents and header, or null if the file has none (or isn't a 64-bit
+// little-endian ELF file whose section headers and that section are inside it).
+static const uint8_t* x86_elf_section(const uint8_t* file, uint64_t length, uint32_t type, const char* name, const Elf64_Shdr** header)
+{
+    const uint8_t* result = 0;
+    const Elf64_Ehdr* elf = (const Elf64_Ehdr*)file;
+    const bool valid = length >= sizeof(Elf64_Ehdr) && memcmp(elf->e_ident, ELFMAG, SELFMAG) == 0 && elf->e_ident[EI_CLASS] == ELFCLASS64 &&
+                       elf->e_ident[EI_DATA] == ELFDATA2LSB && elf->e_shentsize == sizeof(Elf64_Shdr) && elf->e_shoff <= length &&
+                       (length - elf->e_shoff) / sizeof(Elf64_Shdr) >= elf->e_shnum && elf->e_shstrndx < elf->e_shnum;
+    if (valid)
+    {
+        const Elf64_Shdr* sections = (const Elf64_Shdr*)(file + elf->e_shoff);
+        const Elf64_Shdr* names = &sections[elf->e_shstrndx];
+        const bool names_valid = names->sh_offset <= length && names->sh_size <= length - names->sh_offset;
+        for (uint32_t i = 0; names_valid && result == 0 && i < elf->e_shnum; i += 1)
+        {
+            const Elf64_Shdr* section = &sections[i];
+            const char* section_name = (const char*)file + names->sh_offset + section->sh_name;
+            const bool named = section->sh_name < names->sh_size && strnlen(section_name, names->sh_size - section->sh_name) == strlen(name) &&
+                               memcmp(section_name, name, strlen(name)) == 0;
+            if (named && section->sh_type == type && section->sh_offset <= length && section->sh_size <= length - section->sh_offset)
+            {
+                result = file + section->sh_offset;
+                *header = section;
+            }
+        }
+    }
+    return result;
+}
+
+// A relocation as the ELF object has it: the offset in .text, the type (R_X86_64_*), the addend and the symbol's name;
+// and for an expected one, its instruction's index.
+typedef struct X86Relocation X86Relocation;
+struct X86Relocation
+{
+    uint64_t offset;
+    uint32_t type;
+    int64_t addend;
+    const char* symbol;
+    uint64_t instruction;
+};
+
+// The relocation GNU as emits for a symbolic field of a marked instruction that ends at `end`: its field starts
+// x86_fixup_distance before the end. A PC-relative one (a branch, or a RIP-relative operand) counts from the end, so
+// its addend is the field's value minus that distance. GNU as emits R_X86_64_PLT32 for a branch to a symbol without an
+// addend and R_X86_64_PC32 with one; for another address R_X86_64_32S (the processor sign-extends it), but
+// R_X86_64_32 for LEA into a 16- or 32-bit register (which truncates it); and for an imm32 R_X86_64_32S if the operand
+// is 64-bit and R_X86_64_32 if not, or if it's map 7's MSR index (unsigned, as the printer has it).
+static X86Relocation x86_expected_relocation(const X86Instruction* instruction, X86FixupField field, uint64_t end)
+{
+    const X86FormDescription* form = x86_form_description(instruction->form);
+    const uint32_t distance = x86_fixup_distance(instruction->form, field);
+    X86Relocation result = { .offset = end - distance };
+    if (field == X86_FIXUP_DISPLACEMENT)
+    {
+        const bool relative = form->relative_bytes != 0 || (instruction->mode & BUSTER_X86_MODE_RIP);
+        const bool truncated = form->family == BUSTER_X86_FAMILY_LEGACY && x86_form_opcode(form) == 0x8d && (form->reg & BUSTER_X86_OPERAND_CLASS) != BUSTER_X86_CLASS_GPR64;
+        result.addend = relative ? (int64_t)instruction->displacement - distance : instruction->displacement;
+        result.type = form->relative_bytes == 1   ? R_X86_64_PC8
+                      : form->relative_bytes == 4 ? (instruction->displacement == 0 ? R_X86_64_PLT32 : R_X86_64_PC32)
+                      : relative                  ? R_X86_64_PC32
+                      : truncated                 ? R_X86_64_32
+                                                  : R_X86_64_32S;
+        result.symbol = "dsym";
+    }
+    else
+    {
+        // A 64-bit immediate or address continues in the displacement.
+        const bool msr_index = form->family == BUSTER_X86_FAMILY_VEX && x86_opcode_map(form) == 7;
+        result.addend = form->immediate_bytes == 8 ? (int64_t)((uint64_t)(uint32_t)instruction->immediate | ((uint64_t)(uint32_t)instruction->displacement << 32))
+                        : msr_index                ? (int64_t)(uint32_t)instruction->immediate
+                                                   : instruction->immediate;
+        result.type = form->immediate_bytes == 8 ? R_X86_64_64 : (form->w || form->operand_bytes == 8) && !msr_index ? R_X86_64_32S : R_X86_64_32;
+        result.symbol = "isym";
+    }
+    return result;
+}
+
+static void x86_print_relocation(const char* name, const X86Relocation* relocation)
+{
+    printf("  %-17s offset %llu, type %u, %s%+lld\n", name, (unsigned long long)relocation->offset, relocation->type, relocation->symbol,
+           (long long)relocation->addend);
+}
+
+// Compares x86_encode_scalar's bytes and fixup ends with GNU as's object of the instructions --print-assembly printed:
+// its .text, with the marked instructions' symbolic fields zeroed where the fixup ends put them (as GNU as leaves them),
+// its .lengths and its relocations, which must be the expected ones of those fields, in order. x86_encode's fixup ends
+// must be the scalar encoder's too.
+static bool x86_compare_object(uint64_t seed, uint64_t* state, const char* object_path, uint64_t count, X86Instruction* instructions, uint8_t* symbolic,
+                               X86Buffers* buffers)
 {
     bool result = false;
     x86_random_instructions(state, instructions, count, false, true);
-    const int64_t length = x86_encode_scalar(instructions, count, output, BUSTER_X86_ENCODER_CAPACITY(count), offsets);
-    uint64_t text_length = 0;
-    uint64_t lengths_length = 0;
-    uint8_t* text = x86_read_file(text_path, &text_length);
-    uint8_t* lengths = x86_read_file(lengths_path, &lengths_length);
-    if (text != 0 && lengths != 0 && lengths_length != count)
+    x86_mark_symbolic(seed, instructions, count, symbolic);
+    const uint64_t marked = x86_count_marked(instructions, count);
+    uint8_t* output = buffers->expected;
+    uint32_t* offsets = buffers->expected_offsets;
+    uint32_t* fixup_ends = buffers->expected_fixup_ends;
+    const int64_t length = x86_encode_scalar(instructions, count, output, BUSTER_X86_ENCODER_CAPACITY(count), offsets, fixup_ends);
+    const int64_t vectorized = x86_encode(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count), 0, buffers->fixup_ends);
+    const bool same_fixup_ends = vectorized == length && memcmp(buffers->fixup_ends, fixup_ends, marked * sizeof(uint32_t)) == 0;
+
+    uint64_t file_length = 0;
+    uint8_t* file = x86_read_file(object_path, &file_length);
+    const Elf64_Shdr* text_header = 0;
+    const Elf64_Shdr* lengths_header = 0;
+    const Elf64_Shdr* relocations_header = 0;
+    const Elf64_Shdr* symbols_header = 0;
+    const Elf64_Shdr* names_header = 0;
+    const uint8_t* text = file != 0 ? x86_elf_section(file, file_length, SHT_PROGBITS, ".text", &text_header) : 0;
+    const uint8_t* lengths = file != 0 ? x86_elf_section(file, file_length, SHT_PROGBITS, ".lengths", &lengths_header) : 0;
+    const uint8_t* relocations = file != 0 ? x86_elf_section(file, file_length, SHT_RELA, ".rela.text", &relocations_header) : 0;
+    const uint8_t* symbols = file != 0 ? x86_elf_section(file, file_length, SHT_SYMTAB, ".symtab", &symbols_header) : 0;
+    const uint8_t* names = file != 0 ? x86_elf_section(file, file_length, SHT_STRTAB, ".strtab", &names_header) : 0;
+    // An object without symbolic fields has no relocations. (x86_read_file reports a file it can't read.)
+    const uint64_t relocation_count = relocations != 0 ? relocations_header->sh_size / sizeof(Elf64_Rela) : 0;
+    const uint64_t symbol_count = symbols != 0 ? symbols_header->sh_size / sizeof(Elf64_Sym) : 0;
+    if (file != 0 && (text == 0 || lengths == 0 || (relocations == 0 && marked != 0) || symbols == 0 || names == 0))
     {
-        fprintf(stderr, "%s has %lu lengths for %lu instructions\n", lengths_path, (unsigned long)lengths_length, (unsigned long)count);
+        fprintf(stderr, "%s doesn't have the .text, .lengths, .rela.text, .symtab and .strtab sections of GNU as's object\n", object_path);
     }
-    else if (text != 0 && lengths != 0)
+    else if (file != 0 && lengths_header->sh_size != count)
     {
+        fprintf(stderr, "%s has %lu lengths for %lu instructions\n", object_path, (unsigned long)lengths_header->sh_size, (unsigned long)count);
+    }
+    else if (file != 0)
+    {
+        // Zero the symbolic fields, at the offsets that the fixup ends and x86_fixup_distance give, and list the
+        // relocations GNU as should have made of them.
+        X86Relocation* expected = malloc((2 * marked + 1) * sizeof(X86Relocation));
+        uint64_t expected_count = 0;
+        uint64_t k = 0;
+        uint64_t symbolic_fields[2] = { 0 };
+        uint64_t types[R_X86_64_NUM] = { 0 };
+        for (uint64_t i = 0; expected != 0 && i < count; i += 1)
+        {
+            if (instructions[i].form & BUSTER_X86_FORM_FIXUP)
+            {
+                const X86FormDescription* form = x86_form_description(instructions[i].form);
+                for (uint32_t field = X86_FIXUP_DISPLACEMENT; field <= X86_FIXUP_IMMEDIATE; field += 1)
+                {
+                    if (symbolic[i] & (1u << field))
+                    {
+                        X86Relocation relocation = x86_expected_relocation(&instructions[i], (X86FixupField)field, fixup_ends[k]);
+                        relocation.instruction = i;
+                        const uint32_t bytes = field == X86_FIXUP_IMMEDIATE ? form->immediate_bytes : form->relative_bytes != 0 ? form->relative_bytes : 4;
+                        if (relocation.offset + bytes <= (uint64_t)length)
+                        {
+                            memset(output + relocation.offset, 0, bytes);
+                        }
+                        expected[expected_count] = relocation;
+                        expected_count += 1;
+                        symbolic_fields[field] += 1;
+                        types[relocation.type] += 1;
+                    }
+                }
+                k += 1;
+            }
+        }
+
+        // The bytes, instruction by instruction.
         uint64_t differences = 0;
         uint64_t assembled = 0;
         for (uint64_t i = 0; i < count; i += 1)
         {
             const uint32_t start = offsets[i];
             const uint32_t end = i + 1 < count ? offsets[i + 1] : (uint32_t)length;
-            const bool same = assembled + lengths[i] <= text_length && lengths[i] == end - start && memcmp(text + assembled, output + start, end - start) == 0;
+            const bool same = assembled + lengths[i] <= text_header->sh_size && lengths[i] == end - start && memcmp(text + assembled, output + start, end - start) == 0;
             if (!same)
             {
                 if (differences < 40)
                 {
                     printf("instruction %lu: ", (unsigned long)i);
-                    x86_print_instruction(stdout, &instructions[i]);
+                    x86_print_instruction(stdout, &instructions[i], symbolic[i]);
                     printf("\n  x86_encode_scalar: ");
                     x86_print_bytes(output + start, end - start);
                     printf("\n  GNU as:            ");
-                    x86_print_bytes(text + assembled, assembled + lengths[i] <= text_length ? lengths[i] : 0);
+                    x86_print_bytes(text + assembled, assembled + lengths[i] <= text_header->sh_size ? lengths[i] : 0);
                     printf("\n");
                 }
                 differences += 1;
             }
             assembled += lengths[i];
         }
-        printf("compared %lu instructions (%lld bytes, GNU as %lu): %lu differ\n", (unsigned long)count, (long long)length, (unsigned long)text_length,
+
+        // The relocations. GNU as's are mostly in offset order (not a relaxed branch's), and the expected ones are in
+        // instruction order, so each of GNU as's finds the expected one at its offset by binary search.
+        uint64_t relocation_differences = 0;
+        bool* matched = calloc(expected_count + 1, sizeof(bool));
+        for (uint64_t r = 0; expected != 0 && matched != 0 && r < relocation_count; r += 1)
+        {
+            Elf64_Rela record;
+            memcpy(&record, relocations + r * sizeof(Elf64_Rela), sizeof(record));
+            const uint64_t symbol_index = ELF64_R_SYM(record.r_info);
+            const char* symbol = "(none)";
+            if (symbol_index < symbol_count)
+            {
+                Elf64_Sym symbol_record;
+                memcpy(&symbol_record, symbols + symbol_index * sizeof(Elf64_Sym), sizeof(symbol_record));
+                const bool named = symbol_record.st_name < names_header->sh_size &&
+                                   memchr(names + symbol_record.st_name, 0, names_header->sh_size - symbol_record.st_name) != 0;
+                symbol = named ? (const char*)names + symbol_record.st_name : "(bad name)";
+            }
+            const X86Relocation assembled_relocation = { record.r_offset, (uint32_t)ELF64_R_TYPE(record.r_info), record.r_addend, symbol };
+            uint64_t low = 0;
+            uint64_t high = expected_count;
+            while (low < high)
+            {
+                const uint64_t middle = low + (high - low) / 2;
+                low = expected[middle].offset < assembled_relocation.offset ? middle + 1 : low;
+                high = expected[middle].offset < assembled_relocation.offset ? high : middle;
+            }
+            const bool found = low < expected_count && expected[low].offset == assembled_relocation.offset && !matched[low];
+            const X86Relocation* reported = found ? &expected[low] : 0;
+            const bool same = found && assembled_relocation.type == reported->type && assembled_relocation.addend == reported->addend &&
+                              strcmp(assembled_relocation.symbol, reported->symbol) == 0;
+            matched[low] = matched[low] || found;
+            if (!same)
+            {
+                if (relocation_differences < 40)
+                {
+                    printf("relocation %lu:\n", (unsigned long)r);
+                    x86_print_relocation("GNU as:", &assembled_relocation);
+                    if (found)
+                    {
+                        x86_print_relocation("from fixup ends:", reported);
+                        printf("  instruction %lu: ", (unsigned long)reported->instruction);
+                        x86_print_instruction(stdout, &instructions[reported->instruction], symbolic[reported->instruction]);
+                        printf("\n");
+                    }
+                    else
+                    {
+                        printf("  from fixup ends:  none at that offset\n");
+                    }
+                }
+                relocation_differences += 1;
+            }
+        }
+        // The expected relocations GNU as doesn't have.
+        for (uint64_t e = 0; expected != 0 && matched != 0 && e < expected_count; e += 1)
+        {
+            if (!matched[e])
+            {
+                if (relocation_differences < 40)
+                {
+                    printf("relocation from fixup ends without GNU as's:\n");
+                    x86_print_relocation("from fixup ends:", &expected[e]);
+                    printf("  instruction %lu: ", (unsigned long)expected[e].instruction);
+                    x86_print_instruction(stdout, &instructions[expected[e].instruction], symbolic[expected[e].instruction]);
+                    printf("\n");
+                }
+                relocation_differences += 1;
+            }
+        }
+
+        // The forms that had a symbolic field of each kind, of those that can have one (their forms without a segment
+        // override).
+        static bool covered[2][X86_FORM_COUNT];
+        static bool coverable[2][X86_FORM_COUNT];
+        uint64_t covered_forms[2] = { 0 };
+        uint64_t coverable_forms[2] = { 0 };
+        for (uint64_t i = 0; i < count; i += 1)
+        {
+            const uint32_t row = (instructions[i].form & BUSTER_X86_FORM_NUMBER) % X86_FORM_COUNT;
+            const uint32_t fields = x86_symbolic_fields(&instructions[i]);
+            for (uint32_t field = X86_FIXUP_DISPLACEMENT; field <= X86_FIXUP_IMMEDIATE; field += 1)
+            {
+                coverable_forms[field] += (fields & (1u << field)) && !coverable[field][row];
+                coverable[field][row] = coverable[field][row] || (fields & (1u << field));
+                covered_forms[field] += (symbolic[i] & (1u << field)) && !covered[field][row];
+                covered[field][row] = covered[field][row] || (symbolic[i] & (1u << field));
+            }
+        }
+
+        printf("compared %lu instructions (%lld bytes, GNU as %lu): %lu differ\n", (unsigned long)count, (long long)length, (unsigned long)text_header->sh_size,
                (unsigned long)differences);
-        result = differences == 0 && text_length == (uint64_t)length;
+        printf("compared %lu relocations (GNU as %lu) of %lu marked instructions: %lu displacements of %lu of the %lu forms that had one, %lu immediates of "
+               "%lu of %lu; PC32 %lu, PLT32 %lu, PC8 %lu, 32S %lu, 32 %lu, 64 %lu; %lu differ\n",
+               (unsigned long)expected_count, (unsigned long)relocation_count, (unsigned long)marked, (unsigned long)symbolic_fields[X86_FIXUP_DISPLACEMENT],
+               (unsigned long)covered_forms[X86_FIXUP_DISPLACEMENT], (unsigned long)coverable_forms[X86_FIXUP_DISPLACEMENT],
+               (unsigned long)symbolic_fields[X86_FIXUP_IMMEDIATE], (unsigned long)covered_forms[X86_FIXUP_IMMEDIATE],
+               (unsigned long)coverable_forms[X86_FIXUP_IMMEDIATE], (unsigned long)types[R_X86_64_PC32], (unsigned long)types[R_X86_64_PLT32],
+               (unsigned long)types[R_X86_64_PC8], (unsigned long)types[R_X86_64_32S], (unsigned long)types[R_X86_64_32], (unsigned long)types[R_X86_64_64],
+               (unsigned long)relocation_differences);
+        printf("x86_encode's fixup ends: %s\n", same_fixup_ends ? "the same" : "DIFFERENT");
+        result = expected != 0 && matched != 0 && differences == 0 && text_header->sh_size == (uint64_t)length && relocation_differences == 0 &&
+                 relocation_count == expected_count && same_fixup_ends;
+        free(expected);
+        free(matched);
     }
-    free(text);
-    free(lengths);
+    free(file);
     return result;
 }
 
@@ -2469,7 +3002,6 @@ static int run_x86_encoder_tests(int argc, char** argv)
     uint64_t print_count = 0;
     uint64_t compare_count = 0;
     const char* compare_path = 0;
-    const char* compare_lengths_path = 0;
     bool valid = true;
     for (int i = 0; i < argc; i += 1)
     {
@@ -2488,12 +3020,11 @@ static int run_x86_encoder_tests(int argc, char** argv)
             valid = valid && x86_parse_u64(argv[i + 1], &print_count);
             i += 1;
         }
-        else if (strcmp(argv[i], "--compare-binary") == 0 && i + 3 < argc)
+        else if (strcmp(argv[i], "--compare-object") == 0 && i + 2 < argc)
         {
             compare_path = argv[i + 1];
-            compare_lengths_path = argv[i + 2];
-            valid = valid && x86_parse_u64(argv[i + 3], &compare_count);
-            i += 3;
+            valid = valid && x86_parse_u64(argv[i + 2], &compare_count);
+            i += 2;
         }
         else
         {
@@ -2504,19 +3035,25 @@ static int run_x86_encoder_tests(int argc, char** argv)
     const uint64_t largest = count > BUSTER_X86_TEST_DIGEST_INSTRUCTIONS ? count : BUSTER_X86_TEST_DIGEST_INSTRUCTIONS;
     const uint64_t capacity = largest > print_count ? (largest > compare_count ? largest : compare_count) : (print_count > compare_count ? print_count : compare_count);
     X86Instruction* instructions = malloc(capacity * sizeof(X86Instruction));
+    uint8_t* symbolic = malloc(capacity);
     X86Buffers buffers = {
         .expected = malloc(BUSTER_X86_ENCODER_CAPACITY(capacity)),
         .output = malloc(BUSTER_X86_ENCODER_CAPACITY(capacity)),
         .expected_offsets = malloc(capacity * sizeof(uint32_t)),
         .offsets = malloc(capacity * sizeof(uint32_t)),
+        .expected_fixup_ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(capacity) * sizeof(uint32_t)),
+        .fixup_ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(capacity) * sizeof(uint32_t)),
     };
-    uint64_t state = (seed == 0 ? BUSTER_X86_TEST_DIGEST_SEED : seed) * BUSTER_X86_TEST_GOLDEN_RATIO + 1;
+    const uint64_t effective_seed = seed == 0 ? BUSTER_X86_TEST_DIGEST_SEED : seed;
+    uint64_t state = effective_seed * BUSTER_X86_TEST_GOLDEN_RATIO + 1;
     int result = 1;
-    if (!valid || count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
+    if (!valid || count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS || print_count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS ||
+        compare_count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
     {
-        fprintf(stderr, "usage: test-x86-encoder [--count N] [--seed N] [--print-assembly N | --compare-binary text lengths N]\n");
+        fprintf(stderr, "usage: test-x86-encoder [--count N] [--seed N] [--print-assembly N | --compare-object object N]\n");
     }
-    else if (instructions == 0 || buffers.expected == 0 || buffers.output == 0 || buffers.expected_offsets == 0 || buffers.offsets == 0)
+    else if (instructions == 0 || symbolic == 0 || buffers.expected == 0 || buffers.output == 0 || buffers.expected_offsets == 0 || buffers.offsets == 0 ||
+             buffers.expected_fixup_ends == 0 || buffers.fixup_ends == 0)
     {
         fprintf(stderr, "out of memory\n");
     }
@@ -2526,16 +3063,17 @@ static int run_x86_encoder_tests(int argc, char** argv)
     }
     else if (print_count != 0)
     {
-        result = x86_print_assembly(&state, print_count, instructions, buffers.output) ? 0 : 1;
+        result = x86_print_assembly(effective_seed, &state, print_count, instructions, symbolic, buffers.output) ? 0 : 1;
     }
     else if (compare_path != 0)
     {
-        result = x86_compare_binary(&state, compare_path, compare_lengths_path, compare_count, instructions, buffers.output, buffers.offsets) ? 0 : 1;
+        result = x86_compare_object(effective_seed, &state, compare_path, compare_count, instructions, symbolic, &buffers) ? 0 : 1;
     }
     else
     {
         bool passed = x86_check_templates();
         passed = x86_check_known() && passed;
+        passed = x86_check_known_fixups() && passed;
         passed = x86_check_digest(instructions, buffers.output) && passed;
         passed = x86_check_random(&state, count, instructions, &buffers) && passed;
         passed = x86_check_page_edges(&state, instructions, &buffers) && passed;
@@ -2543,9 +3081,12 @@ static int run_x86_encoder_tests(int argc, char** argv)
         result = passed ? 0 : 1;
     }
     free(instructions);
+    free(symbolic);
     free(buffers.expected);
     free(buffers.output);
     free(buffers.expected_offsets);
     free(buffers.offsets);
+    free(buffers.expected_fixup_ends);
+    free(buffers.fixup_ends);
     return result;
 }

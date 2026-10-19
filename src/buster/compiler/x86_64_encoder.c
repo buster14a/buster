@@ -10,7 +10,9 @@
 // vectorized encoder), x86_encode_scalar (a plain reference encoder, for testing), x86_validate and
 // x86_form_descriptions (the form table, for tests and diagnostics). The output needs room for
 // BUSTER_X86_ENCODER_CAPACITY(count) bytes; x86_encode writes nothing past that, but may write past the instructions'
-// bytes (its 64-byte stores).
+// bytes (its 64-byte stores). Besides the machine code, x86_encode can store each instruction's offset, and the end of
+// each instruction marked with BUSTER_X86_FORM_FIXUP (one with a symbolic operand), from which x86_fixup_distance
+// locates the fields a fixup patches without decoding the machine code again.
 //
 // How x86_encode works, a group of BUSTER_X86_GROUP_INSTRUCTIONS (16) instructions at a time:
 //   I.   Load. Four instructions fill a ZMM register. Each one's form has a 32-byte template (X86Template, built from
@@ -27,7 +29,8 @@
 //        in II. One byte shuffle per 4 instructions moves every canonical byte to its position in the instruction and
 //        a vpternlogd XORs the template's bytes in. Compressing those 4 slots by the bytes the instructions have
 //        (vpcompressb) leaves the 4 instructions' machine code, one after the other, which a 64-byte store appends to
-//        the output.
+//        the output. Offsets and fixup ends are the running sum of II's lengths (a vpermb and a multiplication), the
+//        fixup ends compressed by the marks (vpcompressd).
 // The form decides everything the bytes' positions depend on, so instructions with different forms (legacy, VEX or
 // EVEX) take the same path, and a form with no bytes (X86_FORM_NONE, which zeroed records have) is how a group is
 // padded. The choices are Zen 5's: docs/x86-64-encoder.md has the measurements behind them (encode_group's and
@@ -37,15 +40,16 @@
 //   - API: registers and addressing modes (BUSTER_X86_MODE_*), X86Instruction and its decorations
 //     (BUSTER_X86_DECORATION_*), X86EncoderError, the operand, encoding, family and syntax constants of the form
 //     table, BUSTER_X86_VECTOR_FORMS (the VEX and EVEX forms) and BUSTER_X86_FORMS (the form table), X86Form, the
-//     segment overrides (BUSTER_X86_FORM_FS and BUSTER_X86_FORM_GS) and the entry points' prototypes.
+//     segment overrides (BUSTER_X86_FORM_FS and BUSTER_X86_FORM_GS), the fixup flag (BUSTER_X86_FORM_FIXUP),
+//     X86FixupField and x86_fixup_distance, and the entry points' prototypes.
 //   - Templates: the canonical slot (BUSTER_X86_CANONICAL_*), the layout, checks and flags constants, X86Template,
 //     build_template and x86_encoder_initialize.
 //   - Validation: x86_instruction_is_valid and x86_validate.
 //   - The scalar encoder: encode_one and x86_encode_scalar.
-//   - The vectorized encoder: X86Gather and X86Store (the variants the benchmark compares), X86Fields, the
-//     addressing mode tables (x86_mode_fields, x86_mode_constants, x86_mode_presence), compute_fields (II),
-//     encode_group (I-III), encode_batches (the loop, with the instructions per iteration as a parameter), the
-//     x86_encode_N instantiations and x86_encode.
+//   - The vectorized encoder: X86Gather, X86Store and X86FixupStore (the variants the benchmark compares), X86Fields,
+//     the addressing mode tables (x86_mode_fields, x86_mode_constants, x86_mode_presence), compute_fields (II), the
+//     running sum's tables (x86_length_bytes and the others), encode_group (I-III), encode_batches (the loop, with the
+//     instructions per iteration as a parameter), the x86_encode_N instantiations and x86_encode.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -146,7 +150,8 @@ struct X86Instruction
     uint8_t index;
     // BUSTER_X86_REGISTER_DIRECT or a BUSTER_X86_MEMORY_* addressing mode.
     uint8_t mode;
-    // An X86Form, plus BUSTER_X86_FORM_FS or BUSTER_X86_FORM_GS for a segment override.
+    // An X86Form, plus BUSTER_X86_FORM_FS or BUSTER_X86_FORM_GS for a segment override, and BUSTER_X86_FORM_FIXUP for an
+    // instruction with a symbolic operand.
     uint16_t form;
     // The register in VEX.vvvv (EVEX.V'vvvv): a VEX or EVEX form's operand that isn't in ModRM.
     uint8_t vvvv;
@@ -4073,22 +4078,33 @@ static const X86FormDescription x86_form_descriptions[X86_FORM_COUNT] = { BUSTER
 #define BUSTER_X86_FORM_TEMPLATES (3 * X86_FORM_COUNT)
 _Static_assert(BUSTER_X86_FORM_TEMPLATES <= 65536, "a form with a segment override fits in X86Instruction.form");
 
+// A marked instruction: one with a symbolic operand, a field (its displacement, its immediate, or both) that the code
+// generator can't fill in before layout. The form, with or without a segment override, plus this flag. The encoders
+// encode the form as it is without the flag (the vectorized one with a copy of its template), and report where each
+// marked instruction ends (x86_encode's `fixup_ends`), which locates its fields without decoding anything
+// (x86_fixup_distance).
+#define BUSTER_X86_FORM_FIXUP 0x8000
+// The bits of X86Instruction.form below the flag: the form and its segment override.
+#define BUSTER_X86_FORM_NUMBER (BUSTER_X86_FORM_FIXUP - 1)
+_Static_assert(BUSTER_X86_FORM_TEMPLATES <= BUSTER_X86_FORM_FIXUP, "the fixup flag is past every form with a segment override");
+
 // A form's segment override: 0 for none, 1 for FS and 2 for GS. These two are branches on the rare overrides, so
 // that the scalar encoder pays a compare for them.
 static uint32_t x86_form_segment(uint32_t form)
 {
+    const uint32_t number = form & BUSTER_X86_FORM_NUMBER;
     uint32_t result = 0;
-    if (BUSTER_UNLIKELY(form >= BUSTER_X86_FORM_FS))
+    if (BUSTER_UNLIKELY(number >= BUSTER_X86_FORM_FS))
     {
-        result = form >= BUSTER_X86_FORM_GS ? 2 : 1;
+        result = number >= BUSTER_X86_FORM_GS ? 2 : 1;
     }
     return result;
 }
 
-// The form table's row of a form, with or without a segment override.
+// The form table's row of a form, with or without a segment override (and with or without the fixup flag).
 static const X86FormDescription* x86_form_description(uint32_t form)
 {
-    uint32_t row = form;
+    uint32_t row = form & BUSTER_X86_FORM_NUMBER;
     if (BUSTER_UNLIKELY(row >= BUSTER_X86_FORM_FS))
     {
         row -= row >= BUSTER_X86_FORM_GS ? BUSTER_X86_FORM_GS : BUSTER_X86_FORM_FS;
@@ -4096,21 +4112,58 @@ static const X86FormDescription* x86_form_description(uint32_t form)
     return &x86_form_descriptions[row];
 }
 
+// The fields of a marked instruction that a fixup patches: X86Instruction's displacement (a memory operand's, or a
+// relative branch's) and its immediate (an imm32, or a 64-bit immediate or address).
+typedef enum X86FixupField
+{
+    X86_FIXUP_DISPLACEMENT,
+    X86_FIXUP_IMMEDIATE,
+} X86FixupField;
+
+// How many bytes before the end of an instruction of the form the field starts: its offset is the end x86_encode
+// reports minus this. The processor measures PC-relative values from the end, so a PC-relative fixup's addend from its
+// field is the symbol's addend minus this too: -4 for call f and lea rax, [rip + x], -5 for cmp byte ptr [rip + x], 1
+// and -8 for mov dword ptr [rip + x], imm32. The displacement and the immediate are the last fields, in that order. A
+// memory operand's displacement field is 32-bit when it is RIP-relative, absolute or index-only; after a base, only when
+// the displacement doesn't fit in 8 bits (in units of an EVEX form's N), so a symbolic one there needs a placeholder that
+// doesn't, such as INT32_MIN (and the fixup overwrites it).
+static __attribute__((unused)) uint32_t x86_fixup_distance(uint32_t form, X86FixupField field)
+{
+    const X86FormDescription* description = x86_form_description(form);
+    uint32_t result = description->immediate_bytes;
+    if (field == X86_FIXUP_DISPLACEMENT)
+    {
+        result += description->relative_bytes != 0 ? description->relative_bytes : 4;
+    }
+    return result;
+}
+
+// x86_encode stores a group's fixup ends 16 at a time, each store after the ends before it, so the last store ends at
+// most this many past the marked instructions' ends.
+#define BUSTER_X86_ENCODER_FIXUP_STORE_ENDS 16
+#define BUSTER_X86_ENCODER_FIXUP_CAPACITY(marked) ((uint64_t)(marked) + BUSTER_X86_ENCODER_FIXUP_STORE_ENDS)
+
 // Builds the templates. Returns false if a form doesn't fit in one (a broken form table).
 static __attribute__((unused)) bool x86_encoder_initialize(void);
 // Encodes the instructions into `output`, which has room for `capacity` bytes (at least
-// BUSTER_X86_ENCODER_CAPACITY(count)), and stores each one's offset in `offsets` if it isn't null. Writes nothing past
-// output + capacity, but the bytes after the instructions' may change. Returns the number of bytes, or a negative
-// X86EncoderError. Requires x86_encoder_initialize. It rejects the operands its encoding can't represent, but not those
-// only x86_validate does: an immediate or rel8 outside its field's range (it writes the field's low bytes), an /is4
-// immediate that isn't a register's number times 16 (plus a selector), a control or segment register that doesn't
-// exist, MOV to CS, a complex multiplication into one of its sources, an AMX product of tiles with one twice, zeroing
-// without an opmask or into memory, a VSIB operand without an index, an EVEX gather or scatter without an opmask, a
-// gather whose destination, index and mask aren't different registers, a SIB operand without a SIB byte (a base alone,
-// or RIP) or with SIB's none and a scale, and fields the form doesn't have (which it ignores).
-static __attribute__((unused)) int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets);
-// The same, one instruction at a time from the form table, after x86_validate: the reference for testing.
-static __attribute__((unused)) int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets);
+// BUSTER_X86_ENCODER_CAPACITY(count)), and stores each one's offset in `offsets` if it isn't null. If `fixup_ends` isn't
+// null, stores the end offset of each marked instruction (BUSTER_X86_FORM_FIXUP), in order, in an array with room for
+// BUSTER_X86_ENCODER_FIXUP_CAPACITY(marked instructions). Writes nothing past output + capacity or past the fixup ends'
+// capacity, but the bytes after the instructions' and the ends after the marked ones' may change. Returns the number of
+// bytes, or a negative X86EncoderError. Requires x86_encoder_initialize. It rejects the operands its encoding can't
+// represent, but not those only x86_validate does: an immediate or rel8 outside its field's range (it writes the
+// field's low bytes), an /is4 immediate that isn't a register's number times 16 (plus a selector), a control or
+// segment register that doesn't exist, MOV to CS, a complex multiplication into one of its sources, an AMX product of
+// tiles with one twice, zeroing without an opmask or into memory, a VSIB operand without an index, an EVEX gather or
+// scatter without an opmask, a gather whose destination, index and mask aren't different registers, a SIB operand
+// without a SIB byte (a base alone, or RIP) or with SIB's none and a scale, and fields the form doesn't have (which it
+// ignores).
+static __attribute__((unused)) int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
+                                                  uint32_t* fixup_ends);
+// The same, one instruction at a time from the form table, after x86_validate: the reference for testing. Its fixup
+// ends need room for the marked instructions' alone.
+static __attribute__((unused)) int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
+                                                         uint32_t* fixup_ends);
 // The index of the first instruction that can't be encoded, or count if they all can.
 static __attribute__((unused)) uint64_t x86_validate(const X86Instruction* instructions, uint64_t count);
 
@@ -4244,9 +4297,13 @@ struct X86Template
 _Static_assert(sizeof(X86Template) == 32, "a template is one YMM load");
 
 // The templates, with BUSTER_X86_TEMPLATE_PADDING unused templates on either side: the vectorized encoder loads 16 bytes
-// of a template into a lane of a ZMM register with a masked load that spans up to 48 bytes on either side of them.
+// of a template into a lane of a ZMM register with a masked load that spans up to 48 bytes on either side of them. A
+// marked form's are a copy at BUSTER_X86_FORM_FIXUP and up, so that the vectorized encoder looks the form up as the
+// record has it: taking the flag off each form cost the loop 2.4% on Zen 5. Between the two, the pages nothing touches
+// stay unmapped.
 #define BUSTER_X86_TEMPLATE_PADDING 2
-static X86Template x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING] __attribute__((aligned(64)));
+static X86Template x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
+    __attribute__((aligned(64)));
 static X86Template* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_PADDING;
 static bool x86_encoder_initialized;
 
@@ -4473,6 +4530,7 @@ static bool x86_encoder_initialize(void)
     {
         result = build_template(x86_form_description(form), x86_form_segment(form), &x86_templates[form]) && result;
     }
+    memcpy(&x86_templates[BUSTER_X86_FORM_FIXUP], &x86_templates[0], BUSTER_X86_FORM_TEMPLATES * sizeof(X86Template));
     x86_encoder_initialized = result;
     return result;
 }
@@ -4538,7 +4596,7 @@ static bool x86_form_has_is4(const X86FormDescription* form)
 // mode, decorations the form can have, and immediates and relative displacements that fit their fields.
 static bool x86_instruction_is_valid(const X86Instruction* instruction)
 {
-    bool result = instruction->form < BUSTER_X86_FORM_TEMPLATES;
+    bool result = (instruction->form & BUSTER_X86_FORM_NUMBER) < BUSTER_X86_FORM_TEMPLATES;
     if (result)
     {
         const X86FormDescription* form = x86_form_description(instruction->form);
@@ -4863,7 +4921,8 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out)
     return length;
 }
 
-static int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets)
+static int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
+                                 uint32_t* fixup_ends)
 {
     int64_t result;
     if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
@@ -4881,6 +4940,7 @@ static int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t co
     else
     {
         uint64_t length = 0;
+        uint64_t marked = 0;
         for (uint64_t i = 0; i < count; i += 1)
         {
             if (offsets != 0)
@@ -4888,6 +4948,11 @@ static int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t co
                 offsets[i] = (uint32_t)length;
             }
             length += encode_one(&instructions[i], output + length);
+            if (fixup_ends != 0 && (instructions[i].form & BUSTER_X86_FORM_FIXUP))
+            {
+                fixup_ends[marked] = (uint32_t)length;
+                marked += 1;
+            }
         }
         result = (int64_t)length;
     }
@@ -4928,6 +4993,16 @@ typedef enum X86Store
     X86_STORE_MASKED,
     X86_STORE_COMPRESS,
 } X86Store;
+
+// How a group appends the end offsets of its marked instructions to the fixup ends: compressed in a register
+// (vpcompressd, two µops on FP1 and FP2 on Zen 5) and stored whole (16 ends, past the marked ones' but inside the fixup
+// ends' capacity), or compressed straight to memory (8 µops, one store every 3 cycles on Zen 5, and 144 µops, one every
+// 72 cycles, on Zen 4: uops.info).
+typedef enum X86FixupStore
+{
+    X86_FIXUP_STORE_FULL,
+    X86_FIXUP_STORE_COMPRESS,
+} X86FixupStore;
 
 // What Phase II computes for each instruction of a group, one instruction per dword lane.
 typedef struct X86Fields X86Fields;
@@ -5192,9 +5267,6 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     return result;
 }
 
-// Shifts the dword lanes of x up by `lanes` (a constant), filling with zeros.
-#define BUSTER_X86_SHIFT_LANES_UP(x, lanes) _mm512_alignr_epi32((x), _mm512_setzero_si512(), 16 - (lanes))
-
 // Loads the 16 bytes at `pointer` into 128-bit lane `lane` (a constant) of `vector`. The load spans the 64 bytes from
 // pointer - 16 * lane, but masked-out elements are neither read nor able to fault.
 BUSTER_INLINE __m512i x86_load_lane(__m512i vector, uint32_t lane, const uint8_t* pointer)
@@ -5202,16 +5274,31 @@ BUSTER_INLINE __m512i x86_load_lane(__m512i vector, uint32_t lane, const uint8_t
     return _mm512_mask_loadu_epi64(vector, (__mmask8)(3u << (2 * lane)), pointer - 16 * lane);
 }
 
+// vpermb's indices that put a byte of each of Phase II's lanes in instruction order: byte i takes byte 0 of lane
+// 4(i % 4) + i / 4 (instruction i's length), and with the second, byte 1 (the high byte of instruction i's form, with the
+// fixup flag in bit 7).
+static const uint8_t x86_length_bytes[64] __attribute__((aligned(64))) = { 0, 16, 32, 48, 4, 20, 36, 52, 8, 24, 40, 56, 12, 28, 44, 60 };
+static const uint8_t x86_form_high_bytes[64] __attribute__((aligned(64))) = { 1, 17, 33, 49, 5, 21, 37, 53, 9, 25, 41, 57, 13, 29, 45, 61 };
+// vpshufb's indices that give bytes 8-15 of each 128-bit lane its byte 7, and the others zero.
+static const uint8_t x86_first_qword_total[64] __attribute__((aligned(64))) = {
+    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 7, 7, 7, 7, 7, 7, 7, 7, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+};
+
 // Encodes the 4 * `quads` instructions at `instructions` (quads is 1, 2 or 4, and a constant), appending their
 // machine code at `out`, and returns where it ends. If `offsets` isn't null, stores the offsets (from `output`) of
-// the instructions of `offset_lanes` (a bit per instruction). ORs the invalid instructions' lanes into `*invalid`.
+// the instructions of `offset_lanes` (a bit per instruction). If `fixup_ends` isn't null, appends the end offsets (from
+// `output`) of the marked instructions at *fixup_ends and advances it past them. ORs the invalid instructions' lanes
+// into `*invalid`.
 //
 // Phase II works on instruction 4q + j (quad q, slot j) in dword lane 4j + q, so that moving its fields between a
 // quad's records and the group's lanes is a 4x4 transpose of dwords inside each 128-bit lane, both ways: unpacks,
 // which on Zen 5 run on any of the four vector pipes (uops.info), where cross-lane permutes would take two of them
 // from Phase III's shuffles and compressions.
 BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t quads, uint8_t* out, const uint8_t* output, uint32_t* offsets,
-                                    uint32_t offset_lanes, X86Gather gather, X86Store store, __m512i* invalid)
+                                    uint32_t offset_lanes, uint32_t** fixup_ends, X86Gather gather, X86Store store, X86FixupStore fixup_store,
+                                    __m512i* invalid)
 {
     // I. Records and templates (zero for the quads past `quads`).
     __m512i records[4];
@@ -5284,18 +5371,8 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
     const X86Fields fields = compute_fields(operands, displacement, extension, flags, checks);
     *invalid = _mm512_or_epi32(*invalid, fields.invalid);
 
-    if (offsets != 0)
-    {
-        // The lengths in instruction order, then their running sum.
-        const __m512i lengths = _mm512_permutexvar_epi32(_mm512_setr_epi32(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15), fields.length);
-        __m512i end = lengths;
-        end = _mm512_add_epi32(end, BUSTER_X86_SHIFT_LANES_UP(end, 1));
-        end = _mm512_add_epi32(end, BUSTER_X86_SHIFT_LANES_UP(end, 2));
-        end = _mm512_add_epi32(end, BUSTER_X86_SHIFT_LANES_UP(end, 4));
-        end = _mm512_add_epi32(end, BUSTER_X86_SHIFT_LANES_UP(end, 8));
-        const __m512i start = _mm512_add_epi32(_mm512_sub_epi32(end, lengths), BUSTER_X86_SPLAT(out - output));
-        _mm512_mask_storeu_epi32(offsets, (__mmask16)offset_lanes, start);
-    }
+    // Where the group's machine code starts, for its offsets and fixup ends.
+    uint8_t* const group_out = out;
 
     // III. Each quad's canonical slots: the immediate, the displacement, canonical bytes 8-11 and the prefix bytes
     // 12-15. And its presence bits, in every dword of each slot, for vpshufbitqmb to pick from by the layout: an
@@ -5338,10 +5415,49 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
         }
         out += length;
     }
+
+    if (offsets != 0 || fixup_ends != 0)
+    {
+        // After Phase III, so that these wait for the lengths behind its operations rather than ahead of them in the FP
+        // scheduler. Each instruction's end in the group, the running sum of the lengths (at most 240): as bytes in
+        // instruction order (a vpermb), a multiplication by 0x0101010101010101 sums each qword's bytes up to each one
+        // (eight lengths of at most 15, so nothing carries), and a vpshufb adds the first qword's total to the second's.
+        // About 12 cycles on Zen 5, where the shifts and adds of dwords that this replaced took about 30 and held up the
+        // retirement of the group's Phase III: the reorder buffer was full 17% of the time with offsets and 27% with
+        // fixup ends.
+        const __m512i lengths = _mm512_permutexvar_epi8(_mm512_load_si512(x86_length_bytes), fields.length);
+        const __m512i qword_sums = _mm512_mullo_epi64(lengths, _mm512_set1_epi64(0x0101010101010101ll));
+        const __m512i ends = _mm512_add_epi8(qword_sums, _mm512_shuffle_epi8(qword_sums, _mm512_load_si512(x86_first_qword_total)));
+        // The group's offset in the output, broadcast from memory: a load, where a broadcast from a general register
+        // takes FP1 or FP2 too.
+        uint32_t group_offset = (uint32_t)(group_out - output);
+        __asm__("" : "+m"(group_offset));
+        const __m512i group_start = BUSTER_X86_SPLAT(group_offset);
+        if (offsets != 0)
+        {
+            const __m512i starts = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_sub_epi8(ends, lengths)));
+            _mm512_mask_storeu_epi32(offsets, (__mmask16)offset_lanes, _mm512_add_epi32(starts, group_start));
+        }
+        if (fixup_ends != 0)
+        {
+            // The marked instructions' ends, compressed, by the fixup flags of the forms, which the records had long
+            // before the lengths. The zeroed copy's padding isn't marked.
+            const __mmask16 marked = (__mmask16)_mm512_movepi8_mask(_mm512_permutexvar_epi8(_mm512_load_si512(x86_form_high_bytes), extension));
+            const __m512i marked_ends = _mm512_add_epi32(_mm512_cvtepu8_epi32(_mm512_castsi512_si128(ends)), group_start);
+            if (fixup_store == X86_FIXUP_STORE_COMPRESS)
+            {
+                _mm512_mask_compressstoreu_epi32(*fixup_ends, marked, marked_ends);
+            }
+            else
+            {
+                _mm512_storeu_si512(*fixup_ends, _mm512_maskz_compress_epi32(marked, marked_ends));
+            }
+            *fixup_ends += __builtin_popcount(marked);
+        }
+    }
     return out;
 }
 
-#undef BUSTER_X86_SHIFT_LANES_UP
 #undef BUSTER_X86_SPLAT
 
 // The vectorized encoder's loop: `groups` groups of 4 * `quads` instructions per iteration (all constants), then the
@@ -5352,14 +5468,17 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
 // Why a full 64-byte store stays inside that capacity: a quad's store starts after the bytes of the instructions
 // before it, at most 15 for each of the first `count` (the zeroed copy's padding adds none), so it ends by
 // 15 * count + 64.
-BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t quads,
-                                     uint32_t groups, X86Gather gather, X86Store store)
+BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t* fixup_ends,
+                                     uint32_t quads, uint32_t groups, X86Gather gather, X86Store store, X86FixupStore fixup_store)
 {
     const uint64_t group_instructions = BUSTER_X86_QUAD_INSTRUCTIONS * quads;
     const uint64_t iteration_instructions = group_instructions * groups;
     const uint32_t group_lanes = (uint32_t)((1ull << group_instructions) - 1);
     __m512i invalid = _mm512_setzero_si512();
     uint8_t* out = output;
+    // Where the next fixup end goes, through a pointer that is null (a constant) in the loops without fixup ends.
+    uint32_t* fixup_cursor = fixup_ends;
+    uint32_t** fixups = fixup_ends != 0 ? &fixup_cursor : 0;
     uint64_t i = 0;
     while (i + iteration_instructions <= count)
     {
@@ -5367,47 +5486,60 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
         // spill (unrolled, it's 14% slower on Zen 5).
         for (uint32_t g = 0; g < groups; g += 1)
         {
-            out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, gather, store, &invalid);
+            out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, &invalid);
             i += group_instructions;
         }
     }
     while (i + group_instructions <= count)
     {
-        out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, gather, store, &invalid);
+        out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, &invalid);
         i += group_instructions;
     }
     if (i < count)
     {
         X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
         memcpy(tail, instructions + i, (count - i) * sizeof(X86Instruction));
-        out = encode_group(tail, quads, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)((1ull << (count - i)) - 1), gather, store, &invalid);
+        out = encode_group(tail, quads, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)((1ull << (count - i)) - 1), fixups, gather, store, fixup_store,
+                           &invalid);
     }
     return _mm512_test_epi32_mask(invalid, invalid) != 0 ? X86_ENCODER_ERROR_INVALID_INSTRUCTION : (int64_t)(out - output);
 }
 
 // The instantiations, by instructions per iteration, and for the benchmark, with the other gathers and stores. All of
-// them need room for BUSTER_X86_ENCODER_CAPACITY(count) bytes. Each has a loop with offsets and one without, so that
-// neither tests for them per group.
-#define BUSTER_X86_ENCODE_VARIANT(name, quads, groups, gather, store) \
-    __attribute__((noinline)) static int64_t name(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets) \
+// them need room for BUSTER_X86_ENCODER_CAPACITY(count) bytes, and those with full fixup stores, room for
+// BUSTER_X86_ENCODER_FIXUP_CAPACITY(marked) fixup ends. Each has a loop for each combination of offsets and fixup ends,
+// so that none tests for them per group.
+#define BUSTER_X86_ENCODE_VARIANT(name, quads, groups, gather, store, fixup_store) \
+    __attribute__((noinline)) static int64_t name(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t* fixup_ends) \
     { \
-        return offsets != 0 ? encode_batches(instructions, count, output, offsets, quads, groups, gather, store) \
-                            : encode_batches(instructions, count, output, 0, quads, groups, gather, store); \
+        int64_t result; \
+        if (fixup_ends == 0) \
+        { \
+            result = offsets != 0 ? encode_batches(instructions, count, output, offsets, 0, quads, groups, gather, store, fixup_store) \
+                                  : encode_batches(instructions, count, output, 0, 0, quads, groups, gather, store, fixup_store); \
+        } \
+        else \
+        { \
+            result = offsets != 0 ? encode_batches(instructions, count, output, offsets, fixup_ends, quads, groups, gather, store, fixup_store) \
+                                  : encode_batches(instructions, count, output, 0, fixup_ends, quads, groups, gather, store, fixup_store); \
+        } \
+        return result; \
     }
-BUSTER_X86_ENCODE_VARIANT(x86_encode_4, 1, 1, X86_GATHER_INSERTS, X86_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_8, 2, 1, X86_GATHER_INSERTS, X86_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_16, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_32, 4, 2, X86_GATHER_INSERTS, X86_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_64, 4, 4, X86_GATHER_INSERTS, X86_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_16_forms_from_records, 4, 1, X86_GATHER_INSERTS_FORMS_FROM_RECORDS, X86_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_16_masked_loads, 4, 1, X86_GATHER_MASKED_LOADS, X86_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_16_masked_stores, 4, 1, X86_GATHER_INSERTS, X86_STORE_MASKED)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_16_compress_stores, 4, 1, X86_GATHER_INSERTS, X86_STORE_COMPRESS)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_4, 1, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_8, 2, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_32, 4, 2, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_64, 4, 4, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16_forms_from_records, 4, 1, X86_GATHER_INSERTS_FORMS_FROM_RECORDS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16_masked_loads, 4, 1, X86_GATHER_MASKED_LOADS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16_masked_stores, 4, 1, X86_GATHER_INSERTS, X86_STORE_MASKED, X86_FIXUP_STORE_FULL)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16_compress_stores, 4, 1, X86_GATHER_INSERTS, X86_STORE_COMPRESS, X86_FIXUP_STORE_FULL)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_64_fixup_compress_stores, 4, 4, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_COMPRESS)
 #undef BUSTER_X86_ENCODE_VARIANT
 
 // The production entry point: 64 instructions per iteration, which the Zen 5 benchmark found the fastest
 // (docs/x86-64-encoder.md has the numbers).
-static int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets)
+static int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
 {
     int64_t result;
     if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
@@ -5420,7 +5552,7 @@ static int64_t x86_encode(const X86Instruction* instructions, uint64_t count, ui
     }
     else
     {
-        result = x86_encode_64(instructions, count, output, offsets);
+        result = x86_encode_64(instructions, count, output, offsets, fixup_ends);
     }
     return result;
 }

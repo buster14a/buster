@@ -1,24 +1,26 @@
 // The x86-64 encoder benchmark: times x86_encode at each batch width (instructions per loop iteration) and output
 // store, and a one-instruction-at-a-time scalar loop, on a synthetic instruction stream, after checking that they all
-// produce the same bytes and offsets.
+// produce the same bytes, offsets and fixup ends.
 //
-// Usage: build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform | --vector] [--offsets] [--seed N]
-//                                             [--only NAME]
+// Usage: build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform | --vector] [--offsets] [--fixups]
+//                                             [--seed N] [--only NAME]
 //
 // The stream has --count instructions (BUSTER_X86_BENCHMARK_DEFAULT_COUNT by default): a mix shaped like compiler
 // output (x86_benchmark_patterns: register moves, stack loads and stores, calls, branches, arithmetic, some SSE); with
 // --vector, like vectorized compiler output (x86_benchmark_vector_patterns: AVX-512 with opmasks and broadcasts, AVX2,
 // BMI and the loop around them); or with --uniform, random instructions of every form. --section N encodes it in calls
 // of N instructions, each appending to the same output, like a compiler encoding a function at a time; otherwise one
-// call encodes it all. --offsets has every call store each instruction's offset too, and --only times just the
-// implementation NAME (for perf stat, say). Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the
-// arguments are invalid or an implementation's output differs from the scalar loop's.
+// call encodes it all. --offsets has every call store each instruction's offset too; --fixups marks the instructions a
+// code generator would have fixups for (calls and RIP-relative operands, x86_benchmark_mark) and has every call
+// report their ends; and --only times just the implementation NAME (for perf stat, say). Run it pinned to one CPU
+// (taskset -c 2 ...). The exit status is 1 if the arguments are invalid or an implementation's output differs from the
+// scalar loop's.
 //
 // Layout, in this order:
-//   - The stream: x86_benchmark_patterns and x86_benchmark_vector_patterns, pattern_instruction and make_stream
+//   - The stream: x86_benchmark_patterns and x86_benchmark_vector_patterns, pattern_instruction, make_stream
 //     (x86_64_encoder_test.c's generator isn't in this translation unit, so the uniform stream has its own copy,
-//     uniform_instruction).
-//   - The implementations: encode_scalar_loop and x86_benchmark_implementations.
+//     uniform_instruction) and x86_benchmark_mark.
+//   - The implementations: encode_scalar_loop, encode_offsets_then_pick and x86_benchmark_implementations.
 //   - Timing: the perf counters, encode_stream and run_x86_encoder_benchmark, which runs a warm-up pass and then
 //     BUSTER_X86_BENCHMARK_PASSES passes with the implementations taking turns, and reports medians.
 
@@ -418,13 +420,33 @@ static bool make_stream(X86Instruction* instructions, uint64_t count, const X86B
     return result;
 }
 
+// Marks the instructions a code generator would have fixups for: calls (to other functions; branches inside a function
+// are resolved before encoding) and RIP-relative operands (globals and constants), and lists their indices in
+// `marked`. Returns how many.
+static uint64_t x86_benchmark_mark(X86Instruction* instructions, uint64_t count, uint32_t* marked)
+{
+    uint64_t result = 0;
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        if (instructions[i].form == X86_FORM_CALL_REL32 || (instructions[i].mode & BUSTER_X86_MODE_RIP) != 0)
+        {
+            instructions[i].form |= BUSTER_X86_FORM_FIXUP;
+            marked[result] = (uint32_t)i;
+            result += 1;
+        }
+    }
+    return result;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The implementations
 
 // The scalar encoder's loop without its checks: what one instruction at a time costs.
-__attribute__((noinline)) static int64_t encode_scalar_loop(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets)
+__attribute__((noinline)) static int64_t encode_scalar_loop(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets,
+                                                            uint32_t* fixup_ends)
 {
     uint64_t length = 0;
+    uint64_t marked = 0;
     for (uint64_t i = 0; i < count; i += 1)
     {
         if (offsets != 0)
@@ -432,11 +454,38 @@ __attribute__((noinline)) static int64_t encode_scalar_loop(const X86Instruction
             offsets[i] = (uint32_t)length;
         }
         length += encode_one(&instructions[i], output + length);
+        if (fixup_ends != 0 && (instructions[i].form & BUSTER_X86_FORM_FIXUP))
+        {
+            fixup_ends[marked] = (uint32_t)length;
+            marked += 1;
+        }
     }
     return (int64_t)length;
 }
 
-typedef int64_t X86BenchmarkFunction(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets);
+// The offsets encode_offsets_then_pick stores when its caller wants none (room for the stream's).
+static uint32_t* x86_benchmark_starts;
+// What a code generator knows about the instructions of each call encode_offsets_then_pick makes: which are marked (their
+// indices, in order). encode_stream sets them before each call.
+static const uint32_t* x86_benchmark_marked;
+static uint64_t x86_benchmark_marked_count;
+
+// The other way to have fixup ends: x86_encode_64 with every instruction's offset, then the caller picks the ends of the
+// marked instructions (the next instruction's start) from its list of them.
+__attribute__((noinline)) static int64_t encode_offsets_then_pick(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets,
+                                                                  uint32_t* fixup_ends)
+{
+    uint32_t* starts = offsets != 0 ? offsets : x86_benchmark_starts;
+    const int64_t result = x86_encode_64(instructions, count, output, starts, 0);
+    for (uint64_t k = 0; fixup_ends != 0 && result >= 0 && k < x86_benchmark_marked_count; k += 1)
+    {
+        const uint32_t i = x86_benchmark_marked[k];
+        fixup_ends[k] = i + 1 < count ? starts[i + 1] : (uint32_t)result;
+    }
+    return result;
+}
+
+typedef int64_t X86BenchmarkFunction(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t* fixup_ends);
 
 typedef struct X86BenchmarkImplementation X86BenchmarkImplementation;
 struct X86BenchmarkImplementation
@@ -457,6 +506,8 @@ static const X86BenchmarkImplementation x86_benchmark_implementations[] = {
     { "x86_encode_16_masked_loads", x86_encode_16_masked_loads },
     { "x86_encode_16_masked_stores", x86_encode_16_masked_stores },
     { "x86_encode_16_compress_stores", x86_encode_16_compress_stores },
+    { "x86_encode_64_fixup_compress_stores", x86_encode_64_fixup_compress_stores },
+    { "x86_encode_64_offsets_then_pick", encode_offsets_then_pick },
 };
 #define BUSTER_X86_BENCHMARK_IMPLEMENTATIONS BUSTER_ARRAY_LENGTH(x86_benchmark_implementations)
 
@@ -521,16 +572,33 @@ static void x86_benchmark_sort(uint64_t* values, uint64_t count)
     }
 }
 
-// Encodes the stream in calls of `section` instructions, appending to `output`. Returns the number of bytes, or a
-// negative error.
+// Encodes the stream in calls of `section` instructions, appending to `output`, each call's fixup ends (from its own
+// output's start) after the previous calls'. `marked` lists the marked instructions (by index in their call's
+// instructions) and section_marks[s] how many of call s's instructions are marked. Returns the number of bytes, or a
+// negative error. Without fixup ends, a call costs what it did before they existed, so that short calls compare with
+// older measurements.
 static int64_t encode_stream(const X86BenchmarkImplementation* implementation, const X86Instruction* instructions, uint64_t count, uint64_t section, uint8_t* output,
-                             uint32_t* offsets)
+                             uint32_t* offsets, uint32_t* fixup_ends, const uint32_t* marked, const uint32_t* section_marks)
 {
     int64_t result = 0;
+    uint64_t marks = 0;
+    uint64_t s = 0;
     for (uint64_t start = 0; result >= 0 && start < count; start += section)
     {
         const uint64_t n = count - start < section ? count - start : section;
-        const int64_t length = implementation->encode(instructions + start, n, output + result, offsets != 0 ? offsets + start : 0);
+        int64_t length;
+        if (fixup_ends != 0)
+        {
+            x86_benchmark_marked = marked + marks;
+            x86_benchmark_marked_count = section_marks[s];
+            length = implementation->encode(instructions + start, n, output + result, offsets != 0 ? offsets + start : 0, fixup_ends + marks);
+            marks += section_marks[s];
+            s += 1;
+        }
+        else
+        {
+            length = implementation->encode(instructions + start, n, output + result, offsets != 0 ? offsets + start : 0, 0);
+        }
         result = length < 0 ? length : result + length;
     }
     return result;
@@ -553,6 +621,7 @@ int run_x86_encoder_benchmark(int argc, char** argv)
     bool uniform = false;
     bool vector = false;
     bool with_offsets = false;
+    bool with_fixups = false;
     const char* only = 0;
     bool valid = true;
     for (int i = 1; i < argc; i += 1)
@@ -584,6 +653,10 @@ int run_x86_encoder_benchmark(int argc, char** argv)
         {
             with_offsets = true;
         }
+        else if (strcmp(argv[i], "--fixups") == 0)
+        {
+            with_fixups = true;
+        }
         else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
             only = argv[i + 1];
@@ -598,11 +671,14 @@ int run_x86_encoder_benchmark(int argc, char** argv)
 
     int result = 1;
     X86Instruction* instructions = 0;
+    uint32_t* marked_indices = 0;
+    uint32_t* section_marks = 0;
     uint8_t* outputs[BUSTER_X86_BENCHMARK_IMPLEMENTATIONS] = { 0 };
     uint32_t* offsets[BUSTER_X86_BENCHMARK_IMPLEMENTATIONS] = { 0 };
+    uint32_t* fixup_ends[BUSTER_X86_BENCHMARK_IMPLEMENTATIONS] = { 0 };
     if (!valid || count == 0 || count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS || (uniform && vector))
     {
-        fprintf(stderr, "usage: %s [--count N] [--section N] [--uniform | --vector] [--offsets] [--seed N] [--only NAME]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--count N] [--section N] [--uniform | --vector] [--offsets] [--fixups] [--seed N] [--only NAME]\n", argv[0]);
     }
     else if (!x86_encoder_initialize())
     {
@@ -610,13 +686,18 @@ int run_x86_encoder_benchmark(int argc, char** argv)
     }
     else
     {
+        const uint64_t sections = (count + section - 1) / section;
         bool allocated = (instructions = aligned_alloc(64, (count * sizeof(X86Instruction) + 63) / 64 * 64)) != 0;
+        allocated = allocated && (marked_indices = calloc(count, sizeof(uint32_t))) != 0;
+        allocated = allocated && (section_marks = calloc(sections, sizeof(uint32_t))) != 0;
+        allocated = allocated && (x86_benchmark_starts = aligned_alloc(64, (count * sizeof(uint32_t) + 63) / 64 * 64)) != 0;
         for (uint64_t i = 0; allocated && i < BUSTER_X86_BENCHMARK_IMPLEMENTATIONS; i += 1)
         {
             const uint64_t output_bytes = (BUSTER_X86_ENCODER_CAPACITY(count) + 63) / 64 * 64;
             outputs[i] = aligned_alloc(64, output_bytes);
             offsets[i] = aligned_alloc(64, (count * sizeof(uint32_t) + 63) / 64 * 64);
-            allocated = outputs[i] != 0 && offsets[i] != 0;
+            fixup_ends[i] = aligned_alloc(64, (BUSTER_X86_ENCODER_FIXUP_CAPACITY(count) * sizeof(uint32_t) + 63) / 64 * 64);
+            allocated = outputs[i] != 0 && offsets[i] != 0 && fixup_ends[i] != 0;
         }
 
         if (!allocated)
@@ -630,14 +711,26 @@ int run_x86_encoder_benchmark(int argc, char** argv)
         }
         else
         {
-            // Check every implementation against the scalar loop (with offsets, whether or not the timed runs have them).
+            // The marks, the list of them (by index in each call's instructions) and how many each call has.
+            uint64_t marked = 0;
+            for (uint64_t s = 0; with_fixups && s < sections; s += 1)
+            {
+                const uint64_t start = s * section;
+                section_marks[s] = (uint32_t)x86_benchmark_mark(instructions + start, count - start < section ? count - start : section, marked_indices + marked);
+                marked += section_marks[s];
+            }
+
+            // Check every implementation against the scalar loop (with offsets and fixup ends, whether or not the timed
+            // runs have them).
             int64_t lengths[BUSTER_X86_BENCHMARK_IMPLEMENTATIONS];
             uint64_t different = 0;
             for (uint64_t i = 0; i < BUSTER_X86_BENCHMARK_IMPLEMENTATIONS; i += 1)
             {
-                lengths[i] = encode_stream(&x86_benchmark_implementations[i], instructions, count, section, outputs[i], offsets[i]);
+                lengths[i] = encode_stream(&x86_benchmark_implementations[i], instructions, count, section, outputs[i], offsets[i], fixup_ends[i], marked_indices,
+                                           section_marks);
                 const bool same = lengths[i] == lengths[0] && lengths[i] >= 0 && memcmp(outputs[i], outputs[0], (uint64_t)lengths[0]) == 0 &&
-                                  memcmp(offsets[i], offsets[0], count * sizeof(uint32_t)) == 0;
+                                  memcmp(offsets[i], offsets[0], count * sizeof(uint32_t)) == 0 &&
+                                  memcmp(fixup_ends[i], fixup_ends[0], marked * sizeof(uint32_t)) == 0;
                 if (!same)
                 {
                     fprintf(stderr, "%s's output differs from the scalar loop's\n", x86_benchmark_implementations[i].name);
@@ -668,7 +761,8 @@ int run_x86_encoder_benchmark(int argc, char** argv)
                         const X86BenchmarkSample before = x86_benchmark_now(cycles_fd, instructions_fd);
                         for (uint64_t r = 0; r < repeat; r += 1)
                         {
-                            encode_stream(&x86_benchmark_implementations[i], instructions, count, section, outputs[i], with_offsets ? offsets[i] : 0);
+                            encode_stream(&x86_benchmark_implementations[i], instructions, count, section, outputs[i], with_offsets ? offsets[i] : 0,
+                                          with_fixups ? fixup_ends[i] : 0, marked_indices, section_marks);
                         }
                         const X86BenchmarkSample after = x86_benchmark_now(cycles_fd, instructions_fd);
                         if (pass > 0)
@@ -684,9 +778,15 @@ int run_x86_encoder_benchmark(int argc, char** argv)
             }
 
             const double encoded = (double)count * (double)repeat;
-            printf("%lu %s instructions, %lld bytes (%.2f per instruction), in calls of %lu%s; %d interleaved passes of %lu runs, medians (cycles also min-max):\n",
+            char fixups_text[64] = "";
+            if (with_fixups)
+            {
+                snprintf(fixups_text, sizeof(fixups_text), ", with fixup ends (%lu marked)", (unsigned long)marked);
+            }
+            printf("%lu %s instructions, %lld bytes (%.2f per instruction), in calls of %lu%s%s; %d interleaved passes of %lu runs, medians (cycles also "
+                   "min-max):\n",
                    (unsigned long)count, uniform ? "uniform" : vector ? "vector" : "mixed", (long long)lengths[0], (double)lengths[0] / (double)count, (unsigned long)section,
-                   with_offsets ? ", with offsets" : "", BUSTER_X86_BENCHMARK_PASSES, (unsigned long)repeat);
+                   with_offsets ? ", with offsets" : "", fixups_text, BUSTER_X86_BENCHMARK_PASSES, (unsigned long)repeat);
             for (uint64_t i = 0; i < BUSTER_X86_BENCHMARK_IMPLEMENTATIONS; i += 1)
             {
                 if (selected[i])
@@ -725,10 +825,15 @@ int run_x86_encoder_benchmark(int argc, char** argv)
         }
     }
     free(instructions);
+    free(marked_indices);
+    free(section_marks);
+    free(x86_benchmark_starts);
+    x86_benchmark_starts = 0;
     for (uint64_t i = 0; i < BUSTER_X86_BENCHMARK_IMPLEMENTATIONS; i += 1)
     {
         free(outputs[i]);
         free(offsets[i]);
+        free(fixup_ends[i]);
     }
     return result;
 }
