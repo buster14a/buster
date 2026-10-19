@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "Skill",
+      "mcp__github",
+      "mcp__claude-code-remote",
+      "Bash(gh api -X PUT repos/buster14a/buster-fast/pulls/*/ccr/auto_merge -f merge_method=merge)",
+      "Bash(git push origin HEAD:*)",
+      "Bash(git -C * push origin HEAD:*)",
+      "Bash(tailscale ssh david@benchpress:*)",
+      "Bash(tailscale status:*)"
+    ]
+  }
+}
