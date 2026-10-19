@@ -1508,23 +1508,34 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
   same instructions with symbolic operands, over random streams of every form
   that takes a displacement or an immediate.
 - **Generated programs** (`link_program.c`), which every later step's tests
-  and benchmarks use. They are static programs without libc, whose `_start`
-  sets up TLS from `PT_TLS` and runs the init and fini arrays. Their workers
-  call each other directly and through the GOT, read globals directly and
-  through the GOT, use local-exec and initial-exec TLS, and read string
-  literals. Their data holds pointers, wide addends among them. Every class
-  appears given two thread-locals, an init function and a fini function, and
-  every fixup kind, but options leave out the absolute ones (for a PIE) and
-  `SIZE32` and `SIZE64` (wild 0.10 refuses them, as linking each kind with GNU
-  ld, lld, mold and wild on the 9700X showed). The program prints a
-  checksum of what it read, which a model of it predicts. The sizes come from
-  options and the rest from a seed, so a benchmark can scale them up.
-  `test-link` lays them out in memory as a static executable at a fixed
-  address, patches every fixup, and runs them in a child process: a reference
-  for the direct path's patch kernel.
+  and benchmarks use, of two kinds. Static programs without libc, whose
+  `_start` sets up TLS from `PT_TLS` and runs the init and fini arrays, are
+  step 4's first executables. Programs whose `main` the C runtime calls are
+  step 5's: they import `write`, `strlen`, `environ` and `__errno_location`
+  from libc through the GOT, as "Binding before instruction selection" says,
+  keep a pointer to `strlen` in their data, and check that their TLS block
+  and libc's don't overlap. Their workers call each other directly and
+  through the GOT, read globals directly and through the GOT, use local-exec
+  and initial-exec TLS, and read string literals. Their data holds pointers,
+  wide addends among them, and both kinds read a weak symbol that nothing
+  defines through its GOT slot. Every class appears given two thread-locals,
+  an init function and a fini function, and every fixup kind, but options
+  leave out the absolute ones (for a PIE) and `SIZE32` and `SIZE64` (wild 0.10
+  refuses them, as linking each kind with GNU ld, lld, mold and wild on the
+  9700X showed). The program prints a checksum of what it read, which a model
+  of it predicts. The sizes come from options and the rest from a seed, so a
+  benchmark can scale them up. `test-link` lays them out in memory as a
+  static executable at a fixed address, patches every fixup, and runs them in
+  a child process, which does what the C runtime does around `main` and gives
+  libc's functions stand-ins: a reference for the direct path's patch kernel.
+  `test-link --print-assembly` writes them as GNU as source, with a `.reloc`
+  for each fixup. On the 9700X, GNU ld, lld, mold and wild link the objects,
+  statically or through `cc` with libc (as a PIE, with `-no-pie` and with
+  `-static`), into programs that print what the model predicts.
 - **Objects:**
   - read back with `readelf` and `llvm-readobj` in the tests' cross-check
-    mode;
+    mode, and compared with GNU as's objects of the same units
+    (`test-link --print-assembly`);
   - linked by GNU ld, lld, mold and wild;
   - run, with their output compared.
 
@@ -1601,7 +1612,7 @@ and with this document updated with what was measured:
    the compiler-like mix encodes no slower than the offsets loop (0.72 ns per
    instruction).
 
-   Then what steps 3 and 4 both build on: the representation (`link.c`: the
+   Then what steps 3 to 5 build on: the representation (`link.c`: the
    tables in "Representation", and fixups from the encoder's marked
    instructions) and generated test programs (`link_program.c`). Done:
    `test-link`.

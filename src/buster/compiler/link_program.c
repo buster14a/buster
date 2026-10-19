@@ -1,25 +1,38 @@
 // The test programs: whole programs in the link representation (link.c), for the tests and benchmarks of the object
-// writer and of the direct path (steps 3 and 4 of the plan in docs/object-writer-and-linker.md).
+// writer and of the direct path (steps 3 to 5 of the plan in docs/object-writer-and-linker.md).
 // link_program_generate makes one from LinkProgramOptions, deterministic from the seed and sized by the options, so
 // that a benchmark can scale it up. Its code is encoded with x86_encode and its fixups come from link_add_code_fixups,
 // as a code generator's would.
 //
-// The program doesn't use libc: it is a static executable whose _start makes system calls, as with -nostdlib, the
-// first kind of executable the direct path writes (step 4), and its objects link with ld -static -e _start (step 3).
-// Step 5's programs, which call libc, will need another entry point (main, called by the C runtime) and imports. Link
-// it at any fixed address, below 2 GB with LinkProgramOptions.absolute (and with wild 0.10, which doesn't link SIZE32
-// and SIZE64, without LinkProgramOptions.sizes). It prints a checksum of everything it read, as
-// 16 hexadecimal digits and a newline (LinkProgram.output), and exits with status 0; what a link gets wrong changes the
-// checksum or crashes it. The linker provides __init_array_start, __init_array_end, __fini_array_start and
-// __fini_array_end (BUSTER_LINK_SOURCE_LINKER), and the program headers in a loaded segment, where the auxiliary
-// vector's AT_PHDR points. Each unit is a translation unit, whose atoms the object writer puts in one object:
-//   - _start (GLOBAL, unit 0) calls buster_main with the initial stack. buster_main finds the program headers through
-//     the auxiliary vector, sets up the TLS block from PT_TLS in buster_tls_area (variant II: the block ends at the
-//     thread pointer, aligned to p_align, which points at itself) and sets FS with arch_prctl, calls the entries from
-//     __init_array_start to __init_array_end, calls every worker through buster_functions with depth 1 and folds each
-//     result into the checksum with buster_mix, calls the entries from __fini_array_start to __fini_array_end, folds
-//     the values that buster_globals and buster_far point at and the values link_program_emit_kinds reads, writes the
-//     checksum with buster_write_hex and exits with exit_group.
+// A program is one of two kinds, as LinkProgramOptions.libc says:
+//   - Without libc, a static executable whose _start makes system calls, as with -nostdlib: the first kind the direct
+//     path writes (step 4). Its objects link with ld -static -e _start (step 3), at any fixed address, below 2 GB with
+//     LinkProgramOptions.absolute. The linker provides __init_array_start, __init_array_end, __fini_array_start and
+//     __fini_array_end (BUSTER_LINK_SOURCE_LINKER), and the program headers in a loaded segment, where the auxiliary
+//     vector's AT_PHDR points.
+//   - With libc, a main that the C runtime calls, as in step 5: its objects link with cc, which makes a PIE unless
+//     given -no-pie, so without absolute. The runtime sets up TLS, and runs the init functions before main and the fini
+//     functions after it. The program imports write, strlen, environ and __errno_location from libc
+//     (BUSTER_LINK_SOURCE_RUNTIME_SHARED, without a type, as undefined symbols are in a compiler's objects), and its
+//     code reaches them through the GOT, as the direct path binds imports (docs/object-writer-and-linker.md, "Binding
+//     before instruction selection").
+// Either kind refers through the GOT to buster_absent, a weak symbol that nothing defines (BUSTER_LINK_SOURCE_NONE).
+// Link either with wild 0.10, which doesn't link SIZE32 and SIZE64, without LinkProgramOptions.sizes. The program
+// prints a checksum of everything it read, as 16 hexadecimal digits and a newline (LinkProgram.output), and exits with
+// status 0; what a link gets wrong changes the checksum or crashes the program. Each unit is a translation unit, whose
+// atoms the object writer puts in one object:
+//   - _start (GLOBAL, unit 0, without libc) calls buster_main with the initial stack. buster_main finds the program
+//     headers through the auxiliary vector, sets up the TLS block from PT_TLS in buster_tls_area (variant II: the
+//     block ends at the thread pointer, aligned to p_align, which points at itself) and sets FS with arch_prctl, calls
+//     the entries from __init_array_start to __init_array_end, calls every worker through buster_functions with depth
+//     1 and folds each result into the checksum with buster_mix, calls the entries from __fini_array_start to
+//     __fini_array_end, folds the values that buster_globals and buster_far point at and the values that
+//     link_program_emit_kinds and link_program_emit_imports read, writes the checksum with buster_write_hex and exits
+//     with exit_group.
+//   - main (GLOBAL, unit 0, with libc) does the same from the workers on, but for the fini functions, and returns 0.
+//     Before the workers, it stores a value from the plan in errno, a thread-local of libc's (through
+//     __errno_location), and link_program_emit_imports reads it back after them: if the program's TLS block overlapped
+//     libc's, the workers' stores would change it. buster_write_hex writes with libc's write.
 //   - Workers f_N (GLOBAL, unit N % units): each reads a global RIP-relatively (PC32) and one through the GOT
 //     (LOAD_GOT), an entry of buster_constants (PC32 with an addend), a thread-local with local-exec (TPOFF32) and one
 //     with initial-exec (GOTTPOFF), and a byte of a string in its unit's pool (PC32); mixes them with filler
@@ -37,10 +50,11 @@
 //   - In unit 0 besides: buster_mix (GLOBAL), buster_write_hex, buster_constants (RODATA, GLOBAL), buster_functions
 //     and buster_globals (DATA_RELRO, ABS64; buster_globals' last entries point into buster_constants, with addends),
 //     buster_relative (DATA_RELRO, PC64), buster_far (DATA, ABS64 with addends past 2^32, which go to the side table
-//     and which buster_main subtracts again), buster_tls_area and buster_output (BSS).
+//     and which the code subtracts again), buster_output (BSS), and buster_tls_area (BSS) without libc or
+//     buster_imports (DATA_RELRO, ABS64 to strlen) with it.
 // Every class but NONE appears given two thread-locals, an init function and a fini function (as with the defaults),
 // and every fixup kind: ABS32, ABS32S and ABS64 in code only with absolute addresses, and SIZE32 and SIZE64 only with
-// sizes.
+// sizes. With libc, a fini function shows only if it crashes, since it runs after the output is written.
 // LinkProgram.output comes from a model of the program that link_program_generate runs: the same arithmetic in C, on
 // the same random choices.
 //
@@ -48,10 +62,10 @@
 // file after link.c. Layout, in this order: the API (LinkProgramOptions, LinkProgram and the prototypes); the plan,
 // which holds the random choices (LinkProgramPlan and link_program_plan); the model (link_program_mix,
 // link_program_model_body and link_program_run_model); the code (LinkProgramCode, LinkProgramBuilder, the instruction
-// builders, link_program_finish, and link_program_emit_start, _mix, _write_hex, _hooks, _fold, _kinds, _main, _worker
-// and _hook); the data (link_program_add_data, link_program_add_pointers, link_program_emit_variable and
-// link_program_emit_data); and generating (link_program_add_symbols, link_program_capacity, link_program_bytes and
-// link_program_generate).
+// builders, link_program_finish, and link_program_emit_start, _mix, _write_hex, _hooks, _fold, _kinds, _imports,
+// _runtime, _main, _worker and _hook); the data (link_program_add_data, link_program_add_pointers,
+// link_program_emit_variable and link_program_emit_data); and generating (link_program_add_symbols,
+// link_program_capacity, link_program_bytes and link_program_generate).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -89,6 +103,9 @@ struct LinkProgramOptions
     bool absolute;
     // Whether the code takes symbols' sizes (SIZE32 and SIZE64), which wild 0.10 doesn't link.
     bool sizes;
+    // Whether the program calls libc: a main that the C runtime calls, and imports from libc, instead of a _start that
+    // makes system calls.
+    bool libc;
 };
 
 typedef struct LinkProgram LinkProgram;
@@ -99,7 +116,9 @@ struct LinkProgram
     Arena tables;
     Arena names;
     Arena bytes;
-    // _start.
+    // What it was generated with.
+    LinkProgramOptions options;
+    // _start, or main with libc.
     SymbolId entry;
     // What the program writes to its standard output.
     uint8_t output[BUSTER_LINK_PROGRAM_OUTPUT_BYTES];
@@ -216,6 +235,8 @@ struct LinkProgramPlan
     uint32_t far_globals[BUSTER_LINK_PROGRAM_FAR_POINTERS];
     // The globals buster_main reads through the kinds the workers and the tables don't have (link_program_emit_kinds).
     uint32_t kind_globals[BUSTER_LINK_PROGRAM_KIND_GLOBALS];
+    // What main stores in errno with libc, and reads back after the workers (link_program_emit_imports).
+    int32_t errno_value;
     // Strings: string 0 is the hexadecimal digits, in unit 0, and then each unit has options.strings, unit u's from
     // 1 + u * options.strings. Each string's offset in its unit's pool and its length without the NUL.
     uint32_t string_count;
@@ -372,6 +393,7 @@ static bool link_program_plan(LinkProgramPlan* plan, Arena* arena, LinkProgramOp
         {
             plan->kind_globals[i] = link_program_pick(&state, plan->globals, options.globals, units, 0, true);
         }
+        plan->errno_value = (int32_t)link_program_random(&state);
         for (uint32_t i = 0; i < hooks; i += 1)
         {
             const uint32_t unit = (i < options.init_functions ? i : i - options.init_functions) % units;
@@ -503,7 +525,8 @@ static bool link_program_run_model(const LinkProgramPlan* plan, Arena* arena, ui
             value += link_program_mix(value);
             checksum = link_program_mix(value + checksum);
         }
-        for (uint32_t i = 0; i < options->fini_functions; i += 1)
+        // With libc, the fini functions run after main has returned.
+        for (uint32_t i = 0; !options->libc && i < options->fini_functions; i += 1)
         {
             const LinkProgramHook* hook = &plan->hooks[options->init_functions + i];
             globals[hook->global] += (uint64_t)(int64_t)hook->addend;
@@ -534,6 +557,16 @@ static bool link_program_run_model(const LinkProgramPlan* plan, Arena* arena, ui
         for (uint32_t i = 4; options->absolute && i < BUSTER_LINK_PROGRAM_KIND_GLOBALS; i += 1)
         {
             checksum = link_program_mix(globals[kind[i]] ^ checksum);
+        }
+        // The weak reference's slot holds 0. With libc, environ less envp is 0, strlen of the hexadecimal digits is 16,
+        // strlen's GOT slot less buster_imports' entry is 0, and errno is what main stored.
+        checksum = link_program_mix(checksum);
+        if (options->libc)
+        {
+            checksum = link_program_mix(checksum);
+            checksum = link_program_mix(plan->string_lengths[0] ^ checksum);
+            checksum = link_program_mix(checksum);
+            checksum = link_program_mix((uint32_t)plan->errno_value ^ checksum);
         }
         for (uint32_t i = 0; i < 16; i += 1)
         {
@@ -572,8 +605,8 @@ struct LinkProgramCode
     uint32_t marked;
 };
 
-// What generating a program works with: the program, the plan, the function being built and the symbols' ids. The
-// symbols of each kind are added one after another, from the first's id.
+// What generating a program works with: the program, the plan, the function being built and the symbols' ids (0 for
+// those the program's kind doesn't have). The symbols of each kind are added one after another, from the first's id.
 typedef struct LinkProgramBuilder LinkProgramBuilder;
 struct LinkProgramBuilder
 {
@@ -581,6 +614,7 @@ struct LinkProgramBuilder
     const LinkProgramPlan* plan;
     LinkProgramCode* code;
     SymbolId start;
+    // buster_main, or main with libc.
     SymbolId main;
     SymbolId mix;
     SymbolId write_hex;
@@ -589,12 +623,18 @@ struct LinkProgramBuilder
     SymbolId globals_table;
     SymbolId far;
     SymbolId relative;
+    SymbolId imports;
     SymbolId tls_area;
     SymbolId output;
+    SymbolId absent;
     SymbolId init_array_start;
     SymbolId init_array_end;
     SymbolId fini_array_start;
     SymbolId fini_array_end;
+    SymbolId libc_write;
+    SymbolId libc_strlen;
+    SymbolId libc_environ;
+    SymbolId libc_errno_location;
     SymbolId first_worker;
     SymbolId first_global;
     SymbolId first_thread_local;
@@ -815,7 +855,8 @@ static bool link_program_emit_mix(LinkProgramBuilder* builder)
     return link_program_finish(builder, 0, builder->mix);
 }
 
-// buster_write_hex(x): x's 16 hexadecimal digits and a newline in buster_output, written to standard output.
+// buster_write_hex(x): x's 16 hexadecimal digits and a newline in buster_output, written to standard output with the
+// write system call, or with libc's write through the GOT, after a push that aligns the stack for the call.
 static bool link_program_emit_write_hex(LinkProgramBuilder* builder)
 {
     LinkProgramCode* code = builder->code;
@@ -836,11 +877,24 @@ static bool link_program_emit_write_hex(LinkProgramBuilder* builder)
     X86Instruction newline = link_program_memory(X86_FORM_MOV_RM8_IMM8, 0, X86_REGISTER_RSI, 0);
     newline.immediate = '\n';
     link_program_add(code, newline);
+    const bool libc = builder->plan->options.libc;
+    if (libc)
+    {
+        link_program_add(code, link_program_immediate(X86_FORM_PUSH_R64, X86_REGISTER_RAX, 0));
+    }
     link_program_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RDI, 1));
     link_program_refer(code, link_program_rip(X86_FORM_LEA_R64_M, X86_REGISTER_RSI), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_PC32, builder->output, 0);
     link_program_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RDX, BUSTER_LINK_PROGRAM_OUTPUT_BYTES));
-    link_program_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RAX, 1));
-    link_program_add(code, link_program_bare(X86_FORM_SYSCALL));
+    if (libc)
+    {
+        link_program_refer(code, link_program_rip(X86_FORM_CALL_RM64, 0), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_CALL_GOT, builder->libc_write, 0);
+        link_program_add(code, link_program_immediate(X86_FORM_POP_R64, X86_REGISTER_RCX, 0));
+    }
+    else
+    {
+        link_program_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RAX, 1));
+        link_program_add(code, link_program_bare(X86_FORM_SYSCALL));
+    }
     link_program_add(code, link_program_bare(X86_FORM_RET));
     return link_program_finish(builder, 0, builder->write_hex);
 }
@@ -936,12 +990,39 @@ static void link_program_emit_kinds(LinkProgramBuilder* builder)
     }
 }
 
-// buster_main(stack): see the orientation comment. It never returns, so its five pushes only align the stack.
-static bool link_program_emit_main(LinkProgramBuilder* builder)
+// Folds what the imports give: buster_absent's GOT slot, which holds 0, and with libc, environ (through its GOT slot)
+// less main's envp in r14, strlen of the hexadecimal digits called through buster_imports, strlen's GOT slot less
+// buster_imports' entry, and errno, which main stored before the workers ran.
+static void link_program_emit_imports(LinkProgramBuilder* builder)
+{
+    LinkProgramCode* code = builder->code;
+    link_program_refer(code, link_program_rip(X86_FORM_MOV_R64_RM64, X86_REGISTER_RDI), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_LOAD_GOT, builder->absent, 0);
+    link_program_emit_fold_value(builder);
+    if (builder->plan->options.libc)
+    {
+        link_program_refer(code, link_program_rip(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_LOAD_GOT, builder->libc_environ, 0);
+        link_program_add(code, link_program_memory(X86_FORM_MOV_R64_RM64, X86_REGISTER_RDI, X86_REGISTER_RAX, 0));
+        link_program_add(code, link_program_registers(X86_FORM_SUB_R64_RM64, X86_REGISTER_RDI, X86_REGISTER_R14));
+        link_program_emit_fold_value(builder);
+        link_program_refer(code, link_program_rip(X86_FORM_LEA_R64_M, X86_REGISTER_RDI), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_PC32, builder->first_string, 0);
+        link_program_refer(code, link_program_rip(X86_FORM_CALL_RM64, 0), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_PC32, builder->imports, 0);
+        link_program_add(code, link_program_registers(X86_FORM_MOV_R64_RM64, X86_REGISTER_RDI, X86_REGISTER_RAX));
+        link_program_emit_fold_value(builder);
+        link_program_refer(code, link_program_rip(X86_FORM_MOV_R64_RM64, X86_REGISTER_RDI), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_LOAD_GOT, builder->libc_strlen, 0);
+        link_program_refer(code, link_program_rip(X86_FORM_SUB_R64_RM64, X86_REGISTER_RDI), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_PC32, builder->imports, 0);
+        link_program_emit_fold_value(builder);
+        link_program_refer(code, link_program_rip(X86_FORM_CALL_RM64, 0), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_CALL_GOT, builder->libc_errno_location, 0);
+        link_program_add(code, link_program_memory(X86_FORM_MOV_R32_RM32, X86_REGISTER_RDI, X86_REGISTER_RAX, 0));
+        link_program_emit_fold_value(builder);
+    }
+}
+
+// What the C runtime does before main, for buster_main without libc, which gets the initial stack in rdi: the TLS
+// block from PT_TLS, set up as the orientation comment says, and the init functions.
+static void link_program_emit_runtime(LinkProgramBuilder* builder)
 {
     const LinkProgramPlan* plan = builder->plan;
     LinkProgramCode* code = builder->code;
-    link_program_begin(code);
     const uint32_t environment = link_program_label(code);
     const uint32_t auxiliary = link_program_label(code);
     const uint32_t auxiliary_done = link_program_label(code);
@@ -951,13 +1032,6 @@ static bool link_program_emit_main(LinkProgramBuilder* builder)
     const uint32_t copy = link_program_label(code);
     const uint32_t copy_done = link_program_label(code);
     const uint32_t tls_done = link_program_label(code);
-    const uint32_t work = link_program_label(code);
-    const uint32_t work_done = link_program_label(code);
-    static const uint8_t saved[] = { X86_REGISTER_RBX, X86_REGISTER_R12, X86_REGISTER_R13, X86_REGISTER_R14, X86_REGISTER_R15 };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(saved); i += 1)
-    {
-        link_program_add(code, link_program_immediate(X86_FORM_PUSH_R64, saved[i], 0));
-    }
 
     // The auxiliary vector is after envp's null, which is after argv's: rdi + 8 * argc + 16 is envp.
     link_program_add(code, link_program_memory(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_RDI, 0));
@@ -1051,6 +1125,36 @@ static bool link_program_emit_main(LinkProgramBuilder* builder)
     link_program_place(code, tls_done);
 
     link_program_emit_hooks(builder, builder->init_array_start, builder->init_array_end);
+}
+
+// buster_main(stack), or main(argc, argv, envp) with libc: see the orientation comment. Its five pushes align the stack
+// for its calls. buster_main never returns, and main returns 0.
+static bool link_program_emit_main(LinkProgramBuilder* builder)
+{
+    const LinkProgramPlan* plan = builder->plan;
+    const bool libc = plan->options.libc;
+    LinkProgramCode* code = builder->code;
+    link_program_begin(code);
+    const uint32_t work = link_program_label(code);
+    const uint32_t work_done = link_program_label(code);
+    static const uint8_t saved[] = { X86_REGISTER_RBX, X86_REGISTER_R12, X86_REGISTER_R13, X86_REGISTER_R14, X86_REGISTER_R15 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(saved); i += 1)
+    {
+        link_program_add(code, link_program_immediate(X86_FORM_PUSH_R64, saved[i], 0));
+    }
+    if (libc)
+    {
+        // envp in r14, and errno, which link_program_emit_imports reads back.
+        link_program_add(code, link_program_registers(X86_FORM_MOV_R64_RM64, X86_REGISTER_R14, X86_REGISTER_RDX));
+        link_program_refer(code, link_program_rip(X86_FORM_CALL_RM64, 0), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_CALL_GOT, builder->libc_errno_location, 0);
+        X86Instruction store = link_program_memory(X86_FORM_MOV_RM32_IMM32, 0, X86_REGISTER_RAX, 0);
+        store.immediate = plan->errno_value;
+        link_program_add(code, store);
+    }
+    else
+    {
+        link_program_emit_runtime(builder);
+    }
 
     // Every worker f_i(i, 1), through buster_functions: r13 = buster_mix(f_i(i, 1) + r13).
     link_program_add(code, link_program_registers(X86_FORM_XOR_R32_RM32, X86_REGISTER_R13, X86_REGISTER_R13));
@@ -1070,18 +1174,34 @@ static bool link_program_emit_main(LinkProgramBuilder* builder)
     link_program_jump(code, X86_FORM_JMP_REL32, work);
     link_program_place(code, work_done);
 
-    link_program_emit_hooks(builder, builder->fini_array_start, builder->fini_array_end);
+    if (!libc)
+    {
+        link_program_emit_hooks(builder, builder->fini_array_start, builder->fini_array_end);
+    }
     link_program_emit_fold(builder, builder->globals_table, plan->global_globals + BUSTER_LINK_PROGRAM_CONSTANT_POINTERS, false);
     link_program_emit_fold(builder, builder->far, BUSTER_LINK_PROGRAM_FAR_POINTERS, true);
     link_program_emit_kinds(builder);
+    link_program_emit_imports(builder);
 
     link_program_add(code, link_program_registers(X86_FORM_MOV_R64_RM64, X86_REGISTER_RDI, X86_REGISTER_R13));
     link_program_refer(code, link_program_bare(X86_FORM_CALL_REL32), X86_FIXUP_DISPLACEMENT, BUSTER_LINK_FIXUP_CALL, builder->write_hex, 0);
-    // exit_group(0).
-    link_program_add(code, link_program_registers(X86_FORM_XOR_R32_RM32, X86_REGISTER_RDI, X86_REGISTER_RDI));
-    link_program_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RAX, 231));
-    link_program_add(code, link_program_bare(X86_FORM_SYSCALL));
-    link_program_add(code, link_program_bare(X86_FORM_UD2));
+    if (libc)
+    {
+        link_program_add(code, link_program_registers(X86_FORM_XOR_R32_RM32, X86_REGISTER_RAX, X86_REGISTER_RAX));
+        for (uint32_t i = BUSTER_ARRAY_LENGTH(saved); i != 0; i -= 1)
+        {
+            link_program_add(code, link_program_immediate(X86_FORM_POP_R64, saved[i - 1], 0));
+        }
+        link_program_add(code, link_program_bare(X86_FORM_RET));
+    }
+    else
+    {
+        // exit_group(0).
+        link_program_add(code, link_program_registers(X86_FORM_XOR_R32_RM32, X86_REGISTER_RDI, X86_REGISTER_RDI));
+        link_program_add(code, link_program_immediate(X86_FORM_MOV_R32_IMM32, X86_REGISTER_RAX, 231));
+        link_program_add(code, link_program_bare(X86_FORM_SYSCALL));
+        link_program_add(code, link_program_bare(X86_FORM_UD2));
+    }
     return link_program_finish(builder, 0, builder->main);
 }
 
@@ -1314,6 +1434,11 @@ static bool link_program_emit_data(LinkProgramBuilder* builder, Arena* scratch)
         result = relative != 0 && link_add_fixup(link, relative, 0, BUSTER_LINK_FIXUP_PC64, builder->first_global + plan->kind_globals[1], 0) != 0 &&
                  link_define_symbol(link, builder->relative, relative, 0, 8);
     }
+    if (result && options->libc)
+    {
+        const AtomId imports = link_program_add_pointers(builder, BUSTER_LINK_CLASS_DATA_RELRO, 0, &builder->libc_strlen, 0, 1);
+        result = imports != 0 && link_define_symbol(link, builder->imports, imports, 0, 8);
+    }
 
     // Each unit's INIT_ARRAY and FINI_ARRAY atoms, listing its init and fini functions in order.
     for (uint32_t list = 0; result && list < 2; list += 1)
@@ -1333,12 +1458,15 @@ static bool link_program_emit_data(LinkProgramBuilder* builder, Arena* scratch)
         }
     }
 
-    if (result)
+    if (result && !options->libc)
     {
         const AtomId tls_area = link_program_add_data(builder, BUSTER_LINK_CLASS_BSS, 6, plan->tls_area_bytes, 0, 0);
+        result = tls_area != 0 && link_define_symbol(link, builder->tls_area, tls_area, 0, plan->tls_area_bytes);
+    }
+    if (result)
+    {
         const AtomId output = link_program_add_data(builder, BUSTER_LINK_CLASS_BSS, 3, 24, 0, 0);
-        result = tls_area != 0 && output != 0 && link_define_symbol(link, builder->tls_area, tls_area, 0, plan->tls_area_bytes) &&
-                 link_define_symbol(link, builder->output, output, 0, 24);
+        result = output != 0 && link_define_symbol(link, builder->output, output, 0, 24);
     }
     return result;
 }
@@ -1395,8 +1523,19 @@ static bool link_program_add_symbols(LinkProgramBuilder* builder)
     const uint8_t global_object = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT;
     const uint8_t local_object = BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_OBJECT;
     const uint8_t linker = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE | BUSTER_LINK_SYMBOL_HIDDEN;
-    builder->start = link_program_symbol(link, "_start", 0, false, global_function, program);
-    builder->main = link_program_symbol(link, "buster_main", 0, false, local_function, program);
+    // Undefined symbols have no type, as in a compiler's objects.
+    const uint8_t import = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE;
+    const uint8_t runtime = BUSTER_LINK_SOURCE_RUNTIME_SHARED;
+    const bool libc = options->libc;
+    if (libc)
+    {
+        builder->main = link_program_symbol(link, "main", 0, false, global_function, program);
+    }
+    else
+    {
+        builder->start = link_program_symbol(link, "_start", 0, false, global_function, program);
+        builder->main = link_program_symbol(link, "buster_main", 0, false, local_function, program);
+    }
     builder->mix = link_program_symbol(link, "buster_mix", 0, false, global_function, program);
     builder->write_hex = link_program_symbol(link, "buster_write_hex", 0, false, local_function, program);
     builder->constants = link_program_symbol(link, "buster_constants", 0, false, global_object, program);
@@ -1404,12 +1543,24 @@ static bool link_program_add_symbols(LinkProgramBuilder* builder)
     builder->globals_table = link_program_symbol(link, "buster_globals", 0, false, local_object, program);
     builder->far = link_program_symbol(link, "buster_far", 0, false, local_object, program);
     builder->relative = link_program_symbol(link, "buster_relative", 0, false, local_object, program);
-    builder->tls_area = link_program_symbol(link, "buster_tls_area", 0, false, local_object, program);
     builder->output = link_program_symbol(link, "buster_output", 0, false, local_object, program);
-    builder->init_array_start = link_program_symbol(link, "__init_array_start", 0, false, linker, BUSTER_LINK_SOURCE_LINKER);
-    builder->init_array_end = link_program_symbol(link, "__init_array_end", 0, false, linker, BUSTER_LINK_SOURCE_LINKER);
-    builder->fini_array_start = link_program_symbol(link, "__fini_array_start", 0, false, linker, BUSTER_LINK_SOURCE_LINKER);
-    builder->fini_array_end = link_program_symbol(link, "__fini_array_end", 0, false, linker, BUSTER_LINK_SOURCE_LINKER);
+    builder->absent = link_program_symbol(link, "buster_absent", 0, false, BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_NONE);
+    if (libc)
+    {
+        builder->imports = link_program_symbol(link, "buster_imports", 0, false, local_object, program);
+        builder->libc_write = link_program_symbol(link, "write", 0, false, import, runtime);
+        builder->libc_strlen = link_program_symbol(link, "strlen", 0, false, import, runtime);
+        builder->libc_environ = link_program_symbol(link, "environ", 0, false, import, runtime);
+        builder->libc_errno_location = link_program_symbol(link, "__errno_location", 0, false, import, runtime);
+    }
+    else
+    {
+        builder->tls_area = link_program_symbol(link, "buster_tls_area", 0, false, local_object, program);
+        builder->init_array_start = link_program_symbol(link, "__init_array_start", 0, false, linker, BUSTER_LINK_SOURCE_LINKER);
+        builder->init_array_end = link_program_symbol(link, "__init_array_end", 0, false, linker, BUSTER_LINK_SOURCE_LINKER);
+        builder->fini_array_start = link_program_symbol(link, "__fini_array_start", 0, false, linker, BUSTER_LINK_SOURCE_LINKER);
+        builder->fini_array_end = link_program_symbol(link, "__fini_array_end", 0, false, linker, BUSTER_LINK_SOURCE_LINKER);
+    }
     builder->first_worker = link->symbols.count;
     for (uint32_t i = 0; i < options->functions; i += 1)
     {
@@ -1443,16 +1594,17 @@ static bool link_program_add_symbols(LinkProgramBuilder* builder)
     return link->error == LINK_ERROR_NONE;
 }
 
-// The representation's room: the exact counts of names and wide addends, and bounds on the others.
+// The representation's room: the exact count of wide addends, and bounds on the others (the 16 fixed names, which
+// either kind of program has at most, the hexadecimal digits' symbol, and the helpers' fixups).
 static LinkCapacity link_program_capacity(LinkProgramOptions options)
 {
     const uint32_t hooks = options.init_functions + options.fini_functions;
     const uint32_t variables = options.globals + options.thread_locals;
     LinkCapacity result = {
-        .names = options.functions + variables + hooks + 15,
+        .names = options.functions + variables + hooks + 16,
         .atoms = options.functions + variables + hooks + 3 * options.units + 11,
-        .symbols = options.functions + variables + hooks + options.units * options.strings + 16,
-        .fixups = 12 * options.functions + options.globals + 2 * hooks + 48,
+        .symbols = options.functions + variables + hooks + options.units * options.strings + 17,
+        .fixups = 12 * options.functions + options.globals + 2 * hooks + 64,
         .wide_addends = BUSTER_LINK_PROGRAM_FAR_POINTERS,
     };
     return result;
@@ -1487,13 +1639,16 @@ static LinkProgramOptions link_program_default_options(void)
         .filler = 8,
         .absolute = true,
         .sizes = true,
+        .libc = false,
     };
     return result;
 }
 
 static bool link_program_generate(LinkProgram* program, LinkProgramOptions options)
 {
-    *program = (LinkProgram){ 0 };
+    *program = (LinkProgram){
+        .options = options,
+    };
     const uint32_t maximum = BUSTER_LINK_PROGRAM_MAX_COUNT;
     const bool valid = options.units >= 1 && options.units <= maximum && options.functions >= 1 && options.functions <= maximum && options.globals >= 1 &&
                        options.globals <= maximum && options.thread_locals >= 1 && options.thread_locals <= maximum && options.strings >= 1 &&
@@ -1536,7 +1691,7 @@ static bool link_program_generate(LinkProgram* program, LinkProgramOptions optio
         program->problem = result ? 0 : "out of memory for the plan";
     }
     result = result && link_program_add_symbols(&builder);
-    result = result && link_program_emit_start(&builder) && link_program_emit_main(&builder) && link_program_emit_mix(&builder) &&
+    result = result && (options.libc || link_program_emit_start(&builder)) && link_program_emit_main(&builder) && link_program_emit_mix(&builder) &&
              link_program_emit_write_hex(&builder);
     for (uint32_t i = 0; result && i < options.functions; i += 1)
     {
@@ -1555,7 +1710,7 @@ static bool link_program_generate(LinkProgram* program, LinkProgramOptions optio
     }
     if (result)
     {
-        program->entry = builder.start;
+        program->entry = options.libc ? builder.main : builder.start;
         result = link_check(&program->link) == LINK_ERROR_NONE;
     }
     if (!result && program->problem == 0)

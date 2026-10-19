@@ -1,6 +1,7 @@
 // The link representation's tests, for the test-link command:
 //
 //   build/compiler test-link [--seed N] [--functions N]
+//   build/compiler test-link --print-assembly DIRECTORY [--seed N] [--functions N]
 //
 // main.c includes this file after link.c and link_program.c and calls run_link_tests for the command. The checks, in
 // this order:
@@ -19,27 +20,35 @@
 //     it can't patch, and references that don't match the marked instructions.
 //   - Wide addends: addends around int32's limits, directly and through an instruction's distance to its end, to the
 //     side table exactly when they don't fit.
-//   - Programs: link_program_generate with several options (the defaults, the smallest, many units, no absolute
-//     addresses, and --functions workers without sizes), which link_check accepts. Each is generated twice from its
-//     seed, byte for byte the same, and differently from another seed; and run: laid out in memory as a static
-//     executable would be (link_test_load: atoms in class order, a GOT, the TLS segment, every fixup patched), started
-//     in a child process with an initial stack and auxiliary vector as the kernel's, it must exit with status 0 having
-//     written LinkProgram.output. The defaults' program and the one with many units have every class and every kind,
-//     and a copy with the hexadecimal digits' fixup one byte off must write something else.
-// The exit status is 1 if the arguments are invalid or a check fails.
+//   - Programs: link_program_generate with the sets of options in link_test_program_options (the defaults, the
+//     smallest, many units, no absolute addresses, --functions workers without sizes, and two that call libc), which
+//     link_check accepts. Each is generated twice from its seed, byte for byte the same, and differently from another
+//     seed; and run: laid out in memory as a static executable would be (link_test_load: atoms in class order, a GOT,
+//     the TLS segment, every fixup patched) and started in a child process, it must exit with status 0 having written
+//     LinkProgram.output. A program without libc starts at _start, with an initial stack and auxiliary vector as the
+//     kernel's. One that calls libc gets stand-ins for its imports (link_test_import), and the child does what the C
+//     runtime would around main (link_test_start_libc). Each set with two thread-locals, an init function and a fini
+//     function has every class and every kind its options allow, and a copy of the defaults' program with the
+//     hexadecimal digits' fixup one byte off must write something else.
+// --print-assembly writes those programs (from the same --seed and --functions) as GNU as source instead: a directory
+// for each set of options (link_test_program_directories) with a file per unit and the expected output, for the
+// cross-check in AGENTS.md, where GNU as assembles them and GNU ld, lld, mold and wild link them (through cc, with
+// libc). The exit status is 1 if the arguments are invalid, a check fails or a file can't be written.
 //
 // Layout, in this order: the tally, the round trips, the capacity and rules checks, the known fixups and the kinds
-// checks, the wide addends, the loader and the program checks, and run_link_tests.
+// checks, the wide addends, the loader and the program checks, the assembly, and run_link_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <signal.h>
 #include <unistd.h>
 #include <elf.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 #define BUSTER_LINK_TEST_REPORTED 3
@@ -1370,16 +1379,25 @@ static bool link_test_wide(void)
 // each from a page boundary: R (RODATA and STRINGS), RX (TEXT) and RW (the TLS image, INIT_ARRAY, FINI_ARRAY,
 // DATA_RELRO, the GOT, DATA, BSS, and the program headers), atoms in class order and id order within a class, each at
 // its alignment. At a non-PIE executable's usual address, BUSTER_LINK_TEST_IMAGE_ADDRESS, or if something is mapped
-// there, wherever MAP_32BIT puts it (a 1 GB window); either way below 2 GB, so that ABS32 and ABS32S fit.
+// there, wherever MAP_32BIT puts it (a 1 GB window); either way below 2 GB, so that ABS32 and ABS32S fit. A program
+// that calls libc gets stand-ins for its imports (link_test_import), and the child that runs it does what the C
+// runtime would (link_test_start_libc).
 typedef struct LinkTestImage LinkTestImage;
 struct LinkTestImage
 {
     uint8_t* base;
     uint64_t size;
+    // _start's address, or main's with libc.
     uint64_t entry;
+    bool libc;
     // The program headers the auxiliary vector points at: PT_PHDR, PT_LOAD and PT_TLS.
     Elf64_Phdr* headers;
     uint32_t header_count;
+    // The init and fini arrays' addresses, from start to end.
+    uint64_t init_begin;
+    uint64_t init_end;
+    uint64_t fini_begin;
+    uint64_t fini_end;
     const char* problem;
 };
 
@@ -1387,6 +1405,9 @@ struct LinkTestImage
 #define BUSTER_LINK_TEST_HEADERS 3
 #define BUSTER_LINK_TEST_IMAGE_ADDRESS 0x400000ull
 #define BUSTER_LINK_TEST_IMAGE_LIMIT (1ull << 31)
+// What the thread pointer has above it in link_test_start_libc's TLS area: its own address, in the first 8 bytes, and
+// zeros where glibc keeps its stack guard (at 0x28), which code built with a stack protector reads.
+#define BUSTER_LINK_TEST_TCB_BYTES 64
 
 static uint64_t link_test_align(uint64_t value, uint64_t alignment)
 {
@@ -1416,12 +1437,64 @@ static bool link_test_named(const Link* link, SymbolId symbol, const char* text)
     return name != 0 && link->names.length[name] == length && memcmp(link->names.bytes[name], text, length) == 0;
 }
 
-static bool link_test_load(const Link* link, SymbolId entry, Arena* arena, LinkTestImage* image)
+// Stand-ins for what a program that calls libc imports: write, strlen, __errno_location and environ. They use no TLS,
+// since the program's TLS block is FS's while it runs.
+static char** link_test_environ;
+static int32_t link_test_errno;
+
+static int64_t link_test_write(int64_t descriptor, const void* bytes, uint64_t count)
+{
+    int64_t result = 1;
+    __asm__ volatile("syscall" : "+a"(result) : "D"(descriptor), "S"(bytes), "d"(count) : "rcx", "r11", "memory");
+    return result;
+}
+
+static uint64_t link_test_strlen(const char* text)
+{
+    uint64_t result = 0;
+    while (text[result] != 0)
+    {
+        result += 1;
+    }
+    return result;
+}
+
+static int32_t* link_test_errno_location(void)
+{
+    return &link_test_errno;
+}
+
+// The address of an import's stand-in, or 0 if it has none.
+static uint64_t link_test_import(const Link* link, SymbolId symbol)
+{
+    uint64_t result = 0;
+    if (link_test_named(link, symbol, "write"))
+    {
+        result = (uint64_t)link_test_write;
+    }
+    else if (link_test_named(link, symbol, "strlen"))
+    {
+        result = (uint64_t)link_test_strlen;
+    }
+    else if (link_test_named(link, symbol, "__errno_location"))
+    {
+        result = (uint64_t)link_test_errno_location;
+    }
+    else if (link_test_named(link, symbol, "environ"))
+    {
+        result = (uint64_t)&link_test_environ;
+    }
+    return result;
+}
+
+static bool link_test_load(const Link* link, SymbolId entry, bool libc, Arena* arena, LinkTestImage* image)
 {
     const LinkAtoms* atoms = &link->atoms;
     const LinkSymbols* symbols = &link->symbols;
     const LinkFixups* fixups = &link->fixups;
-    *image = (LinkTestImage){ 0 };
+    *image = (LinkTestImage){
+        .libc = libc,
+    };
     uint64_t* offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, atoms->count);
     uint64_t* tls_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, atoms->count);
     uint64_t* values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, symbols->count);
@@ -1517,8 +1590,8 @@ static bool link_test_load(const Link* link, SymbolId entry, Arena* arena, LinkT
         image->problem = result ? 0 : "the image can't be mapped below 2 GB";
     }
 
-    // The bytes, and the symbols' values: an address, or a TLS variable's offset from the thread pointer (the end of
-    // the TLS block, which is the TLS segment's memory size rounded up to its alignment), or the linker's.
+    // The bytes, and the symbols' values: an address, a TLS variable's offset from the thread pointer (the end of the
+    // TLS block, which is the TLS segment's memory size rounded up to its alignment), the linker's, or a stand-in's.
     const uint64_t base = (uint64_t)image->base;
     const uint64_t tls_block = link_test_align(tls_cursor, tls_alignment);
     for (AtomId atom = 1; result && atom < atoms->count; atom += 1)
@@ -1547,6 +1620,10 @@ static bool link_test_load(const Link* link, SymbolId entry, Arena* arena, LinkT
         else if (link_test_named(link, symbol, "__fini_array_start") || link_test_named(link, symbol, "__fini_array_end"))
         {
             values[symbol] = base + (link_test_named(link, symbol, "__fini_array_start") ? fini_begin : fini_end);
+        }
+        else if (symbols->source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED && link_test_import(link, symbol) != 0)
+        {
+            values[symbol] = link_test_import(link, symbol);
         }
         else if (weak)
         {
@@ -1657,6 +1734,10 @@ static bool link_test_load(const Link* link, SymbolId entry, Arena* arena, LinkT
         image->headers = phdr;
         image->header_count = BUSTER_LINK_TEST_HEADERS;
         image->entry = values[entry];
+        image->init_begin = base + init_begin;
+        image->init_end = base + init_end;
+        image->fini_begin = base + fini_begin;
+        image->fini_end = base + fini_end;
         result = mprotect(image->base, text_begin, PROT_READ) == 0 &&
                  mprotect(image->base + text_begin, link_test_align(text_end, BUSTER_LINK_TEST_PAGE_BYTES) - text_begin, PROT_READ | PROT_EXEC) == 0;
         image->problem = result ? 0 : "mprotect failed";
@@ -1707,6 +1788,57 @@ static void link_test_start(const LinkTestImage* image, int output)
     __builtin_unreachable();
 }
 
+// The child's side of link_test_run for a program that calls libc: what the C runtime does around main. It sets up the
+// TLS block from PT_TLS as glibc does an executable's (variant II: the block ends at the thread pointer, aligned to
+// p_align, which points at itself), makes the thread pointer FS's base, and calls the init array's entries, main and
+// the fini array's entries in reverse, each with argc, argv and envp (one argument and one variable); then exits with
+// main's status. Once FS is the program's, it calls nothing that uses TLS.
+static void link_test_start_libc(const LinkTestImage* image, int output) __attribute__((noreturn));
+static void link_test_start_libc(const LinkTestImage* image, int output)
+{
+    typedef int32_t LinkTestMain(int32_t argc, char** argv, char** envp);
+    typedef void LinkTestHook(int32_t argc, char** argv, char** envp);
+    static char argument[] = "program";
+    static char variable[] = "BUSTER=1";
+    static char* arguments[] = { argument, 0 };
+    static char* variables[] = { variable, 0 };
+    const Elf64_Phdr* tls = 0;
+    for (uint32_t i = 0; i < image->header_count; i += 1)
+    {
+        tls = image->headers[i].p_type == PT_TLS ? &image->headers[i] : tls;
+    }
+    const uint64_t alignment = tls != 0 && tls->p_align > 1 ? tls->p_align : 1;
+    const uint64_t block = tls != 0 ? link_test_align(tls->p_memsz, alignment) : 0;
+    uint8_t* area = mmap(0, block + alignment + BUSTER_LINK_TEST_TCB_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (area == MAP_FAILED || dup2(output, 1) < 0)
+    {
+        _exit(126);
+    }
+    const uint64_t pointer = link_test_align((uint64_t)area + block, alignment);
+    if (tls != 0)
+    {
+        memcpy((void*)(pointer - block), (const void*)tls->p_vaddr, tls->p_filesz);
+    }
+    memcpy((void*)pointer, &pointer, sizeof(pointer));
+    link_test_environ = variables;
+    alarm(BUSTER_LINK_TEST_RUN_SECONDS);
+    // arch_prctl(ARCH_SET_FS, pointer).
+    int64_t call = 158;
+    __asm__ volatile("syscall" : "+a"(call) : "D"(0x1002), "S"(pointer) : "rcx", "r11", "memory");
+    for (uint64_t entry = image->init_begin; entry < image->init_end; entry += 8)
+    {
+        (*(LinkTestHook**)entry)(1, arguments, variables);
+    }
+    const int64_t status = ((LinkTestMain*)image->entry)(1, arguments, variables);
+    for (uint64_t entry = image->fini_end; entry > image->fini_begin; entry -= 8)
+    {
+        (*(LinkTestHook**)(entry - 8))(1, arguments, variables);
+    }
+    // exit_group(status).
+    __asm__ volatile("syscall" : : "a"(231), "D"(status) : "rcx", "r11", "memory");
+    __builtin_unreachable();
+}
+
 // Runs the loaded program in a child process: what it writes to standard output, and how it ended.
 static bool link_test_run(const LinkTestImage* image, uint8_t* output, uint64_t* output_length, int* status)
 {
@@ -1719,7 +1851,12 @@ static bool link_test_run(const LinkTestImage* image, uint8_t* output, uint64_t*
         fflush(stdout);
         fflush(stderr);
         const pid_t child = fork();
-        if (child == 0)
+        if (child == 0 && image->libc)
+        {
+            close(pipe_ends[0]);
+            link_test_start_libc(image, pipe_ends[1]);
+        }
+        else if (child == 0)
         {
             close(pipe_ends[0]);
             link_test_start(image, pipe_ends[1]);
@@ -1776,7 +1913,7 @@ static bool link_test_runs(LinkTestTally* tally, const LinkProgram* program, con
     uint8_t output[BUSTER_LINK_TEST_OUTPUT_BYTES];
     uint64_t length = 0;
     int status = -1;
-    const bool loaded = link_test_load(&program->link, program->entry, scratch.arena, &image);
+    const bool loaded = link_test_load(&program->link, program->entry, program->options.libc, scratch.arena, &image);
     const bool ran = loaded && link_test_run(&image, output, &length, &status);
     const bool result = ran && WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == BUSTER_LINK_PROGRAM_OUTPUT_BYTES &&
                         memcmp(output, expected, BUSTER_LINK_PROGRAM_OUTPUT_BYTES) == 0;
@@ -1805,7 +1942,7 @@ static bool link_test_runs_otherwise(const LinkProgram* program, const uint8_t* 
     uint8_t output[BUSTER_LINK_TEST_OUTPUT_BYTES];
     uint64_t length = 0;
     int status = -1;
-    const bool loaded = link_test_load(&program->link, program->entry, scratch.arena, &image);
+    const bool loaded = link_test_load(&program->link, program->entry, program->options.libc, scratch.arena, &image);
     const bool ran = loaded && link_test_run(&image, output, &length, &status);
     const bool result = ran && !(WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == BUSTER_LINK_PROGRAM_OUTPUT_BYTES &&
                                  memcmp(output, expected, BUSTER_LINK_PROGRAM_OUTPUT_BYTES) == 0);
@@ -1814,14 +1951,32 @@ static bool link_test_runs_otherwise(const LinkProgram* program, const uint8_t* 
     return result;
 }
 
-static bool link_test_programs(uint64_t seed, uint32_t functions)
+// The programs check's sets of options, from --seed and --functions: what each is called, and the directory
+// --print-assembly writes its program to.
+#define BUSTER_LINK_TEST_PROGRAMS 7
+static const char* const link_test_program_names[BUSTER_LINK_TEST_PROGRAMS] = {
+    "the defaults",
+    "the smallest",
+    "many units",
+    "without absolute addresses",
+    "--functions workers, without sizes",
+    "calling libc",
+    "calling libc, many units, without sizes",
+};
+static const char* const link_test_program_directories[BUSTER_LINK_TEST_PROGRAMS] = {
+    "static-defaults",
+    "static-smallest",
+    "static-units",
+    "static-no-absolute",
+    "static-functions-no-sizes",
+    "libc-defaults",
+    "libc-units-no-sizes",
+};
+
+static void link_test_program_options(LinkProgramOptions* options, uint64_t seed, uint32_t functions)
 {
-    LinkTestTally tally = {
-        .check = "programs",
-    };
     const LinkProgramOptions defaults = link_program_default_options();
-    LinkProgramOptions options[5];
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(options); i += 1)
+    for (uint32_t i = 0; i < BUSTER_LINK_TEST_PROGRAMS; i += 1)
     {
         options[i] = defaults;
         options[i].seed = seed + i;
@@ -1838,6 +1993,7 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
         .filler = 0,
         .absolute = true,
         .sizes = true,
+        .libc = false,
     };
     options[2].units = 16;
     options[2].functions = 300;
@@ -1852,13 +2008,23 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
     options[4].functions = functions;
     options[4].filler = 32;
     options[4].sizes = false;
-    static const char* const names[] = {
-        "the defaults",
-        "the smallest",
-        "many units",
-        "without absolute addresses",
-        "--functions workers, without sizes",
+    options[5].absolute = false;
+    options[5].libc = true;
+    options[6] = options[2];
+    options[6].seed = seed + 6;
+    options[6].absolute = false;
+    options[6].sizes = false;
+    options[6].libc = true;
+}
+
+static bool link_test_programs(uint64_t seed, uint32_t functions)
+{
+    LinkTestTally tally = {
+        .check = "programs",
     };
+    LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
+    link_test_program_options(options, seed, functions);
+    const char* const* names = link_test_program_names;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(options); i += 1)
     {
         LinkProgram program;
@@ -1889,9 +2055,12 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
                    options[i].functions, program.link.atoms.count - 1, program.link.fixups.count - 1, program.link.fixups.wide_count - 1,
                    (unsigned long long)program.code_bytes, ran ? "ran" : "failed", other_ran ? "ran" : "failed");
         }
-        // Every class and every kind, with the options that have them all.
-        if (generated && (i == 0 || i == 2))
+        // Every class, and every kind the options allow, given two thread-locals, an init function and a fini function.
+        if (generated && options[i].thread_locals >= 2 && options[i].init_functions >= 1 && options[i].fini_functions >= 1)
         {
+            const uint32_t absolute = (1u << BUSTER_LINK_FIXUP_ABS32) | (1u << BUSTER_LINK_FIXUP_ABS32S);
+            const uint32_t sizes = (1u << BUSTER_LINK_FIXUP_SIZE32) | (1u << BUSTER_LINK_FIXUP_SIZE64);
+            const uint32_t expected = ((1u << BUSTER_LINK_FIXUP_KINDS) - 2) & ~(options[i].absolute ? 0 : absolute) & ~(options[i].sizes ? 0 : sizes);
             uint32_t classes = 0;
             uint32_t kinds = 0;
             for (AtomId atom = 1; atom < program.link.atoms.count; atom += 1)
@@ -1902,7 +2071,7 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
             {
                 kinds |= 1u << (program.link.fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND);
             }
-            link_test_expect(&tally, classes == (1u << BUSTER_LINK_CLASS_COUNT) - 2 && kinds == (1u << BUSTER_LINK_FIXUP_KINDS) - 2, "every class and every kind", i);
+            link_test_expect(&tally, classes == (1u << BUSTER_LINK_CLASS_COUNT) - 2 && kinds == expected, "every class and every kind the options allow", i);
         }
         // The lea of the hexadecimal digits in buster_write_hex, one byte off, which changes every digit printed.
         if (generated && i == 0)
@@ -1929,6 +2098,287 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Assembly: --print-assembly
+
+// The section each class's atoms go to in an object, as GNU as's directive, and the relocation each fixup kind gets.
+static const char* const link_test_sections[BUSTER_LINK_CLASS_COUNT] = {
+    [BUSTER_LINK_CLASS_NONE] = 0,
+    [BUSTER_LINK_CLASS_RODATA] = ".section .rodata,\"a\",@progbits",
+    [BUSTER_LINK_CLASS_STRINGS] = ".section .rodata.str1.1,\"aMS\",@progbits,1",
+    [BUSTER_LINK_CLASS_TEXT] = ".section .text,\"ax\",@progbits",
+    [BUSTER_LINK_CLASS_TDATA] = ".section .tdata,\"awT\",@progbits",
+    [BUSTER_LINK_CLASS_TBSS] = ".section .tbss,\"awT\",@nobits",
+    [BUSTER_LINK_CLASS_INIT_ARRAY] = ".section .init_array,\"aw\",@init_array",
+    [BUSTER_LINK_CLASS_FINI_ARRAY] = ".section .fini_array,\"aw\",@fini_array",
+    [BUSTER_LINK_CLASS_DATA_RELRO] = ".section .data.rel.ro,\"aw\",@progbits",
+    [BUSTER_LINK_CLASS_DATA] = ".section .data,\"aw\",@progbits",
+    [BUSTER_LINK_CLASS_BSS] = ".section .bss,\"aw\",@nobits",
+};
+static const char* const link_test_relocations[BUSTER_LINK_FIXUP_KINDS] = {
+    [BUSTER_LINK_FIXUP_NONE] = 0,
+    [BUSTER_LINK_FIXUP_CALL] = "R_X86_64_PLT32",
+    [BUSTER_LINK_FIXUP_CALL_GOT] = "R_X86_64_GOTPCRELX",
+    [BUSTER_LINK_FIXUP_LOAD_GOT] = "R_X86_64_REX_GOTPCRELX",
+    [BUSTER_LINK_FIXUP_GOTPCREL] = "R_X86_64_GOTPCREL",
+    [BUSTER_LINK_FIXUP_PC32] = "R_X86_64_PC32",
+    [BUSTER_LINK_FIXUP_TPOFF32] = "R_X86_64_TPOFF32",
+    [BUSTER_LINK_FIXUP_GOTTPOFF] = "R_X86_64_GOTTPOFF",
+    [BUSTER_LINK_FIXUP_ABS64] = "R_X86_64_64",
+    [BUSTER_LINK_FIXUP_PC64] = "R_X86_64_PC64",
+    [BUSTER_LINK_FIXUP_ABS32] = "R_X86_64_32",
+    [BUSTER_LINK_FIXUP_ABS32S] = "R_X86_64_32S",
+    [BUSTER_LINK_FIXUP_SIZE32] = "R_X86_64_SIZE32",
+    [BUSTER_LINK_FIXUP_SIZE64] = "R_X86_64_SIZE64",
+};
+
+// A symbol's name in the source: its own, or .Lsym_ and its id without one (a label that stays out of the object's
+// symbol table, but where GNU as keeps it for a relocation into a SHF_MERGE section).
+static void link_test_print_name(FILE* file, const Link* link, SymbolId symbol)
+{
+    const NameId name = link->symbols.name[symbol];
+    if (name != 0)
+    {
+        fprintf(file, "%.*s", (int)link->names.length[name], (const char*)link->names.bytes[name]);
+    }
+    else
+    {
+        fprintf(file, ".Lsym_%u", symbol);
+    }
+}
+
+// A named symbol's binding, visibility, type and size, as directives: all of them for a definition, and for a symbol
+// that the unit refers to without defining it, what its undefined symbol needs (a weak binding, a visibility and a TLS
+// type, which linkers check against the definition's).
+static void link_test_print_attributes(FILE* file, const Link* link, SymbolId symbol, bool defined)
+{
+    static const char* const visibilities[] = { 0, ".internal", ".hidden", ".protected" };
+    const uint8_t flags = link->symbols.flags[symbol];
+    const uint8_t binding = flags & BUSTER_LINK_SYMBOL_BINDING;
+    const uint8_t type = flags & BUSTER_LINK_SYMBOL_TYPE;
+    const char* visibility = visibilities[flags >> BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT];
+    const char* type_name = type == BUSTER_LINK_SYMBOL_FUNCTION ? "@function" : type == BUSTER_LINK_SYMBOL_OBJECT ? "@object" : type == BUSTER_LINK_SYMBOL_TLS ? "@tls_object" : 0;
+    const char* binding_directive = binding == BUSTER_LINK_SYMBOL_WEAK ? ".weak" : binding == BUSTER_LINK_SYMBOL_GLOBAL && defined ? ".globl" : 0;
+    if (binding_directive != 0)
+    {
+        fprintf(file, "    %s ", binding_directive);
+        link_test_print_name(file, link, symbol);
+        fprintf(file, "\n");
+    }
+    if (visibility != 0)
+    {
+        fprintf(file, "    %s ", visibility);
+        link_test_print_name(file, link, symbol);
+        fprintf(file, "\n");
+    }
+    if (type_name != 0 && (defined || type == BUSTER_LINK_SYMBOL_TLS))
+    {
+        fprintf(file, "    .type ");
+        link_test_print_name(file, link, symbol);
+        fprintf(file, ", %s\n", type_name);
+    }
+    if (defined)
+    {
+        fprintf(file, "    .size ");
+        link_test_print_name(file, link, symbol);
+        fprintf(file, ", %llu\n", (unsigned long long)link->symbols.size[symbol]);
+    }
+}
+
+// Bytes `begin` to `end` of an atom: .byte lines, or .zero for a zero-fill atom.
+static void link_test_print_bytes(FILE* file, const uint8_t* bytes, uint64_t begin, uint64_t end)
+{
+    if (bytes == 0 && end > begin)
+    {
+        fprintf(file, "    .zero %llu\n", (unsigned long long)(end - begin));
+    }
+    for (uint64_t line = begin; bytes != 0 && line < end; line += 16)
+    {
+        const uint64_t line_end = end - line > 16 ? line + 16 : end;
+        fprintf(file, "    .byte 0x%02x", bytes[line]);
+        for (uint64_t i = line + 1; i < line_end; i += 1)
+        {
+            fprintf(file, ",0x%02x", bytes[i]);
+        }
+        fprintf(file, "\n");
+    }
+}
+
+// Writes one unit as GNU as source: each of its atoms in its class's section, at its alignment, as its bytes with a
+// label at each symbol defined there (`defined` holds the symbols of atom a, by value, from defined_begin[a] to
+// defined_begin[a + 1]) and a .reloc for each of its fixups; then the attributes of the named symbols it defines, and
+// of those it refers to without defining them (`declared` holds the unit + 1 that last declared each).
+static bool link_test_print_unit(const char* path, const Link* link, uint32_t unit, const SymbolId* defined, const uint32_t* defined_begin, uint32_t* declared)
+{
+    const LinkAtoms* atoms = &link->atoms;
+    const LinkSymbols* symbols = &link->symbols;
+    const LinkFixups* fixups = &link->fixups;
+    FILE* file = fopen(path, "w");
+    for (AtomId atom = 1; file != 0 && atom < atoms->count; atom += 1)
+    {
+        if (atoms->unit[atom] == unit)
+        {
+            fprintf(file, "    %s\n    .p2align %u\n.Latom_%u:\n", link_test_sections[atoms->class[atom]], atoms->alignment_log2[atom], atom);
+            uint64_t cursor = 0;
+            for (uint32_t i = defined_begin[atom]; i < defined_begin[atom + 1]; i += 1)
+            {
+                link_test_print_bytes(file, atoms->bytes[atom], cursor, symbols->value[defined[i]]);
+                cursor = symbols->value[defined[i]];
+                link_test_print_name(file, link, defined[i]);
+                fprintf(file, ":\n");
+            }
+            link_test_print_bytes(file, atoms->bytes[atom], cursor, atoms->size[atom]);
+            for (uint32_t i = 0; i < atoms->fixup_count[atom]; i += 1)
+            {
+                const FixupId fixup = atoms->fixup_begin[atom] + i;
+                fprintf(file, "    .reloc .Latom_%u+%u, %s, ", atom, fixups->offset[fixup], link_test_relocations[fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND]);
+                link_test_print_name(file, link, fixups->target[fixup]);
+                fprintf(file, "%+lld\n", (long long)link_fixup_addend(link, fixup));
+            }
+        }
+    }
+    for (SymbolId symbol = 1; file != 0 && symbol < symbols->count; symbol += 1)
+    {
+        const AtomId atom = symbols->atom[symbol];
+        if (atom != 0 && atoms->unit[atom] == unit && symbols->name[symbol] != 0)
+        {
+            link_test_print_attributes(file, link, symbol, true);
+        }
+    }
+    for (AtomId atom = 1; file != 0 && atom < atoms->count; atom += 1)
+    {
+        for (uint32_t i = 0; atoms->unit[atom] == unit && i < atoms->fixup_count[atom]; i += 1)
+        {
+            const SymbolId target = fixups->target[atoms->fixup_begin[atom] + i];
+            const AtomId target_atom = symbols->atom[target];
+            if ((target_atom == 0 || atoms->unit[target_atom] != unit) && declared[target] != unit + 1)
+            {
+                link_test_print_attributes(file, link, target, false);
+                declared[target] = unit + 1;
+            }
+        }
+    }
+    bool result = file != 0;
+    if (result)
+    {
+        fprintf(file, "    .section .note.GNU-stack,\"\",@progbits\n");
+        result = ferror(file) == 0;
+        result = fclose(file) == 0 && result;
+    }
+    if (!result)
+    {
+        fprintf(stderr, "can't write %s\n", path);
+    }
+    return result;
+}
+
+// Writes a generated program to `directory`, which must exist: unit_N.s for each unit, and what it must print to
+// `expected`.
+static bool link_test_print_program(const LinkProgram* program, const char* directory)
+{
+    const Link* link = &program->link;
+    Scratch scratch = scratch_begin(0);
+    uint32_t* defined_begin = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, link->atoms.count + 1);
+    uint32_t* next = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, link->atoms.count);
+    SymbolId* defined = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, SymbolId, link->symbols.count);
+    uint32_t* declared = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, link->symbols.count);
+    bool result = defined_begin != 0 && next != 0 && defined != 0 && declared != 0;
+    if (result)
+    {
+        // The symbols by atom, counted, placed and filled, and then by value within an atom.
+        memset(defined_begin, 0, (link->atoms.count + 1) * sizeof(*defined_begin));
+        memset(declared, 0, link->symbols.count * sizeof(*declared));
+        for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+        {
+            const AtomId atom = link->symbols.atom[symbol];
+            defined_begin[atom + 1] += atom != 0 ? 1 : 0;
+        }
+        for (AtomId atom = 1; atom <= link->atoms.count; atom += 1)
+        {
+            defined_begin[atom] += defined_begin[atom - 1];
+            next[atom - 1] = defined_begin[atom - 1];
+        }
+        for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+        {
+            const AtomId atom = link->symbols.atom[symbol];
+            if (atom != 0)
+            {
+                defined[next[atom]] = symbol;
+                next[atom] += 1;
+            }
+        }
+        for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+        {
+            for (uint32_t i = defined_begin[atom] + 1; i < defined_begin[atom + 1]; i += 1)
+            {
+                const SymbolId symbol = defined[i];
+                uint32_t j = i;
+                while (j > defined_begin[atom] && link->symbols.value[defined[j - 1]] > link->symbols.value[symbol])
+                {
+                    defined[j] = defined[j - 1];
+                    j -= 1;
+                }
+                defined[j] = symbol;
+            }
+        }
+    }
+    char path[4096];
+    for (uint32_t unit = 0; result && unit < program->options.units; unit += 1)
+    {
+        snprintf(path, sizeof(path), "%s/unit_%u.s", directory, unit);
+        result = link_test_print_unit(path, link, unit, defined, defined_begin, declared);
+    }
+    if (result)
+    {
+        snprintf(path, sizeof(path), "%s/expected", directory);
+        FILE* file = fopen(path, "w");
+        result = file != 0 && fwrite(program->output, 1, BUSTER_LINK_PROGRAM_OUTPUT_BYTES, file) == BUSTER_LINK_PROGRAM_OUTPUT_BYTES;
+        result = file != 0 && fclose(file) == 0 && result;
+        if (!result)
+        {
+            fprintf(stderr, "can't write %s\n", path);
+        }
+    }
+    scratch_end(scratch);
+    return result;
+}
+
+// --print-assembly: the programs check's programs, each in a directory of `directory` named in
+// link_test_program_directories.
+static bool link_test_print_programs(const char* directory, uint64_t seed, uint32_t functions)
+{
+    LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
+    link_test_program_options(options, seed, functions);
+    bool result = mkdir(directory, 0777) == 0 || errno == EEXIST;
+    if (!result)
+    {
+        fprintf(stderr, "can't make %s\n", directory);
+    }
+    for (uint32_t i = 0; result && i < BUSTER_LINK_TEST_PROGRAMS; i += 1)
+    {
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/%s", directory, link_test_program_directories[i]);
+        LinkProgram program;
+        result = link_program_generate(&program, options[i]);
+        if (!result)
+        {
+            fprintf(stderr, "%s: %s\n", link_test_program_names[i], program.problem);
+        }
+        else if (mkdir(path, 0777) != 0 && errno != EEXIST)
+        {
+            fprintf(stderr, "can't make %s\n", path);
+            result = false;
+        }
+        result = result && link_test_print_program(&program, path);
+        if (result)
+        {
+            printf("%s: %s, %u units\n", path, link_test_program_names[i], options[i].units);
+        }
+        link_program_release(&program);
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The command
 
 #define BUSTER_LINK_TEST_DEFAULT_FUNCTIONS 2000
@@ -1946,6 +2396,7 @@ static int run_link_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
     uint64_t functions = BUSTER_LINK_TEST_DEFAULT_FUNCTIONS;
+    const char* assembly = 0;
     bool valid = true;
     for (int i = 0; i < argc; i += 1)
     {
@@ -1959,6 +2410,11 @@ static int run_link_tests(int argc, char** argv)
             valid = valid && link_test_parse_u64(argv[i + 1], &functions) && functions >= 1 && functions <= BUSTER_LINK_PROGRAM_MAX_COUNT;
             i += 1;
         }
+        else if (strcmp(argv[i], "--print-assembly") == 0 && i + 1 < argc)
+        {
+            assembly = argv[i + 1];
+            i += 1;
+        }
         else
         {
             valid = false;
@@ -1967,11 +2423,15 @@ static int run_link_tests(int argc, char** argv)
     int result = 1;
     if (!valid)
     {
-        fprintf(stderr, "usage: test-link [--seed N] [--functions N]\n");
+        fprintf(stderr, "usage: test-link [--seed N] [--functions N] [--print-assembly DIRECTORY]\n");
     }
     else if (!x86_encoder_initialized && !x86_encoder_initialize())
     {
         fprintf(stderr, "the encoder's templates can't be built\n");
+    }
+    else if (assembly != 0)
+    {
+        result = link_test_print_programs(assembly, seed, (uint32_t)functions) ? 0 : 1;
     }
     else
     {

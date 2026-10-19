@@ -72,10 +72,10 @@ or infrastructure machinery merely to match its style.
   linker share: names, atoms, symbols and fixups in column arrays indexed by
   32-bit ids, in arenas, and `link_add_code_fixups`, which turns the encoder's
   marked instructions into fixups of the design's kinds. `link_program.c`
-  generates test programs in it (libc-free static programs, from a seed and
-  sizes) for the object writer's and the linker's tests and benchmarks.
-  `link_test.c` holds the tests of both (`main.c` includes them;
-  `./build/compiler test-link` runs them).
+  generates test programs in it (static ones without libc, and ones that call
+  libc, from a seed and sizes) for the object writer's and the linker's tests
+  and benchmarks. `link_test.c` holds the tests of both (`main.c` includes
+  them; `./build/compiler test-link` runs them).
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -324,16 +324,48 @@ informational.
   marked instructions;
 - addends around int32's limits, which go to the side table exactly when they
   don't fit, through an instruction's distance to its end too;
-- generated programs with five sets of options (the defaults, the smallest,
-  16 units, no absolute addresses, and `--functions N` workers, 2,000 by
-  default, without `SIZE32` and `SIZE64`, which wild 0.10 doesn't link): the same seed must give byte-identical tables and bytes, and
-  another seed others. Each is laid out in memory as a static executable at a
-  fixed address (`link_test_load`, which patches every kind and is the
-  reference for the direct path's patch kernel), run in a child process, and
-  must exit with status 0 having printed the output the generator's model
-  predicts. Two of them must have every class and every kind, and a copy with
-  the hexadecimal digits' fixup one byte off must print something else.
+- generated programs with seven sets of options: the defaults, the smallest,
+  16 units, no absolute addresses, `--functions N` workers (2,000 by default)
+  without `SIZE32` and `SIZE64`, which wild 0.10 doesn't link, and two that
+  call libc (the defaults, and 16 units without sizes). The same seed must
+  give byte-identical tables and bytes, and another seed others. Each is laid
+  out in memory as a static executable at a fixed address (`link_test_load`,
+  which patches every kind and is the reference for the direct path's patch
+  kernel) and run in a child process. A program that calls libc gets
+  stand-ins for `write`, `strlen`, `environ` and `__errno_location`, and the
+  child does what the C runtime does around `main`. Each must exit with status
+  0 having printed the output the generator's model predicts. Every set with
+  two thread-locals, an init function and a fini function must have every
+  class and every kind its options allow, and a copy of the defaults' program
+  with the hexadecimal digits' fixup one byte off must print something else.
 
 `--seed N` changes the random records and programs. The programs check is
 what scales: `--functions 1000000` builds three programs of a million workers
 each.
+
+`--print-assembly DIR` writes the same programs (for the same `--seed` and
+`--functions`) as GNU as source instead: a directory for each set, with a
+`unit_N.s` per unit and `expected`, the output. Each atom's bytes go in its
+class's section, with a label at each symbol and a `.reloc` for each fixup, so
+GNU as's object of a unit is a reference for the object writer's. To check
+the programs with real toolchains, assemble every unit, then link each
+program, run it and compare what it prints (the `static-*` directories with
+`-static -e _start`, the `libc-*` ones through `cc`):
+
+```sh
+./build/compiler test-link --print-assembly build/programs
+for s in build/programs/*/unit_*.s; do as $s -o ${s%.s}.o; done
+for d in build/programs/static-*; do
+    ld.bfd -static -e _start -o $d/program $d/unit_*.o && $d/program | cmp - $d/expected
+done
+for d in build/programs/libc-*; do
+    cc -o $d/program $d/unit_*.o && $d/program | cmp - $d/expected
+done
+```
+
+The same with `ld.lld`, `mold` or, for the `*-no-sizes` sets, `wild` for
+`ld.bfd`, and with `-fuse-ld=lld`, `mold` or `wild` and `-no-pie` or `-static`
+for `cc`. On the 9700X, GNU ld 2.47, lld 23.1.1 and mold 3.0.0 linked every
+set and wild 0.10.0 the `*-no-sizes` ones, 37 links per seed, for seeds 1, 2,
+3, 7, 99 and 1,000, and for seed 5 with 100,000 workers; every program printed
+what its model predicts.
