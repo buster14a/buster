@@ -7,9 +7,10 @@ machine code and data into files:
 - **The linker:** executables written straight from the compiler, and links of
   other compilers' objects, archives and shared libraries.
 
-The lane base layer, the encoder's fixups and the representation are
-implemented (`src/buster/compiler/lane.c`, `x86_64_encoder.c` and `link.c`,
-with generated test programs in `link_program.c`); the object writer and the
+The lane base layer, the encoder's fixups, the representation and the direct
+path's first executables are implemented (`src/buster/compiler/lane.c`,
+`x86_64_encoder.c`, `link.c` with generated test programs in
+`link_program.c`, and `executable.c`); the object writer and the rest of the
 linker aren't yet. The document records the measurements on the Ryzen 7 9700X
 that the design rests on, the design itself, and the order to build it in, as
 `docs/x86-64-encoder.md` does for the encoder.
@@ -63,6 +64,12 @@ the output on tmpfs:
 | hello world (6–16 KB) | 2.43 / 5.35 ms | 1.27 / 2.58 ms | ≤ 20 µs | ≥ 125× |
 | tcc (440 KB) | 3.30 / 6.75 ms | 2.14 / 2.95 ms | 50–120 µs | 25–60× |
 | 102,400 functions (46 MB) | 96 / 38 ms | 140 / 25 ms | 4–10 ms | 2.5–6× |
+
+Step 4's static executables without libc, written by one lane from generated
+programs of 3.9 KB, 397 KB and 35.5 MB, take 2.4 µs, 69 µs and 8.5 ms in
+place on tmpfs (3.6 µs, 86 µs and 9.8 ms as new files), and the largest
+4.0 ms with eight lanes ("The first executables"). A dynamic PIE that calls
+libc has more to write (step 5).
 
 Orders of magnitude are there for programs up to a few megabytes, where
 fixed costs dominate. For a 46 MB output both sides spend their time in the
@@ -779,72 +786,255 @@ is sized before any function is encoded:
 
 #### Patching and writing
 
-After layout, each lane walks its own output ranges in file order, a chunk at
-a time. Chunks are about 256 KB, a quarter of Zen 5's L2.
+After layout, the lanes take the output's chunks, in parts by bytes from a
+counter (rule 1 in "Lanes"). Chunks are about 256 KB, a quarter of Zen 5's L2.
 
 **Chunk boundaries never split a field.** They are computed from the image and
-its fixups alone:
+its fixups alone. Boundary k is at k × 256 KB of the file, unless an atom
+holds it:
 
-- a chunk ends at an atom's end, since no field crosses one;
-- an atom larger than a chunk is cut where no field crosses.
+- an atom of at most a chunk ends the chunk at its own end, since no field
+  crosses an atom's end;
+- in a larger atom the boundary stays where it is, unless a field crosses it,
+  and then it moves to the field's end.
 
 A 4-byte field two bytes before a 256 KB boundary is ordinary (GNU as puts a
 `call`'s at `0x3fffe` after 262,141 bytes of padding). A lane patching such a
 field could otherwise change bytes the next lane had already hashed or
 written. Because the boundaries don't depend on the lane count, the build ID's
-chunks don't either. The lane tests place 4- and 8-byte fields across the
-nominal boundaries.
+chunks don't either. `test-executable` puts 4- and 8-byte fields at every
+place across the nominal boundaries.
 
 For each chunk the lane:
 
 1. applies the chunk's fixups (sorted by offset already);
 2. hashes it for the build ID;
-3. writes it.
+3. writes it with `pwritev`, from where its bytes are: the atoms' own buffers,
+   the linker's headers and GOT, and fill for the gaps between them (`int3`
+   in `.text`, zeros elsewhere).
 
 The chunk is pulled into L2 by the first step and written from L2, where
 `pwrite` into an existing page reaches 41 GB/s on tmpfs. Each byte of the
-output moves once from the lane's buffer, and the fixup columns are read in
-order.
+output moves once from its buffer, and the fixup columns are read in order.
+Measured on 440 KB, 4 MB and 46 MB of bytes, on tmpfs and btrfs, writing each
+chunk as it is hashed costs what one `pwrite` of the whole file does, to within
+−17% and +16%. Hashing every chunk first and then writing the file once cost up
+to 22% more, the chunks having left L2, and copying each chunk into a staging
+buffer before writing it 3–65% more.
 
-The patch loop reads, per fixup:
+**The patch kernel** reads, per fixup:
 
 - the field offset;
-- the target's 32-bit image offset, from a table that stays in L2 up to about
-  250,000 symbols;
+- the target's 32-bit `reference`, its image offset, from a table that stays
+  in L2 up to about 250,000 symbols;
 - the addend.
 
-Then it computes S + A − P and stores 4 bytes. It measures 0.39–0.55 ns per
-fixup in L1 and L2, 0.56–0.79 ns in L3 and 1.4 ns from DRAM (see "SIMD"):
-1.02 million fixups take 0.5–1.4 ms.
+Then it computes S + A − P and stores 4 bytes. That is `CALL` and `PC32`,
+which most fixups are, and `executable_patch_pc32` takes every fixup of an
+atom that way. A vector compare of the kind column then finds the others, 64
+fixups at a time, and `executable_patch_other` redoes each of them over what
+the loop wrote: any kind, with addends from the side table. Neither checks
+S + A − P per fixup. The count phase finds the largest addend magnitude with a
+vector maximum, and while the base, the image and that addend stay below 2^31
+together, no `CALL` or `PC32` value can leave int32. Otherwise every fixup
+goes through `executable_patch_other`, which checks each value's range. A
+value that doesn't fit fails the link, naming the fixup, and its field is
+zeroed, so that both paths leave the same bytes. `benchmark-executable`, ns
+per fixup on CPU 2, on the synthetic cases of "SIMD" (every fixup `CALL` or
+`PC32`):
 
-**The build ID** is a hash of every chunk, combined in a tree in chunk order,
-so the lanes compute it without depending on each other and the result doesn't
-depend on the lane count. Its note is written last.
+| Kernel | 64 KB, 2,000 fixups, 10,000 targets | 1 MB, 30,000, 100,000 | 64 MB, 2 M, 1 M |
+| --- | ---: | ---: | ---: |
+| `executable_patch_pc32` | **0.37** | **0.53** | **1.40** |
+| a branch on the kind per fixup, the other kinds out of line | 0.73 | 0.74 | 1.42 |
+| `executable_patch_other` for every fixup (the checked path) | 1.47 | 1.64 | 2.52 |
+
+Clang unrolls `executable_patch_pc32`'s loop eight times and leaves the
+branching one rolled; an earlier build of the same source measured the
+branching one at 0.48 ns in L1. On the generated programs, half of whose fixups are of the other kinds so
+that the tests cover every kind, the kernel takes 1.5–1.7 ns per fixup, and
+3.1 ns on the smallest program's 91: 2.16 million fixups take 3.7 ms. A
+compiled program's fixups are mostly `CALL` and `PC32`, since the direct path
+reaches the program's own symbols directly.
+
+**The build ID** is a tree of the chunks' hashes: each chunk is hashed while it
+is in L2, and the build ID is the hash of the chunks' hashes in chunk order.
+The lanes compute it without depending on each other, and the result doesn't
+depend on the lane count. The note's 16 bytes are hashed as zeros and written
+last, after every chunk.
 
 GNU ld's default style, SHA-1, and the others it offers (md5, uuid, an
-explicit value, none) are honored when asked for. The direct path's own
-default is a fast 128-bit hash, decided by measurement.
+explicit value, none) are to be honored when asked for. The direct path's own
+default is a 128-bit hash of AES rounds, decided by measurement. Eight ZMM
+accumulators take the stream's 64-byte blocks in turn, each block as the round
+key of one `vaesenc` of its accumulator, followed by a round with a constant
+key. Then the accumulators fold into one, the length goes in, and the four
+128-bit lanes fold into the 16 bytes. It isn't cryptographic: a build ID only
+has to tell builds apart. The candidates, GB/s on CPU 2, medians of 21 passes:
+
+| Hash | 4 KB (L1) | 256 KB (L2) | 1 MB | 64 MB |
+| --- | ---: | ---: | ---: | ---: |
+| 8 accumulators, one `vaesenc` per block | 430 | 259 | 308 | 87.5 |
+| 4 accumulators, one `vaesenc` per block | 391 | 222 | 315 | 86.9 |
+| 8 accumulators, two rounds per block (`executable.c`) | 300 | **257** | 294 | 82.7 |
+| multiply-accumulate, as XXH3, 4 accumulators | 144 | 168 | 157 | 68.4 |
+| reading alone (an XOR of the blocks) | 699 | 258 | 315 | 87.8 |
+
+In L2, where the chunk is, the chosen hash runs as fast as reading it, and its
+second round mixes each block into its accumulator before the next one comes.
+With each of the four, flipping any input bit of 64 or 600 bytes flips 64 of
+the 128 output bits on average. Clang unrolled the hash's loop four times,
+which took it down to 176 GB/s in L2, so the loop asks it not to. In
+`benchmark-executable` it hashes 256 KB in L2 at 260 GB/s (1.0 µs), in pieces
+of 4 KB at 250, in pieces of 100 bytes at 9.0 (a chunk of many small data
+atoms: 11 ns a piece), and 64 MB at 82.
 
 **Writing the file:**
 
 1. If the output exists, is a regular file with one link and isn't running,
    open it with `O_RDWR` and overwrite it in place. Then `ftruncate` it to the
-   new size and set its mode. In place is 1.2–3.6× faster than a new file
-   (table above). mold and wild do the same for executables.
+   new size and set its mode (0777 less the umask, as a new file gets), each
+   only if it changed. In place is 1.2–3.6× faster than a new file (table
+   above). mold and wild do the same for executables.
 2. If opening it fails with ETXTBSY (the program is running), or the file has
-   other hard links, or the output is a shared library (which running
-   processes map without ETXTBSY to protect them): write a new file with
-   `O_CREAT | O_EXCL` beside it and rename it over the old one.
+   other hard links, or it is a symbolic link (opened with `O_NOFOLLOW`, so
+   the link is replaced, not written through), or the output is a shared
+   library (which running processes map without ETXTBSY to protect them):
+   write a new file with `O_CREAT | O_EXCL` beside it, named after it with
+   `.tmp` and the process id, and rename it over the old one. If the output
+   doesn't exist, create it.
 3. Never `O_TRUNC`: on btrfs it costs 58 µs for 16 KB and 10.4 ms for 4 MB.
-4. **One lane writes with `pwritev`.** On tmpfs that is 6.8–12.6 GB/s for a
-   new file and 11.7–41.6 GB/s in place; on btrfs, 4.4–7.5 and 6.4–9.4.
-   **Several lanes copy into a shared mapping** of the file, which
-   scales on tmpfs (14–19 GB/s with eight) and not on btrfs. So the choice
-   goes by `statfs`'s filesystem type, from measurements per filesystem,
-   including whether `fallocate` and `MADV_HUGEPAGE` help (they did on mold's
-   ext4 and didn't here).
+4. **Each lane writes the chunks it patches, with `pwritev`.** One `pwrite`
+   reaches 6.8–12.6 GB/s on tmpfs for a new file and 11.7–41.6 GB/s in place;
+   on btrfs, 4.4–7.5 and 6.4–9.4. The lanes' writes take turns at the file's
+   lock in the kernel, so their speeds don't add up, but each write overlaps
+   the other lanes' patching and reads its chunk from its own L2 (measured
+   below). **Several lanes copying into a shared mapping** of the file scales
+   on tmpfs (14–19 GB/s with eight) and not on btrfs, so step 8 may choose by
+   `statfs`'s filesystem type, from measurements per filesystem, including
+   whether `fallocate` and `MADV_HUGEPAGE` help (they did on mold's ext4 and
+   didn't here).
 5. Close the file before returning: `execve` of a file open for writing fails
    with ETXTBSY. Don't `fsync`, like every other linker.
+6. A link that fails after opening the output removes it rather than leave a
+   half-written executable. One that fails before leaves the old one alone.
+
+**One writer, or every lane.** This section first had one lane write
+everything, which keeps the file's writes in one place, but that lane becomes
+the bottleneck. Three ways, measured with the 180,000-worker program of "The
+first executables" (35.5 MB, 136 chunks) on the 9700X, µs, in place / as a new
+file on tmpfs:
+
+| Lanes | Lane 0 writes after the patching | Lane 0 writes 4 MB waves while the others patch the next | Every lane writes its chunks |
+| ---: | ---: | ---: | ---: |
+| 2 | 7,070 / 9,090 | 5,930 / 6,610 | **4,940 / 5,590** |
+| 4 | 6,130 / 8,160 | 5,070 / 6,540 | **4,290 / 5,780** |
+| 8 | 5,820 / 7,480 | 5,070 / 6,410 | **4,000 / 5,550** |
+
+The first column's figures are sums of phases, from a harness that started the
+lanes for every link. With waves on 8 lanes, lane 0 spent 4.2 ms writing,
+where one `pwrite` of the same bytes from memory takes 2.3 ms, while the other
+lanes patched their 19 chunks each at a quarter of one lane's speed per chunk
+and then waited for it: the patching and the copy compete for DRAM, and lane 0
+reads what other cores wrote. On btrfs, at 8 lanes over three runs, every lane
+writing took 6.7–7.4 ms in place against 8.4–8.8 with waves, and 7.1–8.5 ms
+for a new file against 7.4–7.7, the one case where a single writer can win.
+
+#### The first executables: static, without libc
+
+Step 4's executables are static and use no libc: no crt objects, no dynamic
+sections, and a `_start` that makes its own system calls, as with `-nostdlib
+-static`. `executable_write` (`executable.c`) lays them out, patches them and
+writes them from the representation, at GNU ld's fixed base, 0x400000:
+
+- **Sections and segments:** the layout above without the dynamic sections.
+  R holds the ELF header and the program headers (where a program finds its
+  `PT_TLS` through `AT_PHDR`), `.note.gnu.build-id` and `.rodata`, string
+  literals after the other constants; RX `.text`; RELRO `.tdata` and
+  `.tbss`, `.init_array`, `.fini_array`, `.data.rel.ro` and `.got`; RW
+  `.data` and `.bss`. `.shstrtab` and the section headers follow, outside
+  the segments. The program headers are lld's, in its order: `PT_PHDR`, the
+  `PT_LOAD`s, `PT_TLS`, `PT_GNU_RELRO`, `PT_GNU_STACK` and `PT_NOTE`.
+  `.tbss` takes no address space, and a section without bits has the file
+  offset where its bytes would start, as lld gives it.
+- **Atoms:** counted per bucket, a class and an alignment, and placed by
+  prefix sums of their padded sizes, largest alignment first. Functions are at
+  least 16-byte aligned and padded to 16 with `int3`. The init and fini arrays
+  keep id order, as whole 8-byte entries. Atoms aligned past a page are
+  refused for now.
+- **The GOT:** a slot for each target of `CALL_GOT`, `LOAD_GOT`, `GOTPCREL`
+  and `GOTTPOFF`, numbered from 1 in symbol order: the target's address, its
+  offset from the thread pointer for TLS, or 0 for a weak symbol defined
+  nowhere. Nothing is relaxed, and a static executable needs no dynamic
+  relocations. The generated programs use the GOT kinds to test them, where a
+  compiled program's references to its own symbols are direct.
+- **Symbols:** `reference` is the image offset (the address less the base); a
+  TLS symbol's is its offset from the thread pointer (variant II: from the end
+  of the TLS block, the segment's memory size rounded up to its alignment); a
+  weak symbol defined nowhere gets address 0's. The linker defines
+  `__init_array_start`, `__init_array_end`, `__fini_array_start` and
+  `__fini_array_end`. Any other symbol defined nowhere fails the link, naming
+  it, even when nothing refers to it, and so does an import from a shared
+  library until step 5.
+- **The image** must end below 2 GB, so that every image offset and
+  PC-relative value fits in 32 bits.
+
+Its phases, each lane taking a range of the atoms, fixups, symbols or GOT
+words (`lane_range`, since each loop is a few nanoseconds per item), or parts
+of the chunks:
+
+1. **count:** the atoms per bucket; the GOT kinds' targets, into a bitset per
+   lane, from a vector compare of the kind column; and the largest addend.
+   The lanes' bitsets are then ORed, a range of words each;
+2. **layout:** every lane lays out the sections from the counts, then places
+   its own atoms after those of the lanes before it, and numbers its words'
+   GOT slots;
+3. **symbols:** each lane fills its symbols' references and GOT slots, and its
+   chunk boundaries, and lane 0 writes the headers;
+4. **open:** lane 0 opens the output for every lane;
+5. **chunks:** patch, hash and write, as above;
+6. **finish:** lane 0 hashes the chunks' hashes, writes the build ID and
+   closes the file.
+
+`benchmark-executable` writes generated programs of about hello world's, the
+test defaults', tcc's and synth's sizes. Medians in µs on the 9700X, the output
+on tmpfs, in place / as a new file, with one lane per core, against the floor
+(one `pwrite` of the same bytes from memory, opened and closed):
+
+| Program (file) | 1 lane | 2 lanes | 4 lanes | 8 lanes | Floor |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 worker (3.9 KB) | **2.4 / 3.6** | 3.1 / 4.8 | 5.2 / 5.2 | 7.1 / 7.5 | 0.6 / 1.4 |
+| 64 workers (16 KB) | **4.7 / 6.5** | 6.1 / 7.5 | 6.7 / 8.2 | 6.7 / 9.2 | 0.8 / 2.3 |
+| 2,000 workers (397 KB) | 69 / 86 | 48 / 71 | 45 / 70 | **44 / 62** | 8.4 / 24 |
+| 180,000 workers (35.5 MB) | 8,480 / 9,830 | 4,940 / 5,590 | 4,290 / 5,780 | **4,000 / 5,550** | 2,550 / 4,200 |
+
+The largest has 184,531 atoms and 2.16 million fixups in 136 chunks. Its
+phases in place, µs:
+
+| Lanes | count | layout | symbols | open | chunks | finish |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 794 | 511 | 574 | 6.6 | 6,592 | 2.3 |
+| 8 | 300 | 107 | 63 | 6.5 | 3,533 | 2.5 |
+
+On btrfs (`/home`), the 397 KB program takes 105 / 107 µs on one lane and
+71 / 92 on eight (floor 43 / 42), and the 35.5 MB one 11.4 / 11.3 ms and
+6.4 / 7.1 (floor 5.5 / 5.7).
+
+- **Small programs pay fixed costs.** The 3.9 KB one spends 0.7 µs in the
+  three phases before the file, 0.5 µs opening it (1.5 µs creating it),
+  0.9 µs on its one chunk and 0.3 µs closing it, where one `pwrite` of the file
+  costs 0.6. For it and the 16 KB one, more lanes cost more than they save:
+  their syncs and parts outweigh the work. From 397 KB they pay.
+- **Large programs pay for memory.** On one lane, 35.5 MB takes 3.3 times the
+  floor in place: 3.7 ms of patching, the write, and 1.9 ms of count, layout
+  and symbols, loops over atoms, fixups and symbols whose columns come from
+  DRAM. On eight lanes it takes 1.6 times the floor, and the chunks are
+  DRAM-bound: the patching reads 35 MB of code and 28 MB of fixup columns and
+  writes the code back, and the page cache takes its copy.
+- **The count phase reads every fixup** for the GOT's targets and the largest
+  addend. Step 5's binding knows the imports before any code is selected, so
+  the GOT can be sized before the code exists, as "Layout" says, and the
+  addends' bound can come from the code generator.
 
 #### Synthetic sections
 
@@ -1464,27 +1654,29 @@ Zen 5's numbers for the instructions in question:
 | `vpscatterdq` (8 qwords) | 9 | |
 | `vpcompressb` to memory | 3 | Zen 4's is microcoded at 168 |
 
-Patching `PC32` fields, ns per fixup on CPU 2:
+Patching `PC32` fields, ns per fixup on CPU 2 (`benchmark-executable`, which
+keeps every variant and checks each one's bytes against the kernel's):
 
 | Variant | 64 KB, 2,000 fixups, 10,000 targets | 1 MB, 30,000, 100,000 | 64 MB, 2 M, 1 M |
 | --- | ---: | ---: | ---: |
-| scalar, 64-bit targets | 0.55 | 0.79 | 1.44 |
-| gather (8), scalar stores | 0.45 | 0.60 | 1.37 |
-| gather (8), scatter | 1.20 | 1.30 | 1.89 |
-| scalar, 32-bit targets | **0.39** | 0.56 | 1.36 |
-| gather (16), scatter, 32-bit | **0.37** | **0.52** | 1.42 |
+| scalar, 64-bit targets | 0.54 | 0.78 | 1.44 |
+| gather (8), scalar stores | 0.42 | 0.59 | **1.38** |
+| gather (8), scatter | 0.70 | 0.92 | 1.77 |
+| scalar, 32-bit targets (`executable_patch_pc32`) | **0.37** | **0.53** | 1.40 |
+| gather (16), scatter, 32-bit | 0.38 | **0.53** | 1.45 |
 
 Gathers win back about 20% when targets are 64-bit. With 32-bit image offsets
-the scalar loop is as fast as anything, and scatters lose everywhere. The
-kernel stays scalar with 32-bit targets, and the variants stay in the
-benchmark.
+the scalar loop is as fast as anything, and scatters tie or lose. The kernel
+stays scalar with 32-bit targets, and the variants stay in the benchmark. (The
+first measurements, in a harness before the representation, had the 8-wide
+scatter at 1.20–1.89 ns.)
 
 Where the decisions stand:
 
 | Work | Bound by | Decision |
 | --- | --- | --- |
 | Encoding instructions | dependency chains (see the encoder document) | AVX-512 (done: 0.64 ns per instruction) |
-| Patching fixups | loads and stores | scalar, 32-bit targets (measured above) |
+| Patching fixups | loads and stores | scalar, 32-bit targets (done: `executable_patch_pc32`, measured above) |
 | ELF records (`Rela`, `Sym`, dynamic tables) | stores | scalar (measured: ties the `vpermt2q` transpose) |
 | Copying chunks | bandwidth | `memcpy`; the chunks stay in L2 |
 | Hashing names | arithmetic | vectorized, one name per masked load, several in flight |
@@ -1492,7 +1684,7 @@ Where the decisions stand:
 | Decoding and classifying relocations | shuffles and tables | `vpermt2q` transpose, `vpermb` classification, `vpcompressd` lists |
 | Bitsets (liveness, GOT needs) | bandwidth | 512-bit OR, `vpopcntq` for counts |
 | Prefix sums for layout | latency | scalar until a profile says otherwise |
-| Build ID | arithmetic | a vector hash on each chunk while it is in L2 |
+| Build ID | arithmetic | AES rounds on each chunk while it is in L2 (done: 260 GB/s, as fast as reading it; "Patching and writing") |
 | Probing hash tables | memory latency | scalar loads with software prefetch: gathers measured no faster than scalar loads in the patch kernel |
 
 So on the direct path, most of the output is produced by a vector kernel that
@@ -1553,11 +1745,21 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
   - a definition a shared library refers to is exported;
   - a local-exec TLS reference in an object is a `TPOFF32`, not a frozen
     offset.
-- **The patch kernel:** every variant against the scalar reference, at every
-  count around a group's size, between `PROT_NONE` guard pages as the lexer's
-  and the encoder's tests place their buffers.
+- **The patch kernel:** its fast path against the checked one, on random
+  fixups of every kind with wide addends among them, at every count from 0 to
+  199, with the kind column ending at a `PROT_NONE` page, as the lexer's and
+  the encoder's tests place their buffers (`test-executable`). The benchmark
+  checks every variant's bytes against the kernel's.
+- **The direct path's executables:** `test-executable` writes test-link's
+  static programs and runs them, checks every field against its kind's
+  arithmetic, the GOT's slots, the headers against lld's layout, the chunk
+  boundaries and the build ID, and the output file's cases (in place, created,
+  renamed over a running program, another link or a symbolic link, and
+  removed when the link fails).
 - **Lane counts:** each phase with 1, 2, 3 and 8 lanes, outputs compared byte
-  for byte.
+  for byte. `test-executable` writes every program so, each time from zeroed
+  fields over the last file scribbled over, so that a lane that skipped a
+  field or a chunk shows.
 - **Foreign links,** against lld and mold on the inputs above and a larger
   corpus: same exit status and output when run, the same set of symbols with
   the same sizes, and `readelf` checks of the dynamic section, versions and
@@ -1625,7 +1827,9 @@ and with this document updated with what was measured:
    compiler's state goes through. Linking libc needs step 5's runtime
    snapshot, so the first executables are static ones whose `_start` makes
    system calls, with no libc or crt objects. Done when the tests' programs
-   run.
+   run. Done: `executable.c`, `test-executable` and `benchmark-executable`
+   ("The first executables"): the tests' programs run, written byte for byte
+   alike by 1, 2, 3 and 8 lanes.
 5. **The runtime snapshot and the dynamic PIE:** the direct path for programs
    that call libc: binding, GOT, RELR, versions, the snapshot's validation and
    rebuild. Done when generated programs that call libc run, match their
