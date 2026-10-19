@@ -13,9 +13,12 @@
 //     c_identifier_start_ranges and c_identifier_continue_ranges for non-ASCII identifiers.
 //   - Scalar lexer: ScalarLexer, get_char_slow, get_char and peek_char (line splices and trigraphs), the lex_*
 //     functions, c_tokenize_scalar_range (a line range, used by c_tokenize) and c_tokenize_scalar.
-//   - Vectorized lexer: the U64x8 bitstring helpers, classify (Phase I), ChunkTokens and write_chunk (Phase III),
-//     tokenize_chunks (Phase II, with the BUSTER_LEX_CHUNK_BYTES chunk loop), tokenize_c and tokenize_cpp,
-//     c_tokenize_vectorized and c_tokenize.
+//   - Vectorized lexer: the U64x8 bitstring helpers, the vector helpers (perm2b, shift_in_previous), the source
+//     checks it calls on rare paths (is_raw_string_quote, is_literal_suffix, contains_trigraph), load_lane, the
+//     masks, State and needs_scalar, property_masks and transpose_property_masks (the GFNI property transposition),
+//     classify (Phase I), scan_lines (the delimiter scan), skip_leading_comments, ChunkTokens and write_chunk
+//     (Phase III), tokenize_chunks (Phase II, with the BUSTER_LEX_CHUNK_BYTES chunk loop), tokenize_c and
+//     tokenize_cpp, c_tokenize_vectorized and c_tokenize.
 //
 // Origin: a single-file version of the C lexer from https://github.com/davidgmbb/Accelerated-Zig-Parser
 // (c/c_tokenizer.h, c/c_tokenizer_tables.h, c/c_tokenizer_unicode.h, c/c_tokenizer_scalar.c and c/c_tokenizer.c at
@@ -414,7 +417,7 @@ static __attribute__((unused)) const char* c_token_kind_name(uint8_t kind);
 #endif
 #if !(defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512VBMI__) && \
       defined(__AVX512VBMI2__) && defined(__AVX512VPOPCNTDQ__) && defined(__GFNI__) && defined(__BMI2__))
-#error "c_lexer.c needs AVX-512 F/BW/VL/VBMI/VBMI2/VPOPCNTDQ, GFNI and BMI2 (build on Zen 5)"
+#error "c_lexer.c needs AVX-512 F/BW/VL/VBMI/VBMI2/VPOPCNTDQ, GFNI and BMI2 (Zen 4 and later, Intel since Ice Lake)"
 #endif
 
 #include <immintrin.h>
@@ -2442,9 +2445,11 @@ BUSTER_INLINE Scan scan_lines(U64x8 cursors, State state, U64x8 line_break, U64x
     return result;
 }
 
-// Leading comments cannot produce tokens or change the first token's start-of-line flag.
-// Stop at a backslash: translation-phase splices need the general lexer. Only commit
-// complete comments, keeping malformed comments and whitespace-only prefixes unchanged.
+// Leading comments cannot produce tokens or change the first token's start-of-line flag: `begin` is the start of the
+// source (after a byte order mark) or of a logical line, where c_tokenize resumes after the scalar lexer. Stop at a
+// backslash: translation-phase splices need the general lexer. (With C_TOKENIZER_TRIGRAPHS, a source with a trigraph
+// never gets here, so "??/" can't splice a comment either.) Only commit complete comments, keeping malformed comments
+// and whitespace-only prefixes unchanged.
 static uint64_t skip_leading_comments(const uint8_t* source, uint64_t length, uint64_t begin)
 {
     uint64_t result = begin;
