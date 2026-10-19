@@ -20,11 +20,12 @@
 //   - Wide addends: addends around int32's limits, directly and through an instruction's distance to its end, to the
 //     side table exactly when they don't fit.
 //   - Programs: link_program_generate with several options (the defaults, the smallest, many units, no absolute
-//     addresses, and --functions workers without sizes), which link_check accepts. Each is generated twice from its seed, byte for
-//     byte the same, and differently from another seed; and run: laid out in memory as a static executable would be
-//     (link_test_load: atoms in class order, a GOT, the TLS segment, every fixup patched), started in a child process
-//     with an initial stack and auxiliary vector as the kernel's, it must exit with status 0 having written
-//     LinkProgram.output. A copy with one fixup's addend off by 8 must write something else.
+//     addresses, and --functions workers without sizes), which link_check accepts. Each is generated twice from its
+//     seed, byte for byte the same, and differently from another seed; and run: laid out in memory as a static
+//     executable would be (link_test_load: atoms in class order, a GOT, the TLS segment, every fixup patched), started
+//     in a child process with an initial stack and auxiliary vector as the kernel's, it must exit with status 0 having
+//     written LinkProgram.output. The defaults' program and the one with many units have every class and every kind,
+//     and a copy with the hexadecimal digits' fixup one byte off must write something else.
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, the round trips, the capacity and rules checks, the known fixups and the kinds
@@ -42,8 +43,11 @@
 #include <sys/wait.h>
 
 #define BUSTER_LINK_TEST_REPORTED 3
-// 2^64 divided by the golden ratio: the multiplier that turns --seed N into a state.
+// splitmix64's increment, and what each check's sequence starts from, scrambled with --seed N (link_program_scramble,
+// so that nearby seeds don't share a sequence).
 #define BUSTER_LINK_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
+#define BUSTER_LINK_TEST_ROUND_TRIPS_STREAM 0x5851F42D4C957F2Dull
+#define BUSTER_LINK_TEST_KINDS_STREAM 0x2545F4914F6CDD1Dull
 #define BUSTER_LINK_TEST_ARENA_BYTES (1ull << 30)
 // The streams of known fixups: each length of marked instructions, around x86_encode's groups of 16 and its iterations
 // of 64.
@@ -170,7 +174,7 @@ static bool link_test_round_trips(uint64_t seed)
     LinkTestTally tally = {
         .check = "round trips",
     };
-    uint64_t state = seed * BUSTER_LINK_TEST_GOLDEN_RATIO + 2;
+    uint64_t state = link_program_scramble(seed ^ BUSTER_LINK_TEST_ROUND_TRIPS_STREAM);
     LinkTestArenas arenas = link_test_reserve();
     Scratch scratch = scratch_begin(0);
     const LinkCapacity capacity = {
@@ -919,7 +923,7 @@ static bool link_test_kinds(uint64_t seed)
     LinkTestTally tally = {
         .check = "kinds",
     };
-    uint64_t state = seed * BUSTER_LINK_TEST_GOLDEN_RATIO + 3;
+    uint64_t state = link_program_scramble(seed ^ BUSTER_LINK_TEST_KINDS_STREAM);
     LinkTestArenas arenas = link_test_reserve();
     Scratch scratch = scratch_begin(0);
     const uint32_t known_count = BUSTER_ARRAY_LENGTH(link_test_known_fixups);
@@ -1365,7 +1369,8 @@ static bool link_test_wide(void)
 // A program laid out in memory as a static executable at a fixed address would be, by link_test_load: three segments,
 // each from a page boundary: R (RODATA and STRINGS), RX (TEXT) and RW (the TLS image, INIT_ARRAY, FINI_ARRAY,
 // DATA_RELRO, the GOT, DATA, BSS, and the program headers), atoms in class order and id order within a class, each at
-// its alignment. Below 2 GB (MAP_32BIT), so that ABS32 and ABS32S fit.
+// its alignment. At a non-PIE executable's usual address, BUSTER_LINK_TEST_IMAGE_ADDRESS, or if something is mapped
+// there, wherever MAP_32BIT puts it (a 1 GB window); either way below 2 GB, so that ABS32 and ABS32S fit.
 typedef struct LinkTestImage LinkTestImage;
 struct LinkTestImage
 {
@@ -1380,6 +1385,8 @@ struct LinkTestImage
 
 #define BUSTER_LINK_TEST_PAGE_BYTES 4096
 #define BUSTER_LINK_TEST_HEADERS 3
+#define BUSTER_LINK_TEST_IMAGE_ADDRESS 0x400000ull
+#define BUSTER_LINK_TEST_IMAGE_LIMIT (1ull << 31)
 
 static uint64_t link_test_align(uint64_t value, uint64_t alignment)
 {
@@ -1495,8 +1502,17 @@ static bool link_test_load(const Link* link, SymbolId entry, Arena* arena, LinkT
         headers = link_test_align(cursor, 8);
         cursor = headers + BUSTER_LINK_TEST_HEADERS * sizeof(Elf64_Phdr);
         image->size = link_test_align(cursor, BUSTER_LINK_TEST_PAGE_BYTES);
-        image->base = mmap(0, image->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
-        result = image->base != MAP_FAILED;
+        const int protection = PROT_READ | PROT_WRITE;
+        image->base = mmap((void*)BUSTER_LINK_TEST_IMAGE_ADDRESS, image->size, protection, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        if (image->base == MAP_FAILED)
+        {
+            image->base = mmap(0, image->size, protection, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+        }
+        result = image->base != MAP_FAILED && (uint64_t)image->base + image->size <= BUSTER_LINK_TEST_IMAGE_LIMIT;
+        if (!result && image->base != MAP_FAILED)
+        {
+            munmap(image->base, image->size);
+        }
         image->base = result ? image->base : 0;
         image->problem = result ? 0 : "the image can't be mapped below 2 GB";
     }
@@ -1687,7 +1703,7 @@ static void link_test_start(const LinkTestImage* image, int output)
     };
     memcpy(top, initial, sizeof(initial));
     alarm(BUSTER_LINK_TEST_RUN_SECONDS);
-    __asm__ volatile("mov %0, %%rsp\n\txor %%edx, %%edx\n\tjmp *%1" : : "r"(top), "r"(image->entry) : "memory");
+    __asm__ volatile("mov %0, %%rsp\n\txor %%edx, %%edx\n\tjmp *%1" : : "r"(top), "r"(image->entry) : "rdx", "memory");
     __builtin_unreachable();
 }
 
@@ -1873,15 +1889,36 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
                    options[i].functions, program.link.atoms.count - 1, program.link.fixups.count - 1, program.link.fixups.wide_count - 1,
                    (unsigned long long)program.code_bytes, ran ? "ran" : "failed", other_ran ? "ran" : "failed");
         }
-        // buster_globals' first pointer, 8 bytes off.
+        // Every class and every kind, with the options that have them all.
+        if (generated && (i == 0 || i == 2))
+        {
+            uint32_t classes = 0;
+            uint32_t kinds = 0;
+            for (AtomId atom = 1; atom < program.link.atoms.count; atom += 1)
+            {
+                classes |= 1u << program.link.atoms.class[atom];
+            }
+            for (FixupId fixup = 1; fixup < program.link.fixups.count; fixup += 1)
+            {
+                kinds |= 1u << (program.link.fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND);
+            }
+            link_test_expect(&tally, classes == (1u << BUSTER_LINK_CLASS_COUNT) - 2 && kinds == (1u << BUSTER_LINK_FIXUP_KINDS) - 2, "every class and every kind", i);
+        }
+        // The lea of the hexadecimal digits in buster_write_hex, one byte off, which changes every digit printed.
         if (generated && i == 0)
         {
             FixupId broken = 0;
             for (SymbolId symbol = 1; symbol < program.link.symbols.count; symbol += 1)
             {
-                broken = link_test_named(&program.link, symbol, "buster_globals") ? program.link.atoms.fixup_begin[program.link.symbols.atom[symbol]] : broken;
+                const AtomId atom = program.link.symbols.atom[symbol];
+                for (uint32_t j = 0; link_test_named(&program.link, symbol, "buster_write_hex") && j < program.link.atoms.fixup_count[atom]; j += 1)
+                {
+                    const FixupId fixup = program.link.atoms.fixup_begin[atom] + j;
+                    const AtomId target = program.link.symbols.atom[program.link.fixups.target[fixup]];
+                    broken = program.link.atoms.class[target] == BUSTER_LINK_CLASS_STRINGS ? fixup : broken;
+                }
             }
-            program.link.fixups.addend[broken] += 8;
+            program.link.fixups.addend[broken] += 1;
             link_test_expect(&tally, broken != 0 && link_test_runs_otherwise(&program, program.output), "a broken fixup changes the output", broken);
         }
         link_program_release(&program);

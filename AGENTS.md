@@ -331,7 +331,8 @@ informational.
   fixed address (`link_test_load`, which patches every kind and is the
   reference for the direct path's patch kernel), run in a child process, and
   must exit with status 0 having printed the output the generator's model
-  predicts. A copy with one fixup 8 bytes off must print something else.
+  predicts. Two of them must have every class and every kind, and a copy with
+  the hexadecimal digits' fixup one byte off must print something else.
 
 `--seed N` changes the random records and programs. The programs check is
 what scales: `--functions 1000000` builds three programs of a million workers

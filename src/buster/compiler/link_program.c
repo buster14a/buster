@@ -27,8 +27,9 @@
 //     depth 1 calls another worker directly (CALL), one through the GOT (CALL_GOT) and buster_mix (CALL), each with
 //     depth 0.
 //   - Globals g_N and thread-locals t_N (unit N % units): 8 bytes, or 16 aligned to 16 (an over-aligned object, padded
-//     to a multiple of its alignment), with random initial values (DATA, TDATA) or zero (BSS, TBSS). The first of each
-//     is GLOBAL, and of the others, a quarter are LOCAL, which only their own unit refers to.
+//     to a multiple of its alignment), with random initial values (DATA, TDATA) or zero (BSS, TBSS): the first of each
+//     has a value and the second is zero. The first of each is GLOBAL, and of the others, a quarter are LOCAL, which
+//     only their own unit refers to.
 //   - init_N and fini_N (LOCAL, unit N % units) add a constant to a global; their unit's INIT_ARRAY or FINI_ARRAY atom
 //     lists them (ABS64).
 //   - A string pool per unit (STRINGS), in which each string is a LOCAL symbol without a name. Unit 0's starts with the
@@ -37,8 +38,9 @@
 //     and buster_globals (DATA_RELRO, ABS64; buster_globals' last entries point into buster_constants, with addends),
 //     buster_relative (DATA_RELRO, PC64), buster_far (DATA, ABS64 with addends past 2^32, which go to the side table
 //     and which buster_main subtracts again), buster_tls_area and buster_output (BSS).
-// Every class but NONE appears, and every fixup kind: ABS32, ABS32S and ABS64 in code only with absolute addresses,
-// and SIZE32 and SIZE64 only with sizes.
+// Every class but NONE appears given two thread-locals, an init function and a fini function (as with the defaults),
+// and every fixup kind: ABS32, ABS32S and ABS64 in code only with absolute addresses, and SIZE32 and SIZE64 only with
+// sizes.
 // LinkProgram.output comes from a model of the program that link_program_generate runs: the same arithmetic in C, on
 // the same random choices.
 //
@@ -138,7 +140,7 @@ static __attribute__((unused)) void link_program_release(LinkProgram* program);
 #define BUSTER_LINK_PROGRAM_INT3 0xcc
 // What the thread pointer has above it in buster_tls_area: its own address, in the first 8 bytes.
 #define BUSTER_LINK_PROGRAM_TCB_BYTES 64
-// splitmix64's increment, and the multiplier that turns a seed into a first state.
+// splitmix64's increment.
 #define BUSTER_LINK_PROGRAM_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
 
 // The filler instructions' operations on the accumulator: add and xor with an imm32, rotate left by an imm8 and
@@ -181,7 +183,8 @@ struct LinkProgramWorker
     uint32_t filler_count;
 };
 
-// A global or a thread-local.
+// A global or a thread-local. The first of each has a value and is global, and the second is zero, so that DATA and
+// BSS, and with two thread-locals TDATA and TBSS, all have atoms.
 typedef struct LinkProgramVariable LinkProgramVariable;
 struct LinkProgramVariable
 {
@@ -227,14 +230,20 @@ struct LinkProgramPlan
     uint32_t tls_area_bytes;
 };
 
-// splitmix64.
-static uint64_t link_program_random(uint64_t* state)
+// splitmix64's finalizer.
+static uint64_t link_program_scramble(uint64_t x)
 {
-    *state += BUSTER_LINK_PROGRAM_GOLDEN_RATIO;
-    uint64_t x = *state;
     x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
     x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
     return x ^ (x >> 31);
+}
+
+// splitmix64, whose sequence for a seed starts from the scrambled seed: starting from the seed times the increment
+// would make seed s + 1's sequence seed s's without its first number.
+static uint64_t link_program_random(uint64_t* state)
+{
+    *state += BUSTER_LINK_PROGRAM_GOLDEN_RATIO;
+    return link_program_scramble(*state);
 }
 
 // A number from 0 to bound - 1.
@@ -262,9 +271,12 @@ static void link_program_plan_variables(uint64_t* state, LinkProgramVariable* va
 {
     for (uint32_t i = 0; i < count; i += 1)
     {
+        // The first has a value that isn't 0 and the second is zero; a third of the others are zero.
         const uint32_t kind = link_program_below(state, 24);
+        const bool zero = i == 1 || (i > 1 && kind < 8);
+        const uint64_t value = link_program_random(state) | (i == 0 ? 1 : 0);
         variables[i] = (LinkProgramVariable){
-            .value = kind < 8 ? 0 : link_program_random(state),
+            .value = zero ? 0 : value,
             .local = i != 0 && link_program_below(state, 4) == 0,
             .alignment_log2 = kind % 8 == 7 ? 4 : 3,
         };
@@ -277,7 +289,7 @@ static bool link_program_plan(LinkProgramPlan* plan, Arena* arena, LinkProgramOp
     static const uint8_t hexadecimal_digits[] = "0123456789abcdef";
     const uint32_t units = options.units;
     const uint32_t hooks = options.init_functions + options.fini_functions;
-    uint64_t state = options.seed * BUSTER_LINK_PROGRAM_GOLDEN_RATIO + 1;
+    uint64_t state = link_program_scramble(options.seed);
     *plan = (LinkProgramPlan){
         .options = options,
         .string_count = 1 + units * options.strings,
@@ -556,6 +568,8 @@ struct LinkProgramCode
     uint32_t reference_count;
     uint32_t branch_count;
     uint32_t label_count;
+    // How many instructions have BUSTER_X86_FORM_FIXUP.
+    uint32_t marked;
 };
 
 // What generating a program works with: the program, the plan, the function being built and the symbols' ids. The
@@ -672,6 +686,7 @@ static void link_program_begin(LinkProgramCode* code)
     code->reference_count = 0;
     code->branch_count = 0;
     code->label_count = 0;
+    code->marked = 0;
 }
 
 static void link_program_add(LinkProgramCode* code, X86Instruction instruction)
@@ -693,6 +708,7 @@ static void link_program_refer(LinkProgramCode* code, X86Instruction instruction
         .addend = addend,
     };
     code->reference_count += 1;
+    code->marked += 1;
     link_program_add(code, instruction);
 }
 
@@ -757,7 +773,7 @@ static bool link_program_finish(LinkProgramBuilder* builder, uint32_t unit, Symb
         memset(output + length, BUSTER_LINK_PROGRAM_INT3, padded - (uint64_t)length);
         arena_pop_to(&program->bytes, (uint64_t)(output - program->bytes.base) + padded);
         const AtomId atom = link_add_atom(&program->link, BUSTER_LINK_CLASS_TEXT, BUSTER_LINK_PROGRAM_FUNCTION_ALIGNMENT_LOG2, padded, output, unit);
-        result = atom != 0 && link_add_code_fixups(&program->link, atom, code->instructions, count, code->fixup_ends, code->reference_count, code->references,
+        result = atom != 0 && link_add_code_fixups(&program->link, atom, code->instructions, count, code->fixup_ends, code->marked, code->references,
                                                    code->reference_count) &&
                  link_define_symbol(&program->link, symbol, atom, 0, (uint64_t)length);
         program->instructions += count;

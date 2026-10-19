@@ -1513,9 +1513,10 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
   call each other directly and through the GOT, read globals directly and
   through the GOT, use local-exec and initial-exec TLS, and read string
   literals. Their data holds pointers, wide addends among them. Every class
-  and every fixup kind appears, but options leave out the absolute ones (for a
-  PIE) and `SIZE32` and `SIZE64` (wild 0.10 refuses them, as linking each kind
-  with GNU ld, lld, mold and wild on the 9700X showed). The program prints a
+  appears given two thread-locals, an init function and a fini function, and
+  every fixup kind, but options leave out the absolute ones (for a PIE) and
+  `SIZE32` and `SIZE64` (wild 0.10 refuses them, as linking each kind with GNU
+  ld, lld, mold and wild on the 9700X showed). The program prints a
   checksum of what it read, which a model of it predicts. The sizes come from
   options and the rest from a seed, so a benchmark can scale them up.
   `test-link` lays them out in memory as a static executable at a fixed
