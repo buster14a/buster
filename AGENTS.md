@@ -48,6 +48,9 @@ or infrastructure machinery merely to match its style.
   `x86_64_encoder_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-x86-encoder` runs them) and
   `x86_64_encoder_benchmark.c` provides `benchmark-x86-encoder`.
+- `docs/object-writer-and-linker.md` is the design of the object writer and the
+  linker, with the 9700X measurements of mold, wild, lld and the kernel's file
+  costs behind it, and the order to build it in. None of it is implemented yet.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
