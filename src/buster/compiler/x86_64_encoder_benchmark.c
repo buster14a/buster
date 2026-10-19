@@ -266,11 +266,15 @@ static void x86_benchmark_decorations(uint64_t* state, const X86FormDescription*
     }
 }
 
-// An immediate for the form: small, as most are.
+// An immediate for the form: small, as most are, or an /is4 register.
 static int32_t x86_benchmark_immediate(uint64_t* state, const X86FormDescription* form)
 {
     int32_t result = 0;
-    if (form->immediate_bytes == 1)
+    if (x86_form_has_is4(form))
+    {
+        result = (int32_t)x86_benchmark_below(state, 16) << 4;
+    }
+    else if (form->immediate_bytes == 1)
     {
         result = (int32_t)x86_benchmark_below(state, 128);
     }
