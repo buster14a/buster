@@ -125,6 +125,22 @@ Two variants of the same measurement:
 | synth | 105.6 | 96.4 | 139.9 | 65.6 | 66.1 | 34.3 |
 | synth, `-g` | 161.7 | 143.5 | 233.3 | 90.1 | 106.7 | 68.5 |
 
+**Matching the options.** The direct path's executables bind at load time and
+keep every section, and wild's guide recommends giving every linker the same
+options. With `-z now --no-gc-sections` added to every link above, no median
+moved by more than 5%:
+
+| Run | Default options | Matched options |
+| --- | ---: | ---: |
+| hello, mold | 5.35 | 5.32 |
+| hello, wild | 2.58 | 2.52 |
+| synth, mold | 37.9 | 38.0 |
+| synth, wild | 25.4 | 25.9 |
+| hello, mold, one thread | 2.43 | 2.44 |
+| hello, wild, one thread | 1.27 | 1.34 |
+
+The full table is in the appendix, with the exact commands.
+
 For scale, tinycc, a compiler that links its own output, takes:
 
 - 1.03 ms to compile and link hello world;
@@ -172,10 +188,15 @@ wild takes 140 ms with one thread (ms):
 | layout | 41 | finding required sections 28.7 |
 | writing | 64.7 | writing data 58 |
 
-The mold paper (arXiv 2608.23228) reports the same shape at scale. With one
-thread, mold links Firefox's debug build (2.47 GiB) in 12.18 s, of which
-copying and applying relocations take 5.18 s (about 0.5 GB/s, §7.3, Table 8).
-Its multi-thread speedups come from running those passes in parallel over
+The mold paper (arXiv 2608.23228) reports the same shape at scale:
+
+- **One thread:** mold links Firefox's debug build (2.47 GiB) in 12.2 s
+  (§7.3, Table 7).
+- **One pass on one thread:** its ablation runs each pass on one thread while
+  the others stay parallel (§7.4, Table 8). Copying and applying relocations
+  then take 5.18 s, about 0.5 GB/s, against 0.24 s in parallel.
+
+Its multi-thread speedups come from running every pass in parallel over
 homogeneous arrays, with copying fused with relocation (§3, §4.10).
 
 ## The floors
@@ -363,9 +384,9 @@ several, and several definitions can compete for one name. Columns:
 | `flags` | binding, visibility, type |
 | `source` | where it is defined: program, runtime shared library, runtime archive member, foreign object, foreign shared library, or the linker |
 | `got_slot`, `dynamic_index`, `version` | its GOT slot, `.dynsym` index and version |
-| `image_offset` | after layout |
+| `reference` | after layout: what code that refers to it uses (its address, its GOT slot's for an import, its offset in the TLS block for a TLS variable) |
 
-`image_offset` is the only column the patch kernel reads. It is 32-bit,
+`reference` is the only symbol column the patch kernel reads. It is 32-bit,
 because a small-code-model image (everything a PC32 field can reach) is under
 2 GiB, and the measured 32-bit kernel is the fastest (see "SIMD").
 
@@ -379,22 +400,38 @@ atom and offset, 13 bytes each in columns:
 | `addend` | 32-bit, relative to the field |
 | `kind` | 8-bit, from the table below |
 
-The semantic decisions (direct or through the GOT, which TLS model, whether a
-dynamic relocation is needed) are made before a fixup exists. A GOT reference
-targets the slot's own symbol, so by the time the patch kernel runs, every
-fixup is one of a few arithmetic forms against final addresses:
+A fixup keeps what the reference means: the symbol it names, never a GOT slot
+or an offset worked out in advance, and a kind that says how the instruction or
+the data reaches it. The object writer needs exactly that to pick an ELF
+relocation, and an executable's patch kernel derives its arithmetic from it:
 
-| Kind | Value | Field |
-| --- | --- | --- |
-| `PC32` | S + A − P | 4 bytes, checked to fit in int32 |
-| `PC64` | S + A − P | 8 bytes (unwind tables) |
-| `ABS64` | S + A | 8 bytes; in a PIE also a relative relocation, or a symbolic one against an import |
-| `ABS64_WIDE` | S + A | the same, with a 64-bit A from a side table (`(char*)&x + 0x100000000`, which C allows and almost nothing writes) |
-| `ABS32`, `ABS32S` | S + A | 4 bytes, zero- or sign-extension checked (non-PIE only) |
-| `SIZE32`, `SIZE64` | size of S + A | 4 or 8 bytes |
+| Kind | Where | Relocation in an object | Value in an executable |
+| --- | --- | --- | --- |
+| `CALL` | `call` or `jmp rel32` | `R_X86_64_PLT32` | S + A − P |
+| `CALL_GOT` | `call` or `jmp [rip + slot]` (`ff 15`, `ff 25`) | `R_X86_64_GOTPCRELX` | G + A − P |
+| `LOAD_GOT` | `mov reg, [rip + slot]` | `R_X86_64_REX_GOTPCRELX`, or `R_X86_64_GOTPCRELX` without REX | G + A − P, or, when S turns out to be local, S + A − P with `mov` rewritten to `lea` |
+| `PC32` | any other RIP-relative operand | `R_X86_64_PC32` | S + A − P, checked to fit in int32 |
+| `TPOFF32` | `fs:[x@tpoff]` (local-exec) | `R_X86_64_TPOFF32` | S's offset from the end of the TLS block + A |
+| `GOTTPOFF` | `mov reg, [rip + x@gottpoff]` (initial-exec) | `R_X86_64_GOTTPOFF` | G + A − P, with a `TPOFF64` for the slot |
+| `ABS64` | 8 bytes of data | `R_X86_64_64` | S + A, and in a PIE a relative relocation (a symbolic one for an import) |
+| `PC64` | 8 bytes (unwind tables) | `R_X86_64_PC64` | S + A − P |
+| `ABS32`, `ABS32S` | 4 bytes, non-PIE only | `R_X86_64_32`, `R_X86_64_32S` | S + A, zero- or sign-extension checked |
+| `SIZE32`, `SIZE64` | 4 or 8 bytes | `R_X86_64_SIZE32`, `R_X86_64_SIZE64` | the size of S + A |
 
-Most fixups (all calls and RIP-relative references) are `PC32`, so the kernel's
-loop is built for them, and the others go in a separate, short loop.
+G is the address of S's GOT slot.
+
+**Wide addends.** Any kind can carry a 64-bit addend: a bit in `kind` sends
+the patch to a side table that holds it. Initializers like
+`(char*)&x + 0x100000000` need it, and so do foreign `R_X86_64_PC64` and
+`R_X86_64_64` relocations with large addends, which GNU as and ld accept.
+The common case stays 13 bytes.
+
+In an executable, every code reference to a symbol goes the same way: directly
+for the program's, through the slot for an import. So the kernel reads one
+32-bit column per symbol, `reference`, and the kind chooses only the
+arithmetic and the width. Most fixups are `CALL`, `CALL_GOT` and `PC32`, the
+same S + A − P on a 4-byte field. The loop is built for those, and the others
+go in a separate, short loop.
 
 Fixups use 0.4 bytes per byte of code at the measured density.
 
@@ -443,9 +480,11 @@ measure against each other:
   marked lanes, stored to the fixup list. On Zen 5 that is one more FP1/FP2
   µop per group plus a store, where Zen 4's memory compress is microcoded.
 
-A reference whose value doesn't depend on where anything is placed is filled
-in before encoding and never becomes a fixup: a local-exec TLS offset, fixed by
-the TLS block's layout, and a branch within the function.
+Only a branch within the function is filled in before encoding. A local-exec
+TLS offset is known as soon as the program's TLS block is laid out, but it
+stays a fixup (`TPOFF32`): an object written from the same encoded state has
+to leave it to the linker that combines it with other objects' TLS. With the
+offset frozen, the object would read another variable's storage.
 
 Three rules for the encoder's side:
 
@@ -510,8 +549,8 @@ What follows from this:
 - **Function pointers compare equal everywhere:** a pointer to `puts` is
   libc's own address, loaded from the slot.
 - **Thread-local variables** the program defines use local-exec (`mov rax,
-  qword ptr fs:[offset]`), whose offset is fixed once the TLS block is laid
-  out, before encoding. Imported ones, rare in C (libc's `errno` goes through
+  qword ptr fs:[offset]`), whose `TPOFF32` fixup is patched once the TLS block
+  is laid out. Imported ones, rare in C (libc's `errno` goes through
   `__errno_location`), use initial-exec through a GOT slot with a `TPOFF64`
   dynamic relocation.
 
@@ -522,9 +561,16 @@ Duplicate strong definitions are an error. With `-fno-common` (the default
 since GCC 10), tentative definitions are definitions, so duplicates of those
 are too. A weak definition loses to a strong one.
 
-**Interposition.** When the program defines a name that libc.so.6 also exports
-(its own `malloc`), the program's symbol goes into `.dynsym`. libc's own
-references then bind to it, as GNU ld and lld arrange.
+**Exports.** A program definition goes into `.dynsym` and `.gnu.hash`, even
+without `-rdynamic`, when a shared library in the link:
+
+- defines the same name: the program's own `malloc` then interposes libc's, and
+  libc's references bind to it;
+- refers to it: a callback that a library calls, which the loader would
+  otherwise report as undefined.
+
+GNU ld and lld export both kinds, so the snapshot records each shared
+library's undefined names as well as its definitions.
 
 **Classify early, or relax later.** Foreign objects in the same link are
 imported first, so their definitions are known before instruction selection.
@@ -558,7 +604,8 @@ it once and keeps the result in a snapshot under `$XDG_CACHE_HOME/buster/`.
   (`frame_dummy`), and weak undefined references (`__gmon_start__`, the
   `_ITM_*` clone table functions) that resolve to 0.
 - **libc.so.6's exports:** an open-addressing table keyed by the front end's
-  name hash, holding each name's default version, type and size. It is a few
+  name hash, holding each name's default version, type and size, and the
+  library's undefined names, which decide the program's exports. It is a few
   tens of kilobytes. The other shared libraries in the link get the same.
 - **For `-static`, libc.a's 2,227 members:** each member's atoms and fixups,
   already converted; a table from symbol to defining member; and each member's
@@ -584,11 +631,15 @@ rebuilding it at once write identical files, so no lock is needed.
 **Static links.** The closure over libc.a is GNU ld's group semantics, which
 the driver asks for (`--start-group -lgcc -lgcc_eh -lc --end-group`):
 
-1. Start from the program's undefined names.
+1. Start from the program's undefined names that aren't weak.
 2. For each one, find the defining member in the snapshot's table.
-3. Load that member and add its undefined names that nothing defines yet.
+3. Load that member, and add its own undefined names that aren't weak and that
+   nothing defines yet.
 4. Repeat until nothing is added.
 
+Weak references load no member, as with GNU ld. They bind to a definition that
+was loaded for another reason, or to 0: a program that tests `puts` declared
+weak must see it null under `-static` unless something else pulls `puts` in.
 A member defining a name the program also defines is only pulled in by another
 of its names, and then the duplicate is an error, as with GNU ld. Members are
 laid out in their archive order, whatever order the walk visited them in.
@@ -652,8 +703,22 @@ is sized before any function is encoded:
 #### Patching and writing
 
 After layout, each lane walks its own output ranges in file order, a chunk at
-a time. Chunks are about 256 KB, a quarter of Zen 5's L2. For each chunk the
-lane:
+a time. Chunks are about 256 KB, a quarter of Zen 5's L2.
+
+**Chunk boundaries never split a field.** They are computed from the image and
+its fixups alone:
+
+- a chunk ends at an atom's end, since no field crosses one;
+- an atom larger than a chunk is cut where no field crosses.
+
+A 4-byte field two bytes before a 256 KB boundary is ordinary (GNU as puts a
+`call`'s at `0x3fffe` after 262,141 bytes of padding). A lane patching such a
+field could otherwise change bytes the next lane had already hashed or
+written. Because the boundaries don't depend on the lane count, the build ID's
+chunks don't either. The lane tests place 4- and 8-byte fields across the
+nominal boundaries.
+
+For each chunk the lane:
 
 1. applies the chunk's fixups (sorted by offset already);
 2. hashes it for the build ID;
@@ -710,12 +775,12 @@ default is a fast 128-bit hash, decided by measurement.
 | --- | --- |
 | `.interp` | `/lib64/ld-linux-x86-64.so.2` |
 | `.dynamic` | `DT_NEEDED` for each runtime library actually referenced (as `--as-needed`), `DT_FLAGS`, `DT_FLAGS_1`, `DT_DEBUG`, `DT_INIT`/`DT_FINI` and the array entries, the table addresses and sizes, `DT_RELR`/`DT_RELRSZ`/`DT_RELRENT` or `DT_RELA`/`DT_RELACOUNT`, `DT_VERNEED`/`DT_VERSYM` |
-| `.dynsym`, `.dynstr` | imports, and the program's interposing definitions |
-| `.gnu.hash` | a minimal table, since an executable exports nothing by default; a full one for `-rdynamic` and shared libraries |
+| `.dynsym`, `.dynstr` | imports, and the program's definitions that a shared library in the link also defines or refers to (see "Exports") |
+| `.gnu.hash` | those exported definitions, so the loader can find them (empty when there are none); every global definition with `-rdynamic` and in shared libraries |
 | `.gnu.version`, `.gnu.version_r` | each import's default version from the snapshot, and the needed version names per library |
 | `.got` | one slot per imported or weak-undefined symbol |
-| `.rela.dyn` | a `GLOB_DAT` per import, and an `R_X86_64_64` per pointer to one in data |
-| `.relr.dyn` | the relative relocations, packed as RELR when libc defines `GLIBC_ABI_DT_RELR` (it does here, so the executable also needs that version) |
+| `.rela.dyn` | a `GLOB_DAT` per import, an `R_X86_64_64` per pointer to one in data, and an `R_X86_64_RELATIVE` per pointer at an odd address |
+| `.relr.dyn` | the other relative relocations, packed as RELR when libc defines `GLIBC_ABI_DT_RELR` (it does here, so the executable also needs that version) |
 | `.eh_frame`, `.eh_frame_hdr` | a CIE and an FDE per function from the code generator, merged with the runtime's |
 | `.symtab`, `.strtab`, `.shstrtab` and section headers | for debuggers and profilers, after the loaded segments |
 
@@ -731,6 +796,17 @@ RELA takes 24 bytes per relocation, RELR takes 8 for an isolated pointer and
 under a bit per pointer in a dense table. Arch links its own packages this way
 (`-z pack-relative-relocs` in `makepkg.conf`).
 
+**RELR can only hold even addresses.** An entry's low bit tells an address
+from a bitmap. A pointer at an odd address, where a packed structure can put
+it, goes to `.rela.dyn` as `R_X86_64_RELATIVE`. GNU ld and lld do the same:
+
+- they pack pointers at even addresses, those 2 or 4 bytes past a multiple of
+  8 among them;
+- they keep the odd ones in `.rela.dyn`.
+
+The initializers say how many pointers fall on odd addresses, so both tables
+are sized before layout.
+
 #### Streaming the output
 
 At the end of compilation, the direct path above still writes the whole file.
@@ -738,8 +814,19 @@ For large programs that is the page cache floor (3.3–8.8 ms for 46 MB). Writin
 during compilation removes it from the end, for every byte that doesn't wait
 on an address:
 
-- **Read-only data and initialized data without pointers:** their addresses
-  are fixed before any code is encoded.
+- **Everything the code refers to, placed before it.** lld's order puts the
+  GOT, `.data` and `.bss` after `.text`, so their addresses wait for the code's
+  size, and so does every reference to them. Streaming uses another order:
+  1. R: headers, dynamic tables, `.rodata`;
+  2. the RELRO segment with the GOT;
+  3. `.data` and `.bss`;
+  4. RX: the code;
+  5. `.eh_frame` and `.eh_frame_hdr` in an R segment of their own.
+
+  Every address the code refers to is then fixed before the first function is
+  encoded. glibc 2.44's loader runs a PIE laid out this way on both kernels
+  here (6.18 and 7.2; for the test, lld linked it with a linker script). Data
+  without pointers can be written as soon as it is produced.
 - **Debug information:** with DWARF 5 nearly all of it is
   position-independent. Addresses go through `.debug_addr`, and the line
   table's `DW_LNE_set_address` once per sequence. So `.debug_info`,
@@ -747,19 +834,19 @@ on an address:
   and only `.debug_addr` and the sequence addresses wait for layout. Debug
   information is most of a `-g` output (synth's `-g` build is 126 MB against
   46 MB).
-- **Code, with one lane:** every reference to data, and every call to a
-  function already encoded, can be filled in right away. Only calls forward,
+- **Code, with one lane:** in that order, every reference to data or a GOT
+  slot, and every call to a function already encoded, can be filled in right
+  away. Without it, data references wait for the end too. Only calls forward,
   to functions not yet encoded, wait. Compiling callees before callers (a
   reverse topological order of the call graph, ties broken by source order)
   leaves forward calls only on cycles. Each chunk of code can then go to the
   file as soon as it is full, and the few calls waiting are patched at the end
   through a mapping of the file.
 
-Streaming is the step after the first implementation, measured against it.
-It needs everything before `.text` in the file sized before encoding, so
-`.eh_frame` and `.eh_frame_hdr` move after it, into an R segment of their own.
-With several lanes, a lane's base address isn't known until every lane before
-it has finished, so code that crosses lanes waits for the end anyway.
+Streaming is the step after the first implementation, measured against it,
+along with checking the data-first order with debuggers and profilers. With
+several lanes, a lane's base address isn't known until every lane before it
+has finished, so code that crosses lanes waits for the end anyway.
 
 Fixing forward calls by sending them through a table (one indirect call each)
 would make code streamable in any order, but at a permanent cost to the
@@ -807,22 +894,30 @@ lld, mold, wild and this linker accept. Its structure is count, place, fill:
 function sections), indices go in `SHT_SYMTAB_SHNDX` and `e_shstrndx` in
 section 0. Internal ids never inherit `st_shndx`'s 16 bits.
 
-**Relocations.** An object can't know where its symbols will end up, so its
-fixups map to relocation types that let the linker decide. The table is for
-`-fPIE`:
+**Relocations.** Each fixup's kind names its relocation type (the table in
+"Representation"), so the type always matches the instruction. GNU as writes
+`R_X86_64_GOTPCRELX` for `call *puts@GOTPCREL(%rip)`; `PLT32` there would make
+the call read PLT code as a function pointer. `GOTPCRELX` and `REX_GOTPCRELX`
+go only on the instructions the psABI lets a linker rewrite (`call`, `jmp`,
+`mov`, `test` and the binary operations), and `R_X86_64_GOTPCREL` on any other
+instruction that reads a slot.
 
-| Reference | Type |
-| --- | --- |
-| a call | `R_X86_64_PLT32` (lld's and GCC's convention for every call) |
-| data defined in the translation unit | `R_X86_64_PC32` |
-| external data | `R_X86_64_REX_GOTPCRELX`, which a linker turns into `lea` when the target is local |
-| a pointer in data | `R_X86_64_64` |
-| TLS | `TPOFF32` (local-exec) for the unit's own variables, `GOTTPOFF` (initial-exec) for others |
+For `-c` on its own, the code generator can't know where external symbols end
+up, so it chooses forms that let the linker decide:
 
-`-fPIC` changes data references to the GOT and TLS to the general-dynamic and
-local-dynamic sequences. The addends are the fixups' (A relative to the field,
-"Fixups from the encoder"), and the fields themselves are zero, as GNU as
-writes them.
+| Reference | Form | Relocation |
+| --- | --- | --- |
+| a call | `call rel32` | `PLT32` |
+| external data | `mov` through the GOT | `REX_GOTPCRELX`, which a linker turns into `lea` when the target is local |
+| the unit's own data | RIP-relative | `PC32` |
+| the unit's own TLS | local-exec | `TPOFF32` |
+| other TLS | initial-exec | `GOTTPOFF` |
+| a pointer in data | | `R_X86_64_64` |
+
+`-fPIC` sends data references through the GOT, and TLS through the
+general-dynamic and local-dynamic sequences. The addends are the fixups' (A
+relative to the field, "Fixups from the encoder"), and the fields themselves
+are zero, as GNU as writes them.
 
 The scalar kernels decide the per-record costs. Writing `Elf64_Rela` from
 columns takes 0.18 ns per record in L1 and 0.61 ns from DRAM, and the AVX-512
@@ -836,7 +931,12 @@ and copies take a few microseconds, against 4–40 µs to write the file (in
 place on tmpfs, new on btrfs).
 
 `-c` and the direct path can run from the same encoded state. The object gets
-each chunk before it is patched, and the executable after.
+the fixups as relocations, and each chunk before it is patched; the executable
+gets the chunk after.
+
+Such an object carries the executable's binding decisions: direct calls into
+the program, GOT calls into libc, local-exec TLS. So, like a `-fPIE` object,
+it links into executables and not into shared libraries.
 
 ### Linking other compilers' objects
 
@@ -857,9 +957,17 @@ from the mapped files. Each step is a lane phase (see "Lanes"):
    - most C names fit in one load, and C++'s longer ones loop.
 3. **Resolve** through the exchange in "Lanes": each lane owns a fixed range
    of hash partitions and builds each partition's table from records it
-   receives in input order. Precedence is mold's (Table 2 of its paper):
-   strong, weak, shared-library and archive definitions, common, undefined.
-   Ties go to the earlier input. A hash match is checked against the bytes.
+   receives in input order. Precedence follows the ELF specification and GNU
+   ld:
+   1. a strong definition;
+   2. a common symbol, which beats a weak definition (ELF §5.2);
+   3. a weak definition;
+   4. a shared library's definition;
+   5. undefined.
+
+   mold ranks weak definitions above common ones (Table 2 of its paper); this
+   linker doesn't. Ties go to the earlier input. A hash match is checked
+   against the bytes.
 4. **Load archive members** whose symbols are needed. This is a frontier walk
    in rounds (new members, their undefined names, the next round) rather than
    GNU ld's left-to-right scan. The results are GNU ld's except where its
@@ -883,8 +991,14 @@ from the mapped files. Each step is a lane phase (see "Lanes"):
    `TLSGD` or `TLSLD` relocation and the call to `__tls_get_addr` after it.
 8. **Merge strings** (`SHF_MERGE | SHF_STRINGS`, above all `.debug_str`, which
    dominates debug links):
-   - split at NULs with the lexer's bitmask-to-positions method (`vpcompressb`
-     to memory costs 3 cycles on Zen 5, against 168 on Zen 4);
+   - split into strings by `sh_entsize`, the character's width:
+     - in one-byte sections (`.rodata.str1.1`) a zero byte ends a string, and
+       the lexer's bitmask-to-positions method finds them (`vpcompressb` to
+       memory costs 3 cycles on Zen 5, against 168 on Zen 4);
+     - in two- and four-byte sections (a C `L"..."` string makes
+       `.rodata.str4.4`) a zero code unit does, found with `vpcmpeqw` or
+       `vpcmpeqd`, and the pieces keep the section's alignment;
+     - other widths are copied without merging;
    - hash, exchange through partitions, and deduplicate per partition;
    - assign offsets in partition order, then first-occurrence order;
    - remap each reference into a merged section (a symbol or a section plus an
@@ -1063,6 +1177,15 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
   linked directly and through the object writer and lld must behave the same,
   and must have the same symbols, segments, dynamic entries and relocations up
   to addresses.
+- **Rules other linkers follow,** each against GNU ld's and lld's output for a
+  small program:
+  - a pointer at an odd address stays in `.rela.dyn`;
+  - a weak reference loads no archive member;
+  - a common symbol beats a weak definition;
+  - a wide string section keeps its strings;
+  - a definition a shared library refers to is exported;
+  - a local-exec TLS reference in an object is a `TPOFF32`, not a frozen
+    offset.
 - **The patch kernel:** every variant against the scalar reference, at every
   count around a group's size, between `PROT_NONE` guard pages as the lexer's
   and the encoder's tests place their buffers.
@@ -1131,6 +1254,13 @@ and with this document updated with what was measured:
    call libc run, match their objects linked by lld, and `benchmark-link`
    meets the targets in "Summary".
 
+   The comparison has to be between outputs with the same features. The
+   generated programs carry a CIE and an FDE per function, so this step
+   writes `.eh_frame` and `.eh_frame_hdr`, a build ID, and binds at load time.
+   It is measured against the baselines with matched options
+   (`--eh-frame-hdr`, `--build-id`, `-z now`, no garbage collection). DWARF
+   waits for step 9, which is measured against the `-g` baselines.
+
    `benchmark-link` replays one generated program through the direct path,
    and through the object writer followed by mold, wild and lld. Besides
    time, it reports the work done: bytes written, fixups applied, names looked
@@ -1142,8 +1272,9 @@ and with this document updated with what was measured:
    pass on a corpus.
 8. **More than one lane:** measured scaling, and the per-filesystem write
    choice.
-9. **Unwind tables and DWARF** from the code generator, then **streaming the
-   output**, measured against writing at the end.
+9. **Unwind tables from the code generator's prologues, and DWARF,** then
+   **streaming the output** in the data-first order, measured against writing
+   at the end.
 10. **Incremental output,** if the measurements in 9 leave it worth doing.
 
 ## Sources
@@ -1151,7 +1282,8 @@ and with this document updated with what was measured:
 - Rui Ueyama, *mold: A Massively Parallel Linker*, arXiv 2608.23228 (2026):
   - the pipeline, §3–4;
   - huge pages, `fallocate` and overwriting executables in place, §5;
-  - single-thread and per-pass numbers, §7.3, Tables 7–8.
+  - the single-thread run, §7.3, Table 7;
+  - the per-pass ablation, §7.4, Table 8.
 - David Lattimore's wild:
   - `DESIGN.md` and `BENCHMARKING.md`;
   - "Designing Wild's incremental linking" (2024-11-19);
@@ -1168,8 +1300,229 @@ and with this document updated with what was measured:
   Debugger's `src/base/base_thread_context.h`.
 - uops.info's Zen 5 measurements for the gather, scatter and compress
   instructions above.
-- The measurements on the 9700X described in this document. Their harness
-  (fork-and-exec medians, the link commands, the generated program, the file
-  and memory floors and the kernel prototypes) is to become `benchmark-link`
-  and the floor commands in step 5, so that they can be rerun from the
-  repository.
+- The measurements on the 9700X: the appendix has the inputs, the exact
+  commands and the methods. The harness becomes `benchmark-link` and the floor
+  commands in step 5, inside `build/compiler` like every other benchmark.
+
+## Appendix: how the numbers were measured
+
+**The machine.** A Ryzen 7 9700X (Zen 5) running Arch Linux with kernel
+6.18.50-2-lts:
+
+- 15 CPUs online (CPU 10, CPU 2's SMT sibling, is offline);
+- the performance governor;
+- tmpfs at `/tmp` and btrfs (zstd:3) at `/home`;
+- glibc 2.44, GCC 16.2.1's crt files and libgcc, clang 23.1.1;
+- GNU ld 2.47, lld 23.1.1, mold 3.0.0 and wild 0.10.0.
+
+Every run took the machine's lock (`~/buster-fast-bench/exclusive.sh`), one
+run per lock. One-thread runs are pinned with `taskset -c 2`. The scripts are
+in `~/buster-fast-bench/linker-baseline/` there.
+
+**Inputs.**
+
+- **hello world:** `hello.c`, a `main` that calls `puts("hello")`, compiled
+  with `clang -O2 -c`.
+- **tcc:** tinycc at 43c7708b, built with `./configure --cc=clang` and
+  `make ONE_SOURCE=no tcc`. The `-g` build adds
+  `--extra-cflags="-O2 -g -Wall"` to `configure`. Its link takes `tcc.o
+  libtcc.a -lm -ldl -lpthread`.
+- **synth:** the script below, run with `512 200 synth_src`. Each file is
+  compiled with `clang -O2 -c`, or `clang -O2 -g -c` for the `-g` build,
+  without `-march`.
+
+```python
+#!/usr/bin/env python3
+# Generates a synthetic C program for link benchmarks: FILES translation units of FUNCS functions each, with calls
+# across files (PLT32), extern data (GOTPCRELX/PC32), function pointer tables (R_X86_64_64 -> RELATIVE in a PIE),
+# string literals (mergeable .rodata.str1.1) and libc calls. main() runs f_0_0(argc - 1), which takes no branch for
+# argc == 1, so the linked program can be run to check the link.
+import random
+import sys
+import os
+
+files = int(sys.argv[1])
+funcs = int(sys.argv[2])
+out = sys.argv[3]
+rng = random.Random(12345)
+os.makedirs(out, exist_ok=True)
+
+def fname(f, i):
+    return f"f_{f}_{i}"
+
+def gname(f, i):
+    return f"g_{f}_{i}"
+
+GLOBALS = 8
+for f in range(files):
+    lines = ["#include <stdio.h>", "#include <string.h>"]
+    body = []
+    for i in range(funcs):
+        callees = [(rng.randrange(files), rng.randrange(funcs)) for _ in range(3)]
+        data = [(rng.randrange(files), rng.randrange(GLOBALS)) for _ in range(2)]
+        for (cf, ci) in callees:
+            if cf != f:
+                lines.append(f"extern int {fname(cf, ci)}(int);")
+            else:
+                lines.append(f"int {fname(cf, ci)}(int);")
+        for (df, di) in data:
+            if df != f:
+                lines.append(f"extern long {gname(df, di)};")
+        (c0, c1, c2) = callees
+        (d0, d1) = data
+        k = rng.randrange(1, 1000)
+        body.append(f"""int {fname(f, i)}(int x)
+{{
+    int acc = x;
+    for (int i = 0; i < (x & 7); i++) acc = acc * {k} + i;
+    if (acc & 1) acc += {fname(*c0)}(acc >> 1);
+    if (acc & 2) acc ^= {fname(*c1)}(acc + 3);
+    acc += (int){gname(*d0)};
+    {gname(*d1)} += acc;
+    if (acc == {k * 7 + 12345}) printf("{fname(f, i)} %d %s\\n", acc, "{rng.choice(['alpha', 'beta', 'gamma', 'delta'])}");
+    if (acc & 4) acc += table_{f}[acc & 3](acc);
+    if (acc & 8) {{ char buf[32]; memset(buf, acc, sizeof(buf)); acc += buf[x & 31]; }}
+    return acc + ((acc & 16) ? {fname(*c2)}(acc) : 0);
+}}
+""")
+    for g in range(GLOBALS):
+        lines.append(f"long {gname(f, g)};")
+    lines.append(f"static int (*table_{f}[4])(int);")
+    lines.extend(body)
+    lines.append(f"static int (*table_{f}[4])(int) = {{ {', '.join(fname(f, rng.randrange(funcs)) for _ in range(4))} }};")
+    with open(os.path.join(out, f"s{f}.c"), "w") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+with open(os.path.join(out, "main.c"), "w") as handle:
+    handle.write("#include <stdio.h>\nint f_0_0(int);\nint main(int argc, char** argv)\n{\n    (void)argv;\n    printf(\"%d\\n\", f_0_0(argc - 1));\n    return 0;\n}\n")
+```
+
+**Link commands.** These are the clang driver's (`clang -###`) with the linker
+swapped. `GCC` is `/usr/lib/gcc/x86_64-pc-linux-gnu/16`, and the options in
+brackets are the matched ones:
+
+```sh
+LINKER --hash-style=gnu --build-id --eh-frame-hdr -m elf_x86_64 [-z now --no-gc-sections] \
+    -pie -dynamic-linker /lib64/ld-linux-x86-64.so.2 -o OUT \
+    /usr/lib/Scrt1.o /usr/lib/crti.o $GCC/crtbeginS.o -L$GCC -L/usr/lib INPUTS \
+    -lgcc --as-needed -lgcc_s --no-as-needed -lc -lgcc --as-needed -lgcc_s --no-as-needed \
+    $GCC/crtendS.o /usr/lib/crtn.o
+```
+
+For `-static`:
+
+```sh
+LINKER --hash-style=gnu --build-id --eh-frame-hdr -m elf_x86_64 [-z now --no-gc-sections] -static -o OUT \
+    /usr/lib/crt1.o /usr/lib/crti.o $GCC/crtbeginT.o -L$GCC -L/usr/lib hello.o \
+    --start-group -lgcc -lgcc_eh -lc --end-group $GCC/crtend.o /usr/lib/crtn.o
+```
+
+- `LINKER` is `ld.bfd`, `ld.lld`, `mold` or `wild`.
+- One-thread runs add `--threads=1` (lld) or `--no-threads` (mold, wild).
+- `--build-id` without a style is each linker's default.
+
+**Timing.** A harness forks and execs the linker, with stdout and stderr on
+`/dev/null`, and waits for it.
+
+| Runs | Pause between runs |
+| --- | --- |
+| 41, after one warm-up | 20 ms |
+| 11 for synth | 200 ms |
+| 5 for GNU ld on synth | 500 ms |
+
+- The median of the wall time from `fork` to `waitpid`.
+- The output path is the same for every run, so the file exists.
+- mold's and wild's forking parents return once the output is written.
+
+The phase breakdowns come from `mold --perf --no-fork` and `wild --time
+--no-fork`, and the counters from `perf stat -r 11 -e
+task-clock,page-faults,context-switches,cycles,instructions`, all with one
+thread.
+
+**All baselines with matched options** (`-z now --no-gc-sections`), ms:
+
+| Program | GNU ld | lld | mold | wild | lld, 1 thread | mold, 1 thread | wild, 1 thread |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| hello | 6.01 | 6.01 | 5.32 | 2.52 | 5.02 | 2.44 | 1.34 |
+| hello, `-static` | 14.11 | 8.84 | 8.58 | 3.97 | | | |
+| tcc | 10.56 | 6.89 | 6.82 | 2.84 | 5.78 | 3.26 | 2.15 |
+| tcc, `-g` | 12.63 | 7.81 | 7.93 | 3.11 | | | |
+| synth | 343.5 | 58.4 | 38.0 | 25.9 | 106.9 | 96.4 | 140.0 |
+| synth, `-g` | 480.7 | 77.5 | 49.7 | 43.3 | 164.1 | 146.1 | 236.6 |
+
+**File and memory floors.** One thread on CPU 2, medians of 15 runs (5 at 64 MB
+and above).
+
+- Between runs at 64 MB and above, a `syncfs`, outside the timed region.
+- The source is an anonymous buffer with `MADV_HUGEPAGE`, filled before
+  timing.
+- Each method's time includes `open` and `close`.
+
+| Method | Calls |
+| --- | --- |
+| New file | `unlink`, `open(O_CREAT \| O_WRONLY \| O_TRUNC)`, `pwrite` until done, `close` |
+| `O_TRUNC` | the same without `unlink` |
+| In place | `open(O_WRONLY)`, `pwrite`, `ftruncate` to the same size, `close` |
+| Temporary file | `open` of another name, `pwrite`, `close`, `rename` |
+| `mmap` | `unlink`, `open(O_RDWR \| O_CREAT)`, `ftruncate`, `mmap(MAP_SHARED)`, `memcpy`, `munmap`, `close` |
+| `mmap` with `fallocate` | the same with `fallocate` instead of `ftruncate`, and `MADV_HUGEPAGE` on the mapping |
+| `mmap` in place | without `unlink` |
+
+- **Several threads:** N threads pinned to CPUs 0 to N−1, released by a barrier
+  once the file is open and sized (creating them isn't timed), each writing a
+  contiguous Nth of the file.
+- **Teardown:** a child touches N MiB of anonymous memory, tells the parent
+  through a pipe and exits. The time is from the message to `waitpid`'s
+  return.
+- **Small calls:** 1,000 of each, timed together.
+
+**Kernel prototypes.**
+
+- Field offsets are sorted, one per stride (the buffer's size over the fixup
+  count), at a random place within it, and targets are random.
+- Every variant's output was compared byte for byte with the scalar loop's.
+- Each time is the median of 11 timings of repeated calls.
+
+The two 32-bit variants:
+
+```c
+// S + A - P into each 4-byte field. target_offsets are 32-bit image offsets; buffer_offset is the buffer's.
+static void patch_pc32_scalar(uint8_t* buffer, uint32_t buffer_offset, const uint32_t* target_offsets,
+                              const uint32_t* offsets, const uint32_t* targets, const int32_t* addends, uint64_t count)
+{
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        uint32_t value = target_offsets[targets[i]] + (uint32_t)addends[i] - (buffer_offset + offsets[i]);
+        memcpy(buffer + offsets[i], &value, 4);
+    }
+}
+
+static void patch_pc32_gather_scatter(uint8_t* buffer, uint32_t buffer_offset, const uint32_t* target_offsets,
+                                      const uint32_t* offsets, const uint32_t* targets, const int32_t* addends,
+                                      uint64_t count)
+{
+    __m512i base = _mm512_set1_epi32((int)buffer_offset);
+    uint64_t i = 0;
+    for (; i + 16 <= count; i += 16)
+    {
+        __m512i fields = _mm512_loadu_si512(offsets + i);
+        __m512i s = _mm512_i32gather_epi32(_mm512_loadu_si512(targets + i), target_offsets, 4);
+        __m512i value = _mm512_sub_epi32(_mm512_add_epi32(s, _mm512_loadu_si512(addends + i)),
+                                         _mm512_add_epi32(base, fields));
+        // The fields are disjoint, so the order the scatter writes them in doesn't matter.
+        _mm512_i32scatter_epi32(buffer, fields, value, 1);
+    }
+    patch_pc32_scalar(buffer, buffer_offset, target_offsets, offsets + i, targets + i, addends + i, count - i);
+}
+```
+
+The 64-bit variants:
+
+- gather eight targets per iteration with `vpgatherdq`;
+- check the int32 range by narrowing with `vpmovqd` and widening back with
+  `vpmovsxdq`;
+- store through a small array and scalar stores, or with `vpscatterdd`.
+
+The `Elf64_Rela` writers fill 24-byte records from four 32-bit columns
+(offset, symbol, type, addend): scalar, or three `vpermt2q` and three masked
+`vpermq` per eight records.
