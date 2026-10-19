@@ -174,8 +174,8 @@ yet compared against a performance baseline. Keep just one compiler executable.
 
 ## x86-64 encoder tests
 
-`./build/compiler test-x86-encoder` (about 0.9 s) checks that every form fits a
-template, both encoders on 642 known encodings from GNU as (each also with the
+`./build/compiler test-x86-encoder` (about 1 s) checks that every form fits a
+template, both encoders on 688 known encodings from GNU as (each also with the
 fixup flag, whose end they must report), a digest of the scalar encoder's output
 for 100,000 random instructions, every batch width and variant of `x86_encode`
 against the scalar encoder (bytes, offsets and fixup ends, in each of the four
@@ -185,13 +185,14 @@ and MMX, VEX and EVEX, with opmasks, broadcasts, rounding, registers 16-31,
 gathers and scatters, FS and GS segment overrides, and one in eight marked with
 the fixup flag), the same between `PROT_NONE` guard pages, and that invalid
 operands are rejected (immediates and rel8s outside their fields' ranges by
-`x86_validate` alone: `x86_encode` writes their low bytes). Then it runs those
+`x86_validate` alone: `x86_encode` writes their low bytes; and memory operands in
+the 104 FS and GS forms without room for the override). Then it runs those
 checks again with 32-bit addresses, but the known fixups: 33 known encodings, a
 digest of their own, `x86_encode_64_address32` against the scalar encoder on the
 random streams and at page edges, and invalid operands, among them MPX memory
-operands and memory operands in the 80 FS and GS forms without room for the
-`67`. And again for APX, but the known fixups: 115 known encodings, 24 known
-invalid instructions (as GNU as rejects them), a digest of their own,
+operands and memory operands in the 184 FS and GS forms and the 52 forms without
+room for the `67`. And again for APX, but the known fixups: 138 known encodings,
+28 known invalid instructions (as GNU as rejects them), a digest of their own,
 `x86_encode_64_apx` against the scalar encoder on random streams in which half
 the forms have REX2 and a quarter are EVEX ones, and at page edges, and invalid
 operands, among them a high byte register with REX2, registers 16 to 31 in
@@ -230,7 +231,7 @@ general register gives the address size, and the relocations of displacements
 other than RIP-relative ones are R_X86_64_32; with `--apx`, it names registers
 16 to 31 `r16` to `r31` (`r16d`, `r16w`, `r16b`). Cross-check more than one seed
 after changing forms (1.7 million instructions over seeds 1, 7 and 99 were last
-checked for each entry point, with 200,083, 201,914 and 200,220 relocations).
+checked for each entry point, with 197,779, 198,810 and 198,186 relocations).
 
 ## x86-64 encoder benchmark
 

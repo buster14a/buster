@@ -103,10 +103,10 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0x7566af7a457ced89ull
+#define BUSTER_X86_TEST_DIGEST 0x6b14eea05e0397e6ull
 // The same for the stream with 32-bit addresses (--address32), and for the one with APX's registers (--apx).
-#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0xcaefa1844530c3f5ull
-#define BUSTER_X86_TEST_DIGEST_APX 0xba7c4fbbd19e90e1ull
+#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0xdaba74021a202114ull
+#define BUSTER_X86_TEST_DIGEST_APX 0x0e46468dcb3d07d9ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -217,10 +217,12 @@ static bool x86_fits_int8(int32_t value)
     return value >= -128 && value <= 127;
 }
 
-// A form's opcode, without its prefixes, as one number (for the forms GNU as encodes differently).
+// A form's opcode, without its prefixes, as one number (for the forms GNU as encodes differently), and for APX's map 4
+// forms, the legacy opcode byte they take.
 static uint32_t x86_form_opcode(const X86FormDescription* form)
 {
-    return form->opcode_bytes == 1 ? form->opcode : 0x10000 | form->opcode;
+    const bool map4 = form->family == BUSTER_X86_FAMILY_EVEX && x86_opcode_map(form) == 4;
+    return form->opcode_bytes == 1 || map4 ? form->opcode & 0xff : 0x10000 | form->opcode;
 }
 
 // The entry point the instructions are for, which --address32 and --apx and the passes of x86_encode_address32 and
@@ -300,6 +302,8 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
     const int32_t immediate = form->immediate_bytes == 1 ? (int8_t)instruction->immediate : form->immediate_bytes == 2 ? (int16_t)instruction->immediate
                                                                                                                        : instruction->immediate;
     const bool legacy = form->family == BUSTER_X86_FAMILY_LEGACY;
+    // APX's map 4 forms of the legacy instructions, among which GNU as picks as among those.
+    const bool map4 = form->family == BUSTER_X86_FAMILY_EVEX && x86_opcode_map(form) == 4;
     bool result = false;
     // MOVQ (and VEX's VMOVQ) between an XMM register and memory is F3 0F 7E or 66 0F D6, not the W1 forms of MOVD; and
     // EVEX's the other way around. Between an MMX register and memory, it's 0F 6F or 0F 7F.
@@ -325,9 +329,9 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
     {
         result = true;
     }
-    // Immediates that fit in a sign-extended byte take the imm8 forms, also instead of the AX, EAX and RAX forms of
-    // the arithmetic instructions (05, 0D ... 3D).
-    if (legacy && (opcode == 0x81 || opcode == 0x69 || opcode == 0x68) && form->immediate_bytes != 1 && x86_fits_int8(immediate))
+    // Immediates that fit in a sign-extended byte take the imm8 forms (in map 4 too), also instead of the AX, EAX and
+    // RAX forms of the arithmetic instructions (05, 0D ... 3D).
+    if ((legacy || map4) && (opcode == 0x81 || opcode == 0x69 || opcode == 0x68) && form->immediate_bytes != 1 && x86_fits_int8(immediate))
     {
         result = true;
     }
@@ -335,8 +339,8 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
     {
         result = true;
     }
-    // A shift by 1 is D0/D1, and INT 3 is INT3.
-    if (legacy && (opcode == 0xc0 || opcode == 0xc1) && instruction->immediate == 1)
+    // A shift by 1 is D0/D1 (in map 4 too), and INT 3 is INT3.
+    if ((legacy || map4) && (opcode == 0xc0 || opcode == 0xc1) && instruction->immediate == 1)
     {
         result = true;
     }
@@ -803,6 +807,11 @@ static const char* x86_syntax_operands(uint8_t syntax)
         case X86_SYNTAX_IMM_RM: result = "im"; break;
         case X86_SYNTAX_REG: result = "r"; break;
         case X86_SYNTAX_VVVV_REG_RM: result = "vrm"; break;
+        case X86_SYNTAX_VVVV_RM_REG: result = "vmr"; break;
+        case X86_SYNTAX_VVVV_RM_ONE: result = "vm1"; break;
+        case X86_SYNTAX_VVVV_RM_CL: result = "vmc"; break;
+        case X86_SYNTAX_VVVV_RM_REG_IMM: result = "vmri"; break;
+        case X86_SYNTAX_VVVV_RM_REG_CL: result = "vmrc"; break;
         default: break;
     }
     return result;
@@ -833,7 +842,8 @@ static bool x86_vex_form_shares_mnemonic(uint32_t form)
 }
 
 // Prints the instruction in GNU as Intel syntax. A register-to-register move or arithmetic instruction gets {load} or
-// {store}, which picks the form with ModRM.reg as the destination or the source (and keeps GNU as from swapping a VEX
+// {store}, which picks the form with ModRM.reg as the destination or the source (or with ND, the first source or the
+// second: a destination in EVEX.vvvv) (and keeps GNU as from swapping a VEX
 // move's operands to make it VEX2, and picks XOP's W1 shifts). An EVEX form gets {evex}, which GNU as otherwise only
 // picks when the operands need it (and an APX NF form {nf} too), and a VEX form whose mnemonic an EVEX form has gets
 // {vex}: GNU as picks EVEX for some of those (vpdpbusd, vpmadd52luq and vcvtneps2bf16, whose AVX-512 forms came first).
@@ -859,11 +869,12 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction,
         fprintf(file, "{vex} ");
     }
     if (register_direct && form->reg != BUSTER_X86_OPERAND_NONE &&
-        (form->syntax == X86_SYNTAX_RM_REG || form->syntax == X86_SYNTAX_REG_RM || form->syntax == X86_SYNTAX_REG_VVVV_RM))
+        (form->syntax == X86_SYNTAX_RM_REG || form->syntax == X86_SYNTAX_REG_RM || form->syntax == X86_SYNTAX_REG_VVVV_RM ||
+         form->syntax == X86_SYNTAX_VVVV_RM_REG || form->syntax == X86_SYNTAX_VVVV_REG_RM))
     {
         // XOP's shifts and rotates by a vector of counts swap their sources with W1, which {store} picks.
         const bool swapped = form->w && form->syntax == X86_SYNTAX_REG_VVVV_RM && x86_opcode_map(form) >= 8;
-        fprintf(file, "%s ", form->syntax == X86_SYNTAX_RM_REG || swapped ? "{store}" : "{load}");
+        fprintf(file, "%s ", form->syntax == X86_SYNTAX_RM_REG || form->syntax == X86_SYNTAX_VVVV_RM_REG || swapped ? "{store}" : "{load}");
     }
     if (form->syntax == X86_SYNTAX_REL && form->relative_bytes >= 2 && form->opcode != 0xe8)
     {
@@ -996,10 +1007,48 @@ static void x86_print_bytes(const uint8_t* bytes, uint64_t length)
 // ---------------------------------------------------------------------------------------------------------------------
 // The checks
 
+// Whether the form is one of APX's map 4 forms with an imm32 and a memory operand, whose longest encoding (with a SIB
+// byte and a 32-bit displacement) is 15 bytes, leaving no room for a segment override or a 67.
+static bool x86_form_is_map4_imm32(uint32_t form_index)
+{
+    const X86FormDescription* form = x86_form_description(form_index);
+    return form->family == BUSTER_X86_FAMILY_EVEX && x86_opcode_map(form) == 4 && form->immediate_bytes == 4 && (form->rm & BUSTER_X86_OPERAND_MEMORY);
+}
+
+// Counts the forms whose template in the mode has no room for a memory operand (x86_form_lacks_room), with a segment
+// override and without, and returns how many shouldn't: with 64-bit addresses, only map 4's imm32 forms with a segment
+// override lack room (REX2's forms take x86_encode's template instead), and with 32-bit addresses, any form with one,
+// and map 4's imm32 forms without one.
+static uint32_t x86_check_room(X86EncoderMode encoder, uint32_t* with_override, uint32_t* without_override)
+{
+    uint32_t unexpected = 0;
+    *with_override = 0;
+    *without_override = 0;
+    for (uint32_t form = 1; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
+    {
+        const bool unfit = x86_form_lacks_room(form, encoder);
+        const bool segment = x86_form_segment(form) != 0;
+        const bool expected = encoder == X86_ENCODER_MODE_ADDRESS32 ? segment || x86_form_is_map4_imm32(form) : segment && x86_form_is_map4_imm32(form);
+        if (unfit && !expected && unexpected < BUSTER_X86_TEST_REPORTED)
+        {
+            printf("  form %u (%s, segment override %u) has no room for a memory operand (mode %u)\n", form, x86_form_description(form)->mnemonic, x86_form_segment(form),
+                   (unsigned)encoder);
+        }
+        unexpected += unfit && !expected;
+        *with_override += unfit && segment;
+        *without_override += unfit && !segment;
+    }
+    return unexpected;
+}
+
 static bool x86_check_templates(void)
 {
     bool result = x86_encoder_initialize();
-    printf("templates: %u forms, and each with FS and GS, %s\n", (unsigned)X86_FORM_COUNT, result ? "all fit" : "SOME DON'T FIT");
+    uint32_t with_override = 0;
+    uint32_t without_override = 0;
+    const uint32_t unexpected_64 = x86_check_room(X86_ENCODER_MODE_64, &with_override, &without_override);
+    printf("templates: %u forms, and each with FS and GS, %s, but %u with a segment override, which have no room for it\n", (unsigned)X86_FORM_COUNT,
+           result && unexpected_64 == 0 ? "all fit" : "SOME DON'T FIT", with_override);
     if (!result)
     {
         for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
@@ -1011,23 +1060,11 @@ static bool x86_check_templates(void)
             }
         }
     }
-    // For 32-bit addresses: only forms with a segment override may have no template (x86_form_lacks_address32_template).
+    // For 32-bit addresses: forms with a segment override, and map 4's imm32 forms, may have no room for a 67.
     const bool address32 = x86_encoder_initialize_address32();
-    uint32_t unfit = 0;
-    uint32_t unexpected = 0;
-    for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
-    {
-        X86Template template;
-        const bool fits = build_template(x86_form_description(form), x86_form_segment(form), X86_ENCODER_MODE_ADDRESS32, &template);
-        unfit += !fits;
-        if (!fits && x86_form_segment(form) == 0 && unexpected < BUSTER_X86_TEST_REPORTED)
-        {
-            printf("  form %u (%s) doesn't fit with 32-bit addresses, without a segment override\n", form, x86_form_description(form)->mnemonic);
-        }
-        unexpected += !fits && x86_form_segment(form) == 0;
-    }
-    printf("templates for 32-bit addresses: %s, but %u with a segment override, which have no room for a 67\n", address32 && unexpected == 0 ? "all fit" : "SOME DON'T FIT",
-           unfit);
+    const uint32_t unexpected = x86_check_room(X86_ENCODER_MODE_ADDRESS32, &with_override, &without_override);
+    printf("templates for 32-bit addresses: %s, but %u with a segment override and %u without, which have no room for a 67\n",
+           address32 && unexpected == 0 ? "all fit" : "SOME DON'T FIT", with_override, without_override);
     // For APX: REX2's positions in every legacy form of maps 0 and 1 but the XSAVE family's (x86_form_takes_rex2), and
     // only there, but in those with a segment override that have no room for its payload (x86_form_has_rex2).
     const bool apx = x86_encoder_initialize_apx();
@@ -1047,9 +1084,11 @@ static bool x86_check_templates(void)
         without_room += takes && !has;
         unexpected_apx += wrong;
     }
-    printf("templates for APX: %s, %u forms with REX2's positions, and their FS and GS copies but %u without room for its payload\n",
-           apx && unexpected_apx == 0 ? "all fit" : "SOME DON'T FIT", rex2_forms, without_room);
-    result = result && address32 && unexpected == 0 && apx && unexpected_apx == 0;
+    const uint32_t unexpected_room_apx = x86_check_room(X86_ENCODER_MODE_APX, &with_override, &without_override);
+    printf("templates for APX: %s, %u forms with REX2's positions, and their FS and GS copies but %u without room for its payload, and %u with a segment "
+           "override, which have no room for it\n",
+           apx && unexpected_apx == 0 && unexpected_room_apx == 0 ? "all fit" : "SOME DON'T FIT", rex2_forms, without_room, with_override);
+    result = result && unexpected_64 == 0 && address32 && unexpected == 0 && apx && unexpected_apx == 0 && unexpected_room_apx == 0;
     return result;
 }
 
@@ -1211,6 +1250,61 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_WRUSSQ_M64_R64_EVEX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE, .reg = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0xfd, 0x08, 0x65, 0x01 } },
     { { .form = X86_FORM_AOR_M32_R32_EVEX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE, .reg = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0x7f, 0x08, 0xfc, 0x01 } },
     { { .form = X86_FORM_MOVRS_R8_M8_EVEX, .reg = X86_REGISTER_RSI, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf4, 0x7c, 0x08, 0x8a, 0x30 } },
+    // APX's map 4 forms of the legacy arithmetic, here with registers 0 to 15: {store} and {load} add eax, ecx; add
+    // eax, ecx, edx both ways and add eax, ecx, dword ptr [rdx+64] (ND: the destination in vvvv); {nf} add eax, ecx and
+    // {nf} add eax, ecx, edx; add eax, 5 and 500, and add eax, ecx, 5; add ax, cx (66); add al, cl, dl; add rax, rcx,
+    // rdx; add byte ptr [rcx], 5; add sil, dil, al; the longest, 15 bytes: add dword ptr [rax+rbx*4+0x12345678],
+    // 0x12345678; adc eax, ecx; sbb eax, 5; shl eax, 1, cl and 3; shl eax, ecx, 1 and cl; {nf} sar eax, ecx, 3; {nf}
+    // rol al, 1; rcr eax, ecx, cl; inc eax, ecx, {nf} inc eax and inc al; not eax, ecx; {nf} mul ecx; idiv rcx; mul
+    // byte ptr [rax]; imul eax, ecx, and eax, ecx, edx; {nf} imul eax, ecx, 5; imulzu ax, cx, 500 and {nf} imulzu ax,
+    // cx, 5 (ZU: ND's bit); shld eax, ecx, 3, and eax, ecx, edx, cl; shrd rax, rcx, rdx, 1; cmovb eax, ecx, dword ptr
+    // [rdx] and cmovp ax, cx, dx; setb al, setnp byte ptr [rax] and setzua al (F2)
+    { { .form = X86_FORM_ADD_RM32_R32_EVEX, .rm = X86_REGISTER_RAX, .reg = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7c, 0x08, 0x01, 0xc8 } },
+    { { .form = X86_FORM_ADD_R32_RM32_EVEX, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7c, 0x08, 0x03, 0xc1 } },
+    { { .form = X86_FORM_ADD_R32_RM32_R32, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .reg = X86_REGISTER_RDX }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0x01, 0xd1 } },
+    { { .form = X86_FORM_ADD_R32_R32_RM32, .vvvv = X86_REGISTER_RAX, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RDX }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0x03, 0xca } },
+    { { .form = X86_FORM_ADD_R32_R32_RM32, .vvvv = X86_REGISTER_RAX, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RDX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 64 }, 7, { 0x62, 0xf4, 0x7c, 0x18, 0x03, 0x4a, 0x40 } },
+    { { .form = X86_FORM_ADD_RM32_R32_NF, .rm = X86_REGISTER_RAX, .reg = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7c, 0x0c, 0x01, 0xc8 } },
+    { { .form = X86_FORM_ADD_R32_RM32_R32_NF, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .reg = X86_REGISTER_RDX }, 6, { 0x62, 0xf4, 0x7c, 0x1c, 0x01, 0xd1 } },
+    { { .form = X86_FORM_ADD_RM32_IMM8_EVEX, .rm = X86_REGISTER_RAX, .immediate = 5 }, 7, { 0x62, 0xf4, 0x7c, 0x08, 0x83, 0xc0, 0x05 } },
+    { { .form = X86_FORM_ADD_RM32_IMM32_EVEX, .rm = X86_REGISTER_RAX, .immediate = 500 }, 10, { 0x62, 0xf4, 0x7c, 0x08, 0x81, 0xc0, 0xf4, 0x01, 0x00, 0x00 } },
+    { { .form = X86_FORM_ADD_R32_RM32_IMM8, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .immediate = 5 }, 7, { 0x62, 0xf4, 0x7c, 0x18, 0x83, 0xc1, 0x05 } },
+    { { .form = X86_FORM_ADD_RM16_R16_EVEX, .rm = X86_REGISTER_RAX, .reg = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7d, 0x08, 0x01, 0xc8 } },
+    { { .form = X86_FORM_ADD_R8_RM8_R8, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .reg = X86_REGISTER_RDX }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0x00, 0xd1 } },
+    { { .form = X86_FORM_ADD_R64_RM64_R64, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .reg = X86_REGISTER_RDX }, 6, { 0x62, 0xf4, 0xfc, 0x18, 0x01, 0xd1 } },
+    { { .form = X86_FORM_ADD_RM8_IMM8_EVEX, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 5 }, 7, { 0x62, 0xf4, 0x7c, 0x08, 0x80, 0x01, 0x05 } },
+    { { .form = X86_FORM_ADD_R8_RM8_R8, .vvvv = X86_REGISTER_RSI, .rm = X86_REGISTER_RDI, .reg = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0x4c, 0x18, 0x00, 0xc7 } },
+    { { .form = X86_FORM_ADD_RM32_IMM32_EVEX, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = 0x12345678, .immediate = 0x12345678 }, 15, { 0x62, 0xf4, 0x7c, 0x08, 0x81, 0x84, 0x98, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12 } },
+    { { .form = X86_FORM_ADC_RM32_R32_EVEX, .rm = X86_REGISTER_RAX, .reg = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7c, 0x08, 0x11, 0xc8 } },
+    { { .form = X86_FORM_SBB_RM32_IMM8_EVEX, .rm = X86_REGISTER_RAX, .immediate = 5 }, 7, { 0x62, 0xf4, 0x7c, 0x08, 0x83, 0xd8, 0x05 } },
+    { { .form = X86_FORM_SHL_RM32_1_EVEX, .rm = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0x7c, 0x08, 0xd1, 0xe0 } },
+    { { .form = X86_FORM_SHL_RM32_CL_EVEX, .rm = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0x7c, 0x08, 0xd3, 0xe0 } },
+    { { .form = X86_FORM_SHL_RM32_IMM8_EVEX, .rm = X86_REGISTER_RAX, .immediate = 3 }, 7, { 0x62, 0xf4, 0x7c, 0x08, 0xc1, 0xe0, 0x03 } },
+    { { .form = X86_FORM_SHL_R32_RM32_1, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0xd1, 0xe1 } },
+    { { .form = X86_FORM_SHL_R32_RM32_CL, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0xd3, 0xe1 } },
+    { { .form = X86_FORM_SAR_R32_RM32_IMM8_NF, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .immediate = 3 }, 7, { 0x62, 0xf4, 0x7c, 0x1c, 0xc1, 0xf9, 0x03 } },
+    { { .form = X86_FORM_ROL_RM8_1_NF, .rm = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0x7c, 0x0c, 0xd0, 0xc0 } },
+    { { .form = X86_FORM_RCR_R32_RM32_CL, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0xd3, 0xd9 } },
+    { { .form = X86_FORM_INC_R32_RM32, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0xff, 0xc1 } },
+    { { .form = X86_FORM_INC_RM32_NF, .rm = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0x7c, 0x0c, 0xff, 0xc0 } },
+    { { .form = X86_FORM_INC_RM8_EVEX, .rm = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0x7c, 0x08, 0xfe, 0xc0 } },
+    { { .form = X86_FORM_NOT_R32_RM32, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0xf7, 0xd1 } },
+    { { .form = X86_FORM_MUL_RM32_NF, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7c, 0x0c, 0xf7, 0xe1 } },
+    { { .form = X86_FORM_IDIV_RM64_EVEX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0xfc, 0x08, 0xf7, 0xf9 } },
+    { { .form = X86_FORM_MUL_RM8_EVEX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf4, 0x7c, 0x08, 0xf6, 0x20 } },
+    { { .form = X86_FORM_IMUL_R32_RM32_EVEX, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX }, 6, { 0x62, 0xf4, 0x7c, 0x08, 0xaf, 0xc1 } },
+    { { .form = X86_FORM_IMUL_R32_R32_RM32, .vvvv = X86_REGISTER_RAX, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RDX }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0xaf, 0xca } },
+    { { .form = X86_FORM_IMUL_R32_RM32_IMM8_NF, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .immediate = 5 }, 7, { 0x62, 0xf4, 0x7c, 0x0c, 0x6b, 0xc1, 0x05 } },
+    { { .form = X86_FORM_IMULZU_R16_RM16_IMM16, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .immediate = 500 }, 8, { 0x62, 0xf4, 0x7d, 0x18, 0x69, 0xc1, 0xf4, 0x01 } },
+    { { .form = X86_FORM_IMULZU_R16_RM16_IMM8_NF, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .immediate = 5 }, 7, { 0x62, 0xf4, 0x7d, 0x1c, 0x6b, 0xc1, 0x05 } },
+    { { .form = X86_FORM_SHLD_RM32_R32_IMM8_EVEX, .rm = X86_REGISTER_RAX, .reg = X86_REGISTER_RCX, .immediate = 3 }, 7, { 0x62, 0xf4, 0x7c, 0x08, 0x24, 0xc8, 0x03 } },
+    { { .form = X86_FORM_SHLD_R32_RM32_R32_CL, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .reg = X86_REGISTER_RDX }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0xa5, 0xd1 } },
+    { { .form = X86_FORM_SHRD_R64_RM64_R64_IMM8, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_RCX, .reg = X86_REGISTER_RDX, .immediate = 1 }, 7, { 0x62, 0xf4, 0xfc, 0x18, 0x2c, 0xd1, 0x01 } },
+    { { .form = X86_FORM_CMOVB_R32_R32_RM32, .vvvv = X86_REGISTER_RAX, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RDX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf4, 0x7c, 0x18, 0x42, 0x0a } },
+    { { .form = X86_FORM_CMOVP_R16_R16_RM16, .vvvv = X86_REGISTER_RAX, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RDX }, 6, { 0x62, 0xf4, 0x7d, 0x18, 0x4a, 0xca } },
+    { { .form = X86_FORM_SETB_RM8_EVEX, .rm = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0x7f, 0x08, 0x42, 0xc0 } },
+    { { .form = X86_FORM_SETNP_RM8_EVEX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf4, 0x7f, 0x08, 0x4b, 0x00 } },
+    { { .form = X86_FORM_SETZUA_R8, .rm = X86_REGISTER_RAX }, 6, { 0x62, 0xf4, 0x7f, 0x18, 0x47, 0xc0 } },
     // EVEX: vaddps zmm1{k1}{z}, zmm2, zmm3; vaddps zmm1, zmm2, zmmword ptr [rax+64] (8-bit 1 in units of 64); vaddps
     // zmm1, zmm2, dword ptr [rax+64]{1to16} (16 in units of 4); vaddps zmm1, zmm2, zmm3, {rz-sae}; vmaxps zmm1, zmm2,
     // zmm3, {sae}; vaddsd xmm1{k1}{z}, xmm2, xmm3, {rz-sae}
@@ -2311,6 +2405,35 @@ static const KnownEncoding x86_known_encodings_apx[] = {
     { { .form = X86_FORM_AADD_M64_R64_EVEX, .rm = 16, .index = 17, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .reg = 18 }, 7, { 0x62, 0xec, 0xf8, 0x08, 0xfc, 0x14, 0x08 } },
     { { .form = X86_FORM_WRSSD_M32_R32_EVEX, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE, .reg = 17 }, 6, { 0x62, 0xec, 0x7c, 0x08, 0x66, 0x08 } },
     { { .form = X86_FORM_MOVDIRI_M64_R64_EVEX, .rm = 31, .mode = BUSTER_X86_MEMORY_BASE, .reg = 30 }, 6, { 0x62, 0x4c, 0xfc, 0x08, 0xf9, 0x37 } },
+    // APX's map 4 forms of the legacy arithmetic: add r16d, r17d, r18d both ways; add r31, qword ptr [r20+r21*8+0x80],
+    // r22 (V', R', B4 and X4); {nf} sub r16, r17, 0x12345678; {nf} xor r16b, r17b; or r18w, 0x1234; sar r16d, r17d,
+    // cl; {nf} shl r20, r21, 3; rcr r16b, 1; inc r16, r17; {nf} neg r31d, dword ptr [r16]; not r20; {nf} mul r16; idiv
+    // byte ptr [r17+r18]; imul r16, r17, r18; {nf} imul r16d, dword ptr [r17], 0x12345678; imulzu r16w, r17w, 5; shld
+    // r16d, r17d, r18d, 7; {nf} shrd r16, r17, r18, cl; cmovl r16, r17, r18; cmovge r16d, r17d, dword ptr [rip+0x100];
+    // setb r16b; and setzug r17b
+    { { .form = X86_FORM_ADD_R32_RM32_R32, .vvvv = 16, .rm = 17, .reg = 18 }, 6, { 0x62, 0xec, 0x7c, 0x10, 0x01, 0xd1 } },
+    { { .form = X86_FORM_ADD_R32_R32_RM32, .vvvv = 16, .reg = 17, .rm = 18 }, 6, { 0x62, 0xec, 0x7c, 0x10, 0x03, 0xca } },
+    { { .form = X86_FORM_ADD_R64_RM64_R64, .vvvv = 31, .rm = 20, .index = 21, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = 0x80, .reg = 22 }, 11, { 0x62, 0xec, 0x80, 0x10, 0x01, 0xb4, 0xec, 0x80, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_SUB_R64_RM64_IMM32_NF, .vvvv = 16, .rm = 17, .immediate = 0x12345678 }, 10, { 0x62, 0xfc, 0xfc, 0x14, 0x81, 0xe9, 0x78, 0x56, 0x34, 0x12 } },
+    { { .form = X86_FORM_XOR_RM8_R8_NF, .rm = 16, .reg = 17 }, 6, { 0x62, 0xec, 0x7c, 0x0c, 0x30, 0xc8 } },
+    { { .form = X86_FORM_OR_RM16_IMM16_EVEX, .rm = 18, .immediate = 0x1234 }, 8, { 0x62, 0xfc, 0x7d, 0x08, 0x81, 0xca, 0x34, 0x12 } },
+    { { .form = X86_FORM_SAR_R32_RM32_CL, .vvvv = 16, .rm = 17 }, 6, { 0x62, 0xfc, 0x7c, 0x10, 0xd3, 0xf9 } },
+    { { .form = X86_FORM_SHL_R64_RM64_IMM8_NF, .vvvv = 20, .rm = 21, .immediate = 3 }, 7, { 0x62, 0xfc, 0xdc, 0x14, 0xc1, 0xe5, 0x03 } },
+    { { .form = X86_FORM_RCR_RM8_1_EVEX, .rm = 16 }, 6, { 0x62, 0xfc, 0x7c, 0x08, 0xd0, 0xd8 } },
+    { { .form = X86_FORM_INC_R64_RM64, .vvvv = 16, .rm = 17 }, 6, { 0x62, 0xfc, 0xfc, 0x10, 0xff, 0xc1 } },
+    { { .form = X86_FORM_NEG_R32_RM32_NF, .vvvv = 31, .rm = 16, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xfc, 0x04, 0x14, 0xf7, 0x18 } },
+    { { .form = X86_FORM_NOT_RM64_EVEX, .rm = 20 }, 6, { 0x62, 0xfc, 0xfc, 0x08, 0xf7, 0xd4 } },
+    { { .form = X86_FORM_MUL_RM64_NF, .rm = 16 }, 6, { 0x62, 0xfc, 0xfc, 0x0c, 0xf7, 0xe0 } },
+    { { .form = X86_FORM_IDIV_RM8_EVEX, .rm = 17, .index = 18, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0) }, 7, { 0x62, 0xfc, 0x78, 0x08, 0xf6, 0x3c, 0x11 } },
+    { { .form = X86_FORM_IMUL_R64_R64_RM64, .vvvv = 16, .reg = 17, .rm = 18 }, 6, { 0x62, 0xec, 0xfc, 0x10, 0xaf, 0xca } },
+    { { .form = X86_FORM_IMUL_R32_RM32_IMM32_NF, .reg = 16, .rm = 17, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 0x12345678 }, 10, { 0x62, 0xec, 0x7c, 0x0c, 0x69, 0x01, 0x78, 0x56, 0x34, 0x12 } },
+    { { .form = X86_FORM_IMULZU_R16_RM16_IMM8, .reg = 16, .rm = 17, .immediate = 5 }, 7, { 0x62, 0xec, 0x7d, 0x18, 0x6b, 0xc1, 0x05 } },
+    { { .form = X86_FORM_SHLD_R32_RM32_R32_IMM8, .vvvv = 16, .rm = 17, .reg = 18, .immediate = 7 }, 7, { 0x62, 0xec, 0x7c, 0x10, 0x24, 0xd1, 0x07 } },
+    { { .form = X86_FORM_SHRD_R64_RM64_R64_CL_NF, .vvvv = 16, .rm = 17, .reg = 18 }, 6, { 0x62, 0xec, 0xfc, 0x14, 0xad, 0xd1 } },
+    { { .form = X86_FORM_CMOVL_R64_R64_RM64, .vvvv = 16, .reg = 17, .rm = 18 }, 6, { 0x62, 0xec, 0xfc, 0x10, 0x4c, 0xca } },
+    { { .form = X86_FORM_CMOVGE_R32_R32_RM32, .vvvv = 16, .reg = 17, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x100 }, 10, { 0x62, 0xe4, 0x7c, 0x10, 0x4d, 0x0d, 0x00, 0x01, 0x00, 0x00 } },
+    { { .form = X86_FORM_SETB_RM8_EVEX, .rm = 16 }, 6, { 0x62, 0xfc, 0x7f, 0x08, 0x42, 0xc0 } },
+    { { .form = X86_FORM_SETZUG_R8, .rm = 17 }, 6, { 0x62, 0xfc, 0x7f, 0x18, 0x4f, 0xc1 } },
     // Without registers 16 to 31, as for x86_encode: REX's add rax, r8; VEX and EVEX; map 2's crc32; xsave [r15]
     { { .form = X86_FORM_ADD_RM64_R64, .reg = 8 }, 3, { 0x4c, 0x01, 0xc0 } },
     { { .form = X86_FORM_VADDPS_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 4, { 0xc5, 0xe8, 0x58, 0xcb } },
@@ -2422,6 +2545,12 @@ static const X86Instruction x86_known_invalid_apx[] = {
     { .form = X86_FORM_KMOVW_K_R32, .reg = 1, .rm = 16 },
     { .form = X86_FORM_CRC32_R32_RM8, .reg = X86_REGISTER_RAX, .rm = 16 },
     { .form = X86_FORM_MOVBE_R32_M32, .reg = 16, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE },
+    // Map 4's forms: setzub byte ptr [rax] (ZU takes only a register), and a high byte register, which no EVEX form can
+    // have, in vvvv, rm and reg: add ah, cl, dl; add al, ah, dl; {evex} add cl, ah
+    { .form = X86_FORM_SETZUB_R8, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE },
+    { .form = X86_FORM_ADD_R8_RM8_R8, .vvvv = X86_REGISTER_AH, .rm = X86_REGISTER_RCX, .reg = X86_REGISTER_RDX },
+    { .form = X86_FORM_ADD_R8_RM8_R8, .vvvv = X86_REGISTER_RAX, .rm = X86_REGISTER_AH, .reg = X86_REGISTER_RDX },
+    { .form = X86_FORM_ADD_RM8_R8_EVEX, .rm = X86_REGISTER_RCX, .reg = X86_REGISTER_AH },
 };
 
 static bool x86_check_known_invalid_apx(void)
@@ -2876,12 +3005,6 @@ static uint32_t x86_range_kind(const X86FormDescription* form)
     return x86_form_has_is4(form) ? 5 : form->relative_bytes == 1 ? 4 : form->relative_bytes == 2 ? 6 : form->immediate_bytes <= 3 ? form->immediate_bytes : 0;
 }
 
-// Whether the form (an FS or GS one, as no other lacks room) has a memory operand but no template for 32-bit addresses
-// (see x86_form_lacks_address32_template, which a segment override's form without a memory operand also satisfies).
-static bool x86_form_is_unfit_address32(uint32_t form_index)
-{
-    return (x86_form_description(form_index)->rm & BUSTER_X86_OPERAND_MEMORY) && x86_form_lacks_address32_template(form_index);
-}
 
 // Breaks one operand of a valid instruction in one of the ways x86_encode checks, or in one that only x86_validate
 // checks (and then sets *validate_only). Returns false if this instruction can't be broken that way.
@@ -2894,10 +3017,9 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
     // With APX, a form whose general registers, base and general index can be 16 to 31.
     const bool extended = x86_test_mode == X86_ENCODER_MODE_APX && x86_form_has_apx_registers(instruction->form);
     bool result = true;
-    // The ways after the first 23 are for one mode alone, so that the 64-bit pass breaks the instructions it did before
-    // them: 23 and 24 for 32-bit addresses, and 25 to 27 for APX.
-    const uint32_t way = x86_random_below(state, x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? 25 : x86_test_mode == X86_ENCODER_MODE_APX ? 26 : 23);
-    switch (x86_test_mode == X86_ENCODER_MODE_APX && way >= 23 ? way + 2 : way)
+    // The ways after the first 23 are for some modes alone: 23 for 32-bit addresses, 24 for all, and 25 to 27 for APX.
+    const uint32_t way = x86_random_below(state, x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? 25 : x86_test_mode == X86_ENCODER_MODE_APX ? 27 : 24);
+    switch (x86_test_mode != X86_ENCODER_MODE_ADDRESS32 && way >= 23 ? way + 1 : way)
     {
         case 0:
             // A high byte register with an extended register (and so a REX prefix, or with APX, maybe REX2).
@@ -3327,21 +3449,21 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
         }
         case 24:
         {
-            // With 32-bit addresses, a memory operand in a form whose template has no room for the 67, which
-            // x86_encode_address32 rejects too: in a new instruction of one such form's row, chosen evenly (none if
-            // every template has room), with a memory operand (bextr's and LWP's rm can be a register), given the
-            // form's segment override.
+            // A memory operand in a form whose template has no room for its bytes (a segment override's, or a 32-bit
+            // address's 67: see x86_form_lacks_room), which the encoder rejects too: in a new instruction of one such
+            // form's row, chosen evenly (none if every template has room), with a memory operand (bextr's, LWP's and
+            // map 4's rm can be a register), given the form's segment override.
             uint32_t unfit = 0;
-            for (uint32_t form_index = BUSTER_X86_FORM_FS; form_index < BUSTER_X86_FORM_TEMPLATES; form_index += 1)
+            for (uint32_t form_index = 1; form_index < BUSTER_X86_FORM_TEMPLATES; form_index += 1)
             {
-                unfit += x86_form_is_unfit_address32(form_index);
+                unfit += x86_form_lacks_room(form_index, x86_test_mode);
             }
             const uint32_t chosen = unfit != 0 ? x86_random_below(state, unfit) : 0;
-            uint32_t form_index = BUSTER_X86_FORM_FS;
+            uint32_t form_index = 1;
             uint32_t seen = 0;
-            while (unfit != 0 && !(x86_form_is_unfit_address32(form_index) && seen == chosen))
+            while (unfit != 0 && !(x86_form_lacks_room(form_index, x86_test_mode) && seen == chosen))
             {
-                seen += x86_form_is_unfit_address32(form_index);
+                seen += x86_form_lacks_room(form_index, x86_test_mode);
                 form_index += 1;
             }
             if (unfit == 0)
@@ -3350,12 +3472,17 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
             }
             else
             {
+                // As the 64-bit mode makes it, since the row's memory operands may have no room in this mode either
+                // (map 4's imm32 forms with a 67).
                 const uint16_t row = (uint16_t)(form_index % X86_FORM_COUNT);
+                const X86EncoderMode mode = x86_test_mode;
+                x86_test_mode = X86_ENCODER_MODE_64;
                 *instruction = x86_random_instruction(state, row, false);
                 while (!(instruction->mode & BUSTER_X86_MODE_MEMORY))
                 {
                     *instruction = x86_random_instruction(state, row, false);
                 }
+                x86_test_mode = mode;
                 instruction->form = (uint16_t)form_index;
             }
             break;
