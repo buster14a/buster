@@ -61,7 +61,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0xb5ee315739da5b29ull
+#define BUSTER_X86_TEST_DIGEST 0x88be087841d3402cull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -234,6 +234,12 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
     {
         result = true;
     }
+    // XOP's vpcmov and vpperm, and vpermil2ps and vpermil2pd, are W0 between registers: no pseudo-prefix picks W1.
+    if (register_direct && form->w &&
+        ((form->syntax == X86_SYNTAX_REG_VVVV_IS4_RM && x86_opcode_map(form) >= 8) || form->syntax == X86_SYNTAX_REG_VVVV_IS4_RM_IMM))
+    {
+        result = true;
+    }
     // PUSH and POP of a register are 50+r and 58+r.
     if (legacy && register_direct && (opcode == 0xff || opcode == 0x8f) && (form->encoding == BUSTER_X86_ENCODING_D6 || opcode == 0x8f))
     {
@@ -349,6 +355,7 @@ static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_inde
         if (x86_form_has_is4(form))
         {
             result.immediate = x86_random_register(state, form->reg, form->family) << 4;
+            result.immediate |= x86_form_has_is4_selector(form) ? (int32_t)x86_random_below(state, 16) : 0;
         }
         if (form->immediate_bytes == 8)
         {
@@ -491,8 +498,8 @@ static void x86_print_rm(FILE* file, const X86Instruction* instruction, const X8
 }
 
 // The operands of a syntax, in order (r for reg, v for vvvv, m for rm, i for the immediate, c for CL, 1 for 1, s for
-// ST(0), a for the accumulator and 4 for the /is4 register), for the syntaxes x86_print_instruction doesn't print
-// itself.
+// ST(0), a for the accumulator, 4 for the /is4 register and z for the selector below it), for the syntaxes
+// x86_print_instruction doesn't print itself.
 static const char* x86_syntax_operands(uint8_t syntax)
 {
     const char* result = "";
@@ -524,6 +531,8 @@ static const char* x86_syntax_operands(uint8_t syntax)
         case X86_SYNTAX_RM_VVVV_REG: result = "mvr"; break;
         case X86_SYNTAX_REG_VVVV_RM_IS4: result = "rvm4"; break;
         case X86_SYNTAX_REG_VVVV_IS4_RM: result = "rv4m"; break;
+        case X86_SYNTAX_REG_VVVV_RM_IS4_IMM: result = "rvm4z"; break;
+        case X86_SYNTAX_REG_VVVV_IS4_RM_IMM: result = "rv4mz"; break;
         default: break;
     }
     return result;
@@ -555,10 +564,11 @@ static bool x86_vex_form_shares_mnemonic(uint32_t form)
 
 // Prints the instruction in GNU as Intel syntax. A register-to-register move or arithmetic instruction gets {load} or
 // {store}, which picks the form with ModRM.reg as the destination or the source (and keeps GNU as from swapping a VEX
-// move's operands to make it VEX2). An EVEX form gets {evex}, which GNU as otherwise only picks when the operands need
-// it, and a VEX form whose mnemonic an EVEX form has gets {vex}: GNU as picks EVEX for some of those (vpdpbusd,
-// vpmadd52luq and vcvtneps2bf16, whose AVX-512 forms came first). The opmask and zeroing follow the first operand, a
-// broadcast follows the memory operand, and embedded rounding or suppressed exceptions come after the registers.
+// move's operands to make it VEX2, and picks XOP's W1 shifts). An EVEX form gets {evex}, which GNU as otherwise only
+// picks when the operands need it, and a VEX form whose mnemonic an EVEX form has gets {vex}: GNU as picks EVEX for
+// some of those (vpdpbusd, vpmadd52luq and vcvtneps2bf16, whose AVX-512 forms came first). The opmask and zeroing
+// follow the first operand, a broadcast follows the memory operand, and embedded rounding or suppressed exceptions come
+// after the registers.
 static void x86_print_instruction(FILE* file, const X86Instruction* instruction)
 {
     const X86FormDescription* form = x86_form_description(instruction->form);
@@ -577,7 +587,9 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction)
     if (register_direct && form->reg != BUSTER_X86_OPERAND_NONE &&
         (form->syntax == X86_SYNTAX_RM_REG || form->syntax == X86_SYNTAX_REG_RM || form->syntax == X86_SYNTAX_REG_VVVV_RM))
     {
-        fprintf(file, "%s ", form->syntax == X86_SYNTAX_RM_REG ? "{store}" : "{load}");
+        // XOP's shifts and rotates by a vector of counts swap their sources with W1, which {store} picks.
+        const bool swapped = form->w && form->syntax == X86_SYNTAX_REG_VVVV_RM && x86_opcode_map(form) >= 8;
+        fprintf(file, "%s ", form->syntax == X86_SYNTAX_RM_REG || swapped ? "{store}" : "{load}");
     }
     if (form->syntax == X86_SYNTAX_REL && form->relative_bytes == 4 && form->opcode != 0xe8)
     {
@@ -632,6 +644,7 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction)
                     case 'k': fprintf(file, "%d", (instruction->immediate >> 8) & 0xff); break;
                     case 'x': fprintf(file, "xmm0"); break;
                     case '4': fprintf(file, "%s", x86_register_name((uint8_t)((uint32_t)instruction->immediate >> 4), form->reg)); break;
+                    case 'z': fprintf(file, "%d", instruction->immediate & 15); break;
                     case 'c': fprintf(file, "cl"); break;
                     case 's': fprintf(file, "st"); break;
                     case 'a': fprintf(file, "%s", x86_accumulator_name(form->operand_bytes)); break;
@@ -1444,6 +1457,52 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_VMOVD_X_X, .reg = 1, .rm = 2 }, 6, { 0x62, 0xf1, 0x7e, 0x08, 0x7e, 0xca } },
     { { .form = X86_FORM_VCVTTSD2SIS_R64_X_SAE, .reg = X86_REGISTER_RAX, .rm = 1 }, 6, { 0x62, 0xf5, 0xff, 0x18, 0x6d, 0xc1 } },
     { { .form = X86_FORM_VDPPHPS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 3 }, 6, { 0x62, 0xf2, 0x6c, 0x48, 0x52, 0xcb } },
+    // XOP (8F in place of C4, maps 8 to 0A): vfrczps xmm1, xmm2; vpcmov ymm9, ymm10, ymm11, ymm12 (R, vvvv, B and 12 in
+    // the immediate); vpcmov ymm1, ymm2, ymm3, ymmword ptr [r9] (W1); W1 between registers, which GNU as doesn't write
+    // (objdump reads these bytes as vpcmov xmm1, xmm2, xmm3, xmm4); vpperm xmm1, xmm2, xmm3, xmm4; vpermil2ps xmm1,
+    // xmm2, xmm3, xmm4, 3 (VEX, with a selector below the register) and vpermil2pd ymm1, ymm2, ymm3, ymmword ptr [rax],
+    // 15; vpcomb xmm1, xmm2, xmm3, 200; vprotb xmm1, xmm2, xmm3 and {store} vprotb xmm1, xmm2, xmm3 (W0 and W1); vprotq
+    // xmm1, xmm2, 200 (map 8); vpshlw xmm1, xmmword ptr [rax], xmm3; vphaddbw xmm1, xmm2; and vpmacssww xmm1, xmm2,
+    // xmmword ptr [rax], xmm4
+    { { .form = X86_FORM_VFRCZPS_X_XM128, .reg = 1, .rm = 2 }, 5, { 0x8f, 0xe9, 0x78, 0x80, 0xca } },
+    { { .form = X86_FORM_VPCMOV_Y_Y_YM256_Y, .reg = 9, .vvvv = 10, .rm = 11, .immediate = 12 << 4 }, 6, { 0x8f, 0x48, 0x2c, 0xa2, 0xcb, 0xc0 } },
+    { { .form = X86_FORM_VPCMOV_Y_Y_Y_YM256, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_R9, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 << 4 },
+      6,
+      { 0x8f, 0xc8, 0xec, 0xa2, 0x09, 0x30 } },
+    { { .form = X86_FORM_VPCMOV_X_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 4, .immediate = 3 << 4 }, 6, { 0x8f, 0xe8, 0xe8, 0xa2, 0xcc, 0x30 } },
+    { { .form = X86_FORM_VPPERM_X_X_XM128_X, .reg = 1, .vvvv = 2, .rm = 3, .immediate = 4 << 4 }, 6, { 0x8f, 0xe8, 0x68, 0xa3, 0xcb, 0x40 } },
+    { { .form = X86_FORM_VPERMIL2PS_X_X_XM128_X_IMM8, .reg = 1, .vvvv = 2, .rm = 3, .immediate = 4 << 4 | 3 }, 6, { 0xc4, 0xe3, 0x69, 0x48, 0xcb, 0x43 } },
+    { { .form = X86_FORM_VPERMIL2PD_Y_Y_Y_YM256_IMM8, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 << 4 | 15 },
+      6,
+      { 0xc4, 0xe3, 0xed, 0x49, 0x08, 0x3f } },
+    { { .form = X86_FORM_VPCOMB_X_X_XM128_IMM8, .reg = 1, .vvvv = 2, .rm = 3, .immediate = 200 }, 6, { 0x8f, 0xe8, 0x68, 0xcc, 0xcb, 0xc8 } },
+    { { .form = X86_FORM_VPROTB_X_XM128_X, .reg = 1, .vvvv = 3, .rm = 2 }, 5, { 0x8f, 0xe9, 0x60, 0x90, 0xca } },
+    { { .form = X86_FORM_VPROTB_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0x8f, 0xe9, 0xe8, 0x90, 0xcb } },
+    { { .form = X86_FORM_VPROTQ_X_XM128_IMM8, .reg = 1, .rm = 2, .immediate = 200 }, 6, { 0x8f, 0xe8, 0x78, 0xc3, 0xca, 0xc8 } },
+    { { .form = X86_FORM_VPSHLW_X_XM128_X, .reg = 1, .vvvv = 3, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x8f, 0xe9, 0x60, 0x95, 0x08 } },
+    { { .form = X86_FORM_VPHADDBW_X_XM128, .reg = 1, .rm = 2 }, 5, { 0x8f, 0xe9, 0x78, 0xc1, 0xca } },
+    { { .form = X86_FORM_VPMACSSWW_X_X_XM128_X, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 4 << 4 },
+      6,
+      { 0x8f, 0xe8, 0x68, 0x85, 0x08, 0x40 } },
+    // TBM and LWP: blcfill eax, dword ptr fs:[rax] (the override before 8F); tzmsk r9, qword ptr [r10] (into VEX.vvvv,
+    // W1); bextr r9, r10, 0x12345 (map 0A, a 32-bit immediate); llwpcb rax; lwpval r9, r10d, 0x12345 (W1 for the 64-bit
+    // register); and lwpins eax, dword ptr [rax], 0x12345
+    { { .form = X86_FORM_BLCFILL_R32_RM32 + BUSTER_X86_FORM_FS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE },
+      6,
+      { 0x64, 0x8f, 0xe9, 0x78, 0x01, 0x08 } },
+    { { .form = X86_FORM_TZMSK_R64_RM64, .vvvv = X86_REGISTER_R9, .rm = X86_REGISTER_R10, .mode = BUSTER_X86_MEMORY_BASE },
+      5,
+      { 0x8f, 0xc9, 0xb0, 0x01, 0x22 } },
+    { { .form = X86_FORM_BEXTR_R64_RM64_IMM32, .reg = X86_REGISTER_R9, .rm = X86_REGISTER_R10, .immediate = 0x12345 },
+      9,
+      { 0x8f, 0x4a, 0xf8, 0x10, 0xca, 0x45, 0x23, 0x01, 0x00 } },
+    { { .form = X86_FORM_LLWPCB_R64, .rm = X86_REGISTER_RAX }, 5, { 0x8f, 0xe9, 0xf8, 0x12, 0xc0 } },
+    { { .form = X86_FORM_LWPVAL_R64_RM32_IMM32, .vvvv = X86_REGISTER_R9, .rm = X86_REGISTER_R10, .immediate = 0x12345 },
+      9,
+      { 0x8f, 0xca, 0xb0, 0x12, 0xca, 0x45, 0x23, 0x01, 0x00 } },
+    { { .form = X86_FORM_LWPINS_R32_RM32_IMM32, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 0x12345 },
+      9,
+      { 0x8f, 0xea, 0x78, 0x12, 0x00, 0x45, 0x23, 0x01, 0x00 } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.
@@ -1895,9 +1954,10 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
         {
             // An immediate or a relative displacement just outside its field's range, above or below: imm8's [-128,
             // 255], imm16's [-32768, 65535], ENTER's [0, 2^24) or rel8's [-128, 127] (imm32, a 64-bit immediate and
-            // rel32 take any value); or an /is4 register past the last (16) or with one of bits 3 to 0 set. x86_encode
-            // writes the field's low bytes, so only x86_validate checks this. In a new instruction of a random form with
-            // such a field, each kind of field as often, as only one form (ENTER) has the third and few have a rel8.
+            // rel32 take any value); or an /is4 register past the last (16) or with one of bits 3 to 0 set (or below 0,
+            // for one with a selector there). x86_encode writes the field's low bytes, so only x86_validate checks
+            // this. In a new instruction of a random form with such a field, each kind of field as often, as only one
+            // form (ENTER) has the third and few have a rel8.
             const uint32_t kind = 1 + x86_random_below(state, 5);
             uint16_t form_index = x86_random_form(state, false);
             while (x86_range_kind(&x86_form_descriptions[form_index]) != kind)
@@ -1911,7 +1971,12 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
                 case 1: instruction->immediate = above ? 256 : -129; break;
                 case 2: instruction->immediate = above ? 65536 : -32769; break;
                 case 3: instruction->immediate = above ? 1 << 24 : -1; break;
-                case 5: instruction->immediate = above ? 16 << 4 : instruction->immediate | (int32_t)(1 + x86_random_below(state, 15)); break;
+                case 5:
+                {
+                    const bool selector = x86_form_has_is4_selector(&x86_form_descriptions[form_index]);
+                    instruction->immediate = above ? 16 << 4 : selector ? -1 : instruction->immediate | (int32_t)(1 + x86_random_below(state, 15));
+                    break;
+                }
                 default: instruction->displacement = above ? 128 : -129; break;
             }
             *validate_only = true;

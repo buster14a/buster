@@ -130,7 +130,8 @@ struct X86Instruction
     // The immediate, in as many low bytes as the form's immediate has (ENTER's two are imm16 | imm8 << 16), signed or
     // not: imm8 in [-128, 255], imm16 in [-32768, 65535] and ENTER's in [0, 2^24). A 64-bit immediate or address
     // (MOV r64, imm64 and MOVABS) is immediate | displacement << 32. An /is4 operand (a register in the immediate's
-    // bits 7 to 4) is the register's number times 16, as the instruction has it.
+    // bits 7 to 4) is the register's number times 16, as the instruction has it, plus vpermil2ps's and vpermil2pd's
+    // selector (0 to 15).
     int32_t immediate;
     // The memory operand's displacement, or a relative branch's displacement from the end of the instruction (a rel8's
     // in [-128, 127]).
@@ -263,8 +264,8 @@ typedef enum X86EncoderError
 // doesn't depend on it). ACC is AL, AX, EAX or RAX; MOFFS is a 64-bit absolute address; VVVV is the VEX.vvvv register;
 // ST is the x87 register ST(0), where the rm operand is ST(i); XMM0 is the variable blends' implicit mask register;
 // IMM8_IMM8 is two 8-bit immediates (SSE4a's extrq and insertq), the immediate's low byte first; RM_VVVV_REG is a
-// masked store's memory, mask and source; and IS4 is the register in the immediate's bits 7 to 4, of the reg
-// operand's class.
+// masked store's memory, mask and source; IS4 is the register in the immediate's bits 7 to 4, of the reg operand's
+// class; and IS4_..._IMM has a 4-bit selector in bits 3 to 0 too (vpermil2ps's and vpermil2pd's).
 typedef enum X86Syntax
 {
     X86_SYNTAX_NONE,
@@ -299,6 +300,8 @@ typedef enum X86Syntax
     X86_SYNTAX_RM_VVVV_REG,
     X86_SYNTAX_REG_VVVV_RM_IS4,
     X86_SYNTAX_REG_VVVV_IS4_RM,
+    X86_SYNTAX_REG_VVVV_RM_IS4_IMM,
+    X86_SYNTAX_REG_VVVV_IS4_RM_IMM,
 } X86Syntax;
 
 // The form table. Each row is X(name, mnemonic, prefixes, opcode bytes, opcode, encoding, immediate bytes, relative
@@ -514,7 +517,8 @@ typedef enum X86Syntax
 // bytes, W, L, reg operand, vvvv operand, rm operand, operand bytes, disp8 scale, decorations, syntax):
 //   - family: VEX or EVEX; prefixes: the legacy prefix the form implies (66, F3 or F2, which become VEX.pp and
 //     EVEX.pp), or 0; opcode: as for the legacy forms, with its escape bytes (0F, 0F 38 or 0F 3A: the opcode map),
-//     or for EVEX's maps 5 and 6, which have none, the map's number in the escape's place (0x0558: map 5's 58);
+//     or for the maps without escape bytes, EVEX's 5 and 6 and XOP's 8, 9 and 0A (VEX rows, whose prefix is then
+//     XOP's: 8F in place of C4), the map's number in the escape's place (0x0558: map 5's 58);
 //   - W: VEX.W or EVEX.W (0 where it's ignored, as GNU as encodes those); L: VEX.L or EVEX.L'L, 0 (128-bit, scalar
 //     or no vector length), 1 (256-bit) or 2 (512-bit);
 //   - vvvv operand: the register in VEX.vvvv or EVEX.V'vvvv, or NONE;
@@ -623,6 +627,52 @@ typedef enum X86Syntax
     XV(N##_X_M128, m, VEX, prefixes, opcode_bytes, opcode, R, 0, 0, 0, V, NONE, M, 16, 1, NONE, REG_RM) \
     XV(N##_Y_M256, m, VEX, prefixes, opcode_bytes, opcode, R, 0, 0, 1, Y, NONE, M, 32, 1, NONE, REG_RM)
 
+// Four operands, the last two in ModRM.rm and the immediate (/is4) in either order: with W0 the third in ModRM.rm and
+// the fourth in the immediate, with W1 the other way around; at 128 and 256 bits (FMA4's and XOP's vpcmov). Then the
+// same with a selector in the immediate's low bits (vpermil2ps and vpermil2pd).
+#define BUSTER_X86_AVX_IS4_SWAP_FORMS(XV, N, m, prefixes, opcode_bytes, opcode) \
+    XV(N##_X_X_XM128_X, m, VEX, prefixes, opcode_bytes, opcode, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(N##_X_X_X_XM128, m, VEX, prefixes, opcode_bytes, opcode, R, 1, 1, 0, V, V, XM, 16, 1, NONE, REG_VVVV_IS4_RM) \
+    XV(N##_Y_Y_YM256_Y, m, VEX, prefixes, opcode_bytes, opcode, R, 1, 0, 1, Y, Y, YM, 32, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(N##_Y_Y_Y_YM256, m, VEX, prefixes, opcode_bytes, opcode, R, 1, 1, 1, Y, Y, YM, 32, 1, NONE, REG_VVVV_IS4_RM)
+
+#define BUSTER_X86_AVX_IS4_SWAP_SELECTOR_FORMS(XV, N, m, prefixes, opcode_bytes, opcode) \
+    XV(N##_X_X_XM128_X_IMM8, m, VEX, prefixes, opcode_bytes, opcode, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4_IMM) \
+    XV(N##_X_X_X_XM128_IMM8, m, VEX, prefixes, opcode_bytes, opcode, R, 1, 1, 0, V, V, XM, 16, 1, NONE, REG_VVVV_IS4_RM_IMM) \
+    XV(N##_Y_Y_YM256_Y_IMM8, m, VEX, prefixes, opcode_bytes, opcode, R, 1, 0, 1, Y, Y, YM, 32, 1, NONE, REG_VVVV_RM_IS4_IMM) \
+    XV(N##_Y_Y_Y_YM256_IMM8, m, VEX, prefixes, opcode_bytes, opcode, R, 1, 1, 1, Y, Y, YM, 32, 1, NONE, REG_VVVV_IS4_RM_IMM)
+
+// XOP (VEX rows in maps 8 to 0A): compares of bytes, words, doublewords and quadwords (at `opcode` and the next three)
+// with a predicate in the immediate; shifts and rotates of them by a vector of counts, with W0 the source in ModRM.rm
+// and the counts in VEX.vvvv and with W1 the other way around (in map 9); and rotates by an immediate (in map 8).
+#define BUSTER_X86_XOP_COMPARE_FORMS(XV, N, m, opcode) \
+    XV(N##B_X_X_XM128_IMM8, m "b", VEX, 0, 2, opcode, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IMM) \
+    XV(N##W_X_X_XM128_IMM8, m "w", VEX, 0, 2, opcode + 1, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IMM) \
+    XV(N##D_X_X_XM128_IMM8, m "d", VEX, 0, 2, opcode + 2, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IMM) \
+    XV(N##Q_X_X_XM128_IMM8, m "q", VEX, 0, 2, opcode + 3, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IMM)
+
+#define BUSTER_X86_XOP_SHIFT_PAIR_FORMS(XV, N, m, opcode) \
+    XV(N##_X_XM128_X, m, VEX, 0, 2, opcode, R, 0, 0, 0, V, V, XM, 16, 1, NONE, REG_RM_VVVV) \
+    XV(N##_X_X_XM128, m, VEX, 0, 2, opcode, R, 0, 1, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM)
+
+#define BUSTER_X86_XOP_SHIFT_FORMS(XV, N, m, opcode) \
+    BUSTER_X86_XOP_SHIFT_PAIR_FORMS(XV, N##B, m "b", opcode) \
+    BUSTER_X86_XOP_SHIFT_PAIR_FORMS(XV, N##W, m "w", opcode + 1) \
+    BUSTER_X86_XOP_SHIFT_PAIR_FORMS(XV, N##D, m "d", opcode + 2) \
+    BUSTER_X86_XOP_SHIFT_PAIR_FORMS(XV, N##Q, m "q", opcode + 3)
+
+#define BUSTER_X86_XOP_ROTATE_IMMEDIATE_FORMS(XV, N, m, opcode) \
+    XV(N##B_X_XM128_IMM8, m "b", VEX, 0, 2, opcode, R, 1, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
+    XV(N##W_X_XM128_IMM8, m "w", VEX, 0, 2, opcode + 1, R, 1, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
+    XV(N##D_X_XM128_IMM8, m "d", VEX, 0, 2, opcode + 2, R, 1, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
+    XV(N##Q_X_XM128_IMM8, m "q", VEX, 0, 2, opcode + 3, R, 1, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM)
+
+// TBM's bit manipulations (XOP map 9, ModRM.reg the operation, K), into VEX.vvvv, of a 32- or 64-bit (W1) register or
+// memory operand.
+#define BUSTER_X86_TBM_FORMS(XV, N, m, opcode, K) \
+    XV(N##_R32_RM32, m, VEX, 0, 2, opcode, D##K, 0, 0, 0, NONE, GD, ED, 4, 1, NONE, VVVV_RM) \
+    XV(N##_R64_RM64, m, VEX, 0, 2, opcode, D##K, 0, 1, 0, NONE, GQ, EQ, 8, 1, NONE, VVVV_RM)
+
 // Four operands, the last a register in the immediate (/is4, see X86Instruction.immediate): the destination, the
 // first source in VEX.vvvv, the second in ModRM.rm and the third in the immediate, at 128 and 256 bits (AVX's
 // variable blends, whose mask is the third).
@@ -630,15 +680,11 @@ typedef enum X86Syntax
     XV(N##_X_X_XM128_X, m, VEX, 0x66, 3, opcode, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
     XV(N##_Y_Y_YM256_Y, m, VEX, 0x66, 3, opcode, R, 1, 0, 1, Y, Y, YM, 32, 1, NONE, REG_VVVV_RM_IS4)
 
-// AMD's FMA4: the product of the first two sources plus or minus the third, with W0 the second source in ModRM.rm
-// and the third in the immediate, and with W1 the other way around (which GNU as uses between registers); packed at
-// both widths, and scalar (`bits`), from the packed single-precision form's opcode: double precision at the next,
-// and single and double scalar at the two after it.
-#define BUSTER_X86_FMA4_PACKED_FORMS(XV, N, m, opcode) \
-    XV(N##_X_X_XM128_X, m, VEX, 0x66, 3, opcode, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
-    XV(N##_X_X_X_XM128, m, VEX, 0x66, 3, opcode, R, 1, 1, 0, V, V, XM, 16, 1, NONE, REG_VVVV_IS4_RM) \
-    XV(N##_Y_Y_YM256_Y, m, VEX, 0x66, 3, opcode, R, 1, 0, 1, Y, Y, YM, 32, 1, NONE, REG_VVVV_RM_IS4) \
-    XV(N##_Y_Y_Y_YM256, m, VEX, 0x66, 3, opcode, R, 1, 1, 1, Y, Y, YM, 32, 1, NONE, REG_VVVV_IS4_RM)
+// AMD's FMA4: the product of the first two sources plus or minus the third, the second and the third in either order
+// (BUSTER_X86_AVX_IS4_SWAP_FORMS: GNU as uses W1 between registers); packed at both widths, and scalar (`bits`), from
+// the packed single-precision form's opcode: double precision at the next, and single and double scalar at the two
+// after it.
+#define BUSTER_X86_FMA4_PACKED_FORMS(XV, N, m, opcode) BUSTER_X86_AVX_IS4_SWAP_FORMS(XV, N, m, 0x66, 3, opcode)
 
 #define BUSTER_X86_FMA4_SCALAR_FORMS(XV, N, m, opcode, bits) \
     XV(N##_X_X_XM##bits##_X, m, VEX, 0x66, 3, opcode, R, 1, 0, 0, V, V, XM, bits / 8, 1, NONE, REG_VVVV_RM_IS4) \
@@ -1630,6 +1676,71 @@ typedef enum X86Syntax
     BUSTER_X86_FMA4_FORMS(XV, VFMSUB, "vfmsub", 0x0f3a6c) \
     BUSTER_X86_FMA4_FORMS(XV, VFNMADD, "vfnmadd", 0x0f3a78) \
     BUSTER_X86_FMA4_FORMS(XV, VFNMSUB, "vfnmsub", 0x0f3a7c) \
+    /* AMD's XOP (VEX rows in maps 8 to 0A, whose prefix starts with 8F instead of C4), and vpermil2ps and vpermil2pd. */ \
+    BUSTER_X86_AVX_UNARY_FORMS(XV, VFRCZPS, "vfrczps", 0, 2, 0x0980) \
+    BUSTER_X86_AVX_UNARY_FORMS(XV, VFRCZPD, "vfrczpd", 0, 2, 0x0981) \
+    XV(VFRCZSS_X_XM32, "vfrczss", VEX, 0, 2, 0x0982, R, 0, 0, 0, V, NONE, XM, 4, 1, NONE, REG_RM) \
+    XV(VFRCZSD_X_XM64, "vfrczsd", VEX, 0, 2, 0x0983, R, 0, 0, 0, V, NONE, XM, 8, 1, NONE, REG_RM) \
+    BUSTER_X86_AVX_IS4_SWAP_FORMS(XV, VPCMOV, "vpcmov", 0, 2, 0x08a2) \
+    XV(VPPERM_X_X_XM128_X, "vpperm", VEX, 0, 2, 0x08a3, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(VPPERM_X_X_X_XM128, "vpperm", VEX, 0, 2, 0x08a3, R, 1, 1, 0, V, V, XM, 16, 1, NONE, REG_VVVV_IS4_RM) \
+    BUSTER_X86_AVX_IS4_SWAP_SELECTOR_FORMS(XV, VPERMIL2PS, "vpermil2ps", 0x66, 3, 0x0f3a48) \
+    BUSTER_X86_AVX_IS4_SWAP_SELECTOR_FORMS(XV, VPERMIL2PD, "vpermil2pd", 0x66, 3, 0x0f3a49) \
+    BUSTER_X86_XOP_COMPARE_FORMS(XV, VPCOM, "vpcom", 0x08cc) \
+    BUSTER_X86_XOP_COMPARE_FORMS(XV, VPCOMU, "vpcomu", 0x08ec) \
+    BUSTER_X86_XOP_SHIFT_FORMS(XV, VPROT, "vprot", 0x0990) \
+    BUSTER_X86_XOP_SHIFT_FORMS(XV, VPSHL, "vpshl", 0x0994) \
+    BUSTER_X86_XOP_SHIFT_FORMS(XV, VPSHA, "vpsha", 0x0998) \
+    BUSTER_X86_XOP_ROTATE_IMMEDIATE_FORMS(XV, VPROT, "vprot", 0x08c0) \
+    /* Horizontal additions and subtractions of adjacent elements into wider ones. */ \
+    XV(VPHADDBW_X_XM128, "vphaddbw", VEX, 0, 2, 0x09c1, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHADDBD_X_XM128, "vphaddbd", VEX, 0, 2, 0x09c2, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHADDBQ_X_XM128, "vphaddbq", VEX, 0, 2, 0x09c3, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHADDWD_X_XM128, "vphaddwd", VEX, 0, 2, 0x09c6, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHADDWQ_X_XM128, "vphaddwq", VEX, 0, 2, 0x09c7, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHADDDQ_X_XM128, "vphadddq", VEX, 0, 2, 0x09cb, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHADDUBW_X_XM128, "vphaddubw", VEX, 0, 2, 0x09d1, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHADDUBD_X_XM128, "vphaddubd", VEX, 0, 2, 0x09d2, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHADDUBQ_X_XM128, "vphaddubq", VEX, 0, 2, 0x09d3, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHADDUWD_X_XM128, "vphadduwd", VEX, 0, 2, 0x09d6, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHADDUWQ_X_XM128, "vphadduwq", VEX, 0, 2, 0x09d7, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHADDUDQ_X_XM128, "vphaddudq", VEX, 0, 2, 0x09db, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHSUBBW_X_XM128, "vphsubbw", VEX, 0, 2, 0x09e1, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHSUBWD_X_XM128, "vphsubwd", VEX, 0, 2, 0x09e2, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VPHSUBDQ_X_XM128, "vphsubdq", VEX, 0, 2, 0x09e3, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    /* Multiplications with an accumulator from the immediate (/is4), s saturating. */ \
+    XV(VPMACSSWW_X_X_XM128_X, "vpmacssww", VEX, 0, 2, 0x0885, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(VPMACSSWD_X_X_XM128_X, "vpmacsswd", VEX, 0, 2, 0x0886, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(VPMACSSDQL_X_X_XM128_X, "vpmacssdql", VEX, 0, 2, 0x0887, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(VPMACSSDD_X_X_XM128_X, "vpmacssdd", VEX, 0, 2, 0x088e, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(VPMACSSDQH_X_X_XM128_X, "vpmacssdqh", VEX, 0, 2, 0x088f, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(VPMACSWW_X_X_XM128_X, "vpmacsww", VEX, 0, 2, 0x0895, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(VPMACSWD_X_X_XM128_X, "vpmacswd", VEX, 0, 2, 0x0896, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(VPMACSDQL_X_X_XM128_X, "vpmacsdql", VEX, 0, 2, 0x0897, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(VPMACSDD_X_X_XM128_X, "vpmacsdd", VEX, 0, 2, 0x089e, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(VPMACSDQH_X_X_XM128_X, "vpmacsdqh", VEX, 0, 2, 0x089f, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(VPMADCSSWD_X_X_XM128_X, "vpmadcsswd", VEX, 0, 2, 0x08a6, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(VPMADCSWD_X_X_XM128_X, "vpmadcswd", VEX, 0, 2, 0x08b6, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    /* TBM's bit manipulations and bextr with a 32-bit immediate (the field's start and length), and LWP's. */ \
+    BUSTER_X86_TBM_FORMS(XV, BLCFILL, "blcfill", 0x0901, 1) \
+    BUSTER_X86_TBM_FORMS(XV, BLSFILL, "blsfill", 0x0901, 2) \
+    BUSTER_X86_TBM_FORMS(XV, BLCS, "blcs", 0x0901, 3) \
+    BUSTER_X86_TBM_FORMS(XV, TZMSK, "tzmsk", 0x0901, 4) \
+    BUSTER_X86_TBM_FORMS(XV, BLCIC, "blcic", 0x0901, 5) \
+    BUSTER_X86_TBM_FORMS(XV, BLSIC, "blsic", 0x0901, 6) \
+    BUSTER_X86_TBM_FORMS(XV, T1MSKC, "t1mskc", 0x0901, 7) \
+    BUSTER_X86_TBM_FORMS(XV, BLCMSK, "blcmsk", 0x0902, 1) \
+    BUSTER_X86_TBM_FORMS(XV, BLCI, "blci", 0x0902, 6) \
+    XV(BEXTR_R32_RM32_IMM32, "bextr", VEX, 0, 2, 0x0a10, R, 4, 0, 0, GD, NONE, ED, 4, 1, NONE, REG_RM_IMM) \
+    XV(BEXTR_R64_RM64_IMM32, "bextr", VEX, 0, 2, 0x0a10, R, 4, 1, 0, GQ, NONE, EQ, 8, 1, NONE, REG_RM_IMM) \
+    XV(LLWPCB_R32, "llwpcb", VEX, 0, 2, 0x0912, D0, 0, 0, 0, NONE, NONE, GD, 4, 1, NONE, RM) \
+    XV(LLWPCB_R64, "llwpcb", VEX, 0, 2, 0x0912, D0, 0, 1, 0, NONE, NONE, GQ, 8, 1, NONE, RM) \
+    XV(SLWPCB_R32, "slwpcb", VEX, 0, 2, 0x0912, D1, 0, 0, 0, NONE, NONE, GD, 4, 1, NONE, RM) \
+    XV(SLWPCB_R64, "slwpcb", VEX, 0, 2, 0x0912, D1, 0, 1, 0, NONE, NONE, GQ, 8, 1, NONE, RM) \
+    XV(LWPINS_R32_RM32_IMM32, "lwpins", VEX, 0, 2, 0x0a12, D0, 4, 0, 0, NONE, GD, ED, 4, 1, NONE, VVVV_RM_IMM) \
+    XV(LWPINS_R64_RM32_IMM32, "lwpins", VEX, 0, 2, 0x0a12, D0, 4, 1, 0, NONE, GQ, ED, 4, 1, NONE, VVVV_RM_IMM) \
+    XV(LWPVAL_R32_RM32_IMM32, "lwpval", VEX, 0, 2, 0x0a12, D1, 4, 0, 0, NONE, GD, ED, 4, 1, NONE, VVVV_RM_IMM) \
+    XV(LWPVAL_R64_RM32_IMM32, "lwpval", VEX, 0, 2, 0x0a12, D1, 4, 1, 0, NONE, GQ, ED, 4, 1, NONE, VVVV_RM_IMM) \
     XV(ANDN_R32_R32_RM32, "andn", VEX, 0, 3, 0x0f38f2, R, 0, 0, 0, GD, GD, ED, 4, 1, NONE, REG_VVVV_RM) \
     XV(ANDN_R64_R64_RM64, "andn", VEX, 0, 3, 0x0f38f2, R, 0, 1, 0, GQ, GQ, EQ, 8, 1, NONE, REG_VVVV_RM) \
     XV(BEXTR_R32_RM32_R32, "bextr", VEX, 0, 3, 0x0f38f7, R, 0, 0, 0, GD, GD, ED, 4, 1, NONE, REG_RM_VVVV) \
@@ -3645,9 +3756,9 @@ static __attribute__((unused)) bool x86_encoder_initialize(void);
 // output + capacity, but the bytes after the instructions' may change. Returns the number of bytes, or a negative
 // X86EncoderError. Requires x86_encoder_initialize. It rejects the operands its encoding can't represent, but not those
 // only x86_validate does: an immediate or rel8 outside its field's range (it writes the field's low bytes), an /is4
-// immediate that isn't a register's number times 16, a control or segment register that doesn't exist, MOV to CS, a
-// complex multiplication into one of its sources, zeroing without an opmask or into memory, and fields the form
-// doesn't have (which it ignores).
+// immediate that isn't a register's number times 16 (plus a selector), a control or segment register that doesn't
+// exist, MOV to CS, a complex multiplication into one of its sources, zeroing without an opmask or into memory, and
+// fields the form doesn't have (which it ignores).
 static __attribute__((unused)) int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets);
 // The same, one instruction at a time from the form table, after x86_validate: the reference for testing.
 static __attribute__((unused)) int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets);
@@ -3660,7 +3771,8 @@ static uint8_t x86_opcode_byte(const X86FormDescription* form, uint32_t i)
 }
 
 // A VEX or EVEX form's opcode map (VEX.mmmmm, EVEX.mmm): 1 for 0F, 2 for 0F 38 and 3 for 0F 3A, from the escape bytes
-// of its opcode, and EVEX's maps 5 and 6 from the number in the escape's place; 0 if they're none of those.
+// of its opcode, and EVEX's maps 5 and 6 and XOP's 8 to 0A from the number in the escape's place; 0 if they're none of
+// those.
 static uint8_t x86_opcode_map(const X86FormDescription* form)
 {
     uint8_t result = 0;
@@ -3670,6 +3782,10 @@ static uint8_t x86_opcode_map(const X86FormDescription* form)
         result = 1;
     }
     else if (form->opcode_bytes == 2 && form->family == BUSTER_X86_FAMILY_EVEX && (first == 5 || first == 6))
+    {
+        result = first;
+    }
+    else if (form->opcode_bytes == 2 && form->family == BUSTER_X86_FAMILY_VEX && first >= 8 && first <= 10)
     {
         result = first;
     }
@@ -3878,9 +3994,10 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
         const uint8_t pp = x86_prefix_pp(form);
         if (form->family == BUSTER_X86_FAMILY_VEX)
         {
-            // C4 (C5 for VEX2); R, X and B (inverted) and the map; W, vvvv (inverted), L and pp.
-            template->bytes[position] = 0xc4;
-            template->layout[position] = BUSTER_X86_CANONICAL_VEX_ESCAPE;
+            // C4 (C5 for VEX2), or XOP's 8F (for maps 8 and up, never in two bytes); R, X and B (inverted) and the
+            // map; W, vvvv (inverted), L and pp.
+            template->bytes[position] = map >= 8 ? 0x8f : 0xc4;
+            template->layout[position] = map >= 8 ? BUSTER_X86_LAYOUT_STATIC : BUSTER_X86_CANONICAL_VEX_ESCAPE;
             template->bytes[position + 1] = (uint8_t)(0xe0 | map);
             template->layout[position + 1] = BUSTER_X86_CANONICAL_PREFIX_P0;
             template->bytes[position + 2] = (uint8_t)((form->w << 7) | 0x78 | (form->vector_length << 2) | pp);
@@ -3917,8 +4034,9 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
         static_length += 1;
         last_static = position;
         flags |= BUSTER_X86_TEMPLATE_NO_REX;
+        // An 8-bit immediate, or TBM's and LWP's 32-bit ones (in XOP maps).
         valid = valid && map != 0 && (form->prefixes == 0 || pp != 0) && form->encoding != BUSTER_X86_ENCODING_PR && form->relative_bytes == 0 &&
-                form->immediate_bytes <= 1;
+                (form->immediate_bytes <= 1 || (map >= 8 && form->immediate_bytes == 4));
     }
 
     if (form->opcode_bytes != 0)
@@ -4023,10 +4141,17 @@ static bool x86_form_has_distinct_destination(const X86FormDescription* form)
            (opcode == 0x56 || opcode == 0x57 || opcode == 0xd6 || opcode == 0xd7);
 }
 
+// Whether the form's immediate has a 4-bit selector in bits 3 to 0 below an /is4 register (vpermil2ps's and
+// vpermil2pd's).
+static bool x86_form_has_is4_selector(const X86FormDescription* form)
+{
+    return form->syntax == X86_SYNTAX_REG_VVVV_RM_IS4_IMM || form->syntax == X86_SYNTAX_REG_VVVV_IS4_RM_IMM;
+}
+
 // Whether the form's immediate is an /is4 register (a fourth operand, in bits 7 to 4).
 static bool x86_form_has_is4(const X86FormDescription* form)
 {
-    return form->syntax == X86_SYNTAX_REG_VVVV_RM_IS4 || form->syntax == X86_SYNTAX_REG_VVVV_IS4_RM;
+    return form->syntax == X86_SYNTAX_REG_VVVV_RM_IS4 || form->syntax == X86_SYNTAX_REG_VVVV_IS4_RM || x86_form_has_is4_selector(form);
 }
 
 // Whether the instruction can be encoded: a valid form, operands the form has and no others, a consistent addressing
@@ -4111,10 +4236,10 @@ static bool x86_instruction_is_valid(const X86Instruction* instruction)
             case 3: result = result && immediate >= 0 && immediate < (1 << 24); break;
             default: break;
         }
-        // An /is4 register: 0 to 15 in bits 7 to 4, and bits 3 to 0 clear.
+        // An /is4 register: 0 to 15 in bits 7 to 4, and bits 3 to 0 clear or a selector.
         if (x86_form_has_is4(form))
         {
-            result = result && (immediate & ~(int64_t)0xf0) == 0;
+            result = result && (immediate & ~(int64_t)(x86_form_has_is4_selector(form) ? 0xff : 0xf0)) == 0;
         }
         if (form->relative_bytes == 1)
         {
@@ -4219,7 +4344,7 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out)
         }
         else if (form->family == BUSTER_X86_FAMILY_VEX)
         {
-            out[length] = 0xc4;
+            out[length] = map >= 8 ? 0x8f : 0xc4;
             out[length + 1] = (uint8_t)((!r << 7) | (!x << 6) | (!b << 5) | map);
             out[length + 2] = (uint8_t)((form->w << 7) | vvvv_field | (form->vector_length << 2) | pp);
             length += 3;
