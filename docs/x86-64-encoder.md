@@ -37,10 +37,10 @@ BMI at 0.64 ns (9.4 GB/s). That is:
   all 6,116 forms (1,647 legacy, 137 of them x87, 1,065 VEX, 103 of them XOP,
   and 3,404 EVEX), one in sixteen of them with an FS or GS override;
 - with the ends of the instructions that have symbolic operands (the 6% of the
-  compiler mix that are calls and RIP-relative operands), **0.69 ns**: as fast
-  as every instruction's offset (0.69 ns, and 0.71 before the running sum they
-  share was redone for them), and where GNU as 2.47 puts its relocations
-  (offset, type, addend and symbol) for all 195,000 symbolic fields of those 1.7
+  compiler mix that are calls and RIP-relative operands), **0.70 ns**: what
+  every instruction's offset cost before (0.70 ns, and 0.68 now that the running
+  sum they share is redone), and where GNU as 2.47 puts its relocations
+  (offset, type, addend and symbol) for all 192,000 symbolic fields of those 1.7
   million instructions, on every form whose symbolic fields GNU as encodes the
   same way.
 
@@ -211,7 +211,7 @@ own forms'; a form without a memory operand gets copies that take no operand at
 all. So x86_encode does nothing for an override that it doesn't do for every
 form, and its loop is the same code with them as without. The fixup flag works
 the same way (see "Fixups"): the templates are copied again at the flag's
-index, 583 KB more.
+index, 587 KB more.
 
 ### VEX and EVEX
 
@@ -305,13 +305,15 @@ The last partial group goes through a zeroed copy, so no load reads past the
 input. The page-edge test places inputs, outputs, offsets and fixup ends
 against `PROT_NONE` pages to check both.
 
-With offsets or fixup ends, Phase II's lengths are summed in each group: a
-`vpermb` puts them in instruction order as bytes, a multiplication by
-0x0101010101010101 (`vpmullq`) sums each qword's bytes up to each one (eight
-lengths of at most 15, so nothing carries), and a `vpshufb` and an add carry the
-first qword's total into the second. That is each instruction's end in the group
-(at most 240), and minus its length, its start; `vpmovzxbd` widens them and the
-group's offset in the output is added (see "Zen 5's costs" for why bytes).
+With offsets or fixup ends, Phase II's lengths are summed in each group, after
+Phase III: a `vpermb` puts them in instruction order as bytes, a
+multiplication by 0x0101010101010101 (`vpmullq`) sums each qword's bytes up to
+each one (eight lengths of at most 15, so nothing carries), and a `vpshufb` and
+an add carry the first qword's total into the second. That is each
+instruction's end in the group (at most 240), and minus its length, its start;
+`vpmovzxbd` widens them and the group's offset in the output, broadcast from
+memory, is added (see "Zen 5's costs" for why bytes, why after Phase III and why
+from memory).
 
 ### Fixups
 
@@ -320,7 +322,7 @@ are numbers by the time an instruction is encoded. What only layout can fill in
 are fields: a call's rel32, a RIP-relative displacement to a global, an imm32
 or imm64 with a symbol's address. The code generator marks those instructions
 with `BUSTER_X86_FORM_FIXUP`, bit 15 of the form (the last form with a segment
-override is 17,465), and puts a placeholder in the field. The encoders encode
+override is 18,350), and puts a placeholder in the field. The encoders encode
 the form without the flag, and with `fixup_ends`, `x86_encode` stores each
 marked instruction's end offset, in order: one per marked instruction, however
 many of its fields are symbolic.
@@ -363,7 +365,7 @@ lengths. A `vpcompressd` by it keeps the marked instructions' ends, which a
 64-byte store appends to the fixup ends (their capacity has 16 more than the
 marked instructions, `BUSTER_X86_ENCODER_FIXUP_CAPACITY`), advanced by the
 mask's popcount; the zeroed copy's padding isn't marked. A marked form's
-template is a copy at its own index: `x86_encoder_initialize` copies the 18,201
+template is a copy at its own index: `x86_encoder_initialize` copies the 18,351
 templates to `BUSTER_X86_FORM_FIXUP` and up (the pages between stay unmapped),
 so Phase I looks a form up as the record has it, and the loop without offsets
 and fixup ends is the same code as before. Taking the flag off each form with
@@ -570,6 +572,16 @@ ends took their flags from the lengths' dwords at first (a `vpmovb2m` and a
 `kshiftrq` after the `vpermb`, the longest path to the compress); taking them
 from the records instead, with a `vpermb` of their own, took another 3% off
 (the reorder buffer full 8.6% of cycles), which made them as fast as offsets.
+Merging #35's changes, which made the loop with offsets 2.6% faster, left fixup
+ends 4% slower than main's offsets loop (15 interleaved rounds: 0.725 ns per
+instruction against 0.696), with dispatch stalled on the FP scheduler 26% of
+cycles against 23%. Two changes brought them level: the running sum and the
+stores moved after Phase III, so that their operations wait for the lengths
+behind Phase III's rather than ahead of them in the FP scheduler, and the
+group's offset is broadcast from memory, a load, where a broadcast from a
+general register takes FP1 or FP2 too. In nine rounds, the broadcast alone took
+fixup ends from 0.721 ns to 0.702 (and both to 0.697), and the position alone
+took offsets from 0.699 to 0.685.
 
 ## Evaluation
 
@@ -584,10 +596,10 @@ the changes above (32 per iteration) for comparison:
 | 16,384 mixed (L2) | 1.46 | 1.11 | 0.67 | 0.65 | **0.64** | 10.60 | 0.66 |
 | 16,384 vector | 1.46 | 1.09 | 0.66 | 0.66 | **0.64** | 11.94 | 0.65 |
 | 16,384 uniform | 1.47 | 1.13 | 0.66 | 0.68 | **0.66** | 19.53 | 0.67 |
-| 16,384, with offsets | 1.77 | 1.27 | 0.68 | 0.70 | **0.69** | 11.14 | 0.75 |
-| 16,384, with fixup ends | 1.77 | 1.26 | 0.72 | 0.70 | **0.69** | 11.33 | — |
+| 16,384, with offsets | 1.71 | 1.26 | 0.70 | 0.69 | **0.68** | 11.25 | 0.75 |
+| 16,384, with fixup ends | 1.75 | 1.25 | 0.70 | 0.73 | **0.70** | 11.44 | — |
 | calls of 16 | 1.53 | 1.15 | 0.71 | 0.71 | **0.70** | 11.20 | 0.73 |
-| calls of 16, with fixup ends | 1.84 | 1.20 | 0.80 | 0.80 | **0.81** | 12.02 | — |
+| calls of 16, with fixup ends | 1.84 | 1.20 | 0.80 | 0.79 | **0.79** | 12.04 | — |
 | calls of 64 | 1.48 | 1.11 | 0.67 | 0.68 | **0.66** | 10.74 | 0.68 |
 | calls of 256 | 1.47 | 1.08 | 0.67 | 0.67 | **0.66** | 10.57 | 0.66 |
 | 262,144 mixed | 1.46 | 1.10 | 0.67 | 0.66 | **0.64** | 12.47 | 0.66 |
@@ -614,13 +626,14 @@ quarter and a half of them), so the fixed cost per group dominates. 16, 32 and
 `x86_encode` uses 64.
 
 The rows with offsets and fixup ends are from the fixup interface's changes,
-the others from before them. Against the code before them, in 15
-interleaved rounds of `x86_encode_64`: without offsets or fixup ends, −2.1% to
-+0.9% on the compiler, vector and uniform mixes and in calls of 16, 64 and 256,
-and +0.2% and +0.5% on the compiler and vector mixes with both copies of the
-function aligned to 64 bytes (the AND that takes the fixup flag off each form);
-with offsets, 1.8–5.4% faster (the running sum in bytes), and 4% slower at 4
-per iteration.
+the others from before them. Against the code before them (#71's), in 15
+interleaved rounds of `x86_encode_64`: without offsets or fixup ends, −0.4% to
++1.1% on the compiler, vector and uniform mixes and in calls of 16, 64 and 256
+(the same loop: a marked form's template is a copy, see "Fixups"); with
+offsets, 3.0% faster on the compiler mix, 3.2% on the vector mix and 4.5% in
+calls of 16 (the running sum in bytes, after Phase III). Fixup ends take 0.702
+ns on the compiler mix, 0.698 on the vector mix and 0.795 in calls of 16, where
+offsets took 0.703, 0.709 and 0.802 before these changes.
 
 The fixup ends' two designs and two stores, `x86_encode_64`, nanoseconds per
 instruction (medians of five runs; `--fixups` marks the calls and the
@@ -629,23 +642,23 @@ the uniform one):
 
 | Stream | neither | offsets | **fixup ends** | compressed to memory | offsets, then picked |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 16,384 mixed | 0.63 | 0.69 | **0.69** | 0.70 | 0.71 |
-| 16,384 vector | 0.64 | 0.69 | **0.69** | 0.69 | 0.69 |
-| 16,384 uniform | 0.67 | 0.72 | **0.72** | 0.72 | 0.75 |
-| 262,144 mixed | 0.64 | 0.70 | **0.70** | 0.70 | 0.72 |
-| calls of 16 | 0.70 | 0.77 | **0.81** | 0.82 | 0.84 |
-| calls of 64 | 0.66 | 0.72 | **0.73** | 0.75 | 0.76 |
-| calls of 256 | 0.66 | 0.70 | **0.71** | 0.70 | 0.72 |
+| 16,384 mixed | 0.63 | 0.68 | **0.70** | 0.69 | 0.70 |
+| 16,384 vector | 0.62 | 0.69 | **0.70** | 0.69 | 0.69 |
+| 16,384 uniform | 0.66 | 0.72 | **0.74** | 0.74 | 0.76 |
+| 262,144 mixed | 0.63 | 0.70 | **0.70** | 0.70 | 0.72 |
+| calls of 16 | 0.72 | 0.78 | **0.79** | 0.81 | 0.84 |
+| calls of 64 | 0.65 | 0.71 | **0.73** | 0.75 | 0.76 |
+| calls of 256 | 0.62 | 0.70 | **0.71** | 0.71 | 0.71 |
 
 "Offsets, then picked" is the other design: every offset, then the ends of the
 marked instructions picked from the list of them a code generator keeps (the
-next instruction's start); it costs 1–4% more than fixup ends. Before these
-changes, offsets took 0.70–0.71 ns on the long streams and 0.80 in calls of 16,
-so fixup ends cost no more than offsets did except in calls of 16 (1% more).
-Compressing the ends straight to memory (`vpcompressd` to memory, 8 µops and a
-store every 3 cycles on Zen 5, where Zen 4 takes 72 cycles) is as fast or within
-3% (calls of 64), off the loop's critical path; the 64-byte store of the
-compressed register stays, as it does for the machine code.
+next instruction's start). It costs as much as fixup ends on the long compiler
+and vector streams and up to 6% more elsewhere (calls of 16), and it needs the
+offsets' 4 bytes per instruction and the list. Compressing the ends straight to
+memory (`vpcompressd` to memory, 8 µops and a store every 3 cycles on Zen 5,
+where Zen 4 takes 72 cycles) is within 3% of the full store either way, off the
+loop's critical path; `x86_encode` stores the compressed register whole, as it
+does the machine code.
 
 The variants that lost (all at 16 per iteration, 16,384 mixed):
 
@@ -831,20 +844,22 @@ emits a relaxed branch's late) against the ones they give, with GNU as's types:
 R_X86_64_PLT32 for a branch without an addend and R_X86_64_PC32 with one, PC8
 for a rel8, PC32 for RIP-relative operands, 32S for other addresses but 32 for
 LEA into a 16- or 32-bit register, 32S or 32 for an imm32 by whether its operand
-is 64-bit, and 64 for a 64-bit immediate or address. Over seeds 1, 7 and 99:
-194,957 relocations (39,560 PC32, 34 PLT32, 272 PC8, 152,058 32S, 2,400 32 and
-633 64), 0 different, on all 4,939 forms whose memory operand or branch target
-the streams print (of 4,947 that have one: the other 8 are the MOVQ memory forms
-GNU as encodes otherwise) and all 71 with an imm32 or a 64-bit immediate, and
-`x86_encode`'s fixup ends the same as the scalar encoder's. `test-x86-encoder`
+is 64-bit (but 32 for map 7's MSR index, which is unsigned), and 64 for a
+64-bit immediate or address. Over seeds 1, 7 and 99: 192,229 relocations (37,507
+PC32, 26 PLT32, 265 PC8, 151,305 32S, 2,500 32 and 626 64), 0 different, on all
+5,067 forms whose memory operand or branch target the streams print (of 5,075
+that have one: the other 8 are the MOVQ memory forms GNU as encodes otherwise)
+and all 75 with an imm32 or a 64-bit immediate, and `x86_encode`'s fixup ends
+the same as the scalar encoder's. `test-x86-encoder`
 has 28 known fixups from GNU as too, so that the regular tests check
 `x86_fixup_distance` and the reported ends without GNU as. Twelve broken copies
 fail the tests: the vectorized loop's byte order of the lengths, the byte that
 carries the first qword's total, the flags' byte, the multiplier, the compress
 mask and the cursor's advance (92 to 200 of each width's 201 random streams
-differ), a fixup capacity one short (a page-edge fault), the template lookup
-and the scalar form's row with the flag left in (both fault), the scalar
-encoder's end off by one (all 28 known fixups, and the random streams), and
+differ), a fixup capacity one short (a page-edge fault), the templates' copy
+for marked forms left out (all 28 known fixups and 188 to 195 random streams),
+the scalar form's row with the flag left in (a fault), the scalar encoder's end
+off by one (all 28 known fixups, and the random streams), and
 `x86_fixup_distance` without the immediate's bytes or without a branch's own
 width (16 and 4 known fixups wrong, and the GNU as cross-check).
 

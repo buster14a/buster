@@ -174,7 +174,7 @@ zeros and a relocation for them, and `--compare-object` reads `.text`,
 fields zeroed where the reported fixup ends put them) and each relocation's
 offset, type, addend and symbol with the ones the fixup ends and
 `x86_fixup_distance` give. Cross-check more than one seed after changing forms
-(1.7 million instructions over seeds 1, 7 and 99 were last checked, with 195,000
+(1.7 million instructions over seeds 1, 7 and 99 were last checked, with 192,000
 relocations).
 
 ## x86-64 encoder benchmark
