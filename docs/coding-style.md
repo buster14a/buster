@@ -13,7 +13,17 @@ its portability layers, build system, or performance-acceptance machinery.
 - Use four spaces, no tabs, `snake_case` functions and local variables,
   `PascalCase` named structs/types, and `BUSTER_`-prefixed uppercase macros.
 - Put opening braces on their own lines. Use braces for conditionals and loops.
-  Keep declarations and statements on one line when readable.
+  Prefer single-line declarations and statements, including assignments,
+  expressions, and function calls. Keep separate statements on separate lines.
+  Split a statement only when doing so improves readability, rather than merely
+  to meet a line-length target.
+- Prefer single-line function headers, including the return type, function name,
+  and parameter list, for both declarations and definitions. Keep the opening
+  brace of a definition on its own line. Split a header only when it improves
+  readability.
+- Put each field in a `struct` or `union` on its own line, with one field per
+  declaration. Put each aggregate initializer entry and each enum enumerator on
+  its own line as well; apply the same layout to nested aggregates.
 - Declare structs explicitly as `typedef struct Name Name;` followed by
   `struct Name { ... };`, matching the existing codebase.
 - Use plain `static` for functions private to a translation unit. Do not

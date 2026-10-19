@@ -29,7 +29,9 @@ code. The essentials are: C and Clang on Linux/Zen 5, 4-space Allman formatting,
 `snake_case` functions, `PascalCase` types, `BUSTER_` macros, one return per
 function, direct and explicit control flow, bounded slices, arena-oriented
 allocation, and safe SIMD memory accesses. Prefer simple data layouts and
-measured end-to-end performance improvements. Do not import Buster's portability
+measured end-to-end performance improvements. Prefer single-line statements,
+declarations, and function headers where readable, and one aggregate field or
+initializer entry per line. Do not import Buster's portability
 or infrastructure machinery merely to match its style.
 
 ## Current repository and exact smoke commands
@@ -42,6 +44,8 @@ or infrastructure machinery merely to match its style.
   it, and `./build/compiler test-lexer` runs them.
 - `src/buster/compiler/c_lexer_benchmark.c` provides the `benchmark-lexer`
   command. The 9700X CI workflow runs it on the repository's C sources by default.
+  `docs/c-lexer.md` records the GFNI classifier, the leading-comment skip, branch-free chunk state, the
+  pipelined write-out, table-driven punctuator kinds, the delimiter scan and their 9700X measurements.
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
   of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder,
   and the fixup interface: `BUSTER_X86_FORM_FIXUP` marks an instruction with a
@@ -51,6 +55,9 @@ or infrastructure machinery merely to match its style.
   `x86_64_encoder_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-x86-encoder` runs them) and
   `x86_64_encoder_benchmark.c` provides `benchmark-x86-encoder`.
+- `docs/object-writer-and-linker.md` is the design of the object writer and the
+  linker, with the 9700X measurements of mold, wild, lld and the kernel's file
+  costs behind it, and the order to build it in. None of it is implemented yet.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -95,15 +102,18 @@ with the scalar lexer token by token on:
   `--seed N`). The first inputs that differ are saved as `fuzz_failure_N.c` in
   the current directory;
 - page edges: every length from 0 to 1,099 bytes, cut as a prefix and as a
-  suffix from the repeated snippet and from four strings of random inputs
-  (which continue the random sequence), placed to end exactly at the end of a
+  suffix from the repeated snippet, four strings of random inputs (which
+  continue the random sequence), and three comment templates, placed to end exactly at the end of a
   readable page and to start exactly at the start of one, between `PROT_NONE`
-  guard pages: 22,000 inputs. These also compare `c_tokenize_vectorized`, and
+  guard pages: 35,200 inputs. These also compare `c_tokenize_vectorized`, and
   a read outside the source faults; the command then names the input and exits
   with status 1. Length 0 at a page end points at the guard page itself. The
   vectorized path loads aligned 64-byte lanes, so only a lane wholly outside
   the source can fault; an over-read within the source's last lane stays on a
-  readable page and is not caught.
+  readable page and is not caught;
+- 4,096 comment cases across every source misalignment, with closers around
+  64-byte load and 512-byte chunk boundaries, including a spliced closer and a
+  comment inside a preprocessing directive.
 
 `--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces. The
 command prints each check's counts and first differences, and exits with status
@@ -129,18 +139,18 @@ yet compared against a performance baseline. Keep just one compiler executable.
 ## x86-64 encoder tests
 
 `./build/compiler test-x86-encoder` (about 0.6 s) checks that every form fits a
-template, both encoders on 452 known encodings from GNU as (each also with the
+template, both encoders on 492 known encodings from GNU as (each also with the
 fixup flag, whose end they must report), a digest of the scalar encoder's output
 for 100,000 random instructions, every batch width and variant of `x86_encode`
 against the scalar encoder (bytes, offsets and fixup ends, in each of the four
 loops: with neither, either or both of offsets and fixup ends) on every count
 from 0 to 199 and on 300,000 random instructions of every form (legacy with x87
-and MMX, VEX and EVEX, with opmasks, broadcasts, rounding, registers 16-31, FS
-and GS segment overrides, and one in eight marked with the fixup flag), the same
-between `PROT_NONE` guard pages, and that invalid operands are rejected
-(immediates and rel8s outside their fields' ranges by `x86_validate` alone:
-`x86_encode` writes their low bytes). `--count N` and `--seed N` change the
-random streams.
+and MMX, VEX and EVEX, with opmasks, broadcasts, rounding, registers 16-31,
+gathers and scatters, FS and GS segment overrides, and one in eight marked with
+the fixup flag), the same between `PROT_NONE` guard pages, and that invalid
+operands are rejected (immediates and rel8s outside their fields' ranges by
+`x86_validate` alone: `x86_encode` writes their low bytes). `--count N` and
+`--seed N` change the random streams.
 
 The digest was recorded when GNU as encoded the same stream to the same bytes.
 After changing the form table, the scalar encoder or the fixup interface,
