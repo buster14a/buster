@@ -1,5 +1,6 @@
 // The lane benchmark: what lane_sync, lane_broadcast and lane_run cost on groups of 1 to 8 lanes, each lane on a CPU of
-// its own, how fast lanes run after waiting at a sync, and what an arena's first touches cost.
+// its own, how fast lanes run after waiting at a sync, how well parts taken from a counter balance a phase, and what an
+// arena's first touches cost.
 //
 // Usage: build/compiler benchmark-lanes [--lanes N] [--cpus LIST] [--rounds N]
 //
@@ -23,6 +24,12 @@
 // others wait for it at a sync, and then every lane does BUSTER_LANE_BENCHMARK_WORK_NANOSECONDS of full-speed work. The
 // figures are the wake, as above, lane 0's speed while alone, and how much longer than at full speed the slowest and the
 // median waiting lane took for their work.
+// Then, on the largest group, the balance of a phase of lane_benchmark_balance_workloads, each
+// BUSTER_LANE_BENCHMARK_BALANCE_NANOSECONDS of the busy loop at full speed in all, split by rule 1 (lane_range_by_cost)
+// or cut into parts that the lanes take (lane_parts_by_cost and lane_take; docs/object-writer-and-linker.md, "Lanes"):
+// with every lane at full speed, and with the upper half of the lanes running every item twice, at half speed. Each
+// figure is the phase's time, from the sync before to the sync after, and its share of the best possible: all the work
+// at full speed, spread over the lanes as fast as each can do it.
 // Then, on the first CPU, the arenas: reserving and releasing a scratch arena's 64 GB, and in fresh arenas the first
 // touch of the page at the start, of all the base pages before BUSTER_ARENA_SMALL_BYTES, and of the first huge page
 // after them. The exit status is 1 if the arguments are invalid, a group can't be started or pinned, or a broadcast
@@ -65,6 +72,47 @@
 #define BUSTER_LANE_BENCHMARK_LCG_MULTIPLIER 6364136223846793005ull
 #define BUSTER_LANE_BENCHMARK_LCG_INCREMENT 1442695040888963407ull
 
+// The balance passes: each phase's work at full speed, and the costs of its items, 2^(r mod 24) for a random r: a heavy
+// tail in which an item can cost 8 million times another.
+#define BUSTER_LANE_BENCHMARK_BALANCE_NANOSECONDS 4000000
+#define BUSTER_LANE_BENCHMARK_BALANCE_COST_BITS 24
+// The busy loop's iteration on the 9700X, in nanoseconds, which sizes the phases; their share of the best possible uses
+// the speed lane 0 measures.
+#define BUSTER_LANE_BENCHMARK_NOMINAL_ITERATION_NANOSECONDS 0.72
+#define BUSTER_LANE_BENCHMARK_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
+
+typedef struct LaneBenchmarkBalanceWorkload LaneBenchmarkBalanceWorkload;
+struct LaneBenchmarkBalanceWorkload
+{
+    const char* name;
+    uint64_t count;
+    // Whether the costs have the heavy tail, or are all equal.
+    bool heavy;
+};
+
+static const LaneBenchmarkBalanceWorkload lane_benchmark_balance_workloads[] = {
+    {
+        .name = "256 heavy-tailed",
+        .count = 256,
+        .heavy = true,
+    },
+    {
+        .name = "16384 heavy-tailed",
+        .count = 16384,
+        .heavy = true,
+    },
+    {
+        .name = "65536 equal",
+        .count = 65536,
+        .heavy = false,
+    },
+};
+
+#define BUSTER_LANE_BENCHMARK_BALANCE_WORKLOAD_COUNT (sizeof(lane_benchmark_balance_workloads) / sizeof(lane_benchmark_balance_workloads[0]))
+#define BUSTER_LANE_BENCHMARK_BALANCE_MAX_ITEMS 65536
+// The balance passes' splits and conditions: rule 1 or parts, each with every lane at full speed or half of them slow.
+#define BUSTER_LANE_BENCHMARK_BALANCE_RUNS 4
+
 // How long lane 0 works alone in the passes after a wait while the other lanes wait for it, in nanoseconds: within the
 // mwaitx time, around it, and past it.
 static const uint64_t lane_benchmark_waits[] = { 200000, 1000000, 2000000, 5000000 };
@@ -102,6 +150,20 @@ struct LaneBenchmarkAfter
     uint64_t arrival;
     uint64_t left[BUSTER_LANE_BENCHMARK_MAX_LANES];
     uint64_t work[BUSTER_LANE_BENCHMARK_MAX_LANES];
+};
+
+// The balance passes', on the largest group: each workload's items (the iterations of each, and the inclusive prefix sums
+// of their costs), the parts' boundaries, which the lanes share, and each pass's time per workload and run.
+typedef struct LaneBenchmarkBalance LaneBenchmarkBalance;
+struct LaneBenchmarkBalance
+{
+    uint64_t* iterations[BUSTER_LANE_BENCHMARK_BALANCE_WORKLOAD_COUNT];
+    uint64_t* cost_prefix[BUSTER_LANE_BENCHMARK_BALANCE_WORKLOAD_COUNT];
+    uint64_t* boundaries;
+    uint64_t time[BUSTER_LANE_BENCHMARK_BALANCE_WORKLOAD_COUNT][BUSTER_LANE_BENCHMARK_BALANCE_RUNS][BUSTER_LANE_BENCHMARK_PASSES];
+    // Lane 0's nanoseconds per iteration at full speed, with every lane working.
+    double nanoseconds_per_iteration;
+    uint64_t sink[BUSTER_LANE_BENCHMARK_MAX_LANES];
 };
 
 typedef struct LaneBenchmarkArenas LaneBenchmarkArenas;
@@ -315,6 +377,83 @@ static void lane_benchmark_after_wait(void* argument)
             }
         }
     }
+}
+
+// The items of [range.begin, range.end), each run `repeat` times.
+static uint64_t lane_benchmark_run_items(const uint64_t* iterations, Range64 range, uint64_t repeat, uint64_t x)
+{
+    for (uint64_t item = range.begin; item < range.end; item += 1)
+    {
+        x = lane_benchmark_work(x, iterations[item] * repeat);
+    }
+    return x;
+}
+
+// The entry point of the balance passes.
+static void lane_benchmark_balance(void* argument)
+{
+    LaneBenchmarkBalance* balance = argument;
+    const uint32_t index = lane_index();
+    const uint32_t lanes = lane_count();
+    uint64_t x = index + 1;
+    // Every lane runs the calibration, so that they all work, and lane 0 keeps its own.
+    lane_sync();
+    x = lane_benchmark_work_until(x, lane_benchmark_now() + BUSTER_LANE_BENCHMARK_SETTLE_NANOSECONDS);
+    uint64_t best = UINT64_MAX;
+    for (uint32_t run = 0; run < BUSTER_LANE_BENCHMARK_CALIBRATION_RUNS; run += 1)
+    {
+        const uint64_t begin = lane_benchmark_now();
+        x = lane_benchmark_work(x, BUSTER_LANE_BENCHMARK_CALIBRATION_ITERATIONS);
+        const uint64_t end = lane_benchmark_now();
+        best = end - begin < best ? end - begin : best;
+    }
+    if (index == 0)
+    {
+        balance->nanoseconds_per_iteration = (double)best / BUSTER_LANE_BENCHMARK_CALIBRATION_ITERATIONS;
+    }
+    Scratch scratch = scratch_begin(0);
+    uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, BUSTER_LANE_MAX_PARTS);
+    for (uint32_t workload = 0; workload < BUSTER_LANE_BENCHMARK_BALANCE_WORKLOAD_COUNT; workload += 1)
+    {
+        const uint64_t count = lane_benchmark_balance_workloads[workload].count;
+        const uint64_t* iterations = balance->iterations[workload];
+        const uint64_t* cost_prefix = balance->cost_prefix[workload];
+        for (uint32_t run = 0; run < BUSTER_LANE_BENCHMARK_BALANCE_RUNS; run += 1)
+        {
+            const bool parts = run % 2 == 1;
+            const uint64_t repeat = run >= 2 && index >= lanes - lanes / 2 ? 2 : 1;
+            for (uint64_t pass = 0; pass <= BUSTER_LANE_BENCHMARK_PASSES; pass += 1)
+            {
+                lane_sync();
+                const uint64_t begin = lane_benchmark_now();
+                if (parts)
+                {
+                    const uint64_t part_count = lane_parts_by_cost(cost_prefix, count, balance->boundaries, order);
+                    for (uint64_t taken = lane_take(part_count); taken < part_count; taken = lane_take(part_count))
+                    {
+                        const uint32_t part = order[taken];
+                        const Range64 range = {
+                            .begin = balance->boundaries[part],
+                            .end = balance->boundaries[part + 1],
+                        };
+                        x = lane_benchmark_run_items(iterations, range, repeat, x);
+                    }
+                }
+                else
+                {
+                    x = lane_benchmark_run_items(iterations, lane_range_by_cost(cost_prefix, count), repeat, x);
+                }
+                lane_sync();
+                const uint64_t end = lane_benchmark_now();
+                if (index == 0 && pass > 0)
+                {
+                    balance->time[workload][run][pass - 1] = end - begin;
+                }
+            }
+        }
+    }
+    scratch_end(scratch);
+    balance->sink[index] = x;
 }
 
 static void lane_benchmark_empty(void* argument)
@@ -548,6 +687,75 @@ int run_lane_benchmark(int argc, char** argv)
             }
             fflush(stdout);
         }
+
+        static LaneBenchmarkBalance balance;
+        Arena balance_memory = arena_reserve(1ull << 30);
+        for (uint32_t workload = 0; passed && lanes > 1 && workload < BUSTER_LANE_BENCHMARK_BALANCE_WORKLOAD_COUNT; workload += 1)
+        {
+            balance.iterations[workload] = BUSTER_ARENA_PUSH_ARRAY(&balance_memory, uint64_t, BUSTER_LANE_BENCHMARK_BALANCE_MAX_ITEMS);
+            balance.cost_prefix[workload] = BUSTER_ARENA_PUSH_ARRAY(&balance_memory, uint64_t, BUSTER_LANE_BENCHMARK_BALANCE_MAX_ITEMS);
+        }
+        balance.boundaries = BUSTER_ARENA_PUSH_ARRAY(&balance_memory, uint64_t, BUSTER_LANE_MAX_PARTS + 1);
+        if (passed && lanes > 1 && balance.boundaries != 0 && balance.cost_prefix[BUSTER_LANE_BENCHMARK_BALANCE_WORKLOAD_COUNT - 1] != 0)
+        {
+            // Costs from splitmix64, then scaled to iterations that add up to the phase's work.
+            const double work_iterations = BUSTER_LANE_BENCHMARK_BALANCE_NANOSECONDS / BUSTER_LANE_BENCHMARK_NOMINAL_ITERATION_NANOSECONDS;
+            uint64_t state = 1;
+            for (uint32_t workload = 0; workload < BUSTER_LANE_BENCHMARK_BALANCE_WORKLOAD_COUNT; workload += 1)
+            {
+                const uint64_t count = lane_benchmark_balance_workloads[workload].count;
+                uint64_t sum = 0;
+                for (uint64_t item = 0; item < count; item += 1)
+                {
+                    state += BUSTER_LANE_BENCHMARK_GOLDEN_RATIO;
+                    uint64_t z = state;
+                    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+                    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+                    z ^= z >> 31;
+                    const uint64_t cost = lane_benchmark_balance_workloads[workload].heavy ? 1ull << (z % BUSTER_LANE_BENCHMARK_BALANCE_COST_BITS) : 1;
+                    sum += cost;
+                    balance.cost_prefix[workload][item] = sum;
+                }
+                for (uint64_t item = 0; item < count; item += 1)
+                {
+                    const uint64_t cost = balance.cost_prefix[workload][item] - (item == 0 ? 0 : balance.cost_prefix[workload][item - 1]);
+                    balance.iterations[workload][item] = (uint64_t)((double)cost * work_iterations / (double)sum);
+                }
+            }
+            passed = lane_run((uint32_t)lanes, lane_benchmark_balance, &balance, cpus);
+            if (!passed)
+            {
+                fprintf(stderr, "a group of %lu lanes couldn't be started or pinned\n", (unsigned long)lanes);
+            }
+        }
+        if (passed && lanes > 1)
+        {
+            const uint64_t slow = lanes / 2;
+            printf("balance, %lu lanes: %lu us of work at full speed, split by rule 1 or taken in parts; medians of %d passes, and their share of the best possible:\n",
+                   (unsigned long)lanes, (unsigned long)(BUSTER_LANE_BENCHMARK_BALANCE_NANOSECONDS / 1000), BUSTER_LANE_BENCHMARK_PASSES);
+            printf("  %-20s  %-30s  lanes %lu-%lu at half speed\n", "", "every lane at full speed", (unsigned long)(lanes - slow), (unsigned long)(lanes - 1));
+            printf("  %-20s  %-14s  %-14s  %-14s  %-14s\n", "", "rule 1", "parts", "rule 1", "parts");
+            for (uint32_t workload = 0; workload < BUSTER_LANE_BENCHMARK_BALANCE_WORKLOAD_COUNT; workload += 1)
+            {
+                uint64_t work = 0;
+                for (uint64_t item = 0; item < lane_benchmark_balance_workloads[workload].count; item += 1)
+                {
+                    work += balance.iterations[workload][item];
+                }
+                const double work_nanoseconds = (double)work * balance.nanoseconds_per_iteration;
+                printf("  %-20s", lane_benchmark_balance_workloads[workload].name);
+                for (uint32_t run = 0; run < BUSTER_LANE_BENCHMARK_BALANCE_RUNS; run += 1)
+                {
+                    // The best possible: the slow lanes do half as much as the others.
+                    const double capacity = run >= 2 ? (double)(lanes - slow) + (double)slow / 2.0 : (double)lanes;
+                    const double time = lane_benchmark_median(balance.time[workload][run]);
+                    printf("  %6.0f us %3.0f%%", time / 1e3, 100.0 * work_nanoseconds / capacity / time);
+                }
+                printf("\n");
+            }
+            fflush(stdout);
+        }
+        arena_release(&balance_memory);
 
         static LaneBenchmarkArenas arenas;
         if (passed && !lane_run(1, lane_benchmark_arenas, &arenas, cpus))

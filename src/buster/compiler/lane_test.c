@@ -13,7 +13,9 @@
 //   - Ranges: lane_range for every count from 0 to BUSTER_LANE_TEST_MAX_RANGE, and lane_range_by_cost for the same
 //     counts with each pattern of lane_test_cost: the parts must cover [0, count) in lane order, lane_range's first
 //     count % lanes parts must be the longer ones, and lane_range_by_cost must give each item to the lane whose share of
-//     the total cost holds the item's midpoint, which keeps each part within the largest cost of an equal share.
+//     the total cost holds the item's midpoint, which keeps each part within the largest cost of an equal share. Once,
+//     on the calling thread, the same of range_part and range_part_by_cost with lane_test_part_counts parts, for
+//     lane_test_part_range_counts.
 //   - Syncs: --rounds rounds (BUSTER_LANE_TEST_DEFAULT_ROUNDS by default) in which each lane writes its slot, syncs and
 //     reads every lane's slot, and then gets a broadcast from a different lane each round. Once every
 //     BUSTER_LANE_TEST_STALL_INTERVAL rounds a lane comes late, in turn to the sync and to the broadcast, and in turn
@@ -29,14 +31,22 @@
 //     lane: each key's winner is its record of lowest precedence, the earliest of them on a tie, as a strong definition
 //     beats a weak one. For each of lane_test_record_counts, the partitioned records and the winners must be
 //     byte-identical to the sequential reference's for every lane count.
+//   - Parts: for each of lane_test_part_inputs (a count and a cost pattern), every lane cuts the items with
+//     lane_parts_by_cost and the lanes count, place and fill by part (rule 3 in "Lanes"): each item has 0 to 4 bytes of
+//     output, the lanes take parts and count their bytes, and after a sync each lane places the parts it took by the
+//     prefix sums of every part's bytes and fills them. One lane comes late to each input's loop, by turns long enough to
+//     sleep and only briefly. Lane 0 then checks that the output is byte-identical to the sequential reference's, that
+//     every part was taken once, that the boundaries are range_part_by_cost's, and that every lane got the same order,
+//     by decreasing bit width of cost and then by index. The loops follow each other with a sync between them, as the
+//     counter must reset itself.
 //
 // A watchdog ends the run with status 1 if a group runs for longer than BUSTER_LANE_TEST_TIMEOUT_SECONDS, which is how a
 // lost wake-up would show. The exit status is 1 if the arguments are invalid or a check fails.
 //
-// Layout, in this order: the inputs (lane_test_random, lane_test_cost and lane_test_make_records), the arena checks
-// (lane_test_arenas), the lanes' side of each check (lane_test_ranges, lane_test_syncs, lane_test_alone,
-// lane_test_scratch, lane_test_exchange and lane_test_main, which runs them), their verification
-// (lane_test_check_parts and the others), and run_lane_tests.
+// Layout, in this order: the inputs (lane_test_random, lane_test_cost, lane_test_make_records and lane_test_output_byte),
+// the arena checks (lane_test_arenas), the lanes' side of each check (lane_test_ranges, lane_test_syncs,
+// lane_test_alone, lane_test_scratch, lane_test_exchange, lane_test_parts and lane_test_main, which runs them), their
+// verification (lane_test_check_parts and the others), and run_lane_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -74,6 +84,71 @@
 
 static const uint32_t lane_test_counts[] = { 1, 2, 3, 8 };
 static const uint64_t lane_test_record_counts[] = { 0, 1, 2, 3, 63, 64, 65, 1000, 100000 };
+// range_part's checks: these part counts, beyond the lane counts, and these item counts, with every cost pattern.
+static const uint64_t lane_test_part_counts[] = { 64, 512, 1001 };
+static const uint64_t lane_test_part_range_counts[] = { 0, 1, 2, 3, 5, 31, 63, 64, 65, 100, 255, 256, 257, 511, 512, 513, 999, 1000 };
+
+// The parts check's inputs: an item count and the cost pattern of lane_test_cost. Pattern 5's costs add up past 2^64
+// beyond BUSTER_LANE_TEST_MAX_RANGE items.
+typedef struct LaneTestPartInput LaneTestPartInput;
+struct LaneTestPartInput
+{
+    uint64_t count;
+    uint32_t pattern;
+};
+
+static const LaneTestPartInput lane_test_part_inputs[] = {
+    {
+        .count = 0,
+        .pattern = 0,
+    },
+    {
+        .count = 1,
+        .pattern = 1,
+    },
+    {
+        .count = 2,
+        .pattern = 6,
+    },
+    {
+        .count = 3,
+        .pattern = 3,
+    },
+    {
+        .count = 63,
+        .pattern = 1,
+    },
+    {
+        .count = 64,
+        .pattern = 4,
+    },
+    {
+        .count = 65,
+        .pattern = 0,
+    },
+    {
+        .count = 1000,
+        .pattern = 2,
+    },
+    {
+        .count = 1000,
+        .pattern = 5,
+    },
+    {
+        .count = 4097,
+        .pattern = 6,
+    },
+    {
+        .count = 100000,
+        .pattern = 1,
+    },
+    {
+        .count = 100000,
+        .pattern = 3,
+    },
+};
+
+#define BUSTER_LANE_TEST_PART_INPUT_COUNT (sizeof(lane_test_part_inputs) / sizeof(lane_test_part_inputs[0]))
 
 typedef enum LaneTestCheck
 {
@@ -82,6 +157,7 @@ typedef enum LaneTestCheck
     LANE_TEST_ALONE,
     LANE_TEST_SCRATCH,
     LANE_TEST_EXCHANGE,
+    LANE_TEST_PARTS,
 } LaneTestCheck;
 
 static const char* const lane_test_check_names[] = {
@@ -90,6 +166,7 @@ static const char* const lane_test_check_names[] = {
     "alone",
     "scratch",
     "exchange",
+    "parts",
 };
 
 typedef struct LaneTestRecord LaneTestRecord;
@@ -125,6 +202,19 @@ struct LaneTest
     uint32_t counts[BUSTER_LANE_TEST_MAX_LANES * BUSTER_LANE_TEST_PARTITIONS];
     LaneTestRecord* exchanged;
     uint32_t* winners;
+    // Parts: each input's cost prefix and its reference output, one after another (part_prefix_offsets and
+    // part_output_offsets say where each starts); the lanes' output, the boundaries, each part's bytes and the lane that
+    // took it (plus one), each lane's count of parts taken and its order, for lane 0 to check.
+    const uint64_t* part_prefixes;
+    const uint8_t* part_references;
+    uint64_t part_prefix_offsets[BUSTER_LANE_TEST_PART_INPUT_COUNT];
+    uint64_t part_output_offsets[BUSTER_LANE_TEST_PART_INPUT_COUNT + 1];
+    uint8_t* part_output;
+    uint64_t* part_boundaries;
+    uint64_t* part_bytes;
+    uint32_t* part_takers;
+    uint64_t part_taken[BUSTER_LANE_TEST_MAX_LANES];
+    const uint32_t* part_orders[BUSTER_LANE_TEST_MAX_LANES];
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -182,6 +272,17 @@ static void lane_test_make_records(uint64_t* state, LaneTestRecord* records, uin
             .precedence = (uint32_t)(lane_test_random(state) % 5),
         };
     }
+}
+
+// How many bytes of output item `item` of the parts check makes (0 to 4), and the value of its byte `byte`.
+static uint64_t lane_test_output_bytes(uint64_t item)
+{
+    return lane_test_mix(item * 3 + 1) % 5;
+}
+
+static uint8_t lane_test_output_byte(uint64_t item, uint64_t byte)
+{
+    return (uint8_t)lane_test_mix(item * 5 + byte + 7);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -470,6 +571,23 @@ static uint64_t lane_test_alone(void)
         const Range64 by_cost = lane_range_by_cost(cost_prefix, 3);
         failures += lane_index() != 0 || lane_count() != 1 || range.begin != 0 || range.end != 10 || by_cost.begin != 0 || by_cost.end != 3 ? 1 : 0;
         failures += lane_broadcast(12345, 0) != 12345 ? 1 : 0;
+        // A lane of one takes from its own counter, which resets itself after each loop: twice 0 to 4, then 5.
+        for (uint32_t loop = 0; loop < 2; loop += 1)
+        {
+            uint64_t taken = 0;
+            uint64_t next = lane_take(5);
+            while (next < 5)
+            {
+                failures += next != taken ? 1 : 0;
+                taken += 1;
+                next = lane_take(5);
+            }
+            failures += taken != 5 || next != 5 ? 1 : 0;
+        }
+        uint64_t boundaries[2] = { 0 };
+        uint32_t order[1] = { 1 };
+        const uint64_t parts = lane_parts_by_cost(cost_prefix, 3, boundaries, order);
+        failures += parts != 1 || boundaries[0] != 0 || boundaries[1] != 3 || order[0] != 0 || lane_take(parts) != 0 || lane_take(parts) != 1 ? 1 : 0;
         lane_restore(group);
         failures += lane_index() != index || lane_count() != lanes ? 1 : 0;
     }
@@ -628,6 +746,126 @@ static uint64_t lane_test_exchange(LaneTest* test)
     return failures;
 }
 
+// The parts check's bucket of a part: the leading zeros of its cost, 64 without one.
+static uint32_t lane_test_cost_bucket(const uint64_t* cost_prefix, const uint64_t* boundaries, uint64_t part)
+{
+    const uint64_t begin = boundaries[part];
+    const uint64_t end = boundaries[part + 1];
+    const uint64_t cost = end == begin ? 0 : cost_prefix[end - 1] - (begin == 0 ? 0 : cost_prefix[begin - 1]);
+    return cost == 0 ? 64 : (uint32_t)__builtin_clzll(cost);
+}
+
+// Lane 0's checks of one input's loop: the output, every part taken once, the boundaries, and every lane's order.
+static uint64_t lane_test_check_part_loop(LaneTest* test, const uint64_t* cost_prefix, uint64_t count, uint64_t parts, uint64_t input, uint64_t bytes)
+{
+    const uint32_t lanes = lane_count();
+    uint64_t failures = 0;
+    const uint64_t reference_bytes = test->part_output_offsets[input + 1] - test->part_output_offsets[input];
+    failures += bytes != reference_bytes || memcmp(test->part_output, test->part_references + test->part_output_offsets[input], reference_bytes) != 0 ? 1 : 0;
+    uint64_t taken = 0;
+    for (uint32_t lane = 0; lane < lanes; lane += 1)
+    {
+        taken += test->part_taken[lane];
+    }
+    failures += taken != parts || parts != (lanes == 1 ? (count < 1 ? count : 1) : (count < BUSTER_LANE_PARTS_PER_LANE * lanes ? count : BUSTER_LANE_PARTS_PER_LANE * lanes)) ? 1 : 0;
+    for (uint64_t part = 0; part < parts; part += 1)
+    {
+        failures += test->part_takers[part] == 0 ? 1 : 0;
+        test->part_takers[part] = 0;
+        failures += test->part_boundaries[part] != range_part_by_cost(cost_prefix, count, part, parts).begin ? 1 : 0;
+    }
+    failures += test->part_boundaries[parts] != count ? 1 : 0;
+    // The order: parts that exist, by bucket, then by index; and the same for every lane.
+    const uint32_t* order = test->part_orders[0];
+    bool in_range = true;
+    for (uint64_t taken_index = 0; taken_index < parts; taken_index += 1)
+    {
+        in_range = in_range && order[taken_index] < parts;
+    }
+    failures += in_range ? 0 : 1;
+    for (uint64_t taken_index = 1; in_range && taken_index < parts; taken_index += 1)
+    {
+        const uint32_t previous = lane_test_cost_bucket(cost_prefix, test->part_boundaries, order[taken_index - 1]);
+        const uint32_t current = lane_test_cost_bucket(cost_prefix, test->part_boundaries, order[taken_index]);
+        failures += previous > current || (previous == current && order[taken_index - 1] >= order[taken_index]) ? 1 : 0;
+    }
+    for (uint32_t lane = 1; lane < lanes; lane += 1)
+    {
+        failures += memcmp(test->part_orders[lane], order, parts * sizeof(uint32_t)) != 0 ? 1 : 0;
+    }
+    return failures;
+}
+
+// Count, place and fill by part, for every input in turn (docs/object-writer-and-linker.md, "Lanes", rules 1 and 3).
+static uint64_t lane_test_parts(LaneTest* test)
+{
+    const uint32_t lanes = lane_count();
+    const uint32_t index = lane_index();
+    uint64_t failures = 0;
+    Scratch scratch = scratch_begin(0);
+    uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, BUSTER_LANE_MAX_PARTS);
+    uint32_t* mine = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, BUSTER_LANE_MAX_PARTS);
+    uint64_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, BUSTER_LANE_MAX_PARTS);
+    test->part_orders[index] = order;
+    for (uint64_t input = 0; input < BUSTER_LANE_TEST_PART_INPUT_COUNT; input += 1)
+    {
+        const uint64_t count = lane_test_part_inputs[input].count;
+        const uint64_t* cost_prefix = test->part_prefixes + test->part_prefix_offsets[input];
+        const uint64_t parts = lane_parts_by_cost(cost_prefix, count, test->part_boundaries, order);
+        // One lane comes late to the loop, so the others take its parts: by turns for long enough to sleep, and briefly.
+        if (lanes > 1 && index == input % lanes)
+        {
+            lane_test_stall(input % 3 == 0 ? BUSTER_LANE_TEST_STALL_NANOSECONDS : BUSTER_LANE_TEST_SHORT_STALL_NANOSECONDS);
+        }
+        // Count.
+        uint64_t taken = 0;
+        for (uint64_t next = lane_take(parts); next < parts; next = lane_take(parts))
+        {
+            const uint32_t part = order[next];
+            uint64_t bytes = 0;
+            for (uint64_t item = test->part_boundaries[part]; item < test->part_boundaries[part + 1]; item += 1)
+            {
+                bytes += lane_test_output_bytes(item);
+            }
+            test->part_bytes[part] = bytes;
+            test->part_takers[part] = index + 1;
+            mine[taken] = part;
+            taken += 1;
+        }
+        test->part_taken[index] = taken;
+        lane_sync();
+        // Place: every lane adds up every part's bytes for itself.
+        uint64_t total = 0;
+        for (uint64_t part = 0; part < parts; part += 1)
+        {
+            offsets[part] = total;
+            total += test->part_bytes[part];
+        }
+        // Fill the parts this lane took.
+        for (uint64_t i = 0; i < taken; i += 1)
+        {
+            const uint32_t part = mine[i];
+            uint64_t offset = offsets[part];
+            for (uint64_t item = test->part_boundaries[part]; item < test->part_boundaries[part + 1]; item += 1)
+            {
+                for (uint64_t byte = 0; byte < lane_test_output_bytes(item); byte += 1)
+                {
+                    test->part_output[offset] = lane_test_output_byte(item, byte);
+                    offset += 1;
+                }
+            }
+        }
+        lane_sync();
+        if (index == 0)
+        {
+            failures += lane_test_check_part_loop(test, cost_prefix, count, parts, input, total);
+        }
+        lane_sync();
+    }
+    scratch_end(scratch);
+    return failures;
+}
+
 // The entry point of the checks' lanes.
 static void lane_test_main(void* argument)
 {
@@ -641,6 +879,7 @@ static void lane_test_main(void* argument)
         case LANE_TEST_ALONE: failures = lane_test_alone(); break;
         case LANE_TEST_SCRATCH: failures = lane_test_scratch(test); break;
         case LANE_TEST_EXCHANGE: failures = lane_test_exchange(test); break;
+        case LANE_TEST_PARTS: failures = lane_test_parts(test); break;
     }
     test->failures[lane_index()] = failures;
     test->sleeps[lane_index()] = thread_context.sleeps - sleeps;
@@ -770,6 +1009,40 @@ static uint64_t lane_test_check_ranges(const LaneTest* test, uint32_t lanes, uin
     return failures;
 }
 
+// range_part and range_part_by_cost with more parts than lanes, on the calling thread: lane_test_part_counts parts of
+// each of lane_test_part_range_counts items, without cost and with each cost pattern.
+static uint64_t lane_test_part_ranges(const LaneTest* test, uint64_t* checked)
+{
+    uint64_t failures = 0;
+    *checked = 0;
+    Scratch scratch = scratch_begin(0);
+    Range64* parts = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, Range64, 1001);
+    for (uint64_t p = 0; parts != 0 && p < BUSTER_ARRAY_LENGTH(lane_test_part_counts); p += 1)
+    {
+        const uint64_t part_count = lane_test_part_counts[p];
+        for (int32_t pattern = -1; pattern < BUSTER_LANE_TEST_COST_PATTERNS; pattern += 1)
+        {
+            for (uint64_t c = 0; c < BUSTER_ARRAY_LENGTH(lane_test_part_range_counts); c += 1)
+            {
+                const uint64_t count = lane_test_part_range_counts[c];
+                for (uint64_t part = 0; part < part_count; part += 1)
+                {
+                    parts[part] = pattern < 0 ? range_part(count, part, part_count) : range_part_by_cost(test->cost_prefix[pattern], count, part, part_count);
+                }
+                const bool good = lane_test_check_parts(parts, part_count, count, pattern < 0 ? 0 : test->cost_prefix[pattern]);
+                if (!good && failures < BUSTER_LANE_TEST_REPORTED)
+                {
+                    printf("  parts: %lu items in %lu parts %s are wrong\n", (unsigned long)count, (unsigned long)part_count, pattern < 0 ? "by count" : "by cost");
+                }
+                failures += good ? 0 : 1;
+                *checked += 1;
+            }
+        }
+    }
+    scratch_end(scratch);
+    return failures + (parts == 0 ? 1 : 0);
+}
+
 // Whether every lane's scratch arenas are distinct and reserved.
 static bool lane_test_check_scratch(const LaneTest* test, uint32_t lanes)
 {
@@ -842,12 +1115,20 @@ static int run_lane_tests(int argc, char** argv)
         }
     }
 
-    // Everything the checks use, from one arena: the parts of every count for the largest group, the cost prefixes, and
-    // the records with their references, for every record count one after another.
+    // Everything the checks use, from one arena: the parts of every count for the largest group, the cost prefixes, the
+    // records with their references, for every record count one after another, and the parts check's inputs, references
+    // and outputs.
     uint64_t total_records = 0;
     for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(lane_test_record_counts); i += 1)
     {
         total_records += lane_test_record_counts[i];
+    }
+    uint64_t total_part_items = 0;
+    uint64_t most_part_items = 0;
+    for (uint64_t i = 0; i < BUSTER_LANE_TEST_PART_INPUT_COUNT; i += 1)
+    {
+        total_part_items += lane_test_part_inputs[i].count;
+        most_part_items = lane_test_part_inputs[i].count > most_part_items ? lane_test_part_inputs[i].count : most_part_items;
     }
     Arena memory = arena_reserve(1ull << 30);
     LaneTest* test = BUSTER_ARENA_PUSH_ARRAY(&memory, LaneTest, 1);
@@ -858,13 +1139,21 @@ static int run_lane_tests(int argc, char** argv)
     uint32_t* reference_winners = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, total_records);
     LaneTestRecord* exchanged = BUSTER_ARENA_PUSH_ARRAY(&memory, LaneTestRecord, total_records);
     uint32_t* winners = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, total_records);
+    // Each item has at most 4 bytes of output.
+    uint64_t* part_prefixes = BUSTER_ARENA_PUSH_ARRAY(&memory, uint64_t, total_part_items);
+    uint8_t* part_references = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, 4 * total_part_items);
+    uint8_t* part_output = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, 4 * most_part_items);
+    uint64_t* part_boundaries = BUSTER_ARENA_PUSH_ARRAY(&memory, uint64_t, BUSTER_LANE_MAX_PARTS + 1);
+    uint64_t* part_bytes = BUSTER_ARENA_PUSH_ARRAY(&memory, uint64_t, BUSTER_LANE_MAX_PARTS);
+    uint32_t* part_takers = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, BUSTER_LANE_MAX_PARTS);
     struct sigaction action = { .sa_handler = lane_test_report_hang };
     int result = 1;
     if (!valid)
     {
         fprintf(stderr, "usage: test-lanes [--rounds N] [--seed N]\n");
     }
-    else if (test == 0 || parts == 0 || cost_prefixes == 0 || records == 0 || reference_exchanged == 0 || reference_winners == 0 || exchanged == 0 || winners == 0)
+    else if (test == 0 || parts == 0 || cost_prefixes == 0 || records == 0 || reference_exchanged == 0 || reference_winners == 0 || exchanged == 0 || winners == 0 ||
+             part_prefixes == 0 || part_references == 0 || part_output == 0 || part_boundaries == 0 || part_bytes == 0 || part_takers == 0)
     {
         fprintf(stderr, "out of memory\n");
     }
@@ -900,6 +1189,38 @@ static int run_lane_tests(int argc, char** argv)
             passed = lane_test_reference(records + offset, count, reference_exchanged + offset, reference_winners + offset) && passed;
             offset += count;
         }
+        // The parts check's inputs: each input's cost prefix, and its output in item order.
+        uint64_t prefix_offset = 0;
+        uint64_t output_offset = 0;
+        for (uint64_t i = 0; i < BUSTER_LANE_TEST_PART_INPUT_COUNT; i += 1)
+        {
+            test->part_prefix_offsets[i] = prefix_offset;
+            test->part_output_offsets[i] = output_offset;
+            uint64_t sum = 0;
+            for (uint64_t item = 0; item < lane_test_part_inputs[i].count; item += 1)
+            {
+                sum += lane_test_cost(&state, lane_test_part_inputs[i].pattern, item);
+                part_prefixes[prefix_offset + item] = sum;
+                for (uint64_t byte = 0; byte < lane_test_output_bytes(item); byte += 1)
+                {
+                    part_references[output_offset] = lane_test_output_byte(item, byte);
+                    output_offset += 1;
+                }
+            }
+            prefix_offset += lane_test_part_inputs[i].count;
+        }
+        test->part_output_offsets[BUSTER_LANE_TEST_PART_INPUT_COUNT] = output_offset;
+        test->part_prefixes = part_prefixes;
+        test->part_references = part_references;
+        test->part_output = part_output;
+        test->part_boundaries = part_boundaries;
+        test->part_bytes = part_bytes;
+        test->part_takers = part_takers;
+        memset(part_takers, 0, BUSTER_LANE_MAX_PARTS * sizeof(uint32_t));
+        uint64_t part_ranges_checked = 0;
+        const uint64_t part_ranges_wrong = lane_test_part_ranges(test, &part_ranges_checked);
+        printf("part ranges: %lu checked, %lu wrong\n", (unsigned long)part_ranges_checked, (unsigned long)part_ranges_wrong);
+        passed = passed && part_ranges_wrong == 0;
 
         for (uint64_t c = 0; c < BUSTER_ARRAY_LENGTH(lane_test_counts); c += 1)
         {
@@ -943,16 +1264,19 @@ static int run_lane_tests(int argc, char** argv)
                 offset += count;
             }
 
-            printf("%u lane%s ranges %lu checked, %lu wrong; syncs %lu rounds, %lu sleeps, %lu wrong; alone %lu wrong; scratch %lu wrong; exchange %lu inputs, %lu differ\n",
+            const uint64_t parts_wrong = lane_test_run(test, LANE_TEST_PARTS, lanes, &sleeps);
+
+            printf("%u lane%s ranges %lu checked, %lu wrong; syncs %lu rounds, %lu sleeps, %lu wrong; alone %lu wrong; scratch %lu wrong; exchange %lu inputs, %lu differ; "
+                   "parts %lu inputs, %lu wrong\n",
                    lanes, lanes == 1 ? ": " : "s:", (unsigned long)checked, (unsigned long)ranges_wrong, (unsigned long)rounds, (unsigned long)sync_sleeps,
                    (unsigned long)syncs_wrong, (unsigned long)alone_wrong, (unsigned long)scratch_wrong, (unsigned long)BUSTER_ARRAY_LENGTH(lane_test_record_counts),
-                   (unsigned long)exchange_differ);
+                   (unsigned long)exchange_differ, (unsigned long)BUSTER_LANE_TEST_PART_INPUT_COUNT, (unsigned long)parts_wrong);
             if (!slept)
             {
                 printf("  syncs: %lu sleeps on %u lanes, where the late lanes should have made the others sleep only with more than one\n", (unsigned long)sync_sleeps, lanes);
             }
             fflush(stdout);
-            passed = passed && ranges_wrong == 0 && syncs_wrong == 0 && slept && alone_wrong == 0 && scratch_wrong == 0 && exchange_differ == 0;
+            passed = passed && ranges_wrong == 0 && syncs_wrong == 0 && slept && alone_wrong == 0 && scratch_wrong == 0 && exchange_differ == 0 && parts_wrong == 0;
         }
         result = passed ? 0 : 1;
     }

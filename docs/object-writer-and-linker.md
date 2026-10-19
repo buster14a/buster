@@ -39,8 +39,8 @@ can bring that close to what the kernel needs to put a file in the page cache.
   writer and imported ELF inputs alike.
 - **Every phase is written in lanes.** This is Ryan Fleury's *multi-core by
   default*, the style of the RAD Debugger's base layer:
-  - every thread runs the same code, splitting work with `lane_range` and
-    meeting at `lane_sync`;
+  - every thread runs the same code, taking parts of the work, cut by cost,
+    from a counter, and meeting at `lane_sync`;
   - each lane writes only what it owns;
   - names are resolved by exchanging records through fixed hash partitions,
     with no shared hash table and no locks.
@@ -1056,6 +1056,15 @@ static Range64 lane_range(uint64_t count);
 // lane whose share of the total cost holds the item's midpoint, so each part's cost is within the largest item's of an
 // equal share.
 static Range64 lane_range_by_cost(const uint64_t* cost_prefix, uint64_t count);
+// Part `part` of [0, count) cut into `parts`, as lane_range and lane_range_by_cost cut it into lanes.
+static Range64 range_part(uint64_t count, uint64_t part, uint64_t parts);
+static Range64 range_part_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t part, uint64_t parts);
+// Cuts [0, count) by cost into 64 parts per lane, whose boundaries the lanes find together: part i is
+// [boundaries[i], boundaries[i + 1]). Each lane's order gets the parts costliest first, to within a factor of two. Like
+// lane_sync, it waits for every lane.
+static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t* boundaries, uint32_t* order);
+// The next number this lane takes from its group's counter: 0, 1, 2, ... across the lanes, then parts or more.
+static uint64_t lane_take(uint64_t parts);
 // Runs entry(argument) on a group of count lanes, the calling thread being lane 0, and returns once they all have.
 static bool lane_run(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus);
 ```
@@ -1065,7 +1074,9 @@ The lane lives in a thread-local context with the thread's scratch arenas, as
 alone, while the others do something else, makes itself a group of one (index
 0, count 1, no barrier) with `lane_alone` and restores its group afterwards.
 The barrier is a counter and a generation word: it spins briefly, waits in
-`mwaitx`, then sleeps on a futex. Its atomics are the only ones the linker has.
+`mwaitx`, then sleeps on a futex. Its atomics, and the counter `lane_take` adds
+to, are the only ones the linker has: one atomic add per part, and none with one
+lane.
 
 Three things differ from the RAD Debugger, each measured below:
 
@@ -1087,21 +1098,28 @@ Three things differ from the RAD Debugger, each measured below:
   system call.
 
 The RAD Debugger's PDB converter balances uneven work with atomic counters that
-lanes take tasks from. Rule 1 below balances with `lane_range_by_cost` instead,
-from costs known up front, which keeps the barrier's atomics the only ones.
+lanes take tasks from, one task per take. Rule 1 below takes from a counter
+too, but parts cut by cost, costliest first ("Balancing a phase" below).
 
 The rules for every phase:
 
-1. **Ranges, not tasks.** Work is split with `lane_range` or
-   `lane_range_by_cost`, in canonical order: lane 0's part is first. The cost
-   prefix is what keeps uneven inputs balanced without a shared work counter:
-   bytes for files, instructions for functions.
+1. **Parts by cost, taken from a counter.** `lane_parts_by_cost` cuts a loop
+   into 64 parts per lane, contiguous and in canonical order, each holding the
+   items whose midpoints, in cost, fall in its share of the total. The costs
+   are a prefix sum known before the phase: bytes for files, instructions for
+   functions. The lanes take the parts from one counter with `lane_take`,
+   costliest first to within a factor of two, until none are left. A lane that
+   runs slower takes fewer parts, and a heavy item starts early rather than
+   ending the phase late. A phase with less than about 64 µs of work per lane
+   splits once instead, with `lane_range_by_cost`, since taking parts costs it
+   2 to 7 µs on 8 lanes.
 2. **Lanes write only what they own.** Shared memory is either read-only after
    a `lane_sync`, or split into ranges that one lane writes. There are no
    locks, and no two lanes write a cache line except at a range's edge.
-3. **Count, place, fill.** Variable-sized output is counted per lane, placed by
-   prefix sums over `lane_count()` values that every lane computes for itself
-   (cheaper than a broadcast), and filled into exactly sized ranges.
+3. **Count, place, fill.** Variable-sized output is counted per part, placed
+   by prefix sums over the parts' counts that every lane computes for itself
+   (cheaper than a broadcast, even at 512 values with 8 lanes), and filled into
+   exactly sized ranges: each lane fills the parts it took.
 4. **Exchange instead of sharing.** To bring together records that only a key
    relates (symbols by name, strings by content), each lane:
    1. counts its records per hash partition;
@@ -1114,10 +1132,16 @@ The rules for every phase:
    (§4.1). Unlike mold's resolution and string merging (§4.2–4.3) and the RAD
    linker's hash trie, it needs no compare-and-swap. Records are 16 bytes (a
    hash, the input symbol and its precedence), and each crosses between cores
-   once.
+   once. Its first three steps split the records by lane (`lane_range`), so
+   the segments' places follow from `lane_count()` counts per partition, where
+   parts would need 64 times as many; the fourth takes parts of the
+   partitions, by record count.
 5. **Determinism.** The output depends on the inputs and options, never on the
    lane count or on scheduling:
    - the partition count depends on the input size, not on the lanes;
+   - parts are contiguous and in canonical order, and output is placed by
+     part, so neither which lane took a part nor how many parts there were
+     shows;
    - ties break by input order;
    - padding is absolute (see "Layout");
    - every reduction is order-independent or done in canonical order.
@@ -1134,18 +1158,18 @@ How the phases map onto lanes:
 
 | Phase | Split | Lane-owned output | After the sync |
 | --- | --- | --- | --- |
-| Encoding (direct path) | functions, by instruction count | code buffer, function sizes, fixups | each lane's base: a prefix sum over `lane_count()` sizes |
-| Layout | atoms | the addresses of its atoms | each lane's base: a prefix sum of the lane totals |
-| Patch and write | output chunks, by bytes | its file ranges | the build ID's tree |
-| Parse (foreign) | inputs, by bytes | sections, symbols, name hashes | the exchange |
-| Resolve | hash partitions | winners, written into each input's resolution array | — |
+| Encoding (direct path) | parts of the functions, by instruction count | code buffer, with each part's offset in it; function sizes; fixups | each part's base: a prefix sum over the parts' sizes |
+| Layout | parts of the atoms | the addresses of its atoms | each part's base: a prefix sum of the part totals |
+| Patch and write | parts of the output, by bytes | its file ranges | the build ID's tree |
+| Parse (foreign) | parts of the inputs, by bytes: a few large inputs are a part each, largest first | sections, symbols, name hashes | the exchange |
+| Resolve | parts of the hash partitions, by record count | winners, written into each input's resolution array | — |
 | Garbage collection and archive loading | frontier ranges | bitsets | OR-reduce into the next frontier |
-| Merge strings | sections, then partitions | string offsets | — |
+| Merge strings | parts of the sections, then of the partitions | string offsets | — |
 
-With one lane, every sync returns at once, `lane_range` returns everything,
-and the exchange's partitions are processed by one owner. That is the first
-implementation, and it pays almost nothing for being written this way. Where
-lanes help is measured, as is everything else:
+With one lane, every sync returns at once, a loop is one part, `lane_range`
+returns everything, and the exchange's partitions are processed by one owner.
+That is the first implementation, and it pays almost nothing for being written
+this way. Where lanes help is measured, as is everything else:
 
 - the exchange costs a second pass over the records;
 - on btrfs, the file write doesn't scale.
@@ -1156,14 +1180,14 @@ runs, each of them the median of 21 passes:
 
 | Lanes | `lane_sync` | `lane_broadcast` | `pthread_barrier_wait` | Waking from `mwaitx` | Waking from the futex | Starting the group |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 0.0 ns | 0.4 ns | 48 ns | — | — | — |
-| 2 | 43 ns | 28 ns | 1.47 µs | 0.30 µs | 9.5 µs | 9.4 µs |
-| 3 | 79 ns | 84 ns | 1.53 µs | 0.31 µs | 14 µs | 9.7 µs |
-| 4 | 109 ns | 104 ns | 1.76 µs | 0.29 µs | 14 µs | 14 µs |
-| 5 | 139 ns | 134 ns | 1.81 µs | 0.30 µs | 14 µs | 17 µs |
-| 6 | 164 ns | 164 ns | 1.72 µs | 0.39 µs | 14 µs | 25 µs |
-| 7 | 191 ns | 192 ns | 1.81 µs | 0.40 µs | 15 µs | 31 µs |
-| 8 | 216 ns | 212 ns | 1.74 µs | 0.34 µs | 15 µs | 38 µs |
+| 1 | 0.0 ns | 0.3 ns | 48 ns | — | — | — |
+| 2 | 42 ns | 46 ns | 1.46 µs | 0.30 µs | 3.3–14 µs | 9.2 µs |
+| 3 | 85 ns | 72 ns | 1.60 µs | 0.29 µs | 2.3–3.5 µs | 10 µs |
+| 4 | 116 ns | 110 ns | 1.75 µs | 0.37 µs | 3.8–14 µs | 14 µs |
+| 5 | 139 ns | 144 ns | 1.78 µs | 0.31 µs | 10–14 µs | 19 µs |
+| 6 | 166 ns | 168 ns | 1.79 µs | 0.32 µs | 14 µs | 26 µs |
+| 7 | 188 ns | 197 ns | 1.81 µs | 0.33 µs | 15 µs | 32 µs |
+| 8 | 219 ns | 223 ns | 1.86 µs | 0.34 µs | 15 µs | 39 µs |
 
 - **Sync and broadcast:** back-to-back calls, every lane arriving at once. Each
   lane adds about 29 ns, the cost of its atomic add moving the arrival line
@@ -1174,7 +1198,10 @@ runs, each of them the median of 21 passes:
   loop. It costs 8 to 35 times as much with 2 to 8 lanes.
 - **Waking:** lane 0 arrives late, and the time is from its arrival until the
   last lane has left. 200 µs late, the others are waiting in `mwaitx`; 3 ms
-  late, they are asleep on the futex. This table had 2.0–3.4 µs for the
+  late, they are asleep on the futex, and waking them took 2 to 4 µs in some
+  runs and 10 to 15 µs in others, as their cores had gone into a shallower
+  idle state or a deeper one (the futex column has the three runs' range where
+  they differed). This table had 2.0–3.4 µs for the
   futex before (10–15 µs in some runs), from lanes that had done nothing but
   sync before they slept 1 ms. Lanes that worked before they slept, as in
   "How long to wait before sleeping", took 10–15 µs to wake on the cores with
@@ -1277,10 +1304,82 @@ runs, against full speed, with the wake as in the table above:
 
 | Wait | Wake | Lane 0 alone | Slowest lane after | Median lane after |
 | ---: | ---: | ---: | ---: | ---: |
-| 200 µs | 0.42 µs | +0.1% | +0.3% | +0.3% |
-| 1 ms | 0.42 µs | 0.0% | +0.1% | +0.1% |
-| 2 ms | 11 µs | −0.2% | +42% | +42% |
-| 5 ms | 15 µs | −0.8% | +36% | +36% |
+| 200 µs | 0.42 µs | +0.3% | +0.5% | +0.5% |
+| 1 ms | 0.41 µs | +0.2% | +0.3% | +0.3% |
+| 2 ms | 11 µs | 0.0% | +41% | +41% |
+| 5 ms | 15 µs | −0.7% | +36% | +36% |
+
+**Balancing a phase.** Static ranges from `lane_range_by_cost`, which rule 1
+used before, balance as well as anything when every lane runs at full speed
+and the items are many. But they wait for the slowest lane, and for a heavy
+item that comes last. A harness on the 9700X (`~/buster-fast-bench/lane-balance2`,
+from issue #75's `lane-balance`) ran phases of 8 ms of work at full speed on 8
+lanes, with the items' costs estimated up front: heavy-tailed items
+(lognormal, σ = 1.5), with exact estimates or estimates off by 0.5–2×, and
+many equal items, off by 0.5–2×. Four ways to share them out:
+
+- **Rule 1 before:** `lane_range_by_cost`.
+- **`takecost64`:** 64 parts per lane, taken in index order, each finding its
+  boundaries as it is taken.
+- **`largest1`:** one item per take, largest first: the RAD Debugger's loop
+  over the items sorted beforehand, untimed.
+- **Parts, costliest first:** `lane.c`'s, with the boundaries and the order
+  made in the phase.
+
+Each cell is the efficiency (the time on one lane over 8 times the time),
+first with every lane at full speed, then with lanes 4–7 sharing their cores
+with a thread that runs a busy loop, then with lanes 4–7 asleep for 1 ms before
+each phase. Each is the median of 21 passes, averaged over two runs:
+
+| Workload | Rule 1 before | `takecost64` | `largest1` | Parts, costliest first |
+| --- | ---: | ---: | ---: | ---: |
+| 256 heavy-tailed items (32 a lane) | 90 / 89 / 68 | 81 / 81 / 70 | 98 / 97 / 87 | 97 / 97 / 81 |
+| the same, estimates off by 0.5–2× | 78 / 77 / 62 | 75 / 75 / 65 | 98 / 97 / 81 | 97 / 97 / 84 |
+| 2,048 heavy-tailed items | 96 / 95 / 74 | 94 / 93 / 76 | 97 / 96 / 85 | 97 / 96 / 82 |
+| the same, estimates off | 89 / 88 / 68 | 93 / 92 / 77 | 97 / 96 / 85 | 97 / 96 / 82 |
+| 16,384 heavy-tailed items | 98 / 93 / 74 | 96 / 94 / 79 | 89 / 87 / 76 | 97 / 94 / 83 |
+| the same, estimates off | 95 / 91 / 71 | 96 / 94 / 81 | 89 / 87 / 75 | 97 / 94 / 84 |
+| 65,536 items of 120 ns on average | 97 / 80 / 70 | 96 / 87 / 83 | 71 / 67 / 61 | 96 / 87 / 79 |
+| 524,288 items of 15 ns on average | 97 / 67 / 65 | 94 / 79 / 80 | 9 / 9 / 9 | 95 / 80 / 76 |
+
+- **One way covers both cases.** `largest1` beats parts taken in index order
+  up to 512 items per lane, and loses from 1,024 (94% against 96% with 8,192
+  heavy-tailed items): one take per item then costs more than the imbalance
+  it saves. Taking the parts costliest first makes that threshold moot. They
+  come within 0.5 points of `largest1` where it wins, and within 1.6 points of
+  the static ranges at full speed everywhere else.
+- **Uneven lanes are where parts pay:** 1 to 22 points over the static ranges.
+  A thread sharing a core slows throughput-bound work the most, as the many
+  small items are; the busy loop of the heavy items depends on itself and
+  barely notices it.
+- **Lanes that start the phase slow** (the third figure, a slowdown "How long
+  to wait before sleeping" describes) cost parts 3 to 5 points more than
+  `takecost64` on many small items. The lanes find the boundaries together,
+  and the fast ones wait at that sync for the slow ones' share. With the
+  barrier waiting in `mwaitx`, waits of up to 1.5 ms no longer start a phase
+  slow.
+
+`benchmark-lanes` measures the same on its largest group, with phases of
+4 ms of work at full speed and costs of 2^(r mod 24), and with lanes 4–7
+running every item twice. Each figure is the time's share of the best
+possible: all the work at full speed, spread over the lanes as fast as each
+can do it:
+
+| Workload | Rule 1 before | Parts | Rule 1 before, lanes 4–7 at half speed | Parts, lanes 4–7 at half speed |
+| --- | ---: | ---: | ---: | ---: |
+| 256 heavy-tailed items | 89% | 99% | 59% | 99% |
+| 16,384 heavy-tailed items | 99% | 98% | 66% | 98% |
+| 65,536 equal items | 99% | 99% | 66% | 98% |
+
+Parts cost a phase 2 to 7 µs on 8 lanes: the boundaries, a sync, the order
+and 64 atomic adds per lane, the most when the takes come all at once. With
+64 µs of work per lane, parts and static ranges tie at full speed (95–97%
+against 89–99%). With 16 µs, parts lose 2 to 4 µs. With 4 µs, a phase takes
+7–10 µs where static ranges take 2–5. Hence rule 1's limit.
+
+The counter is a second atomic beside the barrier's. All 8 lanes share one CCD
+on the 9700X. On a part with several, a contended take costs more, which 512
+takes per phase on 8 lanes leave room for.
 
 ### SIMD: what pays
 
