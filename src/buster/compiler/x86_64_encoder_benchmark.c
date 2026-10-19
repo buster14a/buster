@@ -453,7 +453,7 @@ __attribute__((noinline)) static int64_t encode_scalar_loop(const X86Instruction
         {
             offsets[i] = (uint32_t)length;
         }
-        length += encode_one(&instructions[i], output + length);
+        length += encode_one(&instructions[i], output + length, false);
         if (fixup_ends != 0 && (instructions[i].form & BUSTER_X86_FORM_FIXUP))
         {
             fixup_ends[marked] = (uint32_t)length;

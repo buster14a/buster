@@ -4346,6 +4346,18 @@ static __attribute__((unused)) int64_t x86_encode_scalar(const X86Instruction* i
 // The index of the first instruction that can't be encoded, or count if they all can.
 static __attribute__((unused)) uint64_t x86_validate(const X86Instruction* instructions, uint64_t count);
 
+// The same three for 32-bit addresses (the x32 ABI's), with templates of their own, which x86_encoder_initialize_address32
+// builds (and the encoders require): each memory operand has a 67, and its base and index are 32-bit registers (and RIP
+// is EIP). Instructions without a memory operand encode as for 64-bit addresses. x86_validate_address32 rejects too
+// MPX's instructions with a memory operand, which are #UD with 67 in 64-bit mode, and the forms whose template has no
+// room for the 67 (see x86_form_lacks_address32_template).
+static __attribute__((unused)) bool x86_encoder_initialize_address32(void);
+static __attribute__((unused)) int64_t x86_encode_address32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity,
+                                                            uint32_t* offsets, uint32_t* fixup_ends);
+static __attribute__((unused)) int64_t x86_encode_scalar_address32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity,
+                                                                   uint32_t* offsets, uint32_t* fixup_ends);
+static __attribute__((unused)) uint64_t x86_validate_address32(const X86Instruction* instructions, uint64_t count);
+
 static uint8_t x86_opcode_byte(const X86FormDescription* form, uint32_t i)
 {
     return (uint8_t)(form->opcode >> (8 * (form->opcode_bytes - 1 - i)));
@@ -4434,6 +4446,11 @@ static uint8_t x86_prefix_pp(const X86FormDescription* form)
 // The layout of a position that isn't part of the instruction: its vpshufbitqmb index is presence bit 63 (always
 // clear), and what vpshufb puts there doesn't matter.
 #define BUSTER_X86_LAYOUT_ABSENT 0x3f
+// The presence bit of a 32-bit address's 67, which compute_fields sets for a memory operand in x86_encode_address32's
+// loop (no other presence has bit 23), and the layout of its position: the template's byte, as for a static one,
+// present only then.
+#define BUSTER_X86_PRESENCE_ADDRESS32 23
+#define BUSTER_X86_LAYOUT_ADDRESS32 (BUSTER_X86_LAYOUT_STATIC | BUSTER_X86_PRESENCE_ADDRESS32)
 // The canonical bytes that every instruction whose layout uses them has: the immediate, ModRM and the opcode
 // register (and from the template's flags, the prefix bytes but VEX's P0). Whether the displacement, SIB, REX and
 // VEX's P0 are there depends on the operands.
@@ -4504,6 +4521,11 @@ static X86Template x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86
     __attribute__((aligned(64)));
 static X86Template* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_PADDING;
 static bool x86_encoder_initialized;
+// The same for 32-bit addresses (x86_encode_address32): the templates of the forms with a memory operand have a 67.
+static X86Template x86_template_storage_address32[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
+    __attribute__((aligned(64)));
+static X86Template* const x86_templates_address32 = x86_template_storage_address32 + BUSTER_X86_TEMPLATE_PADDING;
+static bool x86_encoder_initialized_address32;
 
 // The bits of a register operand of the class that must be zero: registers past the class's last (15 for general
 // registers, VEX's vector registers and control registers, 31 for EVEX's, 7 for opmasks, x87, MMX, debug, segment and
@@ -4555,13 +4577,15 @@ static uint32_t x86_template_checks(const X86FormDescription* form)
            ((uint32_t)x86_forbidden_register_bits(form->vvvv, form->family) << 16) | ((uint32_t)(uint8_t)~decorations << 24);
 }
 
-// Builds the template of a form with a segment override (x86_form_segment's) or none. Returns false if its longest
-// encoding wouldn't fit in a slot (15 bytes), or the form table's row is one the encoders can't encode.
-static bool build_template(const X86FormDescription* form, uint32_t segment, X86Template* template)
+// Builds the template of a form with a segment override (x86_form_segment's) or none, for 64-bit addresses or with
+// `address32`, 32-bit ones. Returns false if its longest encoding wouldn't fit in a slot (15 bytes), its own bytes (a
+// segment override's, a 32-bit address's 67, the prefixes, REX or the VEX or EVEX prefix, the opcode and a ModRM digit)
+// don't fit before the checks, or the form table's row is one the encoders can't encode.
+static bool build_template(const X86FormDescription* form, uint32_t segment, bool address32, X86Template* template)
 {
     uint32_t position = 0;
     uint32_t static_length = 0;
-    // The position after the last of the form's own bytes.
+    // The position after the last of the form's own bytes in the template.
     uint32_t last_static = 0;
     uint32_t flags = BUSTER_X86_TEMPLATE_PREFIX_PRESENT;
     bool valid = true;
@@ -4578,9 +4602,28 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
         static_length += 1;
         last_static = position;
     }
+    // NOTRACK's 3E, which GNU as puts with the segment overrides, and then a 32-bit address's 67, present with a
+    // memory operand.
+    uint32_t prefixes = form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY ? form->prefixes : 0;
+    while ((prefixes & 0xff) == 0x3e)
+    {
+        template->bytes[position] = 0x3e;
+        template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
+        position += 1;
+        static_length += 1;
+        last_static = position;
+        prefixes >>= 8;
+    }
+    if (address32 && memory)
+    {
+        template->bytes[position] = 0x67;
+        template->layout[position] = BUSTER_X86_LAYOUT_ADDRESS32;
+        position += 1;
+        last_static = position;
+    }
     if (form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY)
     {
-        for (uint32_t prefixes = form->prefixes; prefixes != 0; prefixes >>= 8)
+        for (; prefixes != 0; prefixes >>= 8)
         {
             template->bytes[position] = (uint8_t)prefixes;
             template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
@@ -4665,7 +4708,8 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
             template->layout[position] = BUSTER_X86_CANONICAL_MODRM;
             position += 1;
             static_length += 1;
-            last_static = position;
+            // A /r ModRM's template byte is zero, so it may be past the form's own bytes.
+            last_static = (form->encoding & BUSTER_X86_ENCODING_DIGIT) ? position : last_static;
             if (form->rm & BUSTER_X86_OPERAND_MEMORY)
             {
                 template->layout[position] = BUSTER_X86_CANONICAL_SIB;
@@ -4721,10 +4765,34 @@ static bool x86_encoder_initialize(void)
     bool result = true;
     for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
     {
-        result = build_template(x86_form_description(form), x86_form_segment(form), &x86_templates[form]) && result;
+        result = build_template(x86_form_description(form), x86_form_segment(form), false, &x86_templates[form]) && result;
     }
     memcpy(&x86_templates[BUSTER_X86_FORM_FIXUP], &x86_templates[0], BUSTER_X86_FORM_TEMPLATES * sizeof(X86Template));
     x86_encoder_initialized = result;
+    return result;
+}
+
+static bool x86_encoder_initialize_address32(void)
+{
+    bool result = true;
+    for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
+    {
+        const X86FormDescription* description = x86_form_description(form);
+        const uint32_t segment = x86_form_segment(form);
+        X86Template* template = &x86_templates_address32[form];
+        if (!build_template(description, segment, true, template))
+        {
+            // No room for the 67 (see x86_form_lacks_address32_template): the template takes no operand, so that
+            // x86_encode_address32 rejects the form.
+            result = build_template(description, segment, false, template) && result;
+            uint32_t flags;
+            memcpy(&flags, &template->bytes[BUSTER_X86_TEMPLATE_FLAGS_OFFSET], sizeof(flags));
+            flags |= BUSTER_X86_TEMPLATE_NO_MEMORY | BUSTER_X86_TEMPLATE_NO_REGISTER;
+            memcpy(&template->bytes[BUSTER_X86_TEMPLATE_FLAGS_OFFSET], &flags, sizeof(flags));
+        }
+    }
+    memcpy(&x86_templates_address32[BUSTER_X86_FORM_FIXUP], &x86_templates_address32[0], BUSTER_X86_FORM_TEMPLATES * sizeof(X86Template));
+    x86_encoder_initialized_address32 = result;
     return result;
 }
 
@@ -4785,9 +4853,23 @@ static bool x86_form_has_is4(const X86FormDescription* form)
     return form->syntax == X86_SYNTAX_REG_VVVV_RM_IS4 || form->syntax == X86_SYNTAX_REG_VVVV_IS4_RM || x86_form_has_is4_selector(form);
 }
 
-// Whether the instruction can be encoded: a valid form, operands the form has and no others, a consistent addressing
-// mode, decorations the form can have, and immediates and relative displacements that fit their fields.
-static bool x86_instruction_is_valid(const X86Instruction* instruction)
+// Whether the form (with its segment override) has no template for 32-bit addresses, which
+// x86_encoder_initialize_address32 marks as taking no operand: those whose longest instruction would be 16 bytes, past
+// x86's 15 (with a segment override, a 32-bit displacement and an imm32: HLE's arithmetic, TBM's bextr and LWP's), or
+// whose own bytes would run past the template's 8 (with a segment override, HLE's bit tests of a word by an
+// immediate). Requires x86_encoder_initialize_address32.
+static bool x86_form_lacks_address32_template(uint32_t form)
+{
+    uint32_t flags;
+    memcpy(&flags, &x86_templates_address32[form & BUSTER_X86_FORM_NUMBER].bytes[BUSTER_X86_TEMPLATE_FLAGS_OFFSET], sizeof(flags));
+    const uint32_t neither = BUSTER_X86_TEMPLATE_NO_MEMORY | BUSTER_X86_TEMPLATE_NO_REGISTER;
+    return (flags & neither) == neither;
+}
+
+// Whether the instruction can be encoded (with `address32`, with a 32-bit address): a valid form, operands the form
+// has and no others, a consistent addressing mode, decorations the form can have, and immediates and relative
+// displacements that fit their fields.
+static bool instruction_is_valid(const X86Instruction* instruction, bool address32)
 {
     bool result = (instruction->form & BUSTER_X86_FORM_NUMBER) < BUSTER_X86_FORM_TEMPLATES;
     if (result)
@@ -4832,6 +4914,10 @@ static bool x86_instruction_is_valid(const X86Instruction* instruction)
             // Some can't be RIP-relative (AMX's SIB operands, and MPX's bndmk and MIB operands), and a MIB operand's index
             // takes no scale.
             result = result && !(rip && (form->rm & BUSTER_X86_OPERAND_NO_RIP)) && !((form->rm & BUSTER_X86_OPERAND_UNSCALED) && (mode & BUSTER_X86_MODE_SCALE));
+            // A 32-bit address can't be MPX's, which is #UD with 67 in 64-bit mode, or in a form whose template has no
+            // room for the 67.
+            const bool bound = (form->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_BND;
+            result = result && !(address32 && (bound || x86_form_lacks_address32_template(instruction->form)));
             if (vsib)
             {
                 // A VSIB operand always has an index, a vector register of its class, which can be XMM4.
@@ -4926,22 +5012,42 @@ static bool x86_instruction_is_valid(const X86Instruction* instruction)
     return result;
 }
 
-static uint64_t x86_validate(const X86Instruction* instructions, uint64_t count)
+static bool x86_instruction_is_valid(const X86Instruction* instruction)
+{
+    return instruction_is_valid(instruction, false);
+}
+
+static __attribute__((unused)) bool x86_instruction_is_valid_address32(const X86Instruction* instruction)
+{
+    return instruction_is_valid(instruction, true);
+}
+
+static uint64_t validate_instructions(const X86Instruction* instructions, uint64_t count, bool address32)
 {
     uint64_t i = 0;
-    while (i < count && x86_instruction_is_valid(&instructions[i]))
+    while (i < count && instruction_is_valid(&instructions[i], address32))
     {
         i += 1;
     }
     return i;
 }
 
+static uint64_t x86_validate(const X86Instruction* instructions, uint64_t count)
+{
+    return validate_instructions(instructions, count, false);
+}
+
+static uint64_t x86_validate_address32(const X86Instruction* instructions, uint64_t count)
+{
+    return validate_instructions(instructions, count, true);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The scalar encoder: one instruction at a time, from the form table rather than the templates, so that it checks
 // them.
 
-// Encodes a valid instruction at `out` and returns its length.
-static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out)
+// Encodes a valid instruction at `out` (with `address32`, a 32-bit address) and returns its length.
+static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out, bool address32)
 {
     const X86FormDescription* form = x86_form_description(instruction->form);
     const uint32_t segment = x86_form_segment(instruction->form);
@@ -4968,9 +5074,22 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out)
         out[length] = (uint8_t)(0x63 + segment);
         length += 1;
     }
+    // Then NOTRACK's 3E, another segment override for GNU as, and a 32-bit address's 67.
+    uint32_t prefixes = form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY ? form->prefixes : 0;
+    while ((prefixes & 0xff) == 0x3e)
+    {
+        out[length] = 0x3e;
+        length += 1;
+        prefixes >>= 8;
+    }
+    if (address32 && memory)
+    {
+        out[length] = 0x67;
+        length += 1;
+    }
     if (form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY)
     {
-        for (uint32_t prefixes = form->prefixes; prefixes != 0; prefixes >>= 8)
+        for (; prefixes != 0; prefixes >>= 8)
         {
             out[length] = (uint8_t)prefixes;
             length += 1;
@@ -5130,8 +5249,8 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out)
     return length;
 }
 
-static int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
-                                 uint32_t* fixup_ends)
+static int64_t encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends,
+                             bool address32)
 {
     int64_t result;
     if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
@@ -5142,7 +5261,7 @@ static int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t co
     {
         result = X86_ENCODER_ERROR_OUTPUT_TOO_SMALL;
     }
-    else if (x86_validate(instructions, count) != count)
+    else if (validate_instructions(instructions, count, address32) != count)
     {
         result = X86_ENCODER_ERROR_INVALID_INSTRUCTION;
     }
@@ -5156,7 +5275,7 @@ static int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t co
             {
                 offsets[i] = (uint32_t)length;
             }
-            length += encode_one(&instructions[i], output + length);
+            length += encode_one(&instructions[i], output + length, address32);
             if (fixup_ends != 0 && (instructions[i].form & BUSTER_X86_FORM_FIXUP))
             {
                 fixup_ends[marked] = (uint32_t)length;
@@ -5166,6 +5285,18 @@ static int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t co
         result = (int64_t)length;
     }
     return result;
+}
+
+static int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
+                                 uint32_t* fixup_ends)
+{
+    return encode_scalar(instructions, count, output, capacity, offsets, fixup_ends, false);
+}
+
+static int64_t x86_encode_scalar_address32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
+                                           uint32_t* fixup_ends)
+{
+    return encode_scalar(instructions, count, output, capacity, offsets, fixup_ends, true);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -5341,7 +5472,7 @@ static const uint32_t x86_mode_presence[16] __attribute__((aligned(64))) = {
 // first and what needs the flags is a few operations from them: an EVEX displacement's scale picks among
 // compressibilities worked out from the displacement for every scale, and REX and the VEX and EVEX prefixes take the
 // register fields from before ModRM.mod, which depends on the displacement's size and so on the scale.
-BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, __m512i extension, __m512i flags, __m512i checks)
+BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, __m512i extension, __m512i flags, __m512i checks, bool address32)
 {
     const __m512i one = BUSTER_X86_SPLAT(1);
     const __m512i mode = _mm512_srli_epi32(operands, 26);
@@ -5437,6 +5568,10 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     presence = _mm512_ternarylogic_epi32(presence, displacement8, BUSTER_X86_SPLAT(0x10), BUSTER_X86_A_OR_B_AND_C);
     presence = _mm512_ternarylogic_epi32(presence, base_displacement32, BUSTER_X86_SPLAT(0xf0), BUSTER_X86_A_OR_B_AND_C);
     presence = _mm512_or_epi32(presence, rex_presence);
+    // With 32-bit addresses, a memory operand's 67: the mode's memory flag (bit 26) in BUSTER_X86_PRESENCE_ADDRESS32.
+    // Without, a mask of zero (not a branch, which clang simplifies before it inlines the loop and knows the constant,
+    // changing the 64-bit loop's code; a vpternlogd with it wouldn't fold away either).
+    presence = _mm512_or_epi32(presence, _mm512_and_epi32(_mm512_srli_epi32(operands, 26 - BUSTER_X86_PRESENCE_ADDRESS32), BUSTER_X86_SPLAT(address32 ? 1u << BUSTER_X86_PRESENCE_ADDRESS32 : 0)));
     // The flags' last use (but the length's, with offsets): each bit of wrong_kind is the flag in its place or the one
     // above it, as kind's bit there picks. kind is the operands dword with bit 22 (the index's bit 6, which a valid one
     // doesn't have) set if the index's low nibble is 4: rsp_index, the nibble ^ 4 minus 1, has bits 20-31 set only then.
@@ -5448,8 +5583,10 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     const __m512i kind = _mm512_ternarylogic_epi32(rsp_index, operands, BUSTER_X86_SPLAT(BUSTER_X86_TEMPLATE_GENERAL_INDEX), BUSTER_X86_C_SELECTS_A_OVER_B);
     const __m512i wrong_kind = _mm512_ternarylogic_epi32(flags, _mm512_srli_epi32(flags, 1), kind, BUSTER_X86_C_SELECTS_A_OVER_B);
 
-    // The length: the form's static bytes, the displacement, SIB and REX bytes the operands add, and one less for VEX2.
-    const __m512i dynamic = _mm512_ternarylogic_epi32(presence, flags, BUSTER_X86_SPLAT(0x6f0), BUSTER_X86_A_AND_NOT_B_AND_C);
+    // The length: the form's static bytes, the displacement, SIB and REX bytes the operands add (and a 32-bit address's
+    // 67), and one less for VEX2. The flags' bit 23 is clear.
+    const uint32_t dynamic_bytes = 0x6f0 | (address32 ? 1u << BUSTER_X86_PRESENCE_ADDRESS32 : 0);
+    const __m512i dynamic = _mm512_ternarylogic_epi32(presence, flags, BUSTER_X86_SPLAT(dynamic_bytes), BUSTER_X86_A_AND_NOT_B_AND_C);
     const __m512i length = _mm512_add_epi32(_mm512_add_epi32(_mm512_popcnt_epi32(dynamic), _mm512_and_epi32(flags, BUSTER_X86_SPLAT(BUSTER_X86_TEMPLATE_STATIC_LENGTH))),
                                             vex2);
 
@@ -5499,7 +5636,7 @@ static const uint8_t x86_first_qword_total[64] __attribute__((aligned(64))) = {
 // machine code at `out`, and returns where it ends. If `offsets` isn't null, stores the offsets (from `output`) of
 // the instructions of `offset_lanes` (a bit per instruction). If `fixup_ends` isn't null, appends the end offsets (from
 // `output`) of the marked instructions at *fixup_ends and advances it past them. ORs the invalid instructions' lanes
-// into `*invalid`.
+// into `*invalid`. With `address32` (a constant), the instructions have 32-bit addresses.
 //
 // Phase II works on instruction 4q + j (quad q, slot j) in dword lane 4j + q, so that moving its fields between a
 // quad's records and the group's lanes is a 4x4 transpose of dwords inside each 128-bit lane, both ways: unpacks,
@@ -5507,8 +5644,9 @@ static const uint8_t x86_first_qword_total[64] __attribute__((aligned(64))) = {
 // from Phase III's shuffles and compressions.
 BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t quads, uint8_t* out, const uint8_t* output, uint32_t* offsets,
                                     uint32_t offset_lanes, uint32_t** fixup_ends, X86Gather gather, X86Store store, X86FixupStore fixup_store,
-                                    __m512i* invalid)
+                                    bool address32, __m512i* invalid)
 {
+    const X86Template* const templates = address32 ? x86_templates_address32 : x86_templates;
     // I. Records and templates (zero for the quads past `quads`).
     __m512i records[4];
     __m512i bytes[4];
@@ -5552,7 +5690,7 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
         const uint8_t* t[BUSTER_X86_QUAD_INSTRUCTIONS];
         for (uint32_t j = 0; j < BUSTER_X86_QUAD_INSTRUCTIONS; j += 1)
         {
-            t[j] = (const uint8_t*)&x86_templates[gather == X86_GATHER_INSERTS_FORMS_FROM_RECORDS ? (uint16_t)(slot_forms[j] >> (16 * q)) : quad[j].form];
+            t[j] = (const uint8_t*)&templates[gather == X86_GATHER_INSERTS_FORMS_FROM_RECORDS ? (uint16_t)(slot_forms[j] >> (16 * q)) : quad[j].form];
         }
         if (gather == X86_GATHER_MASKED_LOADS)
         {
@@ -5577,7 +5715,7 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
     const __m512i flags = _mm512_unpackhi_epi64(template_high01, template_high23);
 
     // II. The lanes of the quads past `quads` hold zeros, which are valid, as are a zeroed copy's padding.
-    const X86Fields fields = compute_fields(operands, displacement, extension, flags, checks);
+    const X86Fields fields = compute_fields(operands, displacement, extension, flags, checks, address32);
     *invalid = _mm512_or_epi32(*invalid, fields.invalid);
 
     // Where the group's machine code starts, for its offsets and fixup ends.
@@ -5678,7 +5816,7 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
 // before it, at most 15 for each of the first `count` (the zeroed copy's padding adds none), so it ends by
 // 15 * count + 64.
 BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t* fixup_ends,
-                                     uint32_t quads, uint32_t groups, X86Gather gather, X86Store store, X86FixupStore fixup_store)
+                                     uint32_t quads, uint32_t groups, X86Gather gather, X86Store store, X86FixupStore fixup_store, bool address32)
 {
     const uint64_t group_instructions = BUSTER_X86_QUAD_INSTRUCTIONS * quads;
     const uint64_t iteration_instructions = group_instructions * groups;
@@ -5695,13 +5833,15 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
         // spill (unrolled, it's 14% slower on Zen 5).
         for (uint32_t g = 0; g < groups; g += 1)
         {
-            out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, &invalid);
+            out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, address32,
+                               &invalid);
             i += group_instructions;
         }
     }
     while (i + group_instructions <= count)
     {
-        out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, &invalid);
+        out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, address32,
+                           &invalid);
         i += group_instructions;
     }
     if (i < count)
@@ -5709,7 +5849,7 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
         X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
         memcpy(tail, instructions + i, (count - i) * sizeof(X86Instruction));
         out = encode_group(tail, quads, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)((1ull << (count - i)) - 1), fixups, gather, store, fixup_store,
-                           &invalid);
+                           address32, &invalid);
     }
     return _mm512_test_epi32_mask(invalid, invalid) != 0 ? X86_ENCODER_ERROR_INVALID_INSTRUCTION : (int64_t)(out - output);
 }
@@ -5717,33 +5857,34 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
 // The instantiations, by instructions per iteration, and for the benchmark, with the other gathers and stores. All of
 // them need room for BUSTER_X86_ENCODER_CAPACITY(count) bytes, and those with full fixup stores, room for
 // BUSTER_X86_ENCODER_FIXUP_CAPACITY(marked) fixup ends. Each has a loop for each combination of offsets and fixup ends,
-// so that none tests for them per group.
-#define BUSTER_X86_ENCODE_VARIANT(name, quads, groups, gather, store, fixup_store) \
+// so that none tests for them per group. x86_encode_64_address32 is x86_encode_64 for 32-bit addresses.
+#define BUSTER_X86_ENCODE_VARIANT(name, quads, groups, gather, store, fixup_store, address32) \
     __attribute__((noinline)) static int64_t name(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t* fixup_ends) \
     { \
         int64_t result; \
         if (fixup_ends == 0) \
         { \
-            result = offsets != 0 ? encode_batches(instructions, count, output, offsets, 0, quads, groups, gather, store, fixup_store) \
-                                  : encode_batches(instructions, count, output, 0, 0, quads, groups, gather, store, fixup_store); \
+            result = offsets != 0 ? encode_batches(instructions, count, output, offsets, 0, quads, groups, gather, store, fixup_store, address32) \
+                                  : encode_batches(instructions, count, output, 0, 0, quads, groups, gather, store, fixup_store, address32); \
         } \
         else \
         { \
-            result = offsets != 0 ? encode_batches(instructions, count, output, offsets, fixup_ends, quads, groups, gather, store, fixup_store) \
-                                  : encode_batches(instructions, count, output, 0, fixup_ends, quads, groups, gather, store, fixup_store); \
+            result = offsets != 0 ? encode_batches(instructions, count, output, offsets, fixup_ends, quads, groups, gather, store, fixup_store, address32) \
+                                  : encode_batches(instructions, count, output, 0, fixup_ends, quads, groups, gather, store, fixup_store, address32); \
         } \
         return result; \
     }
-BUSTER_X86_ENCODE_VARIANT(x86_encode_4, 1, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_8, 2, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_16, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_32, 4, 2, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_64, 4, 4, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_16_forms_from_records, 4, 1, X86_GATHER_INSERTS_FORMS_FROM_RECORDS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_16_masked_loads, 4, 1, X86_GATHER_MASKED_LOADS, X86_STORE_FULL, X86_FIXUP_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_16_masked_stores, 4, 1, X86_GATHER_INSERTS, X86_STORE_MASKED, X86_FIXUP_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_16_compress_stores, 4, 1, X86_GATHER_INSERTS, X86_STORE_COMPRESS, X86_FIXUP_STORE_FULL)
-BUSTER_X86_ENCODE_VARIANT(x86_encode_64_fixup_compress_stores, 4, 4, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_COMPRESS)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_4, 1, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, false)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_8, 2, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, false)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, false)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_32, 4, 2, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, false)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_64, 4, 4, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, false)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16_forms_from_records, 4, 1, X86_GATHER_INSERTS_FORMS_FROM_RECORDS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, false)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16_masked_loads, 4, 1, X86_GATHER_MASKED_LOADS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, false)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16_masked_stores, 4, 1, X86_GATHER_INSERTS, X86_STORE_MASKED, X86_FIXUP_STORE_FULL, false)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16_compress_stores, 4, 1, X86_GATHER_INSERTS, X86_STORE_COMPRESS, X86_FIXUP_STORE_FULL, false)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_64_fixup_compress_stores, 4, 4, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_COMPRESS, false)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_64_address32, 4, 4, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, true)
 #undef BUSTER_X86_ENCODE_VARIANT
 
 // The production entry point: 64 instructions per iteration, which the Zen 5 benchmark found the fastest
@@ -5762,6 +5903,25 @@ static int64_t x86_encode(const X86Instruction* instructions, uint64_t count, ui
     else
     {
         result = x86_encode_64(instructions, count, output, offsets, fixup_ends);
+    }
+    return result;
+}
+
+static int64_t x86_encode_address32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
+                                    uint32_t* fixup_ends)
+{
+    int64_t result;
+    if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
+    {
+        result = X86_ENCODER_ERROR_TOO_MANY_INSTRUCTIONS;
+    }
+    else if (capacity < BUSTER_X86_ENCODER_CAPACITY(count))
+    {
+        result = X86_ENCODER_ERROR_OUTPUT_TOO_SMALL;
+    }
+    else
+    {
+        result = x86_encode_64_address32(instructions, count, output, offsets, fixup_ends);
     }
     return result;
 }
