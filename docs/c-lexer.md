@@ -17,27 +17,30 @@ All corpus comparisons against the scalar lexer passed.
 | Corpus | Files / bytes | Baseline ms | Optimized ms | Baseline GB/s | Optimized GB/s | Throughput gain |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | C library sources and headers | 8,983 / 93,836,361 | 20.436 | 17.764 | 4.59 | 5.28 | 15.0% |
-| GCC 16 C++ headers | 887 / 14,780,438 | 3.695 | 3.281 | 4.00 | 4.50 | 12.6% |
+| C++ (`corpus-cpp`) | 8,935 / 115,057,429 | 28.616 | 24.912 | 4.02 | 4.62 | 14.9% |
 | Frozen repository `src` | 7 / 732,190 | 0.213 | 0.204 | 3.44 | 3.58 | about 4% |
 
 | Corpus | Baseline cycles/B | Optimized cycles/B | Baseline instructions/B | Optimized instructions/B |
 | --- | ---: | ---: | ---: | ---: |
 | C library | 1.207 | 1.049 | 3.480 | 3.204 |
-| C++ headers | 1.386 | 1.230 | 3.648 | 3.351 |
+| C++ | 1.379 | 1.200 | 3.741 | 3.483 |
 | Repository | 1.608 | 1.546 | 4.179 | 4.033 |
 
 The three C command medians were 20.436/20.461/20.403 ms for the baseline and
-17.764/17.751/17.789 ms for the candidate. C++ was 3.692/3.696/3.695 ms versus
-3.277/3.281/3.287 ms. The repository sample is much shorter, so its percentage is
+17.764/17.751/17.789 ms for the candidate. The C++ row is from the third round's
+interleaved runs below, with executables built from the same two commits:
+28.636/28.610/28.616 ms versus 24.912/24.897/24.945 ms. (The first measurement
+used GCC 16's `/usr/include/c++/16` instead, 887 files and 14.8 MB: 3.695 against
+3.281 ms, 12.6%.) The repository sample is much shorter, so its percentage is
 reported approximately. Throughput gains use wall time; the C cycles/B reduction
 is 13.1%. These are single-thread lexer measurements, not whole-compilation or
 multicore scaling results.
 
-The C library corpus was copied from `~/azp-bench/c-tokenizer/corpus/libc`, and the
-C++ corpus from `/usr/include/c++/16`. The C library snapshot contains additional
-non-C files; only the benchmark's matching files contribute to the counts above.
-The repository input came from the baseline, so added tests and implementation
-comments could not change the workload between executables.
+The C library corpus was copied from `~/azp-bench/c-tokenizer/corpus/libc`; the
+C++ corpus is `~/azp-bench/c-tokenizer/corpus-cpp`. The C library snapshot
+contains additional non-C files; only the benchmark's matching files contribute
+to the counts above. The repository input came from the baseline, so added tests
+and implementation comments could not change the workload between executables.
 
 ## Changes
 
@@ -61,7 +64,11 @@ comments could not change the workload between executables.
   spliced closer. Logical line state is preserved; a newline inside a block
   comment must not end a preprocessing directive. Chunks outside literals and
   comments with no opening delimiters skip the delimiter scan and region
-  arithmetic entirely.
+  arithmetic entirely. (The second round removed the block-comment shortcut
+  again, #63. While it was there, a skipped chunk also skipped the `/*/` check
+  and C++'s raw string check, so a `/*/` across the end of a skipped chunk or an
+  `R"` inside one no longer sent a part of the source to the scalar lexer: 21
+  files of the C++ corpus needed it instead of 22.)
 
 The baseline's sampled hot instructions included the classifier's scalar mask
 stores. The final disassembly contains the expected GFNI, byte permutation and
@@ -93,10 +100,11 @@ On the 9700X, the final binary passed:
   lexer benchmark on the updated repository sources.
 
 The added comment cases sweep every source misalignment and delimiter positions
-around 64-byte loads and 512-byte chunks, including a spliced closer. The three
-new guarded-page templates cover leading and interior multiline comments,
-preprocessor line state, and an escaped newline in a leading line comment.
-Existing random streams are unchanged.
+around the leading-comment scan's 64-byte loads and 1 to 78 bytes past 512-byte
+chunk boundaries (never across one: the third round added those, #62), including
+a spliced closer. The three new guarded-page templates cover leading and
+interior multiline comments, preprocessor line state, and an escaped newline in
+a leading line comment. Existing random streams are unchanged.
 
 AddressSanitizer and UndefinedBehaviorSanitizer also passed 200,000 C inputs with
 seed 7 and 200,000 C++ inputs with seed 99, plus the boundary, guarded-page and
@@ -123,7 +131,9 @@ EXCLUSIVE_OWNER=lexer-reproduce ~/buster-fast-bench/exclusive.sh taskset -c 2 ca
 EXCLUSIVE_OWNER=lexer-reproduce ~/buster-fast-bench/exclusive.sh taskset -c 2 candidate/build/compiler benchmark-lexer baseline/src
 ```
 
-Recorded SHA-256 hashes (the binary hashes identify the measured builds):
+Recorded SHA-256 hashes (the binary hashes identify the measured builds on that
+host only: `-g` records the build directory, so the same sources built in another
+directory hash differently):
 
 * `baseline/build/compiler`: `e9ac35d97b9a1d9aefc1188f99fff0abe292a3703f3ae03a5198c14562a8bf30`
 * `candidate/build/compiler`: `19b572bbdf79f861cdcda371a2de0e5e3d5b512f1c2755c7b6498c8370137d3f`
@@ -363,6 +373,10 @@ Discarded, measured the same way (C, C++):
   part instead of 126,528 (the raw string check), with the same tokens.
 * The A/B harness compared every variant's kinds, starts and ends on both corpora.
 * The sweep of the review of #60: 9,244,800 checks with no difference, for each of two seeds.
+* `check_comments` now also puts a closer's `*` on the last byte of a chunk, after a chunk wholly inside the
+  comment too, and ends a comment with the `*/` of a `/*/` (#62): 7,040 comment cases. A lexer that dropped the
+  carried `*` after a chunk wholly inside a comment failed two of them in each mode, where before only the random
+  inputs caught it (12 of 200,000).
 
 ## Reproduction
 

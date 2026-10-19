@@ -20,11 +20,14 @@
 //     picks. The first inputs that differ are saved in the current directory as fuzz_failure_0.c, fuzz_failure_1.c...
 //   - Page edges: inputs of 0 to BUSTER_TEST_PAGE_EDGE_LENGTHS - 1 bytes that end exactly at the end of a readable
 //     page, or start exactly at the start of one, in a mapping with a PROT_NONE guard page on either side. Each one is
-//     a prefix or a suffix of a template: the snippet repeated, or BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES strings of
-//     random inputs that continue the random check's sequence, and three comment templates. Besides comparing c_tokenize, c_tokenize_vectorized
-//     and c_tokenize_scalar as the other checks do, it catches a read outside of the source, which the other checks'
-//     buffers can't: that faults, and the fault handler names the input and exits with status 1. Length 0 ends at a
-//     page end too, so its source pointer is the first byte of the guard page.
+//     a prefix or a suffix of a template: the snippet repeated, BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES strings of
+//     random inputs that continue the random check's sequence, or one of three comment templates. Besides comparing
+//     c_tokenize, c_tokenize_vectorized and c_tokenize_scalar as the other checks do, it catches a read outside of
+//     the source, which the other checks' buffers can't: that faults, and the fault handler names the input and exits
+//     with status 1. Length 0 ends at a page end too, so its source pointer is the first byte of the guard page.
+//   - Comment delimiters: comments that end around the leading-comment scanner's 64-byte loads and around 512-byte
+//     chunk boundaries (with closers split across chunks), at every misalignment from a cache line, a spliced closer
+//     and a closer right after a slash among them (see check_comments).
 //
 // --cplusplus tokenizes everything as C++, with boundary_snippet_cpp instead and the fuzz_pieces_cpp pieces too. The
 // results go to stdout, with the first differences of each check. The exit status is 1 if the arguments are invalid
@@ -36,7 +39,8 @@
 //   - Random inputs: random_next, fuzz_pieces, fuzz_pieces_cpp, has_backslash, fuzz_input, save_failure and
 //     check_random.
 //   - Page edges: page_edge_input, report_fault, page_edge_template and check_page_edges.
-//   - Comment delimiters: check_comments, including delimiters split across the prefix scanner's unaligned loads.
+//   - Comment delimiters: check_comments, with delimiters split across the prefix scanner's unaligned loads and
+//     across chunks.
 //   - run_c_lexer_tests, with parse_u64.
 
 #include <stdint.h>
@@ -558,13 +562,22 @@ static CheckCounts check_page_edges(Random* random, TokenArrays* vectorized, Tok
 // ---------------------------------------------------------------------------------------------------------------------
 // Comment delimiters
 
-// The leading-comment scanner starts its loads after the opener, independently of the source's alignment.
-// Sweep delimiter positions around those load boundaries, plus the general lexer's 512-byte chunk boundaries.
+// The leading-comment scanner starts its loads after the opener, independently of the source's alignment: the
+// lengths sweep delimiter positions around those load boundaries. The comments after "#define X a" are in the chunk
+// loop, whose 512-byte chunks start at the 64-byte boundary at or before the source. There, the closer's '*' is the
+// last byte of the first chunk at lengths 495 to 497 (alignments 2 to 0), and of the second, which is wholly inside
+// the comment, at lengths 1008 and 1009 (alignments 1 and 0; 1010 puts it just after): the next chunk finds the closer
+// by the '*' it carries. The last variant puts a slash right before the closer: the vectorized path leaves a slash,
+// a star and a slash to the scalar lexer. (The source of these tests doesn't have one, which would send a part of it
+// to the scalar lexer in `benchmark-lexer src`.)
 static bool check_comments(TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
 {
-    static const uint32_t lengths[] = {0, 1, 31, 62, 63, 64, 65, 126, 127, 128, 511, 512, 513, 1023, 1024, 1025};
-    static const char* const prefixes[] = {"/*", "//", "#define X a /*", "/*"};
-    static const char* const suffixes[] = {"*/ int x;\n", "\n int x;\n", "*/ + b\n", "*\\\n/ int x;\n"};
+    static const uint32_t lengths[] = {0, 1, 31, 62, 63, 64, 65, 126, 127, 128, 495, 496, 497, 511, 512, 513,
+                                       1008, 1009, 1010, 1023, 1024, 1025};
+    static const char* const prefixes[] = {"/*", "//", "#define X a /*", "/*", "#define X a /*"};
+    static const char* const suffixes[] = {"*/ int x;\n", "\n int x;\n", "*/ + b\n", "*\\\n/ int x;\n", "/" "*/ + b\n"};
+    // The first three must stay vectorized; the fourth splices its closer, and the fifth has a slash before it.
+    static const bool may_fall_back[] = {false, false, false, true, true};
     uint8_t buffer[BUSTER_TEST_SNIPPET_BUFFER_BYTES] __attribute__((aligned(BUSTER_TEST_BUFFER_ALIGNMENT)));
     uint64_t checked = 0;
     uint64_t failed = 0;
@@ -587,8 +600,7 @@ static bool check_comments(TokenArrays* vectorized, TokenArrays* scalar, uint32_
                          (unsigned long)alignment, (unsigned long)variant, lengths[i]);
                 const Comparison comparison = compare((String8){ .pointer = source, .length = length }, vectorized, scalar, flags,
                                                       failed < BUSTER_TEST_REPORTED_INPUTS ? name : 0);
-                // The first three cases must stay vectorized; the fourth deliberately splices the closing delimiter.
-                const bool unexpected_fallback = variant < 3 && comparison == COMPARISON_FELL_BACK;
+                const bool unexpected_fallback = !may_fall_back[variant] && comparison == COMPARISON_FELL_BACK;
                 if (unexpected_fallback && failed < BUSTER_TEST_REPORTED_INPUTS)
                 {
                     printf("%s unexpectedly needs the scalar lexer\n", name);
