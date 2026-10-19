@@ -60,13 +60,22 @@ or infrastructure machinery merely to match its style.
   `x86_64_encoder_benchmark.c` provides `benchmark-x86-encoder`.
 - `docs/object-writer-and-linker.md` is the design of the object writer and the
   linker, with the 9700X measurements of mold, wild, lld and the kernel's file
-  costs behind it, and the order to build it in. Its first step, the lane base
-  layer below, is implemented; the rest isn't yet.
+  costs behind it, and the order to build it in. The lane base layer, the
+  encoder's fixups and the representation below are implemented; the object
+  writer and the linker aren't yet.
 - `src/buster/compiler/lane.c` is the lane base layer that every phase of the
   object writer and the linker runs on (groups of threads that run the same
   code, their barrier and broadcast, `lane_range`, and arenas).
   `lane_test.c` holds its tests (`main.c` includes it; `./build/compiler
   test-lanes` runs them) and `lane_benchmark.c` provides `benchmark-lanes`.
+- `src/buster/compiler/link.c` is the representation the object writer and the
+  linker share: names, atoms, symbols and fixups in column arrays indexed by
+  32-bit ids, in arenas, and `link_add_code_fixups`, which turns the encoder's
+  marked instructions into fixups of the design's kinds. `link_program.c`
+  generates test programs in it (libc-free static programs, from a seed and
+  sizes) for the object writer's and the linker's tests and benchmarks.
+  `link_test.c` holds the tests of both (`main.c` includes them;
+  `./build/compiler test-link` runs them).
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -81,6 +90,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler benchmark-x86-encoder
 ./build/compiler test-lanes
 ./build/compiler benchmark-lanes
+./build/compiler test-link
 ```
 
 ## Sharing the 9700X
@@ -296,3 +306,33 @@ without `taskset`, since it pins its lanes itself.
 `docs/object-writer-and-linker.md` ("Lanes") has the numbers. The default 9700X
 job runs it after the tests; like the others, its measurements are
 informational.
+
+## Link representation tests
+
+`./build/compiler test-link` checks `link.c` and `link_program.c`:
+
+- random records of every table read back from the columns, with ids from 1
+  and record 0 zero;
+- every table at its capacity, the side table of wide addends full, a name
+  arena too small, and arenas too small for the tables: each add fails with
+  `LINK_ERROR_FULL` and changes nothing;
+- each rule the adds and `link_check` enforce, with the error it gets;
+- every fixup kind on the instructions it can patch, with the bytes, field
+  offsets and addends GNU as gives (binutils 2.42), each alone and in streams
+  of up to 1,000 marked instructions with unmarked ones between them, then
+  every kind on fields it can't patch, and references that don't match the
+  marked instructions;
+- addends around int32's limits, which go to the side table exactly when they
+  don't fit, through an instruction's distance to its end too;
+- generated programs with five sets of options (the defaults, the smallest,
+  16 units, no absolute addresses, and `--functions N` workers, 2,000 by
+  default, without `SIZE32` and `SIZE64`, which wild 0.10 doesn't link): the same seed must give byte-identical tables and bytes, and
+  another seed others. Each is laid out in memory as a static executable at a
+  fixed address (`link_test_load`, which patches every kind and is the
+  reference for the direct path's patch kernel), run in a child process, and
+  must exit with status 0 having printed the output the generator's model
+  predicts. A copy with one fixup 8 bytes off must print something else.
+
+`--seed N` changes the random records and programs. The programs check is
+what scales: `--functions 1000000` builds three programs of a million workers
+each.
