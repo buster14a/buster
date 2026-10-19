@@ -272,3 +272,100 @@ first on a corpus and then times them in 21 interleaved passes in one process (`
 `--only name`). `spills.sh name`, run from a copy of the directory on another machine (it drives `benchpress` over
 ssh), labels a variant's spills and reloads in its assembly, samples it with IBS and lists the hot spill slots. `trees/` has the trees of the results table, and `trees/run_round.sh` the interleaved rounds.
 Build and run each under `exclusive.sh`.
+
+# Third round: raw strings, chunks read in place and carried lanes
+
+Measured on 2026-10-19 on the same 9700X, on top of the second round, with the same lock and pinning.
+
+## Results
+
+`benchmark-lexer` medians of three rounds, interleaving the executables (built from 015df42, from the first and
+second rounds above, and from this round) in rotating order. All corpus checks passed.
+
+| Corpus | Baseline | First round | Second round | Third round | Gain over baseline | Gain over second round |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| C library | 20.412 ms, 1.206 cycles/B | 17.780 ms, 1.050 cycles/B | 13.798 ms, 0.814 cycles/B | 13.349 ms, 0.788 cycles/B | 52.9% | 3.4% |
+| C++ | 28.616 ms, 1.379 cycles/B | 24.912 ms, 1.200 cycles/B | 19.777 ms, 0.953 cycles/B | 18.380 ms, 0.885 cycles/B | 55.7% | 7.6% |
+
+The third round runs at 7.03 GB/s on the C corpus and 6.26 GB/s on C++, with 4.8% and 6.8% fewer instructions per
+byte than the second (3.044 and 3.223). It falls back to the scalar lexer for a part of 8 C++ files instead of 17.
+
+## Where the time went
+
+* Sampling ops by cycles with IBS (`perf record -e ibs_op/cnt_ctl=0/`, which tags the op dispatched when the
+  counter expires, so ops that wait behind a stall are sampled more) put 24% of the lexer's samples in Phase I, 23% in
+  the write-out and the rest in the analysis, with no op above 1.6%. (Cycle samples without IBS piled 15% on one
+  mask store of Phase I: skid.)
+* Two lexer processes on the two hardware threads of one core had 1.22 times the throughput of one (a core IPC of
+  4.6 against 3.7), and on two cores they did not slow each other down: one thread uses about 80% of what the core
+  does for this mix of ops, and memory is not a limit.
+* Inserting 32 instructions per chunk at the start of the analysis cost, once corrected for the 1.5% that any inline
+  `asm` statement there costs by changing Clang's code around it, about 0.17 cycles each for a NOP, a `vpternlogd` or
+  a scalar add, 0.3 for shuffles, permutes, compares into masks and mask stores, and 0.55 for a 64-byte store. The
+  same 32 NOPs at the end of the iteration or spread over Phase I cost under 0.5%. So stores and FP1/FP2 ops
+  are the dearest, and general-register instructions nearly free: testing the source bounds once per chunk took out
+  4.5% of the instructions with no gain, as in the second round.
+* In C++, 20% of the chunks went through the raw string check's scalar loop (next).
+
+## Changes
+
+Gains are from the A/B harness, as medians of three runs on the C and C++ corpora unless noted.
+
+* **C++'s raw string literals checked where literals start.** The check ran before the delimiter scan on every quote
+  after an identifier character, and that includes the closing quote of each string that ends with a letter or
+  digit: 20% of the C++ corpus's chunks took its scalar loop, behind a branch that mispredicted on most of them, for
+  0.18% that have an `R"`. A raw string literal's quote starts a literal, after an identifier character outside
+  literals and comments, and the scan is right up to the first one in a chunk, so the check is now in the block for
+  prefixed literals, which only literal starts after identifier characters enter. It no longer falls back to the
+  scalar lexer for an `R"` in a comment or a string either. +5% on C++ (+6.4% against +1.4% for the same code without
+  it); it is C++ only.
+* **Chunks read in place.** Phase I copied each vector into a buffer for the analysis and the write-out, so that
+  bytes outside the source read as newlines. When a chunk and the next one's first vector are inside the source (one
+  test per chunk), they are now read from the source itself, and only the chunks at its edges go through the buffer:
+  8 fewer 64-byte stores per chunk. About +0.4% and +0.8%. (Testing the bounds once per chunk but still copying:
+  -0.3% to -0.7% on C, within 0.2% on C++.)
+* **The previous chunk's bitstrings as their last lanes, in general registers.** Six bitstrings are shifted in from
+  the previous chunk (and three rare ones for splices and escapes), and only their top bits matter, but they were
+  carried whole, in vector registers through the iteration or spilled at its end. As 64-bit integers, 64-byte spills
+  and reloads went down by 38%. +1.6% on C (+3.0% against +1.35%); on C++, -0.6% to 0.0% without the raw string change
+  and +0.65% with it (+7.1% against +6.4%), which took out the scalar loop that was short of general registers. (The
+  second round carried the lanes in memory: +1.1% and -1.5%.)
+* **One permute to shift a vector by a byte** (`shift_in_previous`, twice per vector in Phase I): a `vpermt2b` with an
+  index that Clang can't see through, where Clang emitted a `valignq` and a `vpalignr`, two FP1/FP2 uops. +0.6% and
+  +0.6%.
+
+Discarded, measured the same way (C, C++):
+
+* 16 vectors (1024 bytes) per chunk: -1.7% to -1.9% and +1.2% to +1.5%. Per byte, 3% to 4% fewer instructions and in C 20%
+  fewer mispredictions, but three times the 64-byte spills (10.5% of the ops were spills and reloads, against 7.6%),
+  three times the ops from the legacy decoder (the loop outgrew the op cache), and in C far fewer chunks without
+  delimiters, which skip the scan (running the scan on every 512-byte chunk costs -5.8% and -1.7%).
+* One mask for the masks that are almost always empty (`%:`, the ends of 3-character punctuators, bytes above 0x7F),
+  told apart from the source bytes in the chunks that have any: between -0.5% and +0.9%. Merging them takes two
+  `vpternlogd` per vector, and parameter packs put `...` in 3.3% of the C++ corpus's chunks.
+* Skipping the write-out of chunks without tokens: -0.1% and +0.2%; of vectors without tokens: -0.7% and -1.2%.
+* One bit per vector for the write-out's rare cases and one for more than 24 tokens: -1.1% and -1.3% (unrolled,
+  -0.5% and -1.1%). Phase I unrolled with the bounds tested once per chunk: 0.0% and -1.7%.
+* Writing 32 positions every time, with the test at 32: -0.2% and -0.2% against 24.
+* The masks loaded where first used rather than at the start of the analysis: +0.3% and -0.75%.
+* The six carried lanes packed into one vector register (one `vpermt2q` per shift, five shuffles per chunk to pack
+  them): +2.4% and +1.35% over the second round, between carrying them in general registers (+3.0% and +1.0%) and
+  whole (+1.35% and +1.6%).
+* The write-out's lanes interleaved into the analysis in two parts: -1.5% to -1.9%.
+* The corpus concatenated into 256 KB files lexes 1.4% faster: about 130 cycles per file, not worth attacking.
+* A cheaper index for the pair table: every two-operation form tried (c0 + 2c1, 2c0 + c1, c0 ^ c1, ...) collides for
+  the 27 pairs.
+
+## Correctness
+
+* `test-lexer` and `test-lexer --cplusplus` on the 9700X and locally, and `--fuzz 2000000` with seeds 7 and 99 in
+  both modes locally: no differences. Of the 200,000 default random C++ inputs, 120,309 need the scalar lexer for a
+  part instead of 126,528 (the raw string check), with the same tokens.
+* The A/B harness compared every variant's kinds, starts and ends on both corpora.
+* The sweep of the review of #60: 9,244,800 checks with no difference, for each of two seeds.
+
+## Reproduction
+
+The A/B harness and `trees/` are as in the second round. Also in the harness directory: `rounds.sh N name...` (N
+interleaved runs and their medians), `stat_remote.sh` (dispatch-stall and misprediction counters per variant) and
+`spills_cpp.sh` (the spill profile on the C++ corpus). Build and run each under `exclusive.sh`.
