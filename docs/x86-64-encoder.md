@@ -28,7 +28,7 @@ BMI at 0.64 ns (9.4 GB/s). That is:
   checks and forms added since cost about 3%, and segment overrides nothing:
   see "Evaluation");
 - byte-identical to GNU as 2.47 on 1.7 million random instructions covering
-  all 2,196 forms (1,242 legacy, 137 of them x87, 636 VEX and 318 EVEX), one
+  all 2,282 forms (1,242 legacy, 137 of them x87, 722 VEX and 318 EVEX), one
   in sixteen of them with an FS or GS override.
 
 ## The historical encoder
@@ -92,12 +92,13 @@ tests and counts, the flags, the small extensions
 SSE4a with MXCSR and the FXSAVE state, and all of x87, whose ST(i) registers
 are a register class of 8 in ModRM.rm); a row gives the prefixes, the opcode
 bytes, how ModRM is used (`/r`, `/digit`, `+r` or none), the immediate and
-relative widths, REX.W and the operand classes. The VEX and EVEX one has 954
+relative widths, REX.W and the operand classes. The VEX and EVEX one has 1,040
 (moves, masked and non-temporal moves, broadcasts, inserts and extracts, integer
 and floating point arithmetic, compares (into opmasks too) and string compares,
 shifts, shuffles and permutes, `vpternlogd`, `vpmultishiftqb`, `vpshufbitqmb`,
-compresses and expands, conversions (F16C's too), FMA, BMI, CMPccXADD, `kmov`
-and the opmask logic); its rows add the vector length, W, the
+compresses and expands, conversions (F16C's too), FMA3 in its three orders,
+BMI, CMPccXADD, `kmov` and the opmask logic); its rows add the vector length,
+W, the
 vvvv operand, the decorations the form can have and EVEX's N, the unit of its
 8-bit displacements. A broadcast memory operand, embedded rounding and
 suppressed exceptions are forms of their own (`_M32BCST`, `_ER`, `_SAE`),
@@ -405,15 +406,16 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
 `./build/compiler test-x86-encoder` (about 0.3 s) checks:
 
 - that every form's template fits;
-- 198 known encodings from GNU as, on the paths most worth pinning down (VEX2
+- 204 known encodings from GNU as, on the paths most worth pinning down (VEX2
   and VEX3, BMI, opmasks, EVEX's opmasks, zeroing, broadcasts, rounding,
   compressed displacements, registers 16–31, x87's register forms and memory
   sizes, `lock`, `rep`, far pointers and 16-bit forms, segment overrides on
   legacy, x87, VEX and EVEX forms, RIP-relative addresses and with `66` and
   `lock` too, SSE's shifts by an immediate, both `pextrw` encodings, SSE4a's
   two immediates, the blends' implicit XMM0, AVX's masked stores (memory, mask,
-  source), F16C, and AVX2 at 256 bits with shift counts and sources from an XMM
-  register among them), with both encoders;
+  source), F16C, AVX2 at 256 bits with shift counts and sources from an XMM
+  register, and FMA3's orders, packed and scalar, among them), with both
+  encoders;
 - a digest of the scalar encoder's output for 100,000 random instructions,
   recorded when GNU as encoded the same stream to the same bytes;
 - every batch width and variant against the scalar encoder, byte for byte and
@@ -431,24 +433,24 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
 `--print-assembly` and `--compare-binary` cross-check the scalar encoder against
 GNU as for any seed (AGENTS.md has the commands): 1.7 million random
 instructions over all forms (seeds 1, 7 and 99), 0 differences. The streams have
-every family in proportion to its forms: of 200,000 instructions, 29,000 EVEX
-(13,800 with an opmask, 5,900 zeroing, 7,800 broadcasts, 2,700 rounding or
-suppressed exceptions, 20,700 with registers 16–31), 17,600 VEX2, 40,700 VEX3,
-18,300 in the SSE forms of #20, 12,500 x87, 11,000 with `lock`, 5,500 string
-instructions and 12,500 with an FS or GS override (1,400 of them with `lock`,
-6,500 vector ones and 2,000 RIP-relative). The printed streams leave out
-encodings GNU as writes another way: `fop st(0), st` (DC) is `fop st, st(0)`
-(D8), `xchg eax, eax` is 87 C0 and `xchg rax, rax` is NOP, and `prefetchit0` and
-`prefetchit1` take only RIP-relative addresses; and LEA with a segment override,
-which GNU as warns does nothing. Eleven deliberately broken copies of the legacy
-encoder (wrong table entries, multishift windows, RBP and RSP checks,
-displacement bounds, lane order, store margin) and ten of its VEX and EVEX parts
-(VEX2's conditions, P0's bits, the compressibility's rotation, V', OR instead of
-XOR, register limits, the displacement's division, an inverted field, a base's
-bit 4) all fail the tests; the last one needed a test of its own (a memory
-operand's base or index past 15). So did the rm operand's kind: until its two
-tests, `x86_encode` encoded `lea rax, rcx` as `48 8d c1` and a memory operand in
-register-only forms (510 of the test's broken instructions), which
+every family in proportion to its forms: of 200,000 instructions, 27,800 EVEX
+(13,400 with an opmask, 5,800 zeroing, 7,500 broadcasts, 2,600 rounding or
+suppressed exceptions, 19,600 with registers 16–31), 17,300 VEX2, 46,400 VEX3
+(8,400 of them FMA3), 17,800 in the SSE forms of #20, 11,800 x87, 10,400 with
+`lock`, 5,300 string instructions and 12,600 with an FS or GS override (1,400 of
+them with `lock`, 6,800 vector ones and 2,000 RIP-relative). The printed streams
+leave out encodings GNU as writes another way: `fop st(0), st` (DC) is `fop st,
+st(0)` (D8), `xchg eax, eax` is 87 C0 and `xchg rax, rax` is NOP, and
+`prefetchit0` and `prefetchit1` take only RIP-relative addresses; and LEA with a
+segment override, which GNU as warns does nothing. Eleven deliberately broken
+copies of the legacy encoder (wrong table entries, multishift windows, RBP and
+RSP checks, displacement bounds, lane order, store margin) and ten of its VEX
+and EVEX parts (VEX2's conditions, P0's bits, the compressibility's rotation,
+V', OR instead of XOR, register limits, the displacement's division, an inverted
+field, a base's bit 4) all fail the tests; the last one needed a test of its own
+(a memory operand's base or index past 15). So did the rm operand's kind: until
+its two tests, `x86_encode` encoded `lea rax, rcx` as `48 8d c1` and a memory
+operand in register-only forms (510 of the test's broken instructions), which
 `x86_validate` rejected. The check costs about 1% on Zen 5. A copy that lets an
 x87 register go past ST(7) fails the tests too, and so do nine of the segment
 overrides' (the prefix's byte and presence in the templates and in the scalar
