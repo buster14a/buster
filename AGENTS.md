@@ -175,7 +175,7 @@ yet compared against a performance baseline. Keep just one compiler executable.
 ## x86-64 encoder tests
 
 `./build/compiler test-x86-encoder` (about 1 s) checks that every form fits a
-template, both encoders on 688 known encodings from GNU as (each also with the
+template, both encoders on 710 known encodings from GNU as (each also with the
 fixup flag, whose end they must report), a digest of the scalar encoder's output
 for 100,000 random instructions, every batch width and variant of `x86_encode`
 against the scalar encoder (bytes, offsets and fixup ends, in each of the four
@@ -185,19 +185,20 @@ and MMX, VEX and EVEX, with opmasks, broadcasts, rounding, registers 16-31,
 gathers and scatters, FS and GS segment overrides, and one in eight marked with
 the fixup flag), the same between `PROT_NONE` guard pages, and that invalid
 operands are rejected (immediates and rel8s outside their fields' ranges by
-`x86_validate` alone: `x86_encode` writes their low bytes; and memory operands in
-the 104 FS and GS forms without room for the override). Then it runs those
+`x86_validate` alone: `x86_encode` writes their low bytes; and memory operands
+in the 232 FS and GS forms without room for the override). Then it runs those
 checks again with 32-bit addresses, but the known fixups: 33 known encodings, a
 digest of their own, `x86_encode_64_address32` against the scalar encoder on the
 random streams and at page edges, and invalid operands, among them MPX memory
-operands and memory operands in the 184 FS and GS forms and the 52 forms without
-room for the `67`. And again for APX, but the known fixups: 138 known encodings,
-28 known invalid instructions (as GNU as rejects them), a digest of their own,
-`x86_encode_64_apx` against the scalar encoder on random streams in which half
-the forms have REX2 and a quarter are EVEX ones, and at page edges, and invalid
-operands, among them a high byte register with REX2, registers 16 to 31 in
-forms without REX2 or EVEX and XMM16 to XMM31 in SSE's forms. `--address32` and `--apx` run only their pass,
-and `--count N` and `--seed N` change the random streams.
+operands and memory operands in the 312 FS and GS forms and the 116 forms
+without room for the `67`. And again for APX, but the known fixups: 147 known
+encodings, 31 known invalid instructions (as GNU as rejects them), a digest of
+their own, `x86_encode_64_apx` against the scalar encoder on random streams in
+which half the forms have REX2 and a quarter are EVEX ones, and at page edges,
+and invalid operands, among them a high byte register with REX2, registers 16 to
+31 in forms without REX2 or EVEX and XMM16 to XMM31 in SSE's forms.
+`--address32` and `--apx` run only their pass, and `--count N` and `--seed N`
+change the random streams.
 
 The digests were recorded when GNU as encoded the same streams to the same
 bytes. After changing the form table, the scalar encoder or the fixup interface,
@@ -216,22 +217,23 @@ as build/x86_apx.s -o build/x86_apx.o
 ./build/compiler test-x86-encoder --compare-object build/x86_apx.o 400000 --seed 1 --apx
 ```
 
-(`build.sh` deletes `build/`, so run these after building.) The printed
-assembly uses only operands GNU as encodes with the same form
-(`{load}`/`{store}`, `{vex}` and `{evex}`, immediates outside the imm8 range for
-imm32 forms, `{nf}` for APX's NF forms, and so on), so any difference is a bug in one of them. A quarter of the fields that can
-be symbolic (32-bit displacements, rel32s, `loop`'s and `jrcxz`'s rel8s, imm32s
-and 64-bit immediates) are printed as symbols plus their values; GNU as writes
-zeros and a relocation for them, and `--compare-object` reads `.text`,
-`.lengths` and `.rela.text` from its object and compares the bytes (with those
-fields zeroed where the reported fixup ends put them) and each relocation's
-offset, type, addend and symbol with the ones the fixup ends and
-`x86_fixup_distance` give. With `--address32`, the printer adds `addr32` where no
-general register gives the address size, and the relocations of displacements
+(`build.sh` deletes `build/`, so run these after building.) The printed assembly
+uses only operands GNU as encodes with the same form (`{load}`/`{store}`,
+`{vex}` and `{evex}`, immediates outside the imm8 range for imm32 forms, `{nf}`
+for APX's NF forms, `{dfv=...}` for `ccmp`'s and `ctest`'s default flags value,
+and so on), so any difference is a bug in one of them. A quarter of the fields
+that can be symbolic (32-bit displacements, rel32s, `loop`'s and `jrcxz`'s
+rel8s, imm32s and 64-bit immediates) are printed as symbols plus their values;
+GNU as writes zeros and a relocation for them, and `--compare-object` reads
+`.text`, `.lengths` and `.rela.text` from its object and compares the bytes
+(with those fields zeroed where the reported fixup ends put them) and each
+relocation's offset, type, addend and symbol with the ones the fixup ends and
+`x86_fixup_distance` give. With `--address32`, the printer adds `addr32` where
+no general register gives the address size, and the relocations of displacements
 other than RIP-relative ones are R_X86_64_32; with `--apx`, it names registers
 16 to 31 `r16` to `r31` (`r16d`, `r16w`, `r16b`). Cross-check more than one seed
 after changing forms (1.7 million instructions over seeds 1, 7 and 99 were last
-checked for each entry point, with 197,779, 198,810 and 198,186 relocations).
+checked for each entry point, with 199,288, 198,922 and 199,426 relocations).
 
 ## x86-64 encoder benchmark
 

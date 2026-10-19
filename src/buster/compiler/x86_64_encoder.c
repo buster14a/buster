@@ -236,6 +236,9 @@ typedef enum X86EncoderError
 // 4VNNIW's sources).
 #define BUSTER_X86_OPERAND_PAIR 0x400
 #define BUSTER_X86_OPERAND_BLOCK 0x800
+// Not a register: APX's default flags value (ccmp's and ctest's flags when their source condition is false), in
+// EVEX.vvvv as it is (not inverted), OF, SF, ZF and CF in bits 3 to 0.
+#define BUSTER_X86_OPERAND_DFV 0x1000
 #define BUSTER_X86_OPERAND_NONE 0
 #define BUSTER_X86_OPERAND_GB (BUSTER_X86_CLASS_GPR8 | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_GW (BUSTER_X86_CLASS_GPR16 | BUSTER_X86_OPERAND_REGISTER)
@@ -293,10 +296,12 @@ typedef enum X86EncoderError
 
 // What an EVEX form's decorations can be: an opmask (merging), an opmask with zeroing, and EVEX.b, which the form
 // always has: a broadcast memory operand (its element repeated), embedded rounding (with a rounding mode in the
-// decorations, and only register operands) or suppressed exceptions (the same, without the rounding mode). And two
+// decorations, and only register operands) or suppressed exceptions (the same, without the rounding mode). And three
 // that APX's forms always have, without an opmask: NF, no flags (the instruction leaves them as they are; P2's bit 2,
 // the opmask's high bit's place), and ND, a new destination (in EVEX.vvvv; EVEX.b's place, which map 4 calls ND), or
-// for setcc and imul, ZU (zero upper: the destination's upper bits are zeroed, rather than kept).
+// for setcc and imul, ZU (zero upper: the destination's upper bits are zeroed, rather than kept); and ccmp's and
+// ctest's source condition, SCC(K) for condition code K, in P2's bits 3 to 0 (V''s, NF's and the opmask's places),
+// with a default flags value in EVEX.vvvv (BUSTER_X86_OPERAND_DFV).
 #define BUSTER_X86_EVEX_NONE 0x00
 #define BUSTER_X86_EVEX_MASK 0x01
 #define BUSTER_X86_EVEX_ZEROING 0x02
@@ -305,6 +310,8 @@ typedef enum X86EncoderError
 #define BUSTER_X86_EVEX_SAE 0x10
 #define BUSTER_X86_EVEX_NF 0x20
 #define BUSTER_X86_EVEX_ND 0x40
+#define BUSTER_X86_EVEX_SOURCE_CONDITION 0x80
+#define BUSTER_X86_EVEX_SCC(condition) (BUSTER_X86_EVEX_SOURCE_CONDITION | (condition) << 8)
 #define BUSTER_X86_EVEX_K BUSTER_X86_EVEX_MASK
 #define BUSTER_X86_EVEX_KZ (BUSTER_X86_EVEX_MASK | BUSTER_X86_EVEX_ZEROING)
 #define BUSTER_X86_EVEX_K_BCST (BUSTER_X86_EVEX_K | BUSTER_X86_EVEX_BROADCAST)
@@ -322,7 +329,8 @@ typedef enum X86EncoderError
 // the x87 register ST(0), where the rm operand is ST(i); XMM0 is the variable blends' implicit mask register; IMM8_IMM8
 // is two 8-bit immediates (SSE4a's extrq and insertq), the immediate's low byte first; RM_VVVV_REG is a masked store's
 // memory, mask and source; IS4 is the register in the immediate's bits 7 to 4, of the reg operand's class; and
-// IS4_..._IMM has a 4-bit selector in bits 3 to 0 too (vpermil2ps's and vpermil2pd's).
+// IS4_..._IMM has a 4-bit selector in bits 3 to 0 too (vpermil2ps's and vpermil2pd's). A default flags value in vvvv
+// (BUSTER_X86_OPERAND_DFV) isn't one of them: GNU as writes it after the mnemonic, as {dfv=of, sf, zf, cf}.
 typedef enum X86Syntax
 {
     X86_SYNTAX_NONE,
@@ -1807,13 +1815,54 @@ typedef enum X86Syntax
     BUSTER_X86_EVEX_ND_DOUBLE_SHIFT_FORMS(XV, N, m, opcode, ND_NF, _NF)
 
 // The conditional forms in map 4 (K the condition): cmovcc with a new destination, and setcc (F2), and its ZU form
-// (setzucc: ND's bit), which zeroes the destination's upper bits and takes only a register.
+// (setzucc: ND's bit), which zeroes the destination's upper bits and takes only a register; and cfcmovcc, a conditional
+// move that doesn't fault on memory it doesn't load or store (when the condition is false): into a register (neither
+// ND nor NF), into a register or memory (NF), and with a new destination (ND and NF), which is the first source when
+// the condition is false and the second when it's true.
 #define BUSTER_X86_EVEX_CONDITION_FORMS(XV, CC, cc, K) \
     XV(CMOV##CC##_R16_R16_RM16, "cmov" cc, EVEX, 0x66, 2, 0x0440 + K, R, 0, 0, 0, GW, GW, EW, 2, 1, ND, VVVV_REG_RM) \
     XV(CMOV##CC##_R32_R32_RM32, "cmov" cc, EVEX, 0, 2, 0x0440 + K, R, 0, 0, 0, GD, GD, ED, 4, 1, ND, VVVV_REG_RM) \
     XV(CMOV##CC##_R64_R64_RM64, "cmov" cc, EVEX, 0, 2, 0x0440 + K, R, 0, 1, 0, GQ, GQ, EQ, 8, 1, ND, VVVV_REG_RM) \
     XV(SET##CC##_RM8_EVEX, "set" cc, EVEX, 0xf2, 2, 0x0440 + K, D0, 0, 0, 0, NONE, NONE, EB, 1, 1, NONE, RM) \
-    XV(SETZU##CC##_R8, "setzu" cc, EVEX, 0xf2, 2, 0x0440 + K, D0, 0, 0, 0, NONE, NONE, GB, 1, 1, ND, RM)
+    XV(SETZU##CC##_R8, "setzu" cc, EVEX, 0xf2, 2, 0x0440 + K, D0, 0, 0, 0, NONE, NONE, GB, 1, 1, ND, RM) \
+    XV(CFCMOV##CC##_R16_RM16, "cfcmov" cc, EVEX, 0x66, 2, 0x0440 + K, R, 0, 0, 0, GW, NONE, EW, 2, 1, NONE, REG_RM) \
+    XV(CFCMOV##CC##_R32_RM32, "cfcmov" cc, EVEX, 0, 2, 0x0440 + K, R, 0, 0, 0, GD, NONE, ED, 4, 1, NONE, REG_RM) \
+    XV(CFCMOV##CC##_R64_RM64, "cfcmov" cc, EVEX, 0, 2, 0x0440 + K, R, 0, 1, 0, GQ, NONE, EQ, 8, 1, NONE, REG_RM) \
+    XV(CFCMOV##CC##_RM16_R16, "cfcmov" cc, EVEX, 0x66, 2, 0x0440 + K, R, 0, 0, 0, GW, NONE, EW, 2, 1, NF, RM_REG) \
+    XV(CFCMOV##CC##_RM32_R32, "cfcmov" cc, EVEX, 0, 2, 0x0440 + K, R, 0, 0, 0, GD, NONE, ED, 4, 1, NF, RM_REG) \
+    XV(CFCMOV##CC##_RM64_R64, "cfcmov" cc, EVEX, 0, 2, 0x0440 + K, R, 0, 1, 0, GQ, NONE, EQ, 8, 1, NF, RM_REG) \
+    XV(CFCMOV##CC##_R16_R16_RM16, "cfcmov" cc, EVEX, 0x66, 2, 0x0440 + K, R, 0, 0, 0, GW, GW, EW, 2, 1, ND_NF, VVVV_REG_RM) \
+    XV(CFCMOV##CC##_R32_R32_RM32, "cfcmov" cc, EVEX, 0, 2, 0x0440 + K, R, 0, 0, 0, GD, GD, ED, 4, 1, ND_NF, VVVV_REG_RM) \
+    XV(CFCMOV##CC##_R64_R64_RM64, "cfcmov" cc, EVEX, 0, 2, 0x0440 + K, R, 0, 1, 0, GQ, GQ, EQ, 8, 1, ND_NF, VVVV_REG_RM)
+
+// ccmpcc and ctestcc (K the source condition, whose 10 and 11 are always true and always false: t and f, not p and np),
+// which compare or test as cmp and test do (map 4's 38 to 3B, 80 to 83 /7, 84, 85 and F6 and F7 /0) if the source
+// condition holds, and otherwise set the flags to the default flags value in vvvv (OF, SF, ZF and CF; the others
+// clear).
+#define BUSTER_X86_EVEX_CCMP_FORMS(XV, CC, cc, K) \
+    XV(CCMP##CC##_RM8_R8, "ccmp" cc, EVEX, 0, 2, 0x0438, R, 0, 0, 0, GB, DFV, EB, 1, 1, SCC(K), RM_REG) \
+    XV(CCMP##CC##_RM16_R16, "ccmp" cc, EVEX, 0x66, 2, 0x0439, R, 0, 0, 0, GW, DFV, EW, 2, 1, SCC(K), RM_REG) \
+    XV(CCMP##CC##_RM32_R32, "ccmp" cc, EVEX, 0, 2, 0x0439, R, 0, 0, 0, GD, DFV, ED, 4, 1, SCC(K), RM_REG) \
+    XV(CCMP##CC##_RM64_R64, "ccmp" cc, EVEX, 0, 2, 0x0439, R, 0, 1, 0, GQ, DFV, EQ, 8, 1, SCC(K), RM_REG) \
+    XV(CCMP##CC##_R8_RM8, "ccmp" cc, EVEX, 0, 2, 0x043a, R, 0, 0, 0, GB, DFV, EB, 1, 1, SCC(K), REG_RM) \
+    XV(CCMP##CC##_R16_RM16, "ccmp" cc, EVEX, 0x66, 2, 0x043b, R, 0, 0, 0, GW, DFV, EW, 2, 1, SCC(K), REG_RM) \
+    XV(CCMP##CC##_R32_RM32, "ccmp" cc, EVEX, 0, 2, 0x043b, R, 0, 0, 0, GD, DFV, ED, 4, 1, SCC(K), REG_RM) \
+    XV(CCMP##CC##_R64_RM64, "ccmp" cc, EVEX, 0, 2, 0x043b, R, 0, 1, 0, GQ, DFV, EQ, 8, 1, SCC(K), REG_RM) \
+    XV(CCMP##CC##_RM8_IMM8, "ccmp" cc, EVEX, 0, 2, 0x0480, D7, 1, 0, 0, NONE, DFV, EB, 1, 1, SCC(K), RM_IMM) \
+    XV(CCMP##CC##_RM16_IMM16, "ccmp" cc, EVEX, 0x66, 2, 0x0481, D7, 2, 0, 0, NONE, DFV, EW, 2, 1, SCC(K), RM_IMM) \
+    XV(CCMP##CC##_RM32_IMM32, "ccmp" cc, EVEX, 0, 2, 0x0481, D7, 4, 0, 0, NONE, DFV, ED, 4, 1, SCC(K), RM_IMM) \
+    XV(CCMP##CC##_RM64_IMM32, "ccmp" cc, EVEX, 0, 2, 0x0481, D7, 4, 1, 0, NONE, DFV, EQ, 8, 1, SCC(K), RM_IMM) \
+    XV(CCMP##CC##_RM16_IMM8, "ccmp" cc, EVEX, 0x66, 2, 0x0483, D7, 1, 0, 0, NONE, DFV, EW, 2, 1, SCC(K), RM_IMM) \
+    XV(CCMP##CC##_RM32_IMM8, "ccmp" cc, EVEX, 0, 2, 0x0483, D7, 1, 0, 0, NONE, DFV, ED, 4, 1, SCC(K), RM_IMM) \
+    XV(CCMP##CC##_RM64_IMM8, "ccmp" cc, EVEX, 0, 2, 0x0483, D7, 1, 1, 0, NONE, DFV, EQ, 8, 1, SCC(K), RM_IMM) \
+    XV(CTEST##CC##_RM8_R8, "ctest" cc, EVEX, 0, 2, 0x0484, R, 0, 0, 0, GB, DFV, EB, 1, 1, SCC(K), RM_REG) \
+    XV(CTEST##CC##_RM16_R16, "ctest" cc, EVEX, 0x66, 2, 0x0485, R, 0, 0, 0, GW, DFV, EW, 2, 1, SCC(K), RM_REG) \
+    XV(CTEST##CC##_RM32_R32, "ctest" cc, EVEX, 0, 2, 0x0485, R, 0, 0, 0, GD, DFV, ED, 4, 1, SCC(K), RM_REG) \
+    XV(CTEST##CC##_RM64_R64, "ctest" cc, EVEX, 0, 2, 0x0485, R, 0, 1, 0, GQ, DFV, EQ, 8, 1, SCC(K), RM_REG) \
+    XV(CTEST##CC##_RM8_IMM8, "ctest" cc, EVEX, 0, 2, 0x04f6, D0, 1, 0, 0, NONE, DFV, EB, 1, 1, SCC(K), RM_IMM) \
+    XV(CTEST##CC##_RM16_IMM16, "ctest" cc, EVEX, 0x66, 2, 0x04f7, D0, 2, 0, 0, NONE, DFV, EW, 2, 1, SCC(K), RM_IMM) \
+    XV(CTEST##CC##_RM32_IMM32, "ctest" cc, EVEX, 0, 2, 0x04f7, D0, 4, 0, 0, NONE, DFV, ED, 4, 1, SCC(K), RM_IMM) \
+    XV(CTEST##CC##_RM64_IMM32, "ctest" cc, EVEX, 0, 2, 0x04f7, D0, 4, 1, 0, NONE, DFV, EQ, 8, 1, SCC(K), RM_IMM)
 
 #define BUSTER_X86_VECTOR_FORMS(XV) \
     BUSTER_X86_AVX_MOVE_FORMS(XV, VMOVUPS, "vmovups", 0, 0x0f10, 0x0f11) \
@@ -3418,7 +3467,7 @@ typedef enum X86Syntax
     XV(MOVDIR64B_R64_M512_EVEX, "movdir64b", EVEX, 0x66, 2, 0x04f8, R, 0, 0, 0, GQ, NONE, M, 0, 1, NONE, REG_RM) \
     XV(ENQCMD_R64_M512_EVEX, "enqcmd", EVEX, 0xf2, 2, 0x04f8, R, 0, 0, 0, GQ, NONE, M, 0, 1, NONE, REG_RM) \
     XV(ENQCMDS_R64_M512_EVEX, "enqcmds", EVEX, 0xf3, 2, 0x04f8, R, 0, 0, 0, GQ, NONE, M, 0, 1, NONE, REG_RM) \
-    /* APX's forms of the legacy arithmetic in map 4: the two-operand forms (but the accumulator's: an EVEX form's first operand can be R16 to R31 anyway), and the ND forms, which write a new destination in EVEX.vvvv; both with NF forms for the operations that set the flags without reading them (not adc, sbb, rcl and rcr) and change something else (not not); and the one-operand multiplications and divisions (with NF), imul's other forms (with ND, NF and ZU: imulzu), shld and shrd, cmovcc with ND, and setcc and setzucc. */ \
+    /* APX's forms of the legacy arithmetic in map 4: the two-operand forms (but the accumulator's: an EVEX form's first operand can be R16 to R31 anyway), and the ND forms, which write a new destination in EVEX.vvvv; both with NF forms for the operations that set the flags without reading them (not adc, sbb, rcl and rcr) and change something else (not not); and the one-operand multiplications and divisions (with NF), imul's other forms (with ND, NF and ZU: imulzu), shld and shrd, and for each condition, cmovcc with ND, setcc and setzucc, and the new cfcmovcc. */ \
     BUSTER_X86_EVEX_ARITHMETIC_NF_FORMS(XV, ADD, "add", 0) \
     BUSTER_X86_EVEX_ARITHMETIC_NF_FORMS(XV, OR, "or", 1) \
     BUSTER_X86_EVEX_ARITHMETIC_FORMS(XV, ADC, "adc", 2, NONE, _EVEX) \
@@ -3482,7 +3531,28 @@ typedef enum X86Syntax
     BUSTER_X86_EVEX_CONDITION_FORMS(XV, L, "l", 12) \
     BUSTER_X86_EVEX_CONDITION_FORMS(XV, GE, "ge", 13) \
     BUSTER_X86_EVEX_CONDITION_FORMS(XV, LE, "le", 14) \
-    BUSTER_X86_EVEX_CONDITION_FORMS(XV, G, "g", 15)
+    BUSTER_X86_EVEX_CONDITION_FORMS(XV, G, "g", 15) \
+    /* APX's other new instructions: ccmpcc and ctestcc, and push2 and pop2 (two registers, the first in EVEX.vvvv: ND's bit), with a hint that the pop2 pops what the push2 pushed (W1: push2p and pop2p). */ \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, O, "o", 0) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, NO, "no", 1) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, B, "b", 2) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, AE, "ae", 3) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, E, "e", 4) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, NE, "ne", 5) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, BE, "be", 6) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, A, "a", 7) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, S, "s", 8) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, NS, "ns", 9) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, T, "t", 10) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, F, "f", 11) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, L, "l", 12) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, GE, "ge", 13) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, LE, "le", 14) \
+    BUSTER_X86_EVEX_CCMP_FORMS(XV, G, "g", 15) \
+    XV(PUSH2_R64_R64, "push2", EVEX, 0, 2, 0x04ff, D6, 0, 0, 0, NONE, GQ, GQ, 8, 1, ND, VVVV_RM) \
+    XV(PUSH2P_R64_R64, "push2p", EVEX, 0, 2, 0x04ff, D6, 0, 1, 0, NONE, GQ, GQ, 8, 1, ND, VVVV_RM) \
+    XV(POP2_R64_R64, "pop2", EVEX, 0, 2, 0x048f, D0, 0, 0, 0, NONE, GQ, GQ, 8, 1, ND, VVVV_RM) \
+    XV(POP2P_R64_R64, "pop2p", EVEX, 0, 2, 0x048f, D0, 0, 1, 0, NONE, GQ, GQ, 8, 1, ND, VVVV_RM)
 
 #define BUSTER_X86_FORMS(X, XV) \
     X(NONE, "", 0, 0, 0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
@@ -4572,8 +4642,8 @@ struct X86FormDescription
     uint8_t vector_length;
     // The VEX.vvvv operand.
     uint16_t vvvv;
-    // BUSTER_X86_EVEX_*.
-    uint8_t evex;
+    // BUSTER_X86_EVEX_*, and a source condition's code in bits 8 to 11.
+    uint16_t evex;
     // EVEX's N.
     uint8_t disp8_scale;
 };
@@ -4684,7 +4754,8 @@ static __attribute__((unused)) bool x86_encoder_initialize(void);
 // scatter without an opmask, a gather whose destination, index and mask aren't different registers, a SIB operand
 // without a SIB byte (a base alone, or RIP) or with SIB's none and a scale, a RIP-relative operand of MPX's bndmk or a
 // MIB operand, a MIB operand's scaled index, a 3DNow! form's immediate other than its operation byte, a NOTRACK form
-// with a segment override, and fields the form doesn't have (which it ignores).
+// with a segment override, push2 or pop2 with RSP, pop2 with one register twice, and fields the form doesn't have
+// (which it ignores).
 static __attribute__((unused)) int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
                                                   uint32_t* fixup_ends);
 // The same, one instruction at a time from the form table, after x86_validate: the reference for testing. Its fixup
@@ -4715,8 +4786,9 @@ static __attribute__((unused)) uint64_t x86_validate_address32(const X86Instruct
 // bit 2, inverted) encode (x86_form_has_apx_registers). An instruction without such a register encodes as for
 // x86_encode. The forms whose template has no room for REX2's payload take registers 0 to 15 alone, as do the XSAVE
 // family (with which REX2 is #UD), maps 2 and 3 and VEX: APX gives their instructions with general registers EVEX forms
-// for that (the EVEX forms of BMI, kmov, CMPccXADD, AMX's loads and stores, and the legacy ones in map 4). Map 4's
-// forms of the legacy arithmetic (with ND, NF and ZU) and APX's new instructions are still to come (#36).
+// for that (the EVEX forms of BMI, kmov, CMPccXADD, AMX's loads and stores, and the legacy ones in map 4, with ND, NF
+// and ZU). APX's new instructions ccmp, ctest, cfcmov, push2 and pop2 are EVEX forms too, but pushp, popp and jmpabs,
+// which always have REX2, are still to come (#36).
 static __attribute__((unused)) bool x86_encoder_initialize_apx(void);
 static __attribute__((unused)) int64_t x86_encode_apx(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
                                                       uint32_t* fixup_ends);
@@ -4930,14 +5002,14 @@ static bool x86_encoder_initialized_apx;
 // registers, VEX's vector registers and control registers, 31 for EVEX's, 7 for opmasks, x87, MMX, debug, segment and
 // tile registers, of which register_is_valid finds the ones that don't exist, and 3 for MPX's bound registers), a
 // group's low bits (which the processor ignores) and the high byte flag, which only a legacy byte register can have;
-// all of them for no operand.
+// all of them for no operand, and those past 15 for a default flags value.
 static uint8_t x86_forbidden_register_bits(uint16_t operand, uint8_t family)
 {
     const uint8_t class = operand & BUSTER_X86_OPERAND_CLASS;
     uint8_t result = 0xf0;
     if (class == BUSTER_X86_CLASS_NONE)
     {
-        result = 0xff;
+        result = (operand & BUSTER_X86_OPERAND_DFV) ? 0xf0 : 0xff;
     }
     else if (class == BUSTER_X86_CLASS_GPR8 && family == BUSTER_X86_FAMILY_LEGACY)
     {
@@ -5129,29 +5201,35 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
             position += 3;
             static_length += 3;
             flags |= map == 1 && !form->w ? BUSTER_X86_TEMPLATE_VEX2 : 0;
-            valid = form->vector_length <= 1 && form->disp8_scale == 1 && form->evex == BUSTER_X86_EVEX_NONE;
+            valid = form->vector_length <= 1 && form->disp8_scale == 1 && form->evex == BUSTER_X86_EVEX_NONE && form->vvvv != BUSTER_X86_OPERAND_DFV;
         }
         else
         {
-            // 62; R, X, B and R' (inverted) and the map; W, vvvv (inverted), 1 and pp; L'L (the rounding mode's
-            // place, 00 with suppressed exceptions as GNU as encodes it), b (or APX's ND), V' (inverted) and APX's NF.
+            // 62; R, X, B and R' (inverted) and the map; W, vvvv (inverted, but a default flags value), 1 and pp; L'L
+            // (the rounding mode's place, 00 with suppressed exceptions as GNU as encodes it), b (or APX's ND), V'
+            // (inverted) and APX's NF, or a source condition in V''s, NF's and the opmask's places (where the canonical
+            // byte has zeros, as a default flags value has no bit 4).
             const bool rounding = (form->evex & (BUSTER_X86_EVEX_ROUNDING | BUSTER_X86_EVEX_SAE)) != 0;
             const bool b = (form->evex & BUSTER_X86_EVEX_B) != 0;
             const bool nf = (form->evex & BUSTER_X86_EVEX_NF) != 0;
+            const bool scc = (form->evex & BUSTER_X86_EVEX_SOURCE_CONDITION) != 0;
+            const bool dfv = form->vvvv == BUSTER_X86_OPERAND_DFV;
             template->bytes[position] = 0x62;
             template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
             template->bytes[position + 1] = (uint8_t)(0xf0 | map);
             template->layout[position + 1] = BUSTER_X86_CANONICAL_PREFIX_P0;
-            template->bytes[position + 2] = (uint8_t)((form->w << 7) | 0x78 | 0x04 | pp);
+            template->bytes[position + 2] = (uint8_t)((form->w << 7) | (dfv ? 0 : 0x78) | 0x04 | pp);
             template->layout[position + 2] = BUSTER_X86_CANONICAL_PREFIX_P1;
-            template->bytes[position + 3] = (uint8_t)(((rounding ? 0 : form->vector_length) << 5) | (b << 4) | 0x08 | (nf << 2));
+            template->bytes[position + 3] = (uint8_t)(((rounding ? 0 : form->vector_length) << 5) | (b << 4) | (scc ? form->evex >> 8 : 0x08 | (nf << 2)));
             template->layout[position + 3] = BUSTER_X86_CANONICAL_PREFIX_P2;
             position += 4;
             static_length += 4;
-            // NF and ND are in the opmask's and EVEX.b's places, so a form with either has no other decoration.
-            const uint8_t apx = BUSTER_X86_EVEX_NF | BUSTER_X86_EVEX_ND;
+            // NF and ND are in the opmask's and EVEX.b's places, so a form with either has no other decoration; and a
+            // source condition is in NF's and the opmask's, so a form with one has no other, and has a default flags
+            // value, as only it does.
+            const uint16_t apx = BUSTER_X86_EVEX_NF | BUSTER_X86_EVEX_ND;
             valid = form->vector_length <= 2 && form->disp8_scale != 0 && form->disp8_scale <= 64 && (form->disp8_scale & (form->disp8_scale - 1)) == 0 &&
-                    !((form->evex & apx) && (form->evex & ~apx));
+                    !((form->evex & apx) && (form->evex & ~apx)) && (scc ? (form->evex & 0xf07f) == 0 : form->evex < BUSTER_X86_EVEX_SOURCE_CONDITION) && scc == dfv;
             flags |= valid ? (uint32_t)__builtin_ctz(form->disp8_scale) << BUSTER_X86_TEMPLATE_DISP8_SCALE : 0;
         }
 
@@ -5345,6 +5423,13 @@ static bool x86_form_has_distinct_tiles(const X86FormDescription* form)
     return form->reg == BUSTER_X86_OPERAND_TMM && form->vvvv == BUSTER_X86_OPERAND_TMM && form->rm == BUSTER_X86_OPERAND_TMM;
 }
 
+// Whether the form is APX's push2 or pop2 (or push2p or pop2p: map 4's FF /6 and 8F /0), whose two registers can't be
+// RSP, and pop2's must be different registers: #UD otherwise.
+static bool x86_form_pushes_or_pops_two(const X86FormDescription* form)
+{
+    return form->family == BUSTER_X86_FAMILY_EVEX && ((form->opcode == 0x04ff && form->encoding == BUSTER_X86_ENCODING_D6) || form->opcode == 0x048f);
+}
+
 // Whether the form's immediate has a 4-bit selector in bits 3 to 0 below an /is4 register (vpermil2ps's and
 // vpermil2pd's).
 static bool x86_form_has_is4_selector(const X86FormDescription* form)
@@ -5480,10 +5565,13 @@ static bool instruction_is_valid(const X86Instruction* instruction, X86EncoderMo
         result = result && (decorations & (x86_template_checks(form) >> 24)) == 0;
         result = result && !((decorations & BUSTER_X86_DECORATION_ZEROING) && ((decorations & BUSTER_X86_DECORATION_MASK) == 0 || memory_destination));
 
-        // A complex multiplication's destination can't be one of its sources, and an AMX product's three tiles must be
-        // different registers.
+        // A complex multiplication's destination can't be one of its sources, an AMX product's three tiles must be
+        // different registers, push2's and pop2's registers can't be RSP, and pop2's two must be different.
         result = result && !(x86_form_has_distinct_destination(form) && (instruction->reg == instruction->vvvv || (!memory && instruction->reg == instruction->rm)));
         result = result && !(x86_form_has_distinct_tiles(form) && (instruction->reg == instruction->vvvv || instruction->reg == instruction->rm || instruction->vvvv == instruction->rm));
+        const bool two = x86_form_pushes_or_pops_two(form);
+        result = result && !(two && (instruction->vvvv == X86_REGISTER_RSP || instruction->rm == X86_REGISTER_RSP));
+        result = result && !(two && form->opcode == 0x048f && instruction->vvvv == instruction->rm);
 
         // A 3DNow! form's immediate is its operation byte.
         result = result && !(x86_form_has_operation_byte(form) && instruction->immediate != (int32_t)(form->opcode & 0xff));
@@ -5689,7 +5777,8 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out, X86E
     {
         const uint8_t map = x86_opcode_map(form);
         const uint8_t pp = x86_prefix_pp(form);
-        const uint8_t vvvv_field = (uint8_t)((~vvvv & 15) << 3);
+        // vvvv is inverted, but a default flags value.
+        const uint8_t vvvv_field = (uint8_t)(((form->vvvv == BUSTER_X86_OPERAND_DFV ? vvvv : ~vvvv) & 15) << 3);
         if (form->family == BUSTER_X86_FAMILY_VEX && map == 1 && !form->w && !x && !b)
         {
             out[length] = 0xc5;
@@ -5706,7 +5795,8 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out, X86E
         else
         {
             // L'L is the vector length, or with embedded rounding the rounding mode (00 for suppressed exceptions). V' is
-            // vvvv's bit 4, or a VSIB operand's index's. APX's ND is EVEX.b, and NF the opmask's bit 2.
+            // vvvv's bit 4, or a VSIB operand's index's. APX's ND is EVEX.b, and NF the opmask's bit 2, and a source
+            // condition is in the bits of V', NF and the opmask.
             const uint8_t decorations = instruction->decorations;
             const bool rounding = (form->evex & (BUSTER_X86_EVEX_ROUNDING | BUSTER_X86_EVEX_SAE)) != 0;
             const uint8_t vector_length = rounding ? (uint8_t)((decorations & BUSTER_X86_DECORATION_ROUNDING) >> 5) : form->vector_length;
@@ -5718,8 +5808,10 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out, X86E
             out[length] = 0x62;
             out[length + 1] = (uint8_t)((!r << 7) | (!x << 6) | (!b << 5) | (!(reg & 16) << 4) | (b4 << 3) | map);
             out[length + 2] = (uint8_t)((form->w << 7) | vvvv_field | (!x4 << 2) | pp);
-            out[length + 3] = (uint8_t)((decorations & BUSTER_X86_DECORATION_ZEROING) | (vector_length << 5) | (((form->evex & BUSTER_X86_EVEX_B) != 0) << 4) |
-                                        (!(v_high & 16) << 3) | (((form->evex & BUSTER_X86_EVEX_NF) != 0) << 2) | (decorations & BUSTER_X86_DECORATION_MASK));
+            const uint8_t low = (form->evex & BUSTER_X86_EVEX_SOURCE_CONDITION)
+                                    ? (uint8_t)(form->evex >> 8)
+                                    : (uint8_t)((!(v_high & 16) << 3) | (((form->evex & BUSTER_X86_EVEX_NF) != 0) << 2) | (decorations & BUSTER_X86_DECORATION_MASK));
+            out[length + 3] = (uint8_t)((decorations & BUSTER_X86_DECORATION_ZEROING) | (vector_length << 5) | (((form->evex & BUSTER_X86_EVEX_B) != 0) << 4) | low);
             length += 4;
         }
         // The opcode's last byte: the map stands for its escape bytes.
