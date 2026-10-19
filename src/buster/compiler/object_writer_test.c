@@ -2213,19 +2213,27 @@ static bool object_test_files(const char* directory, Arena* arena)
     object_test_expect(&tally, stat(path, &after) == 0 && after.st_ino != before.st_ino && after.st_nlink == 1 && (after.st_mode & 0777) == (before.st_mode & 0777),
                        "a new inode with the old mode", 0);
     // A file with another link and the longest name a directory takes: the new file beside it has a name of its own.
+    // Only where the directory's path leaves room for that name within a path's PATH_MAX bytes.
     char longest[BUSTER_OBJECT_TEST_PATH_BYTES];
     char longest_other[BUSTER_OBJECT_TEST_PATH_BYTES];
     const int prefix = snprintf(longest, sizeof(longest), "%s/", directory);
-    memset(longest + prefix, 'n', NAME_MAX);
-    longest[prefix + NAME_MAX] = 0;
-    snprintf(longest_other, sizeof(longest_other), "%s/longest-other.o", directory);
-    const bool longest_linked = object_write_file(longest, small, sizeof(small)) == OBJECT_ERROR_NONE && link(longest, longest_other) == 0;
-    object_test_expect(&tally,
-                       longest_linked && object_write_file(longest, large, sizeof(large)) == OBJECT_ERROR_NONE && object_test_same_file(longest, large, sizeof(large), arena) &&
-                           object_test_same_file(longest_other, small, sizeof(small), arena),
-                       "over a file with another link and a name of NAME_MAX bytes", 0);
-    unlink(longest);
-    unlink(longest_other);
+    if (prefix > 0 && (uint64_t)prefix + NAME_MAX < sizeof(longest))
+    {
+        memset(longest + prefix, 'n', NAME_MAX);
+        longest[prefix + NAME_MAX] = 0;
+        snprintf(longest_other, sizeof(longest_other), "%s/longest-other.o", directory);
+        const bool longest_linked = object_write_file(longest, small, sizeof(small)) == OBJECT_ERROR_NONE && link(longest, longest_other) == 0;
+        object_test_expect(&tally,
+                           longest_linked && object_write_file(longest, large, sizeof(large)) == OBJECT_ERROR_NONE &&
+                               object_test_same_file(longest, large, sizeof(large), arena) && object_test_same_file(longest_other, small, sizeof(small), arena),
+                           "over a file with another link and a name of NAME_MAX bytes", 0);
+        unlink(longest);
+        unlink(longest_other);
+    }
+    else
+    {
+        printf("  %s leaves no room for a name of NAME_MAX bytes: not checked\n", directory);
+    }
     // Not a regular file: /dev/null, and a pipe, which takes the bytes in order (a FIFO, with a reader that doesn't
     // wait, and room for them); and no directory.
     object_test_expect(&tally, object_write_file("/dev/null", large, sizeof(large)) == OBJECT_ERROR_NONE, "/dev/null", 0);
