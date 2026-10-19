@@ -175,8 +175,15 @@ scale without an index, an invalid combination), RSP as an index, a high byte
 register with REX, and an rm operand of a kind the form can't have (a memory
 operand where it has a register or no rm operand, a register where it takes
 only memory, or anything but memory with a segment override: the memory mode's
-bit picks one of two flags). Rules that depend on more than one field (zeroing
-without an opmask, zeroing into memory) only x86_validate checks.
+bit picks one of two flags). Only x86_validate checks the rules that depend on
+more than one field (zeroing without an opmask, zeroing into memory) and the
+ranges of the immediates (imm8 in [−128, 255], imm16 in [−32768, 65535] and
+ENTER's in [0, 2²⁴)) and of a rel8 ([−128, 127]): x86_encode writes the
+field's low bytes, so `jmp rel8` with a displacement of 200 is `eb c8`, a jump
+of −56. Checking the ranges there too costs about 2% (see "Zen 5's costs").
+x86_encode also ignores fields the form doesn't have (an immediate or a
+displacement it has no field for, the rm of a memory operand without a base):
+they don't change its bytes, and x86_validate rejects them.
 
 ### The loop
 
@@ -357,6 +364,23 @@ again. As template copies (see "Templates and the canonical slot"), the
 overrides cost nothing in the loop, whose code is instruction for instruction
 the same as without them.
 
+The immediates' and rel8s' ranges stay x86_validate's: checking them in
+x86_encode made 64 per iteration about 2% slower on the compiler mix and the
+vector mix (15 interleaved rounds against main with #51's forms; 3–4% before
+them), 0.4% on calls of 16 and no slower with offsets. The cheapest of nine
+versions took 10 operations per group, 6 of them on the immediate alone, before
+the template arrives. An immediate x fits b bytes, signed or not, if
+`lzcnt(x ^ (x >> 31))`, one less for a negative x, is at least 32 − 8b, so
+`0xfffffffe` shifted left by that has a bit at 32 − 8b for each size it
+doesn't fit (with ENTER's sign in bit 8). Two bits of the template's flags
+then rotate the form's bit to bit 0, and a rel8 flag, the rotation count's bit
+0, adds the displacement's fit in a byte (`fits8`, from the compressibility
+above).
+Taking the rel8's test from the displacement before the template, folding it
+into the mask, sharing the constants, an empty `asm` statement on the mask, and
+computing the mask first or last were all within the ±1.5% that one build
+varies between runs: 10 operations cost about what 8 did before (2–3%).
+
 ## Evaluation
 
 `./build/compiler benchmark-x86-encoder` on the 9700X, `taskset -c 2`,
@@ -442,7 +466,10 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   them, decorations the form can't have, unknown mode bits, an index register
   or a scale without an index, a memory operand in a form without one, a
   register in a form that takes only memory, a segment override without a
-  memory operand) are rejected by `x86_encode` and found by `x86_validate`.
+  memory operand) are rejected by `x86_encode` and found by `x86_validate`, and
+  that immediates and rel8s just outside their fields' ranges (above and below,
+  in an imm8, imm16, ENTER's or rel8 form, each kind as often) are found by
+  `x86_validate`.
 
 `--print-assembly` and `--compare-binary` cross-check the scalar encoder against
 GNU as for any seed (AGENTS.md has the commands): 1.7 million random
@@ -477,7 +504,11 @@ encoder, an override on an operand that isn't memory in either encoder, an index
 without an index, and the gather that takes the forms from the records). The
 random streams found the form number's bit 13 in pp when #23's forms took GS's
 templates past 8,192; with the old ternlog, the known encoding of a GS override
-on the last form fails too.
+on the last form fails too. Ten copies of `x86_validate` whose ranges let one
+more value in at either end of imm8, imm16, ENTER's or rel8's, or that lack
+imm8's or rel8's rule, fail the range tests (140 to 351 of their broken
+instructions not found), and two that leave out the last value of imm8 or rel8
+change the reference digest.
 
 ## Next steps
 
