@@ -244,7 +244,8 @@ typedef enum X86EncoderError
 
 // The order of a form's operands in Intel syntax, with its implicit ones (for printing and tests; the encoding
 // doesn't depend on it). ACC is AL, AX, EAX or RAX; MOFFS is a 64-bit absolute address; VVVV is the VEX.vvvv register;
-// ST is the x87 register ST(0), where the rm operand is ST(i).
+// ST is the x87 register ST(0), where the rm operand is ST(i); XMM0 is the variable blends' implicit mask register; and
+// IMM8_IMM8 is two 8-bit immediates (SSE4a's extrq and insertq), the immediate's low byte first.
 typedef enum X86Syntax
 {
     X86_SYNTAX_NONE,
@@ -273,6 +274,9 @@ typedef enum X86Syntax
     X86_SYNTAX_ACC,
     X86_SYNTAX_RM_ACC,
     X86_SYNTAX_RM_REG_VVVV,
+    X86_SYNTAX_REG_RM_XMM0,
+    X86_SYNTAX_RM_IMM8_IMM8,
+    X86_SYNTAX_REG_RM_IMM8_IMM8,
 } X86Syntax;
 
 // The form table. Each row is X(name, mnemonic, prefixes, opcode bytes, opcode, encoding, immediate bytes, relative
@@ -408,6 +412,37 @@ typedef enum X86Syntax
 #define BUSTER_X86_SSE_MOVE_FORMS(X, N, m, prefixes, load, store, bytes) \
     X(N##_X_XM, m, prefixes, 2, load, R, 0, 0, 0, V, XM, bytes, REG_RM) \
     X(N##_XM_X, m, prefixes, 2, store, R, 0, 0, 0, V, XM, bytes, RM_REG)
+
+// Packed single precision (no prefix) and double precision (66).
+#define BUSTER_X86_SSE_PS_PD_FORMS(X, N, m, opcode) \
+    BUSTER_X86_SSE_PACKED_FORM(X, N##PS, m "ps", 0, 2, 0x0f00 + opcode) \
+    BUSTER_X86_SSE_PACKED_FORM(X, N##PD, m "pd", 0x66, 2, 0x0f00 + opcode)
+
+// An XMM register from a 128-bit XMM register or memory operand, with an 8-bit immediate.
+#define BUSTER_X86_SSE_PACKED_IMM8_FORM(X, N, m, prefixes, opcode_bytes, opcode) \
+    X(N##_X_XM128_IMM8, m, prefixes, opcode_bytes, opcode, R, 1, 0, 0, V, XM, 16, REG_RM_IMM)
+
+// A packed shift by the low quadword of an XMM register or memory operand, and by an 8-bit immediate (66 0F 71, 72 or
+// 73 with K the ModRM digit).
+#define BUSTER_X86_SSE_SHIFT_FORMS(X, N, m, opcode, immediate_opcode, K) \
+    BUSTER_X86_SSE_PACKED_FORM(X, N, m, 0x66, 2, opcode) \
+    X(N##_X_IMM8, m, 0x66, 2, immediate_opcode, D##K, 1, 0, 0, NONE, V, 16, RM_IMM)
+
+// SSE4.1's sign or zero extensions of an XMM register's or memory operand's low elements, with the opcode of the first:
+// bytes to words (64 bits of them), doublewords (32) and quadwords (16), words to doublewords (64) and quadwords (32),
+// and doublewords to quadwords (64).
+#define BUSTER_X86_SSE_EXTEND_FORMS(X, N, m, opcode) \
+    X(N##BW_X_XM64, m "bw", 0x66, 3, 0x0f3800 + opcode, R, 0, 0, 0, V, XM, 8, REG_RM) \
+    X(N##BD_X_XM32, m "bd", 0x66, 3, 0x0f3801 + opcode, R, 0, 0, 0, V, XM, 4, REG_RM) \
+    X(N##BQ_X_XM16, m "bq", 0x66, 3, 0x0f3802 + opcode, R, 0, 0, 0, V, XM, 2, REG_RM) \
+    X(N##WD_X_XM64, m "wd", 0x66, 3, 0x0f3803 + opcode, R, 0, 0, 0, V, XM, 8, REG_RM) \
+    X(N##WQ_X_XM32, m "wq", 0x66, 3, 0x0f3804 + opcode, R, 0, 0, 0, V, XM, 4, REG_RM) \
+    X(N##DQ_X_XM64, m "dq", 0x66, 3, 0x0f3805 + opcode, R, 0, 0, 0, V, XM, 8, REG_RM)
+
+// An XMM register's low (12) or high (16) quadword from and to memory: the load, and the store at the next opcode.
+#define BUSTER_X86_SSE_HALF_MOVE_FORMS(X, N, m, prefixes, load) \
+    X(N##_X_M64, m, prefixes, 2, load, R, 0, 0, 0, V, M, 8, REG_RM) \
+    X(N##_M64_X, m, prefixes, 2, load + 1, R, 0, 0, 0, V, M, 8, RM_REG)
 
 // x87 arithmetic, with K the ModRM digit: ST(0) and a 32-bit (D8) or 64-bit (DC) float in memory, or ST(i) (D8 with
 // mod 11); and ST(i) as the destination (DC) or with a pop (DE), whose digit KD swaps subtraction and division with
@@ -1233,6 +1268,183 @@ typedef enum X86Syntax
     X(PINSRB_X_RM32_IMM8, "pinsrb", 0x66, 3, 0x0f3a20, R, 1, 0, 0, V, ED, 1, REG_RM_IMM) \
     X(PINSRD_X_RM32_IMM8, "pinsrd", 0x66, 3, 0x0f3a22, R, 1, 0, 0, V, ED, 4, REG_RM_IMM) \
     X(PINSRQ_X_RM64_IMM8, "pinsrq", 0x66, 3, 0x0f3a22, R, 1, 0, 1, V, EQ, 8, REG_RM_IMM) \
+    /* The rest of SSE and SSE2: floating-point arithmetic, compares, shuffles and moves. */ \
+    BUSTER_X86_SSE_PS_PD_FORMS(X, SUB, "sub", 0x5c) \
+    BUSTER_X86_SSE_PS_PD_FORMS(X, MIN, "min", 0x5d) \
+    BUSTER_X86_SSE_PS_PD_FORMS(X, DIV, "div", 0x5e) \
+    BUSTER_X86_SSE_PS_PD_FORMS(X, MAX, "max", 0x5f) \
+    BUSTER_X86_SSE_PS_PD_FORMS(X, SQRT, "sqrt", 0x51) \
+    BUSTER_X86_SSE_PS_PD_FORMS(X, UNPCKL, "unpckl", 0x14) \
+    BUSTER_X86_SSE_PS_PD_FORMS(X, UNPCKH, "unpckh", 0x15) \
+    BUSTER_X86_SSE_PACKED_FORM(X, ADDPD, "addpd", 0x66, 2, 0x0f58) \
+    BUSTER_X86_SSE_PACKED_FORM(X, MULPD, "mulpd", 0x66, 2, 0x0f59) \
+    BUSTER_X86_SSE_PACKED_FORM(X, ANDNPD, "andnpd", 0x66, 2, 0x0f55) \
+    BUSTER_X86_SSE_PACKED_FORM(X, ORPD, "orpd", 0x66, 2, 0x0f56) \
+    BUSTER_X86_SSE_PACKED_FORM(X, RSQRTPS, "rsqrtps", 0, 2, 0x0f52) \
+    BUSTER_X86_SSE_PACKED_FORM(X, RCPPS, "rcpps", 0, 2, 0x0f53) \
+    X(RSQRTSS_X_XM32, "rsqrtss", 0xf3, 2, 0x0f52, R, 0, 0, 0, V, XM, 4, REG_RM) \
+    X(RCPSS_X_XM32, "rcpss", 0xf3, 2, 0x0f53, R, 0, 0, 0, V, XM, 4, REG_RM) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, CMPPS, "cmpps", 0, 2, 0x0fc2) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, CMPPD, "cmppd", 0x66, 2, 0x0fc2) \
+    X(CMPSS_X_XM32_IMM8, "cmpss", 0xf3, 2, 0x0fc2, R, 1, 0, 0, V, XM, 4, REG_RM_IMM) \
+    X(CMPSD_X_XM64_IMM8, "cmpsd", 0xf2, 2, 0x0fc2, R, 1, 0, 0, V, XM, 8, REG_RM_IMM) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, SHUFPD, "shufpd", 0x66, 2, 0x0fc6) \
+    BUSTER_X86_SSE_HALF_MOVE_FORMS(X, MOVLPS, "movlps", 0, 0x0f12) \
+    BUSTER_X86_SSE_HALF_MOVE_FORMS(X, MOVHPS, "movhps", 0, 0x0f16) \
+    BUSTER_X86_SSE_HALF_MOVE_FORMS(X, MOVLPD, "movlpd", 0x66, 0x0f12) \
+    BUSTER_X86_SSE_HALF_MOVE_FORMS(X, MOVHPD, "movhpd", 0x66, 0x0f16) \
+    X(MOVHLPS_X_X, "movhlps", 0, 2, 0x0f12, R, 0, 0, 0, V, V, 16, REG_RM) \
+    X(MOVLHPS_X_X, "movlhps", 0, 2, 0x0f16, R, 0, 0, 0, V, V, 16, REG_RM) \
+    X(MOVDDUP_X_XM64, "movddup", 0xf2, 2, 0x0f12, R, 0, 0, 0, V, XM, 8, REG_RM) \
+    BUSTER_X86_SSE_PACKED_FORM(X, MOVSLDUP, "movsldup", 0xf3, 2, 0x0f12) \
+    BUSTER_X86_SSE_PACKED_FORM(X, MOVSHDUP, "movshdup", 0xf3, 2, 0x0f16) \
+    X(MOVMSKPD_R32_X, "movmskpd", 0x66, 2, 0x0f50, R, 0, 0, 0, GD, V, 0, REG_RM) \
+    X(LDDQU_X_M128, "lddqu", 0xf2, 2, 0x0ff0, R, 0, 0, 0, V, M, 16, REG_RM) \
+    X(MOVNTDQA_X_M128, "movntdqa", 0x66, 3, 0x0f382a, R, 0, 0, 0, V, M, 16, REG_RM) \
+    X(MASKMOVDQU_X_X, "maskmovdqu", 0x66, 2, 0x0ff7, R, 0, 0, 0, V, V, 16, REG_RM) \
+    /* Non-temporal stores. */ \
+    X(MOVNTPS_M128_X, "movntps", 0, 2, 0x0f2b, R, 0, 0, 0, V, M, 16, RM_REG) \
+    X(MOVNTPD_M128_X, "movntpd", 0x66, 2, 0x0f2b, R, 0, 0, 0, V, M, 16, RM_REG) \
+    X(MOVNTDQ_M128_X, "movntdq", 0x66, 2, 0x0fe7, R, 0, 0, 0, V, M, 16, RM_REG) \
+    X(MOVNTSS_M32_X, "movntss", 0xf3, 2, 0x0f2b, R, 0, 0, 0, V, M, 4, RM_REG) \
+    X(MOVNTSD_M64_X, "movntsd", 0xf2, 2, 0x0f2b, R, 0, 0, 0, V, M, 8, RM_REG) \
+    X(MOVNTI_M32_R32, "movnti", 0, 2, 0x0fc3, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(MOVNTI_M64_R64, "movnti", 0, 2, 0x0fc3, R, 0, 0, 1, GQ, M, 8, RM_REG) \
+    /* Conversions (cvtpi2ps and cvtpi2pd from memory; their MMX register forms are #30's). */ \
+    X(CVTSS2SI_R32_XM32, "cvtss2si", 0xf3, 2, 0x0f2d, R, 0, 0, 0, GD, XM, 4, REG_RM) \
+    X(CVTSS2SI_R64_XM32, "cvtss2si", 0xf3, 2, 0x0f2d, R, 0, 0, 1, GQ, XM, 4, REG_RM) \
+    X(CVTSD2SI_R32_XM64, "cvtsd2si", 0xf2, 2, 0x0f2d, R, 0, 0, 0, GD, XM, 8, REG_RM) \
+    X(CVTSD2SI_R64_XM64, "cvtsd2si", 0xf2, 2, 0x0f2d, R, 0, 0, 1, GQ, XM, 8, REG_RM) \
+    X(CVTPI2PS_X_M64, "cvtpi2ps", 0, 2, 0x0f2a, R, 0, 0, 0, V, M, 8, REG_RM) \
+    X(CVTPI2PD_X_M64, "cvtpi2pd", 0x66, 2, 0x0f2a, R, 0, 0, 0, V, M, 8, REG_RM) \
+    X(CVTPS2PD_X_XM64, "cvtps2pd", 0, 2, 0x0f5a, R, 0, 0, 0, V, XM, 8, REG_RM) \
+    BUSTER_X86_SSE_PACKED_FORM(X, CVTPD2PS, "cvtpd2ps", 0x66, 2, 0x0f5a) \
+    BUSTER_X86_SSE_PACKED_FORM(X, CVTDQ2PS, "cvtdq2ps", 0, 2, 0x0f5b) \
+    BUSTER_X86_SSE_PACKED_FORM(X, CVTPS2DQ, "cvtps2dq", 0x66, 2, 0x0f5b) \
+    BUSTER_X86_SSE_PACKED_FORM(X, CVTTPS2DQ, "cvttps2dq", 0xf3, 2, 0x0f5b) \
+    X(CVTDQ2PD_X_XM64, "cvtdq2pd", 0xf3, 2, 0x0fe6, R, 0, 0, 0, V, XM, 8, REG_RM) \
+    BUSTER_X86_SSE_PACKED_FORM(X, CVTPD2DQ, "cvtpd2dq", 0xf2, 2, 0x0fe6) \
+    BUSTER_X86_SSE_PACKED_FORM(X, CVTTPD2DQ, "cvttpd2dq", 0x66, 2, 0x0fe6) \
+    /* SSE2's integer arithmetic, compares, packs, unpacks, shifts and shuffles. */ \
+    BUSTER_X86_SSE_PACKED_FORM(X, PADDW, "paddw", 0x66, 2, 0x0ffd) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PADDSB, "paddsb", 0x66, 2, 0x0fec) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PADDSW, "paddsw", 0x66, 2, 0x0fed) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PADDUSB, "paddusb", 0x66, 2, 0x0fdc) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PADDUSW, "paddusw", 0x66, 2, 0x0fdd) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PSUBB, "psubb", 0x66, 2, 0x0ff8) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PSUBW, "psubw", 0x66, 2, 0x0ff9) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PSUBQ, "psubq", 0x66, 2, 0x0ffb) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PSUBSB, "psubsb", 0x66, 2, 0x0fe8) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PSUBSW, "psubsw", 0x66, 2, 0x0fe9) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PSUBUSB, "psubusb", 0x66, 2, 0x0fd8) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PSUBUSW, "psubusw", 0x66, 2, 0x0fd9) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PAVGB, "pavgb", 0x66, 2, 0x0fe0) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PAVGW, "pavgw", 0x66, 2, 0x0fe3) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PCMPEQW, "pcmpeqw", 0x66, 2, 0x0f75) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PCMPGTB, "pcmpgtb", 0x66, 2, 0x0f64) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PCMPGTW, "pcmpgtw", 0x66, 2, 0x0f65) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PCMPGTD, "pcmpgtd", 0x66, 2, 0x0f66) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMADDWD, "pmaddwd", 0x66, 2, 0x0ff5) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMAXSW, "pmaxsw", 0x66, 2, 0x0fee) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMINSW, "pminsw", 0x66, 2, 0x0fea) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMULHUW, "pmulhuw", 0x66, 2, 0x0fe4) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMULHW, "pmulhw", 0x66, 2, 0x0fe5) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMULLW, "pmullw", 0x66, 2, 0x0fd5) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMULUDQ, "pmuludq", 0x66, 2, 0x0ff4) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PSADBW, "psadbw", 0x66, 2, 0x0ff6) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PACKSSWB, "packsswb", 0x66, 2, 0x0f63) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PACKUSWB, "packuswb", 0x66, 2, 0x0f67) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PACKSSDW, "packssdw", 0x66, 2, 0x0f6b) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PUNPCKLWD, "punpcklwd", 0x66, 2, 0x0f61) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PUNPCKLDQ, "punpckldq", 0x66, 2, 0x0f62) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PUNPCKHBW, "punpckhbw", 0x66, 2, 0x0f68) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PUNPCKHWD, "punpckhwd", 0x66, 2, 0x0f69) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PUNPCKHDQ, "punpckhdq", 0x66, 2, 0x0f6a) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PUNPCKLQDQ, "punpcklqdq", 0x66, 2, 0x0f6c) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PUNPCKHQDQ, "punpckhqdq", 0x66, 2, 0x0f6d) \
+    BUSTER_X86_SSE_SHIFT_FORMS(X, PSRLW, "psrlw", 0x0fd1, 0x0f71, 2) \
+    BUSTER_X86_SSE_SHIFT_FORMS(X, PSRAW, "psraw", 0x0fe1, 0x0f71, 4) \
+    BUSTER_X86_SSE_SHIFT_FORMS(X, PSLLW, "psllw", 0x0ff1, 0x0f71, 6) \
+    BUSTER_X86_SSE_SHIFT_FORMS(X, PSRLD, "psrld", 0x0fd2, 0x0f72, 2) \
+    BUSTER_X86_SSE_SHIFT_FORMS(X, PSRAD, "psrad", 0x0fe2, 0x0f72, 4) \
+    BUSTER_X86_SSE_SHIFT_FORMS(X, PSLLD, "pslld", 0x0ff2, 0x0f72, 6) \
+    BUSTER_X86_SSE_SHIFT_FORMS(X, PSRLQ, "psrlq", 0x0fd3, 0x0f73, 2) \
+    BUSTER_X86_SSE_SHIFT_FORMS(X, PSLLQ, "psllq", 0x0ff3, 0x0f73, 6) \
+    X(PSRLDQ_X_IMM8, "psrldq", 0x66, 2, 0x0f73, D3, 1, 0, 0, NONE, V, 16, RM_IMM) \
+    X(PSLLDQ_X_IMM8, "pslldq", 0x66, 2, 0x0f73, D7, 1, 0, 0, NONE, V, 16, RM_IMM) \
+    X(PSHUFHW_X_XM128_IMM8, "pshufhw", 0xf3, 2, 0x0f70, R, 1, 0, 0, V, XM, 16, REG_RM_IMM) \
+    X(PSHUFLW_X_XM128_IMM8, "pshuflw", 0xf2, 2, 0x0f70, R, 1, 0, 0, V, XM, 16, REG_RM_IMM) \
+    X(PINSRW_X_RM32_IMM8, "pinsrw", 0x66, 2, 0x0fc4, R, 1, 0, 0, V, ED, 2, REG_RM_IMM) \
+    X(PEXTRW_R32_X_IMM8, "pextrw", 0x66, 2, 0x0fc5, R, 1, 0, 0, GD, V, 0, REG_RM_IMM) \
+    X(PEXTRW_M16_X_IMM8, "pextrw", 0x66, 3, 0x0f3a15, R, 1, 0, 0, V, M, 2, RM_REG_IMM) \
+    /* SSE3 and SSSE3. */ \
+    BUSTER_X86_SSE_PACKED_FORM(X, ADDSUBPD, "addsubpd", 0x66, 2, 0x0fd0) \
+    BUSTER_X86_SSE_PACKED_FORM(X, ADDSUBPS, "addsubps", 0xf2, 2, 0x0fd0) \
+    BUSTER_X86_SSE_PACKED_FORM(X, HADDPD, "haddpd", 0x66, 2, 0x0f7c) \
+    BUSTER_X86_SSE_PACKED_FORM(X, HADDPS, "haddps", 0xf2, 2, 0x0f7c) \
+    BUSTER_X86_SSE_PACKED_FORM(X, HSUBPD, "hsubpd", 0x66, 2, 0x0f7d) \
+    BUSTER_X86_SSE_PACKED_FORM(X, HSUBPS, "hsubps", 0xf2, 2, 0x0f7d) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PHADDW, "phaddw", 0x66, 3, 0x0f3801) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PHADDD, "phaddd", 0x66, 3, 0x0f3802) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PHADDSW, "phaddsw", 0x66, 3, 0x0f3803) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMADDUBSW, "pmaddubsw", 0x66, 3, 0x0f3804) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PHSUBW, "phsubw", 0x66, 3, 0x0f3805) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PHSUBD, "phsubd", 0x66, 3, 0x0f3806) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PHSUBSW, "phsubsw", 0x66, 3, 0x0f3807) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PSIGNB, "psignb", 0x66, 3, 0x0f3808) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PSIGNW, "psignw", 0x66, 3, 0x0f3809) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PSIGND, "psignd", 0x66, 3, 0x0f380a) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMULHRSW, "pmulhrsw", 0x66, 3, 0x0f380b) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PABSB, "pabsb", 0x66, 3, 0x0f381c) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PABSW, "pabsw", 0x66, 3, 0x0f381d) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PABSD, "pabsd", 0x66, 3, 0x0f381e) \
+    /* SSE4.1 and SSE4.2. */ \
+    BUSTER_X86_SSE_EXTEND_FORMS(X, PMOVSX, "pmovsx", 0x20) \
+    BUSTER_X86_SSE_EXTEND_FORMS(X, PMOVZX, "pmovzx", 0x30) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMULDQ, "pmuldq", 0x66, 3, 0x0f3828) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PCMPEQQ, "pcmpeqq", 0x66, 3, 0x0f3829) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PACKUSDW, "packusdw", 0x66, 3, 0x0f382b) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PCMPGTQ, "pcmpgtq", 0x66, 3, 0x0f3837) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMINSB, "pminsb", 0x66, 3, 0x0f3838) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMINSD, "pminsd", 0x66, 3, 0x0f3839) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMINUW, "pminuw", 0x66, 3, 0x0f383a) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMAXSB, "pmaxsb", 0x66, 3, 0x0f383c) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMAXSD, "pmaxsd", 0x66, 3, 0x0f383d) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMAXUW, "pmaxuw", 0x66, 3, 0x0f383e) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PMAXUD, "pmaxud", 0x66, 3, 0x0f383f) \
+    BUSTER_X86_SSE_PACKED_FORM(X, PHMINPOSUW, "phminposuw", 0x66, 3, 0x0f3841) \
+    X(PBLENDVB_X_XM128_XMM0, "pblendvb", 0x66, 3, 0x0f3810, R, 0, 0, 0, V, XM, 16, REG_RM_XMM0) \
+    X(BLENDVPS_X_XM128_XMM0, "blendvps", 0x66, 3, 0x0f3814, R, 0, 0, 0, V, XM, 16, REG_RM_XMM0) \
+    X(BLENDVPD_X_XM128_XMM0, "blendvpd", 0x66, 3, 0x0f3815, R, 0, 0, 0, V, XM, 16, REG_RM_XMM0) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, ROUNDPS, "roundps", 0x66, 3, 0x0f3a08) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, ROUNDPD, "roundpd", 0x66, 3, 0x0f3a09) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, BLENDPS, "blendps", 0x66, 3, 0x0f3a0c) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, BLENDPD, "blendpd", 0x66, 3, 0x0f3a0d) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, PBLENDW, "pblendw", 0x66, 3, 0x0f3a0e) \
+    X(EXTRACTPS_RM32_X_IMM8, "extractps", 0x66, 3, 0x0f3a17, R, 1, 0, 0, V, ED, 4, RM_REG_IMM) \
+    X(INSERTPS_X_XM32_IMM8, "insertps", 0x66, 3, 0x0f3a21, R, 1, 0, 0, V, XM, 4, REG_RM_IMM) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, DPPS, "dpps", 0x66, 3, 0x0f3a40) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, DPPD, "dppd", 0x66, 3, 0x0f3a41) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, MPSADBW, "mpsadbw", 0x66, 3, 0x0f3a42) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, PCMPESTRM, "pcmpestrm", 0x66, 3, 0x0f3a60) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, PCMPESTRI, "pcmpestri", 0x66, 3, 0x0f3a61) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, PCMPISTRM, "pcmpistrm", 0x66, 3, 0x0f3a62) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, PCMPISTRI, "pcmpistri", 0x66, 3, 0x0f3a63) \
+    /* The explicit-length string compares with REX.W: 64-bit lengths in RAX and RDX. */ \
+    X(PCMPESTRMQ_X_XM128_IMM8, "pcmpestrmq", 0x66, 3, 0x0f3a60, R, 1, 0, 1, V, XM, 16, REG_RM_IMM) \
+    X(PCMPESTRIQ_X_XM128_IMM8, "pcmpestriq", 0x66, 3, 0x0f3a61, R, 1, 0, 1, V, XM, 16, REG_RM_IMM) \
+    /* AMD's SSE4a. */ \
+    X(EXTRQ_X_X, "extrq", 0x66, 2, 0x0f79, R, 0, 0, 0, V, V, 16, REG_RM) \
+    X(EXTRQ_X_IMM8_IMM8, "extrq", 0x66, 2, 0x0f78, D0, 2, 0, 0, NONE, V, 16, RM_IMM8_IMM8) \
+    X(INSERTQ_X_X, "insertq", 0xf2, 2, 0x0f79, R, 0, 0, 0, V, V, 16, REG_RM) \
+    X(INSERTQ_X_X_IMM8_IMM8, "insertq", 0xf2, 2, 0x0f78, R, 2, 0, 0, V, V, 16, REG_RM_IMM8_IMM8) \
+    /* MXCSR, and the x87, MMX and SSE state (512 bytes). */ \
+    X(LDMXCSR_M32, "ldmxcsr", 0, 2, 0x0fae, D2, 0, 0, 0, NONE, M, 4, RM) \
+    X(STMXCSR_M32, "stmxcsr", 0, 2, 0x0fae, D3, 0, 0, 0, NONE, M, 4, RM) \
+    X(FXSAVE_M, "fxsave", 0, 2, 0x0fae, D0, 0, 0, 0, NONE, M, 0, RM) \
+    X(FXRSTOR_M, "fxrstor", 0, 2, 0x0fae, D1, 0, 0, 0, NONE, M, 0, RM) \
+    X(FXSAVE64_M, "fxsave64", 0, 2, 0x0fae, D0, 0, 0, 1, NONE, M, 0, RM) \
+    X(FXRSTOR64_M, "fxrstor64", 0, 2, 0x0fae, D1, 0, 0, 1, NONE, M, 0, RM) \
     BUSTER_X86_STRING_FORMS(X, MOVS, "movs", 0, 0xa4, 0xa5) \
     BUSTER_X86_STRING_FORMS(X, REP_MOVS, "rep movs", 0xf3, 0xa4, 0xa5) \
     BUSTER_X86_STRING_FORMS(X, REPNE_MOVS, "repne movs", 0xf2, 0xa4, 0xa5) \
@@ -1332,6 +1544,10 @@ typedef enum X86Syntax
     X(NOP_RM64, "nop", 0, 2, 0x0f1f, D0, 0, 0, 1, NONE, EQ, 8, RM) \
     X(PREFETCH_M8, "prefetch", 0, 2, 0x0f0d, D0, 0, 0, 0, NONE, M, 1, RM) \
     X(PREFETCHW_M8, "prefetchw", 0, 2, 0x0f0d, D1, 0, 0, 0, NONE, M, 1, RM) \
+    X(PREFETCHNTA_M8, "prefetchnta", 0, 2, 0x0f18, D0, 0, 0, 0, NONE, M, 1, RM) \
+    X(PREFETCHT0_M8, "prefetcht0", 0, 2, 0x0f18, D1, 0, 0, 0, NONE, M, 1, RM) \
+    X(PREFETCHT1_M8, "prefetcht1", 0, 2, 0x0f18, D2, 0, 0, 0, NONE, M, 1, RM) \
+    X(PREFETCHT2_M8, "prefetcht2", 0, 2, 0x0f18, D3, 0, 0, 0, NONE, M, 1, RM) \
     X(PREFETCHWT1_M8, "prefetchwt1", 0, 2, 0x0f0d, D2, 0, 0, 0, NONE, M, 1, RM) \
     X(PREFETCHRST2_M8, "prefetchrst2", 0, 2, 0x0f18, D4, 0, 0, 0, NONE, M, 1, RM) \
     /* RIP-relative addresses only: with another, they're NOPs. */ \
