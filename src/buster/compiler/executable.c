@@ -26,7 +26,7 @@
 // reference and got_slot. A symbol's reference is its image offset, or a TLS symbol's offset from the thread pointer
 // (variant II: from the end of the TLS block, which is the TLS segment's memory size rounded up to its alignment, since
 // the segment starts on a multiple of its alignment), or for a weak symbol defined nowhere the image offset of address
-// 0. Every fixup's field is patched in place, in its
+// 0, or 0 if the symbol is thread-local, as GNU ld resolves one. Every fixup's field is patched in place, in its
 // atom's bytes.
 //
 // Patching and writing go a chunk at a time (BUSTER_EXECUTABLE_CHUNK_BYTES, about 256 KB, a quarter of Zen 5's L2), in
@@ -73,6 +73,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/random.h>
 #include <sys/uio.h>
 
 // CPU architecture dependent includes
@@ -87,6 +88,10 @@
 #define BUSTER_EXECUTABLE_PAGE_LOG2 12
 // The image's end, as an address: every image offset and PC-relative value fits in int32 below it.
 #define BUSTER_EXECUTABLE_MAX_ADDRESS (1ull << 31)
+// The largest atom, and the largest TLS block: every offset from the thread pointer, from minus the block's size up to
+// 0, fits in int32. .tbss takes no address space, so the image's limit doesn't bound the block.
+#define BUSTER_EXECUTABLE_MAX_ATOM_BYTES (1ull << 31)
+#define BUSTER_EXECUTABLE_MAX_TLS_BYTES (1ull << 31)
 // Functions start on 16 bytes and are padded with int3, as lld pads them.
 #define BUSTER_EXECUTABLE_FUNCTION_ALIGNMENT_LOG2 4
 #define BUSTER_EXECUTABLE_INT3 0xcc
@@ -119,8 +124,9 @@ typedef enum ExecutableError
     EXECUTABLE_ERROR_NONE,
     // Scratch memory ran out.
     EXECUTABLE_ERROR_MEMORY,
-    // The image doesn't fit below BUSTER_EXECUTABLE_MAX_ADDRESS, an atom is aligned past a page, or an INIT_ARRAY or
-    // FINI_ARRAY atom isn't whole 8-byte entries aligned to at most 8 (ExecutableResult.atom).
+    // The image doesn't fit below BUSTER_EXECUTABLE_MAX_ADDRESS or the TLS block in BUSTER_EXECUTABLE_MAX_TLS_BYTES, or
+    // an atom is larger than BUSTER_EXECUTABLE_MAX_ATOM_BYTES or aligned past a page, or an INIT_ARRAY or FINI_ARRAY atom
+    // isn't whole 8-byte entries aligned to at most 8 (ExecutableResult.atom).
     EXECUTABLE_ERROR_LAYOUT,
     // A symbol defined nowhere that isn't weak (ExecutableResult.symbol).
     EXECUTABLE_ERROR_UNDEFINED,
@@ -142,8 +148,10 @@ typedef enum ExecutableWrite
     EXECUTABLE_WRITE_IN_PLACE,
     // It didn't exist: created.
     EXECUTABLE_WRITE_CREATED,
-    // It was running, had other links or wasn't a regular file: written beside it and renamed over it.
+    // It was running, had other links, was someone else's or was a symbolic link: written beside it and renamed over it.
     EXECUTABLE_WRITE_RENAMED,
+    // It is a file of another type, such as /dev/null or a FIFO: written into, in order, and never replaced or removed.
+    EXECUTABLE_WRITE_SEQUENTIAL,
 } ExecutableWrite;
 
 // executable_write's phases, whose ends lane 0 timestamps for the benchmark.
@@ -558,9 +566,9 @@ static FixupId executable_patch_range(const ExecutablePatch* patch, uint8_t* byt
 // ---------------------------------------------------------------------------------------------------------------------
 // The file
 
-// A write of the output: pieces from file offset `offset`, all of them, resumed after short writes and signals.
-// Returns 0, or the errno of the call that failed.
-static int executable_write_all(int file, const struct iovec* pieces, uint64_t piece_count, uint64_t offset)
+// A write of the output: pieces from file offset `offset`, or with `sequential` at the file's position, all of them,
+// resumed after short writes and signals. Returns 0, or the errno of the call that failed.
+static int executable_write_all(int file, const struct iovec* pieces, uint64_t piece_count, uint64_t offset, bool sequential)
 {
     // IOV_MAX on Linux.
     enum { MAX_PIECES = 1024 };
@@ -578,7 +586,7 @@ static int executable_write_all(int file, const struct iovec* pieces, uint64_t p
             window[count].iov_len = pieces[i].iov_len - from;
             count += 1;
         }
-        const ssize_t written = pwritev(file, window, (int)count, (off_t)offset);
+        const ssize_t written = sequential ? writev(file, window, (int)count) : pwritev(file, window, (int)count, (off_t)offset);
         if (written < 0 && errno != EINTR)
         {
             result = errno;
@@ -606,8 +614,10 @@ static int executable_write_all(int file, const struct iovec* pieces, uint64_t p
 // The output, open for writing: its descriptor, how it is being written, and for a renamed one the name it is written
 // under. Paths are copied with a NUL for the system calls.
 #define BUSTER_EXECUTABLE_PATH_BYTES 4096
-// The suffix of the file written beside the output: ".tmp", the process id and a NUL.
-#define BUSTER_EXECUTABLE_SUFFIX_BYTES 32
+// The suffix of the file written beside the output: ".tmp", the process id, a dot, 16 random hexadecimal digits and a
+// NUL; and how many random names to try before giving up.
+#define BUSTER_EXECUTABLE_SUFFIX_BYTES 48
+#define BUSTER_EXECUTABLE_NAME_ATTEMPTS 16
 
 typedef struct ExecutableFile ExecutableFile;
 struct ExecutableFile
@@ -632,10 +642,12 @@ static void executable_fail_file(ExecutableResult* result, const char* call, int
     }
 }
 
-// Opens the output: in place with O_RDWR when it is a regular file with one link (O_NOFOLLOW: a symbolic link is
-// replaced, not written through); ETXTBSY there, or any other file, gets a new file beside it, renamed over it at the
-// end; and a path with nothing there gets a new file. Never O_TRUNC: on btrfs it costs 58 µs for 16 KB and 10 ms for
-// 4 MB (docs/object-writer-and-linker.md, "The floors").
+// Opens the output: in place with O_RDWR when it is a regular file with one link that this process's user owns
+// (O_NOFOLLOW: a symbolic link is replaced, not written through). ETXTBSY there, another link or owner, or a symbolic
+// link gets a new file beside it, under a random name, renamed over it at the end; a path with nothing there gets a new
+// file; and a file of another type (/dev/null, a FIFO) is written in order, with O_WRONLY, as GNU ld and lld write
+// into one rather than replace it. Never O_TRUNC: on btrfs it costs 58 µs for 16 KB and 10 ms for 4 MB
+// (docs/object-writer-and-linker.md, "The floors").
 static bool executable_open(ExecutableFile* file, String8 path, ExecutableResult* result)
 {
     bool opened = path.length != 0 && path.length < BUSTER_EXECUTABLE_PATH_BYTES;
@@ -653,11 +665,30 @@ static bool executable_open(ExecutableFile* file, String8 path, ExecutableResult
         file->descriptor = open(file->path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
         const int open_error = file->descriptor < 0 ? errno : 0;
         struct stat status;
-        if (file->descriptor >= 0 && fstat(file->descriptor, &status) == 0 && S_ISREG(status.st_mode) && status.st_nlink == 1)
+        const bool known = file->descriptor >= 0 && fstat(file->descriptor, &status) == 0;
+        const bool regular = known && S_ISREG(status.st_mode);
+        if (regular && status.st_nlink == 1 && status.st_uid == geteuid())
         {
             file->write = EXECUTABLE_WRITE_IN_PLACE;
             file->old_size = (uint64_t)status.st_size;
             file->old_mode = (uint32_t)status.st_mode & 07777;
+        }
+        else if (known && !regular)
+        {
+            // Opened again for writing only: a FIFO's open waits for a reader, which O_RDWR wouldn't.
+            close(file->descriptor);
+            file->descriptor = open(file->path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+            file->write = file->descriptor >= 0 ? EXECUTABLE_WRITE_SEQUENTIAL : EXECUTABLE_WRITE_NONE;
+            opened = file->descriptor >= 0;
+            if (!opened)
+            {
+                executable_fail_file(result, "open", errno);
+            }
+        }
+        else if (open_error == EISDIR)
+        {
+            executable_fail_file(result, "open", EISDIR);
+            opened = false;
         }
         else
         {
@@ -665,17 +696,31 @@ static bool executable_open(ExecutableFile* file, String8 path, ExecutableResult
             {
                 close(file->descriptor);
             }
+            // The path itself when nothing is there, once; otherwise random names beside it, so that a file a killed link
+            // left doesn't block the next ones.
             const bool absent = open_error == ENOENT;
-            if (!absent)
+            const uint32_t attempts = absent ? 1 : BUSTER_EXECUTABLE_NAME_ATTEMPTS;
+            file->descriptor = -1;
+            int create_error = EEXIST;
+            for (uint32_t attempt = 0; file->descriptor < 0 && create_error == EEXIST && attempt < attempts; attempt += 1)
             {
-                snprintf(file->written_path + path.length, BUSTER_EXECUTABLE_SUFFIX_BYTES, ".tmp%d", (int)getpid());
+                if (!absent)
+                {
+                    uint64_t random = 0;
+                    if (getrandom(&random, sizeof(random), GRND_NONBLOCK) != (ssize_t)sizeof(random))
+                    {
+                        random = __rdtsc();
+                    }
+                    snprintf(file->written_path + path.length, BUSTER_EXECUTABLE_SUFFIX_BYTES, ".tmp%d.%016llx", (int)getpid(), (unsigned long long)random);
+                }
+                file->descriptor = open(file->written_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0777);
+                create_error = file->descriptor < 0 ? errno : 0;
             }
-            file->descriptor = open(file->written_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0777);
             file->write = absent ? EXECUTABLE_WRITE_CREATED : EXECUTABLE_WRITE_RENAMED;
             opened = file->descriptor >= 0;
             if (!opened)
             {
-                executable_fail_file(result, "open", errno);
+                executable_fail_file(result, "open", create_error);
                 file->write = EXECUTABLE_WRITE_NONE;
             }
         }
@@ -685,7 +730,8 @@ static bool executable_open(ExecutableFile* file, String8 path, ExecutableResult
 
 // Finishes the output: in place, its size and its mode (0777 less the umask, as a new file gets) if they changed; then
 // closes it and, for a file written beside the output, renames it over the output. If the link failed (`keep` false),
-// removes what was written instead. Returns whether it all succeeded.
+// removes what was written instead, but for a file of another type, which was the user's. Returns whether it all
+// succeeded.
 static bool executable_close(ExecutableFile* file, uint64_t size, bool keep, ExecutableResult* result)
 {
     bool kept = keep;
@@ -716,7 +762,7 @@ static bool executable_close(ExecutableFile* file, uint64_t size, bool keep, Exe
         executable_fail_file(result, "rename", errno);
         kept = false;
     }
-    if (!kept)
+    if (!kept && file->write != EXECUTABLE_WRITE_SEQUENTIAL)
     {
         unlink(file->written_path);
     }
@@ -910,7 +956,8 @@ struct ExecutableCounts
 
 // Places the sections, from every lane's counts and the GOT's slots: the buckets one after another within their
 // sections, each section at its alignment, and the segments 4 KB-congruent from the next page. Returns false if the
-// image reaches BUSTER_EXECUTABLE_MAX_ADDRESS.
+// image reaches BUSTER_EXECUTABLE_MAX_ADDRESS or the TLS block is larger than BUSTER_EXECUTABLE_MAX_TLS_BYTES. The
+// atoms are at most BUSTER_EXECUTABLE_MAX_ATOM_BYTES each, so no sum of their sizes wraps.
 static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts* counts, uint32_t lanes, uint64_t got_slots)
 {
     *layout = (ExecutableLayout){ 0 };
@@ -1039,6 +1086,7 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
     const ExecutableSectionLayout* tbss = &layout->sections[EXECUTABLE_SECTION_TBSS];
     layout->tls_size = tbss->size != 0 ? tbss->address + tbss->size - tdata->address : tdata->size;
     layout->tls_block = executable_align(layout->tls_size, layout->tls_alignment);
+    const bool tls_fits = layout->tls_block <= BUSTER_EXECUTABLE_MAX_TLS_BYTES;
 
     // Each bucket's start: its class's start in its section, then the buckets before it.
     uint64_t piece = 2;
@@ -1076,7 +1124,7 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
     layout->file_size = layout->section_headers_offset + layout->section_header_count * sizeof(Elf64_Shdr);
     layout->piece_count = piece + 2;
     layout->chunk_count = (layout->file_size + BUSTER_EXECUTABLE_CHUNK_BYTES - 1) / BUSTER_EXECUTABLE_CHUNK_BYTES;
-    return BUSTER_EXECUTABLE_BASE + layout->image_size <= BUSTER_EXECUTABLE_MAX_ADDRESS;
+    return BUSTER_EXECUTABLE_BASE + layout->image_size <= BUSTER_EXECUTABLE_MAX_ADDRESS && tls_fits;
 }
 
 // The file offset of an image offset in a section: sections keep their offset's place in a page.
@@ -1312,8 +1360,8 @@ static uint64_t executable_chunk_boundary(const Link* link, const ExecutablePiec
     return result;
 }
 
-// Patches the fixups whose fields are in [begin, end) of the file. Returns the first fixup whose value doesn't fit, or
-// 0.
+// Patches the fixups whose fields are in [begin, end) of the file. Returns the smallest fixup whose value doesn't fit,
+// or 0.
 static FixupId executable_patch_chunk(const Link* link, const ExecutablePatch* patch, const ExecutablePiece* pieces, uint64_t piece_count, uint64_t begin, uint64_t end)
 {
     FixupId result = 0;
@@ -1335,7 +1383,8 @@ static FixupId executable_patch_chunk(const Link* link, const ExecutablePatch* p
                 last = executable_fixup_at(link->fixups.offset, first, last, end - piece->offset);
             }
             const FixupId failed = executable_patch_range(patch, link->atoms.bytes[atom], (uint32_t)link->atoms.address[atom], first, last);
-            result = result == 0 ? failed : result;
+            // The smallest, which file order doesn't give: buckets put larger alignments first.
+            result = failed != 0 && (result == 0 || failed < result) ? failed : result;
         }
     }
     return result;
@@ -1447,6 +1496,8 @@ struct ExecutableShared
     uint8_t* hashes;
     uint64_t* part_boundaries;
     uint32_t* orders;
+    // Whether the output is written in order, which lane 0 does at the end, rather than chunk by chunk.
+    bool sequential;
     ExecutableHeaders headers;
 };
 
@@ -1480,6 +1531,14 @@ static bool executable_named(const Link* link, SymbolId symbol, const char* text
     const NameId name = link->symbols.name[symbol];
     const uint64_t length = strlen(text);
     return name != 0 && link->names.length[name] == length && memcmp(link->names.bytes[name], text, length) == 0;
+}
+
+// Whether a symbol is thread-local: by its atom's class, or for a symbol without an atom (a weak one defined nowhere)
+// by its type.
+static bool executable_is_tls(const Link* link, SymbolId symbol)
+{
+    const AtomId atom = link->symbols.atom[symbol];
+    return atom != 0 ? link_class_is_tls(link->atoms.class[atom]) : (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
 }
 
 // A symbol's reference (see the orientation comment), or the error it gets.
@@ -1518,8 +1577,9 @@ static ExecutableError executable_reference(const Link* link, const ExecutableLa
     }
     else if (source == BUSTER_LINK_SOURCE_NONE && weak)
     {
-        // Address 0, as an image offset.
-        *reference = (uint32_t)(0 - BUSTER_EXECUTABLE_BASE);
+        // Address 0, as an image offset; for a thread-local one, an offset of 0 from the thread pointer, in TPOFF32
+        // fields and GOT slots alike, as GNU ld gives it.
+        *reference = executable_is_tls(link, symbol) ? 0 : (uint32_t)(0 - BUSTER_EXECUTABLE_BASE);
     }
     else if (source == BUSTER_LINK_SOURCE_NONE)
     {
@@ -1543,7 +1603,8 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
     for (AtomId atom = (AtomId)atom_range.begin + 1; atom < atom_range.end + 1; atom += 1)
     {
         const uint32_t log2 = executable_alignment_log2(atoms, atom);
-        if (log2 == BUSTER_EXECUTABLE_ALIGNMENTS)
+        // Bounded before its padding is added, which could wrap: up to 2^32 atoms of 2 GB each sum to at most 2^63.
+        if (log2 == BUSTER_EXECUTABLE_ALIGNMENTS || atoms->size[atom] > BUSTER_EXECUTABLE_MAX_ATOM_BYTES)
         {
             executable_lane_fail(&shared->errors[lane], EXECUTABLE_ERROR_LAYOUT, atom, 0, 0);
         }
@@ -1679,9 +1740,7 @@ static void executable_resolve(Link* link, ExecutableShared* shared, const Execu
         if (slot != 0)
         {
             // A TLS symbol's slot holds its offset from the thread pointer (TPOFF64), another's its address.
-            const AtomId atom = symbols->atom[symbol];
-            const bool tls = atom != 0 && link_class_is_tls(link->atoms.class[atom]);
-            const int64_t value = tls ? (int32_t)reference : (int64_t)BUSTER_EXECUTABLE_BASE + (int32_t)reference;
+            const int64_t value = executable_is_tls(link, symbol) ? (int32_t)reference : (int64_t)BUSTER_EXECUTABLE_BASE + (int32_t)reference;
             memcpy(shared->got + 8 * (uint64_t)slot, &value, sizeof(value));
         }
     }
@@ -1778,7 +1837,7 @@ static void executable_lane_fail_write(ExecutableLaneError* error, int system_er
     }
 }
 
-// Patches and hashes chunk `chunk`, and writes it while it is in L2.
+// Patches and hashes chunk `chunk`, and writes it while it is in L2, unless `file` is -1.
 static void executable_chunk(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutablePatch* patch, uint64_t chunk, int file,
                              ExecutableLaneError* error)
 {
@@ -1808,13 +1867,31 @@ static void executable_chunk(Link* link, ExecutableShared* shared, const Executa
             executable_hash_bytes(&hash, runs[run].iov_base, runs[run].iov_len);
         }
         executable_hash_end(&hash, shared->hashes + BUSTER_EXECUTABLE_BUILD_ID_BYTES * chunk);
-        const int written = error->error == EXECUTABLE_ERROR_NONE ? executable_write_all(file, runs, count, begin) : 0;
+        const int written = file >= 0 && error->error == EXECUTABLE_ERROR_NONE ? executable_write_all(file, runs, count, begin, false) : 0;
         if (written != 0)
         {
             executable_lane_fail_write(error, written);
         }
     }
     scratch_end(scratch);
+}
+
+// Writes the whole file in order, a chunk at a time, for an output that is written in order. Returns 0, or the errno of
+// the write that failed.
+static int executable_write_in_order(int file, const ExecutableLayout* layout, const ExecutableShared* shared)
+{
+    int result = 0;
+    for (uint64_t chunk = 0; result == 0 && chunk < layout->chunk_count; chunk += 1)
+    {
+        const uint64_t begin = shared->boundaries[chunk];
+        const uint64_t end = shared->boundaries[chunk + 1];
+        Scratch scratch = scratch_begin(0);
+        const uint64_t capacity = executable_run_capacity(shared->pieces, layout->piece_count, begin, end);
+        struct iovec* runs = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, struct iovec, capacity);
+        result = runs == 0 ? ENOMEM : executable_write_all(file, runs, executable_chunk_runs(layout, shared->pieces, layout->piece_count, begin, end, runs), begin, true);
+        scratch_end(scratch);
+    }
+    return result;
 }
 
 // Patches, hashes and writes the chunks of the parts this lane takes.
@@ -1847,7 +1924,14 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     ExecutableShared* shared = (ExecutableShared*)lane_broadcast((uint64_t)allocated, 0);
     bool ok = shared != 0;
 
-    // Count the atoms and the GOT's targets, then reduce the GOT's marks.
+    // Count the atoms and the GOT's targets, then reduce the GOT's marks. Lane 0 checks the entry point first, so that
+    // a bad one is the error reported with any number of lanes.
+    const SymbolId entry = options->entry;
+    const AtomId entry_atom = entry != 0 && entry < link->symbols.count ? link->symbols.atom[entry] : 0;
+    if (ok && lane == 0 && (entry_atom == 0 || link->atoms.class[entry_atom] != BUSTER_LINK_CLASS_TEXT))
+    {
+        executable_lane_fail(&shared->errors[lane], EXECUTABLE_ERROR_ENTRY, 0, entry, 0);
+    }
     if (ok)
     {
         executable_count(link, shared, lane);
@@ -1864,8 +1948,13 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         result->phase_times[EXECUTABLE_PHASE_COUNT] = executable_now();
     }
 
-    // Lay out (every lane alike), place each lane's atoms and slots, and have lane 0 allocate what the layout sizes.
+    // Lay out (every lane alike), place each lane's atoms and slots, and have lane 0 allocate what the layout sizes. A
+    // lane without room for the layout fails in its error slot, so that the sync below stops every lane.
     ExecutableLayout* layout = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ExecutableLayout, 1);
+    if (ok && layout == 0)
+    {
+        executable_lane_fail(&shared->errors[lane], EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
+    }
     ok = ok && layout != 0;
     uint64_t got_slots = 0;
     uint64_t magnitude = 0;
@@ -1874,15 +1963,16 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         got_slots += shared->got_counts[other];
         magnitude = shared->addend_magnitudes[other] > magnitude ? shared->addend_magnitudes[other] : magnitude;
     }
-    if (ok && !executable_lay_out(layout, shared->counts, lanes, got_slots))
+    const bool laid_out = ok && executable_lay_out(layout, shared->counts, lanes, got_slots);
+    if (ok && !laid_out)
     {
         executable_lane_fail(&shared->errors[lane], EXECUTABLE_ERROR_LAYOUT, 0, 0, 0);
     }
-    if (ok)
+    if (laid_out)
     {
         executable_place(link, shared, layout, lane);
     }
-    if (ok && lane == 0 && !executable_prepare(scratch.arena, shared, layout, lanes))
+    if (laid_out && lane == 0 && !executable_prepare(scratch.arena, shared, layout, lanes))
     {
         executable_lane_fail(&shared->errors[lane], EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
     }
@@ -1893,23 +1983,14 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         result->phase_times[EXECUTABLE_PHASE_LAYOUT] = executable_now();
     }
 
-    // The symbols' references, the GOT, the chunks' boundaries, and the headers once the entry point is known.
+    // The symbols' references, the GOT, the chunks' boundaries, and lane 0 the headers.
     if (ok)
     {
         executable_resolve(link, shared, layout, lane);
     }
     if (ok && lane == 0)
     {
-        const SymbolId entry = options->entry;
-        const AtomId atom = entry != 0 && entry < link->symbols.count ? link->symbols.atom[entry] : 0;
-        if (atom == 0 || link->atoms.class[atom] != BUSTER_LINK_CLASS_TEXT)
-        {
-            executable_lane_fail(&shared->errors[lane], EXECUTABLE_ERROR_ENTRY, 0, entry, 0);
-        }
-        else
-        {
-            executable_write_headers(&shared->headers, layout, link->atoms.address[atom] + link->symbols.value[entry]);
-        }
+        executable_write_headers(&shared->headers, layout, link->atoms.address[entry_atom] + link->symbols.value[entry]);
     }
     lane_sync();
     ok = ok && !executable_any_failed(shared, lanes);
@@ -1929,11 +2010,13 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         {
             executable_lane_fail(&shared->errors[lane], file == 0 ? EXECUTABLE_ERROR_MEMORY : EXECUTABLE_ERROR_FILE, 0, 0, 0);
         }
+        shared->sequential = opened && file->write == EXECUTABLE_WRITE_SEQUENTIAL;
     }
     // Every lane writes its chunks to lane 0's descriptor, which is -1 if the link failed before or the output couldn't
-    // be opened.
+    // be opened; but none does to an output written in order, which lane 0 writes at the end.
     const int descriptor = (int)(int64_t)lane_broadcast((uint64_t)(int64_t)(ok && opened ? file->descriptor : -1), 0);
     ok = descriptor >= 0;
+    const bool sequential = ok && shared->sequential;
     if (lane == 0)
     {
         result->phase_times[EXECUTABLE_PHASE_OPEN] = executable_now();
@@ -1955,7 +2038,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     };
     if (ok)
     {
-        executable_chunks(link, shared, layout, &patch, descriptor, lane, lanes);
+        executable_chunks(link, shared, layout, &patch, sequential ? -1 : descriptor, lane, lanes);
     }
     lane_sync();
     const bool patched = ok && !executable_any_failed(shared, lanes);
@@ -2000,11 +2083,13 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
                 .iov_base = build_id,
                 .iov_len = BUSTER_EXECUTABLE_BUILD_ID_BYTES,
             };
-            const int error = executable_write_all(file->descriptor, &piece, 1, layout->sections[EXECUTABLE_SECTION_BUILD_ID].offset + sizeof(Elf64_Nhdr) + 4);
+            // An output written in order gets every chunk now, the note's hash in place; another, the hash alone.
+            const int error = sequential ? executable_write_in_order(file->descriptor, layout, shared)
+                                         : executable_write_all(file->descriptor, &piece, 1, layout->sections[EXECUTABLE_SECTION_BUILD_ID].offset + sizeof(Elf64_Nhdr) + 4, false);
             written = error == 0;
             if (!written)
             {
-                executable_fail_file(result, "pwritev", error);
+                executable_fail_file(result, sequential ? "writev" : "pwritev", error);
             }
         }
         if (opened)

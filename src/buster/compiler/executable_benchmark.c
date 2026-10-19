@@ -519,7 +519,7 @@ static uint64_t executable_benchmark_floor(const char* path, const uint8_t* byte
         .iov_base = (void*)bytes,
         .iov_len = size,
     };
-    const int error = file >= 0 ? executable_write_all(file, &piece, 1, 0) : errno;
+    const int error = file >= 0 ? executable_write_all(file, &piece, 1, 0, false) : errno;
     if (file >= 0)
     {
         close(file);

@@ -412,10 +412,21 @@ segment off its alignment when told where: seed 1's `static-defaults` with
 - the output file: created; overwritten in place by a smaller program (and
   truncated) and with its mode restored; written beside it and renamed over it
   when it has another link (which keeps its bytes), when it is a symbolic link,
-  and when a process runs it (which runs on). A link with an undefined symbol
-  fails, naming it, and leaves the output alone; one whose `ABS32` falls below
-  0 removes it, and so does one whose `PC32` leaves int32's range, which only
-  the checked path sees;
+  when a process runs it (which runs on), when it is someone else's (checked
+  only when the test may `chown`, as root), and past a file a killed link
+  left under the old fixed name; and written in order into a FIFO, which a
+  failed link leaves in place. A link with an undefined symbol fails, naming
+  it, and leaves the output alone; one whose `ABS32` falls below 0 removes it,
+  and so does one whose `PC32` leaves int32's range, which only the checked
+  path sees; one that fails while writing beside the output leaves the output,
+  its other link, and nothing beside them;
+- limits: a weak thread-local symbol defined nowhere (offset 0 in its field
+  and its GOT slot); TLS blocks of 2 GB (linked) and past it, atoms past 2 GB
+  and one whose padding wraps (refused); a bad entry point, the smallest
+  failing fixup, an atom aligned past a page and a bad init array atom, each
+  reported alike with every lane count; and a lane with no scratch memory to
+  spare, then 64 bytes more at a time, until the link succeeds: every failure
+  must be `EXECUTABLE_ERROR_MEMORY` and leave no output;
 - the patch kernel: the fast path against the checked one, on random fixups
   of every kind with wide addends, at every count from 0 to 199 from four
   starts, with the kind column ending at a `PROT_NONE` page.

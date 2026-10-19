@@ -899,20 +899,26 @@ atoms: 11 ns a piece), and 64 MB at 82.
 
 **Writing the file:**
 
-1. If the output exists, is a regular file with one link and isn't running,
-   open it with `O_RDWR` and overwrite it in place. Then `ftruncate` it to the
-   new size and set its mode (0777 less the umask, as a new file gets), each
-   only if it changed. In place is 1.2–3.6× faster than a new file (table
-   above). mold and wild do the same for executables.
+1. If the output exists, is a regular file with one link, is this user's and
+   isn't running, open it with `O_RDWR` and overwrite it in place. Then
+   `ftruncate` it to the new size and set its mode (0777 less the umask, as a
+   new file gets), each only if it changed. In place is 1.2–3.6× faster than a
+   new file (table above). mold and wild do the same for executables.
 2. If opening it fails with ETXTBSY (the program is running), or the file has
-   other hard links, or it is a symbolic link (opened with `O_NOFOLLOW`, so
-   the link is replaced, not written through), or the output is a shared
-   library (which running processes map without ETXTBSY to protect them):
-   write a new file with `O_CREAT | O_EXCL` beside it, named after it with
-   `.tmp` and the process id, and rename it over the old one. If the output
+   other hard links, or is someone else's (whose mode `fchmod` couldn't set),
+   or it is a symbolic link (opened with `O_NOFOLLOW`, so the link is
+   replaced, not written through), or the output is a shared library (which
+   running processes map without ETXTBSY to protect them): write a new file
+   with `O_CREAT | O_EXCL` beside it, named after it with `.tmp`, the process
+   id and 16 random hexadecimal digits (so that a file a killed link left
+   doesn't block the next), and rename it over the old one. If the output
    doesn't exist, create it.
-3. Never `O_TRUNC`: on btrfs it costs 58 µs for 16 KB and 10.4 ms for 4 MB.
-4. **Each lane writes the chunks it patches, with `pwritev`.** One `pwrite`
+3. If it is a file of another type, such as `/dev/null` or a FIFO, write into
+   it, in order, as GNU ld and lld do, rather than replace it: every chunk is
+   patched and hashed first, and lane 0 writes the whole file at the end with
+   the build ID in place. Such a file is never replaced or removed.
+4. Never `O_TRUNC`: on btrfs it costs 58 µs for 16 KB and 10.4 ms for 4 MB.
+5. **Each lane writes the chunks it patches, with `pwritev`.** One `pwrite`
    reaches 6.8–12.6 GB/s on tmpfs for a new file and 11.7–41.6 GB/s in place;
    on btrfs, 4.4–7.5 and 6.4–9.4. The lanes' writes take turns at the file's
    lock in the kernel, so their speeds don't add up, but each write overlaps
@@ -922,10 +928,13 @@ atoms: 11 ns a piece), and 64 MB at 82.
    `statfs`'s filesystem type, from measurements per filesystem, including
    whether `fallocate` and `MADV_HUGEPAGE` help (they did on mold's ext4 and
    didn't here).
-5. Close the file before returning: `execve` of a file open for writing fails
+6. Close the file before returning: `execve` of a file open for writing fails
    with ETXTBSY. Don't `fsync`, like every other linker.
-6. A link that fails after opening the output removes it rather than leave a
-   half-written executable. One that fails before leaves the old one alone.
+7. A link that fails after opening the output removes what it wrote rather
+   than leave a half-written executable: the output written in place or
+   created, or the file beside it, which leaves the old output and its other
+   links as they were. One that fails before opening leaves everything
+   alone.
 
 **One writer, or every lane.** This section first had one lane write
 everything, which keeps the file's writes in one place, but that lane becomes
@@ -985,9 +994,17 @@ writes them from the representation, at GNU ld's fixed base, 0x400000:
   `__init_array_start`, `__init_array_end`, `__fini_array_start` and
   `__fini_array_end`. Any other symbol defined nowhere fails the link, naming
   it, even when nothing refers to it, and so does an import from a shared
-  library until step 5.
-- **The image** must end below 2 GB, so that every image offset and
-  PC-relative value fits in 32 bits.
+  library until step 5. A weak thread-local symbol defined nowhere gets an
+  offset of 0 from the thread pointer, in its `TPOFF32` fields and its GOT
+  slot alike, as GNU ld gives it.
+- **Limits:** the image must end below 2 GB and the TLS block be at most
+  2 GB, so that every image offset, PC-relative value and offset from the
+  thread pointer fits in 32 bits (`.tbss` takes no address space, so the
+  image's limit doesn't bound it). Atoms are at most 2 GB each, checked
+  before their padding is added, so that no sum of sizes wraps.
+- **Errors** don't depend on the lane count: the entry point is checked
+  first, each phase reports the first item in id order that fails, and a
+  failing fixup is the smallest that does.
 
 Its phases, each lane taking a range of the atoms, fixups, symbols or GOT
 words (`lane_range`, since each loop is a few nanoseconds per item), or parts
@@ -1763,9 +1780,11 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
 - **The direct path's executables:** `test-executable` writes test-link's
   static programs and runs them, checks every field against its kind's
   arithmetic, the GOT's slots, the headers against lld's layout, the chunk
-  boundaries and the build ID, and the output file's cases (in place, created,
-  renamed over a running program, another link or a symbolic link, and
-  removed when the link fails).
+  boundaries and the build ID, and the output file's cases: in place, created,
+  renamed over a running program, another link, someone else's file or a
+  symbolic link, written in order into a FIFO, and what a failed link leaves.
+  It checks the refusals (each reported alike with any lane count) and a
+  lane short of scratch memory at every amount, from none up.
 - **Lane counts:** each phase with 1, 2, 3 and 8 lanes, outputs compared byte
   for byte. `test-executable` writes every program so, each time from zeroed
   fields over the last file scribbled over, so that a lane that skipped a

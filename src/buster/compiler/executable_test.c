@@ -21,8 +21,12 @@
 //     (executable_test_straddle): no boundary splits a field, the lanes write the same file (each from zeroed fields
 //     over a scribbled file, as above) and the program runs.
 //   - Files: in place (a smaller program after a larger one, then a file whose mode was changed), created, and written
-//     beside the output and renamed over it when a process runs it, when it has another link, and when it is a symbolic
-//     link; a link that fails before opening the output leaves it alone, and one whose fixup doesn't fit removes it.
+//     beside the output and renamed over it when a process runs it, when it has another link, when it is a symbolic
+//     link, when it is someone else's (as root), and past a file a killed link left; written in order into a FIFO; a
+//     link that fails before opening the output leaves it alone, one whose fixup doesn't fit removes it, one that fails
+//     beside it leaves it and nothing beside it, and one into a FIFO leaves the FIFO.
+//   - Limits: a weak thread-local symbol defined nowhere, TLS blocks and atoms past 2 GB, refusals reported alike with
+//     every lane count, and a lane short of scratch memory at every amount from none up (executable_test_limits).
 //   - Build IDs: the lanes' (the files are identical), another program's, and the tree's root recomputed from the file.
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
@@ -41,6 +45,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -199,17 +204,48 @@ struct ExecutableTestWrite
     Link* link;
     ExecutableOptions options;
     ExecutableResult result;
+    // With `starve`, lane `starved_lane` leaves executable_write only `room` bytes of its scratch arena.
+    bool starve;
+    uint32_t starved_lane;
+    uint64_t room;
     bool succeeded;
 };
 
 static void executable_test_lane_main(void* argument)
 {
     ExecutableTestWrite* write = argument;
+    Scratch scratch = scratch_begin(0);
+    const uint64_t free_bytes = scratch.arena->capacity - scratch.arena->length;
+    if (write->starve && lane_index() == write->starved_lane && free_bytes > write->room)
+    {
+        arena_push(scratch.arena, free_bytes - write->room, 1);
+    }
     const bool succeeded = executable_write(write->link, &write->options, &write->result);
+    scratch_end(scratch);
     if (lane_index() == 0)
     {
         write->succeeded = succeeded;
     }
+}
+
+// Writes the link to `path` with a group of `lanes` lanes, lane `starved_lane` having only `room` bytes of scratch
+// memory: whether executable_write succeeded, and its result.
+static bool executable_test_write_starved(Link* link, SymbolId entry, String8 path, uint32_t lanes, uint32_t starved_lane, uint64_t room, ExecutableResult* result)
+{
+    ExecutableTestWrite write = {
+        .link = link,
+        .options = {
+            .path = path,
+            .entry = entry,
+        },
+        .starve = true,
+        .starved_lane = starved_lane,
+        .room = room,
+        .succeeded = false,
+    };
+    const bool ran = lane_run(lanes, executable_test_lane_main, &write, 0);
+    *result = write.result;
+    return ran && write.succeeded;
 }
 
 // Writes the link to `path` with a group of `lanes` lanes: whether executable_write succeeded, and its result.
@@ -1199,6 +1235,43 @@ static bool executable_test_running(const char* path)
     return result;
 }
 
+// Whether `directory` holds a file whose name starts with `prefix`: what a link that failed shouldn't leave.
+static bool executable_test_leftover(const char* directory, const char* prefix)
+{
+    DIR* listing = opendir(directory);
+    bool result = false;
+    for (struct dirent* entry = listing != 0 ? readdir(listing) : 0; entry != 0 && !result; entry = readdir(listing))
+    {
+        result = strncmp(entry->d_name, prefix, strlen(prefix)) == 0;
+    }
+    if (listing != 0)
+    {
+        closedir(listing);
+    }
+    return result;
+}
+
+// Starts a process that reads the FIFO at `fifo` to its end into a new file at `copy`. Returns its id, or -1.
+static pid_t executable_test_read_fifo(const char* fifo, const char* copy)
+{
+    fflush(stdout);
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        alarm(BUSTER_EXECUTABLE_TEST_RUN_SECONDS);
+        const int input = open(fifo, O_RDONLY | O_CLOEXEC);
+        const int output = open(copy, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        bool copied = input >= 0 && output >= 0;
+        uint8_t buffer[65536];
+        for (ssize_t length = copied ? read(input, buffer, sizeof(buffer)) : 0; copied && length > 0; length = read(input, buffer, sizeof(buffer)))
+        {
+            copied = write(output, buffer, (size_t)length) == length;
+        }
+        _exit(copied ? 0 : 1);
+    }
+    return child;
+}
+
 static bool executable_test_files(const ExecutableTestDirectory* directory, uint64_t seed)
 {
     ExecutableTestTally tally = {
@@ -1317,6 +1390,76 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         executable_test_expect(&tally, built && !written && result.error == EXECUTABLE_ERROR_FIXUP && result.fixup != 0 && access(path.pointer, F_OK) != 0,
                                "a PC32 outside int32, and the output removed", 0);
         executable_test_link_end(&failing);
+
+        // A link that fails after opening a file it writes beside the output leaves the output, its other link and no
+        // file beside them; and a file a killed link left under the old fixed name doesn't block the next one.
+        written = executable_test_write(&large.link, large.entry, path, 1, &result, 0, 0);
+        const String8 before_failure = executable_test_read(scratch.arena, path.pointer);
+        unlink(other.pointer);
+        link(path.pointer, other.pointer);
+        built = executable_test_failing(&failing, &failing_start, BUSTER_LINK_FIXUP_ABS32, below_zero, false);
+        written = built && executable_test_write(&failing.link, failing_start, path, 2, &result, 0, 0);
+        executable_test_expect(&tally, built && !written && result.error == EXECUTABLE_ERROR_FIXUP && executable_test_same_file(scratch.arena, path.pointer, before_failure) &&
+                                           executable_test_same_file(scratch.arena, other.pointer, before_failure) && !executable_test_leftover(directory->path, "file.tmp"),
+                               "a failure beside the output leaves it, and nothing beside it", 0);
+        executable_test_link_end(&failing);
+        char stale[BUSTER_EXECUTABLE_TEST_PATH_BYTES + 32];
+        snprintf(stale, sizeof(stale), "%s.tmp%d", path.pointer, (int)getpid());
+        const int stale_file = open(stale, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+        if (stale_file >= 0)
+        {
+            close(stale_file);
+        }
+        written = executable_test_write(&small.link, small.entry, path, 1, &result, 0, 0);
+        executable_test_expect(&tally, stale_file >= 0 && written && result.write == EXECUTABLE_WRITE_RENAMED &&
+                                           executable_test_runs(path.pointer, small.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
+                               "a file a killed link left beside the output", 0);
+        unlink(stale);
+        unlink(other.pointer);
+
+        // Someone else's file, when this process may give it away (as root): written beside it and renamed over it,
+        // never changed in place, so the new file is this user's.
+        if (chown(path.pointer, 65534, 65534) == 0)
+        {
+            written = executable_test_write(&large.link, large.entry, path, 1, &result, 0, 0);
+            executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_RENAMED && stat(path.pointer, &status) == 0 && status.st_uid == geteuid() &&
+                                               executable_test_runs(path.pointer, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
+                                   "someone else's file renamed over", 0);
+        }
+
+        // A FIFO: written in order, as a regular file would hold it, then a failed link writes nothing, and the FIFO
+        // stays.
+        char fifo_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        char copy_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        const String8 fifo = executable_test_path(directory, "fifo", fifo_bytes);
+        const String8 copy = executable_test_path(directory, "copy", copy_bytes);
+        unlink(path.pointer);
+        written = executable_test_write(&large.link, large.entry, path, 1, &result, 0, 0);
+        const String8 regular = executable_test_read(scratch.arena, path.pointer);
+        unlink(fifo.pointer);
+        const bool made = mkfifo(fifo.pointer, 0644) == 0;
+        for (uint32_t lanes = 1; made && lanes <= 3; lanes += 2)
+        {
+            const pid_t reader = executable_test_read_fifo(fifo.pointer, copy.pointer);
+            written = reader > 0 && executable_test_write(&large.link, large.entry, fifo, lanes, &result, 0, 0);
+            int status_code = -1;
+            const bool read_all = reader > 0 && waitpid(reader, &status_code, 0) == reader && WIFEXITED(status_code) && WEXITSTATUS(status_code) == 0;
+            executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_SEQUENTIAL && read_all && executable_test_same_file(scratch.arena, copy.pointer, regular),
+                                   "a FIFO, written in order", lanes);
+        }
+        built = made && executable_test_failing(&failing, &failing_start, BUSTER_LINK_FIXUP_ABS32, below_zero, false);
+        const pid_t reader = built ? executable_test_read_fifo(fifo.pointer, copy.pointer) : -1;
+        written = reader > 0 && executable_test_write(&failing.link, failing_start, fifo, 2, &result, 0, 0);
+        int reader_status = -1;
+        const bool read_nothing = reader > 0 && waitpid(reader, &reader_status, 0) == reader && WIFEXITED(reader_status) && stat(copy.pointer, &status) == 0 && status.st_size == 0;
+        executable_test_expect(&tally, built && !written && result.error == EXECUTABLE_ERROR_FIXUP && read_nothing && stat(fifo.pointer, &status) == 0 && S_ISFIFO(status.st_mode),
+                               "a failed link into a FIFO, which stays", 0);
+        if (built)
+        {
+            executable_test_link_end(&failing);
+        }
+        unlink(fifo.pointer);
+        unlink(copy.pointer);
     }
     if (!directory->keep)
     {
@@ -1328,6 +1471,232 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         link_program_release(&large);
         link_program_release(&small);
     }
+    scratch_end(scratch);
+    return executable_test_report(&tally);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Limits
+//
+// What the representation allows and the writer must refuse or resolve consistently: a weak thread-local symbol
+// defined nowhere, TLS blocks and atoms past what 32-bit offsets reach, and lanes short of scratch memory.
+
+// The scratch room a starved lane gets, from 0 up by this step until the link succeeds, and the most it gets.
+#define BUSTER_EXECUTABLE_TEST_ROOM_STEP 64
+#define BUSTER_EXECUTABLE_TEST_MAX_ROOM (1ull << 20)
+
+// A program that loads the GOT slot of a weak thread-local symbol defined nowhere (GOTTPOFF) and exits 0, with a table
+// holding the same symbol's TPOFF32: both must be 0.
+static bool executable_test_absent_tls(ExecutableTestLink* test, SymbolId* start)
+{
+    bool result = executable_test_link_begin(test, BUSTER_EXECUTABLE_PAGE_BYTES);
+    Link* link = &test->link;
+    *start = result ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+    const NameId name = result ? link_add_name(link, (const uint8_t*)"absent_tls", 10) : 0;
+    const SymbolId absent = name != 0 ? link_add_symbol(link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_TLS, BUSTER_LINK_SOURCE_NONE) : 0;
+    result = result && *start != 0 && absent != 0;
+    ExecutableTestCode code = { 0 };
+    const X86Instruction load = {
+        .reg = X86_REGISTER_RAX,
+        .mode = BUSTER_X86_MEMORY_RIP,
+        .form = X86_FORM_MOV_R64_RM64,
+    };
+    executable_test_refer(&code, load, BUSTER_LINK_FIXUP_GOTTPOFF, absent, 0);
+    executable_test_exit(&code, 0);
+    result = result && executable_test_code(test, 32, &code, 1, *start) != 0;
+    const AtomId table = result ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 2, 4, 0, 0) : 0;
+    result = result && table != 0 && link_add_fixup(link, table, 0, BUSTER_LINK_FIXUP_TPOFF32, absent, 0) != 0;
+    return result && link_check(link) == LINK_ERROR_NONE;
+}
+
+// A program that exits 0, with zero-fill atoms of `class` and the given sizes, aligned to 8, and a table with a TPOFF32
+// (for TBSS) or an ABS64 (otherwise) to the first one's start. *first gets that atom.
+static bool executable_test_zero_fill(ExecutableTestLink* test, SymbolId* start, uint8_t class, const uint64_t* sizes, uint32_t count, AtomId* first)
+{
+    bool result = executable_test_link_begin(test, BUSTER_EXECUTABLE_PAGE_BYTES);
+    Link* link = &test->link;
+    const bool tls = class == BUSTER_LINK_CLASS_TBSS;
+    *start = result ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+    const SymbolId variable = result ? executable_test_symbol(link, "variable", BUSTER_LINK_SYMBOL_GLOBAL | (tls ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT)) : 0;
+    result = result && *start != 0 && variable != 0;
+    ExecutableTestCode code = { 0 };
+    executable_test_exit(&code, 0);
+    result = result && executable_test_code(test, 32, &code, 1, *start) != 0;
+    *first = 0;
+    for (uint32_t i = 0; result && i < count; i += 1)
+    {
+        const AtomId atom = link_add_atom(link, class, 3, sizes[i], 0, 0);
+        *first = i == 0 ? atom : *first;
+        result = atom != 0;
+    }
+    result = result && link_define_symbol(link, variable, *first, 0, 8);
+    const AtomId table = result ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, 8, 0, 0) : 0;
+    result = result && table != 0 && link_add_fixup(link, table, 0, tls ? BUSTER_LINK_FIXUP_TPOFF32 : BUSTER_LINK_FIXUP_ABS64, variable, 0) != 0;
+    return result && link_check(link) == LINK_ERROR_NONE;
+}
+
+// A program that exits 0, with a table of `atom_class` at `alignment_log2` of `size` bytes (zeros), and `failures` ABS32
+// fields that fall below 0, each in a table of its own, the first one's aligned to 4 and the others' to 8, so that
+// the layout puts the first after the others. `*table` gets the first table, and `*data` a DATA symbol.
+static bool executable_test_refusal(ExecutableTestLink* test, SymbolId* start, SymbolId* data, uint8_t atom_class, uint8_t alignment_log2, uint64_t size,
+                                    uint32_t failures, AtomId* table)
+{
+    bool result = executable_test_link_begin(test, 4 * BUSTER_EXECUTABLE_PAGE_BYTES);
+    Link* link = &test->link;
+    *start = result ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+    *data = result ? executable_test_symbol(link, "data", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT) : 0;
+    result = result && *start != 0 && *data != 0;
+    ExecutableTestCode code = { 0 };
+    executable_test_exit(&code, 0);
+    result = result && executable_test_code(test, 32, &code, 1, *start) != 0;
+    *table = result ? executable_test_data(test, atom_class, alignment_log2, size, 0, *data) : 0;
+    result = result && *table != 0;
+    for (uint32_t i = 0; result && i < failures; i += 1)
+    {
+        const AtomId failing = executable_test_data(test, BUSTER_LINK_CLASS_DATA, i == 0 ? 2 : 3, 8, 0, 0);
+        result = failing != 0 && link_add_fixup(link, failing, 0, BUSTER_LINK_FIXUP_ABS32, *start, -(int64_t)BUSTER_EXECUTABLE_BASE - 0x10000) != 0;
+    }
+    return result && link_check(link) == LINK_ERROR_NONE;
+}
+
+// Writes a link that must fail with every lane count, alike: `error` and what it is about, without creating `path`.
+static void executable_test_refused(ExecutableTestTally* tally, Link* link, SymbolId entry, String8 path, ExecutableError error, AtomId atom, SymbolId symbol, FixupId fixup,
+                                    const char* what)
+{
+    bool refused = true;
+    for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
+    {
+        unlink(path.pointer);
+        ExecutableResult result;
+        const bool written = executable_test_write(link, entry, path, executable_test_lane_counts[l], &result, 0, 0);
+        refused = refused && !written && result.error == error && result.atom == atom && result.symbol == symbol && result.fixup == fixup && access(path.pointer, F_OK) != 0;
+    }
+    executable_test_expect(tally, refused, what, error);
+}
+
+static bool executable_test_limits(const ExecutableTestDirectory* directory, uint64_t seed)
+{
+    ExecutableTestTally tally = {
+        .check = "limits",
+    };
+    Scratch scratch = scratch_begin(0);
+    char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const String8 path = executable_test_path(directory, "limits", path_bytes);
+    ExecutableResult result;
+
+    // A weak thread-local symbol defined nowhere: its TPOFF32 and its GOT slot are both 0, as GNU ld makes them.
+    ExecutableTestLink absent;
+    SymbolId absent_start = 0;
+    bool built = executable_test_absent_tls(&absent, &absent_start);
+    unlink(path.pointer);
+    bool written = built && executable_test_write(&absent.link, absent_start, path, 1, &result, 0, 0);
+    executable_test_expect(&tally, written, "a weak thread-local symbol defined nowhere", 0);
+    const String8 file = written ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
+    if (written)
+    {
+        executable_test_fields(&tally, &absent.link, file, 0);
+    }
+    executable_test_expect(&tally, written && executable_test_runs(path.pointer, (const uint8_t*)"", 0), "its program runs", 0);
+    executable_test_link_end(&absent);
+
+    // TLS blocks: exactly 2 GB fits, and more doesn't, from atoms of at most 2 GB each; nor does one atom over 2 GB, of
+    // .tbss or of .bss, nor one whose size its alignment would wrap. A refused link leaves no output.
+    static const struct
+    {
+        const char* name;
+        uint8_t class;
+        uint64_t sizes[2];
+        uint32_t count;
+        bool fits;
+        bool names_atom;
+    } cases[] = {
+        { "a TLS block of 2 GB", BUSTER_LINK_CLASS_TBSS, { (1ull << 31) - 16, 16 }, 2, true, false },
+        { "a TLS block past 2 GB", BUSTER_LINK_CLASS_TBSS, { (1ull << 31) - 8, 16 }, 2, false, false },
+        { "a .tbss atom of 3 GB", BUSTER_LINK_CLASS_TBSS, { 3ull << 30, 0 }, 1, false, true },
+        { "a .bss atom past 2 GB", BUSTER_LINK_CLASS_BSS, { (1ull << 31) + 8, 0 }, 1, false, true },
+        { "a .bss atom whose padding wraps", BUSTER_LINK_CLASS_BSS, { UINT64_MAX - 3, 0 }, 1, false, true },
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        ExecutableTestLink zero_fill;
+        SymbolId zero_fill_start = 0;
+        AtomId first = 0;
+        built = executable_test_zero_fill(&zero_fill, &zero_fill_start, cases[c].class, cases[c].sizes, cases[c].count, &first);
+        unlink(path.pointer);
+        written = built && executable_test_write(&zero_fill.link, zero_fill_start, path, 2, &result, 0, 0);
+        const bool expected = cases[c].fits ? written && executable_test_runs(path.pointer, (const uint8_t*)"", 0)
+                                            : built && !written && result.error == EXECUTABLE_ERROR_LAYOUT && (!cases[c].names_atom || result.atom == first) &&
+                                                  access(path.pointer, F_OK) != 0;
+        executable_test_expect(&tally, expected, cases[c].name, c);
+        executable_test_link_end(&zero_fill);
+    }
+
+    // Refusals reported alike with any number of lanes: the entry point checked before the symbols (a DATA symbol, with
+    // a symbol defined nowhere beside it), the smallest failing fixup though another comes first in the file, an atom
+    // aligned past a page, and an init array's atom of 12 bytes.
+    ExecutableTestLink refusal;
+    SymbolId refusal_start = 0;
+    SymbolId data = 0;
+    AtomId table = 0;
+    built = executable_test_refusal(&refusal, &refusal_start, &data, BUSTER_LINK_CLASS_DATA, 3, 8, 0, &table);
+    const NameId nowhere_name = built ? link_add_name(&refusal.link, (const uint8_t*)"nowhere", 7) : 0;
+    built = nowhere_name != 0 && link_add_symbol(&refusal.link, nowhere_name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL, BUSTER_LINK_SOURCE_NONE) != 0;
+    executable_test_expect(&tally, built, "the entry's program", 0);
+    if (built)
+    {
+        executable_test_refused(&tally, &refusal.link, data, path, EXECUTABLE_ERROR_ENTRY, 0, data, 0, "an entry point outside the code, before a symbol defined nowhere");
+    }
+    executable_test_link_end(&refusal);
+    built = executable_test_refusal(&refusal, &refusal_start, &data, BUSTER_LINK_CLASS_DATA, 3, 8, 2, &table);
+    executable_test_expect(&tally, built, "the failing fixups' program", 0);
+    if (built)
+    {
+        // The two tables' fixups are the last two, and the first is the smaller.
+        const FixupId smallest = refusal.link.fixups.count - 2;
+        executable_test_refused(&tally, &refusal.link, refusal_start, path, EXECUTABLE_ERROR_FIXUP, 0, 0, smallest, "the smallest failing fixup, though later in the file");
+    }
+    executable_test_link_end(&refusal);
+    built = executable_test_refusal(&refusal, &refusal_start, &data, BUSTER_LINK_CLASS_DATA, BUSTER_EXECUTABLE_PAGE_LOG2 + 1, 8, 0, &table);
+    if (built)
+    {
+        executable_test_refused(&tally, &refusal.link, refusal_start, path, EXECUTABLE_ERROR_LAYOUT, table, 0, 0, "an atom aligned past a page");
+    }
+    executable_test_link_end(&refusal);
+    built = executable_test_refusal(&refusal, &refusal_start, &data, BUSTER_LINK_CLASS_INIT_ARRAY, 3, 12, 0, &table);
+    if (built)
+    {
+        executable_test_refused(&tally, &refusal.link, refusal_start, path, EXECUTABLE_ERROR_LAYOUT, table, 0, 0, "an init array's atom of 12 bytes");
+    }
+    executable_test_link_end(&refusal);
+
+    // A lane short of scratch memory, from no room up: every link fails with EXECUTABLE_ERROR_MEMORY and leaves no
+    // output, until the lane has room enough and the program runs. Lane 0 of one lane, and the last of 2, 3 and 8.
+    LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
+    link_test_program_options(options, seed, 1);
+    LinkProgram program;
+    const bool generated = link_program_generate(&program, options[1]);
+    executable_test_expect(&tally, generated, "the smallest program", 0);
+    for (uint32_t l = 0; generated && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
+    {
+        const uint32_t lanes = executable_test_lane_counts[l];
+        bool succeeded = false;
+        uint64_t wrong = UINT64_MAX;
+        for (uint64_t room = 0; !succeeded && room <= BUSTER_EXECUTABLE_TEST_MAX_ROOM; room += BUSTER_EXECUTABLE_TEST_ROOM_STEP)
+        {
+            unlink(path.pointer);
+            succeeded = executable_test_write_starved(&program.link, program.entry, path, lanes, lanes - 1, room, &result);
+            const bool clean = succeeded || (result.error == EXECUTABLE_ERROR_MEMORY && access(path.pointer, F_OK) != 0);
+            wrong = !clean && wrong == UINT64_MAX ? room : wrong;
+        }
+        executable_test_expect(&tally, wrong == UINT64_MAX, "a lane short of memory fails the link with no output", wrong);
+        executable_test_expect(&tally, succeeded && executable_test_runs(path.pointer, program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "then succeeds with room enough",
+                               lanes);
+    }
+    if (generated)
+    {
+        link_program_release(&program);
+    }
+    unlink(path.pointer);
     scratch_end(scratch);
     return executable_test_report(&tally);
 }
@@ -1494,6 +1863,7 @@ static int run_executable_tests(int argc, char** argv)
         passed = executable_test_programs(&directory, seed, (uint32_t)functions) && passed;
         passed = executable_test_chunks(&directory) && passed;
         passed = executable_test_files(&directory, seed) && passed;
+        passed = executable_test_limits(&directory, seed) && passed;
         passed = executable_test_kernel(seed) && passed;
         result = passed ? 0 : 1;
         if (keep)
