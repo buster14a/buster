@@ -76,3 +76,6 @@ jobs:
       - name: Benchmark the lanes
         # It pins each lane to an allowed CPU of its own.
         run: ./build/compiler benchmark-lanes
+
+      - name: Test the link representation
+        run: ./build/compiler test-link

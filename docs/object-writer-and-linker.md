@@ -7,10 +7,12 @@ machine code and data into files:
 - **The linker:** executables written straight from the compiler, and links of
   other compilers' objects, archives and shared libraries.
 
-The first step of the plan, the lane base layer, is implemented
-(`src/buster/compiler/lane.c`); the rest isn't yet. The document records the
-measurements on the Ryzen 7 9700X that the design rests on, the design itself,
-and the order to build it in, as `docs/x86-64-encoder.md` does for the encoder.
+The lane base layer, the encoder's fixups and the representation are
+implemented (`src/buster/compiler/lane.c`, `x86_64_encoder.c` and `link.c`,
+with generated test programs in `link_program.c`); the object writer and the
+linker aren't yet. The document records the measurements on the Ryzen 7 9700X
+that the design rests on, the design itself, and the order to build it in, as
+`docs/x86-64-encoder.md` does for the encoder.
 
 The premise is that most of what mold and wild do on every link is work this
 compiler can avoid altogether. What remains is memory traffic, and the design
@@ -346,12 +348,23 @@ it, the ELF importer converts foreign inputs into it, the object writer
 serializes it, and the linker lays it out and patches it. The tables are column
 arrays indexed by 32-bit ids, and id 0 of each kind means "none". Final
 addresses and file offsets are 64-bit, so the ids don't put a 4 GiB limit on
-the output.
+the output. `src/buster/compiler/link.c` implements it, and its orientation
+comment lists the rules its adds enforce.
 
 **Names** (`NameId`) are spellings interned by the front end. Each has its
 bytes in the name arena and a 64-bit hash computed once, when the name is
 interned. Local labels, `static` functions and string literals never need
-their name to be looked up: references carry ids.
+their name to be looked up: references carry ids, and their symbols can have
+no name (`NameId` 0).
+
+- **The bytes** are followed by a NUL, which the ELF string tables need, and
+  the length is kept.
+- **The hash** is `link_hash`: wyhash's mixing of 8 bytes at a time, scalar
+  for now. From the runtime snapshot on it is part of the format, so the
+  import path's vectorized hashing has to compute the same function, or
+  replace it everywhere.
+- **The table doesn't deduplicate:** the front end interns, and gives each
+  spelling one id.
 
 **Atoms** (`AtomId`) are what the linker places and keeps or drops as a whole:
 
@@ -369,10 +382,17 @@ Columns:
 | --- | --- |
 | `class` | the output section it goes to (`BUSTER_LINK_CLASS_TEXT`, `_RODATA`, `_DATA`, `_BSS`, `_TDATA`, `_INIT_ARRAY`, ...) |
 | `alignment_log2` | its alignment |
+| `unit` | the translation unit or input it comes from: the object the object writer puts it in, and the scope of its local symbols |
 | `size` | its size |
 | `bytes` | its contents: in a lane's buffer, the runtime snapshot or a mapped input; null for zero-fill |
-| fixup range | where its fixups are |
+| fixup range | where its fixups are: a first `FixupId` and a count |
 | `address` | after layout: an image offset for a loaded atom, a file offset otherwise |
+
+The classes are numbered in lld's order of segments, so that sorting atoms by
+class gives the layout's order: `_RODATA` and `_STRINGS` (pools of string
+literals: `.rodata.str1.1` in an object), `_TEXT`, `_TDATA`, `_TBSS`,
+`_INIT_ARRAY`, `_FINI_ARRAY`, `_DATA_RELRO`, `_DATA` and `_BSS`. `_TBSS` and
+`_BSS` are zero-fill.
 
 **Symbols** (`SymbolId`) are what binding is about. One atom can define
 several, and several definitions can compete for one name. Columns:
@@ -382,7 +402,7 @@ several, and several definitions can compete for one name. Columns:
 | `name` | its `NameId` |
 | `atom`, `value` | the defining atom and the offset in it |
 | `size` | its size |
-| `flags` | binding, visibility, type |
+| `flags` | binding, visibility, type, where ELF's `st_info` and `st_other` have them |
 | `source` | where it is defined: program, runtime shared library, runtime archive member, foreign object, foreign shared library, or the linker |
 | `got_slot`, `dynamic_index`, `version` | its GOT slot, `.dynsym` index and version |
 | `reference` | after layout: what code that refers to it uses (its address, its GOT slot's for an import, its offset in the TLS block for a TLS variable) |
@@ -392,7 +412,9 @@ because a small-code-model image (everything a PC32 field can reach) is under
 2 GiB, and the measured 32-bit kernel is the fastest (see "SIMD").
 
 **Fixups** are references the encoder couldn't fill in. They are sorted by
-atom and offset, 13 bytes each in columns:
+atom and offset: each atom's fixups are one range of consecutive ids, sorted
+by offset, whose fields don't overlap, and the ranges of different atoms don't
+interleave. 13 bytes each in columns:
 
 | Column | Contents |
 | --- | --- |
@@ -408,24 +430,34 @@ relocation, and an executable's patch kernel derives its arithmetic from it:
 
 | Kind | Where | Relocation in an object | Value in an executable |
 | --- | --- | --- | --- |
-| `CALL` | `call` or `jmp rel32` | `R_X86_64_PLT32` | S + A − P |
+| `CALL` | a branch's rel32: `call`, `jmp` or `jcc` | `R_X86_64_PLT32` | S + A − P |
 | `CALL_GOT` | `call` or `jmp [rip + slot]` (`ff 15`, `ff 25`) | `R_X86_64_GOTPCRELX` | G + A − P |
-| `LOAD_GOT` | `mov reg, [rip + slot]` | `R_X86_64_REX_GOTPCRELX`, or `R_X86_64_GOTPCRELX` without REX | G + A − P, or, when S turns out to be local, S + A − P with `mov` rewritten to `lea` |
-| `PC32` | any other RIP-relative operand | `R_X86_64_PC32` | S + A − P, checked to fit in int32 |
-| `TPOFF32` | `fs:[x@tpoff]` (local-exec) | `R_X86_64_TPOFF32` | S's offset from the end of the TLS block + A |
-| `GOTTPOFF` | `mov reg, [rip + x@gottpoff]` (initial-exec) | `R_X86_64_GOTTPOFF` | G + A − P, with a `TPOFF64` for the slot |
-| `ABS64` | 8 bytes of data | `R_X86_64_64` | S + A, and in a PIE a relative relocation (a symbolic one for an import) |
-| `PC64` | 8 bytes (unwind tables) | `R_X86_64_PC64` | S + A − P |
-| `ABS32`, `ABS32S` | 4 bytes, non-PIE only | `R_X86_64_32`, `R_X86_64_32S` | S + A, zero- or sign-extension checked |
-| `SIZE32`, `SIZE64` | 4 or 8 bytes | `R_X86_64_SIZE32`, `R_X86_64_SIZE64` | the size of S + A |
+| `LOAD_GOT` | `mov r64, [rip + slot]` | `R_X86_64_REX_GOTPCRELX`: loading a pointer has REX.W | G + A − P, or, when S turns out to be local, S + A − P with `mov` rewritten to `lea` |
+| `GOTPCREL` | any other instruction that reads the slot (`push [rip + slot]`) | `R_X86_64_GOTPCREL` | G + A − P, never rewritten |
+| `PC32` | any other RIP-relative operand or rel32, or 4 bytes of data | `R_X86_64_PC32` | S + A − P, checked to fit in int32 |
+| `TPOFF32` | a 32-bit displacement or immediate: `fs:[x@tpoff]` (local-exec), `[rax + x@tpoff]` | `R_X86_64_TPOFF32` | S's offset from the end of the TLS block + A |
+| `GOTTPOFF` | `mov` or `add r64, [rip + x@gottpoff]` (initial-exec) | `R_X86_64_GOTTPOFF` | G + A − P, with a `TPOFF64` for the slot |
+| `ABS64` | 8 bytes of data, or `movabs`'s imm64 | `R_X86_64_64` | S + A, and in a PIE a relative relocation (a symbolic one for an import) |
+| `PC64` | 8 bytes of data (unwind tables) | `R_X86_64_PC64` | S + A − P |
+| `ABS32`, `ABS32S` | 4 bytes: data, an imm32 or a disp32, non-PIE only | `R_X86_64_32`, `R_X86_64_32S` | S + A, zero- or sign-extension checked |
+| `SIZE32`, `SIZE64` | 4 or 8 bytes: data, an imm32 or an imm64 | `R_X86_64_SIZE32`, `R_X86_64_SIZE64` | the size of S + A |
 
-G is the address of S's GOT slot.
+G is the address of S's GOT slot. A linker that relaxes `CALL_GOT`,
+`LOAD_GOT` or `GOTTPOFF` rewrites the instruction's bytes before the field,
+from what its relocation type says they are, so those kinds go only on those
+instructions, without a segment override; any other read of a slot is
+`GOTPCREL`, which linkers leave alone.
 
 **Wide addends.** Any kind can carry a 64-bit addend: a bit in `kind` sends
 the patch to a side table that holds it. Initializers like
 `(char*)&x + 0x100000000` need it, and so do foreign `R_X86_64_PC64` and
 `R_X86_64_64` relocations with large addends, which GNU as and ld accept.
-The common case stays 13 bytes.
+The common case stays 13 bytes. The bit is the kind's top bit
+(`BUSTER_LINK_FIXUP_WIDE`), and the `addend` column then holds the side
+table's index. An addend goes there exactly when it doesn't fit in int32,
+after an instruction's distance to its end is taken off: from
+`lea rax, [rip + x]`, a source addend of INT32_MIN + 4 fits and
+INT32_MIN + 3 doesn't.
 
 In an executable, every code reference to a symbol goes the same way: directly
 for the program's, through the slot for an import. So the kernel reads one
@@ -440,6 +472,14 @@ Fixups use 0.4 bytes per byte of code at the measured density.
 "Lanes"). The address space is reserved up front, committed on touch, and
 backed by transparent huge pages: they fault 2.8× faster and tear down 10×
 faster.
+
+All the tables' columns come from one arena, each with room for counts given
+up front (count, place, fill: `link_initialize`, with `link_capacity_bytes`
+saying how much to reserve), so a small program's columns share a few base
+pages. An arena per column would cost a reservation for each of the 26
+columns (1.8 µs each, 47 µs in all, more than hello world's whole link is to
+take) and a huge page each once past its first 64 KB. Names' bytes go to an
+arena of their own, which grows as names are interned.
 
 An arena's first 64 KB stay in 4 KB pages (`MADV_NOHUGEPAGE`), and huge pages
 start right after them, on a 2 MB boundary. A huge page is cleared whole when
@@ -514,6 +554,26 @@ The cross-check is GNU as. The encoder's tests already assemble random streams
 with it; giving some instructions symbolic operands (`call f`, `cmpb $1,
 x(%rip)`) and comparing GNU as's relocation records (offset, type, addend) with
 the fixups pins all of this down.
+
+`link_add_code_fixups` (`link.c`) makes an atom's fixups from the encoder's
+output. The code generator gives a reference per symbolic field: the
+instruction, which field (a displacement and an immediate can both be
+symbolic), the kind, the target and the source's addend. With the fixup ends
+and `x86_fixup_distance`, that gives each fixup's offset and addend.
+
+- **It checks each kind against its field:** a rel32, a RIP-relative
+  displacement, another 32-bit displacement or immediate, or a 64-bit
+  immediate, from the form and the operands.
+- **A displacement after a base needs a placeholder that doesn't fit in 8
+  bits,** such as INT32_MIN. Otherwise the encoder makes it 8-bit or leaves it
+  out, and there is no 32-bit field to patch.
+- **It zeroes the fields in the atom's bytes,** as GNU as writes them. The
+  object writer then writes the bytes as they are, and the executable patches
+  over them.
+
+`test-link` checks each kind's offset, addend and bytes against what GNU as
+makes of the same instruction, alone and in streams across the encoder's
+groups.
 
 ### The direct path (no `-c`)
 
@@ -688,6 +748,14 @@ These are four `PT_LOAD`s, as lld writes for hello world, with `PT_PHDR`,
 File offsets are contiguous. Each segment's address continues at the next page
 plus its offset within a page, so there is no file padding, and segments stay
 4 KB-congruent.
+
+The TLS segment then needn't start on a multiple of its alignment: `.tdata`
+starts at its own alignment, which can be less than `.tbss`'s. The TLS block
+keeps `p_vaddr`'s remainder f modulo `p_align`, so it starts
+align_up(`p_memsz` + f, `p_align`) − f below the thread pointer, as glibc
+allocates it and GNU ld and lld compute `TPOFF`: a variable's `TPOFF` is its
+offset in the segment less that distance. With f = 0 it is just `p_memsz`
+rounded up, which is all an aligned segment exercises.
 
 Exact layout is a recurrence (x′ = align_up(x, a) + s), not a prefix sum of
 `size + align − 1`. It becomes a plain prefix sum in two ways:
@@ -1447,9 +1515,35 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
 - **Fixup offsets and addends** against GNU as's relocation records for the
   same instructions with symbolic operands, over random streams of every form
   that takes a displacement or an immediate.
+- **Generated programs** (`link_program.c`), which every later step's tests
+  and benchmarks use, of two kinds. Static programs without libc, whose
+  `_start` sets up TLS from `PT_TLS` and runs the init and fini arrays, are
+  step 4's first executables. Programs whose `main` the C runtime calls are
+  step 5's: they import `write`, `strlen`, `environ` and `__errno_location`
+  from libc through the GOT, as "Binding before instruction selection" says,
+  keep a pointer to `strlen` in their data, and check that their TLS block
+  and libc's don't overlap. Their workers call each other directly and
+  through the GOT, read globals directly and through the GOT, use local-exec
+  and initial-exec TLS, and read string literals. Their data holds pointers,
+  wide addends among them, and both kinds read a weak symbol that nothing
+  defines through its GOT slot. Every class appears given two thread-locals,
+  an init function and a fini function, and every fixup kind, but options
+  leave out the absolute ones (for a PIE) and `SIZE32` and `SIZE64` (wild 0.10
+  refuses them, as linking each kind with GNU ld, lld, mold and wild on the
+  9700X showed). The program prints a checksum of what it read, which a model
+  of it predicts. The sizes come from options and the rest from a seed, so a
+  benchmark can scale them up. `test-link` lays them out in memory as a
+  static executable at a fixed address, patches every fixup, and runs them in
+  a child process, which does what the C runtime does around `main` and gives
+  libc's functions stand-ins: a reference for the direct path's patch kernel.
+  `test-link --print-assembly` writes them as GNU as source, with a `.reloc`
+  for each fixup. On the 9700X, GNU ld, lld, mold and wild link the objects,
+  statically or through `cc` with libc (as a PIE, with `-no-pie` and with
+  `-static`), into programs that print what the model predicts.
 - **Objects:**
   - read back with `readelf` and `llvm-readobj` in the tests' cross-check
-    mode;
+    mode, and compared with GNU as's objects of the same units
+    (`test-link --print-assembly`);
   - linked by GNU ld, lld, mold and wild;
   - run, with their output compared.
 
@@ -1525,6 +1619,11 @@ and with this document updated with what was measured:
    addends. Done when they match GNU as's relocations on random streams, and
    the compiler-like mix encodes no slower than the offsets loop (0.72 ns per
    instruction).
+
+   Then what steps 3 to 5 build on: the representation (`link.c`: the
+   tables in "Representation", and fixups from the encoder's marked
+   instructions) and generated test programs (`link_program.c`). Done:
+   `test-link`.
 3. **The object writer:** code, data, symbols and relocations from generated
    programs. Done when GNU ld, lld, mold and wild link its objects into
    programs that run, `readelf` agrees, and `benchmark-object-writer` reports
