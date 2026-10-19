@@ -2619,7 +2619,7 @@ struct X86Relocation
 // its addend is the field's value minus that distance. GNU as emits R_X86_64_PLT32 for a branch to a symbol without an
 // addend and R_X86_64_PC32 with one; for another address R_X86_64_32S (the processor sign-extends it), but
 // R_X86_64_32 for LEA into a 16- or 32-bit register (which truncates it); and for an imm32 R_X86_64_32S if the operand
-// is 64-bit and R_X86_64_32 if not.
+// is 64-bit and R_X86_64_32 if not, or if it's map 7's MSR index (unsigned, as the printer has it).
 static X86Relocation x86_expected_relocation(const X86Instruction* instruction, X86FixupField field, uint64_t end)
 {
     const X86FormDescription* form = x86_form_description(instruction->form);
@@ -2640,9 +2640,11 @@ static X86Relocation x86_expected_relocation(const X86Instruction* instruction, 
     else
     {
         // A 64-bit immediate or address continues in the displacement.
+        const bool msr_index = form->family == BUSTER_X86_FAMILY_VEX && x86_opcode_map(form) == 7;
         result.addend = form->immediate_bytes == 8 ? (int64_t)((uint64_t)(uint32_t)instruction->immediate | ((uint64_t)(uint32_t)instruction->displacement << 32))
+                        : msr_index                ? (int64_t)(uint32_t)instruction->immediate
                                                    : instruction->immediate;
-        result.type = form->immediate_bytes == 8 ? R_X86_64_64 : form->w || form->operand_bytes == 8 ? R_X86_64_32S : R_X86_64_32;
+        result.type = form->immediate_bytes == 8 ? R_X86_64_64 : (form->w || form->operand_bytes == 8) && !msr_index ? R_X86_64_32S : R_X86_64_32;
         result.symbol = "isym";
     }
     return result;
