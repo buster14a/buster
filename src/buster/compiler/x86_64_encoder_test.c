@@ -30,10 +30,10 @@
 //     x86_validate checks: it must find them.
 //
 // --print-assembly prints N random instructions in GNU as Intel syntax, each with its bytes from x86_encode_scalar in
-// a comment, choosing operands GNU as encodes with the same form (with {load}, {store} and {evex} where GNU as would
-// pick another), and has GNU as record each one's length in a .lengths section; --compare-binary compares the .text and .lengths sections of the object GNU as makes of that (as objcopy
-// extracts them) with x86_encode_scalar's bytes for the same instructions. The exit status is 1 if the arguments are
-// invalid or a check fails.
+// a comment, choosing operands GNU as encodes with the same form (with {load}, {store}, {vex} and {evex} where GNU as
+// would pick another), and has GNU as record each one's length in a .lengths section; --compare-binary compares the
+// .text and .lengths sections of the object GNU as makes of that (as objcopy extracts them) with x86_encode_scalar's
+// bytes for the same instructions. The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order:
 //   - Random instructions: x86_test_random, x86_random_register, x86_random_displacement, x86_random_immediate and
@@ -60,7 +60,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0x3b1631b4ddd8931full
+#define BUSTER_X86_TEST_DIGEST 0x6e73cb6d5ea8187bull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -495,11 +495,36 @@ static const char* x86_syntax_operands(uint8_t syntax)
     return result;
 }
 
+// Whether the form is a VEX one whose mnemonic an EVEX form has too, from a table of every form that the first call
+// fills.
+static bool x86_vex_form_shares_mnemonic(uint32_t form)
+{
+    static bool filled = false;
+    static bool shares[X86_FORM_COUNT];
+    if (!filled)
+    {
+        for (uint32_t vex = 0; vex < X86_FORM_COUNT; vex += 1)
+        {
+            if (x86_form_descriptions[vex].family == BUSTER_X86_FAMILY_VEX)
+            {
+                for (uint32_t evex = 0; evex < X86_FORM_COUNT && !shares[vex]; evex += 1)
+                {
+                    shares[vex] = x86_form_descriptions[evex].family == BUSTER_X86_FAMILY_EVEX &&
+                                  strcmp(x86_form_descriptions[evex].mnemonic, x86_form_descriptions[vex].mnemonic) == 0;
+                }
+            }
+        }
+        filled = true;
+    }
+    return shares[form % X86_FORM_COUNT];
+}
+
 // Prints the instruction in GNU as Intel syntax. A register-to-register move or arithmetic instruction gets {load} or
 // {store}, which picks the form with ModRM.reg as the destination or the source (and keeps GNU as from swapping a VEX
-// move's operands to make it VEX2), and an EVEX form gets {evex}, which GNU as otherwise only picks when the operands
-// need it. The opmask and zeroing follow the first operand, a broadcast follows the memory operand, and embedded
-// rounding or suppressed exceptions come after the registers.
+// move's operands to make it VEX2). An EVEX form gets {evex}, which GNU as otherwise only picks when the operands need
+// it, and a VEX form whose mnemonic an EVEX form has gets {vex}: GNU as picks EVEX for some of those (vpdpbusd,
+// vpmadd52luq and vcvtneps2bf16, whose AVX-512 forms came first). The opmask and zeroing follow the first operand, a
+// broadcast follows the memory operand, and embedded rounding or suppressed exceptions come after the registers.
 static void x86_print_instruction(FILE* file, const X86Instruction* instruction)
 {
     const X86FormDescription* form = x86_form_description(instruction->form);
@@ -510,6 +535,10 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction)
     if (form->family == BUSTER_X86_FAMILY_EVEX)
     {
         fprintf(file, "{evex} ");
+    }
+    if (form->family == BUSTER_X86_FAMILY_VEX && x86_vex_form_shares_mnemonic(instruction->form))
+    {
+        fprintf(file, "{vex} ");
     }
     if (register_direct && form->reg != BUSTER_X86_OPERAND_NONE &&
         (form->syntax == X86_SYNTAX_RM_REG || form->syntax == X86_SYNTAX_REG_RM || form->syntax == X86_SYNTAX_REG_VVVV_RM))
@@ -1132,6 +1161,56 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_KSHIFTRB_K_K_IMM8, .reg = 1, .rm = 2, .immediate = 3 }, 6, { 0xc4, 0xe3, 0x79, 0x30, 0xca, 0x03 } },
     { { .form = X86_FORM_KSHIFTLD_K_K_IMM8, .reg = 1, .rm = 2, .immediate = 3 }, 6, { 0xc4, 0xe3, 0x79, 0x33, 0xca, 0x03 } },
     { { .form = X86_FORM_KXNORQ_K_K_K, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0xc4, 0xe1, 0xec, 0x46, 0xcb } },
+    // AES, carry-less multiplication, SHA and GFNI: aesenc xmm9, xmmword ptr [rax] (66, REX.R, 0F 38); aeskeygenassist
+    // xmm1, xmm2, 3; pclmulqdq xmm1, xmm2, 0x11; sha256rnds2 xmm1, xmm2, xmm0 (no prefix, and XMM0 implicit); sha1rnds4
+    // xmm1, xmmword ptr [rax], 3; and gf2p8affineinvqb xmm1, xmm2, 5
+    { { .form = X86_FORM_AESENC_X_XM128, .reg = 9, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x66, 0x44, 0x0f, 0x38, 0xdc, 0x08 } },
+    { { .form = X86_FORM_AESKEYGENASSIST_X_XM128_IMM8, .reg = 1, .rm = 2, .immediate = 3 }, 6, { 0x66, 0x0f, 0x3a, 0xdf, 0xca, 0x03 } },
+    { { .form = X86_FORM_PCLMULQDQ_X_XM128_IMM8, .reg = 1, .rm = 2, .immediate = 0x11 }, 6, { 0x66, 0x0f, 0x3a, 0x44, 0xca, 0x11 } },
+    { { .form = X86_FORM_SHA256RNDS2_X_XM128_XMM0, .reg = 1, .rm = 2 }, 4, { 0x0f, 0x38, 0xcb, 0xca } },
+    { { .form = X86_FORM_SHA1RNDS4_X_XM128_IMM8, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 }, 5, { 0x0f, 0x3a, 0xcc, 0x08, 0x03 } },
+    { { .form = X86_FORM_GF2P8AFFINEINVQB_X_XM128_IMM8, .reg = 1, .rm = 2, .immediate = 5 }, 6, { 0x66, 0x0f, 0x3a, 0xcf, 0xca, 0x05 } },
+    // Key Locker and PadLock: aesdec128kl xmm1, [rax] (F3); aesdec256kl xmm1, fs:[rax] (the override before F3);
+    // aesencwide256kl [r9] (/2, REX.B); encodekey128 r8d, ecx; loadiwkey xmm1, xmm2 (aesenc128kl's opcode, with
+    // registers); xstore (0F A7 C0, the ModRM byte part of the opcode); rep xcryptcbc; and rep xsha256
+    { { .form = X86_FORM_AESDEC128KL_X_M384, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xf3, 0x0f, 0x38, 0xdd, 0x08 } },
+    { { .form = X86_FORM_AESDEC256KL_X_M512 + BUSTER_X86_FORM_FS, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE },
+      6,
+      { 0x64, 0xf3, 0x0f, 0x38, 0xdf, 0x08 } },
+    { { .form = X86_FORM_AESENCWIDE256KL_M512, .rm = X86_REGISTER_R9, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0xf3, 0x41, 0x0f, 0x38, 0xd8, 0x11 } },
+    { { .form = X86_FORM_ENCODEKEY128_R32_R32, .reg = X86_REGISTER_R8, .rm = X86_REGISTER_RCX }, 6, { 0xf3, 0x44, 0x0f, 0x38, 0xfa, 0xc1 } },
+    { { .form = X86_FORM_LOADIWKEY_X_X, .reg = 1, .rm = 2 }, 5, { 0xf3, 0x0f, 0x38, 0xdc, 0xca } },
+    { { .form = X86_FORM_XSTORE }, 3, { 0x0f, 0xa7, 0xc0 } },
+    { { .form = X86_FORM_REP_XCRYPTCBC }, 4, { 0xf3, 0x0f, 0xa7, 0xd0 } },
+    { { .form = X86_FORM_REP_XSHA256 }, 4, { 0xf3, 0x0f, 0xa6, 0xd0 } },
+    // VEX: vpdpbusd xmm1, xmm2, xmm3 (AVX-VNNI's, which GNU as takes with {vex}); vpmadd52luq ymm1, ymm2, ymmword ptr
+    // [rax] (W1); vcvtneps2bf16 xmm1, ymmword ptr [rax] (L1 into an XMM register); vaesenc ymm9, ymm10, ymm11 (VAES,
+    // with inverted R, vvvv and B); vaesimc xmm1, xmm2; vaeskeygenassist xmm1, xmmword ptr [rax], 3; vpclmulqdq ymm1,
+    // ymm2, ymm3, 0x11; vgf2p8affineqb ymm1, ymm2, ymm3, 5 (W1); and vgf2p8mulb xmm1, xmm2, xmm3
+    { { .form = X86_FORM_VPDPBUSD_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0xc4, 0xe2, 0x69, 0x50, 0xcb } },
+    { { .form = X86_FORM_VPMADD52LUQ_Y_Y_YM256, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xc4, 0xe2, 0xed, 0xb4, 0x08 } },
+    { { .form = X86_FORM_VCVTNEPS2BF16_X_YM256, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xc4, 0xe2, 0x7e, 0x72, 0x08 } },
+    { { .form = X86_FORM_VAESENC_Y_Y_YM256, .reg = 9, .vvvv = 10, .rm = 11 }, 5, { 0xc4, 0x42, 0x2d, 0xdc, 0xcb } },
+    { { .form = X86_FORM_VAESIMC_X_XM128, .reg = 1, .rm = 2 }, 5, { 0xc4, 0xe2, 0x79, 0xdb, 0xca } },
+    { { .form = X86_FORM_VAESKEYGENASSIST_X_XM128_IMM8, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 3 },
+      6,
+      { 0xc4, 0xe3, 0x79, 0xdf, 0x08, 0x03 } },
+    { { .form = X86_FORM_VPCLMULQDQ_Y_Y_YM256_IMM8, .reg = 1, .vvvv = 2, .rm = 3, .immediate = 0x11 }, 6, { 0xc4, 0xe3, 0x6d, 0x44, 0xcb, 0x11 } },
+    { { .form = X86_FORM_VGF2P8AFFINEQB_Y_Y_YM256_IMM8, .reg = 1, .vvvv = 2, .rm = 3, .immediate = 5 }, 6, { 0xc4, 0xe3, 0xed, 0xce, 0xcb, 0x05 } },
+    { { .form = X86_FORM_VGF2P8MULB_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0xc4, 0xe2, 0x69, 0xcf, 0xcb } },
+    // AVX-NE-CONVERT, AVX-VNNI-INT8 and INT16, SHA512, SM3 and SM4: vbcstnesh2ps ymm1, word ptr [rax] (66);
+    // vcvtneoph2ps xmm1, xmmword ptr [rax] (no prefix); vpdpbsud ymm1, ymm2, ymm3 (F3); vpdpwusds xmm1, xmm2, xmm3 (66);
+    // vsha512msg2 ymm1, ymm2 (F2); vsha512rnds2 ymm1, ymm2, xmm3; vsm3msg1 xmm1, xmm2, xmmword ptr [rax]; vsm3rnds2 xmm1,
+    // xmm2, xmm3, 5 (0F 3A); and vsm4rnds4 ymm1, ymm2, ymm3
+    { { .form = X86_FORM_VBCSTNESH2PS_Y_M16, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xc4, 0xe2, 0x7d, 0xb1, 0x08 } },
+    { { .form = X86_FORM_VCVTNEOPH2PS_X_M128, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xc4, 0xe2, 0x78, 0xb0, 0x08 } },
+    { { .form = X86_FORM_VPDPBSUD_Y_Y_YM256, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0xc4, 0xe2, 0x6e, 0x50, 0xcb } },
+    { { .form = X86_FORM_VPDPWUSDS_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0xc4, 0xe2, 0x69, 0xd3, 0xcb } },
+    { { .form = X86_FORM_VSHA512MSG2_Y_Y, .reg = 1, .rm = 2 }, 5, { 0xc4, 0xe2, 0x7f, 0xcd, 0xca } },
+    { { .form = X86_FORM_VSHA512RNDS2_Y_Y_X, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0xc4, 0xe2, 0x6f, 0xcb, 0xcb } },
+    { { .form = X86_FORM_VSM3MSG1_X_X_XM128, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0xc4, 0xe2, 0x68, 0xda, 0x08 } },
+    { { .form = X86_FORM_VSM3RNDS2_X_X_XM128_IMM8, .reg = 1, .vvvv = 2, .rm = 3, .immediate = 5 }, 6, { 0xc4, 0xe3, 0x69, 0xde, 0xcb, 0x05 } },
+    { { .form = X86_FORM_VSM4RNDS4_Y_Y_YM256, .reg = 1, .vvvv = 2, .rm = 3 }, 5, { 0xc4, 0xe2, 0x6f, 0xda, 0xcb } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.

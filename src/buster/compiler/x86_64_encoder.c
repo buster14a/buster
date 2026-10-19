@@ -580,6 +580,11 @@ typedef enum X86Syntax
     XV(N##_M128_X, m, VEX, prefixes, 2, opcode, R, 0, 0, 0, V, NONE, M, 16, 1, NONE, RM_REG) \
     XV(N##_M256_Y, m, VEX, prefixes, 2, opcode, R, 0, 0, 1, Y, NONE, M, 32, 1, NONE, RM_REG)
 
+// Loads of 128 and 256 bits, from memory only.
+#define BUSTER_X86_AVX_LOAD_FORMS(XV, N, m, prefixes, opcode_bytes, opcode) \
+    XV(N##_X_M128, m, VEX, prefixes, opcode_bytes, opcode, R, 0, 0, 0, V, NONE, M, 16, 1, NONE, REG_RM) \
+    XV(N##_Y_M256, m, VEX, prefixes, opcode_bytes, opcode, R, 0, 0, 1, Y, NONE, M, 32, 1, NONE, REG_RM)
+
 // The opmask instructions at their four widths: bytes (66, W0), words (W0), doublewords (66, W1) and quadwords
 // (W1). Two sources (VEX.L1, the first in VEX.vvvv) or one (VEX.L0); the shifts by an immediate are 66 0F 3A, at
 // `opcode` for bytes and words and the next opcode for doublewords and quadwords.
@@ -1346,7 +1351,6 @@ typedef enum X86Syntax
     BUSTER_X86_AVX_PACKED_FORMS(XV, VPSRLVQ, "vpsrlvq", 0x66, 3, 0x0f3845, 1) \
     BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VPBLENDW, "vpblendw", 0x66, 3, 0x0f3a0e, 0) \
     BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VMPSADBW, "vmpsadbw", 0x66, 3, 0x0f3a42, 0) \
-    XV(VPCLMULQDQ_X_X_XM128_IMM8, "vpclmulqdq", VEX, 0x66, 3, 0x0f3a44, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IMM) \
     BUSTER_X86_AVX_UNARY_FORMS(XV, VPABSB, "vpabsb", 0x66, 3, 0x0f381c) \
     BUSTER_X86_AVX_UNARY_FORMS(XV, VPABSW, "vpabsw", 0x66, 3, 0x0f381d) \
     BUSTER_X86_AVX_UNARY_FORMS(XV, VPABSD, "vpabsd", 0x66, 3, 0x0f381e) \
@@ -1376,6 +1380,56 @@ typedef enum X86Syntax
     XV(VPCMPISTRI_X_XM128_IMM8, "vpcmpistri", VEX, 0x66, 3, 0x0f3a63, R, 1, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
     XV(VPCMPESTRMQ_X_XM128_IMM8, "vpcmpestrmq", VEX, 0x66, 3, 0x0f3a60, R, 1, 1, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
     XV(VPCMPESTRIQ_X_XM128_IMM8, "vpcmpestriq", VEX, 0x66, 3, 0x0f3a61, R, 1, 1, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
+    /* AES (AVX's at 128 bits, and VAES's at 256), carry-less multiplication and GFNI. */ \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VAESENC, "vaesenc", 0x66, 3, 0x0f38dc, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VAESENCLAST, "vaesenclast", 0x66, 3, 0x0f38dd, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VAESDEC, "vaesdec", 0x66, 3, 0x0f38de, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VAESDECLAST, "vaesdeclast", 0x66, 3, 0x0f38df, 0) \
+    XV(VAESIMC_X_XM128, "vaesimc", VEX, 0x66, 3, 0x0f38db, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VAESKEYGENASSIST_X_XM128_IMM8, "vaeskeygenassist", VEX, 0x66, 3, 0x0f3adf, R, 1, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
+    BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VPCLMULQDQ, "vpclmulqdq", 0x66, 3, 0x0f3a44, 0) \
+    BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VGF2P8AFFINEQB, "vgf2p8affineqb", 0x66, 3, 0x0f3ace, 1) \
+    BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VGF2P8AFFINEINVQB, "vgf2p8affineinvqb", 0x66, 3, 0x0f3acf, 1) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VGF2P8MULB, "vgf2p8mulb", 0x66, 3, 0x0f38cf, 0) \
+    /* Dot products (AVX-VNNI, AVX-VNNI-INT8 and AVX-VNNI-INT16) and 52-bit multiplications (AVX-IFMA). */ \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPBUSD, "vpdpbusd", 0x66, 3, 0x0f3850, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPBUSDS, "vpdpbusds", 0x66, 3, 0x0f3851, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPWSSD, "vpdpwssd", 0x66, 3, 0x0f3852, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPWSSDS, "vpdpwssds", 0x66, 3, 0x0f3853, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPBSSD, "vpdpbssd", 0xf2, 3, 0x0f3850, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPBSSDS, "vpdpbssds", 0xf2, 3, 0x0f3851, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPBSUD, "vpdpbsud", 0xf3, 3, 0x0f3850, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPBSUDS, "vpdpbsuds", 0xf3, 3, 0x0f3851, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPBUUD, "vpdpbuud", 0, 3, 0x0f3850, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPBUUDS, "vpdpbuuds", 0, 3, 0x0f3851, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPWSUD, "vpdpwsud", 0xf3, 3, 0x0f38d2, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPWSUDS, "vpdpwsuds", 0xf3, 3, 0x0f38d3, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPWUSD, "vpdpwusd", 0x66, 3, 0x0f38d2, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPWUSDS, "vpdpwusds", 0x66, 3, 0x0f38d3, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPWUUD, "vpdpwuud", 0, 3, 0x0f38d2, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPDPWUUDS, "vpdpwuuds", 0, 3, 0x0f38d3, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMADD52LUQ, "vpmadd52luq", 0x66, 3, 0x0f38b4, 1) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMADD52HUQ, "vpmadd52huq", 0x66, 3, 0x0f38b5, 1) \
+    /* AVX-NE-CONVERT: BF16 and FP16 from memory to single precision (one broadcast, or the even or odd elements). */ \
+    XV(VBCSTNEBF162PS_X_M16, "vbcstnebf162ps", VEX, 0xf3, 3, 0x0f38b1, R, 0, 0, 0, V, NONE, M, 2, 1, NONE, REG_RM) \
+    XV(VBCSTNEBF162PS_Y_M16, "vbcstnebf162ps", VEX, 0xf3, 3, 0x0f38b1, R, 0, 0, 1, Y, NONE, M, 2, 1, NONE, REG_RM) \
+    XV(VBCSTNESH2PS_X_M16, "vbcstnesh2ps", VEX, 0x66, 3, 0x0f38b1, R, 0, 0, 0, V, NONE, M, 2, 1, NONE, REG_RM) \
+    XV(VBCSTNESH2PS_Y_M16, "vbcstnesh2ps", VEX, 0x66, 3, 0x0f38b1, R, 0, 0, 1, Y, NONE, M, 2, 1, NONE, REG_RM) \
+    BUSTER_X86_AVX_LOAD_FORMS(XV, VCVTNEEBF162PS, "vcvtneebf162ps", 0xf3, 3, 0x0f38b0) \
+    BUSTER_X86_AVX_LOAD_FORMS(XV, VCVTNEEPH2PS, "vcvtneeph2ps", 0x66, 3, 0x0f38b0) \
+    BUSTER_X86_AVX_LOAD_FORMS(XV, VCVTNEOBF162PS, "vcvtneobf162ps", 0xf2, 3, 0x0f38b0) \
+    BUSTER_X86_AVX_LOAD_FORMS(XV, VCVTNEOPH2PS, "vcvtneoph2ps", 0, 3, 0x0f38b0) \
+    XV(VCVTNEPS2BF16_X_XM128, "vcvtneps2bf16", VEX, 0xf3, 3, 0x0f3872, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VCVTNEPS2BF16_X_YM256, "vcvtneps2bf16", VEX, 0xf3, 3, 0x0f3872, R, 0, 0, 1, V, NONE, YM, 32, 1, NONE, REG_RM) \
+    /* SHA512 (registers only), SM3 and SM4. */ \
+    XV(VSHA512MSG1_Y_X, "vsha512msg1", VEX, 0xf2, 3, 0x0f38cc, R, 0, 0, 1, Y, NONE, V, 16, 1, NONE, REG_RM) \
+    XV(VSHA512MSG2_Y_Y, "vsha512msg2", VEX, 0xf2, 3, 0x0f38cd, R, 0, 0, 1, Y, NONE, Y, 32, 1, NONE, REG_RM) \
+    XV(VSHA512RNDS2_Y_Y_X, "vsha512rnds2", VEX, 0xf2, 3, 0x0f38cb, R, 0, 0, 1, Y, Y, V, 16, 1, NONE, REG_VVVV_RM) \
+    XV(VSM3MSG1_X_X_XM128, "vsm3msg1", VEX, 0, 3, 0x0f38da, R, 0, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM) \
+    XV(VSM3MSG2_X_X_XM128, "vsm3msg2", VEX, 0x66, 3, 0x0f38da, R, 0, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM) \
+    XV(VSM3RNDS2_X_X_XM128_IMM8, "vsm3rnds2", VEX, 0x66, 3, 0x0f3ade, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IMM) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VSM4KEY4, "vsm4key4", 0xf3, 3, 0x0f38da, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VSM4RNDS4, "vsm4rnds4", 0xf2, 3, 0x0f38da, 0) \
     XV(ANDN_R32_R32_RM32, "andn", VEX, 0, 3, 0x0f38f2, R, 0, 0, 0, GD, GD, ED, 4, 1, NONE, REG_VVVV_RM) \
     XV(ANDN_R64_R64_RM64, "andn", VEX, 0, 3, 0x0f38f2, R, 0, 1, 0, GQ, GQ, EQ, 8, 1, NONE, REG_VVVV_RM) \
     XV(BEXTR_R32_RM32_R32, "bextr", VEX, 0, 3, 0x0f38f7, R, 0, 0, 0, GD, GD, ED, 4, 1, NONE, REG_RM_VVVV) \
@@ -2625,6 +2679,46 @@ typedef enum X86Syntax
     X(EXTRQ_X_IMM8_IMM8, "extrq", 0x66, 2, 0x0f78, D0, 2, 0, 0, NONE, V, 16, RM_IMM8_IMM8) \
     X(INSERTQ_X_X, "insertq", 0xf2, 2, 0x0f79, R, 0, 0, 0, V, V, 16, REG_RM) \
     X(INSERTQ_X_X_IMM8_IMM8, "insertq", 0xf2, 2, 0x0f78, R, 2, 0, 0, V, V, 16, REG_RM_IMM8_IMM8) \
+    /* AES, carry-less multiplication, SHA (sha256rnds2 also reads XMM0) and GFNI. */ \
+    BUSTER_X86_SSE_PACKED_FORM(X, AESIMC, "aesimc", 0x66, 3, 0x0f38db) \
+    BUSTER_X86_SSE_PACKED_FORM(X, AESENC, "aesenc", 0x66, 3, 0x0f38dc) \
+    BUSTER_X86_SSE_PACKED_FORM(X, AESENCLAST, "aesenclast", 0x66, 3, 0x0f38dd) \
+    BUSTER_X86_SSE_PACKED_FORM(X, AESDEC, "aesdec", 0x66, 3, 0x0f38de) \
+    BUSTER_X86_SSE_PACKED_FORM(X, AESDECLAST, "aesdeclast", 0x66, 3, 0x0f38df) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, AESKEYGENASSIST, "aeskeygenassist", 0x66, 3, 0x0f3adf) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, PCLMULQDQ, "pclmulqdq", 0x66, 3, 0x0f3a44) \
+    BUSTER_X86_SSE_PACKED_FORM(X, SHA1NEXTE, "sha1nexte", 0, 3, 0x0f38c8) \
+    BUSTER_X86_SSE_PACKED_FORM(X, SHA1MSG1, "sha1msg1", 0, 3, 0x0f38c9) \
+    BUSTER_X86_SSE_PACKED_FORM(X, SHA1MSG2, "sha1msg2", 0, 3, 0x0f38ca) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, SHA1RNDS4, "sha1rnds4", 0, 3, 0x0f3acc) \
+    X(SHA256RNDS2_X_XM128_XMM0, "sha256rnds2", 0, 3, 0x0f38cb, R, 0, 0, 0, V, XM, 16, REG_RM_XMM0) \
+    BUSTER_X86_SSE_PACKED_FORM(X, SHA256MSG1, "sha256msg1", 0, 3, 0x0f38cc) \
+    BUSTER_X86_SSE_PACKED_FORM(X, SHA256MSG2, "sha256msg2", 0, 3, 0x0f38cd) \
+    BUSTER_X86_SSE_PACKED_FORM(X, GF2P8MULB, "gf2p8mulb", 0x66, 3, 0x0f38cf) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, GF2P8AFFINEQB, "gf2p8affineqb", 0x66, 3, 0x0f3ace) \
+    BUSTER_X86_SSE_PACKED_IMM8_FORM(X, GF2P8AFFINEINVQB, "gf2p8affineinvqb", 0x66, 3, 0x0f3acf) \
+    /* Key Locker: a handle of 384 or 512 bits in memory, which GNU as takes without a size. */ \
+    X(AESENC128KL_X_M384, "aesenc128kl", 0xf3, 3, 0x0f38dc, R, 0, 0, 0, V, M, 48, REG_RM) \
+    X(AESDEC128KL_X_M384, "aesdec128kl", 0xf3, 3, 0x0f38dd, R, 0, 0, 0, V, M, 48, REG_RM) \
+    X(AESENC256KL_X_M512, "aesenc256kl", 0xf3, 3, 0x0f38de, R, 0, 0, 0, V, M, 0, REG_RM) \
+    X(AESDEC256KL_X_M512, "aesdec256kl", 0xf3, 3, 0x0f38df, R, 0, 0, 0, V, M, 0, REG_RM) \
+    X(AESENCWIDE128KL_M384, "aesencwide128kl", 0xf3, 3, 0x0f38d8, D0, 0, 0, 0, NONE, M, 48, RM) \
+    X(AESDECWIDE128KL_M384, "aesdecwide128kl", 0xf3, 3, 0x0f38d8, D1, 0, 0, 0, NONE, M, 48, RM) \
+    X(AESENCWIDE256KL_M512, "aesencwide256kl", 0xf3, 3, 0x0f38d8, D2, 0, 0, 0, NONE, M, 0, RM) \
+    X(AESDECWIDE256KL_M512, "aesdecwide256kl", 0xf3, 3, 0x0f38d8, D3, 0, 0, 0, NONE, M, 0, RM) \
+    X(ENCODEKEY128_R32_R32, "encodekey128", 0xf3, 3, 0x0f38fa, R, 0, 0, 0, GD, GD, 4, REG_RM) \
+    X(ENCODEKEY256_R32_R32, "encodekey256", 0xf3, 3, 0x0f38fb, R, 0, 0, 0, GD, GD, 4, REG_RM) \
+    X(LOADIWKEY_X_X, "loadiwkey", 0xf3, 3, 0x0f38dc, R, 0, 0, 0, V, V, 16, REG_RM) \
+    /* VIA PadLock: the ModRM byte is part of the opcode, and the operands are implicit. */ \
+    X(XSTORE, "xstore", 0, 3, 0x0fa7c0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(REP_XSTORE, "rep xstore", 0xf3, 3, 0x0fa7c0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(REP_XCRYPTECB, "rep xcryptecb", 0xf3, 3, 0x0fa7c8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(REP_XCRYPTCBC, "rep xcryptcbc", 0xf3, 3, 0x0fa7d0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(REP_XCRYPTCTR, "rep xcryptctr", 0xf3, 3, 0x0fa7d8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(REP_XCRYPTCFB, "rep xcryptcfb", 0xf3, 3, 0x0fa7e0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(REP_XCRYPTOFB, "rep xcryptofb", 0xf3, 3, 0x0fa7e8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(REP_XSHA1, "rep xsha1", 0xf3, 3, 0x0fa6c8, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(REP_XSHA256, "rep xsha256", 0xf3, 3, 0x0fa6d0, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     /* MXCSR, and the x87, MMX and SSE state (512 bytes). */ \
     X(LDMXCSR_M32, "ldmxcsr", 0, 2, 0x0fae, D2, 0, 0, 0, NONE, M, 4, RM) \
     X(STMXCSR_M32, "stmxcsr", 0, 2, 0x0fae, D3, 0, 0, 0, NONE, M, 4, RM) \
