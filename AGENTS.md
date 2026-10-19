@@ -43,7 +43,8 @@ or infrastructure machinery merely to match its style.
 - `src/buster/compiler/c_lexer_benchmark.c` provides the `benchmark-lexer`
   command. The 9700X CI workflow runs it on the repository's C sources by default.
   `docs/c-lexer.md` records the GFNI classifier, the leading-comment skip, branch-free chunk state, the
-  pipelined write-out, table-driven punctuator kinds, the delimiter scan and their 9700X measurements.
+  pipelined write-out, table-driven punctuator kinds, the delimiter scan, chunks read in place, the raw string
+  check and their 9700X measurements.
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
   of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder);
   `docs/x86-64-encoder.md` explains its design and measurements.

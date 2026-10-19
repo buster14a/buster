@@ -28,7 +28,9 @@
 // comment-only chunks and chunks without literal/comment delimiters; then branch-free chunk state, a write-out a
 // chunk behind the analysis, a shortcut for chunks without backslashes, multi-character punctuators by table lookup,
 // fewer register spills, and a scan that finds the block comment a chunk starts inside of first (which also covers
-// what the comment-only chunk shortcut did, so that is gone). Measurements: docs/c-lexer.md.
+// what the comment-only chunk shortcut did, so that is gone); then C++'s raw string literals checked at literal
+// starts, chunks read in place from the source, the previous chunk's bitstrings carried as their last lanes, and a
+// one-permute byte shift. Measurements: docs/c-lexer.md.
 //
 // Upstream license (Accelerated-Zig-Parser's LICENSE file, verbatim):
 //
@@ -1905,10 +1907,10 @@ BUSTER_INLINE U64x8 shr(U64x8 a, int i)
     return (__builtin_shufflevector(a, (U64x8){0}, 1, 2, 3, 4, 5, 6, 7, 8) << (64 - i)) | (a >> i);
 }
 
-// `a << i`, shifting in the top `i` bits of the previous chunk's bitstring `previous`.
-BUSTER_INLINE U64x8 shl_carry(U64x8 a, U64x8 previous, int i)
+// `a << i`, shifting in the top `i` bits of `previous`, the last lane of the previous chunk's bitstring.
+BUSTER_INLINE U64x8 shl_carry(U64x8 a, uint64_t previous, int i)
 {
-    return (__builtin_shufflevector(a, previous, 15, 0, 1, 2, 3, 4, 5, 6) >> (64 - i)) | (a << i);
+    return (__builtin_shufflevector(a, (U64x8){previous}, 8, 0, 1, 2, 3, 4, 5, 6) >> (64 - i)) | (a << i);
 }
 
 // `a >> i`, shifting in the low `i` bits of `next`, the bitstring of the next chunk's first 64 bytes.
@@ -2008,13 +2010,21 @@ BUSTER_INLINE __m512i perm2b(const uint8_t table[128], __m512i indices)
     return _mm512_permutex2var_epi8(_mm512_load_si512(table), indices, _mm512_load_si512(table + 64));
 }
 
-// `current` shifted up by one byte, shifting in the last byte of `previous`.
+// For a permute that shifts a vector up by one byte, shifting in the last byte of another: byte i of the result is
+// byte i - 1 of the first vector (index i - 1), and byte 0 is byte 63 of the second (index 127).
+static const uint8_t shift_in_indices[BUSTER_LEX_VECTOR_BYTES] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES))) =
+{
+    127, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+    31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
+};
+
+// `current` shifted up by one byte, shifting in the last byte of `previous`: one vpermt2b (an FP1/FP2 uop), where
+// Clang would otherwise emit a valignq and a vpalignr (two). The index is opaque to Clang so that it keeps the permute.
 BUSTER_INLINE __m512i shift_in_previous(__m512i current, __m512i previous)
 {
-    return (__m512i)__builtin_shufflevector((U8x64)current, (U8x64)previous, 127, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
-                                            14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
-                                            35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
-                                            56, 57, 58, 59, 60, 61, 62);
+    __m512i indices = _mm512_load_si512(shift_in_indices);
+    __asm__("" : "+v"(indices));
+    return _mm512_permutex2var_epi8(current, indices, previous);
 }
 
 // Could the characters before and after a line splice be part of the same token (outside of literals and comments)?
@@ -2629,16 +2639,17 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
     const int64_t base_offset = (int64_t)(base - source);
     const int64_t first_chunk = ((int64_t)begin - base_offset) & ~(int64_t)63;
 
-    // What the previous chunk passes on. Bitstrings only matter for their top bits.
-    U64x8 previous_identifier = zero;
-    U64x8 previous_apostrophe = zero;
-    U64x8 previous_star = zero;
-    U64x8 previous_number_token = zero;
-    U64x8 previous_identifier_token = zero;
-    U64x8 previous_unknown_openers = zero;
-    U64x8 previous_splice_backslash = zero;
-    U64x8 previous_splice_cr = zero;
-    U64x8 next_is_escaped = zero; // At bit 0.
+    // What the previous chunk passes on: the last lanes of its bitstrings (only their top bits matter), in general
+    // registers. (Bitstrings carried whole would hold vector registers through the iteration, or be spilled.)
+    uint64_t previous_identifier = 0;
+    uint64_t previous_apostrophe = 0;
+    uint64_t previous_star = 0;
+    uint64_t previous_number_token = 0;
+    uint64_t previous_identifier_token = 0;
+    uint64_t previous_unknown_openers = 0;
+    uint64_t previous_splice_backslash = 0; // At bit 63.
+    uint64_t previous_splice_cr = 0; // At bit 63.
+    uint64_t next_is_escaped = 0; // At bit 0.
     uint32_t number_carry = 0; // A pp-number continues into the chunk.
     State state = STATE_OUTSIDE;
     uint32_t block_comment_skip = 0; // A "*/" in bits below this can't close the block comment the chunk starts in.
@@ -2671,11 +2682,14 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
         raws[0][j] = load_lane(base, base_offset, begin, length, first_chunk + BUSTER_LEX_VECTOR_BYTES * j);
         classify(raws[0][j], masks[0], j, &properties[0][j], &previous_classes, &previous_pairs, cplusplus);
     }
+    // The vectors of the chunk being analyzed: in the source itself if they (and the next chunk's first one) are all
+    // inside it, else in `raws`, with what is outside of it read as newlines.
+    const __m512i* chunk_vectors = raws[0];
 
     for (int64_t chunk = first_chunk, current = 0, raw_current = 0;; chunk += BUSTER_LEX_CHUNK_BYTES, current ^= 1, raw_current = raw_current == 2 ? 0 : raw_current + 1)
     {
         uint64_t (*o)[BUSTER_LEX_MASK_LANES] = masks[current];
-        const __m512i* raw = raws[raw_current];
+        const __m512i* raw = chunk_vectors;
         const int64_t chunk_position = base_offset + chunk; // The source position of bit 0.
         const bool last_chunk = chunk_position + BUSTER_LEX_CHUNK_BYTES >= (int64_t)length;
 
@@ -2683,17 +2697,31 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
         if (BUSTER_LIKELY(!last_chunk))
         {
             uint64_t (*next_o)[BUSTER_LEX_MASK_LANES] = masks[current ^ 1];
-            __m512i* next_raw = raws[raw_current == 2 ? 0 : raw_current + 1];
-            next_raw[0] = raw[BUSTER_LEX_VECTOR_COUNT];
             properties[current ^ 1][0] = properties[current][BUSTER_LEX_VECTOR_COUNT];
             for (unsigned m = BUSTER_LEX_PROPERTY_MASK_COUNT; m < NUM_MASKS; m += 1)
             {
                 next_o[m][0] = o[m][BUSTER_LEX_VECTOR_COUNT];
             }
-            for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
+            const int64_t next_position = base_offset + chunk + BUSTER_LEX_CHUNK_BYTES; // The source position of the next chunk.
+            if (BUSTER_LIKELY((next_position >= (int64_t)begin) & (next_position + BUSTER_LEX_CHUNK_BYTES + BUSTER_LEX_VECTOR_BYTES <= (int64_t)length)))
             {
-                next_raw[j] = load_lane(base, base_offset, begin, length, chunk + BUSTER_LEX_CHUNK_BYTES + BUSTER_LEX_VECTOR_BYTES * j);
-                classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus);
+                const __m512i* next_raw = (const __m512i*)(base + chunk + BUSTER_LEX_CHUNK_BYTES);
+                for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
+                {
+                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus);
+                }
+                chunk_vectors = next_raw;
+            }
+            else
+            {
+                __m512i* next_raw = raws[raw_current == 2 ? 0 : raw_current + 1];
+                next_raw[0] = raw[BUSTER_LEX_VECTOR_COUNT];
+                for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
+                {
+                    next_raw[j] = load_lane(base, base_offset, begin, length, chunk + BUSTER_LEX_CHUNK_BYTES + BUSTER_LEX_VECTOR_BYTES * j);
+                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus);
+                }
+                chunk_vectors = next_raw;
             }
         }
         // III. Write-out of the previous chunk.
@@ -2742,12 +2770,12 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
         U64x8 joining_splices = zero; // Splices between characters that would make one token outside of literals and comments,
         U64x8 closing_splices = zero; // and between the '*' and '/' that would end a block comment.
         U64x8 escaped = zero;
-        if (BUSTER_UNLIKELY(!is_zero(backslash | previous_splice_backslash | previous_splice_cr | next_is_escaped)))
+        if (BUSTER_UNLIKELY(!is_zero(backslash) | ((previous_splice_backslash | previous_splice_cr | next_is_escaped) != 0)))
         {
             // Line splices: a backslash right before a newline (not the end of the source). They don't break lines and
             // read as whitespace, which is right unless the characters around one could be part of the same token.
             splice_backslash = backslash & shr_next(newline & ~padding, BUSTER_LEX_NEXT(M_NEWLINE) & ~next_padding, 1);
-            if (BUSTER_UNLIKELY(!is_zero(splice_backslash | previous_splice_backslash | previous_splice_cr)))
+            if (BUSTER_UNLIKELY(!is_zero(splice_backslash) | ((previous_splice_backslash | previous_splice_cr) != 0)))
             {
                 U64x8 cr;
                 for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
@@ -2791,8 +2819,8 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
                         }
                     }
                 }
-                previous_splice_backslash = splice_backslash & most_significant;
-                previous_splice_cr = first_newline & cr & most_significant;
+                previous_splice_backslash = splice_backslash[BUSTER_LEX_VECTOR_COUNT - 1] & (1ull << 63);
+                previous_splice_cr = first_newline[BUSTER_LEX_VECTOR_COUNT - 1] & cr[BUSTER_LEX_VECTOR_COUNT - 1] & (1ull << 63);
             }
 
             // A backslash, whitespace and a newline is a line splice too (that's rare).
@@ -2819,12 +2847,12 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
             // Matches the character after any odd number of backslashes (simdjson's algorithm by John Keiser).
             {
                 const U64x8 escape_backslash = backslash & ~splice_backslash;
-                const U64x8 potential_escape = escape_backslash & ~next_is_escaped;
+                const U64x8 potential_escape = escape_backslash & ~bit_0_if(next_is_escaped);
                 const U64x8 maybe_escaped = shl(potential_escape, 1);
                 const U64x8 even_series_codes_and_odd_bits = sub(maybe_escaped | odd_bits, potential_escape);
                 const U64x8 escape_and_terminal_code = even_series_codes_and_odd_bits ^ odd_bits;
-                escaped = escape_and_terminal_code ^ (escape_backslash | next_is_escaped);
-                next_is_escaped = (U64x8){bit_511(escape_and_terminal_code & escape_backslash), 0, 0, 0, 0, 0, 0, 0};
+                escaped = escape_and_terminal_code ^ (escape_backslash | bit_0_if(next_is_escaped));
+                next_is_escaped = bit_511(escape_and_terminal_code & escape_backslash);
             }
         }
 
@@ -2852,22 +2880,6 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
         if (BUSTER_UNLIKELY(!is_zero((block_comment_marks & block_comment_closers) | (block_comment_marks & shr_next(block_comment_closers, next_closers, 2)))))
         {
             return BUSTER_LEX_NEEDS_SCALAR; // "*/*" or "/*/"
-        }
-
-        // C++'s raw string literals need the scalar lexer.
-        if (cplusplus && BUSTER_UNLIKELY(!is_zero(quote & shl_carry(identifier, previous_identifier, 1)) | ((bit_511(identifier) & BUSTER_LEX_NEXT(M_QUOTE) & 1) != 0)))
-        {
-            const U64x8 after_identifier = quote & shl_carry(identifier, previous_identifier, 1);
-            for (uint32_t lane = 0; lane < BUSTER_LEX_LOOKAHEAD_VECTORS; lane += 1)
-            {
-                for (uint64_t bits = lane < BUSTER_LEX_VECTOR_COUNT ? after_identifier[lane] : BUSTER_LEX_NEXT(M_QUOTE) & bit_511(identifier); bits != 0; bits &= bits - 1)
-                {
-                    if (is_raw_string_quote(source, begin, length, chunk_position + BUSTER_LEX_VECTOR_BYTES * lane + __builtin_ctzll(bits)))
-                    {
-                        return BUSTER_LEX_NEEDS_SCALAR;
-                    }
-                }
-            }
         }
 
         // The block comment the chunk starts inside of (if it does) goes up to its first "*/" at or after bit
@@ -2950,7 +2962,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
             // (The newline that starts the next chunk is part of a splice if this chunk ends with its backslash, or
             // with its "\\\r" and the newline is the '\n' after that.)
             const bool next_splice_newline = bit_511(splice_backslash) ||
-                                             (bit_511(previous_splice_cr) && (_mm512_cmpeq_epi8_mask(raw[BUSTER_LEX_VECTOR_COUNT], splat8('\n')) & ~next_padding & 1));
+                                             ((previous_splice_cr >> 63) && (_mm512_cmpeq_epi8_mask(raw[BUSTER_LEX_VECTOR_COUNT], splat8('\n')) & ~next_padding & 1));
             if ((BUSTER_LEX_NEXT(M_NEWLINE) & 1) && !next_splice_newline)
             {
                 next_state = STATE_OUTSIDE;
@@ -3167,6 +3179,23 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
         const uint64_t next_quotes = (BUSTER_LEX_NEXT(M_QUOTE) | BUSTER_LEX_NEXT(M_APOSTROPHE)) & 3;
         if (BUSTER_UNLIKELY(!is_zero(literal_starts & shl_carry(identifier_token, previous_identifier_token, 1)) | ((bit_511(identifier_token) & (uint64_t)(next_quotes != 0)) != 0)))
         {
+            // C++'s raw string literals need the scalar lexer. (A quote after an identifier character is checked only
+            // where it starts a literal, rather than at each one before the scan: most end strings. The scan is right
+            // up to the first raw string literal, which starts one.)
+            if (cplusplus)
+            {
+                const U64x8 prefixed_quotes = quote & literal_starts & shl_carry(identifier_token, previous_identifier_token, 1);
+                for (uint32_t lane = 0; lane < BUSTER_LEX_VECTOR_COUNT; lane += 1)
+                {
+                    for (uint64_t bits = prefixed_quotes[lane]; bits != 0; bits &= bits - 1)
+                    {
+                        if (is_raw_string_quote(source, begin, length, chunk_position + BUSTER_LEX_VECTOR_BYTES * lane + __builtin_ctzll(bits)))
+                        {
+                            return BUSTER_LEX_NEEDS_SCALAR;
+                        }
+                    }
+                }
+            }
             U64x8 letter;
             U64x8 u;
             U64x8 eight;
@@ -3262,12 +3291,12 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
         deferred.special_lanes = _mm512_test_epi64_mask((__m512i)special, (__m512i)special);
         pending = true;
 
-        previous_identifier = identifier;
-        previous_apostrophe = apostrophe;
-        previous_star = star;
-        previous_number_token = number_token;
-        previous_identifier_token = identifier_token;
-        previous_unknown_openers = unknown_openers;
+        previous_identifier = identifier[BUSTER_LEX_VECTOR_COUNT - 1];
+        previous_apostrophe = apostrophe[BUSTER_LEX_VECTOR_COUNT - 1];
+        previous_star = star[BUSTER_LEX_VECTOR_COUNT - 1];
+        previous_number_token = number_token[BUSTER_LEX_VECTOR_COUNT - 1];
+        previous_identifier_token = identifier_token[BUSTER_LEX_VECTOR_COUNT - 1];
+        previous_unknown_openers = unknown_openers[BUSTER_LEX_VECTOR_COUNT - 1];
         number_carry = number_carry_out;
         state = next_state;
         block_comment_skip = next_block_comment_skip;
