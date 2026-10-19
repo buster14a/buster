@@ -127,7 +127,8 @@ struct X86Instruction
 {
     // The immediate, in as many low bytes as the form's immediate has (ENTER's two are imm16 | imm8 << 16), signed or
     // not: imm8 in [-128, 255], imm16 in [-32768, 65535] and ENTER's in [0, 2^24). A 64-bit immediate or address
-    // (MOV r64, imm64 and MOVABS) is immediate | displacement << 32.
+    // (MOV r64, imm64 and MOVABS) is immediate | displacement << 32. An /is4 operand (a register in the immediate's
+    // bits 7 to 4) is the register's number times 16, as the instruction has it.
     int32_t immediate;
     // The memory operand's displacement, or a relative branch's displacement from the end of the instruction (a rel8's
     // in [-128, 127]).
@@ -252,8 +253,9 @@ typedef enum X86EncoderError
 // The order of a form's operands in Intel syntax, with its implicit ones (for printing and tests; the encoding
 // doesn't depend on it). ACC is AL, AX, EAX or RAX; MOFFS is a 64-bit absolute address; VVVV is the VEX.vvvv register;
 // ST is the x87 register ST(0), where the rm operand is ST(i); XMM0 is the variable blends' implicit mask register;
-// IMM8_IMM8 is two 8-bit immediates (SSE4a's extrq and insertq), the immediate's low byte first; and RM_VVVV_REG is a
-// masked store's memory, mask and source.
+// IMM8_IMM8 is two 8-bit immediates (SSE4a's extrq and insertq), the immediate's low byte first; RM_VVVV_REG is a
+// masked store's memory, mask and source; and IS4 is the register in the immediate's bits 7 to 4, of the reg
+// operand's class.
 typedef enum X86Syntax
 {
     X86_SYNTAX_NONE,
@@ -286,6 +288,8 @@ typedef enum X86Syntax
     X86_SYNTAX_RM_IMM8_IMM8,
     X86_SYNTAX_REG_RM_IMM8_IMM8,
     X86_SYNTAX_RM_VVVV_REG,
+    X86_SYNTAX_REG_VVVV_RM_IS4,
+    X86_SYNTAX_REG_VVVV_IS4_RM,
 } X86Syntax;
 
 // The form table. Each row is X(name, mnemonic, prefixes, opcode bytes, opcode, encoding, immediate bytes, relative
@@ -608,6 +612,33 @@ typedef enum X86Syntax
 #define BUSTER_X86_AVX_LOAD_FORMS(XV, N, m, prefixes, opcode_bytes, opcode) \
     XV(N##_X_M128, m, VEX, prefixes, opcode_bytes, opcode, R, 0, 0, 0, V, NONE, M, 16, 1, NONE, REG_RM) \
     XV(N##_Y_M256, m, VEX, prefixes, opcode_bytes, opcode, R, 0, 0, 1, Y, NONE, M, 32, 1, NONE, REG_RM)
+
+// Four operands, the last a register in the immediate (/is4, see X86Instruction.immediate): the destination, the
+// first source in VEX.vvvv, the second in ModRM.rm and the third in the immediate, at 128 and 256 bits (AVX's
+// variable blends, whose mask is the third).
+#define BUSTER_X86_AVX_IS4_FORMS(XV, N, m, opcode) \
+    XV(N##_X_X_XM128_X, m, VEX, 0x66, 3, opcode, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(N##_Y_Y_YM256_Y, m, VEX, 0x66, 3, opcode, R, 1, 0, 1, Y, Y, YM, 32, 1, NONE, REG_VVVV_RM_IS4)
+
+// AMD's FMA4: the product of the first two sources plus or minus the third, with W0 the second source in ModRM.rm
+// and the third in the immediate, and with W1 the other way around (which GNU as uses between registers); packed at
+// both widths, and scalar (`bits`), from the packed single-precision form's opcode: double precision at the next,
+// and single and double scalar at the two after it.
+#define BUSTER_X86_FMA4_PACKED_FORMS(XV, N, m, opcode) \
+    XV(N##_X_X_XM128_X, m, VEX, 0x66, 3, opcode, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(N##_X_X_X_XM128, m, VEX, 0x66, 3, opcode, R, 1, 1, 0, V, V, XM, 16, 1, NONE, REG_VVVV_IS4_RM) \
+    XV(N##_Y_Y_YM256_Y, m, VEX, 0x66, 3, opcode, R, 1, 0, 1, Y, Y, YM, 32, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(N##_Y_Y_Y_YM256, m, VEX, 0x66, 3, opcode, R, 1, 1, 1, Y, Y, YM, 32, 1, NONE, REG_VVVV_IS4_RM)
+
+#define BUSTER_X86_FMA4_SCALAR_FORMS(XV, N, m, opcode, bits) \
+    XV(N##_X_X_XM##bits##_X, m, VEX, 0x66, 3, opcode, R, 1, 0, 0, V, V, XM, bits / 8, 1, NONE, REG_VVVV_RM_IS4) \
+    XV(N##_X_X_X_XM##bits, m, VEX, 0x66, 3, opcode, R, 1, 1, 0, V, V, XM, bits / 8, 1, NONE, REG_VVVV_IS4_RM)
+
+#define BUSTER_X86_FMA4_FORMS(XV, N, m, opcode) \
+    BUSTER_X86_FMA4_PACKED_FORMS(XV, N##PS, m "ps", opcode) \
+    BUSTER_X86_FMA4_PACKED_FORMS(XV, N##PD, m "pd", opcode + 1) \
+    BUSTER_X86_FMA4_SCALAR_FORMS(XV, N##SS, m "ss", opcode + 2, 32) \
+    BUSTER_X86_FMA4_SCALAR_FORMS(XV, N##SD, m "sd", opcode + 3, 64)
 
 // The opmask instructions at their four widths: bytes (66, W0), words (W0), doublewords (66, W1) and quadwords
 // (W1). Two sources (VEX.L1, the first in VEX.vvvv) or one (VEX.L0); the shifts by an immediate are 66 0F 3A, at
@@ -1454,6 +1485,18 @@ typedef enum X86Syntax
     XV(VSM3RNDS2_X_X_XM128_IMM8, "vsm3rnds2", VEX, 0x66, 3, 0x0f3ade, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IMM) \
     BUSTER_X86_AVX_PACKED_FORMS(XV, VSM4KEY4, "vsm4key4", 0xf3, 3, 0x0f38da, 0) \
     BUSTER_X86_AVX_PACKED_FORMS(XV, VSM4RNDS4, "vsm4rnds4", 0xf2, 3, 0x0f38da, 0) \
+    /* Four operands, the last in the immediate (/is4): AVX's variable blends and AMD's FMA4. */ \
+    BUSTER_X86_AVX_IS4_FORMS(XV, VBLENDVPS, "vblendvps", 0x0f3a4a) \
+    BUSTER_X86_AVX_IS4_FORMS(XV, VBLENDVPD, "vblendvpd", 0x0f3a4b) \
+    BUSTER_X86_AVX_IS4_FORMS(XV, VPBLENDVB, "vpblendvb", 0x0f3a4c) \
+    BUSTER_X86_FMA4_PACKED_FORMS(XV, VFMADDSUBPS, "vfmaddsubps", 0x0f3a5c) \
+    BUSTER_X86_FMA4_PACKED_FORMS(XV, VFMADDSUBPD, "vfmaddsubpd", 0x0f3a5d) \
+    BUSTER_X86_FMA4_PACKED_FORMS(XV, VFMSUBADDPS, "vfmsubaddps", 0x0f3a5e) \
+    BUSTER_X86_FMA4_PACKED_FORMS(XV, VFMSUBADDPD, "vfmsubaddpd", 0x0f3a5f) \
+    BUSTER_X86_FMA4_FORMS(XV, VFMADD, "vfmadd", 0x0f3a68) \
+    BUSTER_X86_FMA4_FORMS(XV, VFMSUB, "vfmsub", 0x0f3a6c) \
+    BUSTER_X86_FMA4_FORMS(XV, VFNMADD, "vfnmadd", 0x0f3a78) \
+    BUSTER_X86_FMA4_FORMS(XV, VFNMSUB, "vfnmsub", 0x0f3a7c) \
     XV(ANDN_R32_R32_RM32, "andn", VEX, 0, 3, 0x0f38f2, R, 0, 0, 0, GD, GD, ED, 4, 1, NONE, REG_VVVV_RM) \
     XV(ANDN_R64_R64_RM64, "andn", VEX, 0, 3, 0x0f38f2, R, 0, 1, 0, GQ, GQ, EQ, 8, 1, NONE, REG_VVVV_RM) \
     XV(BEXTR_R32_RM32_R32, "bextr", VEX, 0, 3, 0x0f38f7, R, 0, 0, 0, GD, GD, ED, 4, 1, NONE, REG_RM_VVVV) \
@@ -3160,8 +3203,9 @@ static __attribute__((unused)) bool x86_encoder_initialize(void);
 // BUSTER_X86_ENCODER_CAPACITY(count)), and stores each one's offset in `offsets` if it isn't null. Writes nothing past
 // output + capacity, but the bytes after the instructions' may change. Returns the number of bytes, or a negative
 // X86EncoderError. Requires x86_encoder_initialize. It rejects the operands its encoding can't represent, but not those
-// only x86_validate does: an immediate or rel8 outside its field's range (it writes the field's low bytes), zeroing
-// without an opmask or into memory, and fields the form doesn't have (which it ignores).
+// only x86_validate does: an immediate or rel8 outside its field's range (it writes the field's low bytes), an /is4
+// immediate that isn't a register's number times 16, zeroing without an opmask or into memory, and fields the form
+// doesn't have (which it ignores).
 static __attribute__((unused)) int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets);
 // The same, one instruction at a time from the form table, after x86_validate: the reference for testing.
 static __attribute__((unused)) int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets);
@@ -3510,6 +3554,12 @@ static bool register_is_valid(uint8_t value, uint8_t operand, uint8_t family, bo
     return result;
 }
 
+// Whether the form's immediate is an /is4 register (a fourth operand, in bits 7 to 4).
+static bool x86_form_has_is4(const X86FormDescription* form)
+{
+    return form->syntax == X86_SYNTAX_REG_VVVV_RM_IS4 || form->syntax == X86_SYNTAX_REG_VVVV_IS4_RM;
+}
+
 // Whether the instruction can be encoded: a valid form, operands the form has and no others, a consistent addressing
 // mode, decorations the form can have, and immediates and relative displacements that fit their fields.
 static bool x86_instruction_is_valid(const X86Instruction* instruction)
@@ -3585,6 +3635,11 @@ static bool x86_instruction_is_valid(const X86Instruction* instruction)
             case 2: result = result && immediate >= -32768 && immediate <= 65535; break;
             case 3: result = result && immediate >= 0 && immediate < (1 << 24); break;
             default: break;
+        }
+        // An /is4 register: 0 to 15 in bits 7 to 4, and bits 3 to 0 clear.
+        if (x86_form_has_is4(form))
+        {
+            result = result && (immediate & ~(int64_t)0xf0) == 0;
         }
         if (form->relative_bytes == 1)
         {
