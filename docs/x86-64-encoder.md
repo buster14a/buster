@@ -2,14 +2,14 @@
 
 `src/buster/compiler/x86_64_encoder.c` turns a section (or a chunk of one) of
 selected machine instructions into machine code: legacy and REX forms (x87, MMX,
-SSE to SSE4.2, AES-NI, SHA, GFNI and the system instructions among them), VEX
-forms (AVX, AVX2 with its
-gathers, F16C, FMA, BMI1 and BMI2, the opmask instructions, VAES, AVX-VNNI and
-the other VEX extensions, the variable blends and FMA4 with a register in the
-immediate, AMD's XOP, TBM and LWP, and AMX's tiles) and EVEX forms (AVX-512
-with opmasks, zeroing, broadcasts, embedded rounding, registers 16 to 31,
-gathers and scatters, AVX512-FP16, AVX10.2 and AMX-AVX512), with FS and GS
-segment overrides on any memory operand (thread-local storage). For the
+3DNow!, SSE to SSE4.2, AES-NI, SHA, GFNI, MPX and the system instructions among
+them), VEX forms (AVX, AVX2 with its gathers, F16C, FMA, BMI1 and BMI2, the
+opmask instructions, VAES, AVX-VNNI and the other VEX extensions, the variable
+blends and FMA4 with a register in the immediate, AMD's XOP, TBM and LWP, and
+AMX's tiles) and EVEX forms (AVX-512 with opmasks, zeroing, broadcasts, embedded
+rounding, registers 16 to 31, gathers and scatters, AVX512-FP16, AVX10.2,
+AMX-AVX512 and Xeon Phi's extensions), with FS and GS segment overrides on any
+memory operand (thread-local storage). For the
 instructions with a symbolic operand it reports where each one ends, which
 locates the fields their fixups patch (see "Fixups").
 This document records why it is built the way it is: the review of the
@@ -34,13 +34,13 @@ BMI at 0.64 ns (9.4 GB/s). That is:
   checks and forms added since cost about 3%, and segment overrides nothing:
   see "Evaluation");
 - byte-identical to GNU as 2.47 on 1.7 million random instructions covering
-  all 6,116 forms (1,647 legacy, 137 of them x87, 1,065 VEX, 103 of them XOP,
-  and 3,404 EVEX), one in sixteen of them with an FS or GS override;
+  all 6,222 forms (1,705 legacy, 137 of them x87, 1,065 VEX, 103 of them XOP,
+  and 3,452 EVEX), one in sixteen of them with an FS or GS override;
 - with the ends of the instructions that have symbolic operands (the 6% of the
   compiler mix that are calls and RIP-relative operands), **0.70 ns**: what
   every instruction's offset cost before (0.70 ns, and 0.68 now that the running
   sum they share is redone), and where GNU as 2.47 puts its relocations
-  (offset, type, addend and symbol) for all 192,000 symbolic fields of those 1.7
+  (offset, type, addend and symbol) for all 192,500 symbolic fields of those 1.7
   million instructions, on every form whose symbolic fields GNU as encodes the
   same way.
 
@@ -100,14 +100,16 @@ encoders write it as any imm8, where a number would need a shift in the
 vectorized loop that waits for the flags, and `x86_validate` checks its other
 bits. Registers are numbers by class: 0–15, 0–31 for an EVEX form's vector
 registers, 0–7 for opmasks, MMX registers (which REX doesn't extend), debug
-registers and AMX's tiles, 0–5 for the segment registers (ES, CS, SS, DS, FS and
-GS), the numbers of CR0, CR2 to CR4 and CR8 for the control registers, and the
-even ones for VP2INTERSECT's opmask pair and AMX-TRANSPOSE's tile pairs (the
-processor ignores the odd bit). Operands a
+registers and AMX's tiles, 0–3 for MPX's bound registers, 0–5 for the segment
+registers (ES, CS, SS, DS, FS and GS), the numbers of CR0, CR2 to CR4 and CR8
+for the control registers, and for a group of registers its first, whose number
+is a multiple of the group's size: the even ones for VP2INTERSECT's opmask pair
+and AMX-TRANSPOSE's tile pairs, and multiples of four for 4FMAPS's and 4VNNIW's
+blocks of four (the processor ignores the low bits). Operands a
 form doesn't use are zero, which is also what pads a group: form 0,
 `X86_FORM_NONE`, encodes to nothing.
 
-The forms are X-macro tables. The legacy one has 1,647 rows (integer arithmetic
+The forms are X-macro tables. The legacy one has 1,705 rows (integer arithmetic
 and moves at every size, all the addressing modes, shifts and rotates,
 multiplies and divides, branches (near and far, and `notrack` ones through a
 register), `setcc`, `cmovcc`, `lock` forms of every read-modify-write
@@ -118,15 +120,18 @@ segment, control and debug registers and PUSH and POP of FS and GS, SSE to
 SSE4.2 and AMD's
 SSE4a with MXCSR and the FXSAVE state, AES-NI, PCLMULQDQ, SHA, GFNI, Key
 Locker and VIA PadLock (but not `data16 xstore`, which GNU as rejects), MMX
-with the MMX register forms of SSE, SSE2 and SSSE3, all of x87, whose ST(i)
-registers are a register class of 8 in ModRM.rm, and the system instructions:
+with the MMX register forms of SSE, SSE2 and SSSE3, AMD's 3DNow! (whose
+operation byte, the opcode's last, comes after the operands, where an 8-bit
+immediate goes: the record's immediate is that byte, which `x86_validate`
+checks), all of x87, whose ST(i) registers are a register class of 8 in
+ModRM.rm, MPX with its bound registers, and the system instructions:
 descriptor tables and selectors, port I/O through DX or an immediate and its
 strings, system calls and returns, caches and TLBs, MSRs, XSAVE, FSGSBASE, PKU,
 SMAP, CET's shadow stacks, and AMD's SVM and SEV-SNP and Intel's VMX, TDX, SGX
 and SMX, among others); a row
 gives the prefixes, the opcode bytes, how ModRM is used (`/r`, `/digit`, `+r`
 or none), the immediate and relative widths, REX.W and the operand classes. The
-VEX and EVEX one has 4,469 (moves, masked and non-temporal moves, gathers and
+VEX and EVEX one has 4,517 (moves, masked and non-temporal moves, gathers and
 scatters, broadcasts,
 inserts and extracts, integer and floating point arithmetic, compares (into
 opmasks too) and string compares,
@@ -156,7 +161,9 @@ loads (and AMX-TRANSPOSE's of a pair of tiles) and stores, transposes, and dot
 products and multiplications of three tiles (FP8's and the read-shared pair
 loads in VEX map 5, the same way), and AMX-AVX512's moves and conversions of a
 tile's row into a ZMM register, by an immediate or a general register in
-EVEX.vvvv); its rows add the
+EVEX.vvvv; and Xeon Phi's AVX512ER, AVX512PF's prefetching gathers and scatters
+(VSIB forms with a ModRM digit), and AVX512_4FMAPS's and AVX512_4VNNIW's
+products of a block of four registers and 16 bytes of memory); its rows add the
 vector length, W, the vvvv operand, the decorations the form can have and EVEX's
 N, the unit of its 8-bit displacements. A broadcast memory operand, embedded
 rounding and suppressed exceptions are forms of their own (`_M32BCST`, `_ER`,
@@ -170,9 +177,15 @@ a SIB memory operand (`SIBMEM`, Intel's sibmem), which always has a SIB byte:
 its index (the stride) is a general register, of which 4 (RSP's number) is
 SIB's none, without a scale, and it can be an absolute address, but not a base
 alone (that is a base with none for the index) or RIP-relative. The tiles are a
-class of 8 registers (TMM0 to TMM7). The classes drive validation and
-the tests' assembly printer. A class of fewer than 16 registers
-(opmasks and MMX's) that ModRM.rm can also address memory with is two forms, a
+class of 8 registers (TMM0 to TMM7). MPX's `bndldx` and `bndstx` take a MIB
+operand (`MIB`, Intel's mib), whose index is the pointer they look up in the
+bound tables, not part of the address, so it takes no scale, and `bndmk`'s
+memory operand (`M_NO_RIP`) has the lower bound in its base; neither can be
+RIP-relative. These kinds are flags of an operand, as is a group of registers (a
+pair, or a block of four), so the form table's operands are 16 bits. The classes
+drive validation and the tests' assembly printer. A class of fewer than 16
+registers (opmasks, MMX's and the bound registers) that ModRM.rm can also
+address memory with is two forms, a
 register one and a memory one, since the template's checks of rm can't depend
 on the mode: mm8 to mm15 don't exist, but a base can be R8 to R15. So MMX's
 `paddb mm, mm/m64` is `PADDB_MM_MM` and `PADDB_MM_M64`, and `movq`'s store
@@ -203,15 +216,15 @@ form, and the template builder checks that each form's longest encoding fits in
 15 bytes (the longest EVEX one is 12).
 
 A segment override is the form's too, as `lock` and `rep` are: the form number
-plus `BUSTER_X86_FORM_FS` or `BUSTER_X86_FORM_GS` (6,117 or twice that) names a
+plus `BUSTER_X86_FORM_FS` or `BUSTER_X86_FORM_GS` (6,223 or twice that) names a
 template of its own, which starts with the prefix as a static byte (64 or 65,
 before the other prefixes, as GNU as puts it). `x86_encoder_initialize` builds
-every form's template three times, 587 KB in all, of which a stream touches its
+every form's template three times, 597 KB in all, of which a stream touches its
 own forms'; a form without a memory operand gets copies that take no operand at
 all. So x86_encode does nothing for an override that it doesn't do for every
 form, and its loop is the same code with them as without. The fixup flag works
 the same way (see "Fixups"): the templates are copied again at the flag's
-index, 587 KB more.
+index, 597 KB more.
 
 ### VEX and EVEX
 
@@ -243,7 +256,7 @@ slot takes.
 
 x86_encode also checks what its encoding can't represent, with one test: the
 template's checks against the record's reg, rm, vvvv and decorations (a
-register past its class's last, a pair's odd register, an operand or decoration
+register past its class's last, a group's low bits, an operand or decoration
 the form doesn't have), the addressing mode's (a base past 15, an index
 register or a scale without an index, an invalid combination), a high byte
 register with REX, an rm operand of a kind the form can't have (a memory
@@ -256,9 +269,10 @@ bit, the index's bit 4, and in its bit 6's place, whether the index is 4. Only
 x86_validate checks the rules that depend on more than one field (zeroing
 without an opmask, zeroing into memory, a VSIB operand without an index, an EVEX
 gather or scatter without an opmask, a gather whose destination, index and mask
-aren't different registers, an AMX product whose three tiles aren't either, and
-a SIB operand without a SIB byte, a base alone or RIP, or with none and a scale)
-and the
+aren't different registers, an AMX product whose three tiles aren't either, a
+SIB operand without a SIB byte, a base alone or RIP, or with none and a scale, a
+RIP-relative operand of MPX's `bndmk` or a MIB operand, a MIB operand's scaled
+index, and a 3DNow! form's immediate other than its operation byte) and the
 ranges of the immediates (imm8 in [−128, 255], imm16 in [−32768, 65535] and
 ENTER's in [0, 2²⁴)) and of a rel8 ([−128, 127]): x86_encode writes the
 field's low bytes, so `jmp rel8` with a displacement of 200 is `eb c8`, a jump
@@ -679,7 +693,7 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
 `./build/compiler test-x86-encoder` (about 0.6 s) checks:
 
 - that every form's template fits;
-- 534 known encodings from GNU as, on the paths most worth pinning down (VEX2
+- 577 known encodings from GNU as, on the paths most worth pinning down (VEX2
   and VEX3, BMI, opmasks, EVEX's opmasks, zeroing, broadcasts, rounding,
   compressed displacements, registers 16–31, x87's register forms and memory
   sizes, `lock`, `rep`, far pointers and 16-bit forms, segment overrides on
@@ -723,7 +737,13 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   dot products, transposes and multiplications of tiles (FP8's and the
   read-shared pair loads in VEX map 5), and AMX-AVX512's forms with an immediate
   (EVEX map 3) and with a general register in EVEX.vvvv (map 2), with R and
-  R'), with both encoders, and each again with the
+  R', and MPX's `bndmk` (with an index but no base, which GNU as keeps, as the
+  lower bound is the base), `bndcl` with REX.B after F3, the bound moves, and
+  `bndldx` and `bndstx` through MIB operands, 3DNow!'s operation byte after the
+  displacement (RIP's too) and with FS, and Xeon Phi's AVX512ER forms with
+  broadcasts, opmasks and suppressed exceptions, AVX512PF's prefetching gathers
+  and scatters with V' and N = 4, and 4FMAPS's and 4VNNIW's blocks of four with
+  V' and N = 16), with both encoders, and each again with the
   fixup flag, whose end both must report;
 - a digest of the scalar encoder's output for 100,000 random instructions,
   recorded when GNU as encoded the same stream to the same bytes;
@@ -737,8 +757,9 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   the marked instructions' ends, for the variant that compresses them straight
   to memory);
 - that invalid operands (a high byte register with REX, RSP as a general index,
-  RIP with a base, a register past its class's last, VSIB indexes among them, an
-  odd opmask or tile pair, vvvv or reg in a form without them, decorations the
+  RIP with a base, a register past its class's last, VSIB indexes among them, a
+  group's register that isn't a multiple of its size (an odd opmask or tile
+  pair, a block of four's), vvvv or reg in a form without them, decorations the
   form can't have, unknown mode bits, an index register or a scale without an
   index, a memory operand in a form without one, a register in a form that takes
   only memory, a segment override without a memory operand) are rejected by
@@ -748,32 +769,35 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   0 set (or below 0 where those are a selector), control registers that don't
   exist (CR1, CR5 to CR7 and CR9 to CR15), segment registers past GS, MOV to CS,
   complex multiplications into one of their sources, AMX products with a tile
-  twice, VSIB operands without an index (a base alone, an absolute address or
-  RIP), SIB operands without a SIB byte (a base alone or RIP) or with none and a
-  scale, EVEX gathers and scatters without an opmask, and gathers whose
-  destination, index and mask (AVX2's) aren't different registers are found by
+  twice, RIP-relative operands of MPX's `bndmk` and MIB operands, MIB operands
+  with a scaled index, 3DNow! forms' immediates other than their operation byte,
+  VSIB operands without an index (a base alone, an absolute address or RIP), SIB
+  operands without a SIB byte (a base alone or RIP) or with none and a scale,
+  EVEX gathers and scatters without an opmask, and gathers whose destination,
+  index and mask (AVX2's) aren't different registers are found by
   `x86_validate`.
 
 `--print-assembly` and `--compare-object` cross-check the scalar encoder against
 GNU as for any seed (AGENTS.md has the commands): 1.7 million random
 instructions over all forms (seeds 1, 7 and 99), 0 differences. The streams have
-every family in proportion to its forms: of 200,000 instructions, 110,900 EVEX
-(52,100 with an opmask, 23,300 zeroing, 36,100 broadcasts, 10,300 rounding or
-suppressed exceptions, 77,700 with registers 16–31; 15,200 in the AVX-512F
-forms of #23, 26,700 in the AVX512VL ones of #24, 15,800 in the AVX512BW, DQ and
-CD ones of #25, 6,100 in the other extensions' of #26, 34,800 in the
-AVX512-FP16 and AVX10.2 ones of #33, 1,500 gathers and scatters of #35 and 380
-in AMX-AVX512's forms of #37), 6,700 VEX2, 25,000 VEX3 (3,200 of them FMA3, 900
-in the opmask instructions of #27, 2,500 in the VEX extensions of #28, 2,300 in
-the /is4 forms of #31, 500 AVX2 gathers of #35, 140 MSR instructions in map 7 of
-#19 and 1,200 in AMX's forms of #37), 3,700 in the forms of #34 (3,400 of them
-XOP), 6,600 in the SSE forms of #20, 1,300 in the AES-NI, SHA, GFNI, Key Locker
-and PadLock ones of #28, 5,600 in the MMX forms of #30, 540 with the segment,
-control and debug registers of #32, 5,900 in the system instructions of #19,
-4,600 x87, 4,000 with `lock`, 1,900 string instructions and 14,000 with an FS
-or GS override (500 of them with `lock`, 11,400 vector ones and 2,200
+every family in proportion to its forms: of 200,000 instructions, 110,600 EVEX
+(52,700 with an opmask, 23,600 zeroing, 35,600 broadcasts, 10,300 rounding or
+suppressed exceptions, 77,300 with registers 16–31; 14,800 in the AVX-512F
+forms of #23, 26,700 in the AVX512VL ones of #24, 15,600 in the AVX512BW, DQ and
+CD ones of #25, 5,900 in the other extensions' of #26, 33,900 in the
+AVX512-FP16 and AVX10.2 ones of #33, 1,500 gathers and scatters of #35, 380 in
+AMX-AVX512's forms of #37 and 1,500 in Xeon Phi's of #38), 6,600 VEX2, 24,300
+VEX3 (3,100 of them FMA3, 900 in the opmask instructions of #27, 2,400 in the
+VEX extensions of #28, 2,300 in the /is4 forms of #31, 500 AVX2 gathers of #35,
+130 MSR instructions in map 7 of #19 and 1,200 in AMX's forms of #37), 3,600 in
+the forms of #34 (3,300 of them XOP), 6,500 in the SSE forms of #20, 1,200 in
+the AES-NI, SHA, GFNI, Key Locker and PadLock ones of #28, 5,600 in the MMX
+forms of #30, 510 with the segment, control and debug registers of #32, 5,800 in
+the system instructions of #19, 1,600 in 3DNow!'s forms and 290 in MPX's of #38,
+4,400 x87, 3,900 with `lock`, 1,900 string instructions and 13,700 with an FS
+or GS override (500 of them with `lock`, 11,200 vector ones and 2,100
 RIP-relative). A VEX form whose
-mnemonic an EVEX form has is printed with `{vex}` (19,100 of the 200,000),
+mnemonic an EVEX form has is printed with `{vex}` (18,600 of the 200,000),
 because GNU as takes some of those as EVEX otherwise (`vpdpbusd`, `vpmadd52luq`
 and `vcvtneps2bf16`, whose AVX-512 forms came first). The printed
 streams leave out encodings GNU as writes another way: `movq` and `vmovq`
@@ -789,9 +813,10 @@ rax, rax` is NOP, and
 `prefetchit0` and `prefetchit1` take only RIP-relative addresses; and LEA with a
 segment override, which GNU as warns does nothing. An MSR index in VEX map 7 is
 printed unsigned, as GNU as rejects a negative one; a SIB operand's none isn't
-printed, as GNU as reads `riz` as a symbol in Intel syntax; and the printed
-assembly enables AMX-TRANSPOSE and AMX-TF32 with `.arch`, as GNU as's default
-architecture leaves them out. Eleven deliberately broken
+printed, as GNU as reads `riz` as a symbol in Intel syntax; GNU as keeps
+MPX's index scaled by 1 without a base, as `bndmk`'s lower bound is its base;
+and the printed assembly enables MPX, AMX-TRANSPOSE and AMX-TF32 with `.arch`,
+as GNU as's default architecture leaves them out. Eleven deliberately broken
 copies of the legacy encoder (wrong table entries, multishift windows, RBP and
 RSP checks, displacement bounds, lane order, store margin) and ten of its VEX
 and EVEX parts (VEX2's conditions, P0's bits, the compressibility's rotation,
@@ -827,7 +852,13 @@ rule (a base alone or RIP), its rule for none with a scale, or the products'
 three tiles misses 989, 320 and 358 (and changes the reference digest, as the
 random streams then have such instructions), a template without the check of a
 tile pair's odd tile misses 978, and an `x86_validate` without it makes the
-random streams differ, as `x86_encode` rejects the odd tile.
+random streams differ, as `x86_encode` rejects the odd tile. And five of #38's:
+an `x86_validate` without the rule against RIP for `bndmk`'s and MIB operands,
+without MIB's rule against a scale, or without 3DNow!'s operation byte misses
+895, 300 and 936 broken instructions (the first also changes the reference
+digest), a template check without a group's low bits misses 931, and a template
+with 3DNow!'s operation byte among the opcode's own bytes gets 7 known encodings
+wrong and makes the random streams differ.
 
 The same streams cross-check the fixups. `x86_mark_symbolic` marks a quarter of
 the fields that GNU as encodes the same way with a symbol in them (32-bit
@@ -845,9 +876,9 @@ R_X86_64_PLT32 for a branch without an addend and R_X86_64_PC32 with one, PC8
 for a rel8, PC32 for RIP-relative operands, 32S for other addresses but 32 for
 LEA into a 16- or 32-bit register, 32S or 32 for an imm32 by whether its operand
 is 64-bit (but 32 for map 7's MSR index, which is unsigned), and 64 for a
-64-bit immediate or address. Over seeds 1, 7 and 99: 192,229 relocations (37,507
-PC32, 26 PLT32, 265 PC8, 151,305 32S, 2,500 32 and 626 64), 0 different, on all
-5,067 forms whose memory operand or branch target the streams print (of 5,075
+64-bit immediate or address. Over seeds 1, 7 and 99: 192,537 relocations (37,682
+PC32, 29 PLT32, 282 PC8, 151,492 32S, 2,425 32 and 627 64), 0 different, on all
+5,137 forms whose memory operand or branch target the streams print (of 5,145
 that have one: the other 8 are the MOVQ memory forms GNU as encodes otherwise)
 and all 75 with an imm32 or a 64-bit immediate, and `x86_encode`'s fixup ends
 the same as the scalar encoder's. `test-x86-encoder`
@@ -866,15 +897,14 @@ width (16 and 4 known fixups wrong, and the GNU as cross-check).
 ## Next steps
 
 - **Every x86-64 instruction** (#17, with an issue per family, #18–#39). Rows
-  are data: Xeon Phi's prefetching gathers and scatters (#38) are VSIB forms
-  with a ModRM digit; APX's REX2 and its EVEX extensions (map 4, #36) would need
-  a register's bit 4 in legacy forms, and its AMX forms are EVEX ones of #37's
+  are data: APX's REX2 and its EVEX extensions (map 4, #36) would need a
+  register's bit 4 in legacy forms, and its AMX forms are EVEX ones of #37's
   loads and stores, for registers 16 to 31 in their addresses. Of
   #39's prefixes, these are left: `67` (32-bit
   addresses, for the x32 ABI: template copies of the memory forms, as the
   segment overrides are, and 32-bit registers in the memory operand), the CS,
   DS, ES and SS overrides (which 64-bit mode ignores; padding can use the
-  multi-byte NOPs), branch hints and `bnd` (#38), `notrack` through memory,
+  multi-byte NOPs), branch hints and MPX's `bnd`, `notrack` through memory,
   16-bit near branches (which Intel and AMD decode differently in 64-bit mode),
   and HLE's `xacquire` and `xrelease`.
 - **Labels.** Fixups are done (see "Fixups"); branches inside a function are

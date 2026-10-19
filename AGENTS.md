@@ -147,7 +147,7 @@ yet compared against a performance baseline. Keep just one compiler executable.
 ## x86-64 encoder tests
 
 `./build/compiler test-x86-encoder` (about 0.6 s) checks that every form fits a
-template, both encoders on 534 known encodings from GNU as (each also with the
+template, both encoders on 577 known encodings from GNU as (each also with the
 fixup flag, whose end they must report), a digest of the scalar encoder's output
 for 100,000 random instructions, every batch width and variant of `x86_encode`
 against the scalar encoder (bytes, offsets and fixup ends, in each of the four
@@ -182,7 +182,7 @@ zeros and a relocation for them, and `--compare-object` reads `.text`,
 fields zeroed where the reported fixup ends put them) and each relocation's
 offset, type, addend and symbol with the ones the fixup ends and
 `x86_fixup_distance` give. Cross-check more than one seed after changing forms
-(1.7 million instructions over seeds 1, 7 and 99 were last checked, with 192,000
+(1.7 million instructions over seeds 1, 7 and 99 were last checked, with 192,500
 relocations).
 
 ## x86-64 encoder benchmark
