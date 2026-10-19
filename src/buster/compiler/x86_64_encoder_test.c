@@ -1,12 +1,13 @@
 // The x86-64 encoder tests. The compiler runs them as a command:
 //
-//   build/compiler test-x86-encoder [--count N] [--seed N]
-//   build/compiler test-x86-encoder --print-assembly N [--seed N]
-//   build/compiler test-x86-encoder --compare-object object N [--seed N]
+//   build/compiler test-x86-encoder [--count N] [--seed N] [--address32]
+//   build/compiler test-x86-encoder --print-assembly N [--seed N] [--address32]
+//   build/compiler test-x86-encoder --compare-object object N [--seed N] [--address32]
 //
 // main.c includes this file after x86_64_encoder.c and calls run_x86_encoder_tests for the command. The checks, in this
 // order:
-//   - The templates: every form's longest encoding fits in a slot.
+//   - The templates: every form's longest encoding fits in a slot, and with 32-bit addresses, every one's but those
+//     of the FS and GS forms with no room for the 67.
 //   - Known encodings: x86_encode_scalar and x86_encode on x86_known_encodings, instructions on the paths most worth
 //     pinning down (REX, SIB, RBP and R13 bases, RSP and R12 bases, RIP, absolute and index-only addresses,
 //     displacement sizes, byte registers, prefixes, opcode maps; VEX2 and VEX3, BMI, opmasks, EVEX's opmasks,
@@ -40,6 +41,11 @@
 //     RIP-relative operand of MPX's bndmk or a MIB operand, a MIB operand's scaled index, a 3DNow! form's immediate
 //     other than its operation byte, or a NOTRACK form with a segment override, which only x86_validate checks: it must
 //     find them.
+// Then the same again with 32-bit addresses (x86_test_address32, from the seed's first state again), but the known
+// fixups: x86_encode_address32 and x86_encode_scalar_address32 on x86_known_encodings_address32, a digest of their own
+// (BUSTER_X86_TEST_DIGEST_ADDRESS32), x86_encode_64_address32 on the random streams and at page edges, and the invalid
+// instructions, with two more breaks: an MPX memory operand, which only x86_validate_address32 checks, and a memory
+// operand in a form without room for the 67, which x86_encode_address32 rejects too. --address32 runs only this pass.
 //
 // --print-assembly prints N random instructions in GNU as Intel syntax, each with its bytes from x86_encode_scalar in
 // a comment, choosing operands GNU as encodes with the same form (with {load}, {store}, {vex} and {evex} where GNU as
@@ -49,18 +55,19 @@
 // imm32 and 64-bit immediates) are printed as symbols plus the field's value, for which GNU as writes zeros and a
 // relocation. --compare-object reads the .text, .lengths and .rela.text sections of the object GNU as makes of that
 // and compares them with x86_encode_scalar's bytes, with the symbolic fields zeroed where its fixup ends put them, and
-// with the relocations the fixup ends and x86_fixup_distance give: offset, type, addend and symbol. The exit status is
-// 1 if the arguments are invalid or a check fails.
+// with the relocations the fixup ends and x86_fixup_distance give: offset, type, addend and symbol. With --address32,
+// both take the stream with 32-bit addresses, which the printer writes with 32-bit registers, and with addr32 where no
+// general register says the address's size. The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order:
 //   - Random instructions: x86_test_random, x86_random_register, x86_random_displacement, x86_random_immediate,
 //     x86_random_instruction and x86_mark_random; the symbolic fields, x86_symbolic_fields and x86_mark_symbolic.
 //   - Printing: register names, x86_print_memory and x86_print_instruction.
-//   - The checks: x86_check_templates, x86_known_encodings and x86_check_known, x86_known_fixups and
-//     x86_check_known_fixups, x86_check_digest, x86_compare_encoders and
+//   - The checks: x86_check_templates, x86_known_encodings (and x86_known_encodings_address32) and x86_check_known,
+//     x86_known_fixups and x86_check_known_fixups, x86_check_digest, x86_compare_encoders and
 //     x86_check_random, the page-edge check (x86_test_report_fault and x86_check_page_edges), and x86_check_invalid.
-//   - The cross-check modes (x86_print_assembly, the object reader x86_elf_section and x86_compare_object) and
-//     run_x86_encoder_tests.
+//   - The cross-check modes (x86_print_assembly, the object reader x86_elf_section and x86_compare_object),
+//     x86_check_mode (one address size's checks) and run_x86_encoder_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -85,6 +92,8 @@
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
 #define BUSTER_X86_TEST_DIGEST 0xc0164ca1b67b83a6ull
+// The same for the stream with 32-bit addresses (--address32).
+#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0x15c0faabe6d4d45full
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -196,6 +205,24 @@ static uint32_t x86_form_opcode(const X86FormDescription* form)
     return form->opcode_bytes == 1 ? form->opcode : 0x10000 | form->opcode;
 }
 
+// Set by --address32 and the checks of x86_encode_address32: the instructions have 32-bit addresses, which
+// x86_validate_address32 checks, x86_encode_scalar_address32 encodes, and the printer writes with 32-bit registers.
+static bool x86_test_address32;
+
+// Whether the form's register operand is an address, which takes the address's size: MOVDIR64B's, ENQCMD's and ENQCMDS's.
+static bool x86_form_has_address_register(uint32_t form_index)
+{
+    const uint32_t row = (form_index & BUSTER_X86_FORM_NUMBER) % X86_FORM_COUNT;
+    return row == X86_FORM_MOVDIR64B_R64_M512 || row == X86_FORM_ENQCMD_R64_M512 || row == X86_FORM_ENQCMDS_R64_M512;
+}
+
+// Whether an MPX form takes only memory, so that it has no instruction with a 32-bit address.
+static bool x86_form_is_bound_memory(uint32_t form_index)
+{
+    const X86FormDescription* form = x86_form_description(form_index);
+    return (form->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_BND && (form->rm & BUSTER_X86_OPERAND_MEMORY) && !(form->rm & BUSTER_X86_OPERAND_REGISTER);
+}
+
 // Whether GNU as would encode the instruction with another form of the same mnemonic (a shorter one, usually), so
 // that --print-assembly avoids it.
 static bool x86_assembler_prefers_another_form(const X86Instruction* instruction)
@@ -290,9 +317,16 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
     {
         result = true;
     }
+    // With a 32-bit address, MOV between the accumulator and an absolute address is A0 to A3, with a 32-bit moffs (but
+    // XRELEASE's MOV isn't).
+    if (x86_test_address32 && legacy && opcode >= 0x88 && opcode <= 0x8b && instruction->reg == 0 && instruction->mode == BUSTER_X86_MEMORY_ABSOLUTE &&
+        !x86_form_has_prefix(form, 0xf3))
+    {
+        result = true;
+    }
     // A general index scaled by 1 without a base becomes the base (a VSIB one can't, and GNU as keeps a SIB one's and
-    // MPX's, as bndmk's lower bound is its base).
-    if ((instruction->mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX)) == BUSTER_X86_MODE_INDEX && (instruction->mode & BUSTER_X86_MODE_SCALE) == 0 &&
+    // MPX's, as bndmk's lower bound is its base, and with a 32-bit address).
+    if (!x86_test_address32 && (instruction->mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX)) == BUSTER_X86_MODE_INDEX && (instruction->mode & BUSTER_X86_MODE_SCALE) == 0 &&
         !(form->rm & (BUSTER_X86_OPERAND_VSIB | BUSTER_X86_OPERAND_SIB)) && (form->reg & BUSTER_X86_OPERAND_CLASS) != BUSTER_X86_CLASS_BND)
     {
         result = true;
@@ -419,15 +453,21 @@ static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_inde
         {
             result.displacement = x86_random_displacement(state, 1);
         }
-        done = x86_instruction_is_valid(&result) && !(for_assembler && x86_assembler_prefers_another_form(&result));
+        const bool valid = x86_test_address32 ? x86_instruction_is_valid_address32(&result) : x86_instruction_is_valid(&result);
+        done = valid && !(for_assembler && x86_assembler_prefers_another_form(&result));
     }
     return result;
 }
 
-// A random form other than X86_FORM_NONE, or with `with_none`, X86_FORM_NONE one time in 16.
+// A random form other than X86_FORM_NONE, or with `with_none`, X86_FORM_NONE one time in 16. With 32-bit addresses, one
+// that has instructions with them.
 static uint16_t x86_random_form(uint64_t* state, bool with_none)
 {
     uint16_t result = (uint16_t)(1 + x86_random_below(state, X86_FORM_COUNT - 1));
+    while (x86_test_address32 && x86_form_is_bound_memory(result))
+    {
+        result = (uint16_t)(1 + x86_random_below(state, X86_FORM_COUNT - 1));
+    }
     if (with_none && x86_random_below(state, 16) == 0)
     {
         result = X86_FORM_NONE;
@@ -597,7 +637,8 @@ static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint
     const uint16_t rm = x86_form_description(instruction->form)->rm;
     const bool none = (rm & BUSTER_X86_OPERAND_SIB) && instruction->index == X86_REGISTER_RSP;
     const uint8_t mode = none ? (uint8_t)(instruction->mode & ~BUSTER_X86_MODE_INDEX) : instruction->mode;
-    const char* index = (rm & BUSTER_X86_OPERAND_VSIB) ? x86_register_name(instruction->index, rm) : x86_gpr64_names[instruction->index & 15];
+    const char* const* address_names = x86_test_address32 ? x86_gpr32_names : x86_gpr64_names;
+    const char* index = (rm & BUSTER_X86_OPERAND_VSIB) ? x86_register_name(instruction->index, rm) : address_names[instruction->index & 15];
     const uint32_t override = x86_form_segment(instruction->form);
     const char* segment = override == 0 ? "" : override == 1 ? "fs:" : "gs:";
     const char* symbol = (symbolic & BUSTER_X86_TEST_SYMBOLIC_DISPLACEMENT) ? "dsym" : "";
@@ -615,11 +656,11 @@ static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint
         fprintf(file, "%s%s[", size, segment);
         if (mode & BUSTER_X86_MODE_RIP)
         {
-            fprintf(file, "rip");
+            fprintf(file, x86_test_address32 ? "eip" : "rip");
         }
         if (mode & BUSTER_X86_MODE_BASE)
         {
-            fprintf(file, "%s", x86_gpr64_names[instruction->rm & 15]);
+            fprintf(file, "%s", address_names[instruction->rm & 15]);
         }
         if (mode & BUSTER_X86_MODE_INDEX)
         {
@@ -745,6 +786,17 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction,
     {
         fprintf(file, "{disp32} ");
     }
+    // A 32-bit address takes addr32 if no general register in it says so: an absolute address, or a VSIB operand
+    // without a base, whose index is a vector register. (An address register's 32-bit name says it too, and a SIB
+    // operand's index of 4 is none, which x86_print_memory doesn't print.)
+    const bool none = (form->rm & BUSTER_X86_OPERAND_SIB) && instruction->index == X86_REGISTER_RSP;
+    const uint8_t printed_mode = none ? (uint8_t)(instruction->mode & ~BUSTER_X86_MODE_INDEX) : instruction->mode;
+    const bool general_index = (printed_mode & BUSTER_X86_MODE_INDEX) && !(form->rm & BUSTER_X86_OPERAND_VSIB);
+    const bool general_register = (printed_mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_RIP)) || general_index;
+    if (x86_test_address32 && (printed_mode & BUSTER_X86_MODE_MEMORY) && !general_register && !x86_form_has_address_register(instruction->form))
+    {
+        fprintf(file, "addr32 ");
+    }
     fprintf(file, "%s", form->mnemonic);
     switch (form->syntax)
     {
@@ -810,7 +862,9 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction,
                 }
                 switch (operands[i])
                 {
-                    case 'r': fprintf(file, "%s", x86_register_name(instruction->reg, form->reg)); break;
+                    case 'r':
+                        fprintf(file, "%s", x86_register_name(instruction->reg, x86_test_address32 && x86_form_has_address_register(instruction->form) ? BUSTER_X86_OPERAND_GD : form->reg));
+                        break;
                     case 'v': fprintf(file, "%s", x86_register_name(instruction->vvvv, form->vvvv)); break;
                     case 'm':
                         x86_print_rm(file, instruction, form, symbolic);
@@ -861,19 +915,37 @@ static void x86_print_bytes(const uint8_t* bytes, uint64_t length)
 
 static bool x86_check_templates(void)
 {
-    const bool result = x86_encoder_initialize();
+    bool result = x86_encoder_initialize();
     printf("templates: %u forms, and each with FS and GS, %s\n", (unsigned)X86_FORM_COUNT, result ? "all fit" : "SOME DON'T FIT");
     if (!result)
     {
         for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
         {
             X86Template template;
-            if (!build_template(x86_form_description(form), x86_form_segment(form), &template))
+            if (!build_template(x86_form_description(form), x86_form_segment(form), false, &template))
             {
                 printf("  form %u (%s, segment override %u) doesn't fit\n", form, x86_form_description(form)->mnemonic, x86_form_segment(form));
             }
         }
     }
+    // For 32-bit addresses: only forms with a segment override may have no template (x86_form_lacks_address32_template).
+    const bool address32 = x86_encoder_initialize_address32();
+    uint32_t unfit = 0;
+    uint32_t unexpected = 0;
+    for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
+    {
+        X86Template template;
+        const bool fits = build_template(x86_form_description(form), x86_form_segment(form), true, &template);
+        unfit += !fits;
+        if (!fits && x86_form_segment(form) == 0 && unexpected < BUSTER_X86_TEST_REPORTED)
+        {
+            printf("  form %u (%s) doesn't fit with 32-bit addresses, without a segment override\n", form, x86_form_description(form)->mnemonic);
+        }
+        unexpected += !fits && x86_form_segment(form) == 0;
+    }
+    printf("templates for 32-bit addresses: %s, but %u with a segment override, which have no room for a 67\n", address32 && unexpected == 0 ? "all fit" : "SOME DON'T FIT",
+           unfit);
+    result = result && address32 && unexpected == 0;
     return result;
 }
 
@@ -1914,23 +1986,89 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_JG_REL16, .displacement = -21 }, 5, { 0x66, 0x0f, 0x8f, 0xeb, 0xff } },
 };
 
-// Checks one encoder on the known encodings, encoding each alone, and again with the fixup flag, whose end it must
-// report.
+// The same with 32-bit addresses (x86_encode_address32), from GNU as.
+static const KnownEncoding x86_known_encodings_address32[] = {
+    // mov eax, [eax]; mov rax, [r9d+r10d*8-0x80] (67 before REX); [ebp] and [r13d] with an 8-bit zero, [esp] and [r12d]
+    // with SIB; [ecx*2+0x10], and [ecx*1+0x10], which GNU as keeps with a 32-bit address; an absolute address (with
+    // addr32) and [eip+0x10]; mov rax, fs:[eax] (64 67 48); lea eax, [ecx+edx*2]; add eax, ecx (no memory, no 67);
+    // EVEX's vmovdqu64 with N = 64 and VEX's vaddps after R8D (67 before C4 and 62); gathers by XMM2 and ZMM20 (V');
+    // tileloadd with an index and without (SIB's none); xacquire lock add with 66 and FS (64 67 66 F2 F0); pfadd; call
+    // and a far jmp through memory; notrack (3E before 67) and notrack bnd (3E 67 F2); lock cmpxchg16b with GS and REX;
+    // crc32 of a word with FS (64 67 66 F2); movdir64b eax; prefetchit0 [eip+0x10] and mov eax, gs:[eip+0x10]; bndcl
+    // bnd1, rax (no memory, no 67); an absolute address in EVEX (a 32-bit displacement); and the longest, 15 bytes:
+    // lock add qword ptr fs:[eax+ecx*4+0x12345678], 0x12345678
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x67, 0x8b, 0x00 } },
+    { { .form = X86_FORM_MOV_R64_RM64, .rm = X86_REGISTER_R9, .index = X86_REGISTER_R10, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = -0x80 }, 6, { 0x67, 0x4b, 0x8b, 0x44, 0xd1, 0x80 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RBP, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x67, 0x8b, 0x45, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x67, 0x8b, 0x04, 0x24 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_R13, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x67, 0x41, 0x8b, 0x45, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_R12, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x67, 0x41, 0x8b, 0x04, 0x24 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_INDEX(1), .displacement = 0x10 }, 8, { 0x67, 0x8b, 0x04, 0x4d, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_INDEX(0), .displacement = 0x10 }, 8, { 0x67, 0x8b, 0x04, 0x0d, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .reg = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_ABSOLUTE, .displacement = 0x10 }, 8, { 0x67, 0x8b, 0x0c, 0x25, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x10 }, 7, { 0x67, 0x8b, 0x05, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_MOV_R64_RM64 + BUSTER_X86_FORM_FS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x64, 0x67, 0x48, 0x8b, 0x00 } },
+    { { .form = X86_FORM_LEA_R32_M, .rm = X86_REGISTER_RCX, .index = X86_REGISTER_RDX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(1) }, 4, { 0x67, 0x8d, 0x04, 0x51 } },
+    { { .form = X86_FORM_ADD_RM32_R32, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX }, 2, { 0x01, 0xc8 } },
+    { { .form = X86_FORM_VMOVDQU64_Z_ZM512, .reg = 1, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = 0x40 }, 9, { 0x67, 0x62, 0xf1, 0xfe, 0x48, 0x6f, 0x4c, 0x88, 0x01 } },
+    { { .form = X86_FORM_VADDPS_Y_Y_YM256, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_R8, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x67, 0xc4, 0xc1, 0x6c, 0x58, 0x08 } },
+    { { .form = X86_FORM_VPGATHERDD_X_VM32X_X, .reg = 1, .vvvv = 3, .rm = X86_REGISTER_RAX, .index = 2, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2) }, 7, { 0x67, 0xc4, 0xe2, 0x61, 0x90, 0x0c, 0x90 } },
+    { { .form = X86_FORM_VGATHERDPS_Z_VM32Z, .reg = 1, .rm = X86_REGISTER_R9, .index = 20, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 }, 8, { 0x67, 0x62, 0xd2, 0x7d, 0x41, 0x92, 0x0c, 0xa1 } },
+    { { .form = X86_FORM_TILELOADD_TMM_SIBMEM, .reg = 1, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0) }, 7, { 0x67, 0xc4, 0xe2, 0x7b, 0x4b, 0x0c, 0x08 } },
+    { { .form = X86_FORM_TILELOADD_TMM_SIBMEM, .reg = 1, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0) }, 7, { 0x67, 0xc4, 0xe2, 0x7b, 0x4b, 0x0c, 0x20 } },
+    { { .form = X86_FORM_XACQUIRE_LOCK_ADD_M16_R16 + BUSTER_X86_FORM_FS, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 7, { 0x64, 0x67, 0x66, 0xf2, 0xf0, 0x01, 0x08 } },
+    { { .form = X86_FORM_PFADD_MM_M64, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 0x9e }, 5, { 0x67, 0x0f, 0x0f, 0x00, 0x9e } },
+    { { .form = X86_FORM_CALL_RM64, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x67, 0xff, 0x10 } },
+    { { .form = X86_FORM_JMP_FAR_M48, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x67, 0xff, 0x28 } },
+    { { .form = X86_FORM_NOTRACK_JMP_M64, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x3e, 0x67, 0xff, 0x20 } },
+    { { .form = X86_FORM_NOTRACK_BND_JMP_M64, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x3e, 0x67, 0xf2, 0xff, 0x20 } },
+    { { .form = X86_FORM_LOCK_CMPXCHG16B_M128 + BUSTER_X86_FORM_GS, .rm = X86_REGISTER_R8, .mode = BUSTER_X86_MEMORY_BASE }, 7, { 0x65, 0x67, 0xf0, 0x49, 0x0f, 0xc7, 0x08 } },
+    { { .form = X86_FORM_CRC32_R32_RM16 + BUSTER_X86_FORM_FS, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 8, { 0x64, 0x67, 0x66, 0xf2, 0x0f, 0x38, 0xf1, 0x00 } },
+    { { .form = X86_FORM_MOVDIR64B_R64_M512, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x67, 0x66, 0x0f, 0x38, 0xf8, 0x00 } },
+    { { .form = X86_FORM_PREFETCHIT0_M8, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x10 }, 8, { 0x67, 0x0f, 0x18, 0x3d, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_MOV_R32_RM32 + BUSTER_X86_FORM_GS, .mode = BUSTER_X86_MEMORY_RIP, .displacement = 0x10 }, 8, { 0x65, 0x67, 0x8b, 0x05, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_BNDCL_BND_RM64, .reg = 1, .rm = X86_REGISTER_RAX }, 4, { 0xf3, 0x0f, 0x1a, 0xc8 } },
+    { { .form = X86_FORM_VADDPS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .mode = BUSTER_X86_MEMORY_ABSOLUTE, .displacement = -0x40 }, 12, { 0x67, 0x62, 0xf1, 0x6c, 0x48, 0x58, 0x0c, 0x25, 0xc0, 0xff, 0xff, 0xff } },
+    { { .form = X86_FORM_LOCK_ADD_M64_IMM32 + BUSTER_X86_FORM_FS, .rm = X86_REGISTER_RAX, .index = X86_REGISTER_RCX, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = 0x12345678, .immediate = 0x12345678 }, 15, { 0x64, 0x67, 0xf0, 0x48, 0x81, 0x84, 0x88, 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12 } },
+};
+
+// The mode's encoders (see x86_test_address32): x86_encode's or x86_encode_address32's, the scalar ones and validation.
+static int64_t x86_test_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
+{
+    return x86_test_address32 ? x86_encode_address32(instructions, count, output, capacity, offsets, fixup_ends)
+                              : x86_encode(instructions, count, output, capacity, offsets, fixup_ends);
+}
+
+static int64_t x86_test_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
+{
+    return x86_test_address32 ? x86_encode_scalar_address32(instructions, count, output, capacity, offsets, fixup_ends)
+                              : x86_encode_scalar(instructions, count, output, capacity, offsets, fixup_ends);
+}
+
+static uint64_t x86_test_validate(const X86Instruction* instructions, uint64_t count)
+{
+    return x86_test_address32 ? x86_validate_address32(instructions, count) : x86_validate(instructions, count);
+}
+
+// Checks one encoder of the mode on its known encodings, encoding each alone, and again with the fixup flag, whose end
+// it must report.
 static uint64_t x86_check_known_with(const char* name, bool vectorized)
 {
-    static uint8_t output[BUSTER_X86_ENCODER_CAPACITY(BUSTER_ARRAY_LENGTH(x86_known_encodings))];
+    static uint8_t output[BUSTER_X86_ENCODER_CAPACITY(1)];
     uint32_t fixup_ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)];
+    const KnownEncoding* encodings = x86_test_address32 ? x86_known_encodings_address32 : x86_known_encodings;
+    const uint64_t count = x86_test_address32 ? BUSTER_ARRAY_LENGTH(x86_known_encodings_address32) : BUSTER_ARRAY_LENGTH(x86_known_encodings);
     uint64_t failures = 0;
-    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_known_encodings); i += 1)
+    for (uint64_t i = 0; i < count; i += 1)
     {
-        const KnownEncoding* known = &x86_known_encodings[i];
+        const KnownEncoding* known = &encodings[i];
         for (uint32_t marked = 0; marked < 2; marked += 1)
         {
             X86Instruction instruction = known->instruction;
             instruction.form |= marked ? BUSTER_X86_FORM_FIXUP : 0;
             fixup_ends[0] = UINT32_MAX;
-            const int64_t length = vectorized ? x86_encode(&instruction, 1, output, sizeof(output), 0, fixup_ends)
-                                              : x86_encode_scalar(&instruction, 1, output, sizeof(output), 0, fixup_ends);
+            const int64_t length = vectorized ? x86_test_encode(&instruction, 1, output, sizeof(output), 0, fixup_ends)
+                                              : x86_test_encode_scalar(&instruction, 1, output, sizeof(output), 0, fixup_ends);
             if (length != known->length || memcmp(output, known->bytes, known->length) != 0 || (marked && fixup_ends[0] != known->length))
             {
                 if (failures < BUSTER_X86_TEST_REPORTED)
@@ -1957,10 +2095,11 @@ static uint64_t x86_check_known_with(const char* name, bool vectorized)
 
 static bool x86_check_known(void)
 {
-    const uint64_t scalar = x86_check_known_with("x86_encode_scalar", false);
-    const uint64_t vectorized = x86_check_known_with("x86_encode", true);
-    printf("known encodings: %lu instructions, %lu wrong (scalar), %lu wrong (vectorized)\n", (unsigned long)BUSTER_ARRAY_LENGTH(x86_known_encodings), (unsigned long)scalar,
-           (unsigned long)vectorized);
+    const uint64_t scalar = x86_check_known_with(x86_test_address32 ? "x86_encode_scalar_address32" : "x86_encode_scalar", false);
+    const uint64_t vectorized = x86_check_known_with(x86_test_address32 ? "x86_encode_address32" : "x86_encode", true);
+    const uint64_t count = x86_test_address32 ? BUSTER_ARRAY_LENGTH(x86_known_encodings_address32) : BUSTER_ARRAY_LENGTH(x86_known_encodings);
+    printf("known encodings%s: %lu instructions, %lu wrong (scalar), %lu wrong (vectorized)\n", x86_test_address32 ? " with 32-bit addresses" : "",
+           (unsigned long)count, (unsigned long)scalar, (unsigned long)vectorized);
     return scalar == 0 && vectorized == 0;
 }
 
@@ -2073,11 +2212,11 @@ static bool x86_check_digest(X86Instruction* instructions, uint8_t* output)
 {
     uint64_t state = BUSTER_X86_TEST_DIGEST_SEED * BUSTER_X86_TEST_GOLDEN_RATIO + 1;
     x86_random_instructions(&state, instructions, BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, false, true);
-    const int64_t length = x86_encode_scalar(instructions, BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, output, BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_DIGEST_INSTRUCTIONS), 0, 0);
+    const int64_t length = x86_test_encode_scalar(instructions, BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, output, BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_DIGEST_INSTRUCTIONS), 0, 0);
     const uint64_t digest = length >= 0 ? x86_fnv1a(output, (uint64_t)length) : 0;
-    const bool result = digest == BUSTER_X86_TEST_DIGEST;
-    printf("reference digest: %d instructions, %lld bytes, 0x%016llx (%s)\n", BUSTER_X86_TEST_DIGEST_INSTRUCTIONS, (long long)length, (unsigned long long)digest,
-           result ? "matches the one GNU as checked" : "DIFFERENT FROM THE ONE GNU AS CHECKED");
+    const bool result = digest == (x86_test_address32 ? BUSTER_X86_TEST_DIGEST_ADDRESS32 : BUSTER_X86_TEST_DIGEST);
+    printf("reference digest%s: %d instructions, %lld bytes, 0x%016llx (%s)\n", x86_test_address32 ? " with 32-bit addresses" : "", BUSTER_X86_TEST_DIGEST_INSTRUCTIONS,
+           (long long)length, (unsigned long long)digest, result ? "matches the one GNU as checked" : "DIFFERENT FROM THE ONE GNU AS CHECKED");
     return result;
 }
 
@@ -2107,6 +2246,17 @@ static const X86Variant x86_test_variants[] = {
     { "x86_encode_64_fixup_compress_stores", x86_encode_64_fixup_compress_stores, false, true },
 };
 
+static const X86Variant x86_test_variants_address32[] = {
+    { "x86_encode_64_address32", x86_encode_64_address32, false, false },
+};
+
+// The variants of the mode: every width and alternative for 64-bit addresses, and the production loop for 32-bit ones.
+static const X86Variant* x86_mode_variants(uint64_t* count)
+{
+    *count = x86_test_address32 ? BUSTER_ARRAY_LENGTH(x86_test_variants_address32) : BUSTER_ARRAY_LENGTH(x86_test_variants);
+    return x86_test_address32 ? x86_test_variants_address32 : x86_test_variants;
+}
+
 // Each variant runs with each of its loops: without offsets or fixup ends, with each of them, and with both.
 #define BUSTER_X86_TEST_WITH_OFFSETS 1u
 #define BUSTER_X86_TEST_WITH_FIXUP_ENDS 2u
@@ -2123,12 +2273,12 @@ struct X86Buffers
     uint32_t* fixup_ends;
 };
 
-// Compares a variant with x86_encode_scalar on `count` instructions, with each combination of offsets and fixup ends.
-// Prints the first difference if `report`.
+// Compares a variant with the mode's scalar encoder on `count` instructions, with each combination of offsets and fixup
+// ends. Prints the first difference if `report`.
 static bool x86_compare_encoders(const X86Variant* variant, const X86Instruction* instructions, uint64_t count, X86Buffers* buffers, bool report)
 {
-    const int64_t expected = x86_encode_scalar(instructions, count, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(count), buffers->expected_offsets,
-                                               buffers->expected_fixup_ends);
+    const int64_t expected = x86_test_encode_scalar(instructions, count, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(count), buffers->expected_offsets,
+                                                    buffers->expected_fixup_ends);
     const uint64_t marked = x86_count_marked(instructions, count);
     bool result = expected >= 0;
     for (uint32_t outputs = 0; outputs < BUSTER_X86_TEST_OUTPUT_COMBINATIONS; outputs += 1)
@@ -2186,9 +2336,11 @@ static bool x86_compare_encoders(const X86Variant* variant, const X86Instruction
 static bool x86_check_random(uint64_t* state, uint64_t count, X86Instruction* instructions, X86Buffers* buffers)
 {
     bool result = true;
-    for (uint64_t v = 0; v < BUSTER_ARRAY_LENGTH(x86_test_variants); v += 1)
+    uint64_t variants = 0;
+    const X86Variant* mode_variants = x86_mode_variants(&variants);
+    for (uint64_t v = 0; v < variants; v += 1)
     {
-        const X86Variant* variant = &x86_test_variants[v];
+        const X86Variant* variant = &mode_variants[v];
         uint64_t failures = 0;
         uint64_t marked = 0;
         for (uint64_t n = 0; n < BUSTER_X86_TEST_SHORT_COUNTS; n += 1)
@@ -2270,9 +2422,11 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
         action.sa_handler = x86_test_report_fault;
         sigaction(SIGSEGV, &action, &previous_segv);
         sigaction(SIGBUS, &action, &previous_bus);
-        for (uint64_t v = 0; v < BUSTER_ARRAY_LENGTH(x86_test_variants); v += 1)
+        uint64_t variants = 0;
+        const X86Variant* mode_variants = x86_mode_variants(&variants);
+        for (uint64_t v = 0; v < variants; v += 1)
         {
-            const X86Variant* variant = &x86_test_variants[v];
+            const X86Variant* variant = &mode_variants[v];
             x86_test_page_edge_variant = variant->name;
             for (uint32_t outputs = 0; outputs < BUSTER_X86_TEST_OUTPUT_COMBINATIONS; outputs += 1)
             {
@@ -2286,7 +2440,7 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
                     x86_mark_random(state, scratch, n);
                     X86Instruction* instructions = (X86Instruction*)(input_end - n * sizeof(X86Instruction));
                     memcpy(instructions, scratch, n * sizeof(X86Instruction));
-                    const int64_t expected = x86_encode_scalar(instructions, n, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(n), buffers->expected_offsets,
+                    const int64_t expected = x86_test_encode_scalar(instructions, n, buffers->expected, BUSTER_X86_ENCODER_CAPACITY(n), buffers->expected_offsets,
                                                                buffers->expected_fixup_ends);
                     const uint64_t marked = x86_count_marked(instructions, n);
                     // The output ends where the instructions do (for an exact variant) or where its capacity does, and
@@ -2309,9 +2463,9 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
         }
         sigaction(SIGSEGV, &previous_segv, 0);
         sigaction(SIGBUS, &previous_bus, 0);
-        printf("page edges: 0 to %d instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, %lu "
+        printf("page edges%s: 0 to %d instructions ending at a page end, machine code (or its capacity), offsets and fixup ends (or their capacity) too, %lu "
                "differ\n",
-               BUSTER_X86_TEST_SHORT_COUNTS - 1, (unsigned long)failures);
+               x86_test_address32 ? " with 32-bit addresses" : "", BUSTER_X86_TEST_SHORT_COUNTS - 1, (unsigned long)failures);
         result = failures == 0;
     }
     if (input_end != 0)
@@ -2363,6 +2517,13 @@ static uint32_t x86_range_kind(const X86FormDescription* form)
     return x86_form_has_is4(form) ? 5 : form->relative_bytes == 1 ? 4 : form->relative_bytes == 2 ? 6 : form->immediate_bytes <= 3 ? form->immediate_bytes : 0;
 }
 
+// Whether the form (an FS or GS one, as no other lacks room) has a memory operand but no template for 32-bit addresses
+// (see x86_form_lacks_address32_template, which a segment override's form without a memory operand also satisfies).
+static bool x86_form_is_unfit_address32(uint32_t form_index)
+{
+    return (x86_form_description(form_index)->rm & BUSTER_X86_OPERAND_MEMORY) && x86_form_lacks_address32_template(form_index);
+}
+
 // Breaks one operand of a valid instruction in one of the ways x86_encode checks, or in one that only x86_validate
 // checks (and then sets *validate_only). Returns false if this instruction can't be broken that way.
 static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, bool* validate_only)
@@ -2372,7 +2533,9 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
     const bool vsib = (form->rm & BUSTER_X86_OPERAND_VSIB) != 0;
     const bool sib = (form->rm & BUSTER_X86_OPERAND_SIB) != 0;
     bool result = true;
-    switch (x86_random_below(state, 23))
+    // The last two ways are for 32-bit addresses alone, so that the 64-bit pass breaks the instructions it did before
+    // them.
+    switch (x86_random_below(state, x86_test_address32 ? 25 : 23))
     {
         case 0:
             // A high byte register with an extended register (and so a REX prefix).
@@ -2721,25 +2884,33 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
         case 20:
         {
             // A RIP-relative operand of MPX's bndmk or a MIB operand, or a MIB operand's scaled index, which only
-            // x86_validate checks: in a new instruction of a form with one.
-            uint16_t form_index = x86_random_form(state, false);
-            while (!(x86_form_descriptions[form_index].rm & BUSTER_X86_OPERAND_NO_RIP) || (x86_form_descriptions[form_index].rm & BUSTER_X86_OPERAND_SIB))
+            // x86_validate checks: in a new instruction of a form with one. Those forms take only memory, so with
+            // 32-bit addresses, x86_random_form doesn't pick them (and case 23 breaks them).
+            if (x86_test_address32)
             {
-                form_index = x86_random_form(state, false);
-            }
-            *instruction = x86_random_instruction(state, form_index, false);
-            if ((x86_form_descriptions[form_index].rm & BUSTER_X86_OPERAND_UNSCALED) && x86_random_below(state, 2) == 0)
-            {
-                instruction->index = (instruction->mode & BUSTER_X86_MODE_INDEX) ? instruction->index : X86_REGISTER_RCX;
-                instruction->mode = (uint8_t)((instruction->mode & BUSTER_X86_MODE_BASE) | BUSTER_X86_MEMORY_INDEX(1 + x86_random_below(state, 3)));
+                result = false;
             }
             else
             {
-                instruction->mode = BUSTER_X86_MEMORY_RIP;
-                instruction->rm = 0;
-                instruction->index = 0;
+                uint16_t form_index = x86_random_form(state, false);
+                while (!(x86_form_descriptions[form_index].rm & BUSTER_X86_OPERAND_NO_RIP) || (x86_form_descriptions[form_index].rm & BUSTER_X86_OPERAND_SIB))
+                {
+                    form_index = x86_random_form(state, false);
+                }
+                *instruction = x86_random_instruction(state, form_index, false);
+                if ((x86_form_descriptions[form_index].rm & BUSTER_X86_OPERAND_UNSCALED) && x86_random_below(state, 2) == 0)
+                {
+                    instruction->index = (instruction->mode & BUSTER_X86_MODE_INDEX) ? instruction->index : X86_REGISTER_RCX;
+                    instruction->mode = (uint8_t)((instruction->mode & BUSTER_X86_MODE_BASE) | BUSTER_X86_MEMORY_INDEX(1 + x86_random_below(state, 3)));
+                }
+                else
+                {
+                    instruction->mode = BUSTER_X86_MEMORY_RIP;
+                    instruction->rm = 0;
+                    instruction->index = 0;
+                }
+                *validate_only = true;
             }
-            *validate_only = true;
             break;
         }
         case 21:
@@ -2768,6 +2939,62 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
             *instruction = x86_random_instruction(state, form_index, false);
             instruction->form = (uint16_t)((instruction->form % X86_FORM_COUNT) + (x86_random_below(state, 2) == 0 ? BUSTER_X86_FORM_FS : BUSTER_X86_FORM_GS));
             *validate_only = true;
+            break;
+        }
+        case 23:
+        {
+            // With 32-bit addresses, an MPX memory operand (#UD with a 67), which only x86_validate checks: a base
+            // alone, which every MPX form with a memory operand can have with 64-bit addresses (bndmk and the MIB
+            // operands too), in a new instruction of one. By hand, as x86_random_instruction finds none of the forms
+            // that take only memory (and x86_random_form doesn't pick them).
+            uint16_t form_index = (uint16_t)(1 + x86_random_below(state, X86_FORM_COUNT - 1));
+            while ((x86_form_descriptions[form_index].reg & BUSTER_X86_OPERAND_CLASS) != BUSTER_X86_CLASS_BND || !(x86_form_descriptions[form_index].rm & BUSTER_X86_OPERAND_MEMORY))
+            {
+                form_index = (uint16_t)(1 + x86_random_below(state, X86_FORM_COUNT - 1));
+            }
+            *instruction = (X86Instruction){
+                .form = form_index,
+                .reg = (uint8_t)x86_random_below(state, 4),
+                .rm = (uint8_t)x86_random_below(state, 16),
+                .mode = BUSTER_X86_MEMORY_BASE,
+                .displacement = x86_random_displacement(state, 1),
+            };
+            *validate_only = true;
+            break;
+        }
+        case 24:
+        {
+            // With 32-bit addresses, a memory operand in a form whose template has no room for the 67, which
+            // x86_encode_address32 rejects too: in a new instruction of one such form's row, chosen evenly (none if
+            // every template has room), with a memory operand (bextr's and LWP's rm can be a register), given the
+            // form's segment override.
+            uint32_t unfit = 0;
+            for (uint32_t form_index = BUSTER_X86_FORM_FS; form_index < BUSTER_X86_FORM_TEMPLATES; form_index += 1)
+            {
+                unfit += x86_form_is_unfit_address32(form_index);
+            }
+            const uint32_t chosen = unfit != 0 ? x86_random_below(state, unfit) : 0;
+            uint32_t form_index = BUSTER_X86_FORM_FS;
+            uint32_t seen = 0;
+            while (unfit != 0 && !(x86_form_is_unfit_address32(form_index) && seen == chosen))
+            {
+                seen += x86_form_is_unfit_address32(form_index);
+                form_index += 1;
+            }
+            if (unfit == 0)
+            {
+                result = false;
+            }
+            else
+            {
+                const uint16_t row = (uint16_t)(form_index % X86_FORM_COUNT);
+                *instruction = x86_random_instruction(state, row, false);
+                while (!(instruction->mode & BUSTER_X86_MODE_MEMORY))
+                {
+                    *instruction = x86_random_instruction(state, row, false);
+                }
+                instruction->form = (uint16_t)form_index;
+            }
             break;
         }
         default:
@@ -2802,12 +3029,14 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
         {
             broken += 1;
             broken_for_validate += validate_only;
-            const bool validated = x86_validate(instructions, count) == victim;
+            const bool validated = x86_test_validate(instructions, count) == victim;
             bool rejected = true;
-            for (uint64_t v = 0; v < BUSTER_ARRAY_LENGTH(x86_test_variants) && !validate_only; v += 1)
+            uint64_t variants = 0;
+            const X86Variant* mode_variants = x86_mode_variants(&variants);
+            for (uint64_t v = 0; v < variants && !validate_only; v += 1)
             {
-                rejected = rejected && x86_test_variants[v].encode(instructions, count, buffers->output, 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION &&
-                           x86_test_variants[v].encode(instructions, count, buffers->output, 0, buffers->fixup_ends) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
+                rejected = rejected && mode_variants[v].encode(instructions, count, buffers->output, 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION &&
+                           mode_variants[v].encode(instructions, count, buffers->output, 0, buffers->fixup_ends) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
             }
             if (!(validated && rejected))
             {
@@ -2822,8 +3051,8 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
             }
         }
     }
-    printf("invalid instructions: %lu broken (%lu in a way only x86_validate checks), %lu not caught\n", (unsigned long)broken,
-           (unsigned long)broken_for_validate, (unsigned long)failures);
+    printf("invalid instructions%s: %lu broken (%lu in a way only x86_validate checks), %lu not caught\n", x86_test_address32 ? " with 32-bit addresses" : "",
+           (unsigned long)broken, (unsigned long)broken_for_validate, (unsigned long)failures);
     return failures == 0;
 }
 
@@ -2842,7 +3071,7 @@ static bool x86_print_assembly(uint64_t seed, uint64_t* state, uint64_t count, X
     printf(".intel_syntax noprefix\n.arch .mpx\n.arch .amx_transpose\n.arch .amx_tf32\n.text\n");
     for (uint64_t i = 0; i < count; i += 1)
     {
-        const int64_t length = x86_encode_scalar(&instructions[i], 1, output, BUSTER_X86_ENCODER_CAPACITY(1), 0, 0);
+        const int64_t length = x86_test_encode_scalar(&instructions[i], 1, output, BUSTER_X86_ENCODER_CAPACITY(1), 0, 0);
         printf("0: ");
         x86_print_instruction(stdout, &instructions[i], symbolic[i]);
         printf("\n1: .pushsection .lengths, \"a\"; .byte 1b - 0b; .popsection # ");
@@ -2937,11 +3166,11 @@ static X86Relocation x86_expected_relocation(const X86Instruction* instruction, 
         const bool relative = form->relative_bytes != 0 || (instruction->mode & BUSTER_X86_MODE_RIP);
         const bool truncated = form->family == BUSTER_X86_FAMILY_LEGACY && x86_form_opcode(form) == 0x8d && (form->reg & BUSTER_X86_OPERAND_CLASS) != BUSTER_X86_CLASS_GPR64;
         result.addend = relative ? (int64_t)instruction->displacement - distance : instruction->displacement;
-        result.type = form->relative_bytes == 1   ? R_X86_64_PC8
-                      : form->relative_bytes == 4 ? (instruction->displacement == 0 ? R_X86_64_PLT32 : R_X86_64_PC32)
-                      : relative                  ? R_X86_64_PC32
-                      : truncated                 ? R_X86_64_32
-                                                  : R_X86_64_32S;
+        result.type = form->relative_bytes == 1        ? R_X86_64_PC8
+                      : form->relative_bytes == 4      ? (instruction->displacement == 0 ? R_X86_64_PLT32 : R_X86_64_PC32)
+                      : relative                       ? R_X86_64_PC32
+                      : truncated || x86_test_address32 ? R_X86_64_32
+                                                       : R_X86_64_32S;
         result.symbol = "dsym";
     }
     else
@@ -2977,8 +3206,8 @@ static bool x86_compare_object(uint64_t seed, uint64_t* state, const char* objec
     uint8_t* output = buffers->expected;
     uint32_t* offsets = buffers->expected_offsets;
     uint32_t* fixup_ends = buffers->expected_fixup_ends;
-    const int64_t length = x86_encode_scalar(instructions, count, output, BUSTER_X86_ENCODER_CAPACITY(count), offsets, fixup_ends);
-    const int64_t vectorized = x86_encode(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count), 0, buffers->fixup_ends);
+    const int64_t length = x86_test_encode_scalar(instructions, count, output, BUSTER_X86_ENCODER_CAPACITY(count), offsets, fixup_ends);
+    const int64_t vectorized = x86_test_encode(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count), 0, buffers->fixup_ends);
     const bool same_fixup_ends = vectorized == length && memcmp(buffers->fixup_ends, fixup_ends, marked * sizeof(uint32_t)) == 0;
 
     uint64_t file_length = 0;
@@ -3182,6 +3411,23 @@ static bool x86_parse_u64(const char* text, uint64_t* value)
     return result;
 }
 
+// The checks after the templates', for the addresses x86_test_address32 says, from the seed's first state: for 32-bit
+// addresses, all but the known fixups, which are 64-bit (--compare-object checks 32-bit addresses' relocations).
+static bool x86_check_mode(uint64_t seed, uint64_t count, X86Instruction* instructions, X86Buffers* buffers)
+{
+    uint64_t state = seed * BUSTER_X86_TEST_GOLDEN_RATIO + 1;
+    bool passed = x86_check_known();
+    if (!x86_test_address32)
+    {
+        passed = x86_check_known_fixups() && passed;
+    }
+    passed = x86_check_digest(instructions, buffers->output) && passed;
+    passed = x86_check_random(&state, count, instructions, buffers) && passed;
+    passed = x86_check_page_edges(&state, instructions, buffers) && passed;
+    passed = x86_check_invalid(&state, instructions, buffers) && passed;
+    return passed;
+}
+
 static int run_x86_encoder_tests(int argc, char** argv)
 {
     uint64_t count = BUSTER_X86_TEST_DEFAULT_COUNT;
@@ -3189,10 +3435,15 @@ static int run_x86_encoder_tests(int argc, char** argv)
     uint64_t print_count = 0;
     uint64_t compare_count = 0;
     const char* compare_path = 0;
+    bool address32 = false;
     bool valid = true;
     for (int i = 0; i < argc; i += 1)
     {
-        if (strcmp(argv[i], "--count") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "--address32") == 0)
+        {
+            address32 = true;
+        }
+        else if (strcmp(argv[i], "--count") == 0 && i + 1 < argc)
         {
             valid = valid && x86_parse_u64(argv[i + 1], &count);
             i += 1;
@@ -3237,34 +3488,37 @@ static int run_x86_encoder_tests(int argc, char** argv)
     if (!valid || count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS || print_count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS ||
         compare_count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
     {
-        fprintf(stderr, "usage: test-x86-encoder [--count N] [--seed N] [--print-assembly N | --compare-object object N]\n");
+        fprintf(stderr, "usage: test-x86-encoder [--count N] [--seed N] [--print-assembly N | --compare-object object N] [--address32]\n");
     }
     else if (instructions == 0 || symbolic == 0 || buffers.expected == 0 || buffers.output == 0 || buffers.expected_offsets == 0 || buffers.offsets == 0 ||
              buffers.expected_fixup_ends == 0 || buffers.fixup_ends == 0)
     {
         fprintf(stderr, "out of memory\n");
     }
-    else if (!x86_encoder_initialize())
+    else if (!x86_encoder_initialize() || !x86_encoder_initialize_address32())
     {
         x86_check_templates();
     }
     else if (print_count != 0)
     {
+        x86_test_address32 = address32;
         result = x86_print_assembly(effective_seed, &state, print_count, instructions, symbolic, buffers.output) ? 0 : 1;
     }
     else if (compare_path != 0)
     {
+        x86_test_address32 = address32;
         result = x86_compare_object(effective_seed, &state, compare_path, compare_count, instructions, symbolic, &buffers) ? 0 : 1;
     }
     else
     {
+        // Every check for 64-bit addresses, then again for 32-bit ones, which is all --address32 runs.
         bool passed = x86_check_templates();
-        passed = x86_check_known() && passed;
-        passed = x86_check_known_fixups() && passed;
-        passed = x86_check_digest(instructions, buffers.output) && passed;
-        passed = x86_check_random(&state, count, instructions, &buffers) && passed;
-        passed = x86_check_page_edges(&state, instructions, &buffers) && passed;
-        passed = x86_check_invalid(&state, instructions, &buffers) && passed;
+        if (!address32)
+        {
+            passed = x86_check_mode(effective_seed, count, instructions, &buffers) && passed;
+        }
+        x86_test_address32 = true;
+        passed = x86_check_mode(effective_seed, count, instructions, &buffers) && passed;
         result = passed ? 0 : 1;
     }
     free(instructions);

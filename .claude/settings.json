@@ -18,7 +18,26 @@
       "Bash(git push origin HEAD:*)",
       "Bash(git -C * push origin HEAD:*)",
       "Bash(tailscale ssh david@benchpress:*)",
-      "Bash(tailscale status:*)"
+      "Bash(tailscale status:*)",
+      "Bash(tailscaled --tun=userspace-networking:*)",
+      "Bash(nohup tailscaled --tun=userspace-networking:*)",
+      "Bash(tailscale up:*)",
+      "Bash(tailscale --socket=/tmp/claude-0/ts/sock up:*)",
+      "Bash(tailscale --socket=/tmp/claude-0/ts/sock status:*)",
+      "Bash(tailscale --socket=/tmp/claude-0/ts/sock ssh david@benchpress:*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/join-tailnet.sh",
+            "timeout": 120
+          }
+        ]
+      }
     ]
   }
 }
