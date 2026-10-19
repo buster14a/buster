@@ -18,8 +18,8 @@ can bring that close to what the kernel needs to put a file in the page cache.
 
 ## Summary
 
-- **The fastest link is the one that doesn't happen.** Without `-c`, the
-  compiler:
+- **The fastest link is the one that doesn't happen.** Without `-c`, one
+  command compiles and links (`cc main.c -o main`), and the compiler:
   - binds every name while it compiles: its own definitions directly, the C
     library's through the GOT;
   - lays the image out from the sizes the encoder returns;
@@ -517,11 +517,19 @@ the fixups pins all of this down.
 
 ### The direct path (no `-c`)
 
-When every input is a C source compiled in this process (one or many
-translation units, a unity build or not), the executable is written straight
-from the compiler's state. Foreign `.o` and `.a` inputs fall back to the
-import path (see "Linking other compilers' objects"), which produces the same
-representation, so a link can mix both.
+Without `-c`, one command compiles and links: `cc main.c -o main`, rather than
+`cc -c main.c -o main.o` followed by `cc -o main main.o`. When every input is a
+C source compiled in this process (one or many translation units, a unity
+build or not), the executable is written straight from the compiler's state,
+and no object file is written or read. Foreign `.o` and `.a` inputs fall back
+to the import path (see "Linking other compilers' objects"), which produces
+the same representation, so a link can mix both.
+
+"Direct" is about the missing object file, not about the C library. The
+direct path links the C runtime as `cc` does, through the runtime snapshot
+below. Executables without libc, whose `_start` makes system calls (as with
+`-nostdlib`), are one more output it writes, and the first one built (see
+"Plan").
 
 The steps:
 
@@ -1330,12 +1338,16 @@ and with this document updated with what was measured:
    programs. Done when GNU ld, lld, mold and wild link its objects into
    programs that run, `readelf` agrees, and `benchmark-object-writer` reports
    per-object costs against the file floor.
-4. **The direct path without libc:** a static executable whose `_start` makes
-   system calls. Done when the tests' programs run.
-5. **The runtime snapshot and the dynamic PIE:** binding, GOT, RELR, versions,
-   the snapshot's validation and rebuild. Done when generated programs that
-   call libc run, match their objects linked by lld, and `benchmark-link`
-   meets the targets in "Summary".
+4. **The direct path, starting without libc:** layout, patching, the file
+   write and the build ID, which every executable written straight from the
+   compiler's state goes through. Linking libc needs step 5's runtime
+   snapshot, so the first executables are static ones whose `_start` makes
+   system calls, with no libc or crt objects. Done when the tests' programs
+   run.
+5. **The runtime snapshot and the dynamic PIE:** the direct path for programs
+   that call libc: binding, GOT, RELR, versions, the snapshot's validation and
+   rebuild. Done when generated programs that call libc run, match their
+   objects linked by lld, and `benchmark-link` meets the targets in "Summary".
 
    The comparison has to be between outputs with the same features. The
    generated programs carry a CIE and an FDE per function, so this step
