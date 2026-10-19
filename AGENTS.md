@@ -52,7 +52,13 @@ or infrastructure machinery merely to match its style.
   `x86_64_encoder_benchmark.c` provides `benchmark-x86-encoder`.
 - `docs/object-writer-and-linker.md` is the design of the object writer and the
   linker, with the 9700X measurements of mold, wild, lld and the kernel's file
-  costs behind it, and the order to build it in. None of it is implemented yet.
+  costs behind it, and the order to build it in. Its first step, the lane base
+  layer below, is implemented; the rest isn't yet.
+- `src/buster/compiler/lane.c` is the lane base layer that every phase of the
+  object writer and the linker runs on (groups of threads that run the same
+  code, their barrier and broadcast, `lane_range`, and arenas).
+  `lane_test.c` holds its tests (`main.c` includes it; `./build/compiler
+  test-lanes` runs them) and `lane_benchmark.c` provides `benchmark-lanes`.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -65,6 +71,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler benchmark-lexer src
 ./build/compiler test-x86-encoder
 ./build/compiler benchmark-x86-encoder
+./build/compiler test-lanes
+./build/compiler benchmark-lanes
 ```
 
 ## Sharing the 9700X
@@ -179,3 +187,43 @@ changes a lot with small source changes, so compare every width after changing
 the encoder, and profile which loop the samples land in. The default 9700X job
 runs it after the tests, pinned to one allowed CPU; like the lexer's, its
 measurements are informational.
+
+## Lane tests
+
+`./build/compiler test-lanes` (about 0.1 s) checks the lane base layer. The
+arena checks run on the calling thread, and every other check runs on groups of
+1, 2, 3 and 8 lanes and compares what the lanes produce with a sequential
+reference:
+
+- arenas: pushes at every power-of-two alignment up to 2 MB, invalid
+  alignments, a push one byte past the capacity (it fails and leaves the arena
+  as it was), sizes and counts whose arithmetic overflows, and the page sizes
+  asked for, read back from `/proc/self/smaps`;
+- `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
+  seven cost patterns: the parts must cover the items in lane order, and each
+  item must go to the lane whose share of the total cost holds its midpoint;
+- 10,000 rounds of a sync and a broadcast, with a lane arriving late every
+  1,000 rounds so that the others sleep on the futex, then as many broadcasts
+  back to back, and narrow tasks spread by `lane_from_task_index`;
+- a lane that makes itself a group of one and rejoins, and the scratch arenas;
+- the design's exchange (rule 4 in "Lanes"): records counted per hash
+  partition, placed, filled and resolved by partition, byte-identical to the
+  reference for every lane count.
+
+A watchdog ends the run with status 1 if a group doesn't finish within 60 s,
+which is how a lost wake-up would show. `--rounds N` and `--seed N` change the
+rounds and the random inputs.
+
+## Lane benchmark
+
+`./build/compiler benchmark-lanes [--lanes N] [--cpus LIST] [--rounds N]` pins
+lane i of groups of 1 to 8 lanes to the i-th CPU of `--cpus` (by default the
+allowed CPUs in order: 0 to 7 on the 9700X, one per core) and reports
+21-pass medians of a sync and a broadcast when every lane arrives at once, of
+`pthread_barrier_wait` (the RAD Debugger's barrier on Linux) in the same loop,
+of waking lanes that sleep on the futex, and of starting a group, then what an
+arena's reservation and first touches cost. Run it under the 9700X's lock
+without `taskset`, since it pins its lanes itself.
+`docs/object-writer-and-linker.md` ("Lanes") has the numbers. The default 9700X
+job runs it after the tests; like the others, its measurements are
+informational.
