@@ -39,8 +39,8 @@ can bring that close to what the kernel needs to put a file in the page cache.
   writer and imported ELF inputs alike.
 - **Every phase is written in lanes.** This is Ryan Fleury's *multi-core by
   default*, the style of the RAD Debugger's base layer:
-  - every thread runs the same code, splitting work with `lane_range` and
-    meeting at `lane_sync`;
+  - every thread runs the same code, taking parts of the work, cut by cost,
+    from a counter, and meeting at `lane_sync`;
   - each lane writes only what it owns;
   - names are resolved by exchanging records through fixed hash partitions,
     with no shared hash table and no locks.
@@ -1064,6 +1064,15 @@ static Range64 lane_range(uint64_t count);
 // lane whose share of the total cost holds the item's midpoint, so each part's cost is within the largest item's of an
 // equal share.
 static Range64 lane_range_by_cost(const uint64_t* cost_prefix, uint64_t count);
+// Part `part` of [0, count) cut into `parts`, as lane_range and lane_range_by_cost cut it into lanes.
+static Range64 range_part(uint64_t count, uint64_t part, uint64_t parts);
+static Range64 range_part_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t part, uint64_t parts);
+// Cuts [0, count) by cost into 64 parts per lane, whose boundaries the lanes find together: part i is
+// [boundaries[i], boundaries[i + 1]). Each lane's order gets the parts costliest first, to within a factor of two. Like
+// lane_sync, it waits for every lane.
+static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t* boundaries, uint32_t* order);
+// The next number this lane takes from its group's counter: 0, 1, 2, ... across the lanes, then parts or more.
+static uint64_t lane_take(uint64_t parts);
 // Runs entry(argument) on a group of count lanes, the calling thread being lane 0, and returns once they all have.
 static bool lane_run(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus);
 ```
@@ -1072,42 +1081,53 @@ The lane lives in a thread-local context with the thread's scratch arenas, as
 `TCTX` holds the RAD Debugger's `LaneCtx`. A thread that has to run a phase
 alone, while the others do something else, makes itself a group of one (index
 0, count 1, no barrier) with `lane_alone` and restores its group afterwards.
-The barrier is a counter and a generation word: it spins briefly, then waits on
-a futex. Its atomics are the only ones the linker has.
+The barrier is a counter and a generation word: it spins briefly, waits in
+`mwaitx`, then sleeps on a futex. Its atomics, and the counter `lane_take` adds
+to, are the only ones the linker has: one atomic add per part, and none with one
+lane.
 
 Three things differ from the RAD Debugger, each measured below:
 
 - **The calling thread is lane 0.** radbin's main thread waits for its lanes;
   here it is one of them, so a group of one starts no thread. A program starts
   its group once, with all of its phases in the entry point, since starting
-  threads costs as much as 130 to 190 syncs.
+  threads costs as much as 180 to 220 syncs.
 - **A broadcast is one barrier.** `lane_sync_u64` copies the value in, waits,
   copies it out and waits again. Here the source offers its value on the
   barrier's arrival line, which it writes anyway as it arrives; the last lane to
   arrive copies it next to the generation word, and a waiting lane reads both
   together.
-- **The barrier spins before it sleeps.** On Linux the RAD Debugger's barrier
+- **The barrier waits before it sleeps.** On Linux the RAD Debugger's barrier
   is `pthread_barrier_wait`, which sleeps in the kernel at every wait. Here a
-  waiting lane spins for 2,048 pauses (24 µs on the 9700X) before it sleeps,
-  and it sets a bit in the generation word first, so a sync at which no lane
-  slept makes no system call.
+  waiting lane spins for 128 pauses (1.5 µs on the 9700X), then waits in
+  `mwaitx` for the generation word's line to be written, for up to 1 ms,
+  before it sleeps ("How long to wait before sleeping" below). It sets a bit
+  in the generation word first, so a sync at which no lane slept makes no
+  system call.
 
 The RAD Debugger's PDB converter balances uneven work with atomic counters that
-lanes take tasks from. Rule 1 below balances with `lane_range_by_cost` instead,
-from costs known up front, which keeps the barrier's atomics the only ones.
+lanes take tasks from, one task per take. Rule 1 below takes from a counter
+too, but parts cut by cost, costliest first ("Balancing a phase" below).
 
 The rules for every phase:
 
-1. **Ranges, not tasks.** Work is split with `lane_range` or
-   `lane_range_by_cost`, in canonical order: lane 0's part is first. The cost
-   prefix is what keeps uneven inputs balanced without a shared work counter:
-   bytes for files, instructions for functions.
+1. **Parts by cost, taken from a counter.** `lane_parts_by_cost` cuts a loop
+   into 64 parts per lane, contiguous and in canonical order, each holding the
+   items whose midpoints, in cost, fall in its share of the total. The costs
+   are a prefix sum known before the phase: bytes for files, instructions for
+   functions. The lanes take the parts from one counter with `lane_take`,
+   costliest first to within a factor of two, until none are left. A lane that
+   runs slower takes fewer parts, and a heavy item starts early rather than
+   ending the phase late. A phase with less than about 64 µs of work per lane
+   splits once instead, with `lane_range_by_cost`, since taking parts costs it
+   2 to 7 µs on 8 lanes.
 2. **Lanes write only what they own.** Shared memory is either read-only after
    a `lane_sync`, or split into ranges that one lane writes. There are no
    locks, and no two lanes write a cache line except at a range's edge.
-3. **Count, place, fill.** Variable-sized output is counted per lane, placed by
-   prefix sums over `lane_count()` values that every lane computes for itself
-   (cheaper than a broadcast), and filled into exactly sized ranges.
+3. **Count, place, fill.** Variable-sized output is counted per part, placed
+   by prefix sums over the parts' counts that every lane computes for itself
+   (cheaper than a broadcast, even at 512 values with 8 lanes), and filled into
+   exactly sized ranges: each lane fills the parts it took.
 4. **Exchange instead of sharing.** To bring together records that only a key
    relates (symbols by name, strings by content), each lane:
    1. counts its records per hash partition;
@@ -1120,10 +1140,16 @@ The rules for every phase:
    (§4.1). Unlike mold's resolution and string merging (§4.2–4.3) and the RAD
    linker's hash trie, it needs no compare-and-swap. Records are 16 bytes (a
    hash, the input symbol and its precedence), and each crosses between cores
-   once.
+   once. Its first three steps split the records by lane (`lane_range`), so
+   the segments' places follow from `lane_count()` counts per partition, where
+   parts would need 64 times as many; the fourth takes parts of the
+   partitions, by record count.
 5. **Determinism.** The output depends on the inputs and options, never on the
    lane count or on scheduling:
    - the partition count depends on the input size, not on the lanes;
+   - parts are contiguous and in canonical order, and output is placed by
+     part, so neither which lane took a part nor how many parts there were
+     shows;
    - ties break by input order;
    - padding is absolute (see "Layout");
    - every reduction is order-independent or done in canonical order.
@@ -1140,18 +1166,18 @@ How the phases map onto lanes:
 
 | Phase | Split | Lane-owned output | After the sync |
 | --- | --- | --- | --- |
-| Encoding (direct path) | functions, by instruction count | code buffer, function sizes, fixups | each lane's base: a prefix sum over `lane_count()` sizes |
-| Layout | atoms | the addresses of its atoms | each lane's base: a prefix sum of the lane totals |
-| Patch and write | output chunks, by bytes | its file ranges | the build ID's tree |
-| Parse (foreign) | inputs, by bytes | sections, symbols, name hashes | the exchange |
-| Resolve | hash partitions | winners, written into each input's resolution array | — |
+| Encoding (direct path) | parts of the functions, by instruction count | code buffer, with each part's offset in it; function sizes; fixups | each part's base: a prefix sum over the parts' sizes |
+| Layout | parts of the atoms | the addresses of its atoms | each part's base: a prefix sum of the part totals |
+| Patch and write | parts of the output, by bytes | its file ranges | the build ID's tree |
+| Parse (foreign) | parts of the inputs, by bytes: a few large inputs are a part each, largest first | sections, symbols, name hashes | the exchange |
+| Resolve | parts of the hash partitions, by record count | winners, written into each input's resolution array | — |
 | Garbage collection and archive loading | frontier ranges | bitsets | OR-reduce into the next frontier |
-| Merge strings | sections, then partitions | string offsets | — |
+| Merge strings | parts of the sections, then of the partitions | string offsets | — |
 
-With one lane, every sync returns at once, `lane_range` returns everything,
-and the exchange's partitions are processed by one owner. That is the first
-implementation, and it pays almost nothing for being written this way. Where
-lanes help is measured, as is everything else:
+With one lane, every sync returns at once, a loop is one part, `lane_range`
+returns everything, and the exchange's partitions are processed by one owner.
+That is the first implementation, and it pays almost nothing for being written
+this way. Where lanes help is measured, as is everything else:
 
 - the exchange costs a second pass over the records;
 - on btrfs, the file write doesn't scale.
@@ -1160,30 +1186,40 @@ lanes help is measured, as is everything else:
 CPU i (CPUs 0 to 7 are its eight cores). Each figure is the median of three
 runs, each of them the median of 21 passes:
 
-| Lanes | `lane_sync` | `lane_broadcast` | `pthread_barrier_wait` | Waking sleeping lanes | Starting the group |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 0.0 ns | 0.3 ns | 48 ns | — | — |
-| 2 | 35 ns | 43 ns | 1.32 µs | 2.0–13 µs | 6.5 µs |
-| 3 | 71 ns | 73 ns | 1.56 µs | 2.1 µs | 9.3 µs |
-| 4 | 101 ns | 100 ns | 1.73 µs | 2.5 µs | 14 µs |
-| 5 | 123 ns | 129 ns | 1.79 µs | 2.7 µs | 17 µs |
-| 6 | 146 ns | 158 ns | 1.80 µs | 3.0 µs | 26 µs |
-| 7 | 176 ns | 187 ns | 1.82 µs | 3.2 µs | 31 µs |
-| 8 | 193 ns | 212 ns | 1.86 µs | 3.4–15 µs | 37 µs |
+| Lanes | `lane_sync` | `lane_broadcast` | `pthread_barrier_wait` | Waking from `mwaitx` | Waking from the futex | Starting the group |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.0 ns | 0.3 ns | 48 ns | — | — | — |
+| 2 | 42 ns | 46 ns | 1.46 µs | 0.30 µs | 3.3–14 µs | 9.2 µs |
+| 3 | 85 ns | 72 ns | 1.60 µs | 0.29 µs | 2.3–3.5 µs | 10 µs |
+| 4 | 116 ns | 110 ns | 1.75 µs | 0.37 µs | 3.8–14 µs | 14 µs |
+| 5 | 139 ns | 144 ns | 1.78 µs | 0.31 µs | 10–14 µs | 19 µs |
+| 6 | 166 ns | 168 ns | 1.79 µs | 0.32 µs | 14 µs | 26 µs |
+| 7 | 188 ns | 197 ns | 1.81 µs | 0.33 µs | 15 µs | 32 µs |
+| 8 | 219 ns | 223 ns | 1.86 µs | 0.34 µs | 15 µs | 39 µs |
 
 - **Sync and broadcast:** back-to-back calls, every lane arriving at once. Each
-  lane adds about 26 ns, the cost of its atomic add moving the arrival line
-  between cores. A broadcast costs what a sync does.
+  lane adds about 29 ns, the cost of its atomic add moving the arrival line
+  between cores. A broadcast costs what a sync does. The barrier before
+  `mwaitx`, which spun 2,048 pauses before it slept, measured the same within
+  8% either way, in runs alternating with these.
 - **`pthread_barrier_wait`:** the RAD Debugger's barrier on Linux, in the same
-  loop. It costs 10 to 38 times as much with 2 to 8 lanes.
-- **Waking:** lane 0 arrives 1 ms late, after the others have spun and gone to
-  sleep. The time is from lane 0's arrival until the last lane has left. In
-  some runs it was 10–15 µs: a core had gone into a deeper idle state, and C2
-  declares 18 µs to exit. The 24 µs spin is longer than that dearest wake-up,
-  so a lane sleeps only when its wait is already longer.
+  loop. It costs 8 to 35 times as much with 2 to 8 lanes.
+- **Waking:** lane 0 arrives late, and the time is from its arrival until the
+  last lane has left. 200 µs late, the others are waiting in `mwaitx`; 3 ms
+  late, they are asleep on the futex, and waking them took 2 to 4 µs in some
+  runs and 10 to 15 µs in others, as their cores had gone into a shallower
+  idle state or a deeper one (the futex column has the three runs' range where
+  they differed). This table had 2.0–3.4 µs for the
+  futex before (10–15 µs in some runs), from lanes that had done nothing but
+  sync before they slept 1 ms. Lanes that worked before they slept, as in
+  "How long to wait before sleeping", took 10–15 µs to wake on the cores with
+  the powersave governor, and 1.4–2.4 µs on CPU 2, whose governor is
+  performance (see the appendix).
 - **Starting:** `lane_run` of an entry point that returns at once, without
-  pinning, from the call until it returns. That is what 130 to 190 syncs cost,
-  hence one group per program.
+  pinning, from the call until it returns. That is what 180 to 220 syncs cost,
+  hence one group per program. It costs 0.5 to 3 µs more than with the barrier
+  before `mwaitx`: its passes now follow the ones in which the lanes sleep for
+  3 ms.
 
 Where the broadcast's value goes decided its cost (`benchmark-lanes`, medians
 of four or five rotating runs of each layout):
@@ -1197,6 +1233,161 @@ of four or five rotating runs of each layout):
 
 Writing a slot on the generation line makes the lanes spinning on it read the
 line again, and putting the counter there too makes every arrival do so.
+
+**How long to wait before sleeping.** A lane that waited long enough at a sync
+runs slower afterwards, which costs every phase that follows a narrow section
+or an unbalanced one. On the 9700X its clock drops to half, 2.77 GHz from
+5.5, about 0.1 to 0.2 ms after it resumes, and comes back about 1 ms later, so
+its next millisecond of work takes 25 to 60% longer. On CPU 2, the one core
+with the performance governor, the clock drops to 3.77 GHz instead. What
+counts is how long the core sat idle, not how the lane waited:
+
+- lanes that spun never slowed down;
+- lanes that waited in `mwaitx` didn't up to 1.5 ms, and did from 2 ms on;
+- lanes that slept on the futex did from 0.7 ms on.
+
+A harness measured it (`~/buster-fast-bench/lane-wake` on the 9700X). Eight
+lanes pinned to CPUs 0–7 work for 2 ms. Then one lane, which rotates, works
+alone for the wait while the others wait at a sync, in the way being tested.
+Then they all work for 5 ms more, timing every 3 µs of work and reading APERF
+and MPERF with `rdpru`. Each cell has two figures, medians over 48 trials of
+the seven cores with the powersave governor:
+
+- how much longer than at full speed their first millisecond of work after the
+  wait took. Spinning lanes never slow down, so their 1.3–1.6% is the
+  measurement's floor;
+- how long after the late lane arrived they left.
+
+| Wait | Futex after 2,048 pauses (before) | Spinning | `mwaitx` | `lane.c`: 128 pauses, `mwaitx` up to 1 ms, futex |
+| ---: | ---: | ---: | ---: | ---: |
+| 200 µs | 0.8%, 10 µs | 1.3%, 0.05 µs | 1.7%, 0.23 µs | 1.4%, 0.30 µs |
+| 500 µs | 1.3%, 10 µs | 1.5%, 0.03 µs | 1.7%, 0.23 µs | 1.7%, 0.30 µs |
+| 700 µs | 45%, 11 µs | 1.6%, 0.06 µs | 1.5%, 0.22 µs | 1.5%, 0.31 µs |
+| 1 ms | 32%, 14 µs | 1.6%, 0.05 µs | 1.5%, 0.22 µs | 1.5%, 1.6 µs |
+| 1.5 ms | 44%, 15 µs | 1.6%, 0.03 µs | 1.5%, 0.23 µs | 1.7%, 10 µs |
+| 2 ms | 36%, 15 µs | 1.6%, 0.06 µs | 25%, 0.29 µs | 46%, 14 µs |
+| 5 ms | 37%, 14 µs | 1.5%, 0.06 µs | 33%, 0.32 µs | 41%, 15 µs |
+| 10 ms | 58%, 15 µs | 1.5%, 0.07 µs | 56%, 0.30 µs | 60%, 15 µs |
+
+What the waiting costs meanwhile: the package's power while one lane works
+and the others wait, back to back for 200 ms, and the median waiting core's
+(RAPL's `energy-pkg` and `energy-core`, through perf). With every core idle
+the package draws 20 W, and with all eight working 67 W:
+
+| Wait | Futex (before) | Spinning | `mwaitx` | `lane.c` |
+| ---: | ---: | ---: | ---: | ---: |
+| 200 µs | 47 W, 2.4 W a core | 59 W, 4.2 W | 42 W, 2.0 W | 43 W, 2.1 W |
+| 1 ms | 43 W, 2.0 W | 57 W, 4.0 W | 42 W, 2.0 W | 42 W, 2.0 W |
+| 2 ms | 29 W, 0.13 W | 57 W, 4.0 W | 43 W, 2.0 W | 43 W, 1.9 W |
+| 5 ms | 30 W, 0.09 W | 57 W, 4.0 W | 43 W, 2.0 W | 33 W, 0.59 W |
+| 10 ms | 28 W, 0.07 W | 57 W, 4.0 W | 44 W, 2.2 W | 29 W, 0.17 W |
+
+For waits up to 2 ms, the lane working alone ran at 5.45–5.48 GHz while the
+others spun or waited in `mwaitx`, against 5.48–5.52 GHz while they slept:
+they cost it about 1% of its clock.
+
+So `lane.c` spins for 128 pauses, which a sync at which every lane arrives at
+once never gets past, then waits in `mwaitx` for up to 1 ms, then sleeps on
+the futex:
+
+- **Waits up to 1.5 ms leave the lanes at full speed,** where the barrier
+  before slowed them by 32–45% from 0.7 ms on. The linker's phases should
+  wait less than that: the whole link of the 46 MB program is to take 4 to
+  10 ms on one lane.
+- **The lanes wake in 0.3 µs** rather than 10 to 15 µs.
+- **Waiting in `mwaitx` draws what sleeping does for such waits,** 2 W a core,
+  half what spinning does, and costs the lane working alone as much as
+  spinning does.
+- **Past 1 ms the lane sleeps.** From 2 ms on, every way of waiting but
+  spinning slows the lanes afterwards, and spinning costs 4 W a core and holds
+  cores the rest of the machine could use. So the futex saves the power, and
+  by 10 ms a waiting core draws 0.17 W.
+- **`monitorx` and `mwaitx` work in user mode** on Zen, and `mwaitx`'s timer
+  bounds each wait. Its C1 hint wakes as fast as C0's (`0xf0`) and draws a
+  little less.
+
+`benchmark-lanes` ends with the same measurement for its largest group: lane 0
+works alone for the wait, then every lane works for 1 ms. Medians of three
+runs, against full speed, with the wake as in the table above:
+
+| Wait | Wake | Lane 0 alone | Slowest lane after | Median lane after |
+| ---: | ---: | ---: | ---: | ---: |
+| 200 µs | 0.42 µs | +0.3% | +0.5% | +0.5% |
+| 1 ms | 0.41 µs | +0.2% | +0.3% | +0.3% |
+| 2 ms | 11 µs | 0.0% | +41% | +41% |
+| 5 ms | 15 µs | −0.7% | +36% | +36% |
+
+**Balancing a phase.** Static ranges from `lane_range_by_cost`, which rule 1
+used before, balance as well as anything when every lane runs at full speed
+and the items are many. But they wait for the slowest lane, and for a heavy
+item that comes last. A harness on the 9700X (`~/buster-fast-bench/lane-balance2`,
+from issue #75's `lane-balance`) ran phases of 8 ms of work at full speed on 8
+lanes, with the items' costs estimated up front: heavy-tailed items
+(lognormal, σ = 1.5), with exact estimates or estimates off by 0.5–2×, and
+many equal items, off by 0.5–2×. Four ways to share them out:
+
+- **Rule 1 before:** `lane_range_by_cost`.
+- **`takecost64`:** 64 parts per lane, taken in index order, each finding its
+  boundaries as it is taken.
+- **`largest1`:** one item per take, largest first: the RAD Debugger's loop
+  over the items sorted beforehand, untimed.
+- **Parts, costliest first:** `lane.c`'s, with the boundaries and the order
+  made in the phase.
+
+Each cell is the efficiency (the time on one lane over 8 times the time),
+first with every lane at full speed, then with lanes 4–7 sharing their cores
+with a thread that runs a busy loop, then with lanes 4–7 asleep for 1 ms before
+each phase. Each is the median of 21 passes, averaged over two runs:
+
+| Workload | Rule 1 before | `takecost64` | `largest1` | Parts, costliest first |
+| --- | ---: | ---: | ---: | ---: |
+| 256 heavy-tailed items (32 a lane) | 90 / 89 / 68 | 81 / 81 / 70 | 98 / 97 / 87 | 97 / 97 / 81 |
+| the same, estimates off by 0.5–2× | 78 / 77 / 62 | 75 / 75 / 65 | 98 / 97 / 81 | 97 / 97 / 84 |
+| 2,048 heavy-tailed items | 96 / 95 / 74 | 94 / 93 / 76 | 97 / 96 / 85 | 97 / 96 / 82 |
+| the same, estimates off | 89 / 88 / 68 | 93 / 92 / 77 | 97 / 96 / 85 | 97 / 96 / 82 |
+| 16,384 heavy-tailed items | 98 / 93 / 74 | 96 / 94 / 79 | 89 / 87 / 76 | 97 / 94 / 83 |
+| the same, estimates off | 95 / 91 / 71 | 96 / 94 / 81 | 89 / 87 / 75 | 97 / 94 / 84 |
+| 65,536 items of 120 ns on average | 97 / 80 / 70 | 96 / 87 / 83 | 71 / 67 / 61 | 96 / 87 / 79 |
+| 524,288 items of 15 ns on average | 97 / 67 / 65 | 94 / 79 / 80 | 9 / 9 / 9 | 95 / 80 / 76 |
+
+- **One way covers both cases.** `largest1` beats parts taken in index order
+  up to 512 items per lane, and loses from 1,024 (94% against 96% with 8,192
+  heavy-tailed items): one take per item then costs more than the imbalance
+  it saves. Taking the parts costliest first makes that threshold moot. They
+  come within 0.5 points of `largest1` where it wins, and within 1.6 points of
+  the static ranges at full speed everywhere else.
+- **Uneven lanes are where parts pay:** 1 to 22 points over the static ranges.
+  A thread sharing a core slows throughput-bound work the most, as the many
+  small items are; the busy loop of the heavy items depends on itself and
+  barely notices it.
+- **Lanes that start the phase slow** (the third figure, a slowdown "How long
+  to wait before sleeping" describes) cost parts 3 to 5 points more than
+  `takecost64` on many small items. The lanes find the boundaries together,
+  and the fast ones wait at that sync for the slow ones' share. With the
+  barrier waiting in `mwaitx`, waits of up to 1.5 ms no longer start a phase
+  slow.
+
+`benchmark-lanes` measures the same on its largest group, with phases of
+4 ms of work at full speed and costs of 2^(r mod 24), and with lanes 4–7
+running every item twice. Each figure is the time's share of the best
+possible: all the work at full speed, spread over the lanes as fast as each
+can do it:
+
+| Workload | Rule 1 before | Parts | Rule 1 before, lanes 4–7 at half speed | Parts, lanes 4–7 at half speed |
+| --- | ---: | ---: | ---: | ---: |
+| 256 heavy-tailed items | 89% | 99% | 59% | 99% |
+| 16,384 heavy-tailed items | 99% | 98% | 66% | 98% |
+| 65,536 equal items | 99% | 99% | 66% | 98% |
+
+Parts cost a phase 2 to 7 µs on 8 lanes: the boundaries, a sync, the order
+and 64 atomic adds per lane, the most when the takes come all at once. With
+64 µs of work per lane, parts and static ranges tie at full speed (95–97%
+against 89–99%). With 16 µs, parts lose 2 to 4 µs. With 4 µs, a phase takes
+7–10 µs where static ranges take 2–5. Hence rule 1's limit.
+
+The counter is a second atomic beside the barrier's. All 8 lanes share one CCD
+on the 9700X. On a part with several, a contended take costs more, which 512
+takes per phase on 8 lanes leave room for.
 
 ### SIMD: what pays
 
@@ -1405,7 +1596,10 @@ and with this document updated with what was measured:
 6.18.50-2-lts:
 
 - 15 CPUs online (CPU 10, CPU 2's SMT sibling, is offline);
-- the performance governor;
+- amd-pstate-epp in active mode with the performance governor for the link
+  measurements. For the lanes' (2026-10-19), only CPU 2 had it, and the others
+  ran the powersave governor with the energy preference
+  `balance_performance`;
 - tmpfs at `/tmp` and btrfs (zstd:3) at `/home`;
 - glibc 2.44, GCC 16.2.1's crt files and libgcc, clang 23.1.1;
 - GNU ld 2.47, lld 23.1.1, mold 3.0.0 and wild 0.10.0.

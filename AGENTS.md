@@ -247,7 +247,7 @@ measurements are informational.
 
 ## Lane tests
 
-`./build/compiler test-lanes` (about 0.1 s) checks the lane base layer. The
+`./build/compiler test-lanes` (about 0.2 s) checks the lane base layer. The
 arena checks run on the calling thread, and every other check runs on groups of
 1, 2, 3 and 8 lanes and compares what the lanes produce with a sequential
 reference:
@@ -259,13 +259,21 @@ reference:
 - `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
   seven cost patterns: the parts must cover the items in lane order, and each
   item must go to the lane whose share of the total cost holds its midpoint;
+  and the same of `range_part` and `range_part_by_cost` with 64, 512 and 1,001
+  parts;
 - 10,000 rounds of a sync and a broadcast, with a lane arriving late every
-  1,000 rounds so that the others sleep on the futex, then as many broadcasts
-  back to back, and narrow tasks spread by `lane_from_task_index`;
+  1,000 rounds, by turns so late that the others sleep on the futex and only
+  so late that they wait in `mwaitx`, then as many broadcasts back to back,
+  and narrow tasks spread by `lane_from_task_index`;
 - a lane that makes itself a group of one and rejoins, and the scratch arenas;
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
   partition, placed, filled and resolved by partition, byte-identical to the
-  reference for every lane count.
+  reference for every lane count;
+- parts (rules 1 and 3): 12 inputs cut by `lane_parts_by_cost`, whose parts the
+  lanes take with `lane_take`, then count, place and fill by part, with a late
+  lane in every loop. The output must be byte-identical to the reference,
+  every part must be taken once, and every lane must get the same order,
+  costliest first.
 
 A watchdog ends the run with status 1 if a group doesn't finish within 60 s,
 which is how a lost wake-up would show. `--rounds N` and `--seed N` change the
@@ -278,8 +286,12 @@ lane i of groups of 1 to 8 lanes to the i-th CPU of `--cpus` (by default the
 allowed CPUs in order: 0 to 7 on the 9700X, one per core) and reports
 21-pass medians of a sync and a broadcast when every lane arrives at once, of
 `pthread_barrier_wait` (the RAD Debugger's barrier on Linux) in the same loop,
-of waking lanes that sleep on the futex, and of starting a group, then what an
-arena's reservation and first touches cost. Run it under the 9700X's lock
+of waking lanes that wait in `mwaitx` and that sleep on the futex, and of
+starting a group. Then, on the largest group, how much slower lanes run after
+waiting 0.2 to 5 ms for a lane that works alone, and how well rule 1's parts
+and the static ranges balance three phases, with every lane at full speed and
+with half of them at half speed. Then what an arena's reservation and first
+touches cost. Run it under the 9700X's lock
 without `taskset`, since it pins its lanes itself.
 `docs/object-writer-and-linker.md` ("Lanes") has the numbers. The default 9700X
 job runs it after the tests; like the others, its measurements are

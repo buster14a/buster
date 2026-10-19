@@ -1,15 +1,16 @@
 // The lane base layer: groups of threads that all run the same code, and the arenas they allocate from.
 //
 // Every phase of the object writer and the linker is one function that every lane of a group runs (Ryan Fleury's
-// "multi-core by default"; docs/object-writer-and-linker.md, "Lanes"): each lane takes its part of every loop with
-// lane_range or lane_range_by_cost, the lanes meet at lane_sync, and each writes only what it owns. With one lane, which
-// is how the compiler runs, lane_sync and lane_broadcast return at once and lane_range returns everything.
+// "multi-core by default"; docs/object-writer-and-linker.md, "Lanes"): the lanes cut each loop into parts by cost with
+// lane_parts_by_cost and take the parts with lane_take, costliest first, or split it once with lane_range or
+// lane_range_by_cost; they meet at lane_sync, and each writes only what it owns. With one lane, which is how the
+// compiler runs, lane_sync and lane_broadcast return at once, lane_range returns everything and a loop is one part.
 //
 // The interface is the RAD Debugger's, as its base layer has it today (base_thread_context.h, and radbin, which starts
 // its lanes once and runs the whole program on them), in this repository's style. Three things differ, each measured
 // by benchmark-lanes: the calling thread is lane 0 rather than waiting for the others, so one lane starts no thread; a
-// broadcast is one barrier rather than two (see LaneGroup); and the barrier spins before it sleeps on a futex, where the
-// RAD Debugger's on Linux is pthread_barrier_wait, which sleeps at every wait.
+// broadcast is one barrier rather than two (see LaneGroup); and the barrier spins and then waits in mwaitx before it
+// sleeps on a futex, where the RAD Debugger's on Linux is pthread_barrier_wait, which sleeps at every wait.
 //
 // main.c includes this file, and lane_benchmark.c includes its own copy. Each part declares its interface first, then
 // defines it. In this order:
@@ -19,12 +20,15 @@
 //   - The thread context: thread_context, which holds the thread's lane and its scratch arenas, and scratch_begin and
 //     scratch_end.
 //   - Lanes: Lane, LaneGroup, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index, lane_range,
-//     lane_range_by_cost, lane_alone and lane_restore.
+//     lane_range_by_cost, range_part, range_part_by_cost, lane_part_count, lane_parts_by_cost, lane_take, lane_alone
+//     and lane_restore.
 //   - Starting lanes: lane_run, which runs one entry point on a group of lanes and returns once they all have.
 //
-// The barrier is the only code with atomics. In lane_arrive, each lane counts itself in, and the last one advances the
-// group's generation word with lane_publish while the others wait for it in lane_wait. A waiting lane spins for
-// BUSTER_LANE_SPINS pauses and then sleeps on the word with a futex, setting its bit 0 first so that the lane that
+// The barrier and lane_take are the only code with atomics. lane_take adds one to its group's counter, and the last
+// take of a loop resets it, since every lane takes once more than it gets parts. In lane_arrive, each lane counts itself
+// in, and the last one advances the group's generation word with lane_publish while the others wait for it in
+// lane_wait. A waiting lane spins for BUSTER_LANE_SPINS pauses, waits in mwaitx for the word's line to be written for up
+// to BUSTER_LANE_MWAITX_TICKS, and then sleeps on the word with a futex, setting its bit 0 first so that the lane that
 // advances it knows to wake the sleepers: a sync at which no lane slept makes no system call.
 
 #include <stdint.h>
@@ -40,8 +44,8 @@
 #include <sys/syscall.h>
 #include <linux/futex.h>
 
-// CPU architecture dependent includes
-#include <immintrin.h>
+// CPU architecture dependent includes: x86intrin.h has AMD's monitorx and mwaitx besides immintrin.h.
+#include <x86intrin.h>
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Arenas
@@ -195,6 +199,8 @@ struct ThreadContext
     Arena scratch[BUSTER_SCRATCH_ARENA_COUNT];
     // How many times the thread has slept on a futex, waiting for its group: for the tests and the benchmark.
     uint64_t sleeps;
+    // lane_take's counter while the thread is a lane of one.
+    uint64_t taken;
 };
 
 static _Thread_local ThreadContext thread_context = {
@@ -254,10 +260,31 @@ static void scratch_release(void)
 // Lanes
 
 // How many times a waiting lane reads the generation word, with a pause between reads (11.7 ns on the 9700X), before it
-// sleeps on a futex: 24 µs, longer than waking a sleeping lane costs there (2 to 15 µs, from how deeply its core went
-// idle), so a lane sleeps only once its wait is already longer than that.
-#define BUSTER_LANE_SPINS 2048
+// waits in mwaitx: 1.5 µs, far longer than a sync at which every lane arrives at once takes (35 to 200 ns with 2 to 8
+// lanes), so such a sync never waits in mwaitx.
+#define BUSTER_LANE_SPINS 128
+// How long a lane then waits in mwaitx before it sleeps on a futex, in TSC ticks: 1 ms at the 9700X's 3.79 GHz. Woken
+// from mwaitx, a lane there leaves 0.2 to 0.3 µs after the word changes, against 10 to 14 µs from the futex, and a core
+// waiting either way draws about 2 W, half what a spinning one does. What a long wait costs comes after it: a core that
+// waited longer than 0.6 ms on the futex, or 1.5 ms in mwaitx, has its clock halved and loses 25 to 50% of the next
+// millisecond's work (docs/object-writer-and-linker.md, "Lanes"). Past 1 ms the lane sleeps, since the waits that slow
+// it down do so whichever way it waits, and on the futex its core can go into its deepest idle state, at 0.07 W.
+#define BUSTER_LANE_MWAITX_TICKS 3800000
+// mwaitx's arguments: bit 1 of its extensions enables its timer, and its hint asks for C1, which on the 9700X wakes as
+// fast as C0's (0xf0) and draws a little less.
+#define BUSTER_LANE_MWAITX_TIMER 2u
+#define BUSTER_LANE_MWAITX_C1 0u
 #define BUSTER_LANE_CACHE_LINE_BYTES 64
+// Zen's adjacent-line prefetcher fetches lines in pairs, so a line written by every lane is kept from its neighbours.
+#define BUSTER_LANE_LINE_PAIR_BYTES 128
+#define BUSTER_LANE_MAX_COUNT 256
+// lane_parts_by_cost cuts a loop into this many parts per lane (docs/object-writer-and-linker.md, "Lanes", rule 1):
+// enough that a lane that runs slow takes fewer, few enough that cutting and taking them costs a phase 2 to 7 µs with 8
+// lanes on the 9700X.
+#define BUSTER_LANE_PARTS_PER_LANE 64
+#define BUSTER_LANE_MAX_PARTS (BUSTER_LANE_PARTS_PER_LANE * BUSTER_LANE_MAX_COUNT)
+// lane_parts_by_cost's order: a part's bucket is the count of leading zeros of its cost, 64 for a part without one.
+#define BUSTER_LANE_COST_BUCKETS 65
 
 typedef struct Range64 Range64;
 struct Range64
@@ -289,6 +316,9 @@ struct LaneGroup
     _Alignas(BUSTER_LANE_CACHE_LINE_BYTES) uint32_t gate;
     void (*entry)(void* argument);
     void* argument;
+    // lane_take's counter, which every lane adds to: on a pair of lines of its own, so that taking never disturbs the
+    // barrier.
+    _Alignas(BUSTER_LANE_LINE_PAIR_BYTES) uint64_t taken;
 };
 
 // The calling thread's lane: its index, and the group's size.
@@ -307,6 +337,31 @@ static __attribute__((unused)) Range64 lane_range(uint64_t count);
 // each item goes to the lane whose share of the total cost holds the item's midpoint. Each part's cost is then within
 // the largest item's of an equal share. Without any cost, it is lane_range's split.
 static __attribute__((unused)) Range64 lane_range_by_cost(const uint64_t* cost_prefix, uint64_t count);
+// Part `part` of [0, count) cut into `parts`: what lane_range would give lane `part` of a group of `parts` lanes.
+static __attribute__((unused)) Range64 range_part(uint64_t count, uint64_t part, uint64_t parts);
+// The same by cost: what lane_range_by_cost would give that lane.
+static __attribute__((unused)) Range64 range_part_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t part, uint64_t parts);
+// How many parts lane_parts_by_cost cuts `count` items into: BUSTER_LANE_PARTS_PER_LANE per lane, but no more than the
+// items, and one part (none without items) with one lane.
+static __attribute__((unused)) uint64_t lane_part_count(uint64_t count);
+// Cuts [0, count) by cost into lane_part_count(count) parts, as range_part_by_cost cuts, and returns how many. The
+// parts are contiguous and in canonical order: part i is [boundaries[i], boundaries[i + 1]), and boundaries gets
+// parts + 1 values. order gets the parts in the order to take them: by decreasing cost, to within a factor of two (the
+// cost's bit width), ties in index order. Every lane calls it with the same boundaries, which the lanes fill together
+// and which is read-only once it returns, and with an order of its own, which every lane fills alike. Like lane_sync,
+// it waits for every lane, so it can be the sync that starts a phase. A loop over the parts:
+//
+//     const uint64_t parts = lane_parts_by_cost(cost_prefix, count, boundaries, order);
+//     for (uint64_t taken = lane_take(parts); taken < parts; taken = lane_take(parts))
+//     {
+//         const uint32_t part = order[taken];
+//         ... the items from boundaries[part] to boundaries[part + 1] ...
+//     }
+static __attribute__((unused)) uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t* boundaries, uint32_t* order);
+// The next number this lane takes from its group's counter: 0, 1, 2, ... across the group's lanes, and `parts` or more
+// once they are all taken. Every lane of the group takes until it gets `parts` or more, and then no more until the
+// lanes have synced: the last take of the loop resets the counter for the next one.
+static __attribute__((unused)) uint64_t lane_take(uint64_t parts);
 // Makes the calling thread a group of one (lane 0 of 1, which syncs with no one), to run a phase alone while the rest of
 // its group does something else, and returns its lane for lane_restore.
 static __attribute__((unused)) Lane lane_alone(void);
@@ -322,8 +377,8 @@ static uint32_t lane_count(void)
     return thread_context.lane.count;
 }
 
-// Waits while *word, but for its bit 0, is `value`, and returns its new value without bit 0. Spins first; then sets bit
-// 0, so that whoever changes the word wakes it, and sleeps on a futex while the word is unchanged.
+// Waits while *word, but for its bit 0, is `value`, and returns its new value without bit 0. Spins first, then waits in
+// mwaitx; then sets bit 0, so that whoever changes the word wakes it, and sleeps on a futex while the word is unchanged.
 static uint32_t lane_wait(uint32_t* word, uint32_t value)
 {
     uint32_t current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
@@ -331,6 +386,25 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
     {
         _mm_pause();
         current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+    }
+    // A wait that ended while spinning, as at most syncs, doesn't read the clock (rdtsc is 27 µops on Zen 5).
+    if ((current & ~1u) == value)
+    {
+        const uint64_t begin = __rdtsc();
+        uint64_t waited = 0;
+        while ((current & ~1u) == value && waited < BUSTER_LANE_MWAITX_TICKS)
+        {
+            // The monitor is armed before the read, so a write after the read ends the wait. The wait also ends on an
+            // interrupt, or when the timer runs out the rest of the ticks.
+            _mm_monitorx(word, 0, 0);
+            current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+            if ((current & ~1u) == value)
+            {
+                _mm_mwaitx(BUSTER_LANE_MWAITX_TIMER, BUSTER_LANE_MWAITX_C1, (uint32_t)(BUSTER_LANE_MWAITX_TICKS - waited));
+                current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+            }
+            waited = __rdtsc() - begin;
+        }
     }
     while ((current & ~1u) == value)
     {
@@ -417,33 +491,36 @@ static uint32_t lane_from_task_index(uint64_t task_index)
     return (uint32_t)(task_index % thread_context.lane.count);
 }
 
-static Range64 lane_range(uint64_t count)
+static Range64 range_part(uint64_t count, uint64_t part, uint64_t parts)
 {
-    const uint64_t lanes = thread_context.lane.count;
-    const uint64_t index = thread_context.lane.index;
-    const uint64_t share = count / lanes;
-    const uint64_t longer = count % lanes;
-    const uint64_t begin = index * share + (index < longer ? index : longer);
+    const uint64_t share = count / parts;
+    const uint64_t longer = count % parts;
+    const uint64_t begin = part * share + (part < longer ? part : longer);
     Range64 result = {
         .begin = begin,
-        .end = begin + share + (index < longer ? 1 : 0),
+        .end = begin + share + (part < longer ? 1 : 0),
     };
     return result;
 }
 
-// The first item of lane `lane`'s part in lane_range_by_cost: the first whose midpoint, in cost, is past `lane` shares of
-// the total. With prefix sums P (P[-1] being 0), item i's midpoint is (P[i - 1] + P[i]) / 2 and lane k's share starts at
-// total * k / lanes, so the comparison, multiplied out, is exact. Its products fit in 97 bits.
-static uint64_t lane_cost_boundary(const uint64_t* cost_prefix, uint64_t count, uint64_t lane, uint64_t lanes)
+static Range64 lane_range(uint64_t count)
 {
-    const unsigned __int128 target = (unsigned __int128)cost_prefix[count - 1] * 2 * lane;
+    return range_part(count, thread_context.lane.index, thread_context.lane.count);
+}
+
+// The first item of part `part` of `parts` by cost: the first whose midpoint, in cost, is past `part` shares of the
+// total. With prefix sums P (P[-1] being 0), item i's midpoint is (P[i - 1] + P[i]) / 2 and part k's share starts at
+// total * k / parts, so the comparison, multiplied out, is exact. Its products fit in 97 bits.
+static uint64_t lane_cost_boundary(const uint64_t* cost_prefix, uint64_t count, uint64_t part, uint64_t parts)
+{
+    const unsigned __int128 target = (unsigned __int128)cost_prefix[count - 1] * 2 * part;
     uint64_t low = 0;
     uint64_t high = count;
     while (low < high)
     {
         const uint64_t middle = low + (high - low) / 2;
         const unsigned __int128 before = middle == 0 ? 0 : cost_prefix[middle - 1];
-        if ((before + cost_prefix[middle]) * lanes > target)
+        if ((before + cost_prefix[middle]) * parts > target)
         {
             high = middle;
         }
@@ -455,19 +532,104 @@ static uint64_t lane_cost_boundary(const uint64_t* cost_prefix, uint64_t count, 
     return low;
 }
 
-static Range64 lane_range_by_cost(const uint64_t* cost_prefix, uint64_t count)
+static Range64 range_part_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t part, uint64_t parts)
 {
-    const uint64_t lanes = thread_context.lane.count;
-    const uint64_t index = thread_context.lane.index;
     Range64 result;
     if (count == 0 || cost_prefix[count - 1] == 0)
     {
-        result = lane_range(count);
+        result = range_part(count, part, parts);
     }
     else
     {
-        result.begin = index == 0 ? 0 : lane_cost_boundary(cost_prefix, count, index, lanes);
-        result.end = index + 1 == lanes ? count : lane_cost_boundary(cost_prefix, count, index + 1, lanes);
+        result.begin = part == 0 ? 0 : lane_cost_boundary(cost_prefix, count, part, parts);
+        result.end = part + 1 == parts ? count : lane_cost_boundary(cost_prefix, count, part + 1, parts);
+    }
+    return result;
+}
+
+static Range64 lane_range_by_cost(const uint64_t* cost_prefix, uint64_t count)
+{
+    return range_part_by_cost(cost_prefix, count, thread_context.lane.index, thread_context.lane.count);
+}
+
+static uint64_t lane_part_count(uint64_t count)
+{
+    const uint64_t lanes = thread_context.lane.count;
+    const uint64_t parts = lanes == 1 ? 1 : BUSTER_LANE_PARTS_PER_LANE * lanes;
+    return count < parts ? count : parts;
+}
+
+// The lanes find the boundaries together, a range of them each, with one binary search per boundary. Then each lane
+// orders the parts with a counting sort by bucket, which keeps index order within a bucket. A part's cost is the prefix
+// at its end less the prefix at the last part's end, so finding the buckets reads the prefix sums once per part.
+static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t* boundaries, uint32_t* order)
+{
+    const uint64_t parts = lane_part_count(count);
+    const bool costless = count == 0 || cost_prefix[count - 1] == 0;
+    const Range64 mine = lane_range(parts + 1);
+    for (uint64_t i = mine.begin; i < mine.end; i += 1)
+    {
+        if (i == parts)
+        {
+            boundaries[i] = count;
+        }
+        else if (costless)
+        {
+            boundaries[i] = range_part(count, i, parts).begin;
+        }
+        else
+        {
+            boundaries[i] = i == 0 ? 0 : lane_cost_boundary(cost_prefix, count, i, parts);
+        }
+    }
+    lane_sync();
+    uint8_t buckets[BUSTER_LANE_MAX_PARTS];
+    uint64_t next[BUSTER_LANE_COST_BUCKETS] = { 0 };
+    uint64_t before = 0;
+    for (uint64_t part = 0; part < parts; part += 1)
+    {
+        const uint64_t end = boundaries[part + 1];
+        const uint64_t after = end > boundaries[part] ? cost_prefix[end - 1] : before;
+        const uint64_t cost = after - before;
+        const uint32_t bucket = cost == 0 ? BUSTER_LANE_COST_BUCKETS - 1 : (uint32_t)__builtin_clzll(cost);
+        buckets[part] = (uint8_t)bucket;
+        next[bucket] += 1;
+        before = after;
+    }
+    uint64_t offset = 0;
+    for (uint32_t bucket = 0; bucket < BUSTER_LANE_COST_BUCKETS; bucket += 1)
+    {
+        const uint64_t in_bucket = next[bucket];
+        next[bucket] = offset;
+        offset += in_bucket;
+    }
+    for (uint64_t part = 0; part < parts; part += 1)
+    {
+        order[next[buckets[part]]] = (uint32_t)part;
+        next[buckets[part]] += 1;
+    }
+    return parts;
+}
+
+static uint64_t lane_take(uint64_t parts)
+{
+    const Lane lane = thread_context.lane;
+    uint64_t result = 0;
+    if (lane.count > 1)
+    {
+        // The data the parts are made of was published by the sync before the loop, so the take orders nothing else.
+        result = __atomic_fetch_add(&lane.group->taken, 1, __ATOMIC_RELAXED);
+        // Each lane's last take gets `parts` or more, so a loop makes parts + count takes in all, and the one that gets
+        // the last number is the loop's last. The next loop's takes come after a sync, which this store precedes.
+        if (result == parts + lane.count - 1)
+        {
+            __atomic_store_n(&lane.group->taken, 0, __ATOMIC_RELAXED);
+        }
+    }
+    else
+    {
+        result = thread_context.taken;
+        thread_context.taken = result < parts ? result + 1 : 0;
     }
     return result;
 }
@@ -491,7 +653,6 @@ static void lane_restore(Lane lane)
 // ---------------------------------------------------------------------------------------------------------------------
 // Starting lanes
 
-#define BUSTER_LANE_MAX_COUNT 256
 // The values of LaneGroup.gate: lane_run's threads wait while it is 0.
 #define BUSTER_LANE_GATE_RUN 2u
 #define BUSTER_LANE_GATE_CANCEL 4u
