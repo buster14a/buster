@@ -407,6 +407,17 @@ typedef enum X86Syntax
     X(CMOV##CC##_R32_RM32, "cmov" cc, 0, 2, 0x0f40 + K, R, 0, 0, 0, GD, ED, 4, REG_RM) \
     X(CMOV##CC##_R64_RM64, "cmov" cc, 0, 2, 0x0f40 + K, R, 0, 0, 1, GQ, EQ, 8, REG_RM)
 
+// A conditional jump with a prefix: MPX's BND (F2) and a branch hint (CS's 2E, not taken, and DS's 3E, taken) at both
+// widths, and 66's rel16 (which AMD takes as a jump to a 16-bit address in 64-bit mode, and Intel ignores).
+#define BUSTER_X86_PREFIXED_JCC_FORMS(X, CC, cc, K) \
+    X(BND_J##CC##_REL8, "bnd j" cc, 0xf2, 1, 0x70 + K, NO, 0, 1, 0, NONE, NONE, 0, REL) \
+    X(BND_J##CC##_REL32, "bnd j" cc, 0xf2, 2, 0x0f80 + K, NO, 0, 4, 0, NONE, NONE, 0, REL) \
+    X(J##CC##_REL8_NOT_TAKEN, "cs j" cc, 0x2e, 1, 0x70 + K, NO, 0, 1, 0, NONE, NONE, 0, REL) \
+    X(J##CC##_REL32_NOT_TAKEN, "cs j" cc, 0x2e, 2, 0x0f80 + K, NO, 0, 4, 0, NONE, NONE, 0, REL) \
+    X(J##CC##_REL8_TAKEN, "ds j" cc, 0x3e, 1, 0x70 + K, NO, 0, 1, 0, NONE, NONE, 0, REL) \
+    X(J##CC##_REL32_TAKEN, "ds j" cc, 0x3e, 2, 0x0f80 + K, NO, 0, 4, 0, NONE, NONE, 0, REL) \
+    X(J##CC##_REL16, "data16 j" cc, 0x66, 2, 0x0f80 + K, NO, 0, 2, 0, NONE, NONE, 0, REL)
+
 #define BUSTER_X86_BIT_TEST_FORMS(X, N, m, opcode, K) \
     X(N##_RM16_R16, m, 0x66, 2, 0x0f00 + opcode, R, 0, 0, 0, GW, EW, 2, RM_REG) \
     X(N##_RM16_IMM8, m, 0x66, 2, 0x0fba, D##K, 1, 0, 0, NONE, EW, 2, RM_IMM) \
@@ -427,38 +438,72 @@ typedef enum X86Syntax
     X(N##_RM16_R16, m, 0x66, 2, opcode, R, 0, 0, 0, GW, EW, 2, RM_REG) \
     X(N##_RM32_R32, m, 0, 2, opcode, R, 0, 0, 0, GD, ED, 4, RM_REG) \
     X(N##_RM64_R64, m, 0, 2, opcode, R, 0, 0, 1, GQ, EQ, 8, RM_REG) \
-    X(LOCK_##N##_M8_R8, "lock " m, 0xf0, 2, opcode8, R, 0, 0, 0, GB, M, 1, RM_REG) \
-    X(LOCK_##N##_M16_R16, "lock " m, 0xf066, 2, opcode, R, 0, 0, 0, GW, M, 2, RM_REG) \
-    X(LOCK_##N##_M32_R32, "lock " m, 0xf0, 2, opcode, R, 0, 0, 0, GD, M, 4, RM_REG) \
-    X(LOCK_##N##_M64_R64, "lock " m, 0xf0, 2, opcode, R, 0, 0, 1, GQ, M, 8, RM_REG)
+    BUSTER_X86_LOCKED_ATOMIC_FORMS(X, LOCK_##N, "lock " m, 0xf0, opcode8, opcode)
+
+// The locked forms below take their prefixes as P: LOCK's F0, or with HLE's XACQUIRE (F2) or XRELEASE (F3) before it
+// (the first prefix in P's low byte). A 16-bit form's 66 comes first.
+#define BUSTER_X86_LOCKED_ATOMIC_FORMS(X, N, m, P, opcode8, opcode) \
+    X(N##_M8_R8, m, P, 2, opcode8, R, 0, 0, 0, GB, M, 1, RM_REG) \
+    X(N##_M16_R16, m, (P) << 8 | 0x66, 2, opcode, R, 0, 0, 0, GW, M, 2, RM_REG) \
+    X(N##_M32_R32, m, P, 2, opcode, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(N##_M64_R64, m, P, 2, opcode, R, 0, 0, 1, GQ, M, 8, RM_REG)
 
 // The arithmetic instructions with a LOCK prefix: a memory destination, and a register or immediate source.
-#define BUSTER_X86_LOCK_ARITHMETIC_FORMS(X, N, m, K) \
-    X(LOCK_##N##_M8_R8, "lock " m, 0xf0, 1, 0x00 + 8 * K, R, 0, 0, 0, GB, M, 1, RM_REG) \
-    X(LOCK_##N##_M16_R16, "lock " m, 0xf066, 1, 0x01 + 8 * K, R, 0, 0, 0, GW, M, 2, RM_REG) \
-    X(LOCK_##N##_M32_R32, "lock " m, 0xf0, 1, 0x01 + 8 * K, R, 0, 0, 0, GD, M, 4, RM_REG) \
-    X(LOCK_##N##_M64_R64, "lock " m, 0xf0, 1, 0x01 + 8 * K, R, 0, 0, 1, GQ, M, 8, RM_REG) \
-    X(LOCK_##N##_M8_IMM8, "lock " m, 0xf0, 1, 0x80, D##K, 1, 0, 0, NONE, M, 1, RM_IMM) \
-    X(LOCK_##N##_M16_IMM16, "lock " m, 0xf066, 1, 0x81, D##K, 2, 0, 0, NONE, M, 2, RM_IMM) \
-    X(LOCK_##N##_M32_IMM32, "lock " m, 0xf0, 1, 0x81, D##K, 4, 0, 0, NONE, M, 4, RM_IMM) \
-    X(LOCK_##N##_M64_IMM32, "lock " m, 0xf0, 1, 0x81, D##K, 4, 0, 1, NONE, M, 8, RM_IMM) \
-    X(LOCK_##N##_M16_IMM8, "lock " m, 0xf066, 1, 0x83, D##K, 1, 0, 0, NONE, M, 2, RM_IMM) \
-    X(LOCK_##N##_M32_IMM8, "lock " m, 0xf0, 1, 0x83, D##K, 1, 0, 0, NONE, M, 4, RM_IMM) \
-    X(LOCK_##N##_M64_IMM8, "lock " m, 0xf0, 1, 0x83, D##K, 1, 0, 1, NONE, M, 8, RM_IMM)
+#define BUSTER_X86_LOCKED_ARITHMETIC_FORMS(X, N, m, P, K) \
+    X(N##_M8_R8, m, P, 1, 0x00 + 8 * K, R, 0, 0, 0, GB, M, 1, RM_REG) \
+    X(N##_M16_R16, m, (P) << 8 | 0x66, 1, 0x01 + 8 * K, R, 0, 0, 0, GW, M, 2, RM_REG) \
+    X(N##_M32_R32, m, P, 1, 0x01 + 8 * K, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(N##_M64_R64, m, P, 1, 0x01 + 8 * K, R, 0, 0, 1, GQ, M, 8, RM_REG) \
+    X(N##_M8_IMM8, m, P, 1, 0x80, D##K, 1, 0, 0, NONE, M, 1, RM_IMM) \
+    X(N##_M16_IMM16, m, (P) << 8 | 0x66, 1, 0x81, D##K, 2, 0, 0, NONE, M, 2, RM_IMM) \
+    X(N##_M32_IMM32, m, P, 1, 0x81, D##K, 4, 0, 0, NONE, M, 4, RM_IMM) \
+    X(N##_M64_IMM32, m, P, 1, 0x81, D##K, 4, 0, 1, NONE, M, 8, RM_IMM) \
+    X(N##_M16_IMM8, m, (P) << 8 | 0x66, 1, 0x83, D##K, 1, 0, 0, NONE, M, 2, RM_IMM) \
+    X(N##_M32_IMM8, m, P, 1, 0x83, D##K, 1, 0, 0, NONE, M, 4, RM_IMM) \
+    X(N##_M64_IMM8, m, P, 1, 0x83, D##K, 1, 0, 1, NONE, M, 8, RM_IMM)
 
-#define BUSTER_X86_LOCK_UNARY_FORMS(X, N, m, opcode8, opcode, K) \
-    X(LOCK_##N##_M8, "lock " m, 0xf0, 1, opcode8, D##K, 0, 0, 0, NONE, M, 1, RM) \
-    X(LOCK_##N##_M16, "lock " m, 0xf066, 1, opcode, D##K, 0, 0, 0, NONE, M, 2, RM) \
-    X(LOCK_##N##_M32, "lock " m, 0xf0, 1, opcode, D##K, 0, 0, 0, NONE, M, 4, RM) \
-    X(LOCK_##N##_M64, "lock " m, 0xf0, 1, opcode, D##K, 0, 0, 1, NONE, M, 8, RM)
+#define BUSTER_X86_LOCKED_UNARY_FORMS(X, N, m, P, opcode8, opcode, K) \
+    X(N##_M8, m, P, 1, opcode8, D##K, 0, 0, 0, NONE, M, 1, RM) \
+    X(N##_M16, m, (P) << 8 | 0x66, 1, opcode, D##K, 0, 0, 0, NONE, M, 2, RM) \
+    X(N##_M32, m, P, 1, opcode, D##K, 0, 0, 0, NONE, M, 4, RM) \
+    X(N##_M64, m, P, 1, opcode, D##K, 0, 0, 1, NONE, M, 8, RM)
 
-#define BUSTER_X86_LOCK_BIT_TEST_FORMS(X, N, m, opcode, K) \
-    X(LOCK_##N##_M16_R16, "lock " m, 0xf066, 2, 0x0f00 + opcode, R, 0, 0, 0, GW, M, 2, RM_REG) \
-    X(LOCK_##N##_M32_R32, "lock " m, 0xf0, 2, 0x0f00 + opcode, R, 0, 0, 0, GD, M, 4, RM_REG) \
-    X(LOCK_##N##_M64_R64, "lock " m, 0xf0, 2, 0x0f00 + opcode, R, 0, 0, 1, GQ, M, 8, RM_REG) \
-    X(LOCK_##N##_M16_IMM8, "lock " m, 0xf066, 2, 0x0fba, D##K, 1, 0, 0, NONE, M, 2, RM_IMM) \
-    X(LOCK_##N##_M32_IMM8, "lock " m, 0xf0, 2, 0x0fba, D##K, 1, 0, 0, NONE, M, 4, RM_IMM) \
-    X(LOCK_##N##_M64_IMM8, "lock " m, 0xf0, 2, 0x0fba, D##K, 1, 0, 1, NONE, M, 8, RM_IMM)
+#define BUSTER_X86_LOCKED_BIT_TEST_FORMS(X, N, m, P, opcode, K) \
+    X(N##_M16_R16, m, (P) << 8 | 0x66, 2, 0x0f00 + opcode, R, 0, 0, 0, GW, M, 2, RM_REG) \
+    X(N##_M32_R32, m, P, 2, 0x0f00 + opcode, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(N##_M64_R64, m, P, 2, 0x0f00 + opcode, R, 0, 0, 1, GQ, M, 8, RM_REG) \
+    X(N##_M16_IMM8, m, (P) << 8 | 0x66, 2, 0x0fba, D##K, 1, 0, 0, NONE, M, 2, RM_IMM) \
+    X(N##_M32_IMM8, m, P, 2, 0x0fba, D##K, 1, 0, 0, NONE, M, 4, RM_IMM) \
+    X(N##_M64_IMM8, m, P, 2, 0x0fba, D##K, 1, 0, 1, NONE, M, 8, RM_IMM)
+
+#define BUSTER_X86_LOCK_ARITHMETIC_FORMS(X, N, m, K) BUSTER_X86_LOCKED_ARITHMETIC_FORMS(X, LOCK_##N, "lock " m, 0xf0, K)
+#define BUSTER_X86_LOCK_UNARY_FORMS(X, N, m, opcode8, opcode, K) BUSTER_X86_LOCKED_UNARY_FORMS(X, LOCK_##N, "lock " m, 0xf0, opcode8, opcode, K)
+#define BUSTER_X86_LOCK_BIT_TEST_FORMS(X, N, m, opcode, K) BUSTER_X86_LOCKED_BIT_TEST_FORMS(X, LOCK_##N, "lock " m, 0xf0, opcode, K)
+
+// HLE's XACQUIRE (F2) or XRELEASE (F3), with the prefix's name, mnemonic and byte: on every locked form but
+// CMPXCHG16B's (which GNU as rejects), and on XCHG to memory, which is locked without the prefix.
+#define BUSTER_X86_HLE_FORMS(X, H, h, B) \
+    BUSTER_X86_LOCKED_ATOMIC_FORMS(X, H##_LOCK_CMPXCHG, h " lock cmpxchg", 0xf000 | B, 0x0fb0, 0x0fb1) \
+    BUSTER_X86_LOCKED_ATOMIC_FORMS(X, H##_LOCK_XADD, h " lock xadd", 0xf000 | B, 0x0fc0, 0x0fc1) \
+    X(H##_LOCK_CMPXCHG8B_M64, h " lock cmpxchg8b", 0xf000 | B, 2, 0x0fc7, D1, 0, 0, 0, NONE, M, 8, RM) \
+    BUSTER_X86_LOCKED_ARITHMETIC_FORMS(X, H##_LOCK_ADD, h " lock add", 0xf000 | B, 0) \
+    BUSTER_X86_LOCKED_ARITHMETIC_FORMS(X, H##_LOCK_OR, h " lock or", 0xf000 | B, 1) \
+    BUSTER_X86_LOCKED_ARITHMETIC_FORMS(X, H##_LOCK_ADC, h " lock adc", 0xf000 | B, 2) \
+    BUSTER_X86_LOCKED_ARITHMETIC_FORMS(X, H##_LOCK_SBB, h " lock sbb", 0xf000 | B, 3) \
+    BUSTER_X86_LOCKED_ARITHMETIC_FORMS(X, H##_LOCK_AND, h " lock and", 0xf000 | B, 4) \
+    BUSTER_X86_LOCKED_ARITHMETIC_FORMS(X, H##_LOCK_SUB, h " lock sub", 0xf000 | B, 5) \
+    BUSTER_X86_LOCKED_ARITHMETIC_FORMS(X, H##_LOCK_XOR, h " lock xor", 0xf000 | B, 6) \
+    BUSTER_X86_LOCKED_UNARY_FORMS(X, H##_LOCK_INC, h " lock inc", 0xf000 | B, 0xfe, 0xff, 0) \
+    BUSTER_X86_LOCKED_UNARY_FORMS(X, H##_LOCK_DEC, h " lock dec", 0xf000 | B, 0xfe, 0xff, 1) \
+    BUSTER_X86_LOCKED_UNARY_FORMS(X, H##_LOCK_NOT, h " lock not", 0xf000 | B, 0xf6, 0xf7, 2) \
+    BUSTER_X86_LOCKED_UNARY_FORMS(X, H##_LOCK_NEG, h " lock neg", 0xf000 | B, 0xf6, 0xf7, 3) \
+    BUSTER_X86_LOCKED_BIT_TEST_FORMS(X, H##_LOCK_BTS, h " lock bts", 0xf000 | B, 0xab, 5) \
+    BUSTER_X86_LOCKED_BIT_TEST_FORMS(X, H##_LOCK_BTR, h " lock btr", 0xf000 | B, 0xb3, 6) \
+    BUSTER_X86_LOCKED_BIT_TEST_FORMS(X, H##_LOCK_BTC, h " lock btc", 0xf000 | B, 0xbb, 7) \
+    X(H##_XCHG_M8_R8, h " xchg", B, 1, 0x86, R, 0, 0, 0, GB, M, 1, RM_REG) \
+    X(H##_XCHG_M16_R16, h " xchg", B << 8 | 0x66, 1, 0x87, R, 0, 0, 0, GW, M, 2, RM_REG) \
+    X(H##_XCHG_M32_R32, h " xchg", B, 1, 0x87, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(H##_XCHG_M64_R64, h " xchg", B, 1, 0x87, R, 0, 0, 1, GQ, M, 8, RM_REG)
 
 // A string instruction at each operand size (its implicit operands: AL to RAX and [RSI] or [RDI]), with `prefixes`
 // (none, REP, REPE or REPNE): b (opcode8), w (66, opcode), d (opcode) and q (REX.W, opcode).
@@ -3214,6 +3259,23 @@ typedef enum X86Syntax
     /* CET's NOTRACK (3E), on an indirect branch through a register. */ \
     X(NOTRACK_JMP_R64, "notrack jmp", 0x3e, 1, 0xff, D4, 0, 0, 0, NONE, GQ, 8, RM) \
     X(NOTRACK_CALL_R64, "notrack call", 0x3e, 1, 0xff, D2, 0, 0, 0, NONE, GQ, 8, RM) \
+    /* NOTRACK through memory (with which a segment override would come before the 3E, leaving 3E the last segment prefix, which is the one that counts), and MPX's BND (F2) on the near branches, with NOTRACK too. */ \
+    X(NOTRACK_JMP_M64, "notrack jmp", 0x3e, 1, 0xff, D4, 0, 0, 0, NONE, M, 8, RM) \
+    X(NOTRACK_CALL_M64, "notrack call", 0x3e, 1, 0xff, D2, 0, 0, 0, NONE, M, 8, RM) \
+    X(BND_CALL_REL32, "bnd call", 0xf2, 1, 0xe8, NO, 0, 4, 0, NONE, NONE, 0, REL) \
+    X(BND_CALL_RM64, "bnd call", 0xf2, 1, 0xff, D2, 0, 0, 0, NONE, EQ, 8, RM) \
+    X(BND_JMP_REL8, "bnd jmp", 0xf2, 1, 0xeb, NO, 0, 1, 0, NONE, NONE, 0, REL) \
+    X(BND_JMP_REL32, "bnd jmp", 0xf2, 1, 0xe9, NO, 0, 4, 0, NONE, NONE, 0, REL) \
+    X(BND_JMP_RM64, "bnd jmp", 0xf2, 1, 0xff, D4, 0, 0, 0, NONE, EQ, 8, RM) \
+    X(BND_RET, "bnd ret", 0xf2, 1, 0xc3, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
+    X(BND_RET_IMM16, "bnd ret", 0xf2, 1, 0xc2, NO, 2, 0, 0, NONE, NONE, 0, IMM) \
+    X(NOTRACK_BND_JMP_R64, "notrack bnd jmp", 0xf23e, 1, 0xff, D4, 0, 0, 0, NONE, GQ, 8, RM) \
+    X(NOTRACK_BND_JMP_M64, "notrack bnd jmp", 0xf23e, 1, 0xff, D4, 0, 0, 0, NONE, M, 8, RM) \
+    X(NOTRACK_BND_CALL_R64, "notrack bnd call", 0xf23e, 1, 0xff, D2, 0, 0, 0, NONE, GQ, 8, RM) \
+    X(NOTRACK_BND_CALL_M64, "notrack bnd call", 0xf23e, 1, 0xff, D2, 0, 0, 0, NONE, M, 8, RM) \
+    /* The 16-bit near branches (66 with a rel16), which AMD takes as branches to a 16-bit address in 64-bit mode and Intel ignores 66 on. */ \
+    X(JMP_REL16, "data16 jmp", 0x66, 1, 0xe9, NO, 0, 2, 0, NONE, NONE, 0, REL) \
+    X(CALL_REL16, "data16 call", 0x66, 1, 0xe8, NO, 0, 2, 0, NONE, NONE, 0, REL) \
     BUSTER_X86_CONDITION_FORMS(X, O, "o", 0) \
     BUSTER_X86_CONDITION_FORMS(X, NO, "no", 1) \
     BUSTER_X86_CONDITION_FORMS(X, B, "b", 2) \
@@ -3230,6 +3292,22 @@ typedef enum X86Syntax
     BUSTER_X86_CONDITION_FORMS(X, GE, "ge", 13) \
     BUSTER_X86_CONDITION_FORMS(X, LE, "le", 14) \
     BUSTER_X86_CONDITION_FORMS(X, G, "g", 15) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, O, "o", 0) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, NO, "no", 1) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, B, "b", 2) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, AE, "ae", 3) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, E, "e", 4) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, NE, "ne", 5) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, BE, "be", 6) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, A, "a", 7) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, S, "s", 8) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, NS, "ns", 9) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, P, "p", 10) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, NP, "np", 11) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, L, "l", 12) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, GE, "ge", 13) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, LE, "le", 14) \
+    BUSTER_X86_PREFIXED_JCC_FORMS(X, G, "g", 15) \
     X(RET, "ret", 0, 1, 0xc3, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
     X(RET_IMM16, "ret", 0, 1, 0xc2, NO, 2, 0, 0, NONE, NONE, 0, IMM) \
     X(NOP, "nop", 0, 1, 0x90, NO, 0, 0, 0, NONE, NONE, 0, NONE) \
@@ -3286,6 +3364,17 @@ typedef enum X86Syntax
     BUSTER_X86_LOCK_BIT_TEST_FORMS(X, BTS, "bts", 0xab, 5) \
     BUSTER_X86_LOCK_BIT_TEST_FORMS(X, BTR, "btr", 0xb3, 6) \
     BUSTER_X86_LOCK_BIT_TEST_FORMS(X, BTC, "btc", 0xbb, 7) \
+    /* HLE: XACQUIRE and XRELEASE on the locked forms and XCHG to memory, and XRELEASE on MOV to memory. */ \
+    BUSTER_X86_HLE_FORMS(X, XACQUIRE, "xacquire", 0xf2) \
+    BUSTER_X86_HLE_FORMS(X, XRELEASE, "xrelease", 0xf3) \
+    X(XRELEASE_MOV_M8_R8, "xrelease mov", 0xf3, 1, 0x88, R, 0, 0, 0, GB, M, 1, RM_REG) \
+    X(XRELEASE_MOV_M16_R16, "xrelease mov", 0xf366, 1, 0x89, R, 0, 0, 0, GW, M, 2, RM_REG) \
+    X(XRELEASE_MOV_M32_R32, "xrelease mov", 0xf3, 1, 0x89, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(XRELEASE_MOV_M64_R64, "xrelease mov", 0xf3, 1, 0x89, R, 0, 0, 1, GQ, M, 8, RM_REG) \
+    X(XRELEASE_MOV_M8_IMM8, "xrelease mov", 0xf3, 1, 0xc6, D0, 1, 0, 0, NONE, M, 1, RM_IMM) \
+    X(XRELEASE_MOV_M16_IMM16, "xrelease mov", 0xf366, 1, 0xc7, D0, 2, 0, 0, NONE, M, 2, RM_IMM) \
+    X(XRELEASE_MOV_M32_IMM32, "xrelease mov", 0xf3, 1, 0xc7, D0, 4, 0, 0, NONE, M, 4, RM_IMM) \
+    X(XRELEASE_MOV_M64_IMM32, "xrelease mov", 0xf3, 1, 0xc7, D0, 4, 0, 1, NONE, M, 8, RM_IMM) \
     X(CRC32_R32_RM8, "crc32", 0xf2, 3, 0x0f38f0, R, 0, 0, 0, GD, EB, 1, REG_RM) \
     X(CRC32_R32_RM16, "crc32", 0xf266, 3, 0x0f38f1, R, 0, 0, 0, GD, EW, 2, REG_RM) \
     X(CRC32_R32_RM32, "crc32", 0xf2, 3, 0x0f38f1, R, 0, 0, 0, GD, ED, 4, REG_RM) \
@@ -4117,7 +4206,8 @@ struct X86FormDescription
 {
     const char* mnemonic;
     uint32_t opcode;
-    uint16_t prefixes;
+    // The legacy prefixes, the first in the low byte.
+    uint32_t prefixes;
     uint8_t opcode_bytes;
     uint8_t encoding;
     uint8_t immediate_bytes;
@@ -4239,14 +4329,14 @@ static __attribute__((unused)) bool x86_encoder_initialize(void);
 // BUSTER_X86_ENCODER_FIXUP_CAPACITY(marked instructions). Writes nothing past output + capacity or past the fixup ends'
 // capacity, but the bytes after the instructions' and the ends after the marked ones' may change. Returns the number of
 // bytes, or a negative X86EncoderError. Requires x86_encoder_initialize. It rejects the operands its encoding can't
-// represent, but not those only x86_validate does: an immediate or rel8 outside its field's range (it writes the
-// field's low bytes), an /is4 immediate that isn't a register's number times 16 (plus a selector), a control or
+// represent, but not those only x86_validate does: an immediate, rel8 or rel16 outside its field's range (it writes
+// the field's low bytes), an /is4 immediate that isn't a register's number times 16 (plus a selector), a control or
 // segment register that doesn't exist, MOV to CS, a complex multiplication into one of its sources, an AMX product of
 // tiles with one twice, zeroing without an opmask or into memory, a VSIB operand without an index, an EVEX gather or
 // scatter without an opmask, a gather whose destination, index and mask aren't different registers, a SIB operand
 // without a SIB byte (a base alone, or RIP) or with SIB's none and a scale, a RIP-relative operand of MPX's bndmk or a
-// MIB operand, a MIB operand's scaled index, a 3DNow! form's immediate other than its operation byte, and fields the
-// form doesn't have (which it ignores).
+// MIB operand, a MIB operand's scaled index, a 3DNow! form's immediate other than its operation byte, a NOTRACK form
+// with a segment override, and fields the form doesn't have (which it ignores).
 static __attribute__((unused)) int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
                                                   uint32_t* fixup_ends);
 // The same, one instruction at a time from the form table, after x86_validate: the reference for testing. Its fixup
@@ -4259,6 +4349,17 @@ static __attribute__((unused)) uint64_t x86_validate(const X86Instruction* instr
 static uint8_t x86_opcode_byte(const X86FormDescription* form, uint32_t i)
 {
     return (uint8_t)(form->opcode >> (8 * (form->opcode_bytes - 1 - i)));
+}
+
+// Whether one of the form's legacy prefixes is `byte`.
+static bool x86_form_has_prefix(const X86FormDescription* form, uint8_t byte)
+{
+    bool result = false;
+    for (uint32_t prefixes = form->prefixes; prefixes != 0; prefixes >>= 8)
+    {
+        result = result || (uint8_t)prefixes == byte;
+    }
+    return result;
 }
 
 // Whether the form is 3DNow!'s: 0F 0F with the operation in the opcode's last byte, which comes after ModRM, SIB and the
@@ -4779,6 +4880,10 @@ static bool x86_instruction_is_valid(const X86Instruction* instruction)
         // MOV to CS (8E with CS in ModRM.reg) doesn't exist: it's #UD.
         result = result && !(form->opcode_bytes == 1 && form->opcode == 0x8e && instruction->reg == 1);
 
+        // A NOTRACK form can't have a segment override, which would come before its 3E: 3E would be the last segment
+        // prefix, the one that counts.
+        result = result && !(x86_form_segment(instruction->form) != 0 && form->family == BUSTER_X86_FAMILY_LEGACY && x86_form_has_prefix(form, 0x3e));
+
         // A high byte register can't be in an instruction with a REX prefix.
         const uint8_t rm_register = memory ? 0 : instruction->rm;
         const bool high_byte = ((instruction->reg | rm_register) & BUSTER_X86_REGISTER_HIGH_BYTE) != 0;
@@ -4808,6 +4913,10 @@ static bool x86_instruction_is_valid(const X86Instruction* instruction)
         if (form->relative_bytes == 1)
         {
             result = result && displacement >= -128 && displacement <= 127;
+        }
+        else if (form->relative_bytes == 2)
+        {
+            result = result && displacement >= -32768 && displacement <= 32767;
         }
         else if (form->relative_bytes == 0 && form->immediate_bytes <= 4 && !memory)
         {
