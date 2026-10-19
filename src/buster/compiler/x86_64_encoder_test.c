@@ -59,7 +59,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0xd800f65c2819889cull
+#define BUSTER_X86_TEST_DIGEST 0xfc8a60330d6b458bull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -106,6 +106,10 @@ static uint8_t x86_random_register(uint64_t* state, uint8_t operand, uint8_t fam
     else if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST)
     {
         result &= 7;
+    }
+    else if (class == BUSTER_X86_CLASS_OPMASK_PAIR)
+    {
+        result &= 6;
     }
     return result;
 }
@@ -396,6 +400,7 @@ static const char* x86_register_name(uint8_t value, uint8_t operand)
         case BUSTER_X86_CLASS_YMM: result = x86_ymm_names[number]; break;
         case BUSTER_X86_CLASS_ZMM: result = x86_zmm_names[number]; break;
         case BUSTER_X86_CLASS_OPMASK: result = x86_opmask_names[number & 7]; break;
+        case BUSTER_X86_CLASS_OPMASK_PAIR: result = x86_opmask_names[number & 7]; break;
         case BUSTER_X86_CLASS_ST: result = x86_st_names[number & 7]; break;
         default: result = x86_xmm_names[number]; break;
     }
@@ -1078,6 +1083,43 @@ static const KnownEncoding x86_known_encodings[] = {
       { 0x62, 0xf3, 0x6d, 0x48, 0x1a, 0x48, 0x02, 0x01 } },
     { { .form = X86_FORM_VPCONFLICTQ_Y_M64BCST, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf2, 0xfd, 0x38, 0xc4, 0x08 } },
     { { .form = X86_FORM_VPBROADCASTMB2Q_X_K, .reg = 1, .rm = 1 }, 6, { 0x62, 0xf2, 0xfe, 0x08, 0x2a, 0xc9 } },
+    // Zen 5's other AVX-512 extensions: vp2intersectd k2, xmm1, xmm2, vp2intersectq k6, zmm1, qword ptr [rax]{1to8} and
+    // vp2intersectd k0, ymm17, ymmword ptr [rax+0x40] (an opmask pair); vpshldd xmm1{k1}, xmm2, dword ptr [rax]{1to4},
+    // 5; vpshrdvw zmm1, zmm2, zmmword ptr [rax+0x40]; vpcompressw xmmword ptr [rax+0x40]{k1}, xmm1 (N 2); vpexpandb
+    // xmm1{k1}{z}, xmm2; vpopcntw ymm1, ymm2; vpshufbitqmb k1{k2}, ymm2, ymm3; vpermi2b xmm1, xmm2, xmm3; vpdpwssds ymm1,
+    // ymm2, dword ptr [rax]{1to8}; vpmadd52huq xmm1, xmm2, xmmword ptr [rax+0x40]; vcvtneps2bf16 xmm1, dword ptr
+    // [rax]{1to8}; vdpbf16ps zmm1{k1}, zmm2, zmm3; vgf2p8affineqb ymm1, ymm2, qword ptr [rax]{1to4}, 5; vgf2p8mulb xmm1,
+    // xmm2, xmm3; vaesenc zmm1, zmm2, zmmword ptr [rax+0x40]; vaesdeclast xmm17, xmm18, xmm19; and vpclmulqdq ymm17,
+    // ymm18, ymm19, 0x11
+    { { .form = X86_FORM_VP2INTERSECTD_K_X_XM128, .reg = 2, .vvvv = 1, .rm = 2 }, 6, { 0x62, 0xf2, 0x77, 0x08, 0x68, 0xd2 } },
+    { { .form = X86_FORM_VP2INTERSECTQ_K_Z_M64BCST, .reg = 6, .vvvv = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf2, 0xf7, 0x58, 0x68, 0x30 } },
+    { { .form = X86_FORM_VP2INTERSECTD_K_Y_YM256, .reg = 0, .vvvv = 17, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40 },
+      7,
+      { 0x62, 0xf2, 0x77, 0x20, 0x68, 0x40, 0x02 } },
+    { { .form = X86_FORM_VPSHLDD_X_X_M32BCST_IMM8, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 5, .decorations = 1 },
+      7,
+      { 0x62, 0xf3, 0x6d, 0x19, 0x71, 0x08, 0x05 } },
+    { { .form = X86_FORM_VPSHRDVW_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40 }, 7, { 0x62, 0xf2, 0xed, 0x48, 0x72, 0x48, 0x01 } },
+    { { .form = X86_FORM_VPCOMPRESSW_XM128_X, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40, .decorations = 1 },
+      7,
+      { 0x62, 0xf2, 0xfd, 0x09, 0x63, 0x48, 0x20 } },
+    { { .form = X86_FORM_VPEXPANDB_X_XM128, .reg = 1, .rm = 2, .decorations = 1 | BUSTER_X86_DECORATION_ZEROING }, 6, { 0x62, 0xf2, 0x7d, 0x89, 0x62, 0xca } },
+    { { .form = X86_FORM_VPOPCNTW_Y_YM256, .reg = 1, .rm = 2 }, 6, { 0x62, 0xf2, 0xfd, 0x28, 0x54, 0xca } },
+    { { .form = X86_FORM_VPSHUFBITQMB_K_Y_YM256, .reg = 1, .vvvv = 2, .rm = 3, .decorations = 2 }, 6, { 0x62, 0xf2, 0x6d, 0x2a, 0x8f, 0xcb } },
+    { { .form = X86_FORM_VPERMI2B_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 6, { 0x62, 0xf2, 0x6d, 0x08, 0x75, 0xcb } },
+    { { .form = X86_FORM_VPDPWSSDS_Y_Y_M32BCST, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf2, 0x6d, 0x38, 0x53, 0x08 } },
+    { { .form = X86_FORM_VPMADD52HUQ_X_X_XM128_EVEX, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40 },
+      7,
+      { 0x62, 0xf2, 0xed, 0x08, 0xb5, 0x48, 0x04 } },
+    { { .form = X86_FORM_VCVTNEPS2BF16_X_M32BCST8, .reg = 1, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 6, { 0x62, 0xf2, 0x7e, 0x38, 0x72, 0x08 } },
+    { { .form = X86_FORM_VDPBF16PS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = 3, .decorations = 1 }, 6, { 0x62, 0xf2, 0x6e, 0x49, 0x52, 0xcb } },
+    { { .form = X86_FORM_VGF2P8AFFINEQB_Y_Y_M64BCST_IMM8, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 5 },
+      7,
+      { 0x62, 0xf3, 0xed, 0x38, 0xce, 0x08, 0x05 } },
+    { { .form = X86_FORM_VGF2P8MULB_X_X_XM128_EVEX, .reg = 1, .vvvv = 2, .rm = 3 }, 6, { 0x62, 0xf2, 0x6d, 0x08, 0xcf, 0xcb } },
+    { { .form = X86_FORM_VAESENC_Z_Z_ZM512, .reg = 1, .vvvv = 2, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x40 }, 7, { 0x62, 0xf2, 0x6d, 0x48, 0xdc, 0x48, 0x01 } },
+    { { .form = X86_FORM_VAESDECLAST_X_X_XM128_EVEX, .reg = 17, .vvvv = 18, .rm = 19 }, 6, { 0x62, 0xa2, 0x6d, 0x00, 0xdf, 0xcb } },
+    { { .form = X86_FORM_VPCLMULQDQ_Y_Y_YM256_IMM8_EVEX, .reg = 17, .vvvv = 18, .rm = 19, .immediate = 0x11 }, 7, { 0x62, 0xa3, 0x6d, 0x20, 0x44, 0xcb, 0x11 } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.
@@ -1331,7 +1373,8 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
     return result;
 }
 
-// The lowest bit of a register operand of the class (in a form of the family) past its last register.
+// The lowest bit of a register operand of the class (in a form of the family) past its last register, or for an opmask
+// pair, its odd bit.
 static uint8_t x86_past_last_register(uint8_t operand, uint8_t family)
 {
     const uint8_t class = operand & BUSTER_X86_OPERAND_CLASS;
@@ -1339,6 +1382,10 @@ static uint8_t x86_past_last_register(uint8_t operand, uint8_t family)
     if (class == BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST)
     {
         result = 0x08;
+    }
+    else if (class == BUSTER_X86_CLASS_OPMASK_PAIR)
+    {
+        result = 0x01;
     }
     else if (class >= BUSTER_X86_CLASS_XMM && class <= BUSTER_X86_CLASS_ZMM && family == BUSTER_X86_FAMILY_EVEX)
     {
