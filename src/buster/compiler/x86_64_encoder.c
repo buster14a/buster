@@ -244,8 +244,9 @@ typedef enum X86EncoderError
 
 // The order of a form's operands in Intel syntax, with its implicit ones (for printing and tests; the encoding
 // doesn't depend on it). ACC is AL, AX, EAX or RAX; MOFFS is a 64-bit absolute address; VVVV is the VEX.vvvv register;
-// ST is the x87 register ST(0), where the rm operand is ST(i); XMM0 is the variable blends' implicit mask register; and
-// IMM8_IMM8 is two 8-bit immediates (SSE4a's extrq and insertq), the immediate's low byte first.
+// ST is the x87 register ST(0), where the rm operand is ST(i); XMM0 is the variable blends' implicit mask register;
+// IMM8_IMM8 is two 8-bit immediates (SSE4a's extrq and insertq), the immediate's low byte first; and RM_VVVV_REG is a
+// masked store's memory, mask and source.
 typedef enum X86Syntax
 {
     X86_SYNTAX_NONE,
@@ -277,6 +278,7 @@ typedef enum X86Syntax
     X86_SYNTAX_REG_RM_XMM0,
     X86_SYNTAX_RM_IMM8_IMM8,
     X86_SYNTAX_REG_RM_IMM8_IMM8,
+    X86_SYNTAX_RM_VVVV_REG,
 } X86Syntax;
 
 // The form table. Each row is X(name, mnemonic, prefixes, opcode bytes, opcode, encoding, immediate bytes, relative
@@ -509,6 +511,49 @@ typedef enum X86Syntax
     XV(N##_X_X_IMM8, m, VEX, 0x66, 2, 0x0f00 + opcode, D##K, 1, 0, 0, NONE, V, V, 16, 1, NONE, VVVV_RM_IMM) \
     XV(N##_Y_Y_IMM8, m, VEX, 0x66, 2, 0x0f00 + opcode, D##K, 1, 0, 1, NONE, Y, Y, 32, 1, NONE, VVVV_RM_IMM)
 
+// Shifts by the low quadword of an XMM register or 128-bit memory operand, at both widths.
+#define BUSTER_X86_AVX_SHIFT_COUNT_FORMS(XV, N, m, opcode) \
+    XV(N##_X_X_XM128, m, VEX, 0x66, 2, 0x0f00 + opcode, R, 0, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM) \
+    XV(N##_Y_Y_XM128, m, VEX, 0x66, 2, 0x0f00 + opcode, R, 0, 0, 1, Y, Y, XM, 16, 1, NONE, REG_VVVV_RM)
+
+// The destination and one source, with an 8-bit immediate.
+#define BUSTER_X86_AVX_UNARY_IMMEDIATE_FORMS(XV, N, m, prefixes, opcode_bytes, opcode) \
+    XV(N##_X_XM128_IMM8, m, VEX, prefixes, opcode_bytes, opcode, R, 1, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
+    XV(N##_Y_YM256_IMM8, m, VEX, prefixes, opcode_bytes, opcode, R, 1, 0, 1, Y, NONE, YM, 32, 1, NONE, REG_RM_IMM)
+
+// Sign or zero extensions as SSE4.1's (BUSTER_X86_SSE_EXTEND_FORMS), from half, a quarter or an eighth of the
+// destination's width: at 128 bits, and at 256 from an XMM register or memory operand.
+#define BUSTER_X86_AVX_EXTEND_FORMS(XV, N, m, opcode) \
+    XV(N##BW_X_XM64, m "bw", VEX, 0x66, 3, 0x0f3800 + opcode, R, 0, 0, 0, V, NONE, XM, 8, 1, NONE, REG_RM) \
+    XV(N##BD_X_XM32, m "bd", VEX, 0x66, 3, 0x0f3801 + opcode, R, 0, 0, 0, V, NONE, XM, 4, 1, NONE, REG_RM) \
+    XV(N##BQ_X_XM16, m "bq", VEX, 0x66, 3, 0x0f3802 + opcode, R, 0, 0, 0, V, NONE, XM, 2, 1, NONE, REG_RM) \
+    XV(N##WD_X_XM64, m "wd", VEX, 0x66, 3, 0x0f3803 + opcode, R, 0, 0, 0, V, NONE, XM, 8, 1, NONE, REG_RM) \
+    XV(N##WQ_X_XM32, m "wq", VEX, 0x66, 3, 0x0f3804 + opcode, R, 0, 0, 0, V, NONE, XM, 4, 1, NONE, REG_RM) \
+    XV(N##DQ_X_XM64, m "dq", VEX, 0x66, 3, 0x0f3805 + opcode, R, 0, 0, 0, V, NONE, XM, 8, 1, NONE, REG_RM) \
+    XV(N##BW_Y_XM128, m "bw", VEX, 0x66, 3, 0x0f3800 + opcode, R, 0, 0, 1, Y, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(N##BD_Y_XM64, m "bd", VEX, 0x66, 3, 0x0f3801 + opcode, R, 0, 0, 1, Y, NONE, XM, 8, 1, NONE, REG_RM) \
+    XV(N##BQ_Y_XM32, m "bq", VEX, 0x66, 3, 0x0f3802 + opcode, R, 0, 0, 1, Y, NONE, XM, 4, 1, NONE, REG_RM) \
+    XV(N##WD_Y_XM128, m "wd", VEX, 0x66, 3, 0x0f3803 + opcode, R, 0, 0, 1, Y, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(N##WQ_Y_XM64, m "wq", VEX, 0x66, 3, 0x0f3804 + opcode, R, 0, 0, 1, Y, NONE, XM, 8, 1, NONE, REG_RM) \
+    XV(N##DQ_Y_XM128, m "dq", VEX, 0x66, 3, 0x0f3805 + opcode, R, 0, 0, 1, Y, NONE, XM, 16, 1, NONE, REG_RM)
+
+// Masked loads (the mask in VEX.vvvv) and stores (memory, mask, source) at both widths.
+#define BUSTER_X86_AVX_MASKED_MOVE_FORMS(XV, N, m, load, store, w) \
+    XV(N##_X_X_M128, m, VEX, 0x66, 3, load, R, 0, w, 0, V, V, M, 16, 1, NONE, REG_VVVV_RM) \
+    XV(N##_Y_Y_M256, m, VEX, 0x66, 3, load, R, 0, w, 1, Y, Y, M, 32, 1, NONE, REG_VVVV_RM) \
+    XV(N##_M128_X_X, m, VEX, 0x66, 3, store, R, 0, w, 0, V, V, M, 16, 1, NONE, RM_VVVV_REG) \
+    XV(N##_M256_Y_Y, m, VEX, 0x66, 3, store, R, 0, w, 1, Y, Y, M, 32, 1, NONE, RM_VVVV_REG)
+
+// An XMM register's low or high quadword from memory, with the other from VEX.vvvv, and to memory (the next opcode).
+#define BUSTER_X86_AVX_HALF_MOVE_FORMS(XV, N, m, prefixes, load) \
+    XV(N##_X_X_M64, m, VEX, prefixes, 2, load, R, 0, 0, 0, V, V, M, 8, 1, NONE, REG_VVVV_RM) \
+    XV(N##_M64_X, m, VEX, prefixes, 2, load + 1, R, 0, 0, 0, V, NONE, M, 8, 1, NONE, RM_REG)
+
+// Non-temporal stores of 128 and 256 bits.
+#define BUSTER_X86_AVX_STREAM_FORMS(XV, N, m, prefixes, opcode) \
+    XV(N##_M128_X, m, VEX, prefixes, 2, opcode, R, 0, 0, 0, V, NONE, M, 16, 1, NONE, RM_REG) \
+    XV(N##_M256_Y, m, VEX, prefixes, 2, opcode, R, 0, 0, 1, Y, NONE, M, 32, 1, NONE, RM_REG)
+
 // AVX-512: loads (merging or zeroing) and stores (merging into memory) of 512 bits.
 #define BUSTER_X86_AVX512_MOVE_FORMS(XV, N, m, prefixes, w, load, store) \
     XV(N##_Z_ZM512, m, EVEX, prefixes, 2, load, R, 0, w, 2, Z, NONE, ZM, 64, 64, KZ, REG_RM) \
@@ -716,6 +761,184 @@ typedef enum X86Syntax
     XV(VPINSRB_X_X_RM32_IMM8, "vpinsrb", VEX, 0x66, 3, 0x0f3a20, R, 1, 0, 0, V, V, ED, 1, 1, NONE, REG_VVVV_RM_IMM) \
     XV(VPINSRD_X_X_RM32_IMM8, "vpinsrd", VEX, 0x66, 3, 0x0f3a22, R, 1, 0, 0, V, V, ED, 4, 1, NONE, REG_VVVV_RM_IMM) \
     XV(VPINSRQ_X_X_RM64_IMM8, "vpinsrq", VEX, 0x66, 3, 0x0f3a22, R, 1, 1, 0, V, V, EQ, 8, 1, NONE, REG_VVVV_RM_IMM) \
+    /* The rest of AVX and AVX2 (#21): floating-point arithmetic, compares, blends and shuffles. */ \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VADDSUBPD, "vaddsubpd", 0x66, 2, 0x0fd0, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VADDSUBPS, "vaddsubps", 0xf2, 2, 0x0fd0, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VANDPD, "vandpd", 0x66, 2, 0x0f54, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VANDNPD, "vandnpd", 0x66, 2, 0x0f55, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VORPD, "vorpd", 0x66, 2, 0x0f56, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VMINPD, "vminpd", 0x66, 2, 0x0f5d, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VMAXPD, "vmaxpd", 0x66, 2, 0x0f5f, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VHADDPD, "vhaddpd", 0x66, 2, 0x0f7c, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VHADDPS, "vhaddps", 0xf2, 2, 0x0f7c, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VHSUBPD, "vhsubpd", 0x66, 2, 0x0f7d, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VHSUBPS, "vhsubps", 0xf2, 2, 0x0f7d, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VUNPCKLPD, "vunpcklpd", 0x66, 2, 0x0f14, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VUNPCKHPS, "vunpckhps", 0, 2, 0x0f15, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VUNPCKHPD, "vunpckhpd", 0x66, 2, 0x0f15, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPERMILPS, "vpermilps", 0x66, 3, 0x0f380c, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPERMILPD, "vpermilpd", 0x66, 3, 0x0f380d, 0) \
+    BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VCMPPS, "vcmpps", 0, 2, 0x0fc2, 0) \
+    BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VCMPPD, "vcmppd", 0x66, 2, 0x0fc2, 0) \
+    BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VSHUFPD, "vshufpd", 0x66, 2, 0x0fc6, 0) \
+    BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VBLENDPS, "vblendps", 0x66, 3, 0x0f3a0c, 0) \
+    BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VBLENDPD, "vblendpd", 0x66, 3, 0x0f3a0d, 0) \
+    BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VDPPS, "vdpps", 0x66, 3, 0x0f3a40, 0) \
+    XV(VDPPD_X_X_XM128_IMM8, "vdppd", VEX, 0x66, 3, 0x0f3a41, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IMM) \
+    XV(VCMPSS_X_X_XM32_IMM8, "vcmpss", VEX, 0xf3, 2, 0x0fc2, R, 1, 0, 0, V, V, XM, 4, 1, NONE, REG_VVVV_RM_IMM) \
+    XV(VCMPSD_X_X_XM64_IMM8, "vcmpsd", VEX, 0xf2, 2, 0x0fc2, R, 1, 0, 0, V, V, XM, 8, 1, NONE, REG_VVVV_RM_IMM) \
+    XV(VROUNDSS_X_X_XM32_IMM8, "vroundss", VEX, 0x66, 3, 0x0f3a0a, R, 1, 0, 0, V, V, XM, 4, 1, NONE, REG_VVVV_RM_IMM) \
+    XV(VROUNDSD_X_X_XM64_IMM8, "vroundsd", VEX, 0x66, 3, 0x0f3a0b, R, 1, 0, 0, V, V, XM, 8, 1, NONE, REG_VVVV_RM_IMM) \
+    XV(VRSQRTSS_X_X_XM32, "vrsqrtss", VEX, 0xf3, 2, 0x0f52, R, 0, 0, 0, V, V, XM, 4, 1, NONE, REG_VVVV_RM) \
+    XV(VRCPSS_X_X_XM32, "vrcpss", VEX, 0xf3, 2, 0x0f53, R, 0, 0, 0, V, V, XM, 4, 1, NONE, REG_VVVV_RM) \
+    BUSTER_X86_AVX_UNARY_FORMS(XV, VRSQRTPS, "vrsqrtps", 0, 2, 0x0f52) \
+    BUSTER_X86_AVX_UNARY_FORMS(XV, VRCPPS, "vrcpps", 0, 2, 0x0f53) \
+    BUSTER_X86_AVX_UNARY_FORMS(XV, VTESTPS, "vtestps", 0x66, 3, 0x0f380e) \
+    BUSTER_X86_AVX_UNARY_FORMS(XV, VTESTPD, "vtestpd", 0x66, 3, 0x0f380f) \
+    BUSTER_X86_AVX_UNARY_IMMEDIATE_FORMS(XV, VROUNDPS, "vroundps", 0x66, 3, 0x0f3a08) \
+    BUSTER_X86_AVX_UNARY_IMMEDIATE_FORMS(XV, VROUNDPD, "vroundpd", 0x66, 3, 0x0f3a09) \
+    BUSTER_X86_AVX_UNARY_IMMEDIATE_FORMS(XV, VPERMILPS, "vpermilps", 0x66, 3, 0x0f3a04) \
+    BUSTER_X86_AVX_UNARY_IMMEDIATE_FORMS(XV, VPERMILPD, "vpermilpd", 0x66, 3, 0x0f3a05) \
+    XV(VPERMPS_Y_Y_YM256, "vpermps", VEX, 0x66, 3, 0x0f3816, R, 0, 0, 1, Y, Y, YM, 32, 1, NONE, REG_VVVV_RM) \
+    XV(VPERMPD_Y_YM256_IMM8, "vpermpd", VEX, 0x66, 3, 0x0f3a01, R, 1, 1, 1, Y, NONE, YM, 32, 1, NONE, REG_RM_IMM) \
+    XV(VPERM2F128_Y_Y_YM256_IMM8, "vperm2f128", VEX, 0x66, 3, 0x0f3a06, R, 1, 0, 1, Y, Y, YM, 32, 1, NONE, REG_VVVV_RM_IMM) \
+    XV(VINSERTPS_X_X_XM32_IMM8, "vinsertps", VEX, 0x66, 3, 0x0f3a21, R, 1, 0, 0, V, V, XM, 4, 1, NONE, REG_VVVV_RM_IMM) \
+    XV(VEXTRACTPS_RM32_X_IMM8, "vextractps", VEX, 0x66, 3, 0x0f3a17, R, 1, 0, 0, V, NONE, ED, 4, 1, NONE, RM_REG_IMM) \
+    /* Moves, broadcasts and non-temporal moves. */ \
+    XV(VMOVDDUP_X_XM64, "vmovddup", VEX, 0xf2, 2, 0x0f12, R, 0, 0, 0, V, NONE, XM, 8, 1, NONE, REG_RM) \
+    XV(VMOVDDUP_Y_YM256, "vmovddup", VEX, 0xf2, 2, 0x0f12, R, 0, 0, 1, Y, NONE, YM, 32, 1, NONE, REG_RM) \
+    BUSTER_X86_AVX_UNARY_FORMS(XV, VMOVSLDUP, "vmovsldup", 0xf3, 2, 0x0f12) \
+    BUSTER_X86_AVX_UNARY_FORMS(XV, VMOVSHDUP, "vmovshdup", 0xf3, 2, 0x0f16) \
+    XV(VMOVHLPS_X_X_X, "vmovhlps", VEX, 0, 2, 0x0f12, R, 0, 0, 0, V, V, V, 16, 1, NONE, REG_VVVV_RM) \
+    XV(VMOVLHPS_X_X_X, "vmovlhps", VEX, 0, 2, 0x0f16, R, 0, 0, 0, V, V, V, 16, 1, NONE, REG_VVVV_RM) \
+    BUSTER_X86_AVX_HALF_MOVE_FORMS(XV, VMOVLPS, "vmovlps", 0, 0x0f12) \
+    BUSTER_X86_AVX_HALF_MOVE_FORMS(XV, VMOVHPS, "vmovhps", 0, 0x0f16) \
+    BUSTER_X86_AVX_HALF_MOVE_FORMS(XV, VMOVLPD, "vmovlpd", 0x66, 0x0f12) \
+    BUSTER_X86_AVX_HALF_MOVE_FORMS(XV, VMOVHPD, "vmovhpd", 0x66, 0x0f16) \
+    XV(VMOVMSKPD_R32_X, "vmovmskpd", VEX, 0x66, 2, 0x0f50, R, 0, 0, 0, GD, NONE, V, 0, 1, NONE, REG_RM) \
+    XV(VMOVMSKPD_R32_Y, "vmovmskpd", VEX, 0x66, 2, 0x0f50, R, 0, 0, 1, GD, NONE, Y, 0, 1, NONE, REG_RM) \
+    BUSTER_X86_AVX_MASKED_MOVE_FORMS(XV, VMASKMOVPS, "vmaskmovps", 0x0f382c, 0x0f382e, 0) \
+    BUSTER_X86_AVX_MASKED_MOVE_FORMS(XV, VMASKMOVPD, "vmaskmovpd", 0x0f382d, 0x0f382f, 0) \
+    BUSTER_X86_AVX_MASKED_MOVE_FORMS(XV, VPMASKMOVD, "vpmaskmovd", 0x0f388c, 0x0f388e, 0) \
+    BUSTER_X86_AVX_MASKED_MOVE_FORMS(XV, VPMASKMOVQ, "vpmaskmovq", 0x0f388c, 0x0f388e, 1) \
+    XV(VMASKMOVDQU_X_X, "vmaskmovdqu", VEX, 0x66, 2, 0x0ff7, R, 0, 0, 0, V, NONE, V, 16, 1, NONE, REG_RM) \
+    XV(VBROADCASTF128_Y_M128, "vbroadcastf128", VEX, 0x66, 3, 0x0f381a, R, 0, 0, 1, Y, NONE, M, 16, 1, NONE, REG_RM) \
+    XV(VBROADCASTI128_Y_M128, "vbroadcasti128", VEX, 0x66, 3, 0x0f385a, R, 0, 0, 1, Y, NONE, M, 16, 1, NONE, REG_RM) \
+    XV(VPBROADCASTW_X_XM16, "vpbroadcastw", VEX, 0x66, 3, 0x0f3879, R, 0, 0, 0, V, NONE, XM, 2, 1, NONE, REG_RM) \
+    XV(VPBROADCASTW_Y_XM16, "vpbroadcastw", VEX, 0x66, 3, 0x0f3879, R, 0, 0, 1, Y, NONE, XM, 2, 1, NONE, REG_RM) \
+    BUSTER_X86_AVX_STREAM_FORMS(XV, VMOVNTPS, "vmovntps", 0, 0x0f2b) \
+    BUSTER_X86_AVX_STREAM_FORMS(XV, VMOVNTPD, "vmovntpd", 0x66, 0x0f2b) \
+    BUSTER_X86_AVX_STREAM_FORMS(XV, VMOVNTDQ, "vmovntdq", 0x66, 0x0fe7) \
+    XV(VMOVNTDQA_X_M128, "vmovntdqa", VEX, 0x66, 3, 0x0f382a, R, 0, 0, 0, V, NONE, M, 16, 1, NONE, REG_RM) \
+    XV(VMOVNTDQA_Y_M256, "vmovntdqa", VEX, 0x66, 3, 0x0f382a, R, 0, 0, 1, Y, NONE, M, 32, 1, NONE, REG_RM) \
+    XV(VLDDQU_X_M128, "vlddqu", VEX, 0xf2, 2, 0x0ff0, R, 0, 0, 0, V, NONE, M, 16, 1, NONE, REG_RM) \
+    XV(VLDDQU_Y_M256, "vlddqu", VEX, 0xf2, 2, 0x0ff0, R, 0, 0, 1, Y, NONE, M, 32, 1, NONE, REG_RM) \
+    XV(VLDMXCSR_M32, "vldmxcsr", VEX, 0, 2, 0x0fae, D2, 0, 0, 0, NONE, NONE, M, 4, 1, NONE, RM) \
+    XV(VSTMXCSR_M32, "vstmxcsr", VEX, 0, 2, 0x0fae, D3, 0, 0, 0, NONE, NONE, M, 4, 1, NONE, RM) \
+    /* Conversions, with F16C's. */ \
+    BUSTER_X86_AVX_UNARY_FORMS(XV, VCVTPS2DQ, "vcvtps2dq", 0x66, 2, 0x0f5b) \
+    XV(VCVTDQ2PD_X_XM64, "vcvtdq2pd", VEX, 0xf3, 2, 0x0fe6, R, 0, 0, 0, V, NONE, XM, 8, 1, NONE, REG_RM) \
+    XV(VCVTDQ2PD_Y_XM128, "vcvtdq2pd", VEX, 0xf3, 2, 0x0fe6, R, 0, 0, 1, Y, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VCVTPS2PD_X_XM64, "vcvtps2pd", VEX, 0, 2, 0x0f5a, R, 0, 0, 0, V, NONE, XM, 8, 1, NONE, REG_RM) \
+    XV(VCVTPS2PD_Y_XM128, "vcvtps2pd", VEX, 0, 2, 0x0f5a, R, 0, 0, 1, Y, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VCVTPD2DQ_X_XM128, "vcvtpd2dq", VEX, 0xf2, 2, 0x0fe6, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VCVTPD2DQ_X_YM256, "vcvtpd2dq", VEX, 0xf2, 2, 0x0fe6, R, 0, 0, 1, V, NONE, YM, 32, 1, NONE, REG_RM) \
+    XV(VCVTTPD2DQ_X_XM128, "vcvttpd2dq", VEX, 0x66, 2, 0x0fe6, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VCVTTPD2DQ_X_YM256, "vcvttpd2dq", VEX, 0x66, 2, 0x0fe6, R, 0, 0, 1, V, NONE, YM, 32, 1, NONE, REG_RM) \
+    XV(VCVTPD2PS_X_XM128, "vcvtpd2ps", VEX, 0x66, 2, 0x0f5a, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VCVTPD2PS_X_YM256, "vcvtpd2ps", VEX, 0x66, 2, 0x0f5a, R, 0, 0, 1, V, NONE, YM, 32, 1, NONE, REG_RM) \
+    XV(VCVTSS2SI_R32_XM32, "vcvtss2si", VEX, 0xf3, 2, 0x0f2d, R, 0, 0, 0, GD, NONE, XM, 4, 1, NONE, REG_RM) \
+    XV(VCVTSS2SI_R64_XM32, "vcvtss2si", VEX, 0xf3, 2, 0x0f2d, R, 0, 1, 0, GQ, NONE, XM, 4, 1, NONE, REG_RM) \
+    XV(VCVTSD2SI_R32_XM64, "vcvtsd2si", VEX, 0xf2, 2, 0x0f2d, R, 0, 0, 0, GD, NONE, XM, 8, 1, NONE, REG_RM) \
+    XV(VCVTSD2SI_R64_XM64, "vcvtsd2si", VEX, 0xf2, 2, 0x0f2d, R, 0, 1, 0, GQ, NONE, XM, 8, 1, NONE, REG_RM) \
+    XV(VCVTPH2PS_X_XM64, "vcvtph2ps", VEX, 0x66, 3, 0x0f3813, R, 0, 0, 0, V, NONE, XM, 8, 1, NONE, REG_RM) \
+    XV(VCVTPH2PS_Y_XM128, "vcvtph2ps", VEX, 0x66, 3, 0x0f3813, R, 0, 0, 1, Y, NONE, XM, 16, 1, NONE, REG_RM) \
+    XV(VCVTPS2PH_XM64_X_IMM8, "vcvtps2ph", VEX, 0x66, 3, 0x0f3a1d, R, 1, 0, 0, V, NONE, XM, 8, 1, NONE, RM_REG_IMM) \
+    XV(VCVTPS2PH_XM128_Y_IMM8, "vcvtps2ph", VEX, 0x66, 3, 0x0f3a1d, R, 1, 0, 1, Y, NONE, XM, 16, 1, NONE, RM_REG_IMM) \
+    /* Integer arithmetic, compares, packs, unpacks and shifts (AVX's at 128 bits, AVX2's at 256). */ \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPADDSB, "vpaddsb", 0x66, 2, 0x0fec, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPADDSW, "vpaddsw", 0x66, 2, 0x0fed, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPADDUSB, "vpaddusb", 0x66, 2, 0x0fdc, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPADDUSW, "vpaddusw", 0x66, 2, 0x0fdd, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPSUBW, "vpsubw", 0x66, 2, 0x0ff9, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPSUBSB, "vpsubsb", 0x66, 2, 0x0fe8, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPSUBSW, "vpsubsw", 0x66, 2, 0x0fe9, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPSUBUSB, "vpsubusb", 0x66, 2, 0x0fd8, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPSUBUSW, "vpsubusw", 0x66, 2, 0x0fd9, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPAVGB, "vpavgb", 0x66, 2, 0x0fe0, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPAVGW, "vpavgw", 0x66, 2, 0x0fe3, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPCMPEQW, "vpcmpeqw", 0x66, 2, 0x0f75, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPCMPEQQ, "vpcmpeqq", 0x66, 3, 0x0f3829, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPCMPGTB, "vpcmpgtb", 0x66, 2, 0x0f64, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPCMPGTW, "vpcmpgtw", 0x66, 2, 0x0f65, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPCMPGTQ, "vpcmpgtq", 0x66, 3, 0x0f3837, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMADDWD, "vpmaddwd", 0x66, 2, 0x0ff5, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMADDUBSW, "vpmaddubsw", 0x66, 3, 0x0f3804, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMAXSB, "vpmaxsb", 0x66, 3, 0x0f383c, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMAXSW, "vpmaxsw", 0x66, 2, 0x0fee, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMAXUW, "vpmaxuw", 0x66, 3, 0x0f383e, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMAXUD, "vpmaxud", 0x66, 3, 0x0f383f, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMINSB, "vpminsb", 0x66, 3, 0x0f3838, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMINSW, "vpminsw", 0x66, 2, 0x0fea, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMINSD, "vpminsd", 0x66, 3, 0x0f3839, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMINUW, "vpminuw", 0x66, 3, 0x0f383a, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMULHUW, "vpmulhuw", 0x66, 2, 0x0fe4, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMULHW, "vpmulhw", 0x66, 2, 0x0fe5, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMULHRSW, "vpmulhrsw", 0x66, 3, 0x0f380b, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMULUDQ, "vpmuludq", 0x66, 2, 0x0ff4, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPMULDQ, "vpmuldq", 0x66, 3, 0x0f3828, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPSIGNB, "vpsignb", 0x66, 3, 0x0f3808, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPSIGNW, "vpsignw", 0x66, 3, 0x0f3809, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPSIGND, "vpsignd", 0x66, 3, 0x0f380a, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPHADDW, "vphaddw", 0x66, 3, 0x0f3801, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPHADDD, "vphaddd", 0x66, 3, 0x0f3802, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPHADDSW, "vphaddsw", 0x66, 3, 0x0f3803, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPHSUBW, "vphsubw", 0x66, 3, 0x0f3805, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPHSUBD, "vphsubd", 0x66, 3, 0x0f3806, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPHSUBSW, "vphsubsw", 0x66, 3, 0x0f3807, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPACKSSWB, "vpacksswb", 0x66, 2, 0x0f63, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPACKSSDW, "vpackssdw", 0x66, 2, 0x0f6b, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPACKUSDW, "vpackusdw", 0x66, 3, 0x0f382b, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPUNPCKLWD, "vpunpcklwd", 0x66, 2, 0x0f61, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPUNPCKLDQ, "vpunpckldq", 0x66, 2, 0x0f62, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPUNPCKLQDQ, "vpunpcklqdq", 0x66, 2, 0x0f6c, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPUNPCKHBW, "vpunpckhbw", 0x66, 2, 0x0f68, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPUNPCKHWD, "vpunpckhwd", 0x66, 2, 0x0f69, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPUNPCKHDQ, "vpunpckhdq", 0x66, 2, 0x0f6a, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPUNPCKHQDQ, "vpunpckhqdq", 0x66, 2, 0x0f6d, 0) \
+    BUSTER_X86_AVX_PACKED_FORMS(XV, VPSRLVQ, "vpsrlvq", 0x66, 3, 0x0f3845, 1) \
+    BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VPBLENDW, "vpblendw", 0x66, 3, 0x0f3a0e, 0) \
+    BUSTER_X86_AVX_PACKED_IMMEDIATE_FORMS(XV, VMPSADBW, "vmpsadbw", 0x66, 3, 0x0f3a42, 0) \
+    XV(VPCLMULQDQ_X_X_XM128_IMM8, "vpclmulqdq", VEX, 0x66, 3, 0x0f3a44, R, 1, 0, 0, V, V, XM, 16, 1, NONE, REG_VVVV_RM_IMM) \
+    BUSTER_X86_AVX_UNARY_FORMS(XV, VPABSB, "vpabsb", 0x66, 3, 0x0f381c) \
+    BUSTER_X86_AVX_UNARY_FORMS(XV, VPABSW, "vpabsw", 0x66, 3, 0x0f381d) \
+    BUSTER_X86_AVX_UNARY_FORMS(XV, VPABSD, "vpabsd", 0x66, 3, 0x0f381e) \
+    XV(VPHMINPOSUW_X_XM128, "vphminposuw", VEX, 0x66, 3, 0x0f3841, R, 0, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM) \
+    BUSTER_X86_AVX_UNARY_IMMEDIATE_FORMS(XV, VPSHUFHW, "vpshufhw", 0xf3, 2, 0x0f70) \
+    BUSTER_X86_AVX_UNARY_IMMEDIATE_FORMS(XV, VPSHUFLW, "vpshuflw", 0xf2, 2, 0x0f70) \
+    BUSTER_X86_AVX_EXTEND_FORMS(XV, VPMOVSX, "vpmovsx", 0x20) \
+    BUSTER_X86_AVX_EXTEND_FORMS(XV, VPMOVZX, "vpmovzx", 0x30) \
+    BUSTER_X86_AVX_SHIFT_FORMS(XV, VPSRLW, "vpsrlw", 0x71, 2) \
+    BUSTER_X86_AVX_SHIFT_FORMS(XV, VPSRAW, "vpsraw", 0x71, 4) \
+    BUSTER_X86_AVX_SHIFT_FORMS(XV, VPSLLW, "vpsllw", 0x71, 6) \
+    BUSTER_X86_AVX_SHIFT_COUNT_FORMS(XV, VPSRLW, "vpsrlw", 0xd1) \
+    BUSTER_X86_AVX_SHIFT_COUNT_FORMS(XV, VPSRLD, "vpsrld", 0xd2) \
+    BUSTER_X86_AVX_SHIFT_COUNT_FORMS(XV, VPSRLQ, "vpsrlq", 0xd3) \
+    BUSTER_X86_AVX_SHIFT_COUNT_FORMS(XV, VPSRAW, "vpsraw", 0xe1) \
+    BUSTER_X86_AVX_SHIFT_COUNT_FORMS(XV, VPSRAD, "vpsrad", 0xe2) \
+    BUSTER_X86_AVX_SHIFT_COUNT_FORMS(XV, VPSLLW, "vpsllw", 0xf1) \
+    BUSTER_X86_AVX_SHIFT_COUNT_FORMS(XV, VPSLLD, "vpslld", 0xf2) \
+    BUSTER_X86_AVX_SHIFT_COUNT_FORMS(XV, VPSLLQ, "vpsllq", 0xf3) \
+    XV(VPINSRW_X_X_RM32_IMM8, "vpinsrw", VEX, 0x66, 2, 0x0fc4, R, 1, 0, 0, V, V, ED, 2, 1, NONE, REG_VVVV_RM_IMM) \
+    XV(VPEXTRW_R32_X_IMM8, "vpextrw", VEX, 0x66, 2, 0x0fc5, R, 1, 0, 0, GD, NONE, V, 0, 1, NONE, REG_RM_IMM) \
+    XV(VPEXTRW_M16_X_IMM8, "vpextrw", VEX, 0x66, 3, 0x0f3a15, R, 1, 0, 0, V, NONE, M, 2, 1, NONE, RM_REG_IMM) \
+    /* The string compares (and with W1, 64-bit lengths). */ \
+    XV(VPCMPESTRM_X_XM128_IMM8, "vpcmpestrm", VEX, 0x66, 3, 0x0f3a60, R, 1, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
+    XV(VPCMPESTRI_X_XM128_IMM8, "vpcmpestri", VEX, 0x66, 3, 0x0f3a61, R, 1, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
+    XV(VPCMPISTRM_X_XM128_IMM8, "vpcmpistrm", VEX, 0x66, 3, 0x0f3a62, R, 1, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
+    XV(VPCMPISTRI_X_XM128_IMM8, "vpcmpistri", VEX, 0x66, 3, 0x0f3a63, R, 1, 0, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
+    XV(VPCMPESTRMQ_X_XM128_IMM8, "vpcmpestrmq", VEX, 0x66, 3, 0x0f3a60, R, 1, 1, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
+    XV(VPCMPESTRIQ_X_XM128_IMM8, "vpcmpestriq", VEX, 0x66, 3, 0x0f3a61, R, 1, 1, 0, V, NONE, XM, 16, 1, NONE, REG_RM_IMM) \
     XV(ANDN_R32_R32_RM32, "andn", VEX, 0, 3, 0x0f38f2, R, 0, 0, 0, GD, GD, ED, 4, 1, NONE, REG_VVVV_RM) \
     XV(ANDN_R64_R64_RM64, "andn", VEX, 0, 3, 0x0f38f2, R, 0, 1, 0, GQ, GQ, EQ, 8, 1, NONE, REG_VVVV_RM) \
     XV(BEXTR_R32_RM32_R32, "bextr", VEX, 0, 3, 0x0f38f7, R, 0, 0, 0, GD, GD, ED, 4, 1, NONE, REG_RM_VVVV) \
