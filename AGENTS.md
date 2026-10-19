@@ -126,12 +126,12 @@ yet compared against a performance baseline. Keep just one compiler executable.
 ## x86-64 encoder tests
 
 `./build/compiler test-x86-encoder` (about 0.3 s) checks that every form fits a
-template, both encoders on 452 known encodings from GNU as, a digest of the
+template, both encoders on 466 known encodings from GNU as, a digest of the
 scalar encoder's output for 100,000 random instructions, every batch width and
 variant of `x86_encode` against the scalar encoder (bytes and offsets) on every
 count from 0 to 199 and on 300,000 random instructions of every form (legacy
 with x87 and MMX, VEX and EVEX, with opmasks, broadcasts, rounding, registers
-16-31 and FS and GS segment overrides),
+16-31, gathers and scatters, and FS and GS segment overrides),
 the same between `PROT_NONE` guard pages, and that invalid operands are
 rejected (immediates and rel8s outside their fields' ranges by `x86_validate`
 alone: `x86_encode` writes their low bytes). `--count N` and `--seed N` change
