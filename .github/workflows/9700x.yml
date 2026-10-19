@@ -69,3 +69,10 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-x86-encoder
+
+      - name: Test the lanes
+        run: ./build/compiler test-lanes
+
+      - name: Benchmark the lanes
+        # It pins each lane to an allowed CPU of its own.
+        run: ./build/compiler benchmark-lanes

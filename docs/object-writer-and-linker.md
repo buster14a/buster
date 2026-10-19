@@ -7,9 +7,10 @@ machine code and data into files:
 - **The linker:** executables written straight from the compiler, and links of
   other compilers' objects, archives and shared libraries.
 
-Nothing here is implemented yet. The document records the measurements on the
-Ryzen 7 9700X that the design rests on, the design itself, and the order to
-build it in, as `docs/x86-64-encoder.md` does for the encoder.
+The first step of the plan, the lane base layer, is implemented
+(`src/buster/compiler/lane.c`); the rest isn't yet. The document records the
+measurements on the Ryzen 7 9700X that the design rests on, the design itself,
+and the order to build it in, as `docs/x86-64-encoder.md` does for the encoder.
 
 The premise is that most of what mold and wild do on every link is work this
 compiler can avoid altogether. What remains is memory traffic, and the design
@@ -439,6 +440,14 @@ Fixups use 0.4 bytes per byte of code at the measured density.
 "Lanes"). The address space is reserved up front, committed on touch, and
 backed by transparent huge pages: they fault 2.8× faster and tear down 10×
 faster.
+
+An arena's first 64 KB stay in 4 KB pages (`MADV_NOHUGEPAGE`), and huge pages
+start right after them, on a 2 MB boundary. A huge page is cleared whole when
+it is first touched: 15.1 µs on the 9700X, against 0.75 µs for a 4 KB page
+and 4.7 µs for all sixteen of the first 64 KB (`benchmark-lanes`). With
+transparent huge pages set to "always", as on the 9700X, even an arena used
+for a few kilobytes would otherwise pay for a huge page. Reserving and
+releasing a 64 GB arena costs 1.8 µs.
 
 Logical length and capacity are always separate. A full arena is an error
 that is reported, never a truncation.
@@ -1016,9 +1025,13 @@ vector kernels go. Steps 4–6 are graph walks bound by memory latency.
 
 Fleury's model, adapted to this repository's style: every phase is one
 function that every lane runs, with every lane taking its own part of each
-loop. The RAD Debugger has the same in its base layer (`lane_idx()`,
-`lane_count()`, `lane_sync()`, `lane_sync_u64()`, `lane_range()` in
-`base_thread_context.h`). In this repository's style:
+loop. The RAD Debugger's base layer has the same (`lane_idx()`,
+`lane_count()`, `lane_sync()`, `lane_sync_u64()`, `lane_range()` and
+`lane_from_task_idx()` in `base_thread_context.h`), and its batch tool, radbin,
+shows how it is used today: it starts its lanes once and runs the whole program
+on them. Lane 0 allocates what the lanes share and broadcasts the pointer, and
+each lane writes its own part of the outputs. `src/buster/compiler/lane.c` has,
+in this repository's style:
 
 ```c
 typedef struct Range64 Range64;
@@ -1028,25 +1041,52 @@ struct Range64
     uint64_t end;
 };
 
-// The calling thread's lane: its index, the group's size, and the group's barrier and broadcast slot.
+// The calling thread's lane: its index, and the group's size.
 static uint32_t lane_index(void);
 static uint32_t lane_count(void);
 // Waits for every lane of the group. With one lane, returns at once.
 static void lane_sync(void);
-// Every lane gets source_lane's value.
+// Every lane gets source_lane's value. Like lane_sync, it waits for every lane.
 static uint64_t lane_broadcast(uint64_t value, uint32_t source_lane);
+// The lane that runs narrow task task_index of several spread over the lanes, each of which then broadcasts its result.
+static uint32_t lane_from_task_index(uint64_t task_index);
 // This lane's part of [0, count): contiguous, in lane order, the first count % lane_count() parts one longer.
 static Range64 lane_range(uint64_t count);
-// The same, split so that each part's cost (from the inclusive prefix sum of the items' costs) is about equal.
+// The same, split by cost: cost_prefix holds the inclusive prefix sums of the items' costs, and each item goes to the
+// lane whose share of the total cost holds the item's midpoint, so each part's cost is within the largest item's of an
+// equal share.
 static Range64 lane_range_by_cost(const uint64_t* cost_prefix, uint64_t count);
+// Runs entry(argument) on a group of count lanes, the calling thread being lane 0, and returns once they all have.
+static bool lane_run(uint32_t count, void (*entry)(void* argument), void* argument, const uint32_t* cpus);
 ```
 
 The lane lives in a thread-local context with the thread's scratch arenas, as
 `TCTX` holds the RAD Debugger's `LaneCtx`. A thread that has to run a phase
 alone, while the others do something else, makes itself a group of one (index
-0, count 1, no barrier) and restores its group afterwards. The barrier is a
-counter and a generation word: it spins briefly, then waits on a futex. Its
-atomics are the only ones the linker has.
+0, count 1, no barrier) with `lane_alone` and restores its group afterwards.
+The barrier is a counter and a generation word: it spins briefly, then waits on
+a futex. Its atomics are the only ones the linker has.
+
+Three things differ from the RAD Debugger, each measured below:
+
+- **The calling thread is lane 0.** radbin's main thread waits for its lanes;
+  here it is one of them, so a group of one starts no thread. A program starts
+  its group once, with all of its phases in the entry point, since starting
+  threads costs as much as 130 to 190 syncs.
+- **A broadcast is one barrier.** `lane_sync_u64` copies the value in, waits,
+  copies it out and waits again. Here the source offers its value on the
+  barrier's arrival line, which it writes anyway as it arrives; the last lane to
+  arrive copies it next to the generation word, and a waiting lane reads both
+  together.
+- **The barrier spins before it sleeps.** On Linux the RAD Debugger's barrier
+  is `pthread_barrier_wait`, which sleeps in the kernel at every wait. Here a
+  waiting lane spins for 2,048 pauses (24 µs on the 9700X) before it sleeps,
+  and it sets a bit in the generation word first, so a sync at which no lane
+  slept makes no system call.
+
+The RAD Debugger's PDB converter balances uneven work with atomic counters that
+lanes take tasks from. Rule 1 below balances with `lane_range_by_cost` instead,
+from costs known up front, which keeps the barrier's atomics the only ones.
 
 The rules for every phase:
 
@@ -1107,6 +1147,48 @@ lanes help is measured, as is everything else:
 
 - the exchange costs a second pass over the records;
 - on btrfs, the file write doesn't scale.
+
+**What the lanes cost.** `benchmark-lanes` on the 9700X, with lane i pinned to
+CPU i (CPUs 0 to 7 are its eight cores). Each figure is the median of three
+runs, each of them the median of 21 passes:
+
+| Lanes | `lane_sync` | `lane_broadcast` | `pthread_barrier_wait` | Waking sleeping lanes | Starting the group |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.0 ns | 0.3 ns | 48 ns | — | — |
+| 2 | 35 ns | 43 ns | 1.32 µs | 2.0–13 µs | 6.5 µs |
+| 3 | 71 ns | 73 ns | 1.56 µs | 2.1 µs | 9.3 µs |
+| 4 | 101 ns | 100 ns | 1.73 µs | 2.5 µs | 14 µs |
+| 5 | 123 ns | 129 ns | 1.79 µs | 2.7 µs | 17 µs |
+| 6 | 146 ns | 158 ns | 1.80 µs | 3.0 µs | 26 µs |
+| 7 | 176 ns | 187 ns | 1.82 µs | 3.2 µs | 31 µs |
+| 8 | 193 ns | 212 ns | 1.86 µs | 3.4–15 µs | 37 µs |
+
+- **Sync and broadcast:** back-to-back calls, every lane arriving at once. Each
+  lane adds about 26 ns, the cost of its atomic add moving the arrival line
+  between cores. A broadcast costs what a sync does.
+- **`pthread_barrier_wait`:** the RAD Debugger's barrier on Linux, in the same
+  loop. It costs 10 to 38 times as much with 2 to 8 lanes.
+- **Waking:** lane 0 arrives 1 ms late, after the others have spun and gone to
+  sleep. The time is from lane 0's arrival until the last lane has left. In
+  some runs it was 10–15 µs: a core had gone into a deeper idle state, and C2
+  declares 18 µs to exit. The 24 µs spin is longer than that dearest wake-up,
+  so a lane sleeps only when its wait is already longer.
+- **Starting:** `lane_run` of an entry point that returns at once, without
+  pinning, from the call until it returns. That is what 130 to 190 syncs cost,
+  hence one group per program.
+
+Where the broadcast's value goes decided its cost (`benchmark-lanes`, medians
+of four or five rotating runs of each layout):
+
+| Layout | 4 lanes: sync / broadcast | 8 lanes: sync / broadcast |
+| --- | ---: | ---: |
+| Two slots on the generation line, written by the source | 102 / 141 ns | 204 / 284 ns |
+| The counter, the generation and the slot on one line | 94 / 95 ns | 242 / 246 ns |
+| The slot on a line of its own | 98 / 125 ns | 196 / 230 ns |
+| Offered on the arrival line, copied next to the generation (`lane.c`) | 102 / 98 ns | 208 / 206 ns |
+
+Writing a slot on the generation line makes the lanes spinning on it read the
+line again, and putting the counter there too makes every arrival do so.
 
 ### SIMD: what pays
 
@@ -1238,7 +1320,8 @@ and with this document updated with what was measured:
 
 1. **The lane base layer:** the lane context, barrier, `lane_range`, broadcast
    and arenas with huge pages. Tests run with several lane counts even though
-   the linker starts with one.
+   the linker starts with one. Done: `lane.c`, `test-lanes` and
+   `benchmark-lanes`, whose costs are in "Lanes".
 2. **Fixups from the encoder:** marked instructions, field offsets and
    addends. Done when they match GNU as's relocations on random streams, and
    the compiler-like mix encodes no slower than the offsets loop (0.72 ns per
