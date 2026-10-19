@@ -27,8 +27,9 @@
 //     register with a REX prefix, RSP as an index, RIP with a base, a register past its class's last, vvvv or reg in
 //     a form without them, decorations the form can't have, unknown mode bits): x86_encode must reject them and
 //     x86_validate must find them. And with an immediate or rel8 just outside its field's range, an /is4 register
-//     outside its bits, a control or segment register that doesn't exist, MOV to CS or a complex multiplication into
-//     one of its sources, which only x86_validate checks: it must find them.
+//     outside its bits, a control or segment register that doesn't exist, MOV to CS, a complex multiplication into
+//     one of its sources, a VSIB operand without an index, an EVEX gather or scatter without an opmask or a gather
+//     whose destination, index and mask aren't different registers, which only x86_validate checks: it must find them.
 //
 // --print-assembly prints N random instructions in GNU as Intel syntax, each with its bytes from x86_encode_scalar in
 // a comment, choosing operands GNU as encodes with the same form (with {load}, {store}, {vex} and {evex} where GNU as
@@ -61,7 +62,7 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0x88be087841d3402cull
+#define BUSTER_X86_TEST_DIGEST 0x973c4eb91d60fb69ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -265,8 +266,9 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
     {
         result = true;
     }
-    // An index scaled by 1 without a base becomes the base.
-    if ((instruction->mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX)) == BUSTER_X86_MODE_INDEX && (instruction->mode & BUSTER_X86_MODE_SCALE) == 0)
+    // A general index scaled by 1 without a base becomes the base (a VSIB one can't).
+    if ((instruction->mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX)) == BUSTER_X86_MODE_INDEX && (instruction->mode & BUSTER_X86_MODE_SCALE) == 0 &&
+        !(form->rm & BUSTER_X86_OPERAND_VSIB))
     {
         result = true;
     }
@@ -277,6 +279,7 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
 static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_index, bool for_assembler)
 {
     const X86FormDescription* form = &x86_form_descriptions[form_index];
+    const bool vsib = (form->rm & BUSTER_X86_OPERAND_VSIB) != 0;
     X86Instruction result;
     bool done = false;
     while (!done)
@@ -319,13 +322,18 @@ static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_inde
                         result.mode = BUSTER_X86_MEMORY_RIP;
                         break;
                 }
+                // A VSIB operand always has an index, a vector register of its class, and a base three times in four.
+                if (vsib)
+                {
+                    result.mode = x86_random_below(state, 4) == 0 ? BUSTER_X86_MEMORY_INDEX(scale) : BUSTER_X86_MEMORY_BASE_INDEX(scale);
+                }
                 if (result.mode & BUSTER_X86_MODE_BASE)
                 {
                     result.rm = x86_random_register(state, BUSTER_X86_OPERAND_GQ, BUSTER_X86_FAMILY_LEGACY);
                 }
                 if (result.mode & BUSTER_X86_MODE_INDEX)
                 {
-                    result.index = x86_random_register(state, BUSTER_X86_OPERAND_GQ, BUSTER_X86_FAMILY_LEGACY);
+                    result.index = vsib ? x86_random_register(state, form->rm, form->family) : x86_random_register(state, BUSTER_X86_OPERAND_GQ, BUSTER_X86_FAMILY_LEGACY);
                 }
                 // An FS or GS segment override one time in eight.
                 if (x86_random_below(state, 8) == 0)
@@ -335,8 +343,9 @@ static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_inde
                 result.displacement = x86_random_displacement(state, form->disp8_scale);
             }
         }
-        // An opmask half the time, zeroing half of those (not into memory), and any rounding mode.
-        if ((form->evex & BUSTER_X86_EVEX_MASK) && x86_random_below(state, 2) == 0)
+        // An opmask half the time (and always for a gather or scatter, which needs one), zeroing half of those (not into
+        // memory), and any rounding mode.
+        if ((form->evex & BUSTER_X86_EVEX_MASK) && (vsib || x86_random_below(state, 2) == 0))
         {
             const bool memory_destination = (result.mode & BUSTER_X86_MODE_MEMORY) && (form->syntax == X86_SYNTAX_RM_REG || form->syntax == X86_SYNTAX_RM_REG_IMM);
             result.decorations = (uint8_t)(1 + x86_random_below(state, 7));
@@ -451,9 +460,12 @@ static const char* x86_accumulator_name(uint32_t bytes)
     return bytes == 1 ? "al" : bytes == 2 ? "ax" : bytes == 4 ? "eax" : "rax";
 }
 
+// A memory operand; a VSIB one's index is a vector register of the rm operand's class.
 static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint32_t operand_bytes)
 {
     const uint8_t mode = instruction->mode;
+    const uint8_t rm = x86_form_description(instruction->form)->rm;
+    const char* index = (rm & BUSTER_X86_OPERAND_VSIB) ? x86_register_name(instruction->index, rm) : x86_gpr64_names[instruction->index & 15];
     const uint32_t override = x86_form_segment(instruction->form);
     const char* segment = override == 0 ? "" : override == 1 ? "fs:" : "gs:";
     // A far pointer of 6 bytes is an fword; the x87 environment and state areas (14, 28, 94 and 108 bytes) and MOVDIR64B's
@@ -478,7 +490,7 @@ static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint
         }
         if (mode & BUSTER_X86_MODE_INDEX)
         {
-            fprintf(file, "%s%s*%d", (mode & BUSTER_X86_MODE_BASE) ? "+" : "", x86_gpr64_names[instruction->index & 15], 1 << (mode & BUSTER_X86_MODE_SCALE));
+            fprintf(file, "%s%s*%d", (mode & BUSTER_X86_MODE_BASE) ? "+" : "", index, 1 << (mode & BUSTER_X86_MODE_SCALE));
         }
         fprintf(file, "%+d]", instruction->displacement);
     }
@@ -1503,6 +1515,55 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_LWPINS_R32_RM32_IMM32, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 0x12345 },
       9,
       { 0x8f, 0xea, 0x78, 0x12, 0x00, 0x45, 0x23, 0x01, 0x00 } },
+    // Gathers and scatters (VSIB): vgatherdps xmm1, dword ptr [rax+xmm2*4], xmm3 (the mask in VEX.vvvv); vpgatherdd by
+    // XMM4 (an index, not none) after RBP (an 8-bit zero); vgatherqpd by YMM12 (X) after RSP; vgatherdpd ymm1, qword
+    // ptr [xmm2*8+16], ymm3 (no base, so a 32-bit displacement, and 256 bits by an XMM index); vpgatherqd xmm1, dword
+    // ptr [r9+ymm14*2], xmm15 (128 bits by a YMM index); EVEX's vgatherdps by ZMM20 (V') after R13 (64, 16 units of
+    // N = 4), vpgatherqq zmm30{k7} by ZMM31 (R', X and V') with -1024 (-128 units of 8), vgatherqps ymm1 by ZMM12,
+    // vpgatherdq zmm1 by YMM4, vgatherdpd with 4 (not a multiple of N = 8) and vpgatherdd with 508 (127 units of 4);
+    // and vpscatterdd, vscatterqpd by XMM16 without a base, and vscatterdps with FS
+    { { .form = X86_FORM_VGATHERDPS_X_VM32X_X, .reg = 1, .vvvv = 3, .rm = X86_REGISTER_RAX, .index = 2, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2) },
+      6,
+      { 0xc4, 0xe2, 0x61, 0x92, 0x0c, 0x90 } },
+    { { .form = X86_FORM_VPGATHERDD_X_VM32X_X, .reg = 1, .vvvv = 3, .rm = X86_REGISTER_RBP, .index = 4, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0) },
+      7,
+      { 0xc4, 0xe2, 0x61, 0x90, 0x4c, 0x25, 0x00 } },
+    { { .form = X86_FORM_VGATHERQPD_Y_VM64Y_Y, .reg = 1, .vvvv = 3, .rm = X86_REGISTER_RSP, .index = 12, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = -8 },
+      7,
+      { 0xc4, 0xa2, 0xe5, 0x93, 0x4c, 0xe4, 0xf8 } },
+    { { .form = X86_FORM_VGATHERDPD_Y_VM32X_Y, .reg = 1, .vvvv = 3, .index = 2, .mode = BUSTER_X86_MEMORY_INDEX(3), .displacement = 16 },
+      10,
+      { 0xc4, 0xe2, 0xe5, 0x92, 0x0c, 0xd5, 0x10, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_VPGATHERQD_X_VM64Y_X, .reg = 1, .vvvv = 15, .rm = X86_REGISTER_R9, .index = 14, .mode = BUSTER_X86_MEMORY_BASE_INDEX(1) },
+      6,
+      { 0xc4, 0x82, 0x05, 0x91, 0x0c, 0x71 } },
+    { { .form = X86_FORM_VGATHERDPS_Z_VM32Z, .reg = 1, .rm = X86_REGISTER_R13, .index = 20, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .displacement = 64, .decorations = 1 },
+      8,
+      { 0x62, 0xd2, 0x7d, 0x41, 0x92, 0x4c, 0xa5, 0x10 } },
+    { { .form = X86_FORM_VPGATHERQQ_Z_VM64Z, .reg = 30, .rm = X86_REGISTER_RAX, .index = 31, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = -1024, .decorations = 7 },
+      8,
+      { 0x62, 0x22, 0xfd, 0x47, 0x91, 0x74, 0xf8, 0x80 } },
+    { { .form = X86_FORM_VGATHERQPS_Y_VM64Z, .reg = 1, .rm = X86_REGISTER_RAX, .index = 12, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 },
+      7,
+      { 0x62, 0xb2, 0x7d, 0x49, 0x93, 0x0c, 0xa0 } },
+    { { .form = X86_FORM_VPGATHERDQ_Z_VM32Y, .reg = 1, .rm = X86_REGISTER_RAX, .index = 4, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .decorations = 1 },
+      7,
+      { 0x62, 0xf2, 0xfd, 0x49, 0x90, 0x0c, 0xe0 } },
+    { { .form = X86_FORM_VGATHERDPD_X_VM32X, .reg = 1, .rm = X86_REGISTER_RAX, .index = 2, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = 4, .decorations = 1 },
+      11,
+      { 0x62, 0xf2, 0xfd, 0x09, 0x92, 0x8c, 0xd0, 0x04, 0x00, 0x00, 0x00 } },
+    { { .form = X86_FORM_VPGATHERDD_X_VM32X, .reg = 5, .rm = X86_REGISTER_RDX, .index = 6, .mode = BUSTER_X86_MEMORY_BASE_INDEX(1), .displacement = 508, .decorations = 3 },
+      8,
+      { 0x62, 0xf2, 0x7d, 0x0b, 0x90, 0x6c, 0x72, 0x7f } },
+    { { .form = X86_FORM_VPSCATTERDD_VM32Z_Z, .reg = 1, .rm = X86_REGISTER_RAX, .index = 2, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 },
+      7,
+      { 0x62, 0xf2, 0x7d, 0x49, 0xa0, 0x0c, 0x90 } },
+    { { .form = X86_FORM_VSCATTERQPD_VM64X_X, .reg = 3, .index = 16, .mode = BUSTER_X86_MEMORY_INDEX(3), .displacement = 256, .decorations = 2 },
+      11,
+      { 0x62, 0xf2, 0xfd, 0x02, 0xa3, 0x1c, 0xc5, 0x00, 0x01, 0x00, 0x00 } },
+    { { .form = X86_FORM_VSCATTERDPS_VM32Y_Y + BUSTER_X86_FORM_FS, .reg = 6, .rm = X86_REGISTER_RAX, .index = 5, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 },
+      8,
+      { 0x64, 0x62, 0xf2, 0x7d, 0x29, 0xa2, 0x34, 0xa8 } },
 };
 
 // Checks one encoder on the known encodings, encoding each alone and all of them at once.
@@ -1791,8 +1852,9 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
 {
     const X86FormDescription* form = x86_form_description(instruction->form);
     const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0;
+    const bool vsib = (form->rm & BUSTER_X86_OPERAND_VSIB) != 0;
     bool result = true;
-    switch (x86_random_below(state, 17))
+    switch (x86_random_below(state, 18))
     {
         case 0:
             // A high byte register with an extended register (and so a REX prefix).
@@ -1808,8 +1870,8 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
             }
             break;
         case 1:
-            // RSP as an index.
-            if (memory && (instruction->mode & BUSTER_X86_MODE_INDEX))
+            // RSP as a general index (a VSIB one can be XMM4).
+            if (memory && (instruction->mode & BUSTER_X86_MODE_INDEX) && !vsib)
             {
                 instruction->index = X86_REGISTER_RSP;
             }
@@ -1832,7 +1894,7 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
         case 3:
             // A register number past the class's last (15, or 31 for an EVEX form's vector registers, or 7 for an
             // opmask or an x87, MMX, debug or segment register), in reg, in a register rm, or in a memory operand's base
-            // or index (general registers, so 15).
+            // or index (general registers, so 15, but for a VSIB index of an EVEX form, 31).
             if (form->encoding == BUSTER_X86_ENCODING_R && x86_random_below(state, 2) == 0)
             {
                 instruction->reg |= x86_past_last_register(form->reg, form->family);
@@ -1847,7 +1909,7 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
             }
             else if (memory && (instruction->mode & BUSTER_X86_MODE_INDEX))
             {
-                instruction->index |= 0x10;
+                instruction->index |= vsib ? x86_past_last_register(form->rm, form->family) : 0x10;
             }
             else
             {
@@ -1933,12 +1995,12 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
             }
             break;
         case 11:
-            // An index register or a scale without an index.
+            // An index register (1 to 31) or a scale without an index.
             if (form->rm != BUSTER_X86_OPERAND_NONE && !(instruction->mode & BUSTER_X86_MODE_INDEX))
             {
                 if (x86_random_below(state, 2) == 0)
                 {
-                    instruction->index = (uint8_t)(1 + x86_random_below(state, 15));
+                    instruction->index = (uint8_t)(1 + x86_random_below(state, 31));
                 }
                 else
                 {
@@ -2023,6 +2085,53 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
             else
             {
                 instruction->vvvv = instruction->reg;
+            }
+            *validate_only = true;
+            break;
+        }
+        case 17:
+        {
+            // A VSIB operand without an index (a base alone, an absolute address or RIP), an EVEX gather or scatter
+            // without an opmask, or a gather whose destination is its index or AVX2's mask, or whose index is that
+            // mask, which only x86_validate checks: in a new instruction of a gather or scatter form.
+            uint16_t form_index = x86_random_form(state, false);
+            while (!(x86_form_descriptions[form_index].rm & BUSTER_X86_OPERAND_VSIB))
+            {
+                form_index = x86_random_form(state, false);
+            }
+            const X86FormDescription* vsib_form = &x86_form_descriptions[form_index];
+            const bool evex = vsib_form->family == BUSTER_X86_FAMILY_EVEX;
+            const bool gather = vsib_form->syntax != X86_SYNTAX_RM_REG;
+            *instruction = x86_random_instruction(state, form_index, false);
+            // AVX2's forms are all gathers, without an opmask; a scatter's registers can be the same.
+            uint32_t kind = x86_random_below(state, 3);
+            kind = kind == 1 && !evex ? 2 : kind == 2 && !gather ? 1 : kind;
+            if (kind == 0)
+            {
+                static const uint8_t modes[] = { BUSTER_X86_MEMORY_BASE, BUSTER_X86_MEMORY_ABSOLUTE, BUSTER_X86_MEMORY_RIP };
+                instruction->mode = modes[x86_random_below(state, BUSTER_ARRAY_LENGTH(modes))];
+                instruction->rm = (instruction->mode & BUSTER_X86_MODE_BASE) ? instruction->rm : 0;
+                instruction->index = 0;
+            }
+            else if (kind == 1)
+            {
+                instruction->decorations &= (uint8_t)~BUSTER_X86_DECORATION_MASK;
+            }
+            else
+            {
+                const uint32_t pair = vsib_form->vvvv != BUSTER_X86_OPERAND_NONE ? x86_random_below(state, 3) : 0;
+                if (pair == 0)
+                {
+                    instruction->index = instruction->reg;
+                }
+                else if (pair == 1)
+                {
+                    instruction->vvvv = instruction->reg;
+                }
+                else
+                {
+                    instruction->vvvv = instruction->index;
+                }
             }
             *validate_only = true;
             break;
