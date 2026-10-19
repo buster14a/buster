@@ -44,6 +44,7 @@ or infrastructure machinery merely to match its style.
   it, and `./build/compiler test-lexer` runs them.
 - `src/buster/compiler/c_lexer_benchmark.c` provides the `benchmark-lexer`
   command. The 9700X CI workflow runs it on the repository's C sources by default.
+  `docs/c-lexer.md` records the GFNI classifier, comment shortcuts and 9700X measurements.
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
   of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder);
   `docs/x86-64-encoder.md` explains its design and measurements.
@@ -97,15 +98,18 @@ with the scalar lexer token by token on:
   `--seed N`). The first inputs that differ are saved as `fuzz_failure_N.c` in
   the current directory;
 - page edges: every length from 0 to 1,099 bytes, cut as a prefix and as a
-  suffix from the repeated snippet and from four strings of random inputs
-  (which continue the random sequence), placed to end exactly at the end of a
+  suffix from the repeated snippet, four strings of random inputs (which
+  continue the random sequence), and three comment templates, placed to end exactly at the end of a
   readable page and to start exactly at the start of one, between `PROT_NONE`
-  guard pages: 22,000 inputs. These also compare `c_tokenize_vectorized`, and
+  guard pages: 35,200 inputs. These also compare `c_tokenize_vectorized`, and
   a read outside the source faults; the command then names the input and exits
   with status 1. Length 0 at a page end points at the guard page itself. The
   vectorized path loads aligned 64-byte lanes, so only a lane wholly outside
   the source can fault; an over-read within the source's last lane stays on a
-  readable page and is not caught.
+  readable page and is not caught;
+- 4,096 comment cases across every source misalignment, with closers around
+  64-byte load and 512-byte chunk boundaries, including a spliced closer and a
+  comment inside a preprocessing directive.
 
 `--cplusplus` tokenizes everything as C++, with the C++ snippet and pieces. The
 command prints each check's counts and first differences, and exits with status

@@ -21,7 +21,7 @@
 //   - Page edges: inputs of 0 to BUSTER_TEST_PAGE_EDGE_LENGTHS - 1 bytes that end exactly at the end of a readable
 //     page, or start exactly at the start of one, in a mapping with a PROT_NONE guard page on either side. Each one is
 //     a prefix or a suffix of a template: the snippet repeated, or BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES strings of
-//     random inputs that continue the random check's sequence. Besides comparing c_tokenize, c_tokenize_vectorized
+//     random inputs that continue the random check's sequence, and three comment templates. Besides comparing c_tokenize, c_tokenize_vectorized
 //     and c_tokenize_scalar as the other checks do, it catches a read outside of the source, which the other checks'
 //     buffers can't: that faults, and the fault handler names the input and exits with status 1. Length 0 ends at a
 //     page end too, so its source pointer is the first byte of the guard page.
@@ -36,6 +36,7 @@
 //   - Random inputs: random_next, fuzz_pieces, fuzz_pieces_cpp, has_backslash, fuzz_input, save_failure and
 //     check_random.
 //   - Page edges: page_edge_input, report_fault, page_edge_template and check_page_edges.
+//   - Comment delimiters: check_comments, including delimiters split across the prefix scanner's unaligned loads.
 //   - run_c_lexer_tests, with parse_u64.
 
 #include <stdint.h>
@@ -68,6 +69,9 @@
 // this many random templates.
 #define BUSTER_TEST_PAGE_EDGE_LENGTHS 1100
 #define BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES 4
+// Long leading and interior comments, and splices in a leading line comment.
+#define BUSTER_TEST_PAGE_EDGE_COMMENT_TEMPLATES 3
+#define BUSTER_TEST_PAGE_EDGE_TEMPLATES (1 + BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES + BUSTER_TEST_PAGE_EDGE_COMMENT_TEMPLATES)
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_TEST_GOLDEN_RATIO + 1), as upstream does.
 #define BUSTER_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -442,25 +446,42 @@ static void report_fault(int signal_number)
 }
 
 // Writes template `index` (BUSTER_TEST_PAGE_EDGE_LENGTHS bytes) to `buffer`: for index 0 the snippet repeated, and
-// otherwise random inputs one after the other. A random input in a buffer this big has at least one byte, so each one
-// adds to the template.
+// then random inputs one after the other, then comment regressions. The extra templates do not consume the random
+// sequence. Prefixes and suffixes move their delimiters across every alignment and cut both complete and malformed comments.
 static void page_edge_template(Random* random, uint64_t index, uint8_t* buffer, bool cplusplus)
 {
-    const char* snippet = cplusplus ? boundary_snippet_cpp : boundary_snippet;
-    const uint64_t snippet_length =
-        cplusplus ? BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet_cpp) : BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet);
-    uint64_t length = 0;
-    while (length < BUSTER_TEST_PAGE_EDGE_LENGTHS)
+    if (index > BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES)
     {
-        if (index == 0)
+        static const char body[] = " words 123 'quotes' \"strings\" // ignored **\n";
+        const uint64_t variant = index - BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES - 1;
+        const char* prefix = variant == 0 ? "/*" : variant == 1 ? "#define X a /*" : "// lead\\\ncontinued\n/*";
+        const char* suffix = "*/ + b;\n// last comment";
+        const uint64_t suffix_start = BUSTER_TEST_PAGE_EDGE_LENGTHS - strlen(suffix);
+        for (uint64_t i = 0; i < BUSTER_TEST_PAGE_EDGE_LENGTHS; i += 1)
         {
-            const uint64_t copied = snippet_length < BUSTER_TEST_PAGE_EDGE_LENGTHS - length ? snippet_length : BUSTER_TEST_PAGE_EDGE_LENGTHS - length;
-            memcpy(buffer + length, snippet, copied);
-            length += copied;
+            buffer[i] = (uint8_t)body[i % BUSTER_COMPILE_TIME_STRING_LENGTH(body)];
         }
-        else
+        memcpy(buffer, prefix, strlen(prefix));
+        memcpy(buffer + suffix_start, suffix, strlen(suffix));
+    }
+    else
+    {
+        const char* snippet = cplusplus ? boundary_snippet_cpp : boundary_snippet;
+        const uint64_t snippet_length =
+            cplusplus ? BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet_cpp) : BUSTER_COMPILE_TIME_STRING_LENGTH(boundary_snippet);
+        uint64_t length = 0;
+        while (length < BUSTER_TEST_PAGE_EDGE_LENGTHS)
         {
-            length += fuzz_input(random, buffer + length, BUSTER_TEST_RANDOM_INPUT_BYTES, cplusplus).length;
+            if (index == 0)
+            {
+                const uint64_t copied = snippet_length < BUSTER_TEST_PAGE_EDGE_LENGTHS - length ? snippet_length : BUSTER_TEST_PAGE_EDGE_LENGTHS - length;
+                memcpy(buffer + length, snippet, copied);
+                length += copied;
+            }
+            else
+            {
+                length += fuzz_input(random, buffer + length, BUSTER_TEST_RANDOM_INPUT_BYTES, cplusplus).length;
+            }
         }
     }
 }
@@ -491,7 +512,7 @@ static CheckCounts check_page_edges(Random* random, TokenArrays* vectorized, Tok
     }
     else
     {
-        for (uint64_t index = 0; index < 1 + BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES; index += 1)
+        for (uint64_t index = 0; index < BUSTER_TEST_PAGE_EDGE_TEMPLATES; index += 1)
         {
             page_edge_template(random, index, template, cplusplus);
             for (uint64_t length = 0; length < BUSTER_TEST_PAGE_EDGE_LENGTHS; length += 1)
@@ -524,7 +545,7 @@ static CheckCounts check_page_edges(Random* random, TokenArrays* vectorized, Tok
         action.sa_handler = SIG_DFL;
         sigaction(SIGSEGV, &action, 0);
         printf("page edges: %lu of %lu inputs differ, %lu need the scalar lexer for a part\n", (unsigned long)counts.different,
-               (unsigned long)((1 + BUSTER_TEST_PAGE_EDGE_RANDOM_TEMPLATES) * BUSTER_TEST_PAGE_EDGE_LENGTHS * 4), (unsigned long)counts.fell_back);
+               (unsigned long)(BUSTER_TEST_PAGE_EDGE_TEMPLATES * BUSTER_TEST_PAGE_EDGE_LENGTHS * 4), (unsigned long)counts.fell_back);
     }
 
     if (mapping != MAP_FAILED)
@@ -532,6 +553,53 @@ static CheckCounts check_page_edges(Random* random, TokenArrays* vectorized, Tok
         munmap(mapping, 3 * page_bytes);
     }
     return counts;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Comment delimiters
+
+// The leading-comment scanner starts its loads after the opener, independently of the source's alignment.
+// Sweep delimiter positions around those load boundaries, plus the general lexer's 512-byte chunk boundaries.
+static bool check_comments(TokenArrays* vectorized, TokenArrays* scalar, uint32_t flags)
+{
+    static const uint32_t lengths[] = {0, 1, 31, 62, 63, 64, 65, 126, 127, 128, 511, 512, 513, 1023, 1024, 1025};
+    static const char* const prefixes[] = {"/*", "//", "#define X a /*", "/*"};
+    static const char* const suffixes[] = {"*/ int x;\n", "\n int x;\n", "*/ + b\n", "*\\\n/ int x;\n"};
+    uint8_t buffer[BUSTER_TEST_SNIPPET_BUFFER_BYTES] __attribute__((aligned(BUSTER_TEST_BUFFER_ALIGNMENT)));
+    uint64_t checked = 0;
+    uint64_t failed = 0;
+    for (uint64_t alignment = 0; alignment < BUSTER_TEST_BUFFER_ALIGNMENT; alignment += 1)
+    {
+        for (uint64_t variant = 0; variant < BUSTER_ARRAY_LENGTH(prefixes); variant += 1)
+        {
+            for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(lengths); i += 1)
+            {
+                char* source = (char*)buffer + alignment;
+                const uint64_t prefix_bytes = strlen(prefixes[variant]);
+                const uint64_t suffix_bytes = strlen(suffixes[variant]);
+                const uint64_t length = prefix_bytes + lengths[i] + suffix_bytes;
+                memset(buffer, 0, sizeof(buffer));
+                memcpy(source, prefixes[variant], prefix_bytes);
+                memset(source + prefix_bytes, 'a', lengths[i]);
+                memcpy(source + prefix_bytes + lengths[i], suffixes[variant], suffix_bytes);
+                char name[128];
+                snprintf(name, sizeof(name), "comment (alignment %lu, variant %lu, length %u)",
+                         (unsigned long)alignment, (unsigned long)variant, lengths[i]);
+                const Comparison comparison = compare((String8){ .pointer = source, .length = length }, vectorized, scalar, flags,
+                                                      failed < BUSTER_TEST_REPORTED_INPUTS ? name : 0);
+                // The first three cases must stay vectorized; the fourth deliberately splices the closing delimiter.
+                const bool unexpected_fallback = variant < 3 && comparison == COMPARISON_FELL_BACK;
+                if (unexpected_fallback && failed < BUSTER_TEST_REPORTED_INPUTS)
+                {
+                    printf("%s unexpectedly needs the scalar lexer\n", name);
+                }
+                failed += comparison == COMPARISON_DIFFERENT || unexpected_fallback;
+                checked += 1;
+            }
+        }
+    }
+    printf("comments: %lu of %lu cases fail\n", (unsigned long)failed, (unsigned long)checked);
+    return failed == 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -598,9 +666,10 @@ static int run_c_lexer_tests(const char* program, int argument_count, char** arg
         const CheckCounts random_inputs = check_random(&random, random_count, &vectorized, &scalar, flags);
         // The page edge inputs continue the random sequence, so that the random check's inputs stay upstream's.
         const CheckCounts page_edges = check_page_edges(&random, &vectorized, &scalar, flags);
+        const bool comments = check_comments(&vectorized, &scalar, flags);
         // Random inputs and cut templates are meant to need the scalar lexer at times, but the snippet is meant to stay
         // on the vectorized path.
-        result = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 ? 0 : 1;
+        result = snippet.different == 0 && snippet.fell_back == 0 && random_inputs.different == 0 && page_edges.different == 0 && comments ? 0 : 1;
     }
     return result;
 }
