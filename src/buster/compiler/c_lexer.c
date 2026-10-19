@@ -21,7 +21,10 @@
 // commit f4482e2dd53413522d75d8c254b9a824021238ce; the "=====" section markers name them), adapted to
 // docs/coding-style.md: static functions, BUSTER_-prefixed macros, a single return per function and named chunk
 // constants. The tables are generated upstream by c/gen_c_tokenizer_tables.py and c/gen_c_tokenizer_unicode.py; a
-// regenerated table needs its macros renamed to the BUSTER_LEX_ names used here.
+// regenerated table needs its macros renamed to the BUSTER_LEX_ names used here, and c_char_properties extended
+// with the quote, apostrophe and backslash bits below.
+// Local changes (2026-10-19): GFNI property-mask transposition, bounded leading-comment scanning, and shortcuts for
+// comment-only chunks and chunks without literal/comment delimiters. Measurements: docs/c-lexer.md.
 //
 // Upstream license (Accelerated-Zig-Parser's LICENSE file, verbatim):
 //
@@ -404,8 +407,8 @@ static __attribute__((unused)) const char* c_token_kind_name(uint8_t kind);
 #error "c_lexer.c uses Clang vector extensions"
 #endif
 #if !(defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512VBMI__) && \
-      defined(__AVX512VBMI2__) && defined(__AVX512VPOPCNTDQ__) && defined(__BMI2__))
-#error "c_lexer.c needs AVX-512 F/BW/VL/VBMI/VBMI2/VPOPCNTDQ and BMI2 (e.g. -march=znver4, znver5 or tigerlake)"
+      defined(__AVX512VBMI2__) && defined(__AVX512VPOPCNTDQ__) && defined(__GFNI__) && defined(__BMI2__))
+#error "c_lexer.c needs AVX-512 F/BW/VL/VBMI/VBMI2/VPOPCNTDQ, GFNI and BMI2 (build on Zen 5)"
 #endif
 
 #include <immintrin.h>
@@ -426,6 +429,9 @@ static __attribute__((unused)) const char* c_token_kind_name(uint8_t kind);
 #define BUSTER_LEX_CHAR_WHITESPACE 0x04
 #define BUSTER_LEX_CHAR_NEWLINE 0x08
 #define BUSTER_LEX_CHAR_SEPARATOR_FOLLOWER 0x10
+#define BUSTER_LEX_CHAR_QUOTE 0x20
+#define BUSTER_LEX_CHAR_APOSTROPHE 0x40
+#define BUSTER_LEX_CHAR_BACKSLASH 0x80
 
 #define BUSTER_LEX_CHANNEL_EQ 0x01
 #define BUSTER_LEX_CHANNEL_SELF 0x02
@@ -437,15 +443,15 @@ static __attribute__((unused)) const char* c_token_kind_name(uint8_t kind);
 #define BUSTER_LEX_CHANNEL_EXPSIGN 0x80
 #define BUSTER_LEX_OP_HASH_MULTIPLIER 0xAE3B2443u
 
-// Indexed by ASCII character.
+// Indexed by ASCII character. Bit i becomes property mask i (M_IDENTIFIER through M_BACKSLASH).
 static const uint8_t c_char_properties[128] __attribute__((aligned(64))) =
 {
     0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08, 0x04, 0x04, 0x08, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x20, 0x00, 0x01, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
-    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0x80, 0x00, 0x00, 0x11,
     0x00, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
     0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
@@ -1839,6 +1845,8 @@ static int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t
 // The stride of a mask's lanes in the Phase I buffers: the lookahead lanes, padded so that each mask's first
 // BUSTER_LEX_VECTOR_COUNT lanes load as an aligned U64x8.
 #define BUSTER_LEX_MASK_LANES (2 * BUSTER_LEX_VECTOR_COUNT)
+// All eight bits of c_char_properties are transposed together; the remaining masks are stored separately.
+#define BUSTER_LEX_PROPERTY_MASK_COUNT 8
 
 typedef uint64_t U64x8 __attribute__((ext_vector_type(BUSTER_LEX_VECTOR_COUNT)));
 typedef uint8_t U8x64 __attribute__((ext_vector_type(BUSTER_LEX_VECTOR_BYTES)));
@@ -2151,13 +2159,14 @@ BUSTER_INLINE uint64_t lane_padding(int64_t base_offset, uint64_t length, int64_
 
 // ---------------------------------------------------------------------------------------------------------------------
 
-// The character-class bitstrings that Phase I makes, as `o[mask][lane]`. Lane 8 is the next chunk's first lane.
+// The first eight masks follow the bit order of c_char_properties. Phase I packs them per source lane; Phase II
+// transposes them into bitstrings. The remaining masks are stored as `o[mask][lane]`, with lane 8 for lookahead.
 enum
 {
-    M_NEWLINE, // \n \r, and the bytes past the end of the source
-    M_WHITESPACE, // ' ' \t \v \f \0
     M_IDENTIFIER, // [A-Za-z0-9_$]
     M_DIGIT,
+    M_WHITESPACE, // ' ' \t \v \f \0
+    M_NEWLINE, // \n \r, and the bytes past the end of the source
     M_SEPARATOR_FOLLOWER, // [A-Za-z0-9_]: what may follow a digit separator
     M_QUOTE,
     M_APOSTROPHE,
@@ -2173,6 +2182,13 @@ enum
     M_NONASCII,
     NUM_MASKS,
 };
+
+_Static_assert(M_SLASH == BUSTER_LEX_PROPERTY_MASK_COUNT, "the property masks must precede the other masks");
+_Static_assert((1u << M_IDENTIFIER) == BUSTER_LEX_CHAR_IDENTIFIER && (1u << M_DIGIT) == BUSTER_LEX_CHAR_DIGIT &&
+               (1u << M_WHITESPACE) == BUSTER_LEX_CHAR_WHITESPACE && (1u << M_NEWLINE) == BUSTER_LEX_CHAR_NEWLINE &&
+               (1u << M_SEPARATOR_FOLLOWER) == BUSTER_LEX_CHAR_SEPARATOR_FOLLOWER && (1u << M_QUOTE) == BUSTER_LEX_CHAR_QUOTE &&
+               (1u << M_APOSTROPHE) == BUSTER_LEX_CHAR_APOSTROPHE && (1u << M_BACKSLASH) == BUSTER_LEX_CHAR_BACKSLASH,
+               "property table bits and transposed masks must agree");
 
 // What the chunk starts inside of.
 typedef enum State
@@ -2216,8 +2232,61 @@ __attribute__((cold, noinline)) static int64_t needs_scalar(const LastLine* last
 
 #define BUSTER_LEX_NEEDS_SCALAR needs_scalar(&last_line, begin, chunk_position, written, restart, scalar_until)
 
-// Phase I for one 64-byte vector: its character-class bitstrings, stored to `o[...][lane]`.
-BUSTER_INLINE void classify(__m512i raw, uint64_t o[][BUSTER_LEX_MASK_LANES], unsigned lane, __m512i* previous_classes, __m512i* previous_pairs, const bool cplusplus)
+// Transpose eight property bits per character into eight 64-bit masks with GFNI.
+BUSTER_INLINE __m512i property_masks(__m512i properties)
+{
+    // GFNI reads the eight matrix rows in reverse byte order. After reversing each qword, multiplying by the
+    // one-hot basis packs each property of eight consecutive characters into one byte. The final permutation
+    // collects the eight bytes for each property into one qword, in source order.
+    const __m512i reverse = _mm512_broadcast_i32x4(_mm_set_epi64x(0x08090A0B0C0D0E0F, 0x0001020304050607));
+    const __m512i basis = _mm512_set1_epi64((int64_t)0x8040201008040201ull);
+    const __m512i indices = _mm512_setr_epi64(
+        0x3830282018100800, 0x3931292119110901, 0x3A322A221A120A02, 0x3B332B231B130B03,
+        0x3C342C241C140C04, 0x3D352D251D150D05, 0x3E362E261E160E06, 0x3F372F271F170F07);
+    const __m512i reversed = _mm512_shuffle_epi8(properties, reverse);
+    return _mm512_permutexvar_epi8(indices, _mm512_gf2p8affine_epi64_epi8(basis, reversed, 0));
+}
+
+// Transpose the 8x8 qword matrix into the bitstrings consumed by Phase II: interleave qwords, pairs, then quartets.
+// Keep this at the consumer, so Clang can retain the resulting bitstrings in registers.
+BUSTER_INLINE void transpose_property_masks(const __m512i rows[BUSTER_LEX_LOOKAHEAD_VECTORS], uint64_t o[][BUSTER_LEX_MASK_LANES])
+{
+    const U64x8 t0_0 = __builtin_shufflevector((U64x8)rows[0], (U64x8)rows[1], 0, 8, 2, 10, 4, 12, 6, 14);
+    const U64x8 t0_1 = __builtin_shufflevector((U64x8)rows[0], (U64x8)rows[1], 1, 9, 3, 11, 5, 13, 7, 15);
+    const U64x8 t0_2 = __builtin_shufflevector((U64x8)rows[2], (U64x8)rows[3], 0, 8, 2, 10, 4, 12, 6, 14);
+    const U64x8 t0_3 = __builtin_shufflevector((U64x8)rows[2], (U64x8)rows[3], 1, 9, 3, 11, 5, 13, 7, 15);
+    const U64x8 t0_4 = __builtin_shufflevector((U64x8)rows[4], (U64x8)rows[5], 0, 8, 2, 10, 4, 12, 6, 14);
+    const U64x8 t0_5 = __builtin_shufflevector((U64x8)rows[4], (U64x8)rows[5], 1, 9, 3, 11, 5, 13, 7, 15);
+    const U64x8 t0_6 = __builtin_shufflevector((U64x8)rows[6], (U64x8)rows[7], 0, 8, 2, 10, 4, 12, 6, 14);
+    const U64x8 t0_7 = __builtin_shufflevector((U64x8)rows[6], (U64x8)rows[7], 1, 9, 3, 11, 5, 13, 7, 15);
+    const U64x8 t1_0 = __builtin_shufflevector(t0_0, t0_2, 0, 1, 8, 9, 4, 5, 12, 13);
+    const U64x8 t1_2 = __builtin_shufflevector(t0_0, t0_2, 2, 3, 10, 11, 6, 7, 14, 15);
+    const U64x8 t1_1 = __builtin_shufflevector(t0_1, t0_3, 0, 1, 8, 9, 4, 5, 12, 13);
+    const U64x8 t1_3 = __builtin_shufflevector(t0_1, t0_3, 2, 3, 10, 11, 6, 7, 14, 15);
+    const U64x8 t1_4 = __builtin_shufflevector(t0_4, t0_6, 0, 1, 8, 9, 4, 5, 12, 13);
+    const U64x8 t1_6 = __builtin_shufflevector(t0_4, t0_6, 2, 3, 10, 11, 6, 7, 14, 15);
+    const U64x8 t1_5 = __builtin_shufflevector(t0_5, t0_7, 0, 1, 8, 9, 4, 5, 12, 13);
+    const U64x8 t1_7 = __builtin_shufflevector(t0_5, t0_7, 2, 3, 10, 11, 6, 7, 14, 15);
+    const U64x8 t2_0 = __builtin_shufflevector(t1_0, t1_4, 0, 1, 2, 3, 8, 9, 10, 11);
+    const U64x8 t2_4 = __builtin_shufflevector(t1_0, t1_4, 4, 5, 6, 7, 12, 13, 14, 15);
+    const U64x8 t2_1 = __builtin_shufflevector(t1_1, t1_5, 0, 1, 2, 3, 8, 9, 10, 11);
+    const U64x8 t2_5 = __builtin_shufflevector(t1_1, t1_5, 4, 5, 6, 7, 12, 13, 14, 15);
+    const U64x8 t2_2 = __builtin_shufflevector(t1_2, t1_6, 0, 1, 2, 3, 8, 9, 10, 11);
+    const U64x8 t2_6 = __builtin_shufflevector(t1_2, t1_6, 4, 5, 6, 7, 12, 13, 14, 15);
+    const U64x8 t2_3 = __builtin_shufflevector(t1_3, t1_7, 0, 1, 2, 3, 8, 9, 10, 11);
+    const U64x8 t2_7 = __builtin_shufflevector(t1_3, t1_7, 4, 5, 6, 7, 12, 13, 14, 15);
+    *(U64x8*)o[0] = t2_0;
+    *(U64x8*)o[1] = t2_1;
+    *(U64x8*)o[2] = t2_2;
+    *(U64x8*)o[3] = t2_3;
+    *(U64x8*)o[4] = t2_4;
+    *(U64x8*)o[5] = t2_5;
+    *(U64x8*)o[6] = t2_6;
+    *(U64x8*)o[7] = t2_7;
+}
+
+// Phase I for one 64-byte vector: eight packed property masks and the remaining masks in `o[...][lane]`.
+BUSTER_INLINE void classify(__m512i raw, uint64_t o[][BUSTER_LEX_MASK_LANES], unsigned lane, __m512i* properties_out, __m512i* previous_classes, __m512i* previous_pairs, const bool cplusplus)
 {
     const uint64_t nonascii = _mm512_movepi8_mask(raw);
     __m512i properties = perm2b(c_char_properties, raw);
@@ -2234,14 +2303,7 @@ BUSTER_INLINE void classify(__m512i raw, uint64_t o[][BUSTER_LEX_MASK_LANES], un
     const __m512i pairs = vpshufb(c_second_char_channels, classes) & vpshufb(c_first_char_channels, previous) & allowed;
     const __m512i triples = vpshufb(cplusplus ? c_third_char_channels_cxx : c_third_char_channels, classes) & shift_in_previous(pairs, *previous_pairs);
 
-    o[M_NEWLINE][lane] = _mm512_test_epi8_mask(properties, splat8(BUSTER_LEX_CHAR_NEWLINE));
-    o[M_WHITESPACE][lane] = _mm512_test_epi8_mask(properties, splat8(BUSTER_LEX_CHAR_WHITESPACE));
-    o[M_IDENTIFIER][lane] = _mm512_test_epi8_mask(properties, splat8(BUSTER_LEX_CHAR_IDENTIFIER));
-    o[M_DIGIT][lane] = _mm512_test_epi8_mask(properties, splat8(BUSTER_LEX_CHAR_DIGIT));
-    o[M_SEPARATOR_FOLLOWER][lane] = _mm512_test_epi8_mask(properties, splat8(BUSTER_LEX_CHAR_SEPARATOR_FOLLOWER));
-    o[M_QUOTE][lane] = _mm512_cmpeq_epi8_mask(raw, splat8('"'));
-    o[M_APOSTROPHE][lane] = _mm512_cmpeq_epi8_mask(raw, splat8('\''));
-    o[M_BACKSLASH][lane] = _mm512_cmpeq_epi8_mask(raw, splat8('\\'));
+    *properties_out = property_masks(properties);
     o[M_SLASH][lane] = _mm512_cmpeq_epi8_mask(raw, splat8('/'));
     o[M_STAR][lane] = _mm512_cmpeq_epi8_mask(raw, splat8('*'));
     o[M_DOT][lane] = _mm512_cmpeq_epi8_mask(raw, splat8('.'));
@@ -2374,6 +2436,66 @@ BUSTER_INLINE Scan scan_lines(U64x8 cursors, State state, uint32_t block_comment
     return result;
 }
 
+// Leading comments cannot produce tokens or change the first token's start-of-line flag.
+// Stop at a backslash: translation-phase splices need the general lexer. Only commit
+// complete comments, keeping malformed comments and whitespace-only prefixes unchanged.
+static uint64_t skip_leading_comments(const uint8_t* source, uint64_t length, uint64_t begin)
+{
+    uint64_t result = begin;
+    uint64_t position = begin;
+    while (position < length)
+    {
+        while (position < length && (is_whitespace(source[position]) || source[position] == 0))
+        {
+            position += 1;
+        }
+        if (position + 1 >= length || source[position] != '/' || (source[position + 1] != '/' && source[position + 1] != '*'))
+        {
+            break;
+        }
+        const bool line_comment = source[position + 1] == '/';
+        uint64_t cursor = position + 2;
+        uint64_t previous_star = 0;
+        bool complete = false;
+        while (cursor < length)
+        {
+            const uint64_t remaining = length - cursor;
+            const uint64_t valid = remaining >= BUSTER_LEX_VECTOR_BYTES ? ~0ull : _bzhi_u64(~0ull, (uint32_t)remaining);
+            const __m512i raw = _mm512_maskz_loadu_epi8(valid, source + cursor);
+            const uint64_t backslashes = _mm512_cmpeq_epi8_mask(raw, splat8('\\'));
+            uint64_t closers;
+            if (line_comment)
+            {
+                closers = _mm512_cmpeq_epi8_mask(raw, splat8('\n')) | _mm512_cmpeq_epi8_mask(raw, splat8('\r'));
+            }
+            else
+            {
+                const uint64_t stars = _mm512_cmpeq_epi8_mask(raw, splat8('*'));
+                const uint64_t slashes = _mm512_cmpeq_epi8_mask(raw, splat8('/'));
+                closers = slashes & ((stars << 1) | previous_star);
+                previous_star = stars >> 63;
+            }
+            if ((closers | backslashes) != 0)
+            {
+                const uint32_t first = (uint32_t)__builtin_ctzll(closers | backslashes);
+                if (((backslashes >> first) & 1) == 0)
+                {
+                    result = cursor + first + 1;
+                    complete = true;
+                }
+                break;
+            }
+            cursor += remaining < BUSTER_LEX_VECTOR_BYTES ? remaining : BUSTER_LEX_VECTOR_BYTES;
+        }
+        if (!complete)
+        {
+            break;
+        }
+        position = result;
+    }
+    return result;
+}
+
 // Tokenizes the source from `begin` (the start of the source, or of a line) to its end, or until a chunk that needs
 // the scalar lexer (see BUSTER_LEX_NEEDS_SCALAR).
 BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* restrict kinds_out,
@@ -2383,6 +2505,8 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
     const U64x8 bit_0 = {1, 0, 0, 0, 0, 0, 0, 0};
     const U64x8 most_significant = {0, 0, 0, 0, 0, 0, 0, 1ull << 63};
     const U64x8 odd_bits = 0xAAAAAAAAAAAAAAAAull;
+
+    begin = skip_leading_comments(source, length, begin);
 
     // The source is read in 64-byte-aligned lanes; the bytes before `begin` and after the source read as newlines.
     // Positions are relative to the source, so the first chunk can start at a negative one.
@@ -2415,17 +2539,18 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
     uint32_t* cur_start = starts_out;
     uint32_t* cur_end = ends_out;
 
-    // Phase I runs a chunk ahead: the masks it stores 8 bytes at a time are loaded as 64-byte bitstrings, which the
-    // store buffer can't forward, so they are only loaded an iteration after they're stored. Each buffer holds a
-    // chunk's 64-byte vectors and their masks (`masks[...][mask][lane]`), with the next chunk's first lane as lane 8.
+    // Phase I runs a chunk ahead: its scalar mask stores cannot forward to the 64-byte Phase II loads. The eight
+    // property masks instead share a vector store per source lane, then transpose at the consumer. Their rows in
+    // masks are the transpose destination; the other rows retain the scalar masks. Lane 8 supplies lookahead.
     uint64_t masks[2][NUM_MASKS][BUSTER_LEX_MASK_LANES] __attribute__((aligned(BUSTER_LEX_VECTOR_BYTES)));
     __m512i raws[2][BUSTER_LEX_LOOKAHEAD_VECTORS];
+    __m512i properties[2][BUSTER_LEX_LOOKAHEAD_VECTORS];
     __m512i previous_classes = _mm512_setzero_si512();
     __m512i previous_pairs = _mm512_setzero_si512();
     for (unsigned j = 0; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
     {
         raws[0][j] = load_lane(base, base_offset, begin, length, first_chunk + BUSTER_LEX_VECTOR_BYTES * j);
-        classify(raws[0][j], masks[0], j, &previous_classes, &previous_pairs, cplusplus);
+        classify(raws[0][j], masks[0], j, &properties[0][j], &previous_classes, &previous_pairs, cplusplus);
     }
 
     for (int64_t chunk = first_chunk, current = 0;; chunk += BUSTER_LEX_CHUNK_BYTES, current ^= 1)
@@ -2441,16 +2566,18 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
             uint64_t (*next_o)[BUSTER_LEX_MASK_LANES] = masks[current ^ 1];
             __m512i* next_raw = raws[current ^ 1];
             next_raw[0] = raw[BUSTER_LEX_VECTOR_COUNT];
-            for (unsigned m = 0; m < NUM_MASKS; m += 1)
+            properties[current ^ 1][0] = properties[current][BUSTER_LEX_VECTOR_COUNT];
+            for (unsigned m = BUSTER_LEX_PROPERTY_MASK_COUNT; m < NUM_MASKS; m += 1)
             {
                 next_o[m][0] = o[m][BUSTER_LEX_VECTOR_COUNT];
             }
             for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
             {
                 next_raw[j] = load_lane(base, base_offset, begin, length, chunk + BUSTER_LEX_CHUNK_BYTES + BUSTER_LEX_VECTOR_BYTES * j);
-                classify(next_raw[j], next_o, j, &previous_classes, &previous_pairs, cplusplus);
+                classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus);
             }
         }
+        transpose_property_masks(properties[current], o);
         U64x8 padding = zero;
         uint64_t next_padding = 0;
         if (BUSTER_UNLIKELY(chunk_position + 576 > (int64_t)length))
@@ -2463,7 +2590,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
         }
 
 #define BUSTER_LEX_MASK(m) (*(const U64x8*)o[m])
-#define BUSTER_LEX_NEXT(m) (o[m][BUSTER_LEX_VECTOR_COUNT])
+#define BUSTER_LEX_NEXT(m) ((m) < BUSTER_LEX_PROPERTY_MASK_COUNT ? ((U64x8)properties[current][BUSTER_LEX_VECTOR_COUNT])[m] : o[m][BUSTER_LEX_VECTOR_COUNT])
         const U64x8 newline = BUSTER_LEX_MASK(M_NEWLINE);
         const U64x8 whitespace = BUSTER_LEX_MASK(M_WHITESPACE);
         const U64x8 identifier = BUSTER_LEX_MASK(M_IDENTIFIER);
@@ -2481,6 +2608,28 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
         const U64x8 triple_ends = BUSTER_LEX_MASK(M_OP3);
         const U64x8 nonascii = BUSTER_LEX_MASK(M_NONASCII);
         const U64x8 cxx_triple_ends = cplusplus ? BUSTER_LEX_MASK(M_OP3_CXX) : zero;
+
+        // A whole chunk inside a block comment has no tokens or logical line breaks.
+        // Backslashes can splice a closing delimiter, so leave those to the full analysis.
+        if (state == STATE_BLOCK_COMMENT && !last_chunk &&
+            is_zero(backslash | previous_splice_backslash | previous_splice_cr |
+                    (slash & shl_carry(star, previous_star, 1))))
+        {
+            previous_identifier = identifier;
+            previous_apostrophe = apostrophe;
+            previous_star = star;
+            previous_number_token = zero;
+            previous_identifier_token = zero;
+            previous_unknown_openers = zero;
+            next_is_escaped = zero;
+            number_carry = 0;
+            block_comment_skip = 0;
+            covered = 0;
+            covered_end = 0;
+            suppressed_starts = 0;
+            suppressed_ends = 0;
+            continue;
+        }
 
         // II. Analysis
 
@@ -2615,41 +2764,46 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const uint8_t* sourc
         // each line's state from the previous scan until the two agree (which is then the sequential result).
         const U64x8 bounds = quote_bounds | apostrophe_bounds | line_comment_marks | block_comment_marks;
         const U64x8 scan_cursors = shl(line_break, 1) | (state == STATE_OUTSIDE ? bit_0 : zero);
-        Scan scan = scan_lines(scan_cursors, state, block_comment_skip, line_break, bounds, quote_bounds, apostrophe_closers, apostrophe_bounds,
-                               line_comment_marks, block_comment_marks, block_comment_closers);
-        if (BUSTER_UNLIKELY(scan.spans_lines))
+        U64x8 line_comment_region = zero;
+        U64x8 literal_region = zero;
+        Scan scan = {0};
+        if (!is_zero(bounds) || state != STATE_OUTSIDE)
         {
-            for (unsigned round = 0;; round += 1)
+            scan = scan_lines(scan_cursors, state, block_comment_skip, line_break, bounds, quote_bounds, apostrophe_closers, apostrophe_bounds,
+                              line_comment_marks, block_comment_marks, block_comment_closers);
+            if (BUSTER_UNLIKELY(scan.spans_lines))
             {
-                if (round == 4)
+                for (unsigned round = 0;; round += 1)
                 {
-                    return BUSTER_LEX_NEEDS_SCALAR;
-                }
-                // A line that starts inside a block comment is scanned from the end of the comment, if it's on the line.
-                const U64x8 inside = shl(line_break & scan.block_region, 1);
-                const U64x8 seek = block_comment_closers | line_break;
-                const U64x8 first_closers = block_comment_closers & ~sub(seek, inside);
-                const Scan rescan = scan_lines((scan_cursors & ~inside) | shl(first_closers, 1), state, block_comment_skip, line_break, bounds, quote_bounds,
-                                               apostrophe_closers, apostrophe_bounds, line_comment_marks, block_comment_marks, block_comment_closers);
-                const bool same = is_zero((rescan.block_region ^ scan.block_region) & line_break) &&
-                                  (bit_511(rescan.block_region) & ~bit_511(rescan.block_ends)) == (bit_511(scan.block_region) & ~bit_511(scan.block_ends));
-                scan = rescan;
-                if (same)
-                {
-                    break;
+                    if (round == 4)
+                    {
+                        return BUSTER_LEX_NEEDS_SCALAR;
+                    }
+                    // A line that starts inside a block comment is scanned from the end of the comment, if it's on the line.
+                    const U64x8 inside = shl(line_break & scan.block_region, 1);
+                    const U64x8 seek = block_comment_closers | line_break;
+                    const U64x8 first_closers = block_comment_closers & ~sub(seek, inside);
+                    const Scan rescan = scan_lines((scan_cursors & ~inside) | shl(first_closers, 1), state, block_comment_skip, line_break, bounds, quote_bounds,
+                                                   apostrophe_closers, apostrophe_bounds, line_comment_marks, block_comment_marks, block_comment_closers);
+                    const bool same = is_zero((rescan.block_region ^ scan.block_region) & line_break) &&
+                                      (bit_511(rescan.block_region) & ~bit_511(rescan.block_ends)) == (bit_511(scan.block_region) & ~bit_511(scan.block_ends));
+                    scan = rescan;
+                    if (same)
+                    {
+                        break;
+                    }
                 }
             }
+            const U64x8 carried_literal = state == STATE_STRING || state == STATE_CHAR ? bit_0 : zero;
+            line_comment_region = sub(line_break, scan.line_comment_starts | (state == STATE_LINE_COMMENT ? bit_0 : zero)) & ~line_break;
+            literal_region = sub(scan.literal_closers | scan.literal_unterminated, scan.literal_starts | carried_literal) | scan.literal_closers;
         }
         U64x8 literal_starts = scan.literal_starts;
         const U64x8 literal_closers = scan.literal_closers;
         U64x8 literal_unterminated = scan.literal_unterminated;
-        const U64x8 line_comment_starts = scan.line_comment_starts;
         const U64x8 block_region = scan.block_region;
         const U64x8 block_ends = scan.block_ends;
 
-        const U64x8 carried_literal = state == STATE_STRING || state == STATE_CHAR ? bit_0 : zero;
-        const U64x8 line_comment_region = sub(line_break, line_comment_starts | (state == STATE_LINE_COMMENT ? bit_0 : zero)) & ~line_break;
-        const U64x8 literal_region = sub(literal_closers | literal_unterminated, literal_starts | carried_literal) | literal_closers;
         const U64x8 outside = ~(literal_region | line_comment_region | block_region);
 
         // What the next chunk starts inside of. A literal open at the end of the chunk is unterminated if the next
