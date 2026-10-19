@@ -10,10 +10,11 @@ AMX's tiles) and EVEX forms (AVX-512 with opmasks, zeroing, broadcasts, embedded
 rounding, registers 16 to 31, gathers and scatters, AVX512-FP16, AVX10.2,
 AMX-AVX512 and Xeon Phi's extensions), with FS and GS segment overrides on any
 memory operand (thread-local storage), and the prefixes of HLE, MPX's `bnd`,
-CET's `notrack` and the branch hints, and 16-bit near branches; and through an
-entry point of its own, 32-bit addresses (`67`, see "32-bit addresses"). For the
-instructions with a symbolic operand it reports where each one ends, which
-locates the fields their fixups patch (see "Fixups").
+CET's `notrack` and the branch hints, and 16-bit near branches; and through
+entry points of their own, 32-bit addresses (`67`, see "32-bit addresses") and
+APX's general registers 16 to 31 in legacy forms (REX2, see "APX's registers").
+For the instructions with a symbolic operand it reports where each one ends,
+which locates the fields their fixups patch (see "Fixups").
 This document records why it is built the way it is: the review of the
 historical `encode_wide` that it replaces, the design, the Zen 5 measurements
 behind each choice, and what comes next.
@@ -48,7 +49,12 @@ BMI at 0.64 ns (9.4 GB/s). That is:
 - with 32-bit addresses, byte-identical to GNU as 2.47 on another 1.7 million
   random instructions and their 201,280 relocations, from a second entry point
   whose templates have the `67`, so that the 64-bit loop's code is instruction
-  for instruction the same.
+  for instruction the same;
+- with APX's general registers 16 to 31, byte-identical to GNU as 2.47 on 1.7
+  million more random instructions, 469,795 of them with REX2, and their
+  195,711 relocations, from a third entry point, whose loop costs 18% more than
+  `x86_encode`'s (0.73 ns per instruction on the compiler mix) and leaves the
+  64-bit loop's code the same.
 
 ## The historical encoder
 
@@ -105,7 +111,8 @@ immediate as the instruction has it, the register's number times 16: the
 encoders write it as any imm8, where a number would need a shift in the
 vectorized loop that waits for the flags, and `x86_validate` checks its other
 bits. Registers are numbers by class: 0–15, 0–31 for an EVEX form's vector
-registers, 0–7 for opmasks, MMX registers (which REX doesn't extend), debug
+registers (and for `x86_encode_apx`'s general registers in a legacy form of maps
+0 and 1), 0–7 for opmasks, MMX registers (which REX doesn't extend), debug
 registers and AMX's tiles, 0–3 for MPX's bound registers, 0–5 for the segment
 registers (ES, CS, SS, DS, FS and GS), the numbers of CR0, CR2 to CR4 and CR8
 for the control registers, and for a group of registers its first, whose number
@@ -199,7 +206,10 @@ address memory with is two forms, a
 register one and a memory one, since the template's checks of rm can't depend
 on the mode: mm8 to mm15 don't exist, but a base can be R8 to R15. So MMX's
 `paddb mm, mm/m64` is `PADDB_MM_MM` and `PADDB_MM_M64`, and `movq`'s store
-opcode between registers is `MOVQ_MM_MM_STORE`.
+opcode between registers is `MOVQ_MM_MM_STORE`. With APX, SSE's XMM register
+or memory would need the same (xmm16 to xmm31 don't exist there, but a base can
+be R16 to R31), which a template flag of `x86_encode_apx`'s does instead (see
+"APX's registers").
 
 ### Templates and the canonical slot
 
@@ -461,6 +471,71 @@ build varies between runs; with both built with `-falign-functions=64`, the
 compiler mix took 0.623 ns either way and the others −1.0% to −0.1%.
 `x86_encode_16`, `x86_encode_32` and `x86_encode_64` disassemble the same as
 main's, both copies of each, both ways.
+
+### APX's registers
+
+Intel's APX doubles the general registers to 32. A legacy instruction of opcode
+maps 0 and 1 (no escape, or `0F` and one byte) reaches R16 to R31 through a REX2
+prefix in REX's place: `D5`, then a payload of M0, R4, X4, B4, W, R3, X3 and B3,
+where R4, X4 and B4 are bit 4 of ModRM.reg's register, the index's and
+ModRM.rm's (the base's, or the `+r` register's), R3, X3 and B3 are REX's R, X
+and B, and M0 says the opcode is in map 1, whose `0F` it replaces:
+`movzx r16d, byte ptr [rax]` is `D5 C0 B6 00` (3DNow!'s second `0F` stays). REX2
+counts as REX for SPL to DIL, so a high byte register can't be in such an
+instruction either. R21 and R29 as a base take an 8-bit zero and R20 and R28 a
+SIB byte, as their low bits are RBP's and RSP's, but R20 is an index, which X4
+tells from SIB's none. Maps 2 and 3 have no REX2 (APX encodes their
+instructions with EVEX, in map 4), nor does the XSAVE family, with which REX2 is
+#UD (GNU as rejects it too).
+
+Like 32-bit addresses, APX's registers have an entry point of their own, with
+templates of their own: `x86_encode_apx`, `x86_encode_scalar_apx` and
+`x86_validate_apx`, from the table `x86_encoder_initialize_apx` builds (1.27 MB
+more). An instruction without registers 16 to 31 encodes as with `x86_encode`:
+REX2 is there only where one of them needs it. Template copies couldn't do it,
+as REX2 depends on the operands, not the form, and in map 1 it takes the `0F`'s
+place. `build_template` gives a legacy form of maps 0 and 1 two positions for
+it. REX's takes canonical byte 10 as before, which `compute_fields` makes `D5`
+with REX2 (flipping the template's `0x40 | W` by `0x95 ^ W`). A legacy form has
+no VEX or EVEX prefix to take canonical bytes 12–15, so the payload is one of
+those: in map 0, a position of its own after REX's (canonical byte 15, whose
+template byte is W), present with REX2 alone and then counted in the length;
+in map 1, the `0F`'s (canonical byte 13), which is zero without REX2 and with it
+flips the `0F` into the payload, M0 and W too. 1,902 forms have REX2's
+positions, and their FS and GS copies but 56: HLE's locked arithmetic on a
+doubleword or a quadword by an imm32 would be 16 bytes long with a segment
+override, so those get `x86_encode`'s template, as the forms without REX2 do
+(with one flag more, below).
+
+`compute_fields` works out REX2's mask (bit 4 of reg, rm or the index: in
+another form, a vector register's, whose template has no REX2 position to use
+it), its payload and `D5`, and selects them in at the end, in a legacy form's
+prefix dword, REX's byte and the presence bits; a `+r` form's opcode register
+drops the bits above it, which with REX2 have rm's bit 4. The checks change in
+three places: an index's bit 4 is X4, so R20 isn't RSP; a high byte register
+can't have REX2; and a base can be R16 to R31 in a form with REX2 but in no
+other, while the template's checks of rm can't tell a register from a base. So
+`x86_encode_apx`'s mode table lets a base's bit 4 through (the 64-bit table
+forbids it), and two template flags say where it can't be, as the memory bit
+picks: in a form without REX2, as a base (`NO_HIGH_BASE`), and in a form with
+REX2, as a register rm that isn't a general one (`NO_HIGH_RM_REGISTER`: SSE's
+XMM register or memory; the classes of fewer than 16 registers are two forms
+anyway). The loops pick all of it by a constant parameter, as with 32-bit
+addresses, so their code is the same: all eleven 64-bit and 32-bit loops
+disassemble as main's (clang 23 on the 9700X), and in 15 interleaved rounds
+against main, `x86_encode_64` took 0.621 ns per instruction against 0.627 on the
+compiler mix, 0.633 against 0.627 on the vector mix and 0.662 against 0.664 on
+the uniform one, within the ±1.5% a build varies between runs.
+
+The APX loop costs 18% more: 0.732 ns per instruction against `x86_encode_64`'s
+0.619 on the compiler mix (3.94 cycles against 3.37, in 7 interleaved rounds
+of the benchmark's `x86_encode_64_apx`), as on the vector mix, 14% on the
+uniform one, and 12% with offsets or with fixup ends. The benchmark's streams
+have no registers 16 to 31, but the loop has no branches, so it does the same
+work with them. It runs 2.9 more instructions per instruction: about 32 vector
+operations per group of 16 for REX2, and the spills and constants of the
+registers they take (60 more stack operands and 53 more broadcasts over the
+function's copies of the group).
 
 ### What Niles Salter's tokenizer suggested
 
@@ -760,7 +835,7 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
 
 ## Correctness
 
-`./build/compiler test-x86-encoder` (about 0.7 s) checks:
+`./build/compiler test-x86-encoder` (about 0.9 s) checks:
 
 - that every form's template fits;
 - 612 known encodings from GNU as, on the paths most worth pinning down (VEX2
@@ -862,7 +937,24 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   `x86_encode_64_address32` against the scalar encoder on the random streams and
   at page edges, and the invalid operands with two more breaks: an MPX memory
   operand, which only `x86_validate_address32` finds, and a memory operand in a
-  form without room for the `67`, which `x86_encode_address32` rejects too.
+  form without room for the `67`, which `x86_encode_address32` rejects too;
+- then all but the known fixups again for APX, which is all `--apx` runs: both
+  encoders on 62 known encodings from GNU as (REX2 in maps 0 and 1 with
+  registers 16 to 31 in reg, rm, the base and the index, R20 and R28 as bases
+  with a SIB byte and R21 and R29 with an 8-bit zero, R20 as an index, W, `66`,
+  `F2`, `F3`, `F0`, `3E` and FS before `D5`, the `+r` forms, SIL with REX2, x87,
+  SSE, 3DNow!, MPX, CR8 and the other system instructions with registers 16 to
+  31, the longest, 15 bytes, and REX, VEX, EVEX, map 2 and the XSAVE family
+  without them, as `x86_encode` encodes them), 15 known invalid instructions
+  that both encoders and `x86_validate_apx` must reject, as GNU as does (the
+  XSAVE family with a base or index from 16 to 31, a high byte register with
+  REX2, and XMM16 to XMM31 in SSE's forms), a digest of their own,
+  `x86_encode_64_apx` against the scalar encoder on the random streams (three
+  forms in four with REX2, whose general registers, bases and indexes are 16 to
+  31 half the time) and at page edges, and the invalid operands with three more
+  breaks: a high byte register with REX2, a general register, base or index
+  from 16 to 31 in a form without REX2, and a vector register rm from 16 to 31
+  in a form with it.
 
 `--print-assembly` and `--compare-object` cross-check the scalar encoder against
 GNU as for any seed (AGENTS.md has the commands): 1.7 million random
@@ -1013,12 +1105,42 @@ the initializer keeping a form's template without room for the `67` (the digest
 and the random streams), and `x86_validate_address32` accepting such a form (820
 broken instructions not found) or an MPX memory operand (796).
 
+With `--apx`, the same seeds cross-check APX's streams: 1.7 million
+instructions, 469,795 of them with REX2 (255,332 in map 0 and 214,463 in map 1;
+138,984 with R4, 113,054 with X4 and 322,541 with B4; 142,467 with `lock`,
+220,074 with `66`, `F2` or `F3`, and 41,921 with FS or GS), 0 differences, and
+195,711 relocations (46,086 PC32, 251 PLT32, 741 PC8, 138,749 32S, 8,251 32
+and 1,633 64), 0 different. The printer needs nothing new but the registers'
+names: GNU as encodes the instructions of maps 0 and 1 with registers 16 to 31
+with REX2 as the encoders do, and rejects the XSAVE family's. Eighteen broken
+copies of APX's parts fail the tests: the scalar encoder keeping map 1's `0F`
+after REX2 (46 of the 62 known encodings wrong, the digest and the random
+streams), without M0 (46), or with X4 or REX's X from a register rm (58 each);
+the loop with map 1's payload without W (22, and the random streams), the
+payload without X3 and B3 (16), R20 taken for SIB's none (2), map 0's payload
+left out of the length (34) or of the presence bits (68), a high byte register
+let through with REX2 (253 broken instructions not found) or rm's bit 4
+unchecked (961); templates without `NO_HIGH_RM_REGISTER` (767) or
+`NO_HIGH_BASE` (194); REX2 for the XSAVE family (6 of the 15 known invalid
+instructions accepted, and the digest) or for maps 2 and 3 (the digest, which
+only GNU as's bytes catch); and an `x86_validate_apx` that lets every form's
+general registers be 16 to 31 (835, the digest and the random streams), lets a
+high byte register through with REX2 (266, the digest and the random streams)
+or a vector register be 16 to 31 in a form with REX2 (798), or takes R20 for
+RSP as an index (2 known encodings and the digest). Two more change nothing, as
+validation leaves no instruction they would encode differently: the scalar
+encoder's REX2 outside `x86_encode_apx`'s mode, and its B4 from an absent base,
+whose rm is 0.
+
 ## Next steps
 
 - **Every x86-64 instruction** (#17, with an issue per family, #18–#39). Rows
-  are data: APX's REX2 and its EVEX extensions (map 4, #36) would need a
-  register's bit 4 in legacy forms, and its AMX forms are EVEX ones of #37's
-  loads and stores, for registers 16 to 31 in their addresses. Of #39's
+  are data. APX's REX2 has its entry point (see "APX's registers"); what is
+  left of #36 is EVEX's part (registers 16 to 31 in VEX and EVEX forms, and map
+  4 with ND, NF and ZU, which also takes maps 2 and 3's legacy instructions with
+  them) and APX's new instructions (`ccmp` and `ctest`, `cfcmov`, `push2` and
+  `pop2`, `pushp` and `popp`, `jmpabs`), and its AMX forms are EVEX ones of
+  #37's loads and stores, for registers 16 to 31 in their addresses. Of #39's
   prefixes, `67` has its entry point (see "32-bit addresses"), and the CS, DS,
   ES and SS overrides on instructions other than branches are left out: 64-bit
   mode ignores them, and they only pad, as GNU as's branch alignment's CS
@@ -1042,4 +1164,4 @@ broken instructions not found) or an MPX memory operand (796).
   templates loaded such that the flags need only in-lane shuffles, and fewer
   operations between the flags and the store, are where to look. Clang's code
   for the loop moves with small source changes, so check every width after
-  one.
+  one. The APX loop's 18% is mostly the registers its REX2 operations take.

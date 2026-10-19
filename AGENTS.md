@@ -53,8 +53,9 @@ or infrastructure machinery merely to match its style.
   and the fixup interface: `BUSTER_X86_FORM_FIXUP` marks an instruction with a
   symbolic operand, `x86_encode` reports each marked instruction's end, and
   `x86_fixup_distance` gives its fields' offsets and addends from that; and
-  `x86_encode_address32`, the same for 32-bit addresses, with templates of its
-  own); `docs/x86-64-encoder.md` explains its design and measurements.
+  `x86_encode_address32` and `x86_encode_apx`, the same for 32-bit addresses and
+  for APX's general registers 16 to 31 (REX2), each with templates of its own);
+  `docs/x86-64-encoder.md` explains its design and measurements.
   `x86_64_encoder_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-x86-encoder` runs them) and
   `x86_64_encoder_benchmark.c` provides `benchmark-x86-encoder`.
@@ -172,7 +173,7 @@ yet compared against a performance baseline. Keep just one compiler executable.
 
 ## x86-64 encoder tests
 
-`./build/compiler test-x86-encoder` (about 0.7 s) checks that every form fits a
+`./build/compiler test-x86-encoder` (about 0.9 s) checks that every form fits a
 template, both encoders on 612 known encodings from GNU as (each also with the
 fixup flag, whose end they must report), a digest of the scalar encoder's output
 for 100,000 random instructions, every batch width and variant of `x86_encode`
@@ -188,13 +189,18 @@ checks again with 32-bit addresses, but the known fixups: 33 known encodings, a
 digest of their own, `x86_encode_64_address32` against the scalar encoder on the
 random streams and at page edges, and invalid operands, among them MPX memory
 operands and memory operands in the 80 FS and GS forms without room for the
-`67`. `--address32` runs only that pass, and `--count N` and `--seed N` change
-the random streams.
+`67`. And again for APX, but the known fixups: 62 known encodings, 15 known
+invalid instructions (as GNU as rejects them), a digest of their own,
+`x86_encode_64_apx` against the scalar encoder on random streams in which three
+forms in four have REX2, and at page edges, and invalid operands, among them a
+high byte register with REX2, registers 16 to 31 in forms without REX2 and
+XMM16 to XMM31 in SSE's forms. `--address32` and `--apx` run only their pass,
+and `--count N` and `--seed N` change the random streams.
 
 The digests were recorded when GNU as encoded the same streams to the same
 bytes. After changing the form table, the scalar encoder or the fixup interface,
-cross-check with GNU as (binutils 2.47 for the recorded digests) for both
-address sizes, then record the digests the test prints:
+cross-check with GNU as (binutils 2.47 for the recorded digests) for every entry
+point, then record the digests the test prints:
 
 ```sh
 ./build/compiler test-x86-encoder --print-assembly 400000 --seed 1 > build/x86.s
@@ -203,6 +209,9 @@ as build/x86.s -o build/x86.o
 ./build/compiler test-x86-encoder --print-assembly 400000 --seed 1 --address32 > build/x86_32.s
 as build/x86_32.s -o build/x86_32.o
 ./build/compiler test-x86-encoder --compare-object build/x86_32.o 400000 --seed 1 --address32
+./build/compiler test-x86-encoder --print-assembly 400000 --seed 1 --apx > build/x86_apx.s
+as build/x86_apx.s -o build/x86_apx.o
+./build/compiler test-x86-encoder --compare-object build/x86_apx.o 400000 --seed 1 --apx
 ```
 
 (`build.sh` deletes `build/`, so run these after building.) The printed
@@ -217,9 +226,10 @@ fields zeroed where the reported fixup ends put them) and each relocation's
 offset, type, addend and symbol with the ones the fixup ends and
 `x86_fixup_distance` give. With `--address32`, the printer adds `addr32` where no
 general register gives the address size, and the relocations of displacements
-other than RIP-relative ones are R_X86_64_32. Cross-check more than one seed
+other than RIP-relative ones are R_X86_64_32; with `--apx`, it names registers
+16 to 31 `r16` to `r31` (`r16d`, `r16w`, `r16b`). Cross-check more than one seed
 after changing forms (1.7 million instructions over seeds 1, 7 and 99 were last
-checked at each address size, with 199,441 relocations and with 201,280).
+checked for each entry point, with 199,441, 201,280 and 195,711 relocations).
 
 ## x86-64 encoder benchmark
 
@@ -234,8 +244,10 @@ instructions per call, `--offsets` stores every instruction's offset, and
 `--fixups` marks the calls and RIP-relative operands and reports their ends.
 The variants are the batch widths (`x86_encode_4` to `x86_encode_64`,
 instructions per loop iteration), the template gather, output store and fixup
-store alternatives that lost, and `x86_encode_64_offsets_then_pick`, the other
-way to have fixup ends (every offset, then the caller picks the marked ones).
+store alternatives that lost, `x86_encode_64_offsets_then_pick`, the other
+way to have fixup ends (every offset, then the caller picks the marked ones),
+and `x86_encode_64_apx`, `x86_encode_apx`'s loop (the streams have no registers
+16 to 31, so its bytes are the same).
 Decide them, and any other performance question, with measurements on the 9700X
 (not Zen 4, and not llvm-mca, whose predictions are well off), using uops.info's
 Zen 5 port data to explain them;
