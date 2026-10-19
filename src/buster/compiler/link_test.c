@@ -25,11 +25,12 @@
 //     link_check accepts. Each is generated twice from its seed, byte for byte the same, and differently from another
 //     seed; and run: laid out in memory as a static executable would be (link_test_load: atoms in class order, a GOT,
 //     the TLS segment, every fixup patched) and started in a child process, it must exit with status 0 having written
-//     LinkProgram.output. A program without libc starts at _start, with an initial stack and auxiliary vector as the
-//     kernel's. One that calls libc gets stand-ins for its imports (link_test_import), and the child does what the C
-//     runtime would around main (link_test_start_libc). Each set with two thread-locals, an init function and a fini
-//     function has every class and every kind its options allow, and a copy of the defaults' program with the
-//     hexadecimal digits' fixup one byte off must write something else.
+//     LinkProgram.output. Each program runs again with its TLS segment starting half its alignment past a multiple of
+//     it, as a linker may start .tdata when .tbss is more aligned. A program without libc starts at _start, with an
+//     initial stack and auxiliary vector as the kernel's. One that calls libc gets stand-ins for its imports
+//     (link_test_import), and the child does what the C runtime would around main (link_test_start_libc). Each set
+//     with two thread-locals, an init function and a fini function has every class and every kind its options allow,
+//     and a copy of the defaults' program with the hexadecimal digits' fixup one byte off must write something else.
 // --print-assembly writes those programs (from the same --seed and --functions) as GNU as source instead: a directory
 // for each set of options (link_test_program_directories) with a file per unit and the expected output, for the
 // cross-check in AGENTS.md, where GNU as assembles them and GNU ld, lld, mold and wild link them (through cc, with
@@ -1487,7 +1488,7 @@ static uint64_t link_test_import(const Link* link, SymbolId symbol)
     return result;
 }
 
-static bool link_test_load(const Link* link, SymbolId entry, bool libc, Arena* arena, LinkTestImage* image)
+static bool link_test_load(const Link* link, SymbolId entry, bool libc, bool misaligned, Arena* arena, LinkTestImage* image)
 {
     const LinkAtoms* atoms = &link->atoms;
     const LinkSymbols* symbols = &link->symbols;
@@ -1496,10 +1497,9 @@ static bool link_test_load(const Link* link, SymbolId entry, bool libc, Arena* a
         .libc = libc,
     };
     uint64_t* offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, atoms->count);
-    uint64_t* tls_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, atoms->count);
     uint64_t* values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, symbols->count);
     uint32_t* slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbols->count);
-    bool result = offsets != 0 && tls_offsets != 0 && values != 0 && slots != 0;
+    bool result = offsets != 0 && values != 0 && slots != 0;
     image->problem = result ? 0 : "out of memory";
 
     // A GOT slot for every target of a kind that reads one.
@@ -1522,7 +1522,6 @@ static bool link_test_load(const Link* link, SymbolId entry, bool libc, Arena* a
 
     // The layout, as offsets from the base.
     uint64_t cursor = 0;
-    uint64_t tls_cursor = 0;
     uint64_t tls_alignment = 1;
     uint64_t init_begin = 0;
     uint64_t init_end = 0;
@@ -1532,6 +1531,7 @@ static bool link_test_load(const Link* link, SymbolId entry, bool libc, Arena* a
     uint64_t headers = 0;
     uint64_t tls_image = 0;
     uint64_t tls_file = 0;
+    uint64_t tls_memory = 0;
     uint64_t text_begin = 0;
     uint64_t text_end = 0;
     uint64_t data_begin = 0;
@@ -1550,15 +1550,16 @@ static bool link_test_load(const Link* link, SymbolId entry, bool libc, Arena* a
             const uint64_t alignment = 1ull << atoms->alignment_log2[atom];
             tls_alignment = link_class_is_tls(atoms->class[atom]) && alignment > tls_alignment ? alignment : tls_alignment;
         }
-        link_test_place(link, BUSTER_LINK_CLASS_TDATA, tls_offsets, &tls_cursor);
-        tls_file = tls_cursor;
-        link_test_place(link, BUSTER_LINK_CLASS_TBSS, tls_offsets, &tls_cursor);
-        tls_image = link_test_align(cursor, tls_alignment);
+        // The TLS segment: TDATA's atoms, then TBSS's (which take no room in the image), from a multiple of the
+        // largest TLS alignment, or if `misaligned` from half of it past one, as a linker may start the segment when
+        // TBSS is more aligned than TDATA.
+        tls_image = link_test_align(cursor, tls_alignment) + (misaligned ? tls_alignment / 2 : 0);
+        uint64_t tls_cursor = tls_image;
+        link_test_place(link, BUSTER_LINK_CLASS_TDATA, offsets, &tls_cursor);
+        tls_file = tls_cursor - tls_image;
+        link_test_place(link, BUSTER_LINK_CLASS_TBSS, offsets, &tls_cursor);
+        tls_memory = tls_cursor - tls_image;
         cursor = tls_image + tls_file;
-        for (AtomId atom = 1; atom < atoms->count; atom += 1)
-        {
-            offsets[atom] = atoms->class[atom] == BUSTER_LINK_CLASS_TDATA ? tls_image + tls_offsets[atom] : offsets[atom];
-        }
         init_begin = link_test_align(cursor, 8);
         cursor = init_begin;
         link_test_place(link, BUSTER_LINK_CLASS_INIT_ARRAY, offsets, &cursor);
@@ -1590,10 +1591,13 @@ static bool link_test_load(const Link* link, SymbolId entry, bool libc, Arena* a
         image->problem = result ? 0 : "the image can't be mapped below 2 GB";
     }
 
-    // The bytes, and the symbols' values: an address, a TLS variable's offset from the thread pointer (the end of the
-    // TLS block, which is the TLS segment's memory size rounded up to its alignment), the linker's, or a stand-in's.
+    // The bytes, and the symbols' values: an address, a TLS variable's offset from the thread pointer, the linker's, or
+    // a stand-in's. The TLS block ends at the thread pointer and keeps the segment's first byte's offset from its
+    // alignment, so it starts the memory size plus that offset, rounded up to the alignment, less the offset, below
+    // the thread pointer (as glibc and the linkers compute it).
     const uint64_t base = (uint64_t)image->base;
-    const uint64_t tls_block = link_test_align(tls_cursor, tls_alignment);
+    const uint64_t tls_first = tls_image & (tls_alignment - 1);
+    const uint64_t tls_block = link_test_align(tls_memory + tls_first, tls_alignment) - tls_first;
     for (AtomId atom = 1; result && atom < atoms->count; atom += 1)
     {
         if (atoms->bytes[atom] != 0 && atoms->class[atom] != BUSTER_LINK_CLASS_TBSS)
@@ -1607,7 +1611,7 @@ static bool link_test_load(const Link* link, SymbolId entry, bool libc, Arena* a
         const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
         if (atom != 0 && link_class_is_tls(atoms->class[atom]))
         {
-            values[symbol] = tls_offsets[atom] + symbols->value[symbol] - tls_block;
+            values[symbol] = offsets[atom] - tls_image + symbols->value[symbol] - tls_block;
         }
         else if (atom != 0)
         {
@@ -1728,7 +1732,7 @@ static bool link_test_load(const Link* link, SymbolId entry, bool libc, Arena* a
             .p_flags = PF_R,
             .p_vaddr = base + tls_image,
             .p_filesz = tls_file,
-            .p_memsz = tls_cursor,
+            .p_memsz = tls_memory,
             .p_align = tls_alignment,
         };
         image->headers = phdr;
@@ -1790,9 +1794,10 @@ static void link_test_start(const LinkTestImage* image, int output)
 
 // The child's side of link_test_run for a program that calls libc: what the C runtime does around main. It sets up the
 // TLS block from PT_TLS as glibc does an executable's (variant II: the block ends at the thread pointer, aligned to
-// p_align, which points at itself), makes the thread pointer FS's base, and calls the init array's entries, main and
-// the fini array's entries in reverse, each with argc, argv and envp (one argument and one variable); then exits with
-// main's status. Once FS is the program's, it calls nothing that uses TLS.
+// p_align, which points at itself, and its start keeps p_vaddr's remainder modulo p_align), makes the thread pointer
+// FS's base, and calls the init array's entries, main and the fini array's entries in reverse, each with argc, argv
+// and envp (one argument and one variable); then exits with main's status. Once FS is the program's, it calls nothing
+// that uses TLS.
 static void link_test_start_libc(const LinkTestImage* image, int output) __attribute__((noreturn));
 static void link_test_start_libc(const LinkTestImage* image, int output)
 {
@@ -1808,7 +1813,8 @@ static void link_test_start_libc(const LinkTestImage* image, int output)
         tls = image->headers[i].p_type == PT_TLS ? &image->headers[i] : tls;
     }
     const uint64_t alignment = tls != 0 && tls->p_align > 1 ? tls->p_align : 1;
-    const uint64_t block = tls != 0 ? link_test_align(tls->p_memsz, alignment) : 0;
+    const uint64_t first = tls != 0 ? tls->p_vaddr & (alignment - 1) : 0;
+    const uint64_t block = tls != 0 ? link_test_align(tls->p_memsz + first, alignment) - first : 0;
     uint8_t* area = mmap(0, block + alignment + BUSTER_LINK_TEST_TCB_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (area == MAP_FAILED || dup2(output, 1) < 0)
     {
@@ -1905,21 +1911,22 @@ static bool link_test_same(const Link* a, const Link* b)
     return result;
 }
 
-// Loads and runs a generated program: whether it exits with status 0 having written exactly `expected`.
-static bool link_test_runs(LinkTestTally* tally, const LinkProgram* program, const uint8_t* expected, const char* what)
+// Loads and runs a generated program, with its TLS segment off its alignment if `misaligned`: whether it exits with
+// status 0 having written exactly `expected`.
+static bool link_test_runs(LinkTestTally* tally, const LinkProgram* program, const uint8_t* expected, const char* what, bool misaligned)
 {
     Scratch scratch = scratch_begin(0);
     LinkTestImage image;
     uint8_t output[BUSTER_LINK_TEST_OUTPUT_BYTES];
     uint64_t length = 0;
     int status = -1;
-    const bool loaded = link_test_load(&program->link, program->entry, program->options.libc, scratch.arena, &image);
+    const bool loaded = link_test_load(&program->link, program->entry, program->options.libc, misaligned, scratch.arena, &image);
     const bool ran = loaded && link_test_run(&image, output, &length, &status);
     const bool result = ran && WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == BUSTER_LINK_PROGRAM_OUTPUT_BYTES &&
                         memcmp(output, expected, BUSTER_LINK_PROGRAM_OUTPUT_BYTES) == 0;
     if (!result && tally->failures < BUSTER_LINK_TEST_REPORTED)
     {
-        printf("  %s: %s", what, !loaded ? image.problem : "");
+        printf("  %s%s: %s", what, misaligned ? ", with its TLS segment off its alignment" : "", !loaded ? image.problem : "");
         if (ran)
         {
             printf("status %d, signal %d, %llu bytes: %.*s", WIFEXITED(status) ? WEXITSTATUS(status) : -1, WIFSIGNALED(status) ? WTERMSIG(status) : 0,
@@ -1942,7 +1949,7 @@ static bool link_test_runs_otherwise(const LinkProgram* program, const uint8_t* 
     uint8_t output[BUSTER_LINK_TEST_OUTPUT_BYTES];
     uint64_t length = 0;
     int status = -1;
-    const bool loaded = link_test_load(&program->link, program->entry, program->options.libc, scratch.arena, &image);
+    const bool loaded = link_test_load(&program->link, program->entry, program->options.libc, false, scratch.arena, &image);
     const bool ran = loaded && link_test_run(&image, output, &length, &status);
     const bool result = ran && !(WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == BUSTER_LINK_PROGRAM_OUTPUT_BYTES &&
                                  memcmp(output, expected, BUSTER_LINK_PROGRAM_OUTPUT_BYTES) == 0);
@@ -2049,11 +2056,12 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
                          "another program from another seed", i);
         if (generated)
         {
-            const bool ran = link_test_runs(&tally, &program, program.output, names[i]);
-            const bool other_ran = different && link_test_runs(&tally, &other, other.output, names[i]);
-            printf("  %s: %u units, %u workers, %u atoms, %u fixups (%u wide), %llu bytes of code: %s, and from seed + 1000: %s\n", names[i], options[i].units,
-                   options[i].functions, program.link.atoms.count - 1, program.link.fixups.count - 1, program.link.fixups.wide_count - 1,
-                   (unsigned long long)program.code_bytes, ran ? "ran" : "failed", other_ran ? "ran" : "failed");
+            const bool ran = link_test_runs(&tally, &program, program.output, names[i], false);
+            const bool misaligned_ran = link_test_runs(&tally, &program, program.output, names[i], true);
+            const bool other_ran = different && link_test_runs(&tally, &other, other.output, names[i], false);
+            printf("  %s: %u units, %u workers, %u atoms, %u fixups (%u wide), %llu bytes of code: %s; with its TLS segment off its alignment: %s; from seed + 1000: %s\n",
+                   names[i], options[i].units, options[i].functions, program.link.atoms.count - 1, program.link.fixups.count - 1, program.link.fixups.wide_count - 1,
+                   (unsigned long long)program.code_bytes, ran ? "ran" : "failed", misaligned_ran ? "ran" : "failed", other_ran ? "ran" : "failed");
         }
         // Every class, and every kind the options allow, given two thread-locals, an init function and a fini function.
         if (generated && options[i].thread_locals >= 2 && options[i].init_functions >= 1 && options[i].fini_functions >= 1)

@@ -749,6 +749,14 @@ File offsets are contiguous. Each segment's address continues at the next page
 plus its offset within a page, so there is no file padding, and segments stay
 4 KB-congruent.
 
+The TLS segment then needn't start on a multiple of its alignment: `.tdata`
+starts at its own alignment, which can be less than `.tbss`'s. The TLS block
+keeps `p_vaddr`'s remainder f modulo `p_align`, so it starts
+align_up(`p_memsz` + f, `p_align`) − f below the thread pointer, as glibc
+allocates it and GNU ld and lld compute `TPOFF`: a variable's `TPOFF` is its
+offset in the segment less that distance. With f = 0 it is just `p_memsz`
+rounded up, which is all an aligned segment exercises.
+
 Exact layout is a recurrence (x′ = align_up(x, a) + s), not a prefix sum of
 `size + align − 1`. It becomes a plain prefix sum in two ways:
 
