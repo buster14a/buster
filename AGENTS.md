@@ -128,7 +128,7 @@ yet compared against a performance baseline. Keep just one compiler executable.
 ## x86-64 encoder tests
 
 `./build/compiler test-x86-encoder` (about 0.3 s) checks that every form fits a
-template, both encoders on 466 known encodings from GNU as, a digest of the
+template, both encoders on 492 known encodings from GNU as, a digest of the
 scalar encoder's output for 100,000 random instructions, every batch width and
 variant of `x86_encode` against the scalar encoder (bytes and offsets) on every
 count from 0 to 199 and on 300,000 random instructions of every form (legacy
