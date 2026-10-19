@@ -5,8 +5,8 @@
 // main.c includes this file after link_test.c, whose sets of programs (link_test_program_options) and assembly
 // (link_test_print_program) it uses, and object_writer.c, and calls run_object_writer_tests for the command. The
 // checks, in this order:
-//   - Objects: test-link's programs (static ones and two that call libc) and a link made by hand
-//     (object_test_hand_link, for what the programs don't have), each unit's object built in memory with and without
+//   - Objects: test-link's programs (static ones and two that call libc), a link made by hand (object_test_hand_link,
+//     for what the programs don't have) and a link without atoms, each unit's object built in memory with and without
 //     function sections, and again over bytes set to BUSTER_OBJECT_TEST_POISON, which must come out the same
 //     (object_build writes every byte). object_view_open reads each one back and checks the rules every object keeps:
 //     the header's fixed fields, section headers and contents inside the file, aligned and apart, names in
@@ -21,11 +21,12 @@
 //     each call through the GOT as R_X86_64_GOTPCRELX.
 //   - Many sections: one unit of BUSTER_OBJECT_TEST_MANY_FUNCTIONS functions in sections of their own, past
 //     SHN_LORESERVE: e_shnum and e_shstrndx in section 0, SHN_XINDEX and .symtab_shndx, compared as above.
-//   - Lanes: every unit's object written by object_write_units in groups of 1, 2, 3 and 8 lanes, byte for byte the
-//     same.
+//   - Lanes: every unit's object (a trailing one without atoms among them) written by object_write_units in groups of 1,
+//     2, 3 and 8 lanes, byte for byte the same; and a group in which a lane has no room to start, which writes nothing
+//     and gives every unit OBJECT_ERROR_FULL.
 //   - Files: object_write_file into a new file, over a larger and a smaller one in place (the same inode, truncated),
-//     over one with another hard link (which keeps the old bytes), into /dev/null, and into a missing directory (an
-//     error).
+//     over one with another hard link (which keeps the old bytes), also with a name of NAME_MAX bytes, into /dev/null,
+//     into a pipe, and into a missing directory (an error).
 //   - With --cross-check, which needs readelf, llvm-readobj, as, ld.bfd, ld.lld, mold and wild on PATH, and a cc that
 //     takes -fuse-ld=wild:
 //       - readelf -W and llvm-readobj list every object's sections, symbols and relocations (the link made by hand's
@@ -71,6 +72,8 @@ extern char** environ;
 #define BUSTER_OBJECT_TEST_MAX_TOKENS 16
 // The workers of link_test_program_options's set that takes --functions in test-link.
 #define BUSTER_OBJECT_TEST_FUNCTIONS 500
+// The units of the link made by hand (object_test_hand_link).
+#define BUSTER_OBJECT_TEST_HAND_UNITS 4
 // What the memory an object is built in holds the second time, which no byte of the object may keep.
 #define BUSTER_OBJECT_TEST_POISON 0xa5
 
@@ -1746,7 +1749,8 @@ static NameId object_test_hand_name(Link* link, const char* text)
 // of data (zero), an atom of no size, a TEXT atom without a symbol at offset 0 (so its function section is .text), a
 // weak reference to a symbol defined nowhere, hidden and protected symbols, a reference to a weak definition in another
 // unit, pointers into a string pool without an addend (through the pool's section symbol) and with one (through the
-// string's own), and a unit without atoms (unit 1). The fields are zero, as link_add_code_fixups leaves them.
+// string's own), and units without atoms between others (unit 1) and after them (unit 3): BUSTER_OBJECT_TEST_HAND_UNITS
+// in all. The fields are zero, as link_add_code_fixups leaves them.
 static bool object_test_hand_link(Link* link, Arena* arena)
 {
     const LinkCapacity capacity = {
@@ -1849,7 +1853,7 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
         const uint64_t length = arena->length;
         ObjectUnits units;
         ObjectSymbols symbols;
-        const bool prepared = generated && object_prepare(&units, &program.link, arena) && object_map_symbols(&symbols, &program.link, arena);
+        const bool prepared = generated && object_prepare(&units, &program.link, options[i].units, arena) && object_map_symbols(&symbols, &program.link, arena);
         object_test_expect(&tally, !generated || prepared, "object_prepare", i);
         for (uint32_t sections = 0; prepared && sections < 2; sections += 1)
         {
@@ -1898,15 +1902,16 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
         link_program_release(&program);
     }
     // The link made by hand, each unit's object with and without function sections: of its 7 relocations, only the
-    // pointer to "hi" without an addend refers to a section symbol.
+    // pointer to "hi" without an addend refers to a section symbol. Fewer units than its atoms have is an error.
     const uint64_t length = arena->length;
     Link hand;
     ObjectUnits units;
     ObjectSymbols symbols;
     const bool made = object_test_hand_link(&hand, arena);
     object_test_expect(&tally, made, "the link made by hand", 0);
-    const bool prepared = made && object_prepare(&units, &hand, arena) && object_map_symbols(&symbols, &hand, arena);
-    object_test_expect(&tally, !made || (prepared && units.count == 3), "object_prepare on the link made by hand", 0);
+    object_test_expect(&tally, !made || !object_prepare(&units, &hand, 2, arena), "object_prepare with a unit missing", 0);
+    const bool prepared = made && object_prepare(&units, &hand, BUSTER_OBJECT_TEST_HAND_UNITS, arena) && object_map_symbols(&symbols, &hand, arena);
+    object_test_expect(&tally, !made || (prepared && units.count == BUSTER_OBJECT_TEST_HAND_UNITS), "object_prepare on the link made by hand", 0);
     for (uint32_t sections = 0; prepared && sections < 2; sections += 1)
     {
         const ObjectOptions object_options = {
@@ -1929,11 +1934,25 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
         arena_release(&small);
     }
     arena_pop_to(arena, length);
+    // A link of one unit without atoms, as an empty translation unit's: an object all the same.
+    Link empty;
+    const LinkCapacity nothing = { 0 };
+    const bool empty_prepared = link_initialize(&empty, arena, arena, nothing) && object_prepare(&units, &empty, 1, arena) && object_map_symbols(&symbols, &empty, arena);
+    object_test_expect(&tally, empty_prepared && units.count == 1, "object_prepare on a link without atoms", 0);
+    for (uint32_t sections = 0; empty_prepared && sections < 2; sections += 1)
+    {
+        const ObjectOptions object_options = {
+            .function_sections = sections == 1,
+        };
+        ObjectTestCounts counts = { 0 };
+        object_test_unit(&tally, &empty, &units, &symbols, 0, object_options, &counts, arena);
+    }
+    arena_pop_to(arena, length);
     // An addend past int64.
     Link overflow;
     const bool overflow_made = object_test_overflow_link(&overflow, arena);
     object_test_expect(&tally, overflow_made, "the link with an addend past int64", 0);
-    const bool overflow_prepared = overflow_made && object_prepare(&units, &overflow, arena) && object_map_symbols(&symbols, &overflow, arena);
+    const bool overflow_prepared = overflow_made && object_prepare(&units, &overflow, 1, arena) && object_map_symbols(&symbols, &overflow, arena);
     if (overflow_prepared)
     {
         const ObjectOptions defaults = { 0 };
@@ -1961,7 +1980,7 @@ static bool object_test_many_sections(uint64_t seed, Arena* arena)
     const uint64_t length = arena->length;
     ObjectUnits units;
     ObjectSymbols symbols;
-    const bool prepared = generated && object_prepare(&units, &program.link, arena) && object_map_symbols(&symbols, &program.link, arena);
+    const bool prepared = generated && object_prepare(&units, &program.link, options.units, arena) && object_map_symbols(&symbols, &program.link, arena);
     object_test_expect(&tally, !generated || prepared, "object_prepare", 0);
     if (prepared)
     {
@@ -2015,9 +2034,23 @@ static void object_test_lanes_main(void* argument)
     test->written[lane_index()] = object_write_units(test->link, test->units, test->options, test->paths, test->source_names, test->errors);
 }
 
-// Writes every unit's object of a many-units program with groups of 1, 2, 3 and 8 lanes, each into a directory of its
-// own under `directory` (with function sections in the groups of 2 and 8), and compares each object with the one
-// object_build builds alone, byte for byte.
+// The same, but the last lane's scratch arena, where object_write_units takes what it needs to start, is full.
+static void object_test_lanes_full_main(void* argument)
+{
+    ObjectTestLanes* test = argument;
+    Scratch scratch = scratch_begin(0);
+    if (lane_index() == lane_count() - 1)
+    {
+        arena_push(scratch.arena, scratch.arena->capacity - scratch.arena->length, 1);
+    }
+    test->written[lane_index()] = object_write_units(test->link, test->units, test->options, test->paths, test->source_names, test->errors);
+    scratch_end(scratch);
+}
+
+// Writes every unit's object of a many-units program, and of a unit after them without atoms, with groups of 1, 2, 3
+// and 8 lanes, each into a directory of its own under `directory` (with function sections in the groups of 2 and 8),
+// and compares each object with the one object_build builds alone, byte for byte. Then a group of 3 in which a lane has
+// no room to start: no object, and every unit's error OBJECT_ERROR_FULL.
 static bool object_test_lanes(uint64_t seed, const char* directory, bool keep, Arena* arena)
 {
     ObjectTestTally tally = {
@@ -2035,7 +2068,7 @@ static bool object_test_lanes(uint64_t seed, const char* directory, bool keep, A
     const uint64_t length = arena->length;
     ObjectUnits units;
     ObjectSymbols symbols;
-    const bool prepared = generated && object_prepare(&units, &program.link, arena) && object_map_symbols(&symbols, &program.link, arena);
+    const bool prepared = generated && object_prepare(&units, &program.link, options.units + 1, arena) && object_map_symbols(&symbols, &program.link, arena);
     object_test_expect(&tally, !generated || prepared, "object_prepare", 0);
     const uint32_t count = prepared ? units.count : 0;
     char** paths = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, count) : 0;
@@ -2096,7 +2129,36 @@ static bool object_test_lanes(uint64_t seed, const char* directory, bool keep, A
             rmdir(lanes_directory);
         }
     }
-    printf("  %u units' objects written by groups of 1, 2, 3 and 8 lanes\n", count);
+    if (allocated)
+    {
+        char lanes_directory[BUSTER_OBJECT_TEST_PATH_BYTES];
+        snprintf(lanes_directory, sizeof(lanes_directory), "%s/lanes-full", directory);
+        object_test_expect(&tally, mkdir(lanes_directory, 0755) == 0, "mkdir", 0);
+        for (uint32_t unit = 0; unit < count; unit += 1)
+        {
+            snprintf(paths[unit], BUSTER_OBJECT_TEST_PATH_BYTES, "%s/u%u.o", lanes_directory, unit);
+            errors[unit] = OBJECT_ERROR_NONE;
+        }
+        ObjectTestLanes test = {
+            .link = &program.link,
+            .units = &units,
+            .paths = (const char* const*)paths,
+            .source_names = source_names,
+            .errors = errors,
+        };
+        bool none = lane_run(3, object_test_lanes_full_main, &test, 0);
+        for (uint32_t lane = 0; lane < 3; lane += 1)
+        {
+            none = none && !test.written[lane];
+        }
+        for (uint32_t unit = 0; unit < count; unit += 1)
+        {
+            none = none && errors[unit] == OBJECT_ERROR_FULL && access(paths[unit], F_OK) != 0;
+        }
+        object_test_expect(&tally, none, "a lane without room to start: no object, and every unit's error", 0);
+        rmdir(lanes_directory);
+    }
+    printf("  %u units' objects written by groups of 1, 2, 3 and 8 lanes, the last without atoms\n", count);
     arena_pop_to(arena, length);
     if (generated)
     {
@@ -2150,8 +2212,35 @@ static bool object_test_files(const char* directory, Arena* arena)
                        "over a file with another link", 0);
     object_test_expect(&tally, stat(path, &after) == 0 && after.st_ino != before.st_ino && after.st_nlink == 1 && (after.st_mode & 0777) == (before.st_mode & 0777),
                        "a new inode with the old mode", 0);
-    // Not a regular file, and no directory.
+    // A file with another link and the longest name a directory takes: the new file beside it has a name of its own.
+    char longest[BUSTER_OBJECT_TEST_PATH_BYTES];
+    char longest_other[BUSTER_OBJECT_TEST_PATH_BYTES];
+    const int prefix = snprintf(longest, sizeof(longest), "%s/", directory);
+    memset(longest + prefix, 'n', NAME_MAX);
+    longest[prefix + NAME_MAX] = 0;
+    snprintf(longest_other, sizeof(longest_other), "%s/longest-other.o", directory);
+    const bool longest_linked = object_write_file(longest, small, sizeof(small)) == OBJECT_ERROR_NONE && link(longest, longest_other) == 0;
+    object_test_expect(&tally,
+                       longest_linked && object_write_file(longest, large, sizeof(large)) == OBJECT_ERROR_NONE && object_test_same_file(longest, large, sizeof(large), arena) &&
+                           object_test_same_file(longest_other, small, sizeof(small), arena),
+                       "over a file with another link and a name of NAME_MAX bytes", 0);
+    unlink(longest);
+    unlink(longest_other);
+    // Not a regular file: /dev/null, and a pipe, which takes the bytes in order (a FIFO, with a reader that doesn't
+    // wait, and room for them); and no directory.
     object_test_expect(&tally, object_write_file("/dev/null", large, sizeof(large)) == OBJECT_ERROR_NONE, "/dev/null", 0);
+    char fifo[BUSTER_OBJECT_TEST_PATH_BYTES];
+    snprintf(fifo, sizeof(fifo), "%s/fifo.o", directory);
+    const int reader = mkfifo(fifo, 0600) == 0 ? open(fifo, O_RDONLY | O_NONBLOCK | O_CLOEXEC) : -1;
+    const bool piped = reader != -1 && object_write_file(fifo, small, sizeof(small)) == OBJECT_ERROR_NONE;
+    uint8_t received[sizeof(small) + 1];
+    const ssize_t received_bytes = reader != -1 ? read(reader, received, sizeof(received)) : -1;
+    object_test_expect(&tally, piped && received_bytes == (ssize_t)sizeof(small) && memcmp(received, small, sizeof(small)) == 0, "a pipe", 0);
+    if (reader != -1)
+    {
+        close(reader);
+    }
+    unlink(fifo);
     char missing[BUSTER_OBJECT_TEST_PATH_BYTES];
     snprintf(missing, sizeof(missing), "%s/missing/file.o", directory);
     object_test_expect(&tally, object_write_file(missing, small, sizeof(small)) == OBJECT_ERROR_FILE, "a missing directory", 0);
@@ -2191,8 +2280,8 @@ static bool object_test_listing(ObjectTestTally* tally, const char* tool, const 
 
 // Writes a program's objects to `directory`, lists each with readelf and llvm-readobj, and links them with each linker
 // that `linkers` names (a bit per linker of object_test_linkers) into a program that must print its output.
-static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* link, const uint8_t* output_expected, bool libc, ObjectOptions options,
-                                            const char* directory, const char* name, uint32_t linkers, bool keep, Arena* arena)
+static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* link, uint32_t unit_count, const uint8_t* output_expected, bool libc,
+                                            ObjectOptions options, const char* directory, const char* name, uint32_t linkers, bool keep, Arena* arena)
 {
     static const char* const object_test_linkers[] = {
         "ld.bfd",
@@ -2216,7 +2305,7 @@ static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* 
     const uint64_t failures = tally->failures;
     ObjectUnits units;
     ObjectSymbols symbols;
-    const bool prepared = object_prepare(&units, link, arena) && object_map_symbols(&symbols, link, arena);
+    const bool prepared = object_prepare(&units, link, unit_count, arena) && object_map_symbols(&symbols, link, arena);
     object_test_expect(tally, prepared, "object_prepare", 0);
     const uint32_t count = prepared ? units.count : 0;
     char** paths = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)count + 8) : 0;
@@ -2576,7 +2665,7 @@ static bool object_test_against_as(ObjectTestTally* tally, const LinkProgram* pr
     ObjectUnits units;
     ObjectSymbols symbols;
     const bool prepared = (mkdir(source_directory, 0777) == 0 || errno == EEXIST) && link_test_print_program(program, source_directory) &&
-                          object_prepare(&units, &program->link, arena) && object_map_symbols(&symbols, &program->link, arena);
+                          object_prepare(&units, &program->link, program->options.units, arena) && object_map_symbols(&symbols, &program->link, arena);
     object_test_expect(tally, prepared, "the program as GNU as source", 0);
     char source_path[BUSTER_OBJECT_TEST_PATH_BYTES + 32];
     char object_path[BUSTER_OBJECT_TEST_PATH_BYTES + 32];
@@ -2658,7 +2747,8 @@ static bool object_test_cross_check(uint64_t seed, const char* directory, bool k
             };
             char file[64];
             snprintf(file, sizeof(file), "%s%s", link_test_program_directories[i], sections == 1 ? "-sections" : "");
-            object_test_cross_check_program(&tally, &program.link, program.output, options[i].libc, object_options, directory, file, linkers, keep, arena);
+            object_test_cross_check_program(&tally, &program.link, options[i].units, program.output, options[i].libc, object_options, directory, file, linkers, keep,
+                                            arena);
         }
         if (generated)
         {
@@ -2681,8 +2771,8 @@ static bool object_test_cross_check(uint64_t seed, const char* directory, bool k
         const ObjectOptions object_options = {
             .function_sections = true,
         };
-        object_test_cross_check_program(&tally, &program.link, program.output, false, object_options, directory, "many-sections", BUSTER_OBJECT_TEST_ALL_LINKERS, keep,
-                                        arena);
+        object_test_cross_check_program(&tally, &program.link, many.units, program.output, false, object_options, directory, "many-sections",
+                                        BUSTER_OBJECT_TEST_ALL_LINKERS, keep, arena);
         link_program_release(&program);
     }
     // The link made by hand, listed by the tools but not linked: it has no _start.
@@ -2695,7 +2785,8 @@ static bool object_test_cross_check(uint64_t seed, const char* directory, bool k
         const ObjectOptions object_options = {
             .function_sections = sections == 1,
         };
-        object_test_cross_check_program(&tally, &hand, 0, false, object_options, directory, sections == 1 ? "by-hand-sections" : "by-hand", 0, keep, arena);
+        object_test_cross_check_program(&tally, &hand, BUSTER_OBJECT_TEST_HAND_UNITS, 0, false, object_options, directory, sections == 1 ? "by-hand-sections" : "by-hand", 0,
+                                        keep, arena);
     }
     arena_pop_to(arena, length);
     return object_test_report(&tally);

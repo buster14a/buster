@@ -388,9 +388,10 @@ segment off its alignment when told where: seed 1's `static-defaults` with
 `object_writer.c`:
 
 - objects: each unit's object of `test-link`'s seven programs (with 500 workers
-  in the one that takes `--functions`) and of a link made by hand (gaps between
+  in the one that takes `--functions`), of a link made by hand (gaps between
   atoms, an atom of no size, weak, hidden and protected symbols, pointers into
-  a string pool, a unit without atoms), with and without function sections.
+  a string pool, units without atoms between and after the others) and of a
+  link without atoms, with and without function sections.
   Each is built twice, the second time over poisoned memory, and must come out
   the same; the test's own ELF reader reads it back and checks the rules every
   object keeps; and it is compared with the representation, from which the test
@@ -403,13 +404,15 @@ segment off its alignment when told where: seed 1's `static-defaults` with
 - many sections: one unit of 33,000 functions in sections of their own, 66,039
   sections: `e_shnum` and `e_shstrndx` in section 0, and symbols' indices
   through `SHN_XINDEX` and `.symtab_shndx`;
-- lanes: every unit's object of a program of 24 units written by
-  `object_write_units` with groups of 1, 2, 3 and 8 lanes, byte-identical to
-  `object_build`'s;
+- lanes: every unit's object of a program of 24 units and a 25th without
+  atoms written by `object_write_units` with groups of 1, 2, 3 and 8 lanes,
+  byte-identical to `object_build`'s; and a group in which a lane has no room
+  to start, which writes no object and gives every unit `OBJECT_ERROR_FULL`;
 - files: `object_write_file` into a new file, over a larger and a smaller one
   (in place: the same inode, truncated), over one with another hard link (a
-  new file with its mode, and the other link keeps the old bytes), into
-  `/dev/null`, and into a missing directory (an error);
+  new file with its mode, and the other link keeps the old bytes), also with a
+  name of `NAME_MAX` bytes, into `/dev/null`, into a pipe, and into a missing
+  directory (an error);
 - with `--cross-check`, which needs `readelf`, `llvm-readobj`, `as`,
   `ld.bfd`, `ld.lld`, `mold` and `wild` on `PATH`, and a `cc` that takes
   `-fuse-ld=wild` (GCC 16 on the 9700X):

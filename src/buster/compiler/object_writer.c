@@ -24,7 +24,8 @@
 // link_add_code_fixups zeroes code's, and data's are zero, as GNU as writes them.
 //
 // Count, place, fill (docs/object-writer-and-linker.md, "Lanes", rule 3):
-//   - object_prepare, once per link: the atoms grouped by unit and class, the symbols defined in atoms by unit (locals
+//   - object_prepare, once per link, for the units its caller says the link has (an empty translation unit, without
+//     atoms, still gets its object): the atoms grouped by unit and class, the symbols defined in atoms by unit (locals
 //     first) with what each one is to its unit's object, each symbol's name's bytes and each unit's, each TEXT atom's
 //     name and each unit's cost, by counting sorts.
 //   - object_build, per unit: counts the sections (their sizes, alignments and fixups), the symbols and the string
@@ -96,7 +97,7 @@ struct ObjectOptions
 typedef struct ObjectUnits ObjectUnits;
 struct ObjectUnits
 {
-    // Units 0 to count - 1: one more than the largest atoms.unit.
+    // Units 0 to count - 1, as object_prepare was given them: every atoms.unit is one of them.
     uint32_t count;
     // The atoms by unit, then class, then id: unit u's atoms of class c are from atoms[atom_begin[u * BUSTER_LINK_CLASS_COUNT
     // + c]] up to the next entry's.
@@ -164,9 +165,10 @@ struct Object
     ObjectError error;
 };
 
-// Groups the link's atoms and symbols by unit, with what object_build needs, from `arena`. Returns false if the arena
-// can't hold them (or the scratch arena the counting sorts' cursors), or a unit is UINT32_MAX.
-static __attribute__((unused)) bool object_prepare(ObjectUnits* units, const Link* link, Arena* arena);
+// Groups the link's atoms and symbols by unit, with what object_build needs, from `arena`, for units 0 to count - 1:
+// the caller's translation units, which an atomless one is among, since its object is still written. Returns false if
+// an atom's unit isn't below count, or the arena can't hold them (or the scratch arena the counting sorts' cursors).
+static __attribute__((unused)) bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count, Arena* arena);
 // The calling lane's ObjectSymbols for the link's symbols, from `arena`. Returns false if the arena can't hold them.
 static __attribute__((unused)) bool object_map_symbols(ObjectSymbols* symbols, const Link* link, Arena* arena);
 // Builds unit `unit`'s object in memory, its STT_FILE named `source_name`: its bytes are pushed on `arena`, and what
@@ -178,7 +180,8 @@ static __attribute__((unused)) Object object_build(const Link* link, ObjectUnits
 static __attribute__((unused)) ObjectError object_write_file(const char* path, const uint8_t* bytes, uint64_t size);
 // Every lane of the group calls it with the same arguments: it writes each unit's object to paths[unit], its STT_FILE
 // named source_names[unit], each lane building whole objects in its scratch arenas, and errors[unit] gets each one's
-// error. Returns whether every object was written, the same on every lane; like lane_sync, it waits for every lane.
+// error (OBJECT_ERROR_FULL for every unit if a lane can't hold what it needs to start). Returns whether every object was
+// written, the same on every lane; like lane_sync, it waits for every lane.
 static __attribute__((unused)) bool object_write_units(const Link* link, ObjectUnits* units, ObjectOptions options, const char* const* paths, const String8* source_names,
                                                        ObjectError* errors);
 
@@ -353,22 +356,22 @@ static bool object_align(uint64_t x, uint64_t alignment, uint64_t* aligned)
 // ---------------------------------------------------------------------------------------------------------------------
 // Preparing
 
-static bool object_prepare(ObjectUnits* units, const Link* link, Arena* arena)
+static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count, Arena* arena)
 {
     const LinkAtoms* atoms = &link->atoms;
     const LinkSymbols* symbols = &link->symbols;
     const uint64_t length = arena->length;
-    uint64_t unit_count = 0;
-    for (AtomId atom = 1; atom < atoms->count; atom += 1)
+    // 64 bits, for the sizes worked out from it.
+    const uint64_t unit_count = count;
+    bool prepared = true;
+    for (AtomId atom = 1; prepared && atom < atoms->count; atom += 1)
     {
-        const uint64_t after = (uint64_t)atoms->unit[atom] + 1;
-        unit_count = after > unit_count ? after : unit_count;
+        prepared = atoms->unit[atom] < unit_count;
     }
     ObjectUnits result = {
-        .count = (uint32_t)unit_count,
+        .count = count,
     };
     const uint64_t keys = unit_count * BUSTER_LINK_CLASS_COUNT;
-    bool prepared = unit_count <= UINT32_MAX;
     if (prepared)
     {
         result.atoms = BUSTER_ARENA_PUSH_ARRAY(arena, AtomId, atoms->count);
@@ -1280,6 +1283,10 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
 // ---------------------------------------------------------------------------------------------------------------------
 // Writing
 
+// The new file beside one with other links, in the same directory: mkstemp's template, under NAME_MAX whatever the
+// destination's name is.
+#define BUSTER_OBJECT_TEMPORARY_NAME ".buster-object-XXXXXX"
+
 // One open, with O_CREAT but never O_TRUNC, which on btrfs costs as much as writing again; then by what fstat finds
 // (docs/object-writer-and-linker.md, "The object writer (-c)"):
 //   - a regular file with one link, or the empty one open just made, is written in place, and truncated only if it was
@@ -1287,15 +1294,16 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
 //     either (a transaction on btrfs, about 1 µs), so a rebuild's object, which keeps its size or grows, skips it;
 //   - a regular file with other links gets a new file beside it, with its mode, renamed over it, so that the other links
 //     keep the old contents;
-//   - anything else (/dev/null) is written as it is.
-// One write: an object is one buffer, and pwrite returns early only for more than 2 GB or on an error, which the loop
-// handles.
+//   - anything else is written as it is, in order: write rather than pwrite, which a pipe or a terminal refuses.
+// One write: an object is one buffer, and pwrite or write returns early only for more than 2 GB, on an error, or into a
+// pipe, which the loop handles.
 static ObjectError object_write_file(const char* path, const uint8_t* bytes, uint64_t size)
 {
     ObjectError result = OBJECT_ERROR_NONE;
     char temporary[PATH_MAX];
     bool replace = false;
     bool truncate = false;
+    bool sequential = false;
     struct stat stats;
     int fd = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0666);
     if (fd == -1 || fstat(fd, &stats) != 0)
@@ -1306,7 +1314,9 @@ static ObjectError object_write_file(const char* path, const uint8_t* bytes, uin
     {
         close(fd);
         fd = -1;
-        const int length = snprintf(temporary, sizeof(temporary), "%s.XXXXXX", path);
+        const char* slash = strrchr(path, '/');
+        const int directory_bytes = slash != 0 ? (int)(slash - path) + 1 : 0;
+        const int length = snprintf(temporary, sizeof(temporary), "%.*s%s", directory_bytes, path, BUSTER_OBJECT_TEMPORARY_NAME);
         replace = length > 0 && length < (int)sizeof(temporary);
         fd = replace ? mkstemp(temporary) : -1;
         if (fd == -1 || fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 || fchmod(fd, stats.st_mode & 07777) != 0)
@@ -1317,11 +1327,12 @@ static ObjectError object_write_file(const char* path, const uint8_t* bytes, uin
     else
     {
         truncate = S_ISREG(stats.st_mode) && (uint64_t)stats.st_size > size;
+        sequential = !S_ISREG(stats.st_mode);
     }
     uint64_t written = 0;
     while (result == OBJECT_ERROR_NONE && written < size)
     {
-        const ssize_t count = pwrite(fd, bytes + written, size - written, (off_t)written);
+        const ssize_t count = sequential ? write(fd, bytes + written, size - written) : pwrite(fd, bytes + written, size - written, (off_t)written);
         if (count > 0)
         {
             written += (uint64_t)count;
@@ -1385,6 +1396,16 @@ static bool object_write_units(const Link* link, ObjectUnits* units, ObjectOptio
         {
             result = result && errors[unit] == OBJECT_ERROR_NONE;
         }
+    }
+    else
+    {
+        // No object is written: every unit's error says so, each lane writing a range of them before any lane returns.
+        const Range64 range = lane_range(units->count);
+        for (uint64_t unit = range.begin; unit < range.end; unit += 1)
+        {
+            errors[unit] = OBJECT_ERROR_FULL;
+        }
+        lane_sync();
     }
     scratch_end(scratch);
     return result;

@@ -949,11 +949,13 @@ lld, mold, wild and this linker accept, one object per unit (`atoms.unit`).
 `src/buster/compiler/object_writer.c` implements it, and its orientation
 comment has the rules below in full. Its structure is count, place, fill:
 
-1. **Prepare,** once per link (`object_prepare`): counting sorts group the
-   atoms by unit and class, and the symbols defined in atoms by unit, locals
-   first. Each symbol gets what it is to its unit's object (local or global,
-   in a string pool or not, and its place among them) in one 64-bit word, and
-   each unit the bytes its names take.
+1. **Prepare,** once per link (`object_prepare`), for as many units as the
+   caller says the link has, so that a translation unit without atoms still
+   gets its object: counting sorts group the atoms by unit and class, and the
+   symbols defined in atoms by unit, locals first. Each symbol gets what it is
+   to its unit's object (local or global, in a string pool or not, and its
+   place among them) in one 64-bit word, and each unit the bytes its names
+   take.
 2. **Count,** per object (`object_build`): the sections, with their sizes,
    alignments and relocations. Then one pass over the unit's fixups finds the
    symbols they refer to, the undefined ones among them, and the sections
@@ -1129,12 +1131,18 @@ Copying the atoms with AVX-512 instead of `memcpy` didn't.
 
 **Writing the file** (`object_write_file`):
 
-- A regular file with one link is overwritten in place: `open` without
-  `O_TRUNC`, `fstat`, `pwrite`, and `ftruncate` only if the file was longer.
-- A file with other hard links gets a new file beside it (`mkstemp`) with its
-  mode, renamed over it, so the other links keep the old contents.
-- Without a file, `open` creates one with `O_CREAT | O_EXCL`. Anything else
-  (`/dev/null`) is written as it is.
+- One `open`, with `O_CREAT` and never `O_TRUNC`, then `fstat`. A regular
+  file with one link, or the empty one `open` just made, is written in place
+  with `pwrite`, and truncated only if it was longer.
+- A file with other hard links gets a new file beside it, in the same
+  directory under a name of its own (`mkstemp`, which a suffix to the
+  destination's name could take past `NAME_MAX`), with its mode, renamed over
+  it, so the other links keep the old contents.
+- Anything else (`/dev/null`, a pipe) is written as it is, in order: `write`,
+  since a pipe refuses `pwrite`.
+- A group of lanes that can't start, because a lane has no room for its
+  order of parts or its symbols, writes no object and gives every unit
+  `OBJECT_ERROR_FULL`.
 
 For a 155 KB file, each way writing files of its own (µs):
 

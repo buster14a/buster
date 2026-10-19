@@ -275,7 +275,7 @@ int run_object_writer_benchmark(int argc, char** argv)
     {
         fprintf(stderr, "link_program_generate: %s\n", program.problem);
     }
-    else if (arena.base == 0 || !object_prepare(&units, &program.link, &arena) || !object_map_symbols(&object_symbols, &program.link, &arena) ||
+    else if (arena.base == 0 || !object_prepare(&units, &program.link, options.units, &arena) || !object_map_symbols(&object_symbols, &program.link, &arena) ||
              (paths = arena_push(&arena, (uint64_t)units.count * BUSTER_OBJECT_BENCHMARK_WAYS * BUSTER_OBJECT_BENCHMARK_PATH_BYTES, 1)) == 0)
     {
         fprintf(stderr, "out of memory\n");
@@ -339,7 +339,7 @@ int run_object_writer_benchmark(int argc, char** argv)
                 const uint64_t length = arena.length;
                 ObjectUnits prepared;
                 const uint64_t prepare_begin = object_benchmark_now();
-                written = object_prepare(&prepared, &program.link, &arena);
+                written = object_prepare(&prepared, &program.link, options.units, &arena);
                 const uint64_t prepare_end = object_benchmark_now();
                 arena_pop_to(&arena, length);
                 // Build: every object, one after another, into the same arena.
