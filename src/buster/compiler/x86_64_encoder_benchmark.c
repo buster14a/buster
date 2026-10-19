@@ -1,6 +1,7 @@
 // The x86-64 encoder benchmark: times x86_encode at each batch width (instructions per loop iteration) and output
-// store, and a one-instruction-at-a-time scalar loop, on a synthetic instruction stream, after checking that they all
-// produce the same bytes, offsets and fixup ends.
+// store, x86_encode_apx's loop (whose instructions here have no registers 16 to 31, and so the same bytes) and a
+// one-instruction-at-a-time scalar loop, on a synthetic instruction stream, after checking that they all produce the
+// same bytes, offsets and fixup ends.
 //
 // Usage: build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform | --vector] [--offsets] [--fixups]
 //                                             [--seed N] [--only NAME]
@@ -453,7 +454,7 @@ __attribute__((noinline)) static int64_t encode_scalar_loop(const X86Instruction
         {
             offsets[i] = (uint32_t)length;
         }
-        length += encode_one(&instructions[i], output + length, false);
+        length += encode_one(&instructions[i], output + length, X86_ENCODER_MODE_64);
         if (fixup_ends != 0 && (instructions[i].form & BUSTER_X86_FORM_FIXUP))
         {
             fixup_ends[marked] = (uint32_t)length;
@@ -508,6 +509,7 @@ static const X86BenchmarkImplementation x86_benchmark_implementations[] = {
     { "x86_encode_16_compress_stores", x86_encode_16_compress_stores },
     { "x86_encode_64_fixup_compress_stores", x86_encode_64_fixup_compress_stores },
     { "x86_encode_64_offsets_then_pick", encode_offsets_then_pick },
+    { "x86_encode_64_apx", x86_encode_64_apx },
 };
 #define BUSTER_X86_BENCHMARK_IMPLEMENTATIONS BUSTER_ARRAY_LENGTH(x86_benchmark_implementations)
 
@@ -680,7 +682,7 @@ int run_x86_encoder_benchmark(int argc, char** argv)
     {
         fprintf(stderr, "usage: %s [--count N] [--section N] [--uniform | --vector] [--offsets] [--fixups] [--seed N] [--only NAME]\n", argv[0]);
     }
-    else if (!x86_encoder_initialize())
+    else if (!x86_encoder_initialize() || !x86_encoder_initialize_apx())
     {
         fprintf(stderr, "a form doesn't fit in a template\n");
     }
