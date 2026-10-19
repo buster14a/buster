@@ -29,7 +29,9 @@ code. The essentials are: C and Clang on Linux/Zen 5, 4-space Allman formatting,
 `snake_case` functions, `PascalCase` types, `BUSTER_` macros, one return per
 function, direct and explicit control flow, bounded slices, arena-oriented
 allocation, and safe SIMD memory accesses. Prefer simple data layouts and
-measured end-to-end performance improvements. Do not import Buster's portability
+measured end-to-end performance improvements. Prefer single-line statements,
+declarations, and function headers where readable, and one aggregate field or
+initializer entry per line. Do not import Buster's portability
 or infrastructure machinery merely to match its style.
 
 ## Current repository and exact smoke commands
