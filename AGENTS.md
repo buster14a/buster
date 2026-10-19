@@ -126,7 +126,7 @@ yet compared against a performance baseline. Keep just one compiler executable.
 ## x86-64 encoder tests
 
 `./build/compiler test-x86-encoder` (about 0.3 s) checks that every form fits a
-template, both encoders on 311 known encodings from GNU as, a digest of the
+template, both encoders on 343 known encodings from GNU as, a digest of the
 scalar encoder's output for 100,000 random instructions, every batch width and
 variant of `x86_encode` against the scalar encoder (bytes and offsets) on every
 count from 0 to 199 and on 300,000 random instructions of every form (legacy
@@ -150,10 +150,10 @@ objcopy -O binary -j .lengths build/x86.o build/x86.lengths
 ```
 
 The printed assembly uses only operands GNU as encodes with the same form
-(`{load}`/`{store}`, `{evex}`, immediates outside the imm8 range for imm32
-forms, and so on), so any difference is a bug in one of them. Cross-check more
-than one seed after changing forms (1.7 million instructions over seeds 1, 7
-and 99 were last checked).
+(`{load}`/`{store}`, `{vex}` and `{evex}`, immediates outside the imm8 range for
+imm32 forms, and so on), so any difference is a bug in one of them. Cross-check
+more than one seed after changing forms (1.7 million instructions over seeds 1,
+7 and 99 were last checked).
 
 ## x86-64 encoder benchmark
 
