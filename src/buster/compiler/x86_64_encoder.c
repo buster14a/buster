@@ -125,10 +125,12 @@ typedef enum X86Register
 typedef struct X86Instruction X86Instruction;
 struct X86Instruction
 {
-    // The immediate, in as many low bytes as the form's immediate has (ENTER's two are imm16 | imm8 << 16). A
-    // 64-bit immediate or address (MOV r64, imm64 and MOVABS) is immediate | displacement << 32.
+    // The immediate, in as many low bytes as the form's immediate has (ENTER's two are imm16 | imm8 << 16), signed or
+    // not: imm8 in [-128, 255], imm16 in [-32768, 65535] and ENTER's in [0, 2^24). A 64-bit immediate or address
+    // (MOV r64, imm64 and MOVABS) is immediate | displacement << 32.
     int32_t immediate;
-    // The memory operand's displacement, or a relative branch's displacement from the end of the instruction.
+    // The memory operand's displacement, or a relative branch's displacement from the end of the instruction (a rel8's
+    // in [-128, 127]).
     int32_t displacement;
     // The register in ModRM.reg.
     uint8_t reg;
@@ -2927,7 +2929,9 @@ static __attribute__((unused)) bool x86_encoder_initialize(void);
 // Encodes the instructions into `output`, which has room for `capacity` bytes (at least
 // BUSTER_X86_ENCODER_CAPACITY(count)), and stores each one's offset in `offsets` if it isn't null. Writes nothing past
 // output + capacity, but the bytes after the instructions' may change. Returns the number of bytes, or a negative
-// X86EncoderError. Requires x86_encoder_initialize.
+// X86EncoderError. Requires x86_encoder_initialize. It rejects the operands its encoding can't represent, but not those
+// only x86_validate does: an immediate or rel8 outside its field's range (it writes the field's low bytes), zeroing
+// without an opmask or into memory, and fields the form doesn't have (which it ignores).
 static __attribute__((unused)) int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets);
 // The same, one instruction at a time from the form table, after x86_validate: the reference for testing.
 static __attribute__((unused)) int64_t x86_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets);

@@ -133,7 +133,9 @@ count from 0 to 199 and on 300,000 random instructions of every form (legacy
 with x87, VEX and EVEX, with opmasks, broadcasts, rounding, registers 16-31 and
 FS and GS segment overrides),
 the same between `PROT_NONE` guard pages, and that invalid operands are
-rejected. `--count N` and `--seed N` change the random streams.
+rejected (immediates and rel8s outside their fields' ranges by `x86_validate`
+alone: `x86_encode` writes their low bytes). `--count N` and `--seed N` change
+the random streams.
 
 The digest was recorded when GNU as encoded the same stream to the same bytes.
 After changing the form table or the scalar encoder, cross-check with GNU as
