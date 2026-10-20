@@ -558,6 +558,8 @@ struct Preprocessor
     InternTable* table;
     bool vectorized;
     uint32_t refine_flags;
+    // The prefixed literals the language mode doesn't have, by kind (pp_split_kinds).
+    uint64_t split_kinds;
     // Memory for files' leading-space words and directive tables, macro bodies' spellings and paths. Files' token
     // columns (kinds, starts and values) have an arena each, `columns`, and so do the output and the stacks (PPTokens)
     // and each array of records (`arrays`, whose first pages are then base pages).
@@ -1233,6 +1235,101 @@ static IdentId pp_find_guard(const PPFileData* data)
     return result;
 }
 
+// The prefixed literals a language mode doesn't have, as a mask of their kinds: clang lexes one as its prefix, an
+// identifier, and the literal without it (u'a' before C11 is `u` and 'a'). The u, U and u8 prefixes are C11's, but u8 on
+// a character constant is C23's; L is every mode's.
+static uint64_t pp_split_kinds(CLanguage language)
+{
+    const uint64_t c11 = (1ull << C_TOKEN_UTF8_CHAR_CONSTANT) | (1ull << C_TOKEN_UTF16_CHAR_CONSTANT) | (1ull << C_TOKEN_UTF32_CHAR_CONSTANT) |
+                         (1ull << C_TOKEN_UTF8_STRING_LITERAL) | (1ull << C_TOKEN_UTF16_STRING_LITERAL) | (1ull << C_TOKEN_UTF32_STRING_LITERAL);
+    return language.standard < 2011 ? c11 : language.standard < 2023 ? 1ull << C_TOKEN_UTF8_CHAR_CONSTANT : 0;
+}
+
+// Is a token of this kind (its start-of-line bit aside) one the mode splits?
+BUSTER_INLINE bool pp_splits_kind(uint64_t split, uint8_t kind)
+{
+    const uint8_t base = kind & 0x7F;
+    return base < 64 && ((split >> base) & 1) != 0;
+}
+
+// How many of `count` tokens a mode splits (`split`, pp_split_kinds), 64 kinds at a time: the mask spread to a byte per
+// kind is a vpermi2b table, which reads only a kind's low 7 bits, so the start-of-line bit doesn't matter.
+static uint32_t pp_count_splits_vector(const uint8_t* kinds, uint32_t count, uint64_t split)
+{
+    const __m512i ones = _mm512_set1_epi8(1);
+    const __m512i low = _mm512_maskz_mov_epi8((__mmask64)split, ones);
+    const __m512i high = _mm512_setzero_si512();
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < count; i += 64)
+    {
+        const __mmask64 valid = _bzhi_u64(~0ull, count - i < 64 ? count - i : 64);
+        const __m512i kind = _mm512_maskz_loadu_epi8(valid, kinds + i);
+        result += (uint32_t)__builtin_popcountll(_mm512_mask_test_epi8_mask(valid, _mm512_permutex2var_epi8(low, kind, high), ones));
+    }
+    return result;
+}
+
+// pp_count_splits_vector's scalar twin.
+static uint32_t pp_count_splits_scalar(const uint8_t* kinds, uint32_t count, uint64_t split)
+{
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        result += pp_splits_kind(split, kinds[i]);
+    }
+    return result;
+}
+
+// Splits the `splits` tokens whose kinds the mode splits into their prefix, an identifier with the token's start of line,
+// and the literal from its first quote (a line splice can't hold one), in place from the end. The arrays have room, since
+// a lexer's arrays hold a token per byte. Returns the new count.
+static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, uint32_t splits, uint64_t split)
+{
+    uint32_t remaining = splits;
+    for (uint32_t i = count; remaining != 0 && i > 0; i -= 1)
+    {
+        const uint32_t t = i - 1;
+        const uint8_t kind = kinds[t];
+        const uint32_t start = starts[t];
+        const uint32_t end = ends[t];
+        if (pp_splits_kind(split, kind))
+        {
+            uint32_t quote = start;
+            while (bytes[quote] != '\'' && bytes[quote] != '"')
+            {
+                quote += 1;
+            }
+            kinds[t + remaining] = (kind & 0x7F) <= C_TOKEN_UTF32_CHAR_CONSTANT ? C_TOKEN_CHAR_CONSTANT : C_TOKEN_STRING_LITERAL;
+            starts[t + remaining] = quote;
+            ends[t + remaining] = end;
+            kinds[t + remaining - 1] = (uint8_t)((kind & 0x80) | C_TOKEN_RAW_IDENTIFIER);
+            starts[t + remaining - 1] = start;
+            ends[t + remaining - 1] = quote;
+            remaining -= 1;
+        }
+        else
+        {
+            kinds[t + remaining] = kind;
+            starts[t + remaining] = start;
+            ends[t + remaining] = end;
+        }
+    }
+    return count + splits;
+}
+
+// The prefixed literals among `count` freshly lexed tokens that the mode doesn't have, split (pp_split_prefixes): a scan
+// of the kinds, and the rare split. Returns the new count.
+static uint32_t pp_lex_for_mode(const Preprocessor* pp, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, bool vectorized)
+{
+    uint32_t result = count;
+    if (pp->split_kinds != 0)
+    {
+        const uint32_t splits = vectorized ? pp_count_splits_vector(kinds, count, pp->split_kinds) : pp_count_splits_scalar(kinds, count, pp->split_kinds);
+        result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, count, splits, pp->split_kinds) : count;
+    }
+    return result;
+}
+
 // Lexes, refines and indexes a file's bytes: tokens, values, leading-space bits and the directive table. Returns false
 // if memory runs out or the file is too big for 32-bit positions.
 static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path)
@@ -1245,7 +1342,8 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
     bool result = data->kinds != 0 && data->starts != 0 && data->values != 0;
     const bool timing = pp->options.timing;
     uint64_t tick = timing ? __rdtsc() : 0;
-    const int64_t count = result ? c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, pp->refine_flags) : -1;
+    int64_t count = result ? c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, pp->refine_flags) : -1;
+    count = count > 0 ? pp_lex_for_mode(pp, data->bytes, data->kinds, data->starts, data->values, (uint32_t)count, pp->vectorized) : count;
     if (timing)
     {
         const uint64_t now = __rdtsc();
@@ -2518,7 +2616,8 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
     uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-    const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
+    int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
+    count = count > 0 ? pp_lex_for_mode(pp, bytes, kinds, starts, ends, (uint32_t)count, false) : count;
     uint32_t result = count >= 0 && pp_room(pp, into, (uint32_t)count) ? (uint32_t)count : BUSTER_PP_NONE;
     for (uint32_t i = 0; result != BUSTER_PP_NONE && i < (uint32_t)count; i += 1)
     {
@@ -2580,7 +2679,8 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, pp->refine_flags) : -1;
-            valid = count == 1 && starts[0] == 0 && ends[0] == length;
+            // A prefixed literal the mode doesn't have lexes as two tokens (pp_split_kinds).
+            valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_splits_kind(pp->split_kinds, kinds[0]);
             kind = valid ? kinds[0] & 0x7F : kind;
         }
         if (valid)
@@ -6634,6 +6734,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->table = table;
     pp->vectorized = !options->scalar;
     pp->refine_flags = 0;
+    pp->split_kinds = pp_split_kinds(options->language);
     pp->arena = arena_reserve(BUSTER_PP_ARENA_BYTES);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
     {

@@ -111,15 +111,25 @@ static bool pp_stream_spellings(Preprocessor* pp, PPSpellings* spellings)
     return result;
 }
 
-// The spellings of a text's tokens (as c_tokenize lexes it).
-static bool pp_text_spellings(const uint8_t* text, uint64_t length, PPSpellings* spellings)
+// Lexes a text as the language mode does: c_tokenize, then the prefixed literals the mode doesn't have split, by `split`
+// (pp_split_kinds). Returns the count, or -1.
+static int64_t pp_test_lex(const uint8_t* text, uint64_t length, uint64_t split, uint8_t* kinds, uint32_t* starts, uint32_t* ends)
+{
+    int64_t result = c_tokenize(text, length, kinds, starts, ends, 0);
+    const uint32_t splits = result > 0 ? pp_count_splits_scalar(kinds, (uint32_t)result, split) : 0;
+    result = splits != 0 ? pp_split_prefixes(text, kinds, starts, ends, (uint32_t)result, splits, split) : result;
+    return result;
+}
+
+// The spellings of a text's tokens, as the language mode lexes them (`split`, pp_split_kinds).
+static bool pp_text_spellings(const uint8_t* text, uint64_t length, uint64_t split, PPSpellings* spellings)
 {
     const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY(length);
     Arena arena = arena_reserve(capacity * 9 + 256);
     uint8_t* kinds = arena_push(&arena, capacity, 64);
     uint32_t* starts = arena_push_array(&arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(&arena, capacity, sizeof(uint32_t), 64);
-    const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize(text, length, kinds, starts, ends, 0) : -1;
+    const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? pp_test_lex(text, length, split, kinds, starts, ends) : -1;
     bool result = count >= 0 && pp_spellings_initialize(spellings, (uint64_t)count + 1, length + 64);
     for (int64_t i = 0; result && i < count; i += 1)
     {
@@ -280,7 +290,7 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
         free(scalar_text);
     }
     PPSpellings printed = { 0 };
-    result = result && pp_text_spellings((const uint8_t*)text, length, &printed);
+    result = result && pp_text_spellings((const uint8_t*)text, length, pp->split_kinds, &printed);
     if (result)
     {
         char label[256];
@@ -434,7 +444,7 @@ static bool pp_marker_line(const uint8_t* text, uint64_t at, uint64_t end, uint3
     return result;
 }
 
-static bool pp_placed_tokens(const uint8_t* text, uint64_t length, PPPlaced* placed)
+static bool pp_placed_tokens(const uint8_t* text, uint64_t length, uint64_t split, PPPlaced* placed)
 {
     uint64_t line_count = 1;
     for (uint64_t i = 0; i < length; i += 1)
@@ -500,7 +510,7 @@ static bool pp_placed_tokens(const uint8_t* text, uint64_t length, PPPlaced* pla
             at = end + 1;
         }
         line_starts[line_count] = UINT64_MAX;
-        const int64_t count = c_tokenize(blank, length, kinds, starts, ends, 0);
+        const int64_t count = pp_test_lex(blank, length, split, kinds, starts, ends);
         result = count >= 0 && pp_spellings_initialize(&placed->spellings, (uint64_t)count + 1, length + 64);
         placed->lines = result ? arena_push_array(&placed->arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
         placed->states = result ? arena_push_array(&placed->arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
@@ -601,7 +611,7 @@ static bool pp_test_placed(Preprocessor* pp, const PPPlaced* theirs, const char*
     size_t length = 0;
     char* text = pp_test_print(pp, true, true, &length);
     PPPlaced ours = { 0 };
-    const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, &ours) && pp_compare_placed(&ours, theirs, name, "clang");
+    const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, pp->split_kinds, &ours) && pp_compare_placed(&ours, theirs, name, "clang");
     pp_placed_release(&ours);
     free(text);
     return result;
@@ -628,7 +638,8 @@ struct PPTestCase
     const char* standard;
     // The expected output's text (compared token by token).
     const char* expected;
-    // Whether the case is meant to fail (an error), so that the expected output isn't compared.
+    // Whether the case is meant to fail (an error). Its expected output is then compared only if it has one, to check
+    // how the run went on after the error (clang's goes on the same way).
     bool fails;
     // The warnings each run must give (redefinitions).
     uint32_t warnings;
@@ -830,6 +841,16 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "101\n\"virtual.c\"\n\"a\\\\b.c\"\n\"\xc3\xb1.c\"\n\"\\n.c\"\n", false, 0, 0, 0 },
     { "#line with a numeric escape in its file name", "#line 200 \"\\x76irtual.c\"\n__FILE__\n",
       0, "c17", "", true, 0, 0, 0 },
+    // Lexing by the language mode, as clang lexes: the u, U and u8 prefixes are C11's (u8 on a character constant C23's),
+    // so before them each is an identifier and the literal after it, and a paste that would form one isn't a token.
+    { "literal prefixes before C11", "#define u [u]\n#define U [U]\n#define u8 [u8]\n#define L [L]\nu'a' U'a' u\"s\" U\"s\" u8\"s\" u8'a' L'a' L\"s\"\n",
+      0, "c99", "[u]'a' [U]'a' [u]\"s\" [U]\"s\" [u8]\"s\" [u8]'a' L'a' L\"s\"\n", false, 0, 0, 0 },
+    { "u8 character constants before C23", "#define u [u]\n#define U [U]\n#define u8 [u8]\n#define L [L]\nu'a' U'a' u\"s\" U\"s\" u8\"s\" u8'a' L'a' L\"s\"\n",
+      0, "gnu17", "u'a' U'a' u\"s\" U\"s\" u8\"s\" [u8]'a' L'a' L\"s\"\n", false, 0, 0, 0 },
+    { "literal prefixes in C23", "#define u [u]\n#define U [U]\n#define u8 [u8]\n#define L [L]\nu'a' U'a' u\"s\" U\"s\" u8\"s\" u8'a' L'a' L\"s\"\n",
+      0, "c23", "u'a' U'a' u\"s\" U\"s\" u8\"s\" u8'a' L'a' L\"s\"\n", false, 0, 0, 0 },
+    { "a paste that forms u8'a' before C23", "#define P(a, b) a ## b\nP(u8, 'a')\n",
+      0, "gnu17", "u8 'a'\n", true, 0, 0, 0 },
     { "#include of a missing absolute path", "#include \"/buster-missing-directory/absent.h\"\nafter\n", 0, "c17", "", true },
     { "-include of a missing absolute path", "x\n", 0, "c17", "", true, 0, "-include /buster-missing-directory/absent.h", 0 },
 };
@@ -1017,11 +1038,11 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
             }
         }
     }
-    if (result && !test->fails)
+    if (result && (!test->fails || test->expected[0] != 0))
     {
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
-        result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), &expected) &&
+        result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), runs[0].split_kinds, &expected) &&
                  pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name) &&
                  (test->markers == 0 || pp_test_markers(&runs[0], test, directory));
         if (result && with_clang)
@@ -1029,7 +1050,7 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
-            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, &theirs) &&
+            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, &theirs) &&
                      pp_compare_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], &theirs, test->name);
             pp_placed_release(&theirs);
             free(clang_text);
@@ -1075,7 +1096,7 @@ static bool pp_test_file(int argument_count, char** arguments, const PPOptions* 
     if (result && with_clang)
     {
         PPPlaced theirs = { 0 };
-        result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
+        result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, runs[0].split_kinds, &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
                  pp_test_placed(&runs[0], &theirs, path);
         pp_placed_release(&theirs);
     }
@@ -1468,14 +1489,14 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
         result = result && pp_same_streams(&preprocessors[0], &preprocessors[1], test.name) && pp_stream_spellings(&preprocessors[0], &ours) &&
-                 pp_text_spellings((const uint8_t*)test.expected, strlen(test.expected), &expected) &&
+                 pp_text_spellings((const uint8_t*)test.expected, strlen(test.expected), preprocessors[0].split_kinds, &expected) &&
                  pp_compare_spellings(&preprocessors[0], &ours, &expected, test.name, "wanted");
         if (result && with_clang)
         {
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
-            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, &theirs) &&
+            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, preprocessors[0].split_kinds, &theirs) &&
                      pp_compare_spellings(&preprocessors[0], &ours, &theirs.spellings, test.name, "clang");
             pp_placed_release(&theirs);
             free(clang_text);

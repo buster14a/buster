@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on this branch (`main` at 2aa1358), with `-march=native` (AVX-512 intrinsic headers) | 11 | 6,379,384 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 77 | |
+| The built-in cases (`pp_test_cases`) | 81 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -132,6 +132,18 @@ for the whole translation unit, because macro definitions point into the tokens
 of the file that defines them. Files are found by path (`pp_lookup_path`, a
 table that starts at 1,024 slots and doubles) and shared by device and inode,
 so that two paths to one file are one file.
+
+- **Lexing by the language mode.** The lexer has no language mode, so clang's
+  rule for literal prefixes is applied after it:
+  - The `u`, `U` and `u8` prefixes are C11's, and `u8` on a character constant
+    is C23's (`L` is every mode's). Before those modes, clang lexes `u'a'` as
+    the identifier `u` and the constant `'a'`, so a macro named `u` expands
+    there. After lexing, `pp_count_splits_vector` looks the kinds up 64 at a
+    time (one `vpermi2b` over the mode's mask), and the rare literal it finds
+    is split in place into the prefix and the literal from its quote
+    (`pp_split_prefixes`), before refinement interns the prefix. Scratch text
+    (`_Pragma`, pastes) is lexed the same way, and a paste that would form such
+    a literal is an error, as in clang.
 
 - **Directive tables** (#118). A vectorized scan (`pp_scan_directives_vector`)
   finds every `#` that starts a line (the lexer's start-of-line bit), with its
@@ -540,7 +552,7 @@ the mispredictions it saves.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 77 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 81 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -603,10 +615,15 @@ the mispredictions it saves.
     - `#line`'s number and file name across line splices and with escapes;
     - line markers: `#line` in the main file and in a header, lines that macros
       start, the line after `_Pragma`, the include stack, system headers and
-      escaped names, each with the exact text `-E` prints.
+      escaped names, each with the exact text `-E` prints;
+  - lexing by the language mode: the literal prefixes before C11, `u8'a'`
+    before C23 and both in C23, and a paste that would form `u8'a'` before C23,
+    which fails as clang's does and must then give clang's output.
 
   A case can name more files, and options for both sides (`-I`, `-include`,
-  with `%d` for its directory), and the text `-E` prints with line markers. Each
+  with `%d` for its directory), and the text `-E` prints with line markers. A
+  case that fails can still give the output it must have after its error, as
+  clang's does. Texts are lexed by the case's language mode. Each
   case is preprocessed by both kernels, with the built-in predefines. Their
   streams and directive tables must be the same, and their tokens' spellings
   must be the expected ones. With `--clang`, each case is also preprocessed by
@@ -752,8 +769,6 @@ cleared once and reused.
   line) and no more: no notes, no macro backtraces (#108), and no carets.
 - A `#pragma` among a macro's arguments goes to the output, where clang rejects
   it.
-- Before C23, `u8'a'` is one character constant here, because the lexer has no
-  language mode. clang lexes it as `u8` and `'a'`.
 - C++ (`-x c++`), dependency output (`-M`) and `-dM` aren't supported.
 - Stringizing an identifier that pasting made from a UCN gives its UTF-8
   spelling, where clang keeps the UCN.
