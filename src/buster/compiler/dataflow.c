@@ -284,7 +284,12 @@ static uint64_t dataflow_liveness_scalar(Dataflow* dataflow)
                 for (uint64_t word = 0; word < value_words; word += 1)
                 {
                     uint64_t out = 0;
-                    #pragma clang loop vectorize(disable) interleave(disable)
+                    // Not unrolled: unrolled by 8, this loop over a block's few successors split each word into a
+                    // header, a remainder loop and a latch, two taken jumps apart, which the front end ran up to 24%
+                    // slower, and in states that differ between processes, depending on where the code fell in 64-byte
+                    // lines. Instead Clang unrolls the word loop by 4, which runs four words of a block with one
+                    // successor per taken branch (docs/dataflow.md, "Where the scalar twin's code falls").
+                    #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
                     for (uint32_t edge = begin; edge < end; edge += 1)
                     {
                         const uint64_t* successor_in = in_rows + (uint64_t)successors[edge] * row_words;

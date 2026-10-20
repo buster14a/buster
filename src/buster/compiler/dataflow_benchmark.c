@@ -229,13 +229,15 @@ static void dataflow_benchmark_stop_counters(DataflowBenchmarkCounters* counters
     }
 }
 
-static __attribute__((noinline)) uint64_t dataflow_benchmark_vector(Dataflow* flow)
+// Each wrapper starts a 64-byte line, so that every build lays its solver's loops out in lines the same way, however
+// much driver code comes before them (docs/dataflow.md, "Where the scalar twin's code falls").
+static __attribute__((noinline, aligned(64))) uint64_t dataflow_benchmark_vector(Dataflow* flow)
 {
     const uint64_t iterations = dataflow_liveness_vector(flow);
     return iterations;
 }
 
-static __attribute__((noinline)) uint64_t dataflow_benchmark_scalar(Dataflow* flow)
+static __attribute__((noinline, aligned(64))) uint64_t dataflow_benchmark_scalar(Dataflow* flow)
 {
     const uint64_t iterations = dataflow_liveness_scalar(flow);
     return iterations;
