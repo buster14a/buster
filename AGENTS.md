@@ -30,7 +30,46 @@ including generator inputs, and preserve copyright, license, attribution and
 modification notices. Changes to the license remain the owner's decision.
 Follow the prospective DCO policy and its in-flight-PR transition. Never
 fabricate sign-offs, treat agent co-author trailers as human certification, or
-retroactively certify historical commits.
+retroactively certify historical commits. Add David's sign-off to a commit only
+as "David's sign-off" below says.
+
+## David's sign-off
+
+Under "The maintainer's standing certification" in
+[CONTRIBUTING.md](CONTRIBUTING.md), David's own agent sessions sign off their
+commits for him with:
+
+```text
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+```
+
+His opt-in gates it: `BUSTER_DCO_SIGN_OFF` set to `davidgmbb` in the session's
+environment, which only he sets. Where it isn't set, never add that trailer.
+Where it is:
+
+- `.githooks/commit-msg` ends each message that `git commit` or `git merge`
+  writes with it, once, after the other trailers, so don't write it yourself.
+  Before your first commit, check that `git config core.hooksPath` prints
+  `.githooks`; if it doesn't, run `.githooks/enable-sign-off.sh`. Claude Code
+  runs it at session start (`.claude/settings.json`), and so does Codex
+  (`.codex/hooks.json`) in a trusted project, once David has trusted that hook
+  in `/hooks`. If it reports leaving the hook off, write the trailer yourself,
+  last. While `core.commentChar` is `auto`, the hook refuses every commit, since
+  it can't know the comment character `git commit` picks: set the character
+  explicitly, or make the commit with the opt-in unset and the trailer written
+  by hand.
+- Don't use `git commit -s`, which signs off as the committer
+  (`Claude <noreply@anthropic.com>` in cloud sessions), or `--no-verify`, which
+  skips the hook. The hook signs nothing while a rebase or a cherry-pick is in
+  progress, rewords, amends and continuations included, and a plain
+  `git revert` doesn't run it: for a revert, use `git revert --no-commit` and
+  then `git commit`.
+- Don't sign a commit from before the certification took effect, or a rebase,
+  cherry-pick or amend of one: it still needs David's certification for its
+  PR's head. Unset the opt-in to amend one outside a rebase
+  (`env -u BUSTER_DCO_SIGN_OFF git commit --amend`) or to commit its changes
+  again another way (`git cherry-pick --no-commit`), and to commit outside
+  material whose provenance the PR can't record; then say so in the PR.
 
 ## Host and output scope
 
