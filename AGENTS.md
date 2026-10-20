@@ -69,6 +69,29 @@ declarations, and function headers where readable, and one aggregate field or
 initializer entry per line. Do not import Buster's portability
 or infrastructure machinery merely to match its style.
 
+## Data-parallel first
+
+Design every stage and every pull request data-parallel, vectorized and
+branch-free first, as `src/buster/compiler/c_lexer.c` and `x86_64_encoder.c`
+are built. The tools include masks over many items, prefix sums, in-register
+permutes as table lookups, compress and expand, sorting and segmented scans,
+bitsets, nearest-smaller-values and pointer jumping. Each vector path has an
+exact scalar path for the rare cases, which is also its twin and test oracle:
+both must give identical output or, where the two algorithms legitimately
+differ, pass a semantic check.
+
+No stage is assumed inherently sequential. Where C fixes an order (macro state,
+typedef visibility), vectorize within each step and keep the ordered part small.
+A part that stays scalar says why with measurements on the 9700X, as "SIMD: what
+pays" in `docs/object-writer-and-linker.md` does. The owner set this rule on
+2026-10-20, replacing the premise of
+[#15](https://github.com/buster14a/buster-fast/issues/15) that the parser and
+the type checker are inherently sequential. The issues that apply it are listed
+in the "Data-parallel first" section of
+[#115](https://github.com/buster14a/buster-fast/issues/115). "SIMD and Zen 5" in
+[the C coding style](docs/coding-style.md) has the Zen 5 costs that shape these
+designs and the compilers already built this way.
+
 ## Current repository and exact smoke commands
 
 - `src/buster/compiler/main.c` is the executable entry point
