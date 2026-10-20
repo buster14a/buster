@@ -5358,142 +5358,6 @@ static void spike_after_colons_avx512(SpikeKernels* kernels, uint32_t count)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The vector path together
-
-// What the vector kernels need besides SpikeKernels' arrays.
-typedef struct SpikeVectorBuffers SpikeVectorBuffers;
-struct SpikeVectorBuffers
-{
-    // By depth: K1's open openers, and K2's group roles and typed states.
-    uint32_t* open_stack;
-    uint8_t* group_roles;
-    uint8_t* group_typed;
-    // By token: K2's typed states, K4's L and its key.
-    uint8_t* typed;
-    uint32_t* lefts;
-    uint16_t* left_keys;
-    SpikeCandidates candidates;
-    uint32_t* secondary;
-    SpikeStatement* statements;
-    // K2's blocks by the rounds they took (index 0: the twin did them).
-    uint64_t rounds[BUSTER_SPIKE_ROLE_ROUNDS + 1];
-};
-
-// Candidates for K4's searches, with their padding below index 0.
-static bool spike_candidates_reserve(SpikeCandidates* candidates, Arena* arena, uint64_t capacity)
-{
-    const uint64_t slots = capacity + BUSTER_SPIKE_CANDIDATE_PADDING + 64;
-    uint32_t* positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
-    uint16_t* keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, slots);
-    const bool result = positions != 0 && keys != 0;
-    if (result)
-    {
-        for (uint32_t i = 0; i < BUSTER_SPIKE_CANDIDATE_PADDING; i += 1)
-        {
-            positions[i] = BUSTER_SPIKE_NONE;
-            keys[i] = 0;
-        }
-        candidates->positions = positions + BUSTER_SPIKE_CANDIDATE_PADDING;
-        candidates->keys = keys + BUSTER_SPIKE_CANDIDATE_PADDING;
-        candidates->count = 0;
-    }
-    return result;
-}
-
-// The by-depth stacks have BUSTER_SPIKE_DEPTH_PADDING entries below depth 0: no opener, role NONE, not typed.
-#define BUSTER_SPIKE_DEPTH_PADDING 64
-
-static bool spike_vector_buffers_reserve(SpikeVectorBuffers* buffers, Arena* arena, uint64_t capacity)
-{
-    const uint64_t slots = capacity + 2 * BUSTER_SPIKE_TOKEN_PADDING;
-    uint32_t* open_stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots + BUSTER_SPIKE_DEPTH_PADDING);
-    uint8_t* group_roles = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots + BUSTER_SPIKE_DEPTH_PADDING);
-    uint8_t* group_typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots + BUSTER_SPIKE_DEPTH_PADDING);
-    *buffers = (SpikeVectorBuffers){
-        .open_stack = open_stack != 0 ? open_stack + BUSTER_SPIKE_DEPTH_PADDING : 0,
-        .group_roles = group_roles != 0 ? group_roles + BUSTER_SPIKE_DEPTH_PADDING : 0,
-        .group_typed = group_typed != 0 ? group_typed + BUSTER_SPIKE_DEPTH_PADDING : 0,
-        .typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
-        .lefts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .left_keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, slots),
-        .secondary = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .statements = BUSTER_ARENA_PUSH_ARRAY(arena, SpikeStatement, slots),
-        .rounds = { 0 },
-    };
-    bool result = open_stack != 0 && group_roles != 0 && group_typed != 0 && buffers->typed != 0 && buffers->lefts != 0 && buffers->left_keys != 0 &&
-                  buffers->secondary != 0 && buffers->statements != 0 && spike_candidates_reserve(&buffers->candidates, arena, capacity);
-    if (result)
-    {
-        for (uint32_t i = 0; i < BUSTER_SPIKE_DEPTH_PADDING; i += 1)
-        {
-            open_stack[i] = BUSTER_SPIKE_NONE;
-            group_roles[i] = SPIKE_ROLE_NONE;
-            group_typed[i] = 0;
-        }
-    }
-    return result;
-}
-
-// The deepest node depth, which decides whether K4's 16-bit keys can hold it.
-static uint32_t spike_deepest(const SpikeKernels* kernels, uint32_t count)
-{
-    __m512i deepest = _mm512_setzero_si512();
-    for (uint32_t block = 0; block < count; block += 16)
-    {
-        const __mmask16 live = count - block < 16 ? (__mmask16)((1u << (count - block)) - 1) : (__mmask16)0xFFFF;
-        deepest = _mm512_max_epu32(deepest, _mm512_maskz_loadu_epi32(live, kernels->node_depths + block));
-    }
-    return _mm512_reduce_max_epu32(deepest);
-}
-
-// Every kernel in AVX-512 in turn, then the fallback, into kernels->parents: the data-parallel parser.
-static SpikeKernelResult spike_parse_vector(SpikeKernels* kernels, const uint8_t* kinds, const uint32_t* names, uint32_t count, SpikeMeanings* meanings,
-                                            Arena* scratch, SpikeVectorBuffers* buffers)
-{
-    SpikeKernelResult result = { .flagged_tokens = 0, .everything = false };
-    kernels->unbalanced = false;
-    kernels->unsupported = false;
-    // K1, on ( [ {.
-    kernels->unbalanced = !spike_brackets_avx512(kinds, spike_kind_deltas, count, kernels->depths, kernels->enclosing, buffers->open_stack);
-    // K3.
-    if (!kernels->unbalanced)
-    {
-        spike_typedefs(kernels, kinds, names, count);
-    }
-    spike_classify_mask_avx512(kernels, kinds, names, count);
-    // K2.
-    spike_roles_avx512(kernels, count, buffers->typed, buffers->group_roles, buffers->group_typed, buffers->rounds);
-    // K1's second part, and the roles after the colons it resolved.
-    spike_secondary_avx512(kernels, count, buffers->secondary);
-    spike_after_colons_avx512(kernels, count);
-    // K4: 16-bit keys hold every depth but the deepest nesting, which the twin takes.
-    if (spike_deepest(kernels, count) <= BUSTER_SPIKE_MAX_VECTOR_DEPTH)
-    {
-        spike_parents_left_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, &buffers->candidates);
-        spike_parents_right_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, kernels->parents, &buffers->candidates);
-    }
-    else
-    {
-        spike_parents_scalar(kernels, count);
-    }
-    // K5.
-    const bool statements_ok = spike_statements_avx512(kernels, count, buffers->statements);
-    for (uint32_t block = 0; block < count; block += 64)
-    {
-        const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
-        const __m512i flags = _mm512_maskz_loadu_epi8(live, kernels->flags + block);
-        result.flagged_tokens += (uint64_t)__builtin_popcountll(_mm512_test_epi8_mask(flags, flags));
-    }
-    result.everything = kernels->unbalanced || kernels->unsupported || !statements_ok;
-    result.fallback = spike_fallback(kernels, kinds, names, count, result.everything, meanings, scratch);
-    for (uint32_t i = 0; i < kernels->typedef_count; i += 1)
-    {
-        kernels->typedef_names[kernels->typedef_log[i]] = 0;
-    }
-    return result;
-}
-
-// ---------------------------------------------------------------------------------------------------------------------
 // K1 in 16-bit lanes, for the comparison with byte lanes
 
 // K1 in AVX-512 with 32 tokens a block in 16-bit lanes: the same as spike_brackets_avx512, but a block's depth can't drop
@@ -5561,7 +5425,7 @@ static bool spike_brackets16_avx512(const uint8_t* codes, const int8_t* deltas, 
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// K4 in byte lanes, for the comparison with 16-bit lanes
+// K4 in byte lanes
 //
 // 64 tokens a block, keys (node depth - the block's lowest) * 32 + level in bytes: a block whose node depths span at most
 // BUSTER_SPIKE_BYTE_DEPTH_RANGE fits (an opener's right threshold is one depth further up). Wider blocks run as two
@@ -5903,4 +5767,143 @@ static void spike_parents_right8_avx512(const uint8_t* roles, const uint32_t* no
             spike_parents_right16_block(roles, node_depths, block, live < 32 ? live : 32, lefts, left_keys, parents, stack);
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The vector path together
+
+// What the vector kernels need besides SpikeKernels' arrays.
+typedef struct SpikeVectorBuffers SpikeVectorBuffers;
+struct SpikeVectorBuffers
+{
+    // By depth: K1's open openers, and K2's group roles and typed states.
+    uint32_t* open_stack;
+    uint8_t* group_roles;
+    uint8_t* group_typed;
+    // By token: K2's typed states, K4's L and its key.
+    uint8_t* typed;
+    uint32_t* lefts;
+    uint16_t* left_keys;
+    SpikeCandidates candidates;
+    uint32_t* secondary;
+    SpikeStatement* statements;
+    // K2's blocks by the rounds they took (index 0: the twin did them), and K4's blocks whose depths span more than
+    // byte lanes hold, which run as two 16-bit blocks.
+    uint64_t rounds[BUSTER_SPIKE_ROLE_ROUNDS + 1];
+    uint64_t wide_blocks;
+};
+
+// Candidates for K4's searches, with their padding below index 0.
+static bool spike_candidates_reserve(SpikeCandidates* candidates, Arena* arena, uint64_t capacity)
+{
+    const uint64_t slots = capacity + BUSTER_SPIKE_CANDIDATE_PADDING + 64;
+    uint32_t* positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    uint16_t* keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, slots);
+    const bool result = positions != 0 && keys != 0;
+    if (result)
+    {
+        for (uint32_t i = 0; i < BUSTER_SPIKE_CANDIDATE_PADDING; i += 1)
+        {
+            positions[i] = BUSTER_SPIKE_NONE;
+            keys[i] = 0;
+        }
+        candidates->positions = positions + BUSTER_SPIKE_CANDIDATE_PADDING;
+        candidates->keys = keys + BUSTER_SPIKE_CANDIDATE_PADDING;
+        candidates->count = 0;
+    }
+    return result;
+}
+
+// The by-depth stacks have BUSTER_SPIKE_DEPTH_PADDING entries below depth 0: no opener, role NONE, not typed.
+#define BUSTER_SPIKE_DEPTH_PADDING 64
+
+static bool spike_vector_buffers_reserve(SpikeVectorBuffers* buffers, Arena* arena, uint64_t capacity)
+{
+    const uint64_t slots = capacity + 2 * BUSTER_SPIKE_TOKEN_PADDING;
+    uint32_t* open_stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots + BUSTER_SPIKE_DEPTH_PADDING);
+    uint8_t* group_roles = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots + BUSTER_SPIKE_DEPTH_PADDING);
+    uint8_t* group_typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots + BUSTER_SPIKE_DEPTH_PADDING);
+    *buffers = (SpikeVectorBuffers){
+        .open_stack = open_stack != 0 ? open_stack + BUSTER_SPIKE_DEPTH_PADDING : 0,
+        .group_roles = group_roles != 0 ? group_roles + BUSTER_SPIKE_DEPTH_PADDING : 0,
+        .group_typed = group_typed != 0 ? group_typed + BUSTER_SPIKE_DEPTH_PADDING : 0,
+        .typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
+        .lefts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .left_keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, slots),
+        .secondary = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .statements = BUSTER_ARENA_PUSH_ARRAY(arena, SpikeStatement, slots),
+        .rounds = { 0 },
+        .wide_blocks = 0,
+    };
+    bool result = open_stack != 0 && group_roles != 0 && group_typed != 0 && buffers->typed != 0 && buffers->lefts != 0 && buffers->left_keys != 0 &&
+                  buffers->secondary != 0 && buffers->statements != 0 && spike_candidates_reserve(&buffers->candidates, arena, capacity);
+    if (result)
+    {
+        for (uint32_t i = 0; i < BUSTER_SPIKE_DEPTH_PADDING; i += 1)
+        {
+            open_stack[i] = BUSTER_SPIKE_NONE;
+            group_roles[i] = SPIKE_ROLE_NONE;
+            group_typed[i] = 0;
+        }
+    }
+    return result;
+}
+
+// The deepest node depth, which decides whether K4's 16-bit keys can hold it.
+static uint32_t spike_deepest(const SpikeKernels* kernels, uint32_t count)
+{
+    __m512i deepest = _mm512_setzero_si512();
+    for (uint32_t block = 0; block < count; block += 16)
+    {
+        const __mmask16 live = count - block < 16 ? (__mmask16)((1u << (count - block)) - 1) : (__mmask16)0xFFFF;
+        deepest = _mm512_max_epu32(deepest, _mm512_maskz_loadu_epi32(live, kernels->node_depths + block));
+    }
+    return _mm512_reduce_max_epu32(deepest);
+}
+
+// Every kernel in AVX-512 in turn, then the fallback, into kernels->parents: the data-parallel parser.
+static SpikeKernelResult spike_parse_vector(SpikeKernels* kernels, const uint8_t* kinds, const uint32_t* names, uint32_t count, SpikeMeanings* meanings,
+                                            Arena* scratch, SpikeVectorBuffers* buffers)
+{
+    SpikeKernelResult result = { .flagged_tokens = 0, .everything = false };
+    kernels->unbalanced = false;
+    kernels->unsupported = false;
+    // K1, on ( [ {.
+    kernels->unbalanced = !spike_brackets_avx512(kinds, spike_kind_deltas, count, kernels->depths, kernels->enclosing, buffers->open_stack);
+    // K3.
+    if (!kernels->unbalanced)
+    {
+        spike_typedefs(kernels, kinds, names, count);
+    }
+    spike_classify_mask_avx512(kernels, kinds, names, count);
+    // K2.
+    spike_roles_avx512(kernels, count, buffers->typed, buffers->group_roles, buffers->group_typed, buffers->rounds);
+    // K1's second part, and the roles after the colons it resolved.
+    spike_secondary_avx512(kernels, count, buffers->secondary);
+    spike_after_colons_avx512(kernels, count);
+    // K4 in byte lanes: 16-bit keys hold every depth but the deepest nesting, which the twin takes.
+    if (spike_deepest(kernels, count) <= BUSTER_SPIKE_MAX_VECTOR_DEPTH)
+    {
+        spike_parents_left8_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, &buffers->candidates, &buffers->wide_blocks);
+        spike_parents_right8_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, kernels->parents, &buffers->candidates);
+    }
+    else
+    {
+        spike_parents_scalar(kernels, count);
+    }
+    // K5.
+    const bool statements_ok = spike_statements_avx512(kernels, count, buffers->statements);
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
+        const __m512i flags = _mm512_maskz_loadu_epi8(live, kernels->flags + block);
+        result.flagged_tokens += (uint64_t)__builtin_popcountll(_mm512_test_epi8_mask(flags, flags));
+    }
+    result.everything = kernels->unbalanced || kernels->unsupported || !statements_ok;
+    result.fallback = spike_fallback(kernels, kinds, names, count, result.everything, meanings, scratch);
+    for (uint32_t i = 0; i < kernels->typedef_count; i += 1)
+    {
+        kernels->typedef_names[kernels->typedef_log[i]] = 0;
+    }
+    return result;
 }
