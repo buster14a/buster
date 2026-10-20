@@ -16,6 +16,9 @@
 //   - aliases: clang's IR of a function that calls itself through an alias and through an internal alias of an alias,
 //     and of a call of an ifunc (a problem); then hand-written aliases that lead to no definition: round a loop, and to
 //     a declaration;
+//   - binding: clang's IR of a weak function beside a strong alias of the same name that leads to recursion (the alias
+//     wins), and of a strong function beside a weak alias (the function wins), each in both orders; two strong
+//     definitions (a problem, and both count); and two weak ones (either may be linked, so both count);
 //   - allowed cycles: two units' copies of the same static pair, both allowed by one entry; then a cycle that grew past
 //     its entry, an allowed self-call and an entry without a cycle; then a cycle through two units' static functions of
 //     the same name, which an entry naming the other functions once each, and another, mustn't match;
@@ -260,6 +263,126 @@ static const CallGraphInput call_graph_test_lost_alias[] = {
     },
 };
 
+// clang 23's IR of these files, as for call_graph_test_alias:
+//
+//   fallback.c:   __attribute__((weak)) int again(int n) { (void)n; return 0; }
+//   strong.c:     int again(int n) { (void)n; return 0; }
+//   recurse.c:    int again(int) __attribute__((alias("recurse")));
+//                 int recurse(int n)
+//                 {
+//                     int result = 0;
+//                     if (n != 0)
+//                     {
+//                         result = again(n - 1) + n;
+//                     }
+//                     return result;
+//                 }
+//   weak_alias.c: recurse.c with __attribute__((weak, alias("recurse"))).
+#define BUSTER_CALL_GRAPH_TEST_AGAIN_BODY                \
+    "  %2 = alloca i32, align 4\n"                     \
+    "  store i32 %0, ptr %2, align 4\n"                \
+    "  %3 = load i32, ptr %2, align 4\n"               \
+    "  ret i32 0\n"                                    \
+    "}\n"
+#define BUSTER_CALL_GRAPH_TEST_FALLBACK "define weak dso_local i32 @again(i32 noundef %0) #0 {\n" BUSTER_CALL_GRAPH_TEST_AGAIN_BODY
+#define BUSTER_CALL_GRAPH_TEST_STRONG "define dso_local i32 @again(i32 noundef %0) #0 {\n" BUSTER_CALL_GRAPH_TEST_AGAIN_BODY
+#define BUSTER_CALL_GRAPH_TEST_RECURSE_BODY              \
+    "  %2 = alloca i32, align 4\n"                     \
+    "  %3 = alloca i32, align 4\n"                     \
+    "  store i32 %0, ptr %2, align 4\n"                \
+    "  store i32 0, ptr %3, align 4\n"                 \
+    "  %4 = load i32, ptr %2, align 4\n"               \
+    "  %5 = icmp ne i32 %4, 0\n"                       \
+    "  br i1 %5, label %6, label %12\n"                \
+    "\n"                                               \
+    "6:                                                ; preds = %1\n" \
+    "  %7 = load i32, ptr %2, align 4\n"               \
+    "  %8 = sub i32 %7, 1\n"                           \
+    "  %9 = call i32 @again(i32 noundef %8)\n"         \
+    "  %10 = load i32, ptr %2, align 4\n"              \
+    "  %11 = add i32 %9, %10\n"                        \
+    "  store i32 %11, ptr %3, align 4\n"               \
+    "  br label %12\n"                                 \
+    "\n"                                               \
+    "12:                                               ; preds = %6, %1\n" \
+    "  %13 = load i32, ptr %3, align 4\n"              \
+    "  ret i32 %13\n"                                  \
+    "}\n"
+#define BUSTER_CALL_GRAPH_TEST_RECURSE                  \
+    "@again = dso_local alias i32 (i32), ptr @recurse\n" \
+    "\n"                                               \
+    "define dso_local i32 @recurse(i32 noundef %0) #0 {\n" BUSTER_CALL_GRAPH_TEST_RECURSE_BODY
+#define BUSTER_CALL_GRAPH_TEST_WEAK_ALIAS                \
+    "@again = weak dso_local alias i32 (i32), ptr @recurse\n" \
+    "\n"                                               \
+    "define dso_local i32 @recurse(i32 noundef %0) #0 {\n" BUSTER_CALL_GRAPH_TEST_RECURSE_BODY
+
+static const CallGraphInput call_graph_test_strong_alias[] = {
+    {
+        .name = BUSTER_S8_INIT("fallback.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_FALLBACK),
+    },
+    {
+        .name = BUSTER_S8_INIT("recurse.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_RECURSE),
+    },
+};
+
+static const CallGraphInput call_graph_test_strong_alias_reversed[] = {
+    {
+        .name = BUSTER_S8_INIT("recurse.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_RECURSE),
+    },
+    {
+        .name = BUSTER_S8_INIT("fallback.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_FALLBACK),
+    },
+};
+
+static const CallGraphInput call_graph_test_weak_alias[] = {
+    {
+        .name = BUSTER_S8_INIT("strong.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_STRONG),
+    },
+    {
+        .name = BUSTER_S8_INIT("weak_alias.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_WEAK_ALIAS),
+    },
+};
+
+static const CallGraphInput call_graph_test_weak_alias_reversed[] = {
+    {
+        .name = BUSTER_S8_INIT("weak_alias.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_WEAK_ALIAS),
+    },
+    {
+        .name = BUSTER_S8_INIT("strong.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_STRONG),
+    },
+};
+
+static const CallGraphInput call_graph_test_both_strong[] = {
+    {
+        .name = BUSTER_S8_INIT("strong.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_STRONG),
+    },
+    {
+        .name = BUSTER_S8_INIT("recurse.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_RECURSE),
+    },
+};
+
+static const CallGraphInput call_graph_test_both_weak[] = {
+    {
+        .name = BUSTER_S8_INIT("fallback.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_FALLBACK),
+    },
+    {
+        .name = BUSTER_S8_INIT("weak_alias.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_WEAK_ALIAS),
+    },
+};
+
 static const CallGraphInput call_graph_test_copies[] = {
     {
         .name = BUSTER_S8_INIT("first.ll"),
@@ -433,6 +556,53 @@ static const CallGraphTestCase call_graph_test_cases[] = {
                                    "lost.ll:8: a call of loop_a, an alias that leads to no definition\n"
                                    "lost.ll:9: a call of lost, an alias that leads to no definition\n"
                                    "call graph: 1 translation unit, 1 function, 0 calls between them, 0 cycles, 0 allowed\n"),
+        .success = false,
+    },
+    {
+        .name = "weak function, strong alias",
+        .inputs = call_graph_test_strong_alias,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_strong_alias),
+        .expected = BUSTER_S8_INIT("cycle: recurse.ll:recurse -> recurse.ll:recurse\n"
+                                   "call graph: 2 translation units, 2 functions, 1 call between them, 1 cycle, 0 allowed\n"),
+        .success = false,
+    },
+    {
+        .name = "strong alias, weak function",
+        .inputs = call_graph_test_strong_alias_reversed,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_strong_alias_reversed),
+        .expected = BUSTER_S8_INIT("cycle: recurse.ll:recurse -> recurse.ll:recurse\n"
+                                   "call graph: 2 translation units, 2 functions, 1 call between them, 1 cycle, 0 allowed\n"),
+        .success = false,
+    },
+    {
+        .name = "strong function, weak alias",
+        .inputs = call_graph_test_weak_alias,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_weak_alias),
+        .expected = BUSTER_S8_INIT("call graph: 2 translation units, 2 functions, 1 call between them, 0 cycles, 0 allowed\n"),
+        .success = true,
+    },
+    {
+        .name = "weak alias, strong function",
+        .inputs = call_graph_test_weak_alias_reversed,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_weak_alias_reversed),
+        .expected = BUSTER_S8_INIT("call graph: 2 translation units, 2 functions, 1 call between them, 0 cycles, 0 allowed\n"),
+        .success = true,
+    },
+    {
+        .name = "two strong definitions",
+        .inputs = call_graph_test_both_strong,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_both_strong),
+        .expected = BUSTER_S8_INIT("recurse.ll:1: a second strong definition of again\n"
+                                   "cycle: recurse.ll:recurse -> recurse.ll:recurse\n"
+                                   "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+        .success = false,
+    },
+    {
+        .name = "two weak definitions",
+        .inputs = call_graph_test_both_weak,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_both_weak),
+        .expected = BUSTER_S8_INIT("cycle: weak_alias.ll:recurse -> weak_alias.ll:recurse\n"
+                                   "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
         .success = false,
     },
     {

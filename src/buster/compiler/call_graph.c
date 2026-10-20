@@ -6,10 +6,10 @@
 // Each file is the LLVM IR text of one of the translation units build.sh compiles, as clang -S -emit-llvm -O0 -Xclang
 // -disable-llvm-passes writes it (`./build.sh check-call-graph` makes them and runs the command): without any pass, not
 // even the always-inliner, so a call in the IR is a call in the source. The check reads each `define` and the direct
-// `call`, `invoke` and `callbr` instructions in its body, resolves each callee as the linker would (a symbol of the
-// same translation unit first, whatever its linkage, then an external one of any; an alias, through any chain of them,
-// to the function it names), builds the call graph of the defined functions, and finds its strongly connected
-// components with Tarjan's algorithm, run with explicit stacks. Calls of functions defined nowhere (libc, LLVM's
+// `call`, `invoke` and `callbr` instructions in its body, resolves each callee as the linker would (call_graph_resolve:
+// a symbol of the same translation unit first, then an external one, whose strong definitions win over its weak ones;
+// an alias, through any chain of them, to the function it names), builds the call graph of the defined functions, and
+// finds its strongly connected components with Tarjan's algorithm, run with explicit stacks. Calls of functions defined nowhere (libc, LLVM's
 // intrinsics) and calls through pointers are left out: the style allows function pointers only at the thread-entry
 // boundary. A call of an ifunc, whose callee is chosen at run time, or of an alias that leads to no definition is a
 // problem in the IR, which fails the check.
@@ -22,8 +22,8 @@
 //
 // main.c includes this file after lane.c (for its arenas) and call_graph_test.c after it. Layout, in this order: the
 // allowlist (call_graph_allowed), the interface (CallGraphInput, CallGraphResult, call_graph_check), reading the IR
-// (call_graph_symbol, call_graph_define, call_graph_alias, call_graph_call), the symbol tables (call_graph_find and
-// call_graph_resolve), the report's text (call_graph_append and the others), call_graph_check, and run_check_call_graph,
+// (call_graph_symbol, call_graph_binding, call_graph_define, call_graph_alias, call_graph_call), the symbol table
+// (call_graph_find and call_graph_resolve), the report's text (call_graph_append and the others), call_graph_check, and run_check_call_graph,
 // the command.
 
 #include <stdint.h>
@@ -76,8 +76,8 @@ struct CallGraphResult
     bool success;
 };
 
-// Checks the call graph of `inputs`' translation units against `allowed`. Everything, the report too, is pushed into
-// `arena`, which the caller pops.
+// Checks the call graph of `inputs`' translation units against `allowed`. The report is pushed into `arena`, which the
+// caller pops; the graph is built in a scratch arena.
 static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inputs, uint32_t input_count, const CallGraphAllowed* allowed, uint64_t allowed_count);
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -138,13 +138,40 @@ static CallGraphSymbol call_graph_symbol(String8 line, uint64_t at)
     return result;
 }
 
+typedef enum CallGraphBinding
+{
+    // The name is external, and this definition is the one the linker takes.
+    CALL_GRAPH_BINDING_STRONG,
+    // The name is external, and a strong definition of it, anywhere, wins over this one.
+    CALL_GRAPH_BINDING_WEAK,
+    // internal or private: the name belongs to its translation unit.
+    CALL_GRAPH_BINDING_LOCAL,
+} CallGraphBinding;
+
+// The binding of the definition whose linkage, if it has one, starts at line[at]. weak, linkonce and their _odr forms
+// and available_externally (a copy of a definition elsewhere) give way to a strong definition.
+static CallGraphBinding call_graph_binding(String8 line, uint64_t at)
+{
+    CallGraphBinding result = CALL_GRAPH_BINDING_STRONG;
+    if (call_graph_starts_with(line, at, BUSTER_S8("internal ")) || call_graph_starts_with(line, at, BUSTER_S8("private ")))
+    {
+        result = CALL_GRAPH_BINDING_LOCAL;
+    }
+    else if (call_graph_starts_with(line, at, BUSTER_S8("weak ")) || call_graph_starts_with(line, at, BUSTER_S8("weak_odr ")) ||
+             call_graph_starts_with(line, at, BUSTER_S8("linkonce ")) || call_graph_starts_with(line, at, BUSTER_S8("linkonce_odr ")) ||
+             call_graph_starts_with(line, at, BUSTER_S8("available_externally ")))
+    {
+        result = CALL_GRAPH_BINDING_WEAK;
+    }
+    return result;
+}
+
 typedef struct CallGraphDefine CallGraphDefine;
 struct CallGraphDefine
 {
     String8 name;
     bool is_define;
-    // internal or private linkage: the name belongs to its translation unit.
-    bool local;
+    CallGraphBinding binding;
     // A define line without a name.
     bool malformed;
 };
@@ -158,7 +185,7 @@ static CallGraphDefine call_graph_define(String8 line)
     {
         result.is_define = true;
         const uint64_t linkage = BUSTER_COMPILE_TIME_STRING_LENGTH("define ");
-        result.local = call_graph_starts_with(line, linkage, BUSTER_S8("internal ")) || call_graph_starts_with(line, linkage, BUSTER_S8("private "));
+        result.binding = call_graph_binding(line, linkage);
         uint64_t at = linkage;
         while (at < line.length && line.pointer[at] != '@')
         {
@@ -183,8 +210,7 @@ struct CallGraphAlias
     String8 target;
     bool is_alias;
     bool ifunc;
-    // internal or private linkage.
-    bool local;
+    CallGraphBinding binding;
     // An alias or ifunc without a target.
     bool malformed;
 };
@@ -201,7 +227,7 @@ static CallGraphAlias call_graph_alias(String8 line)
         if (symbol.valid && call_graph_starts_with(line, symbol.end, BUSTER_S8(" = ")))
         {
             uint64_t at = symbol.end + BUSTER_COMPILE_TIME_STRING_LENGTH(" = ");
-            result.local = call_graph_starts_with(line, at, BUSTER_S8("internal ")) || call_graph_starts_with(line, at, BUSTER_S8("private "));
+            result.binding = call_graph_binding(line, at);
             bool searching = true;
             while (searching)
             {
@@ -316,14 +342,16 @@ static String8 call_graph_line(String8 text, uint64_t at)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The symbol table: open addressing over a power-of-two number of slots, each the function's index plus one, or zero.
+// The symbol table: open addressing over a power-of-two number of slots, each a symbol's index plus one, or zero. A
+// symbol is a name in a scope (a translation unit's index, or BUSTER_CALL_GRAPH_EXTERNAL), and has a list of
+// definitions: functions, aliases and ifuncs, as many as the translation units define.
 
 typedef struct CallGraphTable CallGraphTable;
 struct CallGraphTable
 {
     uint32_t* slots;
     uint64_t mask;
-    // Each function's name and its scope: its translation unit's index, or BUSTER_CALL_GRAPH_EXTERNAL.
+    // Each symbol's name and scope.
     const String8* names;
     const uint32_t* scopes;
 };
@@ -360,74 +388,94 @@ static uint64_t call_graph_find(const CallGraphTable* table, uint32_t scope, Str
     return slot;
 }
 
-typedef struct CallGraphAliases CallGraphAliases;
-struct CallGraphAliases
+typedef enum CallGraphKind
+{
+    CALL_GRAPH_KIND_FUNCTION,
+    CALL_GRAPH_KIND_ALIAS,
+    CALL_GRAPH_KIND_IFUNC,
+} CallGraphKind;
+
+typedef struct CallGraphSymbols CallGraphSymbols;
+struct CallGraphSymbols
 {
     CallGraphTable table;
-    uint64_t count;
-    // Each alias's translation unit (where its target is looked up), its target's name, and whether it is an ifunc.
-    const uint32_t* units;
-    const String8* targets;
-    const bool* ifuncs;
+    // Each symbol's first definition, and how many of its definitions are strong.
+    uint32_t* first;
+    uint32_t* strong_count;
+    // Each definition's kind, its function's or alias's index, the next definition of its symbol, and whether it is
+    // strong (a local definition is).
+    uint8_t* kinds;
+    uint32_t* indices;
+    uint32_t* next;
+    bool* strong;
+    // Each alias's translation unit (where its target is looked up) and its target's name.
+    const uint32_t* alias_units;
+    const String8* alias_targets;
+    // The resolution that last followed each alias, and the resolution's worklist of names to look up.
+    uint64_t* alias_stamps;
+    uint32_t* work_units;
+    String8* work_names;
 };
 
-typedef struct CallGraphCallee CallGraphCallee;
-struct CallGraphCallee
+typedef struct CallGraphCallees CallGraphCallees;
+struct CallGraphCallees
 {
-    // The function called, or BUSTER_CALL_GRAPH_NONE.
-    uint32_t function;
-    // An ifunc, or an alias that leads to no definition (to a declaration, or round a loop of aliases).
+    // How many functions the call can reach.
+    uint32_t count;
+    // It reaches an ifunc, or only aliases that lead to no definition (to a declaration, or round a loop of aliases).
     bool ifunc;
     bool lost;
 };
 
-// The function that a call of `name` in translation unit `unit` reaches: the unit's own function or alias of that name,
-// else the external one, and for an alias the same from its target in its unit, at most once per alias.
-static CallGraphCallee call_graph_resolve(const CallGraphTable* functions, const CallGraphAliases* aliases, uint32_t unit, String8 name)
+// The functions a call of `name` from translation unit `unit` can reach, written to `callees` unless it is 0. The name
+// is the unit's own symbol if it has one, else the external symbol, whose strong definitions are the ones the linker
+// takes; without one, it takes one of the weak definitions, by link order, so all of them count. An alias's target is
+// looked up the same way from its unit, and each alias is followed once per resolution, which `stamp` tells apart.
+static CallGraphCallees call_graph_resolve(CallGraphSymbols* symbols, uint32_t unit, String8 name, uint64_t stamp, uint32_t* callees)
 {
-    CallGraphCallee result = {
-        .function = BUSTER_CALL_GRAPH_NONE,
-        .ifunc = false,
-        .lost = false,
-    };
-    uint64_t steps = 0;
-    bool searching = true;
-    while (searching)
+    CallGraphCallees result = { 0 };
+    bool followed = false;
+    uint32_t work_count = 1;
+    symbols->work_units[0] = unit;
+    symbols->work_names[0] = name;
+    while (work_count != 0)
     {
-        uint32_t function = functions->slots[call_graph_find(functions, unit, name)];
-        uint32_t alias = function == 0 ? aliases->table.slots[call_graph_find(&aliases->table, unit, name)] : 0;
-        if (function == 0 && alias == 0)
+        work_count -= 1;
+        const uint32_t work_unit = symbols->work_units[work_count];
+        const String8 work_name = symbols->work_names[work_count];
+        uint32_t symbol = symbols->table.slots[call_graph_find(&symbols->table, work_unit, work_name)];
+        if (symbol == 0)
         {
-            function = functions->slots[call_graph_find(functions, BUSTER_CALL_GRAPH_EXTERNAL, name)];
-            alias = function == 0 ? aliases->table.slots[call_graph_find(&aliases->table, BUSTER_CALL_GRAPH_EXTERNAL, name)] : 0;
+            symbol = symbols->table.slots[call_graph_find(&symbols->table, BUSTER_CALL_GRAPH_EXTERNAL, work_name)];
         }
-        if (function != 0)
+        const bool strong_only = symbol != 0 && symbols->strong_count[symbol - 1] != 0;
+        for (uint32_t definition = symbol != 0 ? symbols->first[symbol - 1] : BUSTER_CALL_GRAPH_NONE; definition != BUSTER_CALL_GRAPH_NONE; definition = symbols->next[definition])
         {
-            result.function = function - 1;
-            searching = false;
-        }
-        else if (alias == 0)
-        {
-            result.lost = steps != 0;
-            searching = false;
-        }
-        else if (aliases->ifuncs[alias - 1])
-        {
-            result.ifunc = true;
-            searching = false;
-        }
-        else if (steps == aliases->count)
-        {
-            result.lost = true;
-            searching = false;
-        }
-        else
-        {
-            unit = aliases->units[alias - 1];
-            name = aliases->targets[alias - 1];
-            steps += 1;
+            const uint32_t index = symbols->indices[definition];
+            const bool taken = !strong_only || symbols->strong[definition];
+            if (taken && symbols->kinds[definition] == CALL_GRAPH_KIND_FUNCTION)
+            {
+                if (callees != 0)
+                {
+                    callees[result.count] = index;
+                }
+                result.count += 1;
+            }
+            else if (taken && symbols->kinds[definition] == CALL_GRAPH_KIND_IFUNC)
+            {
+                result.ifunc = true;
+            }
+            else if (taken && symbols->alias_stamps[index] != stamp)
+            {
+                symbols->alias_stamps[index] = stamp;
+                symbols->work_units[work_count] = symbols->alias_units[index];
+                symbols->work_names[work_count] = symbols->alias_targets[index];
+                work_count += 1;
+                followed = true;
+            }
         }
     }
+    result.lost = followed && result.count == 0 && !result.ifunc;
     return result;
 }
 
@@ -555,99 +603,108 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     }
 
     // The counts index 32-bit arrays.
-    bool fits = define_count < UINT32_MAX && alias_line_count < UINT32_MAX && call_line_count < UINT32_MAX;
+    const bool fits = define_count + alias_line_count < UINT32_MAX && call_line_count < UINT32_MAX;
     const uint64_t function_capacity = fits ? define_count : 0;
     const uint64_t alias_capacity = fits ? alias_line_count : 0;
+    const uint64_t definition_capacity = function_capacity + alias_capacity;
     const uint64_t call_capacity = fits ? call_line_count : 0;
-    // At most half of each table's slots are full.
+    // At most half the slots are full.
     uint64_t slot_count = 16;
-    while (slot_count < 2 * function_capacity)
+    while (slot_count < 2 * definition_capacity)
     {
         slot_count *= 2;
     }
-    uint64_t alias_slot_count = 16;
-    while (alias_slot_count < 2 * alias_capacity)
-    {
-        alias_slot_count *= 2;
-    }
-    String8* names = BUSTER_ARENA_PUSH_ARRAY(arena, String8, function_capacity + 1);
-    uint32_t* units = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    uint32_t* scopes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    uint32_t* slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slot_count);
-    String8* alias_names = BUSTER_ARENA_PUSH_ARRAY(arena, String8, alias_capacity + 1);
-    uint32_t* alias_scopes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, alias_capacity + 1);
-    uint32_t* alias_units = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, alias_capacity + 1);
-    String8* alias_targets = BUSTER_ARENA_PUSH_ARRAY(arena, String8, alias_capacity + 1);
-    bool* alias_ifuncs = BUSTER_ARENA_PUSH_ARRAY(arena, bool, alias_capacity + 1);
-    uint32_t* alias_slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, alias_slot_count);
-    uint32_t* call_callers = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, call_capacity + 1);
-    uint32_t* call_units = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, call_capacity + 1);
-    String8* call_names = BUSTER_ARENA_PUSH_ARRAY(arena, String8, call_capacity + 1);
-    uint64_t* call_lines = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, call_capacity + 1);
-    uint32_t* callers_begin = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 2);
-    uint32_t* targets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, call_capacity + 1);
-    uint32_t* resolved = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, call_capacity + 1);
-    bool* calls_itself = BUSTER_ARENA_PUSH_ARRAY(arena, bool, function_capacity + 1);
+    Scratch scratch = scratch_begin(arena);
+    Arena* work = scratch.arena;
+    String8* symbol_names = BUSTER_ARENA_PUSH_ARRAY(work, String8, definition_capacity + 1);
+    uint32_t* symbol_scopes = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, definition_capacity + 1);
+    uint32_t* symbol_first = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, definition_capacity + 1);
+    uint32_t* symbol_last = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, definition_capacity + 1);
+    uint32_t* symbol_strong_count = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, definition_capacity + 1);
+    uint32_t* slots = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, slot_count);
+    uint8_t* definition_kinds = BUSTER_ARENA_PUSH_ARRAY(work, uint8_t, definition_capacity + 1);
+    uint32_t* definition_indices = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, definition_capacity + 1);
+    uint32_t* definition_next = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, definition_capacity + 1);
+    bool* definition_strong = BUSTER_ARENA_PUSH_ARRAY(work, bool, definition_capacity + 1);
+    String8* names = BUSTER_ARENA_PUSH_ARRAY(work, String8, function_capacity + 1);
+    uint32_t* units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
+    uint32_t* alias_units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, alias_capacity + 1);
+    String8* alias_targets = BUSTER_ARENA_PUSH_ARRAY(work, String8, alias_capacity + 1);
+    uint64_t* alias_stamps = BUSTER_ARENA_PUSH_ARRAY(work, uint64_t, alias_capacity + 1);
+    uint32_t* work_units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, alias_capacity + 1);
+    String8* work_names = BUSTER_ARENA_PUSH_ARRAY(work, String8, alias_capacity + 1);
+    uint32_t* call_callers = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, call_capacity + 1);
+    uint32_t* call_units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, call_capacity + 1);
+    String8* call_names = BUSTER_ARENA_PUSH_ARRAY(work, String8, call_capacity + 1);
+    uint64_t* call_lines = BUSTER_ARENA_PUSH_ARRAY(work, uint64_t, call_capacity + 1);
+    uint32_t* callers_begin = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 2);
+    bool* calls_itself = BUSTER_ARENA_PUSH_ARRAY(work, bool, function_capacity + 1);
     // Tarjan's algorithm: each function's visit index and lowest reachable index, the component stack, the walk's own
     // stack of functions with the next call of each to follow, and each function's component.
-    uint32_t* visit = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    uint32_t* lowest = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    bool* on_stack = BUSTER_ARENA_PUSH_ARRAY(arena, bool, function_capacity + 1);
-    uint32_t* component_stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    uint32_t* walk_functions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    uint32_t* walk_calls = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    uint32_t* components = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
+    uint32_t* visit = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
+    uint32_t* lowest = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
+    bool* on_stack = BUSTER_ARENA_PUSH_ARRAY(work, bool, function_capacity + 1);
+    uint32_t* component_stack = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
+    uint32_t* walk_functions = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
+    uint32_t* walk_calls = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
+    uint32_t* components = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
     // The functions grouped by component, each component's first function, and the breadth-first search for a
     // closing path: its queue, each function's predecessor and the search that last reached it, and the path.
-    uint32_t* component_begin = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 2);
-    uint32_t* members = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    uint32_t* component_first = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    uint32_t* queue = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    uint32_t* predecessors = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    uint32_t* reached = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    uint32_t* path = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, function_capacity + 1);
-    bool* allowed_used = BUSTER_ARENA_PUSH_ARRAY(arena, bool, allowed_count + 1);
-    const bool memory = fits && names != 0 && units != 0 && scopes != 0 && slots != 0 && alias_names != 0 && alias_scopes != 0 && alias_units != 0 && alias_targets != 0 &&
-                        alias_ifuncs != 0 && alias_slots != 0 && call_callers != 0 && call_units != 0 && call_names != 0 && call_lines != 0 && callers_begin != 0 &&
-                        targets != 0 && resolved != 0 && calls_itself != 0 && visit != 0 && lowest != 0 && on_stack != 0 && component_stack != 0 && walk_functions != 0 &&
-                        walk_calls != 0 && components != 0 && component_begin != 0 && members != 0 && component_first != 0 && queue != 0 && predecessors != 0 &&
-                        reached != 0 && path != 0 && allowed_used != 0;
+    uint32_t* component_begin = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 2);
+    uint32_t* members = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
+    uint32_t* component_first = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
+    uint32_t* queue = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
+    uint32_t* predecessors = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
+    uint32_t* reached = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
+    uint32_t* path = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
+    bool* allowed_used = BUSTER_ARENA_PUSH_ARRAY(work, bool, allowed_count + 1);
+    bool memory = fits && symbol_names != 0 && symbol_scopes != 0 && symbol_first != 0 && symbol_last != 0 && symbol_strong_count != 0 && slots != 0 &&
+                  definition_kinds != 0 && definition_indices != 0 && definition_next != 0 && definition_strong != 0 && names != 0 && units != 0 && alias_units != 0 &&
+                  alias_targets != 0 && alias_stamps != 0 && work_units != 0 && work_names != 0 && call_callers != 0 && call_units != 0 && call_names != 0 &&
+                  call_lines != 0 && callers_begin != 0 && calls_itself != 0 && visit != 0 && lowest != 0 && on_stack != 0 && component_stack != 0 &&
+                  walk_functions != 0 && walk_calls != 0 && components != 0 && component_begin != 0 && members != 0 && component_first != 0 && queue != 0 &&
+                  predecessors != 0 && reached != 0 && path != 0 && allowed_used != 0;
 
     CallGraphReport report = {
         .arena = arena,
         .begin = (char*)arena->base + arena->length,
         .length = 0,
-        .full = !memory,
+        .full = false,
     };
     uint32_t function_count = 0;
     uint32_t call_count = 0;
     uint32_t component_count = 0;
+    uint32_t* targets = 0;
     if (memory)
     {
         memset(slots, 0, slot_count * sizeof(*slots));
-        memset(alias_slots, 0, alias_slot_count * sizeof(*alias_slots));
         memset(allowed_used, 0, (allowed_count + 1) * sizeof(*allowed_used));
-        CallGraphTable table = {
-            .slots = slots,
-            .mask = slot_count - 1,
-            .names = names,
-            .scopes = scopes,
-        };
-        CallGraphAliases aliases = {
+        CallGraphSymbols symbols = {
             .table = {
-                .slots = alias_slots,
-                .mask = alias_slot_count - 1,
-                .names = alias_names,
-                .scopes = alias_scopes,
+                .slots = slots,
+                .mask = slot_count - 1,
+                .names = symbol_names,
+                .scopes = symbol_scopes,
             },
-            .count = 0,
-            .units = alias_units,
-            .targets = alias_targets,
-            .ifuncs = alias_ifuncs,
+            .first = symbol_first,
+            .strong_count = symbol_strong_count,
+            .kinds = definition_kinds,
+            .indices = definition_indices,
+            .next = definition_next,
+            .strong = definition_strong,
+            .alias_units = alias_units,
+            .alias_targets = alias_targets,
+            .alias_stamps = alias_stamps,
+            .work_units = work_units,
+            .work_names = work_names,
         };
 
-        // The definitions and their calls, and the aliases. A second definition of a name in the same scope (an inline
-        // function's copies in several translation units) is the same function, and likewise for aliases.
+        // The definitions and their calls, and the aliases. Each definition is added to its symbol's list, in order;
+        // every function definition is a function of the graph, even a weak one that a strong one replaces, and a
+        // second strong definition of a symbol is a problem.
+        uint32_t symbol_count = 0;
+        uint32_t definition_count = 0;
+        uint32_t alias_count = 0;
         uint32_t call_line_index = 0;
         for (uint32_t unit = 0; unit < input_count; unit += 1)
         {
@@ -662,54 +719,76 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
                 const CallGraphDefine define = call_graph_define(line);
                 const CallGraphAlias alias = call_graph_alias(line);
                 const CallGraphCall call = call_graph_call(line);
-                if (alias.is_alias && alias.malformed)
+                if (define.is_define && current != BUSTER_CALL_GRAPH_NONE)
                 {
-                    call_graph_append_problem(&report, inputs[unit].name, line_number, BUSTER_S8("an alias without a target"));
+                    call_graph_append_problem(&report, inputs[unit].name, current_line, BUSTER_S8("a definition without its closing brace"));
                     result.problem_count += 1;
                 }
-                else if (alias.is_alias)
+                if (define.is_define)
                 {
-                    const uint32_t scope = alias.local ? unit : BUSTER_CALL_GRAPH_EXTERNAL;
-                    const uint64_t slot = call_graph_find(&aliases.table, scope, alias.name);
-                    if (alias_slots[slot] == 0)
-                    {
-                        alias_names[aliases.count] = alias.name;
-                        alias_scopes[aliases.count] = scope;
-                        alias_units[aliases.count] = unit;
-                        alias_targets[aliases.count] = alias.target;
-                        alias_ifuncs[aliases.count] = alias.ifunc;
-                        aliases.count += 1;
-                        alias_slots[slot] = (uint32_t)aliases.count;
-                    }
-                }
-                else if (define.is_define)
-                {
-                    if (current != BUSTER_CALL_GRAPH_NONE)
-                    {
-                        call_graph_append_problem(&report, inputs[unit].name, current_line, BUSTER_S8("a definition without its closing brace"));
-                        result.problem_count += 1;
-                    }
                     current = BUSTER_CALL_GRAPH_NONE;
-                    if (define.malformed)
+                }
+                if ((define.is_define && define.malformed) || (alias.is_alias && alias.malformed))
+                {
+                    call_graph_append_problem(&report, inputs[unit].name, line_number, define.is_define ? BUSTER_S8("a definition without a name") : BUSTER_S8("an alias without a target"));
+                    result.problem_count += 1;
+                }
+                else if (define.is_define || alias.is_alias)
+                {
+                    const CallGraphBinding binding = define.is_define ? define.binding : alias.binding;
+                    const String8 name = define.is_define ? define.name : alias.name;
+                    const uint32_t scope = binding == CALL_GRAPH_BINDING_LOCAL ? unit : BUSTER_CALL_GRAPH_EXTERNAL;
+                    const uint64_t slot = call_graph_find(&symbols.table, scope, name);
+                    if (slots[slot] == 0)
                     {
-                        call_graph_append_problem(&report, inputs[unit].name, line_number, BUSTER_S8("a definition without a name"));
-                        result.problem_count += 1;
+                        symbol_names[symbol_count] = name;
+                        symbol_scopes[symbol_count] = scope;
+                        symbol_first[symbol_count] = BUSTER_CALL_GRAPH_NONE;
+                        symbol_strong_count[symbol_count] = 0;
+                        symbol_count += 1;
+                        slots[slot] = symbol_count;
+                    }
+                    const uint32_t symbol = slots[slot] - 1;
+                    definition_strong[definition_count] = binding != CALL_GRAPH_BINDING_WEAK;
+                    definition_next[definition_count] = BUSTER_CALL_GRAPH_NONE;
+                    if (symbol_first[symbol] == BUSTER_CALL_GRAPH_NONE)
+                    {
+                        symbol_first[symbol] = definition_count;
                     }
                     else
                     {
-                        const uint32_t scope = define.local ? unit : BUSTER_CALL_GRAPH_EXTERNAL;
-                        const uint64_t slot = call_graph_find(&table, scope, define.name);
-                        if (slots[slot] == 0)
-                        {
-                            names[function_count] = define.name;
-                            units[function_count] = unit;
-                            scopes[function_count] = scope;
-                            function_count += 1;
-                            slots[slot] = function_count;
-                        }
-                        current = slots[slot] - 1;
-                        current_line = line_number;
+                        definition_next[symbol_last[symbol]] = definition_count;
                     }
+                    symbol_last[symbol] = definition_count;
+                    if (definition_strong[definition_count] && symbol_strong_count[symbol] != 0)
+                    {
+                        call_graph_append_location(&report, inputs[unit].name, line_number);
+                        call_graph_append(&report, BUSTER_S8("a second strong definition of "));
+                        call_graph_append(&report, name);
+                        call_graph_append(&report, BUSTER_S8("\n"));
+                        result.problem_count += 1;
+                    }
+                    symbol_strong_count[symbol] += definition_strong[definition_count];
+                    if (define.is_define)
+                    {
+                        definition_kinds[definition_count] = CALL_GRAPH_KIND_FUNCTION;
+                        definition_indices[definition_count] = function_count;
+                        names[function_count] = name;
+                        units[function_count] = unit;
+                        current = function_count;
+                        current_line = line_number;
+                        function_count += 1;
+                    }
+                    else
+                    {
+                        definition_kinds[definition_count] = alias.ifunc ? CALL_GRAPH_KIND_IFUNC : CALL_GRAPH_KIND_ALIAS;
+                        definition_indices[definition_count] = alias_count;
+                        alias_units[alias_count] = unit;
+                        alias_targets[alias_count] = alias.target;
+                        alias_stamps[alias_count] = UINT64_MAX;
+                        alias_count += 1;
+                    }
+                    definition_count += 1;
                 }
                 else if (call_graph_equal(line, BUSTER_S8("}")))
                 {
@@ -733,43 +812,48 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
             }
         }
 
-        // Each call's callee, which call_graph_resolve finds.
+        // Each call's callees, which call_graph_resolve finds: counted first, then written after their caller's earlier
+        // calls' (callers_begin[f + 2] counts f's; its prefix sums leave callers_begin[f + 1] where f's start, which
+        // writing advances to where they end, f + 1's start).
         memset(callers_begin, 0, (function_count + 2) * sizeof(*callers_begin));
         memset(calls_itself, 0, function_count * sizeof(*calls_itself));
+        uint64_t edge_count = 0;
         for (uint32_t i = 0; i < call_line_index; i += 1)
         {
-            const CallGraphCallee callee = call_graph_resolve(&table, &aliases, call_units[i], call_names[i]);
-            if (callee.ifunc || callee.lost)
+            const CallGraphCallees callees = call_graph_resolve(&symbols, call_units[i], call_names[i], 2 * (uint64_t)i, 0);
+            if (callees.ifunc || callees.lost)
             {
                 call_graph_append_location(&report, inputs[call_units[i]].name, call_lines[i]);
                 call_graph_append(&report, BUSTER_S8("a call of "));
                 call_graph_append(&report, call_names[i]);
-                call_graph_append(&report, callee.ifunc ? BUSTER_S8(", an ifunc, whose callee is chosen at run time\n") : BUSTER_S8(", an alias that leads to no definition\n"));
+                call_graph_append(&report, callees.ifunc ? BUSTER_S8(", an ifunc, whose callee is chosen at run time\n") : BUSTER_S8(", an alias that leads to no definition\n"));
                 result.problem_count += 1;
             }
-            resolved[i] = callee.function;
-            if (resolved[i] != BUSTER_CALL_GRAPH_NONE)
-            {
-                callers_begin[call_callers[i] + 2] += 1;
-                calls_itself[call_callers[i]] = calls_itself[call_callers[i]] || resolved[i] == call_callers[i];
-                call_count += 1;
-            }
+            callers_begin[call_callers[i] + 2] += callees.count;
+            edge_count += callees.count;
         }
-        // callers_begin[f + 2] counted f's calls; its prefix sums leave callers_begin[f + 1] where f's calls start, which
-        // filling advances to where they end, f + 1's start.
-        for (uint32_t f = 0; f < function_count; f += 1)
+        memory = edge_count < UINT32_MAX;
+        targets = memory ? BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, edge_count + 1) : 0;
+        memory = targets != 0;
+        call_count = memory ? (uint32_t)edge_count : 0;
+        for (uint32_t f = 0; memory && f < function_count; f += 1)
         {
             callers_begin[f + 2] += callers_begin[f + 1];
         }
-        for (uint32_t i = 0; i < call_line_index; i += 1)
+        for (uint32_t i = 0; memory && i < call_line_index; i += 1)
         {
-            if (resolved[i] != BUSTER_CALL_GRAPH_NONE)
+            const uint32_t caller = call_callers[i];
+            uint32_t* written = targets + callers_begin[caller + 1];
+            const CallGraphCallees callees = call_graph_resolve(&symbols, call_units[i], call_names[i], 2 * (uint64_t)i + 1, written);
+            for (uint32_t c = 0; c < callees.count; c += 1)
             {
-                targets[callers_begin[call_callers[i] + 1]] = resolved[i];
-                callers_begin[call_callers[i] + 1] += 1;
+                calls_itself[caller] = calls_itself[caller] || written[c] == caller;
             }
+            callers_begin[caller + 1] += callees.count;
         }
-
+    }
+    if (memory)
+    {
         // Tarjan's algorithm, with the walk's stack in walk_functions and walk_calls instead of recursion.
         for (uint32_t f = 0; f < function_count; f += 1)
         {
@@ -978,8 +1062,9 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     result.report = (String8){ .pointer = report.begin, .length = report.length };
     result.function_count = function_count;
     result.call_count = call_count;
-    result.full = report.full;
-    result.success = !report.full && result.problem_count == 0 && result.cycle_count == 0 && result.unused_allowed_count == 0;
+    scratch_end(scratch);
+    result.full = report.full || !memory;
+    result.success = !result.full && result.problem_count == 0 && result.cycle_count == 0 && result.unused_allowed_count == 0;
     return result;
 }
 
