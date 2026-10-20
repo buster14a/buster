@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-// The hash's AES round keys are wyhash's public-domain constants (THIRD_PARTY_NOTICES.md).
+// The hash's constants (the lanes' whitening and the chain's round key) are wyhash's public-domain constants
+// (THIRD_PARTY_NOTICES.md).
 //
 // Identifier interning: every distinct identifier spelling gets one IdentId, a dense u32 handle, so that the stages
 // after the lexer compare, hash and index identifiers by a number. docs/c-refinement.md has the design and its 9700X
@@ -24,9 +25,12 @@
 // C_NAME_KEYWORD_COUNT.
 //
 // The hash (intern_hash_bytes_scalar defines it) folds each 64-byte chunk of the spelling into 128 bits: the XOR of its
-// four 16-byte lanes, lane k's two qwords rotated by intern_lane_rotations[k] so that lanes don't cancel each other.
-// Chunks after the first are chained with an AES round (the state's round, XORed with the chunk's fold), so that equal
-// or swapped chunks don't cancel either. Two more AES rounds mix the result and the length. intern_hash_bytes computes
+// four 16-byte lanes, each XORed with a whitening of its own and put through two AES rounds (the length goes into the
+// first lane). The whitening keeps equal lanes from cancelling in the fold, and the rounds keep changes in two lanes
+// from cancelling: a fold of the lanes as they are is linear, so flipping a bit in one lane and the same bit in another
+// would leave it as it was, and after one round a flipped bit's change still depends on its byte alone. Chunks after
+// the first are chained with an AES round (the state's round, XORed with the chunk's fold), so that equal or swapped
+// chunks don't cancel either. The hash is the low qword of the state. intern_hash_bytes computes
 // it 64 bytes at a time, and intern_hash_vector from a spelling of up to 64 bytes that one masked load read (zero past
 // its end), as c_refine.c does: all three must agree on every spelling (test-refinement checks it).
 //
@@ -34,8 +38,8 @@
 // this order:
 //   - The predefined names: BUSTER_C_NAMES (keywords, then directive names, then the preprocessor's names), IdentId,
 //     the C_NAME_* ids, CLanguage and c_keyword_kind (which keyword kinds a language mode has).
-//   - The table: InternTable, the hash (intern_mix, intern_chain, intern_hash_bytes_scalar, intern_fold,
-//     intern_hash_vector, intern_chain_chunks, intern_hash_bytes), the bucket helpers (intern_bucket_key, intern_bucket_matches, intern_bucket_empties,
+//   - The table: InternTable, the hash (intern_lane_rounds, intern_chain, intern_hash_bytes_scalar, intern_fold,
+//     intern_with_length, intern_hash_vector, intern_chain_chunks, intern_hash_bytes), the bucket helpers (intern_bucket_key, intern_bucket_matches, intern_bucket_empties,
 //     intern_slot_id, intern_first_bytes), intern_allocate_buckets, intern_place, intern_grow, intern_insert,
 //     intern_find_hashed, intern_find_or_add_hashed, intern_find_or_add, intern_find, intern_bytes, intern_length,
 //     intern_initialize, intern_release and intern_reset.
@@ -342,23 +346,27 @@ struct InternTable
     uint32_t count;
 };
 
-// The AES round keys: wyhash's constants (wyhash is in the public domain).
+// The hash's constants: wyhash's (wyhash is in the public domain).
 #define BUSTER_INTERN_SECRET0 0xa0761d6478bd642full
 #define BUSTER_INTERN_SECRET1 0xe7037ed1a0b428dbull
 #define BUSTER_INTERN_SECRET2 0x8ebc6af09c88c6e3ull
 #define BUSTER_INTERN_SECRET3 0x589965cc75374cc3ull
 
-// The rotations of a 16-byte lane's qwords, by its index in its 64-byte chunk.
-static const uint8_t intern_lane_rotations[4] = { 0, 17, 31, 47 };
+// The whitening of a 64-byte chunk's four 16-byte lanes before their AES rounds, a different pair of wyhash's constants
+// per lane (lane k's qwords are 2k and 2k + 1), so that equal lanes don't give equal results, which the fold would
+// cancel.
+static const uint64_t intern_lane_whitening[8] = {
+    BUSTER_INTERN_SECRET0, BUSTER_INTERN_SECRET1, BUSTER_INTERN_SECRET2, BUSTER_INTERN_SECRET3,
+    BUSTER_INTERN_SECRET1, BUSTER_INTERN_SECRET2, BUSTER_INTERN_SECRET3, BUSTER_INTERN_SECRET0,
+};
 
-// Two AES rounds mix the folded lanes and the length: two FP0/FP1 ops on Zen 5, where two 64x64-bit multiplications
-// need the lanes in general registers first (docs/c-refinement.md). After two rounds every bit of the result depends
-// on every bit of the input.
-BUSTER_INLINE uint64_t intern_mix(__m128i folded, uint64_t length)
+// One lane's part of a chunk's fold: two AES rounds of the lane XORed with its whitening (`lane` 0 to 3). Two rounds,
+// because after one, the change a flipped bit makes depends on its byte alone, so a bit flipped in two lanes over equal
+// bytes would change both alike and cancel; after two, every bit of the result depends on every bit of the lane.
+BUSTER_INLINE __m128i intern_lane_rounds(__m128i bytes, uint32_t lane)
 {
-    const __m128i keyed = _mm_xor_si128(folded, _mm_cvtsi64_si128((long long)length));
-    const __m128i first = _mm_aesenc_si128(keyed, _mm_set_epi64x((long long)BUSTER_INTERN_SECRET1, (long long)BUSTER_INTERN_SECRET0));
-    return (uint64_t)_mm_cvtsi128_si64(_mm_aesenc_si128(first, _mm_set_epi64x((long long)BUSTER_INTERN_SECRET3, (long long)BUSTER_INTERN_SECRET2)));
+    const __m128i whitened = _mm_xor_si128(bytes, _mm_set_epi64x((long long)intern_lane_whitening[2 * lane + 1], (long long)intern_lane_whitening[2 * lane]));
+    return _mm_aesenc_si128(_mm_aesenc_si128(whitened, _mm_setzero_si128()), _mm_setzero_si128());
 }
 
 // The state after a 64-byte chunk past the first, whose fold is `folded`: XORed into an AES round of the state (the first
@@ -370,53 +378,57 @@ BUSTER_INLINE __m128i intern_chain(__m128i state, __m128i folded)
 }
 
 // The hash of a spelling of any length, a 16-byte lane at a time: the plain definition, which test-refinement checks
-// intern_hash_bytes and intern_hash_vector against.
+// intern_hash_bytes and intern_hash_vector against. Each chunk has four lanes, zero past the spelling's end (a spelling
+// of no bytes is one chunk of zeros, as the masked loads give them), and the length is XORed into the first lane's low
+// qword. The hash is the low qword of the state.
 static __attribute__((unused)) uint64_t intern_hash_bytes_scalar(const uint8_t* bytes, uint64_t length)
 {
     __m128i state = _mm_setzero_si128();
-    uint64_t x0 = 0;
-    uint64_t x1 = 0;
-    const uint64_t lanes = (length + 15) / 16;
-    for (uint64_t lane = 0; lane < lanes; lane += 1)
+    const uint64_t chunks = length == 0 ? 1 : (length + BUSTER_INTERN_VECTOR_BYTES - 1) / BUSTER_INTERN_VECTOR_BYTES;
+    for (uint64_t chunk = 0; chunk < chunks; chunk += 1)
     {
-        uint8_t chunk[16] = { 0 };
-        const uint64_t remaining = length - lane * 16;
-        memcpy(chunk, bytes + lane * 16, remaining < 16 ? remaining : 16);
-        uint64_t q0;
-        uint64_t q1;
-        memcpy(&q0, chunk, sizeof(q0));
-        memcpy(&q1, chunk + 8, sizeof(q1));
-        const uint8_t rotation = intern_lane_rotations[lane & 3];
-        x0 ^= __builtin_rotateleft64(q0, rotation);
-        x1 ^= __builtin_rotateleft64(q1, rotation);
-        if ((lane & 3) == 3 || lane + 1 == lanes)
+        __m128i folded = _mm_setzero_si128();
+        for (uint32_t lane = 0; lane < 4; lane += 1)
         {
-            // The end of a 64-byte chunk.
-            const __m128i folded = _mm_set_epi64x((long long)x1, (long long)x0);
-            state = lane < 4 ? folded : intern_chain(state, folded);
-            x0 = 0;
-            x1 = 0;
+            uint8_t lane_bytes[16] = { 0 };
+            const uint64_t at = chunk * BUSTER_INTERN_VECTOR_BYTES + lane * 16;
+            if (at < length)
+            {
+                memcpy(lane_bytes, bytes + at, length - at < 16 ? length - at : 16);
+            }
+            uint64_t q0;
+            uint64_t q1;
+            memcpy(&q0, lane_bytes, sizeof(q0));
+            memcpy(&q1, lane_bytes + 8, sizeof(q1));
+            q0 ^= chunk == 0 && lane == 0 ? length : 0;
+            folded = _mm_xor_si128(folded, intern_lane_rounds(_mm_set_epi64x((long long)q1, (long long)q0), lane));
         }
+        state = chunk == 0 ? folded : intern_chain(state, folded);
     }
-    return intern_mix(state, length);
+    return (uint64_t)_mm_cvtsi128_si64(state);
 }
 
-// The rotation of each qword of a 64-byte chunk: four 16-byte lanes, which take intern_lane_rotations in order.
-#define BUSTER_INTERN_CHUNK_ROTATIONS _mm512_setr_epi64(0, 0, 17, 17, 31, 31, 47, 47)
-
-// The fold of a 64-byte chunk whose four lanes are rotated already: their XOR, into the lowest lane with two 128-bit
-// lane swaps.
-BUSTER_INLINE __m128i intern_fold(__m512i lanes)
+// The fold of a 64-byte chunk: its four lanes whitened and through two AES rounds at once (a vpxorq and two vaesenc of
+// the whole vector), then XORed into the lowest lane with two 128-bit lane swaps.
+BUSTER_INLINE __m128i intern_fold(__m512i chunk)
 {
+    const __m512i whitened = _mm512_xor_si512(chunk, _mm512_loadu_si512(intern_lane_whitening));
+    const __m512i lanes = _mm512_aesenc_epi128(_mm512_aesenc_epi128(whitened, _mm512_setzero_si512()), _mm512_setzero_si512());
     __m512i r = _mm512_xor_si512(lanes, _mm512_shuffle_i64x2(lanes, lanes, _MM_SHUFFLE(1, 0, 3, 2)));
     r = _mm512_xor_si512(r, _mm512_shuffle_i64x2(r, r, _MM_SHUFFLE(2, 3, 0, 1)));
     return _mm512_castsi512_si128(r);
 }
 
-// The hash of a spelling of up to 64 bytes in `v`, zero past its length: one chunk, its four lanes rotated at once.
+// A spelling's first chunk with its length XORed into the first lane's low qword.
+BUSTER_INLINE __m512i intern_with_length(__m512i chunk, uint64_t length)
+{
+    return _mm512_xor_si512(chunk, _mm512_zextsi128_si512(_mm_cvtsi64_si128((long long)length)));
+}
+
+// The hash of a spelling of up to 64 bytes in `v`, zero past its length: one chunk.
 BUSTER_INLINE uint64_t intern_hash_vector(__m512i v, uint64_t length)
 {
-    return intern_mix(intern_fold(_mm512_rolv_epi64(v, BUSTER_INTERN_CHUNK_ROTATIONS)), length);
+    return (uint64_t)_mm_cvtsi128_si64(intern_fold(intern_with_length(v, length)));
 }
 
 // The state after the chunks past a spelling's first 64 bytes, chained onto the first's (`state`): out of line, since
@@ -427,23 +439,22 @@ static __attribute__((noinline)) __m128i intern_chain_chunks(const uint8_t* byte
     {
         const uint64_t remaining = length - offset;
         const __mmask64 mask = remaining >= BUSTER_INTERN_VECTOR_BYTES ? ~0ull : _bzhi_u64(~0ull, (uint32_t)remaining);
-        const __m512i chunk = _mm512_maskz_loadu_epi8(mask, bytes + offset);
-        state = intern_chain(state, intern_fold(_mm512_rolv_epi64(chunk, BUSTER_INTERN_CHUNK_ROTATIONS)));
+        state = intern_chain(state, intern_fold(_mm512_maskz_loadu_epi8(mask, bytes + offset)));
     }
     return state;
 }
 
-// The hash of a spelling of any length: its first 64 bytes (a masked load, which never reads past it) rotated and folded,
-// then any later chunks chained.
+// The hash of a spelling of any length: its first 64 bytes (a masked load, which never reads past it) folded, then any
+// later chunks chained.
 static uint64_t intern_hash_bytes(const uint8_t* bytes, uint64_t length)
 {
     const __mmask64 mask = length >= BUSTER_INTERN_VECTOR_BYTES ? ~0ull : _bzhi_u64(~0ull, (uint32_t)length);
-    __m128i state = intern_fold(_mm512_rolv_epi64(_mm512_maskz_loadu_epi8(mask, bytes), BUSTER_INTERN_CHUNK_ROTATIONS));
+    __m128i state = intern_fold(intern_with_length(_mm512_maskz_loadu_epi8(mask, bytes), length));
     if (length > BUSTER_INTERN_VECTOR_BYTES)
     {
         state = intern_chain_chunks(bytes, length, state);
     }
-    return intern_mix(state, length);
+    return (uint64_t)_mm_cvtsi128_si64(state);
 }
 
 // A key for intern_bucket_matches: the spelling's first 16 bytes (zero past its end) in each 128-bit lane.

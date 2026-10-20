@@ -105,8 +105,9 @@ Differences from #116's sketch, each deliberate:
   literal for the sake of a few.
 - The table is not a Swiss table of 1-byte tags. It uses 64-byte buckets of
   prefixes; "The intern table" below explains why, with the measurements.
-- The hash is not `link_hash`. It is a fold of 16-byte lanes and two AES
-  rounds, which hashes an identifier from the same 64-byte load that reads it.
+- The hash is not `link_hash`. It is a fold of 16-byte lanes, each whitened
+  and put through two AES rounds, which hashes an identifier from the same
+  64-byte load that reads it.
   Whether the link representation's names adopt it, now that its runtime
   snapshot would make the function part of a file format, is #84's question.
 
@@ -186,12 +187,13 @@ Inside a batch, the hash is computed per identifier from that identifier's own
 
 - The fold has to stay per identifier: it reduces one identifier's vector to
   128 bits.
-- The mix could take 8 identifiers at once, with a qword transpose of their
-  folds and `vpmullq` (1 uop, latency 2 on Zen 5).
-- But the two `aesenc` rounds are already 2 uops per identifier, and the
-  transpose adds about 1. The 9700X profile of `sqlite3.c` puts the whole mix,
-  with the move of its result to a general register, at 5.5% of
-  `refine_tokens`' samples, which bounds what lane-parallel mixing could save.
+- The rounds run on that vector, all four lanes at once: two `vaesenc zmm` per
+  identifier, before the fold.
+- Before #192's review moved the rounds there, they mixed the folded 128 bits.
+  The 9700X profile of `sqlite3.c` put that mix, with the move of its result
+  to a general register, at 5.5% of `refine_tokens`' samples. That bounds what
+  hashing 8 identifiers per vector could save, and their transpose would cost
+  about a uop each.
 
 Stage 2's per-identifier bookkeeping (the slot's id to its token, and the
 candidate and deferred masks) takes about 18% of the samples, so it is the
@@ -225,15 +227,36 @@ and 20.07 with batches of 64, so they were kept and tuned further:
 and 18.55 for this document's results. Each figure is the median of 21 passes;
 runs differ by about 1%.)
 
-The hash is defined by `intern_hash_bytes_scalar`. It folds each 64-byte chunk
-of the spelling into 128 bits: the XOR of its four 16-byte lanes, with lane
-`k`'s two quadwords rotated by `intern_lane_rotations[k]`, so that lanes can't
-cancel each other. Each chunk after the first is XORed into an `aesenc` round
-of the state, so that equal or swapped chunks can't cancel either: a plain XOR
-of the chunks would hash every identifier `X X` of two equal 64-byte halves by
-its length alone. Two more `aesenc` rounds mix the state and the length. An
-identifier of up to 64 bytes, nearly all of them, is one chunk and pays no
-extra round. `intern_hash_bytes` computes the same hash 64 bytes at a time, and
+The hash is defined by `intern_hash_bytes_scalar`:
+- **Lanes.** Each 64-byte chunk of the spelling, zero past its end, has four
+  16-byte lanes. Each lane is XORed with a whitening of its own (a pair of
+  wyhash's constants per lane) and put through two `aesenc` rounds. The length
+  is XORed into the first lane first.
+- **Fold.** The chunk's fold is the XOR of the four results.
+- **Chain.** Each chunk after the first is XORed into an `aesenc` round of the
+  state.
+- **Result.** The hash is the state's low quadword.
+
+Each piece guards against a way of cancelling that #192's review found:
+- *The chain.* A plain XOR of the chunks would hash every identifier `X X` of
+  two equal 64-byte halves by its length alone.
+- *The lanes' rounds.* A fold of the lanes as they are is linear: the first
+  version rotated each lane by its own amount, and a bit flipped in one lane
+  with the bit its rotation lines up with in another left the hash as it was.
+  The review gave 65,536 such 32-byte identifiers that all shared one hash.
+- *Two rounds, not one.* After one round, the change a flipped bit makes
+  depends on its byte alone. A bit flipped in two lanes over bytes that are
+  equal once whitened still cancels: 6,740 of 14,856 flips did in the test.
+- *The whitening.* It keeps two equal lanes from giving equal results.
+
+An identifier of up to 64 bytes, nearly all of them, is one chunk. Its whole
+hash is a XOR with the length, a XOR with the whitening, two `vaesenc zmm`, the
+fold's two lane swaps, and a move to a general register. That is about as many
+uops as the rotation, fold and two-round mix it replaced. On the 9700X,
+`refine_tokens` measured within noise of the reviewed commit, as medians of
+five interleaved rounds: 10.42 → 10.35 cycles/token on `sqlite3.c`, and
+18.53 → 18.46 on the C library.
+`intern_hash_bytes` computes the same hash 64 bytes at a time, and
 `intern_hash_vector` computes it from the masked load of up to 64 bytes.
 `test-refinement` checks that all three agree.
 
@@ -281,12 +304,17 @@ bit. The checks are:
 
 - **hash:** the three hash functions agree on 200,000 spellings of 0 to 200
   bytes.
-- **long hashes:** 22,528 long spellings made of repeated or swapped parts must
-  all hash differently:
+- **structured hashes:** 88,064 spellings made of repeated, swapped or paired
+  parts must all hash differently:
   - `X X` for 8,192 64-byte `X`;
   - a 16-byte lane eight times;
   - `X Y` and `Y X`;
-  - `X` two, three and four times.
+  - `X` two, three and four times;
+  - the review's 65,536 32-byte identifiers, whose two lanes change in bits
+    that a rotation lines up.
+- **aligned flips:** the same bit flipped in two lanes of a chunk must change
+  the hash, in about 14,800 random spellings of 17 to 200 bytes. Half of them
+  repeat one letter, and in a third the two bytes are equal once whitened.
 - **names:** every predefined name has its id and spelling, and every name is a
   keyword in exactly the modes clang makes it one in, in all ten modes from
   `c89` to `gnu23`. The modes of the names that depend on them (`inline`,
