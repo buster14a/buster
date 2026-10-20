@@ -1,8 +1,8 @@
 # C coding style
 
 This document adapts useful conventions from **buster-legacy** for **buster**. It
-is a coding standard, not permission to copy Buster implementations or inherit
-its portability layers, build system, or performance-acceptance machinery.
+is a coding standard, not permission to copy buster-legacy implementations or
+inherit its portability layers, build system, or performance-acceptance machinery.
 
 ## Language, formatting, and naming
 

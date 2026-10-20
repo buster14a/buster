@@ -81,7 +81,7 @@ function, direct and explicit control flow, bounded slices, arena-oriented
 allocation, and safe SIMD memory accesses. Prefer simple data layouts and
 measured end-to-end performance improvements. Prefer single-line statements,
 declarations, and function headers where readable, and one aggregate field or
-initializer entry per line. Do not import Buster's portability
+initializer entry per line. Do not import buster-legacy's portability
 or infrastructure machinery merely to match its style.
 
 ## Current repository and exact smoke commands
