@@ -8,9 +8,8 @@
 // even the always-inliner, so a call in the IR is a call in the source. The check reads each `define` and the direct
 // `call`, `invoke` and `callbr` instructions in its body, resolves each callee as the linker would (call_graph_resolve:
 // a symbol of the same translation unit first, then an external one, whose strong definitions win over its weak ones,
-// with the unit's own bodies that clang may inline whatever the linker takes: available_externally, linkonce_odr and
-// weak_odr ones and those marked alwaysinline; an alias, through any chain of them, to the definition of its target in
-// its own module), builds the call graph of the defined functions, and
+// with every definition of the name in the calling unit, which clang may inline whatever the linker takes; an alias,
+// through any chain of them, to the definition of its target in its own module), builds the call graph of the defined functions, and
 // finds its strongly connected components with Tarjan's algorithm, run with explicit stacks. Calls of functions defined nowhere (libc, LLVM's
 // intrinsics) and calls through pointers are left out: the style allows function pointers only at the thread-entry
 // boundary. A call of an ifunc, whose callee is chosen at run time, or of an alias that leads to no definition is a
@@ -24,8 +23,7 @@
 //
 // main.c includes this file after lane.c (for its arenas) and call_graph_test.c after it. Layout, in this order: the
 // allowlist (call_graph_allowed), the interface (CallGraphInput, CallGraphResult, call_graph_check), reading the IR
-// (call_graph_symbol, call_graph_binding, call_graph_define, call_graph_alias, call_graph_attributes, call_graph_call),
-// the symbol table
+// (call_graph_symbol, call_graph_binding, call_graph_define, call_graph_alias, call_graph_call), the symbol table
 // (call_graph_find and call_graph_resolve), the report's text (call_graph_append and the others), call_graph_check, and run_check_call_graph,
 // the command.
 
@@ -149,8 +147,8 @@ typedef enum CallGraphBinding
     CALL_GRAPH_BINDING_WEAK,
     // internal or private: the name belongs to its translation unit.
     CALL_GRAPH_BINDING_LOCAL,
-    // available_externally: a copy of an external definition, for inlining. It is never linked, but the calls of its
-    // own translation unit may run it, inlined, whichever definition the linker takes.
+    // available_externally: a copy of an external definition, for inlining. It is never linked; only the calls of its
+    // own translation unit may run it, inlined.
     CALL_GRAPH_BINDING_AVAILABLE,
 } CallGraphBinding;
 
@@ -175,29 +173,12 @@ static CallGraphBinding call_graph_binding(String8 line, uint64_t at)
     return result;
 }
 
-// Whether `word` is in `line` between spaces, or at its end.
-static bool call_graph_has_word(String8 line, uint64_t at, String8 word)
-{
-    bool result = false;
-    for (uint64_t i = at; !result && i + word.length <= line.length; i += 1)
-    {
-        result = (i == 0 || line.pointer[i - 1] == ' ') && memcmp(line.pointer + i, word.pointer, word.length) == 0 &&
-                 (i + word.length == line.length || line.pointer[i + word.length] == ' ');
-    }
-    return result;
-}
-
 typedef struct CallGraphDefine CallGraphDefine;
 struct CallGraphDefine
 {
     String8 name;
     bool is_define;
     CallGraphBinding binding;
-    // Clang may inline the body into its unit's calls whatever the linker takes for the name: an available_externally
-    // copy, a linkonce_odr or weak_odr one (whose copies are all equivalent), or one marked alwaysinline in the line.
-    bool inlinable;
-    // The attribute group the line names (`#N`), whose attributes line may mark it alwaysinline, or UINT32_MAX.
-    uint32_t group;
     // A define line without a name.
     bool malformed;
 };
@@ -224,21 +205,6 @@ static CallGraphDefine call_graph_define(String8 line)
         }
         result.malformed = !symbol.valid || symbol.end >= line.length || line.pointer[symbol.end] != '(';
         result.name = symbol.name;
-        result.inlinable = result.binding == CALL_GRAPH_BINDING_AVAILABLE || call_graph_starts_with(line, linkage, BUSTER_S8("linkonce_odr ")) ||
-                           call_graph_starts_with(line, linkage, BUSTER_S8("weak_odr ")) || call_graph_has_word(line, symbol.end, BUSTER_S8("alwaysinline"));
-        result.group = UINT32_MAX;
-        for (uint64_t i = symbol.end; i + 2 < line.length; i += 1)
-        {
-            if (line.pointer[i] == ' ' && line.pointer[i + 1] == '#' && line.pointer[i + 2] >= '0' && line.pointer[i + 2] <= '9')
-            {
-                uint64_t group = 0;
-                for (uint64_t d = i + 2; d < line.length && line.pointer[d] >= '0' && line.pointer[d] <= '9' && group < UINT32_MAX; d += 1)
-                {
-                    group = group * 10 + (uint64_t)(line.pointer[d] - '0');
-                }
-                result.group = group < UINT32_MAX ? (uint32_t)group : UINT32_MAX;
-            }
-        }
     }
     return result;
 }
@@ -300,34 +266,6 @@ static CallGraphAlias call_graph_alias(String8 line)
                 result.malformed = !target.valid;
             }
         }
-    }
-    return result;
-}
-
-typedef struct CallGraphAttributes CallGraphAttributes;
-struct CallGraphAttributes
-{
-    // An attribute group, `attributes #N = { ... }`, which marks its functions alwaysinline.
-    uint32_t group;
-    bool is_attributes;
-    bool alwaysinline;
-};
-
-static CallGraphAttributes call_graph_attributes(String8 line)
-{
-    CallGraphAttributes result = { 0 };
-    if (call_graph_starts_with(line, 0, BUSTER_S8("attributes #")))
-    {
-        uint64_t group = 0;
-        uint64_t at = BUSTER_COMPILE_TIME_STRING_LENGTH("attributes #");
-        while (at < line.length && line.pointer[at] >= '0' && line.pointer[at] <= '9' && group < UINT32_MAX)
-        {
-            group = group * 10 + (uint64_t)(line.pointer[at] - '0');
-            at += 1;
-        }
-        result.is_attributes = group < UINT32_MAX;
-        result.group = (uint32_t)group;
-        result.alwaysinline = call_graph_has_word(line, at, BUSTER_S8("alwaysinline"));
     }
     return result;
 }
@@ -471,15 +409,13 @@ struct CallGraphSymbols
     // Each symbol's first definition, and how many of its definitions are strong.
     uint32_t* first;
     uint32_t* strong_count;
-    // Each definition's kind, its function's or alias's index, the next definition of its symbol, its binding, its
-    // translation unit, and whether clang may inline it into its unit's calls (CallGraphDefine's inlinable, or its
-    // attribute group's alwaysinline).
+    // Each definition's kind, its function's or alias's index, the next definition of its symbol, its binding and its
+    // translation unit.
     uint8_t* kinds;
     uint32_t* indices;
     uint32_t* next;
     uint8_t* bindings;
     uint32_t* units;
-    bool* inlinable;
     // Each alias's translation unit (where its target is looked up) and its target's name.
     const uint32_t* alias_units;
     const String8* alias_targets;
@@ -503,10 +439,14 @@ struct CallGraphCallees
 
 // The functions a call of `name` from translation unit `unit` can reach, written to `callees` unless it is 0. The name
 // is the unit's own symbol if it has one, else the external symbol, whose strong definitions are the ones the linker
-// takes; without one, it takes one of the weak definitions, by link order, so all of them count. The unit's own
-// definitions that clang may inline count too, whichever the linker takes. An alias refers to its target's
-// definition in its own module, whatever the linker takes for the target's name elsewhere, so a target counts only
-// that unit's definitions of the name. Each alias is followed once per resolution, which `stamp` tells apart.
+// takes; without one, it takes one of the weak definitions, by link order, so all of them count. Every definition of
+// the name in the calling unit counts too, whatever the linker takes: clang may inline the unit's own body into the
+// call before linking (an available_externally or *_odr body, one marked always_inline, a call in a flatten function or
+// marked always_inline itself), and a body that recurses when it runs is recursion in the source, so the check doesn't
+// try to tell which of those holds. A plain weak body that a strong one elsewhere replaces, and that clang won't
+// inline, is then a callee that never runs, which can only add a cycle, never hide one. An alias refers to its
+// target's definition in its own module, whatever the linker takes for the target's name elsewhere, so a target counts
+// only that unit's definitions of the name. Each alias is followed once per resolution, which `stamp` tells apart.
 static CallGraphCallees call_graph_resolve(CallGraphSymbols* symbols, uint32_t unit, String8 name, uint64_t stamp, uint32_t* callees)
 {
     CallGraphCallees result = { 0 };
@@ -533,7 +473,7 @@ static CallGraphCallees call_graph_resolve(CallGraphSymbols* symbols, uint32_t u
             const uint8_t binding = symbols->bindings[definition];
             const bool own = symbols->units[definition] == work_unit;
             const bool linked = binding == CALL_GRAPH_BINDING_STRONG || binding == CALL_GRAPH_BINDING_LOCAL || (binding == CALL_GRAPH_BINDING_WEAK && !strong_only);
-            const bool taken = target ? own : linked || (own && symbols->inlinable[definition]);
+            const bool taken = own || (!target && linked);
             if (taken && symbols->kinds[definition] == CALL_GRAPH_KIND_FUNCTION)
             {
                 if (callees != 0)
@@ -670,7 +610,6 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     uint64_t define_count = 0;
     uint64_t alias_line_count = 0;
     uint64_t call_line_count = 0;
-    uint64_t attributes_line_count = 0;
     for (uint32_t unit = 0; unit < input_count; unit += 1)
     {
         const String8 text = inputs[unit].text;
@@ -681,18 +620,16 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
             define_count += call_graph_define(line).is_define;
             alias_line_count += call_graph_alias(line).is_alias;
             call_line_count += call_graph_call(line).callee.length != 0;
-            attributes_line_count += call_graph_attributes(line).is_attributes;
             at += line.length + 1;
         }
     }
 
     // The counts index 32-bit arrays.
-    const bool fits = define_count + alias_line_count < UINT32_MAX && call_line_count < UINT32_MAX && attributes_line_count < UINT32_MAX;
+    const bool fits = define_count + alias_line_count < UINT32_MAX && call_line_count < UINT32_MAX;
     const uint64_t function_capacity = fits ? define_count : 0;
     const uint64_t alias_capacity = fits ? alias_line_count : 0;
     const uint64_t definition_capacity = function_capacity + alias_capacity;
     const uint64_t call_capacity = fits ? call_line_count : 0;
-    const uint64_t attributes_capacity = fits ? attributes_line_count : 0;
     // At most half the slots are full.
     uint64_t slot_count = 16;
     while (slot_count < 2 * definition_capacity)
@@ -712,11 +649,6 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     uint32_t* definition_next = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, definition_capacity + 1);
     uint8_t* definition_bindings = BUSTER_ARENA_PUSH_ARRAY(work, uint8_t, definition_capacity + 1);
     uint32_t* definition_units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, definition_capacity + 1);
-    bool* definition_inlinable = BUSTER_ARENA_PUSH_ARRAY(work, bool, definition_capacity + 1);
-    // Each function's definition and attribute group, and the groups of the unit being read that are alwaysinline.
-    uint32_t* function_definitions = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
-    uint32_t* function_groups = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
-    uint32_t* forced_groups = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, attributes_capacity + 1);
     String8* names = BUSTER_ARENA_PUSH_ARRAY(work, String8, function_capacity + 1);
     uint32_t* units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
     uint32_t* alias_units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, alias_capacity + 1);
@@ -751,8 +683,7 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     uint32_t* path = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
     bool* allowed_used = BUSTER_ARENA_PUSH_ARRAY(work, bool, allowed_count + 1);
     bool memory = fits && symbol_names != 0 && symbol_scopes != 0 && symbol_first != 0 && symbol_last != 0 && symbol_strong_count != 0 && slots != 0 &&
-                  definition_kinds != 0 && definition_indices != 0 && definition_next != 0 && definition_bindings != 0 && definition_units != 0 && definition_inlinable != 0 && function_definitions != 0 &&
-                  function_groups != 0 && forced_groups != 0 && names != 0 && units != 0 && alias_units != 0 &&
+                  definition_kinds != 0 && definition_indices != 0 && definition_next != 0 && definition_bindings != 0 && definition_units != 0 && names != 0 && units != 0 && alias_units != 0 &&
                   alias_targets != 0 && alias_stamps != 0 && work_units != 0 && work_names != 0 && work_targets != 0 && call_callers != 0 && call_units != 0 && call_names != 0 &&
                   call_lines != 0 && callers_begin != 0 && calls_itself != 0 && visit != 0 && lowest != 0 && on_stack != 0 && component_stack != 0 &&
                   walk_functions != 0 && walk_calls != 0 && components != 0 && component_begin != 0 && members != 0 && component_first != 0 && queue != 0 &&
@@ -786,7 +717,6 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
             .next = definition_next,
             .bindings = definition_bindings,
             .units = definition_units,
-            .inlinable = definition_inlinable,
             .alias_units = alias_units,
             .alias_targets = alias_targets,
             .alias_stamps = alias_stamps,
@@ -809,20 +739,12 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
             uint64_t line_number = 1;
             uint32_t current = BUSTER_CALL_GRAPH_NONE;
             uint64_t current_line = 0;
-            const uint32_t unit_first_function = function_count;
-            uint32_t forced_count = 0;
             while (at < text.length)
             {
                 const String8 line = call_graph_line(text, at);
                 const CallGraphDefine define = call_graph_define(line);
                 const CallGraphAlias alias = call_graph_alias(line);
                 const CallGraphCall call = call_graph_call(line);
-                const CallGraphAttributes attributes = call_graph_attributes(line);
-                if (attributes.is_attributes && attributes.alwaysinline)
-                {
-                    forced_groups[forced_count] = attributes.group;
-                    forced_count += 1;
-                }
                 if (define.is_define && current != BUSTER_CALL_GRAPH_NONE)
                 {
                     call_graph_append_problem(&report, inputs[unit].name, current_line, BUSTER_S8("a definition without its closing brace"));
@@ -856,7 +778,6 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
                     const bool strong = binding == CALL_GRAPH_BINDING_STRONG || binding == CALL_GRAPH_BINDING_LOCAL;
                     definition_bindings[definition_count] = (uint8_t)binding;
                     definition_units[definition_count] = unit;
-                    definition_inlinable[definition_count] = define.is_define && define.inlinable;
                     definition_next[definition_count] = BUSTER_CALL_GRAPH_NONE;
                     if (symbol_first[symbol] == BUSTER_CALL_GRAPH_NONE)
                     {
@@ -882,8 +803,6 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
                         definition_indices[definition_count] = function_count;
                         names[function_count] = name;
                         units[function_count] = unit;
-                        function_definitions[function_count] = definition_count;
-                        function_groups[function_count] = define.group;
                         current = function_count;
                         current_line = line_number;
                         function_count += 1;
@@ -918,14 +837,6 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
             {
                 call_graph_append_problem(&report, inputs[unit].name, current_line, BUSTER_S8("a definition without its closing brace"));
                 result.problem_count += 1;
-            }
-            // The attribute groups follow the definitions, so the unit's functions learn theirs at its end.
-            for (uint32_t f = unit_first_function; f < function_count; f += 1)
-            {
-                for (uint32_t g = 0; g < forced_count; g += 1)
-                {
-                    definition_inlinable[function_definitions[f]] = definition_inlinable[function_definitions[f]] || forced_groups[g] == function_groups[f];
-                }
             }
         }
 

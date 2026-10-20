@@ -17,13 +17,14 @@
 //     and of a call of an ifunc (a problem); then hand-written aliases that lead to no definition: round a loop, and to
 //     a declaration;
 //   - binding: clang's IR of a weak function beside a strong alias of the same name that leads to recursion (the alias
-//     wins), and of a strong function beside a weak alias (the function wins), each in both orders; two strong
-//     definitions (a problem, and both count); and two weak ones (either may be linked, so both count); then, in both
-//     orders, an alias of a weak function that another unit replaces (the alias keeps its own module's body, which
-//     calls the alias), and an available_externally body that calls back into its unit beside a strong definition in
-//     another (the unit's calls may run the body, inlined), and the same of a weak body marked always_inline through
-//     its attribute group; then a linkonce_odr body and a weak one marked alwaysinline in its line, which their unit's
-//     calls may run, beside a plain weak one, which they can't, each replaced by a strong definition elsewhere;
+//     wins), and of a strong function beside a weak alias in the caller's unit (the function wins, but the unit's own
+//     alias counts too), each in both orders; two strong definitions (a problem, and both count); and two weak ones
+//     (either may be linked, so both count); then, in both orders, an alias of a weak function that another unit
+//     replaces (the alias keeps its own module's body, which calls the alias), and weak or available_externally bodies
+//     that call back into their unit beside a strong definition in another, which the unit's calls may run inlined:
+//     available_externally, always_inline, called from a flatten function, and always_inline beside a section name
+//     that looks like an attribute group; then a replaced weak body, which its own unit's call reaches and another
+//     unit's doesn't;
 //   - allowed cycles: two units' copies of the same static pair, both allowed by one entry; then a cycle that grew past
 //     its entry, an allowed self-call and an entry without a cycle; then a cycle through two units' static functions of
 //     the same name, which an entry naming the other functions once each, and another, mustn't match;
@@ -590,40 +591,154 @@ static const CallGraphInput call_graph_test_forced_reversed[] = {
     },
 };
 
-// g is linkonce_odr and h weak with alwaysinline in its line, so their unit's calls may run them inlined; w is plain
-// weak, which clang won't inline, so the strong w is the only one f's call reaches.
+// clang 23's IR of these, as for call_graph_test_forced:
+//
+//   flatten_a.c: forced_a.c with `__attribute__((weak))` on again and `__attribute__((flatten))` on recurse, whose calls
+//                then carry alwaysinline in their own attribute group;
+//   section_a.c: int recurse(int);
+//                __attribute__((weak, always_inline, section(" #999 "))) int again(int n) { return recurse(n); }
+//                and forced_a.c's recurse.
+#define BUSTER_CALL_GRAPH_TEST_FLATTEN_A \
+    "define weak dso_local i32 @again(i32 noundef %0) #0 {\n" \
+    "  %2 = alloca i32, align 4\n" \
+    "  store i32 %0, ptr %2, align 4\n" \
+    "  %3 = load i32, ptr %2, align 4\n" \
+    "  %4 = call i32 @recurse(i32 noundef %3)\n" \
+    "  ret i32 %4\n" \
+    "}\n" \
+    "\n" \
+    "define dso_local i32 @recurse(i32 noundef %0) #0 {\n" \
+    "  %2 = alloca i32, align 4\n" \
+    "  %3 = alloca i32, align 4\n" \
+    "  store i32 %0, ptr %2, align 4\n" \
+    "  store i32 1, ptr %3, align 4\n" \
+    "  %4 = load i32, ptr %2, align 4\n" \
+    "  %5 = icmp sgt i32 %4, 1\n" \
+    "  br i1 %5, label %6, label %14\n" \
+    "\n" \
+    "6:                                                ; preds = %1\n" \
+    "  %7 = load i32, ptr %2, align 4\n" \
+    "  %8 = sub i32 %7, 1\n" \
+    "  %9 = call i32 @again(i32 noundef %8) #1\n" \
+    "  %10 = load i32, ptr %2, align 4\n" \
+    "  %11 = sub i32 %10, 2\n" \
+    "  %12 = call i32 @again(i32 noundef %11) #1\n" \
+    "  %13 = add i32 %9, %12\n" \
+    "  store i32 %13, ptr %3, align 4\n" \
+    "  br label %14\n" \
+    "\n" \
+    "14:                                               ; preds = %6, %1\n" \
+    "  %15 = load i32, ptr %3, align 4\n" \
+    "  ret i32 %15\n" \
+    "}\n" \
+    "\n" \
+    "define dso_local i32 @main() #0 {\n" \
+    "  %1 = alloca i32, align 4\n" \
+    "  store i32 0, ptr %1, align 4\n" \
+    "  %2 = call i32 @recurse(i32 noundef 5)\n" \
+    "  ret i32 %2\n" \
+    "}\n" \
+    "\n" \
+    "attributes #0 = { noinline nounwind optnone sspstrong uwtable }\n" \
+    "attributes #1 = { alwaysinline }\n"
+#define BUSTER_CALL_GRAPH_TEST_SECTION_A \
+    "define weak dso_local i32 @again(i32 noundef %0) #0 section \" #999 \" {\n" \
+    "  %2 = alloca i32, align 4\n" \
+    "  store i32 %0, ptr %2, align 4\n" \
+    "  %3 = load i32, ptr %2, align 4\n" \
+    "  %4 = call i32 @recurse(i32 noundef %3)\n" \
+    "  ret i32 %4\n" \
+    "}\n" \
+    "\n" \
+    "define dso_local i32 @recurse(i32 noundef %0) #1 {\n" \
+    "  %2 = alloca i32, align 4\n" \
+    "  %3 = alloca i32, align 4\n" \
+    "  store i32 %0, ptr %2, align 4\n" \
+    "  store i32 1, ptr %3, align 4\n" \
+    "  %4 = load i32, ptr %2, align 4\n" \
+    "  %5 = icmp sgt i32 %4, 1\n" \
+    "  br i1 %5, label %6, label %14\n" \
+    "\n" \
+    "6:                                                ; preds = %1\n" \
+    "  %7 = load i32, ptr %2, align 4\n" \
+    "  %8 = sub i32 %7, 1\n" \
+    "  %9 = call i32 @again(i32 noundef %8)\n" \
+    "  %10 = load i32, ptr %2, align 4\n" \
+    "  %11 = sub i32 %10, 2\n" \
+    "  %12 = call i32 @again(i32 noundef %11)\n" \
+    "  %13 = add i32 %9, %12\n" \
+    "  store i32 %13, ptr %3, align 4\n" \
+    "  br label %14\n" \
+    "\n" \
+    "14:                                               ; preds = %6, %1\n" \
+    "  %15 = load i32, ptr %3, align 4\n" \
+    "  ret i32 %15\n" \
+    "}\n" \
+    "\n" \
+    "attributes #0 = { alwaysinline nounwind sspstrong uwtable }\n" \
+    "attributes #1 = { noinline nounwind optnone sspstrong uwtable }\n"
+
+static const CallGraphInput call_graph_test_flatten[] = {
+    {
+        .name = BUSTER_S8_INIT("flatten_a.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_FLATTEN_A),
+    },
+    {
+        .name = BUSTER_S8_INIT("flatten_b.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_STRONG),
+    },
+};
+
+static const CallGraphInput call_graph_test_flatten_reversed[] = {
+    {
+        .name = BUSTER_S8_INIT("flatten_b.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_STRONG),
+    },
+    {
+        .name = BUSTER_S8_INIT("flatten_a.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_FLATTEN_A),
+    },
+};
+
+static const CallGraphInput call_graph_test_section[] = {
+    {
+        .name = BUSTER_S8_INIT("section_a.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_SECTION_A),
+    },
+    {
+        .name = BUSTER_S8_INIT("section_b.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_STRONG),
+    },
+};
+
+// g and w are weak, and elsewhere.ll's strong definitions replace them. f's call reaches its own unit's g too, which
+// may run inlined, but c's call in elsewhere.ll reaches only the strong w: bodies.ll's w, which calls c, never runs.
 static const CallGraphInput call_graph_test_replaced_bodies[] = {
     {
         .name = BUSTER_S8_INIT("bodies.ll"),
-        .text = BUSTER_S8_INIT("define linkonce_odr void @g() #0 {\n"
+        .text = BUSTER_S8_INIT("define weak void @g() {\n"
                                "  call void @f()\n"
                                "  ret void\n"
                                "}\n"
-                               "define weak void @h() alwaysinline {\n"
-                               "  call void @f()\n"
-                               "  ret void\n"
-                               "}\n"
-                               "define weak void @w() #0 {\n"
-                               "  call void @f()\n"
-                               "  ret void\n"
-                               "}\n"
-                               "define dso_local void @f() #0 {\n"
+                               "define dso_local void @f() {\n"
                                "  call void @g()\n"
-                               "  call void @h()\n"
-                               "  call void @w()\n"
                                "  ret void\n"
                                "}\n"
-                               "attributes #0 = { noinline nounwind }\n"),
+                               "define weak void @w() {\n"
+                               "  call void @c()\n"
+                               "  ret void\n"
+                               "}\n"),
     },
     {
-        .name = BUSTER_S8_INIT("replacements.ll"),
+        .name = BUSTER_S8_INIT("elsewhere.ll"),
         .text = BUSTER_S8_INIT("define dso_local void @g() {\n"
                                "  ret void\n"
                                "}\n"
-                               "define dso_local void @h() {\n"
+                               "define dso_local void @w() {\n"
                                "  ret void\n"
                                "}\n"
-                               "define dso_local void @w() {\n"
+                               "define dso_local void @c() {\n"
+                               "  call void @w()\n"
                                "  ret void\n"
                                "}\n"),
     },
@@ -868,15 +983,17 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .name = "strong function, weak alias",
         .inputs = call_graph_test_weak_alias,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_weak_alias),
-        .expected = BUSTER_S8_INIT("call graph: 2 translation units, 2 functions, 1 call between them, 0 cycles, 0 allowed\n"),
-        .success = true,
+        .expected = BUSTER_S8_INIT("cycle: weak_alias.ll:recurse -> weak_alias.ll:recurse\n"
+                                   "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+        .success = false,
     },
     {
         .name = "weak alias, strong function",
         .inputs = call_graph_test_weak_alias_reversed,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_weak_alias_reversed),
-        .expected = BUSTER_S8_INIT("call graph: 2 translation units, 2 functions, 1 call between them, 0 cycles, 0 allowed\n"),
-        .success = true,
+        .expected = BUSTER_S8_INIT("cycle: weak_alias.ll:recurse -> weak_alias.ll:recurse\n"
+                                   "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+        .success = false,
     },
     {
         .name = "two strong definitions",
@@ -944,11 +1061,35 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .success = false,
     },
     {
+        .name = "flatten caller",
+        .inputs = call_graph_test_flatten,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_flatten),
+        .expected = BUSTER_S8_INIT("cycle: flatten_a.ll:again -> flatten_a.ll:recurse -> flatten_a.ll:again\n"
+                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed\n"),
+        .success = false,
+    },
+    {
+        .name = "flatten caller, reversed",
+        .inputs = call_graph_test_flatten_reversed,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_flatten_reversed),
+        .expected = BUSTER_S8_INIT("cycle: flatten_a.ll:again -> flatten_a.ll:recurse -> flatten_a.ll:again\n"
+                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed\n"),
+        .success = false,
+    },
+    {
+        .name = "section name",
+        .inputs = call_graph_test_section,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_section),
+        .expected = BUSTER_S8_INIT("cycle: section_a.ll:again -> section_a.ll:recurse -> section_a.ll:again\n"
+                                   "call graph: 2 translation units, 3 functions, 5 calls between them, 1 cycle, 0 allowed\n"),
+        .success = false,
+    },
+    {
         .name = "replaced bodies",
         .inputs = call_graph_test_replaced_bodies,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_replaced_bodies),
         .expected = BUSTER_S8_INIT("cycle: bodies.ll:g -> bodies.ll:f -> bodies.ll:g\n"
-                                   "call graph: 2 translation units, 7 functions, 8 calls between them, 1 cycle, 0 allowed\n"),
+                                   "call graph: 2 translation units, 6 functions, 5 calls between them, 1 cycle, 0 allowed\n"),
         .success = false,
     },
     {
