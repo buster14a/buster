@@ -5787,8 +5787,10 @@ struct SpikeVectorBuffers
     SpikeCandidates candidates;
     uint32_t* secondary;
     SpikeStatement* statements;
-    // The postorder's: each token's last child, and the postorder itself.
+    // The postorder's: each token's last child, the end of its subtree, the counting sort's cursors, and the postorder.
     uint32_t* last_children;
+    uint32_t* subtree_ends;
+    uint32_t* cursors;
     uint32_t* postorder;
     // K2's blocks by the rounds they took (index 0: the twin did them), and K4's blocks whose depths span more than
     // byte lanes hold, which run as two 16-bit blocks.
@@ -5836,12 +5838,14 @@ static bool spike_vector_buffers_reserve(SpikeVectorBuffers* buffers, Arena* are
         .secondary = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .statements = BUSTER_ARENA_PUSH_ARRAY(arena, SpikeStatement, slots),
         .last_children = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .subtree_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .cursors = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .postorder = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .rounds = { 0 },
         .wide_blocks = 0,
     };
     bool result = open_stack != 0 && group_roles != 0 && group_typed != 0 && buffers->typed != 0 && buffers->lefts != 0 && buffers->left_keys != 0 &&
-                  buffers->secondary != 0 && buffers->statements != 0 && buffers->last_children != 0 && buffers->postorder != 0 &&
+                  buffers->secondary != 0 && buffers->statements != 0 && buffers->last_children != 0 && buffers->subtree_ends != 0 && buffers->cursors != 0 && buffers->postorder != 0 &&
                   spike_candidates_reserve(&buffers->candidates, arena, capacity);
     if (result)
     {
@@ -5958,4 +5962,41 @@ static uint32_t spike_postorder(const uint32_t* parents, uint32_t count, uint32_
         }
     }
     return written;
+}
+
+// The same postorder without a branch on the tree, from each token's subtree end: end(v) from its last child after it
+// (or v itself), backward. In postorder a subtree's tokens are a run that ends with its root, after every token whose
+// subtree ends before it, and its other tokens are those its subtree's source run holds, so the root's position is
+// C(v) + end(v) - v, where C(v), the number of tokens whose subtree ends before v, is an exclusive prefix sum of how
+// many subtrees end at each token. last_children has count + 1 entries: the roots' writes go to the last.
+static void spike_postorder_sorted(const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* ends, uint32_t* before, uint32_t* postorder)
+{
+    // 0: no child after the token, as a child at 0 comes after none.
+    memset(last_children, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+    memset(before, 0, (uint64_t)count * sizeof(uint32_t));
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        last_children[parents[i] == BUSTER_SPIKE_NONE ? count : parents[i]] = i;
+    }
+    for (uint32_t v = count; v-- > 0;)
+    {
+        const uint32_t last = last_children[v];
+        // ends[last] is v's end when last comes after v, and was written then; otherwise it is unused. Unpredictable,
+        // so that Clang selects (cmov) rather than branching around the load.
+        const uint32_t end = ends[last];
+        const uint32_t own = __builtin_unpredictable(last > v) ? end : v;
+        ends[v] = own;
+        before[own] += 1;
+    }
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint32_t ending = before[i];
+        before[i] = sum;
+        sum += ending;
+    }
+    for (uint32_t v = 0; v < count; v += 1)
+    {
+        postorder[before[v] + ends[v] - v] = v;
+    }
 }

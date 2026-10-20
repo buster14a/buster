@@ -900,55 +900,63 @@ static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels
 // Passes after one warm-up pass; each implementation runs once per pass, in turn, and the medians are reported.
 #define BUSTER_SPIKE_PASSES 21
 
-// The counters, of this thread's user-space events: cycles and instructions, then the Zen 5 events of perf's
-// PipelineL1 metrics, which split each cycle's 8 dispatch slots into ops that retire, slots the front end left empty,
-// slots that back-end stalls kept from dispatching, and the rest: ops that didn't retire (bad speculation) and slots
-// the other SMT thread took. The NMI watchdog holds one of the 6 counters, so the rest is what the 5 events here
-// don't count (de_src_op_disp.all, which would split it, finds no counter), and nothing runs on the other thread.
+// The counters, of this thread's user-space events: cycles and instructions, then three Zen 5 events of one set. The
+// NMI watchdog holds one of the core's 6 counters, so 5 is all that count without sharing a counter.
+//   - pipeline: the events of perf's PipelineL1 metrics, which split each cycle's 8 dispatch slots into ops that
+//     retire, slots the front end left empty, slots that back-end stalls kept from dispatching, and the rest: ops
+//     that didn't retire (bad speculation; de_src_op_disp.all, which would count them, finds no counter) and slots
+//     the other SMT thread took, which nothing runs on.
+//   - branches: retired branches, those mispredicted, and those taken.
+//   - memory: demand fills of the L1 data cache from the L2, from the L3 (of the core's CCX) and from DRAM.
 typedef enum SpikeCounter
 {
     SPIKE_COUNTER_CYCLES,
     SPIKE_COUNTER_INSTRUCTIONS,
-    SPIKE_COUNTER_RETIRED_OPS,
-    SPIKE_COUNTER_FRONTEND_SLOTS,
-    SPIKE_COUNTER_BACKEND_SLOTS,
+    SPIKE_COUNTER_FIRST,
+    SPIKE_COUNTER_SECOND,
+    SPIKE_COUNTER_THIRD,
     SPIKE_COUNTER_COUNT,
 } SpikeCounter;
 
+typedef enum SpikeCounterSet
+{
+    SPIKE_COUNTERS_PIPELINE,
+    SPIKE_COUNTERS_BRANCHES,
+    SPIKE_COUNTERS_MEMORY,
+    SPIKE_COUNTER_SET_COUNT,
+} SpikeCounterSet;
+
+static const char* const spike_counter_set_names[SPIKE_COUNTER_SET_COUNT] =
+{
+    "pipeline",
+    "branches",
+    "memory",
+};
+
 #define BUSTER_SPIKE_DISPATCH_SLOTS 8
 
-static const uint32_t spike_counter_types[SPIKE_COUNTER_COUNT] =
-{
-    PERF_TYPE_HARDWARE,
-    PERF_TYPE_HARDWARE,
-    PERF_TYPE_RAW,
-    PERF_TYPE_RAW,
-    PERF_TYPE_RAW,
-};
-
 // AMD raw events: the event's low byte in bits 0-7, its high nibble in bits 32-35, the unit mask in bits 8-15.
-// ex_ret_ops (0xc1), de_no_dispatch_per_slot.no_ops_from_frontend (0x1a0, 0x01) and .backend_stalls (0x1a0, 0x1e).
-static const uint64_t spike_counter_configs[SPIKE_COUNTER_COUNT] =
+// ex_ret_ops (0xc1), de_no_dispatch_per_slot.no_ops_from_frontend (0x1a0, 0x01) and .backend_stalls (0x1a0, 0x1e);
+// ex_ret_brn (0xc2), ex_ret_brn_misp (0xc3) and ex_ret_brn_tkn (0xc4); ls_dmnd_fills_from_sys.local_l2 (0x43, 0x01),
+// .local_ccx (0x43, 0x02) and .dram_io_near (0x43, 0x08).
+static const uint64_t spike_counter_configs[SPIKE_COUNTER_SET_COUNT][3] =
 {
-    PERF_COUNT_HW_CPU_CYCLES,
-    PERF_COUNT_HW_INSTRUCTIONS,
-    0xc1,
-    0x1000001a0,
-    0x100001ea0,
+    { 0xc1, 0x1000001a0, 0x100001ea0 },
+    { 0xc2, 0xc3, 0xc4 },
+    { 0x143, 0x243, 0x843 },
 };
 
-static const char* const spike_counter_names[SPIKE_COUNTER_COUNT] =
+static const char* const spike_counter_names[SPIKE_COUNTER_SET_COUNT][SPIKE_COUNTER_COUNT] =
 {
-    "cycles",
-    "instructions",
-    "ex_ret_ops",
-    "de_no_dispatch_per_slot.no_ops_from_frontend",
-    "de_no_dispatch_per_slot.backend_stalls",
+    { "cycles", "instructions", "ex_ret_ops", "de_no_dispatch_per_slot.no_ops_from_frontend", "de_no_dispatch_per_slot.backend_stalls" },
+    { "cycles", "instructions", "ex_ret_brn", "ex_ret_brn_misp", "ex_ret_brn_tkn" },
+    { "cycles", "instructions", "ls_dmnd_fills_from_sys.local_l2", "ls_dmnd_fills_from_sys.local_ccx", "ls_dmnd_fills_from_sys.dram_io_near" },
 };
 
 typedef struct SpikeCounters SpikeCounters;
 struct SpikeCounters
 {
+    SpikeCounterSet set;
     // -1 where perf_event_open isn't allowed.
     int descriptors[SPIKE_COUNTER_COUNT];
     // Each counter's page, read with rdpmc, or 0 where it can't be mapped (read() then, which costs a system call).
@@ -962,16 +970,18 @@ struct SpikeSample
     uint64_t counts[SPIKE_COUNTER_COUNT];
 };
 
-static SpikeCounters spike_open_counters(void)
+static SpikeCounters spike_open_counters(SpikeCounterSet set)
 {
     SpikeCounters result;
+    result.set = set;
     for (uint32_t c = 0; c < SPIKE_COUNTER_COUNT; c += 1)
     {
         struct perf_event_attr attributes;
         memset(&attributes, 0, sizeof(attributes));
         attributes.size = sizeof(attributes);
-        attributes.type = spike_counter_types[c];
-        attributes.config = spike_counter_configs[c];
+        attributes.type = c < SPIKE_COUNTER_FIRST ? PERF_TYPE_HARDWARE : PERF_TYPE_RAW;
+        attributes.config = c == SPIKE_COUNTER_CYCLES ? PERF_COUNT_HW_CPU_CYCLES : c == SPIKE_COUNTER_INSTRUCTIONS ? PERF_COUNT_HW_INSTRUCTIONS :
+                            spike_counter_configs[set][c - SPIKE_COUNTER_FIRST];
         attributes.exclude_kernel = 1;
         attributes.exclude_hv = 1;
         attributes.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
@@ -990,7 +1000,8 @@ static void spike_close_counters(SpikeCounters* counters)
         uint64_t values[3] = { 0, 0, 0 };
         if (counters->descriptors[c] >= 0 && read(counters->descriptors[c], values, sizeof(values)) == sizeof(values) && values[2] < values[1])
         {
-            fprintf(stderr, "%s counted %.1f%% of the time: its numbers are partial\n", spike_counter_names[c], values[1] ? 100.0 * (double)values[2] / (double)values[1] : 0.0);
+            fprintf(stderr, "%s counted %.1f%% of the time: its numbers are partial\n", spike_counter_names[counters->set][c],
+                    values[1] ? 100.0 * (double)values[2] / (double)values[1] : 0.0);
         }
         if (counters->pages[c] != 0)
         {
@@ -1111,9 +1122,9 @@ static uint64_t spike_clamp(uint64_t value)
 }
 
 // Prints the medians of `samples` per token: time, cycles (with the fastest and slowest pass), instructions, and the
-// dispatch slots' split, from the medians: ops that retired, slots the front end left empty, back-end stalls, and the
-// rest (bad speculation).
-static void spike_report(const char* name, const SpikeSample* samples, uint32_t count, uint64_t tokens)
+// set's events: the dispatch slots' split (ops that retired, slots the front end left empty, back-end stalls, and the
+// rest), branches per token (mispredicted, and taken), or fills per token (from the L2, the L3 and DRAM).
+static void spike_report(const char* name, const SpikeSample* samples, uint32_t count, uint64_t tokens, SpikeCounterSet set)
 {
     uint64_t nanoseconds[BUSTER_SPIKE_PASSES];
     uint64_t counts[SPIKE_COUNTER_COUNT][BUSTER_SPIKE_PASSES];
@@ -1132,16 +1143,29 @@ static void spike_report(const char* name, const SpikeSample* samples, uint32_t 
     }
     const double t = (double)tokens;
     const double cycles = (double)counts[SPIKE_COUNTER_CYCLES][count / 2];
-    const double slots = cycles * BUSTER_SPIKE_DISPATCH_SLOTS;
-    const double retiring = slots != 0 ? (double)counts[SPIKE_COUNTER_RETIRED_OPS][count / 2] / slots : 0.0;
-    const double frontend = slots != 0 ? (double)counts[SPIKE_COUNTER_FRONTEND_SLOTS][count / 2] / slots : 0.0;
-    const double backend = slots != 0 ? (double)counts[SPIKE_COUNTER_BACKEND_SLOTS][count / 2] / slots : 0.0;
-    printf("  %-22s %9.3f ms %7.3f ns/token %7.3f cycles/token [%.3f-%.3f] %8.3f instructions/token IPC %.2f  slots: retiring %4.1f%% frontend %4.1f%% "
-           "backend %4.1f%% other %4.1f%%\n",
-           name, (double)nanoseconds[count / 2] / 1e6, (double)nanoseconds[count / 2] / t, cycles / t, (double)counts[SPIKE_COUNTER_CYCLES][0] / t,
-           (double)counts[SPIKE_COUNTER_CYCLES][count - 1] / t, (double)counts[SPIKE_COUNTER_INSTRUCTIONS][count / 2] / t,
-           cycles != 0 ? (double)counts[SPIKE_COUNTER_INSTRUCTIONS][count / 2] / cycles : 0.0, 100.0 * retiring, 100.0 * frontend, 100.0 * backend,
-           100.0 * (1.0 - retiring - frontend - backend));
+    const double first = (double)counts[SPIKE_COUNTER_FIRST][count / 2];
+    const double second = (double)counts[SPIKE_COUNTER_SECOND][count / 2];
+    const double third = (double)counts[SPIKE_COUNTER_THIRD][count / 2];
+    printf("  %-22s %9.3f ms %7.3f ns/token %7.3f cycles/token [%.3f-%.3f] %8.3f instructions/token IPC %.2f  ", name, (double)nanoseconds[count / 2] / 1e6,
+           (double)nanoseconds[count / 2] / t, cycles / t, (double)counts[SPIKE_COUNTER_CYCLES][0] / t, (double)counts[SPIKE_COUNTER_CYCLES][count - 1] / t,
+           (double)counts[SPIKE_COUNTER_INSTRUCTIONS][count / 2] / t, cycles != 0 ? (double)counts[SPIKE_COUNTER_INSTRUCTIONS][count / 2] / cycles : 0.0);
+    if (set == SPIKE_COUNTERS_PIPELINE)
+    {
+        const double slots = cycles * BUSTER_SPIKE_DISPATCH_SLOTS;
+        const double retiring = slots != 0 ? first / slots : 0.0;
+        const double frontend = slots != 0 ? second / slots : 0.0;
+        const double backend = slots != 0 ? third / slots : 0.0;
+        printf("slots: retiring %4.1f%% frontend %4.1f%% backend %4.1f%% other %4.1f%%\n", 100.0 * retiring, 100.0 * frontend, 100.0 * backend,
+               100.0 * (1.0 - retiring - frontend - backend));
+    }
+    else if (set == SPIKE_COUNTERS_BRANCHES)
+    {
+        printf("branches/token %.3f mispredicted %.4f (%.2f%%) taken %.3f\n", first / t, second / t, first != 0 ? 100.0 * second / first : 0.0, third / t);
+    }
+    else
+    {
+        printf("fills/token from L2 %.4f L3 %.4f DRAM %.4f\n", first / t, second / t, third / t);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1174,6 +1198,7 @@ typedef enum SpikeTimed
     SPIKE_TIMED_VECTOR_K4,
     SPIKE_TIMED_VECTOR_K5,
     SPIKE_TIMED_VECTOR_FALLBACK,
+    SPIKE_TIMED_POSTORDER_SORTED,
     SPIKE_TIMED_POSTORDER,
     SPIKE_TIMED_COUNT,
 } SpikeTimed;
@@ -1202,6 +1227,7 @@ static const char* const spike_timed_names[SPIKE_TIMED_COUNT] =
     "vector-k4",
     "vector-k5",
     "vector-fallback",
+    "postorder-sorted",
     "postorder",
 };
 
@@ -1228,6 +1254,7 @@ static const SpikeTimed spike_stage_order[] =
     SPIKE_TIMED_VECTOR_K4,
     SPIKE_TIMED_VECTOR_K5,
     SPIKE_TIMED_VECTOR_FALLBACK,
+    SPIKE_TIMED_POSTORDER_SORTED,
     SPIKE_TIMED_POSTORDER,
 };
 
@@ -1346,6 +1373,9 @@ static void spike_run_stage(SpikeBench* bench, SpikeTimed which, uint32_t f)
             spike_typedefs_clear(k);
             break;
         }
+        case SPIKE_TIMED_POSTORDER_SORTED:
+            spike_postorder_sorted(k->parents, count, buffers->last_children, buffers->subtree_ends, buffers->cursors, buffers->postorder);
+            break;
         case SPIKE_TIMED_POSTORDER: spike_postorder(k->parents, count, buffers->last_children, buffers->postorder); break;
         default: break;
     }
@@ -1371,9 +1401,9 @@ static uint32_t spike_touch(const SpikeFile* file)
 // Times the whole paths, then the stages (only `only`, if it names one; every stage for SPIKE_TIMED_COUNT), `passes`
 // interleaved passes after a warm-up one, and prints the medians. A stage named alone runs `repeat` times per file
 // after the stages before it, and the ones after it don't run, so that perf sees mostly that stage.
-static void spike_benchmark(SpikeBench* bench, uint32_t passes, int32_t only, uint32_t repeat)
+static void spike_benchmark(SpikeBench* bench, uint32_t passes, int32_t only, uint32_t repeat, SpikeCounterSet set)
 {
-    SpikeCounters counters = spike_open_counters();
+    SpikeCounters counters = spike_open_counters(set);
     if (counters.descriptors[SPIKE_COUNTER_CYCLES] < 0 || counters.descriptors[SPIKE_COUNTER_INSTRUCTIONS] < 0)
     {
         fprintf(stderr, "perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): the counts read as 0\n");
@@ -1426,15 +1456,15 @@ static void spike_benchmark(SpikeBench* bench, uint32_t passes, int32_t only, ui
         }
     }
     (void)sink;
-    printf("%u interleaved passes over %u files, %lu tokens, medians (stages per file, less %lu cycles a sample):\n", passes, bench->corpus->file_count,
-           (unsigned long)bench->corpus->token_count, (unsigned long)overhead.counts[SPIKE_COUNTER_CYCLES]);
+    printf("%u interleaved passes over %u files, %lu tokens, medians (stages per file, less %lu cycles a sample; %s counters):\n", passes, bench->corpus->file_count,
+           (unsigned long)bench->corpus->token_count, (unsigned long)overhead.counts[SPIKE_COUNTER_CYCLES], spike_counter_set_names[set]);
     for (uint32_t which = 0; which < SPIKE_TIMED_COUNT; which += 1)
     {
         const bool path = which <= SPIKE_TIMED_VECTOR;
         if (only < 0 || only == (int32_t)which || (!path && only == SPIKE_TIMED_COUNT))
         {
             const bool alone = !path && only == (int32_t)which;
-            spike_report(spike_timed_names[which], samples[which], passes, bench->corpus->token_count * (alone ? repeat : 1));
+            spike_report(spike_timed_names[which], samples[which], passes, bench->corpus->token_count * (alone ? repeat : 1), set);
         }
     }
     spike_close_counters(&counters);
@@ -1461,6 +1491,7 @@ int run_parse_spike(int argc, char** argv)
     uint32_t generated = 0;
     uint32_t passes = BUSTER_SPIKE_PASSES;
     uint32_t repeat = 1;
+    SpikeCounterSet set = SPIKE_COUNTERS_PIPELINE;
     bool check = true;
     int32_t only = -1;
     bool valid = true;
@@ -1479,6 +1510,16 @@ int run_parse_spike(int argc, char** argv)
         else if (strcmp(argv[i], "--no-check") == 0)
         {
             check = false;
+        }
+        else if (strcmp(argv[i], "--counters") == 0 && i + 1 < argc)
+        {
+            set = SPIKE_COUNTER_SET_COUNT;
+            for (uint32_t c = 0; c < SPIKE_COUNTER_SET_COUNT; c += 1)
+            {
+                set = strcmp(argv[i + 1], spike_counter_set_names[c]) == 0 ? (SpikeCounterSet)c : set;
+            }
+            valid &= set != SPIKE_COUNTER_SET_COUNT;
+            i += 1;
         }
         else if (strcmp(argv[i], "--repeat") == 0 && i + 1 < argc)
         {
@@ -1533,7 +1574,9 @@ int run_parse_spike(int argc, char** argv)
     };
     if (!valid || (path_count == 0 && !fixtures && generated == 0))
     {
-        fprintf(stderr, "usage: %s [--fixtures] [--generated N] [--check-only | --no-check] [--flags] [--dump FILE] [--passes N] [--only NAME|stages] [--repeat N] path...\n",
+        fprintf(stderr,
+                "usage: %s [--fixtures] [--generated N] [--check-only | --no-check] [--flags] [--dump FILE] [--passes N] [--only NAME|stages] [--repeat N]\n"
+                "       [--counters pipeline|branches|memory] path...\n",
                 argv[0]);
     }
     else if (corpus.files == 0 || !spike_names_init(&corpus.names, &memory))
@@ -1546,7 +1589,7 @@ int run_parse_spike(int argc, char** argv)
         for (int i = 1; loaded && i < argc; i += 1)
         {
             if (strcmp(argv[i], "--dump") == 0 || strcmp(argv[i], "--generated") == 0 || strcmp(argv[i], "--passes") == 0 || strcmp(argv[i], "--only") == 0 ||
-                strcmp(argv[i], "--repeat") == 0)
+                strcmp(argv[i], "--repeat") == 0 || strcmp(argv[i], "--counters") == 0)
             {
                 i += 1;
             }
@@ -1730,7 +1773,10 @@ int run_parse_spike(int argc, char** argv)
                             vector_failures += 1;
                         }
                         const uint32_t written = spike_postorder(kernels.parents, count, buffers.last_children, buffers.postorder);
-                        const uint32_t postorder_different = spike_check_postorder(kernels.parents, count, buffers.postorder, written, &scratch);
+                        uint32_t postorder_different = spike_check_postorder(kernels.parents, count, buffers.postorder, written, &scratch);
+                        spike_postorder_sorted(kernels.parents, count, buffers.last_children, buffers.subtree_ends, buffers.cursors, buffers.postorder);
+                        const uint32_t sorted_different = spike_check_postorder(kernels.parents, count, buffers.postorder, count, &scratch);
+                        postorder_different = postorder_different != BUSTER_SPIKE_NONE ? postorder_different : sorted_different;
                         if (postorder_different != BUSTER_SPIKE_NONE)
                         {
                             if (postorder_failures < 12)
@@ -1795,7 +1841,7 @@ int run_parse_spike(int argc, char** argv)
                     .statements = statements,
                     .statements_ok = true,
                 };
-                spike_benchmark(&bench, passes, only, repeat);
+                spike_benchmark(&bench, passes, only, repeat, set);
             }
         }
     }
