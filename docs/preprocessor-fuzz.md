@@ -164,15 +164,16 @@ glibc 2.44) with one shared-lock acquisition per command:
 | `--std c17 --seed 99 --fuzz 128` | 1,327 | 0 |
 | `--std c23 --seed 7 --fuzz 256` | 1,591 | 0 |
 
-The unchanged `./build.sh`, every existing smoke test (including the object
-writer's external cross-check), and `./build.sh check-call-graph` passed.
-The call graph had 7 translation units, 1,586 functions and zero cycles.
-The review fixes include main's licensing updates through `08abc25`.
+The build, every existing smoke test (including the object writer's and
+runtime import's external cross-checks), and `./build.sh check-call-graph`
+passed. The call graph had 8 translation units, 2,199 functions and zero
+cycles. The review fixes include main through `c9b1b20`.
 Raw review logs and binary/source hashes are retained on benchpress in
-`~/buster-fast-bench/astra-01a158dd-109-review-evidence/`.
+`~/buster-fast-bench/astra-01a158dd-109-review-evidence/`; the `import-main-`
+files record the final run after integrating main's runtime import.
 
 `taskset -c 2 ./build/compiler benchmark-preprocessor-fuzz` measured C17,
-seed 1 and 16 cases. Its 21-pass median was **5.964 ms per batch**
-(2,682.6 cases/second) for batching and **86.681 ms**
-(184.6 cases/second) for individual processes. These figures include the
+seed 1 and 16 cases. Its 21-pass median was **5.970 ms per batch**
+(2,680.0 cases/second) for batching and **86.278 ms**
+(185.4 cases/second) for individual processes. These figures include the
 external clang processes; they do not measure the compiler's preprocessor.
