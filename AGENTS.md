@@ -540,9 +540,12 @@ each of 32-bit and 16-bit mode, with 135,563 and 136,322).
 ## x86-64 encoder benchmark
 
 `./build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform |
---vector] [--mode32 | --mode16] [--offsets] [--fixups] [--only NAME]` checks
-every implementation against the scalar loop, then reports 21 interleaved-pass
-medians per encoded instruction (time, cycles, instructions, IPC). The stream is
+--vector] [--mode32 | --mode16] [--offsets] [--fixups] [--after-scalar MS]
+[--only NAME]` checks every implementation against the scalar loop, then
+reports 21 interleaved-pass medians per encoded instruction (time, cycles,
+instructions, IPC, and the throttle: PMCx1A0's undocumented umask 0x08, raw
+event `0x1000008a0`, which #199 reads as the dispatch slots Zen 5's power cap
+takes). The stream is
 a compiler-like mix of 16,384 legacy instructions by default (comparable with
 older measurements), a mix like vectorized code (AVX-512, AVX2, BMI) with
 `--vector`, or random instructions of every form with `--uniform`; `--section N`
@@ -553,10 +556,23 @@ their ends. The variants are the batch widths (`x86_encode_4` to
 store and fixup store alternatives that lost, `x86_encode_64_offsets_then_pick`,
 the other way to have fixup ends (every offset, then the caller picks the marked
 ones), and `x86_encode_64_apx` and `x86_encode_16_apx`, APX's loops (the streams
-have no registers 16 to 31, so their bytes are the same). The entry points use
-16 per iteration: it is up to 7% slower than 64 in these runs, but 1% to 7%
-faster after scalar code, where a compiler runs its encoder (measure that state
-too: see `docs/x86-64-encoder.md`'s "Zen 5's costs"). `--mode32` and `--mode16`
+have no registers 16 to 31, so their bytes are the same). `--after-scalar MS`
+runs the scalar loop (256 instructions per call) for MS ms before each timed
+pass of the other implementations: the state a compiler runs its vector phases
+in. Lighter code lets the 9700X's clock boost over 30 to 300 ms, and at that
+clock a heavy AVX-512 loop runs under the core's power cap for 5 to 20 ms
+([#199's report](https://github.com/buster14a/buster-fast/issues/199#issuecomment-6297314071)
+has the controls), longer than a pass. Use 100 to 300: from a settled clock
+30 ms barely boosts it, and 100 ms reaches the state whatever the passes before
+did. Compare
+time as well as cycles, since the clock differs by 2% to 5% between the states.
+Measure the back-to-back state with `--only NAME`, which runs one loop alone:
+in full runs without the option, the loops after the scalar loop's own passes
+(54 ms of the compiler mix) run partly throttled, the more so the nearer they
+follow it. The entry points use 16 per iteration: after scalar code it is 0.3%
+to 7% faster than 64 on every stream, while back to back 64 is up to 6% faster
+on some (`docs/x86-64-encoder.md`'s "Zen 5's costs" and "Both states" have the
+numbers). `--mode32` and `--mode16`
 time the mode's loops at 64 and 16 per iteration (`x86_encode_64_mode32` and
 `x86_encode_16_mode32`, or the 16-bit ones) and its scalar loop instead, on a
 mix like 32-bit compiler output or like real-mode code (or with `--uniform`, the
@@ -1179,8 +1195,9 @@ the check and failure counts and exits with status 1 on any failure. The
 
 ## Dataflow benchmark
 
-`./build/compiler benchmark-dataflow [--seed N]` compares the scalar and
-AVX-512 fixpoints on four generated functions: a small diamond CFG with
+`./build/compiler benchmark-dataflow [--seed N] [--after-scalar MS]
+[--only scalar|avx512]` compares the scalar and AVX-512 fixpoints on four
+generated functions: a small diamond CFG with
 16 blocks and 127 values, nested loops with 256 blocks and 1,025 values, and
 random local components and a connected dispatch loop, each with 4,096 blocks
 and 4,097 values. The local-components case is a streaming control, not a model
@@ -1194,11 +1211,21 @@ with warm batches; every retained sample lasts at least 2 ms. Each timed solve
 includes clearing `in` and `out`; generation, allocation and postorder are
 outside the timed region. Both paths use direct calls through matching
 `noinline` benchmark wrappers. The output gives nanoseconds, cycles and instructions
-per function, cycles per block per iteration, and IPC. Hardware counter values
+per function, cycles per block per iteration, IPC, and the throttle per block
+per iteration (PMCx1A0's undocumented umask 0x08, which #199 reads as the
+dispatch slots Zen 5's per-core power cap takes). Hardware counter values
 are zero when unavailable. A scalar/vector disagreement fails the command.
 Run at least five independent processes, releasing the host lock between
 them, when recording a comparison; process-median ranges expose variation
 that one process's 21 passes may miss.
+
+The AVX-512 solver is heavy enough for the power cap, so measure it in both
+states, as the encoder's benchmark does (#199): `--only avx512` times it alone,
+back to back, and `--after-scalar MS` runs complete scalar solves of the
+workload, untimed, for MS ms (100 to 300) before every AVX-512 sample, the state
+it runs in after a compiler's lighter phases. Without either, its samples follow
+the scalar ones in alternate passes and run partly throttled.
+`docs/dataflow.md` has the three states' numbers.
 
 Run it under the 9700X's lock with `taskset -c 2`. `docs/dataflow.md` records
 the contracts, measurements and implementation choice. The default 9700X job

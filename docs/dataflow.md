@@ -96,7 +96,13 @@ Every retained sample must last at least 2 ms. A shorter sample discards the
 whole distribution and doubles the repetition count, with bounded retries.
 The output includes the shortest retained sample and the number of restarts.
 Missing hardware counters are reported as zero; elapsed time is not
-relabeled as CPU cycles.
+relabeled as CPU cycles. It also gives the throttle per block per iteration:
+PMCx1A0's umask 0x08 (raw event `0x1000008a0`), which AMD doesn't document
+and #199 reads, from its controls, as the dispatch slots that Zen 5's per-core
+power cap takes.
+`--only scalar` or `--only avx512` times one solver alone, back to back, and
+`--after-scalar MS` runs complete scalar solves of the workload, untimed, for
+MS ms before every AVX-512 sample: "The power cap's state" below has why.
 
 The benchmark includes output initialization in each solve, but excludes
 generation and postorder construction. Both timed paths call explicit
@@ -216,3 +222,73 @@ register remain optional follow-ups. Skipping unchanged blocks, storing rows
 in postorder, IR construction and real corpus measurements remain deferred
 until #131 provides representative functions. No end-to-end compiler speedup
 or measured bandwidth floor is claimed.
+
+## The power cap's state
+
+A compiler runs liveness after lighter phases, and on Zen 5 that changes how
+fast the AVX-512 solver runs ([#199's
+report](https://github.com/buster14a/buster-fast/issues/199#issuecomment-6297314071)
+has the controls behind this section's mechanism, and says which parts are
+inferred). Code that draws less than about 17 W per
+core (scalar phases, the vectorized lexer, even a spin or a sleep) lets the
+9700X's firmware boost the clock from about 5.31 to 5.52 GHz over 30 to
+300 ms. At that clock a heavy vector loop would draw more than the core's cap
+of about 21.5 W. The core holds at the cap while the loop loses dispatch slots,
+which #199 reads as a fast throttle withholding them, until the firmware has
+stepped the clock down to what the loop sustains, 5 to 20 ms later. The
+throttle column below is that reading of PMCx1A0's umask 0x08 (see "Measuring
+the alternatives"). Run on its own, the AVX-512 solver draws about 20 W and
+holds the clock at 5.34 to 5.44 GHz (#199, and the table below), so it is such
+a loop.
+
+`benchmark-dataflow` measures it in three states: alone, back to back
+(`--only avx512`), where the clock settles; after 100 ms of complete scalar
+solves of the same workload before each sample (`--after-scalar 100`), as
+after a compiler's lighter phases; and by default, where its samples follow the
+scalar ones (6 to 25 ms each) in alternate passes, a mix of the two. Measured on
+2026-10-20 on `benchpress` (the same kernel, Clang and glibc as above), five
+processes of each state, each under its own lock, `taskset -c 2`; the medians
+of the process medians, AVX-512 solver:
+
+| CFG | State | ns/function | Cycles/block/sweep | GHz | Throttle/block/sweep |
+| --- | --- | ---: | ---: | ---: | ---: |
+| small-diamond | alone | 81.2 | 14.06 | 5.54 | 0.15 |
+| | default | 83.0 | 14.37 | 5.53 | 0.17 |
+| | after 100 ms | 81.1 | 14.05 | 5.54 | 0.16 |
+| medium-nested | alone | 3,869.5 | 27.12 | 5.38 | 4.7 |
+| | default | 3,857.0 | 27.22 | 5.42 | 23.4 |
+| | after 100 ms | 4,280.9 | 30.76 | 5.52 | 80.5 |
+| large-local | alone | 451,232.6 | 119.67 | 5.43 | 12.9 |
+| | default | 457,412.9 | 122.72 | 5.49 | 130.2 |
+| | after 100 ms | 475,444.3 | 128.29 | 5.53 | 239.4 |
+| large-dispatch | alone | 270,330.2 | 119.77 | 5.44 | 11.8 |
+| | default | 272,109.8 | 121.63 | 5.49 | 121.6 |
+| | after 100 ms | 286,803.0 | 129.21 | 5.54 | 268.5 |
+
+After the scalar solves, the three larger CFGs take 5% to 11% longer: 7% to
+13% more cycles at a 2% to 3% higher clock, with the throttle taking 80 to 270
+slots per block per sweep, against 5 to 13 alone. The small diamond's rows are
+one ZMM register each, and its solver draws too little to be capped. 300 ms
+measured the same as 100 ms (two processes, within 0.6%), and so did 30 ms
+(within 1%): a sample of 4 to 7 ms is too short for the clock to come down, so
+the boost carries over from one to the next. From a settled clock, 30 ms of
+scalar code barely boosts it and 100 ms gives most of the effect (#199), so
+use 100 to 300 ms. The results above are the default state's.
+
+The scalar twin draws too little to be capped (a few slots per block per sweep
+at most, in every state), so after scalar code the AVX-512 solver's lead shrinks
+by its own slowdown: against main's build's scalar twin (five processes:
+13,332.5, 1,540,493.9 and 922,677.6 ns per function), it is 3.1 to 3.2 times
+as fast on the three larger CFGs after scalar code and 3.4 times alone, and
+1.15 times on the small diamond either way. AVX-512 stays the selection.
+
+This change's build measures the scalar twin differently from main's. Clang
+emits the benchmark's driver before the solver wrappers, and the driver grew,
+which moved the wrappers 304 bytes, from 16 bytes into a 64-byte line to its
+start. The AVX-512 solver measures the same in both builds, but the scalar
+twin's large-dispatch solves take 415 to 466 cycles per block per sweep over
+twenty processes, against main's 410 to 411 over five; its medium-nested ones
+take about 2% more and its large-local ones about 1% fewer. An earlier build of
+this change, with the wrappers 16 bytes in, measured 399 to 411, and one with
+them aligned to 64 bytes measured as this build does. Read the scalar twin's
+numbers from a build together with its layout.
