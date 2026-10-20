@@ -599,10 +599,12 @@ struct Preprocessor
     PPExpansionStart* expansion_starts;
     uint32_t expansion_start_count;
     uint32_t expansion_location;
-    // Scratch spellings: the arena, and the range of the chunk being filled (BUSTER_PP_NONE before the first).
-    Arena scratch;
-    uint32_t scratch_range;
-    uint32_t scratch_used;
+    // Scratch spellings, per kind (raw, as source to be read again, or clean, which are final: pp_scratch_clean): the
+    // arena, the range of the chunk being filled (BUSTER_PP_NONE before the first) and how much of it is used. A clean
+    // spelling is known by its arena (pp_without_splices).
+    Arena scratch[2];
+    uint32_t scratch_range[2];
+    uint32_t scratch_used[2];
     // Macros: by IdentId (macro_of, and is_macro's bits), and the records.
     PPMacroId* macro_of;
     uint64_t* is_macro;
@@ -793,28 +795,44 @@ static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location)
 }
 
 // Copies `length` bytes into the scratch space, and returns their location (or 0 and a fatal error).
-static uint32_t pp_scratch(Preprocessor* pp, const uint8_t* bytes, uint32_t length)
+static uint32_t pp_scratch_in(Preprocessor* pp, const uint8_t* bytes, uint32_t length, bool clean)
 {
     uint32_t result = 0;
-    if (pp->scratch_range == BUSTER_PP_NONE || pp->scratch_used + length > pp->ranges[pp->scratch_range].length - 1)
+    uint32_t* current = &pp->scratch_range[clean];
+    uint32_t* used = &pp->scratch_used[clean];
+    if (*current == BUSTER_PP_NONE || *used + length > pp->ranges[*current].length - 1)
     {
         const uint32_t chunk = length > BUSTER_PP_SCRATCH_CHUNK_BYTES ? length : BUSTER_PP_SCRATCH_CHUNK_BYTES;
-        uint8_t* memory = arena_push(&pp->scratch, chunk, 1);
-        pp->scratch_range = memory != 0 ? pp_add_range(pp, chunk, BUSTER_PP_NONE, memory, BUSTER_PP_NONE, 0) : BUSTER_PP_NONE;
-        pp->scratch_used = 0;
+        uint8_t* memory = arena_push(&pp->scratch[clean], chunk, 1);
+        *current = memory != 0 ? pp_add_range(pp, chunk, BUSTER_PP_NONE, memory, BUSTER_PP_NONE, 0) : BUSTER_PP_NONE;
+        *used = 0;
         if (memory == 0)
         {
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of scratch memory for generated spellings");
         }
     }
-    if (pp->scratch_range != BUSTER_PP_NONE)
+    if (*current != BUSTER_PP_NONE)
     {
-        const PPRange* range = &pp->ranges[pp->scratch_range];
-        memcpy((uint8_t*)range->bytes + pp->scratch_used, bytes, length);
-        result = range->base + pp->scratch_used;
-        pp->scratch_used += length;
+        const PPRange* range = &pp->ranges[*current];
+        memcpy((uint8_t*)range->bytes + *used, bytes, length);
+        result = range->base + *used;
+        *used += length;
     }
     return result;
+}
+
+// Scratch spellings that are read as source again (pastes and _Pragma's text, which clang lexes again): their line
+// splices and trigraphs come out when they are read.
+static uint32_t pp_scratch(Preprocessor* pp, const uint8_t* bytes, uint32_t length)
+{
+    return pp_scratch_in(pp, bytes, length, false);
+}
+
+// Scratch spellings that are final (stringized strings, the builtins' strings and numbers), which clang makes as clean
+// tokens: they are read as they are, so a "??=" a stringized argument spells stays one, even with trigraphs on.
+static uint32_t pp_scratch_clean(Preprocessor* pp, const uint8_t* bytes, uint32_t length)
+{
+    return pp_scratch_in(pp, bytes, length, true);
 }
 
 // The bytes of [location, end) in the location space (in one range).
@@ -825,11 +843,14 @@ static const uint8_t* pp_location_bytes(const Preprocessor* pp, uint32_t locatio
 }
 
 // `length` bytes without the line splices in them (and trigraphs, with trigraphs on): the bytes themselves if they have
-// none, else a copy in `buffer`, which needs room for `length` bytes. Returns the length.
+// none or are a clean scratch spelling (in its arena: pp_scratch_clean), else a copy in `buffer`, which needs room for
+// `length` bytes. Returns the length.
 static uint32_t pp_without_splices(const Preprocessor* pp, const uint8_t* bytes, uint32_t length, uint8_t* buffer, const uint8_t** spelling)
 {
+    const Arena* clean = &pp->scratch[1];
+    const bool final = bytes >= clean->base && bytes < clean->base + clean->capacity;
     bool cleaned = false;
-    for (uint32_t i = 0; !cleaned && i < length; i += 1)
+    for (uint32_t i = 0; !final && !cleaned && i < length; i += 1)
     {
         cleaned = bytes[i] == '\\' || (bytes[i] == '?' && (pp->refine_flags & C_TOKENIZER_TRIGRAPHS));
     }
@@ -1284,8 +1305,10 @@ static uint32_t pp_count_splits_scalar(const uint8_t* kinds, uint32_t count, uin
 }
 
 // Splits the `splits` tokens whose kinds the mode splits into their prefix, an identifier with the token's start of line,
-// and the literal from its first quote (a line splice can't hold one), in place from the end. The arrays have room, since
-// a lexer's arrays hold a token per byte. Returns the new count.
+// and the literal from its first quote (a line splice can't hold one), in place from the end. The identifier ends after
+// its last prefix character (u, U or 8, which a splice can't hold either): a splice before the quote stays between the
+// two, where refinement reads it as no whitespace, and doesn't take the quote into the identifier. The arrays have room,
+// since a lexer's arrays hold a token per byte. Returns the new count.
 static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, uint32_t splits, uint64_t split)
 {
     uint32_t remaining = splits;
@@ -1298,8 +1321,10 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
         if (pp_splits_kind(split, kind))
         {
             uint32_t quote = start;
+            uint32_t prefix_end = start;
             while (bytes[quote] != '\'' && bytes[quote] != '"')
             {
+                prefix_end = bytes[quote] == 'u' || bytes[quote] == 'U' || bytes[quote] == '8' ? quote + 1 : prefix_end;
                 quote += 1;
             }
             kinds[t + remaining] = (kind & 0x7F) <= C_TOKEN_UTF32_CHAR_CONSTANT ? C_TOKEN_CHAR_CONSTANT : C_TOKEN_STRING_LITERAL;
@@ -1307,7 +1332,7 @@ static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t
             ends[t + remaining] = end;
             kinds[t + remaining - 1] = (uint8_t)((kind & 0x80) | C_TOKEN_RAW_IDENTIFIER);
             starts[t + remaining - 1] = start;
-            ends[t + remaining - 1] = quote;
+            ends[t + remaining - 1] = prefix_end;
             remaining -= 1;
         }
         else
@@ -2770,7 +2795,7 @@ static PPToken pp_stringize(Preprocessor* pp, const PPTokens* tokens, uint32_t b
         }
         text[length] = '"';
         length += 1;
-        result.location = pp_scratch(pp, text, (uint32_t)length);
+        result.location = pp_scratch_clean(pp, text, (uint32_t)length);
         result.value = result.location + (uint32_t)length;
     }
     scratch_end(scratch);
@@ -3787,7 +3812,7 @@ static PPToken pp_number_token(Preprocessor* pp, uint64_t value, uint8_t flags)
 {
     char digits[24];
     const uint32_t length = (uint32_t)snprintf(digits, sizeof(digits), "%lu", (unsigned long)value);
-    const uint32_t location = value == 0 ? pp->zero_location : value == 1 ? pp->one_location : pp_scratch(pp, (const uint8_t*)digits, length);
+    const uint32_t location = value == 0 ? pp->zero_location : value == 1 ? pp->one_location : pp_scratch_clean(pp, (const uint8_t*)digits, length);
     return (PPToken){ .kind = C_TOKEN_NUMERIC_CONSTANT, .flags = (uint8_t)(flags | BUSTER_PP_FROM_MACRO), .value = location + length, .location = location };
 }
 
@@ -3819,7 +3844,7 @@ static PPToken pp_string_token(Preprocessor* pp, const uint8_t* bytes, uint32_t 
         }
         text[n] = '"';
         n += 1;
-        result.location = pp_scratch(pp, text, n);
+        result.location = pp_scratch_clean(pp, text, n);
         result.value = result.location + n;
     }
     scratch_end(scratch);
@@ -6774,8 +6799,10 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     {
         pp->columns[i] = arena_reserve(BUSTER_PP_ARENA_BYTES);
     }
-    pp->scratch = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
-    pp->scratch_range = BUSTER_PP_NONE;
+    pp->scratch[0] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
+    pp->scratch[1] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
+    pp->scratch_range[0] = BUSTER_PP_NONE;
+    pp->scratch_range[1] = BUSTER_PP_NONE;
     bool result = pp_tokens_reserve(&pp->output, BUSTER_PP_MAX_OUTPUT_TOKENS) && pp_tokens_reserve(&pp->arguments, BUSTER_PP_MAX_STACK_TOKENS) &&
                   pp_tokens_reserve(&pp->captures, BUSTER_PP_MAX_STACK_TOKENS) && pp_tokens_reserve(&pp->expansions, BUSTER_PP_MAX_STACK_TOKENS);
     pp->ranges = pp_array(pp, BUSTER_PP_MAX_RANGES, sizeof(PPRange));
@@ -6803,7 +6830,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     result = result && pp->ranges != 0 && pp->datas != 0 && pp->files != 0 && pp->file_slots != 0 && pp->directories != 0 && pp->directory_lengths != 0 &&
              pp->directory_system != 0 && pp->line_directives != 0 && pp->expansion_starts != 0 && pp->macro_of != 0 && pp->is_macro != 0 && pp->macros != 0 && pp->items != 0 &&
              pp->parameters != 0 && pp->pushed_names != 0 && pp->pushed_macros != 0 && pp->contexts != 0 && pp->conditionals != 0 && pp->invocations != 0 &&
-             pp->argument_records != 0 && pp->capture_frames != 0 && pp->scratch.base != 0;
+             pp->argument_records != 0 && pp->capture_frames != 0 && pp->scratch[0].base != 0 && pp->scratch[1].base != 0;
     if (result)
     {
         // Macro 0 is none; location 0 is none.
@@ -6897,9 +6924,9 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         snprintf(pp->time, sizeof(pp->time), "%02d:%02d:%02d", calendar.tm_hour, calendar.tm_min, calendar.tm_sec);
         pp_format_timestamp(pp->timestamp, sizeof(pp->timestamp), &calendar);
         pp->has_epoch = epoch != 0;
-        pp->zero_location = pp_scratch(pp, (const uint8_t*)"0", 1);
-        pp->one_location = pp_scratch(pp, (const uint8_t*)"1", 1);
-        pp->hash_location = pp_scratch(pp, (const uint8_t*)"#", 1);
+        pp->zero_location = pp_scratch_clean(pp, (const uint8_t*)"0", 1);
+        pp->one_location = pp_scratch_clean(pp, (const uint8_t*)"1", 1);
+        pp->hash_location = pp_scratch_clean(pp, (const uint8_t*)"#", 1);
         // The output's keyword kinds: a predefined name that is a keyword in this mode, by id (below 128).
         for (uint32_t id = 0; id < BUSTER_PP_KEYWORD_TABLE; id += 1)
         {
@@ -6923,7 +6950,8 @@ static void pp_release(Preprocessor* pp)
             munmap((void*)pp->datas[d].bytes, pp->datas[d].length);
         }
     }
-    arena_release(&pp->scratch);
+    arena_release(&pp->scratch[0]);
+    arena_release(&pp->scratch[1]);
     arena_release(&pp->arena);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
     {

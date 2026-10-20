@@ -860,6 +860,14 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "1 [ ]\n\"#\" \"[\"\n", false, 0, 0, 0 },
     { "trigraphs ignored in the GNU modes", "\?\?=define X 1\nX \?\?( \?\?)\n#define S(x) #x\nS(\?\?=) \"\?\?(\"\n",
       0, "gnu17", "\? \? =define X 1\nX \? \?( \? \?)\n\"\?\?=\" \"\?\?(\"\n", false, 0, 0, 0 },
+    // #202's review: the split prefix's identifier ends before a line splice that comes before the quote, and a stringized
+    // string is final (with trigraphs on, its "??=" stays), while a paste is lexed again, as clang lexes it.
+    { "a line splice before the quote of a split literal", "#define u X\nu\\\n'a'\n#define U Z\nU\?\?/\n'b'\n",
+      0, "c99", "X 'a' Z 'b'\n", false, 0, 0, 0 },
+    { "a line splice before the quote of u8'a' before C23", "#define u8 Y\nu8\\\n'a'\nu\\\n8'c'\n",
+      0, "c17", "Y 'a' Y 'c'\n", false, 0, 0, 0 },
+    { "a trigraph that a stringized argument spells, and one a paste forms", "#define S(x) #x\n#define P(a, b) a ## b\n#define XP(a, b) P(a, b)\nS(\?\?\\\n=)\nXP(L, S(\?\?\\\n=))\n",
+      0, "c17", "\"\?\?=\"\nL\"#\"\n", false, 0, 0, 0 },
     { "#include of a missing absolute path", "#include \"/buster-missing-directory/absent.h\"\nafter\n", 0, "c17", "", true },
     { "-include of a missing absolute path", "x\n", 0, "c17", "", true, 0, "-include /buster-missing-directory/absent.h", 0 },
 };
