@@ -94,3 +94,11 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-object-writer
+
+      - name: Test the direct path's executables
+        run: ./build/compiler test-executable
+
+      - name: Benchmark the direct path's executables
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-executable
