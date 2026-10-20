@@ -279,9 +279,13 @@ The promotions are 1.61 cycles a code in the scalar twin and 0.04 with `vpermb`.
 explicit stacks in scratch memory. Types form a DAG: a pair of types can be
 inside many others (`int (*)(T, T)`, nested, is n pairs of records but a tree of
 2^n leaves), so each walk keeps a memo of the pairs it has met. Compatibility
-pushes a pair once, and the composite takes a pair it has merged from the memo;
-the canonical comparison they use (`type_same_canonical`) does the same. Equal
-ids are compatible at once; otherwise:
+pushes a pair once, and the composite takes a pair it has merged from the memo.
+The canonical comparison (`type_same_canonical`, which looks through `ALIGNED`)
+is a post-order walk whose memo keeps every pair's answer, and a composite
+shares one such memo among all its comparisons, its frames' and its finishes':
+two chains of n pointers that differ at the bottom would otherwise be compared
+once per level, (n + 1)^2 pairs in all. Equal ids are compatible at once;
+otherwise:
 
 - qualifiers must be equal, and `ALIGNED` is looked through, as clang's
   canonical types have no typedefs;
@@ -341,8 +345,9 @@ location (it prints `(unnamed)` where clang names the file and line).
   against `type_usual_arithmetic` on enums, `_BitInt`s, aligned and atomic types;
   and fixtures of clang's results.
 - **Compatibility, composite types and printing:** fixtures, the C standard's
-  examples among them (C17 6.2.7p5, 6.7.6.2p6 and 6.7.6.3p21), and types that
-  share their insides 64 levels deep, whose trees have 2^64 leaves.
+  examples among them (C17 6.2.7p5, 6.7.6.2p6 and 6.7.6.3p21); types that
+  share their insides 64 levels deep, whose trees have 2^64 leaves; and
+  composites of chains of 65,536 pointers over arrays of an aligned `int`.
 - **clang as the oracle:** a random world of types, records and enums (1,766 by
   default; `--count` sets how many), written as C with a typedef per type built
   from earlier ones, so that the C spells each type independently of the

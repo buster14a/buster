@@ -1325,8 +1325,9 @@ the one `--clang` names:
   twin, at every length to 200 and ending at a `PROT_NONE` page; the TypeId
   batch against `type_usual_arithmetic`; and clang's results as fixtures;
 - compatibility, composite types and printing: fixtures, the C standard's
-  examples among them, and types that share their insides 64 levels deep (2^64
-  leaves), which each walk must take pair by distinct pair;
+  examples among them, types that share their insides 64 levels deep (2^64
+  leaves), which each walk must take pair by distinct pair, and composites of
+  chains of 65,536 pointers, whose canonical comparisons must share one memo;
 - clang as the oracle: a world of random types, records and enums (`--count`
   sets its size), written as C with a typedef per type built from earlier
   ones. `clang -std=gnu17 -fsyntax-only` must accept its `_Static_assert`s of
