@@ -687,6 +687,43 @@ static const RefineTestKeyword refine_test_keywords[] = {
     { C_NAME_ASM, " gnu89 gnu99 gnu11 gnu17 gnu23 " },
 };
 
+// Spellings chosen apart from BUSTER_C_NAMES, with clang 23's answer in every C mode (its __is_identifier), so that a
+// keyword missing from the predefined names fails: keywords from each part of clang's TokenKinds.def that C has
+// (#192's review named the first eight), and names that are no keywords in C (C++'s, Microsoft's and builtins').
+typedef struct RefineTestSpelling RefineTestSpelling;
+struct RefineTestSpelling
+{
+    const char* spelling;
+    bool keyword;
+};
+
+static const RefineTestSpelling refine_test_spellings[] = {
+    { "_ExtInt", true },
+    { "__builtin_bit_cast", true },
+    { "__builtin_FILE", true },
+    { "__builtin_LINE", true },
+    { "__cdecl", true },
+    { "__fp16", true },
+    { "__nullptr", true },
+    { "__builtin_convertvector", true },
+    { "_Countof", true },
+    { "__builtin_offsetof", true },
+    { "__arm_streaming", true },
+    { "__objc_yes", true },
+    { "__vectorcall", true },
+    { "__module_private__", true },
+    { "__ptrauth", true },
+    { "__auto_type", true },
+    { "_Nullable_result", true },
+    { "__builtin_expect", false },
+    { "__has_include", false },
+    { "__int64", false },
+    { "__declspec", false },
+    { "__is_pod", false },
+    { "__w64", false },
+    { "main", false },
+};
+
 // Is `name` a keyword in the mode `mode` names, by refine_test_keywords?
 static bool refine_test_expected_keyword(IdentId name, const char* mode)
 {
@@ -732,9 +769,31 @@ static bool refine_check_names(InternTable* table)
             wrong += keyword != expected;
         }
     }
-    printf("names: %lu of %u predefined names are wrong, and %lu of %u keyword answers (every name in %u modes)\n", (unsigned long)failures, C_NAME_COUNT - 1,
-           (unsigned long)wrong, C_NAME_COUNT * (uint32_t)BUSTER_ARRAY_LENGTH(refine_test_modes), (uint32_t)BUSTER_ARRAY_LENGTH(refine_test_modes));
-    return failures == 0 && wrong == 0;
+    // The spellings chosen apart: a keyword must be a predefined keyword in every mode, and anything else no keyword.
+    uint64_t misnamed = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refine_test_spellings); i += 1)
+    {
+        const char* spelling = refine_test_spellings[i].spelling;
+        const IdentId id = intern_find(table, (const uint8_t*)spelling, (uint32_t)strlen(spelling));
+        bool keyword = true;
+        bool identifier = true;
+        for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(refine_test_modes); m += 1)
+        {
+            const bool is_keyword = c_name_is_keyword(id, refine_test_modes[m].language);
+            keyword &= is_keyword;
+            identifier &= !is_keyword;
+        }
+        const bool right = refine_test_spellings[i].keyword ? keyword : identifier;
+        if (!right)
+        {
+            printf("names: %s should%s be a keyword in every mode\n", spelling, refine_test_spellings[i].keyword ? "" : " not");
+        }
+        misnamed += !right;
+    }
+    printf("names: %lu of %u predefined names are wrong, %lu of %u keyword answers (every name in %u modes), and %lu of %u spellings chosen apart\n",
+           (unsigned long)failures, C_NAME_COUNT - 1, (unsigned long)wrong, C_NAME_COUNT * (uint32_t)BUSTER_ARRAY_LENGTH(refine_test_modes),
+           (uint32_t)BUSTER_ARRAY_LENGTH(refine_test_modes), (unsigned long)misnamed, (uint32_t)BUSTER_ARRAY_LENGTH(refine_test_spellings));
+    return failures == 0 && wrong == 0 && misnamed == 0;
 }
 
 // A random spelling of 1 to 200 bytes (mostly short) from the identifier characters, written to `out`.

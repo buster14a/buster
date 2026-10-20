@@ -68,6 +68,12 @@ typedef uint32_t IdentId;
 // The names that get the first IDs, in order: the keywords of C (with GNU's and clang's spellings), the directive names
 // that aren't keywords (`if` and `else` are), and the names the preprocessor gives a meaning to. X(enumerator, spelling,
 // keyword rule).
+//
+// The keywords are clang 23's for C: every name in its TokenKinds.def and RegularKeywordAttrInfo.inc that its
+// __is_identifier answers 0 for in some mode from c89 to gnu23, with the modes it does (148, in six rules). The first
+// 108 are the ones the C sources use; the 40 after `__private_extern__` are clang's others (calling conventions,
+// builtins that are keywords, Objective-C and ARM keyword attributes, `_ExtInt`, `_Countof`), which are keywords in C
+// all the same. docs/c-refinement.md has the procedure.
 #define BUSTER_C_KEYWORDS(X) \
     X(AUTO, "auto", BUSTER_C_KEYWORD_ALL) \
     X(BREAK, "break", BUSTER_C_KEYWORD_ALL) \
@@ -176,7 +182,47 @@ typedef uint32_t IdentId;
     X(NULLABLE, "_Nullable", BUSTER_C_KEYWORD_ALL) \
     X(NULLABLE_RESULT, "_Nullable_result", BUSTER_C_KEYWORD_ALL) \
     X(NULL_UNSPECIFIED, "_Null_unspecified", BUSTER_C_KEYWORD_ALL) \
-    X(PRIVATE_EXTERN, "__private_extern__", BUSTER_C_KEYWORD_ALL)
+    X(PRIVATE_EXTERN, "__private_extern__", BUSTER_C_KEYWORD_ALL) \
+    X(COUNTOF, "_Countof", BUSTER_C_KEYWORD_ALL) \
+    X(EXTINT, "_ExtInt", BUSTER_C_KEYWORD_ALL) \
+    X(ARM_AGNOSTIC, "__arm_agnostic", BUSTER_C_KEYWORD_ALL) \
+    X(ARM_IN, "__arm_in", BUSTER_C_KEYWORD_ALL) \
+    X(ARM_INOUT, "__arm_inout", BUSTER_C_KEYWORD_ALL) \
+    X(ARM_LOCALLY_STREAMING, "__arm_locally_streaming", BUSTER_C_KEYWORD_ALL) \
+    X(ARM_NEW, "__arm_new", BUSTER_C_KEYWORD_ALL) \
+    X(ARM_OUT, "__arm_out", BUSTER_C_KEYWORD_ALL) \
+    X(ARM_PRESERVES, "__arm_preserves", BUSTER_C_KEYWORD_ALL) \
+    X(ARM_STREAMING, "__arm_streaming", BUSTER_C_KEYWORD_ALL) \
+    X(ARM_STREAMING_COMPATIBLE, "__arm_streaming_compatible", BUSTER_C_KEYWORD_ALL) \
+    X(BUILTIN_COLUMN, "__builtin_COLUMN", BUSTER_C_KEYWORD_ALL) \
+    X(BUILTIN_FILE, "__builtin_FILE", BUSTER_C_KEYWORD_ALL) \
+    X(BUILTIN_FILE_NAME, "__builtin_FILE_NAME", BUSTER_C_KEYWORD_ALL) \
+    X(BUILTIN_FUNCTION, "__builtin_FUNCTION", BUSTER_C_KEYWORD_ALL) \
+    X(BUILTIN_LINE, "__builtin_LINE", BUSTER_C_KEYWORD_ALL) \
+    X(BUILTIN_AVAILABLE, "__builtin_available", BUSTER_C_KEYWORD_ALL) \
+    X(BUILTIN_BIT_CAST, "__builtin_bit_cast", BUSTER_C_KEYWORD_ALL) \
+    X(BUILTIN_OMP_REQUIRED_SIMD_ALIGN, "__builtin_omp_required_simd_align", BUSTER_C_KEYWORD_ALL) \
+    X(BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR, "__builtin_ptrauth_type_discriminator", BUSTER_C_KEYWORD_ALL) \
+    X(BUILTIN_VECTORELEMENTS, "__builtin_vectorelements", BUSTER_C_KEYWORD_ALL) \
+    X(CDECL, "__cdecl", BUSTER_C_KEYWORD_ALL) \
+    X(FASTCALL, "__fastcall", BUSTER_C_KEYWORD_ALL) \
+    X(FP16, "__fp16", BUSTER_C_KEYWORD_ALL) \
+    X(FUNCREF, "__funcref", BUSTER_C_KEYWORD_ALL) \
+    X(IS_BITWISE_CLONEABLE, "__is_bitwise_cloneable", BUSTER_C_KEYWORD_ALL) \
+    X(IS_DESTRUCTIBLE, "__is_destructible", BUSTER_C_KEYWORD_ALL) \
+    X(IS_NOTHROW_DESTRUCTIBLE, "__is_nothrow_destructible", BUSTER_C_KEYWORD_ALL) \
+    X(MODULE_PRIVATE, "__module_private__", BUSTER_C_KEYWORD_ALL) \
+    X(GNU_NULLPTR, "__nullptr", BUSTER_C_KEYWORD_ALL) \
+    X(OB_TRAP, "__ob_trap", BUSTER_C_KEYWORD_ALL) \
+    X(OB_WRAP, "__ob_wrap", BUSTER_C_KEYWORD_ALL) \
+    X(OBJC_NO, "__objc_no", BUSTER_C_KEYWORD_ALL) \
+    X(OBJC_YES, "__objc_yes", BUSTER_C_KEYWORD_ALL) \
+    X(PASCAL, "__pascal", BUSTER_C_KEYWORD_ALL) \
+    X(PTRAUTH, "__ptrauth", BUSTER_C_KEYWORD_ALL) \
+    X(REGCALL, "__regcall", BUSTER_C_KEYWORD_ALL) \
+    X(STDCALL, "__stdcall", BUSTER_C_KEYWORD_ALL) \
+    X(THISCALL, "__thiscall", BUSTER_C_KEYWORD_ALL) \
+    X(VECTORCALL, "__vectorcall", BUSTER_C_KEYWORD_ALL)
 
 #define BUSTER_C_DIRECTIVE_NAMES(X) \
     X(DEFINE, "define", BUSTER_C_KEYWORD_NONE) \
@@ -254,8 +300,8 @@ typedef enum CName
 } CName;
 
 // The keywords are ids 1 to C_NAME_KEYWORD_COUNT.
-#define C_NAME_KEYWORD_COUNT C_NAME_PRIVATE_EXTERN
-_Static_assert(C_NAME_PRIVATE_EXTERN + 1 == C_NAME_DEFINE, "the keywords must come first");
+#define C_NAME_KEYWORD_COUNT C_NAME_VECTORCALL
+_Static_assert(C_NAME_VECTORCALL + 1 == C_NAME_DEFINE, "the keywords must come first");
 
 static const char* const c_name_spellings[C_NAME_COUNT] =
 {
