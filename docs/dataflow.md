@@ -19,9 +19,10 @@ loads or stores.
 `dataflow_create` allocates the columns and rows from a caller-owned `Arena`:
 the successor offsets, the postorder and the successors, then in and out, then
 use and def. The sweeps load the columns in every block and store in and out,
-and while the columns, in and out fit in 4 KB together, this order keeps the
-columns' low 12 address bits off every in and out row ("Where the AVX-512
-solver's frame falls" has why that matters). Allocation failure leaves the
+and while the span from the first column to the end of out fits in 4 KB,
+padding included, this order keeps the columns' low 12 address bits off every
+in and out row ("Where the AVX-512 solver's frame falls" has why that matters
+and for which sizes it holds). Allocation failure leaves the
 arena at its old position and returns no partially usable graph. The caller
 fills the successors and input rows, then calls `dataflow_postorder`. It
 validates the successor representation and constructs a postorder with an
@@ -469,20 +470,29 @@ at 16 and 3% to 7% at 24. Over out rows, 9 of the 112 processes of rows of one
 vector were also in a state 31% to 66% slower, against none of the 96 over in
 rows only and 3 of the 176 over use or def rows (28% to 68% slower). Rows of
 two vectors, which take the general loop, lost about as much as rows of one,
-and rows of three about half as much. Once the columns, in and out together
-take more than 4 KB (from about 30 blocks of rows of one vector), every place
-of the columns shares low bits with in or out rows, and the place changed the
-time by up to 5% to 8% at 64 blocks and up to 2% at 256.
+and rows of three about half as much. With in and out next to each other, as
+here, once the columns, in and out together take more than 4 KB (from about 30
+blocks of rows of one vector), every place of the columns shares low bits with
+in or out rows, and the place changed the time by up to 5% to 8% at 64 blocks
+and up to 2% at 256.
 
 `dataflow_create` now lays out the columns, then in and out, then use and def.
-While the columns, in and out fit in 4 KB together, no column shares low bits
-with an in or out row: with columns of about 13 bytes per block, as the
-generator's diamonds have, up to 29 blocks of rows of one vector, 15 of two and
-10 of three. Past that, no order avoids it. The harness laid the same CFGs out
-as `dataflow_create` would in either order, from the place in a page where the
-benchmark's second flow starts, and timed the one-vector loop, four processes
-of each, in turns (the median, in cycles per block per sweep, for the diamond,
-nested-loop and random shapes):
+This order guarantees that no column shares low bits with an in or out row
+while the whole span from the first column to the end of out fits in 4 KB,
+padding included: the columns, the up to 60 bytes of padding before in, and in
+and out. With columns of about 13 bytes per block, as the generator's diamonds
+have, that holds wherever the columns start for up to 28 blocks of rows of one
+vector, 15 of two and 10 of three, and for 29 of one at 3 of the 16 places in a
+64-byte line where the columns can start; the thresholds depend on the edge
+count and the alignment. Past them the separation depends on the layout. After
+the columns, in, use, out and def, for one, put out 4 KB past in at 32 blocks
+of rows of one vector, so that in and out share low bits with each other but
+not with the columns; this change didn't measure such layouts.
+
+The harness laid the same CFGs out as `dataflow_create` would in either order,
+from the place in a page where the benchmark's second flow starts, and timed
+the one-vector loop, four processes of each, in turns (the median, in cycles
+per block per sweep, for the diamond, nested-loop and random shapes):
 
 | Blocks | #205's order: columns, use, def, in, out | Columns, in, out, use, def |
 | ---: | --- | --- |
