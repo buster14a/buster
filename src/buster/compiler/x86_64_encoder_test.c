@@ -1464,7 +1464,7 @@ static bool x86_check_templates(void)
     for (uint32_t encoder = X86_ENCODER_MODE_32; encoder <= X86_ENCODER_MODE_16; encoder += 1)
     {
         const X86EncoderMode mode = (X86EncoderMode)encoder;
-        const X86Template* templates = x86_mode_templates(mode);
+        const X86TemplateEntry* templates = x86_mode_templates(mode);
         uint32_t full = 0;
         uint32_t overridable = 0;
         uint32_t unexpected_override = 0;
@@ -1476,10 +1476,10 @@ static bool x86_check_templates(void)
             const bool takes = exists && x86_form_segment(form) == 0 && x86_form_takes_override(description);
             uint32_t positions = 0;
             uint32_t prefix_positions = 0;
-            for (uint32_t i = 0; i < sizeof(templates[form].layout); i += 1)
+            for (uint32_t i = 0; i < sizeof(templates[form].template.layout); i += 1)
             {
-                positions += templates[form].layout[i] != BUSTER_X86_LAYOUT_ABSENT;
-                prefix_positions += templates[form].layout[i] == BUSTER_X86_LAYOUT_OVERRIDE;
+                positions += templates[form].template.layout[i] != BUSTER_X86_LAYOUT_ABSENT;
+                prefix_positions += templates[form].template.layout[i] == BUSTER_X86_LAYOUT_OVERRIDE;
             }
             const bool wrong = exists && prefix_positions != (takes || control ? 1u : 0u);
             if (wrong && unexpected_override < BUSTER_X86_TEST_REPORTED)
@@ -1489,7 +1489,7 @@ static bool x86_check_templates(void)
             }
             unexpected_override += wrong;
             overridable += takes;
-            full += exists && positions == sizeof(templates[form].layout);
+            full += exists && positions == sizeof(templates[form].template.layout);
         }
         const uint32_t unexpected_room_legacy = x86_check_room(mode, &with_override, &without_override);
         const bool fit = legacy && unexpected_room_legacy == 0 && unexpected_override == 0;
