@@ -17,7 +17,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | --- | ---: | ---: |
 | `sqlite3.c` 3.53, with glibc's headers | 1 | 707,153 |
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
-| This repository's translation units on this branch (`main` at 2aa1358), with `-march=native` (AVX-512 intrinsic headers) | 11 | 6,379,384 |
+| This repository's translation units on this branch (`main` at a6a1f82), with `-march=native` (AVX-512 intrinsic headers) | 12 | 7,277,368 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
 | The built-in cases (`pp_test_cases`) | 77 | |
 
