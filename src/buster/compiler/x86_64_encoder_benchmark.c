@@ -11,7 +11,7 @@
 // loop.
 //
 // Usage: build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform | --vector] [--mode32 | --mode16]
-//                                             [--offsets] [--fixups] [--seed N] [--only NAME]
+//                                             [--offsets] [--fixups] [--after-scalar MS] [--seed N] [--only NAME]
 //
 // The stream has --count instructions (BUSTER_X86_BENCHMARK_DEFAULT_COUNT by default): a mix shaped like compiler
 // output (x86_benchmark_patterns: register moves, stack loads and stores, calls, branches, arithmetic, some SSE); with
@@ -22,9 +22,10 @@
 // of N instructions, each appending to the same output, like a compiler encoding a function at a time; otherwise one
 // call encodes it all. --offsets has every call store each instruction's offset too; --fixups marks the instructions a
 // code generator would have fixups for (calls and RIP-relative operands, x86_benchmark_mark) and has every call
-// report their ends; and --only times just the implementation NAME (for perf stat, say). Run it pinned to one CPU
-// (taskset -c 2 ...). The exit status is 1 if the arguments are invalid or an implementation's output differs from the
-// scalar loop's.
+// report their ends; --after-scalar MS runs the scalar loop for MS milliseconds before every timed pass of the other
+// implementations (x86_benchmark_after_scalar), so that each pass runs in the state a compiler's vector phases run in;
+// and --only times just the implementation NAME (for perf stat, say). Run it pinned to one CPU (taskset -c 2 ...). The
+// exit status is 1 if the arguments are invalid or an implementation's output differs from the scalar loop's.
 //
 // Layout, in this order:
 //   - The stream: x86_benchmark_patterns, x86_benchmark_vector_patterns, x86_benchmark_patterns_32 and
@@ -33,7 +34,8 @@
 //   - The implementations: encode_scalar_loop (and encode_scalar_loop_32 and encode_scalar_loop_16),
 //     encode_offsets_then_pick and x86_benchmark_implementations (and x86_benchmark_implementations_32 and
 //     x86_benchmark_implementations_16).
-//   - Timing: the perf counters, encode_stream and run_x86_encoder_benchmark, which runs a warm-up pass and then
+//   - Timing: the perf counters (cycles, instructions and the power cap's throttle, BUSTER_X86_BENCHMARK_THROTTLE_EVENT),
+//     encode_stream, x86_benchmark_after_scalar and run_x86_encoder_benchmark, which runs a warm-up pass and then
 //     BUSTER_X86_BENCHMARK_PASSES passes with the implementations taking turns, and reports medians.
 
 #include <stdint.h>
@@ -56,6 +58,15 @@
 // is long next to the timer and counter reads.
 #define BUSTER_X86_BENCHMARK_PASS_INSTRUCTIONS (4u << 20)
 #define BUSTER_X86_BENCHMARK_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
+// --after-scalar's scalar loop encodes the stream's first instructions, this many per call, as the experiment copy of
+// the benchmark that found the state did (#182), and runs for at most BUSTER_X86_BENCHMARK_AFTER_SCALAR_MAX_MS.
+#define BUSTER_X86_BENCHMARK_AFTER_SCALAR_INSTRUCTIONS 256
+#define BUSTER_X86_BENCHMARK_AFTER_SCALAR_MAX_MS 10000
+// PMCx1A0 (dispatch slots not used) with its undocumented umask 0x08, as a raw perf config: the event's low byte in
+// bits 0-7, the umask in bits 8-15 and the event's high nibble in bits 32-35. #199 reads it as the slots that Zen 5's
+// per-core power cap withholds from a heavy vector loop at a boosted clock, an inference from its controls: it is the
+// one dispatch counter that rises in that state, by about the cycles lost.
+#define BUSTER_X86_BENCHMARK_THROTTLE_EVENT 0x1000008a0ull
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The stream
@@ -756,15 +767,26 @@ struct X86BenchmarkSample
     uint64_t nanoseconds;
     uint64_t cycles;
     uint64_t instructions;
+    uint64_t throttle;
 };
 
-// A counter of this thread's user-space hardware events, or -1 if perf_event_open fails.
-static int x86_benchmark_open_counter(uint64_t config)
+// The perf counters' descriptors, each -1 if it isn't open.
+typedef struct X86BenchmarkCounters X86BenchmarkCounters;
+struct X86BenchmarkCounters
+{
+    int cycles;
+    int instructions;
+    int throttle;
+};
+
+// A counter of this thread's user-space events of the type (PERF_TYPE_HARDWARE or PERF_TYPE_RAW), or -1 if
+// perf_event_open fails.
+static int x86_benchmark_open_counter(uint32_t type, uint64_t config)
 {
     struct perf_event_attr attributes;
     memset(&attributes, 0, sizeof(attributes));
     attributes.size = sizeof(attributes);
-    attributes.type = PERF_TYPE_HARDWARE;
+    attributes.type = type;
     attributes.config = config;
     attributes.exclude_kernel = 1;
     attributes.exclude_hv = 1;
@@ -781,14 +803,20 @@ static uint64_t x86_benchmark_read_counter(int fd)
     return value;
 }
 
-static X86BenchmarkSample x86_benchmark_now(int cycles_fd, int instructions_fd)
+static uint64_t x86_benchmark_nanoseconds(void)
 {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+}
+
+static X86BenchmarkSample x86_benchmark_now(const X86BenchmarkCounters* counters)
+{
     X86BenchmarkSample result = {
-        .nanoseconds = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec,
-        .cycles = x86_benchmark_read_counter(cycles_fd),
-        .instructions = x86_benchmark_read_counter(instructions_fd),
+        .nanoseconds = x86_benchmark_nanoseconds(),
+        .cycles = x86_benchmark_read_counter(counters->cycles),
+        .instructions = x86_benchmark_read_counter(counters->instructions),
+        .throttle = x86_benchmark_read_counter(counters->throttle),
     };
     return result;
 }
@@ -840,6 +868,21 @@ static int64_t encode_stream(const X86BenchmarkImplementation* implementation, c
     return result;
 }
 
+// --after-scalar: the scalar loop (`scalar`, implementation 0) on the stream's first instructions for `milliseconds`,
+// before a timed pass. A compiler runs its vector phases in short bursts after lighter ones, which let the clock boost
+// (from about 5.31 to 5.52 GHz on the 9700X, over 30 to 300 ms), and at that clock a heavy vector loop runs under the
+// core's power cap until the clock comes down, 5 to 20 ms later (#199; docs/x86-64-encoder.md, "Zen 5's costs,
+// measured"). Back-to-back passes miss that state.
+static void x86_benchmark_after_scalar(const X86BenchmarkImplementation* scalar, const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t milliseconds)
+{
+    const uint64_t n = count < BUSTER_X86_BENCHMARK_AFTER_SCALAR_INSTRUCTIONS ? count : BUSTER_X86_BENCHMARK_AFTER_SCALAR_INSTRUCTIONS;
+    const uint64_t end = x86_benchmark_nanoseconds() + milliseconds * 1000000;
+    while (x86_benchmark_nanoseconds() < end)
+    {
+        scalar->encode(instructions, n, output, 0, 0);
+    }
+}
+
 static bool x86_benchmark_parse(const char* text, uint64_t* value)
 {
     char* end = 0;
@@ -859,6 +902,7 @@ int run_x86_encoder_benchmark(int argc, char** argv)
     X86EncoderMode mode = X86_ENCODER_MODE_64;
     bool with_offsets = false;
     bool with_fixups = false;
+    uint64_t after_scalar = 0;
     const char* only = 0;
     bool valid = true;
     for (int i = 1; i < argc; i += 1)
@@ -899,6 +943,11 @@ int run_x86_encoder_benchmark(int argc, char** argv)
         {
             with_fixups = true;
         }
+        else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
+        {
+            valid = valid && x86_benchmark_parse(argv[i + 1], &after_scalar) && after_scalar <= BUSTER_X86_BENCHMARK_AFTER_SCALAR_MAX_MS;
+            i += 1;
+        }
         else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
             only = argv[i + 1];
@@ -935,7 +984,8 @@ int run_x86_encoder_benchmark(int argc, char** argv)
     uint32_t* fixup_ends[BUSTER_X86_BENCHMARK_IMPLEMENTATIONS] = { 0 };
     if (!valid || count == 0 || count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS || (uniform && vector) || (vector && mode != X86_ENCODER_MODE_64))
     {
-        fprintf(stderr, "usage: %s [--count N] [--section N] [--uniform | --vector] [--mode32 | --mode16] [--offsets] [--fixups] [--seed N] [--only NAME]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--count N] [--section N] [--uniform | --vector] [--mode32 | --mode16] [--offsets] [--fixups] [--after-scalar MS] [--seed N] [--only NAME]\n",
+                argv[0]);
     }
     else if (!x86_encoder_initialize() || !x86_encoder_initialize_apx() || !x86_encoder_initialize_legacy())
     {
@@ -999,11 +1049,18 @@ int run_x86_encoder_benchmark(int argc, char** argv)
                 selected[i] = only == 0 || strcmp(only, implementations[i].name) == 0;
             }
             const uint64_t repeat = (BUSTER_X86_BENCHMARK_PASS_INSTRUCTIONS + count - 1) / count;
-            const int cycles_fd = x86_benchmark_open_counter(PERF_COUNT_HW_CPU_CYCLES);
-            const int instructions_fd = x86_benchmark_open_counter(PERF_COUNT_HW_INSTRUCTIONS);
-            if (cycles_fd < 0 || instructions_fd < 0)
+            const X86BenchmarkCounters counters = {
+                .cycles = x86_benchmark_open_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES),
+                .instructions = x86_benchmark_open_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS),
+                .throttle = x86_benchmark_open_counter(PERF_TYPE_RAW, BUSTER_X86_BENCHMARK_THROTTLE_EVENT),
+            };
+            if (counters.cycles < 0 || counters.instructions < 0)
             {
                 fprintf(stderr, "perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0\n");
+            }
+            if (counters.throttle < 0)
+            {
+                fprintf(stderr, "perf_event_open failed for PMCx1A0 umask 0x08 (raw event 0x%llx): the throttle reads as 0\n", BUSTER_X86_BENCHMARK_THROTTLE_EVENT);
             }
 
             static X86BenchmarkSample samples[BUSTER_X86_BENCHMARK_IMPLEMENTATIONS][BUSTER_X86_BENCHMARK_PASSES];
@@ -1013,19 +1070,25 @@ int run_x86_encoder_benchmark(int argc, char** argv)
                 {
                     if (selected[i])
                     {
-                        const X86BenchmarkSample before = x86_benchmark_now(cycles_fd, instructions_fd);
+                        // Not before the scalar loop's own passes, which are that phase already.
+                        if (after_scalar != 0 && i != 0)
+                        {
+                            x86_benchmark_after_scalar(&implementations[0], instructions, count, outputs[0], after_scalar);
+                        }
+                        const X86BenchmarkSample before = x86_benchmark_now(&counters);
                         for (uint64_t r = 0; r < repeat; r += 1)
                         {
                             encode_stream(&implementations[i], instructions, count, section, outputs[i], with_offsets ? offsets[i] : 0,
                                           with_fixups ? fixup_ends[i] : 0, marked_indices, section_marks);
                         }
-                        const X86BenchmarkSample after = x86_benchmark_now(cycles_fd, instructions_fd);
+                        const X86BenchmarkSample after = x86_benchmark_now(&counters);
                         if (pass > 0)
                         {
                             samples[i][pass - 1] = (X86BenchmarkSample){
                                 .nanoseconds = after.nanoseconds - before.nanoseconds,
                                 .cycles = after.cycles - before.cycles,
                                 .instructions = after.instructions - before.instructions,
+                                .throttle = after.throttle - before.throttle,
                             };
                         }
                     }
@@ -1038,11 +1101,16 @@ int run_x86_encoder_benchmark(int argc, char** argv)
             {
                 snprintf(fixups_text, sizeof(fixups_text), ", with fixup ends (%lu marked)", (unsigned long)marked);
             }
+            char after_text[64] = "";
+            if (after_scalar != 0)
+            {
+                snprintf(after_text, sizeof(after_text), ", each after %lu ms of the scalar loop", (unsigned long)after_scalar);
+            }
             const char* mode_words = mode == X86_ENCODER_MODE_32 ? " in 32-bit mode" : mode == X86_ENCODER_MODE_16 ? " in 16-bit mode" : "";
-            printf("%lu %s instructions%s, %lld bytes (%.2f per instruction), in calls of %lu%s%s; %d interleaved passes of %lu runs, medians (cycles also "
+            printf("%lu %s instructions%s, %lld bytes (%.2f per instruction), in calls of %lu%s%s; %d interleaved passes of %lu runs%s, medians (cycles also "
                    "min-max):\n",
                    (unsigned long)count, uniform ? "uniform" : vector ? "vector" : "mixed", mode_words, (long long)lengths[0], (double)lengths[0] / (double)count,
-                   (unsigned long)section, with_offsets ? ", with offsets" : "", fixups_text, BUSTER_X86_BENCHMARK_PASSES, (unsigned long)repeat);
+                   (unsigned long)section, with_offsets ? ", with offsets" : "", fixups_text, BUSTER_X86_BENCHMARK_PASSES, (unsigned long)repeat, after_text);
             for (uint64_t i = 0; i < implementation_count; i += 1)
             {
                 if (selected[i])
@@ -1050,32 +1118,40 @@ int run_x86_encoder_benchmark(int argc, char** argv)
                     uint64_t nanoseconds[BUSTER_X86_BENCHMARK_PASSES];
                     uint64_t cycles[BUSTER_X86_BENCHMARK_PASSES];
                     uint64_t retired[BUSTER_X86_BENCHMARK_PASSES];
+                    uint64_t throttle[BUSTER_X86_BENCHMARK_PASSES];
                     for (uint64_t pass = 0; pass < BUSTER_X86_BENCHMARK_PASSES; pass += 1)
                     {
                         nanoseconds[pass] = samples[i][pass].nanoseconds;
                         cycles[pass] = samples[i][pass].cycles;
                         retired[pass] = samples[i][pass].instructions;
+                        throttle[pass] = samples[i][pass].throttle;
                     }
                     x86_benchmark_sort(nanoseconds, BUSTER_X86_BENCHMARK_PASSES);
                     x86_benchmark_sort(cycles, BUSTER_X86_BENCHMARK_PASSES);
                     x86_benchmark_sort(retired, BUSTER_X86_BENCHMARK_PASSES);
+                    x86_benchmark_sort(throttle, BUSTER_X86_BENCHMARK_PASSES);
                     const double median_nanoseconds = (double)nanoseconds[BUSTER_X86_BENCHMARK_PASSES / 2];
                     const double median_cycles = (double)cycles[BUSTER_X86_BENCHMARK_PASSES / 2];
                     const double median_retired = (double)retired[BUSTER_X86_BENCHMARK_PASSES / 2];
-                    printf("  %-32s %7.3f ns  %8.1f M/s  %6.2f GB/s  %6.2f cycles [%.2f-%.2f]  %6.2f instructions  IPC %.2f\n", implementations[i].name,
+                    const double median_throttle = (double)throttle[BUSTER_X86_BENCHMARK_PASSES / 2];
+                    printf("  %-32s %7.3f ns  %8.1f M/s  %6.2f GB/s  %6.2f cycles [%.2f-%.2f]  %6.2f instructions  IPC %.2f  throttle %5.2f\n", implementations[i].name,
                            median_nanoseconds / encoded, encoded / median_nanoseconds * 1e3, (double)lengths[0] * (double)repeat / median_nanoseconds,
                            median_cycles / encoded, (double)cycles[0] / encoded, (double)cycles[BUSTER_X86_BENCHMARK_PASSES - 1] / encoded, median_retired / encoded,
-                           median_cycles != 0 ? median_retired / median_cycles : 0.0);
+                           median_cycles != 0 ? median_retired / median_cycles : 0.0, median_throttle / encoded);
                 }
             }
-            printf("  (per encoded instruction; GB/s of machine code)\n");
-            if (cycles_fd >= 0)
+            printf("  (per encoded instruction; GB/s of machine code; throttle: PMCx1A0 umask 0x08, read as the dispatch slots the power cap takes)\n");
+            if (counters.cycles >= 0)
             {
-                close(cycles_fd);
+                close(counters.cycles);
             }
-            if (instructions_fd >= 0)
+            if (counters.instructions >= 0)
             {
-                close(instructions_fd);
+                close(counters.instructions);
+            }
+            if (counters.throttle >= 0)
+            {
+                close(counters.throttle);
             }
             result = different == 0 ? 0 : 1;
         }
