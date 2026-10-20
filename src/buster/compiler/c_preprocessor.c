@@ -7168,8 +7168,9 @@ static uint32_t pp_print_location(const Preprocessor* pp, PPMarkers* markers, ui
 // to with flag 2, and going into an included file each file it goes into with flag 1; a #line, a new name or a new
 // system level, a marker; a jump forward of up to 8 lines, that many line breaks; any other jump, a marker. The markers
 // go to markers->text (markers->length bytes, ending in a line break); returns the line breaks to put after them, before
-// the token, and false in `*written` if memory ran out.
-static uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint32_t range, uint32_t location, uint32_t physical, bool line_start, bool* written)
+// the token, and false in `*written` if memory ran out. pp_print_place takes the common case inline.
+static __attribute__((noinline)) uint32_t pp_print_place_marking(Preprocessor* pp, PPMarkers* markers, uint32_t range, uint32_t location, uint32_t physical,
+                                                                 bool line_start, bool* written)
 {
     markers->length = 0;
     const PPPresumed here = pp_print_presumed(pp, markers, range, location, physical);
@@ -7243,6 +7244,30 @@ static uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint32_t ra
     markers->name_length = here.name_length;
     markers->system = here.system;
     *written = fits;
+    return result;
+}
+
+// The common case of a line start, inline: in the same range as the line before, past the same line note (none passed
+// since, and none ahead of `location`), a jump forward of 1 to 8 lines is that many line breaks and no marker. Anything
+// else is pp_print_place_marking's.
+BUSTER_INLINE uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint32_t range, uint32_t location, uint32_t physical, bool line_start, bool* written)
+{
+    const uint32_t at = markers->cursors[range];
+    const uint32_t next = at == BUSTER_PP_NONE ? pp->ranges[range].first_line_directive : pp->line_directives[at].next_in_range;
+    const uint32_t line = (uint32_t)((int64_t)physical + markers->delta);
+    const bool same = range == markers->range && (at == BUSTER_PP_NONE || pp->line_directives[at].location <= location) &&
+                      (next == BUSTER_PP_NONE || pp->line_directives[next].location > location) && line > markers->line && line - markers->line <= 8;
+    uint32_t result = line - markers->line;
+    markers->length = 0;
+    *written = true;
+    if (same)
+    {
+        markers->line = line;
+    }
+    else
+    {
+        result = pp_print_place_marking(pp, markers, range, location, physical, line_start, written);
+    }
     return result;
 }
 
@@ -7568,17 +7593,17 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
                     bool placed = true;
                     breaks = pp_print_place(pp, &marked, range, place, pp_print_line(pp, &lines, range, place), line_start, &placed);
                     // The markers go through the buffer, or past it when they are longer than its room.
-                    if (used + marked.length + room > capacity)
+                    if (marked.length != 0 && used + marked.length + room > capacity)
                     {
                         result = result && fwrite(buffer, 1, used, stream) == used;
                         used = 0;
                     }
-                    if (marked.length + room <= capacity)
+                    if (marked.length != 0 && marked.length + room <= capacity)
                     {
                         memcpy(buffer + used, marked.text, marked.length);
                         used += marked.length;
                     }
-                    else
+                    else if (marked.length != 0)
                     {
                         result = result && fwrite(marked.text, 1, marked.length, stream) == marked.length;
                     }
