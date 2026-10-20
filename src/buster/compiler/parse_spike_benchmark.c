@@ -494,6 +494,12 @@ struct SpikeKernelCopy
     uint16_t* left_keys;
     SpikeCandidates candidates;
     uint8_t* typed;
+    uint8_t* roles;
+    uint8_t* flags;
+    uint8_t* classified_flags;
+    uint8_t* group_roles;
+    uint8_t* group_typed;
+    uint64_t rounds[BUSTER_SPIKE_ROLE_ROUNDS + 1];
 };
 
 static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels, SpikeKernelCopy* copy, uint32_t count)
@@ -528,8 +534,42 @@ static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels
     {
         spike_typedefs(kernels, kinds, file->tokens.names, count);
     }
+    // K3's classification: both vector variants against the twin.
+    spike_classify_gather_avx512(kernels, kinds, file->tokens.names, count);
+    memcpy(copy->roles, kernels->vkinds, count);
+    memcpy(copy->flags, kernels->flags, count);
+    spike_classify_mask_avx512(kernels, kinds, file->tokens.names, count);
+    memcpy(copy->typed, kernels->vkinds, count);
+    memcpy(copy->classified_flags, kernels->flags, count);
     spike_classify_scalar(kernels, kinds, file->tokens.names, count);
+    if (memcmp(copy->roles, kernels->vkinds, count) != 0 || memcmp(copy->typed, kernels->vkinds, count) != 0 || memcmp(copy->flags, kernels->flags, count) != 0 ||
+        memcmp(copy->classified_flags, kernels->flags, count) != 0)
+    {
+        printf("%s: K3's classification differs\n", file->path);
+        result += 1;
+    }
+    memcpy(copy->classified_flags, kernels->flags, count);
+    // K2: the vector kernel first, then the twin, which the later kernels read.
+    spike_roles_avx512(kernels, count, copy->typed, copy->group_roles, copy->group_typed, copy->rounds);
+    memcpy(copy->roles, kernels->roles, count);
+    memcpy(copy->flags, kernels->flags, count);
+    memcpy(kernels->flags, copy->classified_flags, count);
     spike_roles_scalar(kernels, count, copy->typed);
+    first = BUSTER_SPIKE_NONE;
+    for (uint32_t i = 0; i < count && first == BUSTER_SPIKE_NONE; i += 1)
+    {
+        if (kernels->roles[i] != copy->roles[i] || kernels->flags[i] != copy->flags[i])
+        {
+            first = i;
+        }
+    }
+    if (first != BUSTER_SPIKE_NONE)
+    {
+        printf("%s: K2 differs at token %u: twin %s%s, vector %s%s\n", file->path, first, spike_role_names[kernels->roles[first]], kernels->flags[first] ? " (flagged)" : "",
+               spike_role_names[copy->roles[first]], copy->flags[first] ? " (flagged)" : "");
+        spike_print_context(file, first);
+        result += 1;
+    }
     spike_secondary_scalar(kernels, count, kernels->stack);
     spike_after_colons(kernels, count);
     for (uint32_t i = 0; i < kernels->typedef_count; i += 1)
@@ -539,13 +579,13 @@ static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels
     uint32_t deepest = 0;
     for (uint32_t i = 0; i < count; i += 1)
     {
-        deepest = kernels->depths[i] > deepest ? kernels->depths[i] : deepest;
+        deepest = kernels->node_depths[i] > deepest ? kernels->node_depths[i] : deepest;
     }
     spike_parents_scalar(kernels, count);
     if (deepest <= BUSTER_SPIKE_MAX_VECTOR_DEPTH)
     {
-        spike_parents_left_avx512(kernels->roles, kernels->depths, count, copy->lefts, copy->left_keys, &copy->candidates);
-        spike_parents_right_avx512(kernels->roles, kernels->depths, count, copy->lefts, copy->left_keys, copy->parents, &copy->candidates);
+        spike_parents_left_avx512(kernels->roles, kernels->node_depths, count, copy->lefts, copy->left_keys, &copy->candidates);
+        spike_parents_right_avx512(kernels->roles, kernels->node_depths, count, copy->lefts, copy->left_keys, copy->parents, &copy->candidates);
         first = BUSTER_SPIKE_NONE;
         for (uint32_t i = 0; i < count && first == BUSTER_SPIKE_NONE; i += 1)
         {
@@ -752,6 +792,8 @@ int run_parse_spike(int argc, char** argv)
         uint8_t* marks = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 1);
         uint8_t* typed = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 1);
         SpikeStatement* statements = BUSTER_ARENA_PUSH_ARRAY(&memory, SpikeStatement, corpus.max_tokens + 1);
+        SpikeVectorBuffers buffers;
+        const bool buffers_reserved = spike_vector_buffers_reserve(&buffers, &memory, corpus.max_tokens);
         SpikeKernelCopy copy = {
             .depths = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
             .enclosing = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
@@ -765,9 +807,15 @@ int run_parse_spike(int argc, char** argv)
                 .count = 0,
             },
             .typed = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .roles = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .flags = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .classified_flags = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .group_roles = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .group_typed = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .rounds = { 0 },
         };
         if (loaded && (meanings.meanings == 0 || marks == 0 || typed == 0 || statements == 0 || !spike_allocate_tree(&memory, &tree, corpus.max_tokens) ||
-                       !spike_kernels_reserve(&kernels, &memory, corpus.max_tokens, BUSTER_SPIKE_NAME_CAPACITY)))
+                       !spike_kernels_reserve(&kernels, &memory, corpus.max_tokens, BUSTER_SPIKE_NAME_CAPACITY) || !buffers_reserved))
         {
             fprintf(stderr, "can't reserve memory\n");
             loaded = false;
@@ -785,8 +833,11 @@ int run_parse_spike(int argc, char** argv)
             uint32_t failed = 0;
             uint32_t broken = 0;
             uint64_t failed_tokens = 0;
+            static uint64_t role_stats[128][128];
             uint32_t twin_failures = 0;
             uint32_t kernel_failures = 0;
+            uint32_t vector_failures = 0;
+            uint64_t vector_fallback_tokens = 0;
             uint32_t flag_reports = 0;
             uint32_t role_reports = 0;
             uint32_t everything_files = 0;
@@ -842,6 +893,10 @@ int run_parse_spike(int argc, char** argv)
                     }
                     // The kernels' scalar twins, against the scalar parser.
                     const SpikeKernelResult twins = spike_parse_twins(&kernels, file->tokens.kinds, file->tokens.names, count, &meanings, &scratch, typed, statements);
+                    for (uint32_t t = 0; t < count; t += 1)
+                    {
+                        role_stats[kernels.vkinds[t]][kernels.roles[t]] += 1;
+                    }
                     uint64_t role_differences = 0;
                     uint32_t first_role_difference = 0;
                     const uint32_t different = spike_compare(&tree, &kernels, count, &role_differences, &first_role_difference);
@@ -879,7 +934,28 @@ int run_parse_spike(int argc, char** argv)
                     {
                         kernel_failures += 1;
                     }
-                    else if (role_differences != 0 && role_reports < 12)
+                    else
+                    {
+                        // The whole vector path, against the scalar parser.
+                        const SpikeKernelResult vector = spike_parse_vector(&kernels, file->tokens.kinds, file->tokens.names, count, &meanings, &scratch, &buffers);
+                        uint64_t vector_role_differences = 0;
+                        uint32_t vector_first_role = 0;
+                        const uint32_t vector_different = spike_compare(&tree, &kernels, count, &vector_role_differences, &vector_first_role);
+                        vector_fallback_tokens += vector.fallback.tokens;
+                        if (vector.fallback.error_token != BUSTER_SPIKE_NONE || vector_different != BUSTER_SPIKE_NONE || vector_role_differences != 0)
+                        {
+                            if (vector_failures < 12)
+                            {
+                                printf("%s: the vector path's tree differs at token %u (roles: %lu differ, the first at %u)\n", file->path, vector_different,
+                                       (unsigned long)vector_role_differences, vector_first_role);
+                                const uint32_t at = vector_different != BUSTER_SPIKE_NONE ? vector_different : vector_first_role;
+                                spike_print_context(file, at);
+                                spike_print_both(file, &tree, &kernels, at > 8 ? at - 8 : 0, at + 6);
+                            }
+                            vector_failures += 1;
+                        }
+                    }
+                    if (role_differences != 0 && role_reports < 12)
                     {
                         printf("%s: %lu roles differ, the first at token %u\n", file->path, (unsigned long)role_differences, first_role_difference);
                         spike_print_both(file, &tree, &kernels, first_role_difference > 6 ? first_role_difference - 6 : 0, first_role_difference + 4);
@@ -892,7 +968,33 @@ int run_parse_spike(int argc, char** argv)
                    twin_failures, (unsigned long)total_role_differences, (unsigned long)flagged_tokens, (unsigned long)fallback_items, (unsigned long)fallback_tokens,
                    corpus.token_count ? 100.0 * (double)fallback_tokens / (double)corpus.token_count : 0.0, everything_files);
             printf("kernels: %u files where a vector kernel differs from its twin\n", kernel_failures);
-            result = failed == 0 && broken == 0 && twin_failures == 0 && kernel_failures == 0 ? 0 : 1;
+            printf("vector path: %u files differ from the scalar parser; fallback: %lu tokens (%.2f%%)\n", vector_failures, (unsigned long)vector_fallback_tokens,
+                   corpus.token_count ? 100.0 * (double)vector_fallback_tokens / (double)corpus.token_count : 0.0);
+            if (getenv("SPIKE_ROLE_STATS") != 0)
+            {
+                for (uint32_t k = 0; k < BUSTER_SPIKE_VKINDS; k += 1)
+                {
+                    uint64_t total = 0;
+                    uint32_t best = 0;
+                    for (uint32_t r = 0; r < SPIKE_ROLE_COUNT; r += 1)
+                    {
+                        total += role_stats[k][r];
+                        best = role_stats[k][r] > role_stats[k][best] ? r : best;
+                    }
+                    if (total != 0)
+                    {
+                        printf("vkind %-22s %9lu  best %-24s %.2f%%\n", k < SPIKE_KIND_COUNT ? spike_kind_names[k] : "TYPE_NAME", (unsigned long)total, spike_role_names[best],
+                               100.0 * (double)role_stats[k][best] / (double)total);
+                    }
+                }
+            }
+            printf("K2 rounds per block:");
+            for (uint32_t r = 0; r <= BUSTER_SPIKE_ROLE_ROUNDS; r += 1)
+            {
+                printf(" %u:%lu", r, (unsigned long)copy.rounds[r]);
+            }
+            printf(" (0: the twin)\n");
+            result = failed == 0 && broken == 0 && twin_failures == 0 && kernel_failures == 0 && vector_failures == 0 ? 0 : 1;
             if (result == 0 && !check_only)
             {
                 SpikeCounters counters = {

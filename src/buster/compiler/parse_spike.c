@@ -2560,8 +2560,10 @@ typedef struct SpikeKernels SpikeKernels;
 struct SpikeKernels
 {
     uint8_t* vkinds;
-    // The depth before each token: of ( [ { after the first K1 pass, of every group after the second.
+    // The depth before each token of ( [ { (K1), and each token's node depth in every group, ? : and case : included,
+    // where a closer is outside its group (K1's second part).
     uint32_t* depths;
+    uint32_t* node_depths;
     uint32_t* enclosing;
     uint8_t* roles;
     uint32_t* parents;
@@ -3179,8 +3181,9 @@ static void spike_roles_scalar(SpikeKernels* kernels, uint32_t count, uint8_t* t
 
 // K1's second part, the groups of ? : and case ... : (the secondary brackets), over their tokens only: each `:` that
 // isn't an asm operand's or a bit-field's closes the innermost ? or case still open in the same group of ( [ {, or is a
-// label if none is. Then the depth of the secondary brackets, added to the depth of ( [ {, gives every token's depth for
-// K4. `secondary` has a slot per token for the matching stack.
+// label if none is (a `:` it has resolved before is resolved again the same way). Then the depth of the secondary
+// brackets, added to the depth of ( [ {, gives every token's node depth for K4. `secondary` has a slot per token for
+// the matching stack.
 static void spike_secondary_scalar(SpikeKernels* kernels, uint32_t count, uint32_t* secondary)
 {
     uint32_t open = 0;
@@ -3192,13 +3195,14 @@ static void spike_secondary_scalar(SpikeKernels* kernels, uint32_t count, uint32
             secondary[open] = i;
             open += 1;
         }
-        else if (role == SPIKE_ROLE_CLOSE_TERNARY)
+        else if (role == SPIKE_ROLE_CLOSE_TERNARY || role == SPIKE_ROLE_CLOSE_CASE || role == SPIKE_ROLE_LABEL)
         {
             const uint32_t depth = kernels->depths[i];
-            // Openers left open in a group that has ended: invalid C.
+            // Openers left open in a group that has ended: invalid C, for the scalar parser to report.
             while (open != 0 && kernels->depths[secondary[open - 1]] > depth)
             {
                 kernels->flags[secondary[open - 1]] = 1;
+                kernels->unbalanced = true;
                 open -= 1;
             }
             if (open != 0 && kernels->depths[secondary[open - 1]] == depth)
@@ -3218,17 +3222,20 @@ static void spike_secondary_scalar(SpikeKernels* kernels, uint32_t count, uint32
     while (open != 0)
     {
         kernels->flags[secondary[open - 1]] = 1;
+        kernels->unbalanced = true;
         open -= 1;
     }
-    // The depth of ? : and case : groups, added to each token's.
+    // The node depths: the depth of ( [ { and of ? : and case : groups before each token, less one for a closer. Every
+    // closer here has its opener (or the file is unbalanced, and the scalar parser takes it), so the sum never goes
+    // below 0.
     uint32_t inner = 0;
     for (uint32_t i = 0; i < count; i += 1)
     {
         const uint8_t role = kernels->roles[i];
         const uint32_t before = inner;
         inner += role == SPIKE_ROLE_OPEN_TERNARY || role == SPIKE_ROLE_OPEN_CASE;
-        inner -= (role == SPIKE_ROLE_CLOSE_TERNARY || role == SPIKE_ROLE_CLOSE_CASE) && inner != 0;
-        kernels->depths[i] += before;
+        inner -= role == SPIKE_ROLE_CLOSE_TERNARY || role == SPIKE_ROLE_CLOSE_CASE;
+        kernels->node_depths[i] = kernels->depths[i] + before - (spike_role_deltas[role] < 0);
     }
 }
 
@@ -3254,7 +3261,7 @@ static void spike_after_colons(SpikeKernels* kernels, uint32_t count)
 // A token's node depth: a closer's is outside its group.
 static uint32_t spike_node_depth(const SpikeKernels* kernels, uint32_t token)
 {
-    return kernels->depths[token] - (spike_role_deltas[kernels->roles[token]] < 0);
+    return kernels->node_depths[token];
 }
 
 static void spike_parents_resolve(SpikeKernels* kernels, uint32_t token, uint32_t right)
@@ -3390,123 +3397,164 @@ static uint32_t spike_k5_owner(SpikeStatementStack* stack)
     return result;
 }
 
-// K5: the statement-level tokens of blocks, in order, through the statement stack, which sets the parents of the
-// statements heads own, of `else` and of a do-statement's parts. Returns false if an else has no if.
+// One token through the statement stack, if it is a statement-level token of a block: the stack sets the parents of the
+// statements heads own, of `else` and of a do-statement's parts. Returns false if it is an else without an if.
+static bool spike_statement_event(SpikeKernels* kernels, SpikeStatementStack* stack, uint32_t i)
+{
+    bool result = true;
+    const uint8_t role = kernels->roles[i];
+    const uint32_t opener = kernels->enclosing[i];
+    const uint8_t group = opener != BUSTER_SPIKE_NONE ? kernels->roles[opener] : SPIKE_ROLE_NONE;
+    // A closer's statement context is its opener's; the enclosing groups are those of ( [ { only, since no statement is
+    // inside a ? : or case group.
+    const uint32_t outer = opener != BUSTER_SPIKE_NONE ? kernels->enclosing[opener] : BUSTER_SPIKE_NONE;
+    const uint8_t outer_group = outer != BUSTER_SPIKE_NONE ? kernels->roles[outer] : SPIKE_ROLE_NONE;
+    const bool in_block = group == SPIKE_ROLE_OPEN_BLOCK || group == SPIKE_ROLE_OPEN_BODY;
+    const bool closer_in_block = outer_group == SPIKE_ROLE_OPEN_BLOCK || outer_group == SPIKE_ROLE_OPEN_BODY;
+    if (role == SPIKE_ROLE_OPEN_BLOCK || role == SPIKE_ROLE_OPEN_BODY)
+    {
+        const bool statement = role == SPIKE_ROLE_OPEN_BLOCK && in_block;
+        uint32_t owner = BUSTER_SPIKE_NONE;
+        if (statement)
+        {
+            spike_k5_flush(stack);
+            owner = spike_k5_owner(stack);
+        }
+        stack->items[stack->count] = (SpikeStatement){ .token = BUSTER_SPIKE_NONE, .owner = owner, .extra = BUSTER_SPIKE_NONE, .state = SPIKE_STATEMENT_BLOCK, .kind = statement };
+        stack->count += 1;
+    }
+    else if (role == SPIKE_ROLE_CLOSE_BLOCK || role == SPIKE_ROLE_CLOSE_BODY)
+    {
+        spike_k5_flush(stack);
+        SpikeStatement* top = spike_k5_top(stack);
+        while (top != 0 && top->state != SPIKE_STATEMENT_BLOCK)
+        {
+            stack->count -= 1;
+            top = spike_k5_top(stack);
+        }
+        if (top != 0)
+        {
+            const bool statement = top->kind != 0;
+            if (top->owner != BUSTER_SPIKE_NONE)
+            {
+                kernels->parents[i] = top->owner;
+            }
+            stack->count -= 1;
+            if (statement)
+            {
+                spike_k5_complete(stack);
+            }
+        }
+    }
+    else if (role == SPIKE_ROLE_TERMINATOR && in_block)
+    {
+        spike_k5_flush(stack);
+        SpikeStatement* top = spike_k5_top(stack);
+        if (top != 0 && top->state == SPIKE_STATEMENT_DO_WHILE)
+        {
+            kernels->parents[top->token] = i;
+            kernels->parents[top->extra] = i;
+            if (top->owner != BUSTER_SPIKE_NONE)
+            {
+                kernels->parents[i] = top->owner;
+            }
+            stack->count -= 1;
+        }
+        else
+        {
+            const uint32_t owner = spike_k5_owner(stack);
+            if (owner != BUSTER_SPIKE_NONE)
+            {
+                kernels->parents[i] = owner;
+            }
+        }
+        spike_k5_complete(stack);
+    }
+    else if (((role == SPIKE_ROLE_CLOSE_CONDITION || role == SPIKE_ROLE_CLOSE_FOR) && closer_in_block) ||
+             ((role == SPIKE_ROLE_CLOSE_CASE || role == SPIKE_ROLE_LABEL || role == SPIKE_ROLE_DO) && in_block))
+    {
+        const uint8_t keyword = role == SPIKE_ROLE_CLOSE_CONDITION ? kernels->vkinds[opener - 1] : role == SPIKE_ROLE_CLOSE_FOR ? SPIKE_KIND_FOR :
+                                role == SPIKE_ROLE_DO ? SPIKE_KIND_DO : SPIKE_KIND_CASE;
+        spike_k5_flush(stack);
+        SpikeStatement* top = spike_k5_top(stack);
+        if (keyword == SPIKE_KIND_WHILE && top != 0 && top->state == SPIKE_STATEMENT_DO_DONE)
+        {
+            top->state = SPIKE_STATEMENT_DO_WHILE;
+            top->extra = i;
+        }
+        else
+        {
+            const uint32_t owner = spike_k5_owner(stack);
+            if (owner != BUSTER_SPIKE_NONE && keyword != SPIKE_KIND_DO)
+            {
+                kernels->parents[i] = owner;
+            }
+            stack->items[stack->count] = (SpikeStatement){
+                .token = i,
+                .owner = keyword == SPIKE_KIND_DO ? owner : BUSTER_SPIKE_NONE,
+                .extra = BUSTER_SPIKE_NONE,
+                .state = SPIKE_STATEMENT_WAITING,
+                .kind = keyword,
+            };
+            stack->count += 1;
+        }
+    }
+    else if (role == SPIKE_ROLE_ELSE)
+    {
+        SpikeStatement* top = spike_k5_top(stack);
+        if (top != 0 && top->state == SPIKE_STATEMENT_IF_DONE)
+        {
+            kernels->parents[i] = top->token;
+            *top = (SpikeStatement){ .token = i, .owner = BUSTER_SPIKE_NONE, .extra = BUSTER_SPIKE_NONE, .state = SPIKE_STATEMENT_WAITING, .kind = SPIKE_KIND_ELSE };
+        }
+        else
+        {
+            result = false;
+        }
+    }
+    return result;
+}
+
+// K5, the twin: every token through spike_statement_event. Returns false if an else has no if.
 static bool spike_statements(SpikeKernels* kernels, uint32_t count, SpikeStatement* items)
 {
     SpikeStatementStack stack = { .items = items, .count = 0, .parents = kernels->parents };
     bool result = true;
     for (uint32_t i = 0; i < count; i += 1)
     {
-        const uint8_t role = kernels->roles[i];
-        const uint32_t opener = kernels->enclosing[i];
-        const uint8_t group = opener != BUSTER_SPIKE_NONE ? kernels->roles[opener] : SPIKE_ROLE_NONE;
-        // A closer's statement context is its opener's; the enclosing groups are those of ( [ { only, since no
-        // statement is inside a ? : or case group.
-        const uint32_t outer = opener != BUSTER_SPIKE_NONE ? kernels->enclosing[opener] : BUSTER_SPIKE_NONE;
-        const uint8_t outer_group = outer != BUSTER_SPIKE_NONE ? kernels->roles[outer] : SPIKE_ROLE_NONE;
-        const bool in_block = group == SPIKE_ROLE_OPEN_BLOCK || group == SPIKE_ROLE_OPEN_BODY;
-        const bool closer_in_block = outer_group == SPIKE_ROLE_OPEN_BLOCK || outer_group == SPIKE_ROLE_OPEN_BODY;
-        if (role == SPIKE_ROLE_OPEN_BLOCK || role == SPIKE_ROLE_OPEN_BODY)
+        result &= spike_statement_event(kernels, &stack, i);
+    }
+    return result;
+}
+
+// K5 in AVX-512: only the tokens whose roles the statement stack reads, from a mask per block.
+static bool spike_statements_avx512(SpikeKernels* kernels, uint32_t count, SpikeStatement* items)
+{
+    SpikeStatementStack stack = { .items = items, .count = 0, .parents = kernels->parents };
+    bool result = true;
+    uint8_t relevant[128] = { 0 };
+    relevant[SPIKE_ROLE_OPEN_BLOCK] = 1;
+    relevant[SPIKE_ROLE_OPEN_BODY] = 1;
+    relevant[SPIKE_ROLE_CLOSE_BLOCK] = 1;
+    relevant[SPIKE_ROLE_CLOSE_BODY] = 1;
+    relevant[SPIKE_ROLE_TERMINATOR] = 1;
+    relevant[SPIKE_ROLE_CLOSE_CONDITION] = 1;
+    relevant[SPIKE_ROLE_CLOSE_FOR] = 1;
+    relevant[SPIKE_ROLE_CLOSE_CASE] = 1;
+    relevant[SPIKE_ROLE_LABEL] = 1;
+    relevant[SPIKE_ROLE_DO] = 1;
+    relevant[SPIKE_ROLE_ELSE] = 1;
+    const __m512i relevant_low = _mm512_loadu_si512(relevant);
+    const __m512i relevant_high = _mm512_loadu_si512(relevant + 64);
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const __m512i bits = _mm512_permutex2var_epi8(relevant_low, _mm512_loadu_si512(kernels->roles + block), relevant_high);
+        uint64_t lanes = _mm512_test_epi8_mask(bits, bits) & (count - block < 64 ? (((uint64_t)1 << (count - block)) - 1) : ~(uint64_t)0);
+        while (lanes != 0)
         {
-            const bool statement = role == SPIKE_ROLE_OPEN_BLOCK && in_block;
-            uint32_t owner = BUSTER_SPIKE_NONE;
-            if (statement)
-            {
-                spike_k5_flush(&stack);
-                owner = spike_k5_owner(&stack);
-            }
-            stack.items[stack.count] = (SpikeStatement){ .token = BUSTER_SPIKE_NONE, .owner = owner, .extra = BUSTER_SPIKE_NONE, .state = SPIKE_STATEMENT_BLOCK, .kind = statement };
-            stack.count += 1;
-        }
-        else if (role == SPIKE_ROLE_CLOSE_BLOCK || role == SPIKE_ROLE_CLOSE_BODY)
-        {
-            spike_k5_flush(&stack);
-            SpikeStatement* top = spike_k5_top(&stack);
-            while (top != 0 && top->state != SPIKE_STATEMENT_BLOCK)
-            {
-                stack.count -= 1;
-                top = spike_k5_top(&stack);
-            }
-            if (top != 0)
-            {
-                const bool statement = top->kind != 0;
-                if (top->owner != BUSTER_SPIKE_NONE)
-                {
-                    kernels->parents[i] = top->owner;
-                }
-                stack.count -= 1;
-                if (statement)
-                {
-                    spike_k5_complete(&stack);
-                }
-            }
-        }
-        else if (role == SPIKE_ROLE_TERMINATOR && in_block)
-        {
-            spike_k5_flush(&stack);
-            SpikeStatement* top = spike_k5_top(&stack);
-            if (top != 0 && top->state == SPIKE_STATEMENT_DO_WHILE)
-            {
-                kernels->parents[top->token] = i;
-                kernels->parents[top->extra] = i;
-                if (top->owner != BUSTER_SPIKE_NONE)
-                {
-                    kernels->parents[i] = top->owner;
-                }
-                stack.count -= 1;
-            }
-            else
-            {
-                const uint32_t owner = spike_k5_owner(&stack);
-                if (owner != BUSTER_SPIKE_NONE)
-                {
-                    kernels->parents[i] = owner;
-                }
-            }
-            spike_k5_complete(&stack);
-        }
-        else if (((role == SPIKE_ROLE_CLOSE_CONDITION || role == SPIKE_ROLE_CLOSE_FOR) && closer_in_block) ||
-                 ((role == SPIKE_ROLE_CLOSE_CASE || role == SPIKE_ROLE_LABEL || role == SPIKE_ROLE_DO) && in_block))
-        {
-            const uint8_t keyword = role == SPIKE_ROLE_CLOSE_CONDITION ? kernels->vkinds[opener - 1] : role == SPIKE_ROLE_CLOSE_FOR ? SPIKE_KIND_FOR :
-                                    role == SPIKE_ROLE_DO ? SPIKE_KIND_DO : SPIKE_KIND_CASE;
-            spike_k5_flush(&stack);
-            SpikeStatement* top = spike_k5_top(&stack);
-            if (keyword == SPIKE_KIND_WHILE && top != 0 && top->state == SPIKE_STATEMENT_DO_DONE)
-            {
-                top->state = SPIKE_STATEMENT_DO_WHILE;
-                top->extra = i;
-            }
-            else
-            {
-                const uint32_t owner = spike_k5_owner(&stack);
-                if (owner != BUSTER_SPIKE_NONE && keyword != SPIKE_KIND_DO)
-                {
-                    kernels->parents[i] = owner;
-                }
-                stack.items[stack.count] = (SpikeStatement){
-                    .token = i,
-                    .owner = keyword == SPIKE_KIND_DO ? owner : BUSTER_SPIKE_NONE,
-                    .extra = BUSTER_SPIKE_NONE,
-                    .state = SPIKE_STATEMENT_WAITING,
-                    .kind = keyword,
-                };
-                stack.count += 1;
-            }
-        }
-        else if (role == SPIKE_ROLE_ELSE)
-        {
-            SpikeStatement* top = spike_k5_top(&stack);
-            if (top != 0 && top->state == SPIKE_STATEMENT_IF_DONE)
-            {
-                kernels->parents[i] = top->token;
-                *top = (SpikeStatement){ .token = i, .owner = BUSTER_SPIKE_NONE, .extra = BUSTER_SPIKE_NONE, .state = SPIKE_STATEMENT_WAITING, .kind = SPIKE_KIND_ELSE };
-            }
-            else
-            {
-                result = false;
-            }
+            const uint32_t i = block + (uint32_t)__builtin_ctzll(lanes);
+            lanes &= lanes - 1;
+            result &= spike_statement_event(kernels, &stack, i);
         }
     }
     return result;
@@ -3549,7 +3597,7 @@ static SpikeFallback spike_fallback(SpikeKernels* kernels, const uint8_t* kinds,
                 meanings->meanings[id] = kernels->typedef_names[id] == BUSTER_SPIKE_TYPEDEF_FILE ? SPIKE_MEANING_TYPEDEF : meanings->meanings[id];
                 visible += 1;
             }
-            SpikeTree tree = { .roles = kernels->roles + begin, .depths = kernels->depths + begin, .parents = kernels->parents + begin };
+            SpikeTree tree = { .roles = kernels->roles + begin, .depths = kernels->node_depths + begin, .parents = kernels->parents + begin };
             const SpikeParseResult parse = spike_parse_scalar(kinds + begin, names + begin, i + 1 - begin, meanings, &tree, scratch);
             if (parse.error_token != BUSTER_SPIKE_NONE)
             {
@@ -3588,6 +3636,7 @@ struct SpikeKernelResult
 
 static void spike_shifts_init(void);
 static void spike_parent_tables_init(void);
+static void spike_role_tables_init(void);
 
 // Reserves the kernels' arrays for up to `capacity` tokens, with padding around each per-token array, and up to
 // `name_capacity` names.
@@ -3600,6 +3649,7 @@ static bool spike_kernels_reserve(SpikeKernels* kernels, Arena* arena, uint64_t 
     *kernels = (SpikeKernels){
         .vkinds = vkinds != 0 ? vkinds + BUSTER_SPIKE_TOKEN_PADDING : 0,
         .depths = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .node_depths = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .enclosing = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .roles = roles != 0 ? roles + BUSTER_SPIKE_TOKEN_PADDING : 0,
         .parents = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
@@ -3613,7 +3663,7 @@ static bool spike_kernels_reserve(SpikeKernels* kernels, Arena* arena, uint64_t 
         .typedef_log = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .typedef_tokens = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
     };
-    const bool result = kernels->vkinds != 0 && kernels->depths != 0 && kernels->enclosing != 0 && kernels->roles != 0 &&
+    const bool result = kernels->vkinds != 0 && kernels->depths != 0 && kernels->node_depths != 0 && kernels->enclosing != 0 && kernels->roles != 0 &&
                         kernels->parents != 0 && kernels->flags != 0 && kernels->stack != 0 && kernels->stack_keys != 0 && kernels->waiting != 0 &&
                         kernels->waiting_thresholds != 0 && kernels->lefts != 0 && kernels->typedef_names != 0 && kernels->typedef_log != 0 &&
                         kernels->typedef_tokens != 0;
@@ -3627,6 +3677,7 @@ static bool spike_kernels_reserve(SpikeKernels* kernels, Arena* arena, uint64_t 
     spike_kernels_init_tables();
     spike_shifts_init();
     spike_parent_tables_init();
+    spike_role_tables_init();
     return result;
 }
 
@@ -4017,12 +4068,11 @@ struct SpikeKeys
     __m512i rules;
 };
 
-BUSTER_INLINE SpikeKeys spike_block_keys(const uint8_t* roles, const uint32_t* depths, uint32_t block)
+BUSTER_INLINE SpikeKeys spike_block_keys(const uint8_t* roles, const uint32_t* node_depths, uint32_t block)
 {
     const __m512i role = _mm512_zextsi256_si512(_mm256_loadu_si256((const __m256i*)(roles + block)));
-    const __m512i depth = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi32_epi16(_mm512_loadu_si512(depths + block))),
-                                             _mm512_cvtepi32_epi16(_mm512_loadu_si512(depths + block + 16)), 1);
-    const __m512i node = _mm512_sub_epi16(depth, spike_lookup8_to16(spike_parent_tables.closers, role));
+    const __m512i node = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi32_epi16(_mm512_loadu_si512(node_depths + block))),
+                                            _mm512_cvtepi32_epi16(_mm512_loadu_si512(node_depths + block + 16)), 1);
     const __m512i base = _mm512_slli_epi16(node, 5);
     SpikeKeys result = {
         .keys = _mm512_add_epi16(base, spike_lookup8_to16(spike_parent_tables.levels, role)),
@@ -4121,8 +4171,8 @@ static uint32_t spike_search_stack(const SpikeCandidates* stack, uint32_t thresh
 
 // K4's left pass in AVX-512: every token's L and L's key, 32 tokens a block. Within the block, spike_previous_smaller16;
 // before it, the stack of candidates. Then the block's keys replace the candidates they hide, and its suffix minima go
-// on top. Depths must be at most BUSTER_SPIKE_MAX_VECTOR_DEPTH.
-static void spike_parents_left_avx512(const uint8_t* roles, const uint32_t* depths, uint32_t count, uint32_t* lefts, uint16_t* left_keys, SpikeCandidates* stack)
+// on top. Node depths must be at most BUSTER_SPIKE_MAX_VECTOR_DEPTH.
+static void spike_parents_left_avx512(const uint8_t* roles, const uint32_t* node_depths, uint32_t count, uint32_t* lefts, uint16_t* left_keys, SpikeCandidates* stack)
 {
     const __m512i ones = _mm512_set1_epi16((short)0xFFFF);
     stack->count = 0;
@@ -4130,7 +4180,7 @@ static void spike_parents_left_avx512(const uint8_t* roles, const uint32_t* dept
     {
         const uint32_t live = count - block < 32 ? count - block : 32;
         const __mmask32 live_mask = live == 32 ? ~(__mmask32)0 : (((__mmask32)1 << live) - 1);
-        const SpikeKeys keys = spike_block_keys(roles, depths, block);
+        const SpikeKeys keys = spike_block_keys(roles, node_depths, block);
         const __m512i block_keys = _mm512_mask_mov_epi16(ones, live_mask, keys.keys);
         const __m512i p = spike_previous_smaller16(block_keys, keys.left);
         const __mmask32 found = _mm512_cmplt_epu16_mask(p, _mm512_set1_epi16(32));
@@ -4185,7 +4235,7 @@ static void spike_parents_left_avx512(const uint8_t* roles, const uint32_t* dept
 
 // K4's right pass in AVX-512, from the last block to the first: every token's R, as the left pass found L, then its
 // parent by its role's rule.
-static void spike_parents_right_avx512(const uint8_t* roles, const uint32_t* depths, uint32_t count, const uint32_t* lefts, const uint16_t* left_keys, uint32_t* parents,
+static void spike_parents_right_avx512(const uint8_t* roles, const uint32_t* node_depths, uint32_t count, const uint32_t* lefts, const uint16_t* left_keys, uint32_t* parents,
                                        SpikeCandidates* stack)
 {
     const __m512i ones = _mm512_set1_epi16((short)0xFFFF);
@@ -4199,7 +4249,7 @@ static void spike_parents_right_avx512(const uint8_t* roles, const uint32_t* dep
         const uint32_t block = b * 32;
         const uint32_t live = count - block < 32 ? count - block : 32;
         const __mmask32 live_mask = live == 32 ? ~(__mmask32)0 : (((__mmask32)1 << live) - 1);
-        const SpikeKeys keys = spike_block_keys(roles, depths, block);
+        const SpikeKeys keys = spike_block_keys(roles, node_depths, block);
         const __m512i block_keys = _mm512_mask_mov_epi16(ones, live_mask, keys.keys);
         const __m512i p = spike_next_smaller16(block_keys, keys.right);
         const __mmask32 found = _mm512_cmplt_epu16_mask(p, _mm512_set1_epi16(32));
@@ -4289,4 +4339,977 @@ static void spike_parents_right_avx512(const uint8_t* roles, const uint32_t* dep
         }
         stack->count += n;
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// K2 in AVX-512
+//
+// The rules of spike_role_rule, for 64 tokens at once in byte lanes. A token's role depends on the token before it
+// (through its pred class), on its group's role and on the typed state of the specifiers before it, so the block is
+// evaluated in rounds: each round computes every lane's role from the previous round's, until nothing changes. Every
+// dependency points backward, so the fixpoint is the sequential twin's result, and a round fixes at least one more lane:
+// a block that hasn't converged after BUSTER_SPIKE_ROLE_ROUNDS rounds is done by the twin's loop. What crosses blocks:
+// the roles and kinds of the two tokens before the block, its typed state, and by depth the role of each open group's
+// opener (with the typed state before an attribute's keyword).
+
+#define BUSTER_SPIKE_ROLE_ROUNDS 8
+
+typedef enum SpikeRuleClass
+{
+    SPIKE_RULE_CLASS_FIXED,
+    SPIKE_RULE_CLASS_STRING,
+    SPIKE_RULE_CLASS_IDENTIFIER,
+    SPIKE_RULE_CLASS_TYPE_NAME,
+    SPIKE_RULE_CLASS_QUALIFIER,
+    SPIKE_RULE_CLASS_STORAGE,
+    SPIKE_RULE_CLASS_GOTO,
+    SPIKE_RULE_CLASS_ATOMIC,
+    SPIKE_RULE_CLASS_EXTENSION,
+    SPIKE_RULE_CLASS_COMMA,
+    SPIKE_RULE_CLASS_COLON,
+    SPIKE_RULE_CLASS_ELLIPSIS,
+    SPIKE_RULE_CLASS_UNARY,
+    SPIKE_RULE_CLASS_PAREN,
+    SPIKE_RULE_CLASS_BRACE,
+    SPIKE_RULE_CLASS_CLOSER,
+} SpikeRuleClass;
+
+// What `(` is after a kind: the opener's role, or one of these to be decided by what came before the keyword.
+#define BUSTER_SPIKE_PAREN_ATTRIBUTE 0xFE
+#define BUSTER_SPIKE_PAREN_ASM 0xFD
+
+// Bits of SpikeRoleTables.vkind_bits.
+#define BUSTER_SPIKE_VKIND_STARTS_TYPE 0x01
+#define BUSTER_SPIKE_VKIND_STARTS_DECLARATION 0x02
+#define BUSTER_SPIKE_VKIND_TYPE_WORD 0x04
+#define BUSTER_SPIKE_VKIND_STARTS_OPERAND 0x08
+#define BUSTER_SPIKE_VKIND_NAME 0x10
+#define BUSTER_SPIKE_VKIND_KEYWORD 0x20
+#define BUSTER_SPIKE_VKIND_ASM_QUALIFIER 0x40
+
+// Bits of SpikeRoleTables.group_bits, by a group's role.
+#define BUSTER_SPIKE_GROUP_BLOCK 0x01
+#define BUSTER_SPIKE_GROUP_INITIALIZER 0x02
+#define BUSTER_SPIKE_GROUP_ATTRIBUTE_LIST 0x04
+#define BUSTER_SPIKE_GROUP_CAST 0x08
+
+// Bits of SpikeRoleTables.role_bits, by role.
+#define BUSTER_SPIKE_ROLE_PROPAGATES 0x01
+#define BUSTER_SPIKE_ROLE_TYPE_IF_WORD 0x02
+#define BUSTER_SPIKE_ROLE_TYPE 0x04
+#define BUSTER_SPIKE_ROLE_COPIES_TYPED 0x08
+#define BUSTER_SPIKE_ROLE_HEAD_CLOSER 0x10
+#define BUSTER_SPIKE_ROLE_CALL_CLOSER 0x20
+
+typedef struct SpikeRoleTables SpikeRoleTables;
+struct SpikeRoleTables
+{
+    // By virtual kind. guesses: the first round's guess of each lane's role, the most frequent on sqlite3.c and the libc
+    // corpus; it changes how many rounds a block takes, never their result.
+    uint8_t guesses[128];
+    uint8_t fixed[128];
+    uint8_t fixed_flags[128];
+    uint8_t classes[128];
+    uint8_t unary[128];
+    uint8_t binary[128];
+    uint8_t paren_previous[128];
+    uint8_t cast_closers[128];
+    uint8_t vkind_bits[128];
+    // By role.
+    uint8_t preds[128];
+    uint8_t comma[128];
+    uint8_t colon[128];
+    uint8_t ellipsis[128];
+    uint8_t closers[128];
+    uint8_t group_bits[128];
+    uint8_t role_bits[128];
+    // By pred class.
+    uint8_t attribute_by_before[64];
+    uint8_t pred_bits[16];
+};
+
+static SpikeRoleTables spike_role_tables;
+
+static void spike_role_tables_init(void)
+{
+    SpikeRoleTables* t = &spike_role_tables;
+    memset(t, 0, sizeof(*t));
+    for (uint32_t k = 0; k < 128; k += 1)
+    {
+        t->fixed[k] = SPIKE_ROLE_ERROR;
+        t->fixed_flags[k] = 1;
+        t->classes[k] = SPIKE_RULE_CLASS_FIXED;
+        const uint8_t binary = k < BUSTER_SPIKE_VKINDS ? spike_binary_role((uint8_t)k) : SPIKE_ROLE_NONE;
+        if (binary != SPIKE_ROLE_NONE)
+        {
+            t->fixed[k] = binary;
+            t->fixed_flags[k] = 0;
+        }
+        const uint8_t vk = (uint8_t)k;
+        t->vkind_bits[k] = (uint8_t)((k < BUSTER_SPIKE_VKINDS && spike_vkind_starts_type(vk) ? BUSTER_SPIKE_VKIND_STARTS_TYPE : 0) |
+                                     (k < BUSTER_SPIKE_VKINDS && spike_vkind_starts_declaration(vk) ? BUSTER_SPIKE_VKIND_STARTS_DECLARATION : 0) |
+                                     (k == SPIKE_KIND_TYPE || k == SPIKE_VKIND_TYPE_NAME ? BUSTER_SPIKE_VKIND_TYPE_WORD : 0) |
+                                     (k < BUSTER_SPIKE_VKINDS && spike_vkind_starts_operand(vk) ? BUSTER_SPIKE_VKIND_STARTS_OPERAND : 0) |
+                                     (k == SPIKE_KIND_IDENTIFIER || k == SPIKE_VKIND_TYPE_NAME ? BUSTER_SPIKE_VKIND_NAME : 0) |
+                                     ((k >= SPIKE_KIND_TYPE && k < BUSTER_SPIKE_VKINDS) || k == SPIKE_KIND_IDENTIFIER ? BUSTER_SPIKE_VKIND_KEYWORD : 0) |
+                                     (k == SPIKE_KIND_QUALIFIER || k == SPIKE_KIND_STORAGE || k == SPIKE_KIND_GOTO ? BUSTER_SPIKE_VKIND_ASM_QUALIFIER : 0));
+        t->cast_closers[k] = k == SPIKE_KIND_L_BRACE ? SPIKE_ROLE_CLOSE_COMPOUND : k < BUSTER_SPIKE_VKINDS && spike_vkind_starts_operand(vk) ? SPIKE_ROLE_CLOSE_CAST :
+                                                                                                                                   SPIKE_ROLE_CLOSE_FUNCTION;
+    }
+    static const uint8_t fixed_kinds[][2] = {
+        { SPIKE_KIND_NUMBER, SPIKE_ROLE_OPERAND },
+        { SPIKE_KIND_CHARACTER, SPIKE_ROLE_OPERAND },
+        { SPIKE_KIND_TYPE, SPIKE_ROLE_SPECIFIER },
+        { SPIKE_KIND_TYPEDEF, SPIKE_ROLE_SPECIFIER },
+        { SPIKE_KIND_LABEL, SPIKE_ROLE_SPECIFIER },
+        { SPIKE_KIND_STRUCT, SPIKE_ROLE_LEAF_RIGHT },
+        { SPIKE_KIND_ENUM, SPIKE_ROLE_LEAF_RIGHT },
+        { SPIKE_KIND_TYPEOF, SPIKE_ROLE_LEAF_RIGHT },
+        { SPIKE_KIND_ALIGNAS, SPIKE_ROLE_LEAF_RIGHT },
+        { SPIKE_KIND_ATTRIBUTE, SPIKE_ROLE_LEAF_RIGHT },
+        { SPIKE_KIND_ASM, SPIKE_ROLE_LEAF_RIGHT },
+        { SPIKE_KIND_TYPE_ARGUMENT, SPIKE_ROLE_LEAF_RIGHT },
+        { SPIKE_KIND_STATIC_ASSERT, SPIKE_ROLE_LEAF_RIGHT },
+        { SPIKE_KIND_IF, SPIKE_ROLE_LEAF_RIGHT },
+        { SPIKE_KIND_WHILE, SPIKE_ROLE_LEAF_RIGHT },
+        { SPIKE_KIND_SWITCH, SPIKE_ROLE_LEAF_RIGHT },
+        { SPIKE_KIND_FOR, SPIKE_ROLE_LEAF_RIGHT },
+        { SPIKE_KIND_SIZEOF, SPIKE_ROLE_PREFIX },
+        { SPIKE_KIND_REAL_IMAG, SPIKE_ROLE_PREFIX },
+        { SPIKE_KIND_EXCLAIM, SPIKE_ROLE_PREFIX },
+        { SPIKE_KIND_TILDE, SPIKE_ROLE_PREFIX },
+        { SPIKE_KIND_ELSE, SPIKE_ROLE_ELSE },
+        { SPIKE_KIND_DO, SPIKE_ROLE_DO },
+        { SPIKE_KIND_CASE, SPIKE_ROLE_OPEN_CASE },
+        { SPIKE_KIND_DEFAULT, SPIKE_ROLE_OPEN_CASE },
+        { SPIKE_KIND_RETURN, SPIKE_ROLE_RETURN },
+        { SPIKE_KIND_BREAK, SPIKE_ROLE_RETURN },
+        { SPIKE_KIND_CONTINUE, SPIKE_ROLE_RETURN },
+        { SPIKE_KIND_SEMI, SPIKE_ROLE_TERMINATOR },
+        { SPIKE_KIND_QUESTION, SPIKE_ROLE_OPEN_TERNARY },
+        { SPIKE_KIND_PERIOD, SPIKE_ROLE_MEMBER_OPERATOR },
+        { SPIKE_KIND_ARROW, SPIKE_ROLE_MEMBER_OPERATOR },
+        { SPIKE_KIND_L_SQUARE, SPIKE_ROLE_OPEN_SUBSCRIPT },
+    };
+    for (uint32_t i = 0; i < sizeof(fixed_kinds) / sizeof(fixed_kinds[0]); i += 1)
+    {
+        t->fixed[fixed_kinds[i][0]] = fixed_kinds[i][1];
+        t->fixed_flags[fixed_kinds[i][0]] = 0;
+    }
+    for (uint32_t k = 0; k < 128; k += 1)
+    {
+        t->guesses[k] = t->fixed[k];
+    }
+    static const uint8_t guesses[][2] = {
+        { SPIKE_KIND_IDENTIFIER, SPIKE_ROLE_OPERAND },
+        { SPIKE_KIND_STRING, SPIKE_ROLE_OPERAND },
+        { SPIKE_KIND_R_SQUARE, SPIKE_ROLE_CLOSE_SUBSCRIPT },
+        { SPIKE_KIND_L_PAREN, SPIKE_ROLE_OPEN_CALL },
+        { SPIKE_KIND_R_PAREN, SPIKE_ROLE_CLOSE_CALL },
+        { SPIKE_KIND_L_BRACE, SPIKE_ROLE_OPEN_BLOCK },
+        { SPIKE_KIND_R_BRACE, SPIKE_ROLE_CLOSE_BLOCK },
+        { SPIKE_KIND_ELLIPSIS, SPIKE_ROLE_OPERAND },
+        { SPIKE_KIND_AMP, SPIKE_ROLE_BITWISE_AND },
+        { SPIKE_KIND_AMPAMP, SPIKE_ROLE_LOGICAL_AND },
+        { SPIKE_KIND_STAR, SPIKE_ROLE_PREFIX },
+        { SPIKE_KIND_PLUS, SPIKE_ROLE_ADDITIVE },
+        { SPIKE_KIND_PLUSPLUS, SPIKE_ROLE_POSTFIX },
+        { SPIKE_KIND_MINUS, SPIKE_ROLE_ADDITIVE },
+        { SPIKE_KIND_MINUSMINUS, SPIKE_ROLE_POSTFIX },
+        { SPIKE_KIND_COLON, SPIKE_ROLE_CLOSE_TERNARY },
+        { SPIKE_KIND_COMMA, SPIKE_ROLE_SEPARATOR },
+        { SPIKE_KIND_QUALIFIER, SPIKE_ROLE_SPECIFIER },
+        { SPIKE_KIND_CALLING_CONVENTION, SPIKE_ROLE_SPECIFIER },
+        { SPIKE_KIND_STORAGE, SPIKE_ROLE_SPECIFIER },
+        { SPIKE_KIND_GOTO, SPIKE_ROLE_RETURN },
+        { SPIKE_KIND_ATOMIC, SPIKE_ROLE_SPECIFIER },
+        { SPIKE_KIND_EXTENSION, SPIKE_ROLE_SPECIFIER },
+        { SPIKE_VKIND_TYPE_NAME, SPIKE_ROLE_SPECIFIER },
+    };
+    for (uint32_t i = 0; i < sizeof(guesses) / sizeof(guesses[0]); i += 1)
+    {
+        t->guesses[guesses[i][0]] = guesses[i][1];
+    }
+    // _Generic is the scalar parser's.
+    t->fixed[SPIKE_KIND_GENERIC] = SPIKE_ROLE_LEAF_RIGHT;
+    t->fixed_flags[SPIKE_KIND_GENERIC] = 1;
+    static const uint8_t class_kinds[][2] = {
+        { SPIKE_KIND_STRING, SPIKE_RULE_CLASS_STRING },
+        { SPIKE_KIND_IDENTIFIER, SPIKE_RULE_CLASS_IDENTIFIER },
+        { SPIKE_VKIND_TYPE_NAME, SPIKE_RULE_CLASS_TYPE_NAME },
+        { SPIKE_KIND_QUALIFIER, SPIKE_RULE_CLASS_QUALIFIER },
+        { SPIKE_KIND_CALLING_CONVENTION, SPIKE_RULE_CLASS_QUALIFIER },
+        { SPIKE_KIND_STORAGE, SPIKE_RULE_CLASS_STORAGE },
+        { SPIKE_KIND_GOTO, SPIKE_RULE_CLASS_GOTO },
+        { SPIKE_KIND_ATOMIC, SPIKE_RULE_CLASS_ATOMIC },
+        { SPIKE_KIND_EXTENSION, SPIKE_RULE_CLASS_EXTENSION },
+        { SPIKE_KIND_COMMA, SPIKE_RULE_CLASS_COMMA },
+        { SPIKE_KIND_COLON, SPIKE_RULE_CLASS_COLON },
+        { SPIKE_KIND_ELLIPSIS, SPIKE_RULE_CLASS_ELLIPSIS },
+        { SPIKE_KIND_STAR, SPIKE_RULE_CLASS_UNARY },
+        { SPIKE_KIND_AMP, SPIKE_RULE_CLASS_UNARY },
+        { SPIKE_KIND_PLUS, SPIKE_RULE_CLASS_UNARY },
+        { SPIKE_KIND_MINUS, SPIKE_RULE_CLASS_UNARY },
+        { SPIKE_KIND_AMPAMP, SPIKE_RULE_CLASS_UNARY },
+        { SPIKE_KIND_PLUSPLUS, SPIKE_RULE_CLASS_UNARY },
+        { SPIKE_KIND_MINUSMINUS, SPIKE_RULE_CLASS_UNARY },
+        { SPIKE_KIND_L_PAREN, SPIKE_RULE_CLASS_PAREN },
+        { SPIKE_KIND_L_BRACE, SPIKE_RULE_CLASS_BRACE },
+        { SPIKE_KIND_R_PAREN, SPIKE_RULE_CLASS_CLOSER },
+        { SPIKE_KIND_R_SQUARE, SPIKE_RULE_CLASS_CLOSER },
+        { SPIKE_KIND_R_BRACE, SPIKE_RULE_CLASS_CLOSER },
+    };
+    for (uint32_t i = 0; i < sizeof(class_kinds) / sizeof(class_kinds[0]); i += 1)
+    {
+        t->classes[class_kinds[i][0]] = class_kinds[i][1];
+        t->fixed_flags[class_kinds[i][0]] = 0;
+    }
+    t->unary[SPIKE_KIND_STAR] = SPIKE_ROLE_PREFIX;
+    t->unary[SPIKE_KIND_AMP] = SPIKE_ROLE_PREFIX;
+    t->unary[SPIKE_KIND_PLUS] = SPIKE_ROLE_PREFIX;
+    t->unary[SPIKE_KIND_MINUS] = SPIKE_ROLE_PREFIX;
+    t->unary[SPIKE_KIND_AMPAMP] = SPIKE_ROLE_PREFIX;
+    t->unary[SPIKE_KIND_PLUSPLUS] = SPIKE_ROLE_PREFIX;
+    t->unary[SPIKE_KIND_MINUSMINUS] = SPIKE_ROLE_PREFIX;
+    t->binary[SPIKE_KIND_STAR] = SPIKE_ROLE_MULTIPLICATIVE;
+    t->binary[SPIKE_KIND_AMP] = SPIKE_ROLE_BITWISE_AND;
+    t->binary[SPIKE_KIND_PLUS] = SPIKE_ROLE_ADDITIVE;
+    t->binary[SPIKE_KIND_MINUS] = SPIKE_ROLE_ADDITIVE;
+    t->binary[SPIKE_KIND_AMPAMP] = SPIKE_ROLE_LOGICAL_AND;
+    t->binary[SPIKE_KIND_PLUSPLUS] = SPIKE_ROLE_POSTFIX;
+    t->binary[SPIKE_KIND_MINUSMINUS] = SPIKE_ROLE_POSTFIX;
+    t->paren_previous[SPIKE_KIND_IF] = SPIKE_ROLE_OPEN_CONDITION;
+    t->paren_previous[SPIKE_KIND_WHILE] = SPIKE_ROLE_OPEN_CONDITION;
+    t->paren_previous[SPIKE_KIND_SWITCH] = SPIKE_ROLE_OPEN_CONDITION;
+    t->paren_previous[SPIKE_KIND_FOR] = SPIKE_ROLE_OPEN_FOR;
+    t->paren_previous[SPIKE_KIND_SIZEOF] = SPIKE_ROLE_OPEN_SIZEOF;
+    t->paren_previous[SPIKE_KIND_TYPEOF] = SPIKE_ROLE_OPEN_SPECIFIER;
+    t->paren_previous[SPIKE_KIND_ALIGNAS] = SPIKE_ROLE_OPEN_SPECIFIER;
+    t->paren_previous[SPIKE_KIND_ATOMIC] = SPIKE_ROLE_OPEN_SPECIFIER;
+    t->paren_previous[SPIKE_KIND_ATTRIBUTE] = BUSTER_SPIKE_PAREN_ATTRIBUTE;
+    t->paren_previous[SPIKE_KIND_ASM] = BUSTER_SPIKE_PAREN_ASM;
+    t->paren_previous[SPIKE_KIND_TYPE_ARGUMENT] = SPIKE_ROLE_OPEN_KEYWORD;
+    t->paren_previous[SPIKE_KIND_GENERIC] = SPIKE_ROLE_OPEN_KEYWORD;
+    t->paren_previous[SPIKE_KIND_STATIC_ASSERT] = SPIKE_ROLE_OPEN_KEYWORD;
+    for (uint32_t r = 0; r < 128; r += 1)
+    {
+        const uint8_t role = r < SPIKE_ROLE_COUNT ? (uint8_t)r : SPIKE_ROLE_NONE;
+        t->preds[r] = spike_role_preds[role];
+        const bool comma = role == SPIKE_ROLE_NONE || role == SPIKE_ROLE_OPEN_BLOCK || role == SPIKE_ROLE_OPEN_BODY || role == SPIKE_ROLE_OPEN_STRUCT ||
+                           role == SPIKE_ROLE_OPEN_FOR;
+        t->comma[r] = comma ? SPIKE_ROLE_COMMA : SPIKE_ROLE_SEPARATOR;
+        t->colon[r] = role == SPIKE_ROLE_OPEN_ASM ? SPIKE_ROLE_ASM_COLON : role == SPIKE_ROLE_OPEN_STRUCT ? SPIKE_ROLE_BITFIELD : SPIKE_ROLE_CLOSE_TERNARY;
+        t->ellipsis[r] = role == SPIKE_ROLE_OPEN_CALL || role == SPIKE_ROLE_OPEN_FUNCTION || role == SPIKE_ROLE_OPEN_CAST ? SPIKE_ROLE_OPERAND : SPIKE_ROLE_RANGE;
+        t->closers[r] = spike_closer_roles[role] != SPIKE_ROLE_NONE ? spike_closer_roles[role] : SPIKE_ROLE_ERROR;
+        t->group_bits[r] = (uint8_t)((role == SPIKE_ROLE_OPEN_BLOCK || role == SPIKE_ROLE_OPEN_BODY ? BUSTER_SPIKE_GROUP_BLOCK : 0) |
+                                     (role == SPIKE_ROLE_OPEN_INITIALIZER || role == SPIKE_ROLE_OPEN_COMPOUND_BODY ? BUSTER_SPIKE_GROUP_INITIALIZER : 0) |
+                                     (role == SPIKE_ROLE_OPEN_ATTRIBUTE_LIST ? BUSTER_SPIKE_GROUP_ATTRIBUTE_LIST : 0) |
+                                     (role == SPIKE_ROLE_OPEN_CAST ? BUSTER_SPIKE_GROUP_CAST : 0));
+        t->role_bits[r] = (uint8_t)((spike_role_propagates_typed(role) ? BUSTER_SPIKE_ROLE_PROPAGATES : 0) |
+                                    (role == SPIKE_ROLE_SPECIFIER ? BUSTER_SPIKE_ROLE_TYPE_IF_WORD : 0) |
+                                    (role == SPIKE_ROLE_TAG || role == SPIKE_ROLE_CLOSE_STRUCT || role == SPIKE_ROLE_CLOSE_ENUM || role == SPIKE_ROLE_CLOSE_SPECIFIER ?
+                                     BUSTER_SPIKE_ROLE_TYPE : 0) |
+                                    (role == SPIKE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ? BUSTER_SPIKE_ROLE_COPIES_TYPED : 0) |
+                                    (role == SPIKE_ROLE_CLOSE_CONDITION || role == SPIKE_ROLE_CLOSE_FOR ? BUSTER_SPIKE_ROLE_HEAD_CLOSER : 0) |
+                                    (role == SPIKE_ROLE_CLOSE_CALL || role == SPIKE_ROLE_CLOSE_FUNCTION ? BUSTER_SPIKE_ROLE_CALL_CLOSER : 0));
+    }
+    for (uint32_t p = 0; p < 64; p += 1)
+    {
+        t->attribute_by_before[p] = p == SPIKE_PRED_OPERAND ? SPIKE_ROLE_OPEN_ATTRIBUTE : p == SPIKE_PRED_STAR ? SPIKE_ROLE_OPEN_ATTRIBUTE_LEFT :
+                                    p == SPIKE_PRED_LEAF ? SPIKE_ROLE_OPEN_ATTRIBUTE_RIGHT : SPIKE_ROLE_OPEN_ATTRIBUTE_SPECIFIER;
+    }
+    for (uint32_t p = 0; p < 16; p += 1)
+    {
+        t->pred_bits[p] = (uint8_t)(p < 8 ? 1u << p : 0);
+    }
+}
+
+// The pred classes as one-hot bits; SPIKE_PRED_LEAF is no bit.
+#define BUSTER_SPIKE_PRED_BIT(pred) ((uint8_t)(1u << (pred)))
+
+typedef struct SpikeRoleCarry SpikeRoleCarry;
+struct SpikeRoleCarry
+{
+    // The roles of the two tokens before the block (SPIKE_ROLE_NONE before the start), and the typed state of each of
+    // the 64 tokens before it.
+    uint8_t previous_role;
+    uint8_t before_role;
+    uint64_t typed;
+    // By depth: the role of the open opener at that depth, and the typed state just before its keyword.
+    uint8_t* group_roles;
+    uint8_t* group_typed;
+};
+
+BUSTER_INLINE __m512i spike_table8(const uint8_t* table, __m512i index)
+{
+    return _mm512_permutex2var_epi8(_mm512_loadu_si512(table), index, _mm512_loadu_si512(table + 64));
+}
+
+BUSTER_INLINE __mmask64 spike_equal8(__m512i x, uint8_t value)
+{
+    return _mm512_cmpeq_epi8_mask(x, _mm512_set1_epi8((char)value));
+}
+
+// The pred class of each lane's previous token (index and one-hot bits), from its role and kind.
+BUSTER_INLINE __m512i spike_preds8(__m512i role, __m512i vkind)
+{
+    const SpikeRoleTables* t = &spike_role_tables;
+    __m512i pred = spike_table8(t->preds, role);
+    const __mmask64 word = _mm512_test_epi8_mask(spike_table8(t->vkind_bits, vkind), _mm512_set1_epi8(BUSTER_SPIKE_VKIND_TYPE_WORD));
+    pred = _mm512_mask_mov_epi8(pred, spike_equal8(role, SPIKE_ROLE_SPECIFIER) & word, _mm512_set1_epi8(SPIKE_PRED_TYPE));
+    pred = _mm512_mask_mov_epi8(pred, spike_equal8(role, SPIKE_ROLE_PREFIX) & spike_equal8(vkind, SPIKE_KIND_STAR), _mm512_set1_epi8(SPIKE_PRED_STAR));
+    return pred;
+}
+
+BUSTER_INLINE __m512i spike_pred_bits8(__m512i pred)
+{
+    return _mm512_shuffle_epi8(_mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i*)spike_role_tables.pred_bits)), pred);
+}
+
+// The typed state of 64 lanes from their generate, propagate and carry-in bits: t[i] = g[i] | (p[i] & t[i - 1]), as an
+// add's carries.
+BUSTER_INLINE uint64_t spike_typed_carries(uint64_t generate, uint64_t propagate, uint64_t carry_in, uint64_t* carry_out)
+{
+    const uint64_t x = generate | propagate;
+    uint64_t sum;
+    uint64_t sum_carry = __builtin_add_overflow(x, generate, &sum);
+    uint64_t total;
+    sum_carry |= __builtin_add_overflow(sum, carry_in, &total);
+    // The carry into each bit, then the carry out of it.
+    const uint64_t into = total ^ x ^ generate;
+    *carry_out = sum_carry;
+    return (into >> 1) | (sum_carry << 63);
+}
+
+// One block of K2 in AVX-512 (see above). Returns the rounds it took, or 0 if it didn't converge.
+static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, uint32_t live, SpikeRoleCarry* carry, uint64_t* typed_out)
+{
+    const SpikeRoleTables* t = &spike_role_tables;
+    const uint8_t* vkinds = kernels->vkinds;
+    const __mmask64 live_mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
+    const __m512i vk = _mm512_loadu_si512(vkinds + block);
+    const __m512i vk_previous = _mm512_loadu_si512(vkinds + block - 1);
+    const __m512i vk_before = _mm512_loadu_si512(vkinds + block - 2);
+    const __m512i vk_next = _mm512_loadu_si512(vkinds + block + 1);
+    const __m512i cls = spike_table8(t->classes, vk);
+    const __m512i fixed = spike_table8(t->fixed, vk);
+    const __mmask64 fixed_flags = _mm512_test_epi8_mask(spike_table8(t->fixed_flags, vk), _mm512_set1_epi8(1));
+    const __m512i kind_bits = spike_table8(t->vkind_bits, vk);
+    const __m512i previous_bits = spike_table8(t->vkind_bits, vk_previous);
+    const __m512i before_bits = spike_table8(t->vkind_bits, vk_before);
+    const __m512i next_bits = spike_table8(t->vkind_bits, vk_next);
+    const uint32_t depth_base = kernels->depths[block];
+    // The enclosing opener: a lane of the block, or an open group before it, whose role comes from carry->group_roles.
+    __m512i enclosing_lane = _mm512_setzero_si512();
+    __m512i window_index = _mm512_setzero_si512();
+    __mmask64 inside = 0;
+    for (uint32_t q = 0; q < 4; q += 1)
+    {
+        const __m512i enclosing = _mm512_loadu_si512(kernels->enclosing + block + 16 * q);
+        const __m512i lane = _mm512_sub_epi32(enclosing, _mm512_set1_epi32((int)block));
+        const __mmask16 in_block = _mm512_cmplt_epu32_mask(lane, _mm512_set1_epi32(64));
+        inside |= (__mmask64)in_block << (16 * q);
+        const __m512i depth = _mm512_loadu_si512(kernels->depths + block + 16 * q);
+        // depth before - 1 is the opener's depth; its window index is (depth - 1) - (base - 64).
+        const __m512i index = _mm512_add_epi32(_mm512_sub_epi32(depth, _mm512_set1_epi32((int)depth_base)), _mm512_set1_epi32(63));
+        if (q == 0)
+        {
+            enclosing_lane = _mm512_inserti32x4(enclosing_lane, _mm512_cvtepi32_epi8(lane), 0);
+            window_index = _mm512_inserti32x4(window_index, _mm512_cvtepi32_epi8(index), 0);
+        }
+        else if (q == 1)
+        {
+            enclosing_lane = _mm512_inserti32x4(enclosing_lane, _mm512_cvtepi32_epi8(lane), 1);
+            window_index = _mm512_inserti32x4(window_index, _mm512_cvtepi32_epi8(index), 1);
+        }
+        else if (q == 2)
+        {
+            enclosing_lane = _mm512_inserti32x4(enclosing_lane, _mm512_cvtepi32_epi8(lane), 2);
+            window_index = _mm512_inserti32x4(window_index, _mm512_cvtepi32_epi8(index), 2);
+        }
+        else
+        {
+            enclosing_lane = _mm512_inserti32x4(enclosing_lane, _mm512_cvtepi32_epi8(lane), 3);
+            window_index = _mm512_inserti32x4(window_index, _mm512_cvtepi32_epi8(index), 3);
+        }
+    }
+    uint8_t window_roles[64];
+    uint8_t window_typed[64];
+    for (int64_t j = 0; j < 64; j += 1)
+    {
+        const int64_t level = (int64_t)depth_base - 64 + j;
+        window_roles[j] = level >= 0 ? carry->group_roles[level] : SPIKE_ROLE_NONE;
+        window_typed[j] = level >= 0 ? carry->group_typed[level] : 0;
+    }
+    // Lanes with no enclosing opener at all are at depth 0: their window entry is a level below 0, SPIKE_ROLE_NONE.
+    const __m512i outside_group = _mm512_permutexvar_epi8(window_index, _mm512_loadu_si512(window_roles));
+    const uint64_t outside_typed = _mm512_test_epi8_mask(_mm512_permutexvar_epi8(window_index, _mm512_loadu_si512(window_typed)), _mm512_set1_epi8(1));
+    // The tagged-type keyword before a `{` after a tag or an attribute, which doesn't depend on roles.
+    uint8_t tag_keywords[64];
+    uint64_t tag_lanes = spike_equal8(vk, SPIKE_KIND_L_BRACE) & (spike_equal8(vk_previous, SPIKE_KIND_R_PAREN) |
+                                                                   _mm512_test_epi8_mask(previous_bits, _mm512_set1_epi8(BUSTER_SPIKE_VKIND_NAME))) & live_mask;
+    __mmask64 tag_enum = 0;
+    __mmask64 tag_none = 0;
+    while (tag_lanes != 0)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctzll(tag_lanes);
+        tag_lanes &= tag_lanes - 1;
+        tag_keywords[lane] = spike_tag_keyword(kernels, block + lane - 1);
+        tag_enum |= (__mmask64)(tag_keywords[lane] == SPIKE_KIND_ENUM) << lane;
+        tag_none |= (__mmask64)(tag_keywords[lane] == SPIKE_KIND_END) << lane;
+    }
+    // Masks of the kinds that don't change between rounds.
+    const __mmask64 previous_member = spike_equal8(vk_previous, SPIKE_KIND_PERIOD) | spike_equal8(vk_previous, SPIKE_KIND_ARROW);
+    const __mmask64 previous_tag_keyword = spike_equal8(vk_previous, SPIKE_KIND_STRUCT) | spike_equal8(vk_previous, SPIKE_KIND_ENUM);
+    const __m512i tag_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_TAG), spike_equal8(vk_next, SPIKE_KIND_L_BRACE), _mm512_set1_epi8(SPIKE_ROLE_LEAF_RIGHT));
+    const __mmask64 previous_asm = spike_equal8(vk_previous, SPIKE_KIND_ASM);
+    const __mmask64 previous_asm_qualifier = _mm512_test_epi8_mask(previous_bits, _mm512_set1_epi8(BUSTER_SPIKE_VKIND_ASM_QUALIFIER));
+    const __mmask64 next_paren = spike_equal8(vk_next, SPIKE_KIND_L_PAREN);
+    const __mmask64 next_colon = spike_equal8(vk_next, SPIKE_KIND_COLON);
+    const __mmask64 next_starts_type = _mm512_test_epi8_mask(next_bits, _mm512_set1_epi8(BUSTER_SPIKE_VKIND_STARTS_TYPE));
+    const __mmask64 next_starts_declaration = _mm512_test_epi8_mask(next_bits, _mm512_set1_epi8(BUSTER_SPIKE_VKIND_STARTS_DECLARATION));
+    const __mmask64 next_function = spike_equal8(vk_next, SPIKE_KIND_R_PAREN) | spike_equal8(vk_next, SPIKE_KIND_ELLIPSIS);
+    const __mmask64 previous_name = _mm512_test_epi8_mask(previous_bits, _mm512_set1_epi8(BUSTER_SPIKE_VKIND_NAME));
+    const __mmask64 attribute_list = spike_equal8(vk_previous, SPIKE_KIND_L_PAREN) & spike_equal8(vk_before, SPIKE_KIND_ATTRIBUTE);
+    const __mmask64 keyword = _mm512_test_epi8_mask(kind_bits, _mm512_set1_epi8(BUSTER_SPIKE_VKIND_KEYWORD));
+    const __mmask64 word = _mm512_test_epi8_mask(kind_bits, _mm512_set1_epi8(BUSTER_SPIKE_VKIND_TYPE_WORD));
+    (void)before_bits;
+    const __m512i paren_previous = spike_table8(t->paren_previous, vk_previous);
+    const __mmask64 class_string = spike_equal8(cls, SPIKE_RULE_CLASS_STRING);
+    const __mmask64 class_identifier = spike_equal8(cls, SPIKE_RULE_CLASS_IDENTIFIER);
+    const __mmask64 class_type_name = spike_equal8(cls, SPIKE_RULE_CLASS_TYPE_NAME);
+    const __mmask64 class_qualifier = spike_equal8(cls, SPIKE_RULE_CLASS_QUALIFIER);
+    const __mmask64 class_storage = spike_equal8(cls, SPIKE_RULE_CLASS_STORAGE);
+    const __mmask64 class_goto = spike_equal8(cls, SPIKE_RULE_CLASS_GOTO);
+    const __mmask64 class_atomic = spike_equal8(cls, SPIKE_RULE_CLASS_ATOMIC);
+    const __mmask64 class_extension = spike_equal8(cls, SPIKE_RULE_CLASS_EXTENSION);
+    const __mmask64 class_comma = spike_equal8(cls, SPIKE_RULE_CLASS_COMMA);
+    const __mmask64 class_colon = spike_equal8(cls, SPIKE_RULE_CLASS_COLON);
+    const __mmask64 class_ellipsis = spike_equal8(cls, SPIKE_RULE_CLASS_ELLIPSIS);
+    const __mmask64 class_unary = spike_equal8(cls, SPIKE_RULE_CLASS_UNARY);
+    const __mmask64 class_paren = spike_equal8(cls, SPIKE_RULE_CLASS_PAREN);
+    const __mmask64 class_brace = spike_equal8(cls, SPIKE_RULE_CLASS_BRACE);
+    const __mmask64 class_closer = spike_equal8(cls, SPIKE_RULE_CLASS_CLOSER);
+    const __m512i unary = spike_table8(t->unary, vk);
+    const __m512i binary = spike_table8(t->binary, vk);
+    const __m512i cast_closer = spike_table8(t->cast_closers, vk_next);
+    // The two roles before the block, for the shifts.
+    uint8_t fill_bytes[64] = { 0 };
+    fill_bytes[0] = carry->previous_role;
+    const __m512i fill_previous = _mm512_loadu_si512(fill_bytes);
+    fill_bytes[0] = carry->before_role;
+    fill_bytes[1] = carry->previous_role;
+    const __m512i fill_before = _mm512_loadu_si512(fill_bytes);
+    uint8_t up2_bytes[64];
+    for (uint32_t i = 0; i < 64; i += 1)
+    {
+        up2_bytes[i] = (uint8_t)(i >= 2 ? i - 2 : 64 + i);
+    }
+    const __m512i up2 = _mm512_loadu_si512(up2_bytes);
+    // Rounds, from every lane's guessed role.
+    __m512i roles = spike_table8(t->guesses, vk);
+    uint64_t typed = 0;
+    __m512i new_roles = fixed;
+    uint64_t new_typed = 0;
+    __mmask64 flags = 0;
+    uint32_t rounds = 0;
+    bool converged = false;
+    while (!converged && rounds < BUSTER_SPIKE_ROLE_ROUNDS)
+    {
+        rounds += 1;
+        const __m512i previous_role = _mm512_permutex2var_epi8(roles, spike_shifts.up8[0], fill_previous);
+        const __m512i before_role = _mm512_permutex2var_epi8(roles, up2, fill_before);
+        const __m512i pred = spike_preds8(previous_role, vk_previous);
+        const __m512i pred_bits = spike_pred_bits8(pred);
+        const __m512i before_pred = spike_preds8(before_role, vk_before);
+        const __m512i before_pred_bits = spike_pred_bits8(before_pred);
+        const __m512i group = _mm512_mask_mov_epi8(outside_group, inside, _mm512_permutexvar_epi8(enclosing_lane, roles));
+        const __m512i group_bits = spike_table8(t->group_bits, group);
+        const uint64_t typed_before = (typed << 1) | (carry->typed >> 63);
+        const __mmask64 operand = _mm512_test_epi8_mask(pred_bits, _mm512_set1_epi8((char)BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_OPERAND)));
+        const __mmask64 star = _mm512_test_epi8_mask(pred_bits, _mm512_set1_epi8((char)BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_STAR)));
+        const __mmask64 item_or_head = _mm512_test_epi8_mask(pred_bits, _mm512_set1_epi8((char)(BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_ITEM) | BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_HEAD))));
+        const __mmask64 before_item_or_head =
+            _mm512_test_epi8_mask(before_pred_bits, _mm512_set1_epi8((char)(BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_ITEM) | BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_HEAD))));
+        const __mmask64 previous_attribute_right = spike_equal8(previous_role, SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT);
+        const __mmask64 after_asm = previous_asm | (spike_equal8(previous_role, SPIKE_ROLE_LEAF_RIGHT) & previous_asm_qualifier);
+        const __mmask64 in_block = _mm512_test_epi8_mask(group_bits, _mm512_set1_epi8(BUSTER_SPIKE_GROUP_BLOCK));
+        __m512i role = fixed;
+        __mmask64 flag = fixed_flags;
+        // Strings and identifiers.
+        role = _mm512_mask_mov_epi8(role, class_string, _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPERAND), spike_equal8(vk_previous, SPIKE_KIND_STRING),
+                                                                               _mm512_set1_epi8(SPIKE_ROLE_STRING_NEXT)));
+        const __mmask64 tag = previous_tag_keyword | previous_attribute_right;
+        __m512i name_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPERAND), tag, tag_role);
+        name_role = _mm512_mask_mov_epi8(name_role, previous_member, _mm512_set1_epi8(SPIKE_ROLE_MEMBER));
+        role = _mm512_mask_mov_epi8(role, class_identifier, name_role);
+        // Typedef names.
+        const __mmask64 type_position = _mm512_test_epi8_mask(pred_bits, _mm512_set1_epi8((char)(BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_ITEM) | BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_PARAMETER)))) |
+                                        (_mm512_test_epi8_mask(pred_bits, _mm512_set1_epi8((char)BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_SPECIFIER))) & ~typed_before);
+        const __mmask64 type_label = next_colon & item_or_head & in_block;
+        const __mmask64 type_settled = previous_member | tag | spike_equal8(vk_previous, SPIKE_KIND_GOTO) | type_label;
+        __m512i type_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPERAND), ~type_settled & type_position, _mm512_set1_epi8(SPIKE_ROLE_SPECIFIER));
+        type_role = _mm512_mask_mov_epi8(type_role, tag & ~previous_member, tag_role);
+        type_role = _mm512_mask_mov_epi8(type_role, previous_member, _mm512_set1_epi8(SPIKE_ROLE_MEMBER));
+        role = _mm512_mask_mov_epi8(role, class_type_name, type_role);
+        flag |= class_type_name & ~type_settled & ~type_position;
+        // Qualifiers, storage classes, goto, _Atomic and __extension__.
+        const __m512i qualifier_role = _mm512_mask_mov_epi8(_mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_SPECIFIER), star, _mm512_set1_epi8(SPIKE_ROLE_QUALIFIER_LEFT)),
+                                                            after_asm, _mm512_set1_epi8(SPIKE_ROLE_LEAF_RIGHT));
+        role = _mm512_mask_mov_epi8(role, class_qualifier, qualifier_role);
+        role = _mm512_mask_mov_epi8(role, class_storage, _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_SPECIFIER), after_asm, _mm512_set1_epi8(SPIKE_ROLE_LEAF_RIGHT)));
+        role = _mm512_mask_mov_epi8(role, class_goto, _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_RETURN), after_asm, _mm512_set1_epi8(SPIKE_ROLE_LEAF_RIGHT)));
+        const __m512i atomic_role = _mm512_mask_mov_epi8(_mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_SPECIFIER), star, _mm512_set1_epi8(SPIKE_ROLE_QUALIFIER_LEFT)),
+                                                         next_paren, _mm512_set1_epi8(SPIKE_ROLE_LEAF_RIGHT));
+        role = _mm512_mask_mov_epi8(role, class_atomic, atomic_role);
+        role = _mm512_mask_mov_epi8(role, class_extension, _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_PREFIX), next_starts_declaration,
+                                                                                  _mm512_set1_epi8(SPIKE_ROLE_SPECIFIER)));
+        // By the group: commas, colons and ellipses.
+        role = _mm512_mask_mov_epi8(role, class_comma, spike_table8(t->comma, group));
+        role = _mm512_mask_mov_epi8(role, class_colon, spike_table8(t->colon, group));
+        role = _mm512_mask_mov_epi8(role, class_ellipsis, spike_table8(t->ellipsis, group));
+        // * & + - && ++ --.
+        role = _mm512_mask_mov_epi8(role, class_unary, _mm512_mask_mov_epi8(unary, operand, binary));
+        // (.
+        const __m512i attribute_role = _mm512_permutexvar_epi8(before_pred, _mm512_loadu_si512(t->attribute_by_before));
+        const __m512i asm_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPEN_ATTRIBUTE), before_item_or_head, _mm512_set1_epi8(SPIKE_ROLE_OPEN_ASM));
+        __m512i by_previous = _mm512_mask_mov_epi8(paren_previous, spike_equal8(paren_previous, BUSTER_SPIKE_PAREN_ATTRIBUTE), attribute_role);
+        by_previous = _mm512_mask_mov_epi8(by_previous, spike_equal8(paren_previous, BUSTER_SPIKE_PAREN_ASM), asm_role);
+        const __mmask64 function = _mm512_test_epi8_mask(pred_bits, _mm512_set1_epi8((char)(BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_TYPE) | BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_SPECIFIER) |
+                                                                                            BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_STAR)))) & next_function;
+        __m512i paren_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPEN_GROUP), function, _mm512_set1_epi8(SPIKE_ROLE_OPEN_FUNCTION));
+        paren_role = _mm512_mask_mov_epi8(paren_role, next_starts_type, _mm512_set1_epi8(SPIKE_ROLE_OPEN_CAST));
+        paren_role = _mm512_mask_mov_epi8(paren_role, operand, _mm512_set1_epi8(SPIKE_ROLE_OPEN_CALL));
+        paren_role = _mm512_mask_mov_epi8(paren_role, after_asm, _mm512_set1_epi8(SPIKE_ROLE_OPEN_ASM));
+        paren_role = _mm512_mask_mov_epi8(paren_role, attribute_list, _mm512_set1_epi8(SPIKE_ROLE_OPEN_ATTRIBUTE_LIST));
+        paren_role = _mm512_mask_mov_epi8(paren_role, _mm512_test_epi8_mask(paren_previous, paren_previous), by_previous);
+        role = _mm512_mask_mov_epi8(role, class_paren, paren_role);
+        // {, from the lowest priority up.
+        const __mmask64 previous_closer_head = _mm512_test_epi8_mask(spike_table8(t->role_bits, previous_role), _mm512_set1_epi8(BUSTER_SPIKE_ROLE_HEAD_CLOSER));
+        const __mmask64 previous_closer_call = _mm512_test_epi8_mask(spike_table8(t->role_bits, previous_role), _mm512_set1_epi8(BUSTER_SPIKE_ROLE_CALL_CLOSER));
+        const __mmask64 nested = (spike_equal8(vk_previous, SPIKE_KIND_L_BRACE) | spike_equal8(vk_previous, SPIKE_KIND_COMMA)) &
+                                 _mm512_test_epi8_mask(group_bits, _mm512_set1_epi8(BUSTER_SPIKE_GROUP_INITIALIZER));
+        const __mmask64 brace_tag = previous_attribute_right | (spike_equal8(previous_role, SPIKE_ROLE_LEAF_RIGHT) & previous_name);
+        const __mmask64 brace_struct = spike_equal8(vk_previous, SPIKE_KIND_STRUCT) | (previous_name & spike_equal8(vk_before, SPIKE_KIND_STRUCT));
+        const __mmask64 brace_enum = spike_equal8(vk_previous, SPIKE_KIND_ENUM) | (previous_name & spike_equal8(vk_before, SPIKE_KIND_ENUM));
+        const __mmask64 brace_initializer = spike_equal8(vk_previous, SPIKE_KIND_EQUAL);
+        __m512i brace_role = _mm512_set1_epi8(SPIKE_ROLE_OPEN_BLOCK);
+        __mmask64 brace_flag = ~item_or_head;
+        brace_role = _mm512_mask_mov_epi8(brace_role, nested, _mm512_set1_epi8(SPIKE_ROLE_OPEN_INITIALIZER));
+        brace_flag &= ~nested;
+        brace_role = _mm512_mask_mov_epi8(brace_role, spike_equal8(previous_role, SPIKE_ROLE_CLOSE_COMPOUND), _mm512_set1_epi8(SPIKE_ROLE_OPEN_COMPOUND_BODY));
+        brace_role = _mm512_mask_mov_epi8(brace_role, previous_closer_call, _mm512_set1_epi8(SPIKE_ROLE_OPEN_BODY));
+        brace_role = _mm512_mask_mov_epi8(brace_role, previous_closer_head | spike_equal8(vk_previous, SPIKE_KIND_L_PAREN), _mm512_set1_epi8(SPIKE_ROLE_OPEN_BLOCK));
+        brace_flag &= ~(spike_equal8(previous_role, SPIKE_ROLE_CLOSE_COMPOUND) | previous_closer_call | previous_closer_head | spike_equal8(vk_previous, SPIKE_KIND_L_PAREN));
+        brace_role = _mm512_mask_mov_epi8(brace_role, brace_tag, _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPEN_STRUCT), tag_enum, _mm512_set1_epi8(SPIKE_ROLE_OPEN_ENUM)));
+        brace_flag = (brace_flag & ~brace_tag) | (brace_tag & tag_none);
+        brace_role = _mm512_mask_mov_epi8(brace_role, brace_enum, _mm512_set1_epi8(SPIKE_ROLE_OPEN_ENUM));
+        brace_role = _mm512_mask_mov_epi8(brace_role, brace_struct, _mm512_set1_epi8(SPIKE_ROLE_OPEN_STRUCT));
+        brace_role = _mm512_mask_mov_epi8(brace_role, brace_initializer, _mm512_set1_epi8(SPIKE_ROLE_OPEN_INITIALIZER));
+        brace_flag &= ~(brace_enum | brace_struct | brace_initializer);
+        role = _mm512_mask_mov_epi8(role, class_brace, brace_role);
+        flag |= class_brace & brace_flag;
+        // Closers, by their opener's role.
+        const __m512i closer_role = _mm512_mask_mov_epi8(spike_table8(t->closers, group), spike_equal8(group, SPIKE_ROLE_OPEN_CAST), cast_closer);
+        role = _mm512_mask_mov_epi8(role, class_closer, closer_role);
+        // What depends on the group again, from this round's openers: a closer and the commas, colons and ellipses in a
+        // group then settle in the same round as their opener.
+        const __m512i group_now = _mm512_mask_mov_epi8(outside_group, inside, _mm512_permutexvar_epi8(enclosing_lane, role));
+        role = _mm512_mask_mov_epi8(role, class_comma, spike_table8(t->comma, group_now));
+        role = _mm512_mask_mov_epi8(role, class_colon, spike_table8(t->colon, group_now));
+        role = _mm512_mask_mov_epi8(role, class_ellipsis, spike_table8(t->ellipsis, group_now));
+        role = _mm512_mask_mov_epi8(role, class_closer, _mm512_mask_mov_epi8(spike_table8(t->closers, group_now), spike_equal8(group_now, SPIKE_ROLE_OPEN_CAST), cast_closer));
+        // An attribute's names, whatever their spelling.
+        const __mmask64 attribute_name = _mm512_test_epi8_mask(spike_table8(t->group_bits, group_now), _mm512_set1_epi8(BUSTER_SPIKE_GROUP_ATTRIBUTE_LIST)) & keyword;
+        role = _mm512_mask_mov_epi8(role, attribute_name, _mm512_set1_epi8(SPIKE_ROLE_OPERAND));
+        flag &= ~attribute_name;
+        flag |= spike_equal8(role, SPIKE_ROLE_ERROR);
+        // The typed state.
+        const __m512i role_bits = spike_table8(t->role_bits, role);
+        const uint64_t generate = (_mm512_test_epi8_mask(role_bits, _mm512_set1_epi8(BUSTER_SPIKE_ROLE_TYPE_IF_WORD)) & word) |
+                                  _mm512_test_epi8_mask(role_bits, _mm512_set1_epi8(BUSTER_SPIKE_ROLE_TYPE));
+        const uint64_t propagate = _mm512_test_epi8_mask(role_bits, _mm512_set1_epi8(BUSTER_SPIKE_ROLE_PROPAGATES)) & ~generate;
+        uint64_t copies = _mm512_test_epi8_mask(role_bits, _mm512_set1_epi8(BUSTER_SPIKE_ROLE_COPIES_TYPED));
+        // An attribute's closer takes the state from before the attribute's keyword, two tokens before its opener.
+        uint64_t copied = 0;
+        uint64_t copy_lanes = copies & live_mask;
+        while (copy_lanes != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(copy_lanes);
+            copy_lanes &= copy_lanes - 1;
+            const uint32_t opener = kernels->enclosing[block + lane];
+            bool value = false;
+            if (opener != BUSTER_SPIKE_NONE && opener >= 2 && opener - 2 >= block)
+            {
+                value = (typed >> (opener - 2 - block)) & 1;
+            }
+            else if (opener != BUSTER_SPIKE_NONE && opener >= 2 && opener - 2 + 64 >= block)
+            {
+                value = (carry->typed >> (opener - 2 + 64 - block)) & 1;
+            }
+            else if (opener != BUSTER_SPIKE_NONE && opener >= 2)
+            {
+                value = (outside_typed >> lane) & 1;
+            }
+            copied |= (uint64_t)value << lane;
+        }
+        uint64_t carry_out;
+        new_typed = spike_typed_carries(generate | copied, propagate & ~copies, carry->typed >> 63, &carry_out);
+        new_roles = role;
+        flags = flag;
+        converged = _mm512_cmpneq_epi8_mask(new_roles, roles) == 0 && ((new_typed ^ typed) & live_mask) == 0;
+        roles = new_roles;
+        typed = new_typed;
+    }
+    _mm512_storeu_si512(kernels->roles + block, roles);
+    // The flags from K3 stay.
+    const __m512i old_flags = _mm512_loadu_si512(kernels->flags + block);
+    _mm512_storeu_si512(kernels->flags + block, _mm512_mask_mov_epi8(old_flags, flags & live_mask, _mm512_set1_epi8(1)));
+    *typed_out = typed;
+    return converged ? rounds : 0;
+}
+
+// K2 in AVX-512: the blocks in order, each in rounds; a block that doesn't converge runs the twin's loop. `typed` is a
+// byte per token (the twin's array, which the fallback and the group stacks read), and `group_roles` and
+// `group_typed` have an entry per depth. `rounds` (BUSTER_SPIKE_ROLE_ROUNDS + 1 counters) counts the blocks by the
+// rounds they took, index 0 for those the twin did.
+static void spike_roles_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, uint8_t* group_roles, uint8_t* group_typed, uint64_t* rounds)
+{
+    SpikeRoleCarry carry = {
+        .previous_role = SPIKE_ROLE_NONE,
+        .before_role = SPIKE_ROLE_NONE,
+        .typed = 0,
+        .group_roles = group_roles,
+        .group_typed = group_typed,
+    };
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const uint32_t live = count - block < 64 ? count - block : 64;
+        uint64_t typed_mask = 0;
+        const uint32_t taken = spike_roles_block_avx512(kernels, block, live, &carry, &typed_mask);
+        rounds[taken] += 1;
+        if (taken == 0)
+        {
+            // The twin's loop, from the block's start.
+            for (uint32_t i = block; i < block + live; i += 1)
+            {
+                const bool typed_before = i > 0 && typed[i - 1];
+                bool flag = false;
+                const uint8_t role = spike_role_rule(kernels, i, typed_before, &flag);
+                kernels->roles[i] = role;
+                kernels->flags[i] |= flag;
+                const uint32_t opener = kernels->enclosing[i];
+                if (role == SPIKE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER && opener != BUSTER_SPIKE_NONE && opener >= 2)
+                {
+                    typed[i] = typed[opener - 2];
+                }
+                else
+                {
+                    typed[i] = spike_role_is_type_specifier(role, kernels->vkinds[i]) || (spike_role_propagates_typed(role) && typed_before);
+                }
+            }
+            typed_mask = _mm512_test_epi8_mask(_mm512_loadu_si512(typed + block), _mm512_set1_epi8(1));
+        }
+        else
+        {
+            _mm512_storeu_si512(typed + block, _mm512_maskz_mov_epi8(typed_mask, _mm512_set1_epi8(1)));
+            // A cast candidate's opener takes the role its closer decided, as spike_closer_role does.
+            const __m512i role = _mm512_loadu_si512(kernels->roles + block);
+            uint64_t casts = (spike_equal8(role, SPIKE_ROLE_CLOSE_COMPOUND) | spike_equal8(role, SPIKE_ROLE_CLOSE_CAST) | spike_equal8(role, SPIKE_ROLE_CLOSE_FUNCTION)) &
+                             (live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1));
+            while (casts != 0)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctzll(casts);
+                casts &= casts - 1;
+                const uint32_t opener = kernels->enclosing[block + lane];
+                if (opener != BUSTER_SPIKE_NONE && kernels->roles[opener] == SPIKE_ROLE_OPEN_CAST)
+                {
+                    const uint8_t closer_role = kernels->roles[block + lane];
+                    kernels->roles[opener] = closer_role == SPIKE_ROLE_CLOSE_COMPOUND ? SPIKE_ROLE_OPEN_COMPOUND :
+                                             closer_role == SPIKE_ROLE_CLOSE_CAST ? SPIKE_ROLE_OPEN_CAST : SPIKE_ROLE_OPEN_FUNCTION;
+                }
+            }
+        }
+        // Every opener of the block onto the group stacks, in order, so each depth's entry is its open opener's when a
+        // later block reads it.
+        const __m512i kinds = _mm512_loadu_si512(kernels->vkinds + block);
+        uint64_t openers = (spike_equal8(kinds, SPIKE_KIND_L_PAREN) | spike_equal8(kinds, SPIKE_KIND_L_SQUARE) | spike_equal8(kinds, SPIKE_KIND_L_BRACE)) &
+                           (live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1));
+        while (openers != 0)
+        {
+            const uint32_t i = block + (uint32_t)__builtin_ctzll(openers);
+            openers &= openers - 1;
+            group_roles[kernels->depths[i]] = kernels->roles[i];
+            group_typed[kernels->depths[i]] = i >= 2 ? typed[i - 2] : 0;
+        }
+        carry.previous_role = kernels->roles[block + live - 1];
+        carry.before_role = live >= 2 ? kernels->roles[block + live - 2] : carry.previous_role;
+        carry.typed = live == 64 ? typed_mask : typed_mask << (64 - live);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// K3's classification, K1's second part and K5 in AVX-512
+
+// K3's classification in AVX-512, with a gather: 16 identifiers' typedef bytes at a time (vpgatherdd of the dword at
+// each name's byte, so `typedef_names` has 3 bytes of slack). Lanes that aren't identifiers read name 0.
+static void spike_classify_gather_avx512(SpikeKernels* kernels, const uint8_t* kinds, const uint32_t* names, uint32_t count)
+{
+    const __m512i identifier = _mm512_set1_epi8(SPIKE_KIND_IDENTIFIER);
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const __m512i kind = _mm512_loadu_si512(kinds + block);
+        const __mmask64 names_mask = _mm512_cmpeq_epi8_mask(kind, identifier);
+        __mmask64 type_names = 0;
+        __mmask64 scoped = 0;
+        for (uint32_t q = 0; q < 4; q += 1)
+        {
+            const __mmask16 lanes = (__mmask16)(names_mask >> (16 * q));
+            const __m512i ids = _mm512_maskz_loadu_epi32(lanes, names + block + 16 * q);
+            const __m512i bytes = _mm512_and_si512(_mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, ids, kernels->typedef_names, 1), _mm512_set1_epi32(0xFF));
+            type_names |= (__mmask64)_mm512_test_epi32_mask(bytes, bytes) << (16 * q);
+            scoped |= (__mmask64)_mm512_cmpeq_epi32_mask(bytes, _mm512_set1_epi32(BUSTER_SPIKE_TYPEDEF_SCOPED)) << (16 * q);
+        }
+        _mm512_storeu_si512(kernels->vkinds + block, _mm512_mask_mov_epi8(kind, type_names, _mm512_set1_epi8(SPIKE_VKIND_TYPE_NAME)));
+        _mm512_storeu_si512(kernels->flags + block, _mm512_maskz_mov_epi8(scoped, _mm512_set1_epi8(1)));
+    }
+    spike_classify_declarators(kernels);
+}
+
+// The same with a scalar load per identifier, over the block's identifier mask.
+static void spike_classify_mask_avx512(SpikeKernels* kernels, const uint8_t* kinds, const uint32_t* names, uint32_t count)
+{
+    const __m512i identifier = _mm512_set1_epi8(SPIKE_KIND_IDENTIFIER);
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const __m512i kind = _mm512_loadu_si512(kinds + block);
+        uint64_t lanes = _mm512_cmpeq_epi8_mask(kind, identifier);
+        uint64_t type_names = 0;
+        uint64_t scoped = 0;
+        while (lanes != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(lanes);
+            lanes &= lanes - 1;
+            const uint8_t meaning = kernels->typedef_names[names[block + lane]];
+            type_names |= (uint64_t)(meaning != 0) << lane;
+            scoped |= (uint64_t)(meaning == BUSTER_SPIKE_TYPEDEF_SCOPED) << lane;
+        }
+        _mm512_storeu_si512(kernels->vkinds + block, _mm512_mask_mov_epi8(kind, type_names, _mm512_set1_epi8(SPIKE_VKIND_TYPE_NAME)));
+        _mm512_storeu_si512(kernels->flags + block, _mm512_maskz_mov_epi8(scoped, _mm512_set1_epi8(1)));
+    }
+    spike_classify_declarators(kernels);
+}
+
+// K1's second part in AVX-512: the matching runs over the ? case default and `:` tokens only (a mask per block, then
+// the twin's stack), and the depth of their groups is a prefix sum of their deltas, added to each token's depth.
+static void spike_secondary_avx512(SpikeKernels* kernels, uint32_t count, uint32_t* secondary)
+{
+    uint32_t open = 0;
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const __m512i role = _mm512_loadu_si512(kernels->roles + block);
+        uint64_t lanes = (spike_equal8(role, SPIKE_ROLE_OPEN_TERNARY) | spike_equal8(role, SPIKE_ROLE_OPEN_CASE) | spike_equal8(role, SPIKE_ROLE_CLOSE_TERNARY) |
+                          spike_equal8(role, SPIKE_ROLE_CLOSE_CASE) | spike_equal8(role, SPIKE_ROLE_LABEL)) &
+                         (count - block < 64 ? (((uint64_t)1 << (count - block)) - 1) : ~(uint64_t)0);
+        while (lanes != 0)
+        {
+            const uint32_t i = block + (uint32_t)__builtin_ctzll(lanes);
+            lanes &= lanes - 1;
+            if (kernels->roles[i] == SPIKE_ROLE_OPEN_TERNARY || kernels->roles[i] == SPIKE_ROLE_OPEN_CASE)
+            {
+                secondary[open] = i;
+                open += 1;
+            }
+            else
+            {
+                const uint32_t depth = kernels->depths[i];
+                while (open != 0 && kernels->depths[secondary[open - 1]] > depth)
+                {
+                    kernels->flags[secondary[open - 1]] = 1;
+                    kernels->unbalanced = true;
+                    open -= 1;
+                }
+                if (open != 0 && kernels->depths[secondary[open - 1]] == depth)
+                {
+                    const uint32_t opener = secondary[open - 1];
+                    open -= 1;
+                    kernels->roles[i] = kernels->roles[opener] == SPIKE_ROLE_OPEN_CASE ? SPIKE_ROLE_CLOSE_CASE : SPIKE_ROLE_CLOSE_TERNARY;
+                }
+                else
+                {
+                    const uint8_t previous = kernels->vkinds[i - 1];
+                    kernels->roles[i] = SPIKE_ROLE_LABEL;
+                    kernels->flags[i] |= previous != SPIKE_KIND_IDENTIFIER && previous != SPIKE_VKIND_TYPE_NAME;
+                }
+            }
+        }
+    }
+    while (open != 0)
+    {
+        kernels->flags[secondary[open - 1]] = 1;
+        kernels->unbalanced = true;
+        open -= 1;
+    }
+    // The node depths: +1 at an opener, -1 at a closer, exclusive prefix sums, added to the depth of ( [ {, less one
+    // at a closer of any group.
+    int8_t deltas[128] = { 0 };
+    deltas[SPIKE_ROLE_OPEN_TERNARY] = 1;
+    deltas[SPIKE_ROLE_OPEN_CASE] = 1;
+    deltas[SPIKE_ROLE_CLOSE_TERNARY] = -1;
+    deltas[SPIKE_ROLE_CLOSE_CASE] = -1;
+    int8_t closers[128] = { 0 };
+    for (uint32_t r = 0; r < SPIKE_ROLE_COUNT; r += 1)
+    {
+        closers[r] = (int8_t)(spike_role_deltas[r] < 0);
+    }
+    const __m512i delta_low = _mm512_loadu_si512(deltas);
+    const __m512i delta_high = _mm512_loadu_si512(deltas + 64);
+    const __m512i closer_low = _mm512_loadu_si512(closers);
+    const __m512i closer_high = _mm512_loadu_si512(closers + 64);
+    uint32_t inner = 0;
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const __m512i role = _mm512_loadu_si512(kernels->roles + block);
+        const __m512i delta = _mm512_permutex2var_epi8(delta_low, role, delta_high);
+        const __m512i after = spike_prefix_sum8(delta);
+        // The secondary depth before each token, less one at a closer.
+        const __m512i before = _mm512_sub_epi8(_mm512_sub_epi8(after, delta), _mm512_permutex2var_epi8(closer_low, role, closer_high));
+        const __m512i base = _mm512_set1_epi32((int)inner);
+        for (uint32_t q = 0; q < 4; q += 1)
+        {
+            const __m128i quarter = q == 0 ? _mm512_extracti32x4_epi32(before, 0) : q == 1 ? _mm512_extracti32x4_epi32(before, 1) :
+                                    q == 2 ? _mm512_extracti32x4_epi32(before, 2) : _mm512_extracti32x4_epi32(before, 3);
+            const uint32_t* depths = kernels->depths + block + 16 * q;
+            _mm512_storeu_si512(kernels->node_depths + block + 16 * q, _mm512_add_epi32(_mm512_loadu_si512(depths), _mm512_add_epi32(base, _mm512_cvtepi8_epi32(quarter))));
+        }
+        int8_t after_bytes[64];
+        _mm512_storeu_si512(after_bytes, after);
+        const uint32_t live = count - block < 64 ? count - block : 64;
+        inner += (uint32_t)(int32_t)after_bytes[live - 1];
+    }
+}
+
+// spike_after_colons over the `{` tokens after a resolved colon only.
+static void spike_after_colons_avx512(SpikeKernels* kernels, uint32_t count)
+{
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const __m512i previous = _mm512_loadu_si512(kernels->roles + block - 1);
+        const __m512i kind = _mm512_loadu_si512(kernels->vkinds + block);
+        uint64_t lanes = (spike_equal8(previous, SPIKE_ROLE_CLOSE_CASE) | spike_equal8(previous, SPIKE_ROLE_LABEL)) & spike_equal8(kind, SPIKE_KIND_L_BRACE) &
+                         (count - block < 64 ? (((uint64_t)1 << (count - block)) - 1) : ~(uint64_t)0);
+        // Token 0 has no colon before it.
+        lanes &= block == 0 ? ~(uint64_t)1 : ~(uint64_t)0;
+        while (lanes != 0)
+        {
+            const uint32_t i = block + (uint32_t)__builtin_ctzll(lanes);
+            lanes &= lanes - 1;
+            kernels->roles[i] = SPIKE_ROLE_OPEN_BLOCK;
+            kernels->flags[i] = 0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The vector path together
+
+// What the vector kernels need besides SpikeKernels' arrays.
+typedef struct SpikeVectorBuffers SpikeVectorBuffers;
+struct SpikeVectorBuffers
+{
+    // By depth: K1's open openers, and K2's group roles and typed states.
+    uint32_t* open_stack;
+    uint8_t* group_roles;
+    uint8_t* group_typed;
+    // By token: K2's typed states, K4's L and its key.
+    uint8_t* typed;
+    uint32_t* lefts;
+    uint16_t* left_keys;
+    SpikeCandidates candidates;
+    uint32_t* secondary;
+    SpikeStatement* statements;
+    // K2's blocks by the rounds they took (index 0: the twin did them).
+    uint64_t rounds[BUSTER_SPIKE_ROLE_ROUNDS + 1];
+};
+
+static bool spike_vector_buffers_reserve(SpikeVectorBuffers* buffers, Arena* arena, uint64_t capacity)
+{
+    const uint64_t slots = capacity + 2 * BUSTER_SPIKE_TOKEN_PADDING;
+    *buffers = (SpikeVectorBuffers){
+        .open_stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .group_roles = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
+        .group_typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
+        .typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
+        .lefts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .left_keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, slots),
+        .candidates = {
+            .positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+            .keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, slots),
+            .count = 0,
+        },
+        .secondary = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .statements = BUSTER_ARENA_PUSH_ARRAY(arena, SpikeStatement, slots),
+        .rounds = { 0 },
+    };
+    return buffers->open_stack != 0 && buffers->group_roles != 0 && buffers->group_typed != 0 && buffers->typed != 0 && buffers->lefts != 0 &&
+           buffers->left_keys != 0 && buffers->candidates.positions != 0 && buffers->candidates.keys != 0 && buffers->secondary != 0 && buffers->statements != 0;
+}
+
+// The deepest node depth, which decides whether K4's 16-bit keys can hold it.
+static uint32_t spike_deepest(const SpikeKernels* kernels, uint32_t count)
+{
+    __m512i deepest = _mm512_setzero_si512();
+    for (uint32_t block = 0; block < count; block += 16)
+    {
+        const __mmask16 live = count - block < 16 ? (__mmask16)((1u << (count - block)) - 1) : (__mmask16)0xFFFF;
+        deepest = _mm512_max_epu32(deepest, _mm512_maskz_loadu_epi32(live, kernels->node_depths + block));
+    }
+    return _mm512_reduce_max_epu32(deepest);
+}
+
+// Every kernel in AVX-512 in turn, then the fallback, into kernels->parents: the data-parallel parser.
+static SpikeKernelResult spike_parse_vector(SpikeKernels* kernels, const uint8_t* kinds, const uint32_t* names, uint32_t count, SpikeMeanings* meanings,
+                                            Arena* scratch, SpikeVectorBuffers* buffers)
+{
+    SpikeKernelResult result = { .flagged_tokens = 0, .everything = false };
+    kernels->unbalanced = false;
+    kernels->unsupported = false;
+    // K1, on ( [ {.
+    kernels->unbalanced = !spike_brackets_avx512(kinds, spike_kind_deltas, count, kernels->depths, kernels->enclosing, buffers->open_stack);
+    // K3.
+    if (!kernels->unbalanced)
+    {
+        spike_typedefs(kernels, kinds, names, count);
+    }
+    spike_classify_mask_avx512(kernels, kinds, names, count);
+    // K2.
+    spike_roles_avx512(kernels, count, buffers->typed, buffers->group_roles, buffers->group_typed, buffers->rounds);
+    // K1's second part, and the roles after the colons it resolved.
+    spike_secondary_avx512(kernels, count, buffers->secondary);
+    spike_after_colons_avx512(kernels, count);
+    // K4: 16-bit keys hold every depth but the deepest nesting, which the twin takes.
+    if (spike_deepest(kernels, count) <= BUSTER_SPIKE_MAX_VECTOR_DEPTH)
+    {
+        spike_parents_left_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, &buffers->candidates);
+        spike_parents_right_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, kernels->parents, &buffers->candidates);
+    }
+    else
+    {
+        spike_parents_scalar(kernels, count);
+    }
+    // K5.
+    const bool statements_ok = spike_statements_avx512(kernels, count, buffers->statements);
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
+        const __m512i flags = _mm512_maskz_loadu_epi8(live, kernels->flags + block);
+        result.flagged_tokens += (uint64_t)__builtin_popcountll(_mm512_test_epi8_mask(flags, flags));
+    }
+    result.everything = kernels->unbalanced || kernels->unsupported || !statements_ok;
+    result.fallback = spike_fallback(kernels, kinds, names, count, result.everything, meanings, scratch);
+    for (uint32_t i = 0; i < kernels->typedef_count; i += 1)
+    {
+        kernels->typedef_names[kernels->typedef_log[i]] = 0;
+    }
+    return result;
 }
