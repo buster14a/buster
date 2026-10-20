@@ -16,15 +16,17 @@
 //     C's rules): equal structures get equal TypeIds, and different ones never do.
 //   - Batches: random requests (some invalid) given to type_derive one at a time and to type_derive_batch in random
 //     slices, in two tables that must end up identical, results, columns and index alike; and the index grown well
-//     past its first size.
+//     past its first size. Then ALIGNED requests of a tag completed since its wrapper was made, through both.
 //   - Layout: fixtures (clang's corner cases), then random records of every member type, bit-fields of every width
 //     next to every type, packed, #pragma pack, aligned, nesting, anonymous members and flexible array members, laid
 //     out by the scalar layout in one table and by type_layout_records in another: identical offsets, sizes,
-//     alignments and completion order.
+//     alignments and completion order. Member lookup finds the first member of a fresh table, directly and through an
+//     anonymous member.
 //   - Conversions: every pair of codes through both vector kernels and the scalar twin, at every length to 200 and at a
 //     PROT_NONE page; type_usual_arithmetic_types against type_usual_arithmetic on every pair of a set of arithmetic
 //     TypeIds (enums, _BitInts, ALIGNED and atomic types among them); and fixtures of clang's results.
-//   - Compatibility and composite types: fixtures, the C standard's examples among them.
+//   - Compatibility and composite types: fixtures, the C standard's examples among them; and types that share their
+//     insides 64 levels deep, whose trees have 2^64 leaves, which each walk takes pair by distinct pair.
 //   - Printing: fixtures of clang's spellings.
 //   - Clang, as the oracle (type_test_clang): a world of random types, records and enums,
 //     written as C (a typedef per type, built from the earlier ones, so that the C spells each type independently of
@@ -431,7 +433,17 @@ static bool type_test_validation(void)
         Arena index_arena = arena_reserve(type_index_capacity_bytes(small));
         TypeTable table;
         type_test_expect(&tally, type_initialize(&table, &arena, &index_arena, small), "capacity", "a small table can't be made");
-        type_test_expect(&tally, type_pointer(&table, BUSTER_TYPE_INT) != 0 && type_tag(&table, BUSTER_TYPE_KIND_STRUCT, 1) != 0, "capacity", "two types don't fit");
+        const TypeId pointer = type_pointer(&table, BUSTER_TYPE_INT);
+        const TypeId record = type_tag(&table, BUSTER_TYPE_KIND_STRUCT, 1);
+        type_test_expect(&tally, pointer != 0 && record != 0, "capacity", "two types don't fit");
+        // Room for one member besides record 0, the table's own.
+        const TypeMember two[2] = {
+            type_test_member(1, BUSTER_TYPE_INT, BUSTER_TYPE_NOT_BIT_FIELD),
+            type_test_member(2, BUSTER_TYPE_INT, BUSTER_TYPE_NOT_BIT_FIELD),
+        };
+        type_test_expect(&tally, !type_record_define(&table, record, two, 2, (TypeRecordAttributes){ 0 }) && table.last_error == TYPE_ERROR_FULL, "capacity",
+                         "two members fit in room for one");
+        type_test_expect(&tally, type_record_define(&table, record, two, 1, (TypeRecordAttributes){ 0 }), "capacity", "one member doesn't fit in room for one");
         type_test_expect(&tally, type_pointer(&table, BUSTER_TYPE_LONG) == 0 && table.last_error == TYPE_ERROR_FULL, "capacity", "a third type fits");
         type_test_expect(&tally, type_pointer(&table, BUSTER_TYPE_INT) != 0, "capacity", "an existing type isn't found when the table is full");
         type_test_expect(&tally, type_function(&table, BUSTER_TYPE_INT, (TypeId[]){ BUSTER_TYPE_INT, BUSTER_TYPE_INT }, 2, BUSTER_TYPE_FLAG_PROTOTYPE) == 0 &&
@@ -3796,6 +3808,145 @@ static bool type_test_parse_u64(const char* text, uint64_t* value)
     return result;
 }
 
+// type_find_member's answer for no member is 0, which no member is: the first member of the first record in a fresh
+// table, directly and through an anonymous member (a regression: member 0 was the first record's first).
+static bool type_test_member_lookup(void)
+{
+    TypeTestTally tally = { 0 };
+    TypeTestTable test;
+    if (type_test_expect(&tally, type_test_table_open(&test, 64), "member lookup", "the table can't be made"))
+    {
+        TypeTable* table = &test.table;
+        const TypeId record = type_tag(table, BUSTER_TYPE_KIND_STRUCT, 1);
+        const TypeMember members[2] = {
+            type_test_member(1, BUSTER_TYPE_INT, BUSTER_TYPE_NOT_BIT_FIELD),
+            type_test_member(2, BUSTER_TYPE_INT, BUSTER_TYPE_NOT_BIT_FIELD),
+        };
+        type_complete_record(table, record, members, 2, (TypeRecordAttributes){ 0 });
+        uint64_t offset = UINT64_MAX;
+        const uint32_t first = type_find_member(table, record, 1, &offset);
+        type_test_expect(&tally, first != 0 && table->members.name[first] == 1 && offset == 0, "member lookup", "the first member of the first record");
+        offset = UINT64_MAX;
+        const uint32_t second = type_find_member(table, record, 2, &offset);
+        type_test_expect(&tally, first != 0 && second == first + 1 && offset == 32, "member lookup", "the second member");
+        type_test_expect(&tally, type_find_member(table, record, 3, &offset) == 0, "member lookup", "a member that doesn't exist");
+        type_test_table_close(&test);
+    }
+    if (type_test_expect(&tally, type_test_table_open(&test, 64), "member lookup", "the table can't be made"))
+    {
+        // struct { struct { int x; }; int y; }, whose x is the table's first member.
+        TypeTable* table = &test.table;
+        const TypeId inner = type_tag(table, BUSTER_TYPE_KIND_STRUCT, 0);
+        const TypeMember inner_member = type_test_member(1, BUSTER_TYPE_INT, BUSTER_TYPE_NOT_BIT_FIELD);
+        type_complete_record(table, inner, &inner_member, 1, (TypeRecordAttributes){ 0 });
+        const TypeId outer = type_tag(table, BUSTER_TYPE_KIND_STRUCT, 3);
+        const TypeMember outer_members[2] = {
+            type_test_member(0, inner, BUSTER_TYPE_NOT_BIT_FIELD),
+            type_test_member(2, BUSTER_TYPE_INT, BUSTER_TYPE_NOT_BIT_FIELD),
+        };
+        type_complete_record(table, outer, outer_members, 2, (TypeRecordAttributes){ 0 });
+        uint64_t offset = UINT64_MAX;
+        const uint32_t x = type_find_member(table, outer, 1, &offset);
+        type_test_expect(&tally, x != 0 && table->members.name[x] == 1 && offset == 0, "member lookup", "x, the table's first member, through an anonymous member");
+        offset = UINT64_MAX;
+        type_test_expect(&tally, type_find_member(table, outer, 2, &offset) != 0 && offset == 32, "member lookup", "y, after the anonymous member");
+        type_test_table_close(&test);
+    }
+    type_test_report("member lookup", tally);
+    return tally.failures == 0;
+}
+
+// Types that share their insides: level n + 1 is a pointer to int (T, T) of level n's T, so a type of n levels is
+// n pairs of records but a tree of 2^n leaves. Compatibility, the canonical comparison and the composite walk each
+// distinct pair once, so 64 levels take a moment (a regression: they expanded every occurrence of a pair).
+#define BUSTER_TYPE_TEST_SHARED_LEVELS 64
+
+static bool type_test_shared_pairs(void)
+{
+    TypeTestTally tally = { 0 };
+    TypeTestTable test;
+    if (type_test_expect(&tally, type_test_table_open(&test, 1024), "shared pairs", "the table can't be made"))
+    {
+        TypeTable* table = &test.table;
+        // Level 0: int (*)[] and int (*)[3], compatible; a pointer to an 8-byte aligned int and to an int, which are
+        // one canonical type.
+        TypeId levels[4] = {
+            type_pointer(table, type_incomplete_array(table, BUSTER_TYPE_INT)),
+            type_pointer(table, type_array(table, BUSTER_TYPE_INT, 3)),
+            type_pointer(table, type_aligned(table, BUSTER_TYPE_INT, 3)),
+            type_pointer(table, BUSTER_TYPE_INT),
+        };
+        for (uint32_t level = 0; level < BUSTER_TYPE_TEST_SHARED_LEVELS; level += 1)
+        {
+            for (uint32_t chain = 0; chain < 4; chain += 1)
+            {
+                const TypeId parameters[2] = {
+                    levels[chain],
+                    levels[chain],
+                };
+                levels[chain] = type_pointer(table, type_function(table, BUSTER_TYPE_INT, parameters, 2, BUSTER_TYPE_FLAG_PROTOTYPE));
+            }
+        }
+        type_test_expect(&tally, levels[0] != 0 && levels[1] != 0 && levels[2] != 0 && levels[3] != 0, "shared pairs", "the types can't be made");
+        type_test_expect(&tally, type_compatible(table, levels[0], levels[1]), "shared pairs", "int (*)[] and int (*)[3] at the bottom aren't compatible");
+        type_test_expect(&tally, type_composite(table, levels[0], levels[1]) == levels[1], "shared pairs", "the composite isn't the one with int (*)[3]");
+        type_test_expect(&tally, type_same_canonical(table, levels[2], levels[3]), "shared pairs", "an aligned int at the bottom isn't looked through");
+        type_test_expect(&tally, type_compatible(table, levels[2], levels[3]), "shared pairs", "an aligned int at the bottom isn't compatible with int");
+        type_test_expect(&tally, !type_compatible(table, levels[0], levels[3]), "shared pairs", "int (*)[] at the bottom is compatible with int *");
+        type_test_expect(&tally, type_composite(table, levels[0], levels[3]) == 0, "shared pairs", "int (*)[] and int * at the bottom have a composite");
+        type_test_table_close(&test);
+    }
+    type_test_report("shared pairs", tally);
+    return tally.failures == 0;
+}
+
+// An ALIGNED request of a tag completed since its wrapper was made: the batch must give what type_aligned gives (the
+// tag, when the alignment is its own), not the wrapper the index holds (a regression).
+static bool type_test_batch_after_completion(void)
+{
+    TypeTestTally tally = { 0 };
+    TypeTestTable test;
+    if (type_test_expect(&tally, type_test_table_open(&test, 64), "completion", "the table can't be made"))
+    {
+        TypeTable* table = &test.table;
+        const TypeId record = type_tag(table, BUSTER_TYPE_KIND_STRUCT, 1);
+        const TypeId wrapper = type_aligned(table, record, 2);
+        const TypeMember member = type_test_member(1, BUSTER_TYPE_INT, BUSTER_TYPE_NOT_BIT_FIELD);
+        type_complete_record(table, record, &member, 1, (TypeRecordAttributes){ 0 });
+        const uint8_t kinds[2] = {
+            BUSTER_TYPE_KIND_ALIGNED,
+            BUSTER_TYPE_KIND_ALIGNED,
+        };
+        const uint8_t flags[2] = {
+            0,
+            0,
+        };
+        const TypeId bases[2] = {
+            record,
+            record,
+        };
+        const uint64_t extents[2] = {
+            2,
+            3,
+        };
+        const TypeKeys keys = {
+            .kinds = kinds,
+            .flags = flags,
+            .bases = bases,
+            .extents = extents,
+        };
+        TypeId batched[2] = { 0 };
+        type_derive_batch(table, keys, 2, batched);
+        type_test_expect(&tally, wrapper != 0 && wrapper != record, "completion", "no wrapper while the tag was incomplete");
+        type_test_expect(&tally, type_aligned(table, record, 2) == record, "completion", "the tag's own alignment isn't the tag");
+        type_test_expect(&tally, batched[0] == record, "completion", "the batch gave the wrapper for the tag's own alignment");
+        type_test_expect(&tally, batched[1] != 0 && batched[1] == type_aligned(table, record, 3), "completion", "the batch and type_aligned differ on a larger alignment");
+        type_test_table_close(&test);
+    }
+    type_test_report("completion", tally);
+    return tally.failures == 0;
+}
+
 int run_type_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -3842,11 +3993,14 @@ int run_type_tests(int argc, char** argv)
         passed = type_test_normalization(&arena) && passed;
         passed = type_test_hash_consing(seed, (uint32_t)count) && passed;
         passed = type_test_batches(seed, (uint32_t)count * 8) && passed;
+        passed = type_test_batch_after_completion() && passed;
         passed = type_test_layout_fixtures_check() && passed;
+        passed = type_test_member_lookup() && passed;
         passed = type_test_layout_twins(seed, (uint32_t)count / 4) && passed;
         passed = type_test_conversion_kernels(seed) && passed;
         passed = type_test_conversion_types() && passed;
         passed = type_test_compatibility() && passed;
+        passed = type_test_shared_pairs() && passed;
         passed = type_test_printing(&arena) && passed;
         passed = type_test_clang(seed, (uint32_t)count, clang, keep) && passed;
         result = passed ? 0 : 1;

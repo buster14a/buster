@@ -642,7 +642,8 @@ static bool type_benchmark_layout(uint64_t seed, uint32_t count, TypeBenchmarkCo
             sizes[r] = type_size(&table.table, records[r]);
         }
         type_benchmark_reset(&table.table, by_level, made);
-        memset(members->offset, 0xff, members->count * sizeof(uint64_t));
+        // Record 0 is no member's: only the members' offsets are poisoned.
+        memset(members->offset + 1, 0xff, (members->count - 1) * sizeof(uint64_t));
         for (uint32_t level = 0; level < levels; level += 1)
         {
             type_benchmark_layout_vector(&table.table, by_level + level_starts[level], level_starts[level + 1] - level_starts[level]);

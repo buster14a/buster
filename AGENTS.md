@@ -1285,17 +1285,21 @@ the one `--clang` names:
 - batches: random requests, some invalid, given one at a time and in random
   slices of `type_derive_batch` to two tables, which must end up identical
   (results, columns and index), with the index grown well past its first size;
+  then aligned typedefs' requests of a tag completed since their wrapper was
+  made, through both;
 - layout: clang's corner cases, then random records of every member type,
   bit-fields of every width next to every type, packed, packs, aligned,
   nesting, anonymous members and flexible array members, with member counts
   around the vector layout's blocks of 16 and inputs past its limits, laid out
   by the scalar layout in one table and by `type_layout_records` in another:
-  identical offsets, sizes, alignments and completion order;
+  identical offsets, sizes, alignments and completion order; and member lookup
+  of a fresh table's first member, directly and through an anonymous member;
 - conversions: every pair of codes through both vector kernels and the scalar
   twin, at every length to 200 and ending at a `PROT_NONE` page; the TypeId
   batch against `type_usual_arithmetic`; and clang's results as fixtures;
 - compatibility, composite types and printing: fixtures, the C standard's
-  examples among them;
+  examples among them, and types that share their insides 64 levels deep (2^64
+  leaves), which each walk must take pair by distinct pair;
 - clang as the oracle: a world of random types, records and enums (`--count`
   sets its size), written as C with a typedef per type built from earlier
   ones. `clang -std=gnu17 -fsyntax-only` must accept its `_Static_assert`s of

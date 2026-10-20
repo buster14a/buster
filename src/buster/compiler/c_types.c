@@ -27,8 +27,10 @@
 // one-at-a-time path in request order, so that ids never depend on the batch.
 //
 // Layout is type_layout_scalar's, clang's algorithm one record at a time, or type_layout_records', 16 records at once,
-// one per lane, with the scalar layout as its twin. The conversions are tables indexed by arithmetic codes, looked up with vpermb 64 pairs at a time, with a
-// scalar twin. Compatibility, composite types and printing walk types with explicit stacks: nothing here recurses.
+// one per lane, with the scalar layout as its twin. The conversions are tables indexed by arithmetic codes, looked up
+// with vpermb 64 pairs at a time, with a scalar twin. Compatibility, composite types and printing walk types with
+// explicit stacks, the first two with a memo of the pairs they have met, since types share their insides: nothing here
+// recurses.
 //
 // Who writes what: the front end (declarators, #127; the checker, #133; #pragma pack's events, #124; attributes, #147)
 // asks for types and completes tags; layout writes the members' offsets and the records' sizes; the readers (#133,
@@ -313,7 +315,8 @@ struct TypeTags
 
 // Per member of a struct or union, each record's a range. name is an identifier id (#116's IdentId once #192 lands; 0
 // for an unnamed bit-field and an anonymous struct or union), alignment_log2 its explicit alignment (the largest of its
-// _Alignas and aligned attributes) as log2 + 1 or 0, and offset its offset in bits, which layout writes.
+// _Alignas and aligned attributes) as log2 + 1 or 0, and offset its offset in bits, which layout writes. Record 0 is
+// unused, so that 0 is no member (type_find_member's answer when there is none).
 typedef struct TypeMembers TypeMembers;
 struct TypeMembers
 {
@@ -362,7 +365,8 @@ struct TypeTable
     TypeError last_error;
 };
 
-// How many records of each table there is room for: types besides the builtin ones, and tags besides record 0.
+// How many records of each table there is room for: types besides the builtin ones, and tags and members besides
+// record 0.
 typedef struct TypeCapacity TypeCapacity;
 struct TypeCapacity
 {
@@ -813,12 +817,12 @@ static bool type_initialize(TypeTable* table, Arena* arena, Arena* index_arena, 
         result.tags.packed = type_push_column(arena, tags, sizeof(*result.tags.packed), 1, &fits);
         result.tags.pack_log2 = type_push_column(arena, tags, sizeof(*result.tags.pack_log2), 1, &fits);
         result.tags.alignment_log2 = type_push_column(arena, tags, sizeof(*result.tags.alignment_log2), 1, &fits);
-        result.members.name = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.name), 0, &fits);
-        result.members.type = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.type), 0, &fits);
-        result.members.bit_width = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.bit_width), 0, &fits);
-        result.members.alignment_log2 = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.alignment_log2), 0, &fits);
-        result.members.flags = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.flags), 0, &fits);
-        result.members.offset = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.offset), 0, &fits);
+        result.members.name = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.name), 1, &fits);
+        result.members.type = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.type), 1, &fits);
+        result.members.bit_width = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.bit_width), 1, &fits);
+        result.members.alignment_log2 = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.alignment_log2), 1, &fits);
+        result.members.flags = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.flags), 1, &fits);
+        result.members.offset = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.offset), 1, &fits);
         result.index.slots = type_push_column(index_arena, BUSTER_TYPE_INITIAL_BUCKETS * BUSTER_TYPE_BUCKET_SLOTS, sizeof(TypeSlot),
                                               BUSTER_TYPE_INITIAL_BUCKETS * BUSTER_TYPE_BUCKET_SLOTS, &fits);
         if (fits)
@@ -828,7 +832,8 @@ static bool type_initialize(TypeTable* table, Arena* arena, Arena* index_arena, 
             result.parameters.capacity = capacity.parameters;
             result.tags.count = 1;
             result.tags.capacity = (uint32_t)tags;
-            result.members.capacity = capacity.members;
+            result.members.count = 1;
+            result.members.capacity = capacity.members + 1;
             result.index.arena = index_arena;
             result.index.bucket_count = BUSTER_TYPE_INITIAL_BUCKETS;
             type_set_builtins(&result.types);
@@ -1682,9 +1687,11 @@ static TypeId type_adjust_parameter(TypeTable* table, TypeId type)
 
 // The batch: eight requests at a time, their bases' qualifiers hoisted and their keys hashed in vectors, their
 // buckets prefetched, then each looked up with type_index_find_vector. The requests it can't settle that way (a miss,
-// a wide extent, a builtin complex type, a kind it doesn't hash) go to type_derive in request order before the next
-// eight are hashed, so every request gets what the one-at-a-time path would give it at that point: lookups don't change
-// the table, and each miss is added (or found, if an earlier one added it) in order.
+// a wide extent, a builtin complex type, a kind it doesn't hash, and an ALIGNED one that is its base) go to type_derive
+// in request order before the next eight are hashed, so every request gets what the one-at-a-time path would give it
+// at that point: lookups don't change the table, and each miss is added (or found, if an earlier one added it) in
+// order. An ALIGNED request is its base when the base is complete with that alignment; the index can still hold an
+// entry for it, made before its tag was completed, which is stale.
 static void type_derive_batch(TypeTable* table, TypeKeys keys, uint32_t count, TypeId* results)
 {
     const __m512i one = _mm512_set1_epi64(1);
@@ -1735,6 +1742,13 @@ static void type_derive_batch(TypeTable* table, TypeKeys keys, uint32_t count, T
             {
                 const uint32_t key = type_slot_key(kind, key_flags, extent, hashes[lane]);
                 found = type_index_find_vector(&table->index, key, (TypeId)normal[lane], (uint32_t)extent, hashes[lane]);
+            }
+            // An ALIGNED hit whose base is now complete with that alignment is stale: its tag was completed since the
+            // entry was made, and type_derive gives the base. (A hit's base is valid: the entry was made of it.)
+            if (found != 0 && kind == BUSTER_TYPE_KIND_ALIGNED && extent == type_alignment_log2(table, (TypeId)normal[lane]) &&
+                type_is_complete(table, (TypeId)normal[lane]))
+            {
+                found = 0;
             }
             if (found != 0)
             {
@@ -3334,8 +3348,15 @@ static void type_usual_arithmetic_types(TypeTable* table, const TypeId* left, co
 // ---------------------------------------------------------------------------------------------------------------------
 // Compatibility and composite types
 
-// Grows an array that is its arena's last push to room for at least `needed` elements, doubling; false if the arena
-// can't hold it. The extension is pushed with alignment 1, so it starts where the array ends.
+typedef struct TypePair TypePair;
+struct TypePair
+{
+    TypeId left;
+    TypeId right;
+};
+
+// Grows an array to room for at least `needed` elements, doubling: into a new array, with the old one's elements copied,
+// so that the arrays and memos of one walk can share an arena. False if the arena can't hold it.
 static bool type_grow_stack(Arena* arena, void** stack, uint64_t* capacity, uint64_t needed, uint64_t element_bytes)
 {
     bool result = needed <= *capacity;
@@ -3346,29 +3367,126 @@ static bool type_grow_stack(Arena* arena, void** stack, uint64_t* capacity, uint
         {
             grown *= 2;
         }
-        if (*stack == 0)
-        {
-            *stack = arena_push_array(arena, grown, element_bytes, 16);
-            result = *stack != 0;
-        }
-        else
-        {
-            result = arena_push_array(arena, grown - *capacity, element_bytes, 1) != 0;
-        }
+        void* larger = arena_push_array(arena, grown, element_bytes, 16);
+        result = larger != 0;
         if (result)
         {
+            if (*capacity != 0)
+            {
+                memcpy(larger, *stack, *capacity * element_bytes);
+            }
+            *stack = larger;
             *capacity = grown;
         }
     }
     return result;
 }
 
-typedef struct TypePair TypePair;
-struct TypePair
+// The pairs a walk has met, and what each merged to (the composite's): types are a DAG, so a pair can be inside many
+// others (int (*)(T, T), nested), and a walk that expanded every occurrence of it would take time exponential in the
+// types' depth. Open addressing over keys of left << 32 | right (0 is an empty slot: no valid TypeId is 0), at most half
+// full, growing into a new table twice as large in its arena.
+typedef struct TypePairMemo TypePairMemo;
+struct TypePairMemo
 {
-    TypeId left;
-    TypeId right;
+    Arena* arena;
+    uint64_t* keys;
+    TypeId* values;
+    uint64_t capacity;
+    uint64_t count;
 };
+
+static uint64_t type_pair_key(TypeId left, TypeId right)
+{
+    return (uint64_t)left << 32 | right;
+}
+
+// The slot that holds key, or the empty one where it goes.
+static uint64_t type_pair_slot(const TypePairMemo* memo, uint64_t key)
+{
+    const uint64_t mask = memo->capacity - 1;
+    uint64_t slot = type_hash_finish(key) & mask;
+    while (memo->keys[slot] != 0 && memo->keys[slot] != key)
+    {
+        slot = (slot + 1) & mask;
+    }
+    return slot;
+}
+
+// Whether the walk has met key, and if so its value.
+static bool type_pair_find(const TypePairMemo* memo, uint64_t key, TypeId* value)
+{
+    bool result = memo->capacity != 0;
+    if (result)
+    {
+        const uint64_t slot = type_pair_slot(memo, key);
+        result = memo->keys[slot] == key;
+        *value = result ? memo->values[slot] : 0;
+    }
+    return result;
+}
+
+// Records key with value; false if the arena can't hold the larger table that needs.
+static bool type_pair_add(TypePairMemo* memo, uint64_t key, TypeId value)
+{
+    bool result = true;
+    if ((memo->count + 1) * 2 > memo->capacity)
+    {
+        const uint64_t capacity = memo->capacity == 0 ? 64 : memo->capacity * 2;
+        uint64_t* keys = arena_push_array(memo->arena, capacity, sizeof(uint64_t), 64);
+        TypeId* values = keys != 0 ? arena_push_array(memo->arena, capacity, sizeof(TypeId), 64) : 0;
+        result = values != 0;
+        if (result)
+        {
+            memset(keys, 0, capacity * sizeof(uint64_t));
+            TypePairMemo grown = {
+                .arena = memo->arena,
+                .keys = keys,
+                .values = values,
+                .capacity = capacity,
+                .count = memo->count,
+            };
+            for (uint64_t i = 0; i < memo->capacity; i += 1)
+            {
+                if (memo->keys[i] != 0)
+                {
+                    const uint64_t slot = type_pair_slot(&grown, memo->keys[i]);
+                    grown.keys[slot] = memo->keys[i];
+                    grown.values[slot] = memo->values[i];
+                }
+            }
+            *memo = grown;
+        }
+    }
+    if (result)
+    {
+        const uint64_t slot = type_pair_slot(memo, key);
+        memo->count += memo->keys[slot] == 0 ? 1 : 0;
+        memo->keys[slot] = key;
+        memo->values[slot] = value;
+    }
+    return result;
+}
+
+// Keeps, of `count` pairs, those that are two types and that the walk hasn't met (adding them to `met`), in order;
+// returns how many it kept, or UINT32_MAX if `met` can't grow. A pair met before is compared already, or will be.
+static uint32_t type_pairs_unmet(TypePairMemo* met, TypePair* pairs, uint32_t count)
+{
+    uint32_t kept = 0;
+    bool fits = true;
+    for (uint32_t i = 0; fits && i < count; i += 1)
+    {
+        const uint64_t key = type_pair_key(pairs[i].left, pairs[i].right);
+        TypeId unused = 0;
+        if (pairs[i].left != pairs[i].right && !type_pair_find(met, key, &unused))
+        {
+            fits = type_pair_add(met, key, 0);
+            pairs[kept] = pairs[i];
+            kept += 1;
+        }
+    }
+    return fits ? kept : UINT32_MAX;
+}
 
 // mergeTypes's classes of types: a function with a prototype and one without are one class, the three arrays are one,
 // and the two vectors are one.
@@ -3526,13 +3644,17 @@ static uint64_t type_merge_inner_count(const TypeTable* table, TypeId left)
     return kind == BUSTER_TYPE_KIND_FUNCTION ? 1 + table->types.extent[type_index(l)] : 1;
 }
 
-// A worklist of the pairs still to compare, each of which must be compatible: no composite is made.
+// A worklist of the pairs still to compare, each of which must be compatible, and each pushed once: no composite is
+// made.
 static bool type_compatible(const TypeTable* table, TypeId left, TypeId right)
 {
     Scratch scratch = scratch_begin(0);
     void* stack = 0;
     uint64_t capacity = 0;
     uint64_t depth = 0;
+    TypePairMemo met = {
+        .arena = scratch.arena,
+    };
     bool result = type_is_valid(table, left) && type_is_valid(table, right) && type_grow_stack(scratch.arena, &stack, &capacity, 1, sizeof(TypePair));
     if (result)
     {
@@ -3553,7 +3675,10 @@ static bool type_compatible(const TypeTable* table, TypeId left, TypeId right)
             result = type_grow_stack(scratch.arena, &stack, &capacity, depth + type_merge_inner_count(table, pair.left), sizeof(TypePair));
             if (result)
             {
-                depth += type_merge_inner(table, pair.left, pair.right, (TypePair*)stack + depth);
+                TypePair* pairs = (TypePair*)stack + depth;
+                const uint32_t kept = type_pairs_unmet(&met, pairs, type_merge_inner(table, pair.left, pair.right, pairs));
+                result = kept != UINT32_MAX;
+                depth += result ? kept : 0;
             }
         }
     }
@@ -3562,7 +3687,8 @@ static bool type_compatible(const TypeTable* table, TypeId left, TypeId right)
 }
 
 // Whether two types have one canonical type (clang's, without typedefs): the same TypeId, or the same structure once
-// every ALIGNED is looked through. Types without ALIGNED inside need only the first compare.
+// every ALIGNED is looked through, each pair inside compared once. Types without ALIGNED inside need only the first
+// compare.
 static bool type_same_canonical(const TypeTable* table, TypeId left, TypeId right)
 {
     const uint8_t aligned = (table->types.flags[type_index(left)] | table->types.flags[type_index(right)]) & BUSTER_TYPE_FLAG_ALIGNED_INSIDE;
@@ -3573,6 +3699,9 @@ static bool type_same_canonical(const TypeTable* table, TypeId left, TypeId righ
         void* stack = 0;
         uint64_t capacity = 0;
         uint64_t depth = 0;
+        TypePairMemo met = {
+            .arena = scratch.arena,
+        };
         result = type_grow_stack(scratch.arena, &stack, &capacity, 1, sizeof(TypePair));
         if (result)
         {
@@ -3622,7 +3751,9 @@ static bool type_same_canonical(const TypeTable* table, TypeId left, TypeId righ
                             };
                         }
                     }
-                    depth += 1 + count;
+                    const uint32_t kept = type_pairs_unmet(&met, pairs, 1 + count);
+                    result = kept != UINT32_MAX;
+                    depth += result ? kept : 0;
                 }
             }
         }
@@ -3764,10 +3895,11 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
 }
 
 // clang's mergeTypes, with explicit stacks: frames of the pairs being merged, and the inner pairs' results, which a
-// frame reads once all of them are done. A pair that is canonically one type merges to its left type; one that
-// type_merge_shallow settles merges to its left type (or, for an enum against an integer type, the integer type) or
-// fails; any other pushes its inner pairs (the last first, so that their results come out in order) and finishes once
-// they are merged. A failure anywhere fails the whole.
+// frame reads once all of them are done. A pair merged before takes its result from the memo; one that is canonically
+// one type merges to its left type; one that type_merge_shallow settles merges to its left type (or, for an enum
+// against an integer type, the integer type) or fails; any other pushes its inner pairs (the last first, so that their
+// results come out in order) and finishes once they are merged, into the memo. So each pair is expanded once, however
+// many types it is inside. A failure anywhere fails the whole.
 static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
 {
     Scratch frames_scratch = scratch_begin(0);
@@ -3778,6 +3910,9 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
     uint64_t result_capacity = 0;
     uint64_t depth = 0;
     uint64_t result_count = 0;
+    TypePairMemo merges = {
+        .arena = results_scratch.arena,
+    };
     bool valid = type_is_valid(table, left) && type_is_valid(table, right) && type_grow_stack(frames_scratch.arena, &frames, &frame_capacity, 1, sizeof(TypeMergeFrame));
     if (valid)
     {
@@ -3797,7 +3932,12 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
         if (!frame->entered)
         {
             bool leaf = true;
-            if (type_same_canonical(table, frame->left, frame->right))
+            TypeId known = 0;
+            if (type_pair_find(&merges, type_pair_key(frame->left, frame->right), &known))
+            {
+                merged = known;
+            }
+            else if (type_same_canonical(table, frame->left, frame->right))
             {
                 merged = frame->left;
             }
@@ -3842,7 +3982,7 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
         {
             merged = type_merge_finish(table, frame->left, frame->right, (TypeId*)results + frame->results);
             result_count = frame->results;
-            valid = merged != 0;
+            valid = merged != 0 && type_pair_add(&merges, type_pair_key(frame->left, frame->right), merged);
         }
         if (valid && done)
         {

@@ -118,13 +118,17 @@ ids never change.
 (`vpmullq`), prefetches their buckets, and compares each bucket's four slots
 with one vector compare. Misses go through `type_derive`, the one-at-a-time
 path, in request order, so the ids never depend on the batch; so do functions,
-extents past 32 bits and complex types of builtin elements. Against
+extents past 32 bits and complex types of builtin elements. So does an
+`ALIGNED` hit whose base is now complete with that alignment: the entry was
+made while its tag was incomplete, and `type_derive` now gives the tag itself.
+That check costs the benchmark's batch of hits 1.3 cycles a request (6% of its
+requests are `ALIGNED`). Against
 `type_derive` one at a time, on the 9700X:
 
 | 65,536 requests | One at a time | Batch |
 | --- | ---: | ---: |
-| every one a hit | 83.7 cycles, 218.9 instructions | 21.4 cycles, 92.4 instructions |
-| 1 in 8 a miss, into a fresh table | 105.5 cycles, 258.9 instructions | 58.9 cycles, 165.0 instructions |
+| every one a hit | 82.9 cycles, 218.9 instructions | 22.7 cycles, 95.8 instructions |
+| 1 in 8 a miss, into a fresh table | 105.2 cycles, 258.9 instructions | 60.4 cycles, 168.0 instructions |
 
 The handoff proposed groups of 32 u16 tags compared with one `vpcmpeqw`; a tag
 match then needs the columns to confirm it, a second line per lookup at least,
@@ -140,7 +144,8 @@ the order in which tags are completed, from 1, for #113's deferred bodies. An
 enum gets its underlying type when complete: fixed, or as clang chooses it from
 the enumerators' values (`type_enum_value_bits` and `type_enum_underlying`,
 `packed` included). `type_find_member` looks into anonymous members as C does,
-with an explicit stack, and `type_builtin_va_list` makes x86-64's
+with an explicit stack, and returns 0 for no member (member record 0 is
+reserved, as tag record 0 is), and `type_builtin_va_list` makes x86-64's
 `__builtin_va_list`.
 
 ### clang's layout
@@ -199,11 +204,11 @@ bit-fields), in 11 levels of nesting:
 
 | Layout | ns/member | cycles/member | instructions/member | IPC |
 | --- | ---: | ---: | ---: | ---: |
-| one record at a time, as they were defined | 3.21 | 17.80 | 86.5 | 4.86 |
-| scalar, the same levels | 3.36 | 18.62 | 86.5 | 4.65 |
-| vector, the same levels | 2.66 | 14.78 | 49.3 | 3.33 |
+| one record at a time, as they were defined | 3.26 | 18.06 | 86.5 | 4.79 |
+| scalar, the same levels | 3.39 | 18.77 | 86.5 | 4.61 |
+| vector, the same levels | 2.66 | 14.76 | 49.3 | 3.34 |
 
-The vector layout is 1.26 times the scalar one on the same batches and 1.20
+The vector layout is 1.27 times the scalar one on the same batches and 1.22
 times one record at a time in definition order, which reads the member columns
 in order. Its time: the groups 48%, the scalar pass 33%, and the batch's sort
 and completion 15% (`perf record`). The NSQ in front of the FP schedulers is
@@ -260,19 +265,23 @@ kernel. On the 9700X, 65,536 pairs drawn as a C program's operands are:
 
 | Conversions | cycles/pair | instructions/pair |
 | --- | ---: | ---: |
-| scalar twin, on codes | 44.07 | 99.8 |
+| scalar twin, on codes | 44.05 | 99.8 |
 | `vpermb`, 64-entry table | 0.17 | 0.59 |
 | `vpermi2b`, 128-entry table | 0.23 | 0.60 |
-| `type_usual_arithmetic`, on TypeIds, one at a time | 43.37 | 115.0 |
-| `type_usual_arithmetic_types`, on TypeIds | 2.27 | 5.38 |
+| `type_usual_arithmetic`, on TypeIds, one at a time | 44.20 | 115.0 |
+| `type_usual_arithmetic_types`, on TypeIds | 2.25 | 5.38 |
 
-The promotions are 1.64 cycles a code in the scalar twin and 0.05 with `vpermb`.
+The promotions are 1.61 cycles a code in the scalar twin and 0.04 with `vpermb`.
 
 ## Compatibility and composite types
 
 `type_compatible` and `type_composite` are clang's `mergeTypes` in C17, on
-explicit stacks in scratch memory (types form a DAG, so the stacks are bounded
-by the table). Equal ids are compatible at once; otherwise:
+explicit stacks in scratch memory. Types form a DAG: a pair of types can be
+inside many others (`int (*)(T, T)`, nested, is n pairs of records but a tree of
+2^n leaves), so each walk keeps a memo of the pairs it has met. Compatibility
+pushes a pair once, and the composite takes a pair it has merged from the memo;
+the canonical comparison they use (`type_same_canonical`) does the same. Equal
+ids are compatible at once; otherwise:
 
 - qualifiers must be equal, and `ALIGNED` is looked through, as clang's
   canonical types have no typedefs;
@@ -317,20 +326,23 @@ location (it prints `(unnamed)` where clang names the file and line).
   get equal ids, and different ones never do.
 - **Batches:** random requests, some invalid, given one at a time and in random
   slices of batches to two tables that must end up identical (results, columns
-  and index), growing the index well past its first size.
+  and index), growing the index well past its first size; then `ALIGNED`
+  requests of a tag completed since its wrapper was made, through both.
 - **Layout:** clang's corner cases as fixtures, then 3,000 random records of
   every member type, bit-fields of every width next to every type, packed,
   packs, aligned, nesting, anonymous members and flexible array members, with
   member counts around the vector layout's blocks of 16 and inputs past its
   limits, laid out by the scalar layout in one table and by
   `type_layout_records` in another: identical offsets, sizes, alignments and
-  completion order.
+  completion order. Member lookup finds the first member of a fresh table,
+  directly and through an anonymous member.
 - **Conversions:** every pair of codes through both kernels and the scalar twin,
   at every length to 200 and ending at a `PROT_NONE` page; the TypeId batch
   against `type_usual_arithmetic` on enums, `_BitInt`s, aligned and atomic types;
   and fixtures of clang's results.
 - **Compatibility, composite types and printing:** fixtures, the C standard's
-  examples among them (C17 6.2.7p5, 6.7.6.2p6 and 6.7.6.3p21).
+  examples among them (C17 6.2.7p5, 6.7.6.2p6 and 6.7.6.3p21), and types that
+  share their insides 64 levels deep, whose trees have 2^64 leaves.
 - **clang as the oracle:** a random world of types, records and enums (1,766 by
   default; `--count` sets how many), written as C with a typedef per type built
   from earlier ones, so that the C spells each type independently of the
