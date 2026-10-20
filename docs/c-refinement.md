@@ -83,7 +83,9 @@ to the names the later stages switch on (`BUSTER_C_NAMES` in `c_intern.c`):
 Telling a keyword is then one compare against `C_NAME_KEYWORD_COUNT`. Whether a
 name is a keyword depends on the language mode (`bool`, `true` and `typeof`
 come with C23; `asm` and `typeof` come with GNU modes), so `c_name_is_keyword`
-reads a rule per keyword, the rules of clang's `TokenKinds.def`. Nothing may be
+reads a rule per keyword, the rules of clang's `TokenKinds.def`. A mode's
+`CLanguage` holds the standard's year in full (1989 to 2023), so that a later
+standard compares greater. Nothing may be
 emitted in id order, so that interning from several threads later (#150) can't
 change the compiler's output.
 
@@ -223,13 +225,17 @@ and 20.07 with batches of 64, so they were kept and tuned further:
 and 18.55 for this document's results. Each figure is the median of 21 passes;
 runs differ by about 1%.)
 
-The hash is defined by `intern_hash_bytes_scalar`. It folds the spelling's
-16-byte lanes into 128 bits, rotating lane `k`'s two quadwords by
-`intern_lane_rotations[k % 4]` so that lanes can't cancel each other, then mixes
-the 128 bits and the length with two `aesenc` rounds. `intern_hash_bytes`
-computes the same hash 64 bytes at a time, and `intern_hash_vector` computes it
-from the masked load of up to 64 bytes. `test-refinement` checks that all three
-agree.
+The hash is defined by `intern_hash_bytes_scalar`. It folds each 64-byte chunk
+of the spelling into 128 bits: the XOR of its four 16-byte lanes, with lane
+`k`'s two quadwords rotated by `intern_lane_rotations[k]`, so that lanes can't
+cancel each other. Each chunk after the first is XORed into an `aesenc` round
+of the state, so that equal or swapped chunks can't cancel either: a plain XOR
+of the chunks would hash every identifier `X X` of two equal 64-byte halves by
+its length alone. Two more `aesenc` rounds mix the state and the length. An
+identifier of up to 64 bytes, nearly all of them, is one chunk and pays no
+extra round. `intern_hash_bytes` computes the same hash 64 bytes at a time, and
+`intern_hash_vector` computes it from the masked load of up to 64 bytes.
+`test-refinement` checks that all three agree.
 
 ### Zen 5 costs that shaped it
 
@@ -275,10 +281,17 @@ bit. The checks are:
 
 - **hash:** the three hash functions agree on 200,000 spellings of 0 to 200
   bytes.
-- **names:** every predefined name has its id and spelling, and a sample of
-  keywords (`int`, `asm`, `typeof`, `bool`, `inline`, `restrict`,
-  `__attribute__`) is a keyword exactly in the modes clang makes it one (C89,
-  C17, C23 and GNU modes).
+- **long hashes:** 22,528 long spellings made of repeated or swapped parts must
+  all hash differently:
+  - `X X` for 8,192 64-byte `X`;
+  - a 16-byte lane eight times;
+  - `X Y` and `Y X`;
+  - `X` two, three and four times.
+- **names:** every predefined name has its id and spelling, and every name is a
+  keyword in exactly the modes clang makes it one in, in all ten modes from
+  `c89` to `gnu23`. The modes of the names that depend on them (`inline`,
+  `restrict`, `typeof`, `asm`, C23's keywords) are written out mode by mode,
+  not computed from years.
 - **table:** 300,000 random spellings of 1 to 200 bytes, enough to grow the
   table seven times, get ids in first-seen order and the same id again. Absent
   spellings are not found.
