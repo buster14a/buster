@@ -931,18 +931,85 @@ column. The import of an input must give the exact path's result and records
 either way. The tests also check that each well-formed input takes the
 vector path.
 
+Binding, the second part (`bind.c`), joins the runtime to the program's link
+and binds every name before any layout:
+
+- **Order by construction.** The classes whose atoms keep their id order
+  (`.init`'s and `.fini`'s fragments, `.eh_frame` and the terminator that
+  `crtendS.o` ends it with, the init and fini arrays) must come out in GCC's
+  link order. So the runtime's objects join around the program's atoms rather
+  than being sorted later: `bind_begin` joins `Scrt1.o`, `crti.o` and
+  `crtbeginS.o` after the program's symbols and before its atoms, and
+  `bind_end` the members of `libc_nonshared.a` the link needs, then
+  `crtendS.o` and `crtn.o`, after them. The test programs leave room for this
+  (`link_program_generate_begin`, `_atoms` and `_end`).
+- **One symbol per global name.** A global or weak symbol of the runtime's
+  takes the link's symbol of its name, if there is one. So `bind_begin` first
+  matches every global symbol of the program against the runtime's global
+  names (`RuntimeNames`: each name of the runtime's global symbols, of
+  `libc.so.6`'s exports and of its references, once, built by
+  `runtime_import`, indexed as the exports are). The match is the one part
+  that grows with the program; the rest grows with the runtime, or with the
+  names the program leaves undefined. Most of the program's names aren't the
+  runtime's, so the match is mostly misses, and a miss mustn't touch the
+  index: its buckets and hashes are 48 KB, which a large program's columns
+  stream out of L1. So the names also have a blocked Bloom filter, a word per
+  four names (8 KB for libc's), each name setting two bits of the word its
+  hash's top bits choose. Eight symbols at a time, their names' hashes are
+  gathered by name id, their filter words by the hashes' top bits, and a lane
+  mask of both bits set sends about one miss in a hundred, and every hit, to
+  the index. Gathers pay here where the patch kernel's didn't: the alternative
+  is two dependent scalar loads a symbol, and the filter's words stay in L1.
+- **Each object joins as a block** (the vector path). Its names' bytes are
+  one run in the runtime's name arena, copied at once, with their pointers
+  moved eight at a time. Its atoms' units and fixup ranges move sixteen at a
+  time and their bytes are copied one atom at a time: an executable patches
+  atoms in place, so the runtime's bytes aren't shared. Its symbols that join
+  new are compressed into place eight at a time, their ids an expand of
+  consecutive ones, and the rest merge with the link's symbol of their name by
+  scalar rules. Its fixups' targets move through the symbols' new ids by
+  scalar loads, in a pass of their own. The exact path adds the same records
+  one at a time through `link.c`'s checked adds.
+- **Binding** (`bind_end`). The symbols that nothing defines are selected
+  eight at a time by a compress over the atom, name and source columns, and
+  each is looked up: the linker's names, a crt object after the program, an
+  export of `libc.so.6` (an import, with the export's type and version), a
+  member of `libc_nonshared.a` for a strong reference, nothing for a weak one.
+  The members are a frontier walk over a bitset: each round binds the symbols
+  the round before added. The exports come from the names that took a link
+  symbol, as they took it, rather than from all of the runtime's.
+
+Measured on the 9700X (`benchmark-bind`, one CPU, medians of 21 runs), for
+generated programs that call libc, 200 workers per unit:
+
+| Workers (global symbols) | Match, vector | Match, exact | `bind_begin`, vector / exact | `bind_end`, vector / exact |
+| --- | ---: | ---: | ---: | ---: |
+| 1 (18) | 0.09 µs | 0.07 µs | 0.28 / 0.40 µs | 0.23 / 0.20 µs |
+| 64 (81) | 0.14 µs | 0.22 µs | 0.33 / 0.54 µs | 0.26 / 0.22 µs |
+| 2,000 (2,080) | 1.83 µs, 0.88 ns per global | 4.71 µs, 2.26 ns | 2.05 / 5.06 µs | 0.73 / 0.69 µs |
+| 102,400 (106,260) | 90.7 µs, 0.85 ns | 727 µs, 6.84 ns | 91.1 / 733 µs | 25.5 / 24.6 µs |
+
+Before the filter, the vector match took 7.2 ns per global symbol at 102,400
+workers, at an IPC of 1.1, against 2.0 ns at 2,000: the same instructions,
+waiting on the index's lines. With it, 0.85 to 0.88 ns at both sizes, two
+gathers per eight symbols. The crt objects' joins are a fixed 0.2 to 0.3 µs.
+`bind_end`'s scan of the symbol columns for the names nothing defines runs as
+fast scalar as in vectors (25 µs for 112,683 symbols, 0.22 ns each, the
+scalar loop at an IPC of 7.5), both bound by reading the columns rather than
+by instructions.
+So the smallest program binds in 0.5 µs, well within hello world's 20 µs
+target, and one of 102,400 workers in 117 µs, against 4 to 10 ms for its
+whole link.
+
 The phases still to come are designed the same way:
 
-- **Binding the program** (part 2). The program's undefined names already
-  have their hashes (`link_hash`, in the names' column). Each is looked up in
-  the runtime's definitions' index, then in `libc.so.6`'s exports' index: the
-  buckets eight at a time by a vector shift, then each bucket's scan.
-  `libc_nonshared.a`'s members are loaded by a frontier walk over a bitset of
-  loaded members: each round looks up the names that the members loaded in
-  the round before leave undefined.
-- **Exports** (part 2). A program definition whose name `libc.so.6` refers to
-  goes to `.dynsym`: each definition is a lookup in an index of the library's
-  references, built as the exports' is.
+- **Stubs for the runtime's calls into libc** (part 3). The program's code
+  reaches an import through the GOT, but the runtime's objects call libc
+  through `R_X86_64_PLT32`: `crtbeginS.o`'s call of `__cxa_finalize` and each
+  member's tail call (`atexit`'s of `__cxa_atexit`). Each import that a
+  `CALL` fixup reaches gets a stub, `jmp [rip + slot]` through its GOT slot,
+  and the call goes to the stub: a lane mask over the fixups' kinds and
+  targets, compressed into the stubs' list.
 - **`.dynsym`, `.dynstr` and `.gnu.hash`** (part 3). The imported and
   exported symbols are a compress of the symbol columns by their masks, and
   the names' offsets in `.dynstr` an exclusive prefix sum of their lengths
@@ -2110,6 +2177,7 @@ Where the decisions stand:
 | Prefix sums for layout | latency | scalar until a profile says otherwise; the counting sorts' are vectors (`import_exclusive_scan`) |
 | Build ID | arithmetic | AES rounds on each chunk while it is in L2 (done: 260 GB/s, as fast as reading it; "Patching and writing") |
 | Probing hash tables | memory latency | scalar loads with software prefetch: gathers measured no faster than scalar loads in the patch kernel |
+| Matching a program's names against the runtime's (binding) | the index's cache lines, for lookups that mostly miss | a blocked Bloom filter in L1 tested eight names at a time by two gathers, the index only behind it (done: 0.85 against 6.8 ns per global symbol; "Step 5's phases, data-parallel") |
 
 So on the direct path, most of the output is produced by a vector kernel that
 already exists (the encoder), and what is left for the linker is load/store
@@ -2291,8 +2359,9 @@ and with this document updated with what was measured:
    reader with a vector path and an exact one (`import.c`, `runtime.c`,
    `test-import` and `benchmark-import`, done: "The runtime snapshot" and
    "Step 5's phases, data-parallel"); the runtime in the program's link,
-   bound; the dynamic PIE; then the snapshot itself, `.eh_frame` for the
-   generated programs and `benchmark-link`.
+   bound (`bind.c`, `test-bind` and `benchmark-bind`, done: "Step 5's phases,
+   data-parallel"); the dynamic PIE; then the snapshot itself, `.eh_frame` for
+   the generated programs and `benchmark-link`.
 6. **`-static`:** libc.a's closure, IRELATIVE for its IFUNCs, static TLS.
    Then `-static-pie` and `-shared`.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse

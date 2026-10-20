@@ -1,0 +1,817 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// Binding: the C runtime (runtime.c) joined to a program's link, and each name of the link bound
+// (docs/object-writer-and-linker.md, "Step 5's phases, data-parallel"), for the dynamic PIE that step 5 writes.
+//
+// The runtime's objects join the link in the order GCC's driver links them, so that the classes whose atoms keep their
+// id order (.init's fragments, .eh_frame and the terminator that crtendS.o ends it with, the init and fini arrays) come
+// out as lld lays them out: bind_begin appends Scrt1.o, crti.o and crtbeginS.o, the caller then adds the program's
+// atoms, and bind_end appends the members of libc_nonshared.a that the link needs, then crtendS.o and crtn.o. The
+// program's global symbols should all exist before bind_begin; one added later is matched in bind_end. An object joins
+// as a block: its names, atoms, symbols, fixups and wide addends, with their ids moved by the link's counts, its units
+// numbered from the caller's unit_base on, and its atoms' bytes copied into the caller's arena, since an executable
+// patches atoms where they are.
+//
+// A global or weak symbol of the runtime takes the link's symbol of its name if there is one, so that the link keeps
+// one symbol per global name: bind_begin matches the link's global symbols against the runtime's global names
+// (RuntimeNames) once, and each of the runtime's that joins without a match becomes its name's symbol. Two of the
+// link's global symbols with one of those names are an error. When both define the name, the link's definition wins
+// over a weak one of the runtime's, and a strong one is an error (for two weak ones GNU ld would take the runtime's,
+// which comes first in link order); a definition of the runtime's defines a link symbol that only refers to the name,
+// with its atom, value, size, type, binding and source, and the more constraining visibility. Two references keep the
+// stronger binding, the more constraining visibility and the type either has. A definition of the link's keeps its
+// flags.
+//
+// bind_end binds each name that nothing in the link defines, in the order GNU ld resolves the driver's link line:
+//   - to the linker, for a name it defines (_GLOBAL_OFFSET_TABLE_): source LINKER;
+//   - to a crt object after the program (__TMC_END__), which defines it when it joins;
+//   - to libc.so.6's export: an import, with source RUNTIME_SHARED, the export's type, and its version in the linker's
+//     column, listed in Bind.imports;
+//   - for a strong reference, to a member of libc_nonshared.a (atexit), which joins the link;
+//   - for a weak reference, to nothing: source NONE. As with GNU ld, a weak reference loads no member.
+// Anything else is an error naming it. Members that join can refer to names nothing else does, so binding goes in
+// rounds, each over the symbols the round before added, until no member joins: a frontier walk over a bitset of the
+// members. crtendS.o's and crtn.o's references bind without members, as GNU ld scans libc's group before them. A
+// member's strong reference to a name that a weak one left to nothing is an error, where GNU ld would scan the archive
+// again; libc_nonshared.a's members refer only to libc.so.6 and crtbeginS.o. Last, each definition with default or
+// protected visibility of a name that libc.so.6 defines too or refers to is an export (Bind.exports), as GNU ld and lld
+// export them: those among the names that took a link symbol, which binding lists as they do.
+//
+// Two paths, which make the same link (bind_test.c compares them column by column):
+//   - BIND_PATH_VECTOR: the symbols to match tested eight at a time against a filter of the runtime's names (their
+//     hashes and the filter's words gathered), and those to bind selected eight at a time by a compress over the
+//     symbol columns; each object joined as a block of columns: copies, with the ids moved eight or sixteen at a
+//     time, the symbols that join new compressed into place, and the targets of its fixups moved by scalar loads in a
+//     pass of their own.
+//   - BIND_PATH_EXACT: the symbols tested one at a time and each looked up in the index, without the filter, and the
+//     objects joined one record at a time through link.c's checked adds. It is the vector path's twin and oracle.
+// Both look names up in the runtime's index (runtime_find_global_name), which bind_test.c checks against a scan.
+//
+// main.c includes this file after runtime.c. Layout, in this order:
+//   - API: BindError, BindPath, Bind and the entry points' prototypes.
+//   - Matching: bind_lane_mask, bind_visibility_rank, bind_fail, bind_name_symbol, bind_take_name, bind_match_vector,
+//     bind_match_exact and bind_match.
+//   - Joining an object: bind_merge, bind_piece_fits, bind_join_block, bind_join_records and bind_join.
+//   - Binding: bind_resolve_symbol, bind_resolve_vector, bind_resolve_exact, bind_resolve, bind_members,
+//     bind_keep_imports and bind_find_exports.
+//   - Entry points: bind_capacity, bind_begin and bind_end.
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+
+// CPU architecture dependent includes
+#include <immintrin.h>
+
+// ---------------------------------------------------------------------------------------------------------------------
+// API
+
+typedef enum BindError
+{
+    BIND_ERROR_NONE,
+    // A name that nothing defines, referred to without being weak: Bind.name.
+    BIND_ERROR_UNDEFINED,
+    // A name that the link and the runtime both define, neither of them weakly: Bind.name.
+    BIND_ERROR_DUPLICATE,
+    // A name of the runtime's that two of the link's global symbols have: Bind.name.
+    BIND_ERROR_SYMBOLS,
+    // The link's tables or arenas, or the binding's own memory, have no room.
+    BIND_ERROR_FULL,
+} BindError;
+
+typedef enum BindPath
+{
+    BIND_PATH_VECTOR,
+    BIND_PATH_EXACT,
+} BindPath;
+
+typedef struct Bind Bind;
+struct Bind
+{
+    const Runtime* runtime;
+    BindPath path;
+    // Where the runtime's atoms' bytes are copied.
+    Arena* bytes;
+    // The link's unit for the runtime's unit 0: the runtime's units follow it in their order.
+    uint32_t unit_base;
+    // By entry of the runtime's global names: the link's symbol of that name, or 0; and the entries that have one, in
+    // the order they took it.
+    SymbolId* name_symbols;
+    uint32_t* named;
+    uint32_t named_count;
+    // By symbol of the runtime's link: the link's symbol it became, or 0 before its object joined.
+    SymbolId* symbols;
+    // libc_nonshared.a's members that the link needs, and those that joined it, a bit each.
+    uint64_t* members_needed;
+    uint64_t* members_joined;
+    // The link's symbols count after bind_begin: bind_end matches those from there to its own start.
+    uint32_t symbols_begun;
+    // Whether binding has begun, after which a link symbol with source NONE is a weak reference to nothing, and
+    // whether crtendS.o and crtn.o have joined.
+    bool resolving;
+    bool tail_joined;
+    // The link's imports from libc.so.6 and the definitions it exports, room for `capacity` of each.
+    SymbolId* imports;
+    uint32_t import_count;
+    SymbolId* exports;
+    uint32_t export_count;
+    uint32_t capacity;
+    // The first error, and the link's name it is about (0 for none).
+    BindError error;
+    NameId name;
+};
+
+// How many records the runtime adds to a link at most, and how many bytes of names and of atoms (with their
+// alignments): the room a link that binds against it needs besides its own.
+static __attribute__((unused)) LinkCapacity bind_capacity(const Runtime* runtime, uint64_t* name_bytes, uint64_t* atom_bytes);
+// Begins binding `link` against `runtime` by `path`: matches the link's global symbols against the runtime's names and
+// appends Scrt1.o, crti.o and crtbeginS.o, numbering the runtime's units from unit_base and copying atoms' bytes into
+// `bytes`. Bind's arrays come from `arena`. False, with bind->error, if it fails.
+static __attribute__((unused)) bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena);
+// Binds every name of the link, appending the members of libc_nonshared.a it needs, then crtendS.o and crtn.o, and
+// lists the imports and exports. False, with bind->error and bind->name, if it fails; the link is then unfit to link.
+static __attribute__((unused)) bool bind_end(Bind* bind, Link* link);
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Matching
+
+#define BUSTER_BIND_BATCH 8
+
+static uint32_t bind_lane_mask(uint32_t count)
+{
+    return _bzhi_u32(0xff, count);
+}
+
+// How constraining a visibility is: default, protected, hidden, then internal.
+static uint32_t bind_visibility_rank(uint8_t flags)
+{
+    const uint8_t visibility = flags & BUSTER_LINK_SYMBOL_VISIBILITY;
+    return visibility == BUSTER_LINK_SYMBOL_DEFAULT     ? 0
+           : visibility == BUSTER_LINK_SYMBOL_PROTECTED ? 1
+           : visibility == BUSTER_LINK_SYMBOL_HIDDEN    ? 2
+                                                        : 3;
+}
+
+static void bind_fail(Bind* bind, BindError error, NameId name)
+{
+    if (bind->error == BIND_ERROR_NONE)
+    {
+        bind->error = error;
+        bind->name = name;
+    }
+}
+
+// Makes `symbol` the link symbol of the runtime's global name `entry`, which has none, and lists the entry.
+static void bind_name_symbol(Bind* bind, uint32_t entry, SymbolId symbol)
+{
+    bind->name_symbols[entry] = symbol;
+    bind->named[bind->named_count] = entry;
+    bind->named_count += 1;
+}
+
+// Makes `symbol` its name's link symbol if the runtime has the name: an error if another symbol is.
+static void bind_take_name(Bind* bind, const Link* link, SymbolId symbol)
+{
+    const NameId name = link->symbols.name[symbol];
+    const uint32_t entry = runtime_find_global_name(&bind->runtime->global_names, link->names.bytes[name], link->names.length[name], link->names.hash[name]);
+    if (entry != 0 && bind->name_symbols[entry - 1] == 0)
+    {
+        bind_name_symbol(bind, entry - 1, symbol);
+    }
+    else if (entry != 0 && bind->name_symbols[entry - 1] != symbol)
+    {
+        bind_fail(bind, BIND_ERROR_SYMBOLS, name);
+    }
+}
+
+// The link's global symbols from `first` to `end`, eight at a time: those whose binding isn't local and that have a
+// name, their names' hashes gathered by name, and their words of the runtime's names' filter gathered by the hashes'
+// top bits. Only a symbol whose two bits are both set, about one in a hundred of those the runtime doesn't have, goes
+// on to the index (bind_take_name). Gathers win here where the patch kernel's didn't: the alternative is two dependent
+// scalar loads a symbol, and the filter's words stay in L1.
+static void bind_match_vector(Bind* bind, const Link* link, SymbolId first, SymbolId end)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    const RuntimeNames* names = &bind->runtime->global_names;
+    const __m512i ones = _mm512_set1_epi64(1);
+    const __m512i low6 = _mm512_set1_epi64(63);
+    for (SymbolId batch = first; batch < end; batch += BUSTER_BIND_BATCH)
+    {
+        const uint32_t n = end - batch < BUSTER_BIND_BATCH ? end - batch : BUSTER_BIND_BATCH;
+        const __mmask8 loaded = (__mmask8)bind_lane_mask(n);
+        const __m512i flags = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(loaded, symbols->flags + batch));
+        const __m256i name = _mm256_maskz_loadu_epi32(loaded, symbols->name + batch);
+        const __mmask8 kept = (__mmask8)(_mm512_test_epi64_mask(flags, _mm512_set1_epi64(BUSTER_LINK_SYMBOL_BINDING)) & _mm256_test_epi32_mask(name, name) & loaded);
+        const __m512i hash = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), kept, name, link->names.hash, 8);
+        const __m512i word_index = _mm512_srli_epi64(hash, 64 - names->filter_bits);
+        const __m512i word = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), kept, word_index, names->filter, 8);
+        const __m512i bits = _mm512_or_si512(_mm512_sllv_epi64(ones, _mm512_and_si512(hash, low6)), _mm512_sllv_epi64(ones, _mm512_and_si512(_mm512_srli_epi64(hash, 6), low6)));
+        uint32_t maybe = _mm512_mask_cmpeq_epi64_mask(kept, _mm512_and_si512(word, bits), bits);
+        while (maybe != 0)
+        {
+            bind_take_name(bind, link, batch + (SymbolId)__builtin_ctz(maybe));
+            maybe &= maybe - 1;
+        }
+    }
+}
+
+static void bind_match_exact(Bind* bind, const Link* link, SymbolId first, SymbolId end)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    for (SymbolId symbol = first; symbol < end; symbol += 1)
+    {
+        if ((symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL && symbols->name[symbol] != 0)
+        {
+            bind_take_name(bind, link, symbol);
+        }
+    }
+}
+
+static void bind_match(Bind* bind, const Link* link, SymbolId first, SymbolId end)
+{
+    if (bind->path == BIND_PATH_VECTOR)
+    {
+        bind_match_vector(bind, link, first, end);
+    }
+    else
+    {
+        bind_match_exact(bind, link, first, end);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Joining an object
+
+// Joins the runtime's symbol `from_symbol`, of an object that has just joined with its atoms `atom_delta` on, to the
+// link's `symbol` of the same name (see the orientation comment).
+static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId symbol, uint32_t atom_delta)
+{
+    const LinkSymbols* from = &bind->runtime->link.symbols;
+    LinkSymbols* symbols = &link->symbols;
+    const uint8_t from_flags = from->flags[from_symbol];
+    const uint8_t flags = symbols->flags[symbol];
+    const bool from_defined = from->atom[from_symbol] != 0;
+    // A program symbol is the program's definition, before or after its atom joins.
+    const bool defined = symbols->atom[symbol] != 0 || symbols->source[symbol] == BUSTER_LINK_SOURCE_PROGRAM;
+    const bool from_weak = (from_flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    const uint8_t visibility = bind_visibility_rank(from_flags) > bind_visibility_rank(flags) ? from_flags & BUSTER_LINK_SYMBOL_VISIBILITY : flags & BUSTER_LINK_SYMBOL_VISIBILITY;
+    if (from_defined && defined && !from_weak)
+    {
+        bind_fail(bind, BIND_ERROR_DUPLICATE, symbols->name[symbol]);
+    }
+    else if (from_defined && !defined)
+    {
+        if (link_define_symbol(link, symbol, from->atom[from_symbol] + atom_delta, from->value[from_symbol], from->size[from_symbol]))
+        {
+            symbols->flags[symbol] = (uint8_t)((from_flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | visibility);
+            symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
+        }
+        else
+        {
+            bind_fail(bind, BIND_ERROR_FULL, symbols->name[symbol]);
+        }
+    }
+    else if (!from_defined && !defined)
+    {
+        const bool weak = from_weak && (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+        const uint8_t type = (flags & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_NOTYPE ? flags & BUSTER_LINK_SYMBOL_TYPE : from_flags & BUSTER_LINK_SYMBOL_TYPE;
+        symbols->flags[symbol] = (uint8_t)(type | (weak ? BUSTER_LINK_SYMBOL_WEAK : BUSTER_LINK_SYMBOL_GLOBAL) | visibility);
+        // Once binding has begun, a link symbol of source NONE is a weak reference that nothing defines.
+        if (bind->resolving && !weak && symbols->source[symbol] == BUSTER_LINK_SOURCE_NONE)
+        {
+            bind_fail(bind, BIND_ERROR_UNDEFINED, symbols->name[symbol]);
+        }
+    }
+}
+
+// Whether the link has room for piece `piece` of the runtime: its records, its names' bytes, and its atoms' bytes with
+// their alignments.
+static bool bind_piece_fits(const Bind* bind, const Link* link, uint32_t piece)
+{
+    const Link* from = &bind->runtime->link;
+    const ImportMark begin = bind->runtime->pieces[piece].begin;
+    const ImportMark end = bind->runtime->pieces[piece].end;
+    uint64_t atom_bytes = 0;
+    for (AtomId atom = begin.atoms; atom < end.atoms; atom += 1)
+    {
+        atom_bytes += from->atoms.bytes[atom] != 0 ? from->atoms.size[atom] + ((uint64_t)1 << from->atoms.alignment_log2[atom]) - 1 : 0;
+    }
+    const Arena* names = link->name_arena;
+    return link->names.capacity - link->names.count >= end.names - begin.names && link->atoms.capacity - link->atoms.count >= end.atoms - begin.atoms &&
+           link->symbols.capacity - link->symbols.count >= end.symbols - begin.symbols && link->fixups.capacity - link->fixups.count >= end.fixups - begin.fixups &&
+           link->fixups.wide_capacity - link->fixups.wide_count >= end.wide_addends - begin.wide_addends &&
+           names->capacity - names->length >= end.name_bytes - begin.name_bytes && bind->bytes->capacity - bind->bytes->length >= atom_bytes;
+}
+
+// The vector path's join: each table's columns copied as a block (see the orientation comment).
+static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
+{
+    const Runtime* runtime = bind->runtime;
+    const Link* from = &runtime->link;
+    const ImportMark begin = runtime->pieces[piece].begin;
+    const ImportMark end = runtime->pieces[piece].end;
+    const uint32_t name_count = end.names - begin.names;
+    const uint32_t atom_count = end.atoms - begin.atoms;
+    const uint32_t symbol_count = end.symbols - begin.symbols;
+    const uint32_t fixup_count = end.fixups - begin.fixups;
+    const uint32_t wide_count = end.wide_addends - begin.wide_addends;
+    const NameId name_first = link->names.count;
+    const AtomId atom_first = link->atoms.count;
+    const SymbolId symbol_first = link->symbols.count;
+    const FixupId fixup_first = link->fixups.count;
+    const uint32_t name_delta = name_first - begin.names;
+    const uint32_t atom_delta = atom_first - begin.atoms;
+    const uint32_t fixup_delta = fixup_first - begin.fixups;
+    const uint32_t wide_delta = link->fixups.wide_count - begin.wide_addends;
+
+    // Names: the piece's bytes are one run in the runtime's name arena, copied at once, and the pointers moved with them.
+    const uint64_t name_bytes = end.name_bytes - begin.name_bytes;
+    const uint8_t* source = runtime->names.base + begin.name_bytes;
+    uint8_t* copy = arena_push(link->name_arena, name_bytes, 1);
+    memcpy(copy, source, name_bytes);
+    const __m512i moved = _mm512_set1_epi64((long long)((uintptr_t)copy - (uintptr_t)source));
+    for (uint32_t i = 0; i < name_count; i += BUSTER_BIND_BATCH)
+    {
+        const __mmask8 lanes = (__mmask8)bind_lane_mask(name_count - i < BUSTER_BIND_BATCH ? name_count - i : BUSTER_BIND_BATCH);
+        const __m512i pointers = _mm512_maskz_loadu_epi64(lanes, from->names.bytes + begin.names + i);
+        _mm512_mask_storeu_epi64(link->names.bytes + name_first + i, lanes, _mm512_add_epi64(pointers, moved));
+    }
+    memcpy(link->names.length + name_first, from->names.length + begin.names, name_count * sizeof(uint32_t));
+    memcpy(link->names.hash + name_first, from->names.hash + begin.names, name_count * sizeof(uint64_t));
+    link->names.count += name_count;
+
+    // Atoms: units and fixup ranges moved sixteen at a time, bytes copied one atom at a time.
+    LinkAtoms* atoms = &link->atoms;
+    memcpy(atoms->class + atom_first, from->atoms.class + begin.atoms, atom_count);
+    memcpy(atoms->alignment_log2 + atom_first, from->atoms.alignment_log2 + begin.atoms, atom_count);
+    memcpy(atoms->size + atom_first, from->atoms.size + begin.atoms, atom_count * sizeof(uint64_t));
+    memcpy(atoms->fixup_count + atom_first, from->atoms.fixup_count + begin.atoms, atom_count * sizeof(uint32_t));
+    memset(atoms->address + atom_first, 0, atom_count * sizeof(uint64_t));
+    for (uint32_t i = 0; i < atom_count; i += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, atom_count - i < 16 ? atom_count - i : 16);
+        const __m512i units = _mm512_maskz_loadu_epi32(lanes, from->atoms.unit + begin.atoms + i);
+        _mm512_mask_storeu_epi32(atoms->unit + atom_first + i, lanes, _mm512_add_epi32(units, _mm512_set1_epi32((int)bind->unit_base)));
+        const __m512i counts = _mm512_maskz_loadu_epi32(lanes, from->atoms.fixup_count + begin.atoms + i);
+        const __m512i firsts = _mm512_maskz_loadu_epi32(lanes, from->atoms.fixup_begin + begin.atoms + i);
+        const __mmask16 ranged = _mm512_test_epi32_mask(counts, counts);
+        _mm512_mask_storeu_epi32(atoms->fixup_begin + atom_first + i, lanes, _mm512_mask_add_epi32(firsts, ranged, firsts, _mm512_set1_epi32((int)fixup_delta)));
+    }
+    for (uint32_t i = 0; i < atom_count; i += 1)
+    {
+        const AtomId atom = begin.atoms + i;
+        const uint8_t* bytes = from->atoms.bytes[atom];
+        uint8_t* placed = bytes != 0 ? arena_push(bind->bytes, from->atoms.size[atom], (uint64_t)1 << from->atoms.alignment_log2[atom]) : 0;
+        if (bytes != 0)
+        {
+            memcpy(placed, bytes, from->atoms.size[atom]);
+        }
+        atoms->bytes[atom_first + i] = placed;
+    }
+    atoms->count += atom_count;
+
+    // Symbols: each one's link symbol, if its name has one, by scalar loads in a pass of their own; then eight at a time,
+    // those without one compressed into place with their name and atom ids moved, and every one's link symbol stored.
+    Scratch scratch = scratch_begin(bind->bytes);
+    SymbolId* taken = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, SymbolId, symbol_count + BUSTER_BIND_BATCH);
+    for (uint32_t i = 0; taken != 0 && i < symbol_count; i += 1)
+    {
+        const uint32_t entry = runtime->symbol_names[begin.symbols + i];
+        taken[i] = entry != 0 ? bind->name_symbols[entry - 1] : 0;
+    }
+    LinkSymbols* symbols = &link->symbols;
+    const __m512i lane_index = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+    uint32_t added = 0;
+    for (uint32_t i = 0; taken != 0 && i < symbol_count; i += BUSTER_BIND_BATCH)
+    {
+        const uint32_t n = symbol_count - i < BUSTER_BIND_BATCH ? symbol_count - i : BUSTER_BIND_BATCH;
+        const __mmask8 lanes = (__mmask8)bind_lane_mask(n);
+        const SymbolId first = begin.symbols + i;
+        const __m512i owner = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, taken + i));
+        const __mmask8 fresh = _mm512_mask_testn_epi64_mask(lanes, owner, owner);
+        const uint32_t fresh_count = (uint32_t)__builtin_popcount(fresh);
+        const __mmask8 placed = (__mmask8)bind_lane_mask(fresh_count);
+        const __m512i names = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, from->symbols.name + first));
+        const __m512i atom_ids = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, from->symbols.atom + first));
+        const __m512i moved_names = _mm512_mask_add_epi64(names, _mm512_test_epi64_mask(names, names), names, _mm512_set1_epi64(name_delta));
+        const __m512i moved_atoms = _mm512_mask_add_epi64(atom_ids, _mm512_test_epi64_mask(atom_ids, atom_ids), atom_ids, _mm512_set1_epi64(atom_delta));
+        const SymbolId to = symbol_first + added;
+        _mm256_mask_storeu_epi32(symbols->name + to, placed, _mm512_cvtepi64_epi32(_mm512_maskz_compress_epi64(fresh, moved_names)));
+        _mm256_mask_storeu_epi32(symbols->atom + to, placed, _mm512_cvtepi64_epi32(_mm512_maskz_compress_epi64(fresh, moved_atoms)));
+        _mm512_mask_storeu_epi64(symbols->value + to, placed, _mm512_maskz_compress_epi64(fresh, _mm512_maskz_loadu_epi64(lanes, from->symbols.value + first)));
+        _mm512_mask_storeu_epi64(symbols->size + to, placed, _mm512_maskz_compress_epi64(fresh, _mm512_maskz_loadu_epi64(lanes, from->symbols.size + first)));
+        const __m512i flags = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, from->symbols.flags + first));
+        const __m512i sources = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, from->symbols.source + first));
+        _mm_mask_storeu_epi8(symbols->flags + to, placed, _mm512_cvtepi64_epi8(_mm512_maskz_compress_epi64(fresh, flags)));
+        _mm_mask_storeu_epi8(symbols->source + to, placed, _mm512_cvtepi64_epi8(_mm512_maskz_compress_epi64(fresh, sources)));
+        // A fresh symbol's id is the next of the block's, by its rank among the fresh ones: an expand of consecutive ids.
+        const __m512i fresh_ids = _mm512_maskz_expand_epi64(fresh, _mm512_add_epi64(lane_index, _mm512_set1_epi64(to)));
+        _mm256_mask_storeu_epi32(bind->symbols + first, lanes, _mm512_cvtepi64_epi32(_mm512_mask_blend_epi64(fresh, owner, fresh_ids)));
+        added += fresh_count;
+    }
+    memset(symbols->got_slot + symbol_first, 0, added * sizeof(uint32_t));
+    memset(symbols->dynamic_index + symbol_first, 0, added * sizeof(uint32_t));
+    memset(symbols->version + symbol_first, 0, added * sizeof(uint16_t));
+    memset(symbols->reference + symbol_first, 0, added * sizeof(uint32_t));
+    symbols->count += added;
+    // The names of the fresh global symbols are theirs now; the others join their link symbols.
+    for (uint32_t i = 0; taken != 0 && i < symbol_count; i += 1)
+    {
+        const SymbolId from_symbol = begin.symbols + i;
+        const uint32_t entry = runtime->symbol_names[from_symbol];
+        if (taken[i] == 0 && entry != 0)
+        {
+            bind_name_symbol(bind, entry - 1, bind->symbols[from_symbol]);
+        }
+        else if (taken[i] != 0)
+        {
+            bind_merge(bind, link, from_symbol, taken[i], atom_delta);
+        }
+    }
+    if (taken == 0)
+    {
+        bind_fail(bind, BIND_ERROR_FULL, 0);
+    }
+    scratch_end(scratch);
+
+    // Fixups: offsets and kinds copied, wide addends' indices moved sixteen at a time, targets through the symbols' link
+    // symbols by scalar loads, and the wide addends copied.
+    LinkFixups* fixups = &link->fixups;
+    memcpy(fixups->offset + fixup_first, from->fixups.offset + begin.fixups, fixup_count * sizeof(uint32_t));
+    memcpy(fixups->kind + fixup_first, from->fixups.kind + begin.fixups, fixup_count);
+    for (uint32_t i = 0; i < fixup_count; i += 16)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, fixup_count - i < 16 ? fixup_count - i : 16);
+        const __m512i kinds = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, from->fixups.kind + begin.fixups + i));
+        const __mmask16 wide = _mm512_test_epi32_mask(kinds, _mm512_set1_epi32(BUSTER_LINK_FIXUP_WIDE));
+        const __m512i addends = _mm512_maskz_loadu_epi32(lanes, from->fixups.addend + begin.fixups + i);
+        _mm512_mask_storeu_epi32(fixups->addend + fixup_first + i, lanes, _mm512_mask_add_epi32(addends, wide, addends, _mm512_set1_epi32((int)wide_delta)));
+    }
+    for (uint32_t i = 0; i < fixup_count; i += 1)
+    {
+        fixups->target[fixup_first + i] = bind->symbols[from->fixups.target[begin.fixups + i]];
+    }
+    memcpy(fixups->wide_addends + fixups->wide_count, from->fixups.wide_addends + begin.wide_addends, wide_count * sizeof(int64_t));
+    fixups->count += fixup_count;
+    fixups->wide_count += wide_count;
+}
+
+// The exact path's join: one record at a time, through link.c's adds.
+static void bind_join_records(Bind* bind, Link* link, uint32_t piece)
+{
+    const Runtime* runtime = bind->runtime;
+    const Link* from = &runtime->link;
+    const ImportMark begin = runtime->pieces[piece].begin;
+    const ImportMark end = runtime->pieces[piece].end;
+    const NameId name_first = link->names.count;
+    const AtomId atom_first = link->atoms.count;
+    bool result = true;
+    for (NameId name = begin.names; result && name < end.names; name += 1)
+    {
+        result = link_add_name_hashed(link, from->names.bytes[name], from->names.length[name], from->names.hash[name]) == name_first + (name - begin.names);
+    }
+    for (AtomId atom = begin.atoms; result && atom < end.atoms; atom += 1)
+    {
+        const uint8_t* bytes = from->atoms.bytes[atom];
+        uint8_t* placed = bytes != 0 ? arena_push(bind->bytes, from->atoms.size[atom], (uint64_t)1 << from->atoms.alignment_log2[atom]) : 0;
+        if (bytes != 0)
+        {
+            memcpy(placed, bytes, from->atoms.size[atom]);
+        }
+        const AtomId added = link_add_atom(link, from->atoms.class[atom], from->atoms.alignment_log2[atom], from->atoms.size[atom], placed, from->atoms.unit[atom] + bind->unit_base);
+        result = added == atom_first + (atom - begin.atoms);
+    }
+    for (SymbolId symbol = begin.symbols; result && symbol < end.symbols; symbol += 1)
+    {
+        const uint32_t entry = runtime->symbol_names[symbol];
+        const SymbolId taken = entry != 0 ? bind->name_symbols[entry - 1] : 0;
+        if (taken == 0)
+        {
+            const NameId name = from->symbols.name[symbol];
+            const AtomId atom = from->symbols.atom[symbol];
+            const SymbolId added = link_add_symbol(link, name != 0 ? name_first + (name - begin.names) : 0, atom != 0 ? atom_first + (atom - begin.atoms) : 0,
+                                                   from->symbols.value[symbol], from->symbols.size[symbol], from->symbols.flags[symbol], from->symbols.source[symbol]);
+            bind->symbols[symbol] = added;
+            result = added != 0;
+            if (entry != 0)
+            {
+                bind_name_symbol(bind, entry - 1, added);
+            }
+        }
+        else
+        {
+            bind->symbols[symbol] = taken;
+            bind_merge(bind, link, symbol, taken, atom_first - begin.atoms);
+        }
+    }
+    for (AtomId atom = begin.atoms; result && atom < end.atoms; atom += 1)
+    {
+        const FixupId first = from->atoms.fixup_begin[atom];
+        for (uint32_t i = 0; result && i < from->atoms.fixup_count[atom]; i += 1)
+        {
+            const FixupId fixup = first + i;
+            const uint8_t kind = from->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+            result = link_add_fixup(link, atom_first + (atom - begin.atoms), from->fixups.offset[fixup], kind, bind->symbols[from->fixups.target[fixup]],
+                                    link_fixup_addend(from, fixup)) != 0;
+        }
+    }
+    if (!result)
+    {
+        bind_fail(bind, BIND_ERROR_FULL, 0);
+    }
+}
+
+// Joins piece `piece` of the runtime (a crt object, or RUNTIME_OBJECTS + m for member m) to the link, if it has room.
+static bool bind_join(Bind* bind, Link* link, uint32_t piece)
+{
+    const bool fits = bind_piece_fits(bind, link, piece);
+    if (!fits)
+    {
+        bind_fail(bind, BIND_ERROR_FULL, 0);
+    }
+    else if (bind->path == BIND_PATH_VECTOR)
+    {
+        bind_join_block(bind, link, piece);
+    }
+    else
+    {
+        bind_join_records(bind, link, piece);
+    }
+    return bind->error == BIND_ERROR_NONE;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Binding
+
+// Binds `symbol`, which nothing in the link defines (see the orientation comment); with `members`, a member of
+// libc_nonshared.a that defines it is marked as needed.
+static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool members)
+{
+    const Runtime* runtime = bind->runtime;
+    const RuntimeNames* names = &runtime->global_names;
+    LinkSymbols* symbols = &link->symbols;
+    const NameId name = symbols->name[symbol];
+    const uint32_t entry = runtime_find_global_name(names, link->names.bytes[name], link->names.length[name], link->names.hash[name]);
+    const SymbolId definition = entry != 0 ? names->definition[entry - 1] : 0;
+    const uint32_t unit = definition != 0 ? runtime->link.atoms.unit[runtime->link.symbols.atom[definition]] : 0;
+    const bool after = definition != 0 && !bind->tail_joined && (unit == RUNTIME_OBJECT_END || unit == RUNTIME_OBJECT_INIT_EPILOGUE);
+    const uint32_t export = entry != 0 ? names->export[entry - 1] : 0;
+    const bool member = definition != 0 && unit >= runtime->nonshared_unit;
+    const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    if (entry != 0 && names->linker[entry - 1])
+    {
+        symbols->source[symbol] = BUSTER_LINK_SOURCE_LINKER;
+    }
+    else if (after)
+    {
+        // crtendS.o or crtn.o defines it when it joins.
+        symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
+    }
+    else if (export != 0)
+    {
+        const ImportExports* exports = &runtime->libc.exports;
+        symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_SHARED;
+        symbols->version[symbol] = exports->version[export - 1];
+        symbols->flags[symbol] = (uint8_t)((symbols->flags[symbol] & ~BUSTER_LINK_SYMBOL_TYPE) | (exports->flags[export - 1] & BUSTER_LINK_SYMBOL_TYPE));
+        if (bind->import_count < bind->capacity)
+        {
+            bind->imports[bind->import_count] = symbol;
+            bind->import_count += 1;
+        }
+        else
+        {
+            bind_fail(bind, BIND_ERROR_FULL, name);
+        }
+    }
+    else if (member && members && !weak)
+    {
+        const uint32_t m = unit - runtime->nonshared_unit;
+        bind->members_needed[m / 64] |= 1ull << (m % 64);
+    }
+    else if (weak)
+    {
+        symbols->source[symbol] = BUSTER_LINK_SOURCE_NONE;
+    }
+    else
+    {
+        bind_fail(bind, BIND_ERROR_UNDEFINED, name);
+    }
+}
+
+// The symbols from `first` to `end` that nothing defines (no atom, a name, and a source that isn't the program's or
+// the linker's), selected eight at a time by a compress, then bound in symbol order.
+static void bind_resolve_vector(Bind* bind, Link* link, SymbolId first, SymbolId end, bool members)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    const __m512i lane_index = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+    for (SymbolId batch = first; batch < end; batch += BUSTER_BIND_BATCH)
+    {
+        const uint32_t n = end - batch < BUSTER_BIND_BATCH ? end - batch : BUSTER_BIND_BATCH;
+        const __mmask8 loaded = (__mmask8)bind_lane_mask(n);
+        const __m512i atoms = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(loaded, symbols->atom + batch));
+        const __m512i names = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(loaded, symbols->name + batch));
+        const __m512i sources = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(loaded, symbols->source + batch));
+        const uint32_t undefined = _mm512_testn_epi64_mask(atoms, atoms) & _mm512_test_epi64_mask(names, names) &
+                                   _mm512_cmpneq_epi64_mask(sources, _mm512_set1_epi64(BUSTER_LINK_SOURCE_PROGRAM)) &
+                                   _mm512_cmpneq_epi64_mask(sources, _mm512_set1_epi64(BUSTER_LINK_SOURCE_LINKER)) & loaded;
+        SymbolId candidates[BUSTER_BIND_BATCH];
+        _mm256_mask_storeu_epi32(candidates, (__mmask8)bind_lane_mask((uint32_t)__builtin_popcount(undefined)),
+                                 _mm512_cvtepi64_epi32(_mm512_maskz_compress_epi64((__mmask8)undefined, _mm512_add_epi64(lane_index, _mm512_set1_epi64(batch)))));
+        for (uint32_t i = 0; i < (uint32_t)__builtin_popcount(undefined); i += 1)
+        {
+            bind_resolve_symbol(bind, link, candidates[i], members);
+        }
+    }
+}
+
+static void bind_resolve_exact(Bind* bind, Link* link, SymbolId first, SymbolId end, bool members)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    for (SymbolId symbol = first; symbol < end; symbol += 1)
+    {
+        const uint8_t source = symbols->source[symbol];
+        if (symbols->atom[symbol] == 0 && symbols->name[symbol] != 0 && source != BUSTER_LINK_SOURCE_PROGRAM && source != BUSTER_LINK_SOURCE_LINKER)
+        {
+            bind_resolve_symbol(bind, link, symbol, members);
+        }
+    }
+}
+
+static void bind_resolve(Bind* bind, Link* link, SymbolId first, SymbolId end, bool members)
+{
+    if (bind->path == BIND_PATH_VECTOR)
+    {
+        bind_resolve_vector(bind, link, first, end, members);
+    }
+    else
+    {
+        bind_resolve_exact(bind, link, first, end, members);
+    }
+}
+
+// Binds the symbols from `first` on, then joins the members they need and binds those members' symbols, round after
+// round, until no member joins.
+static void bind_members(Bind* bind, Link* link, SymbolId first)
+{
+    const Runtime* runtime = bind->runtime;
+    const uint32_t words = (runtime->nonshared.member_count + 63) / 64;
+    SymbolId from = first;
+    bool joined = true;
+    while (joined && bind->error == BIND_ERROR_NONE)
+    {
+        const SymbolId to = link->symbols.count;
+        bind_resolve(bind, link, from, to, true);
+        joined = false;
+        for (uint32_t w = 0; bind->error == BIND_ERROR_NONE && w < words; w += 1)
+        {
+            uint64_t pending = bind->members_needed[w] & ~bind->members_joined[w];
+            bind->members_joined[w] |= pending;
+            while (pending != 0 && bind->error == BIND_ERROR_NONE)
+            {
+                const uint32_t m = w * 64 + (uint32_t)__builtin_ctzll(pending);
+                pending &= pending - 1;
+                bind_join(bind, link, RUNTIME_OBJECTS + m);
+                joined = true;
+            }
+        }
+        from = to;
+    }
+}
+
+// The imports that are still imports: a member that joined may have defined a name libc.so.6 exports too, which its
+// definition takes, as GNU ld lets an object's definition take a name from a shared library.
+static void bind_keep_imports(Bind* bind, const Link* link)
+{
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < bind->import_count; i += 1)
+    {
+        const SymbolId symbol = bind->imports[i];
+        bind->imports[kept] = symbol;
+        kept += link->symbols.source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED ? 1 : 0;
+    }
+    bind->import_count = kept;
+}
+
+// The link's definitions of names that libc.so.6 defines too or refers to, with default or protected visibility: among
+// the runtime's names that took a link symbol, in the order they took it.
+static void bind_find_exports(Bind* bind, const Link* link)
+{
+    const RuntimeNames* names = &bind->runtime->global_names;
+    const LinkSymbols* symbols = &link->symbols;
+    for (uint32_t i = 0; bind->error == BIND_ERROR_NONE && i < bind->named_count; i += 1)
+    {
+        const uint32_t e = bind->named[i];
+        const SymbolId symbol = bind->name_symbols[e];
+        const bool defined = symbol != 0 && symbols->atom[symbol] != 0;
+        const bool visible = defined && bind_visibility_rank(symbols->flags[symbol]) <= 1;
+        if (visible && (names->export[e] != 0 || names->referenced[e]))
+        {
+            bind->exports[bind->export_count] = symbol;
+            bind->export_count += 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Entry points
+
+static LinkCapacity bind_capacity(const Runtime* runtime, uint64_t* name_bytes, uint64_t* atom_bytes)
+{
+    const Link* link = &runtime->link;
+    const LinkCapacity result = {
+        .names = link->names.count - 1,
+        .atoms = link->atoms.count - 1,
+        .symbols = link->symbols.count - 1,
+        .fixups = link->fixups.count - 1,
+        .wide_addends = link->fixups.wide_count - 1,
+    };
+    uint64_t names = 0;
+    for (NameId name = 1; name < link->names.count; name += 1)
+    {
+        names += (uint64_t)link->names.length[name] + 1;
+    }
+    uint64_t atoms = 0;
+    for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+    {
+        atoms += link->atoms.bytes[atom] != 0 ? link->atoms.size[atom] + ((uint64_t)1 << link->atoms.alignment_log2[atom]) - 1 : 0;
+    }
+    *name_bytes = names;
+    *atom_bytes = atoms;
+    return result;
+}
+
+static bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena)
+{
+    const uint32_t words = (runtime->nonshared.member_count + 63) / 64;
+    *bind = (Bind){
+        .runtime = runtime,
+        .path = path,
+        .bytes = bytes,
+        .unit_base = unit_base,
+        .capacity = link->symbols.capacity,
+    };
+    bind->name_symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->global_names.count);
+    bind->named = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, runtime->global_names.count);
+    bind->symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->link.symbols.count);
+    bind->members_needed = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words);
+    bind->members_joined = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words);
+    bind->imports = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, bind->capacity);
+    bind->exports = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, bind->capacity);
+    const bool pushed = bind->name_symbols != 0 && bind->named != 0 && bind->symbols != 0 && (words == 0 || (bind->members_needed != 0 && bind->members_joined != 0)) &&
+                        bind->imports != 0 && bind->exports != 0;
+    if (!pushed)
+    {
+        bind_fail(bind, BIND_ERROR_FULL, 0);
+    }
+    else
+    {
+        memset(bind->name_symbols, 0, runtime->global_names.count * sizeof(SymbolId));
+        memset(bind->symbols, 0, runtime->link.symbols.count * sizeof(SymbolId));
+        memset(bind->members_needed, 0, words * sizeof(uint64_t));
+        memset(bind->members_joined, 0, words * sizeof(uint64_t));
+        bind_match(bind, link, 1, link->symbols.count);
+    }
+    const uint32_t head[] = {
+        RUNTIME_OBJECT_START,
+        RUNTIME_OBJECT_INIT_PROLOGUE,
+        RUNTIME_OBJECT_BEGIN,
+    };
+    for (uint32_t i = 0; bind->error == BIND_ERROR_NONE && i < BUSTER_ARRAY_LENGTH(head); i += 1)
+    {
+        bind_join(bind, link, head[i]);
+    }
+    bind->symbols_begun = link->symbols.count;
+    return bind->error == BIND_ERROR_NONE;
+}
+
+static bool bind_end(Bind* bind, Link* link)
+{
+    if (bind->error == BIND_ERROR_NONE)
+    {
+        // The global symbols added since bind_begin, then every name nothing defines, with the members they need.
+        bind_match(bind, link, bind->symbols_begun, link->symbols.count);
+    }
+    bind->resolving = true;
+    if (bind->error == BIND_ERROR_NONE)
+    {
+        bind_members(bind, link, 1);
+    }
+    const uint32_t tail[] = {
+        RUNTIME_OBJECT_END,
+        RUNTIME_OBJECT_INIT_EPILOGUE,
+    };
+    const SymbolId before_tail = link->symbols.count;
+    for (uint32_t i = 0; bind->error == BIND_ERROR_NONE && i < BUSTER_ARRAY_LENGTH(tail); i += 1)
+    {
+        bind_join(bind, link, tail[i]);
+    }
+    bind->tail_joined = true;
+    if (bind->error == BIND_ERROR_NONE)
+    {
+        bind_resolve(bind, link, before_tail, link->symbols.count, false);
+    }
+    bind_keep_imports(bind, link);
+    bind_find_exports(bind, link);
+    return bind->error == BIND_ERROR_NONE;
+}

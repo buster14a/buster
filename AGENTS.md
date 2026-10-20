@@ -212,9 +212,22 @@ designs and the compilers already built this way.
   does (`Scrt1.o`, `crti.o`, `crtbeginS.o`, `crtendS.o` and `crtn.o`, and the
   `libc.so.6` and `libc_nonshared.a` that `libc.so` names) and imports them
   into a link of their own, with what each name they refer to binds to (the
-  first part of step 5 of the design's plan). `import_test.c` holds their
-  tests (`main.c` includes it; `./build/compiler test-import` runs them) and
-  `import_benchmark.c` provides `benchmark-import`.
+  first part of step 5 of the design's plan), each object's records as a
+  piece, and an index and a filter of their global names and libc's.
+  `import_test.c` holds their tests (`main.c` includes it; `./build/compiler
+  test-import` runs them) and `import_benchmark.c` provides
+  `benchmark-import`.
+- `src/buster/compiler/bind.c` is binding (the second part of step 5): the C
+  runtime that `runtime.c` imports joined to a program's link in the order
+  GCC's driver links it, one symbol per global name, and each name of the link
+  bound as GNU ld binds it: to the program, the runtime's objects, the linker,
+  an export of `libc.so.6` at its version (an import), a member of
+  `libc_nonshared.a`, which joins, or for a weak reference to nothing; with
+  the link's imports and exports listed. It has a vector path and an exact
+  one, its twin, which make the same link. `link_program.c`'s programs leave
+  room for it (`link_program_generate_begin`, `_atoms` and `_end`).
+  `bind_test.c` holds its tests (`main.c` includes it; `./build/compiler
+  test-bind` runs them) and `bind_benchmark.c` provides `benchmark-bind`.
 - `src/buster/compiler/executable.c` writes the direct path's first
   executables: a link in that representation laid out, patched and written as
   a static executable without libc (step 4 of the design's plan), with a build
@@ -255,6 +268,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler benchmark-object-writer
 ./build/compiler test-import --cross-check
 ./build/compiler benchmark-import
+./build/compiler test-bind --cross-check
+./build/compiler benchmark-bind
 ./build/compiler test-executable
 ./build/compiler benchmark-executable
 ```
@@ -786,7 +801,12 @@ the 9700X, and 0.15 s with `--cross-check`) checks `import.c` and
   `__libc_start_main` and `__cxa_finalize` to libc, `__gmon_start__` and the
   `_ITM_` functions to nothing, `__TMC_END__` to `crtendS.o`, and
   `_GLOBAL_OFFSET_TABLE_`, which the crt objects that use the GOT name, to the
-  linker.
+  linker. Each object's piece must follow the one before, with its atoms in
+  its own unit and its names' bytes one run, and the global names (binding's
+  index of the runtime's names and libc's) must hold each name once, found by
+  its bytes and in its filter, each global symbol's its own: `main` defined by
+  none of them, `__libc_start_main` libc.so.6's, `__dso_handle` crtbeginS.o's,
+  `atexit` a member's and `_GLOBAL_OFFSET_TABLE_` the linker's.
 
 `--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
 version, type, binding and size) and references with `readelf -W --dyn-syms`,
@@ -821,6 +841,81 @@ Run it under the 9700X's lock with `taskset -c 2`. With `--library
 data-parallel" has the numbers for. The default 9700X job runs it after the
 import tests, pinned to one allowed CPU; like the others, its measurements are
 informational.
+
+## Bind tests
+
+`./build/compiler test-bind [--seed N] [--cross-check] [--keep]` (about
+5 ms on the 9700X, and 0.08 s with `--cross-check`) checks `bind.c` against
+this system's runtime (`runtime_import`). Every check binds by both paths,
+which must make the same link, column by column, and the same imports,
+exports and members:
+
+- programs: test-link's two sets that call libc, each generated with room for
+  the runtime, Scrt1.o, crti.o and crtbeginS.o joined after the program's
+  symbols, its atoms, then the rest (`link_program_generate_begin`, `_atoms`
+  and `_end`, which runs `link_check` on the whole link). Then: one symbol per
+  global name; every name's bytes in the link's own arena and every atom's in
+  the program's; every fixup's target defined, imported from `libc.so.6` at
+  its export's version and with its type, the linker's, or a weak reference
+  to nothing; `main` the program's, and what the crt objects refer to bound
+  as GNU ld binds it (`__libc_start_main` at `GLIBC_2.34`, `__cxa_finalize`
+  weakly, `__gmon_start__` and the `_ITM_` functions to nothing,
+  `_GLOBAL_OFFSET_TABLE_` to the linker, `__TMC_END__` to `crtendS.o`,
+  `__dso_handle` in `crtbeginS.o`, hidden); the crt objects' atoms before the
+  program's and after it in GCC's order, each with the runtime's bytes and
+  fixups; `.init`'s and `.fini`'s fragments `crti.o`'s first and `crtn.o`'s
+  last, and `crtendS.o`'s `.eh_frame` last;
+- names: every name of the programs and every export of `libc.so.6`, looked
+  up in the runtime's index, must find what a scan of the runtime's names
+  finds;
+- rules: links made by hand, each exercising one rule, with what binding
+  reports: a strong definition of `_start` (a duplicate); one of `data_start`,
+  which Scrt1.o defines weakly (the program's wins); a reference to
+  `__dso_handle` (defined by crtbeginS.o's atom, hidden); strong and weak
+  references to a name nothing defines (an error, and nothing); definitions
+  of `strlen`, which libc.so.6 defines, and `_dl_argv`, which it refers to
+  (exports), a hidden `qsort` and a name of the program's own (not); two
+  symbols named `write`; references added after `bind_begin` of a name the
+  runtime has and of `memcpy`; strong and weak references to `__cxa_finalize`,
+  which crtbeginS.o refers to weakly; strong and weak references to
+  `pthread_atfork`, which a member defines (it joins, and doesn't); a local
+  `_init`; a symbol of the program's that it never defines (left to
+  `link_check`); and a link without room. Then the rules this system's runtime
+  can't reach through the entry points, on binding's own steps: a strong
+  reference joining a weak one that binding left to nothing (an error, but
+  not for a name left to `crtendS.o`), a name left to `crtendS.o` with source
+  `RUNTIME_ARCHIVE`, and an import a member came to define dropped from the
+  imports;
+- an atexit program: `main` registers a handler with `atexit` and returns 3,
+  the handler exits with 0. Bound, it must pass `link_check`, and `atexit.oS`
+  must join, defining `atexit`, its `__cxa_atexit` imported at `GLIBC_2.2.5`
+  and its `__dso_handle` bound to crtbeginS.o's;
+- with `--cross-check`, which needs `ld.lld`, `ld.bfd`, `cc` and `readelf`:
+  each bound program written as objects, one per unit, linked by ld.lld and
+  ld.bfd as a PIE with only `libc.so.6` and the loader besides, in GCC's
+  order, without errors or warnings, must run and print what its model
+  predicts (the atexit program must exit with 0); and the program's own
+  objects, linked by `cc` with lld, must have in readelf's `.dynsym` the
+  imports at their versions and with their types, the weak references and the
+  exports binding found, and lld's `--why-extract` the members that joined.
+
+The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
+removed at the end unless `--keep`. The default 9700X job runs it with
+`--cross-check` after the import benchmark.
+
+## Bind benchmark
+
+`./build/compiler benchmark-bind [--functions LIST] [--seed N]` binds
+generated programs that call libc, of 1, 64, 2,000 and 102,400 workers by
+default (`--functions` takes a list), 200 workers per unit as synth's
+translation units have, by each path, and reports 21-run medians (time,
+cycles, instructions, IPC) of the match (the program's global symbols looked
+up in the runtime's names, per global symbol), `bind_begin` and `bind_end`,
+each run on the same link put back as it was. The paths must make the same
+links. Run it under the 9700X's lock with `taskset -c 2`; the design's "Step
+5's phases, data-parallel" has the numbers. The default 9700X job runs it
+after the bind tests, pinned to one allowed CPU; like the others, its
+measurements are informational.
 
 ## Direct executable tests
 
