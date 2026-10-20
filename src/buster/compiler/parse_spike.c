@@ -297,6 +297,7 @@ struct SpikeNames
     uint64_t byte_capacity;
 };
 
+// FNV-1a (Fowler, Noll and Vo; public domain), its high bits folded into the low ones the table indexes by.
 static uint64_t spike_hash(const uint8_t* bytes, uint64_t length)
 {
     uint64_t hash = 0xcbf29ce484222325ull;

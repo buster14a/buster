@@ -1,5 +1,7 @@
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+// SPDX-License-Identifier: (Apache-2.0 WITH LLVM-exception) AND MIT
+// Original material Copyright (c) 2026 David Gonzalez Martin.
+// Counter/timing/sort helpers adapted through c_lexer_benchmark.c retain MIT and the upstream notice:
+// Copyright (c) 2023 Niles Salter. See THIRD_PARTY_NOTICES.md and LICENSES/Accelerated-Zig-Parser.txt.
 //
 // The spike-parse command (#186): loads preprocessed C, parses it with the scalar parser and with the kernels of
 // parse_spike.c, checks that every tree is the same, and times them.

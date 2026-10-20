@@ -31,10 +31,12 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/link.c`, `src/buster/compiler/link_program.c`, `src/buster/compiler/link_test.c` | Original representation, synthetic program generators and tests; Default, with the public-domain generator reference noted below. |
 | `src/buster/compiler/object_writer.c`, `src/buster/compiler/object_writer_test.c` | Original ELF writer and tests; Default. ELF constants describe the format; no external linker implementation is vendored. |
 | `src/buster/compiler/executable.c`, `src/buster/compiler/executable_test.c`, `src/buster/compiler/executable_benchmark.c` | Original static-executable writer, tests and benchmarks; Default, with the generator reference below. |
+| `src/buster/compiler/parse_spike.c` | Original data-parallel parsing spike (#186): token refinement, the scalar parser, the kernels and their twins; Default. Its identifier hash is FNV-1a, a public-domain algorithm; the cited papers (Bar-On and Vishkin; Hsu; Voetter, Huijben and Rietveld) supply ideas, not code. |
+| `src/buster/compiler/parse_spike_benchmark.c` | Original spike-parse command body under Default; its counter-open setup, read fallback, clock sample and insertion sort follow the lexer benchmark's helpers and retain MIT. |
 | `build.sh`, `.gitignore`, `.github/workflows/9700x.yml` | Original build/configuration; Default. The referenced GitHub action runs externally and is not vendored. |
 | `.claude/settings.json`, `.claude/hooks/join-tailnet.sh` | Maintainer configuration: settings adapted from his older Buster configuration; locally added tailnet hook. Default. See the recorded import below. |
 | `AGENTS.md`, `CLAUDE.md`, `docs/coding-style.md` | Original project/contributor guidance; Default. The style adapts conventions, not a grant to import old compiler code. |
-| `docs/c-lexer.md`, `docs/x86-64-encoder.md`, `docs/object-writer-and-linker.md` | Original design/measurement reports; Default. Referenced tools, articles and measurements are distinguished from vendored source. |
+| `docs/c-lexer.md`, `docs/x86-64-encoder.md`, `docs/object-writer-and-linker.md`, `docs/data-parallel-parsing.md` | Original design/measurement reports; Default. Referenced tools, articles and measurements are distinguished from vendored source. |
 | `README.md`, `LICENSING.md`, `CONTRIBUTING.md`, this file | Original adoption documentation; Default, except quoted upstream notices retain their terms. |
 | `LICENSE`, `DCO`, `LICENSES/*` | Retained legal/attribution texts; their own terms. These are not original project prose. |
 
