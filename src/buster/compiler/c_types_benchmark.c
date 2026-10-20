@@ -616,7 +616,8 @@ static bool type_benchmark_layout(uint64_t seed, uint32_t count, TypeBenchmarkCo
     uint32_t* level_of = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, count);
     uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, count);
     uint32_t* level_starts = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, count + 1);
-    uint64_t* offsets = BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, (uint64_t)count * BUSTER_TYPE_BENCHMARK_MEMBERS);
+    // Every member's offset, and member record 0's.
+    uint64_t* offsets = BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, (uint64_t)count * BUSTER_TYPE_BENCHMARK_MEMBERS + 1);
     uint64_t* sizes = BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, count);
     bool valid = records != 0 && by_level != 0 && level_of != 0 && order != 0 && level_starts != 0 && offsets != 0 && sizes != 0 && type_benchmark_open(&table, count * 4 + 64);
     static TypeBenchmarkSamples samples;

@@ -25,8 +25,9 @@
 //   - Conversions: every pair of codes through both vector kernels and the scalar twin, at every length to 200 and at a
 //     PROT_NONE page; type_usual_arithmetic_types against type_usual_arithmetic on every pair of a set of arithmetic
 //     TypeIds (enums, _BitInts, ALIGNED and atomic types among them); and fixtures of clang's results.
-//   - Compatibility and composite types: fixtures, the C standard's examples among them; and types that share their
-//     insides 64 levels deep, whose trees have 2^64 leaves, which each walk takes pair by distinct pair.
+//   - Compatibility and composite types: fixtures, the C standard's examples among them; types that share their
+//     insides 64 levels deep, whose trees have 2^64 leaves, which each walk takes pair by distinct pair; and composites
+//     of chains of pointers 65,536 deep, whose canonical comparisons share one memo.
 //   - Printing: fixtures of clang's spellings.
 //   - Clang, as the oracle (type_test_clang): a world of random types, records and enums,
 //     written as C (a typedef per type, built from the earlier ones, so that the C spells each type independently of
@@ -3900,6 +3901,45 @@ static bool type_test_shared_pairs(void)
     return tally.failures == 0;
 }
 
+// A composite of two chains of pointers 65,536 deep that differ only at the bottom, over arrays of an aligned int: its
+// canonical comparisons, of every frame and of every finish, share one memo, so each pair is compared once (a
+// regression: each started a walk of its own, (n + 1)^2 pairs in all). Then two chains that are one canonical type
+// all the way down, which the composite takes as they are.
+#define BUSTER_TYPE_TEST_CHAIN_LEVELS 65536
+
+static bool type_test_composite_chains(void)
+{
+    TypeTestTally tally = { 0 };
+    TypeTestTable test;
+    if (type_test_expect(&tally, type_test_table_open(&test, 4 * BUSTER_TYPE_TEST_CHAIN_LEVELS + 64), "composite chains", "the table can't be made"))
+    {
+        TypeTable* table = &test.table;
+        const TypeId element = type_aligned(table, BUSTER_TYPE_INT, 0);
+        TypeId chains[4] = {
+            type_incomplete_array(table, element),
+            type_array(table, element, 3),
+            type_array(table, BUSTER_TYPE_INT, 3),
+            type_array(table, element, 3),
+        };
+        for (uint32_t level = 0; level < BUSTER_TYPE_TEST_CHAIN_LEVELS; level += 1)
+        {
+            for (uint32_t chain = 0; chain < 4; chain += 1)
+            {
+                chains[chain] = type_pointer(table, chains[chain]);
+            }
+        }
+        type_test_expect(&tally, chains[0] != 0 && chains[1] != 0 && chains[2] != 0 && chains[3] != 0, "composite chains", "the types can't be made");
+        type_test_expect(&tally, type_compatible(table, chains[0], chains[1]), "composite chains", "int[] and int[3] at the bottom aren't compatible");
+        type_test_expect(&tally, !type_same_canonical(table, chains[0], chains[1]), "composite chains", "int[] and int[3] at the bottom are one canonical type");
+        type_test_expect(&tally, type_composite(table, chains[0], chains[1]) == chains[1], "composite chains", "the composite isn't the chain over int[3]");
+        type_test_expect(&tally, type_same_canonical(table, chains[2], chains[3]), "composite chains", "an aligned int at the bottom isn't looked through");
+        type_test_expect(&tally, type_composite(table, chains[2], chains[3]) == chains[2], "composite chains", "the composite of one canonical type isn't its left type");
+        type_test_table_close(&test);
+    }
+    type_test_report("composite chains", tally);
+    return tally.failures == 0;
+}
+
 // An ALIGNED request of a tag completed since its wrapper was made: the batch must give what type_aligned gives (the
 // tag, when the alignment is its own), not the wrapper the index holds (a regression).
 static bool type_test_batch_after_completion(void)
@@ -4001,6 +4041,7 @@ int run_type_tests(int argc, char** argv)
         passed = type_test_conversion_types() && passed;
         passed = type_test_compatibility() && passed;
         passed = type_test_shared_pairs() && passed;
+        passed = type_test_composite_chains() && passed;
         passed = type_test_printing(&arena) && passed;
         passed = type_test_clang(seed, (uint32_t)count, clang, keep) && passed;
         result = passed ? 0 : 1;

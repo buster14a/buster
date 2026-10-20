@@ -60,7 +60,8 @@
 //   - Conversions: type_integer_conversion, type_promote, type_promote_bit_field, type_default_argument_promote,
 //     type_usual_arithmetic, the kernels' tables, type_promote_codes, type_usual_arithmetic_vector and its scalar twin
 //     type_usual_arithmetic_code, type_usual_arithmetic_types.
-//   - Compatibility and composite types: type_compatible, type_same_canonical, type_composite.
+//   - Compatibility and composite types: the pair memo (TypePairMemo), type_compatible, type_canonical_compare and
+//     type_same_canonical, type_merge_finish, type_composite.
 //   - Printing: TypePrintFrame, type_print_step, type_print.
 
 #include <stdint.h>
@@ -528,6 +529,9 @@ static __attribute__((unused)) void type_usual_arithmetic_types(TypeTable* table
 // composite may make types, so it returns 0 if they're incompatible or the table is full.
 static __attribute__((unused)) bool type_compatible(const TypeTable* table, TypeId left, TypeId right);
 static __attribute__((unused)) TypeId type_composite(TypeTable* table, TypeId left, TypeId right);
+// Whether two types have one canonical type (clang's, which has no typedefs): the same TypeId, or the same structure
+// once every ALIGNED is looked through.
+static __attribute__((unused)) bool type_same_canonical(const TypeTable* table, TypeId left, TypeId right);
 
 // Prints a type as clang's TypePrinter does, after `name` if it has one (a declarator's), into `arena`, whose pushes
 // the result's bytes take in order; `names` spell the tags. Returns the text, empty if the arena is full.
@@ -3686,83 +3690,8 @@ static bool type_compatible(const TypeTable* table, TypeId left, TypeId right)
     return result;
 }
 
-// Whether two types have one canonical type (clang's, without typedefs): the same TypeId, or the same structure once
-// every ALIGNED is looked through, each pair inside compared once. Types without ALIGNED inside need only the first
-// compare.
-static bool type_same_canonical(const TypeTable* table, TypeId left, TypeId right)
-{
-    const uint8_t aligned = (table->types.flags[type_index(left)] | table->types.flags[type_index(right)]) & BUSTER_TYPE_FLAG_ALIGNED_INSIDE;
-    bool result = left == right;
-    if (!result && aligned != 0)
-    {
-        Scratch scratch = scratch_begin(0);
-        void* stack = 0;
-        uint64_t capacity = 0;
-        uint64_t depth = 0;
-        TypePairMemo met = {
-            .arena = scratch.arena,
-        };
-        result = type_grow_stack(scratch.arena, &stack, &capacity, 1, sizeof(TypePair));
-        if (result)
-        {
-            ((TypePair*)stack)[0] = (TypePair){
-                .left = left,
-                .right = right,
-            };
-            depth = 1;
-        }
-        while (result && depth != 0)
-        {
-            depth -= 1;
-            const TypePair pair = ((TypePair*)stack)[depth];
-            const TypeId l = type_strip_aligned(table, pair.left);
-            const TypeId r = type_strip_aligned(table, pair.right);
-            const uint32_t li = type_index(l);
-            const uint32_t ri = type_index(r);
-            const bool inside = ((table->types.flags[li] | table->types.flags[ri]) & BUSTER_TYPE_FLAG_ALIGNED_INSIDE) != 0;
-            if (l != r)
-            {
-                const TypeColumns* types = &table->types;
-                result = inside && type_qualifiers(l) == type_qualifiers(r) && types->kind[li] == types->kind[ri] &&
-                         (types->flags[li] & BUSTER_TYPE_FLAG_KEY) == (types->flags[ri] & BUSTER_TYPE_FLAG_KEY) && types->extent[li] == types->extent[ri];
-                const uint8_t kind = types->kind[li];
-                result = result && (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_ATOMIC);
-                if (result)
-                {
-                    result = type_grow_stack(scratch.arena, &stack, &capacity, depth + type_merge_inner_count(table, l), sizeof(TypePair));
-                }
-                if (result)
-                {
-                    TypePair* pairs = (TypePair*)stack + depth;
-                    pairs[0] = (TypePair){
-                        .left = types->base[li],
-                        .right = types->base[ri],
-                    };
-                    uint32_t count = 0;
-                    if (kind == BUSTER_TYPE_KIND_FUNCTION)
-                    {
-                        const TypeId* left_parameters = type_parameters(table, l, &count);
-                        const TypeId* right_parameters = type_parameters(table, r, &count);
-                        for (uint32_t i = 0; i < count; i += 1)
-                        {
-                            pairs[1 + i] = (TypePair){
-                                .left = left_parameters[i],
-                                .right = right_parameters[i],
-                            };
-                        }
-                    }
-                    const uint32_t kept = type_pairs_unmet(&met, pairs, 1 + count);
-                    result = kept != UINT32_MAX;
-                    depth += result ? kept : 0;
-                }
-            }
-        }
-        scratch_end(scratch);
-    }
-    return result;
-}
-
-// The composite's frames: a pair, and where its inner pairs' results start once it has pushed them.
+// The frames of the canonical comparison's and the composite's walks: a pair, and where its inner pairs' results start
+// once it has pushed them.
 typedef struct TypeMergeFrame TypeMergeFrame;
 struct TypeMergeFrame
 {
@@ -3772,9 +3701,157 @@ struct TypeMergeFrame
     bool entered;
 };
 
+// The checks of one pair of the canonical comparison (ALIGNED stripped from both) that don't need the pairs inside it:
+// whether the two could have one canonical type, which the pairs inside then decide.
+static bool type_canonical_shallow(const TypeTable* table, TypeId l, TypeId r)
+{
+    const TypeColumns* types = &table->types;
+    const uint32_t li = type_index(l);
+    const uint32_t ri = type_index(r);
+    const uint8_t kind = types->kind[li];
+    const bool inside = ((types->flags[li] | types->flags[ri]) & BUSTER_TYPE_FLAG_ALIGNED_INSIDE) != 0;
+    return inside && type_qualifiers(l) == type_qualifiers(r) && kind == types->kind[ri] && (types->flags[li] & BUSTER_TYPE_FLAG_KEY) == (types->flags[ri] & BUSTER_TYPE_FLAG_KEY) &&
+           types->extent[li] == types->extent[ri] && (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_ATOMIC);
+}
+
+// Whether two types have one canonical type (clang's, without typedefs): the same TypeId, or the same structure once
+// every ALIGNED is looked through. Types without ALIGNED inside need only the first compare. The rest is a post-order
+// walk with explicit stacks in `arena`, popped when it ends: a pair is one canonical type when its own checks pass and
+// every pair inside it is. `known` keeps every pair's answer, so that each pair is compared once however many types
+// it is inside, and once in all the comparisons that share `known` (all of a composite's); it lives in another arena,
+// or in `arena` when nothing shares it.
+static bool type_canonical_compare(const TypeTable* table, TypeId left, TypeId right, TypePairMemo* known, Arena* arena)
+{
+    const uint8_t aligned = (table->types.flags[type_index(left)] | table->types.flags[type_index(right)]) & BUSTER_TYPE_FLAG_ALIGNED_INSIDE;
+    bool result = left == right;
+    if (!result && aligned != 0)
+    {
+        const Scratch stacks = {
+            .arena = arena,
+            .length = arena->length,
+        };
+        void* frames = 0;
+        void* answers = 0;
+        uint64_t frame_capacity = 0;
+        uint64_t answer_capacity = 0;
+        uint64_t depth = 0;
+        uint64_t answer_count = 0;
+        bool fits = type_grow_stack(arena, &frames, &frame_capacity, 1, sizeof(TypeMergeFrame));
+        if (fits)
+        {
+            ((TypeMergeFrame*)frames)[0] = (TypeMergeFrame){
+                .left = left,
+                .right = right,
+                .results = 0,
+                .entered = false,
+            };
+            depth = 1;
+        }
+        while (fits && depth != 0)
+        {
+            TypeMergeFrame* frame = (TypeMergeFrame*)frames + depth - 1;
+            const uint64_t key = type_pair_key(frame->left, frame->right);
+            bool same = true;
+            bool done = true;
+            if (!frame->entered)
+            {
+                const TypeId l = type_strip_aligned(table, frame->left);
+                const TypeId r = type_strip_aligned(table, frame->right);
+                TypeId answer = 0;
+                if (l == r)
+                {
+                    same = true;
+                }
+                else if (type_pair_find(known, key, &answer))
+                {
+                    same = answer != 0;
+                }
+                else if (!type_canonical_shallow(table, l, r))
+                {
+                    same = false;
+                    fits = type_pair_add(known, key, 0);
+                }
+                else
+                {
+                    const TypeColumns* types = &table->types;
+                    const uint64_t inner = type_merge_inner_count(table, l);
+                    fits = type_grow_stack(arena, &frames, &frame_capacity, depth + inner, sizeof(TypeMergeFrame));
+                    if (fits)
+                    {
+                        // The pairs inside: the bases (pointees, elements without the array's qualifiers, which this
+                        // pair compared, values or return types), and a function's parameters.
+                        frame = (TypeMergeFrame*)frames + depth - 1;
+                        frame->entered = true;
+                        frame->results = answer_count;
+                        TypeMergeFrame* pushed = (TypeMergeFrame*)frames + depth;
+                        pushed[0] = (TypeMergeFrame){
+                            .left = types->base[type_index(l)],
+                            .right = types->base[type_index(r)],
+                            .results = 0,
+                            .entered = false,
+                        };
+                        uint32_t count = 0;
+                        if (types->kind[type_index(l)] == BUSTER_TYPE_KIND_FUNCTION)
+                        {
+                            const TypeId* left_parameters = type_parameters(table, l, &count);
+                            const TypeId* right_parameters = type_parameters(table, r, &count);
+                            for (uint32_t i = 0; i < count; i += 1)
+                            {
+                                pushed[1 + i] = (TypeMergeFrame){
+                                    .left = left_parameters[i],
+                                    .right = right_parameters[i],
+                                    .results = 0,
+                                    .entered = false,
+                                };
+                            }
+                        }
+                        depth += 1 + count;
+                        done = false;
+                    }
+                }
+            }
+            else
+            {
+                for (uint64_t i = frame->results; i < answer_count; i += 1)
+                {
+                    same = same && ((const uint8_t*)answers)[i] != 0;
+                }
+                answer_count = frame->results;
+                fits = type_pair_add(known, key, same ? 1 : 0);
+            }
+            if (fits && done)
+            {
+                depth -= 1;
+                fits = type_grow_stack(arena, &answers, &answer_capacity, answer_count + 1, sizeof(uint8_t));
+                if (fits)
+                {
+                    ((uint8_t*)answers)[answer_count] = same ? 1 : 0;
+                    answer_count += 1;
+                }
+            }
+        }
+        result = fits && answer_count == 1 && ((const uint8_t*)answers)[0] != 0;
+        scratch_end(stacks);
+    }
+    return result;
+}
+
+// The same, alone: its memo and stacks in scratch memory.
+static bool type_same_canonical(const TypeTable* table, TypeId left, TypeId right)
+{
+    Scratch scratch = scratch_begin(0);
+    TypePairMemo known = {
+        .arena = scratch.arena,
+    };
+    const bool result = type_canonical_compare(table, left, right, &known, scratch.arena);
+    scratch_end(scratch);
+    return result;
+}
+
 // A pair whose inner pairs are merged (results, from type_merge_inner's order), as mergeTypes finishes it: the left
-// or the right type when the merged inner types are already theirs (canonically), else a new type of them.
-static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, const TypeId* results)
+// or the right type when the merged inner types are already theirs (canonically: compared with the composite's memo,
+// and stacks in `arena`), else a new type of them.
+static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, const TypeId* results, TypePairMemo* canonical, Arena* arena)
 {
     const TypeId l = type_strip_aligned(table, left);
     const TypeId r = type_strip_aligned(table, right);
@@ -3784,11 +3861,11 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
     TypeId result = 0;
     if (left_kind == BUSTER_TYPE_KIND_POINTER || left_kind == BUSTER_TYPE_KIND_ATOMIC)
     {
-        if (type_same_canonical(table, table->types.base[type_index(l)], merged))
+        if (type_canonical_compare(table, table->types.base[type_index(l)], merged, canonical, arena))
         {
             result = left;
         }
-        else if (type_same_canonical(table, table->types.base[type_index(r)], merged))
+        else if (type_canonical_compare(table, table->types.base[type_index(r)], merged, canonical, arena))
         {
             result = right;
         }
@@ -3804,8 +3881,8 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
         const bool right_constant = right_kind == BUSTER_TYPE_KIND_ARRAY;
         const bool left_variable = left_kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY;
         const bool right_variable = right_kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY;
-        const bool left_element = type_same_canonical(table, type_element(table, l), merged);
-        const bool right_element = type_same_canonical(table, type_element(table, r), merged);
+        const bool left_element = type_canonical_compare(table, type_element(table, l), merged, canonical, arena);
+        const bool right_element = type_canonical_compare(table, type_element(table, r), merged, canonical, arena);
         if (left_constant && left_element)
         {
             result = left;
@@ -3850,8 +3927,8 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
         const uint8_t right_flags = table->types.flags[type_index(r)];
         const bool left_prototype = (left_flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
         const bool right_prototype = (right_flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
-        bool all_left = type_same_canonical(table, merged, table->types.base[type_index(l)]);
-        bool all_right = type_same_canonical(table, merged, table->types.base[type_index(r)]);
+        bool all_left = type_canonical_compare(table, merged, table->types.base[type_index(l)], canonical, arena);
+        bool all_right = type_canonical_compare(table, merged, table->types.base[type_index(r)], canonical, arena);
         uint32_t count = 0;
         const TypeId* left_parameters = type_parameters(table, l, &count);
         const TypeId* right_parameters = type_parameters(table, r, &count);
@@ -3859,8 +3936,8 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
         {
             for (uint32_t i = 0; i < count; i += 1)
             {
-                all_left = all_left && type_same_canonical(table, results[1 + i], left_parameters[i]);
-                all_right = all_right && type_same_canonical(table, results[1 + i], right_parameters[i]);
+                all_left = all_left && type_canonical_compare(table, results[1 + i], left_parameters[i], canonical, arena);
+                all_right = all_right && type_canonical_compare(table, results[1 + i], right_parameters[i], canonical, arena);
             }
         }
         else
@@ -3896,7 +3973,7 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
 
 // clang's mergeTypes, with explicit stacks: frames of the pairs being merged, and the inner pairs' results, which a
 // frame reads once all of them are done. A pair merged before takes its result from the memo; one that is canonically
-// one type merges to its left type; one that type_merge_shallow settles merges to its left type (or, for an enum
+// one type (by the canonical comparisons' own memo, shared by all of them, the finishes' too) merges to its left type; one that type_merge_shallow settles merges to its left type (or, for an enum
 // against an integer type, the integer type) or fails; any other pushes its inner pairs (the last first, so that their
 // results come out in order) and finishes once they are merged, into the memo. So each pair is expanded once, however
 // many types it is inside. A failure anywhere fails the whole.
@@ -3911,6 +3988,10 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
     uint64_t depth = 0;
     uint64_t result_count = 0;
     TypePairMemo merges = {
+        .arena = results_scratch.arena,
+    };
+    // Every canonical comparison the composite makes shares one memo: a pair's answer is worked out once.
+    TypePairMemo canonical = {
         .arena = results_scratch.arena,
     };
     bool valid = type_is_valid(table, left) && type_is_valid(table, right) && type_grow_stack(frames_scratch.arena, &frames, &frame_capacity, 1, sizeof(TypeMergeFrame));
@@ -3937,7 +4018,7 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
             {
                 merged = known;
             }
-            else if (type_same_canonical(table, frame->left, frame->right))
+            else if (type_canonical_compare(table, frame->left, frame->right, &canonical, frames_scratch.arena))
             {
                 merged = frame->left;
             }
@@ -3980,7 +4061,7 @@ static TypeId type_composite(TypeTable* table, TypeId left, TypeId right)
         }
         else
         {
-            merged = type_merge_finish(table, frame->left, frame->right, (TypeId*)results + frame->results);
+            merged = type_merge_finish(table, frame->left, frame->right, (TypeId*)results + frame->results, &canonical, frames_scratch.arena);
             result_count = frame->results;
             valid = merged != 0 && type_pair_add(&merges, type_pair_key(frame->left, frame->right), merged);
         }
