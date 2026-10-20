@@ -45,6 +45,8 @@ struct Dataflow
 static __attribute__((unused)) bool dataflow_create(Arena* arena, uint32_t block_count, uint32_t value_count, uint32_t edge_count, Dataflow* result);
 // Failure leaves postorder unchanged. Scratch memory is returned to its original length on either outcome.
 static __attribute__((unused)) bool dataflow_postorder(Dataflow* dataflow, Arena* scratch);
+static __attribute__((unused, noinline, aligned(64))) uint64_t dataflow_liveness_vector_one(Dataflow* dataflow);
+static __attribute__((unused, noinline, aligned(64))) uint64_t dataflow_liveness_vector_rows(Dataflow* dataflow);
 static __attribute__((unused)) uint64_t dataflow_liveness_vector(Dataflow* dataflow);
 static __attribute__((unused)) uint64_t dataflow_liveness_scalar(Dataflow* dataflow);
 static __attribute__((unused)) uint64_t dataflow_liveness(Dataflow* dataflow);
@@ -195,7 +197,60 @@ static bool dataflow_postorder(Dataflow* dataflow, Arena* scratch)
     return success;
 }
 
-static uint64_t dataflow_liveness_vector(Dataflow* dataflow)
+// Rows of one vector (up to 512 values). Without the word loop, this loop keeps every pointer and counter in registers,
+// where the general loop spills some to the stack and reloads them in every block: where those slots share their low 12
+// bits with an in or out row that the sweep stores (about half of the places the frame can take in a page), the loads
+// wait on those stores, and some processes fall into states 10% to 150% slower. Neither of its loops is unrolled:
+// unrolled, either takes registers, and Clang moves some of the loop's state back to the stack (docs/dataflow.md,
+// "Where the AVX-512 solver's frame falls").
+static __attribute__((noinline, aligned(64))) uint64_t dataflow_liveness_vector_one(Dataflow* dataflow)
+{
+    uint64_t iterations = 1;
+    const uint32_t block_count = dataflow->block_count;
+    const uint32_t* restrict successor_offsets = dataflow->successor_offsets;
+    const uint32_t* restrict successors = dataflow->successors;
+    const uint32_t* restrict postorder = dataflow->postorder;
+    const uint64_t* restrict use_rows = dataflow->use;
+    const uint64_t* restrict def_rows = dataflow->def;
+    uint64_t* restrict in_rows = dataflow->in;
+    uint64_t* restrict out_rows = dataflow->out;
+    const uint64_t matrix_bytes = (uint64_t)block_count * BUSTER_DATAFLOW_VECTOR_BYTES;
+    memset(in_rows, 0, matrix_bytes);
+    memset(out_rows, 0, matrix_bytes);
+    bool changed;
+    do
+    {
+        __mmask8 changes = 0;
+        #pragma clang loop unroll(disable)
+        for (uint32_t order = 0; order < block_count; order += 1)
+        {
+            const uint32_t block = postorder[order];
+            const uint64_t row = (uint64_t)block * BUSTER_DATAFLOW_VECTOR_WORDS;
+            const uint32_t begin = successor_offsets[block];
+            const uint32_t end = successor_offsets[(uint64_t)block + 1];
+            __m512i out = _mm512_setzero_si512();
+            #pragma clang loop unroll(disable)
+            for (uint32_t edge = begin; edge < end; edge += 1)
+            {
+                out = _mm512_or_si512(out, _mm512_load_si512(in_rows + (uint64_t)successors[edge] * BUSTER_DATAFLOW_VECTOR_WORDS));
+            }
+            const __m512i use = _mm512_load_si512(use_rows + row);
+            const __m512i def = _mm512_load_si512(def_rows + row);
+            const __m512i previous = _mm512_load_si512(in_rows + row);
+            const __m512i in = _mm512_ternarylogic_epi64(use, out, def, 0xF4);
+            const __m512i difference = _mm512_xor_si512(in, previous);
+            changes |= _mm512_test_epi64_mask(difference, difference);
+            _mm512_store_si512(out_rows + row, out);
+            _mm512_store_si512(in_rows + row, in);
+        }
+        changed = changes != 0;
+        iterations += changed;
+    } while (changed);
+    return iterations;
+}
+
+// Rows of any width, a vector of eight words at a time.
+static __attribute__((noinline, aligned(64))) uint64_t dataflow_liveness_vector_rows(Dataflow* dataflow)
 {
     uint64_t iterations = 1;
     const uint32_t block_count = dataflow->block_count;
@@ -249,6 +304,23 @@ static uint64_t dataflow_liveness_vector(Dataflow* dataflow)
     return iterations;
 }
 
+// The two loops are separate functions, so that neither changes how Clang compiles the other: inlined together, the
+// general loop's registers and stack slots changed, and medium-nested took 3.6% more cycles after scalar code. Each
+// starts a 64-byte line, so that a build's code before them doesn't decide where their loops fall in lines.
+static uint64_t dataflow_liveness_vector(Dataflow* dataflow)
+{
+    uint64_t iterations;
+    if (dataflow->row_words == BUSTER_DATAFLOW_VECTOR_WORDS && dataflow->block_count != 0)
+    {
+        iterations = dataflow_liveness_vector_one(dataflow);
+    }
+    else
+    {
+        iterations = dataflow_liveness_vector_rows(dataflow);
+    }
+    return iterations;
+}
+
 static uint64_t dataflow_liveness_scalar(Dataflow* dataflow)
 {
     uint64_t iterations = 1;
@@ -284,7 +356,12 @@ static uint64_t dataflow_liveness_scalar(Dataflow* dataflow)
                 for (uint64_t word = 0; word < value_words; word += 1)
                 {
                     uint64_t out = 0;
-                    #pragma clang loop vectorize(disable) interleave(disable)
+                    // Not unrolled: unrolled by 8, this loop over a block's few successors split each word into a
+                    // header, a remainder loop and a latch, two taken jumps apart, which the front end ran up to 24%
+                    // slower, and in states that differ between processes, depending on where the code fell in 64-byte
+                    // lines. Instead Clang unrolls the word loop by 4, which runs four words of a block with one
+                    // successor per taken branch (docs/dataflow.md, "Where the scalar twin's code falls").
+                    #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
                     for (uint32_t edge = begin; edge < end; edge += 1)
                     {
                         const uint64_t* successor_in = in_rows + (uint64_t)successors[edge] * row_words;
