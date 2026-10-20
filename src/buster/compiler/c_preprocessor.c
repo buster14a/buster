@@ -94,9 +94,10 @@
 #define BUSTER_PP_KIND_KEYWORD C_TOKEN_KIND_COUNT
 _Static_assert(BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT <= BUSTER_PP_KIND_PRAGMA_END, "keyword kinds must fit below the internal kinds");
 
-// The ids pp_resolve_keywords looks up (the keywords' are below it): one vpermi2b's table.
-#define BUSTER_PP_KEYWORD_TABLE 128
+// The ids pp_resolve_keywords looks up (the keywords' are below it): two vpermi2b tables, by an id's low byte.
+#define BUSTER_PP_KEYWORD_TABLE 256
 _Static_assert(C_NAME_KEYWORD_COUNT < BUSTER_PP_KEYWORD_TABLE, "the keywords must have ids below the keyword table's size");
+_Static_assert(BUSTER_PP_KEYWORD_TABLE == 256, "pp_resolve_keywords_vector looks up an id's low byte in four 64-byte quarters");
 // Limits: tokens in the output and in each stack, contexts, nested inclusions, a directive's line.
 #define BUSTER_PP_MAX_OUTPUT_TOKENS (1u << 28)
 #define BUSTER_PP_MAX_STACK_TOKENS (1u << 26)
@@ -6851,13 +6852,15 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
 // The output
 
 // Gives each identifier of the output that is a keyword in the language mode its keyword's kind, 64 tokens at a time: one
-// compare finds the identifiers, and for each 16, one compare their ids below the table's size and one vpermi2b looks
-// their kinds up in pp->keyword_kinds.
+// compare finds the identifiers, and for each 16, one compare their ids below the table's size, and two vpermi2b look
+// their kinds up in pp->keyword_kinds's halves, one picked by bit 7 of the id.
 static void pp_resolve_keywords_vector(Preprocessor* pp)
 {
     PPTokens* out = &pp->output;
-    const __m512i low = _mm512_loadu_si512(pp->keyword_kinds);
-    const __m512i high = _mm512_loadu_si512(pp->keyword_kinds + 64);
+    const __m512i table0 = _mm512_loadu_si512(pp->keyword_kinds);
+    const __m512i table1 = _mm512_loadu_si512(pp->keyword_kinds + 64);
+    const __m512i table2 = _mm512_loadu_si512(pp->keyword_kinds + 128);
+    const __m512i table3 = _mm512_loadu_si512(pp->keyword_kinds + 192);
     for (uint32_t i = 0; i < out->count; i += 64)
     {
         const __mmask64 valid = out->count - i >= 64 ? ~0ull : _bzhi_u64(~0ull, out->count - i);
@@ -6873,7 +6876,10 @@ static void pp_resolve_keywords_vector(Preprocessor* pp)
                 const __m512i values = _mm512_maskz_loadu_epi32(lanes, out->values + i + group * 16);
                 const __mmask16 keywords = _mm512_mask_cmplt_epu32_mask(lanes, values, _mm512_set1_epi32(BUSTER_PP_KEYWORD_TABLE));
                 const __m128i indices = _mm512_cvtepi32_epi8(values);
-                const __m128i kinds_here = _mm512_castsi512_si128(_mm512_permutex2var_epi8(low, _mm512_zextsi128_si512(indices), high));
+                const __m512i wide = _mm512_zextsi128_si512(indices);
+                const __m128i lower = _mm512_castsi512_si128(_mm512_permutex2var_epi8(table0, wide, table1));
+                const __m128i upper = _mm512_castsi512_si128(_mm512_permutex2var_epi8(table2, wide, table3));
+                const __m128i kinds_here = _mm_mask_blend_epi8(_mm_movepi8_mask(indices), lower, upper);
                 looked = group == 0 ? _mm512_inserti32x4(looked, kinds_here, 0)
                        : group == 1 ? _mm512_inserti32x4(looked, kinds_here, 1)
                        : group == 2 ? _mm512_inserti32x4(looked, kinds_here, 2)

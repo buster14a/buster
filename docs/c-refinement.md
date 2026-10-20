@@ -72,9 +72,23 @@ For token `i` of a file:
 interned, so in token order within a file. Id 0 is none. The first ids belong
 to the names the later stages switch on (`BUSTER_C_NAMES` in `c_intern.c`):
 
-1. the keywords of C, with GNU's and clang's spellings (`__attribute__`,
-   `__asm__`, `__typeof__`, `__extension__`, `__inline`, `__restrict` and the
-   others);
+1. the keywords of C, as clang 23 has them in C: the standard's, GNU's and
+   clang's spellings (`__attribute__`, `__asm__`, `__typeof__`,
+   `__extension__`, `__inline`, `__restrict` and the others), and clang's other
+   keywords:
+   - calling conventions such as `__cdecl`;
+   - builtins that are keywords, such as `__builtin_bit_cast`;
+   - ARM and Objective-C keyword attributes;
+   - `_ExtInt` and `_Countof`.
+
+   That is 148 keywords. They were generated rather than written by hand
+   (#192's review found 40 missing from the hand-written list):
+   - take every name in clang 23.1.3's `TokenKinds.def` and in the
+     `RegularKeywordAttrInfo.inc` it includes;
+   - ask `clang -E -P -std=MODE` for each one's `__is_identifier`, in the ten
+     modes from `c89` to `gnu23`;
+   - keep the names it answers 0 for in some mode, with those modes. They fall
+     into the six rules of `c_name_is_keyword`.
 2. the directive names that aren't keywords;
 3. the preprocessor's own names (`defined`, `__has_include`, `__VA_ARGS__`,
    `__VA_OPT__`, `_Pragma`, `__FILE__`, `__LINE__`, `__COUNTER__` and the
@@ -317,9 +331,14 @@ bit. The checks are:
   repeat one letter, and in a third the two bytes are equal once whitened.
 - **names:** every predefined name has its id and spelling, and every name is a
   keyword in exactly the modes clang makes it one in, in all ten modes from
-  `c89` to `gnu23`. The modes of the names that depend on them (`inline`,
-  `restrict`, `typeof`, `asm`, C23's keywords) are written out mode by mode,
-  not computed from years.
+  `c89` to `gnu23`: 2,080 answers. The modes of the names that depend on them
+  (`inline`, `restrict`, `typeof`, `asm`, C23's keywords) are written out mode
+  by mode, not computed from years.
+- **spellings chosen apart:** 24 spellings picked independently of the
+  predefined names, with clang's answer. Seventeen are keywords from each part
+  of `TokenKinds.def` that C has, and seven are not: `__int64`, `__declspec`,
+  `__is_pod`, `__builtin_expect` and others. So a keyword missing from the list
+  fails, which the per-name check can't show.
 - **table:** 300,000 random spellings of 1 to 200 bytes, enough to grow the
   table seven times, get ids in first-seen order and the same id again. Absent
   spellings are not found.

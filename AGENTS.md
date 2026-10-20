@@ -1072,8 +1072,9 @@ identifier must get the same id and every token the same leading-space bit, on:
   identifiers with paired changes in two lanes;
 - about 14,800 spellings where the same bit flipped in two lanes must change
   the hash;
-- the predefined names, and every name's keyword answer in each of the ten
-  modes from `c89` to `gnu23`;
+- the predefined names, every name's keyword answer in each of the ten modes
+  from `c89` to `gnu23`, and 24 spellings chosen apart from the predefined names
+  with clang's answer (17 keywords, 7 not);
 - 300,000 random spellings that grow the table seven times;
 - 22 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
   and trigraphs; comments; UCNs; identifiers of 62 to 65 bytes), each at all 64

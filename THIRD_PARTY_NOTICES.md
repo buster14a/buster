@@ -35,7 +35,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/object_writer.c`, `src/buster/compiler/object_writer_test.c` | Original ELF writer and tests; Default. ELF constants describe the format; no external linker implementation is vendored. |
 | `src/buster/compiler/executable.c`, `src/buster/compiler/executable_test.c`, `src/buster/compiler/executable_benchmark.c` | Original static-executable writer, tests and benchmarks; Default, with the generator reference below. |
 | `src/buster/compiler/import.c`, `src/buster/compiler/runtime.c`, `src/buster/compiler/import_test.c`, `src/buster/compiler/import_benchmark.c` | Original readers of ELF relocatable objects, archives, shared libraries and linker scripts, their vector and exact paths, the C runtime's search and import, and their tests and benchmark; Default. The formats are read from their specifications. The archive header's vector size parse uses the widely published multiply-add method for decimal digits (as in simdjson's and Wojciech Muła's write-ups), written here from the method, not copied. The tests and the benchmark make their inputs themselves, and read the system's C runtime files and the libraries and archives named on the command line at run time without copying them; `readelf` is an external oracle for `--cross-check`, not vendored. The benchmark's clock, counter and median helpers are its own, not the lexer benchmark's MIT ones. |
-| `src/buster/compiler/c_intern.c`, `src/buster/compiler/c_refine.c`, `src/buster/compiler/c_refine_test.c` | Original intern table, token refinement and tests; Default. The hash's constants are wyhash's public-domain ones, noted below. |
+| `src/buster/compiler/c_intern.c`, `src/buster/compiler/c_refine.c`, `src/buster/compiler/c_refine_test.c` | Original intern table, token refinement and tests; Default. The hash's constants are wyhash's public-domain ones, and the keyword list is clang-generated data; both are noted below. |
 | `src/buster/compiler/c_preprocessor.c` | Original preprocessor; Default, with the clang-generated predefined macros and feature tables noted below. |
 | `src/buster/compiler/c_preprocessor_test.c` | Original preprocessor tests; Default. Some expected texts are clang 23's `-E` output for the cases' own inputs, and `pp_test_feature_names` lists the names in clang 23's `Features.def` (names only, noted below). |
 | `src/buster/compiler/c_preprocessor_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
@@ -201,6 +201,22 @@ the last revision that has them (later ones changed the default secret). Only
 the constants are used, not wyhash's code. wyhash is released into the public
 domain under the Unlicense; its text at that revision is retained in
 [LICENSES/wyhash.txt](LICENSES/wyhash.txt).
+
+## Clang's keywords
+
+`c_intern.c`'s keyword list (`BUSTER_C_KEYWORDS`) is generated data:
+- **Generator:** clang 23.1.3, the local package `clang 23.1.3-2` for target
+  `x86_64-pc-linux-gnu`.
+- **Inputs:** every identifier named in the entries of that package's
+  `TokenKinds.def` and `RegularKeywordAttrInfo.inc` (`/usr/include/clang/Basic`).
+  Only the names were read.
+- **Procedure:** each name's `__is_identifier` was asked of
+  `clang -E -P -std=MODE` in the ten modes from `c89` to `gnu23`. The list keeps
+  the 148 names it answers 0 for in some mode, with the modes as one of six
+  rules. `docs/c-refinement.md` records this, and LLVM's terms are retained in
+  [LICENSES/LLVM.txt](LICENSES/LLVM.txt).
+
+The same answers are behind `c_refine_test.c`'s spellings chosen apart.
 
 ## Clang-generated predefines and feature tables
 
