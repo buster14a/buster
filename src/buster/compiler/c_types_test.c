@@ -26,8 +26,9 @@
 //     PROT_NONE page; type_usual_arithmetic_types against type_usual_arithmetic on every pair of a set of arithmetic
 //     TypeIds (enums, _BitInts, ALIGNED and atomic types among them); and fixtures of clang's results.
 //   - Compatibility and composite types: fixtures, the C standard's examples among them; types that share their
-//     insides 64 levels deep, whose trees have 2^64 leaves, which each walk takes pair by distinct pair; and composites
-//     of chains of pointers 65,536 deep, whose canonical comparisons share one memo.
+//     insides 64 levels deep, whose trees have 2^64 leaves, which each walk takes pair by distinct pair; composites of
+//     chains of pointers 65,536 deep, whose canonical comparisons share one memo; and the walks with every amount of
+//     room to 16 KB left in either scratch arena, which must answer right or say they couldn't.
 //   - Printing: fixtures of clang's spellings.
 //   - Clang, as the oracle (type_test_clang): a world of random types, records and enums,
 //     written as C (a typedef per type, built from the earlier ones, so that the C spells each type independently of
@@ -2089,12 +2090,13 @@ static bool type_test_conversion_types(void)
 // Two types' compatibility, and their composite: expected (0 if they're incompatible).
 static void type_test_merge(TypeTestTally* tally, TypeTable* table, TypeId left, TypeId right, TypeId expected, const char* what)
 {
-    const bool compatible = type_compatible(table, left, right);
+    const TypeAnswer answer = type_compatible(table, left, right);
+    const bool compatible = answer == TYPE_ANSWER_YES;
     const TypeId composite = type_composite(table, left, right);
     char detail[160];
-    snprintf(detail, sizeof(detail), "%s: compatible %d, composite %u against %u", what, compatible, composite, expected);
-    type_test_expect(tally, compatible == (expected != 0) && composite == expected, "compatibility", detail);
-    type_test_expect(tally, type_compatible(table, right, left) == compatible, "compatibility", "compatibility isn't symmetric");
+    snprintf(detail, sizeof(detail), "%s: compatible %d, composite %u against %u", what, (int)answer, composite, expected);
+    type_test_expect(tally, answer != TYPE_ANSWER_FULL && compatible == (expected != 0) && composite == expected, "compatibility", detail);
+    type_test_expect(tally, type_compatible(table, right, left) == answer, "compatibility", "compatibility isn't symmetric");
 }
 
 static bool type_test_compatibility(void)
@@ -2194,7 +2196,7 @@ static bool type_test_compatibility(void)
         type_test_merge(&tally, table, type_pointer(table, inner4), type_pointer(table, inner6), 0, "C 6.7.6.2's p and a");
         const TypeId r = type_pointer(table, type_variable_array(table, type_variable_array(table, type_variable_array(table, BUSTER_TYPE_INT, 3), 5), 5));
         const TypeId c = type_pointer(table, type_variable_array(table, type_array(table, type_variable_array(table, BUSTER_TYPE_INT, 4), 6), 5));
-        type_test_expect(&tally, type_compatible(table, r, c), "compatibility", "C 6.7.6.2's r and c");
+        type_test_expect(&tally, type_compatible(table, r, c) == TYPE_ANSWER_YES, "compatibility", "C 6.7.6.2's r and c");
         type_test_merge(&tally, table, type_pointer(table, type_variable_array(table, BUSTER_TYPE_INT, 9)), type_pointer(table, int3), type_pointer(table, int3),
                         "int (*)[n] and int (*)[3]");
         type_test_table_close(&test);
@@ -3318,7 +3320,7 @@ static void type_test_write_checks(TypeTestWorld* world, TypeTestOracle* oracle,
         const bool spellable = b != 0 && world->spellings[type_index(a)].spellable && world->spellings[type_index(b)].spellable && left != 0 && right != 0;
         if (spellable)
         {
-            const bool compatible = type_compatible(table, a, b);
+            const bool compatible = type_compatible(table, a, b) == TYPE_ANSWER_YES;
             type_test_format(text, "_Static_assert(__builtin_types_compatible_p(%s *, %s *) == %d, \"compatibility %u\");\n", left, right, compatible ? 1 : 0, i);
             oracle->asserts += 1;
             const bool plain = !world->spellings[type_index(a)].sugared && !world->spellings[type_index(b)].sugared && type_qualifiers(a) == 0 && type_qualifiers(b) == 0;
@@ -3889,11 +3891,11 @@ static bool type_test_shared_pairs(void)
             }
         }
         type_test_expect(&tally, levels[0] != 0 && levels[1] != 0 && levels[2] != 0 && levels[3] != 0, "shared pairs", "the types can't be made");
-        type_test_expect(&tally, type_compatible(table, levels[0], levels[1]), "shared pairs", "int (*)[] and int (*)[3] at the bottom aren't compatible");
+        type_test_expect(&tally, type_compatible(table, levels[0], levels[1]) == TYPE_ANSWER_YES, "shared pairs", "int (*)[] and int (*)[3] at the bottom aren't compatible");
         type_test_expect(&tally, type_composite(table, levels[0], levels[1]) == levels[1], "shared pairs", "the composite isn't the one with int (*)[3]");
-        type_test_expect(&tally, type_same_canonical(table, levels[2], levels[3]), "shared pairs", "an aligned int at the bottom isn't looked through");
-        type_test_expect(&tally, type_compatible(table, levels[2], levels[3]), "shared pairs", "an aligned int at the bottom isn't compatible with int");
-        type_test_expect(&tally, !type_compatible(table, levels[0], levels[3]), "shared pairs", "int (*)[] at the bottom is compatible with int *");
+        type_test_expect(&tally, type_same_canonical(table, levels[2], levels[3]) == TYPE_ANSWER_YES, "shared pairs", "an aligned int at the bottom isn't looked through");
+        type_test_expect(&tally, type_compatible(table, levels[2], levels[3]) == TYPE_ANSWER_YES, "shared pairs", "an aligned int at the bottom isn't compatible with int");
+        type_test_expect(&tally, type_compatible(table, levels[0], levels[3]) == TYPE_ANSWER_NO, "shared pairs", "int (*)[] at the bottom is compatible with int *");
         type_test_expect(&tally, type_composite(table, levels[0], levels[3]) == 0, "shared pairs", "int (*)[] and int * at the bottom have a composite");
         type_test_table_close(&test);
     }
@@ -3929,14 +3931,98 @@ static bool type_test_composite_chains(void)
             }
         }
         type_test_expect(&tally, chains[0] != 0 && chains[1] != 0 && chains[2] != 0 && chains[3] != 0, "composite chains", "the types can't be made");
-        type_test_expect(&tally, type_compatible(table, chains[0], chains[1]), "composite chains", "int[] and int[3] at the bottom aren't compatible");
-        type_test_expect(&tally, !type_same_canonical(table, chains[0], chains[1]), "composite chains", "int[] and int[3] at the bottom are one canonical type");
+        type_test_expect(&tally, type_compatible(table, chains[0], chains[1]) == TYPE_ANSWER_YES, "composite chains", "int[] and int[3] at the bottom aren't compatible");
+        type_test_expect(&tally, type_same_canonical(table, chains[0], chains[1]) == TYPE_ANSWER_NO, "composite chains", "int[] and int[3] at the bottom are one canonical type");
         type_test_expect(&tally, type_composite(table, chains[0], chains[1]) == chains[1], "composite chains", "the composite isn't the chain over int[3]");
-        type_test_expect(&tally, type_same_canonical(table, chains[2], chains[3]), "composite chains", "an aligned int at the bottom isn't looked through");
+        type_test_expect(&tally, type_same_canonical(table, chains[2], chains[3]) == TYPE_ANSWER_YES, "composite chains", "an aligned int at the bottom isn't looked through");
         type_test_expect(&tally, type_composite(table, chains[2], chains[3]) == chains[2], "composite chains", "the composite of one canonical type isn't its left type");
         type_test_table_close(&test);
     }
     type_test_report("composite chains", tally);
+    return tally.failures == 0;
+}
+
+// The walks with their scratch memory nearly full: with every amount of room from none to 16 KB left in either
+// scratch arena, a composite must give its type or 0 with last_error TYPE_ERROR_FULL, and compatibility and the
+// canonical comparison their answer or TYPE_ANSWER_FULL, never another (a regression: a canonical comparison that
+// couldn't push its stacks answered no, and the composite of int[] and int[3] of an int aligned to 1 became an int[3]
+// aligned to 4).
+#define BUSTER_TYPE_TEST_SCRATCH_ROOM 16384
+
+static bool type_test_scratch_exhaustion(void)
+{
+    TypeTestTally tally = { 0 };
+    TypeTestTable test;
+    if (type_test_expect(&tally, type_test_table_open(&test, 1024), "scratch exhaustion", "the table can't be made"))
+    {
+        TypeTable* table = &test.table;
+        // That pair, then both under 100 pointers, so that the walks' stacks grow; and two types that are one canonical
+        // type, pointers to int[3] of the aligned int and of int.
+        const TypeId aligned = type_aligned(table, BUSTER_TYPE_INT, 0);
+        TypeId lefts[2] = {
+            type_incomplete_array(table, BUSTER_TYPE_INT),
+            0,
+        };
+        TypeId rights[2] = {
+            type_array(table, aligned, 3),
+            0,
+        };
+        lefts[1] = lefts[0];
+        rights[1] = rights[0];
+        for (uint32_t level = 0; level < 100; level += 1)
+        {
+            lefts[1] = type_pointer(table, lefts[1]);
+            rights[1] = type_pointer(table, rights[1]);
+        }
+        const TypeId same_left = type_pointer(table, type_array(table, aligned, 3));
+        const TypeId same_right = type_pointer(table, type_array(table, BUSTER_TYPE_INT, 3));
+        for (uint32_t pair = 0; pair < 2; pair += 1)
+        {
+            type_test_expect(&tally, type_composite(table, lefts[pair], rights[pair]) == rights[pair], "scratch exhaustion", "the composite with room isn't int[3] of the aligned int");
+        }
+        Scratch first = scratch_begin(0);
+        Scratch second = scratch_begin(first.arena);
+        Arena* arenas[2] = {
+            first.arena,
+            second.arena,
+        };
+        uint32_t answered = 0;
+        uint32_t refused = 0;
+        for (uint32_t which = 0; which < 2; which += 1)
+        {
+            Arena* arena = arenas[which];
+            for (uint64_t room = 0; room <= BUSTER_TYPE_TEST_SCRATCH_ROOM; room += 16)
+            {
+                const uint64_t length = arena->length;
+                const uint64_t left_bytes = arena->capacity - arena->length;
+                arena_push_array(arena, left_bytes > room ? left_bytes - room : 0, 1, 1);
+                char what[96];
+                snprintf(what, sizeof(what), "%" PRIu64 " bytes left in scratch arena %u", room, which);
+                for (uint32_t pair = 0; pair < 2; pair += 1)
+                {
+                    table->last_error = TYPE_ERROR_NONE;
+                    const TypeId composite = type_composite(table, lefts[pair], rights[pair]);
+                    type_test_expect(&tally, composite == rights[pair] || (composite == 0 && table->last_error == TYPE_ERROR_FULL), "scratch exhaustion composite", what);
+                    answered += composite != 0 ? 1 : 0;
+                    refused += composite == 0 ? 1 : 0;
+                    const TypeAnswer compatible = type_compatible(table, lefts[pair], rights[pair]);
+                    type_test_expect(&tally, compatible == TYPE_ANSWER_YES || compatible == TYPE_ANSWER_FULL, "scratch exhaustion compatibility", what);
+                }
+                const TypeAnswer same = type_same_canonical(table, same_left, same_right);
+                const TypeAnswer different = type_same_canonical(table, lefts[1], rights[1]);
+                type_test_expect(&tally, same == TYPE_ANSWER_YES || same == TYPE_ANSWER_FULL, "scratch exhaustion canonical", what);
+                type_test_expect(&tally, different == TYPE_ANSWER_NO || different == TYPE_ANSWER_FULL, "scratch exhaustion canonical", what);
+                arena_pop_to(arena, length);
+            }
+        }
+        // The room must have reached both: composites that failed and ones that answered, in each arena's loop.
+        type_test_expect(&tally, answered != 0 && refused != 0, "scratch exhaustion", "the room never made a composite fail, or never let one through");
+        printf("%-34s %10u composites answered, %u refused for want of room\n", "scratch exhaustion", answered, refused);
+        scratch_end(second);
+        scratch_end(first);
+        type_test_table_close(&test);
+    }
+    type_test_report("scratch exhaustion", tally);
     return tally.failures == 0;
 }
 
@@ -4042,6 +4128,7 @@ int run_type_tests(int argc, char** argv)
         passed = type_test_compatibility() && passed;
         passed = type_test_shared_pairs() && passed;
         passed = type_test_composite_chains() && passed;
+        passed = type_test_scratch_exhaustion() && passed;
         passed = type_test_printing(&arena) && passed;
         passed = type_test_clang(seed, (uint32_t)count, clang, keep) && passed;
         result = passed ? 0 : 1;

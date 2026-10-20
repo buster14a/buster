@@ -284,8 +284,16 @@ The canonical comparison (`type_same_canonical`, which looks through `ALIGNED`)
 is a post-order walk whose memo keeps every pair's answer, and a composite
 shares one such memo among all its comparisons, its frames' and its finishes':
 two chains of n pointers that differ at the bottom would otherwise be compared
-once per level, (n + 1)^2 pairs in all. Equal ids are compatible at once;
-otherwise:
+once per level, (n + 1)^2 pairs in all.
+
+`type_compatible` and `type_same_canonical` answer `TYPE_ANSWER_YES` or
+`TYPE_ANSWER_NO`, or `TYPE_ANSWER_FULL` when the scratch memory can't hold the
+walk: no answer, which a caller must take for neither (a false "incompatible"
+could pick another `_Generic` association). `type_composite` then returns 0
+with `last_error` `TYPE_ERROR_FULL`, rather than choosing or making a type on a
+missing answer, which could change an alignment.
+
+Equal ids are compatible at once; otherwise:
 
 - qualifiers must be equal, and `ALIGNED` is looked through, as clang's
   canonical types have no typedefs;
@@ -346,8 +354,10 @@ location (it prints `(unnamed)` where clang names the file and line).
   and fixtures of clang's results.
 - **Compatibility, composite types and printing:** fixtures, the C standard's
   examples among them (C17 6.2.7p5, 6.7.6.2p6 and 6.7.6.3p21); types that
-  share their insides 64 levels deep, whose trees have 2^64 leaves; and
-  composites of chains of 65,536 pointers over arrays of an aligned `int`.
+  share their insides 64 levels deep, whose trees have 2^64 leaves; composites
+  of chains of 65,536 pointers over arrays of an aligned `int`; and the walks
+  with every amount of room from none to 16 KB left in either scratch arena,
+  which must answer right or say they couldn't.
 - **clang as the oracle:** a random world of types, records and enums (1,766 by
   default; `--count` sets how many), written as C with a typedef per type built
   from earlier ones, so that the C spells each type independently of the
