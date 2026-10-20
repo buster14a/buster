@@ -146,6 +146,15 @@ designs and the compilers already built this way.
   skip, branch-free chunk state, the pipelined write-out, table-driven
   punctuator kinds, the delimiter scan, chunks read in place, the raw string
   check and their 9700X measurements.
+- `src/buster/compiler/preprocessor_fuzz.c` provides bounded output comparison
+  and the minimizer for the independent preprocessor test harness.
+  `preprocessor_fuzz_generate.c` generates cases, `preprocessor_fuzz_clang.c`
+  runs the Clang oracle, and `preprocessor_fuzz_test.c` provides
+  `test-preprocessor-fuzz`; `main.c` includes all four.
+  `preprocessor_fuzz_benchmark.c` provides `benchmark-preprocessor-fuzz`,
+  measuring the external test harness. `docs/preprocessor-fuzz.md` records
+  its contract. These names and locations are provisional pending agreement
+  with the #117 session; no buster-fast preprocessor is attached yet.
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
   of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder,
   and the fixup interface: `BUSTER_X86_FORM_FIXUP` marks an instruction with a
@@ -241,6 +250,9 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-lexer
 ./build/compiler test-lexer --cplusplus
 ./build/compiler benchmark-lexer src
+./build/compiler test-preprocessor-fuzz --std c17
+./build/compiler test-preprocessor-fuzz --std c23
+./build/compiler benchmark-preprocessor-fuzz
 ./build/compiler test-x86-encoder
 ./build/compiler benchmark-x86-encoder
 ./build/compiler test-lanes
@@ -909,6 +921,64 @@ affinity they start with. `docs/object-writer-and-linker.md` ("Patching and
 writing" and "The first executables") has the numbers. The default 9700X job
 runs it after the tests, pinned to one allowed CPU; like the others, its
 measurements are informational.
+
+## Preprocessor harness tests
+
+`./build/compiler test-preprocessor-fuzz [--fuzz N] [--seed N] [--clang PATH]
+[--std c17|c23]` checks the independent tooling for #109. It requires Clang 23
+on `PATH`, or the executable selected by `--clang PATH`. The defaults are
+64 generated cases, seed 1, `clang` and C17; the 9700X job runs both C17 and
+C23. The checks cover:
+
+- deterministic generation, including every one of the 36 construct families
+  even when `--fuzz N` is smaller, and repeatability for seeds 1, 7 and 99;
+- independent rejection of each invalid `#`/`##` form, with acceptance after
+  repairing its sole intentional fault; arithmetic and bitwise predicates
+  exercise both branch outcomes, and replacing an expression with zero must
+  change the accepted output tokens;
+- batched Clang preprocessing against one process per case: the same
+  acceptance or rejection, token kinds, spellings and token counts, with
+  whitespace ignored. Cases have distinct name prefixes and marker tokens
+  delimit their outputs; a rejected batch is rerun one case at a time.
+  Accepted cases are also batched separately so rejection fallback cannot
+  conceal a batching error;
+- isolation of cases, line information and predefined counter behavior.
+  `__COUNTER__` cases run alone because its state belongs to the Clang process;
+- output comparison, including unequal acceptance, token counts, kinds and
+  spellings, whitespace-only changes, and invalid oracle results;
+- a planted comparison for the minimizer: delete complete lines, then tokens,
+  while preserving the difference, until only the two required identifier
+  tokens remain. Saving and reading a `fuzz_failure_N.c` fixture must preserve
+  its bytes without overwriting an existing failure; the self-test removes
+  its temporary files.
+
+The oracle runs `clang -E -P -undef -nostdinc -std=c17` or `-std=c23` with
+`-x c`. It resets each case's source filename and line number identically in
+batched and individual runs, tokenizes the output with `c_tokenize` and splits
+it at exact marker identifiers. Infrastructure failures are distinct from
+source rejection.
+
+This is test tooling outside the compile path and has no new vector path.
+The minimizer currently uses only the planted comparison; these checks do
+not establish the correctness of a buster-fast preprocessor. The command
+names and file locations remain provisional until agreed with #117.
+`docs/preprocessor-fuzz.md` describes the extension points and remaining work.
+
+## Preprocessor harness benchmark
+
+`./build/compiler benchmark-preprocessor-fuzz [--clang PATH] [--std c17|c23]
+[--seed N]` requires Clang 23 and defaults to `clang`, C17 and seed 1. It
+processes 16 generated family-0 cases (object macros and their shared
+alias/redefinition scaffold) together, then in separate Clang
+processes, checking that every case is accepted and the output byte totals
+agree. After one warm-up pass, 21 measured passes alternate which mode runs
+first and report median milliseconds per batch and cases per second.
+
+The timing includes generation, launching Clang, temporary-file I/O and
+cleanup. It measures the external test harness, not buster-fast compilation
+speed. Run it under the 9700X's lock with `taskset -c 2`; the default 9700X job
+runs it after the tests, pinned to one allowed CPU. Measurements are
+informational; execution or output-check failures fail the command.
 
 ## Refinement tests
 

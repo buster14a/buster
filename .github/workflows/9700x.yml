@@ -92,6 +92,16 @@ jobs:
       - name: Test the link representation
         run: ./build/compiler test-link
 
+      - name: Test the independent preprocessor fuzz harness
+        run: |
+          ./build/compiler test-preprocessor-fuzz --std c17
+          ./build/compiler test-preprocessor-fuzz --std c23
+
+      - name: Benchmark the preprocessor fuzz harness
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor-fuzz
+
       - name: Test the object writer
         # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
         # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
