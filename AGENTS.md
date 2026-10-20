@@ -37,6 +37,10 @@ whether the work is still owned.
 
 ## Coding standards
 
+Write code in **C** unless the goal or action explicitly disallows C or requires
+another language. This applies to supporting tools, tests, and automation as
+well as compiler code.
+
 Follow [the C coding style](docs/coding-style.md) for new or modified compiler
 code. The essentials are: C and Clang on Linux/Zen 5, 4-space Allman formatting,
 `snake_case` functions, `PascalCase` types, `BUSTER_` macros, one return per

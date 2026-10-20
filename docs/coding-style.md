@@ -6,6 +6,9 @@ its portability layers, build system, or performance-acceptance machinery.
 
 ## Language, formatting, and naming
 
+- Write code in **C** unless the goal or action explicitly disallows C or
+  requires another language. This applies to supporting tools, tests, and
+  automation as well as compiler code.
 - Production compiler code is **C**. Use Clang as the host compiler;
   `__attribute__`, `ext_vector_type`, AVX-512 intrinsics, and other deliberate
   Clang/x86-64 extensions are allowed. Do not add compatibility wrappers for
