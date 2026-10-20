@@ -30,7 +30,8 @@
 // substitution by pushing it as a barrier context with a capture, which the main loop fills until the barrier ends;
 // so are a #if, #elif, computed #include or #line line and a builtin's operand, each capture with the continuation that
 // takes it (pp_finish_capture). Nothing nests through calls: there is no recursion (the call graph check, #112),
-// only explicit stacks (contexts, invocations, captures).
+// only explicit stacks (contexts, invocations, captures). An expansion that gives no tokens passes its name's leading
+// space and start of line on to the next token read from its context (PPContext.pending_flags), as clang does.
 //
 // Tokens. A token in a buffer or the output is a kind (C_TOKEN_*, or a keyword's kind in the final output), flags
 // (BUSTER_PP_SPACE, BUSTER_PP_START_OF_LINE, BUSTER_PP_NO_EXPAND, BUSTER_PP_FROM_MACRO), a value (an identifier's
@@ -52,9 +53,10 @@
 //   - Diagnostics, token stacks, location ranges and scratch spellings.
 //   - Files: PPFileData, PPFile, the directive scan (pp_scan_directives_vector, pp_finish_directives, pp_find_guard),
 //     pp_prepare_data, pp_count_lines and pp_line_of, pp_read_data and pp_lookup_path.
-//   - Include search: pp_find_include.
+//   - Include search: pp_find_include (pp_dedupe_directories drops missing and repeated directories).
 //   - Macros: PPMacro, pp_define, pp_same_definition, pp_compile_macro.
-//   - The main loop: contexts, the token copies, pp_read_token, substitution (pp_paste, pp_stringize, pp_substitute),
+//   - The main loop: contexts, the token copies, pp_read_token, substitution (pp_paste, pp_stringize, pp_paste_in_place,
+//     pp_substitute),
 //     invocations (pp_collect_arguments, pp_invoke, PPInvocation), pp_expand_object, the built-in macros
 //     (pp_expand_builtin), pp_expand_current and pp_run_contexts.
 //   - Directives: pp_directive and the handlers (pp_condition, pp_include, pp_line, pp_pragma).
@@ -406,6 +408,13 @@ struct PPContext
     uint8_t kind;
     // A buffer that ends a capture: an argument being expanded, or a directive's line. Nothing reads past it.
     bool barrier;
+    // The leading space and start of line (BUSTER_PP_SPACE, BUSTER_PP_START_OF_LINE) of a macro name read from this context
+    // whose expansion was empty: the next token read from it takes them, as clang passes them on (C 6.10.4.4 leaves
+    // spacing to the implementation; `a EMPTY+b` stringizes as "a +b").
+    uint8_t pending_flags;
+    // A buffer: the leading space its expansion left after its last token (an empty argument there), which the next
+    // token read after it takes.
+    uint8_t trailing_flags;
     // The macro to enable again when the context is popped.
     PPMacroId macro;
     uint32_t position;
@@ -1456,7 +1465,9 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
     uint32_t result = BUSTER_PP_NONE;
     if (length != 0 && length < PATH_MAX && name[0] == '/')
     {
-        result = pp_lookup_path(pp, (const char*)name, length, BUSTER_PP_NONE, false);
+        // An absolute path: its record, if a file is there (a record is kept for a missing one too).
+        const uint32_t candidate = pp_lookup_path(pp, (const char*)name, length, BUSTER_PP_NONE, false);
+        result = candidate != BUSTER_PP_NONE && pp->files[candidate].data != BUSTER_PP_NONE ? candidate : BUSTER_PP_NONE;
     }
     else if (length != 0 && length < PATH_MAX)
     {
@@ -1859,14 +1870,16 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
         pp_diagnose(pp, PP_SEVERITY_ERROR, macro->location, "unterminated __VA_OPT__");
         result = false;
     }
-    // The parameters substituted expanded: those that aren't an operand of ## (or of #, which has its own item).
+    // The parameters substituted expanded: those that aren't an operand of ## (or of #, which has its own item). A
+    // parameter that ends a __VA_OPT__'s content is no operand of a ## after the __VA_OPT__: the content is expanded first.
     const PPItem* items = pp->items + macro->items_begin;
     const uint32_t count = pp->item_count - macro->items_begin;
+    uint32_t content_end = BUSTER_PP_NONE;
     for (uint32_t i = 0; result && i < count; i += 1)
     {
         if (items[i].kind == PP_ITEM_PARAMETER)
         {
-            const bool pasted = (i > 0 && items[i - 1].kind == PP_ITEM_PASTE) || (i + 1 < count && items[i + 1].kind == PP_ITEM_PASTE);
+            const bool pasted = (i > 0 && items[i - 1].kind == PP_ITEM_PASTE) || (i + 1 < count && i + 1 != content_end && items[i + 1].kind == PP_ITEM_PASTE);
             if (!pasted)
             {
                 macro->expanded_parameters |= 1ull << (items[i].parameter < 63 ? items[i].parameter : 63);
@@ -1877,6 +1890,7 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             // __VA_OPT__ tests whether the expanded variadic argument has tokens.
             const uint32_t variadic_index = macro->parameter_count - 1U;
             macro->expanded_parameters |= 1ull << (variadic_index < 63 ? variadic_index : 63);
+            content_end = i + 1 + items[i].parameter;
         }
     }
     macro->item_count = result ? count : 0;
@@ -1985,7 +1999,7 @@ static PPContext* pp_push_buffer(Preprocessor* pp, PPTokens* tokens, uint32_t be
     return result;
 }
 
-static void pp_pop_context(Preprocessor* pp)
+BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
     pp->macros[context->macro].disabled -= context->macro != 0;
@@ -2006,6 +2020,13 @@ static void pp_pop_context(Preprocessor* pp)
         pp->include_depth -= pp->include_depth != 0;
     }
     pp->context_count -= 1;
+    // An expansion that ends passes its pending flags on to the context it was read from; an argument's or a line's
+    // barrier doesn't.
+    const uint8_t passed = context->pending_flags | context->trailing_flags;
+    if (context->kind == BUSTER_PP_CONTEXT_BUFFER && !context->barrier && passed != 0 && pp->context_count != 0)
+    {
+        pp->contexts[pp->context_count - 1].pending_flags |= passed;
+    }
 }
 
 // The token where a file context's run ends: its next directive, or its end.
@@ -2363,7 +2384,7 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
 
 // Pastes two tokens (C 6.10.5.3): their spellings joined must lex as exactly one token. Returns false with an error if
 // they don't, as clang does, and the caller keeps them both.
-static bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPToken* result)
+BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPToken* result)
 {
     Scratch scratch = scratch_begin(0);
     uint8_t left_buffer[24];
@@ -2560,12 +2581,69 @@ static void pp_append_tokens(Preprocessor* pp, const PPTokens* tokens, uint32_t 
     }
 }
 
+// Pastes the token at `at` in `out` onto the one before it, as ## does, when ## is on the left of a __VA_OPT__ and `at`
+// is the first token of its result: a placemarker on either side gives the other (with the left's leading space), and an
+// invalid paste keeps both (after an error). The tokens after `at` move down when the two become one, and so does
+// `*space_at` (pp_substitute's pending space), which a token pasted away drops.
+static void pp_paste_in_place(Preprocessor* pp, PPTokens* out, uint32_t at, uint32_t* space_at)
+{
+    const PPToken left = pp_stack_token(out, at - 1);
+    const PPToken right = pp_stack_token(out, at);
+    PPToken result = right;
+    bool joined = true;
+    if (left.kind == BUSTER_PP_KIND_PLACEMARKER)
+    {
+        result.flags = (uint8_t)((right.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (left.flags & BUSTER_PP_SPACE) | BUSTER_PP_FROM_MACRO);
+    }
+    else if (right.kind == BUSTER_PP_KIND_PLACEMARKER)
+    {
+        result = left;
+    }
+    else
+    {
+        joined = pp_paste(pp, left, right, &result);
+    }
+    if (joined)
+    {
+        pp_tokens_set(out, at - 1, result.kind, result.flags, result.value, result.location);
+        for (uint32_t i = at + 1; i < out->count; i += 1)
+        {
+            pp_tokens_set(out, i - 1, out->kinds[i], out->flags[i], out->values[i], out->locations[i]);
+        }
+        out->count -= 1;
+        *space_at = *space_at == at ? BUSTER_PP_NONE : *space_at - (*space_at != BUSTER_PP_NONE && *space_at > at);
+    }
+    else
+    {
+        out->flags[at] = (uint8_t)((right.flags & ~BUSTER_PP_START_OF_LINE) | BUSTER_PP_FROM_MACRO);
+    }
+}
+
+// A leading space (an empty argument's or a __VA_OPT__'s) for the next token pushed to `out`: `*space_at` is where that
+// token goes, and an earlier one that has its token by now gets it first. pp_substitute applies the last at its end.
+static void pp_pend_space(PPTokens* out, uint32_t* space_at)
+{
+    if (*space_at != BUSTER_PP_NONE && *space_at < out->count)
+    {
+        out->flags[*space_at] |= BUSTER_PP_SPACE;
+    }
+    *space_at = out->count;
+}
+
 // Substitutes an invocation's arguments into its macro's compiled body (C 6.10.4), appending the result to the
 // expansions, where it starts at `*begin`: parameters by their expanded arguments (raw next to ##), # by a string
 // literal, ## by pasting (with placemarkers for empty arguments), __VA_OPT__ by its content when the expanded variadic
 // argument has tokens, and GNU's `, ## __VA_ARGS__` by the comma and the arguments, or nothing when the variadic argument
 // was omitted. Placemarkers are then removed.
-static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint32_t* begin)
+//
+// A __VA_OPT__ next to ## is a placemarker when the variadic argument is absent or its content gives no tokens (C
+// 6.10.5.2), and otherwise ## pastes the content's first token (## on the left) or last token (## on the right). An
+// empty argument at either end of the content is a placemarker for that end's ##, as in clang: `__VA_OPT__(a x) ## y`
+// gives `a y` for an empty x.
+//
+// An empty argument's leading space goes to the next token, as clang does (`a x+b` with an empty x gives `a +b`);
+// `*trailing` gets the space left over after the last token, which the token after the expansion takes.
+static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint32_t* begin, uint8_t* trailing)
 {
     const PPMacro* macro = &pp->macros[invocation->macro];
     const PPItem* items = pp->items + macro->items_begin;
@@ -2584,8 +2662,13 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
         variadic_present = first != last;
     }
     uint32_t va_opt_end = BUSTER_PP_NONE; // The item where the open __VA_OPT__'s content ends,
+    uint32_t va_opt_first = BUSTER_PP_NONE; // the content's first item,
+    uint32_t va_opt_begin = 0; // where its tokens start in `out`,
     uint32_t va_opt_mark = BUSTER_PP_NONE; // and for # __VA_OPT__, where its tokens start
     uint8_t va_opt_flags = 0;
+    bool va_opt_pasted_after = false; // Whether ## follows the open __VA_OPT__.
+    bool va_opt_paste_left = false; // Whether ## precedes the next __VA_OPT__ (set by the ##).
+    uint32_t space_at = BUSTER_PP_NONE; // Where the token that takes a pending leading space goes (pp_pend_space).
     bool placemarkers = false;
     for (uint32_t i = 0; i <= count && !pp->fatal; i += 1)
     {
@@ -2598,14 +2681,38 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 pp_push_token(pp, out, string);
                 va_opt_mark = BUSTER_PP_NONE;
             }
+            // Content of placemarkers alone gives no tokens.
+            bool only_placemarkers = true;
+            for (uint32_t k = va_opt_begin; only_placemarkers && k < out->count; k += 1)
+            {
+                only_placemarkers = out->kinds[k] == BUSTER_PP_KIND_PLACEMARKER;
+            }
+            out->count = only_placemarkers ? va_opt_begin : out->count;
+            space_at = space_at != BUSTER_PP_NONE && space_at > out->count ? out->count : space_at;
+            if (out->count == va_opt_begin)
+            {
+                // A placemarker, which ## on the right takes as its left operand and ## on the left leaves alone.
+                if (va_opt_pasted_after && !va_opt_paste_left)
+                {
+                    pp_push_token(pp, out, (PPToken){ .kind = BUSTER_PP_KIND_PLACEMARKER, .flags = va_opt_flags });
+                    placemarkers = true;
+                }
+            }
+            else if (va_opt_paste_left)
+            {
+                pp_paste_in_place(pp, out, va_opt_begin, &space_at);
+            }
+            va_opt_paste_left = false;
             va_opt_end = BUSTER_PP_NONE;
+            va_opt_first = BUSTER_PP_NONE;
         }
         if (i == count)
         {
             break;
         }
         const PPItem* item = &items[i];
-        const bool pasted_after = i + 1 < count && items[i + 1].kind == PP_ITEM_PASTE;
+        // ## after the item, in the same __VA_OPT__'s content when it is in one.
+        const bool pasted_after = i + 1 < count && i + 1 != va_opt_end && items[i + 1].kind == PP_ITEM_PASTE;
         switch (item->kind)
         {
             case PP_ITEM_TOKEN:
@@ -2632,12 +2739,25 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 uint32_t first;
                 uint32_t last;
                 pp_argument_range(pp, invocation, item->parameter, !pasted_after, &tokens, &first, &last);
-                if (first == last && pasted_after)
+                if (first != last)
                 {
-                    pp_push_token(pp, out, (PPToken){ .kind = BUSTER_PP_KIND_PLACEMARKER, .flags = item->flags });
-                    placemarkers = true;
+                    pp_append_tokens(pp, tokens, first, last, true, item->flags);
                 }
-                pp_append_tokens(pp, tokens, first, last, true, item->flags);
+                else
+                {
+                    // An empty argument: a placemarker next to ##, or at an end of a __VA_OPT__'s content next to ## outside
+                    // it; else its leading space goes to the next token.
+                    const bool edge = va_opt_end != BUSTER_PP_NONE && ((i == va_opt_first && va_opt_paste_left) || (i + 1 == va_opt_end && va_opt_pasted_after));
+                    if (pasted_after || edge)
+                    {
+                        pp_push_token(pp, out, (PPToken){ .kind = BUSTER_PP_KIND_PLACEMARKER, .flags = item->flags });
+                        placemarkers = true;
+                    }
+                    else if (item->flags & BUSTER_PP_SPACE)
+                    {
+                        pp_pend_space(out, &space_at);
+                    }
+                }
                 break;
             }
             case PP_ITEM_STRINGIZE:
@@ -2650,33 +2770,44 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 break;
             }
             case PP_ITEM_VA_OPT:
+            case PP_ITEM_STRINGIZE_VA_OPT:
+            {
+                const uint32_t content_end = i + 1 + item->parameter;
+                const bool content_pasted_after = content_end < count && items[content_end].kind == PP_ITEM_PASTE;
+                // The first token after __VA_OPT__ (its content's first, or the next) takes its leading space, as in clang.
+                if (item->kind == PP_ITEM_VA_OPT && (item->flags & BUSTER_PP_SPACE))
+                {
+                    pp_pend_space(out, &space_at);
+                }
                 if (variadic_present)
                 {
-                    va_opt_end = i + 1 + item->parameter;
+                    va_opt_end = content_end;
+                    va_opt_first = i + 1;
+                    va_opt_begin = out->count;
+                    va_opt_flags = item->flags;
+                    va_opt_pasted_after = content_pasted_after;
+                    va_opt_mark = item->kind == PP_ITEM_STRINGIZE_VA_OPT ? out->count : BUSTER_PP_NONE;
                 }
                 else
                 {
-                    if (pasted_after || (i > 0 && items[i - 1].kind == PP_ITEM_PASTE))
+                    if (item->kind == PP_ITEM_STRINGIZE_VA_OPT)
+                    {
+                        pp_push_token(pp, out, pp_stringize(pp, out, out->count, out->count, item->flags));
+                        if (va_opt_paste_left)
+                        {
+                            pp_paste_in_place(pp, out, out->count - 1, &space_at);
+                        }
+                    }
+                    else if (content_pasted_after && !va_opt_paste_left)
                     {
                         pp_push_token(pp, out, (PPToken){ .kind = BUSTER_PP_KIND_PLACEMARKER, .flags = item->flags });
                         placemarkers = true;
                     }
+                    va_opt_paste_left = false;
                     i += item->parameter;
                 }
                 break;
-            case PP_ITEM_STRINGIZE_VA_OPT:
-                if (variadic_present)
-                {
-                    va_opt_end = i + 1 + item->parameter;
-                    va_opt_mark = out->count;
-                    va_opt_flags = item->flags;
-                }
-                else
-                {
-                    pp_push_token(pp, out, pp_stringize(pp, out, out->count, out->count, item->flags));
-                    i += item->parameter;
-                }
-                break;
+            }
             case PP_ITEM_PASTE:
             {
                 // The left operand is the last token so far (a placemarker for an empty argument); the right one is the
@@ -2722,10 +2853,14 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     }
                     i += 1;
                 }
-                else if (next->kind == PP_ITEM_VA_OPT || next->kind == PP_ITEM_STRINGIZE_VA_OPT || next->kind == PP_ITEM_PASTE)
+                else if (next->kind == PP_ITEM_VA_OPT || next->kind == PP_ITEM_STRINGIZE_VA_OPT)
                 {
-                    // `## __VA_OPT__(...)`: the content follows unpasted (clang pastes its first token; rare enough to
-                    // leave for later).
+                    // `## __VA_OPT__(...)`: the __VA_OPT__ pastes its first token onto the left operand when its tokens
+                    // are known (above).
+                    va_opt_paste_left = true;
+                }
+                else if (next->kind == PP_ITEM_PASTE)
+                {
                 }
                 else
                 {
@@ -2769,6 +2904,12 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                 break;
             }
         }
+    }
+    // The pending space: the token that came after it takes it, or the token after the expansion does.
+    *trailing = space_at != BUSTER_PP_NONE && space_at >= out->count ? BUSTER_PP_SPACE : 0;
+    if (space_at != BUSTER_PP_NONE && space_at < out->count)
+    {
+        out->flags[space_at] |= BUSTER_PP_SPACE;
     }
     // Remove the placemarkers.
     if (placemarkers)
@@ -2895,18 +3036,32 @@ static void pp_finish_invocation(Preprocessor* pp)
 {
     const PPInvocation invocation = pp->invocations[pp->invocation_count - 1];
     uint32_t begin;
-    pp_substitute(pp, &invocation, &begin);
+    uint8_t trailing;
+    pp_substitute(pp, &invocation, &begin, &trailing);
     const uint32_t end = pp->expansions.count;
+    const uint8_t name_flags = invocation.name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE);
     if (begin < end)
     {
         uint8_t* flags = &pp->expansions.flags[begin];
-        *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (invocation.name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)));
+        *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | name_flags);
     }
     pp->captures.count = invocation.captures_begin;
     pp->arguments.count = invocation.arguments_begin;
     pp->argument_record_count = invocation.arguments;
     pp->invocation_count -= 1;
-    pp_push_buffer(pp, &pp->expansions, begin, end, invocation.macro, invocation.expansion_end, false, true);
+    if (begin < end)
+    {
+        PPContext* context = pp_push_buffer(pp, &pp->expansions, begin, end, invocation.macro, invocation.expansion_end, false, true);
+        if (context != 0)
+        {
+            context->trailing_flags = trailing;
+        }
+    }
+    else
+    {
+        // An empty expansion: the next token read after the invocation's ')' takes its name's flags.
+        pp->contexts[pp->context_count - 1].pending_flags |= name_flags | trailing;
+    }
 }
 
 static bool pp_new_argument(Preprocessor* pp)
@@ -3270,7 +3425,8 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
         {
             const PPInvocation invocation = { .macro = id };
             uint32_t substituted;
-            pp_substitute(pp, &invocation, &substituted);
+            uint8_t trailing;
+            pp_substitute(pp, &invocation, &substituted, &trailing);
         }
     }
     else if (pp->vectorized)
@@ -3287,12 +3443,18 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
             tokens->count += 1;
         }
     }
-    if (begin < tokens->count)
+    const bool empty = begin == tokens->count;
+    if (!empty)
     {
         uint8_t* flags = &tokens->flags[begin];
         *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)));
     }
-    if (!direct)
+    else
+    {
+        // An empty expansion: the next token read from this context takes the name's flags.
+        pp->contexts[pp->context_count - 1].pending_flags |= name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE);
+    }
+    if (!direct && !empty)
     {
         pp_push_buffer(pp, &pp->expansions, begin, pp->expansions.count, id, expansion_end, false, true);
     }
@@ -3384,6 +3546,18 @@ static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** na
 BUSTER_INLINE bool pp_in_expression(const Preprocessor* pp)
 {
     return pp->capture_count != 0 && pp->capture_frames[pp->capture_count - 1].kind == BUSTER_PP_CAPTURE_CONDITION;
+}
+
+// Is a #if line being expanded, here or around the macro arguments and builtin operands being expanded in it? (As in
+// clang, __has_include may be in a macro's argument there; `defined` is evaluated in the line itself.)
+static bool pp_in_condition(const Preprocessor* pp)
+{
+    uint32_t c = pp->capture_count;
+    while (c != 0 && (pp->capture_frames[c - 1].kind == BUSTER_PP_CAPTURE_ARGUMENT || pp->capture_frames[c - 1].kind == BUSTER_PP_CAPTURE_BUILTIN))
+    {
+        c -= 1;
+    }
+    return c != 0 && pp->capture_frames[c - 1].kind == BUSTER_PP_CAPTURE_CONDITION;
 }
 
 // The file of the innermost file context (for #include_next and __has_include_next).
@@ -3551,7 +3725,7 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
     uint8_t text[512];
     uint32_t length;
     bool angled;
-    if (include && !pp_in_expression(pp))
+    if (include && !pp_in_condition(pp))
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "__has_include must be used within a preprocessing directive");
     }
@@ -3563,6 +3737,16 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
     else if (include)
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "expected \"FILENAME\" or <FILENAME>");
+    }
+    else if (builtin == PP_BUILTIN_IS_IDENTIFIER && last == first + 1)
+    {
+        // 1 for an identifier that isn't a keyword in the language mode (a macro's name too: it isn't expanded), and 0
+        // for a keyword or another token, as clang answers.
+        result = tokens->kinds[first] == C_TOKEN_RAW_IDENTIFIER && !c_name_is_keyword(tokens->values[first], pp->options.language);
+    }
+    else if (builtin == PP_BUILTIN_IS_IDENTIFIER)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "__is_identifier takes one token");
     }
     else if (pp_feature_name(pp, builtin, tokens, first, last, text, &length))
     {
@@ -3619,21 +3803,37 @@ static void pp_close_builtin(Preprocessor* pp, bool closed)
     if (builtin == PP_BUILTIN_PRAGMA)
     {
         const bool string = closed && end == begin + 1 && tokens->kinds[begin] >= C_TOKEN_STRING_LITERAL && tokens->kinds[begin] <= C_TOKEN_UTF32_STRING_LITERAL;
+        bool started = false;
         if (string)
         {
             pp_pragma_string(pp, pp_stack_token(tokens, begin), invocation.name_location);
+        }
+        else if (closed && begin < end)
+        {
+            // Another operand is expanded first, as clang and GCC do (`_Pragma(P)` with P a string literal), and
+            // pp_finish_builtin takes the string literal it must give.
+            const PPCapture capture = {
+                .kind = BUSTER_PP_CAPTURE_BUILTIN,
+                .arguments_begin = begin,
+                .builtin = (uint8_t)builtin,
+                .flags = invocation.name_flags,
+                .location = invocation.name_location,
+            };
+            started = pp_start_capture(pp, capture, begin, end, invocation.expansion_end);
         }
         else
         {
             pp_diagnose(pp, PP_SEVERITY_ERROR, invocation.name_location, "_Pragma takes a parenthesized string literal");
         }
-        pp->arguments.count = begin;
+        pp->arguments.count = started ? pp->arguments.count : begin;
     }
     else
     {
         const bool include = builtin == PP_BUILTIN_HAS_INCLUDE || builtin == PP_BUILTIN_HAS_INCLUDE_NEXT;
-        // A header name in <...> or a string literal is read as it is; anything else is expanded first.
-        const bool direct = include && begin < end && (tokens->kinds[begin] == C_TOKEN_LESS || tokens->kinds[begin] == C_TOKEN_STRING_LITERAL);
+        // A header name in <...> or a string literal is read as it is, and so is __is_identifier's operand (clang doesn't
+        // expand it); anything else is expanded first.
+        const bool direct = (include && begin < end && (tokens->kinds[begin] == C_TOKEN_LESS || tokens->kinds[begin] == C_TOKEN_STRING_LITERAL)) ||
+                            builtin == PP_BUILTIN_IS_IDENTIFIER;
         const PPCapture capture = {
             .kind = BUSTER_PP_CAPTURE_BUILTIN,
             .arguments_begin = begin,
@@ -3668,10 +3868,31 @@ static void pp_finish_builtin(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
     pp->capture_count -= 1;
-    const uint64_t value = pp_builtin_value(pp, (PPBuiltin)capture.builtin, &pp->captures, capture.begin, pp->captures.count, capture.location);
-    pp->captures.count = capture.begin;
-    pp->arguments.count = capture.arguments_begin;
-    pp_emit(pp, pp_number_token(pp, value, capture.flags));
+    if (capture.builtin == PP_BUILTIN_PRAGMA)
+    {
+        // _Pragma's operand expanded: it must be one string literal.
+        const PPTokens* tokens = &pp->captures;
+        const bool string = tokens->count == capture.begin + 1 && tokens->kinds[capture.begin] >= C_TOKEN_STRING_LITERAL &&
+                            tokens->kinds[capture.begin] <= C_TOKEN_UTF32_STRING_LITERAL;
+        const PPToken token = string ? pp_stack_token(tokens, capture.begin) : (PPToken){ 0 };
+        pp->captures.count = capture.begin;
+        pp->arguments.count = capture.arguments_begin;
+        if (string)
+        {
+            pp_pragma_string(pp, token, capture.location);
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, capture.location, "_Pragma takes a parenthesized string literal");
+        }
+    }
+    else
+    {
+        const uint64_t value = pp_builtin_value(pp, (PPBuiltin)capture.builtin, &pp->captures, capture.begin, pp->captures.count, capture.location);
+        pp->captures.count = capture.begin;
+        pp->arguments.count = capture.arguments_begin;
+        pp_emit(pp, pp_number_token(pp, value, capture.flags));
+    }
 }
 
 // Expands a builtin macro whose name was just read, from the context it was read in (`expansion_end` from
@@ -3766,11 +3987,28 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
 // ---------------------------------------------------------------------------------------------------------------------
 // Steps of the main loop
 
+// A run of `copied` tokens read from `context` was just copied to the target: its first token takes the context's
+// pending flags, which are rare.
+BUSTER_INLINE void pp_take_pending_flags(Preprocessor* pp, PPContext* context, uint32_t copied)
+{
+    if (context->pending_flags != 0 && copied != 0)
+    {
+        PPTokens* target = pp_target(pp);
+        target->flags[target->count - copied] |= context->pending_flags;
+        context->pending_flags = 0;
+    }
+}
+
 // Expands the macro whose name is the top context's current token.
 static void pp_expand_current(Preprocessor* pp)
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
     PPToken name = pp_context_token(pp, context, context->position);
+    if (context->pending_flags != 0)
+    {
+        name.flags |= context->pending_flags;
+        context->pending_flags = 0;
+    }
     const PPMacroId id = pp->macro_of[name.value];
     PPMacro* macro = &pp->macros[id];
     const uint32_t expansion_end = pp_expansion_end(context, name);
@@ -3812,6 +4050,7 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
     {
         const uint32_t base = pp->ranges[context->range].base;
         const uint32_t stop = pp->vectorized ? pp_copy_file_run_vector(pp, data, base, context->position, limit) : pp_copy_file_run_scalar(pp, data, base, context->position, limit);
+        pp_take_pending_flags(pp, context, stop - context->position);
         if (pp->options.timing)
         {
             pp->statistics.file_runs += 1;
@@ -3837,6 +4076,7 @@ static void pp_step_buffer(Preprocessor* pp, PPContext* context)
 {
     const uint32_t stop = pp->vectorized ? pp_copy_buffer_run_vector(pp, context->tokens, context->position, context->end)
                                          : pp_copy_buffer_run_scalar(pp, context->tokens, context->position, context->end);
+    pp_take_pending_flags(pp, context, stop - context->position);
     if (pp->options.timing)
     {
         pp->statistics.buffer_runs += 1;
@@ -4209,32 +4449,51 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     const uint32_t first = hash + 2;
     if (first < end && (data->kinds[first] & 0x7F) == C_TOKEN_LESS)
     {
-        // The lexer doesn't make header names: read <...> from the source, up to the '>' on the line.
-        const uint8_t* bytes = data->bytes;
-        uint32_t p = data->starts[first] + 1;
+        // The lexer doesn't make header names: read <...> from the source, up to the '>' on the line, through the scalar
+        // lexer's characters, which skip line splices (translation phase 2 removed them).
         const uint32_t line_end = end < data->token_count ? data->starts[end] : data->length;
-        while (p < line_end && bytes[p] != '>' && bytes[p] != '\n' && bytes[p] != '\r')
+        const ScalarLexer lexer = {
+            .source = data->bytes,
+            .length = line_end,
+            .trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0,
+            .cplusplus = false,
+        };
+        uint64_t p = data->starts[first] + 1;
+        bool closed = false;
+        bool line_ended = false;
+        while (!closed && !line_ended && p < line_end && length < sizeof(name))
         {
-            p += 1;
+            uint64_t size;
+            uint64_t char_start;
+            const int32_t c = get_char(&lexer, p, &size, &char_start);
+            closed = c == '>';
+            line_ended = c == '\n' || c == '\r' || c == BUSTER_LEX_END_OF_FILE;
+            if (!closed && !line_ended)
+            {
+                name[length] = (uint8_t)c;
+                length += 1;
+            }
+            p += size != 0 ? size : 1;
         }
-        valid = p < line_end && bytes[p] == '>' && p - data->starts[first] - 1 < sizeof(name);
-        if (valid)
-        {
-            length = p - data->starts[first] - 1;
-            memcpy(name, bytes + data->starts[first] + 1, length);
-            angled = true;
-        }
+        valid = closed;
+        angled = valid;
     }
     else if (first + 1 == end && (data->kinds[first] & 0x7F) == C_TOKEN_STRING_LITERAL)
     {
+        // The string literal without its line splices.
         const uint32_t start = data->starts[first];
         const uint32_t stop = data->values[first];
-        valid = stop - start >= 2 && stop - start - 2 < sizeof(name) && data->bytes[start] == '"';
+        Scratch scratch = scratch_begin(0);
+        uint8_t* buffer = arena_push(scratch.arena, (uint64_t)(stop - start) + 1, 1);
+        const uint8_t* spelling = 0;
+        const uint32_t spelled = buffer != 0 ? pp_without_splices(pp, data->bytes + start, stop - start, buffer, &spelling) : 0;
+        valid = spelled >= 2 && spelled - 2 < sizeof(name) && spelling[0] == '"';
         if (valid)
         {
-            length = stop - start - 2;
-            memcpy(name, data->bytes + start + 1, length);
+            length = spelled - 2;
+            memcpy(name, spelling + 1, length);
         }
+        scratch_end(scratch);
     }
     else if (first < end)
     {
@@ -4300,6 +4559,15 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
             }
             name = copy;
         }
+    }
+    // A #line without a name keeps the presumed one: the name of the range's latest #line, if it has one.
+    bool found = name != 0;
+    for (uint32_t i = pp->line_directive_count; valid && !found && i > 0; i -= 1)
+    {
+        const PPLineDirective* line = &pp->line_directives[i - 1];
+        found = line->range == context->range;
+        name = found ? line->name : 0;
+        name_length = found ? line->name_length : 0;
     }
     if (!valid)
     {
@@ -5034,7 +5302,7 @@ static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin
             else if (kind == C_TOKEN_RAW_IDENTIFIER)
             {
                 // An identifier left after expansion is 0; in C23, true is 1 (and false 0).
-                const bool is_true = tokens->values[i] == C_NAME_TRUE && pp->options.language.standard >= 23;
+                const bool is_true = tokens->values[i] == C_NAME_TRUE && pp->options.language.standard >= 2023;
                 values[value_count] = (PPValue){ .bits = is_true };
                 value_count += 1;
                 expect_operand = false;
@@ -5742,7 +6010,7 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer)
     memcpy(buffer, pp_predefines_base, sizeof(pp_predefines_base) - 1);
     length += sizeof(pp_predefines_base) - 1;
     const CLanguage language = options->language;
-    const char* version = language.standard >= 23 ? "202311L" : language.standard >= 17 ? "201710L" : language.standard >= 11 ? "201112L" : language.standard >= 99 ? "199901L" : 0;
+    const char* version = language.standard >= 2023 ? "202311L" : language.standard >= 2017 ? "201710L" : language.standard >= 2011 ? "201112L" : language.standard >= 1999 ? "199901L" : 0;
     if (version != 0)
     {
         length += (uint32_t)sprintf(buffer + length, "#define __STDC_VERSION__ %s\n", version);
@@ -5755,14 +6023,14 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer)
     {
         length += (uint32_t)sprintf(buffer + length, "#define linux 1\n#define unix 1\n");
     }
-    length += (uint32_t)sprintf(buffer + length, language.standard >= 99 ? "#define __GNUC_STDC_INLINE__ 1\n" : "#define __GNUC_GNU_INLINE__ 1\n");
+    length += (uint32_t)sprintf(buffer + length, language.standard >= 1999 ? "#define __GNUC_STDC_INLINE__ 1\n" : "#define __GNUC_GNU_INLINE__ 1\n");
     length += (uint32_t)sprintf(buffer + length, "#define __STDC_HOSTED__ %d\n", options->freestanding ? 0 : 1);
     if (!options->freestanding)
     {
         length += (uint32_t)sprintf(buffer + length, "#define __GCC_HAVE_DWARF2_CFI_ASM 1\n");
     }
     length += (uint32_t)sprintf(buffer + length, options->optimize ? "#define __OPTIMIZE__ 1\n" : "#define __NO_INLINE__ 1\n");
-    if (language.standard >= 23)
+    if (language.standard >= 2023)
     {
         memcpy(buffer + length, pp_predefines_c23, sizeof(pp_predefines_c23) - 1);
         length += sizeof(pp_predefines_c23) - 1;
@@ -5863,6 +6131,57 @@ static bool pp_add_directory(Preprocessor* pp, const char* path, bool system)
     return result;
 }
 
+// Drops the search directories that don't exist, and the later of two that are the same directory (the same device and
+// inode), as clang does (InitHeaderSearch): among the -iquote ones, then among the others, where a directory that is
+// both a system one and not drops the one that isn't. So #include_next can't find a file again through a repeated -I.
+static void pp_dedupe_directories(Preprocessor* pp)
+{
+    Scratch scratch = scratch_begin(0);
+    const uint32_t count = pp->directory_count;
+    uint64_t* devices = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(uint64_t), 8);
+    uint64_t* inodes = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(uint64_t), 8);
+    bool* kept = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(bool), 8);
+    if (devices != 0 && inodes != 0 && kept != 0)
+    {
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            struct stat stats;
+            kept[i] = stat(pp->directories[i], &stats) == 0 && S_ISDIR(stats.st_mode);
+            devices[i] = kept[i] ? (uint64_t)stats.st_dev : 0;
+            inodes[i] = kept[i] ? (uint64_t)stats.st_ino : 0;
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t group_first = i < pp->angled_first ? 0 : pp->angled_first;
+            for (uint32_t j = group_first; kept[i] && j < i; j += 1)
+            {
+                if (kept[j] && devices[j] == devices[i] && inodes[j] == inodes[i])
+                {
+                    const bool system_over_user = pp->directory_system[i] && !pp->directory_system[j];
+                    kept[j] = !system_over_user;
+                    kept[i] = system_over_user;
+                }
+            }
+        }
+        uint32_t written = 0;
+        uint32_t angled_first = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            angled_first += i < pp->angled_first && kept[i];
+            if (kept[i])
+            {
+                pp->directories[written] = pp->directories[i];
+                pp->directory_lengths[written] = pp->directory_lengths[i];
+                pp->directory_system[written] = pp->directory_system[i];
+                written += 1;
+            }
+        }
+        pp->directory_count = written;
+        pp->angled_first = angled_first;
+    }
+    scratch_end(scratch);
+}
+
 // An array of `count` records of `size` bytes, in an arena of its own (address space, touched as it is used).
 static void* pp_array(Preprocessor* pp, uint64_t count, uint64_t size)
 {
@@ -5949,6 +6268,10 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         for (uint32_t i = 0; result && i < options->after_directory_count; i += 1)
         {
             result = pp_add_directory(pp, options->after_directories[i], true);
+        }
+        if (result)
+        {
+            pp_dedupe_directories(pp);
         }
         // The builtin macros.
         static const struct
@@ -6670,11 +6993,11 @@ static bool pp_parse_standard(const char* value, CLanguage* language)
         uint32_t standard;
         bool gnu;
     } standards[] = {
-        { "c89", 89, false }, { "c90", 89, false }, { "iso9899:1990", 89, false }, { "gnu89", 89, true }, { "gnu90", 89, true },
-        { "c99", 99, false }, { "iso9899:1999", 99, false }, { "gnu99", 99, true }, { "c11", 11, false }, { "iso9899:2011", 11, false },
-        { "gnu11", 11, true }, { "c17", 17, false }, { "c18", 17, false }, { "iso9899:2017", 17, false }, { "iso9899:2018", 17, false },
-        { "gnu17", 17, true }, { "gnu18", 17, true }, { "c23", 23, false }, { "c2x", 23, false }, { "iso9899:2024", 23, false },
-        { "gnu23", 23, true }, { "gnu2x", 23, true },
+        { "c89", 1989, false }, { "c90", 1989, false }, { "iso9899:1990", 1989, false }, { "gnu89", 1989, true }, { "gnu90", 1989, true },
+        { "c99", 1999, false }, { "iso9899:1999", 1999, false }, { "gnu99", 1999, true }, { "c11", 2011, false }, { "iso9899:2011", 2011, false },
+        { "gnu11", 2011, true }, { "c17", 2017, false }, { "c18", 2017, false }, { "iso9899:2017", 2017, false }, { "iso9899:2018", 2017, false },
+        { "gnu17", 2017, true }, { "gnu18", 2017, true }, { "c23", 2023, false }, { "c2x", 2023, false }, { "iso9899:2024", 2023, false },
+        { "gnu23", 2023, true }, { "gnu2x", 2023, true },
     };
     bool result = false;
     for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(standards); i += 1)
@@ -6699,7 +7022,7 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     const char** after = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
     const char** macros = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
     const char** includes = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
-    *options = (PPOptions){ .language = { .standard = 17, .gnu = true } };
+    *options = (PPOptions){ .language = { .standard = 2017, .gnu = true } };
     *input = 0;
     *output = 0;
     *markers = true;

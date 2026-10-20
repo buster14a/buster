@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on top of `main` at 75261db, with `-march=native` (AVX-512 intrinsic headers) | 8 | 4,571,031 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 43 | |
+| The built-in cases (`pp_test_cases`) | 58 | |
 
 **Speed**, measured on 2026-10-20 on the Ryzen 7 9700X (clang 23.1.1,
 `build.sh`'s `-O3 -march=native`), pinned to CPU 2 and under the
@@ -38,6 +38,16 @@ read, lexed, refined and indexed. Figures are medians of 21 passes;
 | --- | ---: | ---: | ---: | ---: |
 | `sqlite3.c` | 42.54 | 74.83 | 125.26 | 2.94 |
 | `main.c` | 93.19 | 74.26 | 350.22 | 3.76 |
+
+#193's review fixes (spacing through empty expansions, `__VA_OPT__` pastes and
+the others in "Directives and `#if`") add 0.5% to 0.6% instructions and no
+measurable time. In an A/B against the reviewed commit, medians of five
+interleaved rounds:
+
+| Translation unit | Reviewed commit | With the fixes |
+| --- | ---: | ---: |
+| `sqlite3.c` | 12.09 ms | 12.03 ms |
+| `main.c` | 15.65 ms | 15.67 ms |
 
 That is 4.9 times `clang -E` on `sqlite3.c` and 5.7 times on `main.c`. clang's
 time includes starting a process, which ours doesn't. With printing, as whole
@@ -169,6 +179,22 @@ macro's expansion, an argument being expanded, or a directive's line):
   placemarkers for empty arguments), `__VA_OPT__`, and GNU's
   `, ## __VA_ARGS__`, which drops the comma when the variadic argument is
   omitted.
+- **`__VA_OPT__` next to `##`** (C 6.10.5.2) is a placemarker when the
+  variadic argument is absent or the content gives no tokens. Otherwise `##`
+  pastes the content's first token (`##` on its left) or its last (`##` on its
+  right). As in clang:
+  - an empty argument at either end of the content is a placemarker for that
+    end's `##`: `__VA_OPT__(a x) ## y` gives `a y` for an empty `x`;
+  - content made only of placemarkers gives no tokens.
+
+  GCC differs in one case: `a ## __VA_OPT__(x y) ## b`, with both arguments
+  empty, is `ab` in clang and `a b` in GCC.
+- **Spacing.** An expansion that gives no tokens passes its macro name's
+  leading space and start of line to the next token read from the same context.
+  So does an empty argument, and so does a `__VA_OPT__` to the first token after
+  it. A context's `pending_flags` and `trailing_flags` carry these, as clang's
+  token lexers do. The spacing is visible in strings: with `#define EMPTY`,
+  stringizing `a EMPTY+b` gives `"a +b"`.
 
 The three stacks of tokens (arguments, captures and expansions) are LIFO
 arenas. Popping a context gives its tokens back when they are on top.
@@ -187,16 +213,26 @@ arenas. Popping a context gives its tokens back when they are on top.
   under `/usr/lib/clang`), `/usr/local/include`, `/usr/include` and
   `-idirafter`. `#include_next` resumes after the directory that found the
   includer. `__has_include` and `__has_include_next` use the same search.
+  - As in clang, directories that don't exist are dropped, and so are later
+    copies of a directory (by device and inode). A non-system directory that is
+    also a system one is dropped in favor of the system one. Otherwise a
+    repeated `-I` would make `#include_next` find the same file again.
+  - A header name is read without its line splices.
+  - `__has_include` also works inside a macro's argument in a `#if` line.
 - **Pragmas** are acted on when they are `once`, `GCC system_header`,
   `push_macro`/`pop_macro` and `GCC poison`. Every other pragma, and `#ident`,
   goes to the output as `#`, its name and its line's tokens (never expanded),
   followed by a `BUSTER_PP_KIND_PRAGMA_END`, and `-E` prints it on a line of its
   own as clang does. So `#pragma pack` reaches the parser at its place in the
   stream (#124). `_Pragma` from an expansion is destringized and handled the
-  same way.
+  same way. An operand that isn't a string literal is expanded first, as in
+  clang and GCC, and must then be one.
 - **`#line` and line markers** set presumed lines and files apart from the
-  physical ones. `__LINE__` in a macro's expansion is the line of the end of
-  the outermost expansion, as in clang.
+  physical ones. One without a file name keeps the presumed name. `__LINE__`
+  in a macro's expansion is the line of the end of the outermost expansion, as
+  in clang. Where clang and GCC differ, we follow clang:
+  - a `#line` continued onto the next line counts from the line of its `#`;
+  - `__BASE_FILE__` in a forced include is `<built-in>`.
 
 ### Built-in macros and the predefines
 
@@ -206,6 +242,10 @@ arenas. Popping a context gives its tokens back when they are on top.
 `__has_attribute`, `__has_builtin`, `__has_feature`, `__has_extension`,
 `__has_c_attribute`, `__has_declspec_attribute`, `__has_warning`,
 `__is_identifier` and the `__is_target_*` queries.
+
+`__is_identifier(x)` is 1 when `x` is an identifier that isn't a keyword in the
+language mode (`c_name_is_keyword`), as clang answers. Its operand isn't
+expanded, so a macro's name is an identifier.
 
 The feature queries answer from tables of what clang 23 answers nonzero, for
 x86-64 Linux in C. They were generated by asking clang about every name the
@@ -412,7 +452,7 @@ the mispredictions it saves.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 43 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 58 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -446,12 +486,33 @@ the mispredictions it saves.
   - directives among a macro's arguments (a `#if` line expanded there, a
     `#define`), a builtin's operand from another context and with a `#define`
     in it, `_Pragma` from a macro, a computed `#include`, and `#line` with a
-    macro (the main loop's frames).
+    macro (the main loop's frames);
+  - the cases from #193's review:
+    - missing headers by absolute path;
+    - `__VA_OPT__` on either side of `##`;
+    - spaces through empty expansions;
+    - `__has_include` in a macro's argument;
+    - header names with line splices;
+    - a repeated `-I` with `#include_next`;
+    - `_Pragma` of a macro;
+    - `#line` without a file name;
+    - `__is_identifier`;
+    - `true` in C99;
+    - the two places where we follow clang rather than GCC.
 
-  Each case is preprocessed by both kernels, whose streams and directive
-  tables must be the same, and whose tokens' spellings must be the expected
-  ones. With `--clang`, each
+  A case can name more files, and options for both sides (`-I`, `-include`,
+  with `%d` for its directory). Each case is preprocessed by both kernels, with
+  the built-in predefines. Their streams and directive tables must be the same,
+  and their tokens' spellings must be the expected ones. With `--clang`, each
   case is also preprocessed by `clang -E -P` and must give the same spellings.
+- **Predefines and keywords.** The cases and files under `--clang` give our side
+  clang's predefines, so `--clang` checks our built-in ones separately:
+  - In ten language modes (`c89` to `gnu23`), with `-ffreestanding` and with
+    `-O2`, 14 option sets in all, `pp_predefines` must give `clang -dM -E` line
+    for line. Only the three macros that name clang's patch release are left
+    out.
+  - In each mode, `__is_identifier` of every predefined name (keywords,
+    directive names, the preprocessor's names) must give clang's answer.
 - **Files.** With files, each is preprocessed with the options, by both
   kernels, and compared. With `--clang`, our side reads clang's own predefines
   for the same options (`clang -dM -E`, through `--predefines`), so both start
@@ -555,8 +616,6 @@ cleared once and reused.
 ## Not yet
 
 - `#embed` is an error, and `__has_embed` isn't answered (C23).
-- `## __VA_OPT__(...)` doesn't paste: the content follows unpasted, where
-  clang pastes its first token. No corpus has it.
 - Target options (`-march`, `-m*`, `-funsigned-char`) don't change the built-in
   predefines; they come only through `--predefines`. #117's configuration asks
   for clang's macros for the same `-march`.
@@ -566,12 +625,16 @@ cleared once and reused.
   clang's table, which #117 and #125 keep for the oracle's mode. Outside it, they
   are to answer what the compiler implements (#123, #148).
 - Line markers in `-E` output aren't compared with clang's; the oracle compares
-  `-P` output.
+  `-P` output. The printer's spacing also differs from clang's in places: it
+  puts a space between `<` and `>`, where clang doesn't.
 - Diagnostics give `file:line:column: error: message` and no more: no notes, no
   macro backtraces (#108), and no carets.
 - C++ (`-x c++`), dependency output (`-M`) and `-dM` aren't supported.
 - Stringizing an identifier that pasting made from a UCN gives its UTF-8
   spelling, where clang keeps the UCN.
+- `defined` that a macro's argument brings into a `#if` line (`ID(defined X)`)
+  is an error here. clang evaluates it in the line, with a warning that it is
+  undefined behavior.
 
 ## Next steps
 

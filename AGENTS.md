@@ -794,13 +794,18 @@ the others its measurements are informational.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 43 built-in cases (`pp_test_cases`: cases of our own on the
-  topics of the C standard's examples, the behaviors probed against GCC and
-  clang, inputs past the vectorized kernels' limits, and directives and builtins
-  that nest through the main loop's frames), each preprocessed by the vectorized
-  kernels and their scalar twins, which must give the same stream token for
-  token (kind, flags, value and location) and the same directive tables, with
-  the expected spellings and the expected number of warnings;
+- without files, the 58 built-in cases (`pp_test_cases`), each preprocessed by
+  the vectorized kernels and their scalar twins. They must give the same stream
+  token for token (kind, flags, value and location) and the same directive
+  tables, with the expected spellings and the expected number of warnings. The
+  cases are of our own:
+  - on the topics of the C standard's examples;
+  - the behaviors probed against GCC and clang;
+  - inputs past the vectorized kernels' limits;
+  - directives and builtins that nest through the main loop's frames;
+  - #193's review fixes.
+
+  A case can also give extra files and options for both sides;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, ...), by both kernels, which must agree.
 
@@ -809,9 +814,15 @@ byte, with line markers and without, and must lex back into the stream's
 spellings.
 
 `--clang` also compares every case and file with `clang -E -P` and the same
-options (our side reads clang's own predefines for them through
-`--predefines`), token spelling by token spelling, and prints the first
-difference with the tokens around it. `sqlite3.c`, musl 1.2.5's 1,357 sources,
+options, token spelling by token spelling, and prints the first difference with
+the tokens around it. For files, our side reads clang's own predefines for the
+options through `--predefines`. Without files, `--clang` also checks the
+built-in predefines and the keywords:
+- in 14 option sets (the ten modes from `c89` to `gnu23`, and `-ffreestanding`
+  and `-O2`), `pp_predefines` must give `clang -dM -E` line for line, but for
+  the patch release's three macros;
+- in each mode, `__is_identifier` of every predefined name must give clang's
+  answer. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;
 `docs/c-preprocessor.md` has the configurations. The 9700X job runs the cases
 and the repository's translation units with `--clang`.

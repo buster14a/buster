@@ -10,8 +10,11 @@
 // vectorized kernels' limits, each written to a new directory under $TMPDIR (or /tmp) and preprocessed by the vectorized and the
 // scalar kernels, whose output streams must be the same token for token (kind, flags, value and location), whose
 // directive tables must be the same (pp_same_directive_tables), whose tokens' spellings must be the expected ones, and
-// which must give the expected number of warnings. With --clang, each case is also preprocessed by `clang -E -P` and
-// must give the same spellings.
+// which must give the expected number of warnings. A case can name more files and options for both sides (%d stands
+// for its directory). With --clang, each case is also preprocessed by `clang -E -P` and must give the same spellings,
+// and two more checks compare what the cases can't, since the files' runs read clang's predefines: our built-in
+// predefines with `clang -dM -E` in 14 option sets (pp_test_predefines), and __is_identifier of every predefined name
+// with clang's in each language mode (pp_test_keywords).
 //
 // With files, each is preprocessed with the options (-I, -isystem, -D, -std=, -ffreestanding, ... as for -E) by both
 // kernels, which must agree, and with --clang compared with `clang -E -P` and the same options: our side then reads
@@ -20,7 +23,8 @@
 // printer's byte for byte, with line markers and without, and must lex back into the stream's tokens.
 //
 // main.c includes this file after c_preprocessor.c. Layout: the token spellings of a stream and of a text, the
-// comparison, the cases, clang's side (pp_test_clang), and run_preprocessor_tests.
+// comparison, clang's side (pp_test_clang), the cases, the files, the predefines and keywords checks, and
+// run_preprocessor_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -370,6 +374,14 @@ static char* pp_test_clang(char** arguments, int argument_count, const char* pat
 // ---------------------------------------------------------------------------------------------------------------------
 // The cases
 
+// A file a case writes besides case.c: its path in the case's directory (at most one directory deep), and its text.
+typedef struct PPTestFile PPTestFile;
+struct PPTestFile
+{
+    const char* path;
+    const char* text;
+};
+
 typedef struct PPTestCase PPTestCase;
 struct PPTestCase
 {
@@ -384,6 +396,16 @@ struct PPTestCase
     bool fails;
     // The warnings each run must give (redefinitions).
     uint32_t warnings;
+    // Options for both sides, separated by spaces, where %d stands for the case's directory; or null.
+    const char* options;
+    // More files, ended by one without a path; or null.
+    const PPTestFile* files;
+};
+
+static const PPTestFile pp_test_files_include_next[] = {
+    { "first/wrapper.h", "LAYER_ONE\n#include_next <wrapper.h>\n" },
+    { "second/wrapper.h", "LAYER_TWO\n" },
+    { 0, 0 },
 };
 
 static const PPTestCase pp_test_cases[] = {
@@ -468,40 +490,156 @@ static const PPTestCase pp_test_cases[] = {
     { "unterminated invocation", "#define f(x) x\nf(1\n", 0, "c17", "", true },
     // An identifier is printed as it is interned (a UCN as UTF-8), but stringized as written, without its splices.
     { "identifiers written with UCNs and splices", "#define S(x) #x\ncaf\\u00e9 S(caf\\u00e9) S(caf\xC3\xA9) S(fo\\\no) S(\\U000000E9t\\\n\\u00e9)\n", 0,
-      "c17", "caf\xC3\xA9 \"caf\\u00e9\" \"caf\xC3\xA9\" \"foo\" \"\\U000000E9t\\u00e9\"\n", false },
+      "c17", "caf\xC3\xA9 \"caf\\u00e9\" \"caf\xC3\xA9\" \"foo\" \"\\U000000E9t\\u00e9\"\n", false },    // Review fixes (#193): a missing header by absolute path, as __has_include asks and as #include and -include name it
+    // (an error, not a crash).
+    { "a missing absolute header", "#if __has_include(\"/buster-missing-directory/absent.h\") || __has_include(</buster-missing-directory/absent.h>)\nfound\n#else\nmissing\n#endif\n",
+      0, "c17", "missing\n", false, 0, 0, 0 },
+    // __VA_OPT__ on either side of ## (C 6.10.5.2): a placemarker when it gives no tokens, else its first or last token
+    // pasted; an empty argument at an end of its content is a placemarker there (P1, P2), and content of placemarkers
+    // alone gives none (P4(, , 1): clang's ab, where GCC gives a b).
+    { "__VA_OPT__ next to ##", "#define E1 z\n#define EMPTY\n#define F(...) __VA_OPT__(x) ## y\nF() F(1)\n#define G(...) prefix __VA_OPT__(x) ## y\nG() G(1)\n#define H(...) __VA_OPT__() ## y\nH() H(1)\n#define R(...) a ## __VA_OPT__(b c)\nR() R(1)\n#define S(...) a ## __VA_OPT__(__VA_ARGS__ q)\nS() S(E1) S(1 2)\n#define T(x, ...) __VA_OPT__(x) ## x\nT(1) T(1, 2)\n#define U(...) __VA_OPT__(a ## b) ## c\nU() U(1)\n#define W(...) __VA_OPT__(x)##__VA_OPT__(y)\nW() W(1)\n#define X(a, ...) a ## __VA_OPT__(a) ## a\nX(1) X(1, 2)\n#define Y(...) __VA_OPT__(__VA_ARGS__) ## y\nY() Y(E1) Y(1 2) Y(E1 E1)\n#define Z(p, ...) p ## __VA_OPT__() ## p\nZ(1) Z(1, 2)\n#define P(...) __VA_OPT__(x y) ## __VA_OPT__(z w)\nP() P(1)\n#define P1(x, ...) __VA_OPT__(a x) ## y\nP1(E1, 1) P1(EMPTY, 1) P1(, 1)\n#define P2(x, ...) a ## __VA_OPT__(x b)\nP2(, 1) P2(E1, 1) P2(c, 1)\n#define P4(x, y, ...) a ## __VA_OPT__(x y) ## b\nP4(, , 1) P4(c, , 1) P4(, d, 1) P4(c, d, 1)\n#define S2(...) L ## #__VA_OPT__(a b)\nS2() S2(1)\n#define V2(...) w __VA_OPT__( __VA_ARGS__ ) ## v\nV2() V2( 1 ) V2(1 2)\n",
+      0, "c23", "y xy\nprefix y prefix xy\ny y\na ab c\na az q a1 2 q\n1 11\nc abc\nxy\n11 111\ny zy 1 2y z zy\n11 11\nx yz w\na zy a y a y\na b az b ac b\nab ac b a db ac db\nL\"\" L\"a b\"\nw v w 1v w 1 2v\n", false, 0, 0, 0 },
+    // An empty expansion's or empty argument's leading space goes to the next token, as clang does.
+    { "spaces through empty expansions", "#define EMPTY\n#define S(x) #x\n#define EXPAND(x) S(x)\nEXPAND(a EMPTY+b)\n#define F(x) a x+b\nEXPAND(F())\n#define G()\nEXPAND(a G()+b)\n#define H(x) a x\nEXPAND(H()+b)\n#define E2 EMPTY\nEXPAND(a E2+b)\n#define J(x, y) [x y]\nEXPAND(J(, +))\n#define K(x) x\nEXPAND(a K()+b)\n#define V(...) a __VA_OPT__(b)c\nEXPAND(V() V(1))\n",
+      0, "c23", "\"a +b\"\n\"a +b\"\n\"a +b\"\n\"a +b\"\n\"a +b\"\n\"[ +]\"\n\"a +b\"\n\"a c a bc\"\n", false, 0, 0, 0 },
+    { "__has_include in a macro's argument in #if", "#define ID(x) x\n#if ID(__has_include(\"other.h\")) && ID(!__has_include(\"missing.h\"))\npresent\n#else\nabsent\n#endif\n",
+      "x\n", "c17", "present\n", false, 0, 0, 0 },
+    { "header names with line splices", "#include \"oth\\\ner.h\"\n#include <oth\\\ner.h>\n",
+      "spliced\n", "c17", "spliced\nspliced\n", false, 0, "-I %d", 0 },
+    { "a repeated -I and #include_next", "#include <wrapper.h>\n",
+      0, "c17", "LAYER_ONE\nLAYER_TWO\n", false, 0, "-I %d/first -I %d/first -I %d/second -I %d/first", pp_test_files_include_next },
+    { "_Pragma of a macro", "#define P \"omp parallel for\"\n_Pragma(P)\n#define Q(x) _Pragma(x)\nQ(\"STDC FP_CONTRACT ON\")\n#define R _Pragma(P)\nR after\n",
+      0, "c17", "#pragma omp parallel for\n#pragma STDC FP_CONTRACT ON\n#pragma omp parallel for\nafter\n", false, 0, 0, 0 },
+    { "#line without a file name", "#line 100 \"virtual.h\"\n#line 200\n__FILE__ __LINE__\n# 300\n__FILE__ __LINE__\n",
+      0, "c17", "\"virtual.h\" 200\n\"virtual.h\" 300\n", false, 0, 0, 0 },
+    { "__is_identifier", "#define M int\n__is_identifier(x) __is_identifier(int) __is_identifier(M) __is_identifier(1) __is_identifier(+) __is_identifier(bool) __is_identifier(__attribute__) __is_identifier(defined) __is_identifier(typeof) __is_identifier(asm)\n",
+      0, "gnu17", "1 0 1 0 0 1 0 1 0 0\n", false, 0, 0, 0 },
+    { "__is_identifier in C23", "__is_identifier(bool) __is_identifier(typeof) __is_identifier(asm) __is_identifier(restrict) __is_identifier(inline)\n",
+      0, "c23", "0 0 1 0 0\n", false, 0, 0, 0 },
+    { "true in C99", "#if true\nyes\n#else\nno\n#endif\n",
+      0, "c99", "no\n", false, 0, 0, 0 },
+    // Where clang and GCC differ, clang's answer: a #line continued on the next line counts from the line of its # (GCC
+    // gives 100), and __BASE_FILE__ in a forced include is <built-in> (GCC gives the main file).
+    { "#line continued on the next line", "#line \\\n100\n__LINE__\n",
+      0, "c17", "101\n", false, 0, 0, 0 },
+    { "__BASE_FILE__ in a forced include", "main\n",
+      "__BASE_FILE__\n", "c17", "\"<built-in>\"\nmain\n", false, 0, "-include %d/other.h", 0 },
+    { "#include of a missing absolute path", "#include \"/buster-missing-directory/absent.h\"\nafter\n", 0, "c17", "", true },
+    { "-include of a missing absolute path", "x\n", 0, "c17", "", true, 0, "-include /buster-missing-directory/absent.h", 0 },
 };
 
-// Writes a case's files into a new directory; returns the main file's path (in `path`).
-static bool pp_test_write_case(const PPTestCase* test, const char* directory, char* path, uint32_t capacity)
+// Writes a text to a file; returns whether it could.
+static bool pp_test_write_file(const char* path, const char* text)
 {
-    bool result = true;
-    snprintf(path, capacity, "%s/case.c", directory);
     FILE* file = fopen(path, "w");
-    result = file != 0 && fputs(test->source, file) >= 0;
+    const bool result = file != 0 && fputs(text, file) >= 0;
     if (file != 0)
     {
         fclose(file);
     }
+    return result;
+}
+
+// Writes a case's files into its directory (other.h, and the others with their directories); returns the main file's
+// path (in `path`).
+static bool pp_test_write_case(const PPTestCase* test, const char* directory, char* path, uint32_t capacity)
+{
+    snprintf(path, capacity, "%s/case.c", directory);
+    bool result = pp_test_write_file(path, test->source);
+    char other[4096];
     if (result && test->other != 0)
     {
-        char other[4096];
         snprintf(other, sizeof(other), "%s/other.h", directory);
-        file = fopen(other, "w");
-        result = file != 0 && fputs(test->other, file) >= 0;
-        if (file != 0)
+        result = pp_test_write_file(other, test->other);
+    }
+    for (uint32_t i = 0; result && test->files != 0 && test->files[i].path != 0; i += 1)
+    {
+        const char* slash = strchr(test->files[i].path, '/');
+        if (slash != 0)
         {
-            fclose(file);
+            snprintf(other, sizeof(other), "%s/%.*s", directory, (int)(slash - test->files[i].path), test->files[i].path);
+            mkdir(other, 0700);
         }
+        snprintf(other, sizeof(other), "%s/%s", directory, test->files[i].path);
+        result = pp_test_write_file(other, test->files[i].text);
     }
     return result;
+}
+
+// Removes the files pp_test_write_case wrote besides case.c, and their directories.
+static void pp_test_remove_case(const PPTestCase* test, const char* directory)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/other.h", directory);
+    unlink(path);
+    for (uint32_t i = 0; test->files != 0 && test->files[i].path != 0; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, test->files[i].path);
+        unlink(path);
+        const char* slash = strchr(test->files[i].path, '/');
+        if (slash != 0)
+        {
+            snprintf(path, sizeof(path), "%s/%.*s", directory, (int)(slash - test->files[i].path), test->files[i].path);
+            rmdir(path);
+        }
+    }
+}
+
+#define BUSTER_PP_TEST_MAX_ARGUMENTS 32
+
+// A case's arguments, for pp_parse_options and clang: -std= and its options with %d replaced by the directory, written
+// into `text`, then `path` after them (which clang's don't take). Returns how many come before `path`.
+static int pp_test_arguments(const PPTestCase* test, const char* directory, const char* path, char* text, uint32_t capacity, char** arguments)
+{
+    uint32_t used = (uint32_t)snprintf(text, capacity, "-std=%s", test->standard) + 1;
+    int count = 1;
+    arguments[0] = text;
+    const char* options = test->options != 0 ? test->options : "";
+    while (*options != 0 && count + 1 < BUSTER_PP_TEST_MAX_ARGUMENTS && used < capacity)
+    {
+        while (*options == ' ')
+        {
+            options += 1;
+        }
+        if (*options != 0)
+        {
+            arguments[count] = text + used;
+            count += 1;
+            while (*options != 0 && *options != ' ' && used + 4096 < capacity)
+            {
+                if (options[0] == '%' && options[1] == 'd')
+                {
+                    used += (uint32_t)snprintf(text + used, capacity - used, "%s", directory);
+                    options += 2;
+                }
+                else
+                {
+                    text[used] = *options;
+                    used += 1;
+                    options += 1;
+                }
+            }
+            text[used] = 0;
+            used += 1;
+        }
+    }
+    arguments[count] = (char*)path;
+    return count;
 }
 
 static bool pp_test_case(const PPTestCase* test, const char* directory, bool with_clang)
 {
     char path[4096];
     bool result = pp_test_write_case(test, directory, path, sizeof(path));
-    PPOptions options = { .language = { .standard = 17, .gnu = true } };
-    result = result && pp_parse_standard(test->standard, &options.language);
+    char text[16384];
+    char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
+    const int argument_count = pp_test_arguments(test, directory, path, text, sizeof(text), arguments);
+    Arena arena = arena_reserve(1ull << 20);
+    PPOptions options;
+    const char* input;
+    const char* output;
+    bool markers;
+    result = result && pp_parse_options(argument_count + 1, arguments, &options, &arena, &input, &output, &markers);
     static InternTable tables[2];
     static Preprocessor runs[2];
     bool ran[2] = { false, false };
@@ -536,15 +674,13 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
                  pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name);
         if (result && with_clang)
         {
-            char standard[32];
-            snprintf(standard, sizeof(standard), "-std=%s", test->standard);
-            char* arguments[] = { standard };
             size_t length;
-            char* text = pp_test_clang(arguments, 1, path, 0, &length);
+            char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPSpellings theirs = { 0 };
-            result = text != 0 && pp_text_spellings((const uint8_t*)text, length, &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs, test->name, "clang");
+            result = clang_text != 0 && pp_text_spellings((const uint8_t*)clang_text, length, &theirs) &&
+                     pp_compare_spellings(&runs[0], &ours, &theirs, test->name, "clang");
             arena_release(&theirs.arena);
-            free(text);
+            free(clang_text);
         }
         arena_release(&ours.arena);
         arena_release(&expected.arena);
@@ -554,6 +690,8 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
         pp_release(&runs[k]);
         intern_release(&tables[k]);
     }
+    arena_release(&arena);
+    pp_test_remove_case(test, directory);
     return result;
 }
 
@@ -596,6 +734,158 @@ static bool pp_test_file(int argument_count, char** arguments, const PPOptions* 
         intern_release(&tables[k]);
     }
     return result;
+}
+
+static int pp_test_compare_lines(const void* a, const void* b)
+{
+    return strcmp(*(char* const*)a, *(char* const*)b);
+}
+
+// The lines of a predefines text, sorted, without the macros that name clang's patch release (which the 9700X's and
+// the generator's clang differ in) and our own __BUSTER__: `lines` gets pointers into `text`, whose newlines become
+// NULs. Returns the count.
+static uint32_t pp_test_predefine_lines(char* text, size_t length, char** lines, uint32_t capacity)
+{
+    static const char* const skipped[] = { "#define __clang_patchlevel__ ", "#define __clang_version__ ", "#define __VERSION__ ", "#define __BUSTER__ " };
+    uint32_t count = 0;
+    char* line = text;
+    for (size_t i = 0; i < length; i += 1)
+    {
+        if (text[i] == '\n')
+        {
+            // clang writes a space after the name of a macro without a body: lines are compared without trailing spaces.
+            text[i] = 0;
+            for (size_t k = i; k > (size_t)(line - text) && text[k - 1] == ' '; k -= 1)
+            {
+                text[k - 1] = 0;
+            }
+            bool kept = *line != 0;
+            for (uint32_t k = 0; kept && k < BUSTER_ARRAY_LENGTH(skipped); k += 1)
+            {
+                kept = strncmp(line, skipped[k], strlen(skipped[k])) != 0;
+            }
+            if (kept && count < capacity)
+            {
+                lines[count] = line;
+                count += 1;
+            }
+            line = text + i + 1;
+        }
+    }
+    qsort(lines, count, sizeof(lines[0]), pp_test_compare_lines);
+    return count;
+}
+
+#define BUSTER_PP_TEST_MAX_PREDEFINES 1024
+
+// The built-in predefines for each language mode, and with -ffreestanding and -O2, must be clang's (`clang -dM -E` with
+// the same options) line for line: the cases and the files under --clang read clang's own, so only this checks ours.
+static bool pp_test_predefines(const char* directory)
+{
+    static const char* const modes[][2] = {
+        { "-std=c89", 0 }, { "-std=gnu89", 0 }, { "-std=c99", 0 }, { "-std=gnu99", 0 }, { "-std=c11", 0 }, { "-std=gnu11", 0 },
+        { "-std=c17", 0 }, { "-std=gnu17", 0 }, { "-std=c23", 0 }, { "-std=gnu23", 0 }, { "-ffreestanding", 0 }, { "-O2", 0 },
+        { "-std=c99", "-ffreestanding" }, { "-std=c23", "-O2" },
+    };
+    uint32_t failures = 0;
+    char clang_path[4096];
+    char empty_path[4096];
+    snprintf(clang_path, sizeof(clang_path), "%s/predefines.h", directory);
+    snprintf(empty_path, sizeof(empty_path), "%s/empty.c", directory);
+    pp_test_write_file(empty_path, "");
+    for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+    {
+        char* arguments[3] = { (char*)modes[m][0], (char*)modes[m][1], 0 };
+        const int count = modes[m][1] != 0 ? 2 : 1;
+        arguments[count] = empty_path;
+        Arena arena = arena_reserve(1ull << 20);
+        PPOptions options;
+        const char* input;
+        const char* output;
+        bool markers;
+        bool passed = pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
+        char* ours = malloc(sizeof(pp_predefines_base) + sizeof(pp_predefines_c23) + 512);
+        size_t ours_length = passed && ours != 0 ? pp_predefines(&options, ours) : 0;
+        size_t clang_length = 0;
+        free(pp_test_clang(arguments, count, empty_path, clang_path, &clang_length));
+        FILE* file = fopen(clang_path, "r");
+        char* theirs = malloc(1 << 20);
+        clang_length = file != 0 && theirs != 0 ? fread(theirs, 1, (1 << 20) - 1, file) : 0;
+        if (file != 0)
+        {
+            fclose(file);
+        }
+        static char* our_lines[BUSTER_PP_TEST_MAX_PREDEFINES];
+        static char* their_lines[BUSTER_PP_TEST_MAX_PREDEFINES];
+        const uint32_t our_count = ours != 0 ? pp_test_predefine_lines(ours, ours_length, our_lines, BUSTER_PP_TEST_MAX_PREDEFINES) : 0;
+        const uint32_t their_count = theirs != 0 ? pp_test_predefine_lines(theirs, clang_length, their_lines, BUSTER_PP_TEST_MAX_PREDEFINES) : 0;
+        passed = passed && their_count != 0 && our_count == their_count;
+        uint32_t reported = 0;
+        for (uint32_t i = 0, j = 0; (i < our_count || j < their_count) && reported < 4;)
+        {
+            const int order = i == our_count ? 1 : j == their_count ? -1 : strcmp(our_lines[i], their_lines[j]);
+            if (order != 0)
+            {
+                printf("predefines %s%s%s: %s %s\n", modes[m][0], modes[m][1] != 0 ? " " : "", modes[m][1] != 0 ? modes[m][1] : "", order < 0 ? "only ours:" : "only clang's:",
+                       order < 0 ? our_lines[i] : their_lines[j]);
+                reported += 1;
+                passed = false;
+            }
+            i += order <= 0;
+            j += order >= 0;
+        }
+        failures += !passed;
+        free(ours);
+        free(theirs);
+        arena_release(&arena);
+    }
+    unlink(clang_path);
+    unlink(empty_path);
+    printf("predefines: %u of %lu option sets differ from clang -dM\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(modes));
+    return failures == 0;
+}
+
+// __is_identifier of every predefined name, in each language mode, must be clang's: 0 exactly for the mode's keywords.
+static bool pp_test_keywords(const char* directory)
+{
+    static const char* const modes[] = { "-std=c89", "-std=gnu89", "-std=c99", "-std=gnu99", "-std=c11", "-std=gnu11", "-std=c17", "-std=gnu17", "-std=c23", "-std=gnu23" };
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/keywords.c", directory);
+    FILE* file = fopen(path, "w");
+    bool result = file != 0;
+    for (uint32_t name = 1; result && name < C_NAME_COUNT; name += 1)
+    {
+        // Not __VA_ARGS__ and __VA_OPT__, which clang warns about outside a macro's body.
+        if (name != C_NAME_VA_ARGS && name != C_NAME_VA_OPT)
+        {
+            fprintf(file, "__is_identifier(%s)\n", c_name_spellings[name]);
+        }
+    }
+    if (file != 0)
+    {
+        fclose(file);
+    }
+    uint32_t failures = 0;
+    for (uint32_t m = 0; result && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+    {
+        char* arguments[2] = { (char*)modes[m], path };
+        Arena arena = arena_reserve(1ull << 20);
+        PPOptions options;
+        const char* input;
+        const char* output;
+        bool markers;
+        uint64_t tokens = 0;
+        const bool passed = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers) && pp_test_file(1, arguments, &options, path, true, directory, &tokens);
+        if (!passed)
+        {
+            printf("keywords: __is_identifier differs from clang's with %s\n", modes[m]);
+        }
+        failures += !passed;
+        arena_release(&arena);
+    }
+    unlink(path);
+    printf("keywords: %u of %lu modes differ from clang's __is_identifier (%u names)\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(modes), C_NAME_COUNT - 3);
+    return result && failures == 0;
 }
 
 static int run_preprocessor_tests(int argument_count, char** arguments)
@@ -648,6 +938,11 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
         }
         printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
         passed_all = failures == 0;
+        if (with_clang)
+        {
+            passed_all &= pp_test_predefines(directory);
+            passed_all &= pp_test_keywords(directory);
+        }
     }
     else if (passed_all)
     {
