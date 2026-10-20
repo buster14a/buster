@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
 // The direct path's executable benchmark: what executable_write costs on generated programs, phase by phase, against
 // the file write's floor; and the kernels it rests on: the patch kernel and the variants measured against it, and the
 // build ID's chunk hash.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
 // The direct path's executables: a link (link.c) laid out, patched and written as a static executable at a fixed
 // address, in one call that every lane of a group makes (docs/object-writer-and-linker.md, "The direct path (no -c)",
 // "Layout" and "Patching and writing"). It is the first output the direct path writes (step 4 of the plan): no libc, no

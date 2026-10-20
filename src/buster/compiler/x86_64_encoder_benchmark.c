@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: (Apache-2.0 WITH LLVM-exception) AND MIT
+// Original material Copyright (c) 2026 David Gonzalez Martin.
+// Counter/timing/sort helpers adapted through c_lexer_benchmark.c retain MIT and the upstream notice:
+// Copyright (c) 2023 Niles Salter. See THIRD_PARTY_NOTICES.md and LICENSES/Accelerated-Zig-Parser.txt.
+//
 // The x86-64 encoder benchmark: times x86_encode at each batch width (instructions per loop iteration) and output
 // store, and a one-instruction-at-a-time scalar loop, on a synthetic instruction stream, after checking that they all
 // produce the same bytes, offsets and fixup ends.

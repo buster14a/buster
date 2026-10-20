@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2023 Niles Salter. Local modifications Copyright (c) 2026 David Gonzalez Martin.
+// Adapted for buster-fast: bounded slices, arena allocation, iterative directory traversal and command integration.
+// Retain LICENSES/Accelerated-Zig-Parser.txt and the provenance in THIRD_PARTY_NOTICES.md.
+//
 // The C lexer benchmark: checks that c_tokenize (c_lexer.c) agrees with its scalar lexer on every file of a corpus of
 // C or C++ sources, then times both. It is a port of the corpus check and the benchmark of c/c_tokenizer_test.c in
 // https://github.com/davidgmbb/Accelerated-Zig-Parser (commit f4482e2dd53413522d75d8c254b9a824021238ce, which
