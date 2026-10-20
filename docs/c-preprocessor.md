@@ -17,7 +17,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | --- | ---: | ---: |
 | `sqlite3.c` 3.53, with glibc's headers | 1 | 707,153 |
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
-| This repository's translation units on this branch (`main` at 2aa1358), with `-march=native` (AVX-512 intrinsic headers) | 11 | 6,378,758 |
+| This repository's translation units on this branch (`main` at 2aa1358), with `-march=native` (AVX-512 intrinsic headers) | 11 | 6,379,384 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
 | The built-in cases (`pp_test_cases`) | 77 | |
 
@@ -61,6 +61,29 @@ hash) were also within noise against their reviewed commit:
 | --- | ---: | ---: | ---: |
 | `sqlite3.c` | 11.99 ms | 11.97 ms | 127.04 → 127.07 |
 | `main.c` | 15.63 ms | 15.66 ms | 354.05 → 354.17 |
+
+The third review's fixes come with #192's keyword list from clang:
+- comma elision;
+- `#__VA_OPT__`'s space;
+- definitions checked where they are made;
+- the signedness of character constants;
+- `__TIMESTAMP__`;
+- the features by mode;
+- `#line`'s operands;
+- the line markers' presumed positions.
+
+Together they add 0.6% to 0.7% instructions and 1.1% to 1.4% time against their
+reviewed commit (this branch's `main.c`, which has grown since the first table):
+
+| Translation unit | Reviewed commit | With the fixes | Instructions/input token |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 11.99 ms | 12.12 ms | 127.07 → 127.99 |
+| `main.c` | 18.74 ms | 19.00 ms | 358.03 → 360.01 |
+
+`-E` costs about the same, timed as whole processes with `perf stat -r 21` over
+four rounds on `sqlite3.c`:
+- with markers, 19.34 → 19.41 ms;
+- with `-P`, 17.75 → 17.65 ms.
 
 That is 4.9 times `clang -E` on `sqlite3.c` and 5.7 times on `main.c`. clang's
 time includes starting a process, which ours doesn't. With printing, as whole
