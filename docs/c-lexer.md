@@ -226,7 +226,7 @@ the others on top of the first round and the steps before them.
   and 1.0%).
 * **No shortcut for chunks inside a block comment.** With the changes above, the first round's shortcut cost 0.8%
   to 1.2% on C and 0.3% to 0.7% on C++ (two runs of 31 passes), and it reset 13 pieces of chunk state by hand
-  ([#63](https://github.com/buster14a/buster-fast/issues/63)). The next change covers such chunks without it.
+  ([#63](https://github.com/buster14a/buster/issues/63)). The next change covers such chunks without it.
 * **A delimiter scan that takes one round and starts after the comment the chunk is inside of.** Of the chunks that
   have delimiters, the scan took two rounds in 89% of its calls in C, the second finding nothing; it now tests
   whether a cursor finds another delimiter before going round again, and one round does in 98% of them. The block comment that a

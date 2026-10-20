@@ -1,6 +1,6 @@
 # C coding style
 
-This document adapts the useful conventions from Buster for **buster-fast**. It
+This document adapts useful conventions from **buster-legacy** for **buster**. It
 is a coding standard, not permission to copy Buster implementations or inherit
 its portability layers, build system, or performance-acceptance machinery.
 

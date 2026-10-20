@@ -1,4 +1,4 @@
-# buster-fast
+# buster
 
 This file is the shared repository guide for coding agents. `CLAUDE.md` imports
 it; keep project instructions here rather than maintaining parallel copies.
@@ -10,7 +10,7 @@ AMD Zen 5**, with heavy, deliberate use of SIMD intrinsics. Optimize both
 single-threaded compile throughput and useful multicore scaling while preserving
 C correctness and generated-program quality.
 
-This is a fresh compiler, not a compatibility branch of `buster14a/buster`.
+This is a fresh compiler, not a compatibility branch of `buster14a/buster-legacy`.
 Do not inherit that repository's frameworks, historical token parsers, CI
 matrices, benchmark services, or acceptance bureaucracy. Reuse an idea only when
 it earns its place here. Do not copy implementation code without checking its
@@ -39,6 +39,21 @@ the instruction set of every program it generates. Keep host ISA, generated-code
 ISA, and output ABI separate. Do not add other host operating systems, older-CPU
 production fallbacks, or hot-path CPU dispatch. Broader output targets and extra
 applications are outside the current scope.
+
+## Repository identity
+
+The current compiler is `buster14a/buster`, GitHub repository ID `1421805693`,
+formerly `buster14a/buster-fast`. The previous implementation remains maintained
+at `buster14a/buster-legacy`, ID `1071732997`, with its own history, issues and
+pull requests. Verify the destination ID when retargeting a checkout or writer;
+old `buster14a/buster` links now address this compiler.
+
+Local checkout directories, `~/buster-fast-bench/`, the shared host lock,
+`~/llm-memory/projects/buster-fast/` and its memory symlinks retain their existing
+names. The repository-local `buster-fast-9700x` concurrency key is also retained.
+These are operational resources, not canonical repository URLs; do not rename
+them by replacing text. Source paths, executable names and object-file metadata
+are unchanged by the repository rename.
 
 ## Issue ownership
 
