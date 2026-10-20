@@ -2545,7 +2545,7 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         }
         import_test_expect(&tally, atexit_indexed, "libc_nonshared.a's index has atexit", runtime.nonshared.symbol_count);
         import_test_expect(&tally, runtime.abi_note.length >= 16, "Scrt1.o's ABI note", runtime.abi_note.length);
-        // The bindings.
+        // The bindings, of every reference to each name.
         const char* const binding_names[] = {
             "main",
             "__libc_start_main",
@@ -2554,6 +2554,7 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
             "_ITM_deregisterTMCloneTable",
             "_ITM_registerTMCloneTable",
             "__TMC_END__",
+            "_GLOBAL_OFFSET_TABLE_",
         };
         const RuntimeBindingKind binding_kinds[] = {
             RUNTIME_BINDING_PROGRAM,
@@ -2563,13 +2564,22 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
             RUNTIME_BINDING_NOWHERE,
             RUNTIME_BINDING_NOWHERE,
             RUNTIME_BINDING_RUNTIME,
+            RUNTIME_BINDING_LINKER,
         };
         for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(binding_names); b += 1)
         {
-            const SymbolId reference = import_test_runtime_symbol(&runtime, binding_names[b], false);
-            const bool bound = reference != 0 && runtime.bindings[reference].kind == binding_kinds[b] &&
-                               (binding_kinds[b] != RUNTIME_BINDING_RUNTIME || runtime.bindings[reference].symbol == tmc);
-            import_test_expect(&tally, bound, binding_names[b], b);
+            const uint64_t length = strlen(binding_names[b]);
+            uint32_t references = 0;
+            bool bound = true;
+            for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+            {
+                const NameId name = link->symbols.name[symbol];
+                const bool reference = name != 0 && link->symbols.atom[symbol] == 0 && link->names.length[name] == length && memcmp(link->names.bytes[name], binding_names[b], length) == 0;
+                const RuntimeBinding binding = runtime.bindings[symbol];
+                references += reference ? 1 : 0;
+                bound = bound && (!reference || (binding.kind == binding_kinds[b] && (binding_kinds[b] != RUNTIME_BINDING_RUNTIME || binding.symbol == tmc)));
+            }
+            import_test_expect(&tally, references != 0 && bound, binding_names[b], references);
         }
         // Every probe is a path, and the crt objects' and libc's files are found among them.
         uint32_t found = 0;

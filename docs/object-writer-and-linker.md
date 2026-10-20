@@ -756,10 +756,11 @@ import reads each file once into an arena that the atoms point into:
   function; its version definitions with their hashes; and its undefined
   names;
 - each name the crt objects and members refer to without defining binds to
-  another of them (`__TMC_END__` to `crtendS.o`), to a `libc.so.6` export
-  (`__libc_start_main`, `__cxa_finalize`), to nothing for a weak reference
-  that neither defines (`__gmon_start__`, the `_ITM_` functions), or to the
-  program (`main`).
+  another of them (`__TMC_END__` to `crtendS.o`), to the linker for a name it
+  defines (`_GLOBAL_OFFSET_TABLE_`, which GNU as names in an object that uses
+  the GOT), to a `libc.so.6` export (`__libc_start_main`, `__cxa_finalize`),
+  to nothing for a weak reference that neither defines (`__gmon_start__`, the
+  `_ITM_` functions), or to the program (`main`).
 
 The readers bound every offset, size, count and index they read by the file
 or the table it indexes. A malformed file gets an error that names the

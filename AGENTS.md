@@ -723,9 +723,11 @@ the 9700X, and 0.15 s with `--cross-check`) checks `import.c` and
   `libc.so.6` with its soname, `write`, `strlen`, `environ` and
   `__errno_location` at `GLIBC_2.2.5`, `__libc_start_main` at `GLIBC_2.34`
   and `GLIBC_ABI_DT_RELR`, `libc_nonshared.a` with `atexit` in its index, and
-  the names bound: `main` to the program, `__libc_start_main` and
-  `__cxa_finalize` to libc, `__gmon_start__` and the `_ITM_` functions to
-  nothing, `__TMC_END__` to `crtendS.o`.
+  every reference to each name bound: `main` to the program,
+  `__libc_start_main` and `__cxa_finalize` to libc, `__gmon_start__` and the
+  `_ITM_` functions to nothing, `__TMC_END__` to `crtendS.o`, and
+  `_GLOBAL_OFFSET_TABLE_`, which the crt objects that use the GOT name, to the
+  linker.
 
 `--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
 version, type, binding and size) and references with `readelf -W --dyn-syms`,

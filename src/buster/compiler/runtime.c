@@ -22,8 +22,9 @@
 // fills a link of the runtime's own: the crt objects as units 0 to 4 (RuntimeObject), then libc_nonshared.a's members
 // as units after them. libc.so.6 becomes an ImportLibrary: its exports with their default versions, its versions and
 // the names it refers to. Then it binds each name the runtime refers to (runtime_bind): to a definition in the
-// runtime's own objects (an index of them by name hash, as libc.so.6's exports have), to an export of libc.so.6, to
-// nothing for a weak reference that neither defines, or else to the program (main): RuntimeBinding, by symbol.
+// runtime's own objects (an index of them by name hash, as libc.so.6's exports have), to the linker for a name it
+// defines (_GLOBAL_OFFSET_TABLE_), to an export of libc.so.6, to nothing for a weak reference that neither defines, or
+// else to the program (main): RuntimeBinding, by symbol.
 //
 // main.c includes this file after import.c. Layout, in this order:
 //   - API: RuntimeError, RuntimeObject, RuntimeProbe, RuntimeBinding, Runtime and the entry points' prototypes.
@@ -98,6 +99,9 @@ typedef enum RuntimeBindingKind
     RUNTIME_BINDING_SHARED,
     // A weak reference that nothing defines: 0.
     RUNTIME_BINDING_NOWHERE,
+    // A name the linker defines (runtime_linker_names): _GLOBAL_OFFSET_TABLE_, which the crt objects' GOT references
+    // name.
+    RUNTIME_BINDING_LINKER,
     // A name the program defines (main).
     RUNTIME_BINDING_PROGRAM,
 } RuntimeBindingKind;
@@ -581,6 +585,29 @@ static String8 runtime_section(String8 bytes, const char* name)
     return result;
 }
 
+// The names the direct path's linker defines (BUSTER_LINK_SOURCE_LINKER) when something refers to one, as lld does when
+// no object defines it: the bounds of the init and fini arrays, which step 4's executables define, and the GOT's
+// _GLOBAL_OFFSET_TABLE_, which GNU as names in an object with a GOT reference and the dynamic PIE (step 5) defines.
+static const char* const runtime_linker_names[] = {
+    "_GLOBAL_OFFSET_TABLE_",
+    "__init_array_start",
+    "__init_array_end",
+    "__fini_array_start",
+    "__fini_array_end",
+};
+
+// Whether the name is one of runtime_linker_names.
+static bool runtime_linker_name(const Link* link, NameId name)
+{
+    const uint32_t length = link->names.length[name];
+    bool result = false;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(runtime_linker_names); i += 1)
+    {
+        result = result || (strlen(runtime_linker_names[i]) == length && memcmp(runtime_linker_names[i], link->names.bytes[name], length) == 0);
+    }
+    return result;
+}
+
 // The runtime's first symbol that defines the name (a global or weak definition in an atom), by the definitions' index:
 // the name's bucket in symbol order, each hash compared, then the bytes of an equal one. 0 for none.
 static SymbolId runtime_definition(const Link* link, const ImportNameIndex* index, const SymbolId* definitions, NameId name)
@@ -649,9 +676,11 @@ static RuntimeError runtime_bind(Runtime* runtime)
         if (symbols->atom[symbol] == 0 && name != 0)
         {
             const SymbolId definition = runtime_definition(link, &index, definitions, name);
-            const uint32_t export = definition == 0 ? import_library_find(&runtime->libc, link->names.bytes[name], link->names.length[name], link->names.hash[name]) : 0;
+            const bool linker = definition == 0 && runtime_linker_name(link, name);
+            const uint32_t export = definition == 0 && !linker ? import_library_find(&runtime->libc, link->names.bytes[name], link->names.length[name], link->names.hash[name]) : 0;
             const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
-            binding.kind = definition != 0 ? RUNTIME_BINDING_RUNTIME : export != 0 ? RUNTIME_BINDING_SHARED : weak ? RUNTIME_BINDING_NOWHERE : RUNTIME_BINDING_PROGRAM;
+            const RuntimeBindingKind otherwise = export != 0 ? RUNTIME_BINDING_SHARED : weak ? RUNTIME_BINDING_NOWHERE : RUNTIME_BINDING_PROGRAM;
+            binding.kind = definition != 0 ? RUNTIME_BINDING_RUNTIME : linker ? RUNTIME_BINDING_LINKER : otherwise;
             binding.symbol = definition;
             binding.export = export != 0 ? export - 1 : 0;
         }
