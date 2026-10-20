@@ -66,9 +66,9 @@ the output on tmpfs:
 | 102,400 functions (46 MB) | 96 / 38 ms | 140 / 25 ms | 4–10 ms | 2.5–6× |
 
 Step 4's static executables without libc, written by one lane from generated
-programs of 3.9 KB, 397 KB and 35.5 MB, take 2.4 µs, 69 µs and 8.5 ms in
-place on tmpfs (3.6 µs, 86 µs and 9.8 ms as new files), and the largest
-4.0 ms with eight lanes ("The first executables"). A dynamic PIE that calls
+programs of 3.9 KB, 397 KB and 35.5 MB, take 2.7 µs, 70 µs and 8.5 ms in
+place on tmpfs (3.4 µs, 87 µs and 9.9 ms as new files), and the largest
+4.1 ms with eight lanes ("The first executables"). A dynamic PIE that calls
 libc has more to write (step 5).
 
 Orders of magnitude are there for programs up to a few megabytes, where
@@ -897,7 +897,16 @@ which took it down to 176 GB/s in L2, so the loop asks it not to. In
 of 4 KB at 250, in pieces of 100 bytes at 9.0 (a chunk of many small data
 atoms: 11 ns a piece), and 64 MB at 82.
 
-**Writing the file:**
+**Writing the file:** what the output is comes from `lstat`, which opens
+nothing and needs no permission on the file. Opening a FIFO to look at it
+would count as a reader or a writer: it would release a reader waiting for a
+writer, which could then read an end of file and leave. `fstat` then checks
+what was opened, in case the path changed in between, and a file that no
+longer qualifies for 1 or 3 is written beside the output, as in 2. The
+`lstat` costs 0.2–0.3 µs of a link in place (its open went from 0.5 to
+0.7 µs). An `O_WRONLY | O_NONBLOCK` open would classify without it, since a
+FIFO without a reader fails it with ENXIO untouched, but in place would then
+be `O_WRONLY`, and a shared mapping (5) needs `O_RDWR`.
 
 1. If the output exists, is a regular file with one link, is this user's and
    isn't running, open it with `O_RDWR` and overwrite it in place. Then
@@ -906,14 +915,15 @@ atoms: 11 ns a piece), and 64 MB at 82.
    new file (table above). mold and wild do the same for executables.
 2. If opening it fails with ETXTBSY (the program is running), or the file has
    other hard links, or is someone else's (whose mode `fchmod` couldn't set),
-   or it is a symbolic link (opened with `O_NOFOLLOW`, so the link is
-   replaced, not written through), or the output is a shared library (which
+   or it is a symbolic link (replaced, not written through: the open in place
+   has `O_NOFOLLOW` too), or the output is a shared library (which
    running processes map without ETXTBSY to protect them): write a new file
    with `O_CREAT | O_EXCL` beside it, named after it with `.tmp`, the process
    id and 16 random hexadecimal digits (so that a file a killed link left
    doesn't block the next), and rename it over the old one. If the output
    doesn't exist, create it.
-3. If it is a file of another type, such as `/dev/null` or a FIFO, write into
+3. If it is a file of another type, such as `/dev/null` or a FIFO, open it
+   once, with `O_WRONLY` (a FIFO's open waits for a reader), and write into
    it, in order, as GNU ld and lld do, rather than replace it: every chunk is
    patched and hashed first, and lane 0 writes the whole file at the end with
    the build ID in place. Such a file is never replaced or removed.
@@ -1004,7 +1014,9 @@ writes them from the representation, at GNU ld's fixed base, 0x400000:
   before their padding is added, so that no sum of sizes wraps.
 - **Errors** don't depend on the lane count: the entry point is checked
   first, each phase reports the first item in id order that fails, and a
-  failing fixup is the smallest that does.
+  failing fixup is the smallest that does. Each phase's errors go in a row of
+  their own, so a lane that has gone on to the next phase can't change what
+  the others still read of the last one.
 
 Its phases, each lane taking a range of the atoms, fixups, symbols or GOT
 words (`lane_range`, since each loop is a few nanoseconds per item), or parts
@@ -1030,27 +1042,27 @@ on tmpfs, in place / as a new file, with one lane per core, against the floor
 
 | Program (file) | 1 lane | 2 lanes | 4 lanes | 8 lanes | Floor |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 1 worker (3.9 KB) | **2.4 / 3.6** | 3.1 / 4.8 | 5.2 / 5.2 | 7.1 / 7.5 | 0.6 / 1.4 |
-| 64 workers (16 KB) | **4.7 / 6.5** | 6.1 / 7.5 | 6.7 / 8.2 | 6.7 / 9.2 | 0.8 / 2.3 |
-| 2,000 workers (397 KB) | 69 / 86 | 48 / 71 | 45 / 70 | **44 / 62** | 8.4 / 24 |
-| 180,000 workers (35.5 MB) | 8,480 / 9,830 | 4,940 / 5,590 | 4,290 / 5,780 | **4,000 / 5,550** | 2,550 / 4,200 |
+| 1 worker (3.9 KB) | **2.7 / 3.4** | 3.2 / 3.8 | 4.1 / 4.6 | 5.9 / 5.8 | 0.6 / 1.3 |
+| 64 workers (16 KB) | **5.0 / 6.3** | 5.9 / 7.2 | 6.3 / 8.0 | 7.0 / 8.6 | 0.8 / 2.2 |
+| 2,000 workers (397 KB) | 70 / 87 | 48 / 68 | 45 / 66 | **43 / 63** | 8.7 / 24 |
+| 180,000 workers (35.5 MB) | 8,520 / 9,850 | 4,990 / 5,550 | 4,210 / 5,560 | **4,110 / 5,680** | 2,570 / 4,240 |
 
 The largest has 184,531 atoms and 2.16 million fixups in 136 chunks. Its
 phases in place, µs:
 
 | Lanes | count | layout | symbols | open | chunks | finish |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 794 | 511 | 574 | 6.6 | 6,592 | 2.3 |
-| 8 | 300 | 107 | 63 | 6.5 | 3,533 | 2.5 |
+| 1 | 828 | 505 | 571 | 8.0 | 6,615 | 2.2 |
+| 8 | 334 | 108 | 68 | 7.9 | 3,603 | 2.5 |
 
 On btrfs (`/home`), the 397 KB program takes 105 / 107 µs on one lane and
 71 / 92 on eight (floor 43 / 42), and the 35.5 MB one 11.4 / 11.3 ms and
 6.4 / 7.1 (floor 5.5 / 5.7).
 
-- **Small programs pay fixed costs.** The 3.9 KB one spends 0.7 µs in the
-  three phases before the file, 0.5 µs opening it (1.5 µs creating it),
-  0.9 µs on its one chunk and 0.3 µs closing it, where one `pwrite` of the file
-  costs 0.6. For it and the 16 KB one, more lanes cost more than they save:
+- **Small programs pay fixed costs.** The 3.9 KB one spends 0.8 µs in the
+  three phases before the file, 0.7 µs opening it in place (`lstat`, `open`
+  and `fstat`; 1.3 µs creating it), 0.9 µs on its one chunk and 0.3 µs
+  closing it, where one `pwrite` of the file costs 0.6. For it and the 16 KB one, more lanes cost more than they save:
   their syncs and parts outweigh the work. From 397 KB they pay.
 - **Large programs pay for memory.** On one lane, 35.5 MB takes 3.3 times the
   floor in place: 3.7 ms of patching, the write, and 1.9 ms of count, layout
@@ -1782,7 +1794,9 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
   arithmetic, the GOT's slots, the headers against lld's layout, the chunk
   boundaries and the build ID, and the output file's cases: in place, created,
   renamed over a running program, another link, someone else's file or a
-  symbolic link, written in order into a FIFO, and what a failed link leaves.
+  symbolic link, written in order into a FIFO (opened once, for writing, and
+  one that may be written but not read), a directory, and what a failed link
+  leaves.
   It checks the refusals (each reported alike with any lane count) and a
   lane short of scratch memory at every amount, from none up.
 - **Lane counts:** each phase with 1, 2, 3 and 8 lanes, outputs compared byte

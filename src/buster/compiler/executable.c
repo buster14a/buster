@@ -154,7 +154,7 @@ typedef enum ExecutableWrite
     EXECUTABLE_WRITE_SEQUENTIAL,
 } ExecutableWrite;
 
-// executable_write's phases, whose ends lane 0 timestamps for the benchmark.
+// executable_write's phases, whose ends lane 0 timestamps for the benchmark. Each has a row of the lanes' errors.
 typedef enum ExecutablePhase
 {
     // Counting the atoms per bucket, and the GOT's targets.
@@ -642,12 +642,17 @@ static void executable_fail_file(ExecutableResult* result, const char* call, int
     }
 }
 
-// Opens the output: in place with O_RDWR when it is a regular file with one link that this process's user owns
-// (O_NOFOLLOW: a symbolic link is replaced, not written through). ETXTBSY there, another link or owner, or a symbolic
-// link gets a new file beside it, under a random name, renamed over it at the end; a path with nothing there gets a new
-// file; and a file of another type (/dev/null, a FIFO) is written in order, with O_WRONLY, as GNU ld and lld write
-// into one rather than replace it. Never O_TRUNC: on btrfs it costs 58 µs for 16 KB and 10 ms for 4 MB
-// (docs/object-writer-and-linker.md, "The floors").
+// Opens the output, by what lstat finds at its path: lstat opens nothing, which a FIFO would count as a reader or a
+// writer, and needs no permission on the file.
+//   - A regular file with one link that this process's user owns is opened with O_RDWR and written in place.
+//   - One that is running (ETXTBSY), has other links or another owner, and a symbolic link (replaced, not written
+//     through) get a new file beside them, under a random name, renamed over them at the end.
+//   - A path with nothing there gets a new file, and a directory is an error.
+//   - A file of another type (/dev/null, a FIFO) is opened once, with O_WRONLY, and written in order, as GNU ld and lld
+//     write into one rather than replace it.
+// fstat then checks what was opened, in case the path changed after lstat: a file opened in place that no longer
+// qualifies, or a regular file opened as another type, is closed, and the output written beside it. Never O_TRUNC: on
+// btrfs it costs 58 µs for 16 KB and 10 ms for 4 MB (docs/object-writer-and-linker.md, "The floors").
 static bool executable_open(ExecutableFile* file, String8 path, ExecutableResult* result)
 {
     bool opened = path.length != 0 && path.length < BUSTER_EXECUTABLE_PATH_BYTES;
@@ -662,32 +667,46 @@ static bool executable_open(ExecutableFile* file, String8 path, ExecutableResult
         memcpy(file->path, path.pointer, path.length);
         file->path[path.length] = 0;
         memcpy(file->written_path, file->path, path.length + 1);
-        file->descriptor = open(file->path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+        struct stat found;
+        const int found_error = lstat(file->path, &found) == 0 ? 0 : errno;
+        const mode_t type = found_error == 0 ? found.st_mode & S_IFMT : 0;
+        const bool special = type != 0 && type != S_IFREG && type != S_IFLNK && type != S_IFDIR;
+        if (type == S_IFREG && found.st_nlink == 1 && found.st_uid == geteuid())
+        {
+            file->descriptor = open(file->path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+        }
+        else if (special)
+        {
+            // A FIFO's open waits for a reader.
+            file->descriptor = open(file->path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY);
+        }
         const int open_error = file->descriptor < 0 ? errno : 0;
         struct stat status;
         const bool known = file->descriptor >= 0 && fstat(file->descriptor, &status) == 0;
         const bool regular = known && S_ISREG(status.st_mode);
-        if (regular && status.st_nlink == 1 && status.st_uid == geteuid())
+        if (!special && regular && status.st_nlink == 1 && status.st_uid == geteuid())
         {
             file->write = EXECUTABLE_WRITE_IN_PLACE;
             file->old_size = (uint64_t)status.st_size;
             file->old_mode = (uint32_t)status.st_mode & 07777;
         }
-        else if (known && !regular)
+        else if (special && file->descriptor >= 0 && !regular)
         {
-            // Opened again for writing only: a FIFO's open waits for a reader, which O_RDWR wouldn't.
-            close(file->descriptor);
-            file->descriptor = open(file->path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
-            file->write = file->descriptor >= 0 ? EXECUTABLE_WRITE_SEQUENTIAL : EXECUTABLE_WRITE_NONE;
-            opened = file->descriptor >= 0;
-            if (!opened)
-            {
-                executable_fail_file(result, "open", errno);
-            }
+            file->write = EXECUTABLE_WRITE_SEQUENTIAL;
         }
-        else if (open_error == EISDIR)
+        else if (special && file->descriptor < 0)
+        {
+            executable_fail_file(result, "open", open_error);
+            opened = false;
+        }
+        else if (type == S_IFDIR)
         {
             executable_fail_file(result, "open", EISDIR);
+            opened = false;
+        }
+        else if (found_error != 0 && found_error != ENOENT)
+        {
+            executable_fail_file(result, "lstat", found_error);
             opened = false;
         }
         else
@@ -698,7 +717,7 @@ static bool executable_open(ExecutableFile* file, String8 path, ExecutableResult
             }
             // The path itself when nothing is there, once; otherwise random names beside it, so that a file a killed link
             // left doesn't block the next ones.
-            const bool absent = open_error == ENOENT;
+            const bool absent = found_error == ENOENT;
             const uint32_t attempts = absent ? 1 : BUSTER_EXECUTABLE_NAME_ATTEMPTS;
             file->descriptor = -1;
             int create_error = EEXIST;
@@ -1481,6 +1500,8 @@ typedef struct ExecutableShared ExecutableShared;
 struct ExecutableShared
 {
     ExecutableCounts* counts;
+    // The lanes' first failures, a row per phase: lane i's in phase p at [p * lanes + i]. A phase writes only its own
+    // row, so a lane that has started the next phase never changes what another still reads of the last one.
     ExecutableLaneError* errors;
     // Each lane's bitset of the symbols that a GOT kind targets, words_per_lane words each; after the reduction, row 0
     // holds them all. Then each lane's count of them in its range of words, and its largest addend magnitude.
@@ -1514,13 +1535,20 @@ static void executable_lane_fail(ExecutableLaneError* error, ExecutableError kin
     }
 }
 
-// Whether any lane has failed, after a sync: every lane gets the same answer.
-static bool executable_any_failed(const ExecutableShared* shared, uint32_t lanes)
+// This lane's error slot in a phase's row.
+static ExecutableLaneError* executable_error(ExecutableShared* shared, ExecutablePhase phase, uint32_t lane, uint32_t lanes)
+{
+    return &shared->errors[(uint64_t)phase * lanes + lane];
+}
+
+// Whether any lane failed in a phase, after the sync that ends it: every lane gets the same answer, since no lane writes
+// that row any more.
+static bool executable_any_failed(const ExecutableShared* shared, ExecutablePhase phase, uint32_t lanes)
 {
     bool result = false;
     for (uint32_t lane = 0; lane < lanes; lane += 1)
     {
-        result = result || shared->errors[lane].error != EXECUTABLE_ERROR_NONE;
+        result = result || shared->errors[(uint64_t)phase * lanes + lane].error != EXECUTABLE_ERROR_NONE;
     }
     return result;
 }
@@ -1593,8 +1621,8 @@ static ExecutableError executable_reference(const Link* link, const ExecutableLa
 }
 
 // Counts this lane's atoms per bucket, and marks in its bitset the targets of the GOT kinds among its fixups, whose
-// largest addend magnitude it records.
-static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane)
+// largest addend magnitude it records. Failures go to `error`.
+static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane, ExecutableLaneError* error)
 {
     const LinkAtoms* atoms = &link->atoms;
     ExecutableCounts* counts = &shared->counts[lane];
@@ -1606,7 +1634,7 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
         // Bounded before its padding is added, which could wrap: up to 2^32 atoms of 2 GB each sum to at most 2^63.
         if (log2 == BUSTER_EXECUTABLE_ALIGNMENTS || atoms->size[atom] > BUSTER_EXECUTABLE_MAX_ATOM_BYTES)
         {
-            executable_lane_fail(&shared->errors[lane], EXECUTABLE_ERROR_LAYOUT, atom, 0, 0);
+            executable_lane_fail(error, EXECUTABLE_ERROR_LAYOUT, atom, 0, 0);
         }
         else
         {
@@ -1722,18 +1750,19 @@ static void executable_place(Link* link, ExecutableShared* shared, const Executa
     }
 }
 
-// Fills this lane's range of the symbols' references and their GOT slots, and of the chunks' boundaries.
-static void executable_resolve(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, uint32_t lane)
+// Fills this lane's range of the symbols' references and their GOT slots, and of the chunks' boundaries. Failures go to
+// `error`.
+static void executable_resolve(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, ExecutableLaneError* error)
 {
     LinkSymbols* symbols = &link->symbols;
     const Range64 symbol_range = lane_range(symbols->count - 1);
     for (SymbolId symbol = (SymbolId)symbol_range.begin + 1; symbol < symbol_range.end + 1; symbol += 1)
     {
         uint32_t reference = 0;
-        const ExecutableError error = executable_reference(link, layout, symbol, &reference);
-        if (error != EXECUTABLE_ERROR_NONE)
+        const ExecutableError failure = executable_reference(link, layout, symbol, &reference);
+        if (failure != EXECUTABLE_ERROR_NONE)
         {
-            executable_lane_fail(&shared->errors[lane], error, 0, symbol, 0);
+            executable_lane_fail(error, failure, 0, symbol, 0);
         }
         symbols->reference[symbol] = reference;
         const uint32_t slot = symbols->got_slot[symbol];
@@ -1761,7 +1790,7 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
         *shared = (ExecutableShared){ 0 };
         shared->words_per_lane = link->symbols.count / 64 + 1;
         shared->counts = BUSTER_ARENA_PUSH_ARRAY(arena, ExecutableCounts, lanes);
-        shared->errors = arena_push_array(arena, lanes, sizeof(ExecutableLaneError), BUSTER_LANE_CACHE_LINE_BYTES);
+        shared->errors = arena_push_array(arena, (uint64_t)lanes * EXECUTABLE_PHASES, sizeof(ExecutableLaneError), BUSTER_LANE_CACHE_LINE_BYTES);
         shared->got_marks = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, lanes * shared->words_per_lane);
         shared->got_counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, lanes);
         shared->addend_magnitudes = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, lanes);
@@ -1771,7 +1800,7 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
     }
     if (fits)
     {
-        memset(shared->errors, 0, lanes * sizeof(ExecutableLaneError));
+        memset(shared->errors, 0, (uint64_t)lanes * EXECUTABLE_PHASES * sizeof(ExecutableLaneError));
     }
     return fits ? shared : 0;
 }
@@ -1904,7 +1933,7 @@ static void executable_chunks(Link* link, ExecutableShared* shared, const Execut
         const uint32_t part = order[taken];
         for (uint64_t chunk = shared->part_boundaries[part]; chunk < shared->part_boundaries[part + 1]; chunk += 1)
         {
-            executable_chunk(link, shared, layout, patch, chunk, file, &shared->errors[lane]);
+            executable_chunk(link, shared, layout, patch, chunk, file, executable_error(shared, EXECUTABLE_PHASE_CHUNKS, lane, lanes));
         }
     }
 }
@@ -1930,14 +1959,14 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     const AtomId entry_atom = entry != 0 && entry < link->symbols.count ? link->symbols.atom[entry] : 0;
     if (ok && lane == 0 && (entry_atom == 0 || link->atoms.class[entry_atom] != BUSTER_LINK_CLASS_TEXT))
     {
-        executable_lane_fail(&shared->errors[lane], EXECUTABLE_ERROR_ENTRY, 0, entry, 0);
+        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_ENTRY, 0, entry, 0);
     }
     if (ok)
     {
-        executable_count(link, shared, lane);
+        executable_count(link, shared, lane, executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes));
     }
     lane_sync();
-    ok = ok && !executable_any_failed(shared, lanes);
+    ok = ok && !executable_any_failed(shared, EXECUTABLE_PHASE_COUNT, lanes);
     if (ok)
     {
         executable_reduce_got(shared, lane, lanes);
@@ -1953,7 +1982,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     ExecutableLayout* layout = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ExecutableLayout, 1);
     if (ok && layout == 0)
     {
-        executable_lane_fail(&shared->errors[lane], EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
+        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
     }
     ok = ok && layout != 0;
     uint64_t got_slots = 0;
@@ -1966,7 +1995,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     const bool laid_out = ok && executable_lay_out(layout, shared->counts, lanes, got_slots);
     if (ok && !laid_out)
     {
-        executable_lane_fail(&shared->errors[lane], EXECUTABLE_ERROR_LAYOUT, 0, 0, 0);
+        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_LAYOUT, 0, 0, 0);
     }
     if (laid_out)
     {
@@ -1974,10 +2003,10 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     }
     if (laid_out && lane == 0 && !executable_prepare(scratch.arena, shared, layout, lanes))
     {
-        executable_lane_fail(&shared->errors[lane], EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
+        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
     }
     lane_sync();
-    ok = ok && !executable_any_failed(shared, lanes);
+    ok = ok && !executable_any_failed(shared, EXECUTABLE_PHASE_LAYOUT, lanes);
     if (lane == 0)
     {
         result->phase_times[EXECUTABLE_PHASE_LAYOUT] = executable_now();
@@ -1986,14 +2015,14 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     // The symbols' references, the GOT, the chunks' boundaries, and lane 0 the headers.
     if (ok)
     {
-        executable_resolve(link, shared, layout, lane);
+        executable_resolve(link, shared, layout, executable_error(shared, EXECUTABLE_PHASE_SYMBOLS, lane, lanes));
     }
     if (ok && lane == 0)
     {
         executable_write_headers(&shared->headers, layout, link->atoms.address[entry_atom] + link->symbols.value[entry]);
     }
     lane_sync();
-    ok = ok && !executable_any_failed(shared, lanes);
+    ok = ok && !executable_any_failed(shared, EXECUTABLE_PHASE_SYMBOLS, lanes);
     if (lane == 0)
     {
         result->phase_times[EXECUTABLE_PHASE_SYMBOLS] = executable_now();
@@ -2008,7 +2037,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         opened = file != 0 && executable_open(file, options->path, result);
         if (!opened)
         {
-            executable_lane_fail(&shared->errors[lane], file == 0 ? EXECUTABLE_ERROR_MEMORY : EXECUTABLE_ERROR_FILE, 0, 0, 0);
+            executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_OPEN, lane, lanes), file == 0 ? EXECUTABLE_ERROR_MEMORY : EXECUTABLE_ERROR_FILE, 0, 0, 0);
         }
         shared->sequential = opened && file->write == EXECUTABLE_WRITE_SEQUENTIAL;
     }
@@ -2041,7 +2070,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         executable_chunks(link, shared, layout, &patch, sequential ? -1 : descriptor, lane, lanes);
     }
     lane_sync();
-    const bool patched = ok && !executable_any_failed(shared, lanes);
+    const bool patched = ok && !executable_any_failed(shared, EXECUTABLE_PHASE_CHUNKS, lanes);
     if (lane == 0)
     {
         result->phase_times[EXECUTABLE_PHASE_CHUNKS] = executable_now();
@@ -2053,9 +2082,9 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     bool succeeded = false;
     if (lane == 0)
     {
-        for (uint32_t other = 0; shared != 0 && other < lanes; other += 1)
+        for (uint64_t slot = 0; shared != 0 && slot < (uint64_t)EXECUTABLE_PHASES * lanes; slot += 1)
         {
-            const ExecutableLaneError* error = &shared->errors[other];
+            const ExecutableLaneError* error = &shared->errors[slot];
             const bool first = result->error == EXECUTABLE_ERROR_NONE || (error->error == EXECUTABLE_ERROR_FIXUP && result->error == EXECUTABLE_ERROR_FIXUP && error->fixup < result->fixup);
             if (error->error == EXECUTABLE_ERROR_FILE)
             {

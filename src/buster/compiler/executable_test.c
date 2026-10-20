@@ -22,11 +22,14 @@
 //     over a scribbled file, as above) and the program runs.
 //   - Files: in place (a smaller program after a larger one, then a file whose mode was changed), created, and written
 //     beside the output and renamed over it when a process runs it, when it has another link, when it is a symbolic
-//     link, when it is someone else's (as root), and past a file a killed link left; written in order into a FIFO; a
+//     link, when it is someone else's (as root), and past a file a killed link left; written in order into a FIFO,
+//     opened once for writing (inotify counts the closes after writing), for a reader that opens it and one that holds
+//     the read end of a FIFO that may be written but not read; a directory and a path under a regular file refused; a
 //     link that fails before opening the output leaves it alone, one whose fixup doesn't fit removes it, one that fails
 //     beside it leaves it and nothing beside it, and one into a FIFO leaves the FIFO.
 //   - Limits: a weak thread-local symbol defined nowhere, TLS blocks and atoms past 2 GB, refusals reported alike with
-//     every lane count, and a lane short of scratch memory at every amount from none up (executable_test_limits).
+//     every lane count (among them the first of two symbols defined nowhere in different lanes' ranges), and a lane
+//     short of scratch memory at every amount from none up (executable_test_limits).
 //   - Build IDs: the lanes' (the files are identical), another program's, and the tree's root recomputed from the file.
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
@@ -46,6 +49,8 @@
 #include <signal.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <poll.h>
+#include <sys/inotify.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -1251,25 +1256,60 @@ static bool executable_test_leftover(const char* directory, const char* prefix)
     return result;
 }
 
-// Starts a process that reads the FIFO at `fifo` to its end into a new file at `copy`. Returns its id, or -1.
-static pid_t executable_test_read_fifo(const char* fifo, const char* copy)
+// Starts a process that reads a FIFO to its first end of file into a new file at `copy`: from `input`, a read end held
+// from before, once a writer has written or closed the FIFO (a read with no writer ends at once), or if `input` is -1,
+// from the FIFO at `fifo`, which it opens after the copy, so that it reads as soon as a writer opens the FIFO. Returns
+// its id, or -1.
+static pid_t executable_test_read_fifo(const char* fifo, int input, const char* copy)
 {
     fflush(stdout);
     const pid_t child = fork();
     if (child == 0)
     {
         alarm(BUSTER_EXECUTABLE_TEST_RUN_SECONDS);
-        const int input = open(fifo, O_RDONLY | O_CLOEXEC);
         const int output = open(copy, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-        bool copied = input >= 0 && output >= 0;
+        struct pollfd written = {
+            .fd = input,
+            .events = POLLIN,
+        };
+        const bool ready = input >= 0 && fcntl(input, F_SETFL, 0) == 0 && poll(&written, 1, -1) == 1;
+        const int reading = input >= 0 ? (ready ? input : -1) : open(fifo, O_RDONLY | O_CLOEXEC);
+        bool copied = reading >= 0 && output >= 0;
         uint8_t buffer[65536];
-        for (ssize_t length = copied ? read(input, buffer, sizeof(buffer)) : 0; copied && length > 0; length = read(input, buffer, sizeof(buffer)))
+        for (ssize_t length = copied ? read(reading, buffer, sizeof(buffer)) : 0; copied && length > 0; length = read(reading, buffer, sizeof(buffer)))
         {
             copied = write(output, buffer, (size_t)length) == length;
         }
         _exit(copied ? 0 : 1);
     }
     return child;
+}
+
+// Whether the process `child` exited with status 0.
+static bool executable_test_succeeded(pid_t child)
+{
+    int status = -1;
+    return child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// How many times the file that inotify descriptor `watch` watches, for IN_OPEN and IN_CLOSE_WRITE, was closed after
+// being opened for writing. inotify merges an event into the one before it when they are the same, but an open comes
+// between any two such closes.
+static uint32_t executable_test_closes_written(int watch)
+{
+    uint32_t result = 0;
+    uint8_t buffer[4096];
+    for (ssize_t length = read(watch, buffer, sizeof(buffer)); length > 0; length = read(watch, buffer, sizeof(buffer)))
+    {
+        for (ssize_t offset = 0; offset < length;)
+        {
+            struct inotify_event event;
+            memcpy(&event, buffer + offset, sizeof(event));
+            result += (event.mask & IN_CLOSE_WRITE) != 0;
+            offset += (ssize_t)(sizeof(event) + event.len);
+        }
+    }
+    return result;
 }
 
 static bool executable_test_files(const ExecutableTestDirectory* directory, uint64_t seed)
@@ -1427,8 +1467,8 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
                                    "someone else's file renamed over", 0);
         }
 
-        // A FIFO: written in order, as a regular file would hold it, then a failed link writes nothing, and the FIFO
-        // stays.
+        // A FIFO: opened once, for writing, and written in order, as a regular file would hold it, for a reader that
+        // opens it and reads to the first end of file; then a failed link writes nothing, and the FIFO stays.
         char fifo_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
         char copy_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
         const String8 fifo = executable_test_path(directory, "fifo", fifo_bytes);
@@ -1440,26 +1480,62 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         const bool made = mkfifo(fifo.pointer, 0644) == 0;
         for (uint32_t lanes = 1; made && lanes <= 3; lanes += 2)
         {
-            const pid_t reader = executable_test_read_fifo(fifo.pointer, copy.pointer);
+            const int watch = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+            const bool watched = watch >= 0 && inotify_add_watch(watch, fifo.pointer, IN_OPEN | IN_CLOSE_WRITE) >= 0;
+            const pid_t reader = executable_test_read_fifo(fifo.pointer, -1, copy.pointer);
             written = reader > 0 && executable_test_write(&large.link, large.entry, fifo, lanes, &result, 0, 0);
-            int status_code = -1;
-            const bool read_all = reader > 0 && waitpid(reader, &status_code, 0) == reader && WIFEXITED(status_code) && WEXITSTATUS(status_code) == 0;
+            const bool read_all = executable_test_succeeded(reader);
             executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_SEQUENTIAL && read_all && executable_test_same_file(scratch.arena, copy.pointer, regular),
                                    "a FIFO, written in order", lanes);
+            executable_test_expect(&tally, read_all && watched && executable_test_closes_written(watch) == 1, "a FIFO opened once, for writing", lanes);
+            if (watch >= 0)
+            {
+                close(watch);
+            }
         }
         built = made && executable_test_failing(&failing, &failing_start, BUSTER_LINK_FIXUP_ABS32, below_zero, false);
-        const pid_t reader = built ? executable_test_read_fifo(fifo.pointer, copy.pointer) : -1;
+        const pid_t reader = built ? executable_test_read_fifo(fifo.pointer, -1, copy.pointer) : -1;
         written = reader > 0 && executable_test_write(&failing.link, failing_start, fifo, 2, &result, 0, 0);
-        int reader_status = -1;
-        const bool read_nothing = reader > 0 && waitpid(reader, &reader_status, 0) == reader && WIFEXITED(reader_status) && stat(copy.pointer, &status) == 0 && status.st_size == 0;
-        executable_test_expect(&tally, built && !written && result.error == EXECUTABLE_ERROR_FIXUP && read_nothing && stat(fifo.pointer, &status) == 0 && S_ISFIFO(status.st_mode),
+        const bool read_nothing = executable_test_succeeded(reader) && stat(copy.pointer, &status) == 0 && status.st_size == 0;
+        executable_test_expect(&tally, built && !written && result.error == EXECUTABLE_ERROR_FIXUP && read_nothing && lstat(fifo.pointer, &status) == 0 && S_ISFIFO(status.st_mode),
                                "a failed link into a FIFO, which stays", 0);
         if (built)
         {
             executable_test_link_end(&failing);
         }
+        // A FIFO that may be written but not read (root may read it anyway), whose read end a reader opened before:
+        // written in order, and it stays.
+        unlink(fifo.pointer);
+        const int held = mkfifo(fifo.pointer, 0600) == 0 ? open(fifo.pointer, O_RDONLY | O_NONBLOCK | O_CLOEXEC) : -1;
+        const pid_t holder = held >= 0 && chmod(fifo.pointer, 0222) == 0 ? executable_test_read_fifo(0, held, copy.pointer) : -1;
+        if (held >= 0)
+        {
+            close(held);
+        }
+        written = holder > 0 && executable_test_write(&large.link, large.entry, fifo, 2, &result, 0, 0);
+        const bool held_all = executable_test_succeeded(holder);
+        executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_SEQUENTIAL && held_all && executable_test_same_file(scratch.arena, copy.pointer, regular) &&
+                                           lstat(fifo.pointer, &status) == 0 && S_ISFIFO(status.st_mode),
+                               "a FIFO that may be written but not read", 0);
         unlink(fifo.pointer);
         unlink(copy.pointer);
+
+        // A directory, and a path under a regular file: refused, naming the call, and the directory stays.
+        char under_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES + 8];
+        const String8 under = {
+            .pointer = under_bytes,
+            .length = (uint64_t)snprintf(under_bytes, sizeof(under_bytes), "%s/under", path.pointer),
+        };
+        written = executable_test_write(&small.link, small.entry, under, 1, &result, 0, 0);
+        executable_test_expect(&tally, !written && result.error == EXECUTABLE_ERROR_FILE && strcmp(result.call, "lstat") == 0 && result.system_error == ENOTDIR,
+                               "a path under a regular file", 0);
+        unlink(path.pointer);
+        const bool directory_made = mkdir(path.pointer, 0755) == 0;
+        written = directory_made && executable_test_write(&small.link, small.entry, path, 2, &result, 0, 0);
+        executable_test_expect(&tally, directory_made && !written && result.error == EXECUTABLE_ERROR_FILE && strcmp(result.call, "open") == 0 && result.system_error == EISDIR &&
+                                           lstat(path.pointer, &status) == 0 && S_ISDIR(status.st_mode) && !executable_test_leftover(directory->path, "file.tmp"),
+                               "a directory", 0);
+        rmdir(path.pointer);
     }
     if (!directory->keep)
     {
@@ -1559,6 +1635,39 @@ static bool executable_test_refusal(ExecutableTestLink* test, SymbolId* start, S
     return result && link_check(link) == LINK_ERROR_NONE;
 }
 
+// The symbols after _start of executable_test_undefined's program: with _start, 16, two for each of 8 lanes.
+#define BUSTER_EXECUTABLE_TEST_UNDEFINED_SYMBOLS 15
+
+// A program that exits 0, with symbols 2 to 16 after _start, defined in a table but for the first and the last, which
+// are defined nowhere: lane 0's range has the first and the last lane's the last, with 2, 3 and 8 lanes. *first gets
+// the first.
+static bool executable_test_undefined(ExecutableTestLink* test, SymbolId* start, SymbolId* first)
+{
+    bool result = executable_test_link_begin(test, BUSTER_EXECUTABLE_PAGE_BYTES);
+    Link* link = &test->link;
+    *start = result ? executable_test_symbol(link, "_start", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION) : 0;
+    result = result && *start != 0;
+    ExecutableTestCode code = { 0 };
+    executable_test_exit(&code, 0);
+    result = result && executable_test_code(test, 32, &code, 1, *start) != 0;
+    const AtomId table = result ? executable_test_data(test, BUSTER_LINK_CLASS_DATA, 3, 8, 0, 0) : 0;
+    result = result && table != 0;
+    *first = 0;
+    for (uint32_t i = 0; result && i < BUSTER_EXECUTABLE_TEST_UNDEFINED_SYMBOLS; i += 1)
+    {
+        char name[16];
+        const int length = snprintf(name, sizeof(name), "symbol_%u", i);
+        const NameId name_id = link_add_name(link, (const uint8_t*)name, (uint32_t)length);
+        const bool defined = i != 0 && i != BUSTER_EXECUTABLE_TEST_UNDEFINED_SYMBOLS - 1;
+        const SymbolId symbol = name_id != 0 ? link_add_symbol(link, name_id, defined ? table : 0, 0, defined ? 8 : 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT,
+                                                               defined ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE)
+                                             : 0;
+        *first = i == 0 ? symbol : *first;
+        result = symbol != 0;
+    }
+    return result && link_check(link) == LINK_ERROR_NONE;
+}
+
 // Writes a link that must fail with every lane count, alike: `error` and what it is about, without creating `path`.
 static void executable_test_refused(ExecutableTestTally* tally, Link* link, SymbolId entry, String8 path, ExecutableError error, AtomId atom, SymbolId symbol, FixupId fixup,
                                     const char* what)
@@ -1632,8 +1741,9 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
     }
 
     // Refusals reported alike with any number of lanes: the entry point checked before the symbols (a DATA symbol, with
-    // a symbol defined nowhere beside it), the smallest failing fixup though another comes first in the file, an atom
-    // aligned past a page, and an init array's atom of 12 bytes.
+    // a symbol defined nowhere beside it), the first of two symbols defined nowhere in different lanes' ranges, the
+    // smallest failing fixup though another comes first in the file, an atom aligned past a page, and an init array's
+    // atom of 12 bytes.
     ExecutableTestLink refusal;
     SymbolId refusal_start = 0;
     SymbolId data = 0;
@@ -1645,6 +1755,14 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
     if (built)
     {
         executable_test_refused(&tally, &refusal.link, data, path, EXECUTABLE_ERROR_ENTRY, 0, data, 0, "an entry point outside the code, before a symbol defined nowhere");
+    }
+    executable_test_link_end(&refusal);
+    SymbolId first_undefined = 0;
+    built = executable_test_undefined(&refusal, &refusal_start, &first_undefined);
+    executable_test_expect(&tally, built, "the undefined symbols' program", 0);
+    if (built)
+    {
+        executable_test_refused(&tally, &refusal.link, refusal_start, path, EXECUTABLE_ERROR_UNDEFINED, 0, first_undefined, 0, "the first of two symbols defined nowhere");
     }
     executable_test_link_end(&refusal);
     built = executable_test_refusal(&refusal, &refusal_start, &data, BUSTER_LINK_CLASS_DATA, 3, 8, 2, &table);
