@@ -1422,7 +1422,16 @@ compares each with lld's link of the same objects.
   `R_X86_64_64` with the fixup's addend. Refused, naming the smallest fixup:
   an `ABS64` that needs a relocation in an atom the loader doesn't write (a
   text relocation), an `ABS32` or `ABS32S` that needs one, and a fixup of
-  another kind to a dynamic symbol, as lld refuses them.
+  another kind to a dynamic symbol, as lld refuses them; and a `PC32` or
+  `PC64` to a weak reference to nothing that isn't dynamic, which is at
+  address 0 wherever the image loads, so that no field measured from the
+  image reaches it. GNU ld refuses that `PC32` in code and read-only data
+  ("can not be used when making a PIE object"); a `PC32` in writable data and
+  a `PC64` anywhere, it and lld write as `0 - P` from the link's addresses,
+  off by the load address. A `CALL`
+  to it is patched so, as both linkers patch it: the program can only call it
+  after checking that it has an address, which its absolute fields and GOT
+  slot say (0, with no relocation).
 - **Stubs.** A `CALL` to a dynamic symbol (GCC 13's `crtbeginS.o` calls
   `__cxa_finalize` so, where GCC 16's reads the slot itself) goes to a stub
   in `.plt.got`, `jmp [rip + slot]` and a two-byte nop, GNU ld's form for a

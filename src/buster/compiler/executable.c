@@ -45,7 +45,10 @@
 // layout, and the GOT's a word of marks at a time. The others are .rela.dyn's, RELATIVE ones first. A CALL to a dynamic
 // symbol goes to its stub in .plt.got (jmp [rip + slot], GNU ld's form). Refused (EXECUTABLE_ERROR_RELOCATION): an
 // ABS64 that needs a relocation outside the atoms the loader writes (a text relocation), an ABS32 or ABS32S that needs
-// one, and a fixup of another kind to a dynamic symbol, as lld refuses them.
+// one, and a fixup of another kind to a dynamic symbol, as lld refuses them; and a PC32 or PC64 to address 0 (a weak
+// reference to nothing that isn't dynamic), which no field measured from where the image loads reaches. GNU ld refuses
+// that PC32 in code and read-only data; a PC32 in writable data and a PC64 anywhere, it and lld write off by the load
+// address.
 //
 // A PIE's passes are data-parallel and vectorized, each with an exact twin, scalar, that ExecutableOptions.exact selects
 // and the tests compare it with: the symbols' classes as bitsets, 64 symbols at a time (executable_mark_symbols); the
@@ -196,8 +199,8 @@ typedef enum ExecutableError
     // The entry point isn't a symbol defined in a TEXT atom.
     EXECUTABLE_ERROR_ENTRY,
     // A dynamic PIE can't relocate the fixup: an ABS64 that needs a relocation in an atom the loader doesn't write (a
-    // text relocation), an ABS32 or ABS32S that needs one (no load address fits it), or a fixup to a dynamic symbol of
-    // another kind than a GOT kind, ABS64 and CALL (ExecutableResult.fixup).
+    // text relocation), an ABS32 or ABS32S that needs one (no load address fits it), a fixup to a dynamic symbol of
+    // another kind than a GOT kind, ABS64 and CALL, or a PC32 or PC64 to address 0 (ExecutableResult.fixup).
     EXECUTABLE_ERROR_RELOCATION,
     // A fixup's value doesn't fit its field (ExecutableResult.fixup).
     EXECUTABLE_ERROR_FIXUP,
@@ -1814,10 +1817,10 @@ struct ExecutableLaneError
 // A dynamic PIE's counts of one lane, each from its range of what it says: the GOT's words' stubs, and their slots that
 // the loader relocates, RELATIVE and otherwise; the symbols' .dynsym entries (the SYMBOLIC ones, all undefined) and
 // their names' bytes with NULs; the fixups' ABS64 ones, their ABS32 and ABS32S ones, and the others to a dynamic symbol
-// that can't reach it (executable_check_direct); the ABS64 fixups of the atoms the loader writes, and of those the ones
-// .rela.dyn relocates, RELATIVE and otherwise; the relocations .relr.dyn holds (the GOT's and the fixups') with its
-// words, and the GOT's words among them; and once the layout is known, the RELR words of its range of the pieces before
-// the GOT's piece and after it.
+// or address 0 that can't reach it (executable_check_direct); the ABS64 fixups of the atoms the loader writes, and of
+// those the ones .rela.dyn relocates, RELATIVE and otherwise; the relocations .relr.dyn holds (the GOT's and the
+// fixups') with its words, and the GOT's words among them; and once the layout is known, the RELR words of its range of
+// the pieces before the GOT's piece and after it.
 typedef struct ExecutableDynamicCounts ExecutableDynamicCounts;
 struct ExecutableDynamicCounts
 {
@@ -2055,6 +2058,17 @@ static uint8_t executable_relocation_class(const Link* link, SymbolId symbol)
     return result;
 }
 
+// Whether a dynamic PIE's symbol is at address 0 wherever the image loads: a weak reference to nothing that isn't dynamic
+// or thread-local (relocation class NONE), as hidden ones are. Its reference is address 0's image offset, right for an
+// absolute field, which no relocation then changes, but not for a field measured from where it is: the loader moves the
+// field, and not address 0.
+static bool executable_is_absolute_zero(const Link* link, SymbolId symbol)
+{
+    const bool weak = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    return weak && link->symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE && link->symbols.atom[symbol] == 0 && !executable_is_tls(link, symbol) &&
+           executable_relocation_class(link, symbol) == BUSTER_EXECUTABLE_RELOCATION_NONE;
+}
+
 // Whether the loader writes a class's atoms, so that a dynamic relocation can patch them: those of the RELRO and RW
 // segments with bytes. A table of 64 bytes, so that 64 atoms' classes look it up at once.
 static const uint8_t executable_written_classes[64] __attribute__((aligned(64))) = {
@@ -2215,19 +2229,23 @@ static void executable_mark_symbols(const Link* link, ExecutableShared* shared, 
 }
 
 // A dynamic PIE's fixup that doesn't read a GOT slot and isn't ABS64, whose target the filter (or with `exact`, its
-// atom) says may be outside the image. A CALL to a dynamic symbol goes to the symbol's stub, which reads its GOT slot: both are
-// marked in this lane's bitsets. Any other kind of fixup to a dynamic symbol can't be relocated (lld refuses it too:
-// the code isn't position-independent); it is only counted here, and executable_check_relocations reports it.
+// atom) says may be outside the image. A CALL to a dynamic symbol goes to the symbol's stub, which reads its GOT slot:
+// both are marked in this lane's bitsets. Any other kind of fixup to a dynamic symbol can't be relocated (lld refuses it
+// too: the code isn't position-independent), and nor can a PC32 or PC64 to address 0 (executable_is_absolute_zero); they
+// are only counted here, and executable_check_relocations reports them. A CALL to address 0 is patched, as GNU ld and
+// lld patch it: whatever it reaches, the program can only call it after checking that the symbol has an address.
 static void executable_check_direct(const Link* link, ExecutableShared* shared, uint32_t lane, FixupId fixup, uint64_t* refused)
 {
     const SymbolId target = link->fixups.target[fixup];
-    const bool call = (link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_CALL;
+    const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+    const bool call = kind == BUSTER_LINK_FIXUP_CALL;
+    const bool relative = kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64;
     const bool dynamic = executable_bit(shared->dynamic_bits, target);
     const uint64_t word = lane * shared->words_per_lane + target / 64;
     const uint64_t bit = dynamic && call ? 1ull << (target % 64) : 0;
     shared->got_marks[word] |= bit;
     shared->stub_marks[word] |= bit;
-    *refused += dynamic && !call ? 1 : 0;
+    *refused += (dynamic && !call) || (relative && !dynamic && executable_is_absolute_zero(link, target)) ? 1 : 0;
 }
 
 // Counts this lane's atoms per bucket (and each ordered class's largest alignment), and marks in its bitset the targets
@@ -2662,16 +2680,19 @@ static void executable_classify(const Link* link, ExecutableShared* shared, cons
     }
 }
 
-// Whether a dynamic PIE can't relocate a fixup in an atom of class `atom_class`: an ABS64 that needs a relocation
-// outside the atoms the loader writes (a text relocation), an ABS32 or ABS32S that needs one (no load address fits it),
-// or a fixup of another kind to a dynamic symbol, but for a GOT kind and a CALL, which goes to the symbol's stub.
-static bool executable_is_refused(uint8_t kind, uint8_t class, uint8_t atom_class)
+// Whether a dynamic PIE can't relocate a fixup of `kind` to `target` in an atom of class `atom_class`: an ABS64 that
+// needs a relocation outside the atoms the loader writes (a text relocation), an ABS32 or ABS32S that needs one (no load
+// address fits it), a fixup of another kind to a dynamic symbol, but for a GOT kind and a CALL, which goes to the
+// symbol's stub, or a PC32 or PC64 to address 0 (executable_is_absolute_zero).
+static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId target, uint8_t atom_class)
 {
+    const uint8_t class = executable_relocation_class(link, target);
     const bool relocated = class != BUSTER_EXECUTABLE_RELOCATION_NONE;
     const bool absolute32 = kind == BUSTER_LINK_FIXUP_ABS32 || kind == BUSTER_LINK_FIXUP_ABS32S;
     const bool text = kind == BUSTER_LINK_FIXUP_ABS64 && !executable_class_is_written(atom_class);
     const bool direct = !executable_kind_reads_got(kind) && kind != BUSTER_LINK_FIXUP_ABS64 && kind != BUSTER_LINK_FIXUP_CALL;
-    return (relocated && (text || absolute32)) || (direct && class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC);
+    const bool relative = kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64;
+    return (relocated && (text || absolute32)) || (direct && class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC) || (relative && executable_is_absolute_zero(link, target));
 }
 
 // A dynamic PIE's fixups that it can't relocate (executable_is_refused), which the lanes' counts point to and lane 0
@@ -2699,7 +2720,7 @@ static void executable_check_relocations(const Link* link, const ExecutableShare
         {
             const uint8_t kind = fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND;
             const bool smaller = failed == 0 || fixup < failed;
-            failed = smaller && executable_is_refused(kind, executable_relocation_class(link, fixups->target[fixup]), atoms->class[atom]) ? fixup : failed;
+            failed = smaller && executable_is_refused(link, kind, fixups->target[fixup], atoms->class[atom]) ? fixup : failed;
         }
     }
     if (failed != 0)

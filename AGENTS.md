@@ -1155,16 +1155,18 @@ same relocations in `.rela.dyn` alone and run alike. The checks:
   `.gnu.hash`;
 - imports: 256 of `libc.so.6`'s functions, each called through a stub and
   pointed to, which the loader must bind at their versions;
-- refusals: a pointer to `main` in `.rodata` (a text relocation), and an
-  `ABS32` to `main` and a `PC32` to a dynamic symbol in `.data`, each refused
-  with its fixup by every lane count and without an output; a call to and a
-  pointer to a weak reference to nothing, loads through the GOT slots of that
-  reference and of the program's data, the dynamic one's first in its word of
-  the bitsets, and a pointer to `main` at an odd address, which RELR can't
-  hold, all of which run; and a lane short of scratch memory (lane 0 of 1 and
-  of 8 lanes, the last of 2 and of 8), with which every link that fails must
-  fail with `EXECUTABLE_ERROR_MEMORY` and no output, and one with room enough
-  must run.
+- refusals: a pointer to `main` in `.rodata` (a text relocation), an `ABS32`
+  to `main` and a `PC32` to a dynamic symbol in `.data`, and a `lea` of and a
+  `PC64` in `.data` to a hidden weak reference to nothing, which stays at
+  address 0 wherever the program loads, each refused with its fixup by every
+  lane count and by the exact twins, without an output; a call to and a
+  pointer to a weak reference to nothing, and to a hidden one, loads through
+  the GOT slots of the first and of the program's data, the dynamic one's
+  first in its word of the bitsets, and a pointer to `main` at an odd
+  address, which RELR can't hold, all of which run; and a lane short of
+  scratch memory (lane 0 of 1 and of 8 lanes, the last of 2 and of 8), with
+  which every link that fails must fail with `EXECUTABLE_ERROR_MEMORY` and no
+  output, and one with room enough must run.
 
 With `--cross-check`, which needs `ld.lld`, the bound link's objects (the
 object writer's) are linked by lld as a PIE against `libc.so.6` and the

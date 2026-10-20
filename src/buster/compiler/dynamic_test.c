@@ -153,12 +153,6 @@ static bool dynamic_test_write_with(DynamicTestWrite* write, Link* link, const B
     return ran && write->succeeded;
 }
 
-static bool dynamic_test_write(Link* link, const Bind* bind, const Runtime* runtime, String8 path, uint32_t lanes, ExecutableResult* result)
-{
-    DynamicTestWrite write = { 0 };
-    return dynamic_test_write_with(&write, link, bind, runtime, path, lanes, result);
-}
-
 // Writes the link with every lane count, each from zeroed fields over the last file scribbled over: whether every
 // write succeeded with the same bytes and build ID, which `file` then holds, read into `arena`.
 static bool dynamic_test_lanes(DynamicTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, String8 path, const char* name, ExecutableResult* result,
@@ -1707,8 +1701,11 @@ static bool dynamic_test_imports(const ExecutableTestDirectory* directory, const
 // dynamic; a call to that weak reference, which goes to a stub (in a function that never runs); a pointer to it in
 // .data, which the loader leaves 0 since nothing defines it, and which main returns whether it isn't; loads through the
 // GOT of it and of the program's data, whose slots share a word of the bitsets, the dynamic one first, so that the
-// GOT's RELR words start past the word's first slot; and a pointer to main at an odd address, after a byte of .data,
-// which RELR can't hold, so .rela.dyn does, and which main returns whether it isn't main's address.
+// GOT's RELR words start past the word's first slot; a pointer to main at an odd address, after a byte of .data, which
+// RELR can't hold, so .rela.dyn does, and which main returns whether it isn't main's address; and a hidden weak
+// reference to nothing, at address 0 wherever the program loads: main's lea of it and a PC64 to it in .data, which no
+// load address makes right (GNU ld refuses the lea), a call to it in the function that never runs, and a pointer to
+// it, which needs no relocation, and which main returns whether it isn't 0.
 typedef enum DynamicTestSmall
 {
     DYNAMIC_TEST_SMALL_TEXT_POINTER,
@@ -1718,6 +1715,10 @@ typedef enum DynamicTestSmall
     DYNAMIC_TEST_SMALL_WEAK_POINTER,
     DYNAMIC_TEST_SMALL_GOT_ORDER,
     DYNAMIC_TEST_SMALL_ODD_POINTER,
+    DYNAMIC_TEST_SMALL_HIDDEN_LEA,
+    DYNAMIC_TEST_SMALL_HIDDEN_PC64,
+    DYNAMIC_TEST_SMALL_HIDDEN_CALL,
+    DYNAMIC_TEST_SMALL_HIDDEN_POINTER,
     DYNAMIC_TEST_SMALLS,
 } DynamicTestSmall;
 
@@ -1729,6 +1730,10 @@ static const char* const dynamic_test_small_names[DYNAMIC_TEST_SMALLS] = {
     [DYNAMIC_TEST_SMALL_WEAK_POINTER] = "a pointer to a weak reference to nothing",
     [DYNAMIC_TEST_SMALL_GOT_ORDER] = "loads through the GOT, a dynamic symbol's slot first",
     [DYNAMIC_TEST_SMALL_ODD_POINTER] = "a pointer to main at an odd address",
+    [DYNAMIC_TEST_SMALL_HIDDEN_LEA] = "a lea of a hidden weak reference to nothing",
+    [DYNAMIC_TEST_SMALL_HIDDEN_PC64] = "a PC64 to a hidden weak reference to nothing in .data",
+    [DYNAMIC_TEST_SMALL_HIDDEN_CALL] = "a call to a hidden weak reference to nothing",
+    [DYNAMIC_TEST_SMALL_HIDDEN_POINTER] = "a pointer to a hidden weak reference to nothing",
 };
 
 // Whether some word of 64 symbols has GOT slots, by the test's own rules, whose first isn't relocated RELATIVE and a
@@ -1779,11 +1784,15 @@ static void dynamic_test_small(DynamicTestSmallProgram* program, const Runtime* 
     const SymbolId main = built ? bind_test_symbol(test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, program_source) : 0;
     const SymbolId data = built ? bind_test_symbol(test, "buster_data", BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_OBJECT, program_source) : 0;
     const SymbolId never = built ? bind_test_symbol(test, "buster_never", BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION, program_source) : 0;
-    built = main != 0 && weak != 0 && data != 0 && never != 0 && bind_begin(&test->bind, &test->link, runtime, BIND_PATH_VECTOR, &test->bytes, 1, &test->arena);
-    // main: return 0, or for the weak pointer whether it isn't 0, or for the odd pointer whether it isn't main's
-    // address: mov rdx, [rip + buster_data]; lea rax, [rip + main]; sub rdx, rax (for the odd pointer, a nop
-    // otherwise); mov eax, 1; mov ecx, 0; test rdx, rdx; cmove rax, rcx; ret.
-    const bool reads = which == DYNAMIC_TEST_SMALL_WEAK_POINTER || which == DYNAMIC_TEST_SMALL_ODD_POINTER;
+    const SymbolId hidden =
+        built ? bind_test_symbol(test, "buster_hidden", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_HIDDEN | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_NONE) : 0;
+    built = main != 0 && weak != 0 && data != 0 && never != 0 && hidden != 0 &&
+            bind_begin(&test->bind, &test->link, runtime, BIND_PATH_VECTOR, &test->bytes, 1, &test->arena);
+    // main: return 0, or for the weak pointers whether they aren't 0, or for the odd pointer whether it isn't main's
+    // address: mov rdx, [rip + buster_data]; lea rax, [rip + main] (for the lea, of buster_hidden); sub rdx, rax (for
+    // the odd pointer, a nop otherwise); mov eax, 1; mov ecx, 0; test rdx, rdx; cmove rax, rcx; ret.
+    const bool reads = which == DYNAMIC_TEST_SMALL_WEAK_POINTER || which == DYNAMIC_TEST_SMALL_ODD_POINTER || which == DYNAMIC_TEST_SMALL_HIDDEN_POINTER;
+    const bool lea = which == DYNAMIC_TEST_SMALL_HIDDEN_LEA;
     const bool odd = which == DYNAMIC_TEST_SMALL_ODD_POINTER;
     const X86Instruction main_code[] = {
         { .reg = X86_REGISTER_RDX, .mode = BUSTER_X86_MEMORY_RIP, .form = X86_FORM_MOV_R64_RM64 | BUSTER_X86_FORM_FIXUP },
@@ -1797,7 +1806,7 @@ static void dynamic_test_small(DynamicTestSmallProgram* program, const Runtime* 
     };
     const LinkReference main_references[] = {
         { .instruction = 0, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_PC32, .target = data, .addend = 0 },
-        { .instruction = 1, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_PC32, .target = main, .addend = 0 },
+        { .instruction = 1, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_PC32, .target = lea ? hidden : main, .addend = 0 },
     };
     // Or for the loads through the GOT: mov rdx, [rip + buster_weak's slot] (0); mov rax, [rip + buster_data's slot];
     // mov rax, [rax] (0); add rax, rdx; ret. A slot relocated wrong exits with another status, or faults.
@@ -1815,15 +1824,17 @@ static void dynamic_test_small(DynamicTestSmallProgram* program, const Runtime* 
     const bool loads = which == DYNAMIC_TEST_SMALL_GOT_ORDER;
     built = built && (loads ? bind_test_code(test, got_code, BUSTER_ARRAY_LENGTH(got_code), got_references, BUSTER_ARRAY_LENGTH(got_references), main)
                             : bind_test_code(test, main_code, BUSTER_ARRAY_LENGTH(main_code), main_references, BUSTER_ARRAY_LENGTH(main_references), main));
+    // The lea's fixup, main's second.
+    const FixupId lea_fixup = built && lea ? test->link.atoms.fixup_begin[test->link.symbols.atom[main]] + 1 : 0;
     // buster_never: call buster_weak; ret. It is only ever called by nothing.
     const X86Instruction never_code[] = {
         { .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP },
         { .form = X86_FORM_RET },
     };
     const LinkReference never_references[] = {
-        { .instruction = 0, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_CALL, .target = weak, .addend = 0 },
+        { .instruction = 0, .field = X86_FIXUP_DISPLACEMENT, .kind = BUSTER_LINK_FIXUP_CALL, .target = which == DYNAMIC_TEST_SMALL_HIDDEN_CALL ? hidden : weak, .addend = 0 },
     };
-    const bool calls = which == DYNAMIC_TEST_SMALL_CALL_WEAK;
+    const bool calls = which == DYNAMIC_TEST_SMALL_CALL_WEAK || which == DYNAMIC_TEST_SMALL_HIDDEN_CALL;
     built = built && bind_test_code(test, never_code, BUSTER_ARRAY_LENGTH(never_code), never_references, calls ? 1 : 0, never);
     // buster_data: 8 bytes in .rodata for the text relocation, in .data otherwise, with the case's fixup; for the odd
     // pointer aligned to a byte, after an atom of a byte, so that it lands an odd address past the even end of the
@@ -1846,12 +1857,18 @@ static void dynamic_test_small(DynamicTestSmallProgram* program, const Runtime* 
         [DYNAMIC_TEST_SMALL_WEAK_POINTER] = BUSTER_LINK_FIXUP_ABS64,
         [DYNAMIC_TEST_SMALL_GOT_ORDER] = 0,
         [DYNAMIC_TEST_SMALL_ODD_POINTER] = BUSTER_LINK_FIXUP_ABS64,
+        [DYNAMIC_TEST_SMALL_HIDDEN_LEA] = 0,
+        [DYNAMIC_TEST_SMALL_HIDDEN_PC64] = BUSTER_LINK_FIXUP_PC64,
+        [DYNAMIC_TEST_SMALL_HIDDEN_CALL] = 0,
+        [DYNAMIC_TEST_SMALL_HIDDEN_POINTER] = BUSTER_LINK_FIXUP_ABS64,
     };
-    const SymbolId target = which == DYNAMIC_TEST_SMALL_PC32_DYNAMIC || which == DYNAMIC_TEST_SMALL_WEAK_POINTER ? weak : main;
+    const bool to_hidden = which == DYNAMIC_TEST_SMALL_HIDDEN_PC64 || which == DYNAMIC_TEST_SMALL_HIDDEN_POINTER;
+    const SymbolId target = which == DYNAMIC_TEST_SMALL_PC32_DYNAMIC || which == DYNAMIC_TEST_SMALL_WEAK_POINTER ? weak : to_hidden ? hidden : main;
     const FixupId fixup = built && kinds[which] != 0 ? link_add_fixup(&test->link, atom, 0, kinds[which], target, 0) : 0;
     built = built && (kinds[which] == 0 || fixup != 0);
-    const bool runs = which == DYNAMIC_TEST_SMALL_CALL_WEAK || which == DYNAMIC_TEST_SMALL_WEAK_POINTER || which == DYNAMIC_TEST_SMALL_GOT_ORDER || odd;
-    program->refused = runs ? 0 : fixup;
+    const bool runs = which == DYNAMIC_TEST_SMALL_CALL_WEAK || which == DYNAMIC_TEST_SMALL_WEAK_POINTER || which == DYNAMIC_TEST_SMALL_GOT_ORDER || odd ||
+                      which == DYNAMIC_TEST_SMALL_HIDDEN_CALL || which == DYNAMIC_TEST_SMALL_HIDDEN_POINTER;
+    program->refused = runs ? 0 : lea ? lea_fixup : fixup;
     program->bound = built && bind_end(&test->bind, &test->link) && link_check(&test->link) == LINK_ERROR_NONE;
 }
 
@@ -1870,13 +1887,19 @@ static bool dynamic_test_smalls(const ExecutableTestDirectory* directory, const 
         BindTestLink* test = &program.test;
         dynamic_test_expect(&tally, program.bound, dynamic_test_small_names[which], which);
         bool outcome = program.bound;
-        for (uint32_t l = 0; program.bound && program.refused != 0 && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts); l += 1)
+        // By every lane count, then by the exact twins with 1 and 8 lanes.
+        for (uint32_t l = 0; program.bound && program.refused != 0 && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) + 2; l += 1)
         {
+            const bool exact = l >= BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts);
+            const uint32_t lanes = exact ? (l == BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) ? 1 : 8) : dynamic_test_lane_counts[l];
+            DynamicTestWrite write = {
+                .exact = exact,
+            };
             ExecutableResult result;
             unlink(path.pointer);
-            const bool written = dynamic_test_write(&test->link, &test->bind, runtime, path, dynamic_test_lane_counts[l], &result);
+            const bool written = dynamic_test_write_with(&write, &test->link, &test->bind, runtime, path, lanes, &result);
             const bool refused = !written && result.error == EXECUTABLE_ERROR_RELOCATION && result.fixup == program.refused && access(path.pointer, F_OK) != 0;
-            dynamic_test_expect(&tally, refused, dynamic_test_small_names[which], dynamic_test_lane_counts[l]);
+            dynamic_test_expect(&tally, refused, dynamic_test_small_names[which], (exact ? 100 : 0) + lanes);
             outcome = outcome && refused;
         }
         if (program.bound && program.refused == 0)
