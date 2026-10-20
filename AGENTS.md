@@ -50,9 +50,10 @@ Where it is:
 - `.githooks/commit-msg` ends each message that `git commit` or `git merge`
   writes with it, once, after the other trailers, so don't write it yourself.
   Before your first commit, check that `git config core.hooksPath` prints
-  `.githooks`; if it doesn't, run `.claude/hooks/enable-sign-off.sh` (Claude
-  Code runs it at session start). If that reports leaving the hook off, write
-  the trailer yourself, last.
+  `.githooks`; if it doesn't, run `.githooks/enable-sign-off.sh`. Claude Code
+  runs it at session start (`.claude/settings.json`), and so does Codex
+  (`.codex/hooks.json`) once David has reviewed and trusted that hook. If it
+  reports leaving the hook off, write the trailer yourself, last.
 - Don't use `git commit -s`, which signs off as the committer
   (`Claude <noreply@anthropic.com>` in cloud sessions), or `--no-verify`, which
   skips the hook. Rebases, cherry-picks and reverts don't run it; for a revert,

@@ -1,5 +1,6 @@
 #!/bin/sh
-# SessionStart hook, which other agents run by hand (AGENTS.md, "David's
+# SessionStart hook of Claude Code (.claude/settings.json) and Codex
+# (.codex/hooks.json), which other agents run by hand (AGENTS.md, "David's
 # sign-off"). Where David's opt-in BUSTER_DCO_SIGN_OFF=davidgmbb is set, it
 # points Git at .githooks, whose commit-msg hook adds his sign-off. Anywhere
 # else it does nothing. It leaves a hooks path that is already set, and the
