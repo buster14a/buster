@@ -226,7 +226,10 @@ or measured bandwidth floor is claimed.
 ## The power cap's state
 
 A compiler runs liveness after lighter phases, and on Zen 5 that changes how
-fast the AVX-512 solver runs (#199). Code that draws less than about 17 W per
+fast the AVX-512 solver runs ([#199's
+report](https://github.com/buster14a/buster-fast/issues/199#issuecomment-6297314071)
+has the controls behind this section's mechanism, and says which parts are
+inferred). Code that draws less than about 17 W per
 core (scalar phases, the vectorized lexer, even a spin or a sleep) lets the
 9700X's firmware boost the clock from about 5.31 to 5.52 GHz over 30 to
 300 ms. At that clock a heavy vector loop would draw more than the core's cap

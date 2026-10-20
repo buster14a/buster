@@ -520,8 +520,10 @@ runs the scalar loop (256 instructions per call) for MS ms before each timed
 pass of the other implementations: the state a compiler runs its vector phases
 in. Lighter code lets the 9700X's clock boost over 30 to 300 ms, and at that
 clock a heavy AVX-512 loop runs under the core's power cap for 5 to 20 ms
-(#199), longer than a pass. Use 100 to 300: from a settled clock 30 ms barely
-boosts it, and 100 ms reaches the state whatever the passes before did. Compare
+([#199's report](https://github.com/buster14a/buster-fast/issues/199#issuecomment-6297314071)
+has the controls), longer than a pass. Use 100 to 300: from a settled clock
+30 ms barely boosts it, and 100 ms reaches the state whatever the passes before
+did. Compare
 time as well as cycles, since the clock differs by 2% to 5% between the states.
 Measure the back-to-back state with `--only NAME`, which runs one loop alone:
 in full runs without the option, the loops after the scalar loop's own passes
