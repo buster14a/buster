@@ -23,7 +23,24 @@ production fallbacks, or hot-path CPU dispatch. Broader output targets and extra
 applications are outside the current scope; but the x86 encoder encodes 16- and
 32-bit modes' instructions too, as the owner asked.
 
+## Issue ownership
+
+Every issue being investigated, tackled or fixed must be claimed in the issue
+itself before work begins. Read its latest comments and linked pull requests,
+then post a comment identifying who is taking the work and the scope being
+claimed. A local plan, branch, pull request or assignee alone does not replace
+this comment. When work covers several issues, claim each one.
+
+Respect existing claims: coordinate with the current owner before taking over
+or starting overlapping work. Keep the claim current with the branch or pull
+request, and comment on the issue when handing off or stopping so others know
+whether the work is still owned.
+
 ## Coding standards
+
+Write code in **C** unless the goal or action explicitly disallows C or requires
+another language. This applies to supporting tools, tests, and automation as
+well as compiler code.
 
 Follow [the C coding style](docs/coding-style.md) for new or modified compiler
 code. The essentials are: C and Clang on Linux/Zen 5, 4-space Allman formatting,
@@ -67,8 +84,9 @@ or infrastructure machinery merely to match its style.
 - `docs/object-writer-and-linker.md` is the design of the object writer and the
   linker, with the 9700X measurements of mold, wild, lld and the kernel's file
   costs behind it, and the order to build it in. The lane base layer, the
-  encoder's fixups, the representation and the object writer below are
-  implemented; the linker isn't yet.
+  encoder's fixups, the representation, the object writer and the direct
+  path's first executables below are implemented; the rest of the linker
+  isn't yet.
 - `src/buster/compiler/lane.c` is the lane base layer that every phase of the
   object writer and the linker runs on (groups of threads that run the same
   code, their barrier and broadcast, `lane_range`, and arenas).
@@ -88,6 +106,12 @@ or infrastructure machinery merely to match its style.
   `object_write_units` for a group of lanes). `object_writer_test.c` holds its
   tests (`main.c` includes it; `./build/compiler test-object-writer` runs them)
   and `object_writer_benchmark.c` provides `benchmark-object-writer`.
+- `src/buster/compiler/executable.c` writes the direct path's first
+  executables: a link in that representation laid out, patched and written as
+  a static executable without libc (step 4 of the design's plan), with a build
+  ID, by every lane of a group. `executable_test.c` holds its tests (`main.c`
+  includes it; `./build/compiler test-executable` runs them) and
+  `executable_benchmark.c` provides `benchmark-executable`.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -105,6 +129,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-link
 ./build/compiler test-object-writer --cross-check
 ./build/compiler benchmark-object-writer
+./build/compiler test-executable
+./build/compiler benchmark-executable
 ```
 
 ## Sharing the 9700X
@@ -506,3 +532,85 @@ with `--directory` on each file system to measure;
 `docs/object-writer-and-linker.md` ("The object writer (`-c`)") has the numbers
 for tmpfs and btrfs. The default 9700X job runs it after the tests, pinned to
 one allowed CPU; like the others, its measurements are informational.
+
+## Direct executable tests
+
+`./build/compiler test-executable` (about 0.1 s on the 9700X) checks
+`executable.c` in a directory of its own under `--directory` (`TMPDIR` or
+`/tmp` by default), which it removes unless `--keep` says to leave it:
+
+- the build ID's chunk hash: every length up to 2,100 bytes, cut at random
+  places, hashes as it does whole, and zeros of each length up to a page hash
+  apart from the next length's;
+- test-link's program sets, and one of 50,000 workers in 38 chunks, each
+  written by groups of 1, 2, 3 and 8 lanes, every time from zeroed fields over
+  the last file scribbled over, so that a lane that skipped a field or a chunk
+  shows. The files and build IDs must be byte-identical, and each program must
+  run and print what its model predicts. In each file every fixup's field must
+  hold its kind's value, the GOT must have a slot for each target of a GOT
+  kind (numbered from 1 in symbol order, holding its value), the headers must
+  have lld's layout, no chunk boundary may split a field, and the build ID
+  must be the tree of the file's chunks. A copy of the defaults' program with
+  one pointer 8 bytes off must print something else, and the two sets that
+  call libc (step 5's) must be refused, an import named, without creating the
+  output;
+- chunk boundaries: programs with a call's rel32 0 to 4 bytes before the
+  nominal 256 KB boundary and an `ABS64` 0 to 8 bytes before 512 KB, both in
+  atoms larger than a chunk. A boundary must move to the end of a field that
+  crosses it and stay where it is otherwise, with every lane count, and the
+  program must run;
+- the output file: created; overwritten in place by a smaller program (and
+  truncated) and with its mode restored; written beside it and renamed over it
+  when it has another link (which keeps its bytes), when it is a symbolic link,
+  when a process runs it (which runs on), when it is someone else's (checked
+  only when the test may `chown`, as root), past a file a killed link left
+  under the name without random digits, and with a name of `NAME_MAX` bytes;
+  and written in order into a FIFO, which a failed link leaves in place: for
+  a reader that opens it and reads to the first end of file, with inotify
+  counting one close after writing, and for one that holds the read end of a
+  FIFO that may be written but not read (which only binds a user other than
+  root). A directory and a path under a regular file are refused, naming the
+  call. A link with an undefined symbol fails, naming it, and leaves the
+  output alone; one whose `ABS32` falls below 0 removes it, and so does one
+  whose `PC32` leaves int32's range, which only the checked path sees; one
+  that fails while writing beside the output leaves the output, its other
+  link, and nothing beside them;
+- limits: a weak thread-local symbol defined nowhere (offset 0 in its field
+  and its GOT slot); TLS blocks of 2 GB (linked) and past it, atoms past 2 GB
+  and one whose padding wraps (refused); a bad entry point, the first of two
+  symbols defined nowhere in different lanes' ranges, the smallest failing
+  fixup, an atom aligned past a page and a bad init array atom, each reported
+  alike with every lane count; and a lane with no scratch memory to
+  spare, then 64 bytes more at a time, until the link succeeds: every failure
+  must be `EXECUTABLE_ERROR_MEMORY` and leave no output;
+- the patch kernel: the fast path against the checked one, on random fixups
+  of every kind with wide addends, at every count from 0 to 199 from four
+  starts, with the kind column ending at a `PROT_NONE` page.
+
+`--seed N` changes the programs and the random inputs, and `--functions N`
+the workers of the set named after it (2,000 by default).
+
+## Direct executable benchmark
+
+`./build/compiler benchmark-executable [--directory PATH] [--functions LIST]
+[--lanes N] [--seed N] [--only kernels|hash|links]` (about 2 s) reports
+medians of:
+
+- the patch kernel and the variants it was chosen over (a branch on the kind,
+  the checked path, 64-bit targets, and gathers with scalar stores or
+  scatters) on the design's three synthetic sizes, each variant's bytes
+  checked against the kernel's first;
+- the chunk hash: 256 KB in L2, whole and in pieces, and 64 MB;
+- links of generated programs of 1, 64, 2,000 and 180,000 workers
+  (`--functions` takes a list), written into `--directory` (`TMPDIR` or
+  `/tmp`) by a group of `--lanes` lanes that runs every write of a case, as a
+  compiler runs its phases on one group: in place and as a new file, phase by
+  phase, against the floor, one `pwrite` of the same bytes; and with one lane,
+  the patch kernel on each program's own mix of kinds.
+
+Run it under the 9700X's lock with `taskset -c 2` for one lane, or with
+`taskset -c 0-7` for 8 (one CPU per core), since the lanes' threads keep the
+affinity they start with. `docs/object-writer-and-linker.md` ("Patching and
+writing" and "The first executables") has the numbers. The default 9700X job
+runs it after the tests, pinned to one allowed CPU; like the others, its
+measurements are informational.
