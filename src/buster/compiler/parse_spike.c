@@ -765,14 +765,35 @@ static const bool spike_level_ties_left[BUSTER_SPIKE_LEVELS] =
 // Whether an L candidate of this level loses to any R: openers, terminators and heads, whose tokens to their right
 // never belong to them through the levels (the expression in a group belongs to its closer, a statement's tokens to
 // its terminator, and `i++` in `for (...; ...; i++)` to the `)`).
-static bool spike_level_is_weak(uint8_t level)
+BUSTER_INLINE bool spike_level_is_weak(uint8_t level)
 {
     return level == SPIKE_LEVEL_OPENER || level == SPIKE_LEVEL_TERMINATOR || level == SPIKE_LEVEL_HEAD;
 }
 
-// The parent from L and R under SPIKE_RULE_SELECT. Keys are depth * BUSTER_SPIKE_LEVELS + level; equal keys are on the
-// same level, which says which way they go.
-static uint32_t spike_select(uint32_t left, uint32_t left_depth, uint8_t left_level, uint32_t right, uint32_t right_depth, uint8_t right_level)
+// The parent from L and R and their keys (depth * BUSTER_SPIKE_LEVELS + level) under SPIKE_RULE_SELECT: equal keys are on
+// the same level, which says which way they go.
+BUSTER_INLINE uint32_t spike_select_keys(uint32_t left, uint32_t left_key, uint32_t right, uint32_t right_key)
+{
+    uint32_t result;
+    const uint8_t left_level = (uint8_t)(left_key % BUSTER_SPIKE_LEVELS);
+    if (left == BUSTER_SPIKE_NONE || (right != BUSTER_SPIKE_NONE && spike_level_is_weak(left_level)))
+    {
+        result = right;
+    }
+    else if (right == BUSTER_SPIKE_NONE)
+    {
+        result = left;
+    }
+    else
+    {
+        const bool take_left = left_key > right_key || (left_key == right_key && spike_level_ties_left[left_level]);
+        result = take_left ? left : right;
+    }
+    return result;
+}
+
+// The same from depths and levels.
+BUSTER_INLINE uint32_t spike_select(uint32_t left, uint32_t left_depth, uint8_t left_level, uint32_t right, uint32_t right_depth, uint8_t right_level)
 {
     uint32_t result;
     if (left == BUSTER_SPIKE_NONE || (right != BUSTER_SPIKE_NONE && spike_level_is_weak(left_level)))
@@ -955,6 +976,25 @@ struct SpikeStatement
     uint8_t kind;
 };
 
+// A candidate on the scalar parser's L stack.
+typedef struct SpikeParserCandidate SpikeParserCandidate;
+struct SpikeParserCandidate
+{
+    uint32_t position;
+    uint32_t key;
+};
+
+// A token on the R stack, waiting for the token that ends its search, with what it needs then: its L and L's key (none
+// for SPIKE_RULE_RIGHT, which then takes R).
+typedef struct SpikeParserWaiting SpikeParserWaiting;
+struct SpikeParserWaiting
+{
+    uint32_t position;
+    uint32_t threshold;
+    uint32_t left;
+    uint32_t left_key;
+};
+
 typedef struct SpikeParser SpikeParser;
 struct SpikeParser
 {
@@ -966,14 +1006,10 @@ struct SpikeParser
     uint32_t* parents;
     SpikeFrame* frames;
     uint32_t frame_count;
-    uint32_t* left_positions;
-    uint32_t* left_keys;
-    uint32_t left_count;
-    uint32_t* right_positions;
-    uint32_t* right_thresholds;
-    uint32_t right_count;
-    // Each token's L, kept until its R comes.
-    uint32_t* lefts;
+    SpikeParserCandidate* candidates;
+    uint32_t candidate_count;
+    SpikeParserWaiting* waiting;
+    uint32_t waiting_count;
     // By name id.
     uint8_t* meanings;
     uint32_t* log_names;
@@ -988,7 +1024,7 @@ struct SpikeParser
     const char* error_message;
 };
 
-static void spike_parser_error(SpikeParser* parser, uint32_t token, const char* message)
+BUSTER_INLINE void spike_parser_error(SpikeParser* parser, uint32_t token, const char* message)
 {
     if (parser->error_token == BUSTER_SPIKE_NONE)
     {
@@ -997,13 +1033,13 @@ static void spike_parser_error(SpikeParser* parser, uint32_t token, const char* 
     }
 }
 
-static bool spike_parser_is_typedef_name(const SpikeParser* parser, uint32_t token)
+BUSTER_INLINE bool spike_parser_is_typedef_name(const SpikeParser* parser, uint32_t token)
 {
     return parser->kinds[token] == SPIKE_KIND_IDENTIFIER && parser->meanings[parser->names[token]] == SPIKE_MEANING_TYPEDEF;
 }
 
 // Whether the token can start a type name: a specifier or qualifier keyword, an attribute or a typedef name.
-static bool spike_parser_starts_type(const SpikeParser* parser, uint32_t token)
+BUSTER_INLINE bool spike_parser_starts_type(const SpikeParser* parser, uint32_t token)
 {
     const uint8_t kind = parser->kinds[token];
     return kind == SPIKE_KIND_TYPE || kind == SPIKE_KIND_STRUCT || kind == SPIKE_KIND_ENUM || kind == SPIKE_KIND_QUALIFIER || kind == SPIKE_KIND_ATOMIC ||
@@ -1012,7 +1048,7 @@ static bool spike_parser_starts_type(const SpikeParser* parser, uint32_t token)
 
 // Whether the token can start a declaration: a type name, or a storage class, typedef, _Alignas, _Static_assert,
 // __label__ or __extension__ before one. In a block, a typedef name followed by `:` is a label instead.
-static bool spike_parser_starts_declaration(const SpikeParser* parser, uint32_t token, bool block)
+BUSTER_INLINE bool spike_parser_starts_declaration(const SpikeParser* parser, uint32_t token, bool block)
 {
     uint32_t i = token;
     while (parser->kinds[i] == SPIKE_KIND_EXTENSION)
@@ -1025,7 +1061,7 @@ static bool spike_parser_starts_declaration(const SpikeParser* parser, uint32_t 
                       kind == SPIKE_KIND_STATIC_ASSERT || kind == SPIKE_KIND_LABEL || kind == SPIKE_KIND_CALLING_CONVENTION);
 }
 
-static void spike_parser_bind(SpikeParser* parser, uint32_t token, uint8_t meaning)
+BUSTER_INLINE void spike_parser_bind(SpikeParser* parser, uint32_t token, uint8_t meaning)
 {
     const uint32_t name = parser->names[token];
     parser->log_names[parser->log_count] = name;
@@ -1034,7 +1070,7 @@ static void spike_parser_bind(SpikeParser* parser, uint32_t token, uint8_t meani
     parser->meanings[name] = meaning;
 }
 
-static void spike_parser_restore(SpikeParser* parser, uint32_t mark)
+BUSTER_INLINE void spike_parser_restore(SpikeParser* parser, uint32_t mark)
 {
     while (parser->log_count > mark)
     {
@@ -1044,13 +1080,13 @@ static void spike_parser_restore(SpikeParser* parser, uint32_t mark)
 }
 
 // The innermost frame with a scope: where a declaration's names are bound.
-static bool spike_parser_binds(const SpikeParser* parser)
+BUSTER_INLINE bool spike_parser_binds(const SpikeParser* parser)
 {
     return (parser->frames[parser->frame_count - 1].flags & BUSTER_SPIKE_FRAME_NO_BIND) == 0;
 }
 
 // Pushes a frame for the group `opener` opens; the current frame continues in `continuation` once it closes.
-static SpikeFrame* spike_parser_push(SpikeParser* parser, uint32_t opener, uint8_t role, uint8_t mode, uint8_t continuation, bool scope)
+BUSTER_INLINE SpikeFrame* spike_parser_push(SpikeParser* parser, uint32_t opener, uint8_t role, uint8_t mode, uint8_t continuation, bool scope)
 {
     SpikeFrame* parent = &parser->frames[parser->frame_count - 1];
     SpikeFrame* frame = &parser->frames[parser->frame_count];
@@ -1078,12 +1114,12 @@ static SpikeFrame* spike_parser_push(SpikeParser* parser, uint32_t opener, uint8
 // ---------------------------------------------------------------------------------------------------------------------
 // The scalar parser's statement stack
 
-static SpikeStatement* spike_statement_top(SpikeParser* parser)
+BUSTER_INLINE SpikeStatement* spike_statement_top(SpikeParser* parser)
 {
     return parser->statement_count != 0 ? &parser->statements[parser->statement_count - 1] : 0;
 }
 
-static void spike_statement_pop(SpikeParser* parser)
+BUSTER_INLINE void spike_statement_pop(SpikeParser* parser)
 {
     SpikeStatement* top = spike_statement_top(parser);
     // A for-statement's scope, which its clauses' declarations are bound in, ends with the statement.
@@ -1096,7 +1132,7 @@ static void spike_statement_pop(SpikeParser* parser)
 
 // A statement just completed: so did every statement whose head owned it, up to an if, which an else may still
 // continue, or a do, which its while continues.
-static void spike_statement_complete(SpikeParser* parser)
+BUSTER_INLINE void spike_statement_complete(SpikeParser* parser)
 {
     bool completing = true;
     while (completing)
@@ -1121,7 +1157,7 @@ static void spike_statement_complete(SpikeParser* parser)
 }
 
 // Anything but an else ends the if-statements that were waiting for one.
-static void spike_statement_flush(SpikeParser* parser)
+BUSTER_INLINE void spike_statement_flush(SpikeParser* parser)
 {
     SpikeStatement* top = spike_statement_top(parser);
     while (top != 0 && top->state == SPIKE_STATEMENT_IF_DONE)
@@ -1133,7 +1169,7 @@ static void spike_statement_flush(SpikeParser* parser)
 }
 
 // The head that owns the statement starting now, if one is waiting for it; it isn't waiting any more.
-static uint32_t spike_statement_owner(SpikeParser* parser)
+BUSTER_INLINE uint32_t spike_statement_owner(SpikeParser* parser)
 {
     uint32_t result = BUSTER_SPIKE_NONE;
     SpikeStatement* top = spike_statement_top(parser);
@@ -1145,7 +1181,7 @@ static uint32_t spike_statement_owner(SpikeParser* parser)
     return result;
 }
 
-static void spike_statement_open_block(SpikeParser* parser, bool statement)
+BUSTER_INLINE void spike_statement_open_block(SpikeParser* parser, bool statement)
 {
     uint32_t owner = BUSTER_SPIKE_NONE;
     if (statement)
@@ -1163,7 +1199,7 @@ static void spike_statement_open_block(SpikeParser* parser, bool statement)
     parser->statement_count += 1;
 }
 
-static void spike_statement_close_block(SpikeParser* parser, uint32_t closer)
+BUSTER_INLINE void spike_statement_close_block(SpikeParser* parser, uint32_t closer)
 {
     spike_statement_flush(parser);
     // C23 lets a label end a block; anything else left waiting is an error the frames have already reported.
@@ -1188,7 +1224,7 @@ static void spike_statement_close_block(SpikeParser* parser, uint32_t closer)
     }
 }
 
-static void spike_statement_terminator(SpikeParser* parser, uint32_t terminator)
+BUSTER_INLINE void spike_statement_terminator(SpikeParser* parser, uint32_t terminator)
 {
     spike_statement_flush(parser);
     SpikeStatement* top = spike_statement_top(parser);
@@ -1215,7 +1251,7 @@ static void spike_statement_terminator(SpikeParser* parser, uint32_t terminator)
 
 // A head: the `)` of if, while, for or switch, a label's or case's `:`, or `do`. `kind` is its keyword. A while after a
 // do's body is its do's instead.
-static void spike_statement_head(SpikeParser* parser, uint32_t head, uint8_t kind, uint32_t scope)
+BUSTER_INLINE void spike_statement_head(SpikeParser* parser, uint32_t head, uint8_t kind, uint32_t scope)
 {
     spike_statement_flush(parser);
     SpikeStatement* top = spike_statement_top(parser);
@@ -1242,7 +1278,7 @@ static void spike_statement_head(SpikeParser* parser, uint32_t head, uint8_t kin
     }
 }
 
-static void spike_statement_else(SpikeParser* parser, uint32_t token)
+BUSTER_INLINE void spike_statement_else(SpikeParser* parser, uint32_t token)
 {
     SpikeStatement* top = spike_statement_top(parser);
     if (top != 0 && top->state == SPIKE_STATEMENT_IF_DONE)
@@ -1265,69 +1301,93 @@ static void spike_statement_else(SpikeParser* parser, uint32_t token)
 // ---------------------------------------------------------------------------------------------------------------------
 // The scalar parser's precedence stacks
 
-static void spike_parser_resolve(SpikeParser* parser, uint32_t token, uint32_t right)
+// Packs a role's level, left and right thresholds and rule for spike_parser_emit, which reads them all at once.
+#define BUSTER_SPIKE_ROLE_INFO(role) ((uint32_t)spike_role_levels[role] | (uint32_t)spike_role_left_thresholds[role] << 8 | \
+                                      (uint32_t)spike_role_right_thresholds[role] << 16 | (uint32_t)spike_role_rules[role] << 24)
+
+static uint32_t spike_role_info[SPIKE_ROLE_COUNT];
+
+static void spike_role_info_init(void)
 {
-    const uint8_t role = parser->roles[token];
-    const uint32_t left = parser->lefts[token];
-    uint32_t parent;
-    if (spike_role_rules[role] == SPIKE_RULE_RIGHT)
+    for (uint32_t role = 0; role < SPIKE_ROLE_COUNT; role += 1)
     {
-        parent = right;
-    }
-    else
-    {
-        const uint32_t left_depth = left != BUSTER_SPIKE_NONE ? parser->depths[left] : 0;
-        const uint8_t left_level = left != BUSTER_SPIKE_NONE ? spike_role_levels[parser->roles[left]] : 0;
-        const uint32_t right_depth = right != BUSTER_SPIKE_NONE ? parser->depths[right] : 0;
-        const uint8_t right_level = right != BUSTER_SPIKE_NONE ? spike_role_levels[parser->roles[right]] : 0;
-        parent = spike_select(left, left_depth, left_level, right, right_depth, right_level);
-    }
-    // The statement stack has already set the parents of what a head owns.
-    if (parser->parents[token] == BUSTER_SPIKE_NONE)
-    {
-        parser->parents[token] = parent;
+        spike_role_info[role] = BUSTER_SPIKE_ROLE_INFO(role);
     }
 }
 
-// Adds token `token` with its role and depth to the tree.
-static void spike_parser_emit(SpikeParser* parser, uint32_t token, uint8_t role, uint32_t depth)
+// Adds token `token` with its role and depth to the tree. Keys count depths from 1 here, so that a sentinel at the
+// bottom of each stack (key 0 and threshold 0, under every key and threshold) ends every search without a check of the
+// count: an L of BUSTER_SPIKE_NONE, and an R search that nothing ends.
+BUSTER_INLINE void spike_parser_emit(SpikeParser* parser, uint32_t token, uint8_t role, uint32_t depth)
 {
+    uint32_t* const parents = parser->parents;
+    SpikeParserCandidate* const candidates = parser->candidates;
+    SpikeParserWaiting* const waiting = parser->waiting;
+    uint32_t candidate_count = parser->candidate_count;
+    uint32_t waiting_count = parser->waiting_count;
+    const uint32_t info = spike_role_info[role];
+    const uint32_t base = (depth + 1) * BUSTER_SPIKE_LEVELS;
+    const uint32_t key = base + (info & 0xff);
+    const uint8_t rule = (uint8_t)(info >> 24);
     parser->roles[token] = role;
     parser->depths[token] = depth;
-    parser->parents[token] = BUSTER_SPIKE_NONE;
-    const uint32_t base = depth * BUSTER_SPIKE_LEVELS;
-    const uint32_t key = base + spike_role_levels[role];
-    const uint8_t rule = spike_role_rules[role];
-    // The tokens this one ends the right search of.
-    while (parser->right_count != 0 && parser->right_thresholds[parser->right_count - 1] > key)
+    parents[token] = BUSTER_SPIKE_NONE;
+    // The tokens this one ends the right search of. The statement stack has already set the parents of what a head
+    // owns.
+    while (waiting[waiting_count - 1].threshold > key)
     {
-        parser->right_count -= 1;
-        spike_parser_resolve(parser, parser->right_positions[parser->right_count], token);
+        waiting_count -= 1;
+        const SpikeParserWaiting entry = waiting[waiting_count];
+        const uint32_t parent = spike_select_keys(entry.left, entry.left_key, token, key);
+        if (parents[entry.position] == BUSTER_SPIKE_NONE)
+        {
+            parents[entry.position] = parent;
+        }
     }
     // L, then this token replaces every candidate it hides.
-    const uint32_t left_threshold = base + spike_role_left_thresholds[role];
-    while (parser->left_count != 0 && parser->left_keys[parser->left_count - 1] >= left_threshold)
+    const uint32_t left_threshold = base + ((info >> 8) & 0xff);
+    while (candidates[candidate_count - 1].key >= left_threshold)
     {
-        parser->left_count -= 1;
+        candidate_count -= 1;
     }
-    const uint32_t left = parser->left_count != 0 ? parser->left_positions[parser->left_count - 1] : BUSTER_SPIKE_NONE;
-    while (parser->left_count != 0 && parser->left_keys[parser->left_count - 1] >= key)
+    const SpikeParserCandidate left = candidates[candidate_count - 1];
+    while (candidates[candidate_count - 1].key >= key)
     {
-        parser->left_count -= 1;
+        candidate_count -= 1;
     }
-    parser->left_positions[parser->left_count] = token;
-    parser->left_keys[parser->left_count] = key;
-    parser->left_count += 1;
+    candidates[candidate_count] = (SpikeParserCandidate){ .position = token, .key = key };
+    candidate_count += 1;
     if (rule == SPIKE_RULE_LEFT)
     {
-        parser->parents[token] = left;
+        parents[token] = left.position;
     }
     else if (rule != SPIKE_RULE_OPENER)
     {
-        parser->lefts[token] = left;
-        parser->right_positions[parser->right_count] = token;
-        parser->right_thresholds[parser->right_count] = base + spike_role_right_thresholds[role];
-        parser->right_count += 1;
+        const bool right_only = rule == SPIKE_RULE_RIGHT;
+        waiting[waiting_count] = (SpikeParserWaiting){
+            .position = token,
+            .threshold = base + ((info >> 16) & 0xff),
+            .left = right_only ? BUSTER_SPIKE_NONE : left.position,
+            .left_key = left.key,
+        };
+        waiting_count += 1;
+    }
+    parser->candidate_count = candidate_count;
+    parser->waiting_count = waiting_count;
+}
+
+// Resolves what is still waiting at the end, which has no R.
+static void spike_parser_finish(SpikeParser* parser)
+{
+    while (parser->waiting_count > 1)
+    {
+        parser->waiting_count -= 1;
+        const SpikeParserWaiting entry = parser->waiting[parser->waiting_count];
+        const uint32_t parent = spike_select_keys(entry.left, entry.left_key, BUSTER_SPIKE_NONE, 0);
+        if (parser->parents[entry.position] == BUSTER_SPIKE_NONE)
+        {
+            parser->parents[entry.position] = parent;
+        }
     }
 }
 
@@ -1360,7 +1420,7 @@ struct SpikeStep
     bool again;
 };
 
-static bool spike_frame_is_block(const SpikeFrame* frame)
+BUSTER_INLINE bool spike_frame_is_block(const SpikeFrame* frame)
 {
     return frame->role == SPIKE_ROLE_OPEN_BLOCK || frame->role == SPIKE_ROLE_OPEN_BODY;
 }
@@ -1368,7 +1428,7 @@ static bool spike_frame_is_block(const SpikeFrame* frame)
 // Whether a comma separates declarators or is the comma operator (COMMA), or separates arguments, parameters,
 // initializers or enumerators (SEPARATOR, below the specifiers), by the innermost group of ( [ { around it: the ?: and
 // case groups don't count, so the kernels decide it from the bracket depth of ( [ { alone.
-static uint8_t spike_frame_comma_role(const SpikeParser* parser)
+BUSTER_INLINE uint8_t spike_frame_comma_role(const SpikeParser* parser)
 {
     uint32_t index = parser->frame_count - 1;
     while (index > 0 && (parser->frames[index].role == SPIKE_ROLE_OPEN_TERNARY || parser->frames[index].role == SPIKE_ROLE_OPEN_CASE))
@@ -1381,7 +1441,7 @@ static uint8_t spike_frame_comma_role(const SpikeParser* parser)
     return comma ? SPIKE_ROLE_COMMA : SPIKE_ROLE_SEPARATOR;
 }
 
-static bool spike_closer_matches(uint8_t kind, uint8_t opener_role)
+BUSTER_INLINE bool spike_closer_matches(uint8_t kind, uint8_t opener_role)
 {
     bool result;
     if (kind == SPIKE_KIND_R_SQUARE)
@@ -1404,7 +1464,7 @@ static bool spike_closer_matches(uint8_t kind, uint8_t opener_role)
 }
 
 // Closes the current frame with token `i` (a `)`, `]`, `}`, or the `:` of ? or case).
-static void spike_parser_close(SpikeParser* parser, uint32_t i, SpikeStep* step)
+BUSTER_INLINE void spike_parser_close(SpikeParser* parser, uint32_t i, SpikeStep* step)
 {
     SpikeFrame* frame = &parser->frames[parser->frame_count - 1];
     const uint8_t kind = parser->kinds[i];
@@ -1462,20 +1522,20 @@ static void spike_parser_close(SpikeParser* parser, uint32_t i, SpikeStep* step)
 }
 
 // Opens a group with token `i`: the opener's depth is its parent's.
-static SpikeFrame* spike_parser_open(SpikeParser* parser, uint32_t i, uint8_t role, uint8_t mode, uint8_t continuation, bool scope, SpikeStep* step)
+BUSTER_INLINE SpikeFrame* spike_parser_open(SpikeParser* parser, uint32_t i, uint8_t role, uint8_t mode, uint8_t continuation, bool scope, SpikeStep* step)
 {
     step->role = role;
     step->depth = parser->frame_count - 1;
     return spike_parser_push(parser, i, role, mode, continuation, scope);
 }
 
-static bool spike_kind_is_closer(uint8_t kind)
+BUSTER_INLINE bool spike_kind_is_closer(uint8_t kind)
 {
     return kind == SPIKE_KIND_R_PAREN || kind == SPIKE_KIND_R_SQUARE || kind == SPIKE_KIND_R_BRACE;
 }
 
 // The end of a declaration's `;`, or of an expression statement's, in any frame that holds them.
-static void spike_parser_terminator(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
+BUSTER_INLINE void spike_parser_terminator(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
 {
     step->role = SPIKE_ROLE_TERMINATOR;
     if (frame->role == SPIKE_ROLE_OPEN_FOR)
@@ -1495,7 +1555,7 @@ static void spike_parser_terminator(SpikeParser* parser, uint32_t i, SpikeFrame*
                       BUSTER_SPIKE_FRAME_AFTER_STAR);
 }
 
-static void spike_parser_item(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
+BUSTER_INLINE void spike_parser_item(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
 {
     const uint8_t kind = parser->kinds[i];
     const uint8_t group = frame->role;
@@ -1676,7 +1736,7 @@ static void spike_parser_item(SpikeParser* parser, uint32_t i, SpikeFrame* frame
     }
 }
 
-static void spike_parser_specifiers(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
+BUSTER_INLINE void spike_parser_specifiers(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
 {
     const uint8_t kind = parser->kinds[i];
     if (kind == SPIKE_KIND_TYPE)
@@ -1730,7 +1790,7 @@ static void spike_parser_specifiers(SpikeParser* parser, uint32_t i, SpikeFrame*
     }
 }
 
-static void spike_parser_tag(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
+BUSTER_INLINE void spike_parser_tag(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
 {
     const uint8_t kind = parser->kinds[i];
     if (kind == SPIKE_KIND_ATTRIBUTE)
@@ -1758,7 +1818,7 @@ static void spike_parser_tag(SpikeParser* parser, uint32_t i, SpikeFrame* frame,
     }
 }
 
-static void spike_parser_declarator(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
+BUSTER_INLINE void spike_parser_declarator(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
 {
     const uint8_t kind = parser->kinds[i];
     const bool after_star = (frame->flags & BUSTER_SPIKE_FRAME_AFTER_STAR) != 0;
@@ -1818,7 +1878,7 @@ static void spike_parser_declarator(SpikeParser* parser, uint32_t i, SpikeFrame*
     }
 }
 
-static void spike_parser_after_declarator(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
+BUSTER_INLINE void spike_parser_after_declarator(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
 {
     const uint8_t kind = parser->kinds[i];
     const uint8_t group = frame->role;
@@ -1897,7 +1957,7 @@ static void spike_parser_after_declarator(SpikeParser* parser, uint32_t i, Spike
 }
 
 // In an expression, where an operand comes next.
-static void spike_parser_operand(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
+BUSTER_INLINE void spike_parser_operand(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
 {
     const uint8_t kind = parser->kinds[i];
     const bool attribute = (frame->flags & BUSTER_SPIKE_FRAME_ATTRIBUTE) != 0;
@@ -1979,7 +2039,7 @@ static void spike_parser_operand(SpikeParser* parser, uint32_t i, SpikeFrame* fr
     }
 }
 
-static uint8_t spike_binary_role(uint8_t kind)
+BUSTER_INLINE uint8_t spike_binary_role(uint8_t kind)
 {
     uint8_t result = SPIKE_ROLE_NONE;
     switch (kind)
@@ -2019,7 +2079,7 @@ static uint8_t spike_binary_role(uint8_t kind)
 }
 
 // In an expression, after an operand.
-static void spike_parser_operator(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
+BUSTER_INLINE void spike_parser_operator(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
 {
     const uint8_t kind = parser->kinds[i];
     const uint8_t binary = spike_binary_role(kind);
@@ -2120,7 +2180,7 @@ static void spike_parser_operator(SpikeParser* parser, uint32_t i, SpikeFrame* f
 }
 
 // The token after a keyword that a group follows.
-static void spike_parser_paren(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
+BUSTER_INLINE void spike_parser_paren(SpikeParser* parser, uint32_t i, SpikeFrame* frame, SpikeStep* step)
 {
     const uint8_t mode = frame->mode;
     const uint8_t kind = parser->kinds[i];
@@ -2172,7 +2232,7 @@ static void spike_parser_paren(SpikeParser* parser, uint32_t i, SpikeFrame* fram
     }
 }
 
-static void spike_parser_token(SpikeParser* parser, uint32_t i)
+BUSTER_INLINE void spike_parser_token(SpikeParser* parser, uint32_t i)
 {
     const uint8_t kind = parser->kinds[i];
     SpikeStep step = {
@@ -2341,13 +2401,10 @@ static SpikeParseResult spike_parse_scalar(const uint8_t* kinds, const uint32_t*
         .parents = tree->parents,
         .frames = BUSTER_ARENA_PUSH_ARRAY(scratch, SpikeFrame, slots),
         .frame_count = 1,
-        .left_positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots),
-        .left_keys = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots),
-        .left_count = 0,
-        .right_positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots),
-        .right_thresholds = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots),
-        .right_count = 0,
-        .lefts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots),
+        .candidates = BUSTER_ARENA_PUSH_ARRAY(scratch, SpikeParserCandidate, slots + 1),
+        .candidate_count = 1,
+        .waiting = BUSTER_ARENA_PUSH_ARRAY(scratch, SpikeParserWaiting, slots + 1),
+        .waiting_count = 1,
         .meanings = meanings->meanings,
         .log_names = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots),
         .log_meanings = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, slots),
@@ -2358,13 +2415,16 @@ static SpikeParseResult spike_parse_scalar(const uint8_t* kinds, const uint32_t*
         .error_token = BUSTER_SPIKE_NONE,
         .error_message = 0,
     };
-    if (parser.frames == 0 || parser.left_keys == 0 || parser.right_thresholds == 0 || parser.lefts == 0 || parser.log_meanings == 0 || parser.statements == 0)
+    if (parser.frames == 0 || parser.candidates == 0 || parser.waiting == 0 || parser.log_names == 0 || parser.log_meanings == 0 || parser.statements == 0)
     {
         result.error_token = 0;
         result.error_message = "out of memory";
     }
     else
     {
+        // The stacks' sentinels.
+        parser.candidates[0] = (SpikeParserCandidate){ .position = BUSTER_SPIKE_NONE, .key = 0 };
+        parser.waiting[0] = (SpikeParserWaiting){ .position = BUSTER_SPIKE_NONE, .threshold = 0, .left = BUSTER_SPIKE_NONE, .left_key = 0 };
         parser.frames[0] = (SpikeFrame){
             .opener = BUSTER_SPIKE_NONE,
             .scope = 0,
@@ -2387,11 +2447,9 @@ static SpikeParseResult spike_parse_scalar(const uint8_t* kinds, const uint32_t*
         {
             spike_parser_error(&parser, count, "unexpected end of input");
         }
-        // What is still waiting has no R.
-        while (parser.error_token == BUSTER_SPIKE_NONE && parser.right_count != 0)
+        if (parser.error_token == BUSTER_SPIKE_NONE)
         {
-            parser.right_count -= 1;
-            spike_parser_resolve(&parser, parser.right_positions[parser.right_count], BUSTER_SPIKE_NONE);
+            spike_parser_finish(&parser);
         }
         spike_parser_restore(&parser, 0);
         result.error_token = parser.error_token;
@@ -2575,6 +2633,7 @@ struct SpikeKernels
     uint32_t* waiting;
     uint32_t* waiting_thresholds;
     uint32_t* lefts;
+    uint32_t* left_key_values;
     // By name: 0, or SPIKE_TYPEDEF_FILE, or SPIKE_TYPEDEF_SCOPED for a name some block declares as a typedef.
     uint8_t* typedef_names;
     // The file's typedef names in order, each with the token that declares it and its scope, for the fallback.
@@ -3294,10 +3353,9 @@ static uint32_t spike_node_depth(const SpikeKernels* kernels, uint32_t token)
     return kernels->node_depths[token];
 }
 
-static void spike_parents_resolve(SpikeKernels* kernels, uint32_t token, uint32_t right)
+BUSTER_INLINE void spike_parents_resolve(SpikeKernels* kernels, uint32_t token, uint32_t right, uint32_t right_key)
 {
     const uint8_t role = kernels->roles[token];
-    const uint32_t left = kernels->lefts[token];
     uint32_t parent;
     if (spike_role_rules[role] == SPIKE_RULE_RIGHT || spike_role_rules[role] == SPIKE_RULE_OPENER)
     {
@@ -3305,11 +3363,7 @@ static void spike_parents_resolve(SpikeKernels* kernels, uint32_t token, uint32_
     }
     else
     {
-        const uint32_t left_depth = left != BUSTER_SPIKE_NONE ? spike_node_depth(kernels, left) : 0;
-        const uint8_t left_level = left != BUSTER_SPIKE_NONE ? spike_role_levels[kernels->roles[left]] : 0;
-        const uint32_t right_depth = right != BUSTER_SPIKE_NONE ? spike_node_depth(kernels, right) : 0;
-        const uint8_t right_level = right != BUSTER_SPIKE_NONE ? spike_role_levels[kernels->roles[right]] : 0;
-        parent = spike_select(left, left_depth, left_level, right, right_depth, right_level);
+        parent = spike_select_keys(kernels->lefts[token], kernels->left_key_values[token], right, right_key);
     }
     kernels->parents[token] = parent;
 }
@@ -3329,7 +3383,7 @@ static void spike_parents_scalar(SpikeKernels* kernels, uint32_t count)
         while (right_count != 0 && kernels->waiting_thresholds[right_count - 1] > key)
         {
             right_count -= 1;
-            spike_parents_resolve(kernels, kernels->waiting[right_count], i);
+            spike_parents_resolve(kernels, kernels->waiting[right_count], i, key);
         }
         const uint32_t left_threshold = base + spike_role_left_thresholds[role];
         while (left_count != 0 && kernels->stack_keys[left_count - 1] >= left_threshold)
@@ -3337,6 +3391,7 @@ static void spike_parents_scalar(SpikeKernels* kernels, uint32_t count)
             left_count -= 1;
         }
         const uint32_t left = left_count != 0 ? kernels->stack[left_count - 1] : BUSTER_SPIKE_NONE;
+        const uint32_t left_key = left_count != 0 ? kernels->stack_keys[left_count - 1] : 0;
         while (left_count != 0 && kernels->stack_keys[left_count - 1] >= key)
         {
             left_count -= 1;
@@ -3351,6 +3406,7 @@ static void spike_parents_scalar(SpikeKernels* kernels, uint32_t count)
         else
         {
             kernels->lefts[i] = left;
+            kernels->left_key_values[i] = left_key;
             kernels->waiting[right_count] = i;
             kernels->waiting_thresholds[right_count] = base + spike_role_right_thresholds[role];
             right_count += 1;
@@ -3359,7 +3415,7 @@ static void spike_parents_scalar(SpikeKernels* kernels, uint32_t count)
     while (right_count != 0)
     {
         right_count -= 1;
-        spike_parents_resolve(kernels, kernels->waiting[right_count], BUSTER_SPIKE_NONE);
+        spike_parents_resolve(kernels, kernels->waiting[right_count], BUSTER_SPIKE_NONE, 0);
     }
 }
 
@@ -3726,6 +3782,7 @@ static bool spike_kernels_reserve(SpikeKernels* kernels, Arena* arena, uint64_t 
         .waiting = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .waiting_thresholds = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .lefts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .left_key_values = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .typedef_names = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, name_capacity),
         .typedef_log = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .typedef_tokens = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
@@ -3733,7 +3790,7 @@ static bool spike_kernels_reserve(SpikeKernels* kernels, Arena* arena, uint64_t 
     };
     const bool result = kernels->vkinds != 0 && kernels->depths != 0 && kernels->node_depths != 0 && kernels->enclosing != 0 && kernels->roles != 0 &&
                         kernels->parents != 0 && kernels->flags != 0 && kernels->stack != 0 && kernels->stack_keys != 0 && kernels->waiting != 0 &&
-                        kernels->waiting_thresholds != 0 && kernels->lefts != 0 && kernels->typedef_names != 0 && kernels->typedef_log != 0 &&
+                        kernels->waiting_thresholds != 0 && kernels->lefts != 0 && kernels->left_key_values != 0 && kernels->typedef_names != 0 && kernels->typedef_log != 0 &&
                         kernels->typedef_tokens != 0 && kernels->typedef_scopes != 0;
     if (result)
     {
@@ -3742,6 +3799,7 @@ static bool spike_kernels_reserve(SpikeKernels* kernels, Arena* arena, uint64_t 
         memset(roles, SPIKE_ROLE_NONE, slots);
         memset(flags, 0, slots);
     }
+    spike_role_info_init();
     spike_kernels_init_tables();
     spike_shifts_init();
     spike_parent_tables_init();
