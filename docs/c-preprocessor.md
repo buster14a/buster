@@ -17,13 +17,13 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | --- | ---: | ---: |
 | `sqlite3.c` 3.53, with glibc's headers | 1 | 707,153 |
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
-| This repository's translation units on this branch (`main` at 2aa1358), with `-march=native` (AVX-512 intrinsic headers) | 11 | 6,378,159 |
+| This repository's translation units on this branch (`main` at 2aa1358), with `-march=native` (AVX-512 intrinsic headers) | 11 | 6,378,758 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
 | The built-in cases (`pp_test_cases`) | 77 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
-cases, `sqlite3.c`, this repository's translation units and Lua.
+cases, `sqlite3.c`, musl, this repository's translation units and Lua.
 
 **Speed**, measured on 2026-10-20 on the Ryzen 7 9700X (clang 23.1.1,
 `build.sh`'s `-O3 -march=native`), pinned to CPU 2 and under the
@@ -267,11 +267,12 @@ arenas. Popping a context gives its tokens back when they are on top.
 
 `__FILE__`, `__LINE__`, `__COUNTER__`, `__INCLUDE_LEVEL__`, `__BASE_FILE__`,
 `__FILE_NAME__`, and `__DATE__`, `__TIME__` and `__TIMESTAMP__` (from
-`SOURCE_DATE_EPOCH` when it is set) are built in. Without it, `__TIMESTAMP__`
-is the modification time of the file being read, in local time, as clang's is. So are the feature queries:
+`SOURCE_DATE_EPOCH` when it is set) are built in. So are the feature queries:
 `__has_attribute`, `__has_builtin`, `__has_feature`, `__has_extension`,
 `__has_c_attribute`, `__has_declspec_attribute`, `__has_warning`,
-`__is_identifier` and the `__is_target_*` queries.
+`__is_identifier` and the `__is_target_*` queries. Without `SOURCE_DATE_EPOCH`,
+`__TIMESTAMP__` is the modification time of the file being read, in local time,
+as clang's is.
 
 `__is_identifier(x)` is 1 when `x` is an identifier that isn't a keyword in the
 language mode (`c_name_is_keyword`), as clang answers. Its operand isn't
@@ -358,11 +359,18 @@ with `# 1 "main.c"` and then marks:
 - names escaped as clang writes them (`\\`, `\"`, and octal for other bytes).
 
 A line that a macro's expansion starts goes on the line of the macro's name, as
-clang places a token by its expansion location. `PPExpansionStart` records
-where each expansion read from a file starts in the output. A `_Pragma`'s pragma
-goes on that line too, and the line after a pragma gets a marker when it is the
-pragma's own line. A jump forward of up to 8 lines is blank lines, and any other
-jump is a marker.
+clang places a token by its expansion location. A `_Pragma`'s pragma goes on
+that line too, and the line after a pragma gets a marker when it is the pragma's
+own line. A jump forward of up to 8 lines is blank lines, and any other jump is
+a marker.
+
+`PPExpansionStart` records where such an expansion read from a file starts in
+the output: one whose name starts a line, or a `_Pragma`. The records are kept
+only when `-E` prints markers (`PPOptions.expansion_starts`). On `sqlite3.c`,
+most expansions start lines (`assert`, `testcase`), and the records cost 0.4
+instructions per input token. The common line start (the same file, no new
+line note, and a jump of up to 8 lines) is decided inline. With that, `-E`
+costs fewer instructions than before markers gave presumed positions.
 
 ### Vectorized kernels and their scalar twins
 
