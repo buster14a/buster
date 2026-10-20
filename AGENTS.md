@@ -30,7 +30,46 @@ including generator inputs, and preserve copyright, license, attribution and
 modification notices. Changes to the license remain the owner's decision.
 Follow the prospective DCO policy and its in-flight-PR transition. Never
 fabricate sign-offs, treat agent co-author trailers as human certification, or
-retroactively certify historical commits.
+retroactively certify historical commits. Add David's sign-off to a commit only
+as "David's sign-off" below says.
+
+## David's sign-off
+
+Under "The maintainer's standing certification" in
+[CONTRIBUTING.md](CONTRIBUTING.md), David's own agent sessions sign off their
+commits for him with:
+
+```text
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+```
+
+His opt-in gates it: `BUSTER_DCO_SIGN_OFF` set to `davidgmbb` in the session's
+environment, which only he sets. Where it isn't set, never add that trailer.
+Where it is:
+
+- `.githooks/commit-msg` ends each message that `git commit` or `git merge`
+  writes with it, once, after the other trailers, so don't write it yourself.
+  Before your first commit, check that `git config core.hooksPath` prints
+  `.githooks`; if it doesn't, run `.githooks/enable-sign-off.sh`. Claude Code
+  runs it at session start (`.claude/settings.json`), and so does Codex
+  (`.codex/hooks.json`) in a trusted project, once David has trusted that hook
+  in `/hooks`. If it reports leaving the hook off, write the trailer yourself,
+  last. While `core.commentChar` is `auto`, the hook refuses every commit, since
+  it can't know the comment character `git commit` picks: set the character
+  explicitly, or make the commit with the opt-in unset and the trailer written
+  by hand.
+- Don't use `git commit -s`, which signs off as the committer
+  (`Claude <noreply@anthropic.com>` in cloud sessions), or `--no-verify`, which
+  skips the hook. The hook signs nothing while a rebase or a cherry-pick is in
+  progress, rewords, amends and continuations included, and a plain
+  `git revert` doesn't run it: for a revert, use `git revert --no-commit` and
+  then `git commit`.
+- Don't sign a commit from before the certification took effect, or a rebase,
+  cherry-pick or amend of one: it still needs David's certification for its
+  PR's head. Unset the opt-in to amend one outside a rebase
+  (`env -u BUSTER_DCO_SIGN_OFF git commit --amend`) or to commit its changes
+  again another way (`git cherry-pick --no-commit`), and to commit outside
+  material whose provenance the PR can't record; then say so in the PR.
 
 ## Host and output scope
 
@@ -107,6 +146,15 @@ designs and the compilers already built this way.
   skip, branch-free chunk state, the pipelined write-out, table-driven
   punctuator kinds, the delimiter scan, chunks read in place, the raw string
   check and their 9700X measurements.
+- `src/buster/compiler/preprocessor_fuzz.c` provides bounded output comparison
+  and the minimizer for the independent preprocessor test harness.
+  `preprocessor_fuzz_generate.c` generates cases, `preprocessor_fuzz_clang.c`
+  runs the Clang oracle, and `preprocessor_fuzz_test.c` provides
+  `test-preprocessor-fuzz`; `main.c` includes all four.
+  `preprocessor_fuzz_benchmark.c` provides `benchmark-preprocessor-fuzz`,
+  measuring the external test harness. `docs/preprocessor-fuzz.md` records
+  its contract. These names and locations are provisional pending agreement
+  with the #117 session; no buster-fast preprocessor is attached yet.
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
   of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder,
   and the fixup interface: `BUSTER_X86_FORM_FIXUP` marks an instruction with a
@@ -125,14 +173,20 @@ designs and the compilers already built this way.
 - `docs/object-writer-and-linker.md` is the design of the object writer and the
   linker, with the 9700X measurements of mold, wild, lld and the kernel's file
   costs behind it, and the order to build it in. The lane base layer, the
-  encoder's fixups, the representation, the object writer and the direct
-  path's first executables below are implemented; the rest of the linker
-  isn't yet.
+  encoder's fixups, the representation, the object writer, the direct path's
+  first executables and the import of the C runtime's files below are
+  implemented; the rest of the linker isn't yet.
 - `src/buster/compiler/lane.c` is the lane base layer that every phase of the
   object writer and the linker runs on (groups of threads that run the same
   code, their barrier and broadcast, `lane_range`, and arenas).
   `lane_test.c` holds its tests (`main.c` includes it; `./build/compiler
   test-lanes` runs them) and `lane_benchmark.c` provides `benchmark-lanes`.
+- `src/buster/compiler/dataflow.c` provides aligned bitset liveness and
+  interference with AVX-512 and scalar implementations, independent of IR.
+  `dataflow_program.c` supplies the shared synthetic CFG generator;
+  `dataflow_test.c` provides `test-dataflow` and `dataflow_benchmark.c`
+  provides `benchmark-dataflow`.
+  `docs/dataflow.md` records the contracts and 9700X measurements.
 - `src/buster/compiler/link.c` is the representation the object writer and the
   linker share: names, atoms, symbols and fixups in column arrays indexed by
   32-bit ids, in arenas, and `link_add_code_fixups`, which turns the encoder's
@@ -147,12 +201,34 @@ designs and the compilers already built this way.
   `object_write_units` for a group of lanes). `object_writer_test.c` holds its
   tests (`main.c` includes it; `./build/compiler test-object-writer` runs them)
   and `object_writer_benchmark.c` provides `benchmark-object-writer`.
+- `src/buster/compiler/import.c` holds the import path's readers: ELF
+  relocatable objects into the representation, archives' members and symbol
+  index, shared libraries' exports at their default versions (indexed by name
+  hash), version definitions and references, and the commands of the linker
+  scripts that `libc.so` and GCC's `_asneeded` libraries are. The object,
+  archive and library readers each have a vector path and an exact one, which
+  takes what the vector path leaves to it (the design's "Step 5's phases,
+  data-parallel"). `runtime.c` finds the C runtime's files as GCC's driver
+  does (`Scrt1.o`, `crti.o`, `crtbeginS.o`, `crtendS.o` and `crtn.o`, and the
+  `libc.so.6` and `libc_nonshared.a` that `libc.so` names) and imports them
+  into a link of their own, with what each name they refer to binds to (the
+  first part of step 5 of the design's plan). `import_test.c` holds their
+  tests (`main.c` includes it; `./build/compiler test-import` runs them) and
+  `import_benchmark.c` provides `benchmark-import`.
 - `src/buster/compiler/executable.c` writes the direct path's first
   executables: a link in that representation laid out, patched and written as
   a static executable without libc (step 4 of the design's plan), with a build
   ID, by every lane of a group. `executable_test.c` holds its tests (`main.c`
   includes it; `./build/compiler test-executable` runs them) and
   `executable_benchmark.c` provides `benchmark-executable`.
+- `src/buster/compiler/call_graph.c` is the call graph check, the coding
+  style's rule against recursion checked mechanically: `check-call-graph`
+  reads the LLVM IR of the translation units `build.sh` compiles, builds their
+  call graph and reports every cycle (Tarjan's algorithm, iterative) that isn't
+  in its allowlist, `call_graph_allowed`. `./build.sh check-call-graph` writes
+  that IR to a temporary directory and runs it. `call_graph_test.c` holds its
+  tests (`main.c` includes both; `./build/compiler test-call-graph` runs them),
+  and `call_graph_capture/` the C fixture that checks the IR capture itself.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -160,16 +236,25 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ```sh
 ./build.sh
 ./build/compiler
+./build/compiler test-call-graph
+./build.sh check-call-graph
 ./build/compiler test-lexer
 ./build/compiler test-lexer --cplusplus
 ./build/compiler benchmark-lexer src
+./build/compiler test-preprocessor-fuzz --std c17
+./build/compiler test-preprocessor-fuzz --std c23
+./build/compiler benchmark-preprocessor-fuzz
 ./build/compiler test-x86-encoder
 ./build/compiler benchmark-x86-encoder
 ./build/compiler test-lanes
 ./build/compiler benchmark-lanes
+./build/compiler test-dataflow
+./build/compiler benchmark-dataflow
 ./build/compiler test-link
 ./build/compiler test-object-writer --cross-check
 ./build/compiler benchmark-object-writer
+./build/compiler test-import --cross-check
+./build/compiler benchmark-import
 ./build/compiler test-executable
 ./build/compiler benchmark-executable
 ```
@@ -207,6 +292,59 @@ owner's computers:
   the owner's other computers.
 
 Where `~/llm-memory` doesn't exist, skip this.
+
+## Call graph check
+
+The coding style forbids recursion over input-dependent structures, and
+`./build.sh check-call-graph` checks it on every function of the compiler. It
+writes the LLVM IR of `build.sh`'s translation units, with the same flags and
+optimization level, `-O3`, but `-Xclang -disable-llvm-passes` (no pass, not
+even the always-inliner, so a call in the IR is a call in the source, while
+the IR holds every body the build may inline: at `-O0`, clang doesn't emit an
+`extern inline` body at all) into a temporary directory, and runs
+`./build/compiler check-call-graph FILE.ll...` on them (so it needs a build).
+First it captures `src/buster/compiler/call_graph_capture` the same way, a
+cycle through an `extern inline` body beside a strong definition in another
+unit, and fails unless the check reports it.
+The command reads each `define` and the direct `call`, `invoke` and `callbr`
+instructions in its body; a callee is its translation unit's function or alias
+of that name first (static functions are per unit: the benchmarks' copies of
+`lane.c` are separate functions), then the external symbol's strong
+definitions, or all its weak ones when it has none (the linker takes one of
+them by link order), and every definition of the name in the calling unit,
+which clang may inline into the call whatever the linker takes (an
+`available_externally` or `*_odr` body, `always_inline`, `flatten`). A
+replaced weak body that clang wouldn't inline then counts too: that can only
+add a cycle, never hide one; an alias, through any chain of them, is its target's
+definition in its own module, whatever replaces that name elsewhere. A second strong definition of a name fails the check. Calls of functions defined
+nowhere (libc, intrinsics) and calls through pointers, which the style allows
+only at the thread-entry boundary, are left out; a call of an ifunc or of an
+alias that leads to no definition fails the check.
+
+It reports each strongly connected component of more than one function and
+each function that calls itself, with the shortest call path through the
+component's first function, as `unit.ll:function -> ... -> unit.ll:function`,
+then a summary line, and exits with status 1 on a cycle not in
+`call_graph_allowed`, on an allowlist entry that matches no cycle, and on IR it
+can't read. An entry names a component's functions, each as many times as
+the component has a function of that name; add one only for the
+style's "trivial statically bounded recursion", with a comment saying what
+bounds its depth. The list is empty: the tree has no cycle. The 9700X job runs
+`test-call-graph` and the check after the build; the IR takes about 1.5 s.
+
+`./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
+on IR of the call forms clang writes and of what must be left out, a
+self-call, a two-function cycle, a cycle with a chord (whose path must be the
+shortest), a cycle through three translation units beside static and external
+functions of the same name, clang's IR of recursion through aliases and of a
+call of an ifunc, aliases that lead nowhere, clang's IR of weak and strong
+functions and aliases of one name, of an alias of a replaced weak function, and
+of `available_externally`, `always_inline` and `flatten` inlining past a
+strong definition elsewhere, in both orders, replaced weak bodies, two units' copies of a cycle
+allowed by one entry, a cycle grown past its entry with an unused entry, a
+cycle through two units' static functions of the same name that entries naming
+it once mustn't match, malformed IR, and a chain of a million functions and a
+ring of 100,000, deeper than a recursive walk's stack.
 
 ## Lexer tests
 
@@ -438,6 +576,10 @@ informational.
 
 - random records of every table read back from the columns, with ids from 1
   and record 0 zero;
+- the name hash: `link_hash`'s values for known names, which pin it (it is
+  part of the snapshot's format), and `link_hash_names` against `link_hash`
+  on random names of 0 to 200 bytes, every count to 40, every length in every
+  lane of a batch, and names ending at a `PROT_NONE` page;
 - every table at its capacity, the side table of wide addends full, a name
   arena too small, and arenas too small for the tables: each add fails with
   `LINK_ERROR_FULL` and changes nothing;
@@ -463,8 +605,9 @@ informational.
   its TLS segment starting half its alignment past a multiple of it, as a
   linker may start `.tdata` when `.tbss` is more aligned. Every set with
   two thread-locals, an init function and a fini function must have every
-  class and every kind its options allow, and a copy of the defaults' program
-  with the hexadecimal digits' fixup one byte off must print something else.
+  class but the C runtime's (`EH_FRAME`, `INIT` and `FINI`) and every kind
+  its options allow, and a copy of the defaults' program with the
+  hexadecimal digits' fixup one byte off must print something else.
 
 `--seed N` changes the random records and programs. The programs check is
 what scales: `--functions 1000000` builds three programs of a million workers
@@ -579,6 +722,109 @@ with `--directory` on each file system to measure;
 for tmpfs and btrfs. The default 9700X job runs it after the tests, pinned to
 one allowed CPU; like the others, its measurements are informational.
 
+## Import tests
+
+`./build/compiler test-import [--seed N] [--cross-check]` (about 0.13 s on
+the 9700X, and 0.15 s with `--cross-check`) checks `import.c` and
+`runtime.c`:
+
+- round trips: each unit's object of `test-link`'s seven programs (with 500
+  workers in the one that takes `--functions`), with and without function
+  sections, and the object writer's unit of 33,000 functions in sections of
+  their own (past `SHN_LORESERVE` sections), imported into a link of its own.
+  Each of the unit's atoms must be in the atom its section became, byte for
+  byte where the writer put it, each symbol at the same place with the same
+  name, flags and size, and each fixup at its place, of its kind, pointing at
+  the same place with the same addend, and no other fixups;
+- an object made by hand with a section of every class, the sections the
+  import drops (`.sframe` with its relocations, a note, `.note.GNU-stack` and
+  `.comment`), every kind of symbol and every relocation type the
+  representation has, out of order, with `R_X86_64_NONE` and addends past
+  int32: each section, symbol and fixup imported exactly, the atoms' bytes in
+  place in the file; the same with `e_shnum` and `e_shstrndx` in section 0,
+  with `.eh_frame` as `SHT_PROGBITS` and with tables' `sh_entsize` 0; and one
+  without a symbol table, as `crtn.o` is. Then each check a well-formed object
+  never trips, one change at a time, with the error, the index of the
+  section, symbol or relocation, the type and the byte offset it reports;
+- archives made by hand (a 32-bit index, a 64-bit one and none, long names,
+  an odd member's padding, a member of no bytes, a member without a symbol,
+  an index of several of the vector path's batches with a member's symbols
+  across them, and no members), then malformed ones;
+- a shared library made by hand: version definitions, a name at a default
+  version and at a hidden one, IFUNC, `GNU_UNIQUE`, `COMMON`, TLS and
+  absolute symbols, weak and protected ones, hidden and local ones and one at
+  `VER_NDX_LOCAL`, which aren't exported, references, and a name exported
+  twice (the index finds the first); the same without `.gnu.version`; then
+  malformed ones;
+- linker scripts: `libc.so`'s and GCC's `_asneeded` ones, commas, comments
+  and `OUTPUT_FORMAT`, then each error at its offset;
+- page edges: every prefix of each input made by hand (the object also with
+  its relocations in order, which the vector path takes), and the input with
+  each byte set to 0, 0xff and a random value, ending at a `PROT_NONE` page,
+  through every reader: each succeeds, or fails reporting a place within its
+  input. A read past the end faults; the command then names the input and
+  exits with status 1;
+- the paths: each object, archive and library above (the round trips, the
+  inputs made by hand, every malformed one, every page-edge input and this
+  system's runtime) is read by its reader's vector path, its exact path and
+  the reader itself, each into a link (or a read) of its own. The reader's
+  result and records must be the exact path's; the vector path may take an
+  input only when the exact path reads it without an error, and must then
+  make the same records, column by column. Each well-formed input must take
+  the vector path (the object made by hand, whose relocations are out of
+  order, the exact one), and each check prints how many inputs each path
+  took. A library's index must find what a linear scan of its exports finds;
+- discovery: GCC's search under a directory of the test's own, whose newer
+  version's directory has no `crtbeginS.o`: the search picks the older
+  version and probes the newer one's `crtbeginS.o` too, so that installing it
+  leaves the probes stale (`runtime_probes_current`) and a fresh search picks
+  it;
+- the runtime: `runtime_import` on this system's files. Each crt object must
+  import with what it is for (`_start`, `_init` and `_fini` in `.init` and
+  `.fini` atoms, crti.o's fragment first, `__dso_handle`, `__TMC_END__`),
+  `libc.so.6` with its soname, `write`, `strlen`, `environ` and
+  `__errno_location` at `GLIBC_2.2.5`, `__libc_start_main` at `GLIBC_2.34`
+  and `GLIBC_ABI_DT_RELR`, `libc_nonshared.a` with `atexit` in its index, and
+  every reference to each name bound: `main` to the program,
+  `__libc_start_main` and `__cxa_finalize` to libc, `__gmon_start__` and the
+  `_ITM_` functions to nothing, `__TMC_END__` to `crtendS.o`, and
+  `_GLOBAL_OFFSET_TABLE_`, which the crt objects that use the GOT name, to the
+  linker.
+
+`--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
+version, type, binding and size) and references with `readelf -W --dyn-syms`,
+and every relocation of the crt objects and `libc_nonshared.a`'s members with
+`readelf -W -r`: each one must be a fixup of its kind at its offset, against
+the symbol (or the section) readelf names, with its addend, and there must be
+no other fixups. `--seed N` changes the programs and the random bytes. The
+default 9700X job runs it with `--cross-check` after the object writer's
+benchmark.
+
+## Import benchmark
+
+`./build/compiler benchmark-import [--units N] [--functions N] [--seed N]
+[--library PATH]... [--archive PATH]...` checks that each reader's vector
+path reads its inputs as the exact path does, then reports 21-run medians of
+both, the paths taking turns (time, cycles, instructions, IPC):
+
+- objects: the object writer's objects of a generated program of `--units`
+  units (64) of `--functions` workers (200), each about one of synth's
+  translation units; the same with function sections; one of 33,000
+  functions in sections of their own; and this system's crt objects and
+  `libc_nonshared.a`'s members, per symbol table entry and relocation;
+- `libc.so.6` and each `--library` (per export and reference), with its
+  exports' index against the open-addressing table it replaced, built and
+  looked up for every name; `libc_nonshared.a` and each `--archive` (per
+  index entry); `libc.so`'s script, which has no vector path; and
+  `runtime_import` end to end.
+
+Run it under the 9700X's lock with `taskset -c 2`. With `--library
+/usr/lib/libstdc++.so.6 --library /usr/lib/libLLVM.so.23.1 --archive
+/usr/lib/libc.a` it measures the larger files the design's "Step 5's phases,
+data-parallel" has the numbers for. The default 9700X job runs it after the
+import tests, pinned to one allowed CPU; like the others, its measurements are
+informational.
+
 ## Direct executable tests
 
 `./build/compiler test-executable` (about 0.1 s on the 9700X) checks
@@ -625,10 +871,11 @@ one allowed CPU; like the others, its measurements are informational.
   and its GOT slot); TLS blocks of 2 GB (linked) and past it, atoms past 2 GB
   and one whose padding wraps (refused); a bad entry point, the first of two
   symbols defined nowhere in different lanes' ranges, the smallest failing
-  fixup, an atom aligned past a page and a bad init array atom, each reported
-  alike with every lane count; and a lane with no scratch memory to
-  spare, then 64 bytes more at a time, until the link succeeds: every failure
-  must be `EXECUTABLE_ERROR_MEMORY` and leave no output;
+  fixup, an atom aligned past a page, a bad init array atom and an atom of
+  each of the C runtime's classes, which step 4's executables have no section
+  for, each reported alike with every lane count; and a lane with no scratch
+  memory to spare, then 64 bytes more at a time, until the link succeeds:
+  every failure must be `EXECUTABLE_ERROR_MEMORY` and leave no output;
 - the patch kernel: the fast path against the checked one, on random fixups
   of every kind with wide addends, at every count from 0 to 199 from four
   starts, with the kind column ending at a `PROT_NONE` page.
@@ -660,3 +907,131 @@ affinity they start with. `docs/object-writer-and-linker.md` ("Patching and
 writing" and "The first executables") has the numbers. The default 9700X job
 runs it after the tests, pinned to one allowed CPU; like the others, its
 measurements are informational.
+
+## Dataflow tests
+
+`./build/compiler test-dataflow [--seed N] [--count N]` checks the IR-independent
+liveness and interference primitives in `dataflow.c`:
+
+- generated CFGs: chains, diamonds, self-loops, nested loops, irreducible
+  two-entry loops, several exits, random local components, and connected
+  dispatch loops. Every shape runs with 0, 1, 2, 3, 8, 17, 65, 257 and
+  2,049 blocks at each of 0, 1, 63, 64, 65, 511, 512, 513, 1,024 and 1,025
+  values, then `--count` more seeds and sizes per shape (24 by default). The
+  same seed must reproduce the columns and input rows. The postorder must
+  visit every block once, and every row must be 64-byte aligned and padded
+  to 512 bits;
+- the AVX-512 and scalar fixpoints: identical `in` and `out` rows and iteration
+  counts, both liveness equations satisfied, and all padding bits zero.
+  Solving again over poisoned output must reproduce the result and iteration
+  count, including zero padding after the poisoned rerun. Small graphs also
+  use an independent per-value reachability check: a value is live when a
+  path reaches its use before its definition. Graphs of 257 and 2,049 blocks
+  independently check selected boundary and seed-derived values at every
+  block with a reverse-reachability oracle;
+- handwritten graphs: disconnected cycles, a self-loop without a use, a value
+  both used and defined in one block, every combination of the transfer
+  function's three input bits, the exact postorder of a chain, and repeated
+  successor/self/exit edges compared with a deduplicated graph;
+- interference: empty rows and every bit position in rows of 512, 1,024 and
+  1,536 bits, with disjoint and intersecting inputs, checked by both paths;
+- page edges: each matrix ends at a `PROT_NONE` page for every boundary value
+  count above, with zero-size rows pointing at the inaccessible page itself.
+  Both solvers and the interference check must stay within the rows, and the
+  poisoned bytes before each matrix must remain unchanged;
+- failure handling: insufficient arena capacity leaves the arena and result
+  unchanged, successful allocations zero the rows, malformed successor
+  offsets or targets leave the postorder and scratch arena unchanged, and
+  missing scratch memory and an edge in an empty CFG are rejected.
+
+`--seed N` changes the generated inputs (1 by default). The command reports
+the check and failure counts and exits with status 1 on any failure. The
+9700X job runs it after the link tests.
+
+## Dataflow benchmark
+
+`./build/compiler benchmark-dataflow [--seed N]` compares the scalar and
+AVX-512 fixpoints on four generated functions: a small diamond CFG with
+16 blocks and 127 values, nested loops with 256 blocks and 1,025 values, and
+random local components and a connected dispatch loop, each with 4,096 blocks
+and 4,097 values. The local-components case is a streaming control, not a model
+of a large real function. `--seed N` selects the inputs (1 by default); generator
+version 2 mixes the seed before generating topology and rows.
+
+Each workload first checks identical rows and iteration counts, then reports
+21 interleaved-pass medians and minimum/maximum ranges with alternating
+implementation order. Both paths use the same repetition count, calibrated
+with warm batches; every retained sample lasts at least 2 ms. Each timed solve
+includes clearing `in` and `out`; generation, allocation and postorder are
+outside the timed region. Both paths use direct calls through matching
+`noinline` benchmark wrappers. The output gives nanoseconds, cycles and instructions
+per function, cycles per block per iteration, and IPC. Hardware counter values
+are zero when unavailable. A scalar/vector disagreement fails the command.
+Run at least five independent processes, releasing the host lock between
+them, when recording a comparison; process-median ranges expose variation
+that one process's 21 passes may miss.
+
+Run it under the 9700X's lock with `taskset -c 2`. `docs/dataflow.md` records
+the contracts, measurements and implementation choice. The default 9700X job
+runs it after the tests, pinned to one allowed CPU; like the other benchmarks,
+its measurements are informational. Building use/def rows from IR columns and
+running the corpora remain outside this module's current scope and wait for
+#131.
+
+## Preprocessor harness tests
+
+`./build/compiler test-preprocessor-fuzz [--fuzz N] [--seed N] [--clang PATH]
+[--std c17|c23]` checks the independent tooling for #109. It requires Clang 23
+on `PATH`, or the executable selected by `--clang PATH`. The defaults are
+64 generated cases, seed 1, `clang` and C17; the 9700X job runs both C17 and
+C23. The checks cover:
+
+- deterministic generation, including every one of the 36 construct families
+  even when `--fuzz N` is smaller, and repeatability for seeds 1, 7 and 99;
+- independent rejection of each invalid `#`/`##` form, with acceptance after
+  repairing its sole intentional fault; arithmetic and bitwise predicates
+  exercise both branch outcomes, and replacing an expression with zero must
+  change the accepted output tokens;
+- batched Clang preprocessing against one process per case: the same
+  acceptance or rejection, token kinds, spellings and token counts, with
+  whitespace ignored. Cases have distinct name prefixes and marker tokens
+  delimit their outputs; a rejected batch is rerun one case at a time.
+  Accepted cases are also batched separately so rejection fallback cannot
+  conceal a batching error;
+- isolation of cases, line information and predefined counter behavior.
+  `__COUNTER__` cases run alone because its state belongs to the Clang process;
+- output comparison, including unequal acceptance, token counts, kinds and
+  spellings, whitespace-only changes, and invalid oracle results;
+- a planted comparison for the minimizer: delete complete lines, then tokens,
+  while preserving the difference, until only the two required identifier
+  tokens remain. Saving and reading a `fuzz_failure_N.c` fixture must preserve
+  its bytes without overwriting an existing failure; the self-test removes
+  its temporary files.
+
+The oracle runs `clang -E -P -undef -nostdinc -std=c17` or `-std=c23` with
+`-x c`. It resets each case's source filename and line number identically in
+batched and individual runs, tokenizes the output with `c_tokenize` and splits
+it at exact marker identifiers. Infrastructure failures are distinct from
+source rejection.
+
+This is test tooling outside the compile path and has no new vector path.
+The minimizer currently uses only the planted comparison; these checks do
+not establish the correctness of a buster-fast preprocessor. The command
+names and file locations remain provisional until agreed with #117.
+`docs/preprocessor-fuzz.md` describes the extension points and remaining work.
+
+## Preprocessor harness benchmark
+
+`./build/compiler benchmark-preprocessor-fuzz [--clang PATH] [--std c17|c23]
+[--seed N]` requires Clang 23 and defaults to `clang`, C17 and seed 1. It
+processes 16 generated family-0 cases (object macros and their shared
+alias/redefinition scaffold) together, then in separate Clang
+processes, checking that every case is accepted and the output byte totals
+agree. After one warm-up pass, 21 measured passes alternate which mode runs
+first and report median milliseconds per batch and cases per second.
+
+The timing includes generation, launching Clang, temporary-file I/O and
+cleanup. It measures the external test harness, not buster-fast compilation
+speed. Run it under the 9700X's lock with `taskset -c 2`; the default 9700X job
+runs it after the tests, pinned to one allowed CPU. Measurements are
+informational; execution or output-check failures fail the command.

@@ -172,6 +172,19 @@ int run_x86_encoder_benchmark(int argc, char** argv);
 #include "buster/compiler/lane_test.c"
 int run_lane_benchmark(int argc, char** argv);
 
+// Liveness and interference over aligned bitsets, independent of the future IR's use/def construction.
+#include "buster/compiler/dataflow.c"
+#include "buster/compiler/dataflow_program.c"
+#include "buster/compiler/dataflow_test.c"
+int run_dataflow_benchmark(int argc, char** argv);
+
+// Independent preprocessor fuzz tooling (#109); command names await agreement with #117.
+#include "buster/compiler/preprocessor_fuzz.c"
+#include "buster/compiler/preprocessor_fuzz_generate.c"
+#include "buster/compiler/preprocessor_fuzz_clang.c"
+#include "buster/compiler/preprocessor_fuzz_test.c"
+int run_preprocessor_fuzz_benchmark(int argc, char** argv);
+
 // The link representation (atoms, symbols, fixups and names, which the object writer and the linker share), the test
 // programs generated in it, and their tests, for the test-link command.
 #include "buster/compiler/link.c"
@@ -184,11 +197,23 @@ int run_lane_benchmark(int argc, char** argv);
 #include "buster/compiler/object_writer_test.c"
 int run_object_writer_benchmark(int argc, char** argv);
 
+// The import path's readers (ELF objects, archives, shared libraries and linker scripts into the link representation),
+// the C runtime's files, found and imported with them, and their tests, for the test-import command.
+#include "buster/compiler/import.c"
+#include "buster/compiler/runtime.c"
+#include "buster/compiler/import_test.c"
+int run_import_benchmark(int argc, char** argv);
+
 // The direct path's executables (layout, patching, the build ID and the output file) and their tests, for the
 // test-executable command. Its benchmark is another translation unit.
 #include "buster/compiler/executable.c"
 #include "buster/compiler/executable_test.c"
 int run_executable_benchmark(int argc, char** argv);
+
+// The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
+// check-call-graph and test-call-graph commands.
+#include "buster/compiler/call_graph.c"
+#include "buster/compiler/call_graph_test.c"
 
 int main(int argc, char** argv)
 {
@@ -217,6 +242,22 @@ int main(int argc, char** argv)
     {
         result = run_lane_benchmark(argc - 1, argv + 1);
     }
+    else if (argc >= 2 && strcmp(argv[1], "test-dataflow") == 0)
+    {
+        result = run_dataflow_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-dataflow") == 0)
+    {
+        result = run_dataflow_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-preprocessor-fuzz") == 0)
+    {
+        result = run_preprocessor_fuzz_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-preprocessor-fuzz") == 0)
+    {
+        result = run_preprocessor_fuzz_benchmark(argc - 1, argv + 1);
+    }
     else if (argc >= 2 && strcmp(argv[1], "test-link") == 0)
     {
         result = run_link_tests(argc - 2, argv + 2);
@@ -229,6 +270,14 @@ int main(int argc, char** argv)
     {
         result = run_object_writer_benchmark(argc - 1, argv + 1);
     }
+    else if (argc >= 2 && strcmp(argv[1], "test-import") == 0)
+    {
+        result = run_import_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-import") == 0)
+    {
+        result = run_import_benchmark(argc - 1, argv + 1);
+    }
     else if (argc >= 2 && strcmp(argv[1], "test-executable") == 0)
     {
         result = run_executable_tests(argc - 2, argv + 2);
@@ -236,6 +285,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-executable") == 0)
     {
         result = run_executable_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "check-call-graph") == 0)
+    {
+        result = run_check_call_graph(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-call-graph") == 0)
+    {
+        result = run_call_graph_tests(argc - 2, argv + 2);
     }
     else
     {

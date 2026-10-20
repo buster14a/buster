@@ -57,6 +57,12 @@ jobs:
       - name: Execute compiler
         run: ./build/compiler
 
+      - name: Check the no-recursion rule on the call graph
+        # Writes the translation units' LLVM IR to a temporary directory and fails on any cycle not in the allowlist.
+        run: |
+          ./build/compiler test-call-graph
+          ./build.sh check-call-graph
+
       - name: Test the C lexer
         run: |
           ./build/compiler test-lexer
@@ -86,6 +92,24 @@ jobs:
       - name: Test the link representation
         run: ./build/compiler test-link
 
+      - name: Test dataflow bitsets
+        run: ./build/compiler test-dataflow
+
+      - name: Benchmark dataflow bitsets
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-dataflow
+
+      - name: Test the independent preprocessor fuzz harness
+        run: |
+          ./build/compiler test-preprocessor-fuzz --std c17
+          ./build/compiler test-preprocessor-fuzz --std c23
+
+      - name: Benchmark the preprocessor fuzz harness
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor-fuzz
+
       - name: Test the object writer
         # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
         # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
@@ -96,6 +120,16 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-object-writer
+
+      - name: Test the import path
+        # --cross-check also compares libc.so.6's exports and references, and the relocations of the crt objects and
+        # libc_nonshared.a's members, with readelf's.
+        run: ./build/compiler test-import --cross-check
+
+      - name: Benchmark the import path
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-import
 
       - name: Test the direct path's executables
         run: ./build/compiler test-executable

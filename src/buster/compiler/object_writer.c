@@ -126,8 +126,8 @@ struct ObjectUnits
     uint64_t* cost_prefix;
     // lane_parts_by_cost's boundaries, which the lanes share: BUSTER_LANE_MAX_PARTS + 1 entries.
     uint64_t* part_boundaries;
-    // Each atom's section in its object (an index of object_build's content sections until it places them, then the
-    // section's index in the object), and its offset there. object_build writes its own unit's.
+    // Each atom's section in its object, among object_build's sections of atoms (numbered from 0 in the order it makes
+    // them, which is their order in the object), and its offset there. object_build writes its own unit's.
     uint32_t* atom_section;
     uint64_t* atom_offset;
 };
@@ -222,8 +222,27 @@ static const ObjectSectionFormat object_class_sections[BUSTER_LINK_CLASS_COUNT] 
         .flags = SHF_ALLOC | SHF_MERGE | SHF_STRINGS,
         .entry_size = 1,
     },
+    // Unwind tables, the type GNU as gives .eh_frame on x86-64.
+    [BUSTER_LINK_CLASS_EH_FRAME] = {
+        .name = ".eh_frame",
+        .type = SHT_X86_64_UNWIND,
+        .flags = SHF_ALLOC,
+        .entry_size = 0,
+    },
     [BUSTER_LINK_CLASS_TEXT] = {
         .name = ".text",
+        .type = SHT_PROGBITS,
+        .flags = SHF_ALLOC | SHF_EXECINSTR,
+        .entry_size = 0,
+    },
+    [BUSTER_LINK_CLASS_INIT] = {
+        .name = ".init",
+        .type = SHT_PROGBITS,
+        .flags = SHF_ALLOC | SHF_EXECINSTR,
+        .entry_size = 0,
+    },
+    [BUSTER_LINK_CLASS_FINI] = {
+        .name = ".fini",
         .type = SHT_PROGBITS,
         .flags = SHF_ALLOC | SHF_EXECINSTR,
         .entry_size = 0,
