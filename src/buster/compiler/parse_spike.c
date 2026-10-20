@@ -5949,10 +5949,11 @@ static void spike_secondary_avx512(SpikeKernels* kernels, uint32_t count, uint32
             const uint32_t* depths = kernels->depths + block + 16 * q;
             _mm512_storeu_si512(kernels->node_depths + block + 16 * q, _mm512_add_epi32(_mm512_loadu_si512(depths), _mm512_add_epi32(base, _mm512_cvtepi8_epi32(quarter))));
         }
-        int8_t after_bytes[64];
-        _mm512_storeu_si512(after_bytes, after);
+        // The last live lane from the register: a byte reloaded from a store of `after` met that store before its data
+        // was ready, in some builds once a block (about 0.1 cycles a token on sqlite3.c, 0.15 on the libc corpus).
         const uint32_t live = count - block < 64 ? count - block : 64;
-        inner += (uint32_t)(int32_t)after_bytes[live - 1];
+        const __m512i last = _mm512_permutexvar_epi8(_mm512_set1_epi8((char)(live - 1)), after);
+        inner += (uint32_t)(int32_t)(int8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(last));
     }
 }
 
