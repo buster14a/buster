@@ -208,8 +208,15 @@ static X86Instruction branch_sizing_branch(uint64_t* state, bool jump)
 }
 
 // The shape of a generated function: `count` records, one in `branch_period` of them a branch on average, a jmp
-// `jmp_per_mille` times in a thousand (a jcc otherwise), whose target is anywhere in the function `far_per_mille` times
-// in a thousand, and otherwise within `near` records of it, either way.
+// `jmp_per_mille` times in a thousand (a jcc otherwise). Its target is far `far_per_mille` times in a thousand, and
+// otherwise near:
+//   - uniform (`compiler_like` false): a far target is anywhere in the function, and a near one within `near` records
+//     of the branch, either way, every distance as likely;
+//   - compiler-like: a near target is up to `near` records away and a far one up to the function's size, backward
+//     `backward_per_mille` times in a thousand (forward to the record after the branch at the least, and backward to the
+//     branch itself), at a distance whose logarithm is about uniform (branch_sizing_log_distance), as compiled code's
+//     are: most branches go a few instructions, and a few go across the function (docs/branch-sizing.md has the
+//     statistics of clang's code that the benchmark's shapes follow).
 typedef struct BranchSizingShape BranchSizingShape;
 struct BranchSizingShape
 {
@@ -218,7 +225,41 @@ struct BranchSizingShape
     uint32_t near;
     uint32_t far_per_mille;
     uint32_t jmp_per_mille;
+    uint32_t backward_per_mille;
+    bool compiler_like;
 };
+
+// A distance from 1 to `range` (at least 1) whose logarithm is about uniform: an octave [2^b, 2^(b + 1)) of a uniform b
+// below the bit length of `range`, and a uniform distance in it, up to `range`.
+static uint32_t branch_sizing_log_distance(uint64_t* state, uint32_t range)
+{
+    const uint32_t octave = branch_sizing_below(state, 32 - (uint32_t)__builtin_clz(range));
+    const uint32_t low = 1u << octave;
+    const uint32_t width = range - low + 1 < low ? range - low + 1 : low;
+    return low + branch_sizing_below(state, width);
+}
+
+// A branch's target in a function of the shape, for the branch at record `i`.
+static uint32_t branch_sizing_target(uint64_t* state, const BranchSizingShape* shape, uint64_t i)
+{
+    const bool far = branch_sizing_below(state, 1000) < shape->far_per_mille;
+    int64_t target;
+    if (!shape->compiler_like && far)
+    {
+        target = branch_sizing_below(state, (uint32_t)shape->count + 1);
+    }
+    else if (!shape->compiler_like)
+    {
+        target = (int64_t)i + (int64_t)branch_sizing_below(state, 2 * shape->near + 1) - shape->near;
+    }
+    else
+    {
+        const uint32_t range = far ? (uint32_t)shape->count : shape->near;
+        const int64_t distance = branch_sizing_log_distance(state, range != 0 ? range : 1);
+        target = branch_sizing_below(state, 1000) < shape->backward_per_mille ? (int64_t)i + 1 - distance : (int64_t)i + distance;
+    }
+    return (uint32_t)(target < 0 ? 0 : target > (int64_t)shape->count ? (int64_t)shape->count : target);
+}
 
 // Writes a function of the shape into `records`, and its branch columns into `branches` and `targets` (room for `count`
 // each). Returns the number of branches.
@@ -230,18 +271,8 @@ static uint64_t branch_sizing_generate(uint64_t* state, const BranchSizingShape*
         if (branch_sizing_below(state, shape->branch_period) == 0)
         {
             records[i] = branch_sizing_branch(state, branch_sizing_below(state, 1000) < shape->jmp_per_mille);
-            int64_t target;
-            if (branch_sizing_below(state, 1000) < shape->far_per_mille)
-            {
-                target = branch_sizing_below(state, (uint32_t)shape->count + 1);
-            }
-            else
-            {
-                target = (int64_t)i + (int64_t)branch_sizing_below(state, 2 * shape->near + 1) - shape->near;
-                target = target < 0 ? 0 : target > (int64_t)shape->count ? (int64_t)shape->count : target;
-            }
             branches[result] = (uint32_t)i;
-            targets[result] = (uint32_t)target;
+            targets[result] = branch_sizing_target(state, shape, i);
             result += 1;
         }
         else
