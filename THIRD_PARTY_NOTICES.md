@@ -165,7 +165,7 @@ included. Future generated imports require a fresh input/notice review.
 `link_program.c` emits original synthetic support routines and fixtures;
 the executable's hash constants are generated from SplitMix64, not imported
 test corpora. Recognizable SplitMix64 arithmetic also appears in link/lane/
-executable tests and benchmarks. The public-domain reference is
+executable tests and benchmarks, and its finalizer ends `link.c`'s name hash. The public-domain reference is
 [Sebastiano Vigna's 2015 implementation](https://prng.di.unimi.it/splitmix64.c);
 its dedication, permission and disclaimer are retained in
 [LICENSES/SplitMix64.txt](LICENSES/SplitMix64.txt). This does not import the

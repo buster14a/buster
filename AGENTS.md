@@ -377,6 +377,10 @@ informational.
 
 - random records of every table read back from the columns, with ids from 1
   and record 0 zero;
+- the name hash: `link_hash`'s values for known names, which pin it (it is
+  part of the snapshot's format), and `link_hash_names` against `link_hash`
+  on random names of 0 to 200 bytes, every count to 40, every length in every
+  lane of a batch, and names ending at a `PROT_NONE` page;
 - every table at its capacity, the side table of wide addends full, a name
   arena too small, and arenas too small for the tables: each add fails with
   `LINK_ERROR_FULL` and changes nothing;

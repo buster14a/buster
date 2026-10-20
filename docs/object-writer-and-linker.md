@@ -370,10 +370,19 @@ no name (`NameId` 0).
 
 - **The bytes** are followed by a NUL, which the ELF string tables need, and
   the length is kept.
-- **The hash** is `link_hash`: wyhash's mixing of 8 bytes at a time, scalar
-  for now. From the runtime snapshot on it is part of the format, so the
-  import path's vectorized hashing has to compute the same function, or
-  replace it everywhere.
+- **The hash** is `link_hash`: 8 bytes at a time, each word mixed in with an
+  XOR, a 64-bit multiplication and a shift that folds the product's high half
+  down, then SplitMix64's finalizer. Each step is an AVX-512 instruction on
+  eight 64-bit lanes (`vpxorq`, `vpmullq`, `vpsrlq`), so `link_hash_names`
+  hashes eight names at once: each name's first 64 bytes in one masked load
+  (a name may end at a page's end), the rows transposed so that a vector holds
+  word j of the eight names, and the words mixed in lane by lane while a
+  lane's name has them. Names past 64 bytes, and those after the last whole
+  batch, go to `link_hash`, which is also the tests' oracle. From the runtime
+  snapshot on it is part of the format, which test-link pins with known
+  values. On libc's 2,912 names, 300,000 generated ones and 96,000 random
+  ones, its low 10, 12 and 16 bits and bits 26 and 52 up are as uniform as
+  random ones (χ² per degree of freedom 0.94 to 1.07).
 - **The table doesn't deduplicate:** the front end interns, and gives each
   spelling one id.
 
