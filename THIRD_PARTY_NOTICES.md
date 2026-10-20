@@ -37,12 +37,15 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/import.c`, `src/buster/compiler/runtime.c`, `src/buster/compiler/import_test.c`, `src/buster/compiler/import_benchmark.c` | Original readers of ELF relocatable objects, archives, shared libraries and linker scripts, their vector and exact paths, the C runtime's search and import, and their tests and benchmark; Default. The formats are read from their specifications. The archive header's vector size parse uses the widely published multiply-add method for decimal digits (as in simdjson's and Wojciech Muła's write-ups), written here from the method, not copied. The tests and the benchmark make their inputs themselves, and read the system's C runtime files and the libraries and archives named on the command line at run time without copying them; `readelf` is an external oracle for `--cross-check`, not vendored. The benchmark's clock, counter and median helpers are its own, not the lexer benchmark's MIT ones. |
 | `src/buster/compiler/bind.c`, `src/buster/compiler/bind_test.c`, `src/buster/compiler/bind_benchmark.c` | Original binding of the C runtime into a program's link, its vector and exact paths, and its tests and benchmark; Default. GNU ld's and lld's symbol resolution are described from their documented behavior and observed output, not copied. The tests make their programs themselves and read the system's C runtime at run time without copying it; `ld.lld`, `ld.bfd`, `cc` and `readelf` are external oracles for `--cross-check`, not vendored. The benchmark's clock, counter and median helpers are its own. |
 | `src/buster/compiler/c_intern.c`, `src/buster/compiler/c_refine.c`, `src/buster/compiler/c_refine_test.c` | Original intern table, token refinement and tests; Default. The hash's constants are wyhash's public-domain ones, and the keyword list is clang-generated data; both are noted below. |
+| `src/buster/compiler/c_preprocessor.c` | Original preprocessor; Default, with the clang-generated predefined macros and feature tables noted below. |
+| `src/buster/compiler/c_preprocessor_test.c` | Original preprocessor tests; Default. Some expected texts are clang 23's `-E` output for the cases' own inputs. `pp_test_keyword_candidates` and `pp_test_feature_names` list names from clang 23's `TokenKinds.def` and companions and from its `Features.def` (names only, noted below). |
+| `src/buster/compiler/c_preprocessor_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `src/buster/compiler/c_refine_benchmark.c` | Original benchmark body under Default; the corpus loader and the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `build.sh`, `.gitignore`, `.github/workflows/9700x.yml` | Original build/configuration; Default. The referenced GitHub action runs externally and is not vendored. |
 | `.claude/settings.json`, `.claude/hooks/join-tailnet.sh` | Maintainer configuration: settings adapted from his older Buster configuration; locally added tailnet hook. Default. See the recorded import below. |
 | `.githooks/commit-msg`, `.githooks/enable-sign-off.sh`, `.codex/hooks.json` | Original hooks that add the maintainer's sign-off where his opt-in is set, and Codex's configuration that runs one; Default. |
 | `AGENTS.md`, `CLAUDE.md`, `docs/coding-style.md` | Original project/contributor guidance; Default. The style adapts conventions, not a grant to import old compiler code. |
-| `docs/c-lexer.md`, `docs/x86-64-encoder.md`, `docs/object-writer-and-linker.md`, `docs/c-refinement.md` | Original design/measurement reports; Default. Referenced tools, articles and measurements are distinguished from vendored source. |
+| `docs/c-lexer.md`, `docs/x86-64-encoder.md`, `docs/object-writer-and-linker.md`, `docs/c-refinement.md`, `docs/c-preprocessor.md` | Original design/measurement reports; Default. Referenced tools, articles and measurements are distinguished from vendored source. |
 | `README.md`, `LICENSING.md`, `CONTRIBUTING.md`, this file | Original adoption documentation; Default, except quoted upstream notices retain their terms. |
 | `LICENSE`, `DCO`, `LICENSES/*` | Retained legal/attribution texts; their own terms. These are not original project prose. |
 
@@ -215,6 +218,40 @@ domain under the Unlicense; its text at that revision is retained in
   [LICENSES/LLVM.txt](LICENSES/LLVM.txt).
 
 The same answers are behind `c_refine_test.c`'s spellings chosen apart.
+`c_preprocessor_test.c` keeps the keyword candidates it asks clang about again
+under `--clang` (`pp_test_keyword_candidates`): the spellings among those
+names, with the ones of `TransformTypeTraits.def`, `OpenCLImageTypes.def` and
+`HLSLIntangibleTypes.def` from the same directory. Only the names were read.
+
+## Clang-generated predefines and feature tables
+
+`c_preprocessor.c`'s predefined macros (`pp_predefines_base`,
+`pp_predefines_c23`) and feature tables (`pp_features_*`) are generated data,
+the output of **clang 23.1.3** (the local package `clang 23.1.3-2`, target
+`x86_64-pc-linux-gnu`), which the configuration decided in #117 takes as the
+compiler's own. LLVM's terms are retained in [LICENSES/LLVM.txt](LICENSES/LLVM.txt).
+
+- The predefines are `clang -dM -E -x c /dev/null` (gnu17), without the macros
+  the language mode and options decide, and the difference of its output
+  under `-std=c23`. `__BUSTER__` is the compiler's own.
+- The feature tables are clang's nonzero answers, under `-std=gnu17` and
+  `-std=c23` (the same), to `__has_attribute`, `__has_builtin`,
+  `__has_c_attribute` and `__has_warning`. The names asked about are those that
+  `/usr/include` (glibc 2.44), clang 23's resource headers, musl 1.2.5, SQLite
+  3.53's amalgamation and Zig 0.14.1's `lib/libc` query, and a list of common
+  GNU attribute names. Only the names were read from those inputs.
+- The `__has_feature` and `__has_extension` tables are clang's nonzero answers
+  for every `FEATURE` and `EXTENSION` name of clang 23.1.3's
+  `clang/include/clang/Basic/Features.def`, in the ten modes from `-std=c89`
+  to `-std=gnu23`, with the first standard of each answer that depends on the
+  mode. `c_preprocessor_test.c` keeps the same names (`pp_test_feature_names`)
+  to ask clang again under `--clang`. Only the names were read from
+  `Features.def`.
+- A local script ran the queries; `docs/c-preprocessor.md` records its
+  procedure.
+
+SQLite, musl, Lua and the system's headers are test oracle inputs only (the
+tests read them where they are installed): none of their code is included.
 
 ## Review limits and distribution
 
