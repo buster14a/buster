@@ -190,6 +190,10 @@ int run_object_writer_benchmark(int argc, char** argv);
 #include "buster/compiler/executable_test.c"
 int run_executable_benchmark(int argc, char** argv);
 
+// The data-parallel parsing spike (#186): the scalar parser, the kernels and their benchmark, for the spike-parse
+// command. It is another translation unit.
+int run_parse_spike(int argc, char** argv);
+
 int main(int argc, char** argv)
 {
     int result = 0;
@@ -236,6 +240,10 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-executable") == 0)
     {
         result = run_executable_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "spike-parse") == 0)
+    {
+        result = run_parse_spike(argc - 1, argv + 1);
     }
     else
     {
