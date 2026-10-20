@@ -19,9 +19,10 @@
 //   - The kernels' scalar twins: K1 brackets, K3 type names, K2 roles, K4 parents, K5 statements, the fallback, and
 //     spike_parse_twins, all of them in turn.
 //   - The kernels in AVX-512: K1 in byte lanes (and in 16-bit lanes for the comparison), K4 in 16-bit and in byte lanes,
-//     K2, K3's classification, K1's second part and K5; K4 with the stack's top in registers (spike_top_parents8_avx512,
-//     the vector path's: every block's in-block work, then the two passes' window work); spike_parse_vector, the
-//     data-parallel parser.
+//     K2 (with the statement contexts K5 reads), K3's classification, K1's second part and K5 (spike_statements_avx512:
+//     owners by compress and expand, and a sparse loop for else and do); K4 with the stack's top in registers
+//     (spike_top_parents8_avx512, the vector path's: every block's in-block work, then the two passes' window work);
+//     spike_parse_vector, the data-parallel parser.
 //   - The postorder, from the parents: spike_postorder (a walk that emits each subtree's end) and
 //     spike_postorder_sorted (positions without a branch on the tree).
 
@@ -3628,8 +3629,49 @@ static bool spike_statements(SpikeKernels* kernels, uint32_t count, SpikeStateme
     return result;
 }
 
-// K5 in AVX-512: only the tokens whose roles the statement stack reads, from a mask per block.
-static bool spike_statements_avx512(SpikeKernels* kernels, uint32_t count, SpikeStatement* items)
+// What the vector K5 reads of each token's surroundings, a bit per token for 64 tokens: whether its statement context is
+// a block (OPEN_BLOCK or OPEN_BODY), as spike_statement_event reads it (the group around the token, or for a closer of
+// ( [ { the group around its opener); and whether it is a closer whose opener follows `if`, or `while`. The vector K2
+// writes them, and spike_statement_contexts checks them.
+typedef struct SpikeStatementContext SpikeStatementContext;
+struct SpikeStatementContext
+{
+    uint64_t blocks;
+    uint64_t ifs;
+    uint64_t whiles;
+};
+
+// The statement contexts of tokens [block, block + live).
+static SpikeStatementContext spike_statement_context_block(const SpikeKernels* kernels, uint32_t block, uint32_t live)
+{
+    SpikeStatementContext result = { .blocks = 0, .ifs = 0, .whiles = 0 };
+    for (uint32_t lane = 0; lane < live; lane += 1)
+    {
+        const uint32_t i = block + lane;
+        const uint32_t opener = kernels->enclosing[i];
+        const bool closer = spike_kind_deltas[kernels->vkinds[i]] < 0;
+        const uint32_t group = closer && opener != BUSTER_SPIKE_NONE ? kernels->enclosing[opener] : opener;
+        const uint8_t role = group != BUSTER_SPIKE_NONE ? kernels->roles[group] : SPIKE_ROLE_NONE;
+        const uint8_t keyword = closer && opener != BUSTER_SPIKE_NONE ? kernels->vkinds[opener - 1] : SPIKE_KIND_END;
+        result.blocks |= (uint64_t)(role == SPIKE_ROLE_OPEN_BLOCK || role == SPIKE_ROLE_OPEN_BODY) << lane;
+        result.ifs |= (uint64_t)(keyword == SPIKE_KIND_IF) << lane;
+        result.whiles |= (uint64_t)(keyword == SPIKE_KIND_WHILE) << lane;
+    }
+    return result;
+}
+
+// Every block's statement contexts, one per 64 tokens.
+static void spike_statement_contexts(const SpikeKernels* kernels, uint32_t count, SpikeStatementContext* contexts)
+{
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        contexts[block / 64] = spike_statement_context_block(kernels, block, count - block < 64 ? count - block : 64);
+    }
+}
+
+// The spike's K5 in AVX-512: only the tokens whose roles the statement stack reads, from a mask per block, through the
+// twin's stack. spike_statements_avx512, the vector path's, replaced it.
+static bool spike_statements_mask_avx512(SpikeKernels* kernels, uint32_t count, SpikeStatement* items)
 {
     SpikeStatementStack stack = { .items = items, .count = 0, .parents = kernels->parents };
     bool result = true;
@@ -3775,6 +3817,7 @@ struct SpikeKernelResult
 static void spike_shifts_init(void);
 static void spike_parent_tables_init(void);
 static void spike_role_tables_init(void);
+static void spike_statement_tables_init(void);
 
 // Reserves the kernels' arrays for up to `capacity` tokens, with padding around each per-token array, and up to
 // `name_capacity` names.
@@ -3819,6 +3862,7 @@ static bool spike_kernels_reserve(SpikeKernels* kernels, Arena* arena, uint64_t 
     spike_shifts_init();
     spike_parent_tables_init();
     spike_role_tables_init();
+    spike_statement_tables_init();
     return result;
 }
 
@@ -4887,6 +4931,16 @@ static void spike_role_tables_init(void)
 // The pred classes as one-hot bits; SPIKE_PRED_LEAF is no bit.
 #define BUSTER_SPIKE_PRED_BIT(pred) ((uint8_t)(1u << (pred)))
 
+// K2's stacks of an entry per depth, with BUSTER_SPIKE_DEPTH_PADDING entries below depth 0: the role of the open opener
+// at each depth, the typed state just before its keyword, and the kind of the token before it.
+typedef struct SpikeGroupStacks SpikeGroupStacks;
+struct SpikeGroupStacks
+{
+    uint8_t* roles;
+    uint8_t* typed;
+    uint8_t* keywords;
+};
+
 typedef struct SpikeRoleCarry SpikeRoleCarry;
 struct SpikeRoleCarry
 {
@@ -4895,9 +4949,11 @@ struct SpikeRoleCarry
     uint8_t previous_role;
     uint8_t before_role;
     uint64_t typed;
-    // By depth: the role of the open opener at that depth, and the typed state just before its keyword.
+    // By depth: the role of the open opener at that depth, the typed state just before its keyword, and the kind of the
+    // token before it.
     uint8_t* group_roles;
     uint8_t* group_typed;
+    uint8_t* group_keywords;
 };
 
 BUSTER_INLINE __m512i spike_table8(const uint8_t* table, __m512i index)
@@ -4952,9 +5008,10 @@ BUSTER_INLINE uint64_t spike_typed_carries(uint64_t generate, uint64_t propagate
     return (into >> 1) | (sum_carry << 63);
 }
 
-// One block of K2 in AVX-512 (see above). Returns the rounds it took, or 0 if it didn't converge.
+// One block of K2 in AVX-512 (see above). Returns the rounds it took, or 0 if it didn't converge. *context_out gets the
+// block's statement contexts (spike_statement_contexts), from the roles it settles on.
 static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, uint32_t live, SpikeRoleCarry* carry, const uint8_t* starts, uint64_t* typed_out,
-                                         uint64_t* open_out)
+                                         uint64_t* open_out, SpikeStatementContext* context_out)
 {
     const SpikeRoleTables* t = &spike_role_tables;
     const uint8_t* vkinds = kernels->vkinds;
@@ -5292,6 +5349,21 @@ static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, 
         features = new_features;
         typed = new_typed;
     }
+    // The statement contexts, from the final roles: a cast candidate's opener that its closer turns into another role
+    // later is no block either way. A closer's is its opener's group: the opener's lane's, or the group two depths below
+    // the closer's depth on the group stack.
+    const __m512i final_group = _mm512_mask_mov_epi8(outside_group, inside, _mm512_permutexvar_epi8(enclosing_lane, roles));
+    const __m512i outside_outer = _mm512_permutexvar_epi8(window_index, _mm512_loadu_si512(carry->group_roles + (int64_t)depth_base - 65));
+    const __m512i outer_group = _mm512_mask_mov_epi8(outside_outer, inside, _mm512_permutexvar_epi8(enclosing_lane, final_group));
+    const __m512i context_group = _mm512_mask_mov_epi8(final_group, class_closer, outer_group);
+    // A closer's opener's keyword: the kind before the opener's lane, or the group stack's.
+    const __m512i outside_keyword = _mm512_permutexvar_epi8(window_index, _mm512_loadu_si512(carry->group_keywords + (int64_t)depth_base - 64));
+    const __m512i opener_keyword = _mm512_mask_mov_epi8(outside_keyword, inside, _mm512_permutexvar_epi8(enclosing_lane, vk_previous));
+    *context_out = (SpikeStatementContext){
+        .blocks = _mm512_test_epi8_mask(spike_table8(t->group_bits, context_group), _mm512_set1_epi8(BUSTER_SPIKE_GROUP_BLOCK)) & live_mask,
+        .ifs = spike_equal8(opener_keyword, SPIKE_KIND_IF) & class_closer & live_mask,
+        .whiles = spike_equal8(opener_keyword, SPIKE_KIND_WHILE) & class_closer & live_mask,
+    };
     _mm512_storeu_si512(kernels->roles + block, roles);
     // The flags from K3 stay.
     const __m512i old_flags = _mm512_loadu_si512(kernels->flags + block);
@@ -5301,26 +5373,31 @@ static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, 
 }
 
 // K2 in AVX-512: the blocks in order, each in rounds; a block that doesn't converge runs the twin's loop. `typed` is a
-// byte per token (the twin's array, which the fallback and the group stacks read), and `group_roles` and
-// `group_typed` have an entry per depth. `rounds` (BUSTER_SPIKE_ROLE_ROUNDS + 1 counters) counts the blocks by the
-// rounds they took, index 0 for those the twin did. `starts`, 0 but in a check, gives every token the role its rounds
-// start from instead of its kind's guess.
-static void spike_roles_starting_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, uint8_t* group_roles, uint8_t* group_typed, uint64_t* rounds,
-                                        const uint8_t* starts)
+// byte per token (the twin's array, which the fallback and the group stacks read), and `groups` holds the stacks of an
+// entry per depth. `contexts` gets each block's statement contexts, which the vector K5 reads. `rounds`
+// (BUSTER_SPIKE_ROLE_ROUNDS + 1 counters) counts the blocks by the rounds they took, index 0 for those the twin did.
+// `starts`, 0 but in a check, gives every token the role its rounds start from instead of its kind's guess.
+static void spike_roles_starting_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, const SpikeGroupStacks* groups, SpikeStatementContext* contexts,
+                                        uint64_t* rounds, const uint8_t* starts)
 {
+    uint8_t* group_roles = groups->roles;
+    uint8_t* group_typed = groups->typed;
+    uint8_t* group_keywords = groups->keywords;
     SpikeRoleCarry carry = {
         .previous_role = SPIKE_ROLE_NONE,
         .before_role = SPIKE_ROLE_NONE,
         .typed = 0,
         .group_roles = group_roles,
         .group_typed = group_typed,
+        .group_keywords = group_keywords,
     };
     for (uint32_t block = 0; block < count; block += 64)
     {
         const uint32_t live = count - block < 64 ? count - block : 64;
         uint64_t typed_mask = 0;
         uint64_t openers = 0;
-        const uint32_t taken = spike_roles_block_avx512(kernels, block, live, &carry, starts, &typed_mask, &openers);
+        SpikeStatementContext context;
+        const uint32_t taken = spike_roles_block_avx512(kernels, block, live, &carry, starts, &typed_mask, &openers, &context);
         rounds[taken] += 1;
         if (taken == 0)
         {
@@ -5343,6 +5420,7 @@ static void spike_roles_starting_avx512(SpikeKernels* kernels, uint32_t count, u
                 }
             }
             typed_mask = _mm512_test_epi8_mask(_mm512_loadu_si512(typed + block), _mm512_set1_epi8(1));
+            context = spike_statement_context_block(kernels, block, live);
         }
         else
         {
@@ -5373,16 +5451,18 @@ static void spike_roles_starting_avx512(SpikeKernels* kernels, uint32_t count, u
             openers &= openers - 1;
             group_roles[kernels->depths[i]] = kernels->roles[i];
             group_typed[kernels->depths[i]] = i >= 2 ? typed[i - 2] : 0;
+            group_keywords[kernels->depths[i]] = kernels->vkinds[i - 1];
         }
+        contexts[block / 64] = context;
         carry.previous_role = kernels->roles[block + live - 1];
         carry.before_role = live >= 2 ? kernels->roles[block + live - 2] : carry.previous_role;
         carry.typed = live == 64 ? typed_mask : typed_mask << (64 - live);
     }
 }
 
-static void spike_roles_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, uint8_t* group_roles, uint8_t* group_typed, uint64_t* rounds)
+static void spike_roles_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, const SpikeGroupStacks* groups, SpikeStatementContext* contexts, uint64_t* rounds)
 {
-    spike_roles_starting_avx512(kernels, count, typed, group_roles, group_typed, rounds, 0);
+    spike_roles_starting_avx512(kernels, count, typed, groups, contexts, rounds, 0);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -5545,6 +5625,462 @@ static void spike_after_colons_avx512(SpikeKernels* kernels, uint32_t count)
             kernels->flags[i] = 0;
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// K5 in AVX-512
+//
+// The twin's statement stack is a stack of levels, a block each, each holding the chain of heads that own the
+// statement being read. Its parents follow from three facts, which make it data-parallel:
+//   - A statement's first event is owned by the event before it in its level if that is a head: a head waits only until
+//     its level's next event, and nothing else leaves one waiting (an else takes its if's place, a do waits as any head
+//     does).
+//   - The event before an event in its level is the event before it, except where a block that isn't a statement (a
+//     statement expression, a nested function body) interrupts the level of a block around it: a statement block's
+//     events end with its closer, an event of the level around it. So the owners are the events' positions compressed,
+//     shifted up a lane and expanded back, with the block's last event carried to the next block. A statement block's
+//     owner goes to its closer through a stack of the blocks open.
+//   - The rest of what the stack decides is which if an else continues and which while ends a do, both found down the
+//     chain of heads from the statement that ended before them: back through the heads (an else standing for its if)
+//     to the first if or do, the first do for a while. Those events are few, and a sparse loop takes them in order,
+//     with the terminators after a head's `)`, which a do-while's `while (...)` may own instead.
+// Blocks that hold a non-statement block's opener or closer go through their events one at a time, with a stack of the
+// levels interrupted. A do without its while, or a do-while's `)` not followed by its `;`, is for the twin: the stack's
+// state there is no longer a chain of heads (spike_statements_vector then runs K4 again and the twin).
+
+// K5's classes, a bit each, by role. The first four are events only in a statement context (in a block; K2's statement
+// contexts), the others always are. HEAD is the `)` of if, while, for and switch, a case's `:` and a label's; the vector
+// part turns a while's `)` (K2's statement contexts again) into WHILE, which a do-while's may be.
+#define BUSTER_SPIKE_STATEMENT_TERMINATOR 0x01
+#define BUSTER_SPIKE_STATEMENT_HEAD 0x02
+#define BUSTER_SPIKE_STATEMENT_WHILE 0x04
+#define BUSTER_SPIKE_STATEMENT_DO 0x08
+#define BUSTER_SPIKE_STATEMENT_ELSE 0x10
+#define BUSTER_SPIKE_STATEMENT_OPEN_BLOCK 0x20
+#define BUSTER_SPIKE_STATEMENT_OPEN_BODY 0x40
+#define BUSTER_SPIKE_STATEMENT_CLOSE 0x80
+#define BUSTER_SPIKE_STATEMENT_CONTEXTUAL \
+    (BUSTER_SPIKE_STATEMENT_TERMINATOR | BUSTER_SPIKE_STATEMENT_HEAD | BUSTER_SPIKE_STATEMENT_WHILE | BUSTER_SPIKE_STATEMENT_DO)
+#define BUSTER_SPIKE_STATEMENT_ALWAYS \
+    (BUSTER_SPIKE_STATEMENT_ELSE | BUSTER_SPIKE_STATEMENT_OPEN_BLOCK | BUSTER_SPIKE_STATEMENT_OPEN_BODY | BUSTER_SPIKE_STATEMENT_CLOSE)
+// The heads, each of which waits for its level's next event; what takes a waiting head as its parent (a do's owner goes
+// to its final `;`); and the ends of statements.
+#define BUSTER_SPIKE_STATEMENT_HEADS (BUSTER_SPIKE_STATEMENT_HEAD | BUSTER_SPIKE_STATEMENT_WHILE | BUSTER_SPIKE_STATEMENT_DO | BUSTER_SPIKE_STATEMENT_ELSE)
+#define BUSTER_SPIKE_STATEMENT_OWNED (BUSTER_SPIKE_STATEMENT_TERMINATOR | BUSTER_SPIKE_STATEMENT_HEAD | BUSTER_SPIKE_STATEMENT_WHILE)
+#define BUSTER_SPIKE_STATEMENT_ENDS (BUSTER_SPIKE_STATEMENT_TERMINATOR | BUSTER_SPIKE_STATEMENT_CLOSE)
+
+static uint8_t spike_statement_classes[128];
+
+static void spike_statement_tables_init(void)
+{
+    memset(spike_statement_classes, 0, sizeof(spike_statement_classes));
+    spike_statement_classes[SPIKE_ROLE_TERMINATOR] = BUSTER_SPIKE_STATEMENT_TERMINATOR;
+    spike_statement_classes[SPIKE_ROLE_CLOSE_CONDITION] = BUSTER_SPIKE_STATEMENT_HEAD;
+    spike_statement_classes[SPIKE_ROLE_CLOSE_FOR] = BUSTER_SPIKE_STATEMENT_HEAD;
+    spike_statement_classes[SPIKE_ROLE_CLOSE_CASE] = BUSTER_SPIKE_STATEMENT_HEAD;
+    spike_statement_classes[SPIKE_ROLE_LABEL] = BUSTER_SPIKE_STATEMENT_HEAD;
+    spike_statement_classes[SPIKE_ROLE_DO] = BUSTER_SPIKE_STATEMENT_DO;
+    spike_statement_classes[SPIKE_ROLE_ELSE] = BUSTER_SPIKE_STATEMENT_ELSE;
+    spike_statement_classes[SPIKE_ROLE_OPEN_BLOCK] = BUSTER_SPIKE_STATEMENT_OPEN_BLOCK;
+    spike_statement_classes[SPIKE_ROLE_OPEN_BODY] = BUSTER_SPIKE_STATEMENT_OPEN_BODY;
+    spike_statement_classes[SPIKE_ROLE_CLOSE_BLOCK] = BUSTER_SPIKE_STATEMENT_CLOSE;
+    spike_statement_classes[SPIKE_ROLE_CLOSE_BODY] = BUSTER_SPIKE_STATEMENT_CLOSE;
+}
+
+typedef enum SpikeStatementsVerdict
+{
+    SPIKE_STATEMENTS_OK,
+    // The twin's false: an else without an if.
+    SPIKE_STATEMENTS_ELSE_WITHOUT_IF,
+    // Only the twin's stack decides: a do without its while, or a do-while's `)` not followed by its `;`.
+    SPIKE_STATEMENTS_TWIN,
+} SpikeStatementsVerdict;
+
+// A level that a block which isn't a statement interrupts: its last event and that event's classes, and the closer
+// that ends the interruption.
+typedef struct SpikeStatementLevel SpikeStatementLevel;
+struct SpikeStatementLevel
+{
+    uint32_t last;
+    uint32_t closer;
+    uint8_t last_classes;
+};
+
+typedef struct SpikeStatementPass SpikeStatementPass;
+struct SpikeStatementPass
+{
+    // The last event of the current level, and its classes.
+    uint32_t last;
+    SpikeStatementLevel* levels;
+    uint32_t level_count;
+    // How many blocks (OPEN_BLOCK and OPEN_BODY) are open, and for each, by depth, the owner of its statement: the head
+    // before a statement block's opener, else BUSTER_SPIKE_NONE.
+    uint32_t block_depth;
+    uint32_t* owners;
+    // Where the branch-free stores a lane doesn't make go: the owners' last slot, which no depth reaches.
+    uint32_t* sink;
+    // The dos whose while hasn't come, and a do-while's `)` whose `;` comes next, with its do.
+    uint32_t open_dos;
+    uint32_t pending_while;
+    uint32_t pending_do;
+    // The sparse loop runs a block behind (spike_statement_block): the last block with events, its sparse events, and
+    // whether a do is among them.
+    uint32_t sparse_block;
+    uint64_t sparse;
+    bool sparse_dos;
+    uint8_t last_classes;
+    bool else_without_if;
+    bool twin;
+};
+
+// What K5 in AVX-512 did: the blocks with events, those it took one event at a time, the events its sparse loop took,
+// and the files the twin did.
+typedef struct SpikeStatementCounts SpikeStatementCounts;
+struct SpikeStatementCounts
+{
+    uint64_t blocks;
+    uint64_t interrupted_blocks;
+    uint64_t sparse;
+    uint64_t twins;
+};
+
+// The events of a block from their classes and statement contexts.
+BUSTER_INLINE uint64_t spike_statement_events8(__m512i classes, uint64_t context, __mmask64 live_mask)
+{
+    const uint64_t contextual = _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_CONTEXTUAL)) & context;
+    const uint64_t always = _mm512_test_epi8_mask(classes, _mm512_set1_epi8((char)BUSTER_SPIKE_STATEMENT_ALWAYS));
+    return (contextual | always) & live_mask;
+}
+
+// The first event after `token`, or BUSTER_SPIKE_NONE.
+static uint32_t spike_statement_next(const SpikeKernels* kernels, uint32_t count, const SpikeStatementContext* contexts, uint32_t token)
+{
+    uint32_t block = token - token % 64;
+    uint64_t after = token % 64 == 63 ? 0 : ~(uint64_t)0 << (token % 64 + 1);
+    uint64_t events = 0;
+    bool searching = true;
+    while (searching)
+    {
+        const uint32_t live = count - block < 64 ? count - block : 64;
+        const __mmask64 live_mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
+        const __m512i classes = spike_table8(spike_statement_classes, _mm512_loadu_si512(kernels->roles + block));
+        events = spike_statement_events8(classes, contexts[block / 64].blocks, live_mask) & after;
+        after = ~(uint64_t)0;
+        searching = events == 0 && block + 64 < count;
+        block += searching ? 64 : 0;
+    }
+    return events != 0 ? block + (uint32_t)__builtin_ctzll(events) : BUSTER_SPIKE_NONE;
+}
+
+BUSTER_INLINE bool spike_statement_is_head(const SpikeKernels* kernels, uint32_t token)
+{
+    return token != BUSTER_SPIKE_NONE && (spike_statement_classes[kernels->roles[token]] & BUSTER_SPIKE_STATEMENT_HEADS) != 0;
+}
+
+BUSTER_INLINE bool spike_statement_bit(uint64_t mask, uint32_t token)
+{
+    return ((mask >> (token % 64)) & 1) != 0;
+}
+
+// The innermost head of the chain that owned the statement ending at `end`, if `end` is a terminator (the event before
+// it) or a block's closer (its owner, which the closer's `previous` holds); it need not be a head, and then the chain
+// is empty or `end` ends no statement.
+BUSTER_INLINE uint32_t spike_statement_chain(const SpikeKernels* kernels, const uint32_t* previous, uint32_t end)
+{
+    const uint8_t classes = end != BUSTER_SPIKE_NONE ? spike_statement_classes[kernels->roles[end]] : 0;
+    return (classes & BUSTER_SPIKE_STATEMENT_ENDS) != 0 ? previous[end] : BUSTER_SPIKE_NONE;
+}
+
+// One event the vector part leaves, in order: an else (its if), a do, a terminator after a head's `)` (that head's,
+// unless the head is a do-while's while), or a while's `)` after the end of a statement while a do waits (the do's, if
+// the chain down from that statement holds one).
+static void spike_statement_sparse(SpikeKernels* kernels, uint32_t count, const SpikeStatementContext* contexts, uint32_t* previous, SpikeStatementPass* state,
+                                   uint32_t i)
+{
+    const uint8_t role = kernels->roles[i];
+    if (role == SPIKE_ROLE_ELSE)
+    {
+        // The first if or do down the chain from the statement that ended before the else: an if is the else's.
+        uint32_t head = spike_statement_chain(kernels, previous, previous[i]);
+        bool matched = false;
+        bool searching = true;
+        while (searching)
+        {
+            const bool is_head = spike_statement_is_head(kernels, head);
+            const bool is_do = is_head && kernels->roles[head] == SPIKE_ROLE_DO;
+            matched = is_head && spike_statement_bit(contexts[head / 64].ifs, head);
+            searching = is_head && !is_do && !matched;
+            head = searching ? previous[head] : head;
+        }
+        if (matched)
+        {
+            kernels->parents[i] = head;
+            // From now on the else stands for its if in the chains.
+            previous[i] = previous[head];
+        }
+        else
+        {
+            state->else_without_if = true;
+        }
+    }
+    else if (role == SPIKE_ROLE_DO)
+    {
+        state->open_dos += 1;
+    }
+    else if (role == SPIKE_ROLE_TERMINATOR)
+    {
+        const uint32_t head = previous[i];
+        if (head == state->pending_while)
+        {
+            // A do-while's `;`: the parent of the do and of the while's `)`, and owned by what owned the do. In the
+            // chains it stands for the do-statement, whose owner is the do's.
+            const uint32_t owner = previous[state->pending_do];
+            kernels->parents[state->pending_do] = i;
+            kernels->parents[head] = i;
+            if (spike_statement_is_head(kernels, owner))
+            {
+                kernels->parents[i] = owner;
+            }
+            previous[i] = owner;
+            state->pending_while = BUSTER_SPIKE_NONE;
+        }
+        else
+        {
+            kernels->parents[i] = head;
+        }
+    }
+    else if (state->open_dos != 0)
+    {
+        // A while after the end of a statement is a do's if the first do down the chain comes before the chain ends.
+        uint32_t head = spike_statement_chain(kernels, previous, previous[i]);
+        while (spike_statement_is_head(kernels, head) && kernels->roles[head] != SPIKE_ROLE_DO)
+        {
+            head = previous[head];
+        }
+        if (spike_statement_is_head(kernels, head))
+        {
+            // Its `;` must come next.
+            const uint32_t next = spike_statement_next(kernels, count, contexts, i);
+            state->twin |= next == BUSTER_SPIKE_NONE || kernels->roles[next] != SPIKE_ROLE_TERMINATOR;
+            state->pending_while = i;
+            state->pending_do = head;
+            state->open_dos -= 1;
+        }
+    }
+}
+
+// A block's openers and closers of blocks in order, without a branch on which: an opener puts its statement's owner on
+// the stack (for a lane of `owned`, the event before it: before it in `events`, else `carried`, or `positions[lane]`
+// in a block that interrupts a level; else BUSTER_SPIKE_NONE), and its closer takes it as its parent, and as its
+// `previous`, where the chains find the chain its statement ended. Each one's slot is the depth before the block and
+// the openers and closers before it, so the iterations chain only through the stack. The stores a lane doesn't make go
+// to `sink`, a slot of a live array that nothing reads, which keeps the compiler from turning them back into branches.
+// Returns the depth after the block.
+static uint32_t spike_statement_brackets(uint64_t opens, uint64_t closes, uint64_t owned, uint64_t events, uint32_t carried, const uint32_t* positions,
+                                         uint32_t block, uint32_t depth, uint32_t* owners, uint32_t* parents, uint32_t* previous, uint32_t* sink)
+{
+    uint64_t brackets = opens | closes;
+    while (brackets != 0)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctzll(brackets);
+        brackets &= brackets - 1;
+        const uint64_t bit = (uint64_t)1 << lane;
+        const uint64_t below = bit - 1;
+        const bool open = (opens & bit) != 0;
+        const int64_t before = (int64_t)depth + __builtin_popcountll(opens & below) - __builtin_popcountll(closes & below);
+        // A closer with nothing open (an unbalanced file, which the fallback takes whole) leaves the stack alone.
+        const bool pop = !open && before > 0;
+        const int64_t raw = before - (open ? 0 : 1);
+        const uint32_t slot = (uint32_t)(raw & ~(raw >> 63));
+        const uint32_t popped = owners[slot];
+        const uint64_t earlier = events & below;
+        const uint32_t last = block + 63 - (uint32_t)__builtin_clzll(earlier | 1);
+        const uint32_t previous_event = positions != 0 ? positions[lane] : __builtin_unpredictable(earlier != 0) ? last : carried;
+        const uint32_t owner = __builtin_unpredictable((owned & bit) != 0) ? previous_event : BUSTER_SPIKE_NONE;
+        uint32_t* push = __builtin_unpredictable(open) ? &owners[slot] : sink;
+        *push = owner;
+        uint32_t* parent = __builtin_unpredictable(pop && popped != BUSTER_SPIKE_NONE) ? &parents[block + lane] : sink;
+        *parent = popped;
+        uint32_t* chain = __builtin_unpredictable(open) ? sink : &previous[block + lane];
+        *chain = pop ? popped : BUSTER_SPIKE_NONE;
+    }
+    const int64_t after = (int64_t)depth + __builtin_popcountll(opens) - __builtin_popcountll(closes);
+    return after > 0 ? (uint32_t)after : 0;
+}
+
+// One block of K5 in AVX-512 with events (see above), whose classes and statement contexts are `classes` and `context`.
+static void spike_statement_block(SpikeKernels* kernels, uint32_t count, const SpikeStatementContext* contexts, uint32_t* previous, SpikeStatementPass* state,
+                                  SpikeStatementCounts* counts, uint32_t block, __m512i classes, SpikeStatementContext context, uint64_t events)
+{
+    const uint64_t open_blocks = _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_OPEN_BLOCK)) & events;
+    const uint64_t opens = _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_OPEN_BLOCK | BUSTER_SPIKE_STATEMENT_OPEN_BODY)) & events;
+    const uint64_t closes = _mm512_test_epi8_mask(classes, _mm512_set1_epi8((char)BUSTER_SPIKE_STATEMENT_CLOSE)) & events;
+    // Whether the block interrupts a level: it holds the opener of a block that isn't a statement inside another block,
+    // or the closer of one.
+    uint64_t candidates = opens & ~(open_blocks & context.blocks);
+    bool interrupting = state->level_count != 0 && state->levels[state->level_count - 1].closer < block + 64;
+    while (candidates != 0)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctzll(candidates);
+        candidates &= candidates - 1;
+        const uint64_t below = ((uint64_t)1 << lane) - 1;
+        interrupting |= (int64_t)state->block_depth + __builtin_popcountll(opens & below) - __builtin_popcountll(closes & below) > 0;
+    }
+    const uint32_t carried = state->last;
+    uint32_t positions[64];
+    __m512i previous_positions[4];
+    __m512i previous_classes;
+    if (interrupting)
+    {
+        // One event at a time, each level's last event kept while a block that isn't a statement interrupts it.
+        counts->interrupted_blocks += 1;
+        uint8_t class_bytes[64];
+        uint8_t previous_bytes[64];
+        _mm512_storeu_si512(class_bytes, classes);
+        uint32_t depth = state->block_depth;
+        uint64_t lanes = events;
+        while (lanes != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(lanes);
+            lanes &= lanes - 1;
+            const uint32_t i = block + lane;
+            positions[lane] = state->last;
+            previous_bytes[lane] = state->last_classes;
+            const SpikeStatementLevel* top = state->level_count != 0 ? &state->levels[state->level_count - 1] : 0;
+            const bool open = (class_bytes[lane] & (BUSTER_SPIKE_STATEMENT_OPEN_BLOCK | BUSTER_SPIKE_STATEMENT_OPEN_BODY)) != 0;
+            const bool statement = (class_bytes[lane] & BUSTER_SPIKE_STATEMENT_OPEN_BLOCK) != 0 && spike_statement_bit(context.blocks, i);
+            if (top != 0 && top->closer == i)
+            {
+                state->last = top->last;
+                state->last_classes = top->last_classes;
+                state->level_count -= 1;
+            }
+            else
+            {
+                if (open && !statement && depth != 0)
+                {
+                    // Its closer is the opener's parent (K4).
+                    state->levels[state->level_count] = (SpikeStatementLevel){ .last = state->last, .closer = kernels->parents[i], .last_classes = state->last_classes };
+                    state->level_count += 1;
+                }
+                state->last = i;
+                state->last_classes = class_bytes[lane];
+            }
+            depth += open ? 1 : 0;
+            depth -= (class_bytes[lane] & BUSTER_SPIKE_STATEMENT_CLOSE) != 0 && depth != 0 ? 1 : 0;
+        }
+        for (uint32_t q = 0; q < 4; q += 1)
+        {
+            previous_positions[q] = _mm512_maskz_loadu_epi32((__mmask16)(events >> (16 * q)), positions + 16 * q);
+        }
+        previous_classes = _mm512_maskz_loadu_epi8(events, previous_bytes);
+    }
+    else
+    {
+        // Each event's previous event: the event lanes compressed, shifted up a lane and expanded back; the first one's is
+        // the event carried from the blocks before.
+        const __m512i dense = _mm512_maskz_compress_epi8(events, spike_shifts.lanes8);
+        const __m512i before = _mm512_maskz_expand_epi8(events, _mm512_permutex2var_epi8(dense, spike_shifts.up8[0], _mm512_set1_epi8((char)0xFF)));
+        const uint64_t first = events & (0 - events);
+        previous_classes = _mm512_mask_mov_epi8(_mm512_permutexvar_epi8(before, classes), first, _mm512_set1_epi8((char)state->last_classes));
+        const __m512i block_vector = _mm512_set1_epi32((int)block);
+        const __m512i carried_vector = _mm512_set1_epi32((int)carried);
+        for (uint32_t q = 0; q < 4; q += 1)
+        {
+            const __m128i quarter = q == 0 ? _mm512_extracti32x4_epi32(before, 0) : q == 1 ? _mm512_extracti32x4_epi32(before, 1) :
+                                    q == 2 ? _mm512_extracti32x4_epi32(before, 2) : _mm512_extracti32x4_epi32(before, 3);
+            previous_positions[q] = _mm512_mask_mov_epi32(_mm512_add_epi32(block_vector, _mm512_cvtepu8_epi32(quarter)), (__mmask16)(first >> (16 * q)), carried_vector);
+        }
+        const uint32_t last = 63 - (uint32_t)__builtin_clzll(events);
+        state->last = block + last;
+        state->last_classes = (uint8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_set1_epi8((char)last), classes)));
+    }
+    const uint64_t after_head = _mm512_test_epi8_mask(previous_classes, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_HEADS)) & events;
+    const uint64_t owned_blocks = open_blocks & context.blocks & after_head;
+    const uint64_t dos = _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_DO)) & events;
+    uint64_t sparse = (_mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_ELSE)) & events) | dos;
+    uint64_t deferred = 0;
+    if (state->open_dos != 0 || state->sparse_dos || dos != 0)
+    {
+        // While a do may wait for its while: a while's `)` after the end of a statement may be its, and a terminator
+        // after a while's `)` its `;`. The sparse loop decides.
+        deferred = _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_TERMINATOR)) & events &
+                   _mm512_test_epi8_mask(previous_classes, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_WHILE));
+        sparse |= deferred | (_mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_WHILE)) & events &
+                              _mm512_test_epi8_mask(previous_classes, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_ENDS)));
+    }
+    const uint64_t owned = _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_OWNED)) & after_head & ~deferred;
+    for (uint32_t q = 0; q < 4; q += 1)
+    {
+        _mm512_mask_storeu_epi32(kernels->parents + block + 16 * q, (__mmask16)(owned >> (16 * q)), previous_positions[q]);
+        _mm512_mask_storeu_epi32(previous + block + 16 * q, (__mmask16)(events >> (16 * q)), previous_positions[q]);
+    }
+    // The blocks' openers and closers, an opener's owner the event before it.
+    state->block_depth = spike_statement_brackets(opens, closes, owned_blocks, events, carried, interrupting ? positions : 0, block, state->block_depth, state->owners,
+                                                  kernels->parents, previous, state->sink);
+    // The block before's sparse events, then this block's later: a block behind, the loads of `previous` find the
+    // stores to it done.
+    uint64_t behind = state->sparse;
+    while (behind != 0)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctzll(behind);
+        behind &= behind - 1;
+        spike_statement_sparse(kernels, count, contexts, previous, state, state->sparse_block + lane);
+    }
+    counts->sparse += (uint64_t)__builtin_popcountll(sparse);
+    state->sparse_block = block;
+    state->sparse = sparse;
+    state->sparse_dos = dos != 0;
+}
+
+// K5 in AVX-512 (see above), from each block's statement contexts (K2's), with `previous` a slot per token for each
+// event's previous event in its level, `owners` count + 2 slots (one per block open, and the sink), and `levels` room
+// for the levels interrupted, one per token at most. Writes the parents spike_statements writes when it returns
+// SPIKE_STATEMENTS_OK; when the twin would return false it returns SPIKE_STATEMENTS_ELSE_WITHOUT_IF, and then, as for
+// the twin, the parents don't matter: the fallback takes the file.
+static SpikeStatementsVerdict spike_statements_avx512(SpikeKernels* kernels, uint32_t count, const SpikeStatementContext* contexts, uint32_t* previous,
+                                                      uint32_t* owners, SpikeStatementLevel* levels, SpikeStatementCounts* counts)
+{
+    SpikeStatementPass state = {
+        .last = BUSTER_SPIKE_NONE,
+        .levels = levels,
+        .level_count = 0,
+        .block_depth = 0,
+        .owners = owners,
+        .sink = owners + count + 1,
+        .open_dos = 0,
+        .pending_while = BUSTER_SPIKE_NONE,
+        .pending_do = BUSTER_SPIKE_NONE,
+        .sparse_block = 0,
+        .sparse = 0,
+        .sparse_dos = false,
+        .last_classes = 0,
+        .else_without_if = false,
+        .twin = false,
+    };
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const uint32_t live = count - block < 64 ? count - block : 64;
+        const __mmask64 live_mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
+        const SpikeStatementContext context = contexts[block / 64];
+        const __m512i table_classes = spike_table8(spike_statement_classes, _mm512_loadu_si512(kernels->roles + block));
+        const uint64_t events = spike_statement_events8(table_classes, context.blocks, live_mask);
+        if (events != 0)
+        {
+            const uint64_t heads = _mm512_test_epi8_mask(table_classes, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_HEAD));
+            const __m512i classes = _mm512_mask_mov_epi8(table_classes, heads & context.whiles, _mm512_set1_epi8(BUSTER_SPIKE_STATEMENT_WHILE));
+            counts->blocks += 1;
+            spike_statement_block(kernels, count, contexts, previous, &state, counts, block, classes, context, events);
+        }
+    }
+    while (state.sparse != 0)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctzll(state.sparse);
+        state.sparse &= state.sparse - 1;
+        spike_statement_sparse(kernels, count, contexts, previous, &state, state.sparse_block + lane);
+    }
+    const bool twin = state.twin || state.open_dos != 0 || state.pending_while != BUSTER_SPIKE_NONE;
+    return twin ? SPIKE_STATEMENTS_TWIN : state.else_without_if ? SPIKE_STATEMENTS_ELSE_WITHOUT_IF : SPIKE_STATEMENTS_OK;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -6678,10 +7214,9 @@ static bool spike_slots_reserve(SpikeSlots* slots, Arena* arena, uint64_t capaci
 typedef struct SpikeVectorBuffers SpikeVectorBuffers;
 struct SpikeVectorBuffers
 {
-    // By depth: K1's open openers, and K2's group roles and typed states.
+    // By depth: K1's open openers, and K2's group stacks.
     uint32_t* open_stack;
-    uint8_t* group_roles;
-    uint8_t* group_typed;
+    SpikeGroupStacks groups;
     // By token: K2's typed states, K4's L and its key.
     uint8_t* typed;
     uint32_t* lefts;
@@ -6692,6 +7227,12 @@ struct SpikeVectorBuffers
     SpikeSlots slots;
     uint32_t* secondary;
     SpikeStatement* statements;
+    // K2's statement contexts, per 64 tokens, and for K5 each event's previous event in its level, the owners of the
+    // open blocks and the levels interrupted.
+    SpikeStatementContext* contexts;
+    uint32_t* statement_previous;
+    uint32_t* statement_owners;
+    SpikeStatementLevel* statement_levels;
     // The postorder's: each token's last child, the end of its subtree, the counting sort's cursors, and the postorder.
     uint32_t* last_children;
     uint32_t* subtree_ends;
@@ -6701,6 +7242,7 @@ struct SpikeVectorBuffers
     // byte lanes hold, which run as two 16-bit blocks.
     uint64_t rounds[BUSTER_SPIKE_ROLE_ROUNDS + 1];
     uint64_t wide_blocks;
+    SpikeStatementCounts statement_counts;
 };
 
 // Candidates for K4's searches, with their padding below index 0.
@@ -6724,8 +7266,9 @@ static bool spike_candidates_reserve(SpikeCandidates* candidates, Arena* arena, 
     return result;
 }
 
-// The by-depth stacks have BUSTER_SPIKE_DEPTH_PADDING entries below depth 0: no opener, role NONE, not typed.
-#define BUSTER_SPIKE_DEPTH_PADDING 64
+// The by-depth stacks have BUSTER_SPIKE_DEPTH_PADDING entries below depth 0: no opener, role NONE, not typed. K2 reads
+// 65 below a block's starting depth.
+#define BUSTER_SPIKE_DEPTH_PADDING 128
 
 static bool spike_vector_buffers_reserve(SpikeVectorBuffers* buffers, Arena* arena, uint64_t capacity)
 {
@@ -6733,25 +7276,36 @@ static bool spike_vector_buffers_reserve(SpikeVectorBuffers* buffers, Arena* are
     uint32_t* open_stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots + BUSTER_SPIKE_DEPTH_PADDING);
     uint8_t* group_roles = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots + BUSTER_SPIKE_DEPTH_PADDING);
     uint8_t* group_typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots + BUSTER_SPIKE_DEPTH_PADDING);
+    uint8_t* group_keywords = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots + BUSTER_SPIKE_DEPTH_PADDING);
     *buffers = (SpikeVectorBuffers){
         .open_stack = open_stack != 0 ? open_stack + BUSTER_SPIKE_DEPTH_PADDING : 0,
-        .group_roles = group_roles != 0 ? group_roles + BUSTER_SPIKE_DEPTH_PADDING : 0,
-        .group_typed = group_typed != 0 ? group_typed + BUSTER_SPIKE_DEPTH_PADDING : 0,
+        .groups = {
+            .roles = group_roles != 0 ? group_roles + BUSTER_SPIKE_DEPTH_PADDING : 0,
+            .typed = group_typed != 0 ? group_typed + BUSTER_SPIKE_DEPTH_PADDING : 0,
+            .keywords = group_keywords != 0 ? group_keywords + BUSTER_SPIKE_DEPTH_PADDING : 0,
+        },
         .typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
         .lefts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .left_keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, slots),
         .works = BUSTER_ARENA_PUSH_ARRAY(arena, SpikeBlockWork, slots / 64 + BUSTER_SPIKE_PREPARED_TOGETHER),
         .secondary = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .statements = BUSTER_ARENA_PUSH_ARRAY(arena, SpikeStatement, slots),
+        .contexts = BUSTER_ARENA_PUSH_ARRAY(arena, SpikeStatementContext, slots / 64 + 1),
+        .statement_previous = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .statement_owners = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .statement_levels = BUSTER_ARENA_PUSH_ARRAY(arena, SpikeStatementLevel, slots),
         .last_children = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .subtree_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .cursors = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .postorder = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .rounds = { 0 },
         .wide_blocks = 0,
+        .statement_counts = { 0 },
     };
-    bool result = open_stack != 0 && group_roles != 0 && group_typed != 0 && buffers->typed != 0 && buffers->lefts != 0 && buffers->left_keys != 0 &&
-                  buffers->secondary != 0 && buffers->statements != 0 && buffers->last_children != 0 && buffers->subtree_ends != 0 && buffers->cursors != 0 && buffers->postorder != 0 &&
+    bool result = open_stack != 0 && group_roles != 0 && group_typed != 0 && group_keywords != 0 && buffers->typed != 0 && buffers->lefts != 0 && buffers->left_keys != 0 &&
+                  buffers->secondary != 0 && buffers->statements != 0 && buffers->contexts != 0 && buffers->statement_previous != 0 && buffers->statement_owners != 0 &&
+                  buffers->statement_levels != 0 &&
+                  buffers->last_children != 0 && buffers->subtree_ends != 0 && buffers->cursors != 0 && buffers->postorder != 0 &&
                   buffers->works != 0 && spike_candidates_reserve(&buffers->candidates, arena, capacity) &&
                   spike_slots_reserve(&buffers->slots, arena, capacity);
     if (result)
@@ -6761,6 +7315,7 @@ static bool spike_vector_buffers_reserve(SpikeVectorBuffers* buffers, Arena* are
             open_stack[i] = BUSTER_SPIKE_NONE;
             group_roles[i] = SPIKE_ROLE_NONE;
             group_typed[i] = 0;
+            group_keywords[i] = SPIKE_KIND_END;
         }
     }
     return result;
@@ -6776,6 +7331,37 @@ static uint32_t spike_deepest(const SpikeKernels* kernels, uint32_t count)
         deepest = _mm512_max_epu32(deepest, _mm512_maskz_loadu_epi32(live, kernels->node_depths + block));
     }
     return _mm512_reduce_max_epu32(deepest);
+}
+
+// K4 as the vector path runs it: in byte lanes with the stack's top in registers, but for nesting too deep for its
+// 16-bit keys, which the twin takes.
+static void spike_parents_vector(SpikeKernels* kernels, uint32_t count, SpikeVectorBuffers* buffers)
+{
+    if (spike_deepest(kernels, count) <= BUSTER_SPIKE_MAX_VECTOR_DEPTH)
+    {
+        spike_top_parents8_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, buffers->works, kernels->parents, &buffers->slots,
+                                  &buffers->wide_blocks);
+    }
+    else
+    {
+        spike_parents_scalar(kernels, count);
+    }
+}
+
+// K5 as the vector path runs it, after K4: in AVX-512, or where only the twin's stack decides, K4 again (for its
+// parents, which K5 overwrote) and the twin. Returns false if an else has no if.
+static bool spike_statements_vector(SpikeKernels* kernels, uint32_t count, SpikeVectorBuffers* buffers)
+{
+    const SpikeStatementsVerdict verdict = spike_statements_avx512(kernels, count, buffers->contexts, buffers->statement_previous, buffers->statement_owners,
+                                                                   buffers->statement_levels, &buffers->statement_counts);
+    bool result = verdict == SPIKE_STATEMENTS_OK;
+    if (verdict == SPIKE_STATEMENTS_TWIN)
+    {
+        buffers->statement_counts.twins += 1;
+        spike_parents_vector(kernels, count, buffers);
+        result = spike_statements(kernels, count, buffers->statements);
+    }
+    return result;
 }
 
 // Every kernel in AVX-512 in turn, then the fallback, into kernels->parents: the data-parallel parser.
@@ -6794,23 +7380,13 @@ static SpikeKernelResult spike_parse_vector(SpikeKernels* kernels, const uint8_t
     }
     spike_classify_mask_avx512(kernels, kinds, names, count);
     // K2.
-    spike_roles_avx512(kernels, count, buffers->typed, buffers->group_roles, buffers->group_typed, buffers->rounds);
+    spike_roles_avx512(kernels, count, buffers->typed, &buffers->groups, buffers->contexts, buffers->rounds);
     // K1's second part, and the roles after the colons it resolved.
     spike_secondary_avx512(kernels, count, buffers->secondary);
     spike_after_colons_avx512(kernels, count);
-    // K4 in byte lanes with the stack's top in registers: 16-bit keys hold every depth but the deepest nesting, which the
-    // twin takes.
-    if (spike_deepest(kernels, count) <= BUSTER_SPIKE_MAX_VECTOR_DEPTH)
-    {
-        spike_top_parents8_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, buffers->works, kernels->parents, &buffers->slots,
-                                  &buffers->wide_blocks);
-    }
-    else
-    {
-        spike_parents_scalar(kernels, count);
-    }
-    // K5.
-    const bool statements_ok = spike_statements_avx512(kernels, count, buffers->statements);
+    // K4 and K5.
+    spike_parents_vector(kernels, count, buffers);
+    const bool statements_ok = spike_statements_vector(kernels, count, buffers);
     for (uint32_t block = 0; block < count; block += 64)
     {
         const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
