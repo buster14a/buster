@@ -2629,11 +2629,11 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         bool found_all = true;
         for (uint32_t e = 0; e < global_names->count; e += 1)
         {
-            found_all = found_all && runtime_find_global_name(global_names, global_names->bytes[e], global_names->length[e], global_names->hash[e]) == e + 1 &&
-                        global_names->hash[e] == link_hash(global_names->bytes[e], global_names->length[e]);
+            found_all = found_all && runtime_find_global_name(global_names, runtime_global_name(global_names, e), global_names->length[e], global_names->hash[e]) == e + 1 &&
+                        global_names->hash[e] == link_hash(runtime_global_name(global_names, e), global_names->length[e]);
             for (uint32_t other = e + 1; distinct && other < global_names->count; other += 1)
             {
-                distinct = global_names->length[other] != global_names->length[e] || memcmp(global_names->bytes[other], global_names->bytes[e], global_names->length[e]) != 0;
+                distinct = global_names->length[other] != global_names->length[e] || memcmp(runtime_global_name(global_names, other), runtime_global_name(global_names, e), global_names->length[e]) != 0;
             }
         }
         import_test_expect(&tally, global_names->count >= runtime.libc.exports.count + runtime.libc.references.count, "a global name for each of libc's", global_names->count);
@@ -2654,7 +2654,7 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
             const bool global = name != 0 && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
             const uint32_t entry = runtime.symbol_names[symbol];
             own = own && (global ? entry != 0 && global_names->length[entry - 1] == link->names.length[name] &&
-                                       memcmp(global_names->bytes[entry - 1], link->names.bytes[name], link->names.length[name]) == 0
+                                       memcmp(runtime_global_name(global_names, entry - 1), link->names.bytes[name], link->names.length[name]) == 0
                                  : entry == 0);
         }
         import_test_expect(&tally, own, "each global symbol's global name its own", 0);

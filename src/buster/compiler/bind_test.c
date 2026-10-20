@@ -562,7 +562,7 @@ static uint32_t bind_test_scan_name(const RuntimeNames* names, const uint8_t* by
     uint32_t result = 0;
     for (uint32_t e = 0; result == 0 && e < names->count; e += 1)
     {
-        result = names->length[e] == length && memcmp(names->bytes[e], bytes, length) == 0 ? e + 1 : 0;
+        result = names->length[e] == length && memcmp(runtime_global_name(names, e), bytes, length) == 0 ? e + 1 : 0;
     }
     return result;
 }

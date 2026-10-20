@@ -256,6 +256,14 @@ designs and the compilers already built this way.
   runs them) and `dynamic_test.c` the PIEs' (`./build/compiler
   test-dynamic`); `main.c` includes both, and `executable_benchmark.c`
   provides `benchmark-executable`.
+- `src/buster/compiler/snapshot.c` is the runtime snapshot (step 5's fourth
+  part): what `runtime_import` makes of the C runtime, kept in a file in the
+  cache directory (`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster`), which
+  `runtime_open` maps and uses in place when this executable wrote it and every
+  file the import probed is as it was, and otherwise rebuilds and renames into
+  place. `snapshot_test.c` holds its tests (`main.c` includes it;
+  `./build/compiler test-snapshot` runs them) and `snapshot_benchmark.c`
+  provides `benchmark-snapshot`.
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
   encoded, from `x86_encode`'s offsets and rounds over the branches alone
@@ -334,6 +342,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-executable
 ./build/compiler test-dynamic --cross-check
 ./build/compiler benchmark-executable
+./build/compiler test-snapshot
+./build/compiler benchmark-snapshot
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
 ./build/compiler test-preprocessor --clang
@@ -1258,6 +1268,63 @@ affinity they start with. `docs/object-writer-and-linker.md` ("Patching and
 writing", "The first executables" and "The dynamic PIE") has the numbers.
 The default 9700X job runs it after the tests, pinned to one allowed CPU;
 like the others, its measurements are informational.
+
+## Snapshot tests
+
+`./build/compiler test-snapshot [--seed N] [--functions N] [--directory PATH]
+[--keep]` (about 0.05 s on the 9700X) checks `snapshot.c` with this system's
+runtime, in a directory of its own under `--directory` (`TMPDIR` or `/tmp` by
+default), which it removes unless `--keep`:
+
+- round trip: the imported runtime written as a snapshot and loaded back must
+  have the import's records, every one that binding and a dynamic PIE read,
+  and the loaded runtime must use the file's mapping and no arena; so must it
+  after another snapshot was renamed over the file it maps;
+- links: test-link's two sets that call libc and a program of `--functions`
+  workers (2,000 by default), bound by both of binding's paths against the
+  imported runtime and against a loaded one: the same links and bindings,
+  written as dynamic PIEs by 1 and 8 lanes into the same bytes, which run;
+- opening: `runtime_open` in a directory two levels below one that exists,
+  which it makes private: imported and written, then loaded; with no
+  directory, or without an identity, imported and nothing written; and where
+  the directory can't be made, the runtime still imported, the failure named;
+- staleness: snapshots with probes of the test's own files, each changed one
+  way (rewritten in place to the same size, its mode changed, replaced by a
+  rename, removed, created where a probe found nothing, a file added to a
+  probed directory, written with its times put back), and one written by
+  another executable, must be stale, and `runtime_open` must rebuild them;
+- invalid files: 1,278 damaged copies (cut short, one byte longer, a byte
+  changed at sampled offsets and in every byte of the header) must be invalid,
+  and so must 9 whose header was changed and then rehashed (another version or
+  magic, a region misaligned, running or starting past the end or of the wrong
+  size, counts out of range), which only the header's own checks catch;
+  `runtime_open` must replace them; a directory and a FIFO at the snapshot's
+  path must neither block a link (run in a child under an alarm) nor fail it,
+  the FIFO replaced and the directory left with nothing beside it;
+- concurrency: eight processes opening the runtime at once in an empty
+  directory must each get it and leave one snapshot, which loads, and no other
+  file;
+- the cache directory: `snapshot_directory` from `XDG_CACHE_HOME` and `HOME`.
+
+`--seed N` and `--functions N` change the programs. The default 9700X job runs
+it after benchmark-executable.
+
+## Snapshot benchmark
+
+`./build/compiler benchmark-snapshot [--directory PATH] [--runs N]` reports
+medians of `--runs` runs (41 by default) of the import without a snapshot,
+`snapshot_write` into a directory under `--directory` (`TMPDIR` or `/tmp`),
+`runtime_open` from the snapshot phase by phase (the compiler's identity, the
+mapping, the header and the hash, the view, the probes' `stat`s),
+`runtime_release` of a loaded runtime, the alternatives the design weighed
+(the snapshot read with `pread` into new memory, and mapped without the hash),
+and binding a program of one worker against the imported and the loaded
+runtime, which must make the same link. Run it under the 9700X's lock with
+`taskset -c 2`, with `--directory` on each file system to measure (the cache
+directory is under `$HOME`, btrfs there). `docs/object-writer-and-linker.md`
+("The runtime snapshot") has the numbers. The default 9700X job runs it after
+the tests, pinned to one allowed CPU; like the others, its measurements are
+informational.
 
 ## Dataflow tests
 

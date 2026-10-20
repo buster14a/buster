@@ -42,6 +42,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -125,11 +126,14 @@ struct RuntimePiece
 
 // The names a program's are bound against (bind.c): each distinct name of a global or weak symbol of the runtime's
 // objects, of libc.so.6's exports and of its references, and of those the linker defines, once, as columns, with what
-// binding needs to know of it, and indexed by hash.
+// binding needs to know of it, and indexed by hash. A name's bytes are `length` bytes at its offset in `strings`, so
+// that the columns hold no pointers and a snapshot's can be mapped as they are (snapshot.c).
 typedef struct RuntimeNames RuntimeNames;
 struct RuntimeNames
 {
-    const uint8_t** bytes;
+    const uint8_t* strings;
+    uint64_t strings_length;
+    uint32_t* offset;
     uint32_t* length;
     uint64_t* hash;
     // The first of the runtime's symbols that defines the name, in symbol order, or 0.
@@ -194,6 +198,12 @@ struct Runtime
     // (0 for a local or unnamed symbol).
     RuntimeNames global_names;
     uint32_t* symbol_names;
+    // For a runtime loaded from a snapshot (snapshot.c), the file, mapped, whose columns it uses where they are; 0 for one
+    // runtime_import made. A loaded runtime has what binding and a dynamic PIE read: none of the files' bytes, the
+    // objects' and members' ImportObjects, or libc.so.6's export names, sizes, references and index, which only the
+    // import uses. Its arenas are empty, and `names` is a view of the mapped names run, which bind.c copies from.
+    uint8_t* snapshot;
+    uint64_t snapshot_bytes;
     // When it failed: the file that didn't import or couldn't be read, or the name that wasn't found, the importer's
     // result and errno.
     char failed_file[BUSTER_RUNTIME_PATH_BYTES];
@@ -201,8 +211,8 @@ struct Runtime
     int system_error;
 };
 
-// Finds the runtime's files and imports them, with arenas of its own; runtime_release frees them. On failure, the
-// error says what went wrong and the runtime's fields where.
+// Finds the runtime's files and imports them, with arenas of its own; runtime_release frees them (or a snapshot's
+// mapping, for a runtime loaded from one). On failure, the error says what went wrong and the runtime's fields where.
 static __attribute__((unused)) RuntimeError runtime_import(Runtime* runtime);
 static __attribute__((unused)) void runtime_release(Runtime* runtime);
 // Whether every path the search probed is as it found it: absent still, or the same file or directory, by st_dev, st_ino,
@@ -210,6 +220,8 @@ static __attribute__((unused)) void runtime_release(Runtime* runtime);
 static __attribute__((unused)) bool runtime_probes_current(const Runtime* runtime);
 // The entry of the runtime's global names (RuntimeNames) with these bytes, plus 1, or 0.
 static __attribute__((unused)) uint32_t runtime_find_global_name(const RuntimeNames* names, const uint8_t* bytes, uint32_t length, uint64_t hash);
+// The bytes of an entry of the runtime's global names.
+static __attribute__((unused)) const uint8_t* runtime_global_name(const RuntimeNames* names, uint32_t entry);
 // The two bits a name's hash sets in its word of the global names' filter: the hash's low six bits and the six above.
 static __attribute__((unused)) uint64_t runtime_name_filter_bits(uint64_t hash);
 
@@ -831,9 +843,18 @@ static RuntimeError runtime_global_names(Runtime* runtime)
         import_exclusive_scan(entries, count + 1);
     }
     const uint32_t entry_count = result == RUNTIME_ERROR_NONE ? entries[count] : 0;
+    // The first ones' bytes, one after another in entry order.
+    uint64_t strings_length = 0;
+    for (uint32_t c = 0; result == RUNTIME_ERROR_NONE && c < count; c += 1)
+    {
+        strings_length += first[c] == c ? lengths[c] : 0;
+    }
     if (result == RUNTIME_ERROR_NONE)
     {
-        names->bytes = BUSTER_ARENA_PUSH_ARRAY(arena, const uint8_t*, entry_count);
+        uint8_t* strings = strings_length <= UINT32_MAX ? arena_push(arena, strings_length, 64) : 0;
+        names->strings = strings;
+        names->strings_length = strings_length;
+        names->offset = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, entry_count);
         names->length = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, entry_count);
         names->hash = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, entry_count);
         names->definition = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, entry_count);
@@ -841,8 +862,8 @@ static RuntimeError runtime_global_names(Runtime* runtime)
         names->referenced = BUSTER_ARENA_PUSH_ARRAY(arena, bool, entry_count);
         names->linker = BUSTER_ARENA_PUSH_ARRAY(arena, bool, entry_count);
         names->count = entry_count;
-        const bool pushed = names->bytes != 0 && names->length != 0 && names->hash != 0 && names->definition != 0 && names->export != 0 && names->referenced != 0 &&
-                            names->linker != 0;
+        const bool pushed = (strings != 0 || strings_length == 0) && names->offset != 0 && names->length != 0 && names->hash != 0 && names->definition != 0 &&
+                            names->export != 0 && names->referenced != 0 && names->linker != 0;
         result = pushed ? result : RUNTIME_ERROR_MEMORY;
     }
     if (result == RUNTIME_ERROR_NONE)
@@ -854,14 +875,17 @@ static RuntimeError runtime_global_names(Runtime* runtime)
         memset(runtime->symbol_names, 0, symbol_count * sizeof(*runtime->symbol_names));
     }
     // Each candidate's entry: a first one's spelling, and what each candidate says of its name.
+    uint64_t position = 0;
     for (uint32_t c = 0; result == RUNTIME_ERROR_NONE && c < count; c += 1)
     {
         const uint32_t entry = entries[first[c]];
         if (first[c] == c)
         {
-            names->bytes[entry] = bytes[c];
+            memcpy((uint8_t*)names->strings + position, bytes[c], lengths[c]);
+            names->offset[entry] = (uint32_t)position;
             names->length[entry] = lengths[c];
             names->hash[entry] = hashes[c];
+            position += lengths[c];
         }
         if (c < named_count)
         {
@@ -924,10 +948,15 @@ static uint32_t runtime_find_global_name(const RuntimeNames* names, const uint8_
     for (uint32_t place = begin; result == 0 && place < end; place += 1)
     {
         const uint32_t entry = index->order[place];
-        const bool same = index->hash[place] == hash && names->length[entry] == length && import_same_bytes(names->bytes[entry], bytes, length);
+        const bool same = index->hash[place] == hash && names->length[entry] == length && import_same_bytes(names->strings + names->offset[entry], bytes, length);
         result = same ? entry + 1 : 0;
     }
     return result;
+}
+
+static const uint8_t* runtime_global_name(const RuntimeNames* names, uint32_t entry)
+{
+    return names->strings + names->offset[entry];
 }
 
 static RuntimeError runtime_import(Runtime* runtime)
@@ -1018,7 +1047,15 @@ static RuntimeError runtime_import(Runtime* runtime)
 
 static void runtime_release(Runtime* runtime)
 {
-    arena_release(&runtime->tables);
-    arena_release(&runtime->names);
-    arena_release(&runtime->files);
+    if (runtime->snapshot != 0)
+    {
+        munmap(runtime->snapshot, runtime->snapshot_bytes);
+        runtime->snapshot = 0;
+    }
+    else
+    {
+        arena_release(&runtime->tables);
+        arena_release(&runtime->names);
+        arena_release(&runtime->files);
+    }
 }

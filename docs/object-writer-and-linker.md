@@ -38,8 +38,9 @@ can bring that close to what the kernel needs to put a file in the page cache.
   libgcc are the same for every link, and reading them is most of what a small
   link costs mold and wild (0.59 of wild's 1.09 ms on hello world go to
   opening them and reading their symbols). The compiler digests them once into
-  a *runtime snapshot*, a small cache file checked on each link with one `stat`
-  per file.
+  a *runtime snapshot*, a cache file mapped and checked on each link with one
+  `stat` per file it was made from: 9.2 µs on the 9700X, against 146 µs for
+  importing the runtime.
 - **One representation serves every path.** Atoms, symbols, fixups and names,
   each a column array indexed by a 32-bit id, carry the direct path, the object
   writer and imported ELF inputs alike.
@@ -308,8 +309,10 @@ gets shorter:
 **Direct path, small programs.** A hello world's link should cost about as much
 as its output file: 1–4 µs on tmpfs, 3–12 µs on btrfs. On top of that:
 
-- a dozen `stat` calls, about 2 µs, to check the runtime snapshot;
-- reading the snapshot, a few microseconds;
+- a dozen `stat` calls, about 2 µs, to check the runtime snapshot (19 as
+  built, 4.1 µs: "The runtime snapshot");
+- reading the snapshot, a few microseconds (mapping and hashing its 185 KB,
+  4 µs as built);
 - layout, patching and writing the dynamic sections, a few microseconds more.
 
 That is 130–270× faster than wild and mold at their defaults, and 64–120×
@@ -710,31 +713,94 @@ it once and keeps the result in a snapshot under `$XDG_CACHE_HOME/buster/`.
   through the GOT, `_init`/`_fini`, `__dso_handle`, the `.init_array` entries
   (`frame_dummy`), and weak undefined references (`__gmon_start__`, the
   `_ITM_*` clone table functions) that resolve to 0.
-- **libc.so.6's exports:** columns of each name's default version, type and
-  size, indexed by the front end's name hash in buckets filled by a counting
-  sort ("Step 5's phases, data-parallel"), and the library's undefined names,
-  which decide the program's exports. It is a few tens of kilobytes. The other
-  shared libraries in the link get the same.
+- **libc.so.6's exports:** each name's default version and type, and the
+  runtime's *global names*: each distinct name of the runtime objects' global
+  symbols and of libc.so.6's exports and undefined names, with what binding
+  needs of it (its definition, its export, whether libc.so.6 refers to it,
+  which decides the program's exports, and whether the linker defines it),
+  indexed by the front end's name hash in buckets filled by a counting sort,
+  with a blocked Bloom filter ("Step 5's phases, data-parallel"). The other
+  shared libraries in the link will get the same.
 - **For `-static`, libc.a's 2,227 members:** each member's atoms and fixups,
   already converted; a table from symbol to defining member; and each member's
   undefined names. libgcc.a and libgcc_eh.a get the same.
-- **The search results** that led to each file: the paths probed in the `-L`
-  order and which ones were absent.
+- **The search results** that led to each file: every path probed, in the
+  search's order, found or absent, with its identity.
 
-**Validation.** The key is the compiler's version, the options that change the
-runtime (`-static`, `-pie`, `-nostdlib`, the search paths) and the identity of
+**Validation.** The key is the identity of the compiler's executable and of
 each file: `st_dev`, `st_ino`, `st_size`, `st_mtim` and `st_ctim`. A package
 upgrade replaces the inode and changes all of these. `st_ctim` changes on any
-write, and no system call sets it.
+write, and no system call sets it. The compiler's own identity stands for its
+version and for the snapshot's layout: a rebuild of the compiler changes it,
+so a snapshot is only ever read by the executable that wrote it, with the same
+struct layouts. The absent candidates are checked so that a library newly
+placed earlier in the search path is noticed. The options that change the
+runtime (`-static`, `-pie`, `-nostdlib`, the search paths) will each get a
+snapshot of their own.
 
-Checking costs one `stat` per file and per absent candidate: about ten calls
-at 0.18 µs. The absent candidates are checked so that a library newly placed
-earlier in the search path is noticed. Reading the snapshot is one `pread` of
-a few kilobytes (or more for `-static`).
+**As built** (`snapshot.c`: `runtime_open`, with `test-snapshot` and
+`benchmark-snapshot`). The snapshot is `runtime.snapshot` in
+`$XDG_CACHE_HOME/buster`, or `$HOME/.cache/buster` without it, made private
+(mode 0700) when it is missing.
 
-A stale or missing snapshot is rebuilt by the import path (the same code as a
-full link), written to a temporary file and renamed into place. Two compilers
-rebuilding it at once write identical files, so no lock is needed.
+- **The file** is the runtime's records as the compiler lays them out in
+  memory: a header (the counts, the paths and each region's place), the
+  records that hold pointers from the second page, the strings they point
+  into, then the columns, each at a multiple of 64 bytes. It is 185 KB on the
+  9700X: 2,673 global names with their index and filter, and 2,630 exports.
+  The "few tens of kilobytes" this section first expected were the exports'
+  columns alone.
+- **Loading** maps it privately. The runtime's columns point into the mapping
+  and are used where they are, which is why the global names hold their bytes
+  as offsets into one string pool rather than as pointers. Only the probes,
+  libc.so.6's versions, `libc_nonshared.a`'s members and the link's names' and
+  atoms' bytes hold pointers, stored as offsets plus 1 (0 for none) and
+  rebased where they are, which copies their page alone.
+- **It is trusted only whole:** its magic, version and size must be right,
+  its 128-bit hash (the build ID's chunk hash, over the file with the hash's
+  field as zeros) must be its bytes', the executable that wrote it must be
+  this one, and every probe must be as it was. A torn, truncated or corrupt
+  file is rebuilt rather than trusted, so the writer needs no `fsync`.
+- **A stale or missing snapshot** is rebuilt by the import (the same code as a
+  link without a snapshot), written into a new file under a random name beside
+  it and renamed into place. A process that has the old one mapped keeps it
+  whole, and two compilers rebuilding it at once write identical files, the
+  last rename winning, so no lock is needed. A snapshot that can't be written
+  (a directory at its path, a cache directory that can't be made) doesn't fail
+  the link, which goes on with the imported runtime.
+
+On the 9700X (`benchmark-snapshot`, one CPU, medians of 41 runs, on tmpfs; on
+btrfs, the cache directory's file system there, within 0.4 µs but for the
+write):
+
+| Step | µs |
+| --- | ---: |
+| `runtime_import` and `runtime_release`, without a snapshot | 146 |
+| `runtime_open` from the snapshot | 9.1–9.5 |
+| — the compiler's identity: `stat` of `/proc/self/exe` | 0.5 |
+| — `open`, `fstat`, `mmap` and `close` | 1.0–1.1 |
+| — the header and the hash, which reads all 185 KB | 2.7–3.1 |
+| — the columns pointed into the mapping, the records rebased | 0.6–0.7 |
+| — the 19 probes' `stat` | 4.1 |
+| `runtime_release` of a loaded runtime (`munmap`) | 1.9–2.3 |
+| `snapshot_write`, on tmpfs / btrfs | 47 / 390–410 |
+| the 185 KB read with `pread` into new memory instead | 20 |
+| mapped without the hash, then 12 lookups | 7.7–8.1 |
+| binding one worker against the imported / the loaded runtime | 2.6 / 2.6 |
+
+- **Mapped, not read.** `pread` puts the 185 KB into new anonymous pages,
+  whose first touches make it cost 20 µs; mapping the page cache's own pages
+  costs 1 µs, and their first reads under the hash 2 µs more.
+- **The hash costs 1.3 µs** over a mapping read only where a hello world's
+  binding reads it. It is what lets the loader trust the file without checking
+  each record: what the hash passes is what this executable wrote.
+- **The probes are the largest part:** 19 `stat` calls at 0.215 µs. Eight are
+  absent candidates in directories the 9700X doesn't have (Debian's multiarch
+  ones). A probe of each directory instead would leave 13, about 2.8 µs, since
+  a directory's times change when a file is added to it; it is left for later.
+  `statx` costs 0.24 µs a call, more than `stat`.
+- **Binding is as fast against a loaded runtime as against an imported one:**
+  the hash has already read the columns it reads.
 
 **Finding and importing the files** (`runtime.c`, with the readers of
 `import.c`). GCC's installation is the highest version under
@@ -1036,12 +1102,10 @@ byte, is a chain within a name but a dot product in closed form, `5381 *
 four `vpmulld` of its bytes widened to dwords by a vector of powers of 33
 right-aligned to its length, and a reduction.
 
-The phase still to come is designed the same way:
-
-- **The snapshot** (part 4): the runtime's link written as its columns are,
-  without a record at a time, and read back with one `pread`. It is
-  validated by one `statx` per probe (19 here, 0.18 µs each), which can go
-  through one `io_uring` submission if that measures faster.
+The snapshot (part 4) holds the runtime's columns as they are, written without
+a record at a time and mapped back rather than read, the link's columns of
+pointers rebased eight at a time, and validated by one `stat` per probe (19
+here, 0.215 µs each, faster than `statx`): "The runtime snapshot".
 
 #### Layout
 
@@ -2525,8 +2589,9 @@ and with this document updated with what was measured:
    bound (`bind.c`, `test-bind` and `benchmark-bind`, done: "Step 5's phases,
    data-parallel"); the dynamic PIE (`executable.c`'s dynamic mode,
    `dynamic.c`, `test-dynamic` and `benchmark-executable`'s PIE rows, done:
-   "The dynamic PIE"); then the snapshot itself, `.eh_frame` for the
-   generated programs and `benchmark-link`.
+   "The dynamic PIE"); the snapshot itself (`snapshot.c`, `test-snapshot`
+   and `benchmark-snapshot`, done: "The runtime snapshot"); then `.eh_frame`
+   for the generated programs and `benchmark-link`.
 6. **`-static`:** libc.a's closure, IRELATIVE for its IFUNCs, static TLS.
    Then `-static-pie` and `-shared`.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse

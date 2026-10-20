@@ -320,6 +320,12 @@ int run_executable_benchmark(int argc, char** argv);
 #include "buster/compiler/dynamic.c"
 #include "buster/compiler/dynamic_test.c"
 
+// The runtime snapshot (the imported runtime kept in the cache directory) and its tests, for the test-snapshot command.
+// Its benchmark is another translation unit.
+#include "buster/compiler/snapshot.c"
+#include "buster/compiler/snapshot_test.c"
+int run_snapshot_benchmark(int argc, char** argv);
+
 // Branch sizing (each branch's rel8 or rel32 form inside a function, before it's encoded), the functions its tests
 // generate, and its tests, for the test-branch-sizing command. Its benchmark is another translation unit.
 #include "buster/compiler/branch_sizing.c"
@@ -444,6 +450,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "test-dynamic") == 0)
     {
         result = run_dynamic_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-snapshot") == 0)
+    {
+        result = run_snapshot_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-snapshot") == 0)
+    {
+        result = run_snapshot_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-branch-sizing") == 0)
     {
