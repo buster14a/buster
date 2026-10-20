@@ -581,7 +581,8 @@ record, and be long exactly where a rel8 can't reach:
 boundaries' probes and the chains as GNU as source, each in a section of its
 own with a label at every target, and GNU as's relaxation of them (every
 branch short at first, then growing the ones out of range) must give the same
-bytes as `x86_encode_scalar` of the sized records. The files go in a directory
+bytes as `x86_encode_scalar` of the sized records; an object that can't be read,
+or a function left uncompared, fails the check. The files go in a directory
 under `$TMPDIR` (or `/tmp`), removed unless `--keep` or a failure. `--seed N`
 changes the generated functions. The default 9700X job runs it with
 `--cross-check` after the encoder's benchmark.
@@ -602,16 +603,17 @@ as the difference between runs that stop after a phase and before it: the
 vector path, the scalar path, and the vector path with each alternative to its
 gathers measured against it (`compress` and `window`). A sample sizes the pool
 in groups of at least 2,048 records, each group's records read into cache and
-its branches' records put back outside the time, around rdpmc reads of this
-thread's cycles and instructions; the pools are larger than the branch
-predictor learns (a pool of 33,000 records sized again and again let it learn
-the scalar path's branches). `--rounds N` sizes with another round limit,
-`--only ROW` runs one row, and `--measure NAME` one measurement (an entry
-point's name, or a path's run through a phase, as `vector-setup`) for
-`--samples N` samples, for perf. Run it under the 9700X's lock with
-`taskset -c 2`. `docs/branch-sizing.md` has the numbers. The default 9700X job
-runs it after the tests, pinned to one allowed CPU; like the others, its
-measurements are informational.
+its branches' records put back outside the time (as generated, or as sized for
+the reference encode: every whole run must come to the sized functions'
+lengths), around rdpmc reads of this thread's cycles and instructions; the
+pools are larger than the branch predictor learns (a pool of 33,000 records
+sized again and again let it learn the scalar path's branches). `--rounds N`
+sizes with another round limit, `--only ROW` runs one row, and `--measure NAME`
+one measurement (an entry point's name, or a path's run through a phase, as
+`vector-setup`) for `--samples N` samples, for perf. Run it under the 9700X's
+lock with `taskset -c 2`. `docs/branch-sizing.md` has the numbers. The default
+9700X job runs it after the tests, pinned to one allowed CPU; like the others,
+its measurements are informational.
 
 ## Lane tests
 

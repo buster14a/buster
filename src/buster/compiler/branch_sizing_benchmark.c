@@ -23,13 +23,15 @@
 // through a phase, as "vector-setup" or "window-write".
 //
 // A sample sizes the whole pool once, a group of functions of at least BUSTER_BRANCH_SIZING_BENCHMARK_GROUP_RECORDS
-// records at a time. Before each group, outside the time, it puts the branches' records back as they were generated and
-// reads the group's records and branch columns, so that they are in cache as a function the code generator has just
-// written is. The counters (this thread's user-space cycles and instructions, with rdpmc) are read around each group,
-// less what reading them costs. The pool is BUSTER_BRANCH_SIZING_BENCHMARK_POOL_RECORDS records of different
-// functions, more than the branch predictor learns: with a pool of 33,000 records, sized 13 times a sample, the scalar
-// path's branches were learnt and its offsets phase ran three times faster than on a pool of 137,000. Run it under the
-// 9700X's lock pinned to one CPU (taskset -c 2). The exit status is 1 if the arguments are invalid or a check fails.
+// records at a time. Before each group, outside the time, it puts the branches' records back as they were generated
+// (or, for the reference encode, as sized, the records the caller encodes: the warm-up checks that it comes to the
+// sized lengths) and reads the group's records and branch columns, so that they are in cache as a function the code
+// generator has just written is. The counters (this thread's user-space cycles and instructions, with rdpmc) are read
+// around each group, less what reading them costs. The pool is BUSTER_BRANCH_SIZING_BENCHMARK_POOL_RECORDS records of
+// different functions, more than the branch predictor learns: with a pool of 33,000 records, sized 13 times a sample,
+// the scalar path's branches were learnt and its offsets phase ran three times faster than on a pool of 137,000. Run it
+// under the 9700X's lock pinned to one CPU (taskset -c 2). The exit status is 1 if the arguments are invalid or a check
+// fails.
 //
 // Layout, in this order: the rows, the pools (generation, restoring and checking), the phase-by-phase run, the
 // counters, timing, and run_branch_sizing_benchmark.
@@ -177,8 +179,10 @@ static const BranchSizingBenchmarkRow branch_sizing_benchmark_rows[] = {
 // The pools
 
 // A row's functions, one after another: each function's records from record_starts[f], and its branch columns (indices
-// within the function) from branch_starts[f]; and each branch's record's form as generated, which the benchmark puts
-// back after sizing changes it. The groups timed at once start at the functions group_starts gives.
+// within the function) from branch_starts[f]; each branch's record's form as generated, which the benchmark puts back
+// after sizing changes it; and each branch's form and displacement once sized, which it puts in the records for the
+// reference encode, the caller's of the sized records. The groups timed at once start at the functions group_starts
+// gives.
 typedef struct BranchSizingBenchmarkPool BranchSizingBenchmarkPool;
 struct BranchSizingBenchmarkPool
 {
@@ -186,6 +190,8 @@ struct BranchSizingBenchmarkPool
     uint32_t* branches;
     uint32_t* targets;
     uint16_t* forms;
+    uint16_t* sized_forms;
+    int32_t* sized_displacements;
     uint64_t* record_starts;
     uint64_t* branch_starts;
     uint64_t* group_starts;
@@ -212,12 +218,14 @@ static BranchSizingBenchmarkPool branch_sizing_benchmark_pool(Arena* arena, cons
         .branches = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, room),
         .targets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, room),
         .forms = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, room),
+        .sized_forms = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, room),
+        .sized_displacements = BUSTER_ARENA_PUSH_ARRAY(arena, int32_t, room),
         .record_starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, most_functions + 1),
         .branch_starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, most_functions + 1),
         .group_starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, most_functions + 1),
     };
-    result.valid = result.records != 0 && result.branches != 0 && result.targets != 0 && result.forms != 0 && result.record_starts != 0 && result.branch_starts != 0 &&
-                   result.group_starts != 0;
+    result.valid = result.records != 0 && result.branches != 0 && result.targets != 0 && result.forms != 0 && result.sized_forms != 0 &&
+                   result.sized_displacements != 0 && result.record_starts != 0 && result.branch_starts != 0 && result.group_starts != 0;
     uint64_t state = seed;
     uint64_t group_records = 0;
     bool done = !result.valid;
@@ -270,9 +278,10 @@ static BranchSizingBenchmarkPool branch_sizing_benchmark_pool(Arena* arena, cons
     return result;
 }
 
-// Puts the group's branches' records back as they were generated (their rel8 forms with displacement 0), and reads the
-// group's records and branch columns, a dword per cache line. Returns what it read, which keeps the reads.
-static uint32_t branch_sizing_benchmark_prepare(BranchSizingBenchmarkPool* pool, uint64_t group)
+// Puts the group's branches' records back as they were generated (their rel8 forms with displacement 0), or as sized if
+// `sized` (for the reference encode), and reads the group's records and branch columns, a dword per cache line. Returns
+// what it read, which keeps the reads.
+static uint32_t branch_sizing_benchmark_prepare(BranchSizingBenchmarkPool* pool, uint64_t group, bool sized)
 {
     const uint64_t first = pool->group_starts[group];
     const uint64_t end = pool->group_starts[group + 1];
@@ -281,8 +290,8 @@ static uint32_t branch_sizing_benchmark_prepare(BranchSizingBenchmarkPool* pool,
         X86Instruction* records = pool->records + pool->record_starts[f];
         for (uint64_t k = pool->branch_starts[f]; k < pool->branch_starts[f + 1]; k += 1)
         {
-            records[pool->branches[k]].form = pool->forms[k];
-            records[pool->branches[k]].displacement = 0;
+            records[pool->branches[k]].form = sized ? pool->sized_forms[k] : pool->forms[k];
+            records[pool->branches[k]].displacement = sized ? pool->sized_displacements[k] : 0;
         }
     }
     const uint32_t* record_words = (const uint32_t*)(pool->records + pool->record_starts[first]);
@@ -690,8 +699,9 @@ struct BranchSizingBenchmarkStatistics
 };
 
 // Checks every function of the pool: branch_sizing_validate accepts it, and every way sizes it to the same result,
-// records and offsets, with no error. Fills the statistics.
-static bool branch_sizing_benchmark_check(Arena* arena, const BranchSizingBenchmarkPool* pool, uint32_t round_limit, BranchSizingBenchmarkStatistics* statistics)
+// records and offsets, with no error. Keeps each branch's sized form and displacement for the reference encode, and fills
+// the statistics.
+static bool branch_sizing_benchmark_check(Arena* arena, BranchSizingBenchmarkPool* pool, uint32_t round_limit, BranchSizingBenchmarkStatistics* statistics)
 {
     bool result = true;
     *statistics = (BranchSizingBenchmarkStatistics){ 0 };
@@ -720,6 +730,11 @@ static bool branch_sizing_benchmark_check(Arena* arena, const BranchSizingBenchm
         if (result)
         {
             const BranchSizing* sized = &outcomes[0].result;
+            for (uint64_t k = pool->branch_starts[f]; k < pool->branch_starts[f + 1]; k += 1)
+            {
+                pool->sized_forms[k] = outcomes[0].records[pool->branches[k]].form;
+                pool->sized_displacements[k] = outcomes[0].records[pool->branches[k]].displacement;
+            }
             statistics->bytes += sized->length;
             statistics->long_branches += sized->long_branches;
             statistics->rounds += sized->rounds;
@@ -756,6 +771,8 @@ struct BranchSizingBenchmarkCount
 {
     uint64_t cycles;
     uint64_t instructions;
+    // In a sample, the lengths its functions came to, which the warm-up checks.
+    uint64_t bytes;
 };
 
 static BranchSizingBenchmarkCounters branch_sizing_benchmark_open_counters(void)
@@ -946,7 +963,7 @@ static BranchSizingBenchmarkCount branch_sizing_benchmark_sample(BranchSizingBen
     BranchSizingBenchmarkCount result = { 0 };
     for (uint64_t group = 0; group < pool->groups; group += 1)
     {
-        const uint32_t read = branch_sizing_benchmark_prepare(pool, group);
+        const uint32_t read = branch_sizing_benchmark_prepare(pool, group, measurement.work == BRANCH_SIZING_BENCHMARK_ENCODE);
         __asm__ volatile("" : : "r"(read) : "memory");
         const BranchSizingBenchmarkCount begin = branch_sizing_benchmark_count(counters);
         const uint64_t length = branch_sizing_benchmark_group(pool, group, measurement);
@@ -954,6 +971,7 @@ static BranchSizingBenchmarkCount branch_sizing_benchmark_sample(BranchSizingBen
         __asm__ volatile("" : : "r"(length) : "memory");
         result.cycles += end.cycles - begin.cycles - overhead.cycles;
         result.instructions += end.instructions - begin.instructions - overhead.instructions;
+        result.bytes += length;
     }
     return result;
 }
@@ -1025,16 +1043,26 @@ static bool branch_sizing_benchmark_row(Arena* arena, const BranchSizingBenchmar
         fprintf(stderr, "benchmark-branch-sizing: no memory for %s's pool\n", row->name);
     }
     result = result && branch_sizing_benchmark_check(arena, &pool, plan.round_limit, &statistics);
+    const bool every = plan.measure == BUSTER_BRANCH_SIZING_BENCHMARK_MEASUREMENTS;
+    const uint32_t first = every ? 0 : plan.measure;
+    const uint32_t measured = every ? BUSTER_BRANCH_SIZING_BENCHMARK_MEASUREMENTS : 1;
+    // A warm-up sample of each measurement, then the samples, each pass starting from another measurement. Every
+    // measurement whose functions come out whole (the reference encode, the entry points and the runs through the records)
+    // must come to the sized functions' lengths: the reference encodes the sized records.
+    for (uint32_t m = 0; result && m < measured; m += 1)
+    {
+        const BranchSizingBenchmarkMeasurement measurement = branch_sizing_benchmark_measurement(first + m, plan.round_limit);
+        const BranchSizingBenchmarkCount warm = branch_sizing_benchmark_sample(&pool, measurement, counters, overhead);
+        const bool whole = measurement.work != BRANCH_SIZING_BENCHMARK_THROUGH || measurement.stop == BRANCH_SIZING_BENCHMARK_WRITE;
+        result = !whole || warm.bytes == statistics.bytes;
+        if (!result)
+        {
+            fprintf(stderr, "benchmark-branch-sizing: %s's measurement %u came to %llu bytes, not the sized functions' %llu\n", row->name, first + m,
+                    (unsigned long long)warm.bytes, (unsigned long long)statistics.bytes);
+        }
+    }
     if (result)
     {
-        const bool every = plan.measure == BUSTER_BRANCH_SIZING_BENCHMARK_MEASUREMENTS;
-        const uint32_t first = every ? 0 : plan.measure;
-        const uint32_t measured = every ? BUSTER_BRANCH_SIZING_BENCHMARK_MEASUREMENTS : 1;
-        // A warm-up sample of each measurement, then the samples, each pass starting from another measurement.
-        for (uint32_t m = 0; m < measured; m += 1)
-        {
-            branch_sizing_benchmark_sample(&pool, branch_sizing_benchmark_measurement(first + m, plan.round_limit), counters, overhead);
-        }
         for (uint64_t pass = 0; pass < plan.samples; pass += 1)
         {
             for (uint32_t turn = 0; turn < measured; turn += 1)

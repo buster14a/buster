@@ -55,27 +55,27 @@ is the caller's encode of the same records after sizing, the reference.
 
 | Row | Functions | Long branches | Rounds | `x86_encode` | `size_branches` | `size_branches_scalar` | Sizing ÷ encode | Vector ÷ scalar |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| tier0-mix | 2,814 | 21.8% | 1.42 | 4.05 | **7.75** | 11.99 | 1.91 | 1.55 |
-| tier0-40 | 6,554 | 4.9% | 1.20 | 4.31 | 8.83 | 9.64 | 2.05 | 1.09 |
-| tier0-250 | 1,049 | 25.9% | 2.11 | 3.26 | 6.00 | 10.82 | 1.84 | 1.80 |
-| tier0-2000 | 132 | 32.1% | 2.73 | 3.16 | 5.21 | 10.25 | 1.65 | 1.97 |
-| tier0-10000 | 27 | 34.3% | 3.11 | 3.20 | 5.45 | 10.45 | 1.70 | 1.92 |
-| optimized-40 | 6,554 | 5.6% | 1.28 | 4.25 | 9.46 | 11.26 | 2.23 | 1.19 |
-| optimized-250 | 1,049 | 32.8% | 2.25 | 3.25 | 6.48 | 13.04 | 1.99 | 2.01 |
-| optimized-2000 | 132 | 40.5% | 2.92 | 3.15 | 5.71 | 12.60 | 1.82 | 2.21 |
-| optimized-10000 | 27 | 42.8% | 3.22 | 3.20 | 5.99 | 12.85 | 1.87 | 2.14 |
-| chain-forward | 18 | 100% | 5 | 3.14 | 14.06 | 42.27 | 4.48 | 3.01 |
-| chain-backward | 18 | 100% | 5 | 3.18 | 14.11 | 42.27 | 4.44 | 2.99 |
+| tier0-mix | 2,814 | 21.8% | 1.42 | 4.02 | **7.63** | 12.08 | 1.90 | 1.58 |
+| tier0-40 | 6,554 | 4.9% | 1.20 | 4.35 | 8.91 | 9.87 | 2.05 | 1.11 |
+| tier0-250 | 1,049 | 25.9% | 2.11 | 3.26 | 5.71 | 10.67 | 1.75 | 1.87 |
+| tier0-2000 | 132 | 32.1% | 2.73 | 3.22 | 5.24 | 10.27 | 1.63 | 1.96 |
+| tier0-10000 | 27 | 34.3% | 3.11 | 3.19 | 5.47 | 10.48 | 1.72 | 1.92 |
+| optimized-40 | 6,554 | 5.6% | 1.28 | 4.30 | 9.53 | 11.65 | 2.22 | 1.22 |
+| optimized-250 | 1,049 | 32.8% | 2.25 | 3.26 | 6.21 | 12.94 | 1.91 | 2.08 |
+| optimized-2000 | 132 | 40.5% | 2.92 | 3.23 | 5.70 | 12.61 | 1.77 | 2.21 |
+| optimized-10000 | 27 | 42.8% | 3.22 | 3.19 | 5.99 | 12.85 | 1.88 | 2.15 |
+| chain-forward | 18 | 100% | 5 | 3.14 | 14.01 | 42.30 | 4.46 | 3.02 |
+| chain-backward | 18 | 100% | 5 | 3.14 | 14.06 | 42.63 | 4.47 | 3.03 |
 
-- `size_branches` costs 1.65 to 2.23 times an encode of the same function
-  (1.91 on the mix), and the first round's `x86_encode`, its lengths phase, is
-  57% of it on the mix: sizing proper costs about 3.3 cycles per record there,
-  and 2.0 on functions of 2,000 records.
-- The vector path is 1.8 to 2.2 times its scalar twin on functions of 250
-  records and more, 1.55 times on the mix, and 1.1 to 1.2 times on functions of
+- `size_branches` costs 1.63 to 2.22 times an encode of the same sized
+  function (1.90 on the mix), and the first round's `x86_encode`, its lengths
+  phase, is 58% of it on the mix: sizing proper costs about 3.2 cycles per
+  record there, and 2.0 on functions of 2,000 records.
+- The vector path is 1.87 to 2.21 times its scalar twin on functions of 250
+  records and more, 1.58 times on the mix, and 1.1 to 1.2 times on functions of
   40, whose costs are the calls' and the gathers' latency more than their work.
 - A chain of 1,000 branches, each pushed out of range by the next (a round per
-  link), costs 14.1 cycles per record, 3 times less than the scalar twin:
+  link), costs 14.0 cycles per record, 3 times less than the scalar twin:
   linear, through the worklist.
 - Every result is the test's reference's (relaxation over the records, as an
   assembler does it) and GNU as's: on 404 functions with 98,920 long branches,
@@ -220,7 +220,9 @@ differences are noise).
 A sample sizes a pool of about 262,000 records of different functions, a group
 of at least 2,048 records at a time, around rdpmc reads of this thread's cycles
 and instructions (66 cycles a read pair, subtracted). Before each group,
-outside the time, the branches' records are put back as generated and the
+outside the time, the branches' records are put back as generated (or, for the
+reference `x86_encode`, as sized, the records the caller encodes; the warm-up
+checks that every whole run comes to the sized functions' lengths) and the
 group's records and branch columns read, so that they are in cache as a
 function the code generator has just written is. The pool is larger than the
 branch predictor learns: the first version sized a pool of 33,000 records 13
@@ -236,24 +238,24 @@ In cycles per branch, and the whole run in cycles per record:
 
 | Phase | tier0-mix vector | scalar | tier0-2000 vector | scalar | optimized-2000 vector | scalar |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| lengths (the first round's `x86_encode`, and the columns) | 40.08 | 39.95 | 28.43 | 28.24 | 22.21 | 22.15 |
-| setup (D0 and the first round) | 8.97 | 24.29 | 4.25 | 18.62 | 4.22 | 21.64 |
-| ranks | 5.09 | 6.41 | 2.90 | 1.23 | 2.67 | 3.57 |
-| rounds | 4.22 | 12.96 | 5.79 | 18.35 | 6.29 | 22.46 |
-| offsets | 5.66 | 16.91 | 3.44 | 16.67 | 2.63 | 13.52 |
-| write (the records) | 4.42 | 2.53 | 1.97 | 0.65 | 2.00 | 1.08 |
-| whole, per record | 7.60 | 11.44 | 5.23 | 9.36 | 5.70 | 12.01 |
+| lengths (the first round's `x86_encode`, and the columns) | 39.87 | 39.84 | 28.66 | 28.49 | 22.37 | 22.25 |
+| setup (D0 and the first round) | 8.55 | 23.33 | 4.23 | 18.69 | 4.15 | 21.61 |
+| ranks | 4.90 | 6.28 | 2.91 | 1.40 | 2.67 | 3.57 |
+| rounds | 4.33 | 12.48 | 5.75 | 18.30 | 6.20 | 22.62 |
+| offsets | 5.54 | 16.88 | 3.45 | 16.64 | 2.71 | 13.34 |
+| write (the records) | 4.46 | 3.01 | 1.92 | 0.53 | 1.96 | 1.13 |
+| whole, per record | 7.51 | 11.30 | 5.24 | 9.40 | 5.70 | 12.03 |
 
 A phase's cost here is what it adds in its place, not what it costs alone: the
 scalar setup leaves the core idle enough that the scalar ranks phase measures
-1.2 cycles per branch after it, though the vector path, given that same
+1.4 cycles per branch after it, though the vector path, given that same
 function, takes 5.4 (see "What was tried"). The write phase is the same code on
 both paths. The lengths phase is the encode, plus the per-call costs (the
-scratch columns, the chunks) that small functions feel: 9 cycles per branch
-over the caller's encode on 40-record functions (about 40 a call), 3.6 on the
-mix, and none measurable on large ones. The vector path's setup does three
-gathers per 16 branches (the branch records' offsets, the targets' and the
-forms), the ranks phase two of 8 qwords, and each round one.
+scratch columns, the chunks) that small functions feel: about 10 cycles per
+branch over the caller's encode on 40-record functions (about 40 a call), 3.6
+on the mix, and none measurable on large ones. The vector path's setup does
+three gathers per 16 branches (the branch records' offsets, the targets' and
+the forms), the ranks phase two of 8 qwords, and each round one.
 
 ### What was tried
 
@@ -263,32 +265,32 @@ checked to give the same records and offsets. Whole runs, in cycles per record:
 
 | Row | vector | compress | window |
 | --- | ---: | ---: | ---: |
-| tier0-mix | **7.60** | 7.94 | 7.77 |
-| tier0-40 | **8.94** | 9.52 | 9.07 |
-| tier0-250 | **5.94** | 6.13 | 6.25 |
-| tier0-2000 | 5.23 | 5.45 | **5.06** |
-| tier0-10000 | 5.47 | 5.65 | **5.23** |
-| optimized-40 | **9.57** | 10.13 | 9.74 |
-| optimized-250 | **6.42** | 6.77 | 6.78 |
-| optimized-2000 | 5.70 | 5.84 | **5.44** |
-| optimized-10000 | 6.00 | 6.16 | **5.68** |
-| chain-forward | 14.08 | 14.28 | **13.67** |
-| chain-backward | 14.13 | 14.34 | **13.73** |
+| tier0-mix | **7.51** | 7.83 | 7.64 |
+| tier0-40 | **8.92** | 9.55 | 9.04 |
+| tier0-250 | **5.78** | 5.84 | 6.08 |
+| tier0-2000 | 5.24 | 5.46 | **5.08** |
+| tier0-10000 | 5.49 | 5.65 | **5.26** |
+| optimized-40 | **9.54** | 10.14 | 9.70 |
+| optimized-250 | **6.22** | 6.50 | 6.57 |
+| optimized-2000 | 5.70 | 5.85 | **5.44** |
+| optimized-10000 | 6.01 | 6.15 | **5.69** |
+| chain-forward | 14.04 | 14.24 | **13.63** |
+| chain-backward | 14.09 | 14.29 | **13.69** |
 
 - **compress**: setup takes the branch records' offsets compressed out of the
   offsets column by the branch map (`vpcompressd`, 16 records at a time) in
   place of their gather, building the map for it, which the ranks phase then
   reuses. Building the map in every function costs more than the gather it
-  replaces (setup 15.95 against 8.97 cycles per branch on the mix), and the
-  ranks phase's saving (2.41 against 5.09) is only for the functions where a
+  replaces (setup 15.29 against 8.55 cycles per branch on the mix), and the
+  ranks phase's saving (2.24 against 4.90) is only for the functions where a
   branch grew. Slower on every row.
 - **window**: the rounds after the first take a short branch's P at its rank
   from the 144 prefix sums around its block of 16 (four `vpermi2d` and a
   `vpermd`; its rank is within 63 branches of it) in place of a gather, and a
   last pass gathers the long branches' displacements, which the window doesn't
   reach. It pays where functions take three rounds or more (3% to 5% faster on
-  2,000 and 10,000 records) and loses where they settle in two (1.5% to 6%
-  slower on 40 and 250 records, 2.2% on the mix): the last pass is a gather
+  2,000 and 10,000 records) and loses where they settle in two (1.3% to 6%
+  slower on 40 and 250 records, 1.8% on the mix): the last pass is a gather
   pass of its own. A dispatch by size could take the gain on large functions;
   not done, for less than 1% on the mix.
 - **Masked gathers**: a `vpgatherdd zmm` costs the same 13 cycles or so with

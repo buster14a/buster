@@ -40,7 +40,8 @@
 //   - With --cross-check, GNU as: random functions, the boundaries' probes and chains printed as GNU as source in a
 //     section each, every branch to a label at its target record, which GNU as relaxes as sizing does (every branch
 //     short at first, growing those out of range until none is). Each section's bytes must be x86_encode_scalar's of
-//     the sized records. The file and the object go in a directory under $TMPDIR (or /tmp), removed unless --keep.
+//     the sized records, and an object that can't be read or a function left uncompared fails the check. The file and
+//     the object go in a directory under $TMPDIR (or /tmp), removed unless --keep or a failure.
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, the functions and their outcomes (branch_sizing_test_size), the reference and the
@@ -1106,7 +1107,10 @@ static bool branch_sizing_test_assembler(Arena* arena, uint64_t seed, const char
     branch_sizing_test_expect(&tally, status == 0, "GNU as assembles the functions (see as.log)", (uint64_t)status);
     uint64_t object_length = 0;
     uint8_t* bytes = status == 0 ? x86_read_file(object, &object_length) : 0;
-    uint64_t compared = 0;
+    // Without the object nothing below is compared, so its absence must fail the check rather than pass it.
+    branch_sizing_test_expect(&tally, status != 0 || bytes != 0, "GNU as's object can be read", 0);
+    uint64_t checked = 0;
+    uint64_t matched = 0;
     uint64_t long_branches = 0;
     if (bytes != 0)
     {
@@ -1141,13 +1145,16 @@ static bool branch_sizing_test_assembler(Arena* arena, uint64_t seed, const char
                 printf("    function %llu: %llu bytes against GNU as's %llu, first differing at byte %llu, in record %llu\n", (unsigned long long)number,
                        (unsigned long long)encoded_length, (unsigned long long)header->sh_size, (unsigned long long)offset, (unsigned long long)record);
             }
-            compared += same;
+            checked += 1;
+            matched += same;
             long_branches += outcome.result.long_branches;
             arena_pop_to(arena, mark);
         }
         free(bytes);
     }
-    printf("GNU as: %llu functions, %llu the same, with %llu long branches\n", (unsigned long long)functions, (unsigned long long)compared, (unsigned long long)long_branches);
+    printf("GNU as: %llu functions, %llu compared, %llu the same, with %llu long branches\n", (unsigned long long)functions, (unsigned long long)checked,
+           (unsigned long long)matched, (unsigned long long)long_branches);
+    branch_sizing_test_expect(&tally, functions != 0 && checked == functions, "every function printed is compared with GNU as's bytes", checked);
     if (made && !keep && tally.failures == 0)
     {
         unlink(source);
