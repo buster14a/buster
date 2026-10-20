@@ -1196,6 +1196,67 @@ static bool pp_test_predefines(const char* directory)
     return failures == 0;
 }
 
+// Clang's keyword candidates, chosen apart from BUSTER_C_NAMES so that a keyword missing from it still fails
+// pp_test_keywords: every spelling of a keyword, alias or type trait in clang 23's TokenKinds.def,
+// TransformTypeTraits.def, OpenCLImageTypes.def and HLSLIntangibleTypes.def, and the ARM keyword attributes of its
+// RegularKeywordAttrInfo.inc (names only, separated by spaces). Most are keywords only in other languages.
+static const char pp_test_keyword_candidates[] =
+    "_Accum _Alignas _Alignof _Atomic _BitInt _Bool _Complex _Countof _Decimal128 _Decimal32 _Decimal64 _Defer _ExtInt _Float16 _Fract _Generic "
+    "_Imaginary _Nonnull _Noreturn _Null_unspecified _Nullable _Nullable_result _Sat _Static_assert _Thread_local __FUNCDNAME__ __FUNCSIG__ "
+    "__FUNCTION__ __PRETTY_FUNCTION__ __alignof __alignof__ __arm_agnostic __arm_in __arm_inout __arm_locally_streaming __arm_new __arm_out "
+    "__arm_preserves __arm_streaming __arm_streaming_compatible __array_extent __array_rank __asm __asm__ __attribute __attribute__ __auto_type "
+    "__bf16 __bool __bridge __bridge_retain __bridge_retained __bridge_transfer __builtin_COLUMN __builtin_FILE __builtin_FILE_NAME "
+    "__builtin_FUNCSIG __builtin_FUNCTION __builtin_LINE __builtin_alignof __builtin_astype __builtin_available __builtin_bit_cast "
+    "__builtin_choose_expr __builtin_convertvector __builtin_ge_synthesizes_from_spaceship __builtin_gt_synthesizes_from_spaceship "
+    "__builtin_hlsl_is_constant_buffer_element_compatible __builtin_hlsl_is_intangible __builtin_hlsl_is_scalarized_layout_compatible "
+    "__builtin_hlsl_is_typed_resource_element_compatible __builtin_is_cpp_trivially_relocatable __builtin_is_implicit_lifetime "
+    "__builtin_is_virtual_base_of __builtin_le_synthesizes_from_spaceship __builtin_lt_synthesizes_from_spaceship __builtin_offsetof "
+    "__builtin_omp_required_simd_align __builtin_ptrauth_type_discriminator __builtin_source_location __builtin_structured_binding_size "
+    "__builtin_sycl_unique_stable_name __builtin_types_compatible_p __builtin_va_arg __builtin_vectorelements __can_pass_in_regs __cdecl "
+    "__char16_t __char32_t __complex __complex__ __const __const__ __constant __contravariant __covariant __datasizeof __declspec __decltype "
+    "__extension__ __fastcall __finally __float128 __forceinline __fp16 __func__ __funcref __generic __global __has_nothrow_assign "
+    "__has_nothrow_constructor __has_nothrow_copy __has_nothrow_move_assign __has_trivial_assign __has_trivial_constructor __has_trivial_copy "
+    "__has_trivial_destructor __has_trivial_move_assign __has_trivial_move_constructor __has_unique_object_representations "
+    "__has_virtual_destructor __ibm128 __if_exists __if_not_exists __imag __imag__ __include_macros __inline __inline__ __int128 __int16 __int32 "
+    "__int64 __int8 __interface __is_abstract __is_aggregate __is_arithmetic __is_array __is_assignable __is_base_of __is_bitwise_cloneable "
+    "__is_bounded_array __is_class __is_complete_type __is_compound __is_const __is_constructible __is_convertible __is_convertible_to "
+    "__is_destructible __is_empty __is_enum __is_final __is_floating_point __is_function __is_fundamental __is_integral __is_interface_class "
+    "__is_layout_compatible __is_literal __is_literal_type __is_lvalue_expr __is_lvalue_reference __is_member_function_pointer "
+    "__is_member_object_pointer __is_member_pointer __is_nothrow_assignable __is_nothrow_constructible __is_nothrow_convertible "
+    "__is_nothrow_destructible __is_object __is_pod __is_pointer __is_pointer_interconvertible_base_of __is_polymorphic __is_reference "
+    "__is_rvalue_expr __is_rvalue_reference __is_same __is_same_as __is_scalar __is_scoped_enum __is_sealed __is_signed __is_standard_layout "
+    "__is_trivial __is_trivially_assignable __is_trivially_constructible __is_trivially_copyable __is_trivially_destructible "
+    "__is_trivially_equality_comparable __is_trivially_relocatable __is_unbounded_array __is_union __is_unsigned __is_void __is_volatile "
+    "__kernel __kindof __label__ __leave __local __module_private__ __multiple_inheritance __noinline__ __null __nullptr __ob_trap __ob_wrap "
+    "__objc_no __objc_yes __pascal __pixel __preprocessed_import __preprocessed_module __private __private_extern__ __private_macro __ptr32 "
+    "__ptr64 __ptrauth __public_macro __read_only __read_write __real __real__ __reference_binds_to_temporary "
+    "__reference_constructs_from_temporary __reference_converts_from_temporary __regcall __restrict __restrict__ __signed __signed__ "
+    "__single_inheritance __sptr __stdcall __super __thiscall __thread __try __typeof __typeof__ __typeof_unqual __typeof_unqual__ __unaligned "
+    "__unknown_anytype __uptr __uuidof __vector __vectorcall __virtual_inheritance __volatile __volatile__ __w64 __wchar_t __write_only _alignof "
+    "_asm _cdecl _declspec _fastcall _finally _forceinline _inline _int16 _int32 _int64 _int8 _leave _multiple_inheritance _pascal _ptr32 _ptr64 "
+    "_restrict _stdcall _thiscall _try _unaligned _uptr _uuidof _vectorcall _virtual_inheritance _w64 addrspace_cast alignas alignof amp ampamp "
+    "ampequal and and_eq arrow arrowstar asm assert at attr_openmp auto autoreleasepool available binary_data bitand bitor bool break caret "
+    "caretcaret caretequal case catch cbuffer char char16_t char32_t char8_t char_constant class co_await co_return co_yield code_completion "
+    "colon coloncolon column_major comma comment compatibility_alias compl concept const const_cast constant consteval constexpr constinit "
+    "continue cxxscope decltype default define defined defs delete do double double_t dynamic dynamic_cast elif elifdef elifndef ellipsis else "
+    "embed encode end endif enum eod eof equal equalequal error exclaim exclaimequal explicit export extern false finally float float_t for "
+    "friend generic global goto greater greaterequal greatergreater greatergreaterequal greatergreatergreater groupshared half hash hashat "
+    "hashhash header_name header_unit ident identifier if ifdef ifndef implementation import in include include_next inline inout int interface "
+    "jmp_buf kernel l_brace l_paren l_square less lessequal lessless lesslessequal lesslessless line local long minus minusequal minusminus "
+    "module module_begin module_end module_include module_name mutable namespace new noexcept non_type non_type_dependent non_type_undeclared "
+    "not not_eq not_keyword not_notable nullptr numeric_constant operator optional or or_eq out overload_set pack_indexing_type package percent "
+    "percentequal period periodstar pipe pipeequal pipepipe plus plusequal plusplus pragma pragma_align pragma_attribute pragma_captured "
+    "pragma_cx_limited_range pragma_dump pragma_export pragma_fenv_access pragma_fenv_access_ms pragma_fenv_round pragma_float_control pragma_fp "
+    "pragma_fp_contract pragma_loop_hint pragma_ms_pointers_to_members pragma_ms_pragma pragma_ms_vtordisp pragma_msstruct pragma_openacc "
+    "pragma_openacc_end pragma_opencl_extension pragma_openmp pragma_openmp_end pragma_pack pragma_parser_crash pragma_redefine_extname "
+    "pragma_riscv pragma_unused pragma_vis pragma_weak pragma_weakalias primary_expr private property protected protocol public question r_brace "
+    "r_paren r_square raw_identifier read_only read_write register reinterpret_cast repl_input_end required requires restrict return row_major "
+    "sccs selector semi short sigjmp_buf signed sizeof slash slashequal spaceship star starequal static static_assert static_cast string_literal "
+    "struct switch synchronized synthesize tbuffer template template_id this thread_local throw tilde true try typedef typeid typename typeof "
+    "typeof_unqual ucontext_t unassert undef union unknown unsigned using utf16_char_constant utf16_string_literal utf32_char_constant "
+    "utf32_string_literal utf8_char_constant utf8_string_literal vec_step virtual void volatile warning wchar_t while wide_char_constant "
+    "wide_string_literal write_only xor xor_eq ";
+
 // Clang's feature names, for __has_feature and __has_extension: every FEATURE and EXTENSION of clang 23's Features.def
 // (names only, separated by spaces).
 static const char pp_test_feature_names[] =
@@ -1289,7 +1350,8 @@ static uint32_t pp_test_modes(const char* directory, const char* path, const cha
     return result;
 }
 
-// __is_identifier of every predefined name, in each language mode, must be clang's: 0 exactly for the mode's keywords.
+// __is_identifier of every predefined name and of clang's keyword candidates, in each language mode, must be clang's: 0
+// exactly for the mode's keywords.
 static bool pp_test_keywords(const char* directory)
 {
     char path[4096];
@@ -1309,7 +1371,12 @@ static bool pp_test_keywords(const char* directory)
                 count += 1;
             }
         }
+        pp_test_write_names(file, pp_test_keyword_candidates, "__is_identifier", 0);
         fclose(file);
+    }
+    for (const char* at = pp_test_keyword_candidates; *at != 0; at += 1)
+    {
+        count += *at == ' ';
     }
     const uint32_t failures = result ? pp_test_modes(directory, path, "keywords") : 1;
     unlink(path);

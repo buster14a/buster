@@ -1143,8 +1143,9 @@ features:
 - in 14 option sets (the ten modes from `c89` to `gnu23`, and `-ffreestanding`
   and `-O2`), `pp_predefines` must give `clang -dM -E` line for line, but for
   the patch release's three macros;
-- in each mode, `__is_identifier` of every predefined name must give clang's
-  answer;
+- in each mode, `__is_identifier` of every predefined name, and of clang's
+  keyword candidates chosen apart from them (`pp_test_keyword_candidates`),
+  must give clang's answer;
 - in each mode, `__has_feature` and `__has_extension` of every name in clang
   23's `Features.def` must give clang's answers. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;

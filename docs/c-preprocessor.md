@@ -17,7 +17,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | --- | ---: | ---: |
 | `sqlite3.c` 3.53, with glibc's headers | 1 | 707,153 |
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
-| This repository's translation units on top of `main` at 75261db, with `-march=native` (AVX-512 intrinsic headers) | 8 | 4,571,031 |
+| This repository's translation units on this branch (`main` at 2aa1358), with `-march=native` (AVX-512 intrinsic headers) | 11 | 6,378,159 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
 | The built-in cases (`pp_test_cases`) | 77 | |
 
@@ -593,7 +593,11 @@ the mispredictions it saves.
     for line. Only the three macros that name clang's patch release are left
     out.
   - In each mode, `__is_identifier` of every predefined name (keywords,
-    directive names, the preprocessor's names) must give clang's answer.
+    directive names, the preprocessor's names) must give clang's answer, and so
+    must that of 568 candidates chosen apart from them, so that a keyword
+    missing from our names fails too. The candidates are every spelling of a
+    keyword, alias or type trait in clang 23's `TokenKinds.def` and its
+    companions, and the ARM keyword attributes.
   - In each mode, `__has_feature` and `__has_extension` of every name in clang
     23's `Features.def` (251) must give clang's answers.
 - **Files.** With files, each is preprocessed with the options, by both

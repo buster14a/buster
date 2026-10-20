@@ -37,7 +37,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/import.c`, `src/buster/compiler/runtime.c`, `src/buster/compiler/import_test.c`, `src/buster/compiler/import_benchmark.c` | Original readers of ELF relocatable objects, archives, shared libraries and linker scripts, their vector and exact paths, the C runtime's search and import, and their tests and benchmark; Default. The formats are read from their specifications. The archive header's vector size parse uses the widely published multiply-add method for decimal digits (as in simdjson's and Wojciech Muła's write-ups), written here from the method, not copied. The tests and the benchmark make their inputs themselves, and read the system's C runtime files and the libraries and archives named on the command line at run time without copying them; `readelf` is an external oracle for `--cross-check`, not vendored. The benchmark's clock, counter and median helpers are its own, not the lexer benchmark's MIT ones. |
 | `src/buster/compiler/c_intern.c`, `src/buster/compiler/c_refine.c`, `src/buster/compiler/c_refine_test.c` | Original intern table, token refinement and tests; Default. The hash's constants are wyhash's public-domain ones, and the keyword list is clang-generated data; both are noted below. |
 | `src/buster/compiler/c_preprocessor.c` | Original preprocessor; Default, with the clang-generated predefined macros and feature tables noted below. |
-| `src/buster/compiler/c_preprocessor_test.c` | Original preprocessor tests; Default. Some expected texts are clang 23's `-E` output for the cases' own inputs, and `pp_test_feature_names` lists the names in clang 23's `Features.def` (names only, noted below). |
+| `src/buster/compiler/c_preprocessor_test.c` | Original preprocessor tests; Default. Some expected texts are clang 23's `-E` output for the cases' own inputs. `pp_test_keyword_candidates` and `pp_test_feature_names` list names from clang 23's `TokenKinds.def` and companions and from its `Features.def` (names only, noted below). |
 | `src/buster/compiler/c_preprocessor_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `src/buster/compiler/c_refine_benchmark.c` | Original benchmark body under Default; the corpus loader and the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `build.sh`, `.gitignore`, `.github/workflows/9700x.yml` | Original build/configuration; Default. The referenced GitHub action runs externally and is not vendored. |
@@ -217,6 +217,10 @@ domain under the Unlicense; its text at that revision is retained in
   [LICENSES/LLVM.txt](LICENSES/LLVM.txt).
 
 The same answers are behind `c_refine_test.c`'s spellings chosen apart.
+`c_preprocessor_test.c` keeps the keyword candidates it asks clang about again
+under `--clang` (`pp_test_keyword_candidates`): the spellings among those
+names, with the ones of `TransformTypeTraits.def`, `OpenCLImageTypes.def` and
+`HLSLIntangibleTypes.def` from the same directory. Only the names were read.
 
 ## Clang-generated predefines and feature tables
 
