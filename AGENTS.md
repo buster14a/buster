@@ -20,7 +20,8 @@ The Zen 5 requirement describes the **host compiler executable**, not necessaril
 the instruction set of every program it generates. Keep host ISA, generated-code
 ISA, and output ABI separate. Do not add other host operating systems, older-CPU
 production fallbacks, or hot-path CPU dispatch. Broader output targets and extra
-applications are outside the current scope.
+applications are outside the current scope; but the x86 encoder encodes 16- and
+32-bit modes' instructions too, as the owner asked.
 
 ## Coding standards
 
@@ -55,7 +56,9 @@ or infrastructure machinery merely to match its style.
   `x86_fixup_distance` gives its fields' offsets and addends from that; and
   `x86_encode_address32` and `x86_encode_apx`, the same for 32-bit addresses and
   for APX's general registers 16 to 31 (REX2, and EVEX's B4 and X4), each with
-  templates of its own);
+  templates of its own; and `x86_encode_scalar_32` and `x86_encode_scalar_16`,
+  scalar ones for 32-bit and 16-bit modes, with their operand and address
+  sizes, segment overrides and own instructions);
   `docs/x86-64-encoder.md` explains its design and measurements.
   `x86_64_encoder_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-x86-encoder` runs them) and
@@ -174,7 +177,7 @@ yet compared against a performance baseline. Keep just one compiler executable.
 
 ## x86-64 encoder tests
 
-`./build/compiler test-x86-encoder` (about 1 s) checks that every form fits a
+`./build/compiler test-x86-encoder` (about 1.3 s) checks that every form fits a
 template, both encoders on 761 known encodings from GNU as (each also with the
 fixup flag, whose end they must report), a digest of the scalar encoder's output
 for 100,000 random instructions, every batch width and variant of `x86_encode`
@@ -196,9 +199,14 @@ encodings, 31 known invalid instructions (as GNU as rejects them), a digest of
 their own, `x86_encode_64_apx` against the scalar encoder on random streams in
 which half the forms have REX2 and a quarter are EVEX ones, and at page edges,
 and invalid operands, among them a high byte register with REX2, registers 16 to
-31 in forms without REX2 or EVEX and XMM16 to XMM31 in SSE's forms.
-`--address32` and `--apx` run only their pass, and `--count N` and `--seed N`
-change the random streams.
+31 in forms without REX2 or EVEX and XMM16 to XMM31 in SSE's forms. And in
+32-bit and 16-bit modes, with the scalar encoder alone: 155 and 146 known
+encodings, 13 and 16 known fixups, a digest of each, and invalid operands, among
+them registers that would need REX, 16-bit addresses that aren't ModRM's,
+forms of 64-bit mode alone, instructions past 15 bytes and segment overrides
+where an instruction takes none. `--address32`, `--apx`, `--mode32` and
+`--mode16` run only their pass, and `--count N` and `--seed N` change the random
+streams.
 
 The digests were recorded when GNU as encoded the same streams to the same
 bytes. After changing the form table, the scalar encoder or the fixup interface,
@@ -215,6 +223,12 @@ as build/x86_32.s -o build/x86_32.o
 ./build/compiler test-x86-encoder --print-assembly 400000 --seed 1 --apx > build/x86_apx.s
 as build/x86_apx.s -o build/x86_apx.o
 ./build/compiler test-x86-encoder --compare-object build/x86_apx.o 400000 --seed 1 --apx
+./build/compiler test-x86-encoder --print-assembly 400000 --seed 1 --mode32 > build/x86_mode32.s
+as build/x86_mode32.s -o build/x86_mode32.o
+./build/compiler test-x86-encoder --compare-object build/x86_mode32.o 400000 --seed 1 --mode32
+./build/compiler test-x86-encoder --print-assembly 400000 --seed 1 --mode16 > build/x86_mode16.s
+as build/x86_mode16.s -o build/x86_mode16.o
+./build/compiler test-x86-encoder --compare-object build/x86_mode16.o 400000 --seed 1 --mode16
 ```
 
 (`build.sh` deletes `build/`, so run these after building.) The printed assembly
@@ -231,9 +245,15 @@ relocation's offset, type, addend and symbol with the ones the fixup ends and
 `x86_fixup_distance` give. With `--address32`, the printer adds `addr32` where
 no general register gives the address size, and the relocations of displacements
 other than RIP-relative ones are R_X86_64_32; with `--apx`, it names registers
-16 to 31 `r16` to `r31` (`r16d`, `r16w`, `r16b`). Cross-check more than one seed
-after changing forms (1.7 million instructions over seeds 1, 7 and 99 were last
-checked for each entry point, with 198,573, 197,926 and 197,735 relocations).
+16 to 31 `r16` to `r31` (`r16d`, `r16w`, `r16b`); and with `--mode32` and
+`--mode16`, the printed assembly is in `.code32` or `.code16`, and the printer
+writes the mode's mnemonics and prefixes (`addr16`, `data32`, `jcxz`, `lcall`,
+segment overrides as prefixes, which GNU as keeps on a default segment), whose
+relocations are never PLT32 or 32S. Cross-check more than one seed after
+changing forms (1.7 million instructions over seeds 1, 7 and 99 were last
+checked for each 64-bit entry point, with 198,573, 197,926 and 197,735
+relocations, and 1.2 million for each of 32-bit and 16-bit mode, with 135,969
+and 136,279).
 
 ## x86-64 encoder benchmark
 

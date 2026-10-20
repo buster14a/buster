@@ -14,9 +14,10 @@ that XED and GNU as know but a few (see "Coverage"), with FS and GS segment
 overrides on any memory operand (thread-local storage), and the prefixes of
 HLE, MPX's `bnd`,
 CET's `notrack` and the branch hints, and 16-bit near branches; and through
-entry points of their own, 32-bit addresses (`67`, see "32-bit addresses") and
+entry points of their own, 32-bit addresses (`67`, see "32-bit addresses"),
 APX's general registers 16 to 31 in legacy and EVEX forms (REX2, and EVEX's B4
-and X4, see "APX's registers").
+and X4, see "APX's registers"), and 16- and 32-bit modes, with every
+instruction of theirs (scalar for now, see "16- and 32-bit modes").
 For the instructions with a symbolic operand it reports where each one ends,
 which locates the fields their fixups patch (see "Fixups").
 This document records why it is built the way it is: the review of the
@@ -61,7 +62,13 @@ BMI at 0.64 ns (9.4 GB/s). That is:
   instructions, and 46,248 in its new ones), and their 197,735 relocations,
   from a third entry point, whose loop costs 21% more than `x86_encode`'s (0.75
   ns per instruction on the compiler mix) and leaves the 64-bit loop's code the
-  same.
+  same;
+- in 32-bit and 16-bit modes, byte-identical to GNU as 2.47 after `.code32` and
+  `.code16` on 1.2 million random instructions each, over the 6,185 and 6,184
+  forms each mode has (109 of them its own: `aaa`, `bound`, `lds`, `pusha`, far
+  pointers and the rest), with both address sizes, ModRM's 16-bit addresses and
+  segment overrides of every segment, and their 135,969 and 136,279
+  relocations, from scalar entry points of their own.
 
 ## The historical encoder
 
@@ -653,6 +660,115 @@ REX2 and 10 for EVEX's bits, and the spills and constants of the registers they
 take (with REX2 alone, 60 more stack operands and 53 more broadcasts over the
 function's copies of the group).
 
+### 16- and 32-bit modes
+
+32-bit mode (protected mode, and compatibility mode under a 64-bit kernel, with
+a 32-bit code segment) and 16-bit mode (real mode, virtual-8086 mode, and
+protected mode with a 16-bit code segment) have entry points of their own,
+scalar ones for now: `x86_encode_scalar_32`, `x86_validate_32`,
+`x86_encode_scalar_16` and `x86_validate_16`, after
+`x86_encoder_initialize_legacy` (see "Next steps"). An instruction is the same
+record, with the form table's forms and their fixed operand sizes, and the mode
+decides the prefixes:
+
+- **Operand size.** The table's 16-bit forms carry the `66` that 64-bit mode
+  needs, and its 32-bit forms none. `x86_encoder_initialize_legacy` gives each
+  form a byte of properties (`x86_form_legacy`): a legacy form without vector
+  operands whose `66` is the operand size's (of map 0, or with a 16-bit
+  register, memory operand, rel16 or 6-byte pseudo-descriptor) is a 16-bit form,
+  which has no `66` in 16-bit mode (342 forms); and a legacy form without a `66`
+  or vector operands that has a 32-bit register or a rel32, or is a 16-bit
+  form's instruction without its `66` (with an imm32, a rel32 or a ptr16:32
+  where that has 16 bits), is a 32-bit form, which takes a `66` in 16-bit mode
+  (400): `add eax, ebx` is `01 D8` in 32-bit mode and `66 01 D8` in 16-bit
+  mode, and `add ax, bx` the other way around. The others keep their prefixes in
+  both modes: a mandatory `66` is the opcode's (ADCX's); the moves to and from
+  control and debug registers are always 32-bit; `ret`, `enter`, `leave`, a push
+  of an imm8 and the pushes and pops of FS and GS keep the mode's default size
+  (their 16- and 32-bit forms are rows of their own); and the forms whose 32-bit
+  register W alone sizes, which a `66` would make another instruction of (`66 0F
+  38 F6` is ADCX, not `wrssd`) or leave as they are, are GNU as's IgnoreSize
+  ones (MOVNTI, MOVDIRI, PTWRITE, UMWAIT, ADOX, `crc32` of a byte, CET's
+  `incsspd`, `rdsspd` and `wrssd`, RAO-INT's `aadd`, `aor` and `axor`, `vmread`,
+  `vmwrite` and `rdpid`), as are those whose register is an address of the
+  address size (`umonitor`, `enqcmd` and `enqcmds`).
+- **Address size.** The mode's, or with `BUSTER_X86_MODE_ADDRESS_SIZE` in the
+  record's mode (bit 6, which 64-bit mode doesn't take) the other one, with a
+  `67`. A 16-bit address is ModRM's own: BX or BP and SI or DI, one of the four
+  alone, or absolute (mod 00 rm 110 and a disp16), without a SIB byte, so
+  without a scale, and VSIB and SIB operands need a 32-bit address, as MPX's do
+  (#UD with a 16-bit one). Its displacement is modulo 2^16, as the address is
+  (`[bx+65535]` is `[bx-1]`, an 8-bit one, as GNU as takes it), and `[bp]`
+  always has one. Without RIP, a 32-bit absolute address is ModRM's own too
+  (mod 00 rm 101, without a SIB byte). Without a memory operand, the bit gives
+  the other size to the addresses the instruction makes itself (100 forms): the
+  string instructions', `xlat`'s, `jcxz`'s and `loop`'s (rCX's), `maskmovq`'s
+  and `maskmovdqu`'s, PadLock's, `monitor`'s, `clzero`'s and the other system
+  instructions' in rAX, and `umonitor`'s register, a 16-bit one with it in
+  32-bit mode (and `jrcxz`'s form is `jecxz` or `jcxz` by it). The 12 moves
+  between the accumulator and an absolute address are forms of their own for
+  each size, moffs16 or moffs32 in the immediate, whose `67` the mode adds where
+  the size isn't its own.
+- **No REX.** Registers 0 to 7 in every class, AH to BH but not SPL to DIL, no
+  64-bit operands, and VEX's and EVEX's register bits always set. A VEX or EVEX
+  prefix in 16-bit mode is 16-bit protected mode's (real mode and virtual-8086
+  mode take `C4`, `C5` and `62` for `les`, `lds` and `bound`); the encoder
+  encodes what it is given.
+- **Segment overrides.** An FS or GS form, as in 64-bit mode; and as segments
+  are more than FS and GS in these modes, an override of any of the six in the
+  decorations' bits 3 to 5 (`BUSTER_X86_SEGMENT_OVERRIDE`, which a memory
+  operand leaves free, as rounding is for registers): on a memory operand, a
+  moffs, or an address the instruction makes itself, a string instruction's
+  source or `xlat`'s (`es lodsw` is `26 AD`), but not on a `notrack` form, whose
+  `3E` would come after it. The encoder writes what the record asks for, a DS
+  override on DS's addresses too, as GNU as does for a prefix (it drops an
+  override in the operand that is the address's default segment).
+- **Prefix order.** GNU as's: FWAIT's `9B`, the segment override, `notrack`'s
+  `3E`, `67`, the mode's `66`, then the form's own (`F2` or `F3`, `F0`, and a
+  branch hint's `2E` or `3E`, which GNU as puts after the `66`: `data32 cs jne`
+  is `66 2E 0F 85` in 16-bit mode, but `notrack call eax` is `3E 66 FF D0`).
+
+Validation takes the forms that exist in the mode: 6,185 in 32-bit mode (1,851
+legacy, 950 VEX and 3,384 EVEX) and 6,184 in 16-bit mode, which has no `push`
+of an imm32 (`pushd`'s row has it). The 2,164 rows of 64-bit mode alone are
+REX.W's and REX2's, those with a 64-bit register, immediate or address or a
+tile, APX's EVEX forms, `udb` (`salc` in these modes), and the instructions
+GNU as takes in 64-bit mode alone: FSGSBASE, `swapgs`, LKGS, FRED, MSRLIST,
+UINTR, TDX's `seamcall`, `seamret` and `seamops`, `pbndkb`, SEV-SNP's but
+`pvalidate`, AMX's tile configuration, `vpcmpestriq` and `vpcmpestrmq`, MOVRS
+and AVX10.2's `vmovrs`, CMPccXADD, PREFETCHIT0 and PREFETCHIT1, the descriptor
+table registers' 10-byte operands and the 64-bit flag pushes. It takes
+registers 0 to 7, 16-bit addresses by their rules, with displacements in
+[-32768, 65535], no RIP, and instructions within x86's 15 bytes, which a `66`
+and a `67` can go past where REX was: in 16-bit mode, HLE's locked arithmetic
+by an imm32 with an FS or GS override and a 32-bit address with a SIB byte and
+a disp32 would be 16 bytes long.
+
+The instructions 64-bit mode doesn't have are 109 rows at the end of the table
+(`BUSTER_X86_FORMS_LEGACY_MODES`, from `BUSTER_X86_FORM_LEGACY_MODES` on),
+whose templates take no instruction, so that the 64-bit entry points reject
+them: the BCD adjustments (`aaa`, `aas`, `daa`, `das`, `aam` and `aad`),
+`salc`, `into`, `bound`, `arpl`, `lds` and `les`, `pusha` and `popa` at both
+sizes, pushes and pops of ES, CS, SS and DS (and 32-bit ones of FS and GS), far
+calls and jumps to a pointer in the immediate (a ptr16:16, or a ptr16:32's
+offset and its selector in the displacement), `inc` and `dec` at `40` to `4F`,
+the descriptor table registers' 6-byte operands at both sizes (`lgdtw`'s base
+is 24-bit), VIA's `montmul` (which XED takes with 16- and 32-bit addresses
+alone), and the 32-bit forms of what 64-bit mode does with 64-bit operands:
+`push` and `pop`, near branches through a register or memory (with `notrack`
+and `bnd` too), `pushfd` and `popfd`, `pushd`, the moves to and from control
+and debug registers, `vmread`, `vmwrite`, `invept`, `invvpid`, `invpcid`,
+MPX's bound checks and `rdpid`, and the instructions with an address in a
+register (`umonitor`, `movdir64b`, `enqcmd` and `enqcmds`); and near branches
+through a 16-bit register or memory, explicit sizes of `ret`, `leave` and
+`enter`, and the moffs moves. A 16-bit address's displacement is a 16-bit
+field, whose distance `x86_fixup_distance_address16` gives; a rel16 and an
+imm16 are fields of their own, and a far pointer's offset is the immediate's
+start, which the selector follows.
+
+The 64-bit entry points are unchanged: their random streams, which leave the
+new rows out, give the same three digests as before them.
+
 ### What Niles Salter's tokenizer suggested
 
 Accelerated-Zig-Parser's guidelines translate to an encoder like this:
@@ -951,7 +1067,7 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
 
 ## Correctness
 
-`./build/compiler test-x86-encoder` (about 1 s) checks:
+`./build/compiler test-x86-encoder` (about 1.3 s) checks:
 
 - that every form's template fits;
 - 761 known encodings from GNU as, on the paths most worth pinning down (VEX2
@@ -1100,7 +1216,28 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   are 16 to 31 half the time) and at page edges, and the invalid operands with
   three more breaks: a high byte register with REX2, a general register, base
   or index from 16 to 31 in a form without REX2 or EVEX, and a vector register
-  rm from 16 to 31 in a form with REX2.
+  rm from 16 to 31 in a form with REX2;
+- then in 32-bit mode and in 16-bit mode, which is all `--mode32` and `--mode16`
+  run, the scalar encoder alone (so no random streams or page edges): 155 and
+  146 known encodings from GNU as (both operand and address sizes, ModRM's eight
+  16-bit addresses and its absolute one, 16-bit displacements modulo 2^16,
+  `[bp]`'s zero, 32-bit absolute addresses without a SIB byte, high byte
+  registers, pushes and pops, branches by a rel16 and a rel32 with hints and
+  `bnd`, near and far branches through memory, the addresses instructions make
+  themselves with a `67`, `jcxz` and `jecxz`, control, debug and segment
+  registers, VEX and EVEX with a 16-bit address's disp8*N, a gather with a
+  `67`, the x87 environment at both sizes, the forms with fixed sizes, HLE, the
+  rows of these modes alone, and segment overrides of every segment in the
+  decorations), 13 and 16 known fixups (rel8s, rel16s and rel32s, 16- and
+  32-bit displacements and immediates, far pointers' offsets and moffs), a
+  digest of each, and the invalid operands, with the 64-bit breaks that apply
+  and five more: a register that would need REX (8 to 15, or SPL to DIL), a
+  memory operand the address size can't have (RIP, a VSIB, SIB or MPX operand
+  with a 16-bit address, or a 16-bit address with another base or index, an
+  index alone, a scale or a displacement past 16 bits), a form that doesn't
+  exist in the mode (which the 64-bit entry points get too, with the rows of
+  these modes), an instruction longer than 15 bytes, and a segment override
+  where the instruction can't take one, or past GS.
 
 `--print-assembly` and `--compare-object` cross-check the scalar encoder against
 GNU as for any seed (AGENTS.md has the commands): 1.7 million random
@@ -1345,6 +1482,48 @@ the payload with REX's `4` (8) or without the static `D5` (8 and a known fixup);
 and the scalar encoder with REX2 for registers 16 to 31 alone (8, a known fixup
 and the digest) or with `D5` among the prefixes too (the same).
 
+With `--mode32` and `--mode16`, the same seeds cross-check the 16- and 32-bit
+streams, which GNU as assembles after `.code32` or `.code16`: 1.2 million
+instructions each, 0 differences, and 135,969 and 136,279 relocations (3,333 and
+3,379 PC32, 874 and 914 PC16, 211 and 207 PC8, 96,306 and 34,895 32, and 35,245
+and 96,884 16), 0 different. A quarter of their memory operands, and of the
+addresses instructions make themselves, have the other address size, and an
+eighth have an FS or GS form and another eighth an override in the decorations:
+of 400,000 instructions, about 27,000 each, with 43,000 16-bit addresses in
+32-bit mode and 126,000 in 16-bit mode, and 1,100 to 1,200 of the instructions
+64-bit mode doesn't have. GNU as's relocations there are R_X86_64_PC32 for
+every rel32 (never PLT32), PC16 for a rel16, and 32 or 16 for an address, an
+immediate (an imm16 too) or a far pointer's offset (never 32S). The printer
+writes 16- and 32-bit address registers, `addr16` or `addr32` where nothing in
+the instruction says the size (`jcxz` and `jecxz` do, as address registers do),
+`data16` or `data32` where a mnemonic can't (`data32 jne` for a rel32 in 16-bit
+mode, `data32 call [bx]`, which GNU as otherwise takes for a far call through a
+doubleword, and `lcall` and `ljmp` for far branches through memory, with the
+prefix of the other size), `{disp16}` for a rel16 in 16-bit mode, a `d` on the
+x87 environment and state forms for their `66` there, a moffs unsigned, and an
+override in the decorations as a prefix (`es mov ax, [bx]`), which GNU as keeps
+on any address, while it drops one in the operand that is the address's default
+segment (`ds:[bx]`, `ss:[bp]`). The streams leave out what GNU as encodes
+another way: `inc` and `dec` of a register with `FF` (GNU as takes `40` to
+`4F`), the accumulator's moves to and from an absolute address with `88` to
+`8B` (it takes `A0` to `A3`), and in 16-bit mode a jump or a conditional jump
+by a rel32 whose target a rel8 reaches, which GNU as relaxes even with `data32`.
+GNU as rejects every row the modes leave out (or takes the text for another
+instruction: `push rbp` pushes a symbol's memory in `.code32`), but `bndcl` and
+`bndcn` through memory, which the 32-bit rows encode. Twenty-two broken copies
+of the 16- and 32-bit parts fail the tests: the `66` in the wrong mode or kept
+by a 16-bit form (70 and 68 of the known encodings wrong), `[si]` and `[di]`
+swapped (10), displacements not modulo 2^16 (2), `[bp]` without its zero (2),
+a moffs without its `67` (6 and 4), a 32-bit absolute address with a SIB byte
+(2), a rel32 or a pseudo-descriptor not 32- and 16-bit (4 and 6), far pointers
+not paired (4), MOVNTI or `ret` sized, `udb` in these modes, the `67` after the
+`66` (4) or a branch hint before it (the digest, which only GNU as's bytes
+catch), `umonitor` without its address size (2), the 16-bit fixup distance (1
+and 3 known fixups), and validation that takes any base in a 16-bit address (90
+and 82 broken instructions not found), registers 8 to 15 (649 and 495),
+displacements past 16 bits (101 and 110), a ptr16:32's selector past 16 bits
+(116 and 109) or instructions past 15 bytes (748 in 16-bit mode).
+
 ## Coverage
 
 #17 asks for every x86-64 instruction. The form table was audited against
@@ -1394,19 +1573,22 @@ DE D0+i, DF D0+i, DF D8+i, D9 D8+i, DD C8+i and DF C8+i), the reserved NOPs
 of `0F 0D` and `0F 18` to `0F 1F` and the reserved prefetches `0F 0D` /3 to /7;
 VIA's `montmul`, which XED takes with 16- and 32-bit addresses alone; and
 Geode's 3DNow! `pfrcpv` and `pfrsqrtv`, which GNU as 2.47 no longer takes.
-And everything only 16- and 32-bit modes have (see "Next steps").
+
+In 16- and 32-bit modes, the table has every instruction GNU as 2.47 takes after
+`.code16` and `.code32` but the aliases and one: each of its templates for
+those modes alone (`No64`) has a row, GNU as rejects each row the modes leave
+out (see "Correctness"), and the 109 rows of their own instructions
+cross-check with the rest. The one is `mov` to and from the 386's and 486's
+test registers (TR3 to TR7, #UD since the Pentium, and unknown to XED). Nor
+does the table have the `82` group (`80`'s alias, which no assembler writes),
+the 286's and 386's LOADALL or AMD's `lock mov` to and from CR0 for CR8.
 
 ## Next steps
 
-- **16- and 32-bit modes**, whose every instruction the encoder is to encode
-  too: their own default operand and address sizes (`66` and
-  `67` meaning the other one), no REX (registers 0 to 7, no SPL to DIL, no
-  64-bit operands), 32-bit absolute addresses where 64-bit mode has RIP, the
-  16-bit addressing forms (`[bx+si]`, `[bp+di]` and the rest, with 16-bit
-  displacements), and the instructions only they have (`aaa` to `das`,
-  `bound`, `arpl`, `into`, `lds` and `les`, `pusha` and `popa`, `push` and
-  `pop` of CS, DS, ES and SS, `salc`, far calls and jumps to a pointer, `inc`
-  and `dec` at `40` to `4F`, the `82` group, `jcxz` and `jecxz`).
+- **Vectorized 16- and 32-bit modes.** Their entry points are scalar (see "16-
+  and 32-bit modes"). A loop of their own would need templates per mode (the
+  forms' `66` and the moffs' `67`), ModRM's 16-bit addresses in the mode
+  tables, and the decorations' segment override as a prefix byte of its own.
 - **The rest of 64-bit mode** (#17): the instructions in "Coverage" that no
   assembler checks yet, once one does. Of #39's prefixes, `67` has its entry
   point (see "32-bit addresses"), and the CS, DS, ES and SS overrides on
