@@ -174,8 +174,9 @@ designs and the compilers already built this way.
   test-lanes` runs them) and `lane_benchmark.c` provides `benchmark-lanes`.
 - `src/buster/compiler/dataflow.c` provides aligned bitset liveness and
   interference with AVX-512 and scalar implementations, independent of IR.
-  `dataflow_test.c` provides `test-dataflow`; `dataflow_benchmark.c` supplies
-  the shared synthetic CFG generator and `benchmark-dataflow`.
+  `dataflow_program.c` supplies the shared synthetic CFG generator;
+  `dataflow_test.c` provides `test-dataflow` and `dataflow_benchmark.c`
+  provides `benchmark-dataflow`.
   `docs/dataflow.md` records the contracts and 9700X measurements.
 - `src/buster/compiler/link.c` is the representation the object writer and the
   linker share: names, atoms, symbols and fixups in column arrays indexed by
@@ -773,20 +774,25 @@ measurements are informational.
 liveness and interference primitives in `dataflow.c`:
 
 - generated CFGs: chains, diamonds, self-loops, nested loops, irreducible
-  two-entry loops, several exits and random local components, including
-  disconnected blocks. Every shape runs with 0, 1, 2, 3, 8, 17, 65, 257 and
-  2,049 blocks at each of 0, 1, 511, 512, 513, 1,024 and 1,025 values, then
-  `--count` more seeds and sizes per shape (24 by default). The same seed must
-  reproduce the columns and input rows. The postorder must visit every block
-  once, and every row must be 64-byte aligned and padded to 512 bits;
+  two-entry loops, several exits, random local components, and connected
+  dispatch loops. Every shape runs with 0, 1, 2, 3, 8, 17, 65, 257 and
+  2,049 blocks at each of 0, 1, 63, 64, 65, 511, 512, 513, 1,024 and 1,025
+  values, then `--count` more seeds and sizes per shape (24 by default). The
+  same seed must reproduce the columns and input rows. The postorder must
+  visit every block once, and every row must be 64-byte aligned and padded
+  to 512 bits;
 - the AVX-512 and scalar fixpoints: identical `in` and `out` rows and iteration
   counts, both liveness equations satisfied, and all padding bits zero.
   Solving again over poisoned output must reproduce the result and iteration
-  count. Small graphs also use an independent per-value reachability check:
-  a value is live when a path reaches its use before its definition;
+  count, including zero padding after the poisoned rerun. Small graphs also
+  use an independent per-value reachability check: a value is live when a
+  path reaches its use before its definition. Graphs of 257 and 2,049 blocks
+  independently check selected boundary and seed-derived values at every
+  block with a reverse-reachability oracle;
 - handwritten graphs: disconnected cycles, a self-loop without a use, a value
   both used and defined in one block, every combination of the transfer
-  function's three input bits, and the exact postorder of a chain;
+  function's three input bits, the exact postorder of a chain, and repeated
+  successor/self/exit edges compared with a deduplicated graph;
 - interference: empty rows and every bit position in rows of 512, 1,024 and
   1,536 bits, with disjoint and intersecting inputs, checked by both paths;
 - page edges: each matrix ends at a `PROT_NONE` page for every boundary value
@@ -800,23 +806,29 @@ liveness and interference primitives in `dataflow.c`:
 
 `--seed N` changes the generated inputs (1 by default). The command reports
 the check and failure counts and exits with status 1 on any failure. The
-9700X job runs it after the lane tests.
+9700X job runs it after the link tests.
 
 ## Dataflow benchmark
 
 `./build/compiler benchmark-dataflow [--seed N]` compares the scalar and
-AVX-512 fixpoints on three generated functions: a small diamond CFG with
+AVX-512 fixpoints on four generated functions: a small diamond CFG with
 16 blocks and 127 values, nested loops with 256 blocks and 1,025 values, and
-random local components with 4,096 blocks and 4,097 values. `--seed N` selects
-the inputs (1 by default); these are synthetic functions, not corpus results.
+random local components and a connected dispatch loop, each with 4,096 blocks
+and 4,097 values. The local-components case is a streaming control, not a model
+of a large real function. `--seed N` selects the inputs (1 by default); generator
+version 2 mixes the seed before generating topology and rows.
 
 Each workload first checks identical rows and iteration counts, then reports
-21 interleaved-pass medians with alternating implementation order. Both paths
-use the same calibrated repetition count after warm-up. Each timed solve
+21 interleaved-pass medians and minimum/maximum ranges with alternating
+implementation order. Both paths use the same repetition count, calibrated
+with warm batches; every retained sample lasts at least 2 ms. Each timed solve
 includes clearing `in` and `out`; generation, allocation and postorder are
 outside the timed region. The output gives nanoseconds, cycles and instructions
 per function, cycles per block per iteration, and IPC. Hardware counter values
 are zero when unavailable. A scalar/vector disagreement fails the command.
+Run at least five independent processes, releasing the host lock between
+them, when recording a comparison; process-median ranges expose variation
+that one process's 21 passes may miss.
 
 Run it under the 9700X's lock with `taskset -c 2`. `docs/dataflow.md` records
 the contracts, measurements and implementation choice. The default 9700X job

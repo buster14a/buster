@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Synthetic CFGs and the liveness benchmark. dataflow_generate is also linked into main.c's tests; it makes only
-// arena-owned columns, with zero padding in every bit row. Its seed, sizes and shape are its complete inputs.
-// The generator and measurement helpers are original to this module, with no external fixtures or implementation.
+// The liveness benchmark uses dataflow_program.c's arena-owned synthetic CFGs and input rows. Measurement helpers
+// are original to this module; no external fixtures or benchmark implementation are incorporated.
 //
 // benchmark-dataflow [--seed N] checks scalar/vector equality, then measures complete solves including clearing in
 // and out. Twenty-one passes alternate which implementation runs first, after warm-up and sample-size calibration.
+// Each retained sample lasts at least 2 ms. Printed ranges are within one process; repeat this command in separately
+// locked processes to measure variation between runs rather than holding the shared host lock around a series.
 // Hardware counters count this thread's user instructions; unavailable counters print zero, never a time estimate.
 // Run on the 9700X through exclusive.sh with taskset -c 2.
 
@@ -24,223 +25,14 @@
 
 #include "buster/compiler/lane.c"
 #include "buster/compiler/dataflow.c"
+#include "buster/compiler/dataflow_program.c"
 
-#define BUSTER_DATAFLOW_GENERATOR_EDGES 4
-#define BUSTER_DATAFLOW_GENERATOR_REGION 64
 #define BUSTER_DATAFLOW_BENCHMARK_PASSES 21
 #define BUSTER_DATAFLOW_BENCHMARK_SAMPLE_NS 2000000
+#define BUSTER_DATAFLOW_BENCHMARK_CALIBRATION_NS (2 * BUSTER_DATAFLOW_BENCHMARK_SAMPLE_NS)
+#define BUSTER_DATAFLOW_BENCHMARK_MAX_RESTARTS 4
 #define BUSTER_DATAFLOW_BENCHMARK_MAX_REPEATS (1u << 20)
 #define BUSTER_DATAFLOW_BENCHMARK_ARENA_BYTES (64ull << 20)
-
-// A small, deterministic congruential stream for test topology and bit locations, not for cryptographic use.
-static uint32_t dataflow_generator_random(uint64_t* state)
-{
-    *state = *state * 1664525u + 1013904223u;
-    return (uint32_t)(*state >> 32);
-}
-
-static void dataflow_generator_edge(uint32_t block_count, uint32_t target, uint32_t* targets, uint32_t* count)
-{
-    bool present = false;
-    for (uint32_t index = 0; index < *count; index += 1)
-    {
-        present |= targets[index] == target;
-    }
-    if (target < block_count && !present)
-    {
-        assert(*count < BUSTER_DATAFLOW_GENERATOR_EDGES);
-        targets[*count] = target;
-        *count += 1;
-    }
-}
-
-static uint32_t dataflow_generator_successors(uint32_t blocks, uint32_t block, uint32_t shape, uint64_t* state, uint32_t* targets)
-{
-    uint32_t count = 0;
-    switch (shape)
-    {
-        case BUSTER_DATAFLOW_SHAPE_CHAIN:
-        {
-            dataflow_generator_edge(blocks, block + 1, targets, &count);
-        } break;
-
-        case BUSTER_DATAFLOW_SHAPE_DIAMOND:
-        {
-            const uint32_t position = block % 4;
-            const uint32_t base = block - position;
-            if (position == 0)
-            {
-                dataflow_generator_edge(blocks, block + 1, targets, &count);
-                dataflow_generator_edge(blocks, block + 2, targets, &count);
-            }
-            else
-            {
-                const uint32_t target = position == 3 ? block + 1 : base + 3;
-                dataflow_generator_edge(blocks, target, targets, &count);
-            }
-        } break;
-
-        case BUSTER_DATAFLOW_SHAPE_SELF_LOOP:
-        {
-            dataflow_generator_edge(blocks, block + 1, targets, &count);
-            if (block % 3 == 0)
-            {
-                dataflow_generator_edge(blocks, block, targets, &count);
-            }
-        } break;
-
-        case BUSTER_DATAFLOW_SHAPE_NESTED_LOOP:
-        {
-            dataflow_generator_edge(blocks, block + 1, targets, &count);
-            if (block % 8 == 6)
-            {
-                dataflow_generator_edge(blocks, block - 4, targets, &count);
-            }
-            if (block % 32 == 30)
-            {
-                dataflow_generator_edge(blocks, block - 29, targets, &count);
-            }
-            if (blocks < 8 && block + 1 == blocks)
-            {
-                dataflow_generator_edge(blocks, 0, targets, &count);
-            }
-        } break;
-
-        case BUSTER_DATAFLOW_SHAPE_IRREDUCIBLE:
-        {
-            // Both nodes of the cycle have an edge entering from outside it: neither dominates the other.
-            const uint32_t position = block % 8;
-            const uint32_t base = block - position;
-            if (position == 0)
-            {
-                dataflow_generator_edge(blocks, base + 1, targets, &count);
-                dataflow_generator_edge(blocks, base + 2, targets, &count);
-            }
-            else if (position == 1)
-            {
-                dataflow_generator_edge(blocks, base + 2, targets, &count);
-                dataflow_generator_edge(blocks, base + 3, targets, &count);
-            }
-            else if (position == 2)
-            {
-                dataflow_generator_edge(blocks, base + 1, targets, &count);
-                dataflow_generator_edge(blocks, base + 3, targets, &count);
-            }
-            else
-            {
-                dataflow_generator_edge(blocks, block + 1, targets, &count);
-            }
-        } break;
-
-        case BUSTER_DATAFLOW_SHAPE_MULTI_EXIT:
-        {
-            if (block % 7 != 4)
-            {
-                dataflow_generator_edge(blocks, block + 1, targets, &count);
-                if (block % 7 == 0)
-                {
-                    dataflow_generator_edge(blocks, block + 2, targets, &count);
-                }
-            }
-        } break;
-
-        case BUSTER_DATAFLOW_SHAPE_RANDOM:
-        {
-            // Local components bound live regions and also exercise postorder's disconnected roots. Making every
-            // edge global would quickly make one large SCC with almost every value live almost everywhere.
-            const uint32_t base = block - block % BUSTER_DATAFLOW_GENERATOR_REGION;
-            const uint32_t left = blocks - base;
-            const uint32_t size = left < BUSTER_DATAFLOW_GENERATOR_REGION ? left : BUSTER_DATAFLOW_GENERATOR_REGION;
-            const uint32_t choice = dataflow_generator_random(state);
-            if (block + 1 < base + size && block % 11 != 7)
-            {
-                dataflow_generator_edge(blocks, block + 1, targets, &count);
-                dataflow_generator_edge(blocks, base + choice % size, targets, &count);
-                if ((choice & 3) == 0)
-                {
-                    const uint32_t target = base + dataflow_generator_random(state) % size;
-                    dataflow_generator_edge(blocks, target, targets, &count);
-                }
-            }
-        } break;
-    }
-    return count;
-}
-
-bool dataflow_generate(Arena* arena, uint32_t blocks, uint32_t values, uint32_t shape, uint64_t seed, Dataflow* result)
-{
-    const uint64_t saved_length = arena->length;
-    bool valid = shape < BUSTER_DATAFLOW_SHAPE_COUNT && blocks <= UINT32_MAX / BUSTER_DATAFLOW_GENERATOR_EDGES;
-    uint32_t edges = 0;
-    uint64_t state = seed;
-    for (uint32_t block = 0; valid && block < blocks; block += 1)
-    {
-        uint32_t targets[BUSTER_DATAFLOW_GENERATOR_EDGES];
-        edges += dataflow_generator_successors(blocks, block, shape, &state, targets);
-    }
-
-    Dataflow generated = { 0 };
-    if (valid)
-    {
-        valid = dataflow_create(arena, blocks, values, edges, &generated);
-    }
-    if (valid)
-    {
-        state = seed;
-        uint32_t edge = 0;
-        for (uint32_t block = 0; block < blocks; block += 1)
-        {
-            uint32_t targets[BUSTER_DATAFLOW_GENERATOR_EDGES];
-            const uint32_t count = dataflow_generator_successors(blocks, block, shape, &state, targets);
-            generated.successor_offsets[block] = edge;
-            for (uint32_t index = 0; index < count; index += 1)
-            {
-                generated.successors[edge] = targets[index];
-                edge += 1;
-            }
-        }
-        generated.successor_offsets[blocks] = edge;
-
-        // Every value has one definition and one to four uses nearby. The placement is independent of the graph,
-        // so loops, bypassed definitions and disconnected uses all remain real inputs to the fixed-point solver.
-        // Setting individual valid bits after zeroing the rows preserves all padding, including unused words.
-        const uint64_t bytes = (uint64_t)blocks * generated.row_words * sizeof(uint64_t);
-        if (bytes != 0)
-        {
-            memset(generated.use, 0, bytes);
-            memset(generated.def, 0, bytes);
-        }
-        for (uint32_t value = 0; blocks != 0 && value < values; value += 1)
-        {
-            const uint32_t anchor = (uint32_t)((uint64_t)value * blocks / values);
-            const uint32_t base = anchor - anchor % BUSTER_DATAFLOW_GENERATOR_REGION;
-            const uint32_t left = blocks - base;
-            const uint32_t size = left < BUSTER_DATAFLOW_GENERATOR_REGION ? left : BUSTER_DATAFLOW_GENERATOR_REGION;
-            const uint32_t definition = base + dataflow_generator_random(&state) % size;
-            const uint32_t uses = 1 + dataflow_generator_random(&state) % 4;
-            const uint64_t bit = 1ull << (value % 64);
-            const uint64_t word = value / 64;
-            generated.def[(uint64_t)definition * generated.row_words + word] |= bit;
-            const uint32_t following = base + size - definition;
-            const uint32_t span = following < 17 ? following : 17;
-            for (uint32_t use = 0; use < uses; use += 1)
-            {
-                const uint32_t user = definition + dataflow_generator_random(&state) % span;
-                generated.use[(uint64_t)user * generated.row_words + word] |= bit;
-            }
-        }
-        valid = dataflow_postorder(&generated, arena);
-    }
-    if (valid)
-    {
-        *result = generated;
-    }
-    else
-    {
-        arena_pop_to(arena, saved_length);
-    }
-    return valid;
-}
 
 typedef struct DataflowBenchmarkCounters DataflowBenchmarkCounters;
 struct DataflowBenchmarkCounters
@@ -259,6 +51,14 @@ struct DataflowBenchmarkSample
     double cycles;
     double instructions;
     uint64_t iterations;
+};
+
+typedef struct DataflowBenchmarkStatistics DataflowBenchmarkStatistics;
+struct DataflowBenchmarkStatistics
+{
+    double minimum;
+    double median;
+    double maximum;
 };
 
 typedef struct DataflowBenchmarkWorkload DataflowBenchmarkWorkload;
@@ -285,10 +85,16 @@ static const DataflowBenchmarkWorkload dataflow_benchmark_workloads[] =
         .shape = BUSTER_DATAFLOW_SHAPE_NESTED_LOOP,
     },
     {
-        .name = "large-random",
+        .name = "large-local",
         .blocks = 4096,
         .values = 4097,
         .shape = BUSTER_DATAFLOW_SHAPE_RANDOM,
+    },
+    {
+        .name = "large-dispatch",
+        .blocks = 4096,
+        .values = 4097,
+        .shape = BUSTER_DATAFLOW_SHAPE_DISPATCH,
     },
 };
 
@@ -421,12 +227,62 @@ static bool dataflow_benchmark_run(Dataflow* flow, bool vector, uint64_t repeats
     return valid;
 }
 
-static double dataflow_benchmark_median(const double* samples)
+static bool dataflow_benchmark_calibrate(Dataflow* flows, uint64_t iterations, uint64_t* repeats)
+{
+    DataflowBenchmarkCounters no_counters =
+    {
+        .cycles = -1,
+        .instructions = -1,
+        .available = false,
+    };
+    bool valid = true;
+    bool ready = false;
+    *repeats = 1;
+    while (valid && !ready)
+    {
+        // Repeated warm batches account for clocks and caches settling after the first solve. Both implementations
+        // use one repetition count, and both orders must reach twice the required retained-sample duration.
+        double shortest = BUSTER_DATAFLOW_BENCHMARK_CALIBRATION_NS;
+        for (uint32_t round = 0; valid && round < 2; round += 1)
+        {
+            for (uint32_t turn = 0; valid && turn < 2; turn += 1)
+            {
+                const uint32_t variant = (round + turn) % 2;
+                DataflowBenchmarkSample sample;
+                valid = dataflow_benchmark_run(&flows[variant], variant != 0, *repeats, &no_counters, &sample);
+                valid = valid && sample.iterations == iterations * (*repeats);
+                shortest = sample.nanoseconds < shortest ? sample.nanoseconds : shortest;
+            }
+        }
+        ready = shortest >= BUSTER_DATAFLOW_BENCHMARK_CALIBRATION_NS;
+        if (valid && !ready)
+        {
+            if (*repeats < BUSTER_DATAFLOW_BENCHMARK_MAX_REPEATS)
+            {
+                *repeats *= 2;
+            }
+            else
+            {
+                valid = false;
+            }
+        }
+    }
+    return valid;
+}
+
+static DataflowBenchmarkStatistics dataflow_benchmark_statistics(const double* samples)
 {
     // Selection by rank is tiny at 21 entries and uses neither a callback nor another module's sorting helper.
-    double result = 0;
+    DataflowBenchmarkStatistics result =
+    {
+        .minimum = samples[0],
+        .median = 0,
+        .maximum = samples[0],
+    };
     for (uint32_t candidate = 0; candidate < BUSTER_DATAFLOW_BENCHMARK_PASSES; candidate += 1)
     {
+        result.minimum = samples[candidate] < result.minimum ? samples[candidate] : result.minimum;
+        result.maximum = samples[candidate] > result.maximum ? samples[candidate] : result.maximum;
         uint32_t less = 0;
         uint32_t equal = 0;
         for (uint32_t other = 0; other < BUSTER_DATAFLOW_BENCHMARK_PASSES; other += 1)
@@ -436,7 +292,7 @@ static double dataflow_benchmark_median(const double* samples)
         }
         if (less <= BUSTER_DATAFLOW_BENCHMARK_PASSES / 2 && less + equal > BUSTER_DATAFLOW_BENCHMARK_PASSES / 2)
         {
-            result = samples[candidate];
+            result.median = samples[candidate];
         }
     }
     return result;
@@ -478,62 +334,75 @@ static bool dataflow_benchmark_workload(const DataflowBenchmarkWorkload* workloa
     uint64_t repeats = 1;
     if (valid)
     {
-        // A complete warm solve on each path has already touched the pages. Calibrate against the faster path,
-        // using the same repetition count for both; measurements include each solve's required row clearing.
-        DataflowBenchmarkCounters no_counters =
+        valid = dataflow_benchmark_calibrate(flows, iterations, &repeats);
+        if (!valid)
         {
-            .cycles = -1,
-            .instructions = -1,
-            .available = false,
-        };
-        DataflowBenchmarkSample calibration[2];
-        valid = dataflow_benchmark_run(&flows[0], false, 1, &no_counters, &calibration[0]);
-        valid = valid && dataflow_benchmark_run(&flows[1], true, 1, &no_counters, &calibration[1]);
-        if (valid)
-        {
-            double fastest = calibration[0].nanoseconds < calibration[1].nanoseconds ? calibration[0].nanoseconds : calibration[1].nanoseconds;
-            fastest = fastest > 0 ? fastest : 1;
-            const double requested = BUSTER_DATAFLOW_BENCHMARK_SAMPLE_NS / fastest + 1;
-            repeats = requested > BUSTER_DATAFLOW_BENCHMARK_MAX_REPEATS ? BUSTER_DATAFLOW_BENCHMARK_MAX_REPEATS : (uint64_t)requested;
+            fprintf(stderr, "dataflow warm calibration failed for %s\n", workload->name);
         }
     }
 
     double nanoseconds[2][BUSTER_DATAFLOW_BENCHMARK_PASSES] = { 0 };
     double cycles[2][BUSTER_DATAFLOW_BENCHMARK_PASSES] = { 0 };
     double instructions[2][BUSTER_DATAFLOW_BENCHMARK_PASSES] = { 0 };
-    for (uint32_t pass = 0; valid && pass < BUSTER_DATAFLOW_BENCHMARK_PASSES; pass += 1)
+    bool complete = false;
+    uint32_t restarts = 0;
+    while (valid && !complete)
     {
-        for (uint32_t turn = 0; valid && turn < 2; turn += 1)
+        bool short_sample = false;
+        for (uint32_t pass = 0; valid && !short_sample && pass < BUSTER_DATAFLOW_BENCHMARK_PASSES; pass += 1)
         {
-            const uint32_t variant = (pass + turn) % 2;
-            DataflowBenchmarkSample sample;
-            valid = dataflow_benchmark_run(&flows[variant], variant != 0, repeats, counters, &sample);
-            valid = valid && sample.iterations == iterations * repeats;
-            nanoseconds[variant][pass] = sample.nanoseconds / (double)repeats;
-            cycles[variant][pass] = sample.cycles / (double)repeats;
-            instructions[variant][pass] = sample.instructions / (double)repeats;
+            for (uint32_t turn = 0; valid && !short_sample && turn < 2; turn += 1)
+            {
+                const uint32_t variant = (pass + turn) % 2;
+                DataflowBenchmarkSample sample;
+                valid = dataflow_benchmark_run(&flows[variant], variant != 0, repeats, counters, &sample);
+                valid = valid && sample.iterations == iterations * repeats;
+                short_sample = sample.nanoseconds < BUSTER_DATAFLOW_BENCHMARK_SAMPLE_NS;
+                nanoseconds[variant][pass] = sample.nanoseconds / (double)repeats;
+                cycles[variant][pass] = sample.cycles / (double)repeats;
+                instructions[variant][pass] = sample.instructions / (double)repeats;
+            }
+        }
+        complete = !short_sample;
+        if (valid && !complete)
+        {
+            // Never mix repetition counts in a reported distribution. If either path becomes faster after warm-up,
+            // discard the entire attempt and restart all passes with twice as many complete solves on both paths.
+            if (restarts < BUSTER_DATAFLOW_BENCHMARK_MAX_RESTARTS && repeats < BUSTER_DATAFLOW_BENCHMARK_MAX_REPEATS)
+            {
+                repeats *= 2;
+                restarts += 1;
+            }
+            else
+            {
+                fprintf(stderr, "dataflow samples remain below 2 ms for %s after bounded calibration\n", workload->name);
+                valid = false;
+            }
         }
     }
     valid = valid && dataflow_benchmark_equal(&flows[0], &flows[1]);
     if (valid)
     {
-        printf("%s: blocks=%u values=%u edges=%u row_bytes=%" PRIu64 " iterations=%" PRIu64 " repeats=%" PRIu64 " digest=%016" PRIx64 "\n",
+        printf("%s: blocks=%u values=%u edges=%u row_bytes=%" PRIu64 " iterations=%" PRIu64 " repeats=%" PRIu64 " restarts=%u digest=%016" PRIx64 "\n",
                workload->name, workload->blocks, workload->values, flows[0].edge_count, flows[0].row_words * sizeof(uint64_t),
-               iterations, repeats, dataflow_benchmark_digest(&flows[0]));
+               iterations, repeats, restarts, dataflow_benchmark_digest(&flows[0]));
         for (uint32_t variant = 0; variant < 2; variant += 1)
         {
-            const double median_ns = dataflow_benchmark_median(nanoseconds[variant]);
-            const double median_cycles = counters->available ? dataflow_benchmark_median(cycles[variant]) : 0;
-            const double median_instructions = counters->available ? dataflow_benchmark_median(instructions[variant]) : 0;
+            const DataflowBenchmarkStatistics time = dataflow_benchmark_statistics(nanoseconds[variant]);
+            const DataflowBenchmarkStatistics cycle = counters->available ? dataflow_benchmark_statistics(cycles[variant]) : (DataflowBenchmarkStatistics){ 0 };
+            const DataflowBenchmarkStatistics instruction = counters->available ? dataflow_benchmark_statistics(instructions[variant]) : (DataflowBenchmarkStatistics){ 0 };
             const double blocks_iterations = (double)workload->blocks * (double)iterations;
-            printf("  %-6s %12.1f ns/function %12.1f cycles/function %8.3f cycles/block/iteration %12.1f instructions/function %5.2f IPC\n",
-                   variant == 0 ? "scalar" : "avx512", median_ns, median_cycles, median_cycles / blocks_iterations,
-                   median_instructions, median_cycles != 0 ? median_instructions / median_cycles : 0);
+            printf("  %-6s %.1f [%.1f-%.1f] ns/function %.1f [%.1f-%.1f] cycles/function %.3f [%.3f-%.3f] cycles/block/iteration %.1f instructions/function %.2f IPC min_sample_ms=%.3f\n",
+                   variant == 0 ? "scalar" : "avx512", time.median, time.minimum, time.maximum,
+                   cycle.median, cycle.minimum, cycle.maximum,
+                   cycle.median / blocks_iterations, cycle.minimum / blocks_iterations, cycle.maximum / blocks_iterations,
+                   instruction.median, cycle.median != 0 ? instruction.median / cycle.median : 0,
+                   time.minimum * (double)repeats / 1e6);
         }
     }
     else
     {
-        fprintf(stderr, "dataflow benchmark failed for %s (allocation, clock, or scalar/vector disagreement)\n", workload->name);
+        fprintf(stderr, "dataflow benchmark failed for %s (allocation, clock, calibration, or scalar/vector disagreement)\n", workload->name);
     }
     arena_release(&arena);
     return valid;
@@ -575,7 +444,8 @@ int run_dataflow_benchmark(int argc, char** argv)
     else
     {
         DataflowBenchmarkCounters counters = dataflow_benchmark_open_counters();
-        printf("dataflow: seed=%" PRIu64 ", 21 interleaved-pass medians; complete solves including in/out clearing\n", seed);
+        printf("dataflow: generator=%u seed=%" PRIu64 ", 21 interleaved-pass median [min-max]; complete solves including in/out clearing\n",
+               BUSTER_DATAFLOW_GENERATOR_VERSION, seed);
         if (!counters.available)
         {
             printf("hardware counters unavailable; cycles, instructions and IPC are zero\n");

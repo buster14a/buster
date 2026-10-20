@@ -4,6 +4,8 @@
 // main.c includes this file after dataflow.c; run_dataflow_tests implements test-dataflow.
 // The generated cases compare both kernels and their iteration counts, equations, padding and repeatability.
 // dataflow_test_reachability independently derives liveness one value at a time by finding a use before a def.
+// dataflow_test_sampled_reachability checks selected values at every block of large graphs by backward reachability.
+// dataflow_test_repeated_edges compares a handwritten multigraph, including repeated self-edges, with its simple CFG.
 // dataflow_test_guards moves each whole matrix to a protected page boundary, including inaccessible zero-size rows.
 // dataflow_test_limits checks failure rollback and malformed successor columns. All fixtures are original C data.
 
@@ -33,6 +35,9 @@ struct DataflowTestTally
 static const uint32_t dataflow_test_values[] = {
     0,
     1,
+    63,
+    64,
+    65,
     511,
     512,
     513,
@@ -191,6 +196,164 @@ static bool dataflow_test_reachability(const Dataflow* graph, Arena* scratch)
     return result;
 }
 
+// Reachability from every use in the reversed CFG gives the same path property for all origins at once. Stop
+// at a predecessor that defines the value, unless it is itself a use (already seeded). This does not use in/out
+// equations, solver order or iteration counts. Selected word/vector boundary values keep large cases inexpensive.
+static bool dataflow_test_sampled_reachability(const Dataflow* graph, Arena* scratch, uint64_t seed)
+{
+    const uint64_t mark = scratch->length;
+    uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)graph->block_count + 1);
+    uint32_t* predecessors = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->edge_count);
+    uint32_t* cursors = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->block_count);
+    uint32_t* stack = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->block_count);
+    uint8_t* live = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->block_count);
+    bool result = offsets != 0 && (graph->edge_count == 0 || predecessors != 0);
+    result = result && (graph->block_count == 0 || (cursors != 0 && stack != 0 && live != 0));
+    const uint32_t boundary_values[] = {
+        0,
+        1,
+        63,
+        64,
+        65,
+        511,
+        512,
+        513,
+        1023,
+        1024,
+        1025,
+    };
+    uint32_t samples[BUSTER_ARRAY_LENGTH(boundary_values) + 3];
+    uint32_t sample_count = 0;
+    for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(boundary_values); i += 1)
+    {
+        if (boundary_values[i] < graph->value_count)
+        {
+            samples[sample_count] = boundary_values[i];
+            sample_count += 1;
+        }
+    }
+    if (graph->value_count != 0)
+    {
+        const uint32_t extra_values[] = {
+            graph->value_count - 1,
+            graph->value_count / 2,
+            (uint32_t)(seed % graph->value_count),
+        };
+        for (uint64_t i = 0; i < BUSTER_ARRAY_LENGTH(extra_values); i += 1)
+        {
+            bool duplicate = false;
+            for (uint32_t sample = 0; sample < sample_count; sample += 1)
+            {
+                duplicate = duplicate || samples[sample] == extra_values[i];
+            }
+            if (!duplicate)
+            {
+                samples[sample_count] = extra_values[i];
+                sample_count += 1;
+            }
+        }
+    }
+    if (result)
+    {
+        memset(offsets, 0, ((uint64_t)graph->block_count + 1) * sizeof(uint32_t));
+        for (uint32_t edge = 0; edge < graph->edge_count; edge += 1)
+        {
+            offsets[(uint64_t)graph->successors[edge] + 1] += 1;
+        }
+        for (uint32_t block = 0; block < graph->block_count; block += 1)
+        {
+            offsets[(uint64_t)block + 1] += offsets[block];
+            cursors[block] = offsets[block];
+        }
+        for (uint32_t block = 0; block < graph->block_count; block += 1)
+        {
+            for (uint32_t edge = graph->successor_offsets[block]; edge < graph->successor_offsets[block + 1]; edge += 1)
+            {
+                const uint32_t successor = graph->successors[edge];
+                predecessors[cursors[successor]] = block;
+                cursors[successor] += 1;
+            }
+        }
+    }
+    for (uint32_t sample = 0; result && sample < sample_count; sample += 1)
+    {
+        const uint32_t value = samples[sample];
+        const uint64_t bit = 1ull << (value % 64);
+        const uint64_t word = value / 64;
+        uint32_t depth = 0;
+        memset(live, 0, graph->block_count);
+        for (uint32_t block = 0; block < graph->block_count; block += 1)
+        {
+            const uint64_t index = (uint64_t)block * graph->row_words + word;
+            if ((graph->use[index] & bit) != 0)
+            {
+                live[block] = 1;
+                stack[depth] = block;
+                depth += 1;
+            }
+        }
+        while (depth != 0)
+        {
+            depth -= 1;
+            const uint32_t block = stack[depth];
+            for (uint32_t edge = offsets[block]; edge < offsets[(uint64_t)block + 1]; edge += 1)
+            {
+                const uint32_t predecessor = predecessors[edge];
+                const uint64_t index = (uint64_t)predecessor * graph->row_words + word;
+                if (live[predecessor] == 0 && (graph->def[index] & bit) == 0)
+                {
+                    // Each block is pushed at most once per value, even with repeated edges and cycles.
+                    live[predecessor] = 1;
+                    stack[depth] = predecessor;
+                    depth += 1;
+                }
+            }
+        }
+        for (uint32_t block = 0; result && block < graph->block_count; block += 1)
+        {
+            const uint64_t index = (uint64_t)block * graph->row_words + word;
+            result = (live[block] != 0) == ((graph->in[index] & bit) != 0);
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return result;
+}
+
+static bool dataflow_test_connected(const Dataflow* graph, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    uint8_t* seen = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->block_count);
+    uint32_t* stack = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->block_count);
+    bool result = graph->block_count == 0 || (seen != 0 && stack != 0);
+    if (result && graph->block_count != 0)
+    {
+        memset(seen, 0, graph->block_count);
+        uint32_t depth = 1;
+        uint32_t reached = 1;
+        stack[0] = 0;
+        seen[0] = 1;
+        while (depth != 0)
+        {
+            depth -= 1;
+            const uint32_t block = stack[depth];
+            for (uint32_t edge = graph->successor_offsets[block]; edge < graph->successor_offsets[block + 1]; edge += 1)
+            {
+                const uint32_t successor = graph->successors[edge];
+                if (seen[successor] == 0)
+                {
+                    seen[successor] = 1;
+                    reached += 1;
+                    stack[depth] = successor;
+                    depth += 1;
+                }
+            }
+        }
+        result = reached == graph->block_count;
+    }
+    arena_pop_to(scratch, mark);
+    return result;
+}
+
 static bool dataflow_test_order(const Dataflow* graph, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
@@ -245,6 +408,8 @@ static void dataflow_test_pair(DataflowTestTally* tally, Dataflow* vector, Dataf
     const uint64_t repeated_scalar_iterations = dataflow_liveness_scalar(scalar);
     dataflow_test_expect(tally, repeated_scalar_iterations == scalar_iterations && dataflow_test_rows_equal(vector, scalar),
         "scalar solve depends on previous output");
+    dataflow_test_expect(tally, dataflow_test_padding(vector) && dataflow_test_padding(scalar),
+        "poisoned padding survived a repeated solve");
 }
 
 static void dataflow_test_generated(DataflowTestTally* tally, Arena* memory, Arena* scratch, uint32_t blocks, uint32_t values, uint32_t shape, uint64_t seed)
@@ -271,6 +436,22 @@ static void dataflow_test_generated(DataflowTestTally* tally, Arena* memory, Are
         }
         dataflow_test_expect(tally, aligned, "row size or alignment is wrong");
         dataflow_test_pair(tally, &vector, &scalar, scratch, blocks <= 8);
+        if (blocks == 257 || blocks == 2049)
+        {
+            dataflow_test_expect(tally, dataflow_test_sampled_reachability(&vector, scratch, seed),
+                "large graph differs from sampled use-before-def reachability");
+            if (shape == BUSTER_DATAFLOW_SHAPE_CHAIN && blocks == 257 && values == 65)
+            {
+                vector.in[0] ^= 1;
+                dataflow_test_expect(tally, !dataflow_test_sampled_reachability(&vector, scratch, seed),
+                    "sampled reachability missed a deliberately flipped live bit");
+                vector.in[0] ^= 1;
+            }
+        }
+        if (shape == BUSTER_DATAFLOW_SHAPE_DISPATCH)
+        {
+            dataflow_test_expect(tally, dataflow_test_connected(&vector, scratch), "dispatch graph has unreachable blocks");
+        }
     }
     arena_pop_to(memory, mark);
 }
@@ -405,6 +586,94 @@ static void dataflow_test_known(DataflowTestTally* tally, Arena* memory, Arena* 
             valid = vector.postorder[position] == 7 - position;
         }
         dataflow_test_expect(tally, valid, "eight-block chain is not in reverse order");
+    }
+    arena_pop_to(memory, mark);
+}
+
+static void dataflow_test_repeated_edges(DataflowTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t mark = memory->length;
+    const uint32_t repeated_offsets[] = {
+        0,
+        5,
+        7,
+        11,
+        11,
+    };
+    const uint32_t repeated_targets[] = {
+        1,
+        1,
+        0,
+        0,
+        2,
+        2,
+        2,
+        3,
+        3,
+        1,
+        1,
+    };
+    const uint32_t simple_offsets[] = {
+        0,
+        3,
+        4,
+        6,
+        6,
+    };
+    const uint32_t simple_targets[] = {
+        1,
+        0,
+        2,
+        2,
+        3,
+        1,
+    };
+    const uint32_t uses[] = {
+        0,
+        63,
+        64,
+        512,
+    };
+    const uint32_t defs[] = {
+        63,
+        512,
+        0,
+        64,
+    };
+    tally->blocks = 4;
+    tally->values = 513;
+    tally->shape = BUSTER_DATAFLOW_SHAPE_IRREDUCIBLE;
+    Dataflow repeated = { 0 };
+    Dataflow simple = { 0 };
+    bool valid = dataflow_create(memory, 4, 513, 11, &repeated) && dataflow_create(memory, 4, 513, 6, &simple);
+    if (valid)
+    {
+        memcpy(repeated.successor_offsets, repeated_offsets, sizeof(repeated_offsets));
+        memcpy(repeated.successors, repeated_targets, sizeof(repeated_targets));
+        memcpy(simple.successor_offsets, simple_offsets, sizeof(simple_offsets));
+        memcpy(simple.successors, simple_targets, sizeof(simple_targets));
+        for (uint32_t block = 0; block < 4; block += 1)
+        {
+            const uint64_t row = (uint64_t)block * repeated.row_words;
+            repeated.use[row + uses[block] / 64] = 1ull << (uses[block] % 64);
+            simple.use[row + uses[block] / 64] = 1ull << (uses[block] % 64);
+            repeated.def[row + defs[block] / 64] = 1ull << (defs[block] % 64);
+            simple.def[row + defs[block] / 64] = 1ull << (defs[block] % 64);
+        }
+        repeated.use[2 * repeated.row_words + 7] |= 1ull << 63;
+        simple.use[2 * simple.row_words + 7] |= 1ull << 63;
+        valid = dataflow_postorder(&repeated, scratch) && dataflow_postorder(&simple, scratch);
+    }
+    dataflow_test_expect(tally, valid, "repeated-edge fixture setup failed");
+    if (valid)
+    {
+        dataflow_test_expect(tally, memcmp(repeated.postorder, simple.postorder, 4 * sizeof(uint32_t)) == 0,
+            "repeated edges changed the DFS postorder");
+        // Both kernels see both versions, including repeated self-edges, a back edge and repeated exit edges.
+        dataflow_test_pair(tally, &repeated, &simple, scratch, true);
+        dataflow_test_pair(tally, &simple, &repeated, scratch, true);
+        dataflow_test_expect(tally, dataflow_test_sampled_reachability(&repeated, scratch, tally->seed),
+            "backward reachability differs on repeated edges");
     }
     arena_pop_to(memory, mark);
 }
@@ -669,6 +938,7 @@ static int run_dataflow_tests(int argc, char** argv)
         {
             dataflow_test_limits(&tally, &memory, &scratch);
             dataflow_test_known(&tally, &memory, &scratch);
+            dataflow_test_repeated_edges(&tally, &memory, &scratch);
             dataflow_test_interference(&tally);
             dataflow_test_guards(&tally, &memory, &scratch);
             for (uint32_t shape = 0; shape < BUSTER_DATAFLOW_SHAPE_COUNT; shape += 1)

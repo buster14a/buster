@@ -174,6 +174,7 @@ int run_lane_benchmark(int argc, char** argv);
 
 // Liveness and interference over aligned bitsets, independent of the future IR's use/def construction.
 #include "buster/compiler/dataflow.c"
+#include "buster/compiler/dataflow_program.c"
 #include "buster/compiler/dataflow_test.c"
 int run_dataflow_benchmark(int argc, char** argv);
 

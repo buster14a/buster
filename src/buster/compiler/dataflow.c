@@ -13,8 +13,7 @@
 // dataflow_intersects_* takes two rows with the same alignment, length and padding contract; zero words permits
 // null pointers. This primitive only reports whether the rows share a bit, without building an interference graph.
 //
-// main.c and dataflow_benchmark.c include this file after lane.c. The synthetic CFG generator is external, defined
-// once in dataflow_benchmark.c and shared with dataflow_test.c; it is test tooling, not use/def construction from IR.
+// main.c and dataflow_benchmark.c include this file after lane.c.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -24,15 +23,6 @@
 #define BUSTER_DATAFLOW_VECTOR_BITS 512
 #define BUSTER_DATAFLOW_VECTOR_WORDS 8
 #define BUSTER_DATAFLOW_VECTOR_BYTES 64
-
-#define BUSTER_DATAFLOW_SHAPE_CHAIN 0
-#define BUSTER_DATAFLOW_SHAPE_DIAMOND 1
-#define BUSTER_DATAFLOW_SHAPE_SELF_LOOP 2
-#define BUSTER_DATAFLOW_SHAPE_NESTED_LOOP 3
-#define BUSTER_DATAFLOW_SHAPE_IRREDUCIBLE 4
-#define BUSTER_DATAFLOW_SHAPE_MULTI_EXIT 5
-#define BUSTER_DATAFLOW_SHAPE_RANDOM 6
-#define BUSTER_DATAFLOW_SHAPE_COUNT 7
 
 typedef struct Dataflow Dataflow;
 struct Dataflow
@@ -60,7 +50,6 @@ static __attribute__((unused)) uint64_t dataflow_liveness_scalar(Dataflow* dataf
 static __attribute__((unused)) uint64_t dataflow_liveness(Dataflow* dataflow);
 static __attribute__((unused)) bool dataflow_intersects_vector(const uint64_t* left, const uint64_t* right, uint64_t row_words);
 static __attribute__((unused)) bool dataflow_intersects_scalar(const uint64_t* left, const uint64_t* right, uint64_t row_words);
-bool dataflow_generate(Arena* arena, uint32_t block_count, uint32_t value_count, uint32_t shape, uint64_t seed, Dataflow* result);
 
 static bool dataflow_create(Arena* arena, uint32_t block_count, uint32_t value_count, uint32_t edge_count, Dataflow* result)
 {
@@ -209,38 +198,48 @@ static bool dataflow_postorder(Dataflow* dataflow, Arena* scratch)
 static uint64_t dataflow_liveness_vector(Dataflow* dataflow)
 {
     uint64_t iterations = 1;
+    const uint32_t block_count = dataflow->block_count;
     const uint64_t row_words = dataflow->row_words;
-    if (row_words != 0 && dataflow->block_count != 0)
+    const uint32_t* restrict successor_offsets = dataflow->successor_offsets;
+    const uint32_t* restrict successors = dataflow->successors;
+    const uint32_t* restrict postorder = dataflow->postorder;
+    const uint64_t* restrict use_rows = dataflow->use;
+    const uint64_t* restrict def_rows = dataflow->def;
+    uint64_t* restrict in_rows = dataflow->in;
+    uint64_t* restrict out_rows = dataflow->out;
+    // dataflow_create allocates these columns separately. Only their bases are restricted: a successor may be
+    // the current block, so derived pointers into in_rows must retain their possible overlap.
+    if (row_words != 0 && block_count != 0)
     {
-        const uint64_t matrix_bytes = (uint64_t)dataflow->block_count * row_words * sizeof(uint64_t);
-        memset(dataflow->in, 0, matrix_bytes);
-        memset(dataflow->out, 0, matrix_bytes);
+        const uint64_t matrix_bytes = (uint64_t)block_count * row_words * sizeof(uint64_t);
+        memset(in_rows, 0, matrix_bytes);
+        memset(out_rows, 0, matrix_bytes);
         bool changed;
         do
         {
             __mmask8 changes = 0;
-            for (uint32_t order = 0; order < dataflow->block_count; order += 1)
+            for (uint32_t order = 0; order < block_count; order += 1)
             {
-                const uint32_t block = dataflow->postorder[order];
+                const uint32_t block = postorder[order];
                 const uint64_t row = (uint64_t)block * row_words;
-                const uint32_t begin = dataflow->successor_offsets[block];
-                const uint32_t end = dataflow->successor_offsets[(uint64_t)block + 1];
+                const uint32_t begin = successor_offsets[block];
+                const uint32_t end = successor_offsets[(uint64_t)block + 1];
                 for (uint64_t word = 0; word < row_words; word += BUSTER_DATAFLOW_VECTOR_WORDS)
                 {
                     __m512i out = _mm512_setzero_si512();
                     for (uint32_t edge = begin; edge < end; edge += 1)
                     {
-                        const uint64_t successor_row = (uint64_t)dataflow->successors[edge] * row_words;
-                        out = _mm512_or_si512(out, _mm512_load_si512(dataflow->in + successor_row + word));
+                        const uint64_t* successor_in = in_rows + (uint64_t)successors[edge] * row_words;
+                        out = _mm512_or_si512(out, _mm512_load_si512(successor_in + word));
                     }
-                    const __m512i use = _mm512_load_si512(dataflow->use + row + word);
-                    const __m512i def = _mm512_load_si512(dataflow->def + row + word);
-                    const __m512i previous = _mm512_load_si512(dataflow->in + row + word);
+                    const __m512i use = _mm512_load_si512(use_rows + row + word);
+                    const __m512i def = _mm512_load_si512(def_rows + row + word);
+                    const __m512i previous = _mm512_load_si512(in_rows + row + word);
                     const __m512i in = _mm512_ternarylogic_epi64(use, out, def, 0xF4);
                     const __m512i difference = _mm512_xor_si512(in, previous);
                     changes |= _mm512_test_epi64_mask(difference, difference);
-                    _mm512_store_si512(dataflow->out + row + word, out);
-                    _mm512_store_si512(dataflow->in + row + word, in);
+                    _mm512_store_si512(out_rows + row + word, out);
+                    _mm512_store_si512(in_rows + row + word, in);
                 }
             }
             changed = changes != 0;
@@ -253,37 +252,48 @@ static uint64_t dataflow_liveness_vector(Dataflow* dataflow)
 static uint64_t dataflow_liveness_scalar(Dataflow* dataflow)
 {
     uint64_t iterations = 1;
+    const uint32_t block_count = dataflow->block_count;
     const uint64_t row_words = dataflow->row_words;
-    if (row_words != 0 && dataflow->block_count != 0)
+    const uint64_t value_words = ((uint64_t)dataflow->value_count + 63) / 64;
+    const uint32_t* restrict successor_offsets = dataflow->successor_offsets;
+    const uint32_t* restrict successors = dataflow->successors;
+    const uint32_t* restrict postorder = dataflow->postorder;
+    const uint64_t* restrict use_rows = dataflow->use;
+    const uint64_t* restrict def_rows = dataflow->def;
+    uint64_t* restrict in_rows = dataflow->in;
+    uint64_t* restrict out_rows = dataflow->out;
+    // As in the vector kernel, every access to in stays based on one restricted matrix pointer, including
+    // self-loop reads. The scalar bound excludes whole padding words; clearing still covers every padded row.
+    if (row_words != 0 && block_count != 0)
     {
-        const uint64_t matrix_bytes = (uint64_t)dataflow->block_count * row_words * sizeof(uint64_t);
-        memset(dataflow->in, 0, matrix_bytes);
-        memset(dataflow->out, 0, matrix_bytes);
+        const uint64_t matrix_bytes = (uint64_t)block_count * row_words * sizeof(uint64_t);
+        memset(in_rows, 0, matrix_bytes);
+        memset(out_rows, 0, matrix_bytes);
         bool changed;
         do
         {
             uint64_t changes = 0;
-            for (uint32_t order = 0; order < dataflow->block_count; order += 1)
+            for (uint32_t order = 0; order < block_count; order += 1)
             {
-                const uint32_t block = dataflow->postorder[order];
+                const uint32_t block = postorder[order];
                 const uint64_t row = (uint64_t)block * row_words;
-                const uint32_t begin = dataflow->successor_offsets[block];
-                const uint32_t end = dataflow->successor_offsets[(uint64_t)block + 1];
+                const uint32_t begin = successor_offsets[block];
+                const uint32_t end = successor_offsets[(uint64_t)block + 1];
                 // Keep a distinct 64-bit oracle and a genuine scalar benchmark alternative at -O3.
                 #pragma clang loop vectorize(disable) interleave(disable)
-                for (uint64_t word = 0; word < row_words; word += 1)
+                for (uint64_t word = 0; word < value_words; word += 1)
                 {
                     uint64_t out = 0;
                     #pragma clang loop vectorize(disable) interleave(disable)
                     for (uint32_t edge = begin; edge < end; edge += 1)
                     {
-                        const uint64_t successor_row = (uint64_t)dataflow->successors[edge] * row_words;
-                        out |= dataflow->in[successor_row + word];
+                        const uint64_t* successor_in = in_rows + (uint64_t)successors[edge] * row_words;
+                        out |= successor_in[word];
                     }
-                    const uint64_t in = dataflow->use[row + word] | (out & ~dataflow->def[row + word]);
-                    changes |= in ^ dataflow->in[row + word];
-                    dataflow->out[row + word] = out;
-                    dataflow->in[row + word] = in;
+                    const uint64_t in = use_rows[row + word] | (out & ~def_rows[row + word]);
+                    changes |= in ^ in_rows[row + word];
+                    out_rows[row + word] = out;
+                    in_rows[row + word] = in;
                 }
             }
             changed = changes != 0;
@@ -300,6 +310,9 @@ static uint64_t dataflow_liveness(Dataflow* dataflow)
 
 static bool dataflow_intersects_vector(const uint64_t* left, const uint64_t* right, uint64_t row_words)
 {
+    // Nonempty rows contain whole aligned vectors; a zero-length row may use any pointer without accessing it.
+    assert(row_words % BUSTER_DATAFLOW_VECTOR_WORDS == 0);
+    assert(row_words == 0 || (((uintptr_t)left | (uintptr_t)right) & (BUSTER_DATAFLOW_VECTOR_BYTES - 1)) == 0);
     __mmask8 intersections = 0;
     for (uint64_t word = 0; word < row_words; word += BUSTER_DATAFLOW_VECTOR_WORDS)
     {
