@@ -5787,6 +5787,9 @@ struct SpikeVectorBuffers
     SpikeCandidates candidates;
     uint32_t* secondary;
     SpikeStatement* statements;
+    // The postorder's: each token's last child, and the postorder itself.
+    uint32_t* last_children;
+    uint32_t* postorder;
     // K2's blocks by the rounds they took (index 0: the twin did them), and K4's blocks whose depths span more than
     // byte lanes hold, which run as two 16-bit blocks.
     uint64_t rounds[BUSTER_SPIKE_ROLE_ROUNDS + 1];
@@ -5832,11 +5835,14 @@ static bool spike_vector_buffers_reserve(SpikeVectorBuffers* buffers, Arena* are
         .left_keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, slots),
         .secondary = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .statements = BUSTER_ARENA_PUSH_ARRAY(arena, SpikeStatement, slots),
+        .last_children = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .postorder = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .rounds = { 0 },
         .wide_blocks = 0,
     };
     bool result = open_stack != 0 && group_roles != 0 && group_typed != 0 && buffers->typed != 0 && buffers->lefts != 0 && buffers->left_keys != 0 &&
-                  buffers->secondary != 0 && buffers->statements != 0 && spike_candidates_reserve(&buffers->candidates, arena, capacity);
+                  buffers->secondary != 0 && buffers->statements != 0 && buffers->last_children != 0 && buffers->postorder != 0 &&
+                  spike_candidates_reserve(&buffers->candidates, arena, capacity);
     if (result)
     {
         for (uint32_t i = 0; i < BUSTER_SPIKE_DEPTH_PADDING; i += 1)
@@ -5906,4 +5912,50 @@ static SpikeKernelResult spike_parse_vector(SpikeKernels* kernels, const uint8_t
         kernels->typedef_names[kernels->typedef_log[i]] = 0;
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The postorder, from the parents
+//
+// Every subtree is a run of tokens: a token's L and R bound its subtree, as in a Cartesian tree, and a statement's
+// head owns the statement that follows it. So a token with no child after it ends its subtree, and the subtrees that
+// end with it are those of the ancestors whose last child, after them, leads down to it. The postorder emits each such
+// token in order, then climbs while it is its parent's last child and comes after the parent. Children come in source
+// order, each child's subtree before the next. The benchmark's check compares the result with a depth-first walk.
+
+static uint32_t spike_postorder(const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* postorder)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        last_children[i] = BUSTER_SPIKE_NONE;
+    }
+    // In order, so that each token's last write is its last child.
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint32_t parent = parents[i];
+        if (parent != BUSTER_SPIKE_NONE)
+        {
+            last_children[parent] = i;
+        }
+    }
+    uint32_t written = 0;
+    for (uint32_t t = 0; t < count; t += 1)
+    {
+        // No child after t: none at all (BUSTER_SPIKE_NONE + 1 wraps to 0), or the last one before it.
+        if (last_children[t] + 1 <= t)
+        {
+            postorder[written] = t;
+            written += 1;
+            uint32_t child = t;
+            uint32_t parent = parents[t];
+            while (parent < child && last_children[parent] == child)
+            {
+                postorder[written] = parent;
+                written += 1;
+                child = parent;
+                parent = parents[parent];
+            }
+        }
+    }
+    return written;
 }

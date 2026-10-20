@@ -625,6 +625,81 @@ static uint8_t spike_canonical_role(uint8_t role)
 
 // Compares a kernel path's tree with the scalar parser's. Returns the first token whose parent differs, or
 // BUSTER_SPIKE_NONE; *role_differences counts the tokens whose (canonical) roles differ outside flagged declarations.
+// The postorder of a depth-first walk with an explicit stack, children in source order: the reference for
+// spike_postorder's `written` tokens. Returns the first position where they differ, or BUSTER_SPIKE_NONE.
+static uint32_t spike_check_postorder(const uint32_t* parents, uint32_t count, const uint32_t* postorder, uint32_t written, Arena* scratch)
+{
+    uint32_t result = BUSTER_SPIKE_NONE;
+    const uint64_t mark = scratch->length;
+    const uint64_t slots = (uint64_t)count + 1;
+    uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    uint32_t* cursors = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    uint32_t* children = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    uint32_t* nodes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    uint32_t* next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    if (offsets == 0 || cursors == 0 || children == 0 || nodes == 0 || next == 0)
+    {
+        result = 0;
+    }
+    else
+    {
+        memset(offsets, 0, slots * sizeof(uint32_t));
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            offsets[parents[i] != BUSTER_SPIKE_NONE ? parents[i] + 1 : 0] += parents[i] != BUSTER_SPIKE_NONE;
+        }
+        for (uint32_t i = 1; i <= count; i += 1)
+        {
+            offsets[i] += offsets[i - 1];
+        }
+        memcpy(cursors, offsets, slots * sizeof(uint32_t));
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            if (parents[i] != BUSTER_SPIKE_NONE)
+            {
+                children[cursors[parents[i]]] = i;
+                cursors[parents[i]] += 1;
+            }
+        }
+        uint32_t position = 0;
+        for (uint32_t root = 0; root < count; root += 1)
+        {
+            uint32_t depth = 0;
+            if (parents[root] == BUSTER_SPIKE_NONE)
+            {
+                nodes[0] = root;
+                next[0] = offsets[root];
+                depth = 1;
+            }
+            while (depth != 0)
+            {
+                const uint32_t top = nodes[depth - 1];
+                if (next[depth - 1] < offsets[top + 1])
+                {
+                    const uint32_t child = children[next[depth - 1]];
+                    next[depth - 1] += 1;
+                    nodes[depth] = child;
+                    next[depth] = offsets[child];
+                    depth += 1;
+                }
+                else
+                {
+                    if (result == BUSTER_SPIKE_NONE && (position >= written || postorder[position] != top))
+                    {
+                        result = position;
+                    }
+                    position += 1;
+                    depth -= 1;
+                }
+            }
+        }
+        // A cycle leaves tokens unwalked.
+        result = result == BUSTER_SPIKE_NONE && (position != count || written != count) ? position : result;
+    }
+    arena_pop_to(scratch, mark);
+    return result;
+}
+
 static uint32_t spike_compare(const SpikeTree* expected, const SpikeKernels* kernels, uint32_t count, uint64_t* role_differences, uint32_t* first_role_difference)
 {
     uint32_t result = BUSTER_SPIKE_NONE;
@@ -1099,6 +1174,7 @@ typedef enum SpikeTimed
     SPIKE_TIMED_VECTOR_K4,
     SPIKE_TIMED_VECTOR_K5,
     SPIKE_TIMED_VECTOR_FALLBACK,
+    SPIKE_TIMED_POSTORDER,
     SPIKE_TIMED_COUNT,
 } SpikeTimed;
 
@@ -1126,6 +1202,7 @@ static const char* const spike_timed_names[SPIKE_TIMED_COUNT] =
     "vector-k4",
     "vector-k5",
     "vector-fallback",
+    "postorder",
 };
 
 // The stages run in this order, so that each finds its inputs; the variants of a kernel come right before the one the
@@ -1151,6 +1228,7 @@ static const SpikeTimed spike_stage_order[] =
     SPIKE_TIMED_VECTOR_K4,
     SPIKE_TIMED_VECTOR_K5,
     SPIKE_TIMED_VECTOR_FALLBACK,
+    SPIKE_TIMED_POSTORDER,
 };
 
 typedef struct SpikeBench SpikeBench;
@@ -1268,6 +1346,7 @@ static void spike_run_stage(SpikeBench* bench, SpikeTimed which, uint32_t f)
             spike_typedefs_clear(k);
             break;
         }
+        case SPIKE_TIMED_POSTORDER: spike_postorder(k->parents, count, buffers->last_children, buffers->postorder); break;
         default: break;
     }
 }
@@ -1509,6 +1588,7 @@ int run_parse_spike(int argc, char** argv)
             uint32_t twin_failures = 0;
             uint32_t kernel_failures = 0;
             uint32_t vector_failures = 0;
+            uint32_t postorder_failures = 0;
             uint64_t vector_fallback_tokens = 0;
             uint32_t flag_reports = 0;
             uint32_t role_reports = 0;
@@ -1626,6 +1706,16 @@ int run_parse_spike(int argc, char** argv)
                             }
                             vector_failures += 1;
                         }
+                        const uint32_t written = spike_postorder(kernels.parents, count, buffers.last_children, buffers.postorder);
+                        const uint32_t postorder_different = spike_check_postorder(kernels.parents, count, buffers.postorder, written, &scratch);
+                        if (postorder_different != BUSTER_SPIKE_NONE)
+                        {
+                            if (postorder_failures < 12)
+                            {
+                                printf("%s: the postorder differs from a depth-first walk at position %u (%u of %u tokens)\n", file->path, postorder_different, written, count);
+                            }
+                            postorder_failures += 1;
+                        }
                     }
                     if (role_differences != 0 && role_reports < 12)
                     {
@@ -1642,6 +1732,7 @@ int run_parse_spike(int argc, char** argv)
             printf("kernels: %u files where a vector kernel differs from its twin\n", kernel_failures);
             printf("vector path: %u files differ from the scalar parser; fallback: %lu tokens (%.2f%%)\n", vector_failures, (unsigned long)vector_fallback_tokens,
                    corpus.token_count ? 100.0 * (double)vector_fallback_tokens / (double)corpus.token_count : 0.0);
+            printf("postorder: %u files where the one derived from the parents differs from a depth-first walk\n", postorder_failures);
             if (getenv("SPIKE_ROLE_STATS") != 0)
             {
                 for (uint32_t k = 0; k < BUSTER_SPIKE_VKINDS; k += 1)
@@ -1667,7 +1758,7 @@ int run_parse_spike(int argc, char** argv)
             }
             printf(" (0: the twin)\n");
             printf("K4 in byte lanes: %lu of %lu blocks span too many depths and run as 16-bit blocks\n", (unsigned long)copy.wide_blocks, (unsigned long)copy.byte_blocks);
-            result = failed == 0 && broken == 0 && twin_failures == 0 && kernel_failures == 0 && vector_failures == 0 ? 0 : 1;
+            result = failed == 0 && broken == 0 && twin_failures == 0 && kernel_failures == 0 && vector_failures == 0 && postorder_failures == 0 ? 0 : 1;
             if (result == 0 && !check_only)
             {
                 SpikeBench bench = {
