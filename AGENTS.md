@@ -179,8 +179,9 @@ instructions in its body; a callee is its translation unit's function or alias
 of that name first (static functions are per unit: the benchmarks' copies of
 `lane.c` are separate functions), then the external symbol's strong
 definitions, or all its weak ones when it has none (the linker takes one of
-them by link order), with the unit's own `available_externally` body, which
-clang may inline; an alias, through any chain of them, is its target's
+them by link order), with the unit's own bodies that clang may inline whatever
+the linker takes (`available_externally`, `linkonce_odr` and `weak_odr` ones,
+and any marked `alwaysinline`); an alias, through any chain of them, is its target's
 definition in its own module, whatever replaces that name elsewhere. A second strong definition of a name fails the check. Calls of functions defined
 nowhere (libc, intrinsics) and calls through pointers, which the style allows
 only at the thread-entry boundary, are left out; a call of an ifunc or of an
@@ -204,7 +205,8 @@ shortest), a cycle through three translation units beside static and external
 functions of the same name, clang's IR of recursion through aliases and of a
 call of an ifunc, aliases that lead nowhere, clang's IR of weak and strong
 functions and aliases of one name, of an alias of a replaced weak function and
-of an `available_externally` body, in both orders, two units' copies of a cycle
+of an `available_externally` body and of a weak `always_inline` one, in both
+orders, `linkonce_odr` and weak bodies replaced elsewhere, two units' copies of a cycle
 allowed by one entry, a cycle grown past its entry with an unused entry, a
 cycle through two units' static functions of the same name that entries naming
 it once mustn't match, malformed IR, and a chain of a million functions and a
