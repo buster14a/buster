@@ -1,4 +1,9 @@
-# buster-fast
+# Buster
+
+This is the current compiler, formerly `buster-fast`, with GitHub repository ID
+`1421805693`. The maintained previous implementation is
+[`buster14a/buster-legacy`](https://github.com/buster14a/buster-legacy), repository
+ID `1071732997`. Each project retains its own history, issues and pull requests.
 
 A C compiler under development for Linux/x86-64, with its implementation tuned
 for AMD Zen 5. The lexer, x86 encoder, lane base layer, ELF object writer and

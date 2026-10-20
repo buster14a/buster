@@ -1,7 +1,7 @@
 # Provenance and third-party notices
 
 Reviewed October 20, 2026 against all 30 tracked files at
-[`c7eadb9989c48767f81c51a3b052a136bbb436ec`](https://github.com/buster14a/buster-fast/tree/c7eadb9989c48767f81c51a3b052a136bbb436ec).
+[`c7eadb9989c48767f81c51a3b052a136bbb436ec`](https://github.com/buster14a/buster/tree/c7eadb9989c48767f81c51a3b052a136bbb436ec).
 The earlier issue pin `d13038574531b064cc87b133bb97665d1728f60a` differs only
 in `.github/workflows/9700x.yml`, `AGENTS.md` and `docs/coding-style.md`.
 Those changes add the C-language rule, Markdown-only CI exclusion and stable
@@ -143,7 +143,7 @@ The reviewed paths are `src/base/base_thread_context.{h,c}`,
 They carry **Copyright (c) Epic Games Tools** and MIT terms, retained verbatim
 in [LICENSES/RAD-Debugger.txt](LICENSES/RAD-Debugger.txt).
 
-Local commit `f72863b` and [PR #72](https://github.com/buster14a/buster-fast/pull/72)
+Local commit `f72863b` and [PR #72](https://github.com/buster14a/buster/pull/72)
 identify that reference. Lane metadata, scratch arenas, modulo task assignment
 and equal-range partitioning follow those interfaces/patterns. The local
 barrier, one-barrier broadcast, caller-as-lane-zero startup, bounded arena
@@ -158,7 +158,7 @@ referenced interface and inspected implementation have the same MIT grant.
 
 ## Encoder, tools and other generated material
 
-[PR #14](https://github.com/buster14a/buster-fast/pull/14), introducing the
+[PR #14](https://github.com/buster14a/buster/pull/14), introducing the
 encoder in `55f05ac`, explicitly records that no code was copied from
 `buster14a/bloat-buster`'s historical encoder at
 `e9b3dea9429996c7ad492d80a4923e75126ada87`. That implementation was an external
@@ -168,7 +168,7 @@ The early encoder document proposed generating a future table from the
 original Buster catalogue. The subsequent implementation uses handwritten
 X-macro rows/families, checked against GNU as. The reviewed tree contains
 neither a XED/uops.info data projection nor that catalogue. Issue
-[#17](https://github.com/buster14a/buster-fast/issues/17) uses XED and
+[#17](https://github.com/buster14a/buster/issues/17) uses XED and
 uops.info's March 29, 2026 list for coverage research; this does not itself
 establish a copied implementation. GNU as 2.47's output bytes/relocations are
 test oracles for the locally authored streams; no GNU as implementation is

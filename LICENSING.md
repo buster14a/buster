@@ -35,19 +35,19 @@ still apply.
 ## Authority and adoption
 
 The review covers all 30 tracked files at
-[`c7eadb9989c48767f81c51a3b052a136bbb436ec`](https://github.com/buster14a/buster-fast/tree/c7eadb9989c48767f81c51a3b052a136bbb436ec),
+[`c7eadb9989c48767f81c51a3b052a136bbb436ec`](https://github.com/buster14a/buster/tree/c7eadb9989c48767f81c51a3b052a136bbb436ec),
 plus the licensing documents, retained texts and source comments introduced
 with this adoption. The inventory records additions since the issues' earlier
 review pin.
 
 On October 20, 2026, in the implementation discussion for
-[#160](https://github.com/buster14a/buster-fast/issues/160),
-[#161](https://github.com/buster14a/buster-fast/issues/161) and
-[#162](https://github.com/buster14a/buster-fast/issues/162), David confirmed that
+[#160](https://github.com/buster14a/buster/issues/160),
+[#161](https://github.com/buster14a/buster/issues/161) and
+[#162](https://github.com/buster14a/buster/issues/162), David confirmed that
 he is the sole contributor to the original buster-fast work, that other
 contributor identities are agents acting for him, and that he has authority to
 license those contributions under Apache-2.0 WITH LLVM-exception. The
-[authority record](https://github.com/buster14a/buster-fast/issues/161#issuecomment-6287479170)
+[authority record](https://github.com/buster14a/buster/issues/161#issuecomment-6287479170)
 preserves that confirmation. The
 maintainer's requested adoption also places his local component modifications
 under the component terms above.

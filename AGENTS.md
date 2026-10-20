@@ -1,4 +1,4 @@
-# buster-fast
+# buster
 
 This file is the shared repository guide for coding agents. `CLAUDE.md` imports
 it; keep project instructions here rather than maintaining parallel copies.
@@ -10,7 +10,7 @@ AMD Zen 5**, with heavy, deliberate use of SIMD intrinsics. Optimize both
 single-threaded compile throughput and useful multicore scaling while preserving
 C correctness and generated-program quality.
 
-This is a fresh compiler, not a compatibility branch of `buster14a/buster`.
+This is a fresh compiler, not a compatibility branch of `buster14a/buster-legacy`.
 Do not inherit that repository's frameworks, historical token parsers, CI
 matrices, benchmark services, or acceptance bureaucracy. Reuse an idea only when
 it earns its place here. Do not copy implementation code without checking its
@@ -80,6 +80,21 @@ production fallbacks, or hot-path CPU dispatch. Broader output targets and extra
 applications are outside the current scope; but the x86 encoder encodes 16- and
 32-bit modes' instructions too, as the owner asked.
 
+## Repository identity
+
+The current compiler is `buster14a/buster`, GitHub repository ID `1421805693`,
+formerly `buster14a/buster-fast`. The previous implementation remains maintained
+at `buster14a/buster-legacy`, ID `1071732997`, with its own history, issues and
+pull requests. Verify the destination ID when retargeting a checkout or writer;
+old `buster14a/buster` links now address this compiler.
+
+Local checkout directories, `~/buster-fast-bench/`, the shared host lock,
+`~/llm-memory/projects/buster-fast/` and its memory symlinks retain their existing
+names. The repository-local `buster-fast-9700x` concurrency key is also retained.
+These are operational resources, not canonical repository URLs; do not rename
+them by replacing text. Source paths, executable names and object-file metadata
+are unchanged by the repository rename.
+
 ## Issue ownership
 
 Every issue being investigated, tackled or fixed must be claimed in the issue
@@ -106,7 +121,7 @@ function, direct and explicit control flow, bounded slices, arena-oriented
 allocation, and safe SIMD memory accesses. Prefer simple data layouts and
 measured end-to-end performance improvements. Prefer single-line statements,
 declarations, and function headers where readable, and one aggregate field or
-initializer entry per line. Do not import Buster's portability
+initializer entry per line. Do not import buster-legacy's portability
 or infrastructure machinery merely to match its style.
 
 ## Data-parallel first
@@ -125,10 +140,10 @@ typedef visibility), vectorize within each step and keep the ordered part small.
 A part that stays scalar says why with measurements on the 9700X, as "SIMD: what
 pays" in `docs/object-writer-and-linker.md` does. The owner set this rule on
 2026-10-20, replacing the premise of
-[#15](https://github.com/buster14a/buster-fast/issues/15) that the parser and
+[#15](https://github.com/buster14a/buster/issues/15) that the parser and
 the type checker are inherently sequential. The issues that apply it are listed
 in the "Data-parallel first" section of
-[#115](https://github.com/buster14a/buster-fast/issues/115). "SIMD and Zen 5" in
+[#115](https://github.com/buster14a/buster/issues/115). "SIMD and Zen 5" in
 [the C coding style](docs/coding-style.md) has the Zen 5 costs that shape these
 designs and the compilers already built this way.
 
@@ -156,7 +171,7 @@ designs and the compilers already built this way.
   `preprocessor_fuzz_benchmark.c` provides `benchmark-preprocessor-fuzz`,
   measuring the external test harness. `docs/preprocessor-fuzz.md` records
   its contract. These names and locations are provisional pending agreement
-  with the #117 session; no buster-fast preprocessor is attached yet.
+  with the #117 session; no Buster preprocessor is attached yet.
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
   of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder,
   and the fixup interface: `BUSTER_X86_FORM_FIXUP` marks an instruction with a
@@ -592,7 +607,7 @@ runs the scalar loop (256 instructions per call) for MS ms before each timed
 pass of the other implementations: the state a compiler runs its vector phases
 in. Lighter code lets the 9700X's clock boost over 30 to 300 ms, and at that
 clock a heavy AVX-512 loop runs under the core's power cap for 5 to 20 ms
-([#199's report](https://github.com/buster14a/buster-fast/issues/199#issuecomment-6297314071)
+([#199's report](https://github.com/buster14a/buster/issues/199#issuecomment-6297314071)
 has the controls), longer than a pass. Use 100 to 300: from a settled clock
 30 ms barely boosts it, and 100 ms reaches the state whatever the passes before
 did. Compare
@@ -1367,7 +1382,7 @@ source rejection.
 
 This is test tooling outside the compile path and has no new vector path.
 The minimizer currently uses only the planted comparison; these checks do
-not establish the correctness of a buster-fast preprocessor. The command
+not establish the correctness of a Buster preprocessor. The command
 names and file locations remain provisional until agreed with #117.
 `docs/preprocessor-fuzz.md` describes the extension points and remaining work.
 
@@ -1382,7 +1397,7 @@ agree. After one warm-up pass, 21 measured passes alternate which mode runs
 first and report median milliseconds per batch and cases per second.
 
 The timing includes generation, launching Clang, temporary-file I/O and
-cleanup. It measures the external test harness, not buster-fast compilation
+cleanup. It measures the external test harness, not Buster compilation
 speed. Run it under the 9700X's lock with `taskset -c 2`; the default 9700X job
 runs it after the tests, pinned to one allowed CPU. Measurements are
 informational; execution or output-check failures fail the command.

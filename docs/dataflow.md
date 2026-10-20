@@ -1,6 +1,6 @@
 # Liveness and interference on bitsets
 
-`dataflow.c` implements the part of [#143](https://github.com/buster14a/buster-fast/issues/143)
+`dataflow.c` implements the part of [#143](https://github.com/buster14a/buster/issues/143)
 that needs no IR: a backward liveness fixpoint over supplied `use` and `def`
 rows, and an intersection test between two rows. The caller supplies dense IDs
 for values that can be live across blocks. Constructing those rows from IR
@@ -198,7 +198,7 @@ for whole padding words and used one process. Version 2 also changes the
 generated inputs, so this comparison does not isolate the gain of each edit.
 
 The small case also varied by process with AVX-512. The
-[independent re-review of b9a6c66/7793927](https://github.com/buster14a/buster-fast/pull/194#pullrequestreview-5586061231)
+[independent re-review of b9a6c66/7793927](https://github.com/buster14a/buster/pull/194#pullrequestreview-5586061231)
 reported process medians of 437.8-1,029.1 cycles against 518.4-534.0 for the
 scalar twin then, including one process where vector was only 0.51x as fast,
 and #204's twenty processes took 445.4-653.9. Five processes can miss such a
@@ -436,7 +436,7 @@ layout stays as it was.
 
 A compiler runs liveness after lighter phases, and on Zen 5 that changes how
 fast the AVX-512 solver runs ([#199's
-report](https://github.com/buster14a/buster-fast/issues/199#issuecomment-6297314071)
+report](https://github.com/buster14a/buster/issues/199#issuecomment-6297314071)
 has the controls behind this section's mechanism, and says which parts are
 inferred). Code that draws less than about 17 W per
 core (scalar phases, the vectorized lexer, even a spin or a sleep) lets the

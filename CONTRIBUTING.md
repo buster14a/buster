@@ -75,9 +75,9 @@ under their component terms, as "Terms" above sets out.
   still need his certification for each PR head, as "Effective point and
   in-flight work" describes.
 - **Open PRs:** it also covers the commits of
-  [#184](https://github.com/buster14a/buster-fast/pull/184) up to its head
+  [#184](https://github.com/buster14a/buster/pull/184) up to its head
   `544394f5d300bd47f9e4f7081ac29ba728ca2f84` and of
-  [#185](https://github.com/buster14a/buster-fast/pull/185) up to its head
+  [#185](https://github.com/buster14a/buster/pull/185) up to its head
   `fc5dcffffb7ddd6d2a6ca0ea76fdf8bfd577203d`, the open agent PRs' heads on
   October 20, 2026, when he approved this section.
 - **Material:** original work, and imported, adapted or generated material
@@ -125,8 +125,8 @@ original/component-specific terms and DCO 1.1. Record that confirmation in the
 merge record. Subsequent commits need their own certification.
 
 This includes the existing PRs
-[#99](https://github.com/buster14a/buster-fast/pull/99) and
-[#159](https://github.com/buster14a/buster-fast/pull/159), if they cross the
+[#99](https://github.com/buster14a/buster/pull/99) and
+[#159](https://github.com/buster14a/buster/pull/159), if they cross the
 effective point, and applies equally to any other open PR or branch.
 This document itself provides no certification for them, apart from the PR
 heads that "The maintainer's standing certification" names.
