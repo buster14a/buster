@@ -641,9 +641,9 @@ static bool link_test_rules(void)
     static uint8_t bytes[64];
     const LinkCapacity capacity = {
         .names = 16,
-        .atoms = 16,
+        .atoms = 32,
         .symbols = 16,
-        .fixups = 16,
+        .fixups = 32,
         .wide_addends = 4,
     };
     Link link;
@@ -763,6 +763,102 @@ static bool link_test_rules(void)
     const AtomId sized = link_add_atom(&link, BUSTER_LINK_CLASS_DATA, 3, 8, bytes, 0);
     link_test_expect(&tally, sized != 0 && link_add_fixup(&link, sized, 0, BUSTER_LINK_FIXUP_SIZE64, variable, 0) != 0 && link_check(&link) == LINK_ERROR_NONE,
                      "a TLS symbol's size", 0);
+    // A shared library's symbols: a function, the object `foreign`, and a TLS variable. The GOT kinds reach each, ABS64
+    // the function and the object, and CALL the function; no other kind reaches one.
+    const SymbolId shared_function = link_add_symbol(&link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_RUNTIME_SHARED);
+    const SymbolId shared_tls = link_add_symbol(&link, name, 0, 0, 0, tls, BUSTER_LINK_SOURCE_RUNTIME_SHARED);
+    link_test_expect(&tally, shared_function != 0 && shared_tls != 0, "a shared library's function and TLS variable", 0);
+    const struct
+    {
+        uint8_t kind;
+        SymbolId target;
+        bool reaches;
+        const char* what;
+    } shared[] = {
+        {
+            BUSTER_LINK_FIXUP_CALL,
+            shared_function,
+            true,
+            "a call to a shared library's function",
+        },
+        {
+            BUSTER_LINK_FIXUP_CALL_GOT,
+            shared_function,
+            true,
+            "a call through the GOT to a shared library's function",
+        },
+        {
+            BUSTER_LINK_FIXUP_LOAD_GOT,
+            foreign,
+            true,
+            "a load through the GOT of a shared library's object",
+        },
+        {
+            BUSTER_LINK_FIXUP_GOTPCREL,
+            foreign,
+            true,
+            "a GOT slot's address of a shared library's object",
+        },
+        {
+            BUSTER_LINK_FIXUP_GOTTPOFF,
+            shared_tls,
+            true,
+            "initial-exec TLS of a shared library's",
+        },
+        {
+            BUSTER_LINK_FIXUP_ABS64,
+            shared_function,
+            true,
+            "a shared library's function's address",
+        },
+        {
+            BUSTER_LINK_FIXUP_PC32,
+            shared_function,
+            false,
+            "a shared library's function by PC32",
+        },
+        {
+            BUSTER_LINK_FIXUP_CALL,
+            foreign,
+            false,
+            "a call to a shared library's object",
+        },
+        {
+            BUSTER_LINK_FIXUP_ABS32,
+            foreign,
+            false,
+            "a shared library's object by ABS32",
+        },
+        {
+            BUSTER_LINK_FIXUP_PC64,
+            foreign,
+            false,
+            "a shared library's object by PC64",
+        },
+        {
+            BUSTER_LINK_FIXUP_SIZE64,
+            foreign,
+            false,
+            "a shared library's object's size",
+        },
+        {
+            BUSTER_LINK_FIXUP_TPOFF32,
+            shared_tls,
+            false,
+            "local-exec TLS of a shared library's",
+        },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(shared); i += 1)
+    {
+        const AtomId atom = link_add_atom(&link, BUSTER_LINK_CLASS_DATA, 3, 8, bytes, 0);
+        const bool added = atom != 0 && link_add_fixup(&link, atom, 0, shared[i].kind, shared[i].target, 0) != 0;
+        const LinkError checked = link_check(&link);
+        link_test_expect(&tally, added && (shared[i].reaches ? checked == LINK_ERROR_NONE : checked == LINK_ERROR_BINDING && link_test_failed(&link, LINK_ERROR_BINDING)),
+                         shared[i].what, i);
+        // Retargeted to a symbol of the program's that it can refer to, it passes again.
+        link.fixups.target[link.fixups.count - 1] = shared[i].kind == BUSTER_LINK_FIXUP_TPOFF32 || shared[i].kind == BUSTER_LINK_FIXUP_GOTTPOFF ? variable : defined;
+        link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check after retargeting", i);
+    }
     // A fixup outside every atom's range, and an atom whose range overlaps another's, which only lanes filling the
     // columns themselves could make.
     link.atoms.fixup_count[data] -= 1;

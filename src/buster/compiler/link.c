@@ -44,8 +44,11 @@
 //     The ranges are in the order the atoms' first fixups were added, which is atom order when atoms are built one
 //     after another.
 // link_check verifies what only the whole representation shows, once it is built: every program symbol is defined, a
-// TLS kind targets a TLS symbol and no other kind does, and a local symbol is referred to only from its own unit. It
-// checks the fixup rules above again too, for columns that lanes filled themselves.
+// TLS kind targets a TLS symbol and no other kind does, a local symbol is referred to only from its own unit, and a
+// shared library's symbol only by the kinds that can reach one from an executable: through the GOT (CALL_GOT, LOAD_GOT,
+// GOTPCREL and GOTTPOFF), by ABS64, which the executable relocates when it loads, and for a function by CALL, which
+// the executable sends through a stub. It checks the fixup rules above again too, for columns that lanes filled
+// themselves.
 //
 // Code: link_add_code_fixups turns x86_encode's output into an atom's fixups (docs/object-writer-and-linker.md, "Fixups
 // from the encoder"). The code generator marks each instruction with a symbolic field (BUSTER_X86_FORM_FIXUP) and
@@ -318,7 +321,8 @@ typedef enum LinkError
     // A code fixup's field isn't one its kind can patch, or the references don't match the marked instructions.
     LINK_ERROR_FIELD,
     // link_check: a program symbol without an atom, a TLS kind whose target isn't a TLS symbol or another kind whose
-    // target is one, or a local symbol referred to from another unit.
+    // target is one, a local symbol referred to from another unit, or a shared library's symbol referred to by a kind
+    // that can't reach it.
     LINK_ERROR_BINDING,
 } LinkError;
 
@@ -1100,16 +1104,22 @@ static bool link_check_fixups(const Link* link, AtomId atom, uint64_t* owned)
 }
 
 // Whether a fixup of `kind` in `atom` can refer to `target`: a TLS kind to a TLS symbol and no other kind to one (but
-// a size of either), and a local symbol only from its own unit.
+// a size of either), a local symbol only from its own unit, and a shared library's symbol only through the GOT, by its
+// absolute address (which the executable relocates when it loads), or for a function by a call (through a stub).
 static bool link_check_target(const Link* link, AtomId atom, uint8_t kind, SymbolId target)
 {
     const uint8_t flags = link->symbols.flags[target];
+    const uint8_t source = link->symbols.source[target];
     const AtomId target_atom = link->symbols.atom[target];
     const bool tls_kind = kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
     const bool size_kind = kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64;
     const bool tls_target = (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
     const bool local = (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
-    return (size_kind || tls_kind == tls_target) && (!local || (target_atom != 0 && link->atoms.unit[target_atom] == link->atoms.unit[atom]));
+    const bool shared = source == BUSTER_LINK_SOURCE_RUNTIME_SHARED || source == BUSTER_LINK_SOURCE_FOREIGN_SHARED;
+    const bool through_got = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
+    const bool call = kind == BUSTER_LINK_FIXUP_CALL && (flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION;
+    const bool reaches_shared = through_got || kind == BUSTER_LINK_FIXUP_ABS64 || call;
+    return (size_kind || tls_kind == tls_target) && (!local || (target_atom != 0 && link->atoms.unit[target_atom] == link->atoms.unit[atom])) && (!shared || reaches_shared);
 }
 
 static LinkError link_check(Link* link)
