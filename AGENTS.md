@@ -1199,10 +1199,11 @@ implementation order. Both paths use the same repetition count, calibrated
 with warm batches; every retained sample lasts at least 2 ms. Each timed solve
 includes clearing `in` and `out`; generation, allocation and postorder are
 outside the timed region. Both paths use direct calls through matching
-`noinline` benchmark wrappers, each starting a 64-byte line, so that edits to
-the driver don't move the solvers' loops within lines (the scalar twin's
-numbers once depended on it: `docs/dataflow.md`, "Where the scalar twin's code
-falls"). The output gives nanoseconds, cycles and instructions
+`noinline` benchmark wrappers, each starting a 64-byte line, as do the AVX-512
+solver's two loops in `dataflow.c` (for one-vector rows and the rest), which
+its wrapper jumps to, so that edits to the driver don't move the solvers' loops
+within lines (the scalar twin's numbers once depended on it: `docs/dataflow.md`,
+"Where the scalar twin's code falls"). The output gives nanoseconds, cycles and instructions
 per function, cycles per block per iteration, IPC, and the throttle per block
 per iteration (PMCx1A0's undocumented umask 0x08, which #199 reads as the
 dispatch slots Zen 5's per-core power cap takes). Hardware counter values
