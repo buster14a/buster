@@ -2641,9 +2641,11 @@ static bool import_library_vector(ImportLibrary* library, String8 bytes, Arena* 
     result = result && (sections.verdef == 0 || import_library_versions(library, &elf, sections.verdef, arena).error == IMPORT_ERROR_NONE);
     result = result && (sections.dynamic == 0 || import_vector_soname(library, &elf, sections.dynamic));
     result = result && import_library_columns(library, symbols.count, arena);
-    // An offset within the names' table starts a name when the table ends with a NUL.
+    // An offset within the names' table starts a name when the table ends with a NUL, and st_name 0, which the batches
+    // below take as the empty name, is the empty name when the table starts with one. In a table that doesn't, the exact
+    // path reads the name it starts with.
     const String8 names = symbols.names;
-    result = result && (names.length == 0 || names.pointer[names.length - 1] == 0);
+    result = result && (names.length == 0 || (names.pointer[0] == 0 && names.pointer[names.length - 1] == 0));
     uint64_t defined[BUSTER_IMPORT_BATCH] = {
         (uint64_t)1 << VER_NDX_GLOBAL,
     };

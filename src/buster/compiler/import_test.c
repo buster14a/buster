@@ -2159,6 +2159,17 @@ static bool import_test_libraries(Arena* arena)
         const ImportResult expected = import_test_result(IMPORT_ERROR_BOUNDS, f->contents[IMPORT_TEST_LIBRARY_DYNSYM] + sizeof(Elf64_Sym), 0, 1, 0, 0);
         import_test_expect(&tally, import_test_same_result(empty_result, expected), "names in a string table of no bytes", empty_result.error);
         import_test_library_paths(&tally, import_test_bytes(&empty), IMPORT_TEST_EXACT, "names in a string table of no bytes", arena);
+        // An export with st_name 0 in a .dynstr that doesn't start with a NUL: the exact path exports it under the name the
+        // table starts with, so the vector path, which takes st_name 0 as the empty name, must leave it to the exact path.
+        ImportTestFile unnamed = import_test_changed(f, f->contents[IMPORT_TEST_LIBRARY_DYNSTR], 1, 'X', arena);
+        unnamed = import_test_changed(&unnamed, variable + offsetof(Elf64_Sym, st_name), 4, 0, arena);
+        ImportLibrary original;
+        ImportLibrary unnamed_library;
+        const ImportResult original_result = import_library(&original, import_test_bytes(f), arena);
+        const ImportResult unnamed_result = import_library(&unnamed_library, import_test_bytes(&unnamed), arena);
+        import_test_expect(&tally, original_result.error == IMPORT_ERROR_NONE && unnamed_result.error == IMPORT_ERROR_NONE && unnamed_library.exports.count == original.exports.count,
+                           "an export with st_name 0 in a .dynstr that doesn't start with a NUL", unnamed_library.exports.count);
+        import_test_library_paths(&tally, import_test_bytes(&unnamed), IMPORT_TEST_EXACT, "an export with st_name 0 in a .dynstr that doesn't start with a NUL", arena);
     }
     arena_pop_to(arena, position);
     return import_test_report(&tally);
