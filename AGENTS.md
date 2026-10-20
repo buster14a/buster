@@ -806,7 +806,8 @@ the 9700X, and 0.15 s with `--cross-check`) checks `import.c` and
   index of the runtime's names and libc's) must hold each name once, found by
   its bytes and in its filter, each global symbol's its own: `main` defined by
   none of them, `__libc_start_main` libc.so.6's, `__dso_handle` crtbeginS.o's,
-  `atexit` a member's and `_GLOBAL_OFFSET_TABLE_` the linker's.
+  `atexit` a member's, and `_GLOBAL_OFFSET_TABLE_` and the init and fini
+  arrays' bounds the linker's, whether or not the runtime refers to them.
 
 `--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
 version, type, binding and size) and references with `readelf -W --dyn-syms`,
@@ -845,7 +846,7 @@ informational.
 ## Bind tests
 
 `./build/compiler test-bind [--seed N] [--cross-check] [--keep]` (about
-5 ms on the 9700X, and 0.08 s with `--cross-check`) checks `bind.c` against
+5 ms on the 9700X, and 0.25 s with `--cross-check`) checks `bind.c` against
 this system's runtime (`runtime_import`). Every check binds by both paths,
 which must make the same link, column by column, and the same imports,
 exports and members:
@@ -870,7 +871,10 @@ exports and members:
   finds;
 - rules: links made by hand, each exercising one rule, with what binding
   reports: a strong definition of `_start` (a duplicate); one of `data_start`,
-  which Scrt1.o defines weakly (the program's wins); a reference to
+  which Scrt1.o defines weakly (the program's wins), and a weak one (Scrt1.o's
+  wins, first in link order); weak definitions of `_init`, with their atoms
+  before and after `bind_begin` (crti.o's strong one takes the symbol, with
+  its atom in `.init` and its visibility); a reference to
   `__dso_handle` (defined by crtbeginS.o's atom, hidden); strong and weak
   references to a name nothing defines (an error, and nothing); definitions
   of `strlen`, which libc.so.6 defines, and `_dl_argv`, which it refers to
@@ -878,8 +882,11 @@ exports and members:
   symbols named `write`; references added after `bind_begin` of a name the
   runtime has and of `memcpy`; strong and weak references to `__cxa_finalize`,
   which crtbeginS.o refers to weakly; strong and weak references to
-  `pthread_atfork`, which a member defines (it joins, and doesn't); a local
-  `_init`; a symbol of the program's that it never defines (left to
+  `pthread_atfork`, which a member defines (it joins, and doesn't), and a
+  hidden one (it joins); hidden and protected references to `puts`, which only
+  libc.so.6 defines (an error), and a weak hidden one (nothing, not an
+  import); references to the init and fini arrays' bounds (the linker's); a
+  local `_init`; a symbol of the program's that it never defines (left to
   `link_check`); and a link without room. Then the rules this system's runtime
   can't reach through the entry points, on binding's own steps: a strong
   reference joining a weak one that binding left to nothing (an error, but
@@ -890,14 +897,23 @@ exports and members:
   the handler exits with 0. Bound, it must pass `link_check`, and `atexit.oS`
   must join, defining `atexit`, its `__cxa_atexit` imported at `GLIBC_2.2.5`
   and its `__dso_handle` bound to crtbeginS.o's;
+- the linkers' cases, programs whose binding GNU ld and lld decide for
+  themselves: a weak `_init` that exits with 7 if it runs, against crti.o's;
+  `main` returning a weak `data_start` of 7, after Scrt1.o's of 0; a call
+  through the GOT to a hidden `puts` (refused); `main` returning whether a
+  weak hidden `puts` isn't 0; and references to the arrays' bounds. Each must
+  bind, or fail to, as the linkers link it;
 - with `--cross-check`, which needs `ld.lld`, `ld.bfd`, `cc` and `readelf`:
   each bound program written as objects, one per unit, linked by ld.lld and
   ld.bfd as a PIE with only `libc.so.6` and the loader besides, in GCC's
   order, without errors or warnings, must run and print what its model
   predicts (the atexit program must exit with 0); and the program's own
   objects, linked by `cc` with lld, must have in readelf's `.dynsym` the
-  imports at their versions and with their types, the weak references and the
-  exports binding found, and lld's `--why-extract` the members that joined.
+  imports at their versions and with their types, the weak references with
+  default visibility and the exports binding found, and lld's `--why-extract`
+  the members that joined. Each linkers' case's own objects, linked by `cc`
+  with GNU ld and with lld, must link, or fail to, as binding did, and run
+  with the case's status (0), and so must its bound link.
 
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
 removed at the end unless `--keep`. The default 9700X job runs it with

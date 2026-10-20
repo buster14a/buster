@@ -16,18 +16,21 @@
 // A global or weak symbol of the runtime takes the link's symbol of its name if there is one, so that the link keeps
 // one symbol per global name: bind_begin matches the link's global symbols against the runtime's global names
 // (RuntimeNames) once, and each of the runtime's that joins without a match becomes its name's symbol. Two of the
-// link's global symbols with one of those names are an error. When both define the name, the link's definition wins
-// over a weak one of the runtime's, and a strong one is an error (for two weak ones GNU ld would take the runtime's,
-// which comes first in link order); a definition of the runtime's defines a link symbol that only refers to the name,
-// with its atom, value, size, type, binding and source, and the more constraining visibility. Two references keep the
-// stronger binding, the more constraining visibility and the type either has. A definition of the link's keeps its
-// flags.
+// link's global symbols with one of those names are an error. Two definitions of a name resolve as GNU ld and lld
+// resolve them: a strong one takes a weak one's place, of two weak ones the first in link order stays (Scrt1.o's,
+// crti.o's and crtbeginS.o's come before the program's, the others' after it), and two strong ones are an error. A
+// definition of the runtime's takes the link's symbol with its atom, value, size, type, binding and source, whether the
+// symbol only referred to the name or had a weak definition; one that takes the program's definition's place waits in
+// Bind.overrides until bind_end, since the program defines its symbols as its atoms join, after bind_begin. Two
+// references keep the stronger binding and the type either has. Whichever stays takes the most constraining visibility
+// of every reference to the name and definition of it, as the gABI gives the resolving symbol.
 //
 // bind_end binds each name that nothing in the link defines, in the order GNU ld resolves the driver's link line:
 //   - to the linker, for a name it defines (_GLOBAL_OFFSET_TABLE_): source LINKER;
 //   - to a crt object after the program (__TMC_END__), which defines it when it joins;
 //   - to libc.so.6's export: an import, with source RUNTIME_SHARED, the export's type, and its version in the linker's
-//     column, listed in Bind.imports;
+//     column, listed in Bind.imports; but not for a hidden, internal or protected reference, which needs a definition
+//     within the executable, as GNU ld and lld bind one;
 //   - for a strong reference, to a member of libc_nonshared.a (atexit), which joins the link;
 //   - for a weak reference, to nothing: source NONE. As with GNU ld, a weak reference loads no member.
 // Anything else is an error naming it. Members that join can refer to names nothing else does, so binding goes in
@@ -49,10 +52,11 @@
 // Both look names up in the runtime's index (runtime_find_global_name), which bind_test.c checks against a scan.
 //
 // main.c includes this file after runtime.c. Layout, in this order:
-//   - API: BindError, BindPath, Bind and the entry points' prototypes.
+//   - API: BindError, BindPath, BindOverride, Bind and the entry points' prototypes.
 //   - Matching: bind_lane_mask, bind_visibility_rank, bind_fail, bind_name_symbol, bind_take_name, bind_match_vector,
 //     bind_match_exact and bind_match.
-//   - Joining an object: bind_merge, bind_piece_fits, bind_join_block, bind_join_records and bind_join.
+//   - Joining an object: bind_visibility, bind_install, bind_merge, bind_piece_fits, bind_join_block, bind_join_records
+//     and bind_join.
 //   - Binding: bind_resolve_symbol, bind_resolve_vector, bind_resolve_exact, bind_resolve, bind_members,
 //     bind_keep_imports and bind_find_exports.
 //   - Entry points: bind_capacity, bind_begin and bind_end.
@@ -70,7 +74,8 @@
 typedef enum BindError
 {
     BIND_ERROR_NONE,
-    // A name that nothing defines, referred to without being weak: Bind.name.
+    // A name that nothing defines, referred to without being weak, or that only libc.so.6 defines and a reference with a
+    // visibility other than default refers to: Bind.name.
     BIND_ERROR_UNDEFINED,
     // A name that the link and the runtime both define, neither of them weakly: Bind.name.
     BIND_ERROR_DUPLICATE,
@@ -86,6 +91,16 @@ typedef enum BindPath
     BIND_PATH_EXACT,
 } BindPath;
 
+// A definition of the runtime's that takes the program's definition of a name over: the name's entry among the
+// runtime's global names, the runtime's symbol, and its object's atom delta.
+typedef struct BindOverride BindOverride;
+struct BindOverride
+{
+    uint32_t entry;
+    SymbolId symbol;
+    uint32_t atom_delta;
+};
+
 typedef struct Bind Bind;
 struct Bind
 {
@@ -100,6 +115,10 @@ struct Bind
     SymbolId* name_symbols;
     uint32_t* named;
     uint32_t named_count;
+    // The definitions of the runtime's that take the program's over in bind_begin, which bind_end installs once the
+    // program's atoms have joined: room for one per global name, and how many (almost always none).
+    BindOverride* overrides;
+    uint32_t override_count;
     // By symbol of the runtime's link: the link's symbol it became, or 0 before its object joined.
     SymbolId* symbols;
     // libc_nonshared.a's members that the link needs, and those that joined it, a bit each.
@@ -243,6 +262,27 @@ static void bind_match(Bind* bind, const Link* link, SymbolId first, SymbolId en
 // ---------------------------------------------------------------------------------------------------------------------
 // Joining an object
 
+// The more constraining of two symbols' visibilities, in their flags' bits.
+static uint8_t bind_visibility(uint8_t a, uint8_t b)
+{
+    return bind_visibility_rank(a) > bind_visibility_rank(b) ? a & BUSTER_LINK_SYMBOL_VISIBILITY : b & BUSTER_LINK_SYMBOL_VISIBILITY;
+}
+
+// The link's `symbol` takes the runtime's definition `from_symbol`, of an object whose atoms joined `atom_delta` on, over
+// the definition it has: its atom, value, size, type, binding and source, with the more constraining visibility. The
+// atom of the definition it had stays in the link, without the name.
+static void bind_install(Bind* bind, Link* link, SymbolId symbol, SymbolId from_symbol, uint32_t atom_delta)
+{
+    const LinkSymbols* from = &bind->runtime->link.symbols;
+    LinkSymbols* symbols = &link->symbols;
+    const uint8_t from_flags = from->flags[from_symbol];
+    symbols->atom[symbol] = from->atom[from_symbol] + atom_delta;
+    symbols->value[symbol] = from->value[from_symbol];
+    symbols->size[symbol] = from->size[from_symbol];
+    symbols->flags[symbol] = (uint8_t)((from_flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | bind_visibility(from_flags, symbols->flags[symbol]));
+    symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
+}
+
 // Joins the runtime's symbol `from_symbol`, of an object that has just joined with its atoms `atom_delta` on, to the
 // link's `symbol` of the same name (see the orientation comment).
 static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId symbol, uint32_t atom_delta)
@@ -252,13 +292,46 @@ static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId sy
     const uint8_t from_flags = from->flags[from_symbol];
     const uint8_t flags = symbols->flags[symbol];
     const bool from_defined = from->atom[from_symbol] != 0;
-    // A program symbol is the program's definition, before or after its atom joins.
-    const bool defined = symbols->atom[symbol] != 0 || symbols->source[symbol] == BUSTER_LINK_SOURCE_PROGRAM;
+    // A program symbol is the program's definition, before or after its atom joins. A definition of the runtime's that
+    // took it over in bind_begin waits in Bind.overrides for bind_end, and stands for the link's definition meanwhile.
+    const bool program = symbols->source[symbol] == BUSTER_LINK_SOURCE_PROGRAM;
+    const bool waiting = program && !bind->resolving;
+    const uint32_t entry = waiting ? bind->runtime->symbol_names[from_symbol] - 1 : 0;
+    uint32_t found = bind->override_count;
+    for (uint32_t i = 0; waiting && i < bind->override_count; i += 1)
+    {
+        found = bind->overrides[i].entry == entry ? i : found;
+    }
+    const SymbolId pending = found < bind->override_count ? bind->overrides[found].symbol : 0;
+    const uint8_t defining_flags = pending != 0 ? from->flags[pending] : flags;
+    const bool defined = symbols->atom[symbol] != 0 || program;
     const bool from_weak = (from_flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
-    const uint8_t visibility = bind_visibility_rank(from_flags) > bind_visibility_rank(flags) ? from_flags & BUSTER_LINK_SYMBOL_VISIBILITY : flags & BUSTER_LINK_SYMBOL_VISIBILITY;
-    if (from_defined && defined && !from_weak)
+    const bool link_weak = (defining_flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    // In link order, Scrt1.o, crti.o and crtbeginS.o come before the program, and the rest after everything that has
+    // joined: the link's definition comes first unless it is the program's own and the object is one of the first three.
+    const bool link_first = !waiting || pending != 0;
+    // Of two definitions, a strong one takes a weak one's place, and of two weak ones the first in link order stays, as
+    // GNU ld and lld resolve them.
+    const bool replaces = from_defined && defined && link_weak && (!from_weak || !link_first);
+    const uint8_t visibility = bind_visibility(from_flags, flags);
+    if (from_defined && defined && !from_weak && !link_weak)
     {
         bind_fail(bind, BIND_ERROR_DUPLICATE, symbols->name[symbol]);
+    }
+    else if (replaces && waiting)
+    {
+        // The program adds its atoms after bind_begin, defining its symbols; bind_end installs this once it has.
+        bind->overrides[found] = (BindOverride){
+            .entry = entry,
+            .symbol = from_symbol,
+            .atom_delta = atom_delta,
+        };
+        bind->override_count += found == bind->override_count ? 1 : 0;
+        symbols->flags[symbol] = (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | visibility);
+    }
+    else if (replaces)
+    {
+        bind_install(bind, link, symbol, from_symbol, atom_delta);
     }
     else if (from_defined && !defined)
     {
@@ -282,6 +355,12 @@ static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId sy
         {
             bind_fail(bind, BIND_ERROR_UNDEFINED, symbols->name[symbol]);
         }
+    }
+    else
+    {
+        // The link's definition stays, with the more constraining visibility: the gABI gives the resolving symbol that of
+        // every reference to the name and every definition of it.
+        symbols->flags[symbol] = (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_VISIBILITY) | visibility);
     }
 }
 
@@ -559,6 +638,9 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     const uint32_t export = entry != 0 ? names->export[entry - 1] : 0;
     const bool member = definition != 0 && unit >= runtime->nonshared_unit;
     const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+    // A reference with a visibility other than default needs a definition within the executable: libc.so.6's can't be
+    // one, as GNU ld and lld resolve it.
+    const bool shareable = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_DEFAULT;
     if (entry != 0 && names->linker[entry - 1])
     {
         symbols->source[symbol] = BUSTER_LINK_SOURCE_LINKER;
@@ -568,7 +650,7 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
         // crtendS.o or crtn.o defines it when it joins.
         symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
     }
-    else if (export != 0)
+    else if (export != 0 && shareable)
     {
         const ImportExports* exports = &runtime->libc.exports;
         symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_SHARED;
@@ -753,13 +835,14 @@ static bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath 
     };
     bind->name_symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->global_names.count);
     bind->named = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, runtime->global_names.count);
+    bind->overrides = BUSTER_ARENA_PUSH_ARRAY(arena, BindOverride, runtime->global_names.count);
     bind->symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->link.symbols.count);
     bind->members_needed = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words);
     bind->members_joined = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words);
     bind->imports = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, bind->capacity);
     bind->exports = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, bind->capacity);
-    const bool pushed = bind->name_symbols != 0 && bind->named != 0 && bind->symbols != 0 && (words == 0 || (bind->members_needed != 0 && bind->members_joined != 0)) &&
-                        bind->imports != 0 && bind->exports != 0;
+    const bool pushed = bind->name_symbols != 0 && bind->named != 0 && bind->overrides != 0 && bind->symbols != 0 &&
+                        (words == 0 || (bind->members_needed != 0 && bind->members_joined != 0)) && bind->imports != 0 && bind->exports != 0;
     if (!pushed)
     {
         bind_fail(bind, BIND_ERROR_FULL, 0);
@@ -787,6 +870,12 @@ static bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath 
 
 static bool bind_end(Bind* bind, Link* link)
 {
+    // The runtime's definitions that took the program's over, now that the program's atoms have joined (Bind.overrides).
+    for (uint32_t i = 0; bind->error == BIND_ERROR_NONE && i < bind->override_count; i += 1)
+    {
+        const BindOverride* override = &bind->overrides[i];
+        bind_install(bind, link, bind->name_symbols[override->entry], override->symbol, override->atom_delta);
+    }
     if (bind->error == BIND_ERROR_NONE)
     {
         // The global symbols added since bind_begin, then every name nothing defines, with the members they need.

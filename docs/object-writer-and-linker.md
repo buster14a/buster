@@ -947,8 +947,9 @@ and binds every name before any layout:
   takes the link's symbol of its name, if there is one. So `bind_begin` first
   matches every global symbol of the program against the runtime's global
   names (`RuntimeNames`: each name of the runtime's global symbols, of
-  `libc.so.6`'s exports and of its references, once, built by
-  `runtime_import`, indexed as the exports are). The match is the one part
+  `libc.so.6`'s exports and of its references, and of those the linker
+  defines, once, built by `runtime_import`, indexed as the exports are). The
+  match is the one part
   that grows with the program; the rest grows with the runtime, or with the
   names the program leaves undefined. Most of the program's names aren't the
   runtime's, so the match is mostly misses, and a miss mustn't touch the
@@ -970,11 +971,26 @@ and binds every name before any layout:
   scalar rules. Its fixups' targets move through the symbols' new ids by
   scalar loads, in a pass of their own. The exact path adds the same records
   one at a time through `link.c`'s checked adds.
+- **Two definitions of a name** resolve as GNU ld and lld resolve them: a
+  strong one takes a weak one's place, of two weak ones the first in link
+  order stays (`Scrt1.o`'s, `crti.o`'s and `crtbeginS.o`'s come before the
+  program's), and two strong ones are an error. So `crti.o`'s `_init` takes a
+  weak `_init` of the program's over, and `Scrt1.o`'s weak `data_start` a weak
+  one of the program's. The program defines its symbols as its atoms join,
+  after `bind_begin`, so a definition of the runtime's that takes the
+  program's place waits until `bind_end`. Whichever stays takes the most
+  constraining visibility of every reference to the name and definition of
+  it, as the gABI says.
 - **Binding** (`bind_end`). The symbols that nothing defines are selected
   eight at a time by a compress over the atom, name and source columns, and
-  each is looked up: the linker's names, a crt object after the program, an
-  export of `libc.so.6` (an import, with the export's type and version), a
-  member of `libc_nonshared.a` for a strong reference, nothing for a weak one.
+  each is looked up: the linker's names (`_GLOBAL_OFFSET_TABLE_` and the init
+  and fini arrays' bounds), a crt object after the program, an export of
+  `libc.so.6` (an import, with the export's type and version) but only for a
+  reference with default visibility, a member of `libc_nonshared.a` for a
+  strong reference, nothing for a weak one. A hidden, internal or protected
+  reference needs a definition within the executable: GNU ld refuses a strong
+  one that only a shared library defines and gives a weak one 0, and lld
+  does the same.
   The members are a frontier walk over a bitset: each round binds the symbols
   the round before added. The exports come from the names that took a link
   symbol, as they took it, rather than from all of the runtime's.

@@ -124,8 +124,8 @@ struct RuntimePiece
 };
 
 // The names a program's are bound against (bind.c): each distinct name of a global or weak symbol of the runtime's
-// objects, of libc.so.6's exports and of its references, once, as columns, with what binding needs to know of it, and
-// indexed by hash.
+// objects, of libc.so.6's exports and of its references, and of those the linker defines, once, as columns, with what
+// binding needs to know of it, and indexed by hash.
 typedef struct RuntimeNames RuntimeNames;
 struct RuntimeNames
 {
@@ -735,8 +735,8 @@ static RuntimeError runtime_bind(Runtime* runtime)
 }
 
 // Builds the runtime's global names (RuntimeNames). The candidates are the names of its global and weak symbols (a
-// compress of their ids, eight at a time, as runtime_bind's), of libc.so.6's exports and of its references, in that
-// order, indexed by hash. A candidate that repeats an earlier one of its bucket, by hash and bytes, is folded into it;
+// compress of their ids, eight at a time, as runtime_bind's), of libc.so.6's exports and of its references, and the
+// names the linker defines (runtime_linker_names), in that order, indexed by hash. A candidate that repeats an earlier one of its bucket, by hash and bytes, is folded into it;
 // the first of each name is numbered by an exclusive prefix sum of the first ones, so that the entries keep the
 // candidates' order, and the entries are indexed again.
 static RuntimeError runtime_global_names(Runtime* runtime)
@@ -748,7 +748,8 @@ static RuntimeError runtime_global_names(Runtime* runtime)
     RuntimeNames* names = &runtime->global_names;
     Arena* arena = &runtime->tables;
     const uint32_t symbol_count = symbols->count;
-    const uint64_t bound = (uint64_t)symbol_count + exports->count + references->count;
+    const uint32_t linker_count = BUSTER_ARRAY_LENGTH(runtime_linker_names);
+    const uint64_t bound = (uint64_t)symbol_count + exports->count + references->count + linker_count;
     runtime->symbol_names = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbol_count);
     Scratch scratch = scratch_begin(arena);
     SymbolId* named = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, SymbolId, symbol_count);
@@ -770,7 +771,10 @@ static RuntimeError runtime_global_names(Runtime* runtime)
         import_store32(named + named_count, _mm512_maskz_compress_epi64((__mmask8)kept, _mm512_add_epi64(lane_index, _mm512_set1_epi64(batch))), (uint32_t)__builtin_popcount(kept));
         named_count += (uint32_t)__builtin_popcount(kept);
     }
-    const uint32_t count = named_count + exports->count + references->count;
+    // The candidates: the objects' global names, libc's exports and references, and the names the linker defines, which
+    // a program can refer to whether or not the runtime does.
+    const uint32_t references_end = named_count + exports->count + references->count;
+    const uint32_t count = references_end + linker_count;
     for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < named_count; i += 1)
     {
         const NameId name = symbols->name[named[i]];
@@ -786,6 +790,12 @@ static RuntimeError runtime_global_names(Runtime* runtime)
         memcpy(bytes + named_count + exports->count, references->name, references->count * sizeof(*bytes));
         memcpy(lengths + named_count + exports->count, references->length, references->count * sizeof(*lengths));
         memcpy(hashes + named_count + exports->count, references->hash, references->count * sizeof(*hashes));
+        for (uint32_t i = 0; i < linker_count; i += 1)
+        {
+            bytes[references_end + i] = (const uint8_t*)runtime_linker_names[i];
+            lengths[references_end + i] = (uint32_t)strlen(runtime_linker_names[i]);
+            hashes[references_end + i] = link_hash(bytes[references_end + i], lengths[references_end + i]);
+        }
     }
     ImportNameIndex candidates = { 0 };
     if (result == RUNTIME_ERROR_NONE && !import_index_build(&candidates, hashes, count, scratch.arena))
@@ -840,6 +850,7 @@ static RuntimeError runtime_global_names(Runtime* runtime)
         memset(names->definition, 0, entry_count * sizeof(*names->definition));
         memset(names->export, 0, entry_count * sizeof(*names->export));
         memset(names->referenced, 0, entry_count * sizeof(*names->referenced));
+        memset(names->linker, 0, entry_count * sizeof(*names->linker));
         memset(runtime->symbol_names, 0, symbol_count * sizeof(*runtime->symbol_names));
     }
     // Each candidate's entry: a first one's spelling, and what each candidate says of its name.
@@ -862,14 +873,14 @@ static RuntimeError runtime_global_names(Runtime* runtime)
         {
             names->export[entry] = c - named_count + 1;
         }
-        else
+        else if (c < references_end)
         {
             names->referenced[entry] = true;
         }
-    }
-    for (uint32_t e = 0; result == RUNTIME_ERROR_NONE && e < entry_count; e += 1)
-    {
-        names->linker[e] = runtime_linker_name(names->bytes[e], names->length[e]);
+        else
+        {
+            names->linker[entry] = true;
+        }
     }
     if (result == RUNTIME_ERROR_NONE && !import_index_build(&names->index, names->hash, entry_count, arena))
     {

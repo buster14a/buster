@@ -21,10 +21,17 @@
 //   - Names: every global name of the programs and every export of libc.so.6 found by the runtime's index as a scan of
 //     the runtime's names finds it.
 //   - Rules: links made by hand that each exercise one rule: a strong definition of _start (a duplicate); one of
-//     data_start, which Scrt1.o defines weakly; a reference to __dso_handle, which crtbeginS.o defines; names nothing
-//     defines, strong and weak; definitions that libc.so.6 defines too or refers to, hidden or not (exports); two
-//     symbols named write; references added after bind_begin, of a name the runtime has and of one it doesn't; strong
-//     and weak references to __cxa_finalize; one to pthread_atfork, which a member defines; and links without room.
+//     data_start, which Scrt1.o defines weakly, and a weak one, which Scrt1.o's takes over as the first in link order;
+//     weak definitions of _init, before and after bind_begin, which crti.o's strong one takes over; a reference to
+//     __dso_handle, which crtbeginS.o defines; names nothing defines, strong and weak; definitions that libc.so.6
+//     defines too or refers to, hidden or not (exports); two symbols named write; references added after bind_begin,
+//     of a name the runtime has and of one it doesn't; strong and weak references to __cxa_finalize; one to
+//     pthread_atfork, which a member defines, hidden too; hidden and protected references to puts, which libc.so.6
+//     can't satisfy, and a weak hidden one, which binds to nothing; references to the init and fini arrays' bounds,
+//     which the linker defines; and links without room.
+//   - Programs that GNU ld and lld decide for themselves (the linkers' cases): a weak _init against crti.o's, a weak
+//     data_start after Scrt1.o's, a hidden and a weak hidden puts, and the arrays' bounds, each bound or refused as
+//     the linkers do.
 //   - A program that calls atexit, which libc_nonshared.a's member defines: bound, it must pass link_check, and the
 //     member must join, defining atexit, with its references bound (__cxa_atexit to libc.so.6, __dso_handle to
 //     crtbeginS.o).
@@ -32,13 +39,15 @@
 //     objects, one per unit, and linked by ld.lld and ld.bfd as a PIE with only libc.so.6 and the loader besides, in
 //     GCC's order, without errors or warnings. It must run and print what its model predicts; the atexit program must
 //     exit with its handler's status, 0, rather than main's, 3. And the same program's own objects linked by cc with
-//     lld must have the imports at their versions, the weak references and the exports that binding found in readelf's
-//     .dynsym, and the members that lld's --why-extract lists.
+//     lld must have the imports at their versions, the weak references with default visibility and the exports that
+//     binding found in readelf's .dynsym, and the members that lld's --why-extract lists. Each of the linkers' cases'
+//     own objects, linked by cc with GNU ld and with lld, must link, or fail to, as binding did, and run with the
+//     case's status, as the bound link must.
 // The objects and programs go in a new directory under $TMPDIR (or /tmp), removed at the end unless --keep. The exit
 // status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, the programs and their comparisons, the programs' checks, the names, links made by
-// hand, the rules, the atexit program, the cross-check, and run_bind_tests.
+// hand, the rules, the atexit program, the cross-check, the linkers' cases, and run_bind_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -670,6 +679,14 @@ typedef enum BindTestRule
     BIND_TEST_RULE_WEAK_ATFORK,
     BIND_TEST_RULE_LOCAL_INIT,
     BIND_TEST_RULE_PROGRAM_UNDEFINED,
+    BIND_TEST_RULE_WEAK_DATA_START,
+    BIND_TEST_RULE_WEAK_INIT,
+    BIND_TEST_RULE_WEAK_INIT_DEFINED,
+    BIND_TEST_RULE_HIDDEN_REFERENCE,
+    BIND_TEST_RULE_PROTECTED_REFERENCE,
+    BIND_TEST_RULE_WEAK_HIDDEN_REFERENCE,
+    BIND_TEST_RULE_HIDDEN_MEMBER,
+    BIND_TEST_RULE_ARRAY_BOUNDS,
     BIND_TEST_RULE_NO_ROOM,
     BIND_TEST_RULES,
 } BindTestRule;
@@ -690,6 +707,14 @@ static const char* const bind_test_rule_names[] = {
     "a weak reference to pthread_atfork, which loads no member",
     "a local symbol named _init, which crti.o defines globally",
     "a symbol of the program's that it never defines",
+    "a weak definition of data_start, which Scrt1.o, before the program in link order, defines weakly",
+    "a weak definition of _init, which crti.o defines strongly",
+    "a weak definition of _init with its atom before bind_begin",
+    "a hidden reference to puts, which only libc.so.6 defines",
+    "a protected reference to puts",
+    "a weak hidden reference to puts",
+    "a hidden reference to pthread_atfork, which a member defines",
+    "references to the init and fini arrays' bounds, which the linker defines",
     "a link without room for the crt objects' symbols",
 };
 
@@ -776,10 +801,50 @@ static void bind_test_rule_link(BindTestRuleLink* rule, const Runtime* runtime, 
     {
         symbols[0] = bind_test_symbol(test, "strlen", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, program);
     }
+    else if (which == BIND_TEST_RULE_WEAK_DATA_START)
+    {
+        symbols[0] = bind_test_symbol(test, "data_start", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_OBJECT, program);
+    }
+    else if (which == BIND_TEST_RULE_WEAK_INIT || which == BIND_TEST_RULE_WEAK_INIT_DEFINED)
+    {
+        symbols[0] = bind_test_symbol(test, "_init", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_FUNCTION, program);
+        // A program whose objects come before the runtime's in the caller's order defines it before bind_begin.
+        built = built && symbols[0] != 0 && (which == BIND_TEST_RULE_WEAK_INIT || bind_test_define(test, symbols[0]));
+    }
+    else if (which == BIND_TEST_RULE_HIDDEN_REFERENCE)
+    {
+        symbols[0] = bind_test_symbol(test, "puts", global_reference | BUSTER_LINK_SYMBOL_HIDDEN, none);
+    }
+    else if (which == BIND_TEST_RULE_PROTECTED_REFERENCE)
+    {
+        symbols[0] = bind_test_symbol(test, "puts", global_reference | BUSTER_LINK_SYMBOL_PROTECTED, none);
+    }
+    else if (which == BIND_TEST_RULE_WEAK_HIDDEN_REFERENCE)
+    {
+        symbols[0] = bind_test_symbol(test, "puts", weak_reference | BUSTER_LINK_SYMBOL_HIDDEN, none);
+    }
+    else if (which == BIND_TEST_RULE_HIDDEN_MEMBER)
+    {
+        symbols[0] = bind_test_symbol(test, "pthread_atfork", global_reference | BUSTER_LINK_SYMBOL_HIDDEN, none);
+    }
+    else if (which == BIND_TEST_RULE_ARRAY_BOUNDS)
+    {
+        static const char* const bounds[] = {
+            "__init_array_start",
+            "__init_array_end",
+            "__fini_array_start",
+            "__fini_array_end",
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bounds); i += 1)
+        {
+            symbols[i] = bind_test_symbol(test, bounds[i], global_reference, none);
+        }
+    }
     rule->begun = built && bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena);
     // The program's atoms, and the symbols it adds after bind_begin.
     rule->begun = rule->begun && bind_test_define(test, rule->main);
-    if (which == BIND_TEST_RULE_DATA_START || which == BIND_TEST_RULE_EXPORTS || which == BIND_TEST_RULE_LOCAL_INIT)
+    if (which == BIND_TEST_RULE_DATA_START || which == BIND_TEST_RULE_EXPORTS || which == BIND_TEST_RULE_LOCAL_INIT || which == BIND_TEST_RULE_WEAK_DATA_START ||
+        which == BIND_TEST_RULE_WEAK_INIT)
     {
         for (uint32_t i = 0; rule->begun && i < BUSTER_ARRAY_LENGTH(rule->symbols); i += 1)
         {
@@ -896,6 +961,52 @@ static bool bind_test_rule_holds(const BindTestRuleLink* rule, const Runtime* ru
         // The local stays the program's, and the global _init is crti.o's own.
         const SymbolId global = bind_test_global(link, "_init");
         result = rule->ended && unit == 0 && global != 0 && global != first && link->atoms.unit[symbols->atom[global]] == 1 + RUNTIME_OBJECT_INIT_PROLOGUE;
+    }
+    else if (which == BIND_TEST_RULE_WEAK_DATA_START)
+    {
+        // Scrt1.o's weak definition comes first in link order, and takes the program's symbol.
+        result = rule->ended && bind_test_global(link, "data_start") == first && unit == 1 + RUNTIME_OBJECT_START && symbols->source[first] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE &&
+                 weak;
+    }
+    else if (which == BIND_TEST_RULE_WEAK_INIT || which == BIND_TEST_RULE_WEAK_INIT_DEFINED)
+    {
+        // crti.o's strong definition takes the program's symbol, with its atom in .init and its visibility.
+        const RuntimeNames* names = &runtime->global_names;
+        const uint32_t entry = runtime_find_global_name(names, (const uint8_t*)"_init", 5, link_hash((const uint8_t*)"_init", 5));
+        const SymbolId definition = entry != 0 ? names->definition[entry - 1] : 0;
+        const uint8_t visibility = definition != 0 ? runtime->link.symbols.flags[definition] & BUSTER_LINK_SYMBOL_VISIBILITY : 0xff;
+        result = rule->ended && bind_test_global(link, "_init") == first && unit == 1 + RUNTIME_OBJECT_INIT_PROLOGUE && link->atoms.class[atom] == BUSTER_LINK_CLASS_INIT &&
+                 (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL && (flags & BUSTER_LINK_SYMBOL_VISIBILITY) == visibility &&
+                 symbols->source[first] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
+    }
+    else if (which == BIND_TEST_RULE_HIDDEN_REFERENCE || which == BIND_TEST_RULE_PROTECTED_REFERENCE)
+    {
+        // libc.so.6's definition can't satisfy it, and nothing else defines it.
+        result = rule->begun && !rule->ended && bind->error == BIND_ERROR_UNDEFINED && bind->name == symbols->name[first];
+    }
+    else if (which == BIND_TEST_RULE_WEAK_HIDDEN_REFERENCE)
+    {
+        bool imported = false;
+        for (uint32_t i = 0; i < bind->import_count; i += 1)
+        {
+            imported = imported || bind->imports[i] == first;
+        }
+        result = rule->ended && atom == 0 && symbols->source[first] == BUSTER_LINK_SOURCE_NONE && !imported;
+    }
+    else if (which == BIND_TEST_RULE_HIDDEN_MEMBER)
+    {
+        // A member is within the executable, so it defines the name.
+        const uint32_t member = unit >= 1 + RUNTIME_OBJECTS ? unit - 1 - RUNTIME_OBJECTS : UINT32_MAX;
+        result = rule->ended && atom != 0 && symbols->source[first] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE && member < runtime->nonshared.member_count &&
+                 (bind->members_joined[member / 64] >> (member % 64) & 1) != 0;
+    }
+    else if (which == BIND_TEST_RULE_ARRAY_BOUNDS)
+    {
+        result = rule->ended;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rule->symbols); i += 1)
+        {
+            result = result && rule->symbols[i] != 0 && symbols->atom[rule->symbols[i]] == 0 && symbols->source[rule->symbols[i]] == BUSTER_LINK_SOURCE_LINKER;
+        }
     }
     else
     {
@@ -1370,8 +1481,8 @@ static uint32_t bind_test_read_dynamic(String8 text, BindTestDynamic* entries)
 }
 
 // Whether readelf's entries are what binding found: each undefined one an import of the link at that version, with its
-// type, or a weak reference to nothing of it, with the same binding; each defined one an export; and every import,
-// export and weak reference to nothing among them.
+// type, or a weak reference to nothing of it with default visibility, with the same binding; each defined one an
+// export; and every import, export and such weak reference among them.
 static bool bind_test_same_dynamic(const Link* link, const Bind* bind, const Runtime* runtime, const BindTestDynamic* entries, uint32_t count)
 {
     const LinkSymbols* symbols = &link->symbols;
@@ -1383,7 +1494,9 @@ static bool bind_test_same_dynamic(const Link* link, const Bind* bind, const Run
         const uint8_t source = symbols->source[symbol];
         const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
         const bool import = source == BUSTER_LINK_SOURCE_RUNTIME_SHARED;
-        const bool nowhere = source == BUSTER_LINK_SOURCE_NONE && symbols->atom[symbol] == 0 && name != 0 && weak;
+        // A weak reference to nothing is dynamic only with default visibility: a hidden one is 0 within the executable.
+        const bool visible = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_DEFAULT;
+        const bool nowhere = source == BUSTER_LINK_SOURCE_NONE && symbols->atom[symbol] == 0 && name != 0 && weak && visible;
         bool exported = false;
         for (uint32_t i = 0; i < bind->export_count; i += 1)
         {
@@ -1514,6 +1627,424 @@ static void bind_test_against_lld(BindTestTally* tally, const Link* own, uint32_
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Programs as GNU ld and lld link them
+//
+// Programs whose names bind by the rules that GNU ld and lld decide for themselves: a weak definition of the program's
+// meeting the runtime's (strong, and weak before it in link order), references with a visibility other than default to
+// a name only libc.so.6 defines, and references to the names the linker defines. Each is bound by both paths, which must
+// agree, and must bind or fail as `links` says. With --cross-check, the program's own objects, linked by cc as a PIE
+// with GNU ld and with lld, must link or fail to alike and run with `status`; lld's .dynsym and --why-extract must have
+// what binding found (bind_test_against_lld); and the bound link's objects, linked by ld.lld and ld.bfd, must run with
+// `status` too.
+
+typedef enum BindTestCase
+{
+    BIND_TEST_CASE_WEAK_INIT,
+    BIND_TEST_CASE_WEAK_DATA_START,
+    BIND_TEST_CASE_HIDDEN_PUTS,
+    BIND_TEST_CASE_WEAK_HIDDEN_PUTS,
+    BIND_TEST_CASE_ARRAY_BOUNDS,
+    BIND_TEST_CASES,
+} BindTestCase;
+
+typedef struct BindTestCaseInfo BindTestCaseInfo;
+struct BindTestCaseInfo
+{
+    // The files' name, and what the program is.
+    const char* name;
+    const char* what;
+    // Whether it links, and its exit status if it does.
+    bool links;
+    int status;
+};
+
+static const BindTestCaseInfo bind_test_cases[BIND_TEST_CASES] = {
+    [BIND_TEST_CASE_WEAK_INIT] = {
+        .name = "weak-init",
+        .what = "a weak _init of the program's, which exits with 7 if it runs, against crti.o's strong one",
+        .links = true,
+        .status = 0,
+    },
+    [BIND_TEST_CASE_WEAK_DATA_START] = {
+        .name = "weak-data-start",
+        .what = "main returns data_start's value: the program's weak one holds 7, and Scrt1.o's, before it, 0",
+        .links = true,
+        .status = 0,
+    },
+    [BIND_TEST_CASE_HIDDEN_PUTS] = {
+        .name = "hidden-puts",
+        .what = "a call through the GOT to a hidden puts, which only libc.so.6 defines",
+        .links = false,
+    },
+    [BIND_TEST_CASE_WEAK_HIDDEN_PUTS] = {
+        .name = "weak-hidden-puts",
+        .what = "main returns whether a weak hidden puts, read through the GOT, isn't 0",
+        .links = true,
+        .status = 0,
+    },
+    [BIND_TEST_CASE_ARRAY_BOUNDS] = {
+        .name = "array-bounds",
+        .what = "main refers to the init and fini arrays' bounds",
+        .links = true,
+        .status = 0,
+    },
+};
+
+typedef struct BindTestCaseProgram BindTestCaseProgram;
+struct BindTestCaseProgram
+{
+    BindTestLink test;
+    bool built;
+    bool bound;
+};
+
+// The case's code: main, and for a weak _init its own.
+static bool bind_test_case_code(BindTestLink* test, BindTestCase which, SymbolId main, const SymbolId* others)
+{
+    const X86Instruction return_zero[] = {
+        {
+            .immediate = 0,
+            .rm = X86_REGISTER_RAX,
+            .form = X86_FORM_MOV_R32_IMM32,
+        },
+        {
+            .form = X86_FORM_RET,
+        },
+    };
+    bool result = false;
+    if (which == BIND_TEST_CASE_WEAK_INIT)
+    {
+        // _init: exit_group(7).
+        const X86Instruction init_code[] = {
+            {
+                .immediate = 231,
+                .rm = X86_REGISTER_RAX,
+                .form = X86_FORM_MOV_R32_IMM32,
+            },
+            {
+                .immediate = 7,
+                .rm = X86_REGISTER_RDI,
+                .form = X86_FORM_MOV_R32_IMM32,
+            },
+            {
+                .form = X86_FORM_SYSCALL,
+            },
+        };
+        result = bind_test_code(test, return_zero, BUSTER_ARRAY_LENGTH(return_zero), 0, 0, main) &&
+                 bind_test_code(test, init_code, BUSTER_ARRAY_LENGTH(init_code), 0, 0, others[0]);
+    }
+    else if (which == BIND_TEST_CASE_WEAK_DATA_START)
+    {
+        // main: mov eax, [rip + data_start]; ret. The program's data_start holds 7.
+        const X86Instruction main_code[] = {
+            {
+                .reg = X86_REGISTER_RAX,
+                .mode = BUSTER_X86_MEMORY_RIP,
+                .form = X86_FORM_MOV_R32_RM32 | BUSTER_X86_FORM_FIXUP,
+            },
+            {
+                .form = X86_FORM_RET,
+            },
+        };
+        const LinkReference references[] = {
+            {
+                .instruction = 0,
+                .field = X86_FIXUP_DISPLACEMENT,
+                .kind = BUSTER_LINK_FIXUP_PC32,
+                .target = others[0],
+                .addend = 0,
+            },
+        };
+        const uint64_t seven = 7;
+        result = bind_test_code(test, main_code, BUSTER_ARRAY_LENGTH(main_code), references, BUSTER_ARRAY_LENGTH(references), main) && bind_test_define(test, others[0]);
+        if (result)
+        {
+            memcpy(test->link.atoms.bytes[test->link.symbols.atom[others[0]]], &seven, sizeof(seven));
+        }
+    }
+    else if (which == BIND_TEST_CASE_HIDDEN_PUTS)
+    {
+        // main: sub rsp, 8; call [rip + puts@GOT]; add rsp, 8; mov eax, 0; ret.
+        const X86Instruction main_code[] = {
+            {
+                .immediate = 8,
+                .rm = X86_REGISTER_RSP,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .form = X86_FORM_SUB_RM64_IMM8,
+            },
+            {
+                .mode = BUSTER_X86_MEMORY_RIP,
+                .form = X86_FORM_CALL_RM64 | BUSTER_X86_FORM_FIXUP,
+            },
+            {
+                .immediate = 8,
+                .rm = X86_REGISTER_RSP,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .form = X86_FORM_ADD_RM64_IMM8,
+            },
+            {
+                .immediate = 0,
+                .rm = X86_REGISTER_RAX,
+                .form = X86_FORM_MOV_R32_IMM32,
+            },
+            {
+                .form = X86_FORM_RET,
+            },
+        };
+        const LinkReference references[] = {
+            {
+                .instruction = 1,
+                .field = X86_FIXUP_DISPLACEMENT,
+                .kind = BUSTER_LINK_FIXUP_CALL_GOT,
+                .target = others[0],
+                .addend = 0,
+            },
+        };
+        result = bind_test_code(test, main_code, BUSTER_ARRAY_LENGTH(main_code), references, BUSTER_ARRAY_LENGTH(references), main);
+    }
+    else if (which == BIND_TEST_CASE_WEAK_HIDDEN_PUTS)
+    {
+        // main: mov rdx, [rip + puts@GOT]; mov eax, 1; mov ecx, 0; test rdx, rdx; cmove rax, rcx; ret.
+        const X86Instruction main_code[] = {
+            {
+                .reg = X86_REGISTER_RDX,
+                .mode = BUSTER_X86_MEMORY_RIP,
+                .form = X86_FORM_MOV_R64_RM64 | BUSTER_X86_FORM_FIXUP,
+            },
+            {
+                .immediate = 1,
+                .rm = X86_REGISTER_RAX,
+                .form = X86_FORM_MOV_R32_IMM32,
+            },
+            {
+                .immediate = 0,
+                .rm = X86_REGISTER_RCX,
+                .form = X86_FORM_MOV_R32_IMM32,
+            },
+            {
+                .reg = X86_REGISTER_RDX,
+                .rm = X86_REGISTER_RDX,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .form = X86_FORM_TEST_RM64_R64,
+            },
+            {
+                .reg = X86_REGISTER_RAX,
+                .rm = X86_REGISTER_RCX,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .form = X86_FORM_CMOVE_R64_RM64,
+            },
+            {
+                .form = X86_FORM_RET,
+            },
+        };
+        const LinkReference references[] = {
+            {
+                .instruction = 0,
+                .field = X86_FIXUP_DISPLACEMENT,
+                .kind = BUSTER_LINK_FIXUP_LOAD_GOT,
+                .target = others[0],
+                .addend = 0,
+            },
+        };
+        result = bind_test_code(test, main_code, BUSTER_ARRAY_LENGTH(main_code), references, BUSTER_ARRAY_LENGTH(references), main);
+    }
+    else
+    {
+        // main: lea rax, [rip + each bound]; mov eax, 0; ret.
+        X86Instruction main_code[6];
+        LinkReference references[4];
+        for (uint32_t i = 0; i < 4; i += 1)
+        {
+            main_code[i] = (X86Instruction){
+                .reg = X86_REGISTER_RAX,
+                .mode = BUSTER_X86_MEMORY_RIP,
+                .form = X86_FORM_LEA_R64_M | BUSTER_X86_FORM_FIXUP,
+            };
+            references[i] = (LinkReference){
+                .instruction = i,
+                .field = X86_FIXUP_DISPLACEMENT,
+                .kind = BUSTER_LINK_FIXUP_PC32,
+                .target = others[i],
+                .addend = 0,
+            };
+        }
+        main_code[4] = return_zero[0];
+        main_code[5] = return_zero[1];
+        result = bind_test_code(test, main_code, BUSTER_ARRAY_LENGTH(main_code), references, BUSTER_ARRAY_LENGTH(references), main);
+    }
+    return result;
+}
+
+// The case's program: main and the case's symbols, then with `bound` the runtime's first objects, its code, and the
+// rest; without, only the program, for a link of its own objects by cc. program->bound also needs link_check to accept
+// the link, which the object writer needs of the links the cross-check writes.
+static void bind_test_case_program(BindTestCaseProgram* program, const Runtime* runtime, BindTestCase which, BindPath path, bool bound)
+{
+    static const char* const bounds[] = {
+        "__init_array_start",
+        "__init_array_end",
+        "__fini_array_start",
+        "__fini_array_end",
+    };
+    const uint8_t reference = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE;
+    const uint8_t program_source = BUSTER_LINK_SOURCE_PROGRAM;
+    BindTestLink* test = &program->test;
+    bool built = bind_test_link_begin(test, runtime, bind_test_room(runtime));
+    const SymbolId main = built ? bind_test_symbol(test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, program_source) : 0;
+    SymbolId others[4] = { 0 };
+    uint32_t other_count = 1;
+    if (built && which == BIND_TEST_CASE_WEAK_INIT)
+    {
+        others[0] = bind_test_symbol(test, "_init", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_FUNCTION, program_source);
+    }
+    else if (built && which == BIND_TEST_CASE_WEAK_DATA_START)
+    {
+        others[0] = bind_test_symbol(test, "data_start", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_OBJECT, program_source);
+    }
+    else if (built && which == BIND_TEST_CASE_HIDDEN_PUTS)
+    {
+        others[0] = bind_test_symbol(test, "puts", reference | BUSTER_LINK_SYMBOL_HIDDEN, BUSTER_LINK_SOURCE_NONE);
+    }
+    else if (built && which == BIND_TEST_CASE_WEAK_HIDDEN_PUTS)
+    {
+        others[0] = bind_test_symbol(test, "puts", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_NOTYPE | BUSTER_LINK_SYMBOL_HIDDEN, BUSTER_LINK_SOURCE_NONE);
+    }
+    else if (built)
+    {
+        other_count = BUSTER_ARRAY_LENGTH(bounds);
+        for (uint32_t i = 0; i < other_count; i += 1)
+        {
+            others[i] = bind_test_symbol(test, bounds[i], reference, BUSTER_LINK_SOURCE_NONE);
+        }
+    }
+    built = main != 0;
+    for (uint32_t i = 0; i < other_count; i += 1)
+    {
+        built = built && others[i] != 0;
+    }
+    built = built && (!bound || bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena));
+    program->built = built && bind_test_case_code(test, which, main, others);
+    program->bound = program->built && (!bound || bind_end(&test->bind, &test->link)) && link_check(&test->link) == LINK_ERROR_NONE;
+}
+
+// Links the case's own objects by cc as a PIE, with GNU ld and with lld: each must link or fail as the case says, and
+// what links must run with its status.
+static void bind_test_case_linkers(BindTestTally* tally, BindTestCase which, const Link* own, const char* directory, bool keep, Arena* arena)
+{
+    static const char* const linkers[] = {
+        "-fuse-ld=bfd",
+        "-fuse-ld=lld",
+    };
+    const BindTestCaseInfo* info = &bind_test_cases[which];
+    const uint64_t length = arena->length;
+    char object_name[BUSTER_BIND_TEST_PATH_BYTES];
+    char object_path[BUSTER_BIND_TEST_PATH_BYTES];
+    char* paths[] = {
+        object_path,
+    };
+    snprintf(object_name, sizeof(object_name), "%s-cc", info->name);
+    const bool written = bind_test_write_objects(own, 1, directory, object_name, paths, arena);
+    bind_test_expect(tally, written, "the program's own objects written", which);
+    for (uint32_t l = 0; written && l < BUSTER_ARRAY_LENGTH(linkers); l += 1)
+    {
+        char program_path[BUSTER_BIND_TEST_PATH_BYTES];
+        char output_path[BUSTER_BIND_TEST_PATH_BYTES];
+        char error_path[BUSTER_BIND_TEST_PATH_BYTES];
+        snprintf(program_path, sizeof(program_path), "%s/%s-cc-%s", directory, info->name, linkers[l] + 9);
+        snprintf(output_path, sizeof(output_path), "%s.out", program_path);
+        snprintf(error_path, sizeof(error_path), "%s.err", program_path);
+        char* arguments[] = {
+            "cc",
+            (char*)linkers[l],
+            "-pie",
+            "-o",
+            program_path,
+            object_path,
+            0,
+        };
+        unlink(program_path);
+        const int link_status = object_test_run(arguments, output_path, error_path);
+        const uint64_t before = arena->length;
+        if ((link_status == 0) != info->links)
+        {
+            const String8 errors = object_test_read_file(arena, error_path);
+            printf("  %s: %s by cc %s: status %d: %.*s\n", tally->check, info->name, linkers[l], link_status,
+                   errors.pointer != 0 ? (int)(errors.length < 600 ? errors.length : 600) : 0, errors.pointer != 0 ? errors.pointer : "");
+        }
+        bind_test_expect(tally, (link_status == 0) == info->links, info->links ? "the program's own objects linked by cc" : "the program's own objects refused by cc", l);
+        char* run[] = {
+            program_path,
+            0,
+        };
+        const int run_status = link_status == 0 ? object_test_run(run, output_path, error_path) : -1;
+        if (link_status == 0 && run_status != info->status)
+        {
+            printf("  %s: %s linked by cc %s: status %d\n", tally->check, info->name, linkers[l], run_status);
+        }
+        bind_test_expect(tally, link_status != 0 || run_status == info->status, "the program linked by cc runs with its status", l);
+        arena_pop_to(arena, before);
+        if (!keep)
+        {
+            unlink(program_path);
+            unlink(output_path);
+            unlink(error_path);
+        }
+    }
+    if (!keep && written)
+    {
+        unlink(object_path);
+    }
+    arena_pop_to(arena, length);
+}
+
+static bool bind_test_linker_cases(const Runtime* runtime, bool cross_check, const char* directory, bool keep, Arena* arena)
+{
+    BindTestTally tally = {
+        .check = "linkers' cases",
+    };
+    for (uint32_t c = 0; c < BIND_TEST_CASES; c += 1)
+    {
+        const BindTestCaseInfo* info = &bind_test_cases[c];
+        BindTestCaseProgram vector;
+        BindTestCaseProgram exact;
+        bind_test_case_program(&vector, runtime, (BindTestCase)c, BIND_PATH_VECTOR, true);
+        bind_test_case_program(&exact, runtime, (BindTestCase)c, BIND_PATH_EXACT, true);
+        if (vector.bound != info->links)
+        {
+            printf("  %s: %s: built %d, bound %d, error %s\n", tally.check, info->what, vector.built, vector.bound, bind_test_errors[vector.test.bind.error]);
+        }
+        bind_test_expect(&tally, vector.built && vector.bound == info->links, info->what, c);
+        bind_test_expect(&tally, exact.built == vector.built && exact.bound == vector.bound && bind_test_same_links(&vector.test.link, &exact.test.link) &&
+                                     bind_test_same_binds(&vector.test.bind, &exact.test.bind),
+                         "the paths agree", c);
+        if (cross_check)
+        {
+            BindTestCaseProgram own;
+            bind_test_case_program(&own, runtime, (BindTestCase)c, BIND_PATH_VECTOR, false);
+            bind_test_expect(&tally, own.bound, "the program alone", c);
+            if (own.bound)
+            {
+                bind_test_case_linkers(&tally, (BindTestCase)c, &own.test.link, directory, keep, arena);
+            }
+            // What binding found against lld's .dynsym and --why-extract for the same program, and the bound link linked
+            // and run.
+            if (own.bound && vector.bound)
+            {
+                bind_test_against_lld(&tally, &own.test.link, 1, &vector.test.link, &vector.test.bind, runtime, directory, info->name, keep, arena);
+            }
+            if (vector.bound)
+            {
+                bind_test_link_and_run(&tally, &vector.test.link, &vector.test.bind, runtime, 1, directory, info->name, (const uint8_t*)"", 0, info->status, keep, arena);
+            }
+            bind_test_link_end(&own.test);
+        }
+        bind_test_link_end(&vector.test);
+        bind_test_link_end(&exact.test);
+    }
+    return bind_test_report(&tally);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The checks and run_bind_tests
 
 static bool bind_test_programs(const Runtime* runtime, uint64_t seed, bool cross_check, const char* directory, bool keep, Arena* arena)
@@ -1632,6 +2163,7 @@ static int run_bind_tests(int argc, char** argv)
         {
             passed = bind_test_atexit_cross_check(&runtime, directory, keep, &arena) && passed;
         }
+        passed = bind_test_linker_cases(&runtime, cross_check, directory, keep, &arena) && passed;
         if (keep)
         {
             printf("the files are in %s\n", directory);

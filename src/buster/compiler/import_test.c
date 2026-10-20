@@ -45,7 +45,8 @@
 //     index (atexit); the ABI note; the bindings of every reference to each name: main to the program,
 //     __libc_start_main and __cxa_finalize to libc, __gmon_start__ and the _ITM_ functions to nothing, __TMC_END__ to
 //     crtendS.o, and _GLOBAL_OFFSET_TABLE_ to the linker; the objects' pieces, one after another; and the global names
-//     binding looks a program's up in, each once, found by its bytes, each global symbol's its own.
+//     binding looks a program's up in, each once, found by its bytes, each global symbol's its own, with each name the
+//     linker defines among them as the linker's.
 //   - With --cross-check, which needs readelf: libc.so.6's exports against `readelf -W --dyn-syms` (name, version,
 //     type, binding and size; IFUNC as a function, GNU_UNIQUE as global) and its references, and the relocations of
 //     the crt objects and libc_nonshared.a's members against `readelf -W -r`: each one a fixup of its kind at its
@@ -2661,7 +2662,6 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         const uint32_t start_main = runtime_find_global_name(global_names, (const uint8_t*)"__libc_start_main", 17, link_hash((const uint8_t*)"__libc_start_main", 17));
         const uint32_t dso_name = runtime_find_global_name(global_names, (const uint8_t*)"__dso_handle", 12, link_hash((const uint8_t*)"__dso_handle", 12));
         const uint32_t atexit_name = runtime_find_global_name(global_names, (const uint8_t*)"atexit", 6, link_hash((const uint8_t*)"atexit", 6));
-        const uint32_t got_name = runtime_find_global_name(global_names, (const uint8_t*)"_GLOBAL_OFFSET_TABLE_", 21, link_hash((const uint8_t*)"_GLOBAL_OFFSET_TABLE_", 21));
         import_test_expect(&tally, main_name != 0 && global_names->definition[main_name - 1] == 0 && global_names->export[main_name - 1] == 0, "main: defined by none of them", 0);
         import_test_expect(&tally, start_main != 0 && global_names->definition[start_main - 1] == 0 && global_names->export[start_main - 1] != 0,
                            "__libc_start_main: libc.so.6's", 0);
@@ -2669,7 +2669,23 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         import_test_expect(&tally, atexit_name != 0 && global_names->definition[atexit_name - 1] != 0 &&
                                        link->atoms.unit[link->symbols.atom[global_names->definition[atexit_name - 1]]] >= runtime.nonshared_unit,
                            "atexit: a member's", 0);
-        import_test_expect(&tally, got_name != 0 && global_names->linker[got_name - 1], "_GLOBAL_OFFSET_TABLE_: the linker's", 0);
+        // Each name the linker defines, whether or not the runtime refers to it (only _GLOBAL_OFFSET_TABLE_ does), and no
+        // other name.
+        uint32_t linker_found = 0;
+        uint32_t linker_marked = 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(runtime_linker_names); i += 1)
+        {
+            const uint8_t* bytes = (const uint8_t*)runtime_linker_names[i];
+            const uint32_t length = (uint32_t)strlen(runtime_linker_names[i]);
+            const uint32_t entry = runtime_find_global_name(global_names, bytes, length, link_hash(bytes, length));
+            linker_found += entry != 0 && global_names->linker[entry - 1] ? 1 : 0;
+        }
+        for (uint32_t e = 0; e < global_names->count; e += 1)
+        {
+            linker_marked += global_names->linker[e] ? 1 : 0;
+        }
+        import_test_expect(&tally, linker_found == BUSTER_ARRAY_LENGTH(runtime_linker_names) && linker_marked == linker_found,
+                           "_GLOBAL_OFFSET_TABLE_ and the arrays' bounds: the linker's", linker_found);
         uint32_t referenced = 0;
         for (uint32_t e = 0; e < global_names->count; e += 1)
         {
