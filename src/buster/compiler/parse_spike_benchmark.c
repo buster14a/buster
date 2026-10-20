@@ -758,6 +758,7 @@ struct SpikeKernelCopy
     uint32_t* depths;
     uint32_t* enclosing;
     uint32_t* open_stack;
+    SpikeBracketBlock* bracket_blocks;
     uint32_t* parents;
     uint32_t* lefts;
     uint16_t* left_keys;
@@ -896,7 +897,7 @@ static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels
         printf("%s: K1 in 16-bit lanes differs at token %u\n", file->path, first);
         result += 1;
     }
-    const bool vector_balanced = spike_brackets_avx512(kinds, spike_kind_deltas, count, copy->depths, copy->enclosing, copy->open_stack);
+    const bool vector_balanced = spike_brackets_avx512(kinds, spike_kind_deltas, count, copy->depths, copy->enclosing, copy->open_stack, copy->bracket_blocks);
     first = BUSTER_SPIKE_NONE;
     for (uint32_t i = 0; i < count && first == BUSTER_SPIKE_NONE; i += 1)
     {
@@ -904,6 +905,13 @@ static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels
         {
             first = i;
         }
+    }
+    // The blocks' views, which K2 reads, from the twin's depths and enclosing openers; on a balanced file the vector
+    // K1's must be the same.
+    spike_bracket_blocks(kinds, spike_kind_deltas, kernels->depths, kernels->enclosing, count, kernels->bracket_blocks);
+    for (uint32_t block = 0; block < count && first == BUSTER_SPIKE_NONE && twin_balanced; block += 64)
+    {
+        first = memcmp(&kernels->bracket_blocks[block / 64], &copy->bracket_blocks[block / 64], sizeof(SpikeBracketBlock)) != 0 ? block : BUSTER_SPIKE_NONE;
     }
     if (first != BUSTER_SPIKE_NONE || twin_balanced != vector_balanced)
     {
@@ -1246,6 +1254,7 @@ static uint32_t spike_check_random_statements(uint32_t sources, uint64_t seed)
                 tokens += count;
                 const uint8_t* kinds = file.tokens.kinds;
                 kernels.unbalanced = !spike_brackets_scalar(kinds, spike_kind_deltas, count, kernels.depths, kernels.enclosing, kernels.stack);
+                spike_bracket_blocks(kinds, spike_kind_deltas, kernels.depths, kernels.enclosing, count, kernels.bracket_blocks);
                 kernels.unsupported = false;
                 spike_typedefs(&kernels, kinds, file.tokens.names, count);
                 spike_classify_scalar(&kernels, kinds, file.tokens.names, count);
@@ -1722,7 +1731,9 @@ static void spike_run_stage(SpikeBench* bench, SpikeTimed which, uint32_t f)
     switch (which)
     {
         case SPIKE_TIMED_TWIN_K1: k->unbalanced = !spike_brackets_scalar(kinds, spike_kind_deltas, count, k->depths, k->enclosing, k->stack); break;
-        case SPIKE_TIMED_VECTOR_K1: k->unbalanced = !spike_brackets_avx512(kinds, spike_kind_deltas, count, k->depths, k->enclosing, buffers->open_stack); break;
+        case SPIKE_TIMED_VECTOR_K1:
+            k->unbalanced = !spike_brackets_avx512(kinds, spike_kind_deltas, count, k->depths, k->enclosing, buffers->open_stack, k->bracket_blocks);
+            break;
         case SPIKE_TIMED_VECTOR_K1_16: k->unbalanced = !spike_brackets16_avx512(kinds, spike_kind_deltas, count, k->depths, k->enclosing, buffers->open_stack); break;
         case SPIKE_TIMED_TWIN_K3_PASS:
         case SPIKE_TIMED_VECTOR_K3_PASS:
@@ -2090,6 +2101,8 @@ int run_parse_spike(int argc, char** argv)
             .rounds = { 0 },
         };
         buffers_reserved &= spike_candidates_reserve(&copy.candidates, &memory, corpus.max_tokens);
+        copy.bracket_blocks = BUSTER_ARENA_PUSH_ARRAY(&memory, SpikeBracketBlock, corpus.max_tokens / 64 + 2);
+        buffers_reserved &= copy.bracket_blocks != 0;
         copy.contexts = BUSTER_ARENA_PUSH_ARRAY(&memory, SpikeStatementContext, corpus.max_tokens / 64 + 2);
         copy.oracle_contexts = BUSTER_ARENA_PUSH_ARRAY(&memory, SpikeStatementContext, corpus.max_tokens / 64 + 2);
         copy.statement_previous = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 1);
