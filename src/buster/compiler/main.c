@@ -316,6 +316,10 @@ int run_bind_benchmark(int argc, char** argv);
 #include "buster/compiler/executable_test.c"
 int run_executable_benchmark(int argc, char** argv);
 
+// A dynamic PIE's inputs from the runtime and binding, and the dynamic PIE's tests, for the test-dynamic command.
+#include "buster/compiler/dynamic.c"
+#include "buster/compiler/dynamic_test.c"
+
 // Branch sizing (each branch's rel8 or rel32 form inside a function, before it's encoded), the functions its tests
 // generate, and its tests, for the test-branch-sizing command. Its benchmark is another translation unit.
 #include "buster/compiler/branch_sizing.c"
@@ -430,6 +434,10 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-executable") == 0)
     {
         result = run_executable_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-dynamic") == 0)
+    {
+        result = run_dynamic_tests(argc - 2, argv + 2);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-branch-sizing") == 0)
     {

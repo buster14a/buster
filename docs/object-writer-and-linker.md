@@ -8,10 +8,12 @@ machine code and data into files:
   other compilers' objects, archives and shared libraries.
 
 The lane base layer, the encoder's fixups, the representation, the object
-writer and the direct path's first executables are implemented
-(`src/buster/compiler/lane.c`, `x86_64_encoder.c`, `link.c`,
-`object_writer.c` and `executable.c`, with generated test programs in
-`link_program.c`); the rest of the linker isn't yet. The document records the
+writer, the direct path's executables (static ones without libc, and dynamic
+PIEs against glibc) and the import and binding of the C runtime they need are
+implemented (`src/buster/compiler/lane.c`, `x86_64_encoder.c`, `link.c`,
+`object_writer.c`, `import.c`, `runtime.c`, `bind.c`, `executable.c` and
+`dynamic.c`, with generated test programs in `link_program.c`); the rest of
+the linker isn't yet. The document records the
 measurements on the Ryzen 7 9700X that the design rests on, the design itself,
 and the order to build it in, as `docs/x86-64-encoder.md` does for the
 encoder.
@@ -69,8 +71,11 @@ the output on tmpfs:
 Step 4's static executables without libc, written by one lane from generated
 programs of 3.9 KB, 397 KB and 35.5 MB, take 2.7 µs, 70 µs and 8.5 ms in
 place on tmpfs (3.4 µs, 87 µs and 9.9 ms as new files), and the largest
-4.1 ms with eight lanes ("The first executables"). A dynamic PIE that calls
-libc has more to write (step 5).
+4.1 ms with eight lanes ("The first executables"). The same programs bound
+against glibc and written as dynamic PIEs take 4.4 µs, 73 µs and 8.6 ms
+(5.4 µs, 89 µs and 10.0 ms as new files), and the largest 4.2 ms with eight
+lanes ("The dynamic PIE"): a few percent over the static executables, all of
+it before the file is written.
 
 Orders of magnitude are there for programs up to a few megabytes, where
 fixed costs dominate. For a 46 MB output both sides spend their time in the
@@ -1017,32 +1022,22 @@ So the smallest program binds in 0.5 µs, well within hello world's 20 µs
 target, and one of 102,400 workers in 117 µs, against 4 to 10 ms for its
 whole link.
 
-The phases still to come are designed the same way:
+The dynamic PIE, the third part, is "The dynamic PIE" below: its stubs,
+dynamic symbols, relocations and RELR, each pass with its vector path and
+its exact twin. Where it differs from the plan here before it: the dynamic
+symbols are found in bitsets, 64 symbols at a time, rather than compressed;
+the stubs and refusals come from a filter in registers that every fixup's
+target is tested against; RELR is encoded per atom, so that its size is known
+before the layout; and `.gnu.hash`'s names are hashed one byte at a time,
+since a program exports tens of them, with the dot product below left for
+when binding exports thousands. `.gnu.hash`'s DJB hash, `h * 33 + c` per
+byte, is a chain within a name but a dot product in closed form, `5381 *
+33^n + sum(c[i] * 33^(n - 1 - i))` mod 2^32: a name of up to 64 bytes is
+four `vpmulld` of its bytes widened to dwords by a vector of powers of 33
+right-aligned to its length, and a reduction.
 
-- **Stubs for the runtime's calls into libc** (part 3). The program's code
-  reaches an import through the GOT, but the runtime's objects call libc
-  through `R_X86_64_PLT32`: `crtbeginS.o`'s call of `__cxa_finalize` and each
-  member's tail call (`atexit`'s of `__cxa_atexit`). Each import that a
-  `CALL` fixup reaches gets a stub, `jmp [rip + slot]` through its GOT slot,
-  and the call goes to the stub: a lane mask over the fixups' kinds and
-  targets, compressed into the stubs' list.
-- **`.dynsym`, `.dynstr` and `.gnu.hash`** (part 3). The imported and
-  exported symbols are a compress of the symbol columns by their masks, and
-  the names' offsets in `.dynstr` an exclusive prefix sum of their lengths
-  plus 1. `.gnu.hash`'s DJB hash, `h * 33 + c` per byte, is a chain within a
-  name but a dot product in closed form, `5381 * 33^n + sum(c[i] *
-  33^(n - 1 - i))` mod 2^32. So a name of up to 64 bytes is four `vpmulld` of
-  its bytes widened to dwords by a vector of powers of 33 right-aligned to
-  its length, and a reduction. The buckets are the counting sort's by `h mod
-  nbuckets`. Each symbol sets 2 Bloom bits in the word its hash selects; the
-  words are a segmented OR over the symbols sorted by word, with no scatter.
-- **Dynamic relocations and RELR** (part 3). Each fixup's need (a GOT slot,
-  `GLOB_DAT` for an import, `RELATIVE` for a program symbol's address) is a
-  lane mask, counted by `vpopcntq` and placed by prefix sums. The relative
-  relocations' addresses are in atom order, so the RELR words (a bitmap of 63
-  slots each) are built from their deltas in vectors.
-- **Layout** (part 3): prefix sums of each class's aligned sizes, as step 4's
-  layout is.
+The phase still to come is designed the same way:
+
 - **The snapshot** (part 4): the runtime's link written as its columns are,
   without a record at a time, and read back with one `pread`. It is
   validated by one `statx` per probe (19 here, 0.18 µs each), which can go
@@ -1371,6 +1366,9 @@ phases in place, µs:
 | 1 | 828 | 505 | 571 | 8.0 | 6,615 | 2.2 |
 | 8 | 334 | 108 | 68 | 7.9 | 3,603 | 2.5 |
 
+(The dynamic PIE's part made the layout and symbols phases faster, and has
+these programs' times again beside the PIEs': "The dynamic PIE".)
+
 On btrfs (`/home`), the 397 KB program takes 105 / 107 µs on one lane and
 71 / 92 on eight (floor 43 / 42), and the 35.5 MB one 11.4 / 11.3 ms and
 6.4 / 7.1 (floor 5.5 / 5.7).
@@ -1390,6 +1388,154 @@ On btrfs (`/home`), the 397 KB program takes 105 / 107 µs on one lane and
   addend. Step 5's binding knows the imports before any code is selected, so
   the GOT can be sized before the code exists, as "Layout" says, and the
   addends' bound can come from the code generator.
+
+#### The dynamic PIE
+
+Step 5's third part: `executable_write` writes a dynamic PIE against glibc
+when `ExecutableOptions.dynamic` gives it what a static executable lacks
+(`ExecutableDynamic`, which `dynamic_inputs` in `dynamic.c` fills from the
+runtime and from binding): the interpreter GCC's driver names, `libc.so.6`
+and its version definitions, `Scrt1.o`'s `.note.ABI-tag`, `crti.o`'s `_init`
+and `_fini`, and the exports. The link is the program's bound by `bind.c`
+("Step 5's phases, data-parallel"), so the writer looks up no name. The
+programs run under the system's loader without stand-ins, and `test-dynamic`
+compares each with lld's link of the same objects.
+
+- **The file** is step 4's laid out at base 0 (`ET_DYN`, `DF_1_PIE`), with
+  lld's sections and program headers besides. R gets `.interp`, the ABI note
+  (one `PT_NOTE` with the build ID), `.dynsym`, `.gnu.version`,
+  `.gnu.version_r`, `.gnu.hash`, `.dynstr`, `.rela.dyn` and `.relr.dyn`, and
+  `.eh_frame` after `.rodata`; RX `.init`, `.fini` and `.plt.got`; RELRO
+  `.dynamic` before `.got`. `PT_INTERP` and `PT_DYNAMIC` join the program
+  headers. `.init`'s and `.fini`'s fragments and `.eh_frame`'s records keep
+  link order, one after another as lld writes them. `.eh_frame_hdr` waits for
+  part 4, which gives the generated programs their FDEs, and `.symtab` for
+  debuggers.
+- **Relocation classes.** Each symbol is RELATIVE (the image's: the load
+  address adds to it), SYMBOLIC (an import, or a weak reference to nothing
+  with default visibility, which a library may define: these are `.dynsym`'s
+  undefined entries) or NONE (a TLS symbol's offset, and a weak reference to
+  nothing that isn't dynamic, which stays 0). A GOT slot of a RELATIVE target
+  is relocated RELATIVE, of a SYMBOLIC one by `GLOB_DAT` (`TPOFF64` for a TLS
+  import). An `ABS64` field in an atom the loader writes (`.tdata`, the init
+  and fini arrays, `.data.rel.ro` and `.data`) is relocated RELATIVE, or by
+  `R_X86_64_64` with the fixup's addend. Refused, naming the smallest fixup:
+  an `ABS64` that needs a relocation in an atom the loader doesn't write (a
+  text relocation), an `ABS32` or `ABS32S` that needs one, and a fixup of
+  another kind to a dynamic symbol, as lld refuses them; and a `PC32` or
+  `PC64` to a weak reference to nothing that isn't dynamic, which is at
+  address 0 wherever the image loads, so that no field measured from the
+  image reaches it. GNU ld refuses that `PC32` in code and read-only data
+  ("can not be used when making a PIE object"); a `PC32` in writable data and
+  a `PC64` anywhere, it and lld write as `0 - P` from the link's addresses,
+  off by the load address. A `CALL`
+  to it is patched so, as both linkers patch it: the program can only call it
+  after checking that it has an address, which its absolute fields and GOT
+  slot say (0, with no relocation).
+- **Stubs.** A `CALL` to a dynamic symbol (GCC 13's `crtbeginS.o` calls
+  `__cxa_finalize` so, where GCC 16's reads the slot itself) goes to a stub
+  in `.plt.got`, `jmp [rip + slot]` and a two-byte nop, GNU ld's form for a
+  symbol whose GOT slot `GLOB_DAT` fills. So nothing binds lazily: there is no
+  `.plt` or `.rela.plt`, as with `-z now`.
+- **RELR.** With `GLIBC_ABI_DT_RELR` in `libc.so.6` (glibc 2.36 on, so the
+  executable needs that version), the RELATIVE relocations at even addresses
+  are `.relr.dyn`'s, the others `.rela.dyn`'s, which sort RELATIVE ones first
+  for `DT_RELACOUNT`. To size `.relr.dyn` before the layout, each written
+  atom's relocations are encoded from its first one's address, as if the atom
+  started a run, so its words don't depend on where it lands; an address is
+  even when the atom is aligned to 2 or more and the field's offset is even.
+  The section is then the atoms' words in address order with the GOT's words
+  among them: the GOT's marked symbols in a word of the bitsets have
+  consecutive slots, so a word's RELATIVE slots are one address entry and at
+  most one bitmap. The field holds the patched `S + A`, RELR's implicit
+  addend. lld encodes the whole section as one run, so its `.relr.dyn` can be
+  about a word per atom shorter.
+- **`.gnu.hash`** has lld's shape: a bucket per four exports, at least one; a
+  Bloom filter of 12 bits per export in the next power of two of 64-bit words
+  above them, with shift 26; and the exports sorted by bucket (a stable
+  counting sort) after the undefined symbols. The versions are numbered from
+  2 in the library's order of them.
+
+Every pass is data-parallel and vectorized, with an exact twin, scalar, that
+`ExecutableOptions.exact` selects; the tests write each program both ways and
+compare the files byte for byte:
+
+| Pass (phase) | Vector path | Exact twin |
+| --- | --- | --- |
+| Symbols (count) | 64 symbols at a time from the source and flags columns, a mask per class: the SYMBOLIC and RELATIVE bitsets, and a 1,024-bit filter of the symbols outside the image (sources NONE and RUNTIME_SHARED). Names are read only in a word with a weak reference to nothing of default visibility | `executable_relocation_class` of each symbol |
+| Fixups (count) | the targets of the fixups that neither read a GOT slot nor are `ABS64`, 16 at a time, against the filter in two registers (`vpmulld`, `vpermt2d`, `vpsrlvd`, `vptestmd`): a hit, a few hundredths of them, is looked up in the SYMBOLIC bitset, and a `CALL` to a dynamic symbol marks its stub and slot | each target's atom loaded |
+| GOT (count) | the slots' classes by popcounts of the bitsets with the GOT's marks | each slot's class |
+| Written atoms (count) | 64 atoms' classes looked up at once (`vpermb`); a dense atom (every fixup an `ABS64` to a RELATIVE target, 8 bytes apart from an even offset) checked 16 fixups at a time and its RELR words counted from its fixup count; the others one fixup at a time | every atom one fixup at a time |
+| Slots (layout) | each word's slot numbers expanded into its marked lanes, 16 symbols at a time (`vpexpandd`) | one symbol at a time |
+| `.rela.dyn` and `.relr.dyn` (dynamic) | each lane's ranges at their places by prefix sums; a dense atom's words from its first address and count, the GOT's by a `pext` of the bitsets, only the atoms with `.rela.dyn` relocations read again | every written atom's fixups encoded again |
+
+The refusals are counted on the way (`ABS64` fixups against those written,
+`ABS32` and `ABS32S`, and the filter's dynamic targets) and looked for, by an
+exact scan for the smallest, only when the counts say there are some. Lane 0
+writes the exports' `.dynsym` entries and `.gnu.hash`, `.gnu.version_r` and
+`.dynamic`, which grow with the exports and the versions, not with the
+program. `.gnu.hash`'s DJB hash is scalar per name: the exports are tens, and
+the plan's dot product is for when binding exports thousands (`-rdynamic`).
+
+`benchmark-executable` writes the same programs, bound against the system's
+runtime, as dynamic PIEs, and the static executables again, in one session.
+Medians in µs on the 9700X, the output on tmpfs, in place / as a new file,
+against the floor (the least of its runs: at 400 KB it varies by half from
+run to run):
+
+| Program (file) | 1 lane | 2 lanes | 4 lanes | 8 lanes | Floor |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| static, 1 worker (3.9 KB) | **3.0 / 3.7** | 5.1 / 6.0 | 4.9 / 4.9 | 7.2 / 6.6 | 0.6 / 1.4 |
+| PIE, 1 worker (6.6 KB) | **4.4 / 5.4** | 8.1 / 7.1 | 5.8 / 6.9 | 8.3 / 9.5 | 0.7 / 1.6 |
+| static, 64 workers (16 KB) | **5.1 / 6.6** | 6.4 / 8.0 | 6.7 / 8.5 | 7.7 / 9.6 | 0.8 / 2.3 |
+| PIE, 64 workers (19 KB) | **6.4 / 7.9** | 8.4 / 9.6 | 8.0 / 9.9 | 9.2 / 11.2 | 0.9 / 2.3 |
+| static, 2,000 workers (397 KB) | 68 / 85 | 48 / 69 | 44 / 65 | **44 / 64** | 9.7 / 24 |
+| PIE, 2,000 workers (401 KB) | 73 / 89 | 50 / 68 | 46 / 67 | **45 / 67** | 8.6 / 24 |
+| static, 180,000 workers (35.5 MB) | 8,400 / 9,620 | 4,860 / 5,620 | **4,060 / 5,620** | 4,200 / 5,910 | 2,320 / 4,240 |
+| PIE, 180,000 workers (35.6 MB) | 8,640 / 10,010 | 5,050 / 5,720 | 4,280 / 5,660 | **4,240 / 5,580** | 2,290 / 4,210 |
+
+The largest PIE has 184,557 atoms and 2.16 million fixups, ten dynamic
+symbols, eleven `.rela.dyn` relocations, and 8,653 `.relr.dyn` words (69 KB)
+for its 299,069 RELATIVE pointers and GOT slots, which `.rela.dyn` would take
+7.2 MB for. Its phases in place, µs, against the static executable's:
+
+| Lanes | | count | layout | symbols | dynamic | open | chunks | finish |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | static | 866 | 383 | 462 | | 8.1 | 6,670 | 2.4 |
+| 1 | PIE | 1,107 | 411 | 481 | 15 | 8.1 | 6,610 | 2.6 |
+| 8 | static | 328 | 120 | 83 | | 8.3 | 3,668 | 2.7 |
+| 8 | PIE | 397 | 116 | 87 | 4.1 | 8.4 | 3,582 | 2.8 |
+
+- **A PIE costs a few percent over a static executable,** 3% on one lane
+  for 35.6 MB and 1% on eight. The dynamic phase is 15 µs; the count phase
+  pays the rest. Its fixups pass reads the targets of the 1.44 million fixups
+  that neither read a GOT slot nor are `ABS64`, 5.8 MB that the static count
+  doesn't read, to find the calls to dynamic symbols: about 180 µs on one
+  lane. The 180,000 pointers of `buster_functions` are one atom, whose dense
+  check takes 49 µs on whichever lane has it, which the other seven wait for.
+  The small PIEs pay their larger files and sections: 1.4 µs more for one
+  worker.
+- **A filter has false positives.** The first version took a dense atom to be
+  one whose targets all miss the filter. With about ten symbols outside the
+  image, 1% of all targets hit it anyway, so no table of thousands of
+  pointers was dense, and three passes went through `buster_functions` one
+  fixup at a time: 1.16 ms of dynamic phase on one lane and 0.71 ms on eight.
+  Looking each hit up in the RELATIVE bitset instead made it 15 µs and 4 µs.
+  `test-dynamic` writes a program whose table is sure to have such hits.
+- **The symbols pass reads 2 bytes a symbol.** The source and flags columns
+  give every class, `link_check` making a symbol of source NONE atomless and
+  a TLS symbol one by its type. Reading the atom and name columns too took
+  61 µs for 190,858 symbols on one lane, from DRAM; this takes 13.
+- **The static path got faster with it.** `executable_count`,
+  `executable_place` and `executable_resolve` keep their columns in locals,
+  which their stores can't alias, and the first two a run of atoms of one
+  bucket in registers, where the sums in memory chained each atom's add to
+  the last one's store. In a session that
+  ran both, 180,000 workers took 8,250 to 8,330 µs on one lane where step 4's
+  code took 8,550 to 8,630 (layout 390 µs against 490, symbols 470 against
+  585), and 2,000 workers 68.5 µs against 70; one worker took 2.9 to 3.0 µs
+  against 2.7 to 2.8, the dynamic sections having made the section table
+  twice as long.
 
 #### Synthetic sections
 
@@ -1413,7 +1559,8 @@ There is no `.note.gnu.property`. The output's property is the AND of its
 inputs', and the program's code carries no IBT or shadow stack markers.
 
 RELR is a list of addresses and 63-bit bitmaps of the 8-byte words after them.
-It is built from the sorted offsets of the `ABS64` fixups in one pass. Where
+The writer encodes it per atom, from each atom's first relocation, so that its
+size is known before the layout ("The dynamic PIE"). Where
 RELA takes 24 bytes per relocation, RELR takes 8 for an isolated pointer and
 under a bit per pointer in a dense table. Arch links its own packages this way
 (`-z pack-relative-relocs` in `makepkg.conf`).
@@ -2376,8 +2523,10 @@ and with this document updated with what was measured:
    `test-import` and `benchmark-import`, done: "The runtime snapshot" and
    "Step 5's phases, data-parallel"); the runtime in the program's link,
    bound (`bind.c`, `test-bind` and `benchmark-bind`, done: "Step 5's phases,
-   data-parallel"); the dynamic PIE; then the snapshot itself, `.eh_frame` for
-   the generated programs and `benchmark-link`.
+   data-parallel"); the dynamic PIE (`executable.c`'s dynamic mode,
+   `dynamic.c`, `test-dynamic` and `benchmark-executable`'s PIE rows, done:
+   "The dynamic PIE"); then the snapshot itself, `.eh_frame` for the
+   generated programs and `benchmark-link`.
 6. **`-static`:** libc.a's closure, IRELATIVE for its IFUNCs, static TLS.
    Then `-static-pie` and `-shared`.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse

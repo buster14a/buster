@@ -176,8 +176,8 @@ designs and the compilers already built this way.
   linker, with the 9700X measurements of mold, wild, lld and the kernel's file
   costs behind it, and the order to build it in. The lane base layer, the
   encoder's fixups, the representation, the object writer, the direct path's
-  first executables and the import of the C runtime's files below are
-  implemented; the rest of the linker isn't yet.
+  executables (static ones and dynamic PIEs) and the import and binding of the
+  C runtime below are implemented; the rest of the linker isn't yet.
 - `src/buster/compiler/lane.c` is the lane base layer that every phase of the
   object writer and the linker runs on (groups of threads that run the same
   code, their barrier and broadcast, `lane_range`, and arenas).
@@ -230,12 +230,17 @@ designs and the compilers already built this way.
   room for it (`link_program_generate_begin`, `_atoms` and `_end`).
   `bind_test.c` holds its tests (`main.c` includes it; `./build/compiler
   test-bind` runs them) and `bind_benchmark.c` provides `benchmark-bind`.
-- `src/buster/compiler/executable.c` writes the direct path's first
-  executables: a link in that representation laid out, patched and written as
-  a static executable without libc (step 4 of the design's plan), with a build
-  ID, by every lane of a group. `executable_test.c` holds its tests (`main.c`
-  includes it; `./build/compiler test-executable` runs them) and
-  `executable_benchmark.c` provides `benchmark-executable`.
+- `src/buster/compiler/executable.c` writes the direct path's executables: a
+  link in that representation laid out, patched and written with a build ID
+  by every lane of a group, as a static executable without libc (step 4 of
+  the design's plan) or as a dynamic PIE against glibc (step 5's third part),
+  with its dynamic symbols, stubs and relocations, RELR among them, from
+  vector passes with exact twins. `dynamic.c` gives it what a PIE needs from
+  the C runtime and from binding (`dynamic_inputs`). `executable_test.c`
+  holds the static executables' tests (`./build/compiler test-executable`
+  runs them) and `dynamic_test.c` the PIEs' (`./build/compiler
+  test-dynamic`); `main.c` includes both, and `executable_benchmark.c`
+  provides `benchmark-executable`.
 - `src/buster/compiler/branch_sizing.c` is branch sizing (#144): the rel8 or
   rel32 form of each branch inside a function, chosen before the function is
   encoded, from `x86_encode`'s offsets and rounds over the branches alone
@@ -303,6 +308,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-bind --cross-check
 ./build/compiler benchmark-bind
 ./build/compiler test-executable
+./build/compiler test-dynamic --cross-check
 ./build/compiler benchmark-executable
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
@@ -1142,11 +1148,67 @@ measurements are informational.
 `--seed N` changes the programs and the random inputs, and `--functions N`
 the workers of the set named after it (2,000 by default).
 
+## Dynamic PIE tests
+
+`./build/compiler test-dynamic [--seed N] [--functions N] [--directory PATH]
+[--cross-check] [--keep]` (about 0.4 s on the 9700X, and 0.5 s with
+`--cross-check`) checks `executable.c`'s dynamic PIEs against this system's
+runtime (`runtime_import`), in a directory of its own under `--directory`
+(`TMPDIR` or `/tmp` by default), which it removes unless `--keep`. Each
+program is bound by `bind.c` and written by groups of 1, 2, 3 and 8 lanes,
+each time from zeroed fields over the last file scribbled over and every
+other time over poisoned scratch memory: the files must be byte-identical.
+Each file is read back and checked by the test's own rules: the headers and
+`.dynamic` (lld's tags, `DT_INIT` and `DT_FINI` crti.o's functions);
+`.dynsym` (every dynamic symbol once, undefined, an import at its version,
+before the exports, and each export at its address, found through
+`.gnu.hash` as glibc's loader looks it up); `.gnu.hash`'s shape (lld's); and
+every relocation the loader needs, from `.rela.dyn` and `.relr.dyn` decoded,
+against the GOT's slots and the `ABS64` fields of the atoms the loader writes,
+with each slot's bytes and each call's stub. The writer's exact twins must
+write the same file with 1 and 8 lanes, and a write without RELR must have the
+same relocations in `.rela.dyn` alone and run alike. The checks:
+
+- programs: test-link's two sets that call libc, and one of `--functions`
+  workers (2,000 by default) whose table of pointers has targets that the
+  writer's filter takes for symbols outside the image. Each must run under
+  the system's loader, without stand-ins, and print what its model predicts;
+- cases: test-bind's atexit program and linkers' cases, each bound or refused
+  as GNU ld and lld link it, and run with their links' status;
+- exports: sixteen functions whose names `libc.so.6` defines too, which
+  binding exports and `main` finds with `dlsym` through the executable's
+  `.gnu.hash`;
+- imports: 256 of `libc.so.6`'s functions, each called through a stub and
+  pointed to, which the loader must bind at their versions;
+- refusals: a pointer to `main` in `.rodata` (a text relocation), an `ABS32`
+  to `main` and a `PC32` to a dynamic symbol in `.data`, and a `lea` of and a
+  `PC64` in `.data` to a hidden weak reference to nothing, which stays at
+  address 0 wherever the program loads, each refused with its fixup by every
+  lane count and by the exact twins, without an output; a call to and a
+  pointer to a weak reference to nothing, and to a hidden one, loads through
+  the GOT slots of the first and of the program's data, the dynamic one's
+  first in its word of the bitsets, and a pointer to `main` at an odd
+  address, which RELR can't hold, all of which run; and a lane short of
+  scratch memory (lane 0 of 1 and of 8 lanes, the last of 2 and of 8), with
+  which every link that fails must fail with `EXECUTABLE_ERROR_MEMORY` and no
+  output, and one with room enough must run.
+
+With `--cross-check`, which needs `ld.lld`, the bound link's objects (the
+object writer's) are linked by lld as a PIE against `libc.so.6` and the
+loader alone (with `-z pack-relative-relocs` when libc defines
+`GLIBC_ABI_DT_RELR`), and the two files must have the same dynamic symbols
+(name, binding, type, whether defined, version), the same symbols with a GOT
+slot the loader fills, the same `R_X86_64_64`s with their addends, as many
+RELATIVE pointers outside the GOT, the same init and fini arrays' sizes, and
+the same `DT_NEEDED`, `DT_INIT`, `DT_FINI`, `DT_GNU_HASH` and `DT_VERNEED`.
+`--seed N` changes the programs. The default 9700X job runs it with
+`--cross-check` after test-executable.
+
 ## Direct executable benchmark
 
 `./build/compiler benchmark-executable [--directory PATH] [--functions LIST]
-[--lanes N] [--seed N] [--only kernels|hash|links]` (about 2 s) reports
-medians of:
+[--lanes N] [--seed N] [--only kernels|hash|links|dynamic]` (about 3 s)
+reports medians of:
 
 - the patch kernel and the variants it was chosen over (a branch on the kind,
   the checked path, 64-bit targets, and gathers with scalar stores or
@@ -1158,14 +1220,18 @@ medians of:
   `/tmp`) by a group of `--lanes` lanes that runs every write of a case, as a
   compiler runs its phases on one group: in place and as a new file, phase by
   phase, against the floor, one `pwrite` of the same bytes; and with one lane,
-  the patch kernel on each program's own mix of kinds.
+  the patch kernel on each program's own mix of kinds;
+- the same sizes as programs that call libc, bound against the system's
+  runtime and written as dynamic PIEs the same way, with their dynamic
+  symbols, relocations, RELR words and stubs (`--only dynamic` runs these
+  alone).
 
 Run it under the 9700X's lock with `taskset -c 2` for one lane, or with
 `taskset -c 0-7` for 8 (one CPU per core), since the lanes' threads keep the
 affinity they start with. `docs/object-writer-and-linker.md` ("Patching and
-writing" and "The first executables") has the numbers. The default 9700X job
-runs it after the tests, pinned to one allowed CPU; like the others, its
-measurements are informational.
+writing", "The first executables" and "The dynamic PIE") has the numbers.
+The default 9700X job runs it after the tests, pinned to one allowed CPU;
+like the others, its measurements are informational.
 
 ## Dataflow tests
 
