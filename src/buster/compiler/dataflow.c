@@ -83,10 +83,14 @@ static bool dataflow_create(Arena* arena, uint32_t block_count, uint32_t value_c
     }
     if (success && matrix_words != 0)
     {
-        candidate.use = arena_push(arena, matrix_bytes, BUSTER_DATAFLOW_VECTOR_BYTES);
-        candidate.def = arena_push(arena, matrix_bytes, BUSTER_DATAFLOW_VECTOR_BYTES);
+        // in and out, which every sweep stores, right after the columns, and use and def, which it only loads, after
+        // them. While the columns, in and out fit in 4 KB, no column then shares its low 12 address bits with an in or
+        // out row, whose stores would hold up the loads of the columns that every block makes (docs/dataflow.md, "Where
+        // the AVX-512 solver's frame falls").
         candidate.in = arena_push(arena, matrix_bytes, BUSTER_DATAFLOW_VECTOR_BYTES);
         candidate.out = arena_push(arena, matrix_bytes, BUSTER_DATAFLOW_VECTOR_BYTES);
+        candidate.use = arena_push(arena, matrix_bytes, BUSTER_DATAFLOW_VECTOR_BYTES);
+        candidate.def = arena_push(arena, matrix_bytes, BUSTER_DATAFLOW_VECTOR_BYTES);
         success = candidate.use != 0 && candidate.def != 0 && candidate.in != 0 && candidate.out != 0;
     }
     if (success)
