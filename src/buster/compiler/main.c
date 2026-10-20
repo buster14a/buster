@@ -197,6 +197,11 @@ int run_import_benchmark(int argc, char** argv);
 #include "buster/compiler/executable_test.c"
 int run_executable_benchmark(int argc, char** argv);
 
+// The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
+// check-call-graph and test-call-graph commands.
+#include "buster/compiler/call_graph.c"
+#include "buster/compiler/call_graph_test.c"
+
 int main(int argc, char** argv)
 {
     int result = 0;
@@ -251,6 +256,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-executable") == 0)
     {
         result = run_executable_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "check-call-graph") == 0)
+    {
+        result = run_check_call_graph(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-call-graph") == 0)
+    {
+        result = run_call_graph_tests(argc - 2, argv + 2);
     }
     else
     {
