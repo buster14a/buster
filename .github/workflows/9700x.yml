@@ -82,6 +82,16 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-x86-encoder
 
+      - name: Test branch sizing
+        # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
+        # relaxation of them must give the bytes of the sized records.
+        run: ./build/compiler test-branch-sizing --cross-check
+
+      - name: Benchmark branch sizing
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-branch-sizing
+
       - name: Test the lanes
         run: ./build/compiler test-lanes
 
