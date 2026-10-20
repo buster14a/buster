@@ -14,26 +14,25 @@
 # "---" line ends nothing. A merge's message has no final newline, and without
 # one git interpret-trailers leaves out the blank line before a new trailer
 # block. With core.commentChar or core.commentString set to auto, git commit
-# picks the comment character of the editor's text, which a hook can't know,
-# so the hook refuses a commit made through an editor (Git tells its hooks
-# that no editor runs with GIT_EDITOR=:) rather than guess. Without one, it
-# places the line as git commit -s does.
+# picks the comment character of the message it writes, which a hook can't
+# learn, nor even whether it wrote comments (GIT_EDITOR=: may be the caller's
+# no-op editor), so the hook refuses the commit rather than guess.
 
 copying()
 {
     [ -e "$(git rev-parse --git-path rebase-merge)" ] || [ -e "$(git rev-parse --git-path rebase-apply)" ] || [ -e "$(git rev-parse --git-path CHERRY_PICK_HEAD)" ]
 }
 
-choosing()
+automatic()
 {
     keys='^core\.comment(char|string)$'
     [ "$(echo x | git -c core.commentString=// stripspace --comment-lines)" = "// x" ] || keys='^core\.commentchar$'
-    [ "${GIT_EDITOR-}" != : ] && git config --get-regexp "$keys" | tail -n 1 | cut -d ' ' -f 2- | grep -q -i -x auto
+    git config --get-regexp "$keys" | tail -n 1 | cut -d ' ' -f 2- | grep -q -i -x auto
 }
 
 if [ "$BUSTER_DCO_SIGN_OFF" = davidgmbb ] && ! copying; then
-    if choosing; then
-        echo "commit-msg: core.commentChar (or core.commentString) is auto, so this hook can't tell the editor's comments from the message. Make this commit with BUSTER_DCO_SIGN_OFF unset and David's sign-off written by hand, last (AGENTS.md, \"David's sign-off\")." >&2
+    if automatic; then
+        echo "commit-msg: core.commentChar (or core.commentString) is auto, so this hook can't tell comments from the message. Set the comment character explicitly, or make this commit with BUSTER_DCO_SIGN_OFF unset and David's sign-off written by hand, last (AGENTS.md, \"David's sign-off\")." >&2
         false
     else
         message="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
