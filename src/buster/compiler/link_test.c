@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
 // The link representation's tests, for the test-link command:
 //
 //   build/compiler test-link [--seed N] [--functions N]

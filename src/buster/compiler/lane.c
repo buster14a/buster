@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) Epic Games Tools. Local modifications Copyright (c) 2026 David Gonzalez Martin.
+// Adapted interface/base-layer patterns from RAD Debugger; locally implemented barrier, allocation and scheduling.
+// This file, including local changes, uses MIT. Retain LICENSES/RAD-Debugger.txt; see THIRD_PARTY_NOTICES.md.
+//
 // The lane base layer: groups of threads that all run the same code, and the arenas they allocate from.
 //
 // Every phase of the object writer and the linker is one function that every lane of a group runs (Ryan Fleury's

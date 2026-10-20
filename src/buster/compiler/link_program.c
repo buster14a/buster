@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
 // The test programs: whole programs in the link representation (link.c), for the tests and benchmarks of the object
 // writer and of the direct path (steps 3 to 5 of the plan in docs/object-writer-and-linker.md).
 // link_program_generate makes one from LinkProgramOptions, deterministic from the seed and sized by the options, so

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: (Apache-2.0 WITH LLVM-exception) AND MIT
+// Original material Copyright (c) 2026 David Gonzalez Martin.
+// Counter/timing/sort helpers adapted through c_lexer_benchmark.c retain MIT and the upstream notice:
+// Copyright (c) 2023 Niles Salter. See THIRD_PARTY_NOTICES.md and LICENSES/Accelerated-Zig-Parser.txt.
+//
 // The object writer's benchmark: what an object costs, from the link representation to its file, against what writing
 // the same bytes costs alone: the file-write floor (docs/object-writer-and-linker.md, "The floors").
 //

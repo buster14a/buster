@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
 // The object writer: relocatable ELF objects (ET_REL, what `cc -c` writes) from the link representation (link.c), for
 // GNU ld, lld, mold, wild and this linker (docs/object-writer-and-linker.md, "The object writer (-c)").
 //
