@@ -1343,6 +1343,8 @@ static uint32_t bind_test_link_arguments(char** arguments, const char* linker, c
     arguments[count++] = (char*)runtime->libc_path.pointer;
     arguments[count++] = paths[units + RUNTIME_OBJECT_END];
     arguments[count++] = paths[units + RUNTIME_OBJECT_INIT_EPILOGUE];
+    // As GCC's driver asks of the linker for a dynamic executable.
+    arguments[count++] = "--eh-frame-hdr";
     arguments[count] = 0;
     return count;
 }

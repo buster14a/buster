@@ -13,11 +13,16 @@
 // groups of 1, 2, 3 and 8 lanes, each time from zeroed fields over the last file scribbled over (executable_test_reset),
 // every other time over poisoned scratch memory: the files must be byte-identical. Each file is then read back and
 // checked by the test's own rules (dynamic_test_structure): the headers and .dynamic, .dynsym with its versions and
-// .gnu.hash, and every relocation the loader needs, from .rela.dyn and from .relr.dyn decoded, with each GOT slot and
-// stub. The writer's exact twins must write the same bytes with 1 and 8 lanes, and a write without RELR must have the
-// same relocations in .rela.dyn alone and run alike (dynamic_test_variants). With --cross-check, ld.lld links the same
-// link's objects (the object writer's) as a PIE, and the two files must have the same dynamic symbols, relocations
-// against them, RELATIVE pointers and init and fini arrays (dynamic_test_against_lld). The checks, in this order:
+// .gnu.hash, every relocation the loader needs, from .rela.dyn and from .relr.dyn decoded, with each GOT slot and
+// stub, and the unwind tables (test-executable's executable_test_unwind). The writer's exact twins must write the same
+// bytes with 1 and 8 lanes, and a write without RELR must have the same relocations in .rela.dyn alone and run alike
+// (dynamic_test_variants). With --cross-check, ld.lld links the same link's objects (the object writer's) as a PIE,
+// and the two files must have the same dynamic symbols, relocations against them, RELATIVE pointers, init and fini
+// arrays and functions in .eh_frame_hdr's table (dynamic_test_against_lld); each program runs again with a library
+// preloaded whose write walks the stack with libgcc's unwinder, which must reach _start; and readelf's reading of each
+// of the program's functions' call frame rules must be what objdump's disassembly of its pushes and pops gives (see
+// "Unwinding").
+// The checks, in this order:
 //   - Programs: test-link's sets of options that call libc (link_test_program_options), and one of --functions workers
 //     (2,000 by default) whose table of pointers has some that the writer's filter takes for symbols outside the image.
 //     Each must run under the system's loader, without stand-ins, exiting with status 0 having written
@@ -36,8 +41,8 @@
 //     fail the link cleanly.
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
-// Layout, in this order: the tally, writing, the structure, the variants, against lld, the programs and the cases, the
-// exports, the imports, the refusals, and run_dynamic_tests.
+// Layout, in this order: the tally, writing, the structure, the variants, unwinding, against lld, the programs and the
+// cases, the exports, the imports, the refusals, and run_dynamic_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -850,6 +855,8 @@ static void dynamic_test_structure(DynamicTestTally* tally, const Link* link, co
         dynamic_test_symbols(tally, link, bind, runtime, &image, indices, index);
         dynamic_test_gnu_hash(tally, &image, index);
         dynamic_test_relocations(tally, link, &image, indices, relr, scratch.arena, index);
+        const char* unwind = executable_test_unwind(link, file, 0, bind->unit_base, 0);
+        dynamic_test_expect(tally, unwind == 0, unwind != 0 ? unwind : "the unwind tables", index);
     }
     scratch_end(scratch);
 }
@@ -915,6 +922,619 @@ static void dynamic_test_variants(DynamicTestTally* tally, Link* link, const Bin
     dynamic_test_expect(tally, ran, "runs without RELR", index);
     scratch_end(scratch);
     unlink(variant.pointer);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Unwinding
+//
+// With --cross-check, two views of the unwind tables from outside: lld's, whose .eh_frame_hdr must index the same
+// functions with the same ranges (dynamic_test_fdes, by the functions' names); and libgcc's unwinder's, in each program
+// run again with a library preloaded (dynamic_test_unwinder_source, built by cc), whose write, on its first call,
+// walks the stack with _Unwind_Backtrace as an exception or a profiler would, and reports how the walk ended and each
+// frame's address less the executable's load address (0 for the frame past the outermost, which libgcc reports with
+// address 0), into the file BUSTER_UNWIND_REPORT names, before it writes what write would. libgcc finds each frame's
+// FDE through PT_GNU_EH_FRAME and .eh_frame_hdr's table, so the walk must go from the function that called write
+// through main, libc's frames and _start, whose FDE says it is the outermost, and end there (_URC_END_OF_STACK)
+// (dynamic_test_unwinder). And the call frame rules, which a walk doesn't need but a debugger or an exception
+// restoring registers does: readelf -wF interprets each FDE as a table, the CFA's rule and each saved register's from
+// each location on, and objdump -d's disassembly gives each of the program's functions' pushes and pops, from which
+// the test works the table out again as GCC's CFI gives it for code that moves rsp with pushes and pops alone: from
+// the function's start the CFA at rsp + 8, after each push 8 bytes more and after each pop 8 less, a callee-saved
+// register that a push saves at the CFA less the new offset, and one that a pop restores as it was. Each of the
+// program's functions must have that table, row for row (dynamic_test_frames).
+
+// _Unwind_Backtrace's result when the walk ends at the outermost frame: _URC_END_OF_STACK in unwind.h.
+#define BUSTER_DYNAMIC_TEST_END_OF_STACK 5
+
+// An FDE that a table indexes: its function's name and its range.
+typedef struct DynamicTestFde DynamicTestFde;
+struct DynamicTestFde
+{
+    const uint8_t* name;
+    uint64_t name_length;
+    uint64_t range;
+};
+
+static int dynamic_test_by_fde(const void* a, const void* b)
+{
+    const DynamicTestFde* x = a;
+    const DynamicTestFde* y = b;
+    const uint64_t shorter = x->name_length < y->name_length ? x->name_length : y->name_length;
+    const int compared = memcmp(x->name, y->name, shorter);
+    const int lengths = x->name_length < y->name_length ? -1 : x->name_length > y->name_length ? 1 : 0;
+    const int ranges = x->range < y->range ? -1 : x->range > y->range ? 1 : 0;
+    return compared != 0 ? compared : lengths != 0 ? lengths : ranges;
+}
+
+// A function's address and name, for the lookups of the tables' initial locations.
+typedef struct DynamicTestFunction DynamicTestFunction;
+struct DynamicTestFunction
+{
+    uint64_t address;
+    const uint8_t* name;
+    uint64_t name_length;
+};
+
+static int dynamic_test_by_address(const void* a, const void* b)
+{
+    const DynamicTestFunction* x = a;
+    const DynamicTestFunction* y = b;
+    return x->address < y->address ? -1 : x->address > y->address ? 1 : 0;
+}
+
+// The functions that a PIE's .eh_frame_hdr indexes, by name and range, sorted, into `fdes` (room for `capacity`): their
+// names from `link` (the writer's file, whose atoms' addresses the write gave them) or, without it, from the file's
+// .symtab (lld's). Returns how many, or UINT64_MAX if the table or a function can't be read.
+static uint64_t dynamic_test_fdes(const DynamicTestImage* image, const Link* link, DynamicTestFde* fdes, uint64_t capacity, Arena* arena)
+{
+    const Elf64_Shdr* header = dynamic_test_section(image, ".eh_frame_hdr");
+    const uint8_t* index = dynamic_test_bytes(image, header);
+    uint32_t count = 0;
+    if (index != 0 && header->sh_size >= 12)
+    {
+        memcpy(&count, index + 8, sizeof(count));
+    }
+    uint64_t result = index != 0 && header->sh_size == 12 + 8 * (uint64_t)count && count <= capacity ? count : UINT64_MAX;
+    // The functions by address: the link's TEXT atoms' first named symbols, or .symtab's functions.
+    const Elf64_Shdr* symtab = link == 0 ? dynamic_test_section(image, ".symtab") : 0;
+    const Elf64_Shdr* strtab = symtab != 0 && symtab->sh_link < image->header->e_shnum ? &image->section_headers[symtab->sh_link] : 0;
+    const uint64_t limit = link != 0 ? link->symbols.count : symtab != 0 ? symtab->sh_size / sizeof(Elf64_Sym) : 0;
+    DynamicTestFunction* functions = BUSTER_ARENA_PUSH_ARRAY(arena, DynamicTestFunction, limit + 1);
+    result = functions != 0 && (link != 0 || strtab != 0) ? result : UINT64_MAX;
+    uint64_t function_count = 0;
+    for (uint64_t s = 1; result != UINT64_MAX && s < limit; s += 1)
+    {
+        if (link != 0)
+        {
+            const AtomId atom = link->symbols.atom[(SymbolId)s];
+            const NameId name = link->symbols.name[(SymbolId)s];
+            if (atom != 0 && name != 0 && link->symbols.value[(SymbolId)s] == 0 && link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT)
+            {
+                functions[function_count] = (DynamicTestFunction){
+                    .address = link->atoms.address[atom],
+                    .name = link->names.bytes[name],
+                    .name_length = link->names.length[name],
+                };
+                function_count += 1;
+            }
+        }
+        else
+        {
+            Elf64_Sym symbol;
+            memcpy(&symbol, image->file.pointer + symtab->sh_offset + s * sizeof(Elf64_Sym), sizeof(symbol));
+            if (ELF64_ST_TYPE(symbol.st_info) == STT_FUNC && symbol.st_shndx != SHN_UNDEF && symbol.st_name < strtab->sh_size)
+            {
+                const char* name = image->file.pointer + strtab->sh_offset + symbol.st_name;
+                functions[function_count] = (DynamicTestFunction){
+                    .address = symbol.st_value,
+                    .name = (const uint8_t*)name,
+                    .name_length = strlen(name),
+                };
+                function_count += 1;
+            }
+        }
+    }
+    if (result != UINT64_MAX)
+    {
+        qsort(functions, function_count, sizeof(*functions), dynamic_test_by_address);
+    }
+    for (uint64_t i = 0; result != UINT64_MAX && i < count; i += 1)
+    {
+        int32_t entry[2];
+        memcpy(entry, index + 12 + 8 * i, sizeof(entry));
+        const uint64_t initial = header->sh_addr + (uint64_t)(int64_t)entry[0];
+        const uint64_t at = dynamic_test_file_offset(image, header->sh_addr + (uint64_t)(int64_t)entry[1] + 12);
+        uint32_t range = 0;
+        if (at != UINT64_MAX)
+        {
+            memcpy(&range, image->file.pointer + at, sizeof(range));
+        }
+        // The function at the initial location, the first of its address.
+        uint64_t low = 0;
+        uint64_t high = function_count;
+        while (low < high)
+        {
+            const uint64_t middle = low + (high - low) / 2;
+            low = functions[middle].address < initial ? middle + 1 : low;
+            high = functions[middle].address < initial ? high : middle;
+        }
+        const bool found = at != UINT64_MAX && low < function_count && functions[low].address == initial;
+        fdes[i] = (DynamicTestFde){
+            .name = found ? functions[low].name : 0,
+            .name_length = found ? functions[low].name_length : 0,
+            .range = range,
+        };
+        result = found ? result : UINT64_MAX;
+    }
+    if (result != UINT64_MAX)
+    {
+        qsort(fdes, result, sizeof(*fdes), dynamic_test_by_fde);
+    }
+    return result;
+}
+
+// The preloaded library's source (see "Unwinding").
+static const char dynamic_test_unwinder_source[] = "#define _GNU_SOURCE\n"
+                                                   "#include <fcntl.h>\n"
+                                                   "#include <link.h>\n"
+                                                   "#include <stdint.h>\n"
+                                                   "#include <stdio.h>\n"
+                                                   "#include <stdlib.h>\n"
+                                                   "#include <sys/syscall.h>\n"
+                                                   "#include <unistd.h>\n"
+                                                   "#include <unwind.h>\n"
+                                                   "\n"
+                                                   "typedef struct\n"
+                                                   "{\n"
+                                                   "    uintptr_t addresses[64];\n"
+                                                   "    int count;\n"
+                                                   "} Trace;\n"
+                                                   "\n"
+                                                   "static int reported;\n"
+                                                   "\n"
+                                                   "static _Unwind_Reason_Code step(struct _Unwind_Context* context, void* argument)\n"
+                                                   "{\n"
+                                                   "    Trace* trace = argument;\n"
+                                                   "    if (trace->count < 64)\n"
+                                                   "    {\n"
+                                                   "        trace->addresses[trace->count] = _Unwind_GetIP(context);\n"
+                                                   "        trace->count += 1;\n"
+                                                   "    }\n"
+                                                   "    return _URC_NO_REASON;\n"
+                                                   "}\n"
+                                                   "\n"
+                                                   "// The executable's load address: the first object dl_iterate_phdr gives.\n"
+                                                   "static int first_object(struct dl_phdr_info* info, size_t size, void* argument)\n"
+                                                   "{\n"
+                                                   "    (void)size;\n"
+                                                   "    *(uintptr_t*)argument = info->dlpi_addr;\n"
+                                                   "    return 1;\n"
+                                                   "}\n"
+                                                   "\n"
+                                                   "ssize_t write(int file, const void* bytes, size_t count)\n"
+                                                   "{\n"
+                                                   "    if (!reported)\n"
+                                                   "    {\n"
+                                                   "        reported = 1;\n"
+                                                   "        Trace trace = { .count = 0 };\n"
+                                                   "        const _Unwind_Reason_Code code = _Unwind_Backtrace(step, &trace);\n"
+                                                   "        uintptr_t base = 0;\n"
+                                                   "        dl_iterate_phdr(first_object, &base);\n"
+                                                   "        const char* path = getenv(\"BUSTER_UNWIND_REPORT\");\n"
+                                                   "        const int report = path != 0 ? open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1;\n"
+                                                   "        char line[64];\n"
+                                                   "        int length = snprintf(line, sizeof(line), \"%d\\n\", (int)code);\n"
+                                                   "        syscall(SYS_write, report, line, length);\n"
+                                                   "        for (int i = 0; i < trace.count; i += 1)\n"
+                                                   "        {\n"
+                                                   "            const uintptr_t address = trace.addresses[i];\n"
+                                                   "            length = snprintf(line, sizeof(line), \"%lx\\n\", (unsigned long)(address != 0 ? address - base : 0));\n"
+                                                   "            syscall(SYS_write, report, line, length);\n"
+                                                   "        }\n"
+                                                   "        close(report);\n"
+                                                   "    }\n"
+                                                   "    return syscall(SYS_write, file, bytes, count);\n"
+                                                   "}\n";
+
+// Writes the preloaded library's source into `directory` and builds it with cc, into `library` (BUSTER_EXECUTABLE_TEST
+// _PATH_BYTES of room): whether it was built.
+static bool dynamic_test_build_unwinder(const char* directory, char* library)
+{
+    char source[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char output_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char error_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    snprintf(source, sizeof(source), "%s/unwinder.c", directory);
+    snprintf(library, BUSTER_EXECUTABLE_TEST_PATH_BYTES, "%s/unwinder.so", directory);
+    snprintf(output_path, sizeof(output_path), "%s/unwinder.out", directory);
+    snprintf(error_path, sizeof(error_path), "%s/unwinder.err", directory);
+    FILE* file = fopen(source, "w");
+    bool result = file != 0 && fwrite(dynamic_test_unwinder_source, 1, sizeof(dynamic_test_unwinder_source) - 1, file) == sizeof(dynamic_test_unwinder_source) - 1;
+    result = file != 0 && fclose(file) == 0 && result;
+    char* arguments[] = { "cc", "-shared", "-fPIC", "-O1", "-o", library, source, "-lgcc_s", 0 };
+    result = result && object_test_run(arguments, output_path, error_path) == 0;
+    unlink(source);
+    unlink(output_path);
+    unlink(error_path);
+    return result;
+}
+
+// Runs the program at `path` with the unwinder preloaded: it must print `expected` as it does without, and the walk
+// must have gone through main and ended at _start, the outermost frame.
+static void dynamic_test_unwinder(DynamicTestTally* tally, const Link* link, const Bind* bind, const Runtime* runtime, const char* path, const char* library,
+                                  const uint8_t* expected, uint64_t expected_length, uint64_t index)
+{
+    char report[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char preload[BUSTER_EXECUTABLE_TEST_PATH_BYTES + 16];
+    char where[BUSTER_EXECUTABLE_TEST_PATH_BYTES + 32];
+    snprintf(report, sizeof(report), "%s.unwind", path);
+    snprintf(preload, sizeof(preload), "LD_PRELOAD=%s", library);
+    snprintf(where, sizeof(where), "BUSTER_UNWIND_REPORT=%s", report);
+    char* environment[] = { "BUSTER=1", preload, where, 0 };
+    unlink(report);
+    uint8_t output[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
+    uint64_t length = 0;
+    int status = -1;
+    const bool ran = executable_test_run_with(path, environment, output, &length, &status) && WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == expected_length &&
+                     memcmp(output, expected, length) == 0;
+    dynamic_test_expect(tally, ran, "runs with the unwinder", index);
+    Scratch scratch = scratch_begin(0);
+    const String8 text = object_test_read_file(scratch.arena, report);
+    // How the walk ended, then each frame's address from the load address, in hexadecimal.
+    char* at = (char*)text.pointer;
+    char* end = 0;
+    const long code = at != 0 ? strtol(at, &end, 10) : -1;
+    bool read = at != 0 && end != at;
+    at = end;
+    AtomId frames[64];
+    uint32_t frame_count = 0;
+    while (read && frame_count < BUSTER_ARRAY_LENGTH(frames) && *at != 0)
+    {
+        const unsigned long long address = strtoull(at, &end, 16);
+        read = end != at;
+        at = end;
+        while (*at == '\n')
+        {
+            at += 1;
+        }
+        // The TEXT atom that holds the call before the return address; none for the frame past the outermost.
+        AtomId atom = 0;
+        for (AtomId a = 1; read && address != 0 && a < link->atoms.count; a += 1)
+        {
+            const uint64_t start = link->atoms.address[a];
+            atom = link->atoms.class[a] == BUSTER_LINK_CLASS_TEXT && address - 1 >= start && address - 1 < start + link->atoms.size[a] ? a : atom;
+        }
+        frames[frame_count] = atom;
+        frame_count += read && address != 0 ? 1 : 0;
+    }
+    AtomId main_atom = 0;
+    for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+    {
+        main_atom = executable_named(link, symbol, "main") && link->symbols.source[symbol] == BUSTER_LINK_SOURCE_PROGRAM ? link->symbols.atom[symbol] : main_atom;
+    }
+    const SymbolId start = dynamic_global(runtime, bind, "_start");
+    const AtomId start_atom = start != 0 ? link->symbols.atom[start] : 0;
+    bool through_main = false;
+    for (uint32_t f = 0; f < frame_count; f += 1)
+    {
+        through_main = through_main || (main_atom != 0 && frames[f] == main_atom);
+    }
+    dynamic_test_expect(tally, read && code == BUSTER_DYNAMIC_TEST_END_OF_STACK, "the unwinder's walk ends at the outermost frame", index * 100 + (uint64_t)(code & 0xff));
+    dynamic_test_expect(tally, through_main, "through main", index);
+    dynamic_test_expect(tally, frame_count != 0 && start_atom != 0 && frames[frame_count - 1] == start_atom, "at _start", index);
+    printf("  the unwinder: %u frames, %s main, ending %s\n", frame_count, through_main ? "through" : "not through",
+           frame_count != 0 && frames[frame_count - 1] == start_atom ? "at _start" : "elsewhere");
+    scratch_end(scratch);
+    unlink(report);
+}
+
+// The callee-saved registers, as objdump's operands (after their '%') and readelf's columns name them.
+#define BUSTER_DYNAMIC_TEST_CALLEE_SAVED 6
+static const char* const dynamic_test_callee_saved[BUSTER_DYNAMIC_TEST_CALLEE_SAVED] = {
+    "rbx",
+    "rbp",
+    "r12",
+    "r13",
+    "r14",
+    "r15",
+};
+
+// The rows a function's table may have: one, then one after each push or pop.
+#define BUSTER_DYNAMIC_TEST_FRAME_ROWS 64
+
+// A push or a pop that objdump lists: where it starts and ends, whether it pushes, and the callee-saved register it
+// pushes or pops (an index into dynamic_test_callee_saved), or UINT32_MAX for another operand.
+typedef struct DynamicTestStackMove DynamicTestStackMove;
+struct DynamicTestStackMove
+{
+    uint64_t start;
+    uint64_t end;
+    bool push;
+    uint32_t saved;
+};
+
+// A row of a function's table: its location, the CFA's offset from rsp, and each callee-saved register's distance below
+// the CFA where it is saved, or 0 where it has its caller's value.
+typedef struct DynamicTestFrameRow DynamicTestFrameRow;
+struct DynamicTestFrameRow
+{
+    uint64_t location;
+    uint64_t offset;
+    uint64_t saved[BUSTER_DYNAMIC_TEST_CALLEE_SAVED];
+};
+
+// A program's function: where it starts and ends, and how many FDEs readelf listed for it.
+typedef struct DynamicTestFrameFunction DynamicTestFrameFunction;
+struct DynamicTestFrameFunction
+{
+    uint64_t start;
+    uint64_t end;
+    uint32_t fdes;
+};
+
+static int dynamic_test_by_start(const void* a, const void* b)
+{
+    const DynamicTestFrameFunction* x = a;
+    const DynamicTestFrameFunction* y = b;
+    return x->start < y->start ? -1 : x->start > y->start ? 1 : 0;
+}
+
+// The callee-saved register `name` names, or UINT32_MAX.
+static uint32_t dynamic_test_callee_saved_register(String8 name)
+{
+    uint32_t result = UINT32_MAX;
+    for (uint32_t r = 0; r < BUSTER_DYNAMIC_TEST_CALLEE_SAVED; r += 1)
+    {
+        result = object_test_equal(name, dynamic_test_callee_saved[r]) ? r : result;
+    }
+    return result;
+}
+
+// The pushes and pops of objdump -d -w's listing `text`, in its order, into `moves` (room for `capacity`): how many, or
+// UINT64_MAX if they don't fit. An instruction's line is its address and a colon, a tab, its bytes, a tab, then its
+// mnemonic and operands.
+static uint64_t dynamic_test_stack_moves(String8 text, DynamicTestStackMove* moves, uint64_t capacity)
+{
+    uint64_t count = 0;
+    uint64_t position = 0;
+    String8 line = { 0 };
+    while (count != UINT64_MAX && object_test_next_line(text, &position, &line))
+    {
+        const char* first = memchr(line.pointer, '\t', line.length);
+        const uint64_t bytes_at = first != 0 ? (uint64_t)(first - line.pointer) + 1 : line.length;
+        const char* second = first != 0 ? memchr(first + 1, '\t', line.length - bytes_at) : 0;
+        const uint64_t text_at = second != 0 ? (uint64_t)(second - line.pointer) + 1 : line.length;
+        String8 address[2];
+        const uint64_t address_count = second != 0 ? object_test_tokens((String8){ .pointer = line.pointer, .length = bytes_at - 1 }, address, 2) : 0;
+        uint64_t start = 0;
+        const bool instruction = address_count == 1 && address[0].length >= 2 && address[0].pointer[address[0].length - 1] == ':' &&
+                                 object_test_number((String8){ .pointer = address[0].pointer, .length = address[0].length - 1 }, true, &start);
+        String8 bytes[16];
+        const uint64_t byte_count = instruction ? object_test_tokens((String8){ .pointer = line.pointer + bytes_at, .length = text_at - 1 - bytes_at }, bytes, 16) : 0;
+        String8 words[3];
+        const uint64_t word_count = instruction ? object_test_tokens(object_test_after(line, text_at), words, 3) : 0;
+        const bool push = word_count >= 2 && (object_test_equal(words[0], "push") || object_test_equal(words[0], "pushq"));
+        const bool pop = word_count >= 2 && (object_test_equal(words[0], "pop") || object_test_equal(words[0], "popq"));
+        if ((push || pop) && count < capacity)
+        {
+            const bool named = words[1].length > 1 && words[1].pointer[0] == '%';
+            moves[count] = (DynamicTestStackMove){
+                .start = start,
+                .end = start + byte_count,
+                .push = push,
+                .saved = named ? dynamic_test_callee_saved_register(object_test_after(words[1], 1)) : UINT32_MAX,
+            };
+        }
+        count = push || pop ? (count < capacity ? count + 1 : UINT64_MAX) : count;
+    }
+    return count;
+}
+
+// The table the pushes and pops in `moves` (sorted by start) give the function from `start` to `end` (see this
+// section's comment), into `rows`: how many rows, or 0 if a move runs past the function, pops past the return address
+// or the rows don't fit.
+static uint32_t dynamic_test_frame_rows(const DynamicTestStackMove* moves, uint64_t move_count, uint64_t start, uint64_t end, DynamicTestFrameRow* rows)
+{
+    // The first move at or past the function's start.
+    uint64_t low = 0;
+    uint64_t high = move_count;
+    while (low < high)
+    {
+        const uint64_t middle = low + (high - low) / 2;
+        low = moves[middle].start < start ? middle + 1 : low;
+        high = moves[middle].start < start ? high : middle;
+    }
+    rows[0] = (DynamicTestFrameRow){
+        .location = start,
+        .offset = 8,
+    };
+    uint32_t count = 1;
+    for (uint64_t m = low; count != 0 && m < move_count && moves[m].start < end; m += 1)
+    {
+        const DynamicTestFrameRow* last = &rows[count - 1];
+        const bool fits = count < BUSTER_DYNAMIC_TEST_FRAME_ROWS && moves[m].end <= end && (moves[m].push || last->offset >= 16);
+        if (fits)
+        {
+            DynamicTestFrameRow* row = &rows[count];
+            *row = *last;
+            row->location = moves[m].end;
+            row->offset = moves[m].push ? last->offset + 8 : last->offset - 8;
+            if (moves[m].saved != UINT32_MAX)
+            {
+                row->saved[moves[m].saved] = moves[m].push ? row->offset : 0;
+            }
+        }
+        count = fits ? count + 1 : 0;
+    }
+    return count;
+}
+
+// Whether readelf's row `tokens` (its location, the CFA's rule, then a rule per one of the FDE's `columns`) says what
+// `row` does: the location, rsp + the offset, each callee-saved register at c-<its distance> or u, and the return
+// address at c-8; and no other register.
+static bool dynamic_test_frame_row(const String8* tokens, uint64_t count, const String8* columns, uint64_t column_count, const DynamicTestFrameRow* row)
+{
+    uint64_t location = 0;
+    char expected[32];
+    snprintf(expected, sizeof(expected), "rsp+%llu", (unsigned long long)row->offset);
+    bool same = count == column_count + 2 && object_test_number(tokens[0], true, &location) && location == row->location && object_test_equal(tokens[1], expected);
+    uint32_t saved = 0;
+    uint32_t listed = 0;
+    for (uint32_t r = 0; r < BUSTER_DYNAMIC_TEST_CALLEE_SAVED; r += 1)
+    {
+        saved += row->saved[r] != 0 ? 1 : 0;
+    }
+    for (uint64_t c = 0; same && c < column_count; c += 1)
+    {
+        const uint32_t r = dynamic_test_callee_saved_register(columns[c]);
+        snprintf(expected, sizeof(expected), "c-%llu", (unsigned long long)(r != UINT32_MAX ? row->saved[r] : 8));
+        const bool ra = object_test_equal(columns[c], "ra");
+        same = ra ? object_test_equal(tokens[2 + c], "c-8") : r != UINT32_MAX && object_test_equal(tokens[2 + c], row->saved[r] != 0 ? expected : "u");
+        listed += !ra && r != UINT32_MAX && row->saved[r] != 0 ? 1 : 0;
+    }
+    return same && listed == saved;
+}
+
+// Compares readelf -wF's table of each of the program's functions' FDEs in the executable at `path` with the one its
+// pushes and pops in objdump -d's listing give (see this section's comment): each TEXT atom of the program's units
+// (those below `units`) must have one FDE, of its range, whose table readelf prints row for row as
+// dynamic_test_frame_rows works it out. The listings go in `directory`, named after `name`.
+static void dynamic_test_frames(DynamicTestTally* tally, const Link* link, uint32_t units, const char* path, const char* directory, const char* name, bool keep,
+                                Arena* arena)
+{
+    char disassembly[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char frames[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    char errors[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    snprintf(disassembly, sizeof(disassembly), "%s/%s.objdump", directory, name);
+    snprintf(frames, sizeof(frames), "%s/%s.frames", directory, name);
+    snprintf(errors, sizeof(errors), "%s/%s.listings.err", directory, name);
+    char* objdump[] = { "objdump", "-d", "-w", (char*)path, 0 };
+    char* readelf[] = { "readelf", "-wF", (char*)path, 0 };
+    const bool listed = object_test_run(objdump, disassembly, errors) == 0 && object_test_run(readelf, frames, errors) == 0;
+    dynamic_test_expect(tally, listed, "objdump and readelf list the program", 0);
+    const String8 code = listed ? object_test_read_file(arena, disassembly) : (String8){ 0 };
+    const String8 table = listed ? object_test_read_file(arena, frames) : (String8){ 0 };
+    // The program's functions, by address: each TEXT atom of its units, of its first symbol's size (its atom's may have
+    // padding).
+    uint64_t* sizes = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, link->atoms.count);
+    for (AtomId atom = 0; sizes != 0 && atom < link->atoms.count; atom += 1)
+    {
+        sizes[atom] = UINT64_MAX;
+    }
+    for (SymbolId symbol = link->symbols.count - 1; sizes != 0 && symbol >= 1; symbol -= 1)
+    {
+        const AtomId atom = link->symbols.atom[symbol];
+        if (atom != 0 && link->symbols.value[symbol] == 0)
+        {
+            sizes[atom] = link->symbols.size[symbol];
+        }
+    }
+    DynamicTestFrameFunction* functions = sizes != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, DynamicTestFrameFunction, link->atoms.count) : 0;
+    uint64_t function_count = 0;
+    for (AtomId atom = 1; functions != 0 && atom < link->atoms.count; atom += 1)
+    {
+        if (link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT && link->atoms.unit[atom] < units)
+        {
+            functions[function_count] = (DynamicTestFrameFunction){
+                .start = link->atoms.address[atom],
+                .end = link->atoms.address[atom] + sizes[atom],
+            };
+            function_count += 1;
+        }
+    }
+    if (functions != 0)
+    {
+        qsort(functions, function_count, sizeof(*functions), dynamic_test_by_start);
+    }
+    // At most a push or a pop per byte of code.
+    const uint64_t capacity = code.length / 8 + 1;
+    DynamicTestStackMove* moves = code.pointer != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, DynamicTestStackMove, capacity) : 0;
+    const uint64_t move_count = moves != 0 ? dynamic_test_stack_moves(code, moves, capacity) : UINT64_MAX;
+    bool sorted = move_count != UINT64_MAX;
+    for (uint64_t m = 1; sorted && m < move_count; m += 1)
+    {
+        sorted = moves[m].start >= moves[m - 1].end;
+    }
+    dynamic_test_expect(tally, functions != 0 && sorted && table.pointer != 0, "objdump's pushes and pops read", move_count);
+    // readelf's tables: an FDE's line ("... FDE cie=... pc=START..END"), then, if it has instructions, its columns'
+    // ("LOC CFA reg... ra") and its rows, then an empty line.
+    DynamicTestFrameRow rows[BUSTER_DYNAMIC_TEST_FRAME_ROWS];
+    String8 columns[BUSTER_OBJECT_TEST_MAX_TOKENS];
+    uint64_t column_count = 0;
+    uint64_t function = UINT64_MAX;
+    uint32_t row_count = 0;
+    uint32_t row = 0;
+    uint64_t compared = 0;
+    bool same = functions != 0 && sorted && table.pointer != 0;
+    uint64_t position = 0;
+    String8 line = { 0 };
+    bool more = same;
+    while (same && more)
+    {
+        more = object_test_next_line(table, &position, &line);
+        String8 tokens[BUSTER_OBJECT_TEST_MAX_TOKENS];
+        const uint64_t count = more ? object_test_tokens(line, tokens, BUSTER_OBJECT_TEST_MAX_TOKENS) : 0;
+        const bool fde = count >= 6 && object_test_equal(tokens[3], "FDE") && object_test_starts_with(tokens[5], "pc=");
+        if (function != UINT64_MAX && (fde || count == 0 || (count >= 4 && object_test_equal(tokens[3], "CIE"))))
+        {
+            // The FDE's end: every row there, an FDE without instructions having none but the CIE's.
+            same = row == row_count || (row == 0 && row_count == 1);
+            function = UINT64_MAX;
+        }
+        if (same && fde)
+        {
+            const String8 range = object_test_after(tokens[5], 3);
+            const char* dots = memchr(range.pointer, '.', range.length);
+            uint64_t start = 0;
+            uint64_t end = 0;
+            same = dots != 0 && dots + 1 < range.pointer + range.length && dots[1] == '.' &&
+                   object_test_number((String8){ .pointer = range.pointer, .length = (uint64_t)(dots - range.pointer) }, true, &start) &&
+                   object_test_number(object_test_after(range, (uint64_t)(dots - range.pointer) + 2), true, &end);
+            DynamicTestFrameFunction key = {
+                .start = start,
+            };
+            const DynamicTestFrameFunction* found = same ? bsearch(&key, functions, function_count, sizeof(*functions), dynamic_test_by_start) : 0;
+            if (found != 0)
+            {
+                function = (uint64_t)(found - functions);
+                functions[function].fdes += 1;
+                row_count = dynamic_test_frame_rows(moves, move_count, start, end, rows);
+                row = 0;
+                column_count = 0;
+                same = found->end == end && row_count != 0;
+            }
+        }
+        else if (same && function != UINT64_MAX && count >= 3 && object_test_equal(tokens[0], "LOC") && object_test_equal(tokens[1], "CFA"))
+        {
+            column_count = count - 2 <= BUSTER_OBJECT_TEST_MAX_TOKENS - 2 ? count - 2 : 0;
+            memcpy(columns, tokens + 2, column_count * sizeof(*columns));
+            same = column_count != 0;
+        }
+        else if (same && function != UINT64_MAX && count != 0)
+        {
+            same = row < row_count && dynamic_test_frame_row(tokens, count, columns, column_count, &rows[row]);
+            if (!same)
+            {
+                printf("  %s: the FDE of the function at 0x%llx, row %u: readelf's \"%.*s\", against rsp+%llu from its pushes and pops\n", name,
+                       (unsigned long long)functions[function].start, row, (int)(line.length < 120 ? line.length : 120), line.pointer,
+                       (unsigned long long)(row < row_count ? rows[row].offset : 0));
+            }
+            row += 1;
+            compared += 1;
+        }
+    }
+    for (uint64_t f = 0; same && f < function_count; f += 1)
+    {
+        same = functions[f].fdes == 1;
+    }
+    dynamic_test_expect(tally, same && function_count != 0, "readelf's call frame rules as objdump's pushes and pops give them", compared);
+    printf("  %s: the call frame rules of %llu functions, %llu rows, as their pushes and pops give them\n", name, (unsigned long long)function_count,
+           (unsigned long long)compared);
+    if (!keep)
+    {
+        unlink(disassembly);
+        unlink(frames);
+        unlink(errors);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1185,6 +1805,23 @@ static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, 
             uint64_t value = 0;
             dynamic_test_expect(tally, dynamic_test_tag(&ours, present[t], &value) == dynamic_test_tag(&theirs, present[t], &value), "lld's tags", t);
         }
+        // .eh_frame_hdr: the same functions' FDEs, with the same ranges.
+        const uint64_t fde_capacity = link->fixups.count + 16;
+        DynamicTestFde* our_fdes = BUSTER_ARENA_PUSH_ARRAY(arena, DynamicTestFde, fde_capacity);
+        DynamicTestFde* their_fdes = BUSTER_ARENA_PUSH_ARRAY(arena, DynamicTestFde, fde_capacity);
+        const uint64_t our_fde_count = our_fdes != 0 && their_fdes != 0 ? dynamic_test_fdes(&ours, link, our_fdes, fde_capacity, arena) : UINT64_MAX;
+        const uint64_t their_fde_count = our_fdes != 0 && their_fdes != 0 ? dynamic_test_fdes(&theirs, 0, their_fdes, fde_capacity, arena) : UINT64_MAX;
+        bool same_fdes = our_fde_count != UINT64_MAX && our_fde_count == their_fde_count;
+        for (uint64_t i = 0; same_fdes && i < our_fde_count; i += 1)
+        {
+            same_fdes = dynamic_test_by_fde(&our_fdes[i], &their_fdes[i]) == 0;
+            if (!same_fdes)
+            {
+                printf("  %s: .eh_frame_hdr: %.*s, %llu bytes, against lld's %.*s, %llu bytes\n", name, (int)our_fdes[i].name_length, (const char*)our_fdes[i].name,
+                       (unsigned long long)our_fdes[i].range, (int)their_fdes[i].name_length, (const char*)their_fdes[i].name, (unsigned long long)their_fdes[i].range);
+            }
+        }
+        dynamic_test_expect(tally, same_fdes, "lld's .eh_frame_hdr indexes the same functions", our_fde_count * 100000 + their_fde_count);
     }
     if (!keep)
     {
@@ -1245,6 +1882,9 @@ static bool dynamic_test_programs(const ExecutableTestDirectory* directory, cons
     options[BUSTER_LINK_TEST_PROGRAMS] = options[5];
     options[BUSTER_LINK_TEST_PROGRAMS].seed = seed + BUSTER_LINK_TEST_PROGRAMS;
     options[BUSTER_LINK_TEST_PROGRAMS].functions = functions;
+    char unwinder[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const bool unwinder_built = cross_check && dynamic_test_build_unwinder(directory->path, unwinder);
+    dynamic_test_expect(&tally, !cross_check || unwinder_built, "cc builds the unwinder", 0);
     for (uint32_t i = 0; i < BUSTER_DYNAMIC_TEST_PROGRAMS; i += 1)
     {
         const bool workers = i == BUSTER_LINK_TEST_PROGRAMS;
@@ -1265,24 +1905,31 @@ static bool dynamic_test_programs(const ExecutableTestDirectory* directory, cons
             if (written)
             {
                 dynamic_test_structure(&tally, &bound.program.link, &bound.bind, runtime, file, dynamic_test_relr_supported(runtime), i);
+                const char* unwind = executable_test_unwind(&bound.program.link, file, 0, bound.bind.unit_base, &result);
+                dynamic_test_expect(&tally, unwind == 0 && result.fdes != 0 && result.fdes_in_order, unwind != 0 ? unwind : "FDEs in order", i);
             }
             if (written && cross_check)
             {
                 dynamic_test_against_lld(&tally, &bound.program.link, &bound.bind, runtime, options[i].units, file, directory->path, directory_name, directory->keep,
                                          scratch.arena);
+                dynamic_test_frames(&tally, &bound.program.link, bound.bind.unit_base, path.pointer, directory->path, directory_name, directory->keep, scratch.arena);
             }
             const bool ran = written && executable_test_runs(path.pointer, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES);
             dynamic_test_expect(&tally, ran, "the program runs as its model predicts", i);
+            if (written && unwinder_built)
+            {
+                dynamic_test_unwinder(&tally, &bound.program.link, &bound.bind, runtime, path.pointer, unwinder, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES, i);
+            }
             if (written)
             {
                 dynamic_test_variants(&tally, &bound.program.link, &bound.bind, runtime, path, file, bound.program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES, 0, i);
             }
             printf("  %s: %u atoms, %u fixups, %llu dynamic symbols, %llu relocations in .rela.dyn (%llu relative) and %llu in %llu words of .relr.dyn, %llu stubs, %llu "
-                   "GOT slots, %llu bytes: %s\n",
+                   "GOT slots, %llu FDEs, %llu bytes: %s\n",
                    name, bound.program.link.atoms.count - 1, bound.program.link.fixups.count - 1, (unsigned long long)result.dynamic_symbols,
                    (unsigned long long)result.relocations, (unsigned long long)result.relative_relocations, (unsigned long long)result.relr_relocations,
-                   (unsigned long long)result.relr_words, (unsigned long long)result.stubs, (unsigned long long)result.got_slots, (unsigned long long)result.file_size,
-                   ran ? "ran" : "didn't run");
+                   (unsigned long long)result.relr_words, (unsigned long long)result.stubs, (unsigned long long)result.got_slots, (unsigned long long)result.fdes,
+                   (unsigned long long)result.file_size, ran ? "ran" : "didn't run");
             scratch_end(scratch);
             if (!directory->keep)
             {
@@ -1290,6 +1937,10 @@ static bool dynamic_test_programs(const ExecutableTestDirectory* directory, cons
             }
             bind_test_release(&bound);
         }
+    }
+    if (unwinder_built && !directory->keep)
+    {
+        unlink(unwinder);
     }
     return dynamic_test_report(&tally);
 }
@@ -1525,11 +2176,16 @@ static bool dynamic_test_exports(const ExecutableTestDirectory* directory, const
     if (written)
     {
         dynamic_test_structure(&tally, &test->link, &test->bind, runtime, file, dynamic_test_relr_supported(runtime), 0);
-        dynamic_test_variants(&tally, &test->link, &test->bind, runtime, path, file, (const uint8_t*)"", 0, 0, 0);
     }
+    // Against lld before the variants, whose write without RELR moves the atoms that the comparison finds the file's
+    // functions by.
     if (written && cross_check)
     {
         dynamic_test_against_lld(&tally, &test->link, &test->bind, runtime, 1, file, directory->path, "exports", directory->keep, scratch.arena);
+    }
+    if (written)
+    {
+        dynamic_test_variants(&tally, &test->link, &test->bind, runtime, path, file, (const uint8_t*)"", 0, 0, 0);
     }
     uint8_t output[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
     uint64_t length = 0;
@@ -1671,11 +2327,16 @@ static bool dynamic_test_imports(const ExecutableTestDirectory* directory, const
     if (written)
     {
         dynamic_test_structure(&tally, &test->link, &test->bind, runtime, file, dynamic_test_relr_supported(runtime), 0);
-        dynamic_test_variants(&tally, &test->link, &test->bind, runtime, path, file, (const uint8_t*)"", 0, 0, 0);
     }
+    // Against lld before the variants, whose write without RELR moves the atoms that the comparison finds the file's
+    // functions by.
     if (written && cross_check)
     {
         dynamic_test_against_lld(&tally, &test->link, &test->bind, runtime, 1, file, directory->path, "imports", directory->keep, scratch.arena);
+    }
+    if (written)
+    {
+        dynamic_test_variants(&tally, &test->link, &test->bind, runtime, path, file, (const uint8_t*)"", 0, 0, 0);
     }
     // At least a stub and a slot for each import, which crtbeginS.o's and the members' calls add to.
     dynamic_test_expect(&tally, result.stubs >= BUSTER_DYNAMIC_TEST_IMPORTS && result.relocations >= 2 * BUSTER_DYNAMIC_TEST_IMPORTS, "a stub, a slot and a pointer for each import",

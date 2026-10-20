@@ -76,7 +76,10 @@ place on tmpfs (3.4 µs, 87 µs and 9.9 ms as new files), and the largest
 against glibc and written as dynamic PIEs take 4.4 µs, 73 µs and 8.6 ms
 (5.4 µs, 89 µs and 10.0 ms as new files), and the largest 4.2 ms with eight
 lanes ("The dynamic PIE"): a few percent over the static executables, all of
-it before the file is written.
+it before the file is written. With unwind tables, as a compiler's objects
+have them, the static executables are 4.6 KB, 510 KB and 45.6 MB and take
+3.1 µs, 75 µs and 10.0 ms, and the largest 5.8 ms with eight lanes ("The
+unwind tables"), most of the difference spent writing 10 MB more.
 
 Orders of magnitude are there for programs up to a few megabytes, where
 fixed costs dominate. For a 46 MB output both sides spend their time in the
@@ -1472,8 +1475,8 @@ compares each with lld's link of the same objects.
   `.eh_frame` after `.rodata`; RX `.init`, `.fini` and `.plt.got`; RELRO
   `.dynamic` before `.got`. `PT_INTERP` and `PT_DYNAMIC` join the program
   headers. `.init`'s and `.fini`'s fragments and `.eh_frame`'s records keep
-  link order, one after another as lld writes them. `.eh_frame_hdr` waits for
-  part 4, which gives the generated programs their FDEs, and `.symtab` for
+  link order, one after another as lld writes them. `.eh_frame_hdr` came with
+  the generated programs' FDEs ("The unwind tables"); `.symtab` waits for
   debuggers.
 - **Relocation classes.** Each symbol is RELATIVE (the image's: the load
   address adds to it), SYMBOLIC (an import, or a weak reference to nothing
@@ -1601,6 +1604,129 @@ for its 299,069 RELATIVE pointers and GOT slots, which `.rela.dyn` would take
   against 2.7 to 2.8, the dynamic sections having made the section table
   twice as long.
 
+#### The unwind tables
+
+Step 5 compares the direct path with linkers on outputs of the same features,
+and a compiler's objects carry unwind tables, so the generated programs do too
+(`link_program.c`). Each unit's `.eh_frame` atom holds GCC's CIE for x86-64
+(`zR`, data alignment -8, the return address in register 16, FDE pointers
+pc-relative `sdata4`) and an FDE per function of the unit: its `pc_begin` a
+`PC32` fixup to the function, its range the function's length, and its call
+frame instructions what the function's pushes and pops give, as GCC's CFI says
+them. `_start`'s says that the return address is undefined, as glibc's does:
+it is the outermost frame. The functions go unit by unit, as a compiler's
+objects have them, so their addresses go in the order of their FDEs.
+
+Both kinds of executable get `.eh_frame` and `.eh_frame_hdr` (step 4's static
+ones too), with lld's layout: `.eh_frame_hdr`, then `.eh_frame`, after
+`.rodata`, with `PT_GNU_EH_FRAME` over the header. `.eh_frame`'s atoms keep
+link order, one after another, so that a terminator (`crtendS.o`'s) is only
+ever last, where an unwinder that walks the records stops. The header is the
+LSB's, what lld writes with `--eh-frame-hdr`: version 1, `.eh_frame`'s address
+pc-relative, the count, and a table of `(initial location, FDE)` pairs from
+the header's address, sorted by initial location, which unwinders search
+(libgcc finds it through `dl_iterate_phdr`). An atom's records must be ones
+the header can index: CIEs of a `z` augmentation with `R`, `P`, `L` or `S`,
+FDE pointers pc-relative `sdata4` (GCC's and clang's for every x86-64 CIE),
+and FDEs that point back to one of the atom's CIEs (eight at most, which a
+compiler's object never reaches), each `pc_begin` a `PC32` fixup's field.
+Other records fail the link (`EXECUTABLE_ERROR_UNWIND`, naming the atom), and
+so does an initial location farther from the header than an int32 reaches,
+which GNU ld and lld refuse too.
+
+Three passes, each with an exact twin:
+
+- **The count, before the layout**, in the count phase. The lanes share the
+  `.eh_frame` atoms by cost, an atom's fixups plus one, each lane taking a
+  run of them in id order as `lane_range_by_cost` cuts: a generated program's
+  atoms are a cluster after its code, which ranges of atom ids gave to one
+  lane. An atom's FDEs are read from its fixups, 16 at a time. Each fixup is
+  a candidate FDE 8 bytes before its field, whose length and CIE pointer are
+  one 8-byte load, made for all 16 before any is compared, where a walk's
+  next record waits on the last one's length. Then compares: each candidate
+  must start where the one before it ends (the first where the CIE does, the
+  one before a group's first where the last group's last ended, a `valignd`
+  carrying it in a register), point back to the CIE and be long enough, the
+  fixups must all be `PC32`s of an addend in the column, and the last must end
+  at the atom's end or its terminator's start. An atom laid out otherwise
+  (other CIEs or fixups among its records, a CIE with a personality) goes to
+  the exact walk, record by record, which is also what `exact` runs.
+- **The table, once every symbol's reference is known**, in the dynamic
+  phase (a static executable now has one too): each lane writes its share's
+  entries, in `.eh_frame`'s order, from the lanes' counts before it. For an
+  atom the vector path read, they come from its fixups' columns alone, 16 at
+  a time: each initial location its target's reference plus its addend, each
+  FDE its field's address less 8, both from the header, the first checked in
+  64 bits against int32's range and the two interleaved by `vpermt2d`. An
+  atom the walk read is walked again.
+- **The sort**, on lane 0 before it opens the output: a check that the
+  entries are sorted, 16 at a time (the initial locations are the even words
+  of two vectors, a `vpermt2d` away, compared with themselves shifted by one,
+  the last group's carried in a register). They are when the functions'
+  addresses go in their FDEs' order, as in a link of a compiler's objects.
+  Only if they aren't does it sort them, by an LSD radix sort, stable, 8 bits
+  a pass; the exact twin always sorts.
+
+On the 9700X (`benchmark-executable --only links`), each program in place,
+medians in µs, main's and then this one's (the median of three rounds,
+taken alternately with main's in one session; on eight lanes the smallest
+programs vary by more than they differ):
+
+| Program (file) | 1 lane | 8 lanes |
+| --- | ---: | ---: |
+| static, 1 worker (3.9 → 4.6 KB) | 2.9 → 3.1 | 7.2 → 8.3 |
+| static, 64 workers (16 → 21 KB) | 5.0 → 5.5 | 7.7 → 8.0 |
+| static, 2,000 workers (397 → 510 KB) | 68 → 75 | 44 → 44 |
+| static, 180,000 workers (35.5 → 45.6 MB) | 8,340 → 10,030 | 4,070 → 5,780 |
+| PIE, 1 worker (6.6 → 7.2 KB) | 4.4 → 4.5 | 8.9 → 7.3 |
+| PIE, 64 workers (19 → 23 KB) | 6.5 → 6.8 | 8.9 → 9.3 |
+| PIE, 2,000 workers (401 → 513 KB) | 73 → 80 | 44 → 45 |
+| PIE, 180,000 workers (35.6 → 45.7 MB) | 8,740 → 10,370 | 4,270 → 5,640 |
+
+The largest static executable's phases, in place (the table is the dynamic
+phase's, and the sorted check is in the open's):
+
+| Lanes | count | layout | symbols | table | open | chunks | floor |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 840 → 1,220 | 387 → 387 | 473 → 479 | 156 | 8.1 → 22.9 | 6,630 → 7,750 | 2,610 → 3,250 |
+| 8 | 289 → 637 | 91 → 174 | 70 → 87 | 59 | 8.0 → 25.0 | 3,640 → 4,690 | 2,320 → 3,110 |
+
+The passes on their own (`benchmark-executable`'s rows, one lane, over the
+180,000 workers' 180,010 FDEs in 900 atoms, which stay in L3 from one run to
+the next), per FDE: the count 0.70 ns by the vector path and 2.09 by the walk;
+the entries 1.00 and 3.14; the sorted check 0.073, and the sort 3.40.
+
+- **Most of the cost is the bytes.** `.eh_frame` and its header are 10.1 MB
+  of the largest program's 45.6 MB, 56 bytes a function (48 of FDE and 8 of
+  table entry), and writing them is most of what the link pays for them: the
+  chunks take 1,120 µs more on one lane and 1,050 on eight, and the floor 640
+  and 800 more. Per MB of output, one lane now writes the largest program in
+  220 µs where main's took 235, and eight lanes in 127 where main's took 115.
+- **The count reads `.eh_frame` from DRAM.** On one lane it takes 380 µs
+  more: about 70 for the 180,010 more fixups that `executable_count` reads,
+  and about 310 for the FDEs, 1.7 ns each where the benchmark's row, from
+  L3, takes 0.70. An experiment that counted each atom's fixups instead,
+  reading none of its bytes and checking nothing, took the count phase from
+  1,226 to 913 µs on one lane and from 529 to 376 on eight, but the whole
+  link only 1.3 to 2.2% less: the phases after it took longer by most of the
+  difference (layout and symbols on one lane, the chunks on eight). So the
+  checks stay in the count. Moving them to the chunks, where the bytes pass
+  through the cache anyway, would save less than that, and a record the
+  header can't index would then fail the link after the output is written.
+- **What the measurements changed.** The first version's count split the
+  `.eh_frame` atoms by id, as the other counts split theirs, and a generated
+  program's come after its code, so on eight lanes the last lane counted all
+  180,010 FDEs: 838 to 1,091 µs of count phase, which shares by cost made 516
+  to 609. Its table checked each atom's records again while writing their
+  entries, 1.7 to 2.5 ns per FDE: 467 to 503 µs on one lane, and 570 to 619
+  on eight, which entries from the fixups' columns, in the count's shares,
+  made 155 and 46 to 63. And
+  the count loaded each candidate's length and CIE pointer separately and
+  stored and reloaded the last group's end, as the sorted check did its last
+  initial location: one 8-byte load per candidate and both carried in
+  registers made the count 0.70 ns per FDE (from 1.0 to 1.8) and the sorted
+  check 0.072 (from 0.287), 13 µs instead of 52 for the largest program.
+
 #### Synthetic sections
 
 | Section | Contents |
@@ -1616,8 +1742,9 @@ for its 299,069 RELATIVE pointers and GOT slots, which `.rela.dyn` would take
 | `.eh_frame`, `.eh_frame_hdr` | a CIE and an FDE per function from the code generator, merged with the runtime's |
 | `.symtab`, `.strtab`, `.shstrtab` and section headers | for debuggers and profilers, after the loaded segments |
 
-`.eh_frame_hdr`'s table is already sorted, because functions are laid out in
-order. `.strtab` is the needed names copied from the name arena.
+`.eh_frame_hdr`'s table comes out sorted when functions are laid out in their
+FDEs' order, as they are; the writer checks, and sorts it only if not ("The
+unwind tables"). `.strtab` is the needed names copied from the name arena.
 
 There is no `.note.gnu.property`. The output's property is the AND of its
 inputs', and the program's code carries no IBT or shadow stack markers.
@@ -1739,9 +1866,11 @@ In a section, each atom starts at the next multiple of its alignment, in id
 order, with `int3` between code atoms and zeros elsewhere. A section's
 contents start in the file at a multiple of its alignment, as GNU as places
 them, up to 4 KB: linkers copy contents from any offset, and more would only
-pad the file. Not yet: `.eh_frame` and `.debug_*`, which wait for unwind tables
-and DWARF (step 9), and priorities in `.init_array`'s and `.fini_array`'s
-names, which the representation doesn't have.
+pad the file. The generated programs' `.eh_frame` atoms ("The unwind
+tables") give each object a `.eh_frame` and its `.rela.eh_frame`. Not yet:
+`.debug_*`, which waits for DWARF (step 9), and priorities in
+`.init_array`'s and `.fini_array`'s names, which the representation doesn't
+have.
 
 **Symbols:**
 
@@ -2590,8 +2719,9 @@ and with this document updated with what was measured:
    data-parallel"); the dynamic PIE (`executable.c`'s dynamic mode,
    `dynamic.c`, `test-dynamic` and `benchmark-executable`'s PIE rows, done:
    "The dynamic PIE"); the snapshot itself (`snapshot.c`, `test-snapshot`
-   and `benchmark-snapshot`, done: "The runtime snapshot"); then `.eh_frame`
-   for the generated programs and `benchmark-link`.
+   and `benchmark-snapshot`, done: "The runtime snapshot"); `.eh_frame` for
+   the generated programs and `.eh_frame_hdr` (done: "The unwind tables");
+   then `benchmark-link`.
 6. **`-static`:** libc.a's closure, IRELATIVE for its IFUNCs, static TLS.
    Then `-static-pie` and `-shared`.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse

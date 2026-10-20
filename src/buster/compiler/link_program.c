@@ -56,9 +56,14 @@
 //     buster_relative (DATA_RELRO, PC64), buster_far (DATA, ABS64 with addends past 2^32, which go to the side table
 //     and which the code subtracts again), buster_output (BSS), and buster_tls_area (BSS) without libc or
 //     buster_imports (DATA_RELRO, ABS64 to strlen) with it.
-// Every class but NONE appears given two thread-locals, an init function and a fini function (as with the defaults),
-// and every fixup kind: ABS32, ABS32S and ABS64 in code only with absolute addresses, and SIZE32 and SIZE64 only with
-// sizes. With libc, a fini function shows only if it crashes, since it runs after the output is written.
+//   - Unwind tables: each unit's .eh_frame (EH_FRAME), a CIE and an FDE for each of the unit's functions (PC32 to the
+//     function), whose call frame instructions follow its pushes and pops as a compiler's would
+//     (link_program_emit_unwind), so that linking the program has the work a compiler's objects give, as
+//     docs/object-writer-and-linker.md's step 5 asks.
+// Every class but NONE, INIT and FINI (which only the C runtime's objects have) appears given two thread-locals, an
+// init function and a fini function (as with the defaults), and every fixup kind: ABS32, ABS32S and ABS64 in code only
+// with absolute addresses, and SIZE32 and SIZE64 only with sizes. With libc, a fini function shows only if it crashes,
+// since it runs after the output is written.
 // LinkProgram.output comes from a model of the program that link_program_generate runs: the same arithmetic in C, on
 // the same random choices.
 //
@@ -69,8 +74,9 @@
 // which holds the random choices (LinkProgramPlan and link_program_plan); the model (link_program_mix,
 // link_program_model_body and link_program_run_model); the code (LinkProgramCode, LinkProgramBuilder, the instruction
 // builders, link_program_finish, and link_program_emit_start, _mix, _write_hex, _hooks, _fold, _kinds, _imports,
-// _runtime, _main, _worker and _hook); the data (link_program_add_data, link_program_add_pointers,
-// link_program_emit_variable and link_program_emit_data); and generating (link_program_add_symbols,
+// _runtime, _main, _worker and _hook, with each function's unwind instructions, link_program_unwind_instructions); the
+// data (link_program_add_data, link_program_add_pointers, link_program_emit_variable and link_program_emit_data); the
+// unwind tables (link_program_emit_unwind); and generating (link_program_add_symbols,
 // link_program_capacity, link_program_bytes and link_program_generate).
 
 #include <stdint.h>
@@ -628,6 +634,53 @@ struct LinkProgramCode
     uint32_t marked;
 };
 
+// The unwind tables (link_program_emit_unwind): each unit's .eh_frame holds a CIE, GCC's and clang's for x86-64
+// (augmentation "zR", code alignment 1, data alignment -8, the return address in DWARF register 16, FDE pointers
+// pc-relative sdata4, the CFA at rsp + 8 and the return address below it), then an FDE for each of the unit's functions
+// in the order they were added, each padded to 4 bytes as clang pads them: its pc_begin a PC32 fixup to the function,
+// its range the function's length, and its instructions from link_program_unwind_instructions.
+#define BUSTER_LINK_PROGRAM_CIE_BYTES 24
+// An FDE's bytes before its instructions: its length, its CIE pointer, pc_begin, the range and the augmentation data's
+// length (0).
+#define BUSTER_LINK_PROGRAM_FDE_HEADER_BYTES 17
+// The most bytes of instructions an FDE has: after each instruction that moves rsp an advance (at most 5 bytes),
+// DW_CFA_def_cfa_offset (at most 3) and a register's save or restore (at most 3); _start's has 2.
+#define BUSTER_LINK_PROGRAM_MAX_UNWIND_BYTES (11 * BUSTER_LINK_PROGRAM_MAX_INSTRUCTIONS + 2)
+// A bound on an FDE's bytes, for link_program_bytes: buster_main moves rsp the most, 12 times.
+#define BUSTER_LINK_PROGRAM_MAX_FDE_BYTES (BUSTER_LINK_PROGRAM_FDE_HEADER_BYTES + 11 * 12 + 3)
+// The DWARF call frame instructions the FDEs use, and DWARF's number of the return address (rip).
+#define BUSTER_LINK_PROGRAM_CFA_ADVANCE_LOC 0x40
+#define BUSTER_LINK_PROGRAM_CFA_OFFSET 0x80
+#define BUSTER_LINK_PROGRAM_CFA_RESTORE 0xc0
+#define BUSTER_LINK_PROGRAM_CFA_ADVANCE_LOC1 0x02
+#define BUSTER_LINK_PROGRAM_CFA_ADVANCE_LOC2 0x03
+#define BUSTER_LINK_PROGRAM_CFA_ADVANCE_LOC4 0x04
+#define BUSTER_LINK_PROGRAM_CFA_UNDEFINED 0x07
+#define BUSTER_LINK_PROGRAM_CFA_DEF_CFA_OFFSET 0x0e
+#define BUSTER_LINK_PROGRAM_DWARF_RIP 16
+
+static const uint8_t link_program_cie[BUSTER_LINK_PROGRAM_CIE_BYTES] = {
+    // Its length past this field, and the CIE id.
+    0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // Version 1, "zR", code alignment 1, data alignment -8, return address register 16, and one byte of augmentation
+    // data: DW_EH_PE_pcrel | DW_EH_PE_sdata4.
+    0x01, 'z', 'R', 0x00, 0x01, 0x78, 0x10, 0x01, 0x1b,
+    // DW_CFA_def_cfa rsp + 8, DW_CFA_offset rip at CFA - 8, and two DW_CFA_nops.
+    0x0c, 0x07, 0x08, 0x90, 0x01, 0x00, 0x00,
+};
+
+// A function's FDE until its unit's .eh_frame is built: its symbol and unit, its length (the FDE's range) and its
+// instructions.
+typedef struct LinkProgramUnwind LinkProgramUnwind;
+struct LinkProgramUnwind
+{
+    SymbolId symbol;
+    uint32_t unit;
+    uint32_t length;
+    uint32_t instruction_bytes;
+    const uint8_t* instructions;
+};
+
 // What generating a program works with: the program, the plan, the function being built and the symbols' ids (0 for
 // those the program's kind doesn't have). The symbols of each kind are added one after another, from the first's id.
 struct LinkProgramBuilder
@@ -662,6 +715,10 @@ struct LinkProgramBuilder
     SymbolId first_thread_local;
     SymbolId first_hook;
     SymbolId first_string;
+    // Each function's FDE, in the order the functions were added, room for unwind_capacity of them.
+    LinkProgramUnwind* unwind;
+    uint32_t unwind_count;
+    uint32_t unwind_capacity;
 };
 
 // Instructions. A register operand with a form's ModRM.reg and ModRM.rm (or +r) roles, an immediate, a memory operand
@@ -799,6 +856,128 @@ static void link_program_jump(LinkProgramCode* code, uint32_t form, uint32_t lab
     link_program_add(code, link_program_bare(form));
 }
 
+// Appends `value` as an unsigned LEB128: the end of what `bytes` holds.
+static uint32_t link_program_uleb128(uint8_t* bytes, uint32_t used, uint64_t value)
+{
+    uint64_t left = value;
+    uint32_t result = used;
+    bool more = true;
+    while (more)
+    {
+        const uint8_t low = (uint8_t)(left & 0x7f);
+        left >>= 7;
+        more = left != 0;
+        bytes[result] = more ? (uint8_t)(low | 0x80) : low;
+        result += 1;
+    }
+    return result;
+}
+
+// Appends an advance of the location by `delta` bytes: in DW_CFA_advance_loc's low 6 bits, or after advance_loc1, 2 or
+// 4 in as many bytes.
+static uint32_t link_program_unwind_advance(uint8_t* bytes, uint32_t used, uint64_t delta)
+{
+    uint32_t result = used;
+    if (delta < 64)
+    {
+        bytes[result] = (uint8_t)(BUSTER_LINK_PROGRAM_CFA_ADVANCE_LOC | delta);
+        result += 1;
+    }
+    else
+    {
+        const uint32_t width = delta < 256 ? 1 : delta < 65536 ? 2 : 4;
+        bytes[result] = width == 1 ? BUSTER_LINK_PROGRAM_CFA_ADVANCE_LOC1 : width == 2 ? BUSTER_LINK_PROGRAM_CFA_ADVANCE_LOC2 : BUSTER_LINK_PROGRAM_CFA_ADVANCE_LOC4;
+        // Little-endian: the low bytes come first.
+        memcpy(bytes + result + 1, &delta, width);
+        result += 1 + width;
+    }
+    return result;
+}
+
+// The FDE instructions of the function that `code` holds, `length` bytes of it encoded, into `bytes`
+// (BUSTER_LINK_PROGRAM_MAX_UNWIND_BYTES of room): their count. The generator's functions move rsp with pushes and pops
+// alone, so after each the location advances to its end, the CFA's offset from rsp changes by 8, and a callee-saved
+// register pushed is saved at the new offset, or restored when popped, as GCC's CFI says. The outermost function's
+// (_start's) say instead that the return address is undefined, as glibc's _start does: it has no caller to unwind to,
+// and its `and rsp, -16` leaves the CFA unknown.
+static uint32_t link_program_unwind_instructions(const LinkProgramCode* code, uint64_t length, bool outermost, uint8_t* bytes)
+{
+    // DWARF's numbers of the registers, by the encoder's, and whether the ABI has the callee save each.
+    static const uint8_t dwarf[16] = { 0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15 };
+    static const bool callee_saved[16] = {
+        [X86_REGISTER_RBX] = true,
+        [X86_REGISTER_RBP] = true,
+        [X86_REGISTER_R12] = true,
+        [X86_REGISTER_R13] = true,
+        [X86_REGISTER_R14] = true,
+        [X86_REGISTER_R15] = true,
+    };
+    uint32_t used = 0;
+    if (outermost)
+    {
+        bytes[0] = BUSTER_LINK_PROGRAM_CFA_UNDEFINED;
+        bytes[1] = BUSTER_LINK_PROGRAM_DWARF_RIP;
+        used = 2;
+    }
+    uint64_t location = 0;
+    uint64_t offset = 8;
+    for (uint32_t i = 0; !outermost && i < code->instruction_count; i += 1)
+    {
+        const X86Instruction* instruction = &code->instructions[i];
+        const uint32_t form = instruction->form & ~(uint32_t)BUSTER_X86_FORM_FIXUP;
+        const bool push = form == X86_FORM_PUSH_R64 || form == X86_FORM_PUSH_RM64;
+        const bool pop = form == X86_FORM_POP_R64;
+        const uint8_t reg = instruction->rm & 15;
+        const bool saved = (form == X86_FORM_PUSH_R64 || pop) && callee_saved[reg];
+        if (push || pop)
+        {
+            const uint64_t end = i + 1 < code->instruction_count ? code->offsets[i + 1] : length;
+            used = link_program_unwind_advance(bytes, used, end - location);
+            location = end;
+            offset = push ? offset + 8 : offset - 8;
+            bytes[used] = BUSTER_LINK_PROGRAM_CFA_DEF_CFA_OFFSET;
+            used = link_program_uleb128(bytes, used + 1, offset);
+        }
+        if (saved && push)
+        {
+            bytes[used] = (uint8_t)(BUSTER_LINK_PROGRAM_CFA_OFFSET | dwarf[reg]);
+            used = link_program_uleb128(bytes, used + 1, offset / 8);
+        }
+        else if (saved)
+        {
+            bytes[used] = (uint8_t)(BUSTER_LINK_PROGRAM_CFA_RESTORE | dwarf[reg]);
+            used += 1;
+        }
+    }
+    return used;
+}
+
+// Keeps the FDE of the function `symbol`, which `code` holds encoded at `length` bytes, for its unit's .eh_frame.
+static bool link_program_keep_unwind(LinkProgramBuilder* builder, uint32_t unit, SymbolId symbol, uint64_t length)
+{
+    LinkProgram* program = builder->program;
+    uint8_t instructions[BUSTER_LINK_PROGRAM_MAX_UNWIND_BYTES];
+    const uint32_t count = link_program_unwind_instructions(builder->code, length, symbol == builder->start, instructions);
+    uint8_t* kept = builder->unwind_count < builder->unwind_capacity ? arena_push(&program->work, count, 1) : 0;
+    if (kept != 0)
+    {
+        memcpy(kept, instructions, count);
+        builder->unwind[builder->unwind_count] = (LinkProgramUnwind){
+            .symbol = symbol,
+            .unit = unit,
+            .length = (uint32_t)length,
+            .instruction_bytes = count,
+            .instructions = kept,
+        };
+        builder->unwind_count += 1;
+    }
+    else
+    {
+        program->problem = "out of memory for the unwind tables";
+    }
+    return kept != 0;
+}
+
 // Encodes the function being built as an atom of `unit` that defines `symbol`. The first encoding gives the offsets
 // that the branches' rel32s come from (the forms' lengths don't depend on them), and the second the marked
 // instructions' ends. The function is encoded after the code before it, whose 64-byte stores' overrun it overwrites,
@@ -837,7 +1016,7 @@ static bool link_program_finish(LinkProgramBuilder* builder, uint32_t unit, Symb
         const AtomId atom = link_add_atom(&program->link, BUSTER_LINK_CLASS_TEXT, BUSTER_LINK_PROGRAM_FUNCTION_ALIGNMENT_LOG2, padded, output, unit);
         result = atom != 0 && link_add_code_fixups(&program->link, atom, code->instructions, count, code->fixup_ends, code->marked, code->references,
                                                    code->reference_count) &&
-                 link_define_symbol(&program->link, symbol, atom, 0, (uint64_t)length);
+                 link_define_symbol(&program->link, symbol, atom, 0, (uint64_t)length) && link_program_keep_unwind(builder, unit, symbol, (uint64_t)length);
         program->instructions += count;
         program->code_bytes += (uint64_t)length;
     }
@@ -1501,6 +1680,100 @@ static bool link_program_emit_data(LinkProgramBuilder* builder, Arena* scratch)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The unwind tables
+
+// An FDE's bytes: its header, its instructions and DW_CFA_nops to a multiple of 4.
+static uint32_t link_program_fde_bytes(const LinkProgramUnwind* unwind)
+{
+    return (BUSTER_LINK_PROGRAM_FDE_HEADER_BYTES + unwind->instruction_bytes + 3) & ~3u;
+}
+
+// The units' .eh_frame atoms, after every other atom (see BUSTER_LINK_PROGRAM_CIE_BYTES): each unit's FDEs in the order
+// its functions were added, found by a counting sort of the functions by unit. A unit without functions has none.
+static bool link_program_emit_unwind(LinkProgramBuilder* builder)
+{
+    LinkProgram* program = builder->program;
+    Link* link = &program->link;
+    const uint32_t units = builder->plan->options.units;
+    const uint32_t count = builder->unwind_count;
+    const uint64_t mark = program->work.length;
+    // Unit u's functions at order[start[u]] to order[start[u + 1] - 1]: counted in start[u + 1], whose exclusive sum is
+    // then where u's go; each placed moves it on by one, so that it ends as u + 1's start.
+    uint32_t* start = BUSTER_ARENA_PUSH_ARRAY(&program->work, uint32_t, (uint64_t)units + 1);
+    uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(&program->work, uint32_t, (uint64_t)count + 1);
+    bool result = start != 0 && order != 0;
+    if (result)
+    {
+        memset(start, 0, ((uint64_t)units + 1) * sizeof(uint32_t));
+        for (uint32_t f = 0; f < count; f += 1)
+        {
+            start[builder->unwind[f].unit + 1] += 1;
+        }
+        uint32_t sum = 0;
+        for (uint32_t u = 1; u <= units; u += 1)
+        {
+            const uint32_t here = start[u];
+            start[u] = sum;
+            sum += here;
+        }
+        for (uint32_t f = 0; f < count; f += 1)
+        {
+            const uint32_t place = start[builder->unwind[f].unit + 1];
+            start[builder->unwind[f].unit + 1] = place + 1;
+            order[place] = f;
+        }
+    }
+    for (uint32_t unit = 0; result && unit < units; unit += 1)
+    {
+        uint64_t size = BUSTER_LINK_PROGRAM_CIE_BYTES;
+        for (uint32_t f = start[unit]; f < start[unit + 1]; f += 1)
+        {
+            size += link_program_fde_bytes(&builder->unwind[order[f]]);
+        }
+        const bool functions = start[unit + 1] != start[unit];
+        uint8_t* bytes = functions ? arena_push(&program->bytes, size, 8) : 0;
+        result = !functions || bytes != 0;
+        program->problem = result ? program->problem : "out of memory for the unwind tables";
+        AtomId atom = 0;
+        if (bytes != 0)
+        {
+            memcpy(bytes, link_program_cie, BUSTER_LINK_PROGRAM_CIE_BYTES);
+            uint32_t fde = BUSTER_LINK_PROGRAM_CIE_BYTES;
+            for (uint32_t f = start[unit]; f < start[unit + 1]; f += 1)
+            {
+                const LinkProgramUnwind* unwind = &builder->unwind[order[f]];
+                const uint32_t fde_bytes = link_program_fde_bytes(unwind);
+                const uint32_t fields[4] = {
+                    // The length past this field, the distance back to the CIE from the next field, pc_begin (the
+                    // fixup's) and the range.
+                    fde_bytes - 4,
+                    fde + 4,
+                    0,
+                    unwind->length,
+                };
+                memcpy(bytes + fde, fields, sizeof(fields));
+                bytes[fde + 16] = 0;
+                memcpy(bytes + fde + BUSTER_LINK_PROGRAM_FDE_HEADER_BYTES, unwind->instructions, unwind->instruction_bytes);
+                memset(bytes + fde + BUSTER_LINK_PROGRAM_FDE_HEADER_BYTES + unwind->instruction_bytes, 0,
+                       fde_bytes - BUSTER_LINK_PROGRAM_FDE_HEADER_BYTES - unwind->instruction_bytes);
+                fde += fde_bytes;
+            }
+            atom = link_add_atom(link, BUSTER_LINK_CLASS_EH_FRAME, 3, size, bytes, unit);
+            result = atom != 0;
+        }
+        uint32_t fde = BUSTER_LINK_PROGRAM_CIE_BYTES;
+        for (uint32_t f = start[unit]; result && atom != 0 && f < start[unit + 1]; f += 1)
+        {
+            const LinkProgramUnwind* unwind = &builder->unwind[order[f]];
+            result = link_add_fixup(link, atom, fde + 8, BUSTER_LINK_FIXUP_PC32, unwind->symbol, 0) != 0;
+            fde += link_program_fde_bytes(unwind);
+        }
+    }
+    arena_pop_to(&program->work, mark);
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Generating
 
 // The names of the program's symbols that have one: a prefix and a number, or a fixed name.
@@ -1631,9 +1904,9 @@ static LinkCapacity link_program_capacity(LinkProgramOptions options)
     const uint32_t variables = options.globals + options.thread_locals;
     LinkCapacity result = {
         .names = options.functions + variables + hooks + 16,
-        .atoms = options.functions + variables + hooks + 3 * options.units + 11,
+        .atoms = options.functions + variables + hooks + 4 * options.units + 11,
         .symbols = options.functions + variables + hooks + options.units * options.strings + 17,
-        .fixups = 12 * options.functions + options.globals + 2 * hooks + 64,
+        .fixups = 13 * options.functions + options.globals + 3 * hooks + 68,
         .wide_addends = BUSTER_LINK_PROGRAM_FAR_POINTERS,
     };
     return result;
@@ -1651,7 +1924,8 @@ static uint64_t link_program_bytes(LinkProgramOptions options)
     const uint64_t pools = (uint64_t)options.units * ((uint64_t)options.strings * (BUSTER_LINK_PROGRAM_MAX_STRING + 1) + 32);
     const uint64_t tables = 8 * ((uint64_t)options.functions + options.globals + hooks + BUSTER_LINK_PROGRAM_CONSTANT_POINTERS + BUSTER_LINK_PROGRAM_FAR_POINTERS);
     const uint64_t data = 32 * variables + pools + tables + 2 * (uint64_t)options.units * 8 + 1024;
-    return code + data;
+    const uint64_t unwind = (uint64_t)options.units * (BUSTER_LINK_PROGRAM_CIE_BYTES + 8) + ((uint64_t)options.functions + hooks + 4) * BUSTER_LINK_PROGRAM_MAX_FDE_BYTES;
+    return code + data + unwind;
 }
 
 static LinkProgramOptions link_program_default_options(void)
@@ -1728,12 +2002,20 @@ static bool link_program_generate_begin(LinkProgram* program, LinkProgramOptions
         LinkProgramCode* code = BUSTER_ARENA_PUSH_ARRAY(&program->work, LinkProgramCode, 1);
         result = program->plan != 0 && program->builder != 0 && code != 0 && link_program_plan(program->plan, &program->work, options);
         program->problem = result ? 0 : "out of memory for the plan";
+        // An FDE for every function: the workers, the init and fini functions, and _start, main, buster_mix and
+        // buster_write_hex.
+        const uint32_t functions = options.functions + options.init_functions + options.fini_functions + 4;
+        LinkProgramUnwind* unwind = result ? BUSTER_ARENA_PUSH_ARRAY(&program->work, LinkProgramUnwind, functions) : 0;
+        result = result && unwind != 0;
+        program->problem = result ? 0 : "out of memory for the plan";
         if (result)
         {
             *program->builder = (LinkProgramBuilder){
                 .program = program,
                 .plan = program->plan,
                 .code = code,
+                .unwind = unwind,
+                .unwind_capacity = functions,
             };
         }
     }
@@ -1752,18 +2034,27 @@ static bool link_program_generate_atoms(LinkProgram* program)
     LinkProgramBuilder* builder = program->builder;
     const LinkProgramOptions options = program->options;
     bool result = builder != 0;
+    // The functions unit by unit, as a compiler's objects have them: unit 0's helpers, then each unit's workers and its
+    // init and fini functions, in their numbers' order. So the functions' addresses go in the order of their FDEs in
+    // the units' .eh_frame, as in a link of a compiler's objects.
     result = result && (options.libc || link_program_emit_start(builder)) && link_program_emit_main(builder) && link_program_emit_mix(builder) &&
              link_program_emit_write_hex(builder);
-    for (uint32_t i = 0; result && i < options.functions; i += 1)
+    for (uint32_t unit = 0; result && unit < options.units; unit += 1)
     {
-        result = link_program_emit_worker(builder, i);
+        for (uint32_t i = unit; result && i < options.functions; i += options.units)
+        {
+            result = link_program_emit_worker(builder, i);
+        }
+        for (uint32_t number = unit; result && number < options.init_functions; number += options.units)
+        {
+            result = link_program_emit_hook(builder, number, unit);
+        }
+        for (uint32_t number = unit; result && number < options.fini_functions; number += options.units)
+        {
+            result = link_program_emit_hook(builder, options.init_functions + number, unit);
+        }
     }
-    for (uint32_t i = 0; result && i < options.init_functions + options.fini_functions; i += 1)
-    {
-        const uint32_t number = i < options.init_functions ? i : i - options.init_functions;
-        result = link_program_emit_hook(builder, i, number % options.units);
-    }
-    result = result && link_program_emit_data(builder, &program->work);
+    result = result && link_program_emit_data(builder, &program->work) && link_program_emit_unwind(builder);
     if (builder != 0 && !result && program->problem == 0)
     {
         program->problem = "the representation refused a record";

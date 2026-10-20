@@ -1670,7 +1670,7 @@ static bool link_test_wide(void)
 // Programs
 
 // A program laid out in memory as a static executable at a fixed address would be, by link_test_load: three segments,
-// each from a page boundary: R (RODATA and STRINGS), RX (TEXT) and RW (the TLS image, INIT_ARRAY, FINI_ARRAY,
+// each from a page boundary: R (RODATA, STRINGS and EH_FRAME), RX (TEXT) and RW (the TLS image, INIT_ARRAY, FINI_ARRAY,
 // DATA_RELRO, the GOT, DATA, BSS, and the program headers), atoms in class order and id order within a class, each at
 // its alignment. At a non-PIE executable's usual address, BUSTER_LINK_TEST_IMAGE_ADDRESS, or if something is mapped
 // there, wherever MAP_32BIT puts it (a 1 GB window); either way below 2 GB, so that ABS32 and ABS32S fit. A program
@@ -1832,6 +1832,7 @@ static bool link_test_load(const Link* link, SymbolId entry, bool libc, bool mis
     {
         link_test_place(link, BUSTER_LINK_CLASS_RODATA, offsets, &cursor);
         link_test_place(link, BUSTER_LINK_CLASS_STRINGS, offsets, &cursor);
+        link_test_place(link, BUSTER_LINK_CLASS_EH_FRAME, offsets, &cursor);
         text_begin = link_test_align(cursor, BUSTER_LINK_TEST_PAGE_BYTES);
         cursor = text_begin;
         link_test_place(link, BUSTER_LINK_CLASS_TEXT, offsets, &cursor);
@@ -2356,14 +2357,14 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
                    names[i], options[i].units, options[i].functions, program.link.atoms.count - 1, program.link.fixups.count - 1, program.link.fixups.wide_count - 1,
                    (unsigned long long)program.code_bytes, ran ? "ran" : "failed", misaligned_ran ? "ran" : "failed", other_ran ? "ran" : "failed");
         }
-        // Every class but the C runtime's (EH_FRAME, INIT and FINI, which come from its objects), and every kind the
-        // options allow, given two thread-locals, an init function and a fini function.
+        // Every class but the C runtime's (INIT and FINI, which come from its objects), and every kind the options
+        // allow, given two thread-locals, an init function and a fini function.
         if (generated && options[i].thread_locals >= 2 && options[i].init_functions >= 1 && options[i].fini_functions >= 1)
         {
             const uint32_t absolute = (1u << BUSTER_LINK_FIXUP_ABS32) | (1u << BUSTER_LINK_FIXUP_ABS32S);
             const uint32_t sizes = (1u << BUSTER_LINK_FIXUP_SIZE32) | (1u << BUSTER_LINK_FIXUP_SIZE64);
             const uint32_t expected = ((1u << BUSTER_LINK_FIXUP_KINDS) - 2) & ~(options[i].absolute ? 0 : absolute) & ~(options[i].sizes ? 0 : sizes);
-            const uint32_t runtime = (1u << BUSTER_LINK_CLASS_EH_FRAME) | (1u << BUSTER_LINK_CLASS_INIT) | (1u << BUSTER_LINK_CLASS_FINI);
+            const uint32_t runtime = (1u << BUSTER_LINK_CLASS_INIT) | (1u << BUSTER_LINK_CLASS_FINI);
             uint32_t classes = 0;
             uint32_t kinds = 0;
             for (AtomId atom = 1; atom < program.link.atoms.count; atom += 1)

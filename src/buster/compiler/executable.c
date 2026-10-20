@@ -149,7 +149,8 @@
 
 // The output sections, in the order of the file and of the addresses. .tbss takes no address space in its segment:
 // the section after it starts where it does. Only a dynamic PIE has .interp, the ABI note, the dynamic symbols, their
-// strings, versions and hash, the dynamic relocations, .eh_frame, .init, .fini, the stubs and .dynamic.
+// strings, versions and hash, the dynamic relocations, .init, .fini, the stubs and .dynamic; and only an executable
+// whose link has unwind tables (EH_FRAME atoms) has .eh_frame and .eh_frame_hdr, its index.
 typedef enum ExecutableSection
 {
     EXECUTABLE_SECTION_INTERP,
@@ -163,6 +164,7 @@ typedef enum ExecutableSection
     EXECUTABLE_SECTION_RELA_DYN,
     EXECUTABLE_SECTION_RELR_DYN,
     EXECUTABLE_SECTION_RODATA,
+    EXECUTABLE_SECTION_EH_FRAME_HDR,
     EXECUTABLE_SECTION_EH_FRAME,
     EXECUTABLE_SECTION_TEXT,
     EXECUTABLE_SECTION_INIT,
@@ -187,9 +189,10 @@ typedef enum ExecutableError
     EXECUTABLE_ERROR_MEMORY,
     // The image doesn't fit below BUSTER_EXECUTABLE_MAX_ADDRESS or the TLS block in BUSTER_EXECUTABLE_MAX_TLS_BYTES, or
     // an atom is larger than BUSTER_EXECUTABLE_MAX_ATOM_BYTES or aligned past a page, an INIT_ARRAY or FINI_ARRAY atom
-    // isn't whole 8-byte entries aligned to at most 8, an atom of an ordered class (a dynamic PIE's EH_FRAME, INIT and
-    // FINI) doesn't land on its alignment where the one before it ends, or in a static executable an atom is of one of
-    // the C runtime's classes, which an executable without libc has no section for (ExecutableResult.atom).
+    // isn't whole 8-byte entries aligned to at most 8, an atom of an ordered class (EH_FRAME, and a dynamic PIE's INIT
+    // and FINI) doesn't land on its alignment where the one before it ends, or in a static executable an atom is of one
+    // of the C runtime's classes (INIT and FINI), which an executable without libc has no section for
+    // (ExecutableResult.atom).
     EXECUTABLE_ERROR_LAYOUT,
     // A symbol defined nowhere that isn't weak (ExecutableResult.symbol).
     EXECUTABLE_ERROR_UNDEFINED,
@@ -206,6 +209,9 @@ typedef enum ExecutableError
     EXECUTABLE_ERROR_FIXUP,
     // A system call on the output failed (ExecutableResult.call and system_error).
     EXECUTABLE_ERROR_FILE,
+    // An EH_FRAME atom's records aren't ones .eh_frame_hdr can index, or an FDE's function is farther from the header
+    // than its table's int32 reaches (see "Unwind tables"; ExecutableResult.atom).
+    EXECUTABLE_ERROR_UNWIND,
 } ExecutableError;
 
 // How the output was written.
@@ -225,16 +231,17 @@ typedef enum ExecutableWrite
 // executable_write's phases, whose ends lane 0 timestamps for the benchmark. Each has a row of the lanes' errors.
 typedef enum ExecutablePhase
 {
-    // Counting the atoms per bucket and the GOT's targets, and a dynamic PIE's symbols, stubs and relocations by class.
+    // Counting the atoms per bucket, the GOT's targets and the FDEs, and a dynamic PIE's symbols, stubs and relocations
+    // by class.
     EXECUTABLE_PHASE_COUNT,
     // Laying out the sections and the atoms, and numbering the GOT slots and the stubs.
     EXECUTABLE_PHASE_LAYOUT,
     // The symbols' references, the GOT's slots, the chunks' boundaries and the headers, and a dynamic PIE's dynamic
     // symbols and stubs.
     EXECUTABLE_PHASE_SYMBOLS,
-    // A dynamic PIE's relocations and the rest of its dynamic sections.
+    // .eh_frame_hdr's table, and a dynamic PIE's relocations and the rest of its dynamic sections.
     EXECUTABLE_PHASE_DYNAMIC,
-    // Opening the output.
+    // Sorting .eh_frame_hdr's table if it must be, and opening the output.
     EXECUTABLE_PHASE_OPEN,
     // Patching, hashing and writing the chunks.
     EXECUTABLE_PHASE_CHUNKS,
@@ -316,6 +323,10 @@ struct ExecutableResult
     uint64_t relr_relocations;
     uint64_t relr_words;
     uint64_t stubs;
+    // The FDEs that .eh_frame_hdr's table indexes, and whether their entries came out sorted in .eh_frame's order, so
+    // that the table didn't need its sort.
+    uint64_t fdes;
+    bool fdes_in_order;
     uint8_t build_id[BUSTER_EXECUTABLE_BUILD_ID_BYTES];
     // CLOCK_MONOTONIC in nanoseconds when executable_write started, and when each phase ended, on lane 0.
     uint64_t start_time;
@@ -931,6 +942,7 @@ static const char* const executable_section_names[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_RELA_DYN] = ".rela.dyn",
     [EXECUTABLE_SECTION_RELR_DYN] = ".relr.dyn",
     [EXECUTABLE_SECTION_RODATA] = ".rodata",
+    [EXECUTABLE_SECTION_EH_FRAME_HDR] = ".eh_frame_hdr",
     [EXECUTABLE_SECTION_EH_FRAME] = ".eh_frame",
     [EXECUTABLE_SECTION_TEXT] = ".text",
     [EXECUTABLE_SECTION_INIT] = ".init",
@@ -959,6 +971,7 @@ static const uint32_t executable_section_types[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_RELA_DYN] = SHT_RELA,
     [EXECUTABLE_SECTION_RELR_DYN] = SHT_RELR,
     [EXECUTABLE_SECTION_RODATA] = SHT_PROGBITS,
+    [EXECUTABLE_SECTION_EH_FRAME_HDR] = SHT_PROGBITS,
     [EXECUTABLE_SECTION_EH_FRAME] = SHT_PROGBITS,
     [EXECUTABLE_SECTION_TEXT] = SHT_PROGBITS,
     [EXECUTABLE_SECTION_INIT] = SHT_PROGBITS,
@@ -987,6 +1000,7 @@ static const uint64_t executable_section_flags[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_RELA_DYN] = SHF_ALLOC,
     [EXECUTABLE_SECTION_RELR_DYN] = SHF_ALLOC,
     [EXECUTABLE_SECTION_RODATA] = SHF_ALLOC,
+    [EXECUTABLE_SECTION_EH_FRAME_HDR] = SHF_ALLOC,
     [EXECUTABLE_SECTION_EH_FRAME] = SHF_ALLOC,
     [EXECUTABLE_SECTION_TEXT] = SHF_ALLOC | SHF_EXECINSTR,
     [EXECUTABLE_SECTION_INIT] = SHF_ALLOC | SHF_EXECINSTR,
@@ -1016,6 +1030,7 @@ static const uint64_t executable_linker_alignment[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_DYNSTR] = 1,
     [EXECUTABLE_SECTION_RELA_DYN] = 8,
     [EXECUTABLE_SECTION_RELR_DYN] = 8,
+    [EXECUTABLE_SECTION_EH_FRAME_HDR] = 4,
     [EXECUTABLE_SECTION_PLT_GOT] = 8,
     [EXECUTABLE_SECTION_DYNAMIC] = 8,
     [EXECUTABLE_SECTION_GOT] = 8,
@@ -1054,6 +1069,7 @@ static const uint8_t executable_linker_before[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_RELA_DYN] = BUSTER_LINK_CLASS_RODATA,
     [EXECUTABLE_SECTION_RELR_DYN] = BUSTER_LINK_CLASS_RODATA,
     [EXECUTABLE_SECTION_RODATA] = BUSTER_LINK_CLASS_COUNT,
+    [EXECUTABLE_SECTION_EH_FRAME_HDR] = BUSTER_LINK_CLASS_EH_FRAME,
     [EXECUTABLE_SECTION_EH_FRAME] = BUSTER_LINK_CLASS_COUNT,
     [EXECUTABLE_SECTION_TEXT] = BUSTER_LINK_CLASS_COUNT,
     [EXECUTABLE_SECTION_INIT] = BUSTER_LINK_CLASS_COUNT,
@@ -1074,13 +1090,13 @@ static const uint8_t executable_linker_before[EXECUTABLE_SECTION_COUNT] = {
 #define BUSTER_EXECUTABLE_BUCKETS ((BUSTER_LINK_CLASS_COUNT - 1) * BUSTER_EXECUTABLE_ALIGNMENTS)
 #define BUSTER_EXECUTABLE_ENTRY_ALIGNMENT_LOG2 3
 
-// The section each class's atoms go to: in a static executable, EXECUTABLE_SECTION_COUNT for the C runtime's classes,
-// which an executable without libc doesn't have; in a dynamic PIE, every class's.
+// The section each class's atoms go to: in a static executable, EXECUTABLE_SECTION_COUNT for the C runtime's classes
+// (.init's and .fini's), which an executable without libc doesn't have; in a dynamic PIE, every class's.
 static const uint8_t executable_class_sections[BUSTER_LINK_CLASS_COUNT] = {
     [BUSTER_LINK_CLASS_NONE] = EXECUTABLE_SECTION_COUNT,
     [BUSTER_LINK_CLASS_RODATA] = EXECUTABLE_SECTION_RODATA,
     [BUSTER_LINK_CLASS_STRINGS] = EXECUTABLE_SECTION_RODATA,
-    [BUSTER_LINK_CLASS_EH_FRAME] = EXECUTABLE_SECTION_COUNT,
+    [BUSTER_LINK_CLASS_EH_FRAME] = EXECUTABLE_SECTION_EH_FRAME,
     [BUSTER_LINK_CLASS_TEXT] = EXECUTABLE_SECTION_TEXT,
     [BUSTER_LINK_CLASS_INIT] = EXECUTABLE_SECTION_COUNT,
     [BUSTER_LINK_CLASS_FINI] = EXECUTABLE_SECTION_COUNT,
@@ -1116,12 +1132,12 @@ static uint8_t executable_class_section(uint8_t class, bool dynamic)
 }
 
 // Whether a class's atoms keep their id order without padding between them, as fragments of one piece: .init's and
-// .fini's, which run into each other, and .eh_frame's, whose records follow one another (a dynamic PIE's). Each must
+// .fini's (a dynamic PIE's), which run into each other, and .eh_frame's, whose records follow one another. Each must
 // start at a multiple of its own alignment where the ones before it end, but .eh_frame's at a multiple of 4: its
 // records' lengths are, and lld writes the records one after another whatever their sections' alignment.
 static bool executable_class_is_ordered(uint8_t class, bool dynamic)
 {
-    return dynamic && (class == BUSTER_LINK_CLASS_EH_FRAME || class == BUSTER_LINK_CLASS_INIT || class == BUSTER_LINK_CLASS_FINI);
+    return class == BUSTER_LINK_CLASS_EH_FRAME || (dynamic && (class == BUSTER_LINK_CLASS_INIT || class == BUSTER_LINK_CLASS_FINI));
 }
 
 // An atom's alignment as its bucket has it, from its class, alignment and size, or BUSTER_EXECUTABLE_ALIGNMENTS if it
@@ -1201,8 +1217,8 @@ struct ExecutableSegmentLayout
 };
 
 // Program headers: PT_PHDR, a dynamic PIE's PT_INTERP, a PT_LOAD per segment with bytes, PT_TLS with TLS, a dynamic
-// PIE's PT_DYNAMIC, PT_GNU_RELRO with a RELRO segment, PT_GNU_STACK and PT_NOTE.
-#define BUSTER_EXECUTABLE_MAX_PROGRAM_HEADERS 11
+// PIE's PT_DYNAMIC, PT_GNU_RELRO with a RELRO segment, PT_GNU_EH_FRAME with .eh_frame_hdr, PT_GNU_STACK and PT_NOTE.
+#define BUSTER_EXECUTABLE_MAX_PROGRAM_HEADERS 12
 // Section headers: the null one, the sections with bytes or memory, and .shstrtab.
 #define BUSTER_EXECUTABLE_MAX_SECTION_HEADERS (EXECUTABLE_SECTION_COUNT + 2)
 #define BUSTER_EXECUTABLE_SHSTRTAB_BYTES 272
@@ -1243,14 +1259,16 @@ struct ExecutableLayout
     uint64_t chunk_count;
 };
 
-// The counts of one lane's atoms: per bucket, how many, their padded bytes and how many go in the file; and per
-// ordered class (executable_class_is_ordered), its atoms' largest alignment.
+// The counts of one lane's atoms: per bucket, how many, their padded bytes and how many go in the file; per ordered
+// class (executable_class_is_ordered), its atoms' largest alignment; and the FDEs in its .eh_frame atoms.
 typedef struct ExecutableCounts ExecutableCounts;
 struct ExecutableCounts
 {
     uint64_t bytes[BUSTER_EXECUTABLE_BUCKETS];
     uint64_t pieces[BUSTER_EXECUTABLE_BUCKETS];
     uint8_t ordered_log2[BUSTER_LINK_CLASS_COUNT];
+    // The FDEs of the lane's .eh_frame atoms.
+    uint64_t fdes;
 };
 
 // Places the sections, from every lane's counts, the GOT's slots and the sizes of the linker's other sections
@@ -1333,7 +1351,8 @@ static bool executable_lay_out(ExecutableLayout* layout, const ExecutableCounts*
                                                         section_bytes[EXECUTABLE_SECTION_DYNAMIC] + section_bytes[EXECUTABLE_SECTION_GOT] !=
                                                     0;
     layout->has_segment[EXECUTABLE_SEGMENT_RW] = section_bytes[EXECUTABLE_SECTION_DATA] + section_bytes[EXECUTABLE_SECTION_BSS] != 0;
-    layout->program_headers = 4 + (has_tls ? 1 : 0) + (layout->has_segment[EXECUTABLE_SEGMENT_RELRO] ? 1 : 0) + (dynamic ? 2 : 0);
+    layout->program_headers = 4 + (has_tls ? 1 : 0) + (layout->has_segment[EXECUTABLE_SEGMENT_RELRO] ? 1 : 0) + (dynamic ? 2 : 0) +
+                              (section_bytes[EXECUTABLE_SECTION_EH_FRAME_HDR] != 0 ? 1 : 0);
     for (uint32_t segment = EXECUTABLE_SEGMENT_RX; segment < EXECUTABLE_SEGMENTS; segment += 1)
     {
         layout->program_headers += layout->has_segment[segment] ? 1 : 0;
@@ -1484,8 +1503,8 @@ static Elf64_Phdr executable_program_header(const ExecutableLayout* layout, uint
 }
 
 // The headers, in lld's order of program headers: PT_PHDR, a dynamic PIE's PT_INTERP, the PT_LOADs, PT_TLS, a dynamic
-// PIE's PT_DYNAMIC, PT_GNU_RELRO, PT_GNU_STACK (not executable) and PT_NOTE (the ABI note and the build ID's, which
-// follow each other). The note's hash stays zero until the build ID is known.
+// PIE's PT_DYNAMIC, PT_GNU_RELRO, PT_GNU_EH_FRAME, PT_GNU_STACK (not executable) and PT_NOTE (the ABI note and the
+// build ID's, which follow each other). The note's hash stays zero until the build ID is known.
 static void executable_write_headers(ExecutableHeaders* headers, const ExecutableLayout* layout, uint64_t entry)
 {
     memset(headers, 0, sizeof(*headers));
@@ -1559,6 +1578,12 @@ static void executable_write_headers(ExecutableHeaders* headers, const Executabl
     {
         const ExecutableSegmentLayout* relro = &layout->segments[EXECUTABLE_SEGMENT_RELRO];
         program[count] = executable_program_header(layout, PT_GNU_RELRO, PF_R, relro->offset, relro->address, relro->file_size, relro->memory_size, 1);
+        count += 1;
+    }
+    const ExecutableSectionLayout* eh_frame_hdr = &layout->sections[EXECUTABLE_SECTION_EH_FRAME_HDR];
+    if (eh_frame_hdr->size != 0)
+    {
+        program[count] = executable_program_header(layout, PT_GNU_EH_FRAME, PF_R, eh_frame_hdr->offset, eh_frame_hdr->address, eh_frame_hdr->size, eh_frame_hdr->size, 4);
         count += 1;
     }
     program[count] = (Elf64_Phdr){
@@ -1799,6 +1824,299 @@ static uint64_t executable_chunk_runs(const ExecutableLayout* layout, const Exec
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Unwind tables
+//
+// .eh_frame holds its atoms' records one after another (executable_class_is_ordered), and .eh_frame_hdr indexes their
+// FDEs, so that an unwinder looks a return address up in its table rather than walk the records: the LSB's format,
+// which lld writes with --eh-frame-hdr. An atom's records must be ones the header can index: CIEs whose augmentation is
+// 'z' and 'R', 'P', 'L' or 'S', with 'R''s FDE pointers pc-relative sdata4, as GCC and clang give every x86-64 one; and
+// FDEs that point back to one of them in the same atom, each with its pc_begin a PC32 fixup's field, which gives the
+// function's address (S + A). A zero length ends the records, as crtendS.o's terminator does. An atom with others fails
+// the link (EXECUTABLE_ERROR_UNWIND), and so does one with an FDE whose function is farther from the header than an
+// int32 reaches, which GNU ld and lld refuse too.
+//   - The count, before the layout, by lanes that share the .eh_frame atoms by cost, their runs in id order
+//     (executable_count_frames): each atom's FDEs from its fixups, 16 at a time, each a candidate 8 bytes before its
+//     field, whose length and CIE pointer are loaded for all 16 before any is compared, since no candidate's place
+//     depends on another's as a walk's next record does on its last (executable_eh_frame_fdes). An atom the candidates
+//     don't describe (its records laid out otherwise, or other fixups among them) goes to the exact walk, record by
+//     record (executable_eh_frame_walk), which is also the twin that ExecutableOptions.exact selects.
+//   - The table, once every symbol's reference is known: each lane the entries of its share's FDEs, in .eh_frame's
+//     order, an atom the vector path read from its fixups' columns alone (executable_eh_frame_entries), one the walk
+//     read by the walk, and an atom with an entry outside int32 failing (executable_eh_frame_table); then lane 0 checks
+//     that they are sorted by initial location, 16 at a time, as they are when the functions' addresses go in the order
+//     of their FDEs, as in a link of a compiler's objects; only if they aren't does it sort them, which the exact twin
+//     always does (executable_eh_frame_sort).
+
+// .eh_frame_hdr's first 12 bytes: version 1; the encodings of .eh_frame's address (pc-relative sdata4), of the count
+// (udata4) and of the table's entries (datarel sdata4: from the header's start); .eh_frame's address and the count.
+// Then the table, two int32 per FDE: its function's initial location and its own address.
+#define BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES 12
+#define BUSTER_EXECUTABLE_EH_PE_PCREL_SDATA4 0x1b
+#define BUSTER_EXECUTABLE_EH_PE_UDATA4 0x03
+#define BUSTER_EXECUTABLE_EH_PE_DATAREL_SDATA4 0x3b
+// The CIEs an atom's walk keeps, among which its FDEs' must be.
+#define BUSTER_EXECUTABLE_EH_FRAME_CIES 8
+
+static uint32_t executable_load32(const uint8_t* bytes)
+{
+    uint32_t result;
+    memcpy(&result, bytes, sizeof(result));
+    return result;
+}
+
+// Reads the LEB128 at *position, before `end`, past it: its value if `value` (unsigned, its first 64 bits). False if it
+// runs past `end`.
+static bool executable_leb128(const uint8_t* bytes, uint64_t end, uint64_t* position, uint64_t* value)
+{
+    uint64_t at = *position;
+    uint64_t result = 0;
+    uint32_t shift = 0;
+    bool more = true;
+    while (more && at < end)
+    {
+        result |= shift < 64 ? (uint64_t)(bytes[at] & 0x7f) << shift : 0;
+        more = (bytes[at] & 0x80) != 0;
+        shift += 7;
+        at += 1;
+    }
+    *position = at;
+    if (value != 0)
+    {
+        *value = result;
+    }
+    return !more;
+}
+
+// The bytes of a pointer of DWARF encoding `encoding`, by its low bits: absptr, udata2, udata4, udata8, sdata2, sdata4
+// and sdata8 by their sizes, uleb128 and sleb128 as 0 (a LEB128's), and UINT32_MAX for the others.
+static uint32_t executable_pointer_bytes(uint8_t encoding)
+{
+    static const uint32_t bytes[16] = { 8, 0, 2, 4, 8, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, 0, 2, 4, 8, UINT32_MAX, UINT32_MAX, UINT32_MAX };
+    return bytes[encoding & 0x0f];
+}
+
+// Whether the record at `cie`, a CIE of `length` bytes past its length field, is one the header can index: version 1
+// or 3, and an augmentation of 'z' then 'R', 'P', 'L' and 'S', 'R''s FDE pointers pc-relative sdata4. 'P''s personality
+// pointer and 'L''s LSDA encoding are skipped within the augmentation data's length.
+static bool executable_cie_indexable(const uint8_t* bytes, uint64_t cie, uint32_t length)
+{
+    const uint64_t end = cie + 4 + (uint64_t)length;
+    uint64_t position = cie + 8;
+    const uint8_t version = position < end ? bytes[position] : 0;
+    position += 1;
+    const uint64_t augmentation = position;
+    while (position < end && bytes[position] != 0)
+    {
+        position += 1;
+    }
+    bool valid = (version == 1 || version == 3) && position < end && bytes[augmentation] == 'z';
+    position += 1;
+    // The code and data alignments, and the return address register: a byte in version 1, a LEB128 in 3.
+    valid = valid && executable_leb128(bytes, end, &position, 0) && executable_leb128(bytes, end, &position, 0);
+    valid = valid && (version == 3 ? executable_leb128(bytes, end, &position, 0) : position < end);
+    position += version == 1 ? 1 : 0;
+    uint64_t data_length = 0;
+    valid = valid && executable_leb128(bytes, end, &position, &data_length) && data_length <= end - position;
+    const uint64_t data_end = valid ? position + data_length : 0;
+    bool encoded = false;
+    for (uint64_t a = augmentation + 1; valid && bytes[a] != 0; a += 1)
+    {
+        const uint8_t letter = bytes[a];
+        const uint8_t datum = position < data_end ? bytes[position] : 0;
+        const uint32_t pointer = letter == 'P' ? executable_pointer_bytes(datum) : 0;
+        valid = (letter == 'S' || position < data_end) && (letter == 'R' || letter == 'P' || letter == 'L' || letter == 'S') && pointer != UINT32_MAX;
+        encoded = encoded || (letter == 'R' && datum == BUSTER_EXECUTABLE_EH_PE_PCREL_SDATA4);
+        valid = valid && (letter != 'R' || datum == BUSTER_EXECUTABLE_EH_PE_PCREL_SDATA4);
+        position += letter == 'S' ? 0 : 1;
+        if (valid && letter == 'P' && pointer == 0)
+        {
+            valid = executable_leb128(bytes, data_end, &position, 0);
+        }
+        position += letter == 'P' ? pointer : 0;
+    }
+    return valid && encoded && position <= data_end;
+}
+
+// The exact walk of an .eh_frame atom's records, one after another (see this section's comment): how many FDEs it has,
+// or UINT32_MAX if a record isn't one the header can index. With `entries`, each FDE's table entry from the first, for
+// the header at image offset `header` and the atom at `address`, and UINT32_MAX also if one doesn't fit.
+static uint32_t executable_eh_frame_walk(const Link* link, AtomId atom, int32_t* entries, uint64_t header, uint64_t address)
+{
+    const uint8_t* bytes = link->atoms.bytes[atom];
+    const uint64_t size = link->atoms.size[atom];
+    const LinkFixups* fixups = &link->fixups;
+    FixupId fixup = link->atoms.fixup_begin[atom];
+    const FixupId fixups_end = fixup + link->atoms.fixup_count[atom];
+    uint64_t cies[BUSTER_EXECUTABLE_EH_FRAME_CIES];
+    uint32_t cie_count = 0;
+    uint64_t offset = 0;
+    uint32_t count = 0;
+    bool valid = bytes != 0 || size == 0;
+    bool ended = false;
+    while (valid && !ended && offset < size)
+    {
+        valid = size - offset >= 4;
+        const uint32_t length = valid ? executable_load32(bytes + offset) : 0;
+        ended = valid && length == 0;
+        valid = valid && (ended || (length >= 4 && (uint64_t)length <= size - offset - 4));
+        const uint32_t id = valid && !ended ? executable_load32(bytes + offset + 4) : 0;
+        if (valid && !ended && id == 0)
+        {
+            valid = cie_count < BUSTER_EXECUTABLE_EH_FRAME_CIES && executable_cie_indexable(bytes, offset, length);
+            cies[valid ? cie_count : 0] = offset;
+            cie_count += valid ? 1 : 0;
+        }
+        else if (valid && !ended)
+        {
+            // Its CIE, from its pointer's field, among the ones met; and its pc_begin's fixup, the fixups being in
+            // offset order.
+            const uint64_t pointed = offset + 4 >= id ? offset + 4 - id : UINT64_MAX;
+            bool known = false;
+            for (uint32_t c = 0; c < cie_count; c += 1)
+            {
+                known = known || cies[c] == pointed;
+            }
+            while (fixup < fixups_end && fixups->offset[fixup] < offset + 8)
+            {
+                fixup += 1;
+            }
+            valid = known && length >= 12 && fixup < fixups_end && fixups->offset[fixup] == offset + 8 &&
+                    (fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_PC32;
+            if (valid && entries != 0)
+            {
+                // The function's address, S + A, from the header, which must fit the entry.
+                const int64_t reference = link->symbols.reference[fixups->target[fixup]];
+                int64_t initial = 0;
+                valid = !__builtin_add_overflow(reference - (int64_t)header, link_fixup_addend(link, fixup), &initial) && initial >= INT32_MIN && initial <= INT32_MAX;
+                entries[2 * (uint64_t)count] = (int32_t)initial;
+                entries[2 * (uint64_t)count + 1] = (int32_t)(address + offset - header);
+            }
+            count += valid ? 1 : 0;
+        }
+        offset += valid && !ended ? 4 + (uint64_t)length : 0;
+    }
+    return valid ? count : UINT32_MAX;
+}
+
+// The FDEs of an .eh_frame atom that is a CIE then FDEs pointing back to it, and perhaps a terminator, each FDE with
+// its pc_begin a PC32 fixup's field (of an addend in the column) and nothing else fixed up: their count, or UINT32_MAX
+// for an atom that isn't, which the exact walk then reads. 16 fixups at a time, each a candidate FDE 8 bytes before its
+// field: the candidates' lengths and CIE pointers are loaded, 8 bytes each by scalar loads that don't wait on each other
+// (gathers cost more on Zen 5), then compared 16 at a time: each must start where the one before it ends (the first
+// where the CIE does, the one before a group's first in the last group's last lane), point back to the CIE, and be long
+// enough for pc_begin and the range; and the last must end at the atom's end or its terminator's start, so none ends
+// past it: the one after an FDE that did would start past its field's candidate.
+static uint32_t executable_eh_frame_fdes(const Link* link, AtomId atom)
+{
+    const uint8_t* bytes = link->atoms.bytes[atom];
+    const uint64_t size = link->atoms.size[atom];
+    const LinkFixups* fixups = &link->fixups;
+    const FixupId first = link->atoms.fixup_begin[atom];
+    const uint32_t count = link->atoms.fixup_count[atom];
+    const uint32_t cie_length = bytes != 0 && size >= 8 ? executable_load32(bytes) : 0;
+    bool valid = bytes != 0 && size >= 8 && size <= BUSTER_EXECUTABLE_MAX_ATOM_BYTES && executable_load32(bytes + 4) == 0 && cie_length >= 4 &&
+                 (uint64_t)cie_length <= size - 4 && executable_cie_indexable(bytes, 0, cie_length);
+    const __m512i size_vector = _mm512_set1_epi32((int32_t)size);
+    const __m512i evens = _mm512_set_epi32(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0);
+    const __m512i odds = _mm512_set_epi32(31, 29, 27, 25, 23, 21, 19, 17, 15, 13, 11, 9, 7, 5, 3, 1);
+    // The last group's ends, whose last lane the next group's first FDE must start at.
+    __m512i last_ends = _mm512_set1_epi32((int32_t)(cie_length + 4));
+    uint32_t last = 15;
+    for (uint32_t i = 0; valid && i < count; i += 16)
+    {
+        const uint32_t n = count - i < 16 ? count - i : 16;
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, n);
+        const __m512i offsets = _mm512_maskz_loadu_epi32(lanes, fixups->offset + first + i);
+        const __m512i kinds = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, fixups->kind + first + i));
+        const __m512i starts = _mm512_sub_epi32(offsets, _mm512_set1_epi32(8));
+        // Each candidate's 12 bytes, its length, CIE pointer and pc_begin, within the atom.
+        const __mmask16 inside = _mm512_mask_cmpge_epu32_mask(lanes, offsets, _mm512_set1_epi32(8)) &
+                                 _mm512_mask_cmple_epu32_mask(lanes, _mm512_add_epi32(offsets, _mm512_set1_epi32(4)), size_vector);
+        valid = inside == lanes && _mm512_mask_cmpneq_epi32_mask(lanes, kinds, _mm512_set1_epi32(BUSTER_LINK_FIXUP_PC32)) == 0;
+        uint32_t start_of[16];
+        uint64_t head_of[16] = { 0 };
+        _mm512_storeu_si512(start_of, starts);
+        for (uint32_t j = 0; valid && j < n; j += 1)
+        {
+            memcpy(&head_of[j], bytes + start_of[j], sizeof(head_of[j]));
+        }
+        // The lengths are the heads' low halves, the CIE pointers their high ones.
+        const __m512i heads_low = _mm512_loadu_si512(head_of);
+        const __m512i heads_high = _mm512_loadu_si512(head_of + 8);
+        const __m512i lengths = _mm512_permutex2var_epi32(heads_low, evens, heads_high);
+        const __m512i pointers = _mm512_permutex2var_epi32(heads_low, odds, heads_high);
+        // Lengths within the atom first, so that the ends fit 32 bits.
+        const __mmask16 sized = _mm512_mask_cmpge_epu32_mask(lanes, lengths, _mm512_set1_epi32(12)) & _mm512_mask_cmple_epu32_mask(lanes, lengths, size_vector);
+        const __m512i ends = _mm512_add_epi32(_mm512_add_epi32(starts, _mm512_set1_epi32(4)), lengths);
+        const __m512i before = _mm512_alignr_epi32(ends, last_ends, 15);
+        const __mmask16 placed = _mm512_mask_cmpeq_epi32_mask(lanes, starts, before);
+        const __mmask16 pointing = _mm512_mask_cmpeq_epi32_mask(lanes, pointers, _mm512_add_epi32(starts, _mm512_set1_epi32(4)));
+        valid = valid && (sized & placed & pointing) == lanes;
+        last_ends = ends;
+        last = n - 1;
+    }
+    const uint64_t last_end = (uint32_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(_mm512_permutexvar_epi32(_mm512_set1_epi32((int32_t)last), last_ends)));
+    valid = valid && (last_end == size || (last_end + 4 == size && executable_load32(bytes + size - 4) == 0));
+    return valid ? count : UINT32_MAX;
+}
+
+// The table entries of an atom that executable_eh_frame_fdes read, whose fixups are its FDEs' pc_begins, each 8 bytes
+// past its FDE's start: from the fixups' columns alone, 16 at a time, each its target's reference plus its addend, and
+// its FDE's address, from the header at image offset `header` for the atom at `address`. False if one doesn't fit,
+// which is checked in 64 bits: the reference less the header, offset by 2^31, plus the addend must be below 2^32.
+static bool executable_eh_frame_entries(const Link* link, AtomId atom, int32_t* entries, uint64_t header, uint64_t address)
+{
+    const LinkFixups* fixups = &link->fixups;
+    const FixupId first = link->atoms.fixup_begin[atom];
+    const uint32_t count = link->atoms.fixup_count[atom];
+    const __m512i bias = _mm512_set1_epi64(0x80000000ll - (int64_t)header);
+    const __m512i limit = _mm512_set1_epi64(1ll << 32);
+    const __m512i from_header = _mm512_set1_epi32((int32_t)(address - 8 - header));
+    const __m512i low_order = _mm512_set_epi32(23, 7, 22, 6, 21, 5, 20, 4, 19, 3, 18, 2, 17, 1, 16, 0);
+    const __m512i high_order = _mm512_set_epi32(31, 15, 30, 14, 29, 13, 28, 12, 27, 11, 26, 10, 25, 9, 24, 8);
+    bool fits = true;
+    for (uint32_t i = 0; fits && i < count; i += 16)
+    {
+        const uint32_t n = count - i < 16 ? count - i : 16;
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, n);
+        const __m512i offsets = _mm512_maskz_loadu_epi32(lanes, fixups->offset + first + i);
+        const __m512i targets = _mm512_maskz_loadu_epi32(lanes, fixups->target + first + i);
+        const __m512i addends = _mm512_maskz_loadu_epi32(lanes, fixups->addend + first + i);
+        uint32_t target_of[16];
+        uint32_t reference_of[16] = { 0 };
+        _mm512_storeu_si512(target_of, targets);
+        for (uint32_t j = 0; j < n; j += 1)
+        {
+            reference_of[j] = link->symbols.reference[target_of[j]];
+        }
+        const __m512i references = _mm512_loadu_si512(reference_of);
+        const __m512i wide_low = _mm512_add_epi64(_mm512_add_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(references)), _mm512_cvtepi32_epi64(_mm512_castsi512_si256(addends))), bias);
+        const __m512i wide_high =
+            _mm512_add_epi64(_mm512_add_epi64(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(references, 1)), _mm512_cvtepi32_epi64(_mm512_extracti64x4_epi64(addends, 1))), bias);
+        const __mmask16 outside = (__mmask16)(_mm512_cmpge_epu64_mask(wide_low, limit) | (uint32_t)_mm512_cmpge_epu64_mask(wide_high, limit) << 8);
+        fits = (outside & lanes) == 0;
+        const __m512i initial = _mm512_sub_epi32(_mm512_add_epi32(references, addends), _mm512_set1_epi32((int32_t)header));
+        const __m512i fde = _mm512_add_epi32(offsets, from_header);
+        const __m512i low = _mm512_permutex2var_epi32(initial, low_order, fde);
+        const __m512i high = _mm512_permutex2var_epi32(initial, high_order, fde);
+        const uint32_t words = 2 * n;
+        int32_t* place = entries + 2 * (uint64_t)i;
+        _mm512_mask_storeu_epi32(place, (__mmask16)_bzhi_u32(0xffff, words), low);
+        _mm512_mask_storeu_epi32(place + 16, (__mmask16)_bzhi_u32(0xffff, words > 16 ? words - 16 : 0), high);
+    }
+    return fits;
+}
+
+// An .eh_frame atom's FDEs: by the vector path, or if it can't read the atom, or with `exact`, by the walk, which
+// *walked then says.
+static uint32_t executable_eh_frame(const Link* link, AtomId atom, bool exact, bool* walked)
+{
+    const uint32_t vector = exact ? UINT32_MAX : executable_eh_frame_fdes(link, atom);
+    *walked = vector == UINT32_MAX;
+    return vector != UINT32_MAX ? vector : executable_eh_frame_walk(link, atom, 0, 0, 0);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Writing
 
 // A lane's first failure in a phase: the error, and the smallest atom, symbol or fixup it was about.
@@ -1879,10 +2197,10 @@ typedef struct ExecutableShared ExecutableShared;
 struct ExecutableShared
 {
     ExecutableCounts* counts;
-    // A dynamic PIE's (0 for a static executable): whether its passes go by their exact twins; the bitsets of the
-    // symbols by relocation class (the dynamic ones, SYMBOLIC, and the RELATIVE ones), words_per_lane words, each lane
-    // writing its range of words; each lane's part of the filter (BUSTER_EXECUTABLE_FILTER_WORDS words each); the
-    // lanes' counts; each lane's bitset of the symbols that have stubs
+    // Whether the passes go by their exact twins (ExecutableOptions.exact). A dynamic PIE's (0 for a static
+    // executable): the bitsets of the symbols by relocation class (the dynamic ones, SYMBOLIC, and the RELATIVE ones),
+    // words_per_lane words, each lane writing its range of words; each lane's part of the filter
+    // (BUSTER_EXECUTABLE_FILTER_WORDS words each); the lanes' counts; each lane's bitset of the symbols that have stubs
     // (words_per_lane words each, reduced into row 0 as the GOT's are); each lane's bitset of the library's version
     // indices that its imports need (version_words words of indices below version_limit each), and lane 0's numbers for
     // them in the executable (from 2, 0 for an index no import needs); and with RELR, the RELR words of each atom the
@@ -2246,6 +2564,84 @@ static void executable_check_direct(const Link* link, ExecutableShared* shared, 
     shared->got_marks[word] |= bit;
     shared->stub_marks[word] |= bit;
     *refused += (dynamic && !call) || (relative && !dynamic && executable_is_absolute_zero(link, target)) ? 1 : 0;
+}
+
+// A lane's share of the .eh_frame atoms (executable_count_frames): in id order, each atom and its FDEs' count, with
+// BUSTER_EXECUTABLE_FRAMES_WALKED for one that the exact walk read, whose table entries it then writes too.
+#define BUSTER_EXECUTABLE_FRAMES_WALKED 0x80000000u
+
+typedef struct ExecutableFrames ExecutableFrames;
+struct ExecutableFrames
+{
+    AtomId* atoms;
+    uint32_t* fdes;
+    uint32_t count;
+};
+
+// The .eh_frame atoms 64 at a time from `group`: a bit each, by a compare of their classes.
+static uint64_t executable_frame_atoms(const LinkAtoms* atoms, AtomId group)
+{
+    const uint64_t left = atoms->count - group;
+    const __mmask64 valid = left >= 64 ? ~0ull : (1ull << left) - 1;
+    return _mm512_mask_cmpeq_epi8_mask(valid, _mm512_maskz_loadu_epi8(valid, atoms->class + group), _mm512_set1_epi8(BUSTER_LINK_CLASS_EH_FRAME));
+}
+
+// This lane's share of the .eh_frame atoms, by their cost (their fixups, which their FDEs' pc_begins are, plus one): the
+// atoms whose cost's midpoint falls in the lane's share of the total, in id order, as lane_range_by_cost cuts, so that
+// the lanes' shares follow one another and the atoms of a cluster (a generated program's, after its code) don't fall to
+// one lane. Every lane finds the atoms twice, for the total, then for its share, whose FDEs (executable_eh_frame) go to
+// its counts, and whose atoms to `frames`, in `arena`, for executable_eh_frame_table. An atom the header can't index
+// fails the link.
+static void executable_count_frames(const Link* link, ExecutableShared* shared, uint32_t lane, uint32_t lanes, ExecutableFrames* frames, Arena* arena, ExecutableLaneError* error)
+{
+    const LinkAtoms* atoms = &link->atoms;
+    uint64_t total = 0;
+    uint64_t atom_count = 0;
+    for (AtomId group = 1; group < atoms->count; group += 64)
+    {
+        const uint64_t found_atoms = executable_frame_atoms(atoms, group);
+        for (uint64_t found = found_atoms; found != 0; found &= found - 1)
+        {
+            total += (uint64_t)atoms->fixup_count[group + (AtomId)__builtin_ctzll(found)] + 1;
+        }
+        atom_count += (uint64_t)__builtin_popcountll(found_atoms);
+    }
+    *frames = (ExecutableFrames){
+        .atoms = BUSTER_ARENA_PUSH_ARRAY(arena, AtomId, atom_count),
+        .fdes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, atom_count),
+    };
+    const bool room = frames->atoms != 0 && frames->fdes != 0;
+    if (!room)
+    {
+        executable_lane_fail(error, EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
+    }
+    uint64_t before = 0;
+    uint64_t fdes = 0;
+    for (AtomId group = 1; room && group < atoms->count; group += 64)
+    {
+        for (uint64_t found = executable_frame_atoms(atoms, group); found != 0; found &= found - 1)
+        {
+            const AtomId atom = group + (AtomId)__builtin_ctzll(found);
+            const uint64_t cost = (uint64_t)atoms->fixup_count[atom] + 1;
+            // The lane whose share of twice the total holds twice the midpoint.
+            const uint64_t owner = (2 * before + cost) * lanes / (2 * total);
+            before += cost;
+            if (owner == lane)
+            {
+                bool walked = false;
+                const uint32_t count = executable_eh_frame(link, atom, shared->exact, &walked);
+                if (count == UINT32_MAX)
+                {
+                    executable_lane_fail(error, EXECUTABLE_ERROR_UNWIND, atom, 0, 0);
+                }
+                frames->atoms[frames->count] = atom;
+                frames->fdes[frames->count] = (count != UINT32_MAX ? count : 0) | (walked ? BUSTER_EXECUTABLE_FRAMES_WALKED : 0);
+                frames->count += 1;
+                fdes += count != UINT32_MAX ? count : 0;
+            }
+        }
+    }
+    shared->counts[lane].fdes = fdes;
 }
 
 // Counts this lane's atoms per bucket (and each ordered class's largest alignment), and marks in its bitset the targets
@@ -3526,6 +3922,7 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
         shared->addend_magnitudes = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, lanes);
         // The atoms' pieces and the linker's: the headers, its sections', .shstrtab and the section headers.
         shared->pieces = BUSTER_ARENA_PUSH_ARRAY(arena, ExecutablePiece, (uint64_t)link->atoms.count + EXECUTABLE_SECTION_COUNT + 3);
+        shared->exact = options->exact;
         fits = shared->counts != 0 && shared->errors != 0 && shared->got_marks != 0 && shared->got_counts != 0 && shared->addend_magnitudes != 0 && shared->pieces != 0;
     }
     if (fits && dynamic != 0)
@@ -3538,7 +3935,6 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
         }
         shared->version_limit = limit;
         shared->version_words = limit / 64 + 1;
-        shared->exact = options->exact;
         shared->relr = dynamic->relr_version != 0;
         shared->dynamic_bits = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, shared->words_per_lane);
         shared->relative_bits = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, shared->words_per_lane);
@@ -3570,10 +3966,12 @@ static bool executable_prepare(Arena* arena, ExecutableShared* shared, const Exe
     shared->part_boundaries = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, parts + 1);
     shared->orders = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, parts * lanes);
     bool result = shared->got != 0 && shared->boundaries != 0 && shared->hashes != 0 && shared->part_boundaries != 0 && shared->orders != 0;
-    // A dynamic PIE's sections of the linker's own, which their phases fill: their first entries here.
-    for (uint32_t section = 0; result && layout->dynamic && section < EXECUTABLE_SECTION_COUNT; section += 1)
+    // The sections of the linker's own that their phases fill, a dynamic PIE's and .eh_frame_hdr: their first entries
+    // here.
+    for (uint32_t section = 0; result && section < EXECUTABLE_SECTION_COUNT; section += 1)
     {
-        const bool own = section != EXECUTABLE_SECTION_BUILD_ID && section != EXECUTABLE_SECTION_GOT && executable_linker_before[section] != BUSTER_LINK_CLASS_COUNT;
+        const bool own = section != EXECUTABLE_SECTION_BUILD_ID && section != EXECUTABLE_SECTION_GOT && executable_linker_before[section] != BUSTER_LINK_CLASS_COUNT &&
+                         (layout->dynamic || section == EXECUTABLE_SECTION_EH_FRAME_HDR);
         const uint64_t size = layout->sections[section].size;
         shared->section_bytes[section] = own && size != 0 ? arena_push_array(arena, size, 1, 8) : 0;
         result = !own || size == 0 || shared->section_bytes[section] != 0;
@@ -3708,6 +4106,116 @@ static void executable_chunks(Link* link, ExecutableShared* shared, const Execut
     }
 }
 
+// This lane's part of .eh_frame_hdr's table (see "Unwind tables"): the entries of its share of the .eh_frame atoms'
+// FDEs, which executable_count_frames counted, from the lanes' before it: an atom the vector path read by its fixups
+// (executable_eh_frame_entries), one the walk read by the walk; an atom with an entry that doesn't fit fails the link.
+// And lane 0 the header's first 12 bytes.
+static void executable_eh_frame_table(const Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutableFrames* frames, uint32_t lane,
+                                      uint32_t lanes, ExecutableLaneError* error)
+{
+    const ExecutableSectionLayout* header = &layout->sections[EXECUTABLE_SECTION_EH_FRAME_HDR];
+    uint8_t* bytes = shared->section_bytes[EXECUTABLE_SECTION_EH_FRAME_HDR];
+    int32_t* table = (int32_t*)(bytes + BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES);
+    uint64_t index = 0;
+    uint64_t fdes = 0;
+    for (uint32_t other = 0; other < lanes; other += 1)
+    {
+        index += other < lane ? shared->counts[other].fdes : 0;
+        fdes += shared->counts[other].fdes;
+    }
+    for (uint32_t f = 0; f < frames->count; f += 1)
+    {
+        const AtomId atom = frames->atoms[f];
+        const uint32_t count = frames->fdes[f] & ~BUSTER_EXECUTABLE_FRAMES_WALKED;
+        const uint64_t address = link->atoms.address[atom];
+        const bool fits = (frames->fdes[f] & BUSTER_EXECUTABLE_FRAMES_WALKED) != 0 ? executable_eh_frame_walk(link, atom, table + 2 * index, header->address, address) == count
+                                                                                    : executable_eh_frame_entries(link, atom, table + 2 * index, header->address, address);
+        if (!fits)
+        {
+            executable_lane_fail(error, EXECUTABLE_ERROR_UNWIND, atom, 0, 0);
+        }
+        index += count;
+    }
+    if (lane == 0)
+    {
+        const int32_t pointer = (int32_t)(layout->sections[EXECUTABLE_SECTION_EH_FRAME].address - (header->address + 4));
+        const uint32_t count = (uint32_t)fdes;
+        bytes[0] = 1;
+        bytes[1] = BUSTER_EXECUTABLE_EH_PE_PCREL_SDATA4;
+        bytes[2] = BUSTER_EXECUTABLE_EH_PE_UDATA4;
+        bytes[3] = BUSTER_EXECUTABLE_EH_PE_DATAREL_SDATA4;
+        memcpy(bytes + 4, &pointer, sizeof(pointer));
+        memcpy(bytes + 8, &count, sizeof(count));
+    }
+}
+
+// Lane 0: whether .eh_frame_hdr's `fdes` entries are sorted by initial location (as signed values, the table's sdata4),
+// 16 at a time, the even words of two vectors; if they aren't, or with `exact`, sorts them, stably, by initial location
+// (an LSD radix sort, 8 bits a pass). Their order is .eh_frame's, so equal initial locations stay in address order
+// either way. Returns false if the arena has no room for the sort.
+static bool executable_eh_frame_sort(uint8_t* bytes, uint64_t fdes, bool exact, Arena* arena, bool* in_order)
+{
+    int32_t* table = (int32_t*)(bytes + BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES);
+    const __m512i evens = _mm512_set_epi32(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0);
+    bool sorted = true;
+    // The last group's initial locations, whose last lane the next group's first must be at or after.
+    __m512i last = _mm512_set1_epi32(INT32_MIN);
+    for (uint64_t i = 0; sorted && i < fdes; i += 16)
+    {
+        const uint32_t n = fdes - i < 16 ? (uint32_t)(fdes - i) : 16;
+        const uint32_t words = 2 * n;
+        const __m512i first = _mm512_maskz_loadu_epi32((__mmask16)_bzhi_u32(0xffff, words), table + 2 * i);
+        const __m512i second = _mm512_maskz_loadu_epi32((__mmask16)_bzhi_u32(0xffff, words > 16 ? words - 16 : 0), table + 2 * i + 16);
+        const __m512i initial = _mm512_permutex2var_epi32(first, evens, second);
+        const __m512i before = _mm512_alignr_epi32(initial, last, 15);
+        sorted = _mm512_mask_cmpgt_epi32_mask((__mmask16)_bzhi_u32(0xffff, n), before, initial) == 0;
+        last = initial;
+    }
+    *in_order = sorted;
+    bool result = true;
+    if (!sorted || exact)
+    {
+        uint64_t* entries = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, 2 * fdes);
+        result = entries != 0;
+        uint64_t* from = entries;
+        uint64_t* to = entries != 0 ? entries + fdes : 0;
+        if (result)
+        {
+            memcpy(from, table, 8 * fdes);
+        }
+        // Each entry as 64 bits: its initial location in the low 32, which a pass's digit comes from, with the sign bit
+        // flipped so that unsigned order is the signed one.
+        for (uint32_t pass = 0; result && pass < 4; pass += 1)
+        {
+            uint64_t starts[257] = { 0 };
+            const uint32_t shift = 8 * pass;
+            for (uint64_t e = 0; e < fdes; e += 1)
+            {
+                starts[((((uint32_t)from[e] ^ 0x80000000u) >> shift) & 0xff) + 1] += 1;
+            }
+            for (uint32_t digit = 0; digit < 256; digit += 1)
+            {
+                starts[digit + 1] += starts[digit];
+            }
+            for (uint64_t e = 0; e < fdes; e += 1)
+            {
+                const uint32_t digit = (((uint32_t)from[e] ^ 0x80000000u) >> shift) & 0xff;
+                to[starts[digit]] = from[e];
+                starts[digit] += 1;
+            }
+            uint64_t* swapped = from;
+            from = to;
+            to = swapped;
+        }
+        // An even number of passes: the entries are back where they were copied to first.
+        if (result)
+        {
+            memcpy(table, from, 8 * fdes);
+        }
+    }
+    return result;
+}
+
 static bool executable_write(Link* link, const ExecutableOptions* options, ExecutableResult* result)
 {
     const uint32_t lane = lane_index();
@@ -3744,9 +4252,11 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes), EXECUTABLE_ERROR_ENTRY, 0, entry, 0);
     }
+    ExecutableFrames frames = { 0 };
     if (ok)
     {
         executable_count(link, shared, lane, dynamic, &filter, executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes));
+        executable_count_frames(link, shared, lane, lanes, &frames, scratch.arena, executable_error(shared, EXECUTABLE_PHASE_COUNT, lane, lanes));
     }
     lane_sync();
     ok = ok && !executable_any_failed(shared, EXECUTABLE_PHASE_COUNT, lanes);
@@ -3793,7 +4303,16 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         executable_dynamic_totals(link, shared, dynamic_options, lanes, &totals);
     }
-    const bool laid_out = ok && executable_lay_out(layout, shared->counts, lanes, got_slots, dynamic, dynamic ? totals.linker_bytes : 0);
+    // .eh_frame_hdr's size: an executable with .eh_frame atoms has one, with an entry per FDE.
+    uint64_t fdes = 0;
+    bool unwind = false;
+    for (uint32_t other = 0; ok && other < lanes; other += 1)
+    {
+        fdes += shared->counts[other].fdes;
+        unwind = unwind || shared->counts[other].bytes[executable_bucket(BUSTER_LINK_CLASS_EH_FRAME, 0)] != 0;
+    }
+    totals.linker_bytes[EXECUTABLE_SECTION_EH_FRAME_HDR] = unwind ? BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES + 8 * fdes : 0;
+    const bool laid_out = ok && executable_lay_out(layout, shared->counts, lanes, got_slots, dynamic, totals.linker_bytes);
     if (ok && !laid_out)
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_LAYOUT, 0, 0, 0);
@@ -3830,7 +4349,13 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         result->phase_times[EXECUTABLE_PHASE_SYMBOLS] = executable_now();
     }
 
-    // A dynamic PIE's relocations, and lane 0 its other dynamic sections.
+    // .eh_frame_hdr's table, each lane its atoms' entries; a dynamic PIE's relocations, and lane 0 its other dynamic
+    // sections.
+    const bool indexed = ok && layout->sections[EXECUTABLE_SECTION_EH_FRAME_HDR].size != 0;
+    if (indexed)
+    {
+        executable_eh_frame_table(link, shared, layout, &frames, lane, lanes, executable_error(shared, EXECUTABLE_PHASE_DYNAMIC, lane, lanes));
+    }
     if (ok && dynamic)
     {
         executable_dynamic_relocations(link, shared, layout, &totals, &filter, lane);
@@ -3840,7 +4365,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_DYNAMIC, lane, lanes), EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
     }
-    if (dynamic)
+    if (dynamic || indexed)
     {
         lane_sync();
     }
@@ -3850,9 +4375,16 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         result->phase_times[EXECUTABLE_PHASE_DYNAMIC] = executable_now();
     }
 
-    // Lane 0 opens the output, once nothing can fail but a fixup's value or the file.
+    // Lane 0 sorts .eh_frame_hdr's table if it must, then opens the output, once nothing can fail but a fixup's value or
+    // the file.
     ExecutableFile* file = 0;
     bool opened = false;
+    bool in_order = true;
+    if (ok && lane == 0 && indexed && !executable_eh_frame_sort(shared->section_bytes[EXECUTABLE_SECTION_EH_FRAME_HDR], fdes, shared->exact, scratch.arena, &in_order))
+    {
+        executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_OPEN, lane, lanes), EXECUTABLE_ERROR_MEMORY, 0, 0, 0);
+        ok = false;
+    }
     if (ok && lane == 0)
     {
         file = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ExecutableFile, 1);
@@ -3966,6 +4498,8 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
             result->relr_relocations = totals.relr_relocations;
             result->relr_words = totals.relr_words;
             result->stubs = totals.stubs;
+            result->fdes = indexed ? fdes : 0;
+            result->fdes_in_order = in_order;
         }
         result->phase_times[EXECUTABLE_PHASE_FINISH] = executable_now();
     }
