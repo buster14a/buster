@@ -214,15 +214,15 @@ typedef enum X86EncoderError
 // The form table's operand roles: a register class, and for ModRM.rm whether it can be a register, memory, or both
 // (as Intel's opcode maps write them: G a general register in ModRM.reg, E a general register or memory in
 // ModRM.rm, V an XMM register, XM an XMM register or memory, M only memory; and Y, YM, Z and ZM for YMM and ZMM, K
-// for the opmask registers, ST for the x87 registers, MM for the MMX registers, CR, DR and SREG for the control,
-// debug and segment registers, TMM for AMX's tiles and BND for MPX's bound registers; KP and TMMP are pairs of them,
-// and V4 and Z4 blocks of four XMM or ZMM registers; VSIBX, VSIBY and VSIBZ are a gather's or scatter's VSIB memory
-// operand, whose index is an XMM, YMM or ZMM register, Intel's vm32x and the rest, SIBMEM AMX's memory operand, which
-// always has a SIB byte, Intel's sibmem, MIB MPX's, Intel's mib, and M_NO_RIP memory that can't be RIP-relative). For a
-// +r form, the register is the rm operand. An rm operand that's an opmask, MMX or bound register, or memory, would need
-// checks that depend on the mode (k8 to k15 and mm8 to mm15 don't exist, but a base can be R8 to R15), so those are two
-// forms. With APX, so would SSE's XMM register or memory (xmm16 to xmm31 don't exist there, but a base can be R16 to
-// R31), which x86_encode_apx's templates mark instead (BUSTER_X86_TEMPLATE_NO_HIGH_RM_REGISTER).
+// for the opmask registers, ST for the x87 registers, MM for the MMX registers, CR, DR, TR and SREG for the control,
+// debug, test and segment registers, TMM for AMX's tiles and BND for MPX's bound registers; KP and TMMP are pairs of
+// them, and V4 and Z4 blocks of four XMM or ZMM registers; VSIBX, VSIBY and VSIBZ are a gather's or scatter's VSIB
+// memory operand, whose index is an XMM, YMM or ZMM register, Intel's vm32x and the rest, SIBMEM AMX's memory operand,
+// which always has a SIB byte, Intel's sibmem, MIB MPX's, Intel's mib, and M_NO_RIP memory that can't be RIP-relative).
+// For a +r form, the register is the rm operand. An rm operand that's an opmask, MMX or bound register, or memory,
+// would need checks that depend on the mode (k8 to k15 and mm8 to mm15 don't exist, but a base can be R8 to R15), so
+// those are two forms. With APX, so would SSE's XMM register or memory (xmm16 to xmm31 don't exist there, but a base
+// can be R16 to R31), which x86_encode_apx's templates mark instead (BUSTER_X86_TEMPLATE_NO_HIGH_RM_REGISTER).
 #define BUSTER_X86_OPERAND_CLASS 0x0f
 #define BUSTER_X86_CLASS_NONE 0
 #define BUSTER_X86_CLASS_GPR8 1
@@ -260,6 +260,9 @@ typedef enum X86EncoderError
 // Not a register: APX's default flags value (ccmp's and ctest's flags when their source condition is false), in
 // EVEX.vvvv as it is (not inverted), OF, SF, ZF and CF in bits 3 to 0.
 #define BUSTER_X86_OPERAND_DFV 0x1000
+// A debug register operand that is a test register instead (TR: the 386's and 486's TR0 to TR7, which 16- and 32-bit
+// modes alone have), which encodes as a debug register does: only the name differs.
+#define BUSTER_X86_OPERAND_TEST 0x2000
 #define BUSTER_X86_OPERAND_NONE 0
 #define BUSTER_X86_OPERAND_GB (BUSTER_X86_CLASS_GPR8 | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_GW (BUSTER_X86_CLASS_GPR16 | BUSTER_X86_OPERAND_REGISTER)
@@ -282,6 +285,7 @@ typedef enum X86EncoderError
 #define BUSTER_X86_OPERAND_MM (BUSTER_X86_CLASS_MMX | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_CR (BUSTER_X86_CLASS_CONTROL | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_DR (BUSTER_X86_CLASS_DEBUG | BUSTER_X86_OPERAND_REGISTER)
+#define BUSTER_X86_OPERAND_TR (BUSTER_X86_OPERAND_DR | BUSTER_X86_OPERAND_TEST)
 #define BUSTER_X86_OPERAND_SREG (BUSTER_X86_CLASS_SEGMENT | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_TMM (BUSTER_X86_CLASS_TILE | BUSTER_X86_OPERAND_REGISTER)
 #define BUSTER_X86_OPERAND_TMMP (BUSTER_X86_OPERAND_TMM | BUSTER_X86_OPERAND_PAIR)
@@ -3616,8 +3620,9 @@ typedef enum X86Syntax
 // pops of ES, CS, SS and DS and 32-bit ones of FS and GS, the moves between the accumulator and moffs16 or moffs32, and
 // the instructions 64-bit mode doesn't have: the BCD adjustments (aaa, aas, daa, das, aam and aad), salc, into, bound,
 // arpl, lds and les, pusha and popa, far branches to a pointer in the immediate (ptr16:16 and ptr16:32), inc and dec of
-// a register in the opcode (40+r and 48+r, REX in 64-bit mode), the descriptor table registers' 6-byte operands at each
-// operand size (16-bit: a 24-bit base), and VIA's montmul, which XED takes with 16- and 32-bit addresses alone.
+// a register in the opcode (40+r and 48+r, REX in 64-bit mode), the moves to and from the 386's and 486's test
+// registers (TR0 to TR7, #UD since the Pentium), the descriptor table registers' 6-byte operands at each operand size
+// (16-bit: a 24-bit base), and VIA's montmul, which XED takes with 16- and 32-bit addresses alone.
 #define BUSTER_X86_FORMS_LEGACY_MODES(X) \
     X(PUSH_R32, "push", 0, 1, 0x50, PR, 0, 0, 0, NONE, GD, 4, RM) \
     X(POP_R32, "pop", 0, 1, 0x58, PR, 0, 0, 0, NONE, GD, 4, RM) \
@@ -3702,6 +3707,8 @@ typedef enum X86Syntax
     X(INC_R32, "inc", 0, 1, 0x40, PR, 0, 0, 0, NONE, GD, 4, RM) \
     X(DEC_R16, "dec", 0x66, 1, 0x48, PR, 0, 0, 0, NONE, GW, 2, RM) \
     X(DEC_R32, "dec", 0, 1, 0x48, PR, 0, 0, 0, NONE, GD, 4, RM) \
+    X(MOV_TR_R32, "mov", 0, 2, 0x0f26, R, 0, 0, 0, TR, GD, 4, REG_RM) \
+    X(MOV_R32_TR, "mov", 0, 2, 0x0f24, R, 0, 0, 0, TR, GD, 4, RM_REG) \
     X(LGDTW_M48, "lgdtw", 0x66, 2, 0x0f01, D2, 0, 0, 0, NONE, M, 6, RM) \
     X(LGDTD_M48, "lgdtd", 0, 2, 0x0f01, D2, 0, 0, 0, NONE, M, 6, RM) \
     X(LIDTW_M48, "lidtw", 0x66, 2, 0x0f01, D3, 0, 0, 0, NONE, M, 6, RM) \
@@ -5828,7 +5835,7 @@ static bool x86_form_exists_in(uint32_t form_index, bool legacy)
 }
 
 // Builds x86_form_legacy. A legacy form without a 66 or vector operands is a 32-bit form if it has a 32-bit general
-// register (but the moves to and from control and debug registers, always 32-bit there) or a rel32, or
+// register (but the moves to and from control, debug and test registers, always 32-bit there) or a rel32, or
 // x86_forms_differ_in_size finds its 16-bit form, but those that keep their default operand size in every mode (ret,
 // enter, leave, push of an imm8, and push and pop of FS and GS: 16-bit in 16-bit mode, 32-bit in 32-bit mode), whose
 // 16- and 32-bit forms are other rows, and those whose 32-bit register W alone sizes, which a 66 would make another
@@ -6012,13 +6019,14 @@ static bool x86_form_has_apx_registers(uint32_t form)
 static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out, X86EncoderMode encoder);
 
 // Whether a register operand of the class can be `value` in the mode (register_is_valid's, and in 16- and 32-bit modes,
-// `legacy`, registers 0 to 7 alone, and in a legacy byte register, 4 to 7 only with the high byte flag: AH to BH, as
-// SPL to DIL need REX).
+// `legacy`, registers 0 to 7 alone but a control register's, whose CR8 AMD's LOCK prefix gives (see encode_one), and in
+// a legacy byte register, 4 to 7 only with the high byte flag: AH to BH, as SPL to DIL need REX).
 static bool mode_register_is_valid(uint8_t value, uint16_t operand, uint8_t family, bool memory_part, bool extended, bool legacy)
 {
     const uint8_t number = value & BUSTER_X86_REGISTER_NUMBER;
     const bool byte = (operand & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_GPR8 && family == BUSTER_X86_FAMILY_LEGACY && !memory_part;
-    const bool without_rex = (number & 0x18) == 0 && !(byte && number >= 4 && (value & BUSTER_X86_REGISTER_HIGH_BYTE) == 0);
+    const bool control = (operand & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_CONTROL;
+    const bool without_rex = (control || (number & 0x18) == 0) && !(byte && number >= 4 && (value & BUSTER_X86_REGISTER_HIGH_BYTE) == 0);
     return register_is_valid(value, operand, family, memory_part, extended) && (!legacy || without_rex);
 }
 
@@ -6318,14 +6326,16 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out, X86E
     const uint8_t vvvv = instruction->vvvv & BUSTER_X86_REGISTER_NUMBER;
     const bool has_modrm = form->encoding == BUSTER_X86_ENCODING_R || (form->encoding & BUSTER_X86_ENCODING_DIGIT);
     // REX.R, REX.X and REX.B (and VEX's and EVEX's): the high bits of ModRM.reg, the index and ModRM.rm (or the base,
-    // or the +r register). EVEX's X is a vector register rm's bit 4 (a general register's is B4, with APX).
+    // or the +r register). EVEX's X is a vector register rm's bit 4 (a general register's is B4, with APX). In 16- and
+    // 32-bit modes, without REX, CR8 is AMD's LOCK prefix on a move of CR0 (AltMovCr8), as GNU as writes it.
+    const bool legacy = x86_mode_is_legacy(encoder);
     const bool general_rm = x86_operand_is_general(form->rm);
-    const bool r = (reg & 8) != 0;
+    const bool lock_control = legacy && (form->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_CONTROL && (reg & 8) != 0;
+    const bool r = (reg & 8) != 0 && !lock_control;
     const bool x = memory ? index && (index_register & 8) : (rm & 16) && !general_rm;
     const bool b = (!memory || base) && (rm & 8);
     // In 16- and 32-bit modes, the mode writes the operand size's 66 (a 16-bit form's, which isn't among its prefixes
     // then, in 32-bit mode, and a 32-bit form's in 16-bit mode) and BUSTER_X86_MODE_ADDRESS_SIZE's 67.
-    const bool legacy = x86_mode_is_legacy(encoder);
     const uint8_t properties = legacy ? x86_form_legacy[form - x86_form_descriptions] : 0;
     const bool size_prefix = (properties & BUSTER_X86_LEGACY_SIZE_16) ? encoder != X86_ENCODER_MODE_16
                                                                       : (properties & BUSTER_X86_LEGACY_SIZE_32) != 0 && encoder == X86_ENCODER_MODE_16;
@@ -6368,6 +6378,11 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out, X86E
     if (size_prefix)
     {
         out[length] = 0x66;
+        length += 1;
+    }
+    if (lock_control)
+    {
+        out[length] = 0xf0;
         length += 1;
     }
     if (form->opcode_bytes != 0 && form->family == BUSTER_X86_FAMILY_LEGACY)

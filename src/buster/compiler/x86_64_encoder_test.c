@@ -77,8 +77,9 @@
 // the stream with APX's registers, whose registers 16 to 31 the printer writes as r16 to r31 (r16d, r16w and r16b); and
 // with --mode32 or --mode16, the stream of 32-bit or 16-bit mode, for GNU as's .code32 or .code16, with both address
 // sizes (addr16 or addr32 where nothing says the size), the mode's mnemonics (jecxz and jcxz, data16 and data32 where
-// a mnemonic can't say the operand size, lcall and ljmp), and segment overrides in the decorations as prefixes. The
-// exit status is 1 if the arguments are invalid or a check fails.
+// a mnemonic can't say the operand size, lcall and ljmp), segment overrides in the decorations as prefixes, and a test
+// register's move between .arch push, .arch i386 and .arch pop. The exit status is 1 if the arguments are invalid or a
+// check fails.
 //
 // Layout, in this order:
 //   - Random instructions: x86_test_random, x86_random_register, x86_random_displacement, x86_random_immediate, the
@@ -120,8 +121,8 @@
 // of 32-bit and 16-bit modes (--mode32 and --mode16).
 #define BUSTER_X86_TEST_DIGEST_ADDRESS32 0x89d61221b2e298c7ull
 #define BUSTER_X86_TEST_DIGEST_APX 0x9417f9289e033f50ull
-#define BUSTER_X86_TEST_DIGEST_32 0x438b04faea973eefull
-#define BUSTER_X86_TEST_DIGEST_16 0xd825b3b3fe832403ull
+#define BUSTER_X86_TEST_DIGEST_32 0xc5d2141a55e25336ull
+#define BUSTER_X86_TEST_DIGEST_16 0x7fa96fd9f6a44a14ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -197,8 +198,9 @@ static uint8_t x86_random_register(uint64_t* state, uint16_t operand, uint8_t fa
     }
     result &= (operand & BUSTER_X86_OPERAND_PAIR) ? 0xfe : 0xff;
     result &= (operand & BUSTER_X86_OPERAND_BLOCK) ? 0xfc : 0xff;
-    // In 16- and 32-bit modes, without REX: 0 to 7 (CR8 is CR0), and for a legacy byte register, AH to BH for 4 to 7.
-    if (x86_mode_is_legacy(x86_test_mode))
+    // In 16- and 32-bit modes, without REX: 0 to 7 (but CR8, AMD's LOCK prefix on a move of CR0), and for a legacy byte
+    // register, AH to BH for 4 to 7.
+    if (x86_mode_is_legacy(x86_test_mode) && class != BUSTER_X86_CLASS_CONTROL)
     {
         const bool byte = class == BUSTER_X86_CLASS_GPR8 && family == BUSTER_X86_FAMILY_LEGACY;
         result = (uint8_t)((result & 7) | (byte && (result & 7) >= 4 ? BUSTER_X86_REGISTER_HIGH_BYTE : 0));
@@ -890,6 +892,7 @@ static const char* const x86_mmx_names[8] = { "mm0", "mm1", "mm2", "mm3", "mm4",
 static const char* const x86_control_names[16] = { "cr0", "cr1", "cr2", "cr3", "cr4", "cr5", "cr6", "cr7",
                                                    "cr8", "cr9", "cr10", "cr11", "cr12", "cr13", "cr14", "cr15" };
 static const char* const x86_debug_names[8] = { "dr0", "dr1", "dr2", "dr3", "dr4", "dr5", "dr6", "dr7" };
+static const char* const x86_test_register_names[8] = { "tr0", "tr1", "tr2", "tr3", "tr4", "tr5", "tr6", "tr7" };
 static const char* const x86_tile_names[8] = { "tmm0", "tmm1", "tmm2", "tmm3", "tmm4", "tmm5", "tmm6", "tmm7" };
 static const char* const x86_bound_names[4] = { "bnd0", "bnd1", "bnd2", "bnd3" };
 // The segment registers, and the two numbers past GS that x86_validate rejects.
@@ -915,7 +918,7 @@ static const char* x86_register_name(uint8_t value, uint16_t operand)
         case BUSTER_X86_CLASS_ST: result = x86_st_names[number & 7]; break;
         case BUSTER_X86_CLASS_MMX: result = x86_mmx_names[number & 7]; break;
         case BUSTER_X86_CLASS_CONTROL: result = x86_control_names[number & 15]; break;
-        case BUSTER_X86_CLASS_DEBUG: result = x86_debug_names[number & 7]; break;
+        case BUSTER_X86_CLASS_DEBUG: result = (operand & BUSTER_X86_OPERAND_TEST) ? x86_test_register_names[number & 7] : x86_debug_names[number & 7]; break;
         case BUSTER_X86_CLASS_SEGMENT: result = x86_segment_names[number & 7]; break;
         case BUSTER_X86_CLASS_TILE: result = x86_tile_names[number & 7]; break;
         default: result = x86_xmm_names[number]; break;
@@ -2962,11 +2965,16 @@ static const KnownEncoding x86_known_encodings_32[] = {
     { { .form = X86_FORM_REP_STOS_D, .mode = BUSTER_X86_MODE_ADDRESS_SIZE }, 3, { 0x67, 0xf3, 0xab } },
     { { .form = X86_FORM_XLATB, .mode = BUSTER_X86_MODE_ADDRESS_SIZE }, 2, { 0x67, 0xd7 } },
     { { .form = X86_FORM_MASKMOVQ_MM_MM, .reg = 0, .rm = 1, .mode = BUSTER_X86_MODE_ADDRESS_SIZE }, 4, { 0x67, 0x0f, 0xf7, 0xc1 } },
-    // Control, debug and segment registers: mov cr0, eax; mov eax, cr3; mov dr7, ecx; mov eax, ds
+    // Control, debug, test and segment registers, and CR8 with AMD's LOCK prefix: mov cr0, eax; mov eax, cr3; mov dr7,
+    // ecx; mov eax, ds; mov cr8, eax; mov eax, cr8; mov eax, tr6; mov tr7, edx
     { { .form = X86_FORM_MOV_CR_R32, .reg = 0, .rm = X86_REGISTER_RAX }, 3, { 0x0f, 0x22, 0xc0 } },
     { { .form = X86_FORM_MOV_R32_CR, .reg = 3, .rm = X86_REGISTER_RAX }, 3, { 0x0f, 0x20, 0xd8 } },
     { { .form = X86_FORM_MOV_DR_R32, .reg = 7, .rm = X86_REGISTER_RCX }, 3, { 0x0f, 0x23, 0xf9 } },
     { { .form = X86_FORM_MOV_R32_SREG, .reg = 3, .rm = X86_REGISTER_RAX }, 2, { 0x8c, 0xd8 } },
+    { { .form = X86_FORM_MOV_CR_R32, .reg = 8, .rm = X86_REGISTER_RAX }, 4, { 0xf0, 0x0f, 0x22, 0xc0 } },
+    { { .form = X86_FORM_MOV_R32_CR, .reg = 8, .rm = X86_REGISTER_RAX }, 4, { 0xf0, 0x0f, 0x20, 0xc0 } },
+    { { .form = X86_FORM_MOV_R32_TR, .reg = 6, .rm = X86_REGISTER_RAX }, 3, { 0x0f, 0x24, 0xf0 } },
+    { { .form = X86_FORM_MOV_TR_R32, .reg = 7, .rm = X86_REGISTER_RDX }, 3, { 0x0f, 0x26, 0xfa } },
     // VEX and EVEX, with a 16-bit address's disp8*N too: vaddps xmm1, xmm2, xmm3; vaddps zmm1{k1}{z}, zmm2, zmm3;
     // vmovaps zmm0, zmmword ptr [bx+192]; vpgatherdd xmm1, dword ptr [eax+xmm2*4], xmm3
     { { .form = X86_FORM_VADDPS_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 4, { 0xc5, 0xe8, 0x58, 0xcb } },
@@ -3182,9 +3190,14 @@ static const KnownEncoding x86_known_encodings_16[] = {
     { { .form = X86_FORM_FNSTENV_M28, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0x66, 0xd9, 0x37 } },
     { { .form = X86_FORM_FNSTENVW_M14, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE }, 2, { 0xd9, 0x37 } },
     { { .form = X86_FORM_FSTENV_M28, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x9b, 0x66, 0xd9, 0x37 } },
-    // A control register, VEX and EVEX, with a 16-bit address's disp8*N, and a gather's 32-bit address: mov cr0, eax;
-    // vaddps xmm1, xmm2, xmm3; vmovaps zmm0, zmmword ptr [bx+si+128]; vpgatherdd xmm1, dword ptr [eax+xmm2*4], xmm3
+    // Control registers (CR8 with AMD's LOCK prefix) and test registers, VEX and EVEX, with a 16-bit address's disp8*N,
+    // and a gather's 32-bit address: mov cr0, eax; mov eax, cr8; mov cr8, ebx; mov eax, tr3; mov tr4, esi; vaddps
+    // xmm1, xmm2, xmm3; vmovaps zmm0, zmmword ptr [bx+si+128]; vpgatherdd xmm1, dword ptr [eax+xmm2*4], xmm3
     { { .form = X86_FORM_MOV_CR_R32, .reg = 0, .rm = X86_REGISTER_RAX }, 3, { 0x0f, 0x22, 0xc0 } },
+    { { .form = X86_FORM_MOV_R32_CR, .reg = 8, .rm = X86_REGISTER_RAX }, 4, { 0xf0, 0x0f, 0x20, 0xc0 } },
+    { { .form = X86_FORM_MOV_CR_R32, .reg = 8, .rm = X86_REGISTER_RBX }, 4, { 0xf0, 0x0f, 0x22, 0xc3 } },
+    { { .form = X86_FORM_MOV_R32_TR, .reg = 3, .rm = X86_REGISTER_RAX }, 3, { 0x0f, 0x24, 0xd8 } },
+    { { .form = X86_FORM_MOV_TR_R32, .reg = 4, .rm = X86_REGISTER_RSI }, 3, { 0x0f, 0x26, 0xe6 } },
     { { .form = X86_FORM_VADDPS_X_X_XM128, .reg = 1, .vvvv = 2, .rm = 3 }, 4, { 0xc5, 0xe8, 0x58, 0xcb } },
     { { .form = X86_FORM_VMOVAPS_Z_ZM512, .rm = X86_REGISTER_RBX, .index = X86_REGISTER_RSI, .mode = BUSTER_X86_MEMORY_BASE_INDEX(0), .displacement = 128 }, 7, { 0x62, 0xf1, 0x7c, 0x48, 0x28, 0x40, 0x02 } },
     { { .form = X86_FORM_VPGATHERDD_X_VM32X_X, .reg = 1, .vvvv = 3, .rm = X86_REGISTER_RAX, .index = 2, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2) | BUSTER_X86_MODE_ADDRESS_SIZE }, 7, { 0x67, 0xc4, 0xe2, 0x61, 0x90, 0x0c, 0x90 } },
@@ -4658,9 +4671,9 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
         }
         case 29:
         {
-            // In 16- and 32-bit modes, a register that would need REX: 8 to 15 in reg, vvvv, a register rm, the base or
-            // the index, or SPL to DIL (AH to BH without the high byte flag). In a new instruction with any of those,
-            // the first of them from a random one.
+            // In 16- and 32-bit modes, a register that would need REX: 8 to 15 in reg (but a control register's: CR8
+            // is AMD's LOCK prefix there), vvvv, a register rm, the base or the index, or SPL to DIL (AH to BH without
+            // the high byte flag). In a new instruction with any of those, the first of them from a random one.
             uint32_t chosen = 5;
             while (chosen == 5)
             {
@@ -4668,7 +4681,7 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
                 const X86FormDescription* candidate = x86_form_description(instruction->form);
                 const bool memory_operand = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0;
                 const bool parts[5] = {
-                    candidate->encoding == BUSTER_X86_ENCODING_R,
+                    candidate->encoding == BUSTER_X86_ENCODING_R && (candidate->reg & BUSTER_X86_OPERAND_CLASS) != BUSTER_X86_CLASS_CONTROL,
                     candidate->vvvv != BUSTER_X86_OPERAND_NONE,
                     !memory_operand && candidate->rm != BUSTER_X86_OPERAND_NONE,
                     memory_operand && (instruction->mode & BUSTER_X86_MODE_BASE),
@@ -4829,11 +4842,14 @@ static bool x86_print_assembly(uint64_t seed, uint64_t* state, uint64_t count, X
     for (uint64_t i = 0; i < count; i += 1)
     {
         const int64_t length = x86_test_encode_scalar(&instructions[i], 1, output, BUSTER_X86_ENCODER_CAPACITY(1), 0, 0);
-        printf("0: ");
+        // GNU as takes the test registers with the 386's and 486's architectures alone: the 386's, as the 486's would
+        // tune for the 486 too, which .arch pop keeps, and GNU as then writes a shift by 1 with an imm8.
+        const bool test_register = (x86_form_description(instructions[i].form)->reg & BUSTER_X86_OPERAND_TEST) != 0;
+        printf(test_register ? ".arch push\n.arch i386\n0: " : "0: ");
         x86_print_instruction(stdout, &instructions[i], symbolic[i]);
         printf("\n1: .pushsection .lengths, \"a\"; .byte 1b - 0b; .popsection # ");
         x86_print_bytes(output, length > 0 ? (uint64_t)length : 0);
-        printf("\n");
+        printf(test_register ? "\n.arch pop\n" : "\n");
     }
     return true;
 }

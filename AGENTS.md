@@ -218,7 +218,7 @@ their own, `x86_encode_64_apx` against the scalar encoder on random streams in
 which half the forms have REX2 and a quarter are EVEX ones, and at page edges,
 and invalid operands, among them a high byte register with REX2, registers 16 to
 31 in forms without REX2 or EVEX and XMM16 to XMM31 in SSE's forms. And in
-32-bit and 16-bit modes, with the scalar encoder alone: 155 and 146 known
+32-bit and 16-bit modes, with the scalar encoder alone: 159 and 150 known
 encodings, 13 and 16 known fixups, a digest of each, and invalid operands, among
 them registers that would need REX, 16-bit addresses that aren't ModRM's,
 forms of 64-bit mode alone, instructions past 15 bytes and segment overrides
@@ -266,12 +266,12 @@ other than RIP-relative ones are R_X86_64_32; with `--apx`, it names registers
 16 to 31 `r16` to `r31` (`r16d`, `r16w`, `r16b`); and with `--mode32` and
 `--mode16`, the printed assembly is in `.code32` or `.code16`, and the printer
 writes the mode's mnemonics and prefixes (`addr16`, `data32`, `jcxz`, `lcall`,
-segment overrides as prefixes, which GNU as keeps on a default segment), whose
-relocations are never PLT32 or 32S. Cross-check more than one seed after
-changing forms (1.7 million instructions over seeds 1, 7 and 99 were last
-checked for each 64-bit entry point, with 198,573, 197,926 and 197,735
-relocations, and 1.2 million for each of 32-bit and 16-bit mode, with 135,969
-and 136,279).
+segment overrides as prefixes, which GNU as keeps on a default segment, and
+`.arch i386` around a test register's move), whose relocations are never PLT32
+or 32S. Cross-check more than one seed after changing forms (1.7 million
+instructions over seeds 1, 7 and 99 were last checked for each 64-bit entry
+point, with 198,573, 197,926 and 197,735 relocations, and 1.2 million for each
+of 32-bit and 16-bit mode, with 135,686 and 136,334).
 
 ## x86-64 encoder benchmark
 
