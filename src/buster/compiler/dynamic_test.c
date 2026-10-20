@@ -29,10 +29,11 @@
 //   - Imports: BUSTER_DYNAMIC_TEST_IMPORTS of libc.so.6's functions, each called through a stub and pointed to, which
 //     the loader must bind at their versions.
 //   - Refusals: small programs with what a dynamic PIE refuses (a text relocation, an ABS32 to the image, a PC32 to a
-//     dynamic symbol), refused by every lane count with their fixup and without an output, or handles (a call to and a
-//     pointer to a weak reference to nothing, loads through GOT slots whose word starts with that dynamic symbol's, and
-//     a pointer at an odd address, which .rela.dyn holds); and lanes short of scratch memory, which must fail the link
-//     cleanly.
+//     dynamic symbol, and a lea of and a PC64 to a hidden weak reference to nothing, at address 0), refused by every
+//     lane count and by the exact twins with their fixup and without an output, or handles (a call to and a pointer to
+//     a weak reference to nothing, and to a hidden one, loads through GOT slots whose word starts with that dynamic
+//     symbol's, and a pointer at an odd address, which .rela.dyn holds); and lanes short of scratch memory, which must
+//     fail the link cleanly.
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, writing, the structure, the variants, against lld, the programs and the cases, the
