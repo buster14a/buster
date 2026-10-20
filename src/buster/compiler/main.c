@@ -172,6 +172,11 @@ int run_x86_encoder_benchmark(int argc, char** argv);
 #include "buster/compiler/lane_test.c"
 int run_lane_benchmark(int argc, char** argv);
 
+// Liveness and interference over aligned bitsets, independent of the future IR's use/def construction.
+#include "buster/compiler/dataflow.c"
+#include "buster/compiler/dataflow_test.c"
+int run_dataflow_benchmark(int argc, char** argv);
+
 // The link representation (atoms, symbols, fixups and names, which the object writer and the linker share), the test
 // programs generated in it, and their tests, for the test-link command.
 #include "buster/compiler/link.c"
@@ -221,6 +226,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-lanes") == 0)
     {
         result = run_lane_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-dataflow") == 0)
+    {
+        result = run_dataflow_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-dataflow") == 0)
+    {
+        result = run_dataflow_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-link") == 0)
     {

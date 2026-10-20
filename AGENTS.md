@@ -133,6 +133,11 @@ designs and the compilers already built this way.
   code, their barrier and broadcast, `lane_range`, and arenas).
   `lane_test.c` holds its tests (`main.c` includes it; `./build/compiler
   test-lanes` runs them) and `lane_benchmark.c` provides `benchmark-lanes`.
+- `src/buster/compiler/dataflow.c` provides aligned bitset liveness and
+  interference with AVX-512 and scalar implementations, independent of IR.
+  `dataflow_test.c` provides `test-dataflow`; `dataflow_benchmark.c` supplies
+  the shared synthetic CFG generator and `benchmark-dataflow`.
+  `docs/dataflow.md` records the contracts and 9700X measurements.
 - `src/buster/compiler/link.c` is the representation the object writer and the
   linker share: names, atoms, symbols and fixups in column arrays indexed by
   32-bit ids, in arenas, and `link_add_code_fixups`, which turns the encoder's
@@ -177,6 +182,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler benchmark-x86-encoder
 ./build/compiler test-lanes
 ./build/compiler benchmark-lanes
+./build/compiler test-dataflow
+./build/compiler benchmark-dataflow
 ./build/compiler test-link
 ./build/compiler test-object-writer --cross-check
 ./build/compiler benchmark-object-writer
@@ -720,3 +727,61 @@ affinity they start with. `docs/object-writer-and-linker.md` ("Patching and
 writing" and "The first executables") has the numbers. The default 9700X job
 runs it after the tests, pinned to one allowed CPU; like the others, its
 measurements are informational.
+
+## Dataflow tests
+
+`./build/compiler test-dataflow [--seed N] [--count N]` checks the IR-independent
+liveness and interference primitives in `dataflow.c`:
+
+- generated CFGs: chains, diamonds, self-loops, nested loops, irreducible
+  two-entry loops, several exits and random local components, including
+  disconnected blocks. Every shape runs with 0, 1, 2, 3, 8, 17, 65, 257 and
+  2,049 blocks at each of 0, 1, 511, 512, 513, 1,024 and 1,025 values, then
+  `--count` more seeds and sizes per shape (24 by default). The same seed must
+  reproduce the columns and input rows. The postorder must visit every block
+  once, and every row must be 64-byte aligned and padded to 512 bits;
+- the AVX-512 and scalar fixpoints: identical `in` and `out` rows and iteration
+  counts, both liveness equations satisfied, and all padding bits zero.
+  Solving again over poisoned output must reproduce the result and iteration
+  count. Small graphs also use an independent per-value reachability check:
+  a value is live when a path reaches its use before its definition;
+- handwritten graphs: disconnected cycles, a self-loop without a use, a value
+  both used and defined in one block, every combination of the transfer
+  function's three input bits, and the exact postorder of a chain;
+- interference: empty rows and every bit position in rows of 512, 1,024 and
+  1,536 bits, with disjoint and intersecting inputs, checked by both paths;
+- page edges: each matrix ends at a `PROT_NONE` page for every boundary value
+  count above, with zero-size rows pointing at the inaccessible page itself.
+  Both solvers and the interference check must stay within the rows, and the
+  poisoned bytes before each matrix must remain unchanged;
+- failure handling: insufficient arena capacity leaves the arena and result
+  unchanged, successful allocations zero the rows, malformed successor
+  offsets or targets leave the postorder and scratch arena unchanged, and
+  missing scratch memory and an edge in an empty CFG are rejected.
+
+`--seed N` changes the generated inputs (1 by default). The command reports
+the check and failure counts and exits with status 1 on any failure. The
+9700X job runs it after the lane tests.
+
+## Dataflow benchmark
+
+`./build/compiler benchmark-dataflow [--seed N]` compares the scalar and
+AVX-512 fixpoints on three generated functions: a small diamond CFG with
+16 blocks and 127 values, nested loops with 256 blocks and 1,025 values, and
+random local components with 4,096 blocks and 4,097 values. `--seed N` selects
+the inputs (1 by default); these are synthetic functions, not corpus results.
+
+Each workload first checks identical rows and iteration counts, then reports
+21 interleaved-pass medians with alternating implementation order. Both paths
+use the same calibrated repetition count after warm-up. Each timed solve
+includes clearing `in` and `out`; generation, allocation and postorder are
+outside the timed region. The output gives nanoseconds, cycles and instructions
+per function, cycles per block per iteration, and IPC. Hardware counter values
+are zero when unavailable. A scalar/vector disagreement fails the command.
+
+Run it under the 9700X's lock with `taskset -c 2`. `docs/dataflow.md` records
+the contracts, measurements and implementation choice. The default 9700X job
+runs it after the tests, pinned to one allowed CPU; like the other benchmarks,
+its measurements are informational. Building use/def rows from IR columns and
+running the corpora remain outside this module's current scope and wait for
+#131.
