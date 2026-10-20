@@ -54,7 +54,10 @@ Where it is:
   runs it at session start (`.claude/settings.json`), and so does Codex
   (`.codex/hooks.json`) in a trusted project, once David has trusted that hook
   in `/hooks`. If it reports leaving the hook off, write the trailer yourself,
-  last.
+  last. The hook refuses a commit made through an editor while
+  `core.commentChar` is `auto`, since it can't know the comment character
+  `git commit` picks; make that one with the opt-in unset and the trailer
+  written by hand.
 - Don't use `git commit -s`, which signs off as the committer
   (`Claude <noreply@anthropic.com>` in cloud sessions), or `--no-verify`, which
   skips the hook. The hook signs nothing while a rebase or a cherry-pick is in

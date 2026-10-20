@@ -7,20 +7,38 @@
 # commits, the copies keep the trailers they had, and the certification
 # doesn't reach copies of commits from before it.
 #
-# git interpret-trailers runs outside the repository with no configuration but
-# the comment character, so that no trailer.* setting changes the line it adds,
-# and with --no-divider, since in a commit message a "---" line ends nothing. A
-# merge's message has no final newline, and without one git interpret-trailers
-# leaves out the blank line before a new trailer block.
+# git interpret-trailers runs outside the repository with no configuration, so
+# that no trailer.* setting changes the line it adds, but the comment prefix,
+# which git stripspace gives as Git itself resolves core.commentChar and
+# core.commentString. It runs with --no-divider, since in a commit message a
+# "---" line ends nothing. A merge's message has no final newline, and without
+# one git interpret-trailers leaves out the blank line before a new trailer
+# block. With core.commentChar or core.commentString set to auto, git commit
+# picks the comment character of the editor's text, which a hook can't know,
+# so the hook refuses a commit made through an editor (Git tells its hooks
+# that no editor runs with GIT_EDITOR=:) rather than guess. Without one, it
+# places the line as git commit -s does.
 
 copying()
 {
     [ -e "$(git rev-parse --git-path rebase-merge)" ] || [ -e "$(git rev-parse --git-path rebase-apply)" ] || [ -e "$(git rev-parse --git-path CHERRY_PICK_HEAD)" ]
 }
 
+choosing()
+{
+    keys='^core\.comment(char|string)$'
+    [ "$(echo x | git -c core.commentString=// stripspace --comment-lines)" = "// x" ] || keys='^core\.commentchar$'
+    [ "${GIT_EDITOR-}" != : ] && git config --get-regexp "$keys" | tail -n 1 | cut -d ' ' -f 2- | grep -q -i -x auto
+}
+
 if [ "$BUSTER_DCO_SIGN_OFF" = davidgmbb ] && ! copying; then
-    message="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
-    comment="$(git config core.commentChar)"
-    [ -z "$(tail -c 1 "$message")" ] || echo >> "$message"
-    cd / && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.commentChar="${comment:-#}" interpret-trailers --in-place --no-divider --where end --if-exists addIfDifferent --if-missing add --trailer "Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>" "$message"
+    if choosing; then
+        echo "commit-msg: core.commentChar (or core.commentString) is auto, so this hook can't tell the editor's comments from the message. Make this commit with BUSTER_DCO_SIGN_OFF unset and David's sign-off written by hand, last (AGENTS.md, \"David's sign-off\")." >&2
+        false
+    else
+        message="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+        prefix="$(echo x | git stripspace --comment-lines)"
+        [ -z "$(tail -c 1 "$message")" ] || echo >> "$message"
+        cd / && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.commentChar="${prefix% x}" interpret-trailers --in-place --no-divider --where end --if-exists addIfDifferent --if-missing add --trailer "Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>" "$message"
+    fi
 fi
