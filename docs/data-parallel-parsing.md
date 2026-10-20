@@ -22,6 +22,14 @@ and K2's round" describes it and what it tried and dropped, K4's included; the
 tables add its numbers, from a series that measured `315b6ef`, `dfd07b4` and
 `dc81644` by turns.
 
+A third follow-up, on branch `claude/spike-186-k2-spills` (commits `6f36b69` to
+`316d7a5`), took K2's spills out of its block loop, and with them its two speed
+states: K2 now takes 3.85 cycles a token on sqlite3 and 3.47 on libc in every
+build, and the vector path runs at 2.70 times the scalar parser's speed on
+sqlite3 and 2.50 on libc. "K2 in one state" describes it and what it tried and
+dropped; the tables add its numbers, from a series that measured `eb43cc7`,
+`dc81644` and `316d7a5` by turns.
+
 The question (#186): #15 called the parser inherently sequential. Does
 preprocessed C parse faster on one Zen 5 core with branch-free AVX-512 kernels,
 which build the tree with nearest-smaller-value searches (Bar-On and Vishkin,
@@ -29,8 +37,9 @@ which build the tree with nearest-smaller-value searches (Bar-On and Vishkin,
 
 ## Results
 
-Yes, by 1.5 to 1.6 times on real code, by 2.1 times with K4 and K2 tuned, and
-by 2.5 and 2.3 times with K5 in AVX-512 too, with the same tree on every token:
+Yes, by 1.5 to 1.6 times on real code, by 2.1 times with K4 and K2 tuned, by
+2.5 and 2.3 times with K5 in AVX-512 too, and by 2.7 and 2.5 times with K2 in
+one state, with the same tree on every token:
 
 | Whole path | sqlite3 ms | cycles/token | instructions/token | IPC | mispredicts/token | libc ms | cycles/token | instructions/token | IPC | mispredicts/token |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -39,6 +48,7 @@ by 2.5 and 2.3 times with K5 in AVX-512 too, with the same tree on every token:
 | Vector path | 3.48 | 27.3 | 58.0 | 2.13 | 0.170 | 13.70 | 19.6 | 45.5 | 2.32 | 0.032 |
 | Vector path, K4 and K2 tuned | 2.67 | 20.9 | 50.8 | 2.43 | 0.157 | 9.71 | 13.9 | 40.6 | 2.92 | 0.029 |
 | Vector path, K5 in AVX-512 | 2.27 | 17.7 | 42.9 | 2.43 | 0.086 | 8.94 | 12.8 | 36.3 | 2.83 | 0.016 |
+| Vector path, K2 in one state | 2.13 | 16.7 | 40.8 | 2.45 | 0.087 | 8.18 | 11.7 | 34.2 | 2.92 | 0.017 |
 
 sqlite3 is the 3.53.4 amalgamation, 707,153 tokens. libc is 733 files of the
 libc corpus, 3,869,223 tokens; the corpus is under "Inputs". Each figure is the
@@ -46,12 +56,12 @@ median of 21 interleaved passes; the whole paths' fastest and slowest passes are
 within 1.3% of it.
 
 - **The vector path is 1.61 times as fast as the scalar parser on sqlite3 and
-  1.51 times on libc**, 2.1 times on both with K4 and K2 tuned, and 2.51 and
-  2.32 times with K5 in AVX-512. It retires 3.3 to 4 times fewer instructions,
-  at half the IPC: its kernels are backend-bound (45% to 60% of dispatch
-  slots). The scalar parser loses its slots
-  to the front end and to bad speculation instead (32% and 15% on sqlite3, with
-  0.50 mispredictions a token).
+  1.51 times on libc**, 2.1 times on both with K4 and K2 tuned, 2.51 and 2.32
+  times with K5 in AVX-512, and 2.70 and 2.50 with K2 in one state. It retires
+  3.3 to 4 times fewer instructions, at half the IPC: its kernels are
+  backend-bound (45% to 60% of dispatch slots). The scalar parser loses its
+  slots to the front end and to bad speculation instead (32% and 15% on
+  sqlite3, with 0.50 mispredictions a token).
 - **Every vectorized kernel beats its scalar twin, by 2.5 to 15 times** (K5 in
   AVX-512 by 9 and 61), but the twins together cost 2.4 times what the scalar
   parser does. Splitting the
@@ -67,7 +77,8 @@ within 1.3% of it.
   3.5 cycles a token per round of its fixpoint. K4 (parents) took 27% to 35%,
   latency-bound inside each 64-token block. Tuned, K2 runs at 5.0 and 4.7 cycles
   a token (from 9.1 and 7.2), in 1.08 and 1.06 rounds a block (from 2.69 and
-  2.10), and K4 at 4.5 and 4.0 (from 7.0 and 6.7).
+  2.10), and K4 at 4.5 and 4.0 (from 7.0 and 6.7). In one state, without
+  spills, K2 runs at 3.85 and 3.47.
 - **K5, the statement stack, came next.** Scalar over the statement-level
   tokens, it took 4.8 cycles a token on sqlite3, nearly K2's size. In AVX-512,
   its owners from a compress and an expand of the events' positions, it takes
@@ -78,7 +89,7 @@ within 1.3% of it.
   converge in K2's 8 rounds and 200,000 nested parentheses exceed K4's 16-bit
   keys. The kernel falls back to its twin, and the vector path runs at 0.54 and
   0.94 times the scalar parser's speed (0.59 and 0.99 with K4 and K2 tuned,
-  0.56 and 1.00 with K5 in AVX-512).
+  0.56 and 1.00 with K5 in AVX-512, 0.63 and 1.05 with K2 in one state).
 - **The postorder derived from the parents costs 7.1 cycles a token on sqlite3
   and 6.0 on libc** without a branch on the tree. The obvious walk costs 14.7 on
   sqlite3, because it mispredicts.
@@ -163,7 +174,9 @@ each the AVX-512 form of a scalar twin whose output is the same:
    the rounds start from refined guesses and stop as soon as no lane reads a
    change ("K4 and K2, tuned"). Since the second follow-up, K2 reads K1's view of
    each block and writes each block's statement contexts for K5 ("K5 in
-   AVX-512, and K2's round").
+   AVX-512, and K2's round"). Since the third, the block loop runs one round,
+   what the kinds decide comes from a pass before the rounds, and the group
+   windows stay in registers ("K2 in one state").
 4. **K1's second part.** `?`, `case` and `default` matched to their colons per
    depth in a sparse scalar loop over the few such tokens. A colon with no opener
    is a label. Then the node depths by a vector prefix sum.
@@ -266,7 +279,9 @@ sqlite3:
 | K2 roles | 32.82 | 128.8 | 3.92 | 9.64 | 19.6 | 2.03 | 3.4x | 27.8/10.7/52.6/8.9 |
 | K2 roles, tuned | | | | 5.02 | 13.2 | 2.63 | 6.5x | 37.0/8.6/48.2/6.1 |
 | K2 roles, with K1's views | | | | 4.85 | 12.3 | 2.53 | 6.8x | 36.4/5.6/51.1/6.2 |
+| K2 roles, in one state | | | | 3.85 | 10.2 | 2.64 | 8.5x | 35.6/6.7/51.5/6.2 |
 | K1 second part | 13.60 | 38.1 | 2.80 | 0.88 | 1.9 | 2.10 | 15.4x | 26.2/11.4/48.2/14.1 |
+| K1 second part, carry from a register | | | | 0.78 | 1.9 | 2.39 | 17.4x | 29.8/12.7/42.2/15.3 |
 | K4 parents | 27.61 | 111.8 | 4.05 | 7.36 | 12.1 | 1.65 | 3.8x | 22.6/1.7/74.8/0.9 |
 | K4 parents, tuned | | | | 4.46 | 11.3 | 2.53 | 6.2x | 33.9/4.9/56.2/5.0 |
 | K5 statements | 16.57 | 65.0 | 3.92 | 4.91 | 12.6 | 2.58 | 3.4x | 28.2/48.2/3.0/20.6 |
@@ -275,6 +290,7 @@ sqlite3:
 | Sum | 107.6 | | | 27.7 | | | 3.9x | |
 | Sum, K4 and K2 tuned | | | | 20.0 | | | 5.4x | |
 | Sum, K5 in AVX-512 | | | | 16.8 | | | 6.4x | |
+| Sum, K2 in one state | | | | 16.0 | | | 6.7x | |
 
 libc:
 
@@ -287,7 +303,9 @@ libc:
 | K2 roles | 23.29 | 125.7 | 5.40 | 7.26 | 16.7 | 2.30 | 3.2x | 31.5/8.0/56.6/3.9 |
 | K2 roles, tuned | | | | 4.70 | 12.9 | 2.75 | 5.0x | 38.9/4.7/53.1/2.9 |
 | K2 roles, with K1's views | | | | 4.34 | 12.1 | 2.78 | 5.4x | 40.0/4.2/53.0/2.7 |
+| K2 roles, in one state | | | | 3.47 | 10.0 | 2.89 | 6.7x | 38.8/5.4/53.7/2.1 |
 | K1 second part | 7.68 | 38.2 | 4.97 | 0.69 | 1.7 | 2.52 | 11.1x | 31.7/9.2/58.1/1.0 |
+| K1 second part, carry from a register | | | | 0.54 | 1.75 | 3.27 | 14.3x | 41.1/12.2/44.6/2.0 |
 | K4 parents | 19.12 | 108.7 | 5.69 | 6.84 | 12.2 | 1.78 | 2.8x | 24.4/1.4/73.8/0.3 |
 | K4 parents, tuned | | | | 3.98 | 11.1 | 2.79 | 4.8x | 37.4/1.8/60.3/0.6 |
 | K5 statements | 12.15 | 58.5 | 4.82 | 1.57 | 4.5 | 2.87 | 7.7x | 31.9/39.1/15.4/13.6 |
@@ -296,6 +314,7 @@ libc:
 | Sum | 71.1 | | | 20.2 | | | 3.5x | |
 | Sum, K4 and K2 tuned | | | | 14.6 | | | 4.9x | |
 | Sum, K5 in AVX-512 | | | | 12.9 | | | 5.5x | |
+| Sum, K2 in one state | | | | 12.0 | | | 5.9x | |
 
 The stages' sums are within 5% of the whole paths' 107.3 and 27.3 (sqlite3)
 and 67.7 and 19.6 (libc). The typedef pass and the fallback are scalar in both
@@ -303,9 +322,11 @@ paths. The tuned rows are medians of the follow-up's series ("K4 and K2,
 tuned"); their speedups are over the twins above, and their sums are within 5% of
 the tuned whole paths' 20.9 and 13.9. The rows "with K2's views", "with K1's
 views" and "in AVX-512" are `dc81644`'s, from the second follow-up's series,
-and its sums are within 6% of its whole paths' 17.7 and 12.8. K5 in AVX-512
-wins 61 times on libc because most of libc's blocks hold no statement-level
-token, and such a block costs it a table lookup and a mask.
+and its sums are within 6% of its whole paths' 17.7 and 12.8. The rows "in one
+state" and "carry from a register" are `316d7a5`'s, from the third follow-up's
+series, and its sums are within 5% of its whole paths' 16.7 and 11.7. K5 in
+AVX-512 wins 61 times on libc because most of libc's blocks hold no
+statement-level token, and such a block costs it a table lookup and a mask.
 
 ### 32 against 64 lanes, and K3's two classifications
 
@@ -360,6 +381,8 @@ place with DRAM fills (0.03 a token).
 | Vector path, K5 in AVX-512 | 0.086 | | | | 0.016 | | | |
 | Vector K2, with K1's views | 0.008 | | | | 0.004 | | | |
 | Vector K5, in AVX-512 | 0.023 | | | | 0.0015 | | | |
+| Vector path, K2 in one state | 0.087 | | | | 0.017 | | | |
+| Vector K2, in one state | 0.009 | | | | 0.005 | | | |
 
 At 15 to 20 cycles each, the scalar parser's mispredictions cost sqlite3 about 8
 to 10 of its 44 cycles a token. Half of the vector path's come from K5, most of
@@ -369,7 +392,8 @@ The tuned K4 mispredicts more, 0.006 a token on sqlite3 against 0.001, in its
 passes' per-block branches: about 0.1 cycles a token. The follow-up didn't count
 fills. In AVX-512, K5 mispredicts 0.023 times a token on sqlite3, from 0.084,
 and the vector path 0.086, from 0.157; K2 halved its own again, its driver's
-loop over the open openers gone.
+loop over the open openers gone. In one state, K2 mispredicts 0.009 times a
+token on sqlite3, from 0.008, at the blocks that leave its block loop.
 
 The prefetchers keep up with every pass over whole files, so fills from L3 and
 DRAM are negligible even for sqlite3, whose arrays (about 20 MB) are in L3.
@@ -419,6 +443,23 @@ parser.
 | Nested ternaries | 16.25 | 15.58 | 1.43x | 1.45x | 4.29 | 4.02 | 0.07 | 0.09 | |
 | Statements | 19.48 | 16.12 | 1.42x | 1.71x | 4.32 | 4.13 | 6.35 | 2.53 | |
 | Declarations | 14.81 | 14.38 | 1.71x | 1.79x | 5.58 | 4.01 | 1.25 | 0.78 | |
+
+With K2 in one state, from the third follow-up's series: one run of `dc81644`
+and of `316d7a5` per case and counter set, the faster of the two. The speedups
+are over `dc81644`'s scalar parser, whose code is the same in both: `316d7a5`'s
+own took 39.0 cycles a token on the calls of calls, against 32.0, the same code
+placed 96 bytes earlier than in `428af9a`'s build, where it took 32.1.
+
+| Case | Vector cycles/token, `dc81644` | `316d7a5` | Speedup, `dc81644` | `316d7a5` | K2, `dc81644` | `316d7a5` | Why |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Operator chain | 12.76 | 11.81 | 1.77x | 1.91x | 3.96 | 3.26 | |
+| Nesting 200,000 deep | 24.80 | 23.41 | 0.99x | 1.05x | 4.15 | 3.34 | K4's twin, as before |
+| No brackets | 14.40 | 13.07 | 2.08x | 2.29x | 3.96 | 3.32 | |
+| Calls of calls | 11.63 | 10.27 | 2.75x | 3.11x | 4.20 | 3.26 | |
+| Casts of casts | 48.52 | 42.88 | 0.55x | 0.63x | 38.36 | 33.21 | K2's twin, as before, after seven rounds out of line |
+| Nested ternaries | 15.71 | 14.78 | 1.44x | 1.54x | 4.06 | 3.33 | |
+| Statements | 16.55 | 15.12 | 1.67x | 1.83x | 4.35 | 3.35 | |
+| Declarations | 14.36 | 14.27 | 1.79x | 1.81x | 5.55 | 5.59 | every block takes two rounds |
 
 ## K4 and K2, tuned
 
@@ -793,6 +834,11 @@ the figures of both are given. A K2 that spills less would be less exposed;
 until then its figures carry about 12% either way, and its instruction counts
 are the stable measure.
 
+The third follow-up removed both states ("K2 in one state"): without the spills
+no build of K2 flipped, and the rest of its spread came from its stores to the
+group stacks, which split across pages and cost more at some stack positions
+than at others.
+
 ### K4: depth ranges from K1's second part
 
 The lead the first follow-up left was to have K1's second part, which computes
@@ -810,28 +856,243 @@ That is 0.12 and 0.19 cycles a token more for the two together, so the change
 was dropped. The register fix alone left K1's second part as it was (0.78 and
 0.53).
 
+## K2 in one state
+
+The third follow-up, on branch `claude/spike-186-k2-spills` (commits `6f36b69`,
+`428af9a` and `316d7a5`), took K2's spills out of its block loop, and with them
+its two speed states ("K2's two speed states"). The rest of what moved its time
+was stores that split across pages. The roles, flags and statement contexts are
+the same on every input; 148 of sqlite3's blocks and 515 of libc's that took two
+rounds now take one, from fuller first guesses. `316d7a5` changes K1's second
+part, which the new builds slowed ("K1's second part's carry"). The numbers
+come from one series on the 9700X, measured as before: builds of `eb43cc7`
+(K2's fast state), `dc81644` (its slow state), `316d7a5` and `316d7a5` with
+K2's function aligned to a page ran by turns, three times each with
+`--counters pipeline` and with `--counters branches`, every run under the lock
+by itself, and each figure is the median of the six runs' medians.
+
+| Cycles a token | sqlite3, `eb43cc7` | `dc81644` | `316d7a5` | aligned | libc, `eb43cc7` | `dc81644` | `316d7a5` | aligned |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Scalar parser | 44.30 | 44.61 | 44.96 | 43.52 | 29.84 | 29.56 | 29.27 | 28.93 |
+| Vector path | 17.55 | 17.84 | 16.67 | 16.66 | 12.48 | 12.76 | 11.72 | 11.67 |
+| Vector path, ms | 2.24 | 2.28 | 2.13 | 2.13 | 8.72 | 8.92 | 8.18 | 8.15 |
+| Vector path's speedup over the scalar parser | 2.52x | 2.50x | 2.70x | 2.61x | 2.39x | 2.32x | 2.50x | 2.48x |
+| Vector path's instructions a token | 43.1 | 42.9 | 40.8 | 40.8 | 36.5 | 36.3 | 34.2 | 34.2 |
+| Vector path's mispredicts a token | 0.085 | 0.086 | 0.087 | 0.087 | 0.016 | 0.017 | 0.017 | 0.017 |
+| K2 roles | 4.34 | 4.88 | 3.85 | 3.87 | 3.93 | 4.35 | 3.47 | 3.47 |
+| K2's six runs | 4.27 to 4.47 | 4.69 to 5.36 | 3.85 to 3.92 | 3.84 to 3.90 | 3.92 to 3.95 | 4.31 to 4.53 | 3.46 to 3.50 | 3.46 to 3.50 |
+| K2's instructions a token | 12.53 | 12.25 | 10.18 | 10.18 | 12.33 | 12.08 | 10.00 | 10.00 |
+| K1 brackets | 2.27 | 2.25 | 2.35 | 2.32 | 1.85 | 1.83 | 1.86 | 1.85 |
+| K3 classification | 1.41 | 1.40 | 1.43 | 1.40 | 1.17 | 1.19 | 1.20 | 1.19 |
+| K1 second part | 0.79 | 0.79 | 0.78 | 0.78 | 0.54 | 0.54 | 0.54 | 0.54 |
+| K4 parents | 4.46 | 4.45 | 4.47 | 4.47 | 3.95 | 3.94 | 3.95 | 3.95 |
+| K5 statements | 1.81 | 1.79 | 1.81 | 1.82 | 0.20 | 0.21 | 0.20 | 0.20 |
+
+K2 takes 3.85 cycles a token on sqlite3 and 3.47 on libc: 11% and 12% less
+than in `eb43cc7`'s fast state and 21% and 20% less than in `dc81644`'s slow
+one, at 10.2 and 10.0 instructions a token against 12.3 and 12.1. Its six runs
+stay within 2% of their median in both builds of `316d7a5`, and its function
+aligned to a page changes nothing. It takes 1.06 and 1.05 rounds a block, from
+1.08 and 1.06, so a round costs 3.6 and 3.3 cycles a token, against 4.65 and
+4.43 tuned and the spike's 3.4. The vector path takes 16.67 and 11.72 cycles a
+token, 5% and 6% less than `eb43cc7`'s and 7% and 8% less than `dc81644`'s
+(its runs 16.66 to 16.93 and 11.69 to 11.84). Its speedups carry the scalar
+parser's spread: the same code took 43.5 to 45.0 cycles a token on sqlite3 from
+build to build. The other stages are as they were.
+
+### What K2 kept on the stack
+
+`dc81644`'s block ran its rounds in a loop of their own. What a round reads of
+the block and doesn't change, the masks of each lane's kind and its neighbors'
+kinds, the guesses, the group windows, was hoisted out of that loop, so all of
+it was live across it: each block stored about 20 vectors and 25 masks before
+its rounds and loaded them back in each round. The new block
+(`spike_roles_block_avx512`) keeps one vector and no mask on the stack:
+
+- **One round, with no loop around it.** The block loop
+  (`spike_roles_rounds_avx512`) runs each block's first round and calls nothing.
+  A block that a round doesn't settle (663 of sqlite3's 11,050, 2,795 of libc's
+  60,795) leaves the loop, and `spike_roles_block_more_avx512`, out of line,
+  runs its later rounds from the roles and typed states the first one left.
+- **What the kinds decide, in a pass of its own.** Whatever a lane's kind and
+  its neighbors' kinds decide is the same in every round, so
+  `spike_role_statics_avx512` works it out for 32 blocks at a time before their
+  rounds, as four vectors a block: the role where no rule holds, the role where
+  the lane's rule holds, the lane's rules as bits, and the facts of a `{`, a
+  comma, a colon, an ellipsis and an attribute's or an asm's `(`.
+- **Features.** A round reads the token before a lane as a *feature* byte: its
+  class in the low nibble and, for the roles the rules name, a code in the high
+  one. One lookup in a 128-byte table (`vpermi2b`) on the feature before gives
+  which of the lane's rules hold, and `{`, the separators and the attribute
+  parens each take one or two more. The end of a round tests one byte vector:
+  whether any lane reads a feature that changed.
+- **The group stacks' windows in registers.** The 64 entries below the block's
+  depth go from block to block in registers (`SpikeGroupWindows`), and since
+  `428af9a` to the out-of-line rounds and back. A block still stores its open
+  openers onto the stacks, for the twin's blocks.
+- **The group stacks on pages** ("Stores across a page", below).
+
+The slots each block stores and loads back in the block loop, in clang 23.1's
+assembly for znver5, and K2's time alone (`--only stages`), each figure the
+median of three runs by turns with `eb43cc7`, `dc81644` and the step before
+(for those two, the range of their medians over the series):
+
+| Step | sqlite3 cycles/token | libc cycles/token | instructions/token, sqlite3 and libc | Slots a block: vectors, masks, general registers |
+| --- | ---: | ---: | --- | --- |
+| `eb43cc7`, the fast state | 4.27 to 4.38 | 3.93 to 3.97 | 12.53 and 12.33 | 16, 25, 19 |
+| `dc81644`, the slow state | 4.72 to 5.01 | 4.33 to 4.49 | 12.25 and 12.08 | 20, 25, 16 |
+| One round in the block loop, the later rounds out of line | 4.81 | 4.27 | 12.18 and 11.85 | 12, 20, 23 |
+| What the kinds decide as four vectors a block; features, and one lookup on the feature before for the rules that hold | 4.50 | 3.99 | 10.37 and 10.14 | 1, 9, 18 |
+| The end of a round tests one byte vector | | | | 1, 9, 10 |
+| The four vectors from a pass of their own, 32 blocks ahead of the rounds | 4.69 | 3.85 | 10.26 and 10.07 | 1, 5, 9 |
+| `{` by two table lookups | 4.63 | 3.83 | 9.60 and 9.42 | 0, 0, 9 |
+| The group stacks' windows in registers | 4.09, and 4.95 to 5.16 in some runs | 3.50 | 10.05 and 9.88 | 1, 0, 9 |
+| The group stacks on pages: `6f36b69` | 3.93 | 3.50 | 10.05 and 9.88 | 1, 0, 9 |
+| The windows to the out-of-line rounds and back: `428af9a` | 3.88 | 3.47 | 10.18 and 10.00 | 1, 0, 10 |
+
+From the sixth row on, the four vectors come from a loop of their own, which in
+`6f36b69` keeps two masks a block on the stack, and in `428af9a` also a general
+register. The fourth row ran at 4.50 with its function aligned to a page too: no
+build of it flipped. The fifth row wasn't timed alone. The steps with their own
+pass were slower than the fourth on sqlite3 and faster on libc until the windows
+went into registers. Loading the windows from memory no store touches, or not
+storing to the stacks (both timing only, since the roles change, and on libc the
+blocks took more rounds), took K2 from 4.64 to 4.22 and 4.20 cycles a token on
+sqlite3 with `{` by lookups: a block's loads of the windows overlap the block
+before's stores to the stacks only in part, and wait for those to commit.
+
+### Stores across a page
+
+With the windows in registers, K2 took 4.09 cycles a token on sqlite3 in most
+runs and 4.95 to 5.16 in some: two of ten runs of one build, with address
+randomization, and none of six without it. Under gdb, with randomization off and
+the stack moved in steps of 128 bytes by the environment's size, it took 4.08 to
+4.13 at 27 of 32 positions, 4.30 at two and 4.68 to 5.18 at three. The group
+stacks were where the arena put them, and for sqlite3, depth 0 of the group
+roles' stack fell 40 bytes before the end of a page: each block's 64-byte store
+of its open openers, near depth 0 in most code, split across two pages. With
+that stack 1 KB further on, the 32 positions took 3.90 to 4.04. The fourth
+step, in which no build flipped, shows it too: at 4 of the 32 positions it took
+4.72 to 4.92, against 4.44 to 4.56 at the rest. Why a split store's cost
+depends on where the stack is wasn't settled: it fits the block's few loads
+from the stack waiting on a split store whose address they match modulo 4 KB,
+but no counter shows it.
+
+So each stack now starts on a page, the second and the third a quarter and a
+half of a page further into theirs, so that the three stacks' stores don't match
+each other's addresses modulo 4 KB either (`spike_depth_stack_reserve`).
+`6f36b69` took 3.92 to 4.00 at the 32 positions and 3.91 to 4.00 in ten runs
+with randomization; `428af9a` took 3.85 to 3.92 at 16 positions (256-byte steps)
+and 3.82 to 3.93 in ten runs. The stacks on pages alone aren't enough: `{` by
+lookups with its windows still loaded from the stacks took 4.37 and 3.81,
+against 4.64 and 3.82 without pages and 3.92 and 3.51 with both. Nor were the
+split stores the old builds' two states: with stacks on pages, `eb43cc7` took
+4.26 to 4.27 in seven of eight runs (4.57 in one) and `dc81644` 4.53 to 4.81
+(4.72 to 5.00 without).
+
+### The counters
+
+`--counters stalls`, with the power cap's event swapped for `ls_stlf` (raw
+`0x35`), and `--counters memory`, with its three events swapped for the power
+cap's throttled slots, the retire queue's dispatch stalls
+(`de_dispatch_stall_cycle_dynamic_tokens_part2.retq`) and the ALU tokens'
+(constants in `.rodata` only, so `.text` is the same), three runs each of K2:
+
+| K2, a token | sqlite3, `eb43cc7` | `dc81644` | `428af9a` | libc, `eb43cc7` | `dc81644` | `428af9a` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Store-to-load conflicts | 0.206 | 0.115 | 0.020 | 0.149 | 0.086 | 0.020 |
+| Store-to-load forwards | 0.48 | 0.80 | 0.40 | 0.48 | 0.82 | 0.39 |
+| Cycles dispatch waits for the FP scheduling queue | 32% | 34% | 24% | 36% | 44% | 25% |
+| Cycles dispatch waits for the retire queue | 0.005 | 0.024 | 0.74 | 0.004 | 0.011 | 0.75 |
+| Slots the power cap throttles | 0.17 | 0.37 | 0.06 | 0.03 | 0.20 | 0.02 |
+
+The new K2 meets a tenth of the fast state's store-to-load conflicts and a sixth
+of the slow state's, and half the slow state's forwards. What holds it now is
+the retire queue: a block's round is about 450 instructions, nearly the 448 ops
+the reorder buffer holds, so the next block's ops wait for the round's chains of
+permutes to retire (0.74 of K2's 3.85 cycles a token on sqlite3). A constant
+carry from the block before took only 2% off (4.57 and 3.78 against 4.65 and
+3.82, with `{` by lookups, timing only), when that step's K2 already waited on
+the retire queue (0.83 cycles a token): the blocks don't wait on each other,
+they wait on the buffer. Fewer instructions a block, not fewer dependencies
+between blocks, is what would take K2 further.
+
+### K1's second part's carry
+
+In the builds of `6f36b69` and `428af9a`, K1's second part, whose code hadn't
+changed, took 0.88 cycles a token on sqlite3 and 0.69 on libc instead of 0.79
+and 0.54. Run 20 times in a row (`--only vector-k1-secondary --repeat 20`), it
+took 0.72 to 0.76 and 0.65 against 0.61 to 0.66 and 0.49 to 0.50, so it wasn't
+what K2 left behind. It met a store-to-load conflict about once a block (0.016
+a token, against 0.0003). Nor was it where its arrays were: with the group
+stacks allocated as before, so that its arrays were where `eb43cc7` had them,
+with them where they were modulo a page, or with every array on a cache line,
+it took 0.85 to 0.91 and 0.65 to 0.75. Each block stored its prefix sum and
+reloaded the last live lane as a byte, the carry into the next block, and that
+reload met the store before its data was ready. `316d7a5` takes the lane with a
+`vpermb` and a move to a general register: 0.78 and 0.53 cycles a token,
+without the conflicts, and in a build of `eb43cc7` with the same change 0.78
+and 0.53 to 0.57. The same change to K1's own carry left K1 no faster (2.30 and
+1.94 against 2.30 to 2.49 and 1.88 to 1.94) and `eb43cc7`'s K1 slower on libc
+(1.93 against 1.85), so K1 keeps its reload.
+
+### The generated cases
+
+On the generated cases ("Generated worst cases"), K2 takes 3.3 cycles a token
+wherever its blocks take one round, from 4.0 to 4.4. The declarations, whose
+every block takes two, are where it didn't gain (5.59, against 5.55): their
+second round runs out of line, where each round loads 14 vectors kept on the
+stack across the rounds. Before `428af9a` handed the windows across, it took
+5.87 there.
+
+### What didn't help
+
+- **The round peeled alone.** One round in the block loop, everything else as
+  `dc81644`: 12 vectors and 20 masks a block on the stack instead of 20 and 25,
+  and still the slow state, 4.81 and 4.27.
+- **The four vectors worked out in the block loop**, everything else as
+  `6f36b69`: 4.48 and 4.24, against 3.92 and 3.51.
+- **One pass over the whole file for them** instead of 32 blocks at a time: 4.72
+  and 3.83, against 4.69 and 3.85. Chunks of 16 took 4.75 and 3.85, of 64 4.69
+  and 3.83. The 32 blocks' 8 KB stay in L1.
+- **Two rounds in the block loop**, only a third out of line, with the windows
+  in registers: 16 vectors a block on the stack again, 11.1 instructions a token
+  against 10.0, and 3.58 cycles a token on libc against 3.50 (on sqlite3, 4.18
+  against 4.11 to 4.92, as the split stores moved it).
+- **Every block taken as settled after its first round** (timing only, with the
+  windows in registers): 3.43 on libc against 3.50, and 3.96 on sqlite3 against
+  4.11 in the runs without the split stores' slow state. The blocks that leave
+  the loop cost about 0.1 cycles a token.
+
+The checks are the second follow-up's: K2's roles, flags and statement contexts
+against the twin's on every input, from random roles twice per file, and with
+every block in the twin's loop. Each of the three commits reports no difference
+on every input of `--check-only --fixtures --generated 200000` with sqlite3 and
+libc, on the 9700X and locally, with the same rounds per block.
+
 ## Where the vector path's time goes
 
-Stage by stage, from the follow-up's series, and from the second follow-up's
-for `dc81644`:
+Stage by stage, from the follow-up's series, from the second follow-up's for
+`dc81644`, and from the third's for `316d7a5`:
 
-| Cycles a token | sqlite3, spike | tuned | K5 in AVX-512 | libc, spike | tuned | K5 in AVX-512 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| K2 roles | 9.10 | 5.02 | 4.85 | 7.20 | 4.70 | 4.34 |
-| K5 statements | 4.85 | 4.83 | 1.79 | 1.41 | 1.42 | 0.20 |
-| K4 parents | 7.03 | 4.46 | 4.45 | 6.66 | 3.98 | 3.94 |
-| K1 brackets | 2.30 | 2.26 | 2.30 | 1.85 | 1.84 | 1.84 |
-| K3 classification | 1.41 | 1.41 | 1.40 | 1.20 | 1.18 | 1.19 |
-| Fallback | 1.09 | 1.08 | 1.13 | 0.35 | 0.35 | 0.35 |
-| K1 second part | 0.88 | 0.88 | 0.78 | 0.69 | 0.69 | 0.54 |
-| K3 typedef pass | 0.10 | 0.10 | 0.11 | 0.47 | 0.47 | 0.50 |
-| Vector path | 26.79 | 20.91 | 17.74 | 19.36 | 13.89 | 12.81 |
+| Cycles a token | sqlite3, spike | tuned | K5 in AVX-512 | K2 in one state | libc, spike | tuned | K5 in AVX-512 | K2 in one state |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| K2 roles | 9.10 | 5.02 | 4.85 | 3.85 | 7.20 | 4.70 | 4.34 | 3.47 |
+| K5 statements | 4.85 | 4.83 | 1.79 | 1.81 | 1.41 | 1.42 | 0.20 | 0.20 |
+| K4 parents | 7.03 | 4.46 | 4.45 | 4.47 | 6.66 | 3.98 | 3.94 | 3.95 |
+| K1 brackets | 2.30 | 2.26 | 2.30 | 2.35 | 1.85 | 1.84 | 1.84 | 1.86 |
+| K3 classification | 1.41 | 1.41 | 1.40 | 1.43 | 1.20 | 1.18 | 1.19 | 1.20 |
+| Fallback | 1.09 | 1.08 | 1.13 | 1.19 | 0.35 | 0.35 | 0.35 | 0.35 |
+| K1 second part | 0.88 | 0.88 | 0.78 | 0.78 | 0.69 | 0.69 | 0.54 | 0.54 |
+| K3 typedef pass | 0.10 | 0.10 | 0.11 | 0.10 | 0.47 | 0.47 | 0.50 | 0.49 |
+| Vector path | 26.79 | 20.91 | 17.74 | 16.67 | 19.36 | 13.89 | 12.81 | 11.72 |
 
-**K2** is still the largest stage, but no longer for its rounds: nearly every
-block takes one. What one round costs is K2's time: 4.4 to 4.7 cycles a token
-tuned, and 4.5 and 4.1 in the second follow-up's build (4.0 and 3.7 in
-`eb43cc7`'s, whose K2 is in the fast state), with about half its slots
-backend-bound at IPC 2.5 to 2.9.
+**K2** was the largest stage, no longer for its rounds: nearly every block
+takes one. What one round costs is K2's time: 4.4 to 4.7 cycles a token tuned,
+4.5 and 4.1 in the second follow-up's build (4.0 and 3.7 in `eb43cc7`'s, whose
+K2 is in the fast state), with about half its slots backend-bound at IPC 2.5
+to 2.9, and 3.6 and 3.3 in one state, at IPC 2.6 and 2.9, waiting on the
+retire queue ("K2 in one state"). K4 is now the largest stage.
 
 **K5** was the statement stack over the statement-level tokens: scalar, branchy
 (0.08 mispredicts a token on sqlite3) and front-end-bound, so it cost in
@@ -865,7 +1126,9 @@ libc.
 Build #127's parser as these kernels, with the scalar parser beside them:
 
 - **Vector**: K1 (brackets, 64 byte lanes), K3's classification (mask loops), K2
-  (roles, from refined guesses, final when no lane reads a change), K1's second
+  (roles, from refined guesses, final when no lane reads a change, one round in
+  the block loop, with what the kinds decide from a pass before the rounds and
+  the group windows in registers), K1's second
   part (node depths), and K4 (parents, 64 byte lanes: every block's in-block
   work first, two blocks at a time, then the passes with the stack's top in
   registers, and aligned parts where depths span too much), and K5
@@ -873,9 +1136,14 @@ Build #127's parser as these kernels, with the scalar parser beside them:
   the blocks' owners on a stack without branches, a sparse loop for else, do
   and while, from K2's statement contexts). Each wins 2.5 to 15 times over its
   twin, K5 9 to 61 times, and they give the whole path its 1.5 to 1.6 times,
-  2.1 with K4 and K2 tuned, 2.3 to 2.5 with K5 in AVX-512. Keep each kernel's
-  rare paths out of its hot loop's function: inlined, they changed the hot
-  loops' code ("The rare paths, in AVX-512 too").
+  2.1 with K4 and K2 tuned, 2.3 to 2.5 with K5 in AVX-512, 2.5 to 2.7 with K2
+  in one state. Keep each kernel's rare paths out of its hot loop's function:
+  inlined, they changed the hot loops' code ("The rare paths, in AVX-512 too").
+  Keep a block's work free of inner loops whose invariants the compiler hoists
+  onto the stack, and start by-depth stacks on pages: K2's loop of rounds kept
+  about 20 vectors and 25 masks a block on the stack, and with its stores split
+  across pages, its time depended on the build and the stack ("K2 in one
+  state").
 - **Scalar**: the typedef pass (0.1 to 0.5 cycles a token, in source order),
   the statement stack (K5's twin, which also takes a file whose do misses its
   while), and the explicit-state parser.
@@ -891,8 +1159,9 @@ Build #127's parser as these kernels, with the scalar parser beside them:
   single-pass type checker. With it the vector path is still 1.28 times as fast
   on sqlite3 (34.3 against 44.0 cycles a token) and 1.16 times on libc (25.6
   against 29.7), against a scalar parser that emits no postorder at all. With K4
-  and K2 tuned, 1.57 and 1.49 times (28.0 and 19.9), and with K5 in AVX-512,
-  1.77 and 1.58 times (25.2 and 18.8).
+  and K2 tuned, 1.57 and 1.49 times (28.0 and 19.9), with K5 in AVX-512, 1.77
+  and 1.58 times (25.2 and 18.8), and with K2 in one state, 1.87 and 1.65 times
+  (24.0 and 17.7).
   - From K4's R and the depth of its L stack, the positions would be
     end(v) - (the number of v's ancestors before it), with no histogram. That
     would make the postorder nearly free, but it hasn't been measured.
@@ -901,20 +1170,19 @@ Build #127's parser as these kernels, with the scalar parser beside them:
   vector path.
 
 What would close most of the remaining gap to #115's 2 ms for sqlite3 (about 16
-cycles a token at 5.5 GHz, against the spike's 27.3, 20.9 tuned and 17.7 with
-K5 in AVX-512):
+cycles a token at 5.5 GHz, against the spike's 27.3, 20.9 tuned, 17.7 with K5
+in AVX-512 and 16.7 with K2 in one state):
 
-- K2 with fewer spills: about 23 vectors a block spilled before its rounds are
-  what its slow state forwards, so a K2 that keeps them in registers would run
-  at its fast state's 4.3 cycles a token or better ("K2's two speed states"),
-  and nearly every block takes one round;
+- K2 with fewer instructions a block: in one state it waits on the retire
+  queue, its round about as long as the reorder buffer ("K2 in one state");
 - K4's window search (about 0.9 cycles a token);
 - K1 and K3's classification (2.3 and 1.4 cycles a token).
 
 The spike's first two leads, interleaving K4's blocks and fewer K2 rounds, are
 the first follow-up's: they took 5.9 cycles a token off sqlite3 and 5.5 off
 libc. Its leads in turn, a vector K5 and a cheaper K2 round, are the second's:
-3.1 and 1.1 more.
+3.1 and 1.1 more. The second's, a K2 that spills less, is the third's: 0.9 and
+0.8 more against `eb43cc7`'s build, 1.2 and 1.0 against `dc81644`'s.
 
 For multicore (#149, #151), top-level declarations start with empty stacks at
 depth 0, so files split there, with only the typedef pass ordered.
