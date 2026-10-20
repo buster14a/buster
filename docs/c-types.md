@@ -1,17 +1,17 @@
 # The C type table
 
-`src/buster/compiler/c_types.c` is [#132](https://github.com/buster14a/buster-fast/issues/132)'s
+`src/buster/compiler/c_types.c` is [#132](https://github.com/buster14a/buster/issues/132)'s
 type table: every type of a translation unit as a `TypeId`, hash-consed so that
 most compatibility checks are a compare, with the record layout, the
 conversions, compatibility and composite types, and clang's spelling of a type
 for diagnostics. It is contract 5 of
-[the coordination comment on #135](https://github.com/buster14a/buster-fast/issues/135#issuecomment-6293200394):
+[the coordination comment on #135](https://github.com/buster14a/buster/issues/135#issuecomment-6293200394):
 the checker (#133) and the calling convention (#137) build on its API, which the
 top of the file documents.
 
 The reference is clang 23 on x86-64 Linux (LP64, the System V psABI), as
-[#154](https://github.com/buster14a/buster-fast/issues/154) decided and
-[#156](https://github.com/buster14a/buster-fast/issues/156) requires: clang's
+[#154](https://github.com/buster14a/buster/issues/154) decided and
+[#156](https://github.com/buster14a/buster/issues/156) requires: clang's
 builtin types, its `getTypeInfo` sizes and alignments, its
 `ItaniumRecordLayoutBuilder` layout, its `UsualArithmeticConversions`, its
 `mergeTypes` for compatibility and composite types, and its `TypePrinter`.

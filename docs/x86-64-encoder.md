@@ -1181,7 +1181,7 @@ In the benchmark's full runs those made `x86_encode` 3.9% faster than main
 passes, had their loops only 2% faster than main, and 1% to 3% slower on two
 rows, where `--only` runs had them 9% faster. The cause is Zen 5's per-core
 power management, not the scalar loop's code. [#199's
-report](https://github.com/buster14a/buster-fast/issues/199#issuecomment-6297314071)
+report](https://github.com/buster14a/buster/issues/199#issuecomment-6297314071)
 has the controls, and says which parts are measured (the clock, RAPL energy,
 temperature, the counters) and which inferred from them (the boost, the cap,
 umask 0x08 as its counter):

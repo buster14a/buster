@@ -4,7 +4,7 @@
 function before the function is encoded: the 2-byte rel8 form (`EB rel8`,
 `7x rel8`) where the displacement fits in [−128, 127], and the rel32 form
 (`E9 rel32`, `0F 8x rel32`, 3 and 4 bytes longer) where it doesn't
-([#144](https://github.com/buster14a/buster-fast/issues/144)). It is what the
+([#144](https://github.com/buster14a/buster/issues/144)). It is what the
 roadmap calls branch relaxation, and what `docs/x86-64-encoder.md` ("Labels")
 leaves for a pass before encoding. This document records the contract, the
 design, the statistics of compiled code that the benchmark's functions follow,
@@ -13,7 +13,7 @@ and the Zen 5 measurements behind each choice.
 ## Contract
 
 Contracts 1 and 2 of
-[the coordination comment on #135](https://github.com/buster14a/buster-fast/issues/135#issuecomment-6293200394):
+[the coordination comment on #135](https://github.com/buster14a/buster/issues/135#issuecomment-6293200394):
 
 - **Input:** a function's `X86Instruction` records, every branch to a label
   in its rel8 form (`JMP_REL8` or one of the 16 `Jcc_REL8`) with displacement

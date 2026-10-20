@@ -140,10 +140,10 @@ typedef visibility), vectorize within each step and keep the ordered part small.
 A part that stays scalar says why with measurements on the 9700X, as "SIMD: what
 pays" in `docs/object-writer-and-linker.md` does. The owner set this rule on
 2026-10-20, replacing the premise of
-[#15](https://github.com/buster14a/buster-fast/issues/15) that the parser and
+[#15](https://github.com/buster14a/buster/issues/15) that the parser and
 the type checker are inherently sequential. The issues that apply it are listed
 in the "Data-parallel first" section of
-[#115](https://github.com/buster14a/buster-fast/issues/115). "SIMD and Zen 5" in
+[#115](https://github.com/buster14a/buster/issues/115). "SIMD and Zen 5" in
 [the C coding style](docs/coding-style.md) has the Zen 5 costs that shape these
 designs and the compilers already built this way.
 
@@ -171,7 +171,7 @@ designs and the compilers already built this way.
   `preprocessor_fuzz_benchmark.c` provides `benchmark-preprocessor-fuzz`,
   measuring the external test harness. `docs/preprocessor-fuzz.md` records
   its contract. These names and locations are provisional pending agreement
-  with the #117 session; no buster-fast preprocessor is attached yet.
+  with the #117 session; no Buster preprocessor is attached yet.
 - `src/buster/compiler/x86_64_encoder.c` is the x86-64 encoder (the form table
   of legacy, VEX and EVEX forms, the scalar reference and the AVX-512 encoder,
   and the fixup interface: `BUSTER_X86_FORM_FIXUP` marks an instruction with a
@@ -607,7 +607,7 @@ runs the scalar loop (256 instructions per call) for MS ms before each timed
 pass of the other implementations: the state a compiler runs its vector phases
 in. Lighter code lets the 9700X's clock boost over 30 to 300 ms, and at that
 clock a heavy AVX-512 loop runs under the core's power cap for 5 to 20 ms
-([#199's report](https://github.com/buster14a/buster-fast/issues/199#issuecomment-6297314071)
+([#199's report](https://github.com/buster14a/buster/issues/199#issuecomment-6297314071)
 has the controls), longer than a pass. Use 100 to 300: from a settled clock
 30 ms barely boosts it, and 100 ms reaches the state whatever the passes before
 did. Compare
@@ -1382,7 +1382,7 @@ source rejection.
 
 This is test tooling outside the compile path and has no new vector path.
 The minimizer currently uses only the planted comparison; these checks do
-not establish the correctness of a buster-fast preprocessor. The command
+not establish the correctness of a Buster preprocessor. The command
 names and file locations remain provisional until agreed with #117.
 `docs/preprocessor-fuzz.md` describes the extension points and remaining work.
 
@@ -1397,7 +1397,7 @@ agree. After one warm-up pass, 21 measured passes alternate which mode runs
 first and report median milliseconds per batch and cases per second.
 
 The timing includes generation, launching Clang, temporary-file I/O and
-cleanup. It measures the external test harness, not buster-fast compilation
+cleanup. It measures the external test harness, not Buster compilation
 speed. Run it under the 9700X's lock with `taskset -c 2`; the default 9700X job
 runs it after the tests, pinned to one allowed CPU. Measurements are
 informational; execution or output-check failures fail the command.

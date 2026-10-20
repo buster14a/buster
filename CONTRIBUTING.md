@@ -75,9 +75,9 @@ under their component terms, as "Terms" above sets out.
   still need his certification for each PR head, as "Effective point and
   in-flight work" describes.
 - **Open PRs:** it also covers the commits of
-  [#184](https://github.com/buster14a/buster-fast/pull/184) up to its head
+  [#184](https://github.com/buster14a/buster/pull/184) up to its head
   `544394f5d300bd47f9e4f7081ac29ba728ca2f84` and of
-  [#185](https://github.com/buster14a/buster-fast/pull/185) up to its head
+  [#185](https://github.com/buster14a/buster/pull/185) up to its head
   `fc5dcffffb7ddd6d2a6ca0ea76fdf8bfd577203d`, the open agent PRs' heads on
   October 20, 2026, when he approved this section.
 - **Material:** original work, and imported, adapted or generated material

@@ -1,7 +1,7 @@
 # Independent preprocessor fuzz tooling
 
 This is the preprocessor-independent slice of
-[#109](https://github.com/buster14a/buster-fast/issues/109): an original
+[#109](https://github.com/buster14a/buster/issues/109): an original
 deterministic C generator, clang oracle, output comparator, minimizer and
 self-tests. It does not call the preprocessor in #117/#193 or establish that
 the compiler preprocesses any generated case correctly.
