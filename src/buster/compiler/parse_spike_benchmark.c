@@ -3,19 +3,31 @@
 // Counter/timing/sort helpers adapted through c_lexer_benchmark.c retain MIT and the upstream notice:
 // Copyright (c) 2023 Niles Salter. See THIRD_PARTY_NOTICES.md and LICENSES/Accelerated-Zig-Parser.txt.
 //
-// The spike-parse command (#186): loads preprocessed C, parses it with the scalar parser and with the kernels of
-// parse_spike.c, checks that every tree is the same, and times them.
+// The spike-parse command (#186): loads preprocessed C, parses it with the scalar parser, the kernels' scalar twins and
+// the vector path of parse_spike.c, checks that every tree is the same, and times them.
 //
-// Usage: build/compiler spike-parse [--dump FILE] [--check-only] path...
+// Usage: build/compiler spike-parse [--fixtures] [--generated N [--case NAME]] [--check-only | --no-check] [--flags]
+//                                   [--dump FILE] [--passes N] [--only NAME|stages] [--repeat N]
+//                                   [--counters pipeline|branches|memory] path...
 //
 // Paths are files, or directories whose files ending in .i are read (preprocessed with `clang -E -P`). Each file is
 // lexed by c_tokenize and refined by spike_refine, with one identifier table for all of them, outside what is timed.
-// The exit status is 1 if a path can't be read, a file doesn't parse, or the trees differ.
+// --fixtures adds the hand-checked sources, --generated N the worst cases of N operations each (--case one of them).
+// The checks compare, on every file, the twins' and the vector path's trees with the scalar parser's, each vector
+// kernel with its twin, and the postorders with a depth-first walk; the exit status is 1 if a path can't be read, a
+// file doesn't parse, or anything differs. Then, unless --check-only, the benchmark (--no-check skips the checks, for
+// perf): --passes interleaved passes (21 by default) of the whole paths and of every stage, reported per token as
+// medians; --only times one path or stage ("stages" for every stage), and a stage named alone runs --repeat times per
+// file; --counters picks the events counted besides cycles and instructions (spike_benchmark).
 //
 // Layout, in this order:
+//   - Fixtures: two sources whose parents were checked by hand.
 //   - Loading: SpikeFile, spike_load_file and spike_load_path (an explicit stack of open directories).
+//   - Generated worst cases: spike_generate, one per SpikeCase.
 //   - Checks: spike_check_tree (every parent a token before or after it at no greater depth, every opener's parent its
-//     closer, no cycle) and spike_print_tree.
+//     closer, no cycle), spike_check_postorder, spike_compare, spike_check_kernels and spike_print_tree.
+//   - Timing: the counters (rdpmc where the kernel allows it) and the report.
+//   - The benchmark: the whole paths, and the stages per file in spike_stage_order.
 //   - run_parse_spike, called by main.c.
 
 #include <stdint.h>

@@ -124,6 +124,14 @@ or infrastructure machinery merely to match its style.
   ID, by every lane of a group. `executable_test.c` holds its tests (`main.c`
   includes it; `./build/compiler test-executable` runs them) and
   `executable_benchmark.c` provides `benchmark-executable`.
+- `src/buster/compiler/parse_spike.c` is the data-parallel parsing spike (#186):
+  a scalar explicit-state parser, the kernels' scalar twins and their AVX-512
+  forms, which build the same tree (a parent for every token), and the postorder
+  derived from it. `parse_spike_benchmark.c` provides the `spike-parse` command,
+  which checks every tree against the scalar parser and times the paths and the
+  kernels. `docs/data-parallel-parsing.md` has the design, the 9700X
+  measurements and the recommendation for #127. It stays on its branch unless
+  #127 adopts it.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -143,6 +151,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler benchmark-object-writer
 ./build/compiler test-executable
 ./build/compiler benchmark-executable
+./build/compiler spike-parse --check-only --fixtures --generated 20000
 ```
 
 ## Sharing the 9700X

@@ -6,10 +6,22 @@
 // the token refinement the parser reads, the tree's definition, the scalar parser (the oracle and the fallback) and the
 // kernels with their scalar twins. parse_spike_benchmark.c includes it and runs the `spike-parse` command.
 //
+// docs/data-parallel-parsing.md describes the design and its measurements on the 9700X.
+//
 // Layout, in this order:
 //   - Token kinds: SpikeKind (BUSTER_SPIKE_KINDS), the keyword table (spike_keywords) and SpikeTokens.
 //   - Refinement: the identifier table (SpikeNames, spike_intern), spike_refine (lexer tokens to parser tokens: keywords
 //     resolved, literals merged, pragma lines dropped, identifiers interned).
+//   - The tree: roles, levels, thresholds and rules (BUSTER_SPIKE_ROLES), and spike_select, which picks a parent from L
+//     and R.
+//   - The scalar parser (spike_parse_scalar): grammar modes on a frame stack, the statement stack, and the precedence
+//     stacks that resolve L and R as tokens arrive. It is the oracle and the fallback.
+//   - The kernels' scalar twins: K1 brackets, K3 type names, K2 roles, K4 parents, K5 statements, the fallback, and
+//     spike_parse_twins, all of them in turn.
+//   - The kernels in AVX-512: K1 in byte lanes (and in 16-bit lanes for the comparison), K4 in 16-bit and in byte lanes,
+//     K2, K3's classification, K1's second part and K5; spike_parse_vector, the data-parallel parser.
+//   - The postorder, from the parents: spike_postorder (a walk that emits each subtree's end) and
+//     spike_postorder_sorted (positions without a branch on the tree).
 
 #include <stdint.h>
 #include <stdbool.h>
