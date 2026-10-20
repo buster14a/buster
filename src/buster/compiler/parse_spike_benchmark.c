@@ -770,10 +770,11 @@ struct SpikeKernelCopy
     uint8_t* flags;
     uint8_t* classified_flags;
     SpikeGroupStacks groups;
-    // K2 from random roles: the twin's roles and flags, and the random starts.
+    // K2 from random roles: the twin's roles and flags, the random starts, and the blocks the twin's loop took from them.
     uint8_t* starts;
     uint8_t* twin_flags;
     uint8_t* random_roles;
+    uint64_t random_twins;
     uint64_t rounds[BUSTER_SPIKE_ROLE_ROUNDS + 1];
     // K4 in byte lanes: 64-token blocks, and those whose depths span too much for bytes.
     uint64_t byte_blocks;
@@ -1000,7 +1001,7 @@ static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels
             }
             memcpy(kernels->flags, copy->classified_flags, count);
             uint64_t random_rounds[BUSTER_SPIKE_ROLE_ROUNDS + 1] = { 0 };
-            spike_roles_starting_avx512(kernels, count, copy->typed, &copy->groups, copy->contexts, random_rounds, copy->random_roles);
+            spike_roles_starting_avx512(kernels, count, copy->typed, &copy->groups, copy->contexts, random_rounds, copy->random_roles, false);
             uint32_t different = BUSTER_SPIKE_NONE;
             for (uint32_t i = 0; i < count && different == BUSTER_SPIKE_NONE; i += 1)
             {
@@ -1013,6 +1014,46 @@ static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels
                 spike_print_context(file, different);
                 result += 1;
             }
+            // And the same statement contexts, many of them from blocks the twin's loop took (on the corpora, only random
+            // starts send blocks there).
+            copy->random_twins += random_rounds[0];
+            uint32_t context_different = BUSTER_SPIKE_NONE;
+            for (uint32_t block = 0; block < count && different == BUSTER_SPIKE_NONE && context_different == BUSTER_SPIKE_NONE && !kernels->unbalanced; block += 64)
+            {
+                const SpikeStatementContext* vector = &copy->contexts[block / 64];
+                const SpikeStatementContext* scalar = &copy->oracle_contexts[block / 64];
+                const uint64_t differ = (vector->blocks ^ scalar->blocks) | (vector->ifs ^ scalar->ifs) | (vector->whiles ^ scalar->whiles);
+                context_different = differ != 0 ? block + (uint32_t)__builtin_ctzll(differ) : BUSTER_SPIKE_NONE;
+            }
+            if (context_different != BUSTER_SPIKE_NONE)
+            {
+                printf("%s: K2's statement context from random roles differs at token %u\n", file->path, context_different);
+                spike_print_context(file, context_different);
+                result += 1;
+            }
+        }
+        // Every block through the twin's loop: its roles, and the statement contexts the vector path works out for such
+        // blocks from them, on every input (which on the corpora send no block there by themselves).
+        memcpy(kernels->flags, copy->classified_flags, count);
+        uint64_t twin_rounds[BUSTER_SPIKE_ROLE_ROUNDS + 1] = { 0 };
+        spike_roles_starting_avx512(kernels, count, copy->typed, &copy->groups, copy->contexts, twin_rounds, 0, true);
+        uint32_t twin_different = BUSTER_SPIKE_NONE;
+        for (uint32_t i = 0; i < count && twin_different == BUSTER_SPIKE_NONE; i += 1)
+        {
+            twin_different = kernels->roles[i] != copy->starts[i] || kernels->flags[i] != copy->twin_flags[i] ? i : BUSTER_SPIKE_NONE;
+        }
+        for (uint32_t block = 0; block < count && twin_different == BUSTER_SPIKE_NONE && !kernels->unbalanced; block += 64)
+        {
+            const SpikeStatementContext* vector = &copy->contexts[block / 64];
+            const SpikeStatementContext* scalar = &copy->oracle_contexts[block / 64];
+            const uint64_t differ = (vector->blocks ^ scalar->blocks) | (vector->ifs ^ scalar->ifs) | (vector->whiles ^ scalar->whiles);
+            twin_different = differ != 0 ? block + (uint32_t)__builtin_ctzll(differ) : BUSTER_SPIKE_NONE;
+        }
+        if (twin_different != BUSTER_SPIKE_NONE)
+        {
+            printf("%s: K2 with every block in the twin's loop differs at token %u\n", file->path, twin_different);
+            spike_print_context(file, twin_different);
+            result += 1;
         }
         memcpy(kernels->roles, copy->starts, count);
         memcpy(kernels->flags, copy->twin_flags, count);
@@ -2110,6 +2151,7 @@ int run_parse_spike(int argc, char** argv)
             .starts = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
             .twin_flags = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
             .random_roles = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .random_twins = 0,
             .rounds = { 0 },
         };
         buffers_reserved &= spike_candidates_reserve(&copy.candidates, &memory, corpus.max_tokens);
@@ -2326,7 +2368,7 @@ int run_parse_spike(int argc, char** argv)
             {
                 printf(" %u:%lu", r, (unsigned long)copy.rounds[r]);
             }
-            printf(" (0: the twin)\n");
+            printf(" (0: the twin); from random roles, %lu blocks to the twin\n", (unsigned long)copy.random_twins);
             printf("K4 in byte lanes: %lu of %lu blocks span too many depths and run as 16-bit blocks (with the stack's top in registers: %lu, as smaller parts)\n",
                    (unsigned long)copy.wide_blocks, (unsigned long)copy.byte_blocks, (unsigned long)copy.top_wide_blocks);
             printf("K5 in AVX-512: %lu blocks with events, %lu of them taken an event at a time, %lu events through the sparse loop, %lu files left to the twin\n",

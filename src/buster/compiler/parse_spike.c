@@ -2735,7 +2735,7 @@ static bool spike_brackets_scalar(const uint8_t* codes, const int8_t* deltas, ui
 }
 
 // K1's view of the block of tokens [block, block + live) from their depths and enclosing openers (`codes` and `deltas`
-// as for spike_brackets_scalar): the twin's, and the vector K1's for a block its scalar loop takes.
+// as for spike_brackets_scalar): the twin's, which the check compares with the vector K1's.
 static void spike_bracket_block(const uint8_t* codes, const int8_t* deltas, const uint32_t* depths, const uint32_t* enclosing, uint32_t block, uint32_t live,
                                 SpikeBracketBlock* out)
 {
@@ -4191,8 +4191,9 @@ BUSTER_INLINE __m512i spike_prefix_sum16(__m512i x)
     return x;
 }
 
-// One block of K1's twin, for a block whose enclosing openers reach further back than the vector path's 16 depths.
-static void spike_brackets_block_scalar(const uint8_t* codes, const int8_t* deltas, uint32_t begin, uint32_t end, uint32_t* depths, uint32_t* enclosing,
+// One block of K1's twin, for a block whose enclosing openers reach further back than the vector path's 16 depths. Out
+// of line, so that this rare path leaves the block loop's code alone.
+__attribute__((noinline)) static void spike_brackets_block_scalar(const uint8_t* codes, const int8_t* deltas, uint32_t begin, uint32_t end, uint32_t* depths, uint32_t* enclosing,
                                         uint32_t* open_stack, int64_t* depth)
 {
     for (uint32_t i = begin; i < end; i += 1)
@@ -4236,13 +4237,26 @@ static bool spike_brackets_avx512(const uint8_t* codes, const int8_t* deltas, ui
         const __mmask64 found = _mm512_cmplt_epu8_mask(p, _mm512_set1_epi8(64));
         const uint32_t live = count - block < 64 ? count - block : 64;
         const __mmask64 live_mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
+        // The block's view for K2, which needs nothing from before the block: a lane whose opener isn't in the block has
+        // it before the block, and the openers still open at its end are those that no token from them on in the block
+        // leaves at a lower depth than theirs.
+        __m512i suffix = after;
+        for (uint32_t k = 0; k < 6; k += 1)
+        {
+            suffix = _mm512_min_epi8(suffix, spike_down8(suffix, k, fill));
+        }
+        const __mmask64 openers = _mm512_cmpgt_epi8_mask(delta, _mm512_setzero_si512()) & live_mask;
+        uint64_t open = openers & _mm512_cmpeq_epi8_mask(suffix, after);
+        SpikeBracketBlock* view = &blocks[block / 64];
+        _mm512_store_si512(view->opener_lanes, _mm512_mask_mov_epi8(_mm512_set1_epi8((char)0xFF), found & live_mask, p));
+        _mm512_store_si512(view->relative_depths, _mm512_maskz_mov_epi8(live_mask, before));
+        view->open = open;
         // Tokens whose opener is before the block are at or below its starting depth; at most 15 depths below it the
         // vector path handles them.
         const __mmask64 deep = _mm512_mask_cmplt_epi8_mask(~found & live_mask, before, _mm512_set1_epi8(-15));
         if (deep != 0)
         {
             spike_brackets_block_scalar(codes, deltas, block, block + live, depths, enclosing, open_stack, &base);
-            spike_bracket_block(codes, deltas, depths, enclosing, block, live, &blocks[block / 64]);
         }
         else
         {
@@ -4265,19 +4279,7 @@ static bool spike_brackets_avx512(const uint8_t* codes, const int8_t* deltas, ui
                 _mm512_storeu_si512(depths + block + 16 * q, _mm512_add_epi32(base_vector, relative));
             }
             (void)none;
-            // The openers still open at the block's end, onto open_stack: an opener is if no token from it on in the
-            // block has a lower depth after it than it has.
-            __m512i suffix = after;
-            for (uint32_t k = 0; k < 6; k += 1)
-            {
-                suffix = _mm512_min_epi8(suffix, spike_down8(suffix, k, fill));
-            }
-            const __mmask64 openers = _mm512_cmpgt_epi8_mask(delta, _mm512_setzero_si512()) & live_mask;
-            uint64_t open = openers & _mm512_cmpeq_epi8_mask(suffix, after);
-            SpikeBracketBlock* view = &blocks[block / 64];
-            _mm512_store_si512(view->opener_lanes, _mm512_mask_mov_epi8(_mm512_set1_epi8((char)0xFF), found & live_mask, p));
-            _mm512_store_si512(view->relative_depths, _mm512_maskz_mov_epi8(live_mask, before));
-            view->open = open;
+            // The openers still open at the block's end, onto open_stack.
             if (open != 0)
             {
                 int8_t before_bytes[64];
@@ -5412,74 +5414,96 @@ static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, 
     return converged ? rounds : 0;
 }
 
-// K2 in AVX-512: the blocks in order, each in rounds; a block that doesn't converge runs the twin's loop. Each block's
-// enclosing openers and depths come from K1's view of it (kernels->bracket_blocks). `typed` is a byte per token (the
-// twin's array, which the fallback and the group stacks read), and `groups` holds the stacks of an entry per depth. `contexts` gets each block's statement contexts, which the vector K5 reads. `rounds`
-// (BUSTER_SPIKE_ROLE_ROUNDS + 1 counters) counts the blocks by the rounds they took, index 0 for those the twin did.
-// `starts`, 0 but in a check, gives every token the role its rounds start from instead of its kind's guess.
-static void spike_roles_starting_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, const SpikeGroupStacks* groups, SpikeStatementContext* contexts,
-                                        uint64_t* rounds, const uint8_t* starts)
+// The statement contexts of a block the twin's loop took, from its final roles, as a converged block works them out
+// (spike_roles_block_avx512): spike_statement_context_block's, in AVX-512. A token's group is its opener's lane's role,
+// or the group stacks' at the depth below its own, and a closer's context is its opener's group.
+static SpikeStatementContext spike_statement_context_avx512(const SpikeKernels* kernels, const SpikeRoleCarry* carry, uint32_t block, uint32_t live)
 {
-    uint8_t* group_roles = groups->roles;
-    uint8_t* group_typed = groups->typed;
-    uint8_t* group_keywords = groups->keywords;
-    SpikeRoleCarry carry = {
-        .previous_role = SPIKE_ROLE_NONE,
-        .before_role = SPIKE_ROLE_NONE,
-        .typed = 0,
-        .group_roles = group_roles,
-        .group_typed = group_typed,
-        .group_keywords = group_keywords,
+    const SpikeRoleTables* t = &spike_role_tables;
+    const __mmask64 live_mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
+    const SpikeBracketBlock* view = &kernels->bracket_blocks[block / 64];
+    const __m512i enclosing_lane = _mm512_load_si512(view->opener_lanes);
+    const __mmask64 inside = _mm512_cmplt_epu8_mask(enclosing_lane, _mm512_set1_epi8(64));
+    const __m512i window_index = _mm512_add_epi8(_mm512_load_si512(view->relative_depths), _mm512_set1_epi8(63));
+    const int64_t depth_base = kernels->depths[block];
+    const __m512i roles = _mm512_loadu_si512(kernels->roles + block);
+    const __m512i vk = _mm512_loadu_si512(kernels->vkinds + block);
+    const __m512i vk_previous = _mm512_loadu_si512(kernels->vkinds + block - 1);
+    const __mmask64 closers = _mm512_cmplt_epi8_mask(spike_table8((const uint8_t*)spike_kind_deltas, vk), _mm512_setzero_si512()) & live_mask;
+    const __m512i outside_group = _mm512_permutexvar_epi8(window_index, _mm512_loadu_si512(carry->group_roles + depth_base - 64));
+    const __m512i group = _mm512_mask_mov_epi8(outside_group, inside, _mm512_permutexvar_epi8(enclosing_lane, roles));
+    const __m512i outside_outer = _mm512_permutexvar_epi8(window_index, _mm512_loadu_si512(carry->group_roles + depth_base - 65));
+    const __m512i outer_group = _mm512_mask_mov_epi8(outside_outer, inside, _mm512_permutexvar_epi8(enclosing_lane, group));
+    const __m512i context_group = _mm512_mask_mov_epi8(group, closers, outer_group);
+    const __m512i outside_keyword = _mm512_permutexvar_epi8(window_index, _mm512_loadu_si512(carry->group_keywords + depth_base - 64));
+    const __m512i opener_keyword = _mm512_mask_mov_epi8(outside_keyword, inside, _mm512_permutexvar_epi8(enclosing_lane, vk_previous));
+    const SpikeStatementContext result = {
+        .blocks = _mm512_test_epi8_mask(spike_table8(t->group_bits, context_group), _mm512_set1_epi8(BUSTER_SPIKE_GROUP_BLOCK)) & live_mask,
+        .ifs = spike_equal8(opener_keyword, SPIKE_KIND_IF) & closers,
+        .whiles = spike_equal8(opener_keyword, SPIKE_KIND_WHILE) & closers,
     };
-    for (uint32_t block = 0; block < count; block += 64)
+    return result;
+}
+
+// A block K2's rounds didn't settle, through the twin's loop, from its start: its roles, flags and typed states, its
+// statement contexts, and its openers still open at its end (K1's view has them) onto the group stacks, at their
+// depths, for the later blocks that read them. Returns its typed states as a mask. Out of line, so that this rare path
+// leaves the rounds' code alone.
+__attribute__((noinline)) static uint64_t spike_roles_twin_block(SpikeKernels* kernels, uint32_t block, uint32_t live, uint8_t* typed, SpikeRoleCarry* carry,
+                                                                  SpikeStatementContext* context)
+{
+    for (uint32_t i = block; i < block + live; i += 1)
+    {
+        const bool typed_before = i > 0 && typed[i - 1];
+        bool flag = false;
+        const uint8_t role = spike_role_rule(kernels, i, typed_before, &flag);
+        kernels->roles[i] = role;
+        kernels->flags[i] |= flag;
+        const uint32_t opener = kernels->enclosing[i];
+        if (role == SPIKE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER && opener != BUSTER_SPIKE_NONE && opener >= 2)
+        {
+            typed[i] = typed[opener - 2];
+        }
+        else
+        {
+            typed[i] = spike_role_is_type_specifier(role, kernels->vkinds[i]) || (spike_role_propagates_typed(role) && typed_before);
+        }
+    }
+    const uint64_t result = _mm512_test_epi8_mask(_mm512_loadu_si512(typed + block), _mm512_set1_epi8(1));
+    *context = spike_statement_context_avx512(kernels, carry, block, live);
+    uint64_t openers = kernels->bracket_blocks[block / 64].open;
+    while (openers != 0)
+    {
+        const uint32_t i = block + (uint32_t)__builtin_ctzll(openers);
+        openers &= openers - 1;
+        carry->group_roles[kernels->depths[i]] = kernels->roles[i];
+        carry->group_typed[kernels->depths[i]] = i >= 2 ? typed[i - 2] : 0;
+        carry->group_keywords[kernels->depths[i]] = kernels->vkinds[i - 1];
+    }
+    carry->previous_role = kernels->roles[block + live - 1];
+    carry->before_role = live >= 2 ? kernels->roles[block + live - 2] : carry->previous_role;
+    return result;
+}
+
+// K2's rounds on the blocks from `block` on, in order, until one doesn't converge (or, with `twin_only`, at once): their
+// roles, typed states (into `typed` as bytes too) and statement contexts. Returns the first block they didn't settle, or
+// count. The loop calls nothing, and keeps the carry in a copy whose address never leaves it, so that its constants
+// and the carry stay in registers from block to block.
+static uint32_t spike_roles_rounds_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, SpikeStatementContext* contexts, uint64_t* rounds,
+                                          const uint8_t* starts, bool twin_only, SpikeRoleCarry* carry_io, uint32_t block)
+{
+    SpikeRoleCarry carry = *carry_io;
+    bool converging = !twin_only;
+    while (block < count && converging)
     {
         const uint32_t live = count - block < 64 ? count - block : 64;
         uint64_t typed_mask = 0;
         SpikeStatementContext context;
         const uint32_t taken = spike_roles_block_avx512(kernels, block, live, &carry, starts, &typed_mask, &context);
-        rounds[taken] += 1;
-        if (taken == 0)
+        converging = taken != 0;
+        if (converging)
         {
-            // The twin's loop, from the block's start.
-            for (uint32_t i = block; i < block + live; i += 1)
-            {
-                const bool typed_before = i > 0 && typed[i - 1];
-                bool flag = false;
-                const uint8_t role = spike_role_rule(kernels, i, typed_before, &flag);
-                kernels->roles[i] = role;
-                kernels->flags[i] |= flag;
-                const uint32_t opener = kernels->enclosing[i];
-                if (role == SPIKE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER && opener != BUSTER_SPIKE_NONE && opener >= 2)
-                {
-                    typed[i] = typed[opener - 2];
-                }
-                else
-                {
-                    typed[i] = spike_role_is_type_specifier(role, kernels->vkinds[i]) || (spike_role_propagates_typed(role) && typed_before);
-                }
-            }
-            typed_mask = _mm512_test_epi8_mask(_mm512_loadu_si512(typed + block), _mm512_set1_epi8(1));
-            context = spike_statement_context_block(kernels, block, live);
-            // The openers still open at the block's end onto the group stacks, at their depths, which differ, for the later
-            // blocks that read them: those after which no token of the block leaves a lower depth than the opener's group.
-            int64_t lowest = INT64_MAX;
-            for (uint32_t i = block + live; i-- > block;)
-            {
-                const int64_t depth = kernels->depths[i];
-                const int8_t delta = spike_kind_deltas[kernels->vkinds[i]];
-                if (delta > 0 && depth < lowest)
-                {
-                    group_roles[depth] = kernels->roles[i];
-                    group_typed[depth] = i >= 2 ? typed[i - 2] : 0;
-                    group_keywords[depth] = kernels->vkinds[i - 1];
-                }
-                lowest = depth + delta < lowest ? depth + delta : lowest;
-            }
-            carry.previous_role = kernels->roles[block + live - 1];
-            carry.before_role = live >= 2 ? kernels->roles[block + live - 2] : carry.previous_role;
-        }
-        else
-        {
+            rounds[taken] += 1;
             _mm512_storeu_si512(typed + block, _mm512_maskz_mov_epi8(typed_mask, _mm512_set1_epi8(1)));
             // A cast candidate's opener takes the role its closer decided, as spike_closer_role does; one that stays a cast
             // keeps OPEN_CAST.
@@ -5498,15 +5522,53 @@ static void spike_roles_starting_avx512(SpikeKernels* kernels, uint32_t count, u
                                              closer_role == SPIKE_ROLE_CLOSE_CAST ? SPIKE_ROLE_OPEN_CAST : SPIKE_ROLE_OPEN_FUNCTION;
                 }
             }
+            contexts[block / 64] = context;
+            carry.typed = live == 64 ? typed_mask : typed_mask << (64 - live);
+            block += 64;
         }
-        contexts[block / 64] = context;
-        carry.typed = live == 64 ? typed_mask : typed_mask << (64 - live);
+    }
+    *carry_io = carry;
+    return block < count ? block : count;
+}
+
+// K2 in AVX-512: the blocks in order, each in rounds; a block that doesn't converge runs the twin's loop. Each block's
+// enclosing openers and depths come from K1's view of it (kernels->bracket_blocks). `typed` is a byte per token (the
+// twin's array, which the fallback and the group stacks read), and `groups` holds the stacks of an entry per depth.
+// `contexts` gets each block's statement contexts, which the vector K5 reads. `rounds` (BUSTER_SPIKE_ROLE_ROUNDS + 1
+// counters) counts the blocks by the rounds they took, index 0 for those the twin did. In a check, `starts` gives every
+// token the role its rounds start from instead of its kind's guess (else 0), and `twin_only` sends every block to the
+// twin's loop.
+static void spike_roles_starting_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, const SpikeGroupStacks* groups, SpikeStatementContext* contexts,
+                                        uint64_t* rounds, const uint8_t* starts, bool twin_only)
+{
+    SpikeRoleCarry carry = {
+        .previous_role = SPIKE_ROLE_NONE,
+        .before_role = SPIKE_ROLE_NONE,
+        .typed = 0,
+        .group_roles = groups->roles,
+        .group_typed = groups->typed,
+        .group_keywords = groups->keywords,
+    };
+    uint32_t block = 0;
+    while (block < count)
+    {
+        block = spike_roles_rounds_avx512(kernels, count, typed, contexts, rounds, starts, twin_only, &carry, block);
+        if (block < count)
+        {
+            const uint32_t live = count - block < 64 ? count - block : 64;
+            SpikeStatementContext context;
+            const uint64_t typed_mask = spike_roles_twin_block(kernels, block, live, typed, &carry, &context);
+            rounds[0] += 1;
+            contexts[block / 64] = context;
+            carry.typed = live == 64 ? typed_mask : typed_mask << (64 - live);
+            block += 64;
+        }
     }
 }
 
 static void spike_roles_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, const SpikeGroupStacks* groups, SpikeStatementContext* contexts, uint64_t* rounds)
 {
-    spike_roles_starting_avx512(kernels, count, typed, groups, contexts, rounds, 0);
+    spike_roles_starting_avx512(kernels, count, typed, groups, contexts, rounds, 0, false);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
