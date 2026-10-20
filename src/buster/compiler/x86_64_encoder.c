@@ -73,9 +73,9 @@
 //     x86_mode_constants_32 and x86_mode_presence_32 halves and the 16-bit ones, and the vpshufb tables x86_rm16 and
 //     x86_overrides), x86_mode_lookup, compute_fields (II), the running sum's tables (x86_length_bytes and the others),
 //     encode_group (I-III), encode_batches (the loop, with the instructions per iteration and the entry point's mode as
-//     parameters), the x86_encode_N instantiations (and x86_encode_64_address32, x86_encode_64_apx,
-//     x86_encode_64_mode32 and x86_encode_64_mode16), x86_encode, x86_encode_address32, x86_encode_apx,
-//     x86_encode_mode32 and x86_encode_mode16.
+//     parameters), the x86_encode_N instantiations (and x86_encode_16_address32, x86_encode_16_apx,
+//     x86_encode_16_mode32 and x86_encode_16_mode16, with the same at 64 per iteration), x86_encode,
+//     x86_encode_address32, x86_encode_apx, x86_encode_mode32 and x86_encode_mode16.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -7480,10 +7480,11 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
 // The instantiations, by instructions per iteration, and for the benchmark, with the other gathers and stores. All of
 // them need room for BUSTER_X86_ENCODER_CAPACITY(count) bytes, and those with full fixup stores, room for
 // BUSTER_X86_ENCODER_FIXUP_CAPACITY(marked) fixup ends. Each has a loop for each combination of offsets and fixup ends,
-// so that none tests for them per group. x86_encode_64_address32, x86_encode_64_apx, x86_encode_64_mode32 and
-// x86_encode_64_mode16 are x86_encode_64 for 32-bit addresses, for APX, and for 32-bit and 16-bit modes.
+// so that none tests for them per group. x86_encode_16_address32, x86_encode_16_apx, x86_encode_16_mode32 and
+// x86_encode_16_mode16 are x86_encode_16 for 32-bit addresses, for APX, and for 32-bit and 16-bit modes, and the
+// x86_encode_64_ ones the same for x86_encode_64. The tests and the benchmark take each its own few of them.
 #define BUSTER_X86_ENCODE_VARIANT(name, quads, groups, gather, store, fixup_store, encoder) \
-    __attribute__((noinline)) static int64_t name(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t* fixup_ends) \
+    __attribute__((noinline, unused)) static int64_t name(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t* fixup_ends) \
     { \
         int64_t result; \
         if (fixup_ends == 0) \
@@ -7512,10 +7513,16 @@ BUSTER_X86_ENCODE_VARIANT(x86_encode_64_address32, 4, 4, X86_GATHER_INSERTS, X86
 BUSTER_X86_ENCODE_VARIANT(x86_encode_64_apx, 4, 4, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_APX)
 BUSTER_X86_ENCODE_VARIANT(x86_encode_64_mode32, 4, 4, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_32)
 BUSTER_X86_ENCODE_VARIANT(x86_encode_64_mode16, 4, 4, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_16)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16_address32, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_ADDRESS32)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16_apx, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_APX)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16_mode32, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_32)
+BUSTER_X86_ENCODE_VARIANT(x86_encode_16_mode16, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_16)
 #undef BUSTER_X86_ENCODE_VARIANT
 
-// The production entry point: 64 instructions per iteration, which the Zen 5 benchmark found the fastest
-// (docs/x86-64-encoder.md has the numbers).
+// The production entry point: 16 instructions per iteration, which the Zen 5 benchmark found the fastest after the
+// scalar code a compiler runs before it, 1% to 6% faster than 64 per iteration there, and at most 7% slower in loops
+// that run for longer than a compiler's encoding does (docs/x86-64-encoder.md has the numbers). The other entry
+// points take the same width.
 static int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
 {
     int64_t result;
@@ -7529,7 +7536,7 @@ static int64_t x86_encode(const X86Instruction* instructions, uint64_t count, ui
     }
     else
     {
-        result = x86_encode_64(instructions, count, output, offsets, fixup_ends);
+        result = x86_encode_16(instructions, count, output, offsets, fixup_ends);
     }
     return result;
 }
@@ -7548,7 +7555,7 @@ static int64_t x86_encode_address32(const X86Instruction* instructions, uint64_t
     }
     else
     {
-        result = x86_encode_64_address32(instructions, count, output, offsets, fixup_ends);
+        result = x86_encode_16_address32(instructions, count, output, offsets, fixup_ends);
     }
     return result;
 }
@@ -7566,7 +7573,7 @@ static int64_t x86_encode_apx(const X86Instruction* instructions, uint64_t count
     }
     else
     {
-        result = x86_encode_64_apx(instructions, count, output, offsets, fixup_ends);
+        result = x86_encode_16_apx(instructions, count, output, offsets, fixup_ends);
     }
     return result;
 }
@@ -7584,7 +7591,7 @@ static int64_t x86_encode_mode32(const X86Instruction* instructions, uint64_t co
     }
     else
     {
-        result = x86_encode_64_mode32(instructions, count, output, offsets, fixup_ends);
+        result = x86_encode_16_mode32(instructions, count, output, offsets, fixup_ends);
     }
     return result;
 }
@@ -7602,7 +7609,7 @@ static int64_t x86_encode_mode16(const X86Instruction* instructions, uint64_t co
     }
     else
     {
-        result = x86_encode_64_mode16(instructions, count, output, offsets, fixup_ends);
+        result = x86_encode_16_mode16(instructions, count, output, offsets, fixup_ends);
     }
     return result;
 }

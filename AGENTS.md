@@ -263,42 +263,42 @@ yet compared against a performance baseline. Keep just one compiler executable.
 
 ## x86-64 encoder tests
 
-`./build/compiler test-x86-encoder` (about 1.5 s) checks that every form fits a
+`./build/compiler test-x86-encoder` (about 1.8 s) checks that every form fits a
 template (and that building each, in every mode, at a `PROT_NONE` page writes
 nothing past it), both encoders on 761 known encodings from GNU as (each also
 with the fixup flag, whose end they must report), a digest of the scalar
-encoder's output
-for 100,000 random instructions, every batch width and variant of `x86_encode`
-against the scalar encoder (bytes, offsets and fixup ends, in each of the four
-loops: with neither, either or both of offsets and fixup ends) on every count
-from 0 to 199 and on 300,000 random instructions of every form (legacy with x87
-and MMX, VEX and EVEX, with opmasks, broadcasts, rounding, registers 16-31,
-gathers and scatters, FS and GS segment overrides, and one in eight marked with
-the fixup flag), the same between `PROT_NONE` guard pages, and that invalid
-operands are rejected (immediates and rel8s outside their fields' ranges by
-`x86_validate` alone: `x86_encode` writes their low bytes; and memory operands
-in the 232 FS and GS forms without room for the override). Then it runs those
-checks again with 32-bit addresses, but the known fixups: 34 known encodings, a
-digest of their own, `x86_encode_64_address32` against the scalar encoder on the
-random streams and at page edges, and invalid operands, among them MPX memory
-operands and memory operands in the 312 FS and GS forms and the 116 forms
-without room for the `67`. And again for APX, but the known fixups: 153 known
-encodings, 31 known invalid instructions (as GNU as rejects them), a digest of
-their own, `x86_encode_64_apx` against the scalar encoder on random streams in
-which half the forms have REX2 and a quarter are EVEX ones, and at page edges,
-and invalid operands, among them a high byte register with REX2, registers 16 to
-31 in forms without REX2 or EVEX and XMM16 to XMM31 in SSE's forms. And in
-32-bit and 16-bit modes: 159 and 150 known encodings, 13 and 16 known fixups, a
-digest of each, `x86_encode_64_mode32` and `x86_encode_64_mode16` against the
-scalar encoders on random streams with both address sizes and segment
-overrides in the decorations, and at page edges, streams of instructions longer
-than 15 bytes at a page end (16-bit mode has them), which the loop must reject
-without writing past the output's capacity, and invalid operands, among them
-registers that would need REX, 16-bit addresses that aren't ModRM's, forms of
-64-bit mode alone, instructions past 15 bytes and segment overrides where an
-instruction takes none. `--address32`, `--apx`, `--mode32` and
-`--mode16` run only their pass, and `--count N` and `--seed N` change the random
-streams.
+encoder's output for 100,000 random instructions, every batch width and variant
+of `x86_encode` against the scalar encoder (bytes, offsets and fixup ends, in
+each of the four loops: with neither, either or both of offsets and fixup ends)
+on every count from 0 to 199 and on 300,000 random instructions of every form
+(legacy with x87 and MMX, VEX and EVEX, with opmasks, broadcasts, rounding,
+registers 16-31, gathers and scatters, FS and GS segment overrides, and one in
+eight marked with the fixup flag), the same between `PROT_NONE` guard pages, and
+that `x86_validate` finds every invalid operand and the scalar encoder rejects
+it (memory operands in the 232 FS and GS forms without room for the override
+among them). `x86_encode` checks nothing: it takes what `x86_validate` accepts,
+as the code generator makes it (an immediate or rel8 outside its field's range,
+for one, gets its low bytes). Then it runs those checks again with 32-bit
+addresses, but the known fixups: 34 known encodings, a digest of their own,
+`x86_encode_16_address32` and `x86_encode_64_address32` against the scalar
+encoder on the random streams and at page edges, and invalid operands, among
+them MPX memory operands and memory operands in the 312 FS and GS forms and the
+116 forms without room for the `67`. And again for APX, but the known fixups:
+153 known encodings, 31 known invalid instructions (as GNU as rejects them), a
+digest of their own, `x86_encode_16_apx` and `x86_encode_64_apx` against the
+scalar encoder on random streams in which half the forms have REX2 and a quarter
+are EVEX ones, and at page edges, and invalid operands, among them a high byte
+register with REX2, registers 16 to 31 in forms without REX2 or EVEX and XMM16
+to XMM31 in SSE's forms. And in 32-bit and 16-bit modes: 159 and 150 known
+encodings, 13 and 16 known fixups, a digest of each, the modes' loops at 16 and
+64 instructions per iteration (`x86_encode_16_mode32` and the rest) against the
+scalar encoders on random streams with both address sizes and segment overrides
+in the decorations, and at page edges, instructions longer than 15 bytes (16-bit
+mode has them), which `x86_validate_16` must reject, and invalid operands, among
+them registers that would need REX, 16-bit addresses that aren't ModRM's, forms
+of 64-bit mode alone, instructions past 15 bytes and segment overrides where an
+instruction takes none. `--address32`, `--apx`, `--mode32` and `--mode16` run
+only their pass, and `--count N` and `--seed N` change the random streams.
 
 The digests were recorded when GNU as encoded the same streams to the same
 bytes. After changing the form table, the scalar encoder or the fixup interface,
@@ -363,14 +363,17 @@ their ends. The variants are the batch widths (`x86_encode_4` to
 `x86_encode_64`, instructions per loop iteration), the template gather, output
 store and fixup store alternatives that lost, `x86_encode_64_offsets_then_pick`,
 the other way to have fixup ends (every offset, then the caller picks the marked
-ones), and `x86_encode_64_apx`, `x86_encode_apx`'s loop (the streams have no
-registers 16 to 31, so its bytes are the same). `--mode32` and `--mode16` time
-`x86_encode_64_mode32` or `x86_encode_64_mode16` and the mode's scalar loop
-instead, on a mix like 32-bit compiler output or like real-mode code (or with
-`--uniform`, the mode's forms).
-Decide them, and any other performance question, with measurements on the 9700X
-(not Zen 4, and not llvm-mca, whose predictions are well off), using uops.info's
-Zen 5 port data to explain them;
+ones), and `x86_encode_64_apx` and `x86_encode_16_apx`, APX's loops (the streams
+have no registers 16 to 31, so their bytes are the same). The entry points use
+16 per iteration: it is up to 7% slower than 64 in these runs, but 1% to 7%
+faster after scalar code, where a compiler runs its encoder (measure that state
+too: see `docs/x86-64-encoder.md`'s "Zen 5's costs"). `--mode32` and `--mode16`
+time the mode's loops at 64 and 16 per iteration (`x86_encode_64_mode32` and
+`x86_encode_16_mode32`, or the 16-bit ones) and its scalar loop instead, on a
+mix like 32-bit compiler output or like real-mode code (or with `--uniform`, the
+mode's forms). Decide them, and any other performance question, with
+measurements on the 9700X (not Zen 4, and not llvm-mca, whose predictions are
+well off), using uops.info's Zen 5 port data to explain them;
 `docs/x86-64-encoder.md` has the current numbers. Clang's code for the loop
 changes a lot with small source changes, so compare every width after changing
 the encoder, and profile which loop the samples land in. The default 9700X job

@@ -50,22 +50,23 @@
 //     x86_encode takes what x86_validate accepts and doesn't check them.
 // Then the same again with 32-bit addresses (x86_test_mode, from the seed's first state again), but the known fixups:
 // x86_encode_address32 and x86_encode_scalar_address32 on x86_known_encodings_address32, a digest of their own
-// (BUSTER_X86_TEST_DIGEST_ADDRESS32), x86_encode_64_address32 on the random streams and at page edges, and the invalid
-// instructions, with two more breaks: an MPX memory operand and a memory operand in a form without room for the 67.
-// --address32 runs only this pass.
+// (BUSTER_X86_TEST_DIGEST_ADDRESS32), x86_encode_16_address32 and x86_encode_64_address32 on the random streams and at
+// page edges, and the invalid instructions, with two more breaks: an MPX memory operand and a memory operand in a form
+// without room for the 67. --address32 runs only this pass.
 // And again for APX, but the known fixups, which is all --apx runs: x86_encode_apx and x86_encode_scalar_apx on
 // x86_known_encodings_apx, the instructions of x86_known_invalid_apx, which x86_validate_apx and x86_encode_scalar_apx
-// must reject (as GNU as does), a digest of their own (BUSTER_X86_TEST_DIGEST_APX), x86_encode_64_apx on the random
-// streams (in which half the forms have REX2 and a quarter are EVEX ones, whose general registers, bases and general
-// indexes are 16 to 31 half the time) and at page edges, and the invalid instructions, with three more breaks: a high
-// byte register with REX2, a general register, base or index from 16 to 31 in a form without REX2 or EVEX, and a vector
-// register rm from 16 to 31 in a form with REX2.
+// must reject (as GNU as does), a digest of their own (BUSTER_X86_TEST_DIGEST_APX), x86_encode_16_apx and
+// x86_encode_64_apx on the random streams (in which half the forms have REX2 and a quarter are EVEX ones, whose general
+// registers, bases and general indexes are 16 to 31 half the time) and at page edges, and the invalid instructions, with
+// three more breaks: a high byte register with REX2, a general register, base or index from 16 to 31 in a form without
+// REX2 or EVEX, and a vector register rm from 16 to 31 in a form with REX2.
 // And in 32-bit mode and in 16-bit mode, which is all --mode32 and --mode16 run: x86_encode_mode32 and
 // x86_encode_scalar_32, and x86_encode_mode16 and x86_encode_scalar_16, on the known encodings of
 // x86_known_encodings_32 and x86_known_encodings_16 and the known fixups of x86_known_fixups_32 and x86_known_fixups_16
 // (with x86_fixup_distance_address16 for a 16-bit address), a digest of each (BUSTER_X86_TEST_DIGEST_32 and
-// BUSTER_X86_TEST_DIGEST_16), x86_encode_64_mode32 and x86_encode_64_mode16 on the random streams (with both address
-// sizes and segment overrides in the decorations) and at page edges, instructions longer than 15 bytes, which
+// BUSTER_X86_TEST_DIGEST_16), the mode's loops at 16 and 64 per iteration (x86_encode_16_mode32 and
+// x86_encode_64_mode32, x86_encode_16_mode16 and x86_encode_64_mode16) on the random streams (with both address sizes
+// and segment overrides in the decorations) and at page edges, instructions longer than 15 bytes, which
 // x86_validate_32 and x86_validate_16 must reject (x86_check_overlong), and the invalid instructions, with five more
 // breaks: a register that would need REX, a memory operand the instruction's address size can't have (a 16-bit
 // address's displacement outside its range among them), a form that doesn't exist in the mode (which 64-bit mode's
@@ -3735,22 +3736,26 @@ static const X86Variant x86_test_variants[] = {
 
 static const X86Variant x86_test_variants_address32[] = {
     { "x86_encode_64_address32", x86_encode_64_address32, false, false },
+    { "x86_encode_16_address32", x86_encode_16_address32, false, false },
 };
 
 static const X86Variant x86_test_variants_apx[] = {
     { "x86_encode_64_apx", x86_encode_64_apx, false, false },
+    { "x86_encode_16_apx", x86_encode_16_apx, false, false },
 };
 
 static const X86Variant x86_test_variants_32[] = {
     { "x86_encode_64_mode32", x86_encode_64_mode32, false, false },
+    { "x86_encode_16_mode32", x86_encode_16_mode32, false, false },
 };
 
 static const X86Variant x86_test_variants_16[] = {
     { "x86_encode_64_mode16", x86_encode_64_mode16, false, false },
+    { "x86_encode_16_mode16", x86_encode_16_mode16, false, false },
 };
 
-// The variants of the mode: every width and alternative for x86_encode, and the production loop for 32-bit addresses,
-// for APX, and for 32-bit and 16-bit modes.
+// The variants of the mode: every width and alternative for x86_encode, and the loops at 16 per iteration (the
+// production ones) and 64 for 32-bit addresses, for APX, and for 32-bit and 16-bit modes.
 static const X86Variant* x86_mode_variants(uint64_t* count)
 {
     *count = x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? BUSTER_ARRAY_LENGTH(x86_test_variants_address32)
