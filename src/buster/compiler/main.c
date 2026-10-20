@@ -273,6 +273,18 @@ int run_dataflow_benchmark(int argc, char** argv);
 #include "buster/compiler/preprocessor_fuzz_test.c"
 int run_preprocessor_fuzz_benchmark(int argc, char** argv);
 
+// Token refinement: identifier interning (c_intern.c) and the per-file pass after the lexer (c_refine.c), and their
+// tests, for the test-refinement command. Its benchmark is another translation unit.
+#include "buster/compiler/c_intern.c"
+#include "buster/compiler/c_refine.c"
+#include "buster/compiler/c_refine_test.c"
+int run_refinement_benchmark(int argc, char** argv);
+
+// The preprocessor (c_preprocessor.c) and its tests, for the -E and test-preprocessor commands.
+#include "buster/compiler/c_preprocessor.c"
+#include "buster/compiler/c_preprocessor_test.c"
+int run_preprocessor_benchmark(int argc, char** argv);
+
 // The link representation (atoms, symbols, fixups and names, which the object writer and the linker share), the test
 // programs generated in it, and their tests, for the test-link command.
 #include "buster/compiler/link.c"
@@ -319,7 +331,19 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 int main(int argc, char** argv)
 {
     int result = 0;
-    if (argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
+    if (argc >= 2 && strcmp(argv[1], "-E") == 0)
+    {
+        result = run_preprocessor_command(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-preprocessor") == 0)
+    {
+        result = run_preprocessor_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-preprocessor") == 0)
+    {
+        result = run_preprocessor_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
     {
         result = run_c_lexer_tests(argv[0], argc - 2, argv + 2);
         if (result == 0)
@@ -362,6 +386,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-preprocessor-fuzz") == 0)
     {
         result = run_preprocessor_fuzz_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-refinement") == 0)
+    {
+        result = run_refinement_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-refinement") == 0)
+    {
+        result = run_refinement_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-link") == 0)
     {
