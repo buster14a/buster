@@ -82,22 +82,29 @@ typedef uint32_t SymbolId;
 typedef uint32_t FixupId;
 
 // Atom classes: the output section an atom goes to, numbered in the order of lld's segments, so that sorting atoms by
-// class gives the layout's order of sections: R (.rodata and the string pools), RX (.text), RW and RELRO (.tdata,
-// .tbss, .init_array, .fini_array, .data.rel.ro), RW (.data, .bss). TBSS and BSS are zero-fill: their atoms have no
-// bytes. The atoms of INIT_ARRAY and FINI_ARRAY, whose order is what the program runs, keep the order of their ids.
+// class gives the layout's order of sections: R (.rodata, the string pools and .eh_frame), RX (.text, .init and
+// .fini), RW and RELRO (.tdata, .tbss, .init_array, .fini_array, .data.rel.ro), RW (.data, .bss). TBSS and BSS are
+// zero-fill: their atoms have no bytes. The atoms of the classes whose order is what the program runs keep the order of
+// their ids: EH_FRAME, INIT, FINI, INIT_ARRAY and FINI_ARRAY.
 #define BUSTER_LINK_CLASS_NONE 0
 #define BUSTER_LINK_CLASS_RODATA 1
 // Pools of string literals: .rodata.str1.1 in an object (SHF_MERGE | SHF_STRINGS), .rodata in an executable.
 #define BUSTER_LINK_CLASS_STRINGS 2
-#define BUSTER_LINK_CLASS_TEXT 3
-#define BUSTER_LINK_CLASS_TDATA 4
-#define BUSTER_LINK_CLASS_TBSS 5
-#define BUSTER_LINK_CLASS_INIT_ARRAY 6
-#define BUSTER_LINK_CLASS_FINI_ARRAY 7
-#define BUSTER_LINK_CLASS_DATA_RELRO 8
-#define BUSTER_LINK_CLASS_DATA 9
-#define BUSTER_LINK_CLASS_BSS 10
-#define BUSTER_LINK_CLASS_COUNT 11
+// Unwind tables: CIEs and FDEs, as an object's .eh_frame holds them, the C runtime's (crtendS.o's terminator last).
+#define BUSTER_LINK_CLASS_EH_FRAME 3
+#define BUSTER_LINK_CLASS_TEXT 4
+// The C runtime's .init and .fini: fragments of one function each, from crti.o's prologue to crtn.o's epilogue, which
+// run into each other.
+#define BUSTER_LINK_CLASS_INIT 5
+#define BUSTER_LINK_CLASS_FINI 6
+#define BUSTER_LINK_CLASS_TDATA 7
+#define BUSTER_LINK_CLASS_TBSS 8
+#define BUSTER_LINK_CLASS_INIT_ARRAY 9
+#define BUSTER_LINK_CLASS_FINI_ARRAY 10
+#define BUSTER_LINK_CLASS_DATA_RELRO 11
+#define BUSTER_LINK_CLASS_DATA 12
+#define BUSTER_LINK_CLASS_BSS 13
+#define BUSTER_LINK_CLASS_COUNT 14
 // An atom's alignment is at most 2^this: 4 GB.
 #define BUSTER_LINK_MAX_ALIGNMENT_LOG2 32
 
@@ -121,9 +128,10 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_SYMBOL_INFO 0x3f
 #define BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT 6
 
-// Where a symbol is defined. A symbol of the program, a runtime archive member or a foreign object is defined in an
-// atom; one of a shared library or of the linker (__init_array_start, _GLOBAL_OFFSET_TABLE_) has none, and neither has
-// one defined nowhere (NONE: undefined, or a weak reference that binds to 0).
+// Where a symbol is defined. A symbol of the program, of the C runtime's objects and archive members (RUNTIME_ARCHIVE:
+// the crt objects, libc_nonshared.a's members) or of a foreign object is defined in an atom; one of a shared library or
+// of the linker (__init_array_start, _GLOBAL_OFFSET_TABLE_) has none, and neither has one defined nowhere (NONE:
+// undefined, or a weak reference that binds to 0).
 #define BUSTER_LINK_SOURCE_NONE 0
 #define BUSTER_LINK_SOURCE_PROGRAM 1
 #define BUSTER_LINK_SOURCE_RUNTIME_SHARED 2

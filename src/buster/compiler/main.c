@@ -181,6 +181,12 @@ int run_lane_benchmark(int argc, char** argv);
 #include "buster/compiler/object_writer_test.c"
 int run_object_writer_benchmark(int argc, char** argv);
 
+// The import path's readers (ELF objects, archives, shared libraries and linker scripts into the link representation),
+// the C runtime's files, found and imported with them, and their tests, for the test-import command.
+#include "buster/compiler/import.c"
+#include "buster/compiler/runtime.c"
+#include "buster/compiler/import_test.c"
+
 // The direct path's executables (layout, patching, the build ID and the output file) and their tests, for the
 // test-executable command. Its benchmark is another translation unit.
 #include "buster/compiler/executable.c"
@@ -225,6 +231,10 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-object-writer") == 0)
     {
         result = run_object_writer_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-import") == 0)
+    {
+        result = run_import_tests(argc - 2, argv + 2);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-executable") == 0)
     {

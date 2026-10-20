@@ -125,8 +125,9 @@ typedef enum ExecutableError
     // Scratch memory ran out.
     EXECUTABLE_ERROR_MEMORY,
     // The image doesn't fit below BUSTER_EXECUTABLE_MAX_ADDRESS or the TLS block in BUSTER_EXECUTABLE_MAX_TLS_BYTES, or
-    // an atom is larger than BUSTER_EXECUTABLE_MAX_ATOM_BYTES or aligned past a page, or an INIT_ARRAY or FINI_ARRAY atom
-    // isn't whole 8-byte entries aligned to at most 8 (ExecutableResult.atom).
+    // an atom is larger than BUSTER_EXECUTABLE_MAX_ATOM_BYTES or aligned past a page, an INIT_ARRAY or FINI_ARRAY atom
+    // isn't whole 8-byte entries aligned to at most 8, or an atom is of one of the C runtime's classes (EH_FRAME, INIT
+    // and FINI), which an executable without libc has no section for (ExecutableResult.atom).
     EXECUTABLE_ERROR_LAYOUT,
     // A symbol defined nowhere that isn't weak (ExecutableResult.symbol).
     EXECUTABLE_ERROR_UNDEFINED,
@@ -849,12 +850,16 @@ static const uint64_t executable_section_flags[EXECUTABLE_SECTION_COUNT] = {
 #define BUSTER_EXECUTABLE_BUCKETS ((BUSTER_LINK_CLASS_COUNT - 1) * BUSTER_EXECUTABLE_ALIGNMENTS)
 #define BUSTER_EXECUTABLE_ENTRY_ALIGNMENT_LOG2 3
 
-// The section each class's atoms go to.
+// The section each class's atoms go to, or EXECUTABLE_SECTION_COUNT for the C runtime's classes, which an executable
+// without libc doesn't have (step 5's).
 static const uint8_t executable_class_sections[BUSTER_LINK_CLASS_COUNT] = {
     [BUSTER_LINK_CLASS_NONE] = EXECUTABLE_SECTION_COUNT,
     [BUSTER_LINK_CLASS_RODATA] = EXECUTABLE_SECTION_RODATA,
     [BUSTER_LINK_CLASS_STRINGS] = EXECUTABLE_SECTION_RODATA,
+    [BUSTER_LINK_CLASS_EH_FRAME] = EXECUTABLE_SECTION_COUNT,
     [BUSTER_LINK_CLASS_TEXT] = EXECUTABLE_SECTION_TEXT,
+    [BUSTER_LINK_CLASS_INIT] = EXECUTABLE_SECTION_COUNT,
+    [BUSTER_LINK_CLASS_FINI] = EXECUTABLE_SECTION_COUNT,
     [BUSTER_LINK_CLASS_TDATA] = EXECUTABLE_SECTION_TDATA,
     [BUSTER_LINK_CLASS_TBSS] = EXECUTABLE_SECTION_TBSS,
     [BUSTER_LINK_CLASS_INIT_ARRAY] = EXECUTABLE_SECTION_INIT_ARRAY,
@@ -877,6 +882,10 @@ static uint32_t executable_alignment_log2(const LinkAtoms* atoms, AtomId atom)
     {
         const bool entries = result <= BUSTER_EXECUTABLE_ENTRY_ALIGNMENT_LOG2 && atoms->size[atom] % 8 == 0;
         result = entries ? BUSTER_EXECUTABLE_ENTRY_ALIGNMENT_LOG2 : BUSTER_EXECUTABLE_ALIGNMENTS;
+    }
+    else if (executable_class_sections[class] == EXECUTABLE_SECTION_COUNT)
+    {
+        result = BUSTER_EXECUTABLE_ALIGNMENTS;
     }
     return result > BUSTER_EXECUTABLE_PAGE_LOG2 ? BUSTER_EXECUTABLE_ALIGNMENTS : result;
 }

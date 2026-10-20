@@ -74,9 +74,9 @@ or infrastructure machinery merely to match its style.
 - `docs/object-writer-and-linker.md` is the design of the object writer and the
   linker, with the 9700X measurements of mold, wild, lld and the kernel's file
   costs behind it, and the order to build it in. The lane base layer, the
-  encoder's fixups, the representation, the object writer and the direct
-  path's first executables below are implemented; the rest of the linker
-  isn't yet.
+  encoder's fixups, the representation, the object writer, the direct path's
+  first executables and the import of the C runtime's files below are
+  implemented; the rest of the linker isn't yet.
 - `src/buster/compiler/lane.c` is the lane base layer that every phase of the
   object writer and the linker runs on (groups of threads that run the same
   code, their barrier and broadcast, `lane_range`, and arenas).
@@ -96,6 +96,17 @@ or infrastructure machinery merely to match its style.
   `object_write_units` for a group of lanes). `object_writer_test.c` holds its
   tests (`main.c` includes it; `./build/compiler test-object-writer` runs them)
   and `object_writer_benchmark.c` provides `benchmark-object-writer`.
+- `src/buster/compiler/import.c` holds the import path's readers: ELF
+  relocatable objects into the representation, archives' members and symbol
+  index, shared libraries' exports at their default versions, version
+  definitions and references, and the commands of the linker scripts that
+  `libc.so` and GCC's `_asneeded` libraries are. `runtime.c` finds the C
+  runtime's files as GCC's driver does (`Scrt1.o`, `crti.o`, `crtbeginS.o`,
+  `crtendS.o` and `crtn.o`, and the `libc.so.6` and `libc_nonshared.a` that
+  `libc.so` names) and imports them into a link of their own, with what each
+  name they refer to binds to (the first part of step 5 of the design's
+  plan). `import_test.c` holds their tests (`main.c` includes it;
+  `./build/compiler test-import` runs them).
 - `src/buster/compiler/executable.c` writes the direct path's first
   executables: a link in that representation laid out, patched and written as
   a static executable without libc (step 4 of the design's plan), with a build
@@ -119,6 +130,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-link
 ./build/compiler test-object-writer --cross-check
 ./build/compiler benchmark-object-writer
+./build/compiler test-import --cross-check
 ./build/compiler test-executable
 ./build/compiler benchmark-executable
 ```
@@ -368,8 +380,9 @@ informational.
   its TLS segment starting half its alignment past a multiple of it, as a
   linker may start `.tdata` when `.tbss` is more aligned. Every set with
   two thread-locals, an init function and a fini function must have every
-  class and every kind its options allow, and a copy of the defaults' program
-  with the hexadecimal digits' fixup one byte off must print something else.
+  class but the C runtime's (`EH_FRAME`, `INIT` and `FINI`) and every kind
+  its options allow, and a copy of the defaults' program with the
+  hexadecimal digits' fixup one byte off must print something else.
 
 `--seed N` changes the random records and programs. The programs check is
 what scales: `--functions 1000000` builds three programs of a million workers
@@ -484,6 +497,65 @@ with `--directory` on each file system to measure;
 for tmpfs and btrfs. The default 9700X job runs it after the tests, pinned to
 one allowed CPU; like the others, its measurements are informational.
 
+## Import tests
+
+`./build/compiler test-import [--seed N] [--cross-check]` (about 0.04 s on
+the 9700X, and 0.06 s with `--cross-check`) checks `import.c` and
+`runtime.c`:
+
+- round trips: each unit's object of `test-link`'s seven programs (with 500
+  workers in the one that takes `--functions`), with and without function
+  sections, and the object writer's unit of 33,000 functions in sections of
+  their own (past `SHN_LORESERVE` sections), imported into a link of its own.
+  Each of the unit's atoms must be in the atom its section became, byte for
+  byte where the writer put it, each symbol at the same place with the same
+  name, flags and size, and each fixup at its place, of its kind, pointing at
+  the same place with the same addend, and no other fixups;
+- an object made by hand with a section of every class, the sections the
+  import drops (`.sframe` with its relocations, a note, `.note.GNU-stack` and
+  `.comment`), every kind of symbol and every relocation type the
+  representation has, out of order, with `R_X86_64_NONE` and addends past
+  int32: each section, symbol and fixup imported exactly, the atoms' bytes in
+  place in the file; the same with `e_shnum` and `e_shstrndx` in section 0,
+  with `.eh_frame` as `SHT_PROGBITS` and with tables' `sh_entsize` 0; and one
+  without a symbol table, as `crtn.o` is. Then each check a well-formed object
+  never trips, one change at a time, with the error, the index of the
+  section, symbol or relocation, the type and the byte offset it reports;
+- archives made by hand (a 32-bit index, a 64-bit one and none, long names,
+  an odd member's padding, a member of no bytes and no members), then
+  malformed ones;
+- a shared library made by hand: version definitions, a name at a default
+  version and at a hidden one, IFUNC, `GNU_UNIQUE`, `COMMON`, TLS and
+  absolute symbols, weak and protected ones, hidden and local ones and one at
+  `VER_NDX_LOCAL`, which aren't exported, references, and a name exported
+  twice (the table keeps the first); the same without `.gnu.version`; then
+  malformed ones;
+- linker scripts: `libc.so`'s and GCC's `_asneeded` ones, commas, comments
+  and `OUTPUT_FORMAT`, then each error at its offset;
+- page edges: every prefix of each input made by hand, and the input with
+  each byte set to 0, 0xff and a random value, ending at a `PROT_NONE` page,
+  through every reader: each succeeds, or fails reporting a place within its
+  input. A read past the end faults; the command then names the input and
+  exits with status 1;
+- the runtime: `runtime_import` on this system's files. Each crt object must
+  import with what it is for (`_start`, `_init` and `_fini` in `.init` and
+  `.fini` atoms, crti.o's fragment first, `__dso_handle`, `__TMC_END__`),
+  `libc.so.6` with its soname, `write`, `strlen`, `environ` and
+  `__errno_location` at `GLIBC_2.2.5`, `__libc_start_main` at `GLIBC_2.34`
+  and `GLIBC_ABI_DT_RELR`, `libc_nonshared.a` with `atexit` in its index, and
+  the names bound: `main` to the program, `__libc_start_main` and
+  `__cxa_finalize` to libc, `__gmon_start__` and the `_ITM_` functions to
+  nothing, `__TMC_END__` to `crtendS.o`.
+
+`--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
+version, type, binding and size) and references with `readelf -W --dyn-syms`,
+and every relocation of the crt objects and `libc_nonshared.a`'s members with
+`readelf -W -r`: each one must be a fixup of its kind at its offset, against
+the symbol (or the section) readelf names, with its addend, and there must be
+no other fixups. `--seed N` changes the programs and the random bytes. The
+default 9700X job runs it with `--cross-check` after the object writer's
+benchmark.
+
 ## Direct executable tests
 
 `./build/compiler test-executable` (about 0.1 s on the 9700X) checks
@@ -530,10 +602,11 @@ one allowed CPU; like the others, its measurements are informational.
   and its GOT slot); TLS blocks of 2 GB (linked) and past it, atoms past 2 GB
   and one whose padding wraps (refused); a bad entry point, the first of two
   symbols defined nowhere in different lanes' ranges, the smallest failing
-  fixup, an atom aligned past a page and a bad init array atom, each reported
-  alike with every lane count; and a lane with no scratch memory to
-  spare, then 64 bytes more at a time, until the link succeeds: every failure
-  must be `EXECUTABLE_ERROR_MEMORY` and leave no output;
+  fixup, an atom aligned past a page, a bad init array atom and an atom of
+  each of the C runtime's classes, which step 4's executables have no section
+  for, each reported alike with every lane count; and a lane with no scratch
+  memory to spare, then 64 bytes more at a time, until the link succeeds:
+  every failure must be `EXECUTABLE_ERROR_MEMORY` and leave no output;
 - the patch kernel: the fast path against the checked one, on random fixups
   of every kind with wide addends, at every count from 0 to 199 from four
   starts, with the kind column ending at a `PROT_NONE` page.

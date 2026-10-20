@@ -29,8 +29,9 @@
 //     it, as a linker may start .tdata when .tbss is more aligned. A program without libc starts at _start, with an
 //     initial stack and auxiliary vector as the kernel's. One that calls libc gets stand-ins for its imports
 //     (link_test_import), and the child does what the C runtime would around main (link_test_start_libc). Each set
-//     with two thread-locals, an init function and a fini function has every class and every kind its options allow,
-//     and a copy of the defaults' program with the hexadecimal digits' fixup one byte off must write something else.
+//     with two thread-locals, an init function and a fini function has every class but the C runtime's and every kind
+//     its options allow, and a copy of the defaults' program with the hexadecimal digits' fixup one byte off must
+//     write something else.
 // --print-assembly writes those programs (from the same --seed and --functions) as GNU as source instead: a directory
 // for each set of options (link_test_program_directories) with a file per unit and the expected output, for the
 // cross-check in AGENTS.md, where GNU as assembles them and GNU ld, lld, mold and wild link them (through cc, with
@@ -2063,12 +2064,14 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
                    names[i], options[i].units, options[i].functions, program.link.atoms.count - 1, program.link.fixups.count - 1, program.link.fixups.wide_count - 1,
                    (unsigned long long)program.code_bytes, ran ? "ran" : "failed", misaligned_ran ? "ran" : "failed", other_ran ? "ran" : "failed");
         }
-        // Every class, and every kind the options allow, given two thread-locals, an init function and a fini function.
+        // Every class but the C runtime's (EH_FRAME, INIT and FINI, which come from its objects), and every kind the
+        // options allow, given two thread-locals, an init function and a fini function.
         if (generated && options[i].thread_locals >= 2 && options[i].init_functions >= 1 && options[i].fini_functions >= 1)
         {
             const uint32_t absolute = (1u << BUSTER_LINK_FIXUP_ABS32) | (1u << BUSTER_LINK_FIXUP_ABS32S);
             const uint32_t sizes = (1u << BUSTER_LINK_FIXUP_SIZE32) | (1u << BUSTER_LINK_FIXUP_SIZE64);
             const uint32_t expected = ((1u << BUSTER_LINK_FIXUP_KINDS) - 2) & ~(options[i].absolute ? 0 : absolute) & ~(options[i].sizes ? 0 : sizes);
+            const uint32_t runtime = (1u << BUSTER_LINK_CLASS_EH_FRAME) | (1u << BUSTER_LINK_CLASS_INIT) | (1u << BUSTER_LINK_CLASS_FINI);
             uint32_t classes = 0;
             uint32_t kinds = 0;
             for (AtomId atom = 1; atom < program.link.atoms.count; atom += 1)
@@ -2079,7 +2082,7 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
             {
                 kinds |= 1u << (program.link.fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND);
             }
-            link_test_expect(&tally, classes == (1u << BUSTER_LINK_CLASS_COUNT) - 2 && kinds == expected, "every class and every kind the options allow", i);
+            link_test_expect(&tally, classes == (((1u << BUSTER_LINK_CLASS_COUNT) - 2) & ~runtime) && kinds == expected, "every class and every kind the options allow", i);
         }
         // The lea of the hexadecimal digits in buster_write_hex, one byte off, which changes every digit printed.
         if (generated && i == 0)
@@ -2113,7 +2116,10 @@ static const char* const link_test_sections[BUSTER_LINK_CLASS_COUNT] = {
     [BUSTER_LINK_CLASS_NONE] = 0,
     [BUSTER_LINK_CLASS_RODATA] = ".section .rodata,\"a\",@progbits",
     [BUSTER_LINK_CLASS_STRINGS] = ".section .rodata.str1.1,\"aMS\",@progbits,1",
+    [BUSTER_LINK_CLASS_EH_FRAME] = ".section .eh_frame,\"a\",@unwind",
     [BUSTER_LINK_CLASS_TEXT] = ".section .text,\"ax\",@progbits",
+    [BUSTER_LINK_CLASS_INIT] = ".section .init,\"ax\",@progbits",
+    [BUSTER_LINK_CLASS_FINI] = ".section .fini,\"ax\",@progbits",
     [BUSTER_LINK_CLASS_TDATA] = ".section .tdata,\"awT\",@progbits",
     [BUSTER_LINK_CLASS_TBSS] = ".section .tbss,\"awT\",@nobits",
     [BUSTER_LINK_CLASS_INIT_ARRAY] = ".section .init_array,\"aw\",@init_array",

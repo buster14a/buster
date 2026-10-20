@@ -154,8 +154,26 @@ static const ObjectTestSection object_test_sections[BUSTER_LINK_CLASS_COUNT] = {
         .flags = SHF_ALLOC | SHF_MERGE | SHF_STRINGS,
         .entry_size = 1,
     },
+    [BUSTER_LINK_CLASS_EH_FRAME] = {
+        .name = ".eh_frame",
+        .type = SHT_X86_64_UNWIND,
+        .flags = SHF_ALLOC,
+        .entry_size = 0,
+    },
     [BUSTER_LINK_CLASS_TEXT] = {
         .name = ".text",
+        .type = SHT_PROGBITS,
+        .flags = SHF_ALLOC | SHF_EXECINSTR,
+        .entry_size = 0,
+    },
+    [BUSTER_LINK_CLASS_INIT] = {
+        .name = ".init",
+        .type = SHT_PROGBITS,
+        .flags = SHF_ALLOC | SHF_EXECINSTR,
+        .entry_size = 0,
+    },
+    [BUSTER_LINK_CLASS_FINI] = {
+        .name = ".fini",
         .type = SHT_PROGBITS,
         .flags = SHF_ALLOC | SHF_EXECINSTR,
         .entry_size = 0,

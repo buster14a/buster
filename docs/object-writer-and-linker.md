@@ -401,9 +401,14 @@ Columns:
 
 The classes are numbered in lld's order of segments, so that sorting atoms by
 class gives the layout's order: `_RODATA` and `_STRINGS` (pools of string
-literals: `.rodata.str1.1` in an object), `_TEXT`, `_TDATA`, `_TBSS`,
+literals: `.rodata.str1.1` in an object), `_EH_FRAME` (the unwind tables'
+CIEs and FDEs, as an object's `.eh_frame` holds them), `_TEXT`, `_INIT` and
+`_FINI` (the C runtime's `.init` and `.fini`: fragments of one function each,
+from `crti.o`'s prologue to `crtn.o`'s epilogue), `_TDATA`, `_TBSS`,
 `_INIT_ARRAY`, `_FINI_ARRAY`, `_DATA_RELRO`, `_DATA` and `_BSS`. `_TBSS` and
-`_BSS` are zero-fill.
+`_BSS` are zero-fill. The atoms of `_EH_FRAME`, `_INIT`, `_FINI`,
+`_INIT_ARRAY` and `_FINI_ARRAY` keep the order of their ids, which is their
+inputs' link order, since that order is their meaning.
 
 **Symbols** (`SymbolId`) are what binding is about. One atom can define
 several, and several definitions can compete for one name. Columns:
@@ -716,6 +721,39 @@ A stale or missing snapshot is rebuilt by the import path (the same code as a
 full link), written to a temporary file and renamed into place. Two compilers
 rebuilding it at once write identical files, so no lock is needed.
 
+**Finding and importing the files** (`runtime.c`, with the readers of
+`import.c`). GCC's installation is the highest version under
+`/usr/lib/gcc/<triple>` or `/usr/lib64/gcc/<triple>` that has `crtbeginS.o`,
+for the triples distributions use (`x86_64-pc-linux-gnu` on Arch,
+`x86_64-linux-gnu` on Debian and Ubuntu). glibc's files are searched in the
+multiarch directories, then `/usr/lib64` and `/lib64`, then `/usr/lib` and
+`/lib`, as GCC's driver searches them; `libc.so`'s script names the rest by
+absolute path. Every path probed, found or not, is recorded with what the
+validation compares, and so is the directory the version was chosen from. The
+import reads each file once into an arena that the atoms point into:
+
+- the crt objects become units 0 to 4, in the driver's order, and each member
+  of `libc_nonshared.a` a unit after them. An object's allocated sections
+  become atoms of the class lld gives them; `.sframe` (which GCC 16's
+  `Scrt1.o` has, and lld 23 copies into the output), notes and `.comment` are
+  dropped. `Scrt1.o`'s `.note.ABI-tag` is kept aside for the executable's
+  `PT_NOTE`;
+- `libc.so.6` becomes a table of its exports, each at its default version
+  (`name@@VERSION`, or unversioned), with its type and size, an IFUNC as a
+  function; its version definitions with their hashes; and its undefined
+  names;
+- each name the crt objects and members refer to without defining binds to
+  another of them (`__TMC_END__` to `crtendS.o`), to a `libc.so.6` export
+  (`__libc_start_main`, `__cxa_finalize`), to nothing for a weak reference
+  that neither defines (`__gmon_start__`, the `_ITM_` functions), or to the
+  program (`main`).
+
+The readers bound every offset, size, count and index they read by the file
+or the table it indexes. A malformed file gets an error that names the
+section, symbol or relocation and the byte offset, and the readers are run on
+every prefix of their test inputs and on every byte changed, ending at a
+`PROT_NONE` page, to show that they read nothing past the end.
+
 **Static links.** The closure over libc.a is GNU ld's group semantics, which
 the driver asks for (`--start-group -lgcc -lgcc_eh -lc --end-group`):
 
@@ -745,7 +783,8 @@ Segments in lld's order, which loaders and tools expect:
 1. **R:** the ELF header, program headers, `.interp`, the notes, `.gnu.hash`,
    `.dynsym`, `.dynstr`, `.gnu.version`, `.gnu.version_r`, `.rela.dyn` and
    `.relr.dyn`, `.rodata`, `.eh_frame_hdr` and `.eh_frame`.
-2. **RX:** `.init`, `.text` and `.fini`.
+2. **RX:** `.text`, `.init` and `.fini`, in that order, as lld 23 writes
+   them.
 3. **RW, RELRO:** `.tdata` and `.tbss`, `.init_array`, `.fini_array`,
    `.data.rel.ro`, `.dynamic` and `.got`. The segment's memory size runs to
    the end of its page, as lld's `.relro_padding` does, so that
@@ -1202,8 +1241,9 @@ builds an object in its scratch arena and writes it with one `pwrite`.
 **Sections**, in this order:
 
 - for each class with atoms, in class order: `.rodata`, `.rodata.str1.1`
-  (`SHF_MERGE | SHF_STRINGS`), `.text`, `.tdata`, `.tbss`, `.init_array`,
-  `.fini_array`, `.data.rel.ro`, `.data` and `.bss`. With function sections,
+  (`SHF_MERGE | SHF_STRINGS`), `.eh_frame` (`SHT_X86_64_UNWIND`), `.text`,
+  `.init`, `.fini`, `.tdata`, `.tbss`, `.init_array`, `.fini_array`,
+  `.data.rel.ro`, `.data` and `.bss`. With function sections,
   each `TEXT` atom has a section of its own, `.text.<name>`, after its first
   named symbol at offset 0. Each section is followed by its `.rela.<section>`
   if its atoms have fixups;
@@ -2056,6 +2096,11 @@ and with this document updated with what was measured:
    and through the object writer followed by mold, wild and lld. Besides
    time, it reports the work done: bytes written, fixups applied, names looked
    up, page faults and peak memory.
+
+   In progress, in three parts: the runtime's files found and imported
+   (`import.c`, `runtime.c` and `test-import`, done: "The runtime snapshot");
+   the dynamic PIE; then the snapshot itself, `.eh_frame` for the generated
+   programs and `benchmark-link`.
 6. **`-static`:** libc.a's closure, IRELATIVE for its IFUNCs, static TLS.
    Then `-static-pie` and `-shared`.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
