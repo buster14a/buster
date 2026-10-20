@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
 // The call graph check: the coding style's rule against recursion over input-dependent structures, checked on the
 // compiler's own call graph, for the check-call-graph command:
 //
