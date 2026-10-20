@@ -210,6 +210,12 @@ int run_import_benchmark(int argc, char** argv);
 #include "buster/compiler/executable_test.c"
 int run_executable_benchmark(int argc, char** argv);
 
+// The C type table (TypeIds, hash-consing, layout, conversions, compatibility and printing) and its tests, for the
+// test-types command. Its benchmark is another translation unit.
+#include "buster/compiler/c_types.c"
+#include "buster/compiler/c_types_test.c"
+int run_type_benchmark(int argc, char** argv);
+
 // The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
 // check-call-graph and test-call-graph commands.
 #include "buster/compiler/call_graph.c"
@@ -285,6 +291,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-executable") == 0)
     {
         result = run_executable_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-types") == 0)
+    {
+        result = run_type_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-types") == 0)
+    {
+        result = run_type_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "check-call-graph") == 0)
     {
