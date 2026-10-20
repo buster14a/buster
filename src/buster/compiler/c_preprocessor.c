@@ -183,6 +183,9 @@ struct PPOptions
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;
+    // Replace trigraphs (translation phase 1): clang's default in the ISO modes before C23, and -trigraphs,
+    // -ftrigraphs or -fno-trigraphs.
+    bool trigraphs;
 };
 
 // A column array of tokens: an output stream, or a stack of buffers.
@@ -558,6 +561,8 @@ struct Preprocessor
     InternTable* table;
     bool vectorized;
     uint32_t refine_flags;
+    // The prefixed literals the language mode doesn't have, by kind (pp_split_kinds).
+    uint64_t split_kinds;
     // Memory for files' leading-space words and directive tables, macro bodies' spellings and paths. Files' token
     // columns (kinds, starts and values) have an arena each, `columns`, and so do the output and the stacks (PPTokens)
     // and each array of records (`arrays`, whose first pages are then base pages).
@@ -594,10 +599,12 @@ struct Preprocessor
     PPExpansionStart* expansion_starts;
     uint32_t expansion_start_count;
     uint32_t expansion_location;
-    // Scratch spellings: the arena, and the range of the chunk being filled (BUSTER_PP_NONE before the first).
-    Arena scratch;
-    uint32_t scratch_range;
-    uint32_t scratch_used;
+    // Scratch spellings, per kind (raw, as source to be read again, or clean, which are final: pp_scratch_clean): the
+    // arena, the range of the chunk being filled (BUSTER_PP_NONE before the first) and how much of it is used. A clean
+    // spelling is known by its arena (pp_without_splices).
+    Arena scratch[2];
+    uint32_t scratch_range[2];
+    uint32_t scratch_used[2];
     // Macros: by IdentId (macro_of, and is_macro's bits), and the records.
     PPMacroId* macro_of;
     uint64_t* is_macro;
@@ -788,28 +795,44 @@ static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location)
 }
 
 // Copies `length` bytes into the scratch space, and returns their location (or 0 and a fatal error).
-static uint32_t pp_scratch(Preprocessor* pp, const uint8_t* bytes, uint32_t length)
+static uint32_t pp_scratch_in(Preprocessor* pp, const uint8_t* bytes, uint32_t length, bool clean)
 {
     uint32_t result = 0;
-    if (pp->scratch_range == BUSTER_PP_NONE || pp->scratch_used + length > pp->ranges[pp->scratch_range].length - 1)
+    uint32_t* current = &pp->scratch_range[clean];
+    uint32_t* used = &pp->scratch_used[clean];
+    if (*current == BUSTER_PP_NONE || *used + length > pp->ranges[*current].length - 1)
     {
         const uint32_t chunk = length > BUSTER_PP_SCRATCH_CHUNK_BYTES ? length : BUSTER_PP_SCRATCH_CHUNK_BYTES;
-        uint8_t* memory = arena_push(&pp->scratch, chunk, 1);
-        pp->scratch_range = memory != 0 ? pp_add_range(pp, chunk, BUSTER_PP_NONE, memory, BUSTER_PP_NONE, 0) : BUSTER_PP_NONE;
-        pp->scratch_used = 0;
+        uint8_t* memory = arena_push(&pp->scratch[clean], chunk, 1);
+        *current = memory != 0 ? pp_add_range(pp, chunk, BUSTER_PP_NONE, memory, BUSTER_PP_NONE, 0) : BUSTER_PP_NONE;
+        *used = 0;
         if (memory == 0)
         {
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of scratch memory for generated spellings");
         }
     }
-    if (pp->scratch_range != BUSTER_PP_NONE)
+    if (*current != BUSTER_PP_NONE)
     {
-        const PPRange* range = &pp->ranges[pp->scratch_range];
-        memcpy((uint8_t*)range->bytes + pp->scratch_used, bytes, length);
-        result = range->base + pp->scratch_used;
-        pp->scratch_used += length;
+        const PPRange* range = &pp->ranges[*current];
+        memcpy((uint8_t*)range->bytes + *used, bytes, length);
+        result = range->base + *used;
+        *used += length;
     }
     return result;
+}
+
+// Scratch spellings that are read as source again (pastes and _Pragma's text, which clang lexes again): their line
+// splices and trigraphs come out when they are read.
+static uint32_t pp_scratch(Preprocessor* pp, const uint8_t* bytes, uint32_t length)
+{
+    return pp_scratch_in(pp, bytes, length, false);
+}
+
+// Scratch spellings that are final (stringized strings, the builtins' strings and numbers), which clang makes as clean
+// tokens: they are read as they are, so a "??=" a stringized argument spells stays one, even with trigraphs on.
+static uint32_t pp_scratch_clean(Preprocessor* pp, const uint8_t* bytes, uint32_t length)
+{
+    return pp_scratch_in(pp, bytes, length, true);
 }
 
 // The bytes of [location, end) in the location space (in one range).
@@ -820,11 +843,14 @@ static const uint8_t* pp_location_bytes(const Preprocessor* pp, uint32_t locatio
 }
 
 // `length` bytes without the line splices in them (and trigraphs, with trigraphs on): the bytes themselves if they have
-// none, else a copy in `buffer`, which needs room for `length` bytes. Returns the length.
+// none or are a clean scratch spelling (in its arena: pp_scratch_clean), else a copy in `buffer`, which needs room for
+// `length` bytes. Returns the length.
 static uint32_t pp_without_splices(const Preprocessor* pp, const uint8_t* bytes, uint32_t length, uint8_t* buffer, const uint8_t** spelling)
 {
+    const Arena* clean = &pp->scratch[1];
+    const bool final = bytes >= clean->base && bytes < clean->base + clean->capacity;
     bool cleaned = false;
-    for (uint32_t i = 0; !cleaned && i < length; i += 1)
+    for (uint32_t i = 0; !final && !cleaned && i < length; i += 1)
     {
         cleaned = bytes[i] == '\\' || (bytes[i] == '?' && (pp->refine_flags & C_TOKENIZER_TRIGRAPHS));
     }
@@ -1233,6 +1259,105 @@ static IdentId pp_find_guard(const PPFileData* data)
     return result;
 }
 
+// The prefixed literals a language mode doesn't have, as a mask of their kinds: clang lexes one as its prefix, an
+// identifier, and the literal without it (u'a' before C11 is `u` and 'a'). The u, U and u8 prefixes are C11's, but u8 on
+// a character constant is C23's; L is every mode's.
+static uint64_t pp_split_kinds(CLanguage language)
+{
+    const uint64_t c11 = (1ull << C_TOKEN_UTF8_CHAR_CONSTANT) | (1ull << C_TOKEN_UTF16_CHAR_CONSTANT) | (1ull << C_TOKEN_UTF32_CHAR_CONSTANT) |
+                         (1ull << C_TOKEN_UTF8_STRING_LITERAL) | (1ull << C_TOKEN_UTF16_STRING_LITERAL) | (1ull << C_TOKEN_UTF32_STRING_LITERAL);
+    return language.standard < 2011 ? c11 : language.standard < 2023 ? 1ull << C_TOKEN_UTF8_CHAR_CONSTANT : 0;
+}
+
+// Is a token of this kind (its start-of-line bit aside) one the mode splits?
+BUSTER_INLINE bool pp_splits_kind(uint64_t split, uint8_t kind)
+{
+    const uint8_t base = kind & 0x7F;
+    return base < 64 && ((split >> base) & 1) != 0;
+}
+
+// How many of `count` tokens a mode splits (`split`, pp_split_kinds), 64 kinds at a time: the mask spread to a byte per
+// kind is a vpermi2b table, which reads only a kind's low 7 bits, so the start-of-line bit doesn't matter.
+static uint32_t pp_count_splits_vector(const uint8_t* kinds, uint32_t count, uint64_t split)
+{
+    const __m512i ones = _mm512_set1_epi8(1);
+    const __m512i low = _mm512_maskz_mov_epi8((__mmask64)split, ones);
+    const __m512i high = _mm512_setzero_si512();
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < count; i += 64)
+    {
+        const __mmask64 valid = _bzhi_u64(~0ull, count - i < 64 ? count - i : 64);
+        const __m512i kind = _mm512_maskz_loadu_epi8(valid, kinds + i);
+        result += (uint32_t)__builtin_popcountll(_mm512_mask_test_epi8_mask(valid, _mm512_permutex2var_epi8(low, kind, high), ones));
+    }
+    return result;
+}
+
+// pp_count_splits_vector's scalar twin.
+static uint32_t pp_count_splits_scalar(const uint8_t* kinds, uint32_t count, uint64_t split)
+{
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        result += pp_splits_kind(split, kinds[i]);
+    }
+    return result;
+}
+
+// Splits the `splits` tokens whose kinds the mode splits into their prefix, an identifier with the token's start of line,
+// and the literal from its first quote (a line splice can't hold one), in place from the end. The identifier ends after
+// its last prefix character (u, U or 8, which a splice can't hold either): a splice before the quote stays between the
+// two, where refinement reads it as no whitespace, and doesn't take the quote into the identifier. The arrays have room,
+// since a lexer's arrays hold a token per byte. Returns the new count.
+static uint32_t pp_split_prefixes(const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, uint32_t splits, uint64_t split)
+{
+    uint32_t remaining = splits;
+    for (uint32_t i = count; remaining != 0 && i > 0; i -= 1)
+    {
+        const uint32_t t = i - 1;
+        const uint8_t kind = kinds[t];
+        const uint32_t start = starts[t];
+        const uint32_t end = ends[t];
+        if (pp_splits_kind(split, kind))
+        {
+            uint32_t quote = start;
+            uint32_t prefix_end = start;
+            while (bytes[quote] != '\'' && bytes[quote] != '"')
+            {
+                prefix_end = bytes[quote] == 'u' || bytes[quote] == 'U' || bytes[quote] == '8' ? quote + 1 : prefix_end;
+                quote += 1;
+            }
+            kinds[t + remaining] = (kind & 0x7F) <= C_TOKEN_UTF32_CHAR_CONSTANT ? C_TOKEN_CHAR_CONSTANT : C_TOKEN_STRING_LITERAL;
+            starts[t + remaining] = quote;
+            ends[t + remaining] = end;
+            kinds[t + remaining - 1] = (uint8_t)((kind & 0x80) | C_TOKEN_RAW_IDENTIFIER);
+            starts[t + remaining - 1] = start;
+            ends[t + remaining - 1] = prefix_end;
+            remaining -= 1;
+        }
+        else
+        {
+            kinds[t + remaining] = kind;
+            starts[t + remaining] = start;
+            ends[t + remaining] = end;
+        }
+    }
+    return count + splits;
+}
+
+// The prefixed literals among `count` freshly lexed tokens that the mode doesn't have, split (pp_split_prefixes): a scan
+// of the kinds, and the rare split. Returns the new count.
+static uint32_t pp_lex_for_mode(const Preprocessor* pp, const uint8_t* bytes, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t count, bool vectorized)
+{
+    uint32_t result = count;
+    if (pp->split_kinds != 0)
+    {
+        const uint32_t splits = vectorized ? pp_count_splits_vector(kinds, count, pp->split_kinds) : pp_count_splits_scalar(kinds, count, pp->split_kinds);
+        result = splits != 0 ? pp_split_prefixes(bytes, kinds, starts, ends, count, splits, pp->split_kinds) : count;
+    }
+    return result;
+}
+
 // Lexes, refines and indexes a file's bytes: tokens, values, leading-space bits and the directive table. Returns false
 // if memory runs out or the file is too big for 32-bit positions.
 static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path)
@@ -1245,7 +1370,8 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
     bool result = data->kinds != 0 && data->starts != 0 && data->values != 0;
     const bool timing = pp->options.timing;
     uint64_t tick = timing ? __rdtsc() : 0;
-    const int64_t count = result ? c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, pp->refine_flags) : -1;
+    int64_t count = result ? c_tokenize(data->bytes, data->length, data->kinds, data->starts, data->values, pp->refine_flags) : -1;
+    count = count > 0 ? pp_lex_for_mode(pp, data->bytes, data->kinds, data->starts, data->values, (uint32_t)count, pp->vectorized) : count;
     if (timing)
     {
         const uint64_t now = __rdtsc();
@@ -2518,7 +2644,8 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     uint8_t* kinds = arena_push(scratch.arena, capacity, 64);
     uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
-    const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
+    int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp->refine_flags) : -1;
+    count = count > 0 ? pp_lex_for_mode(pp, bytes, kinds, starts, ends, (uint32_t)count, false) : count;
     uint32_t result = count >= 0 && pp_room(pp, into, (uint32_t)count) ? (uint32_t)count : BUSTER_PP_NONE;
     for (uint32_t i = 0; result != BUSTER_PP_NONE && i < (uint32_t)count; i += 1)
     {
@@ -2580,7 +2707,8 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             uint32_t* starts = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
             const int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(joined, length, kinds, starts, ends, pp->refine_flags) : -1;
-            valid = count == 1 && starts[0] == 0 && ends[0] == length;
+            // A prefixed literal the mode doesn't have lexes as two tokens (pp_split_kinds).
+            valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_splits_kind(pp->split_kinds, kinds[0]);
             kind = valid ? kinds[0] & 0x7F : kind;
         }
         if (valid)
@@ -2667,7 +2795,7 @@ static PPToken pp_stringize(Preprocessor* pp, const PPTokens* tokens, uint32_t b
         }
         text[length] = '"';
         length += 1;
-        result.location = pp_scratch(pp, text, (uint32_t)length);
+        result.location = pp_scratch_clean(pp, text, (uint32_t)length);
         result.value = result.location + (uint32_t)length;
     }
     scratch_end(scratch);
@@ -3479,10 +3607,28 @@ BUSTER_INLINE bool pp_collecting(const Preprocessor* pp)
     return pp->invocation_count != 0 && pp->invocations[pp->invocation_count - 1].collecting && pp->capture_count == pp->invocations[pp->invocation_count - 1].capture_mark;
 }
 
+// The directives clang rejects among a function-like macro's arguments (Preprocessor::HandleDirective's
+// err_embedded_directive): the inclusions, #pragma and #embed. Their names, by kind, or null for the others.
+static const char* pp_embedded_directive_name(uint8_t kind)
+{
+    const char* result = 0;
+    switch (kind)
+    {
+        case PP_DIRECTIVE_INCLUDE: result = "include"; break;
+        case PP_DIRECTIVE_INCLUDE_NEXT: result = "include_next"; break;
+        case PP_DIRECTIVE_IMPORT: result = "import"; break;
+        case PP_DIRECTIVE_PRAGMA: result = "pragma"; break;
+        case PP_DIRECTIVE_EMBED: result = "embed"; break;
+        default: break;
+    }
+    return result;
+}
+
 // One step of the main loop while it collects the top invocation's arguments (or a builtin's operand) a token at a time:
 // the top context's tokens up to its end or its next directive. An exhausted buffer is popped (which enables its macro
 // again); a directive runs, as clang runs one among a macro's arguments (its line may start a capture, during which the
-// collection waits); the end of a file or of a barrier leaves the invocation unterminated.
+// collection waits), but for those clang rejects there (pp_embedded_directive_name), which are an error and skipped;
+// the end of a file or of a barrier leaves the invocation unterminated.
 static void pp_collect_step(Preprocessor* pp)
 {
     PPInvocation* invocation = &pp->invocations[pp->invocation_count - 1];
@@ -3505,8 +3651,21 @@ static void pp_collect_step(Preprocessor* pp)
         }
         else if (context->next_directive < data->directive_count)
         {
-            // Undefined behavior that clang allows, and warns about only with -pedantic (-Wembedded-directive).
-            pp_directive(pp, context);
+            const uint32_t d = context->next_directive;
+            const char* rejected = invocation->builtin ? 0 : pp_embedded_directive_name(data->directive_kind[d]);
+            if (rejected != 0)
+            {
+                // At the directive's name, as clang reports it.
+                pp_diagnose(pp, PP_SEVERITY_ERROR, base + data->starts[data->directive_hash[d] + 1], "embedding a #%s directive within macro arguments is not supported",
+                            rejected);
+                context->position = data->directive_end[d];
+                context->next_directive = d + 1;
+            }
+            else
+            {
+                // Undefined behavior that clang allows, and warns about only with -pedantic (-Wembedded-directive).
+                pp_directive(pp, context);
+            }
         }
         else
         {
@@ -3653,7 +3812,7 @@ static PPToken pp_number_token(Preprocessor* pp, uint64_t value, uint8_t flags)
 {
     char digits[24];
     const uint32_t length = (uint32_t)snprintf(digits, sizeof(digits), "%lu", (unsigned long)value);
-    const uint32_t location = value == 0 ? pp->zero_location : value == 1 ? pp->one_location : pp_scratch(pp, (const uint8_t*)digits, length);
+    const uint32_t location = value == 0 ? pp->zero_location : value == 1 ? pp->one_location : pp_scratch_clean(pp, (const uint8_t*)digits, length);
     return (PPToken){ .kind = C_TOKEN_NUMERIC_CONSTANT, .flags = (uint8_t)(flags | BUSTER_PP_FROM_MACRO), .value = location + length, .location = location };
 }
 
@@ -3685,7 +3844,7 @@ static PPToken pp_string_token(Preprocessor* pp, const uint8_t* bytes, uint32_t 
         }
         text[n] = '"';
         n += 1;
-        result.location = pp_scratch(pp, text, n);
+        result.location = pp_scratch_clean(pp, text, n);
         result.value = result.location + n;
     }
     scratch_end(scratch);
@@ -6633,14 +6792,17 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->options = *options;
     pp->table = table;
     pp->vectorized = !options->scalar;
-    pp->refine_flags = 0;
+    pp->refine_flags = options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0;
+    pp->split_kinds = pp_split_kinds(options->language);
     pp->arena = arena_reserve(BUSTER_PP_ARENA_BYTES);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
     {
         pp->columns[i] = arena_reserve(BUSTER_PP_ARENA_BYTES);
     }
-    pp->scratch = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
-    pp->scratch_range = BUSTER_PP_NONE;
+    pp->scratch[0] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
+    pp->scratch[1] = arena_reserve(BUSTER_PP_SCRATCH_BYTES);
+    pp->scratch_range[0] = BUSTER_PP_NONE;
+    pp->scratch_range[1] = BUSTER_PP_NONE;
     bool result = pp_tokens_reserve(&pp->output, BUSTER_PP_MAX_OUTPUT_TOKENS) && pp_tokens_reserve(&pp->arguments, BUSTER_PP_MAX_STACK_TOKENS) &&
                   pp_tokens_reserve(&pp->captures, BUSTER_PP_MAX_STACK_TOKENS) && pp_tokens_reserve(&pp->expansions, BUSTER_PP_MAX_STACK_TOKENS);
     pp->ranges = pp_array(pp, BUSTER_PP_MAX_RANGES, sizeof(PPRange));
@@ -6668,7 +6830,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     result = result && pp->ranges != 0 && pp->datas != 0 && pp->files != 0 && pp->file_slots != 0 && pp->directories != 0 && pp->directory_lengths != 0 &&
              pp->directory_system != 0 && pp->line_directives != 0 && pp->expansion_starts != 0 && pp->macro_of != 0 && pp->is_macro != 0 && pp->macros != 0 && pp->items != 0 &&
              pp->parameters != 0 && pp->pushed_names != 0 && pp->pushed_macros != 0 && pp->contexts != 0 && pp->conditionals != 0 && pp->invocations != 0 &&
-             pp->argument_records != 0 && pp->capture_frames != 0 && pp->scratch.base != 0;
+             pp->argument_records != 0 && pp->capture_frames != 0 && pp->scratch[0].base != 0 && pp->scratch[1].base != 0;
     if (result)
     {
         // Macro 0 is none; location 0 is none.
@@ -6762,9 +6924,9 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         snprintf(pp->time, sizeof(pp->time), "%02d:%02d:%02d", calendar.tm_hour, calendar.tm_min, calendar.tm_sec);
         pp_format_timestamp(pp->timestamp, sizeof(pp->timestamp), &calendar);
         pp->has_epoch = epoch != 0;
-        pp->zero_location = pp_scratch(pp, (const uint8_t*)"0", 1);
-        pp->one_location = pp_scratch(pp, (const uint8_t*)"1", 1);
-        pp->hash_location = pp_scratch(pp, (const uint8_t*)"#", 1);
+        pp->zero_location = pp_scratch_clean(pp, (const uint8_t*)"0", 1);
+        pp->one_location = pp_scratch_clean(pp, (const uint8_t*)"1", 1);
+        pp->hash_location = pp_scratch_clean(pp, (const uint8_t*)"#", 1);
         // The output's keyword kinds: a predefined name that is a keyword in this mode, by id (below 128).
         for (uint32_t id = 0; id < BUSTER_PP_KEYWORD_TABLE; id += 1)
         {
@@ -6788,7 +6950,8 @@ static void pp_release(Preprocessor* pp)
             munmap((void*)pp->datas[d].bytes, pp->datas[d].length);
         }
     }
-    arena_release(&pp->scratch);
+    arena_release(&pp->scratch[0]);
+    arena_release(&pp->scratch[1]);
     arena_release(&pp->arena);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
     {
@@ -7762,6 +7925,8 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     *input = 0;
     *output = 0;
     *markers = true;
+    // -trigraphs, -ftrigraphs and -fno-trigraphs override the mode's default (-1 for none).
+    int trigraphs = -1;
     result = quote != 0 && include != 0 && system != 0 && after != 0 && macros != 0 && includes != 0;
     for (int i = 0; result && i < count; i += 1)
     {
@@ -7790,6 +7955,10 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         else if (strncmp(argument, "-O", 2) == 0)
         {
             options->optimize = strcmp(argument, "-O0") != 0;
+        }
+        else if (strcmp(argument, "-trigraphs") == 0 || strcmp(argument, "-ftrigraphs") == 0 || strcmp(argument, "-fno-trigraphs") == 0)
+        {
+            trigraphs = strcmp(argument, "-fno-trigraphs") != 0;
         }
         else if (strncmp(argument, "-m", 2) == 0 || strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0 || strcmp(argument, "-g") == 0)
         {
@@ -7875,6 +8044,7 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     options->include_directories = include;
     options->system_directories = system;
     options->after_directories = after;
+    options->trigraphs = trigraphs >= 0 ? trigraphs != 0 : !options->language.gnu && options->language.standard < 2023;
     options->macros = macros;
     options->includes = includes;
     return result && *input != 0;
@@ -7894,7 +8064,7 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     if (!parsed)
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
-                        "[-include file] [-std=...] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
+                        "[-include file] [-std=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
     }
     else
     {

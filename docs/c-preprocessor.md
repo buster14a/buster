@@ -17,9 +17,9 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | --- | ---: | ---: |
 | `sqlite3.c` 3.53, with glibc's headers | 1 | 707,153 |
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
-| This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,106,969 |
+| This repository's translation units on this branch (`main` at 8e3a520), with `-march=native` (AVX-512 intrinsic headers) | 13 | 8,109,781 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 77 | |
+| The built-in cases (`pp_test_cases`) | 88 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -133,6 +133,30 @@ of the file that defines them. Files are found by path (`pp_lookup_path`, a
 table that starts at 1,024 slots and doubles) and shared by device and inode,
 so that two paths to one file are one file.
 
+- **Lexing by the language mode.** The lexer has no language mode, so two of
+  clang's rules are applied around it:
+  - The `u`, `U` and `u8` prefixes are C11's, and `u8` on a character constant
+    is C23's (`L` is every mode's). Before those modes, clang lexes `u'a'` as
+    the identifier `u` and the constant `'a'`, so a macro named `u` expands
+    there. After lexing, `pp_count_splits_vector` looks the kinds up 64 at a
+    time (one `vpermi2b` over the mode's mask), and the rare literal it finds
+    is split in place into the prefix and the literal from its quote
+    (`pp_split_prefixes`), before refinement interns the prefix. The prefix
+    ends after its last `u`, `U` or `8`, so a line splice before the quote stays
+    between the two, where refinement reads it as no whitespace. Scratch text
+    (`_Pragma`, pastes) is lexed the same way, and a paste that would form such
+    a literal is an error, as in clang.
+  - Trigraphs are replaced in the ISO modes before C23 (`-std=c89` to
+    `-std=c17`), clang's default, and wherever `-trigraphs` or `-ftrigraphs`
+    asks for them (`-fno-trigraphs` turns them off). The lexer, refinement and
+    the printer read them with `C_TOKENIZER_TRIGRAPHS`.
+  - Spellings the preprocessor makes are read again as clang reads them. Some
+    are final, as clang's clean tokens are: stringized strings, and the
+    builtins' strings and numbers. Their scratch arena (`pp_scratch_clean`)
+    tells `pp_without_splices` to leave them alone, so `S(??\`, a line
+    splice, then `=)` stays `"??="`. Pastes and `_Pragma`'s text are lexed
+    again, so their line splices and trigraphs still come out (`pp_scratch`).
+
 - **Directive tables** (#118). A vectorized scan (`pp_scan_directives_vector`)
   finds every `#` that starts a line (the lexer's start-of-line bit), with its
   kind and the token where its line ends. `pp_finish_directives` pairs the
@@ -237,8 +261,11 @@ arenas. Popping a context gives its tokens back when they are on top.
 
 ### Directives and `#if`
 
-- **Directives** run in their file's order (`pp_directive`). `#if` lines are
-  expanded first (#123): with `#define BAD(x,y) x`, `#if 0 && BAD(1)` is an
+- **Directives** run in their file's order (`pp_directive`), even among a
+  macro's arguments, as clang runs them there. The exceptions are the ones
+  clang rejects there: `#include`, `#include_next`, `#import`, `#pragma` and
+  `#embed` are an error, and the invocation goes on without them. `#if` lines
+  are expanded first (#123): with `#define BAD(x,y) x`, `#if 0 && BAD(1)` is an
   error, as in clang, while `#if 0 && (1/0)` is not. They are then evaluated by
   `pp_evaluate` with an explicit stack, over C23's integer constants: binary,
   digit separators, `true` and `false` in C23 mode, and character constants
@@ -540,7 +567,7 @@ the mispredictions it saves.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 77 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 88 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -603,10 +630,21 @@ the mispredictions it saves.
     - `#line`'s number and file name across line splices and with escapes;
     - line markers: `#line` in the main file and in a header, lines that macros
       start, the line after `_Pragma`, the include stack, system headers and
-      escaped names, each with the exact text `-E` prints.
+      escaped names, each with the exact text `-E` prints;
+  - lexing by the language mode: the literal prefixes before C11, `u8'a'`
+    before C23 and both in C23, a paste that would form `u8'a'` before C23, and
+    trigraphs in the ISO modes and in the GNU ones;
+  - `#pragma` and `#include` among a macro's arguments, which fail as clang's
+    do and must then give clang's output;
+  - the cases from #202's review: a line splice before the quote of a split
+    literal (with `u`, `U` and `u8`, and a trigraph splice), and a trigraph a
+    stringized argument spells, which stays, beside one a paste forms, which is
+    replaced.
 
   A case can name more files, and options for both sides (`-I`, `-include`,
-  with `%d` for its directory), and the text `-E` prints with line markers. Each
+  with `%d` for its directory), and the text `-E` prints with line markers. A
+  case that fails can still give the output it must have after its error, as
+  clang's does. Texts are lexed by the case's language mode. Each
   case is preprocessed by both kernels, with the built-in predefines. Their
   streams and directive tables must be the same, and their tokens' spellings
   must be the expected ones. With `--clang`, each case is also preprocessed by
@@ -750,10 +788,6 @@ cleared once and reused.
   where a token needs it.
 - Diagnostics give `file:line:column: error: message` (the presumed file and
   line) and no more: no notes, no macro backtraces (#108), and no carets.
-- A `#pragma` among a macro's arguments goes to the output, where clang rejects
-  it.
-- Before C23, `u8'a'` is one character constant here, because the lexer has no
-  language mode. clang lexes it as `u8` and `'a'`.
 - C++ (`-x c++`), dependency output (`-M`) and `-dM` aren't supported.
 - Stringizing an identifier that pasting made from a UCN gives its UTF-8
   spelling, where clang keeps the UCN.
