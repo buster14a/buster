@@ -13,8 +13,10 @@
 //   - libc.so, found in the same directories: a linker script naming libc.so.6, libc_nonshared.a and, as needed, the
 //     dynamic loader.
 // Each path probed, found or absent, is recorded with what identifies a found file (st_dev, st_ino, st_size, st_mtim
-// and st_ctim), so that the snapshot can tell with one stat per path whether it still describes the system; and so is
-// the directory GCC's versions were chosen from, whose times change when a version comes or goes.
+// and st_ctim), so that the snapshot can tell with one stat per path whether it still describes the system
+// (runtime_probes_current). Among them are the directory GCC's versions were chosen from, whose times change when a
+// version's directory comes or goes, and each version's crtbeginS.o, found or not, so that one installed into a
+// version's existing directory shows too.
 //
 // The import (runtime_import) reads every file once into the runtime's arena, which the atoms then point into, and
 // fills a link of the runtime's own: the crt objects as units 0 to 4 (RuntimeObject), then libc_nonshared.a's members
@@ -69,11 +71,12 @@ typedef enum RuntimeObject
     RUNTIME_OBJECTS,
 } RuntimeObject;
 
-// A path the search probed: found, with what identifies its file, or absent.
+// A path the search probed, for a regular file or a directory: found, with what identifies it, or absent.
 typedef struct RuntimeProbe RuntimeProbe;
 struct RuntimeProbe
 {
     String8 path;
+    bool directory;
     bool found;
     uint64_t device;
     uint64_t inode;
@@ -155,6 +158,9 @@ struct Runtime
 // error says what went wrong and the runtime's fields where.
 static __attribute__((unused)) RuntimeError runtime_import(Runtime* runtime);
 static __attribute__((unused)) void runtime_release(Runtime* runtime);
+// Whether every path the search probed is as it found it: absent still, or the same file or directory, by st_dev, st_ino,
+// st_size, st_mtim and st_ctim.
+static __attribute__((unused)) bool runtime_probes_current(const Runtime* runtime);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Files
@@ -177,6 +183,18 @@ static String8 runtime_copy_path(Runtime* runtime, const char* path)
         result.length = length;
     }
     return result;
+}
+
+// Reserves the runtime's arenas and its probes: false if they can't be had.
+static bool runtime_begin(Runtime* runtime)
+{
+    *runtime = (Runtime){ 0 };
+    runtime->tables = arena_reserve(BUSTER_RUNTIME_TABLES_BYTES);
+    runtime->names = arena_reserve(BUSTER_RUNTIME_NAMES_BYTES);
+    runtime->files = arena_reserve(BUSTER_RUNTIME_FILES_BYTES);
+    runtime->probe_capacity = BUSTER_RUNTIME_MAX_PROBES;
+    runtime->probes = BUSTER_ARENA_PUSH_ARRAY(&runtime->files, RuntimeProbe, runtime->probe_capacity);
+    return runtime->tables.base != 0 && runtime->names.base != 0 && runtime->probes != 0;
 }
 
 static void runtime_identify(RuntimeProbe* probe, const struct stat* status)
@@ -204,6 +222,7 @@ static bool runtime_probe(Runtime* runtime, const char* path, bool directory)
         RuntimeProbe* probe = &runtime->probes[runtime->probe_count];
         *probe = (RuntimeProbe){
             .path = runtime_copy_path(runtime, path),
+            .directory = directory,
         };
         if (found)
         {
@@ -212,6 +231,28 @@ static bool runtime_probe(Runtime* runtime, const char* path, bool directory)
         runtime->probe_count += 1;
     }
     return found;
+}
+
+static bool runtime_probes_current(const Runtime* runtime)
+{
+    bool result = true;
+    for (uint32_t p = 0; result && p < runtime->probe_count; p += 1)
+    {
+        const RuntimeProbe* recorded = &runtime->probes[p];
+        struct stat status;
+        RuntimeProbe now = {
+            .directory = recorded->directory,
+        };
+        const bool exists = recorded->path.pointer != 0 && stat(recorded->path.pointer, &status) == 0;
+        if (exists && (recorded->directory ? S_ISDIR(status.st_mode) : S_ISREG(status.st_mode)))
+        {
+            runtime_identify(&now, &status);
+        }
+        result = recorded->path.pointer != 0 && now.found == recorded->found && now.device == recorded->device && now.inode == recorded->inode &&
+                 now.size == recorded->size && now.modified_seconds == recorded->modified_seconds && now.modified_nanoseconds == recorded->modified_nanoseconds &&
+                 now.changed_seconds == recorded->changed_seconds && now.changed_nanoseconds == recorded->changed_nanoseconds;
+    }
+    return result;
 }
 
 // Reads a whole file into the runtime's arena: its bytes, or an empty slice with the error recorded.
@@ -314,38 +355,74 @@ static bool runtime_version_greater(const char* a, const char* b)
     return result;
 }
 
-// Finds GCC's installation: for each base and triple whose directory exists, the highest version with crtbeginS.o.
-static bool runtime_find_gcc(Runtime* runtime)
+// The longest version directory's name GCC's search considers.
+#define BUSTER_RUNTIME_VERSION_BYTES 256
+
+// Finds GCC's installation under `bases`: for the first base and triple whose directory exists, the highest version
+// that has crtbeginS.o. Each version's crtbeginS.o is probed, found or not, so that the probes show one installed into a
+// version's existing directory, and in the order of the versions' names, highest first, so that they don't depend on
+// the order readdir gives them in.
+static bool runtime_find_gcc(Runtime* runtime, const char* const* bases, uint32_t base_count)
 {
     char path[BUSTER_RUNTIME_PATH_BYTES];
     char best[BUSTER_RUNTIME_PATH_BYTES] = { 0 };
-    char best_version[256] = { 0 };
     char best_triple[BUSTER_RUNTIME_PATH_BYTES] = { 0 };
     bool found = false;
-    for (uint64_t b = 0; !found && b < BUSTER_ARRAY_LENGTH(runtime_gcc_bases); b += 1)
+    for (uint32_t b = 0; !found && b < base_count; b += 1)
     {
         for (uint64_t t = 0; !found && t < BUSTER_ARRAY_LENGTH(runtime_triples); t += 1)
         {
-            snprintf(path, sizeof(path), "%s/%s", runtime_gcc_bases[b], runtime_triples[t]);
+            snprintf(path, sizeof(path), "%s/%s", bases[b], runtime_triples[t]);
             DIR* versions = runtime_probe(runtime, path, true) ? opendir(path) : 0;
+            // The names of the versions' directories, copied to the files arena one after another.
+            const uint64_t names_begin = runtime->files.length;
+            uint32_t name_count = 0;
             for (struct dirent* entry = versions != 0 ? readdir(versions) : 0; entry != 0; entry = readdir(versions))
             {
-                char crt[BUSTER_RUNTIME_PATH_BYTES];
-                struct stat status;
-                const bool version = entry->d_name[0] >= '0' && entry->d_name[0] <= '9' && strlen(entry->d_name) < sizeof(best_version);
-                const int length = version ? snprintf(crt, sizeof(crt), "%s/%s/crtbeginS.o", path, entry->d_name) : -1;
-                if (length > 0 && (uint64_t)length < sizeof(crt) && stat(crt, &status) == 0 && (best_version[0] == 0 || runtime_version_greater(entry->d_name, best_version)))
+                const uint64_t length = strlen(entry->d_name);
+                const bool version = entry->d_name[0] >= '0' && entry->d_name[0] <= '9' && length < BUSTER_RUNTIME_VERSION_BYTES;
+                char* copy = version ? arena_push(&runtime->files, BUSTER_RUNTIME_VERSION_BYTES, 1) : 0;
+                if (copy != 0)
                 {
-                    snprintf(best_version, sizeof(best_version), "%s", entry->d_name);
-                    snprintf(best, sizeof(best), "%s/%s", path, entry->d_name);
-                    snprintf(best_triple, sizeof(best_triple), "%s", path);
+                    memcpy(copy, entry->d_name, length + 1);
+                    name_count += 1;
                 }
+                runtime->probes_full = runtime->probes_full || (version && copy == 0);
             }
             if (versions != 0)
             {
                 closedir(versions);
             }
-            found = best_version[0] != 0;
+            // Highest first: an insertion sort of the names in place (there are a few), by version, then by name.
+            char* names = (char*)runtime->files.base + names_begin;
+            for (uint32_t i = 1; i < name_count; i += 1)
+            {
+                char moving[BUSTER_RUNTIME_VERSION_BYTES];
+                memcpy(moving, names + (uint64_t)i * BUSTER_RUNTIME_VERSION_BYTES, BUSTER_RUNTIME_VERSION_BYTES);
+                uint32_t place = i;
+                while (place > 0 && (runtime_version_greater(moving, names + (uint64_t)(place - 1) * BUSTER_RUNTIME_VERSION_BYTES) ||
+                                     (!runtime_version_greater(names + (uint64_t)(place - 1) * BUSTER_RUNTIME_VERSION_BYTES, moving) &&
+                                      strcmp(moving, names + (uint64_t)(place - 1) * BUSTER_RUNTIME_VERSION_BYTES) < 0)))
+                {
+                    memcpy(names + (uint64_t)place * BUSTER_RUNTIME_VERSION_BYTES, names + (uint64_t)(place - 1) * BUSTER_RUNTIME_VERSION_BYTES, BUSTER_RUNTIME_VERSION_BYTES);
+                    place -= 1;
+                }
+                memcpy(names + (uint64_t)place * BUSTER_RUNTIME_VERSION_BYTES, moving, BUSTER_RUNTIME_VERSION_BYTES);
+            }
+            for (uint32_t i = 0; i < name_count; i += 1)
+            {
+                char crt[BUSTER_RUNTIME_PATH_BYTES];
+                const char* name = names + (uint64_t)i * BUSTER_RUNTIME_VERSION_BYTES;
+                const int length = snprintf(crt, sizeof(crt), "%s/%s/crtbeginS.o", path, name);
+                const bool fits = length > 0 && (uint64_t)length < sizeof(crt);
+                const bool has_crt = fits && runtime_probe(runtime, crt, false);
+                if (has_crt && !found)
+                {
+                    snprintf(best, sizeof(best), "%s/%s", path, name);
+                    snprintf(best_triple, sizeof(best_triple), "%s", path);
+                    found = true;
+                }
+            }
         }
     }
     if (found)
@@ -387,7 +464,7 @@ static RuntimeError runtime_search(Runtime* runtime)
         [RUNTIME_OBJECT_END] = "crtendS.o",
         [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
     };
-    RuntimeError result = runtime_find_gcc(runtime) ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MISSING;
+    RuntimeError result = runtime_find_gcc(runtime, runtime_gcc_bases, BUSTER_ARRAY_LENGTH(runtime_gcc_bases)) ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MISSING;
     if (result != RUNTIME_ERROR_NONE)
     {
         snprintf(runtime->failed_file, sizeof(runtime->failed_file), "crtbeginS.o in a GCC installation");
@@ -549,13 +626,7 @@ static RuntimeError runtime_bind(Runtime* runtime)
 
 static RuntimeError runtime_import(Runtime* runtime)
 {
-    *runtime = (Runtime){ 0 };
-    runtime->tables = arena_reserve(BUSTER_RUNTIME_TABLES_BYTES);
-    runtime->names = arena_reserve(BUSTER_RUNTIME_NAMES_BYTES);
-    runtime->files = arena_reserve(BUSTER_RUNTIME_FILES_BYTES);
-    runtime->probe_capacity = BUSTER_RUNTIME_MAX_PROBES;
-    runtime->probes = BUSTER_ARENA_PUSH_ARRAY(&runtime->files, RuntimeProbe, runtime->probe_capacity);
-    RuntimeError result = runtime->tables.base != 0 && runtime->names.base != 0 && runtime->probes != 0 ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MEMORY;
+    RuntimeError result = runtime_begin(runtime) ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MEMORY;
     if (result == RUNTIME_ERROR_NONE)
     {
         result = runtime_search(runtime);

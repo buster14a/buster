@@ -35,6 +35,9 @@
 //     random value, ending at a PROT_NONE page, through every reader: each succeeds, or fails reporting a place within
 //     its input, without reading past the end (a read there faults; the command then names the input and exits with
 //     status 1).
+//   - Discovery: GCC's search under a directory of the test's own, whose newer version's directory has no crtbeginS.o:
+//     the search picks the older version and probes the newer one's crtbeginS.o, so that installing it leaves the
+//     probes stale (runtime_probes_current) and a fresh search picks it.
 //   - The runtime (runtime_import on this system's files): GCC's installation and the crt objects found and probed;
 //     each crt object imported with what it is for (_start; _init and _fini in .init and .fini atoms; __dso_handle and
 //     __TMC_END__); libc.so.6's soname, its exports at their default versions (write, strlen, environ and
@@ -48,7 +51,7 @@
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, the round trips, files made by hand, objects, archives, shared libraries, linker
-// scripts, page edges, the runtime, the cross-check, and run_import_tests.
+// scripts, page edges, the runtime (discovery among it), the cross-check, and run_import_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -1957,6 +1960,78 @@ static bool import_test_page_edges(const ImportTestInput* inputs, uint32_t count
 // ---------------------------------------------------------------------------------------------------------------------
 // The runtime
 
+// Makes an empty file at `path`.
+static bool import_test_touch(const char* path)
+{
+    const int file = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    const bool result = file >= 0;
+    if (result)
+    {
+        close(file);
+    }
+    return result;
+}
+
+// GCC's search under a directory of the test's own, with the versions 15, which has crtbeginS.o, and 16, a directory
+// without it: the search picks 15, and probes 16's crtbeginS.o too, so that installing it there leaves the probes
+// stale (runtime_probes_current) though no directory the search read changes; a fresh search then picks 16, and the
+// probes show its crtbeginS.o removed again.
+static bool import_test_discovery(void)
+{
+    ImportTestTally tally = {
+        .check = "discovery",
+    };
+    const char* temporary = getenv("TMPDIR");
+    char root[BUSTER_RUNTIME_PATH_BYTES];
+    char triple[BUSTER_RUNTIME_PATH_BYTES];
+    char older[BUSTER_RUNTIME_PATH_BYTES];
+    char newer[BUSTER_RUNTIME_PATH_BYTES];
+    char older_crt[BUSTER_RUNTIME_PATH_BYTES];
+    char newer_crt[BUSTER_RUNTIME_PATH_BYTES];
+    snprintf(root, sizeof(root), "%s/buster-import-XXXXXX", temporary != 0 && temporary[0] != 0 ? temporary : "/tmp");
+    const bool made = mkdtemp(root) != 0;
+    snprintf(triple, sizeof(triple), "%s/x86_64-pc-linux-gnu", root);
+    snprintf(older, sizeof(older), "%s/15", triple);
+    snprintf(newer, sizeof(newer), "%s/16", triple);
+    snprintf(older_crt, sizeof(older_crt), "%s/crtbeginS.o", older);
+    snprintf(newer_crt, sizeof(newer_crt), "%s/crtbeginS.o", newer);
+    const bool tree = made && mkdir(triple, 0755) == 0 && mkdir(older, 0755) == 0 && mkdir(newer, 0755) == 0 && import_test_touch(older_crt);
+    import_test_expect(&tally, tree, "the versions' directories", 0);
+    const char* const bases[] = {
+        root,
+    };
+    Runtime runtime;
+    const bool begun = runtime_begin(&runtime);
+    const bool found = tree && begun && runtime_find_gcc(&runtime, bases, BUSTER_ARRAY_LENGTH(bases));
+    import_test_expect(&tally, found && import_equal(runtime.gcc_directory, older), "the highest version with crtbeginS.o", 0);
+    bool probed = false;
+    for (uint32_t p = 0; found && p < runtime.probe_count; p += 1)
+    {
+        probed = probed || (import_equal(runtime.probes[p].path, newer_crt) && !runtime.probes[p].found && !runtime.probes[p].directory);
+    }
+    import_test_expect(&tally, probed, "the newer version's missing crtbeginS.o among the probes", runtime.probe_count);
+    import_test_expect(&tally, found && runtime_probes_current(&runtime), "the probes current while nothing changes", 0);
+    const bool installed = found && import_test_touch(newer_crt);
+    import_test_expect(&tally, installed && !runtime_probes_current(&runtime), "crtbeginS.o installed into a version's existing directory shows", 0);
+    Runtime fresh;
+    const bool fresh_begun = runtime_begin(&fresh);
+    const bool fresh_found = installed && fresh_begun && runtime_find_gcc(&fresh, bases, BUSTER_ARRAY_LENGTH(bases));
+    import_test_expect(&tally, fresh_found && import_equal(fresh.gcc_directory, newer) && runtime_probes_current(&fresh), "a fresh search picks it", 0);
+    import_test_expect(&tally, fresh_found && unlink(newer_crt) == 0 && !runtime_probes_current(&fresh), "its crtbeginS.o removed again shows", 0);
+    runtime_release(&runtime);
+    runtime_release(&fresh);
+    unlink(newer_crt);
+    unlink(older_crt);
+    rmdir(newer);
+    rmdir(older);
+    rmdir(triple);
+    if (made)
+    {
+        rmdir(root);
+    }
+    return import_test_report(&tally);
+}
+
 // The runtime's symbol of that name, defined or not as `defined` says, or 0.
 static SymbolId import_test_runtime_symbol(const Runtime* runtime, const char* name, bool defined)
 {
@@ -2551,6 +2626,7 @@ static int run_import_tests(int argc, char** argv)
         passed = import_test_libraries(&arena) && passed;
         passed = import_test_scripts(&arena) && passed;
         passed = import_test_edges(seed, &arena) && passed;
+        passed = import_test_discovery() && passed;
         passed = import_test_runtime(cross_check, &arena) && passed;
         arena_release(&arena);
         result = passed ? 0 : 1;

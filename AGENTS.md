@@ -559,6 +559,11 @@ the 9700X, and 0.06 s with `--cross-check`) checks `import.c` and
   through every reader: each succeeds, or fails reporting a place within its
   input. A read past the end faults; the command then names the input and
   exits with status 1;
+- discovery: GCC's search under a directory of the test's own, whose newer
+  version's directory has no `crtbeginS.o`: the search picks the older
+  version and probes the newer one's `crtbeginS.o` too, so that installing it
+  leaves the probes stale (`runtime_probes_current`) and a fresh search picks
+  it;
 - the runtime: `runtime_import` on this system's files. Each crt object must
   import with what it is for (`_start`, `_init` and `_fini` in `.init` and
   `.fini` atoms, crti.o's fragment first, `__dso_handle`, `__TMC_END__`),

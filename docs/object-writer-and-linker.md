@@ -729,7 +729,10 @@ for the triples distributions use (`x86_64-pc-linux-gnu` on Arch,
 multiarch directories, then `/usr/lib64` and `/lib64`, then `/usr/lib` and
 `/lib`, as GCC's driver searches them; `libc.so`'s script names the rest by
 absolute path. Every path probed, found or not, is recorded with what the
-validation compares, and so is the directory the version was chosen from. The
+validation compares (`runtime_probes_current` compares them again): among
+them the directory the version was chosen from, whose times change when a
+version's directory comes or goes, and each version's `crtbeginS.o`, found or
+not, so that one installed into a version's existing directory shows too. The
 import reads each file once into an arena that the atoms point into:
 
 - the crt objects become units 0 to 4, in the driver's order, and each member
