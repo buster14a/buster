@@ -42,8 +42,11 @@
 //     each crt object imported with what it is for (_start; _init and _fini in .init and .fini atoms; __dso_handle and
 //     __TMC_END__); libc.so.6's soname, its exports at their default versions (write, strlen, environ and
 //     __errno_location at GLIBC_2.2.5, __libc_start_main at GLIBC_2.34) and GLIBC_ABI_DT_RELR; libc_nonshared.a's
-//     index (atexit); the ABI note; and the bindings: main to the program, __libc_start_main and __cxa_finalize to
-//     libc, __gmon_start__ and the _ITM_ functions to nothing, and __TMC_END__ to crtendS.o.
+//     index (atexit); the ABI note; the bindings of every reference to each name: main to the program,
+//     __libc_start_main and __cxa_finalize to libc, __gmon_start__ and the _ITM_ functions to nothing, __TMC_END__ to
+//     crtendS.o, and _GLOBAL_OFFSET_TABLE_ to the linker; the objects' pieces, one after another; and the global names
+//     binding looks a program's up in, each once, found by its bytes, each global symbol's its own, with each name the
+//     linker defines among them as the linker's.
 //   - With --cross-check, which needs readelf: libc.so.6's exports against `readelf -W --dyn-syms` (name, version,
 //     type, binding and size; IFUNC as a function, GNU_UNIQUE as global) and its references, and the relocations of
 //     the crt objects and libc_nonshared.a's members against `readelf -W -r`: each one a fixup of its kind at its
@@ -2592,6 +2595,103 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
             }
             import_test_expect(&tally, references != 0 && bound, binding_names[b], references);
         }
+        // The objects' pieces: one after another from each table's first record to its last, each piece's atoms in the
+        // object's unit, and its names' bytes one run.
+        const uint32_t piece_count = RUNTIME_OBJECTS + runtime.nonshared.member_count;
+        bool pieces = true;
+        for (uint32_t p = 0; p < piece_count; p += 1)
+        {
+            const ImportMark begin = runtime.pieces[p].begin;
+            const ImportMark end = runtime.pieces[p].end;
+            const ImportMark before = p == 0 ? (ImportMark){ .names = 1, .atoms = 1, .symbols = 1, .fixups = 1, .wide_addends = 1 } : runtime.pieces[p - 1].end;
+            pieces = pieces && begin.names == before.names && begin.atoms == before.atoms && begin.symbols == before.symbols && begin.fixups == before.fixups &&
+                     begin.wide_addends == before.wide_addends && (p == 0 || begin.name_bytes == before.name_bytes);
+            for (AtomId atom = begin.atoms; atom < end.atoms; atom += 1)
+            {
+                pieces = pieces && link->atoms.unit[atom] == p;
+            }
+            uint64_t name_bytes = 0;
+            for (NameId name = begin.names; name < end.names; name += 1)
+            {
+                pieces = pieces && link->names.bytes[name] == runtime.names.base + begin.name_bytes + name_bytes;
+                name_bytes += (uint64_t)link->names.length[name] + 1;
+            }
+            pieces = pieces && begin.name_bytes + name_bytes == end.name_bytes;
+        }
+        const ImportMark last = runtime.pieces[piece_count - 1].end;
+        pieces = pieces && last.names == link->names.count && last.atoms == link->atoms.count && last.symbols == link->symbols.count && last.fixups == link->fixups.count &&
+                 last.wide_addends == link->fixups.wide_count;
+        import_test_expect(&tally, pieces, "the objects' pieces, one after another", piece_count);
+        // The global names binding looks a program's up in: each once, each found by its bytes, each global symbol's its
+        // own, and what binding needs to know of a few.
+        const RuntimeNames* global_names = &runtime.global_names;
+        bool distinct = true;
+        bool found_all = true;
+        for (uint32_t e = 0; e < global_names->count; e += 1)
+        {
+            found_all = found_all && runtime_find_global_name(global_names, global_names->bytes[e], global_names->length[e], global_names->hash[e]) == e + 1 &&
+                        global_names->hash[e] == link_hash(global_names->bytes[e], global_names->length[e]);
+            for (uint32_t other = e + 1; distinct && other < global_names->count; other += 1)
+            {
+                distinct = global_names->length[other] != global_names->length[e] || memcmp(global_names->bytes[other], global_names->bytes[e], global_names->length[e]) != 0;
+            }
+        }
+        import_test_expect(&tally, global_names->count >= runtime.libc.exports.count + runtime.libc.references.count, "a global name for each of libc's", global_names->count);
+        // The filter: a word per four names at most, and each name's two bits set in its word.
+        bool filtered = ((uint64_t)1 << global_names->filter_bits) * 4 >= global_names->count;
+        for (uint32_t e = 0; filtered && e < global_names->count; e += 1)
+        {
+            const uint64_t bits = runtime_name_filter_bits(global_names->hash[e]);
+            filtered = (global_names->filter[global_names->hash[e] >> (64 - global_names->filter_bits)] & bits) == bits;
+        }
+        import_test_expect(&tally, filtered, "each global name in the filter", global_names->filter_bits);
+        import_test_expect(&tally, distinct, "each global name once", global_names->count);
+        import_test_expect(&tally, found_all, "each global name found by its bytes", global_names->count);
+        bool own = true;
+        for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+        {
+            const NameId name = link->symbols.name[symbol];
+            const bool global = name != 0 && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
+            const uint32_t entry = runtime.symbol_names[symbol];
+            own = own && (global ? entry != 0 && global_names->length[entry - 1] == link->names.length[name] &&
+                                       memcmp(global_names->bytes[entry - 1], link->names.bytes[name], link->names.length[name]) == 0
+                                 : entry == 0);
+        }
+        import_test_expect(&tally, own, "each global symbol's global name its own", 0);
+        const uint32_t main_name = runtime_find_global_name(global_names, (const uint8_t*)"main", 4, link_hash((const uint8_t*)"main", 4));
+        const uint32_t start_main = runtime_find_global_name(global_names, (const uint8_t*)"__libc_start_main", 17, link_hash((const uint8_t*)"__libc_start_main", 17));
+        const uint32_t dso_name = runtime_find_global_name(global_names, (const uint8_t*)"__dso_handle", 12, link_hash((const uint8_t*)"__dso_handle", 12));
+        const uint32_t atexit_name = runtime_find_global_name(global_names, (const uint8_t*)"atexit", 6, link_hash((const uint8_t*)"atexit", 6));
+        import_test_expect(&tally, main_name != 0 && global_names->definition[main_name - 1] == 0 && global_names->export[main_name - 1] == 0, "main: defined by none of them", 0);
+        import_test_expect(&tally, start_main != 0 && global_names->definition[start_main - 1] == 0 && global_names->export[start_main - 1] != 0,
+                           "__libc_start_main: libc.so.6's", 0);
+        import_test_expect(&tally, dso_name != 0 && global_names->definition[dso_name - 1] == dso, "__dso_handle: crtbeginS.o's", 0);
+        import_test_expect(&tally, atexit_name != 0 && global_names->definition[atexit_name - 1] != 0 &&
+                                       link->atoms.unit[link->symbols.atom[global_names->definition[atexit_name - 1]]] >= runtime.nonshared_unit,
+                           "atexit: a member's", 0);
+        // Each name the linker defines, whether or not the runtime refers to it (only _GLOBAL_OFFSET_TABLE_ does), and no
+        // other name.
+        uint32_t linker_found = 0;
+        uint32_t linker_marked = 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(runtime_linker_names); i += 1)
+        {
+            const uint8_t* bytes = (const uint8_t*)runtime_linker_names[i];
+            const uint32_t length = (uint32_t)strlen(runtime_linker_names[i]);
+            const uint32_t entry = runtime_find_global_name(global_names, bytes, length, link_hash(bytes, length));
+            linker_found += entry != 0 && global_names->linker[entry - 1] ? 1 : 0;
+        }
+        for (uint32_t e = 0; e < global_names->count; e += 1)
+        {
+            linker_marked += global_names->linker[e] ? 1 : 0;
+        }
+        import_test_expect(&tally, linker_found == BUSTER_ARRAY_LENGTH(runtime_linker_names) && linker_marked == linker_found,
+                           "_GLOBAL_OFFSET_TABLE_ and the arrays' bounds: the linker's", linker_found);
+        uint32_t referenced = 0;
+        for (uint32_t e = 0; e < global_names->count; e += 1)
+        {
+            referenced += global_names->referenced[e] ? 1 : 0;
+        }
+        import_test_expect(&tally, referenced == runtime.libc.references.count, "libc.so.6's references among them", referenced);
         // Every probe is a path, and the crt objects' and libc's files are found among them.
         uint32_t found = 0;
         for (uint32_t p = 0; p < runtime.probe_count; p += 1)

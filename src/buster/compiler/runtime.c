@@ -114,6 +114,41 @@ struct RuntimeBinding
     uint32_t export;
 };
 
+// The records one of the runtime's objects (a crt object, or a member of libc_nonshared.a) added to its link: the
+// counts of each table before it and after it, the ranges a link the runtime joins copies (bind.c).
+typedef struct RuntimePiece RuntimePiece;
+struct RuntimePiece
+{
+    ImportMark begin;
+    ImportMark end;
+};
+
+// The names a program's are bound against (bind.c): each distinct name of a global or weak symbol of the runtime's
+// objects, of libc.so.6's exports and of its references, and of those the linker defines, once, as columns, with what
+// binding needs to know of it, and indexed by hash.
+typedef struct RuntimeNames RuntimeNames;
+struct RuntimeNames
+{
+    const uint8_t** bytes;
+    uint32_t* length;
+    uint64_t* hash;
+    // The first of the runtime's symbols that defines the name, in symbol order, or 0.
+    SymbolId* definition;
+    // Its export of libc.so.6 plus 1, or 0.
+    uint32_t* export;
+    // Whether libc.so.6 refers to it, and whether the linker defines it (runtime_linker_names).
+    bool* referenced;
+    bool* linker;
+    uint32_t count;
+    ImportNameIndex index;
+    // A blocked Bloom filter of the names' hashes, which a lookup of a name that isn't among them mostly reads alone:
+    // 2^filter_bits words of 64 bits, each name setting two bits (runtime_name_filter_bits) of the word its hash's top
+    // bits choose. Its 8 KB for libc's names stay in L1 while a program's columns stream past, where the index's
+    // buckets and hashes don't.
+    uint64_t* filter;
+    uint32_t filter_bits;
+};
+
 #define BUSTER_RUNTIME_PATH_BYTES 4096
 
 typedef struct Runtime Runtime;
@@ -153,6 +188,12 @@ struct Runtime
     String8 abi_note;
     // By symbol of the runtime's link.
     RuntimeBinding* bindings;
+    // Each object's records: the crt objects' in RuntimeObject order, then each member's of libc_nonshared.a.
+    RuntimePiece* pieces;
+    // The names binding looks a program's up in, and by symbol of the runtime's link its name's entry among them plus 1
+    // (0 for a local or unnamed symbol).
+    RuntimeNames global_names;
+    uint32_t* symbol_names;
     // When it failed: the file that didn't import or couldn't be read, or the name that wasn't found, the importer's
     // result and errno.
     char failed_file[BUSTER_RUNTIME_PATH_BYTES];
@@ -167,6 +208,10 @@ static __attribute__((unused)) void runtime_release(Runtime* runtime);
 // Whether every path the search probed is as it found it: absent still, or the same file or directory, by st_dev, st_ino,
 // st_size, st_mtim and st_ctim.
 static __attribute__((unused)) bool runtime_probes_current(const Runtime* runtime);
+// The entry of the runtime's global names (RuntimeNames) with these bytes, plus 1, or 0.
+static __attribute__((unused)) uint32_t runtime_find_global_name(const RuntimeNames* names, const uint8_t* bytes, uint32_t length, uint64_t hash);
+// The two bits a name's hash sets in its word of the global names' filter: the hash's low six bits and the six above.
+static __attribute__((unused)) uint64_t runtime_name_filter_bits(uint64_t hash);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Files
@@ -597,13 +642,12 @@ static const char* const runtime_linker_names[] = {
 };
 
 // Whether the name is one of runtime_linker_names.
-static bool runtime_linker_name(const Link* link, NameId name)
+static bool runtime_linker_name(const uint8_t* bytes, uint32_t length)
 {
-    const uint32_t length = link->names.length[name];
     bool result = false;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(runtime_linker_names); i += 1)
     {
-        result = result || (strlen(runtime_linker_names[i]) == length && memcmp(runtime_linker_names[i], link->names.bytes[name], length) == 0);
+        result = result || (strlen(runtime_linker_names[i]) == length && memcmp(runtime_linker_names[i], bytes, length) == 0);
     }
     return result;
 }
@@ -676,7 +720,7 @@ static RuntimeError runtime_bind(Runtime* runtime)
         if (symbols->atom[symbol] == 0 && name != 0)
         {
             const SymbolId definition = runtime_definition(link, &index, definitions, name);
-            const bool linker = definition == 0 && runtime_linker_name(link, name);
+            const bool linker = definition == 0 && runtime_linker_name(link->names.bytes[name], link->names.length[name]);
             const uint32_t export = definition == 0 && !linker ? import_library_find(&runtime->libc, link->names.bytes[name], link->names.length[name], link->names.hash[name]) : 0;
             const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
             const RuntimeBindingKind otherwise = export != 0 ? RUNTIME_BINDING_SHARED : weak ? RUNTIME_BINDING_NOWHERE : RUNTIME_BINDING_PROGRAM;
@@ -687,6 +731,202 @@ static RuntimeError runtime_bind(Runtime* runtime)
         runtime->bindings[symbol] = binding;
     }
     scratch_end(scratch);
+    return result;
+}
+
+// Builds the runtime's global names (RuntimeNames). The candidates are the names of its global and weak symbols (a
+// compress of their ids, eight at a time, as runtime_bind's), of libc.so.6's exports and of its references, and the
+// names the linker defines (runtime_linker_names), in that order, indexed by hash. A candidate that repeats an earlier one of its bucket, by hash and bytes, is folded into it;
+// the first of each name is numbered by an exclusive prefix sum of the first ones, so that the entries keep the
+// candidates' order, and the entries are indexed again.
+static RuntimeError runtime_global_names(Runtime* runtime)
+{
+    const Link* link = &runtime->link;
+    const LinkSymbols* symbols = &link->symbols;
+    const ImportExports* exports = &runtime->libc.exports;
+    const ImportReferences* references = &runtime->libc.references;
+    RuntimeNames* names = &runtime->global_names;
+    Arena* arena = &runtime->tables;
+    const uint32_t symbol_count = symbols->count;
+    const uint32_t linker_count = BUSTER_ARRAY_LENGTH(runtime_linker_names);
+    const uint64_t bound = (uint64_t)symbol_count + exports->count + references->count + linker_count;
+    runtime->symbol_names = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbol_count);
+    Scratch scratch = scratch_begin(arena);
+    SymbolId* named = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, SymbolId, symbol_count);
+    const uint8_t** bytes = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, const uint8_t*, bound);
+    uint32_t* lengths = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, bound);
+    uint64_t* hashes = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, bound);
+    uint32_t* first = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, bound);
+    uint32_t* entries = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, bound + 1);
+    RuntimeError result = runtime->symbol_names != 0 && named != 0 && bytes != 0 && lengths != 0 && hashes != 0 && first != 0 && entries != 0 ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MEMORY;
+    const __m512i lane_index = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+    uint32_t named_count = 0;
+    for (uint32_t batch = 1; result == RUNTIME_ERROR_NONE && batch < symbol_count; batch += BUSTER_IMPORT_BATCH)
+    {
+        const uint32_t n = symbol_count - batch < BUSTER_IMPORT_BATCH ? symbol_count - batch : BUSTER_IMPORT_BATCH;
+        const __mmask8 loaded = (__mmask8)import_lane_mask(n);
+        const __m512i flags = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(loaded, symbols->flags + batch));
+        const __m512i name = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(loaded, symbols->name + batch));
+        const uint32_t kept = _mm512_test_epi64_mask(flags, _mm512_set1_epi64(BUSTER_LINK_SYMBOL_BINDING)) & _mm512_test_epi64_mask(name, name) & loaded;
+        import_store32(named + named_count, _mm512_maskz_compress_epi64((__mmask8)kept, _mm512_add_epi64(lane_index, _mm512_set1_epi64(batch))), (uint32_t)__builtin_popcount(kept));
+        named_count += (uint32_t)__builtin_popcount(kept);
+    }
+    // The candidates: the objects' global names, libc's exports and references, and the names the linker defines, which
+    // a program can refer to whether or not the runtime does.
+    const uint32_t references_end = named_count + exports->count + references->count;
+    const uint32_t count = references_end + linker_count;
+    for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < named_count; i += 1)
+    {
+        const NameId name = symbols->name[named[i]];
+        bytes[i] = link->names.bytes[name];
+        lengths[i] = link->names.length[name];
+        hashes[i] = link->names.hash[name];
+    }
+    if (result == RUNTIME_ERROR_NONE)
+    {
+        memcpy(bytes + named_count, exports->name, exports->count * sizeof(*bytes));
+        memcpy(lengths + named_count, exports->length, exports->count * sizeof(*lengths));
+        memcpy(hashes + named_count, exports->hash, exports->count * sizeof(*hashes));
+        memcpy(bytes + named_count + exports->count, references->name, references->count * sizeof(*bytes));
+        memcpy(lengths + named_count + exports->count, references->length, references->count * sizeof(*lengths));
+        memcpy(hashes + named_count + exports->count, references->hash, references->count * sizeof(*hashes));
+        for (uint32_t i = 0; i < linker_count; i += 1)
+        {
+            bytes[references_end + i] = (const uint8_t*)runtime_linker_names[i];
+            lengths[references_end + i] = (uint32_t)strlen(runtime_linker_names[i]);
+            hashes[references_end + i] = link_hash(bytes[references_end + i], lengths[references_end + i]);
+        }
+    }
+    ImportNameIndex candidates = { 0 };
+    if (result == RUNTIME_ERROR_NONE && !import_index_build(&candidates, hashes, count, scratch.arena))
+    {
+        result = RUNTIME_ERROR_MEMORY;
+    }
+    // Each candidate's first one with its name: itself, or an earlier one of its bucket.
+    const uint64_t buckets = result == RUNTIME_ERROR_NONE ? (uint64_t)1 << candidates.bucket_bits : 0;
+    for (uint64_t b = 0; b < buckets; b += 1)
+    {
+        for (uint32_t place = candidates.start[b]; place < candidates.start[b + 1]; place += 1)
+        {
+            const uint32_t candidate = candidates.order[place];
+            uint32_t same = candidate;
+            for (uint32_t other = candidates.start[b]; same == candidate && other < place; other += 1)
+            {
+                const uint32_t earlier = candidates.order[other];
+                const bool equal = candidates.hash[other] == hashes[candidate] && lengths[earlier] == lengths[candidate] &&
+                                   import_same_bytes(bytes[earlier], bytes[candidate], lengths[candidate]);
+                same = equal ? first[earlier] : same;
+            }
+            first[candidate] = same;
+        }
+    }
+    // The first ones numbered in candidate order: entries[c] is the number of first ones before candidate c.
+    for (uint32_t c = 0; result == RUNTIME_ERROR_NONE && c < count; c += 1)
+    {
+        entries[c] = first[c] == c ? 1 : 0;
+    }
+    if (result == RUNTIME_ERROR_NONE)
+    {
+        entries[count] = 0;
+        import_exclusive_scan(entries, count + 1);
+    }
+    const uint32_t entry_count = result == RUNTIME_ERROR_NONE ? entries[count] : 0;
+    if (result == RUNTIME_ERROR_NONE)
+    {
+        names->bytes = BUSTER_ARENA_PUSH_ARRAY(arena, const uint8_t*, entry_count);
+        names->length = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, entry_count);
+        names->hash = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, entry_count);
+        names->definition = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, entry_count);
+        names->export = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, entry_count);
+        names->referenced = BUSTER_ARENA_PUSH_ARRAY(arena, bool, entry_count);
+        names->linker = BUSTER_ARENA_PUSH_ARRAY(arena, bool, entry_count);
+        names->count = entry_count;
+        const bool pushed = names->bytes != 0 && names->length != 0 && names->hash != 0 && names->definition != 0 && names->export != 0 && names->referenced != 0 &&
+                            names->linker != 0;
+        result = pushed ? result : RUNTIME_ERROR_MEMORY;
+    }
+    if (result == RUNTIME_ERROR_NONE)
+    {
+        memset(names->definition, 0, entry_count * sizeof(*names->definition));
+        memset(names->export, 0, entry_count * sizeof(*names->export));
+        memset(names->referenced, 0, entry_count * sizeof(*names->referenced));
+        memset(names->linker, 0, entry_count * sizeof(*names->linker));
+        memset(runtime->symbol_names, 0, symbol_count * sizeof(*runtime->symbol_names));
+    }
+    // Each candidate's entry: a first one's spelling, and what each candidate says of its name.
+    for (uint32_t c = 0; result == RUNTIME_ERROR_NONE && c < count; c += 1)
+    {
+        const uint32_t entry = entries[first[c]];
+        if (first[c] == c)
+        {
+            names->bytes[entry] = bytes[c];
+            names->length[entry] = lengths[c];
+            names->hash[entry] = hashes[c];
+        }
+        if (c < named_count)
+        {
+            const SymbolId symbol = named[c];
+            runtime->symbol_names[symbol] = entry + 1;
+            names->definition[entry] = names->definition[entry] == 0 && symbols->atom[symbol] != 0 ? symbol : names->definition[entry];
+        }
+        else if (c < named_count + exports->count)
+        {
+            names->export[entry] = c - named_count + 1;
+        }
+        else if (c < references_end)
+        {
+            names->referenced[entry] = true;
+        }
+        else
+        {
+            names->linker[entry] = true;
+        }
+    }
+    if (result == RUNTIME_ERROR_NONE && !import_index_build(&names->index, names->hash, entry_count, arena))
+    {
+        result = RUNTIME_ERROR_MEMORY;
+    }
+    // The filter: a word per four names at most, a power of two of them and 16 at least, so that a word holds about eight
+    // bits at most and a name that isn't there passes for one at most about 1.6% of the time (libc's 2,651 names, in
+    // 1,024 words, about 0.7%).
+    uint32_t filter_bits = 4;
+    while (((uint64_t)1 << filter_bits) * 4 < entry_count)
+    {
+        filter_bits += 1;
+    }
+    names->filter_bits = filter_bits;
+    names->filter = result == RUNTIME_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)1 << filter_bits) : 0;
+    result = result == RUNTIME_ERROR_NONE && names->filter == 0 ? RUNTIME_ERROR_MEMORY : result;
+    if (result == RUNTIME_ERROR_NONE)
+    {
+        memset(names->filter, 0, ((uint64_t)1 << filter_bits) * sizeof(uint64_t));
+        for (uint32_t e = 0; e < entry_count; e += 1)
+        {
+            names->filter[names->hash[e] >> (64 - filter_bits)] |= runtime_name_filter_bits(names->hash[e]);
+        }
+    }
+    scratch_end(scratch);
+    return result;
+}
+
+static uint64_t runtime_name_filter_bits(uint64_t hash)
+{
+    return (1ull << (hash & 63)) | (1ull << ((hash >> 6) & 63));
+}
+
+static uint32_t runtime_find_global_name(const RuntimeNames* names, const uint8_t* bytes, uint32_t length, uint64_t hash)
+{
+    const ImportNameIndex* index = &names->index;
+    uint32_t result = 0;
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    import_index_bucket(index, hash, &begin, &end);
+    for (uint32_t place = begin; result == 0 && place < end; place += 1)
+    {
+        const uint32_t entry = index->order[place];
+        const bool same = index->hash[place] == hash && names->length[entry] == length && import_same_bytes(names->bytes[entry], bytes, length);
+        result = same ? entry + 1 : 0;
+    }
     return result;
 }
 
@@ -737,29 +977,40 @@ static RuntimeError runtime_import(Runtime* runtime)
     {
         result = RUNTIME_ERROR_MEMORY;
     }
-    // The crt objects as units 0 to 4, then each member of libc_nonshared.a as a unit of its own.
-    for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < RUNTIME_OBJECTS; i += 1)
-    {
-        const ImportResult imported =
-            import_object(&runtime->link, runtime->object_bytes[i], i, BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE, &runtime->files, &runtime->objects[i]);
-        result = imported.error == IMPORT_ERROR_NONE ? result : runtime_fail_import(runtime, runtime->object_paths[i], imported);
-    }
+    // The crt objects as units 0 to 4, then each member of libc_nonshared.a as a unit of its own, each object's records
+    // a piece.
     runtime->nonshared_unit = RUNTIME_OBJECTS;
     if (result == RUNTIME_ERROR_NONE)
     {
         runtime->member_objects = BUSTER_ARENA_PUSH_ARRAY(&runtime->files, ImportObject, runtime->nonshared.member_count);
-        result = runtime->member_objects != 0 ? result : RUNTIME_ERROR_MEMORY;
+        runtime->pieces = BUSTER_ARENA_PUSH_ARRAY(&runtime->files, RuntimePiece, (uint64_t)RUNTIME_OBJECTS + runtime->nonshared.member_count);
+        result = runtime->member_objects != 0 && runtime->pieces != 0 ? result : RUNTIME_ERROR_MEMORY;
+    }
+    for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < RUNTIME_OBJECTS; i += 1)
+    {
+        runtime->pieces[i].begin = import_mark(&runtime->link, &runtime->files);
+        const ImportResult imported =
+            import_object(&runtime->link, runtime->object_bytes[i], i, BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE, &runtime->files, &runtime->objects[i]);
+        runtime->pieces[i].end = import_mark(&runtime->link, &runtime->files);
+        result = imported.error == IMPORT_ERROR_NONE ? result : runtime_fail_import(runtime, runtime->object_paths[i], imported);
     }
     for (uint32_t m = 0; result == RUNTIME_ERROR_NONE && m < runtime->nonshared.member_count; m += 1)
     {
+        RuntimePiece* piece = &runtime->pieces[RUNTIME_OBJECTS + m];
+        piece->begin = import_mark(&runtime->link, &runtime->files);
         const ImportResult imported = import_object(&runtime->link, runtime->nonshared.members[m].bytes, runtime->nonshared_unit + m, BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE,
                                                     &runtime->files, &runtime->member_objects[m]);
+        piece->end = import_mark(&runtime->link, &runtime->files);
         result = imported.error == IMPORT_ERROR_NONE ? result : runtime_fail_import(runtime, runtime->nonshared_path, imported);
     }
     if (result == RUNTIME_ERROR_NONE)
     {
         runtime->abi_note = runtime_section(runtime->object_bytes[RUNTIME_OBJECT_START], ".note.ABI-tag");
         result = runtime_bind(runtime);
+    }
+    if (result == RUNTIME_ERROR_NONE)
+    {
+        result = runtime_global_names(runtime);
     }
     result = result == RUNTIME_ERROR_NONE && runtime->probes_full ? RUNTIME_ERROR_MEMORY : result;
     return result;

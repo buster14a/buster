@@ -4,10 +4,11 @@
 // Copyright (c) 2023 Niles Salter. See THIRD_PARTY_NOTICES.md and LICENSES/Accelerated-Zig-Parser.txt.
 //
 // The x86-64 encoder benchmark: times x86_encode at each batch width (instructions per loop iteration) and output
-// store, x86_encode_apx's loop (whose instructions here have no registers 16 to 31, and so the same bytes) and a
-// one-instruction-at-a-time scalar loop, on a synthetic instruction stream, after checking that they all produce the
-// same bytes, offsets and fixup ends; or with --mode32 or --mode16, the loop of 32-bit or 16-bit mode
-// (x86_encode_mode32's or x86_encode_mode16's) and the mode's scalar loop.
+// store, x86_encode_apx's loop at 64 and 16 per iteration (whose instructions here have no registers 16 to 31, and so
+// the same bytes) and a one-instruction-at-a-time scalar loop, on a synthetic instruction stream, after checking that
+// they all produce the same bytes, offsets and fixup ends; or with --mode32 or --mode16, the loops of 32-bit or 16-bit
+// mode at 64 and 16 per iteration (x86_encode_mode32's or x86_encode_mode16's is the second) and the mode's scalar
+// loop.
 //
 // Usage: build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform | --vector] [--mode32 | --mode16]
 //                                             [--offsets] [--fixups] [--seed N] [--only NAME]
@@ -728,19 +729,22 @@ static const X86BenchmarkImplementation x86_benchmark_implementations[] = {
     { "x86_encode_64_fixup_compress_stores", x86_encode_64_fixup_compress_stores },
     { "x86_encode_64_offsets_then_pick", encode_offsets_then_pick },
     { "x86_encode_64_apx", x86_encode_64_apx },
+    { "x86_encode_16_apx", x86_encode_16_apx },
 };
 #define BUSTER_X86_BENCHMARK_IMPLEMENTATIONS BUSTER_ARRAY_LENGTH(x86_benchmark_implementations)
 
-// The same for 32-bit and 16-bit modes (--mode32 and --mode16): the mode's scalar loop and x86_encode_mode32's or
-// x86_encode_mode16's.
+// The same for 32-bit and 16-bit modes (--mode32 and --mode16): the mode's scalar loop and its loops at 64 and 16 per
+// iteration (x86_encode_mode32's or x86_encode_mode16's).
 static const X86BenchmarkImplementation x86_benchmark_implementations_32[] = {
     { "scalar", encode_scalar_loop_32 },
     { "x86_encode_64_mode32", x86_encode_64_mode32 },
+    { "x86_encode_16_mode32", x86_encode_16_mode32 },
 };
 
 static const X86BenchmarkImplementation x86_benchmark_implementations_16[] = {
     { "scalar", encode_scalar_loop_16 },
     { "x86_encode_64_mode16", x86_encode_64_mode16 },
+    { "x86_encode_16_mode16", x86_encode_16_mode16 },
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
