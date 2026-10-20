@@ -17,9 +17,9 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | --- | ---: | ---: |
 | `sqlite3.c` 3.53, with glibc's headers | 1 | 707,153 |
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
-| This repository's translation units on this branch (`main` at 2aa1358), with `-march=native` (AVX-512 intrinsic headers) | 11 | 6,379,384 |
+| This repository's translation units on this branch (`main` at 2aa1358), with `-march=native` (AVX-512 intrinsic headers) | 11 | 6,381,696 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 83 | |
+| The built-in cases (`pp_test_cases`) | 85 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -133,8 +133,8 @@ of the file that defines them. Files are found by path (`pp_lookup_path`, a
 table that starts at 1,024 slots and doubles) and shared by device and inode,
 so that two paths to one file are one file.
 
-- **Lexing by the language mode.** The lexer has no language mode, so clang's
-  rule for literal prefixes is applied after it:
+- **Lexing by the language mode.** The lexer has no language mode, so two of
+  clang's rules are applied around it:
   - The `u`, `U` and `u8` prefixes are C11's, and `u8` on a character constant
     is C23's (`L` is every mode's). Before those modes, clang lexes `u'a'` as
     the identifier `u` and the constant `'a'`, so a macro named `u` expands
@@ -144,6 +144,10 @@ so that two paths to one file are one file.
     (`pp_split_prefixes`), before refinement interns the prefix. Scratch text
     (`_Pragma`, pastes) is lexed the same way, and a paste that would form such
     a literal is an error, as in clang.
+  - Trigraphs are replaced in the ISO modes before C23 (`-std=c89` to
+    `-std=c17`), clang's default, and wherever `-trigraphs` or `-ftrigraphs`
+    asks for them (`-fno-trigraphs` turns them off). The lexer, refinement and
+    the printer read them with `C_TOKENIZER_TRIGRAPHS`.
 
 - **Directive tables** (#118). A vectorized scan (`pp_scan_directives_vector`)
   finds every `#` that starts a line (the lexer's start-of-line bit), with its
@@ -555,7 +559,7 @@ the mispredictions it saves.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 83 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 85 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -620,7 +624,8 @@ the mispredictions it saves.
       start, the line after `_Pragma`, the include stack, system headers and
       escaped names, each with the exact text `-E` prints;
   - lexing by the language mode: the literal prefixes before C11, `u8'a'`
-    before C23 and both in C23, and a paste that would form `u8'a'` before C23;
+    before C23 and both in C23, a paste that would form `u8'a'` before C23, and
+    trigraphs in the ISO modes and in the GNU ones;
   - `#pragma` and `#include` among a macro's arguments, which fail as clang's
     do and must then give clang's output.
 

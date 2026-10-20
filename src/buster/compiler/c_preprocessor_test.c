@@ -842,8 +842,8 @@ static const PPTestCase pp_test_cases[] = {
     { "#line with a numeric escape in its file name", "#line 200 \"\\x76irtual.c\"\n__FILE__\n",
       0, "c17", "", true, 0, 0, 0 },
     // Lexing by the language mode, as clang lexes: the u, U and u8 prefixes are C11's (u8 on a character constant C23's),
-    // so before them each is an identifier and the literal after it, and a paste that would form one isn't a token. And
-    // the directives clang rejects among a macro's arguments.
+    // so before them each is an identifier and the literal after it, a paste that would form one isn't a token, and
+    // trigraphs are replaced in the ISO modes before C23. And the directives clang rejects among a macro's arguments.
     { "literal prefixes before C11", "#define u [u]\n#define U [U]\n#define u8 [u8]\n#define L [L]\nu'a' U'a' u\"s\" U\"s\" u8\"s\" u8'a' L'a' L\"s\"\n",
       0, "c99", "[u]'a' [U]'a' [u]\"s\" [U]\"s\" [u8]\"s\" [u8]'a' L'a' L\"s\"\n", false, 0, 0, 0 },
     { "u8 character constants before C23", "#define u [u]\n#define U [U]\n#define u8 [u8]\n#define L [L]\nu'a' U'a' u\"s\" U\"s\" u8\"s\" u8'a' L'a' L\"s\"\n",
@@ -856,6 +856,10 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "[a b]\nafter\n", true, 0, 0, 0 },
     { "#include among a macro's arguments", "#define F(x) [x]\nF(a\n#include \"other.h\"\nb)\nafter\n",
       "inside\n", "c17", "[a b]\nafter\n", true, 0, 0, 0 },
+    { "trigraphs in the ISO modes before C23", "\?\?=define X 1\nX \?\?( \?\?)\n#define S(x) #x\nS(\?\?=) \"\?\?(\"\n",
+      0, "c17", "1 [ ]\n\"#\" \"[\"\n", false, 0, 0, 0 },
+    { "trigraphs ignored in the GNU modes", "\?\?=define X 1\nX \?\?( \?\?)\n#define S(x) #x\nS(\?\?=) \"\?\?(\"\n",
+      0, "gnu17", "\? \? =define X 1\nX \? \?( \? \?)\n\"\?\?=\" \"\?\?(\"\n", false, 0, 0, 0 },
     { "#include of a missing absolute path", "#include \"/buster-missing-directory/absent.h\"\nafter\n", 0, "c17", "", true },
     { "-include of a missing absolute path", "x\n", 0, "c17", "", true, 0, "-include /buster-missing-directory/absent.h", 0 },
 };

@@ -183,6 +183,9 @@ struct PPOptions
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;
+    // Replace trigraphs (translation phase 1): clang's default in the ISO modes before C23, and -trigraphs,
+    // -ftrigraphs or -fno-trigraphs.
+    bool trigraphs;
 };
 
 // A column array of tokens: an output stream, or a stack of buffers.
@@ -6764,7 +6767,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->options = *options;
     pp->table = table;
     pp->vectorized = !options->scalar;
-    pp->refine_flags = 0;
+    pp->refine_flags = options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0;
     pp->split_kinds = pp_split_kinds(options->language);
     pp->arena = arena_reserve(BUSTER_PP_ARENA_BYTES);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
@@ -7894,6 +7897,8 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     *input = 0;
     *output = 0;
     *markers = true;
+    // -trigraphs, -ftrigraphs and -fno-trigraphs override the mode's default (-1 for none).
+    int trigraphs = -1;
     result = quote != 0 && include != 0 && system != 0 && after != 0 && macros != 0 && includes != 0;
     for (int i = 0; result && i < count; i += 1)
     {
@@ -7922,6 +7927,10 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         else if (strncmp(argument, "-O", 2) == 0)
         {
             options->optimize = strcmp(argument, "-O0") != 0;
+        }
+        else if (strcmp(argument, "-trigraphs") == 0 || strcmp(argument, "-ftrigraphs") == 0 || strcmp(argument, "-fno-trigraphs") == 0)
+        {
+            trigraphs = strcmp(argument, "-fno-trigraphs") != 0;
         }
         else if (strncmp(argument, "-m", 2) == 0 || strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0 || strcmp(argument, "-g") == 0)
         {
@@ -8007,6 +8016,7 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
     options->include_directories = include;
     options->system_directories = system;
     options->after_directories = after;
+    options->trigraphs = trigraphs >= 0 ? trigraphs != 0 : !options->language.gnu && options->language.standard < 2023;
     options->macros = macros;
     options->includes = includes;
     return result && *input != 0;
@@ -8026,7 +8036,7 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     if (!parsed)
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
-                        "[-include file] [-std=...] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
+                        "[-include file] [-std=...] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
     }
     else
     {
