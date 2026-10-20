@@ -5709,16 +5709,18 @@ BUSTER_INLINE void spike_roles_settled(SpikeKernels* kernels, uint8_t* typed, Sp
 
 // K2's first round on the blocks from `block` on, in order, until one doesn't converge in it (or, with `twin_only`, at
 // once): their roles, typed states (into `typed` as bytes too) and statement contexts. Returns the first block they
-// didn't settle, or count; *typed_left gets the typed states its round left. The loop calls nothing, and keeps the
-// carry in a copy whose address never leaves it, so that its constants and the carry stay in registers from block to
-// block. With one round and no loop around it, what the round reads of the block isn't hoisted ahead of it: a loop of
-// rounds kept it all live across the loop, about 20 vectors and 20 masks a block stored to the stack before the round
-// and loaded back in it.
+// didn't settle, or count; *typed_left gets the typed states its round left, and *windows_io (the group stacks'
+// windows for `block`'s depth on entry) that block's windows. The loop calls nothing, and keeps the carry and the
+// windows in copies whose addresses never leave it, so that its constants, the carry and the windows stay in registers
+// from block to block. With one round and no loop around it, what the round reads of the block isn't hoisted ahead of
+// it: a loop of rounds kept it all live across the loop, about 20 vectors and 20 masks a block stored to the stack
+// before the round and loaded back in it.
 static uint32_t spike_roles_rounds_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, SpikeStatementContext* contexts, uint64_t* rounds,
-                                          const uint8_t* starts, bool twin_only, SpikeRoleCarry* carry_io, uint32_t block, uint64_t* typed_left)
+                                          const uint8_t* starts, bool twin_only, SpikeRoleCarry* carry_io, SpikeGroupWindows* windows_io, uint32_t block,
+                                          uint64_t* typed_left)
 {
     SpikeRoleCarry carry = *carry_io;
-    SpikeGroupWindows windows = spike_group_windows_load(&carry, kernels->depths[block]);
+    SpikeGroupWindows windows = *windows_io;
     bool converging = !twin_only;
     uint64_t typed_mask = 0;
     while (block < count && converging)
@@ -5735,19 +5737,20 @@ static uint32_t spike_roles_rounds_avx512(SpikeKernels* kernels, uint32_t count,
         }
     }
     *carry_io = carry;
+    *windows_io = windows;
     *typed_left = typed_mask;
     return block < count ? block : count;
 }
 
 // A block whose first round didn't settle it: the rounds after it, from the roles that round left in kernels->roles and
-// the typed states it left in *typed_io, as the rounds would go on. Returns the rounds the block took, the first one's
-// included, or 0 if they didn't settle it either. Out of line, so that the first round's loop has no loop of rounds.
-__attribute__((noinline)) static uint32_t spike_roles_block_more_avx512(SpikeKernels* kernels, uint32_t block, uint32_t live, SpikeRoleCarry* carry, uint64_t* typed_io,
-                                                                         SpikeStatementContext* context_out)
+// the typed states it left in *typed_io, as the rounds would go on, with the block's windows (in which, if they settle
+// it, the next block's go). Returns the rounds the block took, the first one's included, or 0 if they didn't settle it
+// either. Out of line, so that the first round's loop has no loop of rounds.
+__attribute__((noinline)) static uint32_t spike_roles_block_more_avx512(SpikeKernels* kernels, uint32_t block, uint32_t live, SpikeRoleCarry* carry, SpikeGroupWindows* windows,
+                                                                         uint64_t* typed_io, SpikeStatementContext* context_out)
 {
     const uint64_t typed_start = *typed_io;
-    SpikeGroupWindows windows = spike_group_windows_load(carry, kernels->depths[block]);
-    const uint32_t taken = spike_roles_block_avx512(kernels, block, live, carry, &windows, kernels->roles, &typed_start,
+    const uint32_t taken = spike_roles_block_avx512(kernels, block, live, carry, windows, kernels->roles, &typed_start,
                                                     BUSTER_SPIKE_ROLE_ROUNDS - BUSTER_SPIKE_ROLE_LOOP_ROUNDS, typed_io, context_out);
     return taken != 0 ? taken + BUSTER_SPIKE_ROLE_LOOP_ROUNDS : 0;
 }
@@ -5770,33 +5773,36 @@ static void spike_roles_starting_avx512(SpikeKernels* kernels, uint32_t count, u
         .group_typed = groups->typed,
         .group_keywords = groups->keywords,
     };
+    SpikeGroupWindows windows = spike_group_windows_load(&carry, 0);
     uint32_t block = 0;
     uint32_t end = 0;
     while (block < count)
     {
-        // The statics of the next BUSTER_SPIKE_ROLE_CHUNK blocks, then their rounds, which read them from the L1 cache:
-        // a whole file's at once went through the L3 cache for sqlite3.c, and its K2 took 0.2 cycles a token more.
+        // The statics of the next BUSTER_SPIKE_ROLE_CHUNK blocks, then their rounds, which read them from the L1 cache
+        // (on sqlite3.c, one pass over the whole file first took as long).
         if (block == end)
         {
             end = count - block > BUSTER_SPIKE_ROLE_CHUNK * 64 ? block + BUSTER_SPIKE_ROLE_CHUNK * 64 : count;
             spike_role_statics_avx512(kernels, block, end);
         }
         uint64_t typed_mask = 0;
-        block = spike_roles_rounds_avx512(kernels, end, typed, contexts, rounds, starts, twin_only, &carry, block, &typed_mask);
+        block = spike_roles_rounds_avx512(kernels, end, typed, contexts, rounds, starts, twin_only, &carry, &windows, block, &typed_mask);
         if (block < end)
         {
             const uint32_t live = end - block < 64 ? end - block : 64;
             SpikeStatementContext context;
-            const uint32_t taken = twin_only ? 0 : spike_roles_block_more_avx512(kernels, block, live, &carry, &typed_mask, &context);
+            const uint32_t taken = twin_only ? 0 : spike_roles_block_more_avx512(kernels, block, live, &carry, &windows, &typed_mask, &context);
             if (taken != 0)
             {
                 spike_roles_settled(kernels, typed, contexts, &carry, block, live, typed_mask, context);
             }
             else
             {
+                // The twin writes the group stacks a token at a time: the next block's windows come from them.
                 typed_mask = spike_roles_twin_block(kernels, block, live, typed, &carry, &context);
                 contexts[block / 64] = context;
                 carry.typed = live == 64 ? typed_mask : typed_mask << (64 - live);
+                windows = spike_group_windows_load(&carry, block + 64 < count ? kernels->depths[block + 64] : 0);
             }
             rounds[taken] += 1;
             block += 64;
