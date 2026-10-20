@@ -57,6 +57,12 @@ jobs:
       - name: Execute compiler
         run: ./build/compiler
 
+      - name: Check the no-recursion rule on the call graph
+        # Writes the translation units' LLVM IR to a temporary directory and fails on any cycle not in the allowlist.
+        run: |
+          ./build/compiler test-call-graph
+          ./build.sh check-call-graph
+
       - name: Test the C lexer
         run: |
           ./build/compiler test-lexer
@@ -76,6 +82,16 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-x86-encoder
 
+      - name: Test branch sizing
+        # --cross-check also prints generated functions as GNU as source with a label at every target, and GNU as's
+        # relaxation of them must give the bytes of the sized records.
+        run: ./build/compiler test-branch-sizing --cross-check
+
+      - name: Benchmark branch sizing
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-branch-sizing
+
       - name: Test the lanes
         run: ./build/compiler test-lanes
 
@@ -85,6 +101,24 @@ jobs:
 
       - name: Test the link representation
         run: ./build/compiler test-link
+
+      - name: Test dataflow bitsets
+        run: ./build/compiler test-dataflow
+
+      - name: Benchmark dataflow bitsets
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-dataflow
+
+      - name: Test the independent preprocessor fuzz harness
+        run: |
+          ./build/compiler test-preprocessor-fuzz --std c17
+          ./build/compiler test-preprocessor-fuzz --std c23
+
+      - name: Benchmark the preprocessor fuzz harness
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor-fuzz
 
       - name: Test the object writer
         # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
@@ -97,10 +131,68 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-object-writer
 
+      - name: Test the import path
+        # --cross-check also compares libc.so.6's exports and references, and the relocations of the crt objects and
+        # libc_nonshared.a's members, with readelf's.
+        run: ./build/compiler test-import --cross-check
+
+      - name: Benchmark the import path
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-import
+
+      - name: Test binding
+        # --cross-check also links the bound programs with ld.lld and ld.bfd and runs them, and compares what binding
+        # found with lld's link of the programs' own objects.
+        run: ./build/compiler test-bind --cross-check
+
+      - name: Benchmark binding
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-bind
+
       - name: Test the direct path's executables
         run: ./build/compiler test-executable
+
+      - name: Test the dynamic PIEs
+        # --cross-check also links each bound program's objects with ld.lld as a PIE and compares the two files' dynamic
+        # symbols and relocations.
+        run: ./build/compiler test-dynamic --cross-check
 
       - name: Benchmark the direct path's executables
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-executable
+
+      - name: Test token refinement
+        run: ./build/compiler test-refinement src
+
+      - name: Benchmark token refinement on the repository sources
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-refinement src
+
+      - name: Test the preprocessor
+        # --clang also preprocesses each case, and the repository's own translation units (with clang's predefines for
+        # their options), with clang -E and compares the tokens.
+        run: |
+          ./build/compiler test-preprocessor --clang
+          ./build/compiler test-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+
+      - name: Benchmark the preprocessor on main.c
+        # Target options don't change the preprocessor's own predefines yet: it reads clang's for them.
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+
+      - name: Test the C type table
+        # Also checks every size, alignment, member offset, bit-field, conversion, composite type and spelling of a
+        # random world of types against clang's: clang -fsyntax-only on _Static_asserts, the same file compiled and
+        # run, and clang's AST dump.
+        run: ./build/compiler test-types
+
+      - name: Benchmark the C type table
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-types

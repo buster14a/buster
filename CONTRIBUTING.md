@@ -37,11 +37,61 @@ certification of the DCO, not a cryptographic signature. Check the identity and
 the DCO before using it. A Git author field, commit signature or
 `Co-Authored-By` trailer does not provide this certification.
 
-For agent-assisted work, the responsible human contributor reviews the work
-and certifies their right to submit it. An agent must not invent a human
-sign-off, sign on behalf of someone who has not actually certified the work,
-or treat its own co-author trailer as consent. Passing through another
-person's work also requires satisfying the applicable DCO clause.
+For agent-assisted work, the responsible human contributor certifies their
+right to submit it, normally after reviewing the work. An agent adds a human
+sign-off only where that person has actually certified the work: the
+maintainer has done so in advance for his own agent sessions, within the scope
+of "The maintainer's standing certification" below. An agent must never invent
+a sign-off, sign on behalf of someone who has not certified the work, or treat
+its own co-author trailer as consent. Passing through another person's work
+also requires satisfying the applicable DCO clause.
+
+## The maintainer's standing certification
+
+The maintainer, David Gonzalez Martin (`davidgmbb` on GitHub), certifies the
+Developer Certificate of Origin 1.1, as in [DCO](DCO), for each commit that an
+agent session he starts or directs makes for this repository within the scope
+below. He authorizes those sessions to end each such commit with his sign-off,
+which is then his certification of that commit:
+
+```text
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+```
+
+He submits the original material this section covers under
+Apache-2.0 WITH LLVM-exception, and changes to identified third-party portions
+under their component terms, as "Terms" above sets out.
+
+- **Sessions:** Claude Code, Codex or another coding agent, in a session that
+  he starts or directs and that runs with his opt-in: the environment variable
+  `BUSTER_DCO_SIGN_OFF=davidgmbb`, set in his own cloud environments and on his
+  own computers. Only he sets it, and a sign-off added where anyone else set it
+  is not his. Commits he makes himself where it is set carry the same sign-off,
+  and it is his too.
+- **Repository:** this repository only, including under a later name.
+- **Time:** from the first commit on `main` that contains this section; the
+  merge record of the PR that adds it names that commit. Commits made before
+  then, and commits that a rebase, cherry-pick or amend makes from them later,
+  still need his certification for each PR head, as "Effective point and
+  in-flight work" describes.
+- **Open PRs:** it also covers the commits of
+  [#184](https://github.com/buster14a/buster-fast/pull/184) up to its head
+  `544394f5d300bd47f9e4f7081ac29ba728ca2f84` and of
+  [#185](https://github.com/buster14a/buster-fast/pull/185) up to its head
+  `fc5dcffffb7ddd6d2a6ca0ea76fdf8bfd577203d`, the open agent PRs' heads on
+  October 20, 2026, when he approved this section.
+- **Material:** original work, and imported, adapted or generated material
+  only when its PR records what "Imports and generated material" asks for. A
+  session must not add his sign-off to a commit whose material it can't
+  account for that way; it says so in the PR instead.
+
+This section certifies nothing for anyone else. Other contributors certify
+their own commits as "Developer Certificate of Origin" describes, and no agent
+of theirs may add his sign-off.
+
+He revokes or narrows this certification by unsetting his opt-in, which stops
+new sign-offs at once, and by changing this section on `main`, which records
+it. Commits signed before then stay certified.
 
 ## Imports and generated material
 
@@ -78,7 +128,8 @@ This includes the existing PRs
 [#99](https://github.com/buster14a/buster/pull/99) and
 [#159](https://github.com/buster14a/buster/pull/159), if they cross the
 effective point, and applies equally to any other open PR or branch.
-This document itself provides no certification for them.
+This document itself provides no certification for them, apart from the PR
+heads that "The maintainer's standing certification" names.
 Do not backdate sign-offs, rewrite attribution, or bulk-add trailers to
 historical commits. No repository-wide history rewrite is required.
 

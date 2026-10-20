@@ -86,6 +86,30 @@ inherit its portability layers, build system, or performance-acceptance machiner
 - Optimize the host implementation for Zen 5: use AVX-512 intrinsics and
   `ext_vector_type` directly where they pay for themselves. Do not create a
   cross-architecture SIMD abstraction or runtime CPU dispatch by default.
+- Design every stage data-parallel, vectorized, and branch-free first, as
+  `src/buster/compiler/c_lexer.c` and `x86_64_encoder.c` are built. The tools
+  include masks over many items, prefix sums, in-register permutes as table
+  lookups, compress and expand, sorting and segmented scans, bitsets,
+  nearest-smaller-values, and pointer jumping. Do not assume that a stage is
+  inherently sequential: if it does not vectorize, the right data and
+  algorithm have not been found yet. Where C fixes an order (macro state,
+  typedef visibility), vectorize within each step and keep the ordered part
+  small. Whole compilers have been built this way: Co-dfns (Aaron W. Hsu, "A
+  Data Parallel Compiler Hosted on the GPU", 2019) and Pareas (Voetter,
+  Huijben, and Rietveld, "Compilation on the GPU? A feasibility study", 2022);
+  for expression trees, see Bar-On and Vishkin, "Optimal parallel generation
+  of a computation tree form" (TOPLAS, 1985).
+- Give each vector path an exact scalar path for the rare cases, which is also
+  its twin and test oracle: both must produce identical output or, where the
+  two algorithms legitimately differ, pass a semantic check. Compare the two
+  on the 9700X: a part that stays scalar says why with those measurements, as
+  "SIMD: what pays" in `docs/object-writer-and-linker.md` does.
+- Design with Zen 5's measured costs from uops.info. On `zmm`, `vpgatherdd` is
+  64 uops, one every 12.6 cycles or so, and `vpscatterdd` is 88 uops, one every
+  17, so use scalar loads and stores or in-register permutes instead.
+  Register-form `vpcompress*` and `vpexpand*` are 2 uops, but `vpcompress*` to
+  memory is 8. `vpermb`, `vpermw`, `vpermd`, and `vpermi2b` (a 128-byte table)
+  are 1 uop each, and `vpmullq` is 1 uop with a 2-cycle latency.
 - Choose data layout and batch boundaries before choosing instructions.
   Prefer vectorized classification, masks, population counts, and compaction
   when they eliminate useful work, not just when they look branchless.

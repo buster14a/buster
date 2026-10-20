@@ -8,10 +8,12 @@ machine code and data into files:
   other compilers' objects, archives and shared libraries.
 
 The lane base layer, the encoder's fixups, the representation, the object
-writer and the direct path's first executables are implemented
-(`src/buster/compiler/lane.c`, `x86_64_encoder.c`, `link.c`,
-`object_writer.c` and `executable.c`, with generated test programs in
-`link_program.c`); the rest of the linker isn't yet. The document records the
+writer, the direct path's executables (static ones without libc, and dynamic
+PIEs against glibc) and the import and binding of the C runtime they need are
+implemented (`src/buster/compiler/lane.c`, `x86_64_encoder.c`, `link.c`,
+`object_writer.c`, `import.c`, `runtime.c`, `bind.c`, `executable.c` and
+`dynamic.c`, with generated test programs in `link_program.c`); the rest of
+the linker isn't yet. The document records the
 measurements on the Ryzen 7 9700X that the design rests on, the design itself,
 and the order to build it in, as `docs/x86-64-encoder.md` does for the
 encoder.
@@ -69,8 +71,11 @@ the output on tmpfs:
 Step 4's static executables without libc, written by one lane from generated
 programs of 3.9 KB, 397 KB and 35.5 MB, take 2.7 µs, 70 µs and 8.5 ms in
 place on tmpfs (3.4 µs, 87 µs and 9.9 ms as new files), and the largest
-4.1 ms with eight lanes ("The first executables"). A dynamic PIE that calls
-libc has more to write (step 5).
+4.1 ms with eight lanes ("The first executables"). The same programs bound
+against glibc and written as dynamic PIEs take 4.4 µs, 73 µs and 8.6 ms
+(5.4 µs, 89 µs and 10.0 ms as new files), and the largest 4.2 ms with eight
+lanes ("The dynamic PIE"): a few percent over the static executables, all of
+it before the file is written.
 
 Orders of magnitude are there for programs up to a few megabytes, where
 fixed costs dominate. For a 46 MB output both sides spend their time in the
@@ -370,10 +375,19 @@ no name (`NameId` 0).
 
 - **The bytes** are followed by a NUL, which the ELF string tables need, and
   the length is kept.
-- **The hash** is `link_hash`: wyhash's mixing of 8 bytes at a time, scalar
-  for now. From the runtime snapshot on it is part of the format, so the
-  import path's vectorized hashing has to compute the same function, or
-  replace it everywhere.
+- **The hash** is `link_hash`: 8 bytes at a time, each word mixed in with an
+  XOR, a 64-bit multiplication and a shift that folds the product's high half
+  down, then SplitMix64's finalizer. Each step is an AVX-512 instruction on
+  eight 64-bit lanes (`vpxorq`, `vpmullq`, `vpsrlq`), so `link_hash_names`
+  hashes eight names at once: each name's first 64 bytes in one masked load
+  (a name may end at a page's end), the rows transposed so that a vector holds
+  word j of the eight names, and the words mixed in lane by lane while a
+  lane's name has them. Names past 64 bytes, and those after the last whole
+  batch, go to `link_hash`, which is also the tests' oracle. From the runtime
+  snapshot on it is part of the format, which test-link pins with known
+  values. On libc's 2,912 names, 300,000 generated ones and 96,000 random
+  ones, its low 10, 12 and 16 bits and bits 26 and 52 up are as uniform as
+  random ones (χ² per degree of freedom 0.94 to 1.07).
 - **The table doesn't deduplicate:** the front end interns, and gives each
   spelling one id.
 
@@ -401,9 +415,14 @@ Columns:
 
 The classes are numbered in lld's order of segments, so that sorting atoms by
 class gives the layout's order: `_RODATA` and `_STRINGS` (pools of string
-literals: `.rodata.str1.1` in an object), `_TEXT`, `_TDATA`, `_TBSS`,
+literals: `.rodata.str1.1` in an object), `_EH_FRAME` (the unwind tables'
+CIEs and FDEs, as an object's `.eh_frame` holds them), `_TEXT`, `_INIT` and
+`_FINI` (the C runtime's `.init` and `.fini`: fragments of one function each,
+from `crti.o`'s prologue to `crtn.o`'s epilogue), `_TDATA`, `_TBSS`,
 `_INIT_ARRAY`, `_FINI_ARRAY`, `_DATA_RELRO`, `_DATA` and `_BSS`. `_TBSS` and
-`_BSS` are zero-fill.
+`_BSS` are zero-fill. The atoms of `_EH_FRAME`, `_INIT`, `_FINI`,
+`_INIT_ARRAY` and `_FINI_ARRAY` keep the order of their ids, which is their
+inputs' link order, since that order is their meaning.
 
 **Symbols** (`SymbolId`) are what binding is about. One atom can define
 several, and several definitions can compete for one name. Columns:
@@ -691,10 +710,11 @@ it once and keeps the result in a snapshot under `$XDG_CACHE_HOME/buster/`.
   through the GOT, `_init`/`_fini`, `__dso_handle`, the `.init_array` entries
   (`frame_dummy`), and weak undefined references (`__gmon_start__`, the
   `_ITM_*` clone table functions) that resolve to 0.
-- **libc.so.6's exports:** an open-addressing table keyed by the front end's
-  name hash, holding each name's default version, type and size, and the
-  library's undefined names, which decide the program's exports. It is a few
-  tens of kilobytes. The other shared libraries in the link get the same.
+- **libc.so.6's exports:** columns of each name's default version, type and
+  size, indexed by the front end's name hash in buckets filled by a counting
+  sort ("Step 5's phases, data-parallel"), and the library's undefined names,
+  which decide the program's exports. It is a few tens of kilobytes. The other
+  shared libraries in the link get the same.
 - **For `-static`, libc.a's 2,227 members:** each member's atoms and fixups,
   already converted; a table from symbol to defining member; and each member's
   undefined names. libgcc.a and libgcc_eh.a get the same.
@@ -715,6 +735,43 @@ a few kilobytes (or more for `-static`).
 A stale or missing snapshot is rebuilt by the import path (the same code as a
 full link), written to a temporary file and renamed into place. Two compilers
 rebuilding it at once write identical files, so no lock is needed.
+
+**Finding and importing the files** (`runtime.c`, with the readers of
+`import.c`). GCC's installation is the highest version under
+`/usr/lib/gcc/<triple>` or `/usr/lib64/gcc/<triple>` that has `crtbeginS.o`,
+for the triples distributions use (`x86_64-pc-linux-gnu` on Arch,
+`x86_64-linux-gnu` on Debian and Ubuntu). glibc's files are searched in the
+multiarch directories, then `/usr/lib64` and `/lib64`, then `/usr/lib` and
+`/lib`, as GCC's driver searches them; `libc.so`'s script names the rest by
+absolute path. Every path probed, found or not, is recorded with what the
+validation compares (`runtime_probes_current` compares them again): among
+them the directory the version was chosen from, whose times change when a
+version's directory comes or goes, and each version's `crtbeginS.o`, found or
+not, so that one installed into a version's existing directory shows too. The
+import reads each file once into an arena that the atoms point into:
+
+- the crt objects become units 0 to 4, in the driver's order, and each member
+  of `libc_nonshared.a` a unit after them. An object's allocated sections
+  become atoms of the class lld gives them; `.sframe` (which GCC 16's
+  `Scrt1.o` has, and lld 23 copies into the output), notes and `.comment` are
+  dropped. `Scrt1.o`'s `.note.ABI-tag` is kept aside for the executable's
+  `PT_NOTE`;
+- `libc.so.6` becomes a table of its exports, each at its default version
+  (`name@@VERSION`, or unversioned), with its type and size, an IFUNC as a
+  function; its version definitions with their hashes; and its undefined
+  names;
+- each name the crt objects and members refer to without defining binds to
+  another of them (`__TMC_END__` to `crtendS.o`), to the linker for a name it
+  defines (`_GLOBAL_OFFSET_TABLE_`, which GNU as names in an object that uses
+  the GOT), to a `libc.so.6` export (`__libc_start_main`, `__cxa_finalize`),
+  to nothing for a weak reference that neither defines (`__gmon_start__`, the
+  `_ITM_` functions), or to the program (`main`).
+
+The readers bound every offset, size, count and index they read by the file
+or the table it indexes. A malformed file gets an error that names the
+section, symbol or relocation and the byte offset, and the readers are run on
+every prefix of their test inputs and on every byte changed, ending at a
+`PROT_NONE` page, to show that they read nothing past the end.
 
 **Static links.** The closure over libc.a is GNU ld's group semantics, which
 the driver asks for (`--start-group -lgcc -lgcc_eh -lc --end-group`):
@@ -738,6 +795,254 @@ program's imports each get a GOT slot and a `GLOB_DAT`. `__dso_handle` and the
 two init/fini entries become relative relocations. No ELF is parsed on the
 link's path.
 
+#### Step 5's phases, data-parallel
+
+Every phase of step 5 is designed as `c_lexer.c` and the encoder are:
+data-parallel, vectorized and branch-free first, with an exact scalar path for
+what the vector path leaves to it, which is also the oracle the tests compare
+the vector path with. A phase is never taken to be inherently sequential: the
+question is which representation and algorithm vectorize. The tools are prefix
+sums, compression and expansion in registers, permutes as table lookups,
+sorting and segmented scans, and bitsets. Gathers and scatters are left out:
+`vpgatherdd` (zmm) is 64 µops and about 12.6 cycles on Zen 5, `vpscatterdd`
+88 and 17, so the joins are scalar loads, permutes or sorted streams.
+
+What is done, in `import.c` and `runtime.c`, with each reader's vector path
+against its exact path on the 9700X (`benchmark-import`, one CPU, medians of
+21 runs):
+
+| Input | Records | Vector | Exact | |
+| --- | ---: | ---: | ---: | ---: |
+| 64 objects of a generated program (one of synth's translation units each) | 231,604 | 0.49 ms, 2.11 ns per record | 5.10 ms, 22.0 ns | 10.4× |
+| the same with function sections | 231,670 | 0.71 ms, 3.07 ns | 3.13 ms, 13.5 ns | 4.4× |
+| one object of 33,000 functions in sections of their own | 430,617 | 1.06 ms, 2.45 ns | 6.17 ms, 14.3 ns | 5.8× |
+| the crt objects and `libc_nonshared.a`'s members | 94 | 1.36 µs | 1.74 µs | 1.3× |
+| `libc.so.6` (glibc 2.44) | 2,651 names | 11.0 µs, 4.2 ns per name | 41.9 µs, 15.8 ns | 3.8× |
+| `libstdc++.so.6` | 6,345 names | 83 µs, 13.2 ns | 214 µs, 33.8 ns | 2.6× |
+| `libLLVM.so.23.1` | 48,048 names | 1.47 ms, 30.6 ns | 1.98 ms, 41.2 ns | 1.35× |
+| `libc.a` (2,231 members) | 4,880 index entries | 28 µs, 5.7 ns per entry | 111 µs, 22.7 ns | 4.0× |
+| `libc_nonshared.a` | 5 index entries | 0.12 µs | 0.16 µs | 1.3× |
+
+The records are an object's symbol table entries and relocations, and a
+library's exports and references. The small inputs are bound by what each
+file costs whatever its size: the ELF header, the arrays pushed, the tables
+set up. libLLVM's names are C++'s, mostly past 64 bytes, which take memchr and
+the scalar hash.
+
+- **Objects** (`import_object_vector`). Eight records at a time, one per
+  64-bit lane, written straight into the link's columns past their counts:
+  - *sections:* eight headers transposed 8×8 (`link_transpose_words`), so
+    that a vector holds one field of eight sections. Bounds, alignments and
+    the class chain of `import_section_class` are lane masks, and the 16 first
+    bytes of each name are compared with the names the classes depend on
+    (`.init`, `.fini`, `.eh_frame`, `.sframe`, `.data.rel.ro`) by a ternary
+    logic op and a test per pattern. Then the atoms are compressed into the
+    columns, and each section's atom id is expanded into its lane;
+  - *symbols:* eight 24-byte entries in three vectors, transposed to their
+    three words by six `vpermt2q`. Each symbol's atom, and the atom's class
+    and size, are a scalar load per symbol and column, in a pass of their own
+    between two vector passes. Then the classification of
+    `import_object_symbols` and the columns, as for sections;
+  - *names:* a masked 64-byte load per name gives its length (its first NUL).
+    Eight at a time, a second masked load of each gives its hash
+    (`link_hash_rows`, the same function as `link_hash`) and its copy, into
+    one push from the name arena per batch. The lengths are a pass of their
+    own because eight scalar stores read back as one vector can't be
+    forwarded and stall the load;
+  - *relocations:* eight entries in three vectors, the same way. Each type's
+    kind and field width come from a 64-byte table in a register (`vpermb`).
+    The order and overlap checks compare each field with the previous lane's
+    end (`valignq`), and the side table's indices are an expand of the wide
+    addends' ranks. `R_X86_64_NONE` entries are compressed away: a batch
+    without them skips the compression, and one without a wide addend the side
+    table. Each target is then a scalar load per fixup, in a tight pass.
+
+  Anything out of the ordinary sends the whole object to
+  `import_object_scalar`: a malformed record, relocations out of offset
+  order (which the exact path sorts), two relocation sections for one
+  section, a string table without its final NUL, or a table without room for
+  every record. `import_object` then returns the link's counts and the
+  arenas to where they were before running it. On the 9700X the vector path
+  takes every object above, and GCC's and glibc's on the 9700X and on Ubuntu
+  24.04.
+- **Archives** (`import_archive_vector`). The symbol index lists the header
+  offset of each member that defines a global symbol, in archive order. Those
+  members' headers are read on their own, from the index, rather than by
+  walking the chain of headers from the start. From each one, only the
+  members up to the next indexed one are walked: the members without a global
+  symbol, 122 of glibc 2.39's 2,211 in Ubuntu's `libc.a`, none of
+  `libc_nonshared.a`'s. The index's offsets are byte-swapped by `vpshufb`,
+  checked in order, and ranked: an expand of the lanes where the offset
+  changes, then a prefix maximum by shifts of 1, 2 and 4 lanes. Each header's
+  size is parsed in a vector: the digits right-aligned by a shuffle, then
+  multiply-adds of pairs, fours and eights. The index's names are split at
+  their NULs, found 64 bytes at a time. An archive without an index, or with a
+  special member past the first ones, is the exact path's.
+- **Shared libraries** (`import_library_vector`). `.dynsym` is read eight
+  entries at a time, as `.symtab` is. Each export's version is looked up in a
+  512-bit set of the defined versions' indices in a register: its word by
+  `vpermq`, its bit by a variable shift. The exports' and references' columns
+  are compressed into place, then their names' lengths come from a masked load
+  each and their hashes eight at a time. `.dynamic`'s tags are compared eight
+  entries at a time. The version definitions are a chain of entries that only
+  `vd_next` places, 47 in glibc 2.44's: both paths read them with the exact
+  code.
+- **The exports' index** (`import_index_build`). One bucket per export,
+  rounded up to a power of two, by the hash's top bits, filled by a counting
+  sort: the buckets by a vector shift, the counts, an exclusive prefix sum in
+  vectors (`import_exclusive_scan`: shifts of 1, 2, 4 and 8 lanes and a
+  carry), then each export placed in export order, so that a name exported
+  twice is found at its first entry. Split across lanes, the counts would be
+  per lane and the prefix sum would combine them, as rule 4's exchange does.
+  The open-addressing table it replaced is built by inserts whose probe
+  chains depend on the inserts before them, so it can't be split. The
+  benchmark keeps the table to compare:
+
+  | Exports | Index: build | Table: build | Index: lookup | Table: lookup |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 2,630 (`libc.so.6`) | 2.52 µs | 1.33 µs | 2.67 ns | 2.13 ns |
+  | 6,139 (`libstdc++.so.6`) | 6.65 µs | 4.96 µs | 3.15 ns | 2.48 ns |
+  | 47,626 (`libLLVM.so.23.1`) | 66.6 µs | 114.7 µs | 10.8 ns | 10.0 ns |
+
+  At libc's size the table is faster to build and to look up in; the index
+  wins its build from tens of thousands of exports, and it is the one a
+  group of lanes can build. A lookup reads its bucket's bounds, then scans its
+  entries, about one export: a dependent load more than the table's probe.
+  The snapshot stores the index, so a link only looks names up: a few hundred
+  to a few thousand of them, under 2 µs either way.
+- **The runtime's binding** (`runtime_bind`). The runtime's definitions are
+  found eight symbols at a time (a compress of the ids whose binding isn't
+  local, with an atom and a name) and indexed the same way. Each reference is
+  then looked up, rather than every reference scanning every symbol.
+- **Linker scripts** (`import_script`) have no vector path: `libc.so`'s is
+  255 bytes, read in 0.15 µs once per rebuild of the snapshot. A vector lexer
+  would classify 64 bytes at a time into word, space and punctuation masks,
+  as `c_lexer.c` does, with comments left to the exact one.
+- **The whole import** (`runtime_import`: the search's 19 probes, each file
+  read, imported and bound) takes 96 µs, against about 13 µs for the readers
+  alone. The rest is the probes and reading the files, above all
+  `libc.so.6`'s 2.2 MB, of which the import reads only the dynamic sections.
+  The snapshot saves all of it on a link. Reading only those sections, with
+  `pread` after the section table, is what is left for the snapshot's
+  rebuild.
+
+Each vector path is tested against its exact path on every input the tests
+have: every unit's object of test-link's programs, the objects, archives and
+libraries made by hand, every malformed one, every page-edge input (each
+prefix and each changed byte, ending at a `PROT_NONE` page), and this
+system's runtime. The vector path may take an input only when the exact path
+reads it without an error, and must then make the same records, column by
+column. The import of an input must give the exact path's result and records
+either way. The tests also check that each well-formed input takes the
+vector path.
+
+Binding, the second part (`bind.c`), joins the runtime to the program's link
+and binds every name before any layout:
+
+- **Order by construction.** The classes whose atoms keep their id order
+  (`.init`'s and `.fini`'s fragments, `.eh_frame` and the terminator that
+  `crtendS.o` ends it with, the init and fini arrays) must come out in GCC's
+  link order. So the runtime's objects join around the program's atoms rather
+  than being sorted later: `bind_begin` joins `Scrt1.o`, `crti.o` and
+  `crtbeginS.o` after the program's symbols and before its atoms, and
+  `bind_end` the members of `libc_nonshared.a` the link needs, then
+  `crtendS.o` and `crtn.o`, after them. The test programs leave room for this
+  (`link_program_generate_begin`, `_atoms` and `_end`).
+- **One symbol per global name.** A global or weak symbol of the runtime's
+  takes the link's symbol of its name, if there is one. So `bind_begin` first
+  matches every global symbol of the program against the runtime's global
+  names (`RuntimeNames`: each name of the runtime's global symbols, of
+  `libc.so.6`'s exports and of its references, and of those the linker
+  defines, once, built by `runtime_import`, indexed as the exports are). The
+  match is the one part
+  that grows with the program; the rest grows with the runtime, or with the
+  names the program leaves undefined. Most of the program's names aren't the
+  runtime's, so the match is mostly misses, and a miss mustn't touch the
+  index: its buckets and hashes are 48 KB, which a large program's columns
+  stream out of L1. So the names also have a blocked Bloom filter, a word per
+  four names (8 KB for libc's), each name setting two bits of the word its
+  hash's top bits choose. Eight symbols at a time, their names' hashes are
+  gathered by name id, their filter words by the hashes' top bits, and a lane
+  mask of both bits set sends about one miss in a hundred, and every hit, to
+  the index. Gathers pay here where the patch kernel's didn't: the alternative
+  is two dependent scalar loads a symbol, and the filter's words stay in L1.
+- **Each object joins as a block** (the vector path). Its names' bytes are
+  one run in the runtime's name arena, copied at once, with their pointers
+  moved eight at a time. Its atoms' units and fixup ranges move sixteen at a
+  time and their bytes are copied one atom at a time: an executable patches
+  atoms in place, so the runtime's bytes aren't shared. Its symbols that join
+  new are compressed into place eight at a time, their ids an expand of
+  consecutive ones, and the rest merge with the link's symbol of their name by
+  scalar rules. Its fixups' targets move through the symbols' new ids by
+  scalar loads, in a pass of their own. The exact path adds the same records
+  one at a time through `link.c`'s checked adds.
+- **Two definitions of a name** resolve as GNU ld and lld resolve them: a
+  strong one takes a weak one's place, of two weak ones the first in link
+  order stays (`Scrt1.o`'s, `crti.o`'s and `crtbeginS.o`'s come before the
+  program's), and two strong ones are an error. So `crti.o`'s `_init` takes a
+  weak `_init` of the program's over, and `Scrt1.o`'s weak `data_start` a weak
+  one of the program's. The program defines its symbols as its atoms join,
+  after `bind_begin`, so a definition of the runtime's that takes the
+  program's place waits until `bind_end`. Whichever stays takes the most
+  constraining visibility of every reference to the name and definition of
+  it, as the gABI says.
+- **Binding** (`bind_end`). The symbols that nothing defines are selected
+  eight at a time by a compress over the atom, name and source columns, and
+  each is looked up: the linker's names (`_GLOBAL_OFFSET_TABLE_` and the init
+  and fini arrays' bounds), a crt object after the program, an export of
+  `libc.so.6` (an import, with the export's type and version) but only for a
+  reference with default visibility, a member of `libc_nonshared.a` for a
+  strong reference, nothing for a weak one. A hidden, internal or protected
+  reference needs a definition within the executable: GNU ld refuses a strong
+  one that only a shared library defines and gives a weak one 0, and lld
+  does the same.
+  The members are a frontier walk over a bitset: each round binds the symbols
+  the round before added. The exports come from the names that took a link
+  symbol, as they took it, rather than from all of the runtime's.
+
+Measured on the 9700X (`benchmark-bind`, one CPU, medians of 21 runs), for
+generated programs that call libc, 200 workers per unit:
+
+| Workers (global symbols) | Match, vector | Match, exact | `bind_begin`, vector / exact | `bind_end`, vector / exact |
+| --- | ---: | ---: | ---: | ---: |
+| 1 (18) | 0.09 µs | 0.07 µs | 0.28 / 0.40 µs | 0.23 / 0.20 µs |
+| 64 (81) | 0.14 µs | 0.22 µs | 0.33 / 0.54 µs | 0.26 / 0.22 µs |
+| 2,000 (2,080) | 1.83 µs, 0.88 ns per global | 4.71 µs, 2.26 ns | 2.05 / 5.06 µs | 0.73 / 0.69 µs |
+| 102,400 (106,260) | 90.7 µs, 0.85 ns | 727 µs, 6.84 ns | 91.1 / 733 µs | 25.5 / 24.6 µs |
+
+Before the filter, the vector match took 7.2 ns per global symbol at 102,400
+workers, at an IPC of 1.1, against 2.0 ns at 2,000: the same instructions,
+waiting on the index's lines. With it, 0.85 to 0.88 ns at both sizes, two
+gathers per eight symbols. The crt objects' joins are a fixed 0.2 to 0.3 µs.
+`bind_end`'s scan of the symbol columns for the names nothing defines runs as
+fast scalar as in vectors (25 µs for 112,683 symbols, 0.22 ns each, the
+scalar loop at an IPC of 7.5), both bound by reading the columns rather than
+by instructions.
+So the smallest program binds in 0.5 µs, well within hello world's 20 µs
+target, and one of 102,400 workers in 117 µs, against 4 to 10 ms for its
+whole link.
+
+The dynamic PIE, the third part, is "The dynamic PIE" below: its stubs,
+dynamic symbols, relocations and RELR, each pass with its vector path and
+its exact twin. Where it differs from the plan here before it: the dynamic
+symbols are found in bitsets, 64 symbols at a time, rather than compressed;
+the stubs and refusals come from a filter in registers that every fixup's
+target is tested against; RELR is encoded per atom, so that its size is known
+before the layout; and `.gnu.hash`'s names are hashed one byte at a time,
+since a program exports tens of them, with the dot product below left for
+when binding exports thousands. `.gnu.hash`'s DJB hash, `h * 33 + c` per
+byte, is a chain within a name but a dot product in closed form, `5381 *
+33^n + sum(c[i] * 33^(n - 1 - i))` mod 2^32: a name of up to 64 bytes is
+four `vpmulld` of its bytes widened to dwords by a vector of powers of 33
+right-aligned to its length, and a reduction.
+
+The phase still to come is designed the same way:
+
+- **The snapshot** (part 4): the runtime's link written as its columns are,
+  without a record at a time, and read back with one `pread`. It is
+  validated by one `statx` per probe (19 here, 0.18 µs each), which can go
+  through one `io_uring` submission if that measures faster.
+
 #### Layout
 
 Segments in lld's order, which loaders and tools expect:
@@ -745,7 +1050,8 @@ Segments in lld's order, which loaders and tools expect:
 1. **R:** the ELF header, program headers, `.interp`, the notes, `.gnu.hash`,
    `.dynsym`, `.dynstr`, `.gnu.version`, `.gnu.version_r`, `.rela.dyn` and
    `.relr.dyn`, `.rodata`, `.eh_frame_hdr` and `.eh_frame`.
-2. **RX:** `.init`, `.text` and `.fini`.
+2. **RX:** `.text`, `.init` and `.fini`, in that order, as lld 23 writes
+   them.
 3. **RW, RELRO:** `.tdata` and `.tbss`, `.init_array`, `.fini_array`,
    `.data.rel.ro`, `.dynamic` and `.got`. The segment's memory size runs to
    the end of its page, as lld's `.relro_padding` does, so that
@@ -1060,6 +1366,9 @@ phases in place, µs:
 | 1 | 828 | 505 | 571 | 8.0 | 6,615 | 2.2 |
 | 8 | 334 | 108 | 68 | 7.9 | 3,603 | 2.5 |
 
+(The dynamic PIE's part made the layout and symbols phases faster, and has
+these programs' times again beside the PIEs': "The dynamic PIE".)
+
 On btrfs (`/home`), the 397 KB program takes 105 / 107 µs on one lane and
 71 / 92 on eight (floor 43 / 42), and the 35.5 MB one 11.4 / 11.3 ms and
 6.4 / 7.1 (floor 5.5 / 5.7).
@@ -1079,6 +1388,154 @@ On btrfs (`/home`), the 397 KB program takes 105 / 107 µs on one lane and
   addend. Step 5's binding knows the imports before any code is selected, so
   the GOT can be sized before the code exists, as "Layout" says, and the
   addends' bound can come from the code generator.
+
+#### The dynamic PIE
+
+Step 5's third part: `executable_write` writes a dynamic PIE against glibc
+when `ExecutableOptions.dynamic` gives it what a static executable lacks
+(`ExecutableDynamic`, which `dynamic_inputs` in `dynamic.c` fills from the
+runtime and from binding): the interpreter GCC's driver names, `libc.so.6`
+and its version definitions, `Scrt1.o`'s `.note.ABI-tag`, `crti.o`'s `_init`
+and `_fini`, and the exports. The link is the program's bound by `bind.c`
+("Step 5's phases, data-parallel"), so the writer looks up no name. The
+programs run under the system's loader without stand-ins, and `test-dynamic`
+compares each with lld's link of the same objects.
+
+- **The file** is step 4's laid out at base 0 (`ET_DYN`, `DF_1_PIE`), with
+  lld's sections and program headers besides. R gets `.interp`, the ABI note
+  (one `PT_NOTE` with the build ID), `.dynsym`, `.gnu.version`,
+  `.gnu.version_r`, `.gnu.hash`, `.dynstr`, `.rela.dyn` and `.relr.dyn`, and
+  `.eh_frame` after `.rodata`; RX `.init`, `.fini` and `.plt.got`; RELRO
+  `.dynamic` before `.got`. `PT_INTERP` and `PT_DYNAMIC` join the program
+  headers. `.init`'s and `.fini`'s fragments and `.eh_frame`'s records keep
+  link order, one after another as lld writes them. `.eh_frame_hdr` waits for
+  part 4, which gives the generated programs their FDEs, and `.symtab` for
+  debuggers.
+- **Relocation classes.** Each symbol is RELATIVE (the image's: the load
+  address adds to it), SYMBOLIC (an import, or a weak reference to nothing
+  with default visibility, which a library may define: these are `.dynsym`'s
+  undefined entries) or NONE (a TLS symbol's offset, and a weak reference to
+  nothing that isn't dynamic, which stays 0). A GOT slot of a RELATIVE target
+  is relocated RELATIVE, of a SYMBOLIC one by `GLOB_DAT` (`TPOFF64` for a TLS
+  import). An `ABS64` field in an atom the loader writes (`.tdata`, the init
+  and fini arrays, `.data.rel.ro` and `.data`) is relocated RELATIVE, or by
+  `R_X86_64_64` with the fixup's addend. Refused, naming the smallest fixup:
+  an `ABS64` that needs a relocation in an atom the loader doesn't write (a
+  text relocation), an `ABS32` or `ABS32S` that needs one, and a fixup of
+  another kind to a dynamic symbol, as lld refuses them; and a `PC32` or
+  `PC64` to a weak reference to nothing that isn't dynamic, which is at
+  address 0 wherever the image loads, so that no field measured from the
+  image reaches it. GNU ld refuses that `PC32` in code and read-only data
+  ("can not be used when making a PIE object"); a `PC32` in writable data and
+  a `PC64` anywhere, it and lld write as `0 - P` from the link's addresses,
+  off by the load address. A `CALL`
+  to it is patched so, as both linkers patch it: the program can only call it
+  after checking that it has an address, which its absolute fields and GOT
+  slot say (0, with no relocation).
+- **Stubs.** A `CALL` to a dynamic symbol (GCC 13's `crtbeginS.o` calls
+  `__cxa_finalize` so, where GCC 16's reads the slot itself) goes to a stub
+  in `.plt.got`, `jmp [rip + slot]` and a two-byte nop, GNU ld's form for a
+  symbol whose GOT slot `GLOB_DAT` fills. So nothing binds lazily: there is no
+  `.plt` or `.rela.plt`, as with `-z now`.
+- **RELR.** With `GLIBC_ABI_DT_RELR` in `libc.so.6` (glibc 2.36 on, so the
+  executable needs that version), the RELATIVE relocations at even addresses
+  are `.relr.dyn`'s, the others `.rela.dyn`'s, which sort RELATIVE ones first
+  for `DT_RELACOUNT`. To size `.relr.dyn` before the layout, each written
+  atom's relocations are encoded from its first one's address, as if the atom
+  started a run, so its words don't depend on where it lands; an address is
+  even when the atom is aligned to 2 or more and the field's offset is even.
+  The section is then the atoms' words in address order with the GOT's words
+  among them: the GOT's marked symbols in a word of the bitsets have
+  consecutive slots, so a word's RELATIVE slots are one address entry and at
+  most one bitmap. The field holds the patched `S + A`, RELR's implicit
+  addend. lld encodes the whole section as one run, so its `.relr.dyn` can be
+  about a word per atom shorter.
+- **`.gnu.hash`** has lld's shape: a bucket per four exports, at least one; a
+  Bloom filter of 12 bits per export in the next power of two of 64-bit words
+  above them, with shift 26; and the exports sorted by bucket (a stable
+  counting sort) after the undefined symbols. The versions are numbered from
+  2 in the library's order of them.
+
+Every pass is data-parallel and vectorized, with an exact twin, scalar, that
+`ExecutableOptions.exact` selects; the tests write each program both ways and
+compare the files byte for byte:
+
+| Pass (phase) | Vector path | Exact twin |
+| --- | --- | --- |
+| Symbols (count) | 64 symbols at a time from the source and flags columns, a mask per class: the SYMBOLIC and RELATIVE bitsets, and a 1,024-bit filter of the symbols outside the image (sources NONE and RUNTIME_SHARED). Names are read only in a word with a weak reference to nothing of default visibility | `executable_relocation_class` of each symbol |
+| Fixups (count) | the targets of the fixups that neither read a GOT slot nor are `ABS64`, 16 at a time, against the filter in two registers (`vpmulld`, `vpermt2d`, `vpsrlvd`, `vptestmd`): a hit, a few hundredths of them, is looked up in the SYMBOLIC bitset, and a `CALL` to a dynamic symbol marks its stub and slot | each target's atom loaded |
+| GOT (count) | the slots' classes by popcounts of the bitsets with the GOT's marks | each slot's class |
+| Written atoms (count) | 64 atoms' classes looked up at once (`vpermb`); a dense atom (every fixup an `ABS64` to a RELATIVE target, 8 bytes apart from an even offset) checked 16 fixups at a time and its RELR words counted from its fixup count; the others one fixup at a time | every atom one fixup at a time |
+| Slots (layout) | each word's slot numbers expanded into its marked lanes, 16 symbols at a time (`vpexpandd`) | one symbol at a time |
+| `.rela.dyn` and `.relr.dyn` (dynamic) | each lane's ranges at their places by prefix sums; a dense atom's words from its first address and count, the GOT's by a `pext` of the bitsets, only the atoms with `.rela.dyn` relocations read again | every written atom's fixups encoded again |
+
+The refusals are counted on the way (`ABS64` fixups against those written,
+`ABS32` and `ABS32S`, and the filter's dynamic targets) and looked for, by an
+exact scan for the smallest, only when the counts say there are some. Lane 0
+writes the exports' `.dynsym` entries and `.gnu.hash`, `.gnu.version_r` and
+`.dynamic`, which grow with the exports and the versions, not with the
+program. `.gnu.hash`'s DJB hash is scalar per name: the exports are tens, and
+the plan's dot product is for when binding exports thousands (`-rdynamic`).
+
+`benchmark-executable` writes the same programs, bound against the system's
+runtime, as dynamic PIEs, and the static executables again, in one session.
+Medians in µs on the 9700X, the output on tmpfs, in place / as a new file,
+against the floor (the least of its runs: at 400 KB it varies by half from
+run to run):
+
+| Program (file) | 1 lane | 2 lanes | 4 lanes | 8 lanes | Floor |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| static, 1 worker (3.9 KB) | **3.0 / 3.7** | 5.1 / 6.0 | 4.9 / 4.9 | 7.2 / 6.6 | 0.6 / 1.4 |
+| PIE, 1 worker (6.6 KB) | **4.4 / 5.4** | 8.1 / 7.1 | 5.8 / 6.9 | 8.3 / 9.5 | 0.7 / 1.6 |
+| static, 64 workers (16 KB) | **5.1 / 6.6** | 6.4 / 8.0 | 6.7 / 8.5 | 7.7 / 9.6 | 0.8 / 2.3 |
+| PIE, 64 workers (19 KB) | **6.4 / 7.9** | 8.4 / 9.6 | 8.0 / 9.9 | 9.2 / 11.2 | 0.9 / 2.3 |
+| static, 2,000 workers (397 KB) | 68 / 85 | 48 / 69 | 44 / 65 | **44 / 64** | 9.7 / 24 |
+| PIE, 2,000 workers (401 KB) | 73 / 89 | 50 / 68 | 46 / 67 | **45 / 67** | 8.6 / 24 |
+| static, 180,000 workers (35.5 MB) | 8,400 / 9,620 | 4,860 / 5,620 | **4,060 / 5,620** | 4,200 / 5,910 | 2,320 / 4,240 |
+| PIE, 180,000 workers (35.6 MB) | 8,640 / 10,010 | 5,050 / 5,720 | 4,280 / 5,660 | **4,240 / 5,580** | 2,290 / 4,210 |
+
+The largest PIE has 184,557 atoms and 2.16 million fixups, ten dynamic
+symbols, eleven `.rela.dyn` relocations, and 8,653 `.relr.dyn` words (69 KB)
+for its 299,069 RELATIVE pointers and GOT slots, which `.rela.dyn` would take
+7.2 MB for. Its phases in place, µs, against the static executable's:
+
+| Lanes | | count | layout | symbols | dynamic | open | chunks | finish |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | static | 866 | 383 | 462 | | 8.1 | 6,670 | 2.4 |
+| 1 | PIE | 1,107 | 411 | 481 | 15 | 8.1 | 6,610 | 2.6 |
+| 8 | static | 328 | 120 | 83 | | 8.3 | 3,668 | 2.7 |
+| 8 | PIE | 397 | 116 | 87 | 4.1 | 8.4 | 3,582 | 2.8 |
+
+- **A PIE costs a few percent over a static executable,** 3% on one lane
+  for 35.6 MB and 1% on eight. The dynamic phase is 15 µs; the count phase
+  pays the rest. Its fixups pass reads the targets of the 1.44 million fixups
+  that neither read a GOT slot nor are `ABS64`, 5.8 MB that the static count
+  doesn't read, to find the calls to dynamic symbols: about 180 µs on one
+  lane. The 180,000 pointers of `buster_functions` are one atom, whose dense
+  check takes 49 µs on whichever lane has it, which the other seven wait for.
+  The small PIEs pay their larger files and sections: 1.4 µs more for one
+  worker.
+- **A filter has false positives.** The first version took a dense atom to be
+  one whose targets all miss the filter. With about ten symbols outside the
+  image, 1% of all targets hit it anyway, so no table of thousands of
+  pointers was dense, and three passes went through `buster_functions` one
+  fixup at a time: 1.16 ms of dynamic phase on one lane and 0.71 ms on eight.
+  Looking each hit up in the RELATIVE bitset instead made it 15 µs and 4 µs.
+  `test-dynamic` writes a program whose table is sure to have such hits.
+- **The symbols pass reads 2 bytes a symbol.** The source and flags columns
+  give every class, `link_check` making a symbol of source NONE atomless and
+  a TLS symbol one by its type. Reading the atom and name columns too took
+  61 µs for 190,858 symbols on one lane, from DRAM; this takes 13.
+- **The static path got faster with it.** `executable_count`,
+  `executable_place` and `executable_resolve` keep their columns in locals,
+  which their stores can't alias, and the first two a run of atoms of one
+  bucket in registers, where the sums in memory chained each atom's add to
+  the last one's store. In a session that
+  ran both, 180,000 workers took 8,250 to 8,330 µs on one lane where step 4's
+  code took 8,550 to 8,630 (layout 390 µs against 490, symbols 470 against
+  585), and 2,000 workers 68.5 µs against 70; one worker took 2.9 to 3.0 µs
+  against 2.7 to 2.8, the dynamic sections having made the section table
+  twice as long.
 
 #### Synthetic sections
 
@@ -1102,7 +1559,8 @@ There is no `.note.gnu.property`. The output's property is the AND of its
 inputs', and the program's code carries no IBT or shadow stack markers.
 
 RELR is a list of addresses and 63-bit bitmaps of the 8-byte words after them.
-It is built from the sorted offsets of the `ABS64` fixups in one pass. Where
+The writer encodes it per atom, from each atom's first relocation, so that its
+size is known before the layout ("The dynamic PIE"). Where
 RELA takes 24 bytes per relocation, RELR takes 8 for an isolated pointer and
 under a bit per pointer in a dense table. Arch links its own packages this way
 (`-z pack-relative-relocs` in `makepkg.conf`).
@@ -1202,8 +1660,9 @@ builds an object in its scratch arena and writes it with one `pwrite`.
 **Sections**, in this order:
 
 - for each class with atoms, in class order: `.rodata`, `.rodata.str1.1`
-  (`SHF_MERGE | SHF_STRINGS`), `.text`, `.tdata`, `.tbss`, `.init_array`,
-  `.fini_array`, `.data.rel.ro`, `.data` and `.bss`. With function sections,
+  (`SHF_MERGE | SHF_STRINGS`), `.eh_frame` (`SHT_X86_64_UNWIND`), `.text`,
+  `.init`, `.fini`, `.tdata`, `.tbss`, `.init_array`, `.fini_array`,
+  `.data.rel.ro`, `.data` and `.bss`. With function sections,
   each `TEXT` atom has a section of its own, `.text.<name>`, after its first
   named symbol at offset 0. Each section is followed by its `.rela.<section>`
   if its atoms have fixups;
@@ -1871,15 +2330,17 @@ Where the decisions stand:
 | --- | --- | --- |
 | Encoding instructions | dependency chains (see the encoder document) | AVX-512 (done: 0.64 ns per instruction) |
 | Patching fixups | loads and stores | scalar, 32-bit targets (done: `executable_patch_pc32`, measured above) |
-| ELF records (`Rela`, `Sym`, dynamic tables) | stores | scalar (measured: ties the `vpermt2q` transpose) |
+| Writing ELF records (`Rela`, `Sym`, dynamic tables) | stores | scalar (measured: ties the `vpermt2q` transpose) |
+| Reading ELF records (objects, archives, `.dynsym`) | shuffles, compression and scalar joins | AVX-512 with an exact path (done: 2.1 against 22 ns per record; "Step 5's phases, data-parallel") |
 | Copying chunks | bandwidth | `memcpy`; the chunks stay in L2 |
 | Hashing names | arithmetic | vectorized, one name per masked load, several in flight |
 | Splitting strings at NULs | arithmetic | the lexer's bitmask-to-positions method |
 | Decoding and classifying relocations | shuffles and tables | `vpermt2q` transpose, `vpermb` classification, `vpcompressd` lists |
 | Bitsets (liveness, GOT needs) | bandwidth | 512-bit OR, `vpopcntq` for counts |
-| Prefix sums for layout | latency | scalar until a profile says otherwise |
+| Prefix sums for layout | latency | scalar until a profile says otherwise; the counting sorts' are vectors (`import_exclusive_scan`) |
 | Build ID | arithmetic | AES rounds on each chunk while it is in L2 (done: 260 GB/s, as fast as reading it; "Patching and writing") |
 | Probing hash tables | memory latency | scalar loads with software prefetch: gathers measured no faster than scalar loads in the patch kernel |
+| Matching a program's names against the runtime's (binding) | the index's cache lines, for lookups that mostly miss | a blocked Bloom filter in L1 tested eight names at a time by two gathers, the index only behind it (done: 0.85 against 6.8 ns per global symbol; "Step 5's phases, data-parallel") |
 
 So on the direct path, most of the output is produced by a vector kernel that
 already exists (the encoder), and what is left for the linker is load/store
@@ -2056,6 +2517,16 @@ and with this document updated with what was measured:
    and through the object writer followed by mold, wild and lld. Besides
    time, it reports the work done: bytes written, fixups applied, names looked
    up, page faults and peak memory.
+
+   In progress, in four parts: the runtime's files found and imported, each
+   reader with a vector path and an exact one (`import.c`, `runtime.c`,
+   `test-import` and `benchmark-import`, done: "The runtime snapshot" and
+   "Step 5's phases, data-parallel"); the runtime in the program's link,
+   bound (`bind.c`, `test-bind` and `benchmark-bind`, done: "Step 5's phases,
+   data-parallel"); the dynamic PIE (`executable.c`'s dynamic mode,
+   `dynamic.c`, `test-dynamic` and `benchmark-executable`'s PIE rows, done:
+   "The dynamic PIE"); then the snapshot itself, `.eh_frame` for the
+   generated programs and `benchmark-link`.
 6. **`-static`:** libc.a's closure, IRELATIVE for its IFUNCs, static TLS.
    Then `-static-pie` and `-shared`.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse

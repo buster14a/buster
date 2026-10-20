@@ -309,15 +309,17 @@ static bool executable_test_reset(Link* link, const char* path)
 }
 
 static const char* const executable_test_error_names[] = {
-    "none",
-    "memory",
-    "layout",
-    "undefined",
-    "unsupported",
-    "entry",
-    "fixup",
-    "file",
+    [EXECUTABLE_ERROR_NONE] = "none",
+    [EXECUTABLE_ERROR_MEMORY] = "memory",
+    [EXECUTABLE_ERROR_LAYOUT] = "layout",
+    [EXECUTABLE_ERROR_UNDEFINED] = "undefined",
+    [EXECUTABLE_ERROR_UNSUPPORTED] = "unsupported",
+    [EXECUTABLE_ERROR_ENTRY] = "entry",
+    [EXECUTABLE_ERROR_RELOCATION] = "relocation",
+    [EXECUTABLE_ERROR_FIXUP] = "fixup",
+    [EXECUTABLE_ERROR_FILE] = "file",
 };
+_Static_assert(BUSTER_ARRAY_LENGTH(executable_test_error_names) == EXECUTABLE_ERROR_FILE + 1, "every error has a name");
 
 static void executable_test_print_failure(const char* what, const ExecutableResult* result)
 {
@@ -1774,8 +1776,8 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
 
     // Refusals reported alike with any number of lanes: the entry point checked before the symbols (a DATA symbol, with
     // a symbol defined nowhere beside it), the first of two symbols defined nowhere in different lanes' ranges, the
-    // smallest failing fixup though another comes first in the file, an atom aligned past a page, and an init array's
-    // atom of 12 bytes.
+    // smallest failing fixup though another comes first in the file, an atom aligned past a page, an init array's atom
+    // of 12 bytes, and an atom of each of the C runtime's classes, which step 4's executables don't have.
     ExecutableTestLink refusal;
     SymbolId refusal_start = 0;
     SymbolId data = 0;
@@ -1818,6 +1820,20 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
         executable_test_refused(&tally, &refusal.link, refusal_start, path, EXECUTABLE_ERROR_LAYOUT, table, 0, 0, "an init array's atom of 12 bytes");
     }
     executable_test_link_end(&refusal);
+    static const uint8_t runtime_classes[] = {
+        BUSTER_LINK_CLASS_EH_FRAME,
+        BUSTER_LINK_CLASS_INIT,
+        BUSTER_LINK_CLASS_FINI,
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(runtime_classes); c += 1)
+    {
+        built = executable_test_refusal(&refusal, &refusal_start, &data, runtime_classes[c], 2, 8, 0, &table);
+        if (built)
+        {
+            executable_test_refused(&tally, &refusal.link, refusal_start, path, EXECUTABLE_ERROR_LAYOUT, table, 0, 0, "an atom of a C runtime's class");
+        }
+        executable_test_link_end(&refusal);
+    }
 
     // A lane short of scratch memory, from no room up: every link fails with EXECUTABLE_ERROR_MEMORY and leaves no
     // output, until the lane has room enough and the program runs. Lane 0 of one lane, and the last of 2, 3 and 8.
@@ -1923,6 +1939,7 @@ static bool executable_test_kernel(uint64_t seed)
                     .reference = reference,
                     .got_slots = got_slots,
                     .sizes = sizes,
+                    .base = BUSTER_EXECUTABLE_BASE,
                     .got = 1u << 20,
                     .checked = false,
                 };

@@ -11,6 +11,9 @@
 //   - Round trips: random records of every table (names of random bytes, atoms of every class, symbols, and fixups of
 //     every kind, a quarter of them with wide addends) read back from the columns, ids from 1 in order, and record 0
 //     zero in every column.
+//   - Hashes: link_hash's values for known names (it is part of the snapshot's format), and link_hash_names against
+//     link_hash on random names of 0 to 200 bytes, every count to 40, every length in every lane of a batch, and names
+//     ending at a PROT_NONE page.
 //   - Capacity: every table at its capacity, the side table full while the fixups aren't, a name arena too small for a
 //     name, and arenas too small for the tables: each add fails with LINK_ERROR_FULL and changes nothing, and
 //     link_capacity_bytes is room enough.
@@ -32,14 +35,15 @@
 //     it, as a linker may start .tdata when .tbss is more aligned. A program without libc starts at _start, with an
 //     initial stack and auxiliary vector as the kernel's. One that calls libc gets stand-ins for its imports
 //     (link_test_import), and the child does what the C runtime would around main (link_test_start_libc). Each set
-//     with two thread-locals, an init function and a fini function has every class and every kind its options allow,
-//     and a copy of the defaults' program with the hexadecimal digits' fixup one byte off must write something else.
+//     with two thread-locals, an init function and a fini function has every class but the C runtime's and every kind
+//     its options allow, and a copy of the defaults' program with the hexadecimal digits' fixup one byte off must
+//     write something else.
 // --print-assembly writes those programs (from the same --seed and --functions) as GNU as source instead: a directory
 // for each set of options (link_test_program_directories) with a file per unit and the expected output, for the
 // cross-check in AGENTS.md, where GNU as assembles them and GNU ld, lld, mold and wild link them (through cc, with
 // libc). The exit status is 1 if the arguments are invalid, a check fails or a file can't be written.
 //
-// Layout, in this order: the tally, the round trips, the capacity and rules checks, the known fixups and the kinds
+// Layout, in this order: the tally, the hashes, the round trips, the capacity and rules checks, the known fixups and the kinds
 // checks, the wide addends, the loader and the program checks, the assembly, and run_link_tests.
 
 #include <stdint.h>
@@ -181,6 +185,196 @@ struct LinkTestFixup
     AtomId atom;
     uint8_t kind;
 };
+
+// The name hash's values for some names, which pin the function: from the runtime snapshot on it is part of the
+// format. They come from a model of link_hash outside this repository (a few lines of Python, from the definition in
+// link.c's comment).
+typedef struct LinkTestKnownHash LinkTestKnownHash;
+struct LinkTestKnownHash
+{
+    const char* name;
+    uint32_t repeat;
+    uint64_t hash;
+};
+
+static const LinkTestKnownHash link_test_known_hashes[] = {
+    {
+        .name = "",
+        .repeat = 0,
+        .hash = 0xbf8fec90feaa8750ull,
+    },
+    {
+        .name = "a",
+        .repeat = 1,
+        .hash = 0xe49aaf27236c00fbull,
+    },
+    {
+        .name = "main",
+        .repeat = 1,
+        .hash = 0x86b12c038035a134ull,
+    },
+    {
+        .name = "_start",
+        .repeat = 1,
+        .hash = 0xf598490de0a46c0eull,
+    },
+    {
+        .name = "strlen",
+        .repeat = 1,
+        .hash = 0xd74cd9311762f0ccull,
+    },
+    {
+        .name = "__libc_start_main",
+        .repeat = 1,
+        .hash = 0x28c9726aa768ef18ull,
+    },
+    {
+        .name = "_ITM_deregisterTMCloneTable",
+        .repeat = 1,
+        .hash = 0x5c66a31dfc2e1fdbull,
+    },
+    {
+        .name = "x",
+        .repeat = 64,
+        .hash = 0xec389b4efe862673ull,
+    },
+    {
+        .name = "y",
+        .repeat = 65,
+        .hash = 0x208de72be0ebd842ull,
+    },
+};
+
+#define BUSTER_LINK_TEST_HASH_NAMES 4096
+#define BUSTER_LINK_TEST_HASH_LONGEST 200
+#define BUSTER_LINK_TEST_HASH_STREAM 0x9FB21C651E98DF25ull
+
+// A name's length for the hash checks: mostly up to 64 bytes, which link_hash_names loads whole, sometimes longer.
+static uint32_t link_test_hash_length(uint64_t* state)
+{
+    const uint32_t pick = link_test_below(state, 8);
+    return pick == 0 ? link_test_below(state, BUSTER_LINK_TEST_HASH_LONGEST + 1) : link_test_below(state, 65);
+}
+
+// link_hash's known values, and link_hash_names against link_hash: random names of 0 to 200 bytes, every count from 0
+// to 40 (each remainder of a batch), a batch of every length from 0 to 200 in each lane, and names ending at a
+// PROT_NONE page, so that a load past a name faults.
+static bool link_test_hashes(uint64_t seed)
+{
+    LinkTestTally tally = {
+        .check = "hashes",
+    };
+    uint64_t state = link_program_scramble(seed ^ BUSTER_LINK_TEST_HASH_STREAM);
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(link_test_known_hashes); k += 1)
+    {
+        const LinkTestKnownHash* known = &link_test_known_hashes[k];
+        uint8_t bytes[BUSTER_LINK_TEST_HASH_LONGEST];
+        const uint64_t piece = strlen(known->name);
+        const uint64_t length = piece * known->repeat;
+        for (uint64_t i = 0; i < length; i += 1)
+        {
+            bytes[i] = (uint8_t)known->name[i % piece];
+        }
+        link_test_expect(&tally, link_hash(bytes, length) == known->hash, "a known hash", k);
+    }
+    Scratch scratch = scratch_begin(0);
+    uint8_t* bytes = arena_push(scratch.arena, (uint64_t)BUSTER_LINK_TEST_HASH_NAMES * BUSTER_LINK_TEST_HASH_LONGEST, 64);
+    const uint8_t** names = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, const uint8_t*, BUSTER_LINK_TEST_HASH_NAMES);
+    uint32_t* lengths = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, BUSTER_LINK_TEST_HASH_NAMES);
+    uint64_t* hashes = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, BUSTER_LINK_TEST_HASH_NAMES);
+    const bool ready = bytes != 0 && names != 0 && lengths != 0 && hashes != 0;
+    link_test_expect(&tally, ready, "memory for the names", 0);
+    // Random names at random alignments.
+    for (uint32_t i = 0; ready && i < BUSTER_LINK_TEST_HASH_NAMES; i += 1)
+    {
+        uint8_t* name = bytes + (uint64_t)i * BUSTER_LINK_TEST_HASH_LONGEST;
+        lengths[i] = link_test_hash_length(&state);
+        const uint32_t start = link_test_below(&state, BUSTER_LINK_TEST_HASH_LONGEST - lengths[i] + 1);
+        for (uint32_t j = 0; j < lengths[i]; j += 1)
+        {
+            name[start + j] = (uint8_t)link_test_random(&state);
+        }
+        names[i] = name + start;
+    }
+    uint64_t compared = 0;
+    for (uint32_t count = 0; ready && count <= 40; count += 1)
+    {
+        link_hash_names(names, lengths, count, hashes);
+        bool same = true;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            same = same && hashes[i] == link_hash(names[i], lengths[i]);
+        }
+        link_test_expect(&tally, same, "link_hash_names on the first names", count);
+        compared += count;
+    }
+    if (ready)
+    {
+        link_hash_names(names, lengths, BUSTER_LINK_TEST_HASH_NAMES, hashes);
+        bool same = true;
+        for (uint32_t i = 0; i < BUSTER_LINK_TEST_HASH_NAMES; i += 1)
+        {
+            same = same && hashes[i] == link_hash(names[i], lengths[i]);
+        }
+        link_test_expect(&tally, same, "link_hash_names on every name", BUSTER_LINK_TEST_HASH_NAMES);
+        compared += BUSTER_LINK_TEST_HASH_NAMES;
+    }
+    // Every length in every lane of a batch, the other lanes random.
+    for (uint32_t lane = 0; ready && lane < BUSTER_LINK_HASH_BATCH; lane += 1)
+    {
+        for (uint32_t length = 0; length <= BUSTER_LINK_TEST_HASH_LONGEST; length += 1)
+        {
+            const uint8_t* batch[BUSTER_LINK_HASH_BATCH];
+            uint32_t batch_lengths[BUSTER_LINK_HASH_BATCH];
+            uint64_t batch_hashes[BUSTER_LINK_HASH_BATCH];
+            for (uint32_t other = 0; other < BUSTER_LINK_HASH_BATCH; other += 1)
+            {
+                const uint32_t pick = link_test_below(&state, BUSTER_LINK_TEST_HASH_NAMES);
+                batch[other] = other == lane ? bytes : names[pick];
+                batch_lengths[other] = other == lane ? length : lengths[pick];
+            }
+            link_hash_names(batch, batch_lengths, BUSTER_LINK_HASH_BATCH, batch_hashes);
+            bool same = true;
+            for (uint32_t other = 0; other < BUSTER_LINK_HASH_BATCH; other += 1)
+            {
+                same = same && batch_hashes[other] == link_hash(batch[other], batch_lengths[other]);
+            }
+            link_test_expect(&tally, same, "every length in every lane", length);
+            compared += BUSTER_LINK_HASH_BATCH;
+        }
+    }
+    scratch_end(scratch);
+    // Names ending at a PROT_NONE page, every length to 200 bytes, in batches of eight.
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool guarded = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
+    link_test_expect(&tally, guarded, "a guard page", 0);
+    for (uint32_t length = 0; guarded && length <= BUSTER_LINK_TEST_HASH_LONGEST; length += 1)
+    {
+        uint8_t* end = mapping + page;
+        for (uint32_t j = 0; j < length; j += 1)
+        {
+            end[(int64_t)j - (int64_t)length] = (uint8_t)link_test_random(&state);
+        }
+        const uint8_t* batch[BUSTER_LINK_HASH_BATCH];
+        uint32_t batch_lengths[BUSTER_LINK_HASH_BATCH];
+        uint64_t batch_hashes[BUSTER_LINK_HASH_BATCH];
+        for (uint32_t lane = 0; lane < BUSTER_LINK_HASH_BATCH; lane += 1)
+        {
+            batch[lane] = end - length;
+            batch_lengths[lane] = length;
+        }
+        link_hash_names(batch, batch_lengths, BUSTER_LINK_HASH_BATCH, batch_hashes);
+        link_test_expect(&tally, batch_hashes[0] == link_hash(end - length, length) && batch_hashes[7] == batch_hashes[0], "a name ending at a page's end", length);
+        compared += BUSTER_LINK_HASH_BATCH;
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 2 * page);
+    }
+    printf("  %llu names hashed eight at a time, each as link_hash hashes it\n", (unsigned long long)compared);
+    return link_test_report(&tally);
+}
 
 static bool link_test_round_trips(uint64_t seed)
 {
@@ -447,9 +641,9 @@ static bool link_test_rules(void)
     static uint8_t bytes[64];
     const LinkCapacity capacity = {
         .names = 16,
-        .atoms = 16,
+        .atoms = 32,
         .symbols = 16,
-        .fixups = 16,
+        .fixups = 32,
         .wide_addends = 4,
     };
     Link link;
@@ -569,6 +763,102 @@ static bool link_test_rules(void)
     const AtomId sized = link_add_atom(&link, BUSTER_LINK_CLASS_DATA, 3, 8, bytes, 0);
     link_test_expect(&tally, sized != 0 && link_add_fixup(&link, sized, 0, BUSTER_LINK_FIXUP_SIZE64, variable, 0) != 0 && link_check(&link) == LINK_ERROR_NONE,
                      "a TLS symbol's size", 0);
+    // A shared library's symbols: a function, the object `foreign`, and a TLS variable. The GOT kinds reach each, ABS64
+    // the function and the object, and CALL the function; no other kind reaches one.
+    const SymbolId shared_function = link_add_symbol(&link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_RUNTIME_SHARED);
+    const SymbolId shared_tls = link_add_symbol(&link, name, 0, 0, 0, tls, BUSTER_LINK_SOURCE_RUNTIME_SHARED);
+    link_test_expect(&tally, shared_function != 0 && shared_tls != 0, "a shared library's function and TLS variable", 0);
+    const struct
+    {
+        uint8_t kind;
+        SymbolId target;
+        bool reaches;
+        const char* what;
+    } shared[] = {
+        {
+            BUSTER_LINK_FIXUP_CALL,
+            shared_function,
+            true,
+            "a call to a shared library's function",
+        },
+        {
+            BUSTER_LINK_FIXUP_CALL_GOT,
+            shared_function,
+            true,
+            "a call through the GOT to a shared library's function",
+        },
+        {
+            BUSTER_LINK_FIXUP_LOAD_GOT,
+            foreign,
+            true,
+            "a load through the GOT of a shared library's object",
+        },
+        {
+            BUSTER_LINK_FIXUP_GOTPCREL,
+            foreign,
+            true,
+            "a GOT slot's address of a shared library's object",
+        },
+        {
+            BUSTER_LINK_FIXUP_GOTTPOFF,
+            shared_tls,
+            true,
+            "initial-exec TLS of a shared library's",
+        },
+        {
+            BUSTER_LINK_FIXUP_ABS64,
+            shared_function,
+            true,
+            "a shared library's function's address",
+        },
+        {
+            BUSTER_LINK_FIXUP_PC32,
+            shared_function,
+            false,
+            "a shared library's function by PC32",
+        },
+        {
+            BUSTER_LINK_FIXUP_CALL,
+            foreign,
+            false,
+            "a call to a shared library's object",
+        },
+        {
+            BUSTER_LINK_FIXUP_ABS32,
+            foreign,
+            false,
+            "a shared library's object by ABS32",
+        },
+        {
+            BUSTER_LINK_FIXUP_PC64,
+            foreign,
+            false,
+            "a shared library's object by PC64",
+        },
+        {
+            BUSTER_LINK_FIXUP_SIZE64,
+            foreign,
+            false,
+            "a shared library's object's size",
+        },
+        {
+            BUSTER_LINK_FIXUP_TPOFF32,
+            shared_tls,
+            false,
+            "local-exec TLS of a shared library's",
+        },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(shared); i += 1)
+    {
+        const AtomId atom = link_add_atom(&link, BUSTER_LINK_CLASS_DATA, 3, 8, bytes, 0);
+        const bool added = atom != 0 && link_add_fixup(&link, atom, 0, shared[i].kind, shared[i].target, 0) != 0;
+        const LinkError checked = link_check(&link);
+        link_test_expect(&tally, added && (shared[i].reaches ? checked == LINK_ERROR_NONE : checked == LINK_ERROR_BINDING && link_test_failed(&link, LINK_ERROR_BINDING)),
+                         shared[i].what, i);
+        // Retargeted to a symbol of the program's that it can refer to, it passes again.
+        link.fixups.target[link.fixups.count - 1] = shared[i].kind == BUSTER_LINK_FIXUP_TPOFF32 || shared[i].kind == BUSTER_LINK_FIXUP_GOTTPOFF ? variable : defined;
+        link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check after retargeting", i);
+    }
     // A fixup outside every atom's range, and an atom whose range overlaps another's, which only lanes filling the
     // columns themselves could make.
     link.atoms.fixup_count[data] -= 1;
@@ -2066,12 +2356,14 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
                    names[i], options[i].units, options[i].functions, program.link.atoms.count - 1, program.link.fixups.count - 1, program.link.fixups.wide_count - 1,
                    (unsigned long long)program.code_bytes, ran ? "ran" : "failed", misaligned_ran ? "ran" : "failed", other_ran ? "ran" : "failed");
         }
-        // Every class, and every kind the options allow, given two thread-locals, an init function and a fini function.
+        // Every class but the C runtime's (EH_FRAME, INIT and FINI, which come from its objects), and every kind the
+        // options allow, given two thread-locals, an init function and a fini function.
         if (generated && options[i].thread_locals >= 2 && options[i].init_functions >= 1 && options[i].fini_functions >= 1)
         {
             const uint32_t absolute = (1u << BUSTER_LINK_FIXUP_ABS32) | (1u << BUSTER_LINK_FIXUP_ABS32S);
             const uint32_t sizes = (1u << BUSTER_LINK_FIXUP_SIZE32) | (1u << BUSTER_LINK_FIXUP_SIZE64);
             const uint32_t expected = ((1u << BUSTER_LINK_FIXUP_KINDS) - 2) & ~(options[i].absolute ? 0 : absolute) & ~(options[i].sizes ? 0 : sizes);
+            const uint32_t runtime = (1u << BUSTER_LINK_CLASS_EH_FRAME) | (1u << BUSTER_LINK_CLASS_INIT) | (1u << BUSTER_LINK_CLASS_FINI);
             uint32_t classes = 0;
             uint32_t kinds = 0;
             for (AtomId atom = 1; atom < program.link.atoms.count; atom += 1)
@@ -2082,7 +2374,7 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
             {
                 kinds |= 1u << (program.link.fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND);
             }
-            link_test_expect(&tally, classes == (1u << BUSTER_LINK_CLASS_COUNT) - 2 && kinds == expected, "every class and every kind the options allow", i);
+            link_test_expect(&tally, classes == (((1u << BUSTER_LINK_CLASS_COUNT) - 2) & ~runtime) && kinds == expected, "every class and every kind the options allow", i);
         }
         // The lea of the hexadecimal digits in buster_write_hex, one byte off, which changes every digit printed.
         if (generated && i == 0)
@@ -2116,7 +2408,10 @@ static const char* const link_test_sections[BUSTER_LINK_CLASS_COUNT] = {
     [BUSTER_LINK_CLASS_NONE] = 0,
     [BUSTER_LINK_CLASS_RODATA] = ".section .rodata,\"a\",@progbits",
     [BUSTER_LINK_CLASS_STRINGS] = ".section .rodata.str1.1,\"aMS\",@progbits,1",
+    [BUSTER_LINK_CLASS_EH_FRAME] = ".section .eh_frame,\"a\",@unwind",
     [BUSTER_LINK_CLASS_TEXT] = ".section .text,\"ax\",@progbits",
+    [BUSTER_LINK_CLASS_INIT] = ".section .init,\"ax\",@progbits",
+    [BUSTER_LINK_CLASS_FINI] = ".section .fini,\"ax\",@progbits",
     [BUSTER_LINK_CLASS_TDATA] = ".section .tdata,\"awT\",@progbits",
     [BUSTER_LINK_CLASS_TBSS] = ".section .tbss,\"awT\",@nobits",
     [BUSTER_LINK_CLASS_INIT_ARRAY] = ".section .init_array,\"aw\",@init_array",
@@ -2447,6 +2742,7 @@ static int run_link_tests(int argc, char** argv)
     else
     {
         bool passed = link_test_round_trips(seed);
+        passed = link_test_hashes(seed) && passed;
         passed = link_test_capacity() && passed;
         passed = link_test_rules() && passed;
         passed = link_test_kinds(seed) && passed;

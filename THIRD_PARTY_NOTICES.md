@@ -27,14 +27,27 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/lane.c` | Adapted RAD Debugger interface/base-layer patterns with a locally implemented barrier, scheduling and allocation; MIT, including local changes. |
 | `src/buster/compiler/x86_64_encoder_benchmark.c`, `src/buster/compiler/object_writer_benchmark.c`, `src/buster/compiler/lane_benchmark.c` | Original benchmark bodies under Default; shared counter/timing/sort helpers adapted through the lexer benchmark retain MIT. |
 | `src/buster/compiler/x86_64_encoder.c`, `src/buster/compiler/x86_64_encoder_test.c` | Original encoder, handwritten form families and tests; Default. Tool-oracle and catalogue distinctions below. |
-| `src/buster/compiler/main.c`, `src/buster/compiler/lane_test.c` | Original integration, input handling and lane tests; Default. |
+| `src/buster/compiler/main.c`, `src/buster/compiler/main_test.c`, `src/buster/compiler/lane_test.c` | Original integration, input handling, loader regressions and lane tests; Default. The loader fixtures and address-space-limit checks are written for this project; no external fixtures or implementation are imported. |
+| `src/buster/compiler/dataflow.c`, `src/buster/compiler/dataflow_program.c`, `src/buster/compiler/dataflow_test.c`, `src/buster/compiler/dataflow_benchmark.c`, `docs/dataflow.md` | Original liveness/interference kernels, synthetic CFG generator, tests, benchmark and documentation; Default, with the public-domain SplitMix64 seed-mixing reference below. No external corpus is incorporated. |
+| `src/buster/compiler/preprocessor_fuzz*.c`, `docs/preprocessor-fuzz.md` | Original independent test harness, generator, comparator, minimizer, tests and benchmark helpers; Default. Generated test programs are produced by this repository's C generator from a recorded seed, case ID and language mode. Clang 23 is an external oracle; no compiler implementation or external test fixtures are imported. |
+| `src/buster/compiler/call_graph.c`, `src/buster/compiler/call_graph_test.c`, `src/buster/compiler/call_graph_capture/*` | Original call graph check, tests and IR-capture fixture; Default. LLVM IR's text format and Tarjan's algorithm are referenced, not copied. The tests' IR is hand-written, or clang 23's output for C snippets written for them and recorded beside it, cut down by hand; clang runs externally and is not vendored. |
 | `src/buster/compiler/link.c`, `src/buster/compiler/link_program.c`, `src/buster/compiler/link_test.c` | Original representation, synthetic program generators and tests; Default, with the public-domain generator reference noted below. |
 | `src/buster/compiler/object_writer.c`, `src/buster/compiler/object_writer_test.c` | Original ELF writer and tests; Default. ELF constants describe the format; no external linker implementation is vendored. |
-| `src/buster/compiler/executable.c`, `src/buster/compiler/executable_test.c`, `src/buster/compiler/executable_benchmark.c` | Original static-executable writer, tests and benchmarks; Default, with the generator reference below. |
+| `src/buster/compiler/executable.c`, `src/buster/compiler/executable_test.c`, `src/buster/compiler/executable_benchmark.c` | Original writer of static executables and dynamic PIEs, its vector passes and exact twins, and its tests and benchmarks; Default, with the generator reference below. The ELF dynamic sections, RELR and `.gnu.hash` are written from their specifications, and the layout, tags and encodings from lld's and GNU ld's documented behavior and observed output, not copied. |
+| `src/buster/compiler/dynamic.c`, `src/buster/compiler/dynamic_test.c` | Original inputs of a dynamic PIE from the C runtime and binding, and the dynamic PIE's tests; Default. The program interpreter's path is the one GCC's driver passes for x86-64 glibc, a fact, not copied code. The tests make their programs themselves and run them under the system's loader; `ld.lld` is an external oracle for `--cross-check`, not vendored. |
+| `src/buster/compiler/import.c`, `src/buster/compiler/runtime.c`, `src/buster/compiler/import_test.c`, `src/buster/compiler/import_benchmark.c` | Original readers of ELF relocatable objects, archives, shared libraries and linker scripts, their vector and exact paths, the C runtime's search and import, and their tests and benchmark; Default. The formats are read from their specifications. The archive header's vector size parse uses the widely published multiply-add method for decimal digits (as in simdjson's and Wojciech Muła's write-ups), written here from the method, not copied. The tests and the benchmark make their inputs themselves, and read the system's C runtime files and the libraries and archives named on the command line at run time without copying them; `readelf` is an external oracle for `--cross-check`, not vendored. The benchmark's clock, counter and median helpers are its own, not the lexer benchmark's MIT ones. |
+| `src/buster/compiler/bind.c`, `src/buster/compiler/bind_test.c`, `src/buster/compiler/bind_benchmark.c` | Original binding of the C runtime into a program's link, its vector and exact paths, and its tests and benchmark; Default. GNU ld's and lld's symbol resolution are described from their documented behavior and observed output, not copied. The tests make their programs themselves and read the system's C runtime at run time without copying it; `ld.lld`, `ld.bfd`, `cc` and `readelf` are external oracles for `--cross-check`, not vendored. The benchmark's clock, counter and median helpers are its own. |
+| `src/buster/compiler/c_intern.c`, `src/buster/compiler/c_refine.c`, `src/buster/compiler/c_refine_test.c` | Original intern table, token refinement and tests; Default. The hash's constants are wyhash's public-domain ones, and the keyword list is clang-generated data; both are noted below. |
+| `src/buster/compiler/c_preprocessor.c` | Original preprocessor; Default, with the clang-generated predefined macros and feature tables noted below. |
+| `src/buster/compiler/c_preprocessor_test.c` | Original preprocessor tests; Default. Some expected texts are clang 23's `-E` output for the cases' own inputs. `pp_test_keyword_candidates` and `pp_test_feature_names` list names from clang 23's `TokenKinds.def` and companions and from its `Features.def` (names only, noted below). |
+| `src/buster/compiler/c_preprocessor_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
+| `src/buster/compiler/c_refine_benchmark.c` | Original benchmark body under Default; the corpus loader and the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
+| `src/buster/compiler/c_types.c`, `src/buster/compiler/c_types_test.c`, `src/buster/compiler/c_types_benchmark.c`, `docs/c-types.md` | Original type table, hash-consing, record layout, conversion kernels, compatibility, composite types and printer, and their tests, benchmark and documentation; Default, with the public-domain SplitMix64 reference below. They follow clang 23's behaviour: clang's source (`ASTContext`, `ItaniumRecordLayoutBuilder`, `SemaExpr`'s conversions, `mergeTypes`, `TypePrinter`) was read for its rules and none of it is copied. clang runs externally as the tests' oracle on C the tests generate, and is not vendored. The benchmark's clock, counter and median helpers are its own, not the lexer benchmark's MIT ones. |
 | `build.sh`, `.gitignore`, `.github/workflows/9700x.yml` | Original build/configuration; Default. The referenced GitHub action runs externally and is not vendored. |
 | `.claude/settings.json`, `.claude/hooks/join-tailnet.sh` | Maintainer configuration: settings adapted from his older Buster configuration; locally added tailnet hook. Default. See the recorded import below. |
+| `.githooks/commit-msg`, `.githooks/enable-sign-off.sh`, `.codex/hooks.json` | Original hooks that add the maintainer's sign-off where his opt-in is set, and Codex's configuration that runs one; Default. |
 | `AGENTS.md`, `CLAUDE.md`, `docs/coding-style.md` | Original project/contributor guidance; Default. The style adapts conventions, not a grant to import old compiler code. |
-| `docs/c-lexer.md`, `docs/x86-64-encoder.md`, `docs/object-writer-and-linker.md` | Original design/measurement reports; Default. Referenced tools, articles and measurements are distinguished from vendored source. |
+| `docs/c-lexer.md`, `docs/x86-64-encoder.md`, `docs/object-writer-and-linker.md`, `docs/c-refinement.md`, `docs/c-preprocessor.md` | Original design/measurement reports; Default. Referenced tools, articles and measurements are distinguished from vendored source. |
 | `README.md`, `LICENSING.md`, `CONTRIBUTING.md`, this file | Original adoption documentation; Default, except quoted upstream notices retain their terms. |
 | `LICENSE`, `DCO`, `LICENSES/*` | Retained legal/attribution texts; their own terms. These are not original project prose. |
 
@@ -164,7 +177,9 @@ included. Future generated imports require a fresh input/notice review.
 `link_program.c` emits original synthetic support routines and fixtures;
 the executable's hash constants are generated from SplitMix64, not imported
 test corpora. Recognizable SplitMix64 arithmetic also appears in link/lane/
-executable tests and benchmarks. The public-domain reference is
+executable tests and benchmarks, in the dataflow generator's seed mixer, and in
+the type table's tests and benchmark. Its finalizer also ends `link.c`'s name
+hash and `c_types.c`'s key hash. The public-domain reference is
 [Sebastiano Vigna's 2015 implementation](https://prng.di.unimi.it/splitmix64.c);
 its dedication, permission and disclaimer are retained in
 [LICENSES/SplitMix64.txt](LICENSES/SplitMix64.txt). This does not import the
@@ -177,6 +192,69 @@ configuration at Buster commit `5180a65a57ef19e9a2b5251eb33356e57b7120e1`, with
 the repository name changed and local Tailscale permissions added. This is
 maintainer configuration under his confirmed contribution authority, not an
 import of the older compiler's frameworks or implementation.
+
+## wyhash's constants
+
+`c_intern.c`'s identifier hash uses the four 64-bit constants of wyhash's
+default secret, `_wyp` in `wyhash.h`, as the whitening of its lanes and the
+round key of its chain of AES rounds
+(`0xa0761d6478bd642f`, `0xe7037ed1a0b428db`, `0x8ebc6af09c88c6e3`,
+`0x589965cc75374cc3`). They are as in
+[wangyi-fudan/wyhash at `e92bc3e9adf862aad364ff74a24ef2cae854b0b1`](https://github.com/wangyi-fudan/wyhash/tree/e92bc3e9adf862aad364ff74a24ef2cae854b0b1),
+the last revision that has them (later ones changed the default secret). Only
+the constants are used, not wyhash's code. wyhash is released into the public
+domain under the Unlicense; its text at that revision is retained in
+[LICENSES/wyhash.txt](LICENSES/wyhash.txt).
+
+## Clang's keywords
+
+`c_intern.c`'s keyword list (`BUSTER_C_KEYWORDS`) is generated data:
+- **Generator:** clang 23.1.3, the local package `clang 23.1.3-2` for target
+  `x86_64-pc-linux-gnu`.
+- **Inputs:** every identifier named in the entries of that package's
+  `TokenKinds.def` and `RegularKeywordAttrInfo.inc` (`/usr/include/clang/Basic`).
+  Only the names were read.
+- **Procedure:** each name's `__is_identifier` was asked of
+  `clang -E -P -std=MODE` in the ten modes from `c89` to `gnu23`. The list keeps
+  the 148 names it answers 0 for in some mode, with the modes as one of six
+  rules. `docs/c-refinement.md` records this, and LLVM's terms are retained in
+  [LICENSES/LLVM.txt](LICENSES/LLVM.txt).
+
+The same answers are behind `c_refine_test.c`'s spellings chosen apart.
+`c_preprocessor_test.c` keeps the keyword candidates it asks clang about again
+under `--clang` (`pp_test_keyword_candidates`): the spellings among those
+names, with the ones of `TransformTypeTraits.def`, `OpenCLImageTypes.def` and
+`HLSLIntangibleTypes.def` from the same directory. Only the names were read.
+
+## Clang-generated predefines and feature tables
+
+`c_preprocessor.c`'s predefined macros (`pp_predefines_base`,
+`pp_predefines_c23`) and feature tables (`pp_features_*`) are generated data,
+the output of **clang 23.1.3** (the local package `clang 23.1.3-2`, target
+`x86_64-pc-linux-gnu`), which the configuration decided in #117 takes as the
+compiler's own. LLVM's terms are retained in [LICENSES/LLVM.txt](LICENSES/LLVM.txt).
+
+- The predefines are `clang -dM -E -x c /dev/null` (gnu17), without the macros
+  the language mode and options decide, and the difference of its output
+  under `-std=c23`. `__BUSTER__` is the compiler's own.
+- The feature tables are clang's nonzero answers, under `-std=gnu17` and
+  `-std=c23` (the same), to `__has_attribute`, `__has_builtin`,
+  `__has_c_attribute` and `__has_warning`. The names asked about are those that
+  `/usr/include` (glibc 2.44), clang 23's resource headers, musl 1.2.5, SQLite
+  3.53's amalgamation and Zig 0.14.1's `lib/libc` query, and a list of common
+  GNU attribute names. Only the names were read from those inputs.
+- The `__has_feature` and `__has_extension` tables are clang's nonzero answers
+  for every `FEATURE` and `EXTENSION` name of clang 23.1.3's
+  `clang/include/clang/Basic/Features.def`, in the ten modes from `-std=c89`
+  to `-std=gnu23`, with the first standard of each answer that depends on the
+  mode. `c_preprocessor_test.c` keeps the same names (`pp_test_feature_names`)
+  to ask clang again under `--clang`. Only the names were read from
+  `Features.def`.
+- A local script ran the queries; `docs/c-preprocessor.md` records its
+  procedure.
+
+SQLite, musl, Lua and the system's headers are test oracle inputs only (the
+tests read them where they are installed): none of their code is included.
 
 ## Review limits and distribution
 
