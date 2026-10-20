@@ -178,6 +178,13 @@ int run_lane_benchmark(int argc, char** argv);
 #include "buster/compiler/dataflow_test.c"
 int run_dataflow_benchmark(int argc, char** argv);
 
+// Independent preprocessor fuzz tooling (#109); command names await agreement with #117.
+#include "buster/compiler/preprocessor_fuzz.c"
+#include "buster/compiler/preprocessor_fuzz_generate.c"
+#include "buster/compiler/preprocessor_fuzz_clang.c"
+#include "buster/compiler/preprocessor_fuzz_test.c"
+int run_preprocessor_fuzz_benchmark(int argc, char** argv);
+
 // The link representation (atoms, symbols, fixups and names, which the object writer and the linker share), the test
 // programs generated in it, and their tests, for the test-link command.
 #include "buster/compiler/link.c"
@@ -242,6 +249,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-dataflow") == 0)
     {
         result = run_dataflow_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-preprocessor-fuzz") == 0)
+    {
+        result = run_preprocessor_fuzz_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-preprocessor-fuzz") == 0)
+    {
+        result = run_preprocessor_fuzz_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-link") == 0)
     {
