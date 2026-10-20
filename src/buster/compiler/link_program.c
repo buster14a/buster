@@ -62,8 +62,10 @@
 // LinkProgram.output comes from a model of the program that link_program_generate runs: the same arithmetic in C, on
 // the same random choices.
 //
-// Entry points: link_program_default_options, link_program_generate and link_program_release. main.c includes this
-// file after link.c. Layout, in this order: the API (LinkProgramOptions, LinkProgram and the prototypes); the plan,
+// Entry points: link_program_default_options, link_program_generate and link_program_release. A caller that adds
+// records of its own before and after the program's atoms (the C runtime's, which come before and after the program in
+// link order) calls link_program_generate_begin, which adds the program's symbols and no atom,
+// link_program_generate_atoms, which adds its atoms, and link_program_generate_end instead of link_program_generate. main.c includes this file after link.c. Layout, in this order: the API (LinkProgramOptions, LinkProgram and the prototypes); the plan,
 // which holds the random choices (LinkProgramPlan and link_program_plan); the model (link_program_mix,
 // link_program_model_body and link_program_run_model); the code (LinkProgramCode, LinkProgramBuilder, the instruction
 // builders, link_program_finish, and link_program_emit_start, _mix, _write_hex, _hooks, _fold, _kinds, _imports,
@@ -112,6 +114,9 @@ struct LinkProgramOptions
     bool libc;
 };
 
+typedef struct LinkProgramPlan LinkProgramPlan;
+typedef struct LinkProgramBuilder LinkProgramBuilder;
+
 typedef struct LinkProgram LinkProgram;
 struct LinkProgram
 {
@@ -120,6 +125,11 @@ struct LinkProgram
     Arena tables;
     Arena names;
     Arena bytes;
+    // The plan and the builder from link_program_generate_begin to link_program_generate_end, and what they and the
+    // code being built are in.
+    Arena work;
+    LinkProgramPlan* plan;
+    LinkProgramBuilder* builder;
     // What it was generated with.
     LinkProgramOptions options;
     // _start, or main with libc.
@@ -139,6 +149,16 @@ static __attribute__((unused)) LinkProgramOptions link_program_default_options(v
 // program->problem (and program->link.error if the representation refused a record), if the options are out of range or
 // memory runs out; release the program either way.
 static __attribute__((unused)) bool link_program_generate(LinkProgram* program, LinkProgramOptions options);
+// link_program_generate in three steps. link_program_generate_begin checks the options, reserves the arenas with room for the
+// program and for `extra` more records, `extra_name_bytes` more bytes of names (with their NULs) and `extra_bytes` more
+// bytes of atoms (with their alignments), plans the program and adds its symbols, none of them defined yet.
+// link_program_generate_atoms adds the program's atoms and fixups, and defines its symbols; link_program_generate_end
+// computes its output
+// and checks the link with link_check. Each returns false, with program->problem, as link_program_generate does; once
+// one has, the next ones do too. Release the program either way.
+static __attribute__((unused)) bool link_program_generate_begin(LinkProgram* program, LinkProgramOptions options, LinkCapacity extra, uint64_t extra_name_bytes, uint64_t extra_bytes);
+static __attribute__((unused)) bool link_program_generate_atoms(LinkProgram* program);
+static __attribute__((unused)) bool link_program_generate_end(LinkProgram* program);
 static __attribute__((unused)) void link_program_release(LinkProgram* program);
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -224,7 +244,6 @@ struct LinkProgramHook
     int32_t addend;
 };
 
-typedef struct LinkProgramPlan LinkProgramPlan;
 struct LinkProgramPlan
 {
     LinkProgramOptions options;
@@ -611,7 +630,6 @@ struct LinkProgramCode
 
 // What generating a program works with: the program, the plan, the function being built and the symbols' ids (0 for
 // those the program's kind doesn't have). The symbols of each kind are added one after another, from the first's id.
-typedef struct LinkProgramBuilder LinkProgramBuilder;
 struct LinkProgramBuilder
 {
     LinkProgram* program;
@@ -1655,7 +1673,10 @@ static LinkProgramOptions link_program_default_options(void)
     return result;
 }
 
-static bool link_program_generate(LinkProgram* program, LinkProgramOptions options)
+// The work arena's capacity: the plan's arrays, which grow with the counts, and the code being built.
+#define BUSTER_LINK_PROGRAM_WORK_BYTES (16ull << 30)
+
+static bool link_program_generate_begin(LinkProgram* program, LinkProgramOptions options, LinkCapacity extra, uint64_t extra_name_bytes, uint64_t extra_bytes)
 {
     *program = (LinkProgram){
         .options = options,
@@ -1665,18 +1686,31 @@ static bool link_program_generate(LinkProgram* program, LinkProgramOptions optio
                        options.globals <= maximum && options.thread_locals >= 1 && options.thread_locals <= maximum && options.strings >= 1 &&
                        options.strings <= maximum && (uint64_t)options.units * options.strings <= maximum && options.init_functions <= maximum &&
                        options.fini_functions <= maximum && options.filler <= BUSTER_LINK_PROGRAM_MAX_FILLER;
+    // Room for the extra records: each table's total stays below UINT32_MAX, which link_initialize refuses.
+    const LinkCapacity own = link_program_capacity(options);
+    const bool extra_fits = extra.names < UINT32_MAX - own.names && extra.atoms < UINT32_MAX - own.atoms && extra.symbols < UINT32_MAX - own.symbols &&
+                            extra.fixups < UINT32_MAX - own.fixups && extra.wide_addends < UINT32_MAX - own.wide_addends && extra_name_bytes <= (1ull << 40) &&
+                            extra_bytes <= (1ull << 40);
     bool result = false;
-    if (!valid)
+    if (!valid || !extra_fits)
     {
         program->problem = "the options are out of range";
     }
     else
     {
-        const LinkCapacity capacity = link_program_capacity(options);
+        const LinkCapacity capacity = {
+            .names = own.names + extra.names,
+            .atoms = own.atoms + extra.atoms,
+            .symbols = own.symbols + extra.symbols,
+            .fixups = own.fixups + extra.fixups,
+            .wide_addends = own.wide_addends + extra.wide_addends,
+        };
         program->tables = arena_reserve(link_capacity_bytes(capacity));
-        program->names = arena_reserve(32 * ((uint64_t)capacity.names + 1));
-        program->bytes = arena_reserve(link_program_bytes(options));
-        result = link_initialize(&program->link, &program->tables, &program->names, capacity) && program->names.base != 0 && program->bytes.base != 0;
+        program->names = arena_reserve(32 * ((uint64_t)own.names + 1) + extra_name_bytes);
+        program->bytes = arena_reserve(link_program_bytes(options) + extra_bytes);
+        program->work = arena_reserve(BUSTER_LINK_PROGRAM_WORK_BYTES);
+        result = link_initialize(&program->link, &program->tables, &program->names, capacity) && program->names.base != 0 && program->bytes.base != 0 &&
+                 program->work.base != 0;
         if (!result)
         {
             program->problem = "out of memory for the representation";
@@ -1687,49 +1721,82 @@ static bool link_program_generate(LinkProgram* program, LinkProgramOptions optio
         result = x86_encoder_initialize();
         program->problem = result ? 0 : "the encoder's templates can't be built";
     }
-
-    Scratch scratch = scratch_begin(0);
-    LinkProgramPlan plan;
-    LinkProgramBuilder builder = {
-        .program = program,
-        .plan = &plan,
-        .code = 0,
-    };
     if (result)
     {
-        builder.code = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, LinkProgramCode, 1);
-        result = builder.code != 0 && link_program_plan(&plan, scratch.arena, options);
+        program->plan = BUSTER_ARENA_PUSH_ARRAY(&program->work, LinkProgramPlan, 1);
+        program->builder = BUSTER_ARENA_PUSH_ARRAY(&program->work, LinkProgramBuilder, 1);
+        LinkProgramCode* code = BUSTER_ARENA_PUSH_ARRAY(&program->work, LinkProgramCode, 1);
+        result = program->plan != 0 && program->builder != 0 && code != 0 && link_program_plan(program->plan, &program->work, options);
         program->problem = result ? 0 : "out of memory for the plan";
+        if (result)
+        {
+            *program->builder = (LinkProgramBuilder){
+                .program = program,
+                .plan = program->plan,
+                .code = code,
+            };
+        }
     }
-    result = result && link_program_add_symbols(&builder);
-    result = result && (options.libc || link_program_emit_start(&builder)) && link_program_emit_main(&builder) && link_program_emit_mix(&builder) &&
-             link_program_emit_write_hex(&builder);
-    for (uint32_t i = 0; result && i < options.functions; i += 1)
-    {
-        result = link_program_emit_worker(&builder, i);
-    }
-    for (uint32_t i = 0; result && i < options.init_functions + options.fini_functions; i += 1)
-    {
-        const uint32_t number = i < options.init_functions ? i : i - options.init_functions;
-        result = link_program_emit_hook(&builder, i, number % options.units);
-    }
-    result = result && link_program_emit_data(&builder, scratch.arena);
-    if (result)
-    {
-        result = link_program_run_model(&plan, scratch.arena, program->output);
-        program->problem = result ? 0 : "out of memory for the model";
-    }
-    if (result)
-    {
-        program->entry = options.libc ? builder.main : builder.start;
-        result = link_check(&program->link) == LINK_ERROR_NONE;
-    }
+    result = result && link_program_add_symbols(program->builder);
     if (!result && program->problem == 0)
     {
         program->problem = "the representation refused a record";
     }
-    scratch_end(scratch);
+    // The steps after a failed one fail too.
+    program->builder = result ? program->builder : 0;
     return result;
+}
+
+static bool link_program_generate_atoms(LinkProgram* program)
+{
+    LinkProgramBuilder* builder = program->builder;
+    const LinkProgramOptions options = program->options;
+    bool result = builder != 0;
+    result = result && (options.libc || link_program_emit_start(builder)) && link_program_emit_main(builder) && link_program_emit_mix(builder) &&
+             link_program_emit_write_hex(builder);
+    for (uint32_t i = 0; result && i < options.functions; i += 1)
+    {
+        result = link_program_emit_worker(builder, i);
+    }
+    for (uint32_t i = 0; result && i < options.init_functions + options.fini_functions; i += 1)
+    {
+        const uint32_t number = i < options.init_functions ? i : i - options.init_functions;
+        result = link_program_emit_hook(builder, i, number % options.units);
+    }
+    result = result && link_program_emit_data(builder, &program->work);
+    if (builder != 0 && !result && program->problem == 0)
+    {
+        program->problem = "the representation refused a record";
+    }
+    program->builder = result ? builder : 0;
+    return result;
+}
+
+static bool link_program_generate_end(LinkProgram* program)
+{
+    LinkProgramBuilder* builder = program->builder;
+    bool result = builder != 0;
+    if (result)
+    {
+        result = link_program_run_model(program->plan, &program->work, program->output);
+        program->problem = result ? 0 : "out of memory for the model";
+    }
+    if (result)
+    {
+        program->entry = program->options.libc ? builder->main : builder->start;
+        result = link_check(&program->link) == LINK_ERROR_NONE;
+        program->problem = result ? 0 : "the representation refused a record";
+    }
+    program->builder = 0;
+    return result;
+}
+
+static bool link_program_generate(LinkProgram* program, LinkProgramOptions options)
+{
+    const LinkCapacity none = { 0 };
+    const bool begun = link_program_generate_begin(program, options, none, 0, 0);
+    const bool emitted = begun && link_program_generate_atoms(program);
+    return emitted && link_program_generate_end(program);
 }
 
 static void link_program_release(LinkProgram* program)
@@ -1737,5 +1804,6 @@ static void link_program_release(LinkProgram* program)
     arena_release(&program->tables);
     arena_release(&program->names);
     arena_release(&program->bytes);
+    arena_release(&program->work);
     *program = (LinkProgram){ 0 };
 }
