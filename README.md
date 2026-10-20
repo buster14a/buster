@@ -20,7 +20,8 @@ See [AGENTS.md](AGENTS.md) for test commands and the shared 9700X host lock,
 
 ## License and contributions
 
-Original material is licensed under **Apache-2.0 WITH LLVM-exception**.
+Except where component-specific terms apply, original material is licensed
+under **Apache-2.0 WITH LLVM-exception**.
 [LICENSE](LICENSE) contains the complete text;
 [LICENSING.md](LICENSING.md) defines its scope, compiler-output rules and
 distribution requirements. Imported and adapted portions retain the terms

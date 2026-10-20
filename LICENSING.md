@@ -35,7 +35,7 @@ still apply.
 ## Authority and adoption
 
 The review covers all 30 tracked files at
-[`76cab868a233fb81dac33933861a7b7d8d554649`](https://github.com/buster14a/buster-fast/tree/76cab868a233fb81dac33933861a7b7d8d554649),
+[`c7eadb9989c48767f81c51a3b052a136bbb436ec`](https://github.com/buster14a/buster-fast/tree/c7eadb9989c48767f81c51a3b052a136bbb436ec),
 plus the licensing documents, retained texts and source comments introduced
 with this adoption. The inventory records additions since the issues' earlier
 review pin.

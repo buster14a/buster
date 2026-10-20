@@ -1,11 +1,13 @@
 # Provenance and third-party notices
 
 Reviewed October 20, 2026 against all 30 tracked files at
-[`76cab868a233fb81dac33933861a7b7d8d554649`](https://github.com/buster14a/buster-fast/tree/76cab868a233fb81dac33933861a7b7d8d554649).
+[`c7eadb9989c48767f81c51a3b052a136bbb436ec`](https://github.com/buster14a/buster-fast/tree/c7eadb9989c48767f81c51a3b052a136bbb436ec).
 The earlier issue pin `d13038574531b064cc87b133bb97665d1728f60a` differs only
 in `.github/workflows/9700x.yml`, `AGENTS.md` and `docs/coding-style.md`.
-Those changes add the C-language rule and Markdown-only CI exclusion, with no
-new imported implementation. This adoption adds legal texts, documentation
+Those changes add the C-language rule, Markdown-only CI exclusion and stable
+repository-ID check, with no new imported implementation. The latter is the
+only change since the initial inventory at `76cab868a233fb81dac33933861a7b7d8d554649`.
+This adoption adds legal texts, documentation
 and source comments; it changes no executable statements.
 
 The first-party grant and maintainer's historical-authority confirmation are

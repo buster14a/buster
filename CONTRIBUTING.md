@@ -74,10 +74,11 @@ the exact head commit and the changes it covers, explicitly accepting these
 original/component-specific terms and DCO 1.1. Record that confirmation in the
 merge record. Subsequent commits need their own certification.
 
-This also applies to the two PRs open at the review pin,
+This includes the existing PRs
 [#99](https://github.com/buster14a/buster-fast/pull/99) and
 [#159](https://github.com/buster14a/buster-fast/pull/159), if they cross the
-effective point. This document itself provides no certification for them.
+effective point, and applies equally to any other open PR or branch.
+This document itself provides no certification for them.
 Do not backdate sign-offs, rewrite attribution, or bulk-add trailers to
 historical commits. No repository-wide history rewrite is required.
 
