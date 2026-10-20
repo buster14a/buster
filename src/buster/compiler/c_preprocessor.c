@@ -244,6 +244,9 @@ struct PPFileData
 {
     uint64_t device;
     uint64_t inode;
+    // The file's modification time (for __TIMESTAMP__), and whether it has one (a file the preprocessor made has none).
+    int64_t modified;
+    bool has_modified;
     const uint8_t* bytes;
     uint32_t length;
     // The bytes are a mapping of the file (pp_release unmaps it), not memory of the arena.
@@ -280,8 +283,16 @@ struct PPFile
     // The length of the directory part (before the last '/'), or BUSTER_PP_NONE if there is none.
     uint32_t directory_length;
     uint32_t data;
-    bool system;
+    // BUSTER_PP_USER_FILE, BUSTER_PP_SYSTEM_FILE or BUSTER_PP_EXTERN_C_FILE: how its inclusions start.
+    uint8_t system;
 };
+
+// What a file found through a search directory is, as clang's line markers say (SrcMgr::CharacteristicKind): a user
+// file, a system header (flag 3: -isystem, -idirafter and clang's resource directory), or a system header clang would
+// wrap in extern "C" for C++ (flags 3 4: the standard directories, -internal-externc-isystem in clang's driver).
+#define BUSTER_PP_USER_FILE 0
+#define BUSTER_PP_SYSTEM_FILE 1
+#define BUSTER_PP_EXTERN_C_FILE 2
 
 // A range of the location space: one inclusion of a file, or a chunk of scratch spellings (`file` BUSTER_PP_NONE).
 typedef struct PPRange PPRange;
@@ -294,10 +305,15 @@ struct PPRange
     // The inclusion that included it, and where (for line markers), or BUSTER_PP_NONE.
     uint32_t parent;
     uint32_t include_location;
+    // Its line notes (indices in Preprocessor.line_directives, linked by next_in_range), or BUSTER_PP_NONE.
+    uint32_t first_line_directive;
+    uint32_t last_line_directive;
+    // What the file was when this inclusion started (PPFile.system then: #pragma GCC system_header changes it later).
+    uint8_t system;
 };
 
-// A #line: from `location` on in its range, lines are `delta` more than the physical ones, and the file is `name` if it
-// isn't null.
+// A line note, from a #line or a #pragma GCC system_header: from `location` on in its range, lines are `delta` more
+// than the physical ones, the file is `name` if it isn't null, and it is a `system` one (BUSTER_PP_USER_FILE, ...).
 typedef struct PPLineDirective PPLineDirective;
 struct PPLineDirective
 {
@@ -306,6 +322,19 @@ struct PPLineDirective
     int64_t delta;
     const char* name;
     uint32_t name_length;
+    // The range's next note, or BUSTER_PP_NONE.
+    uint32_t next_in_range;
+    uint8_t system;
+};
+
+// The output token at `token` and the ones after it come from the expansion of a macro whose name, at `location`,
+// was read from a file into the output (or none, until the next start): -E's line markers place such a token that
+// starts a line on the line of that name, as clang places a token by its expansion location.
+typedef struct PPExpansionStart PPExpansionStart;
+struct PPExpansionStart
+{
+    uint32_t token;
+    uint32_t location;
 };
 
 // Macro flags.
@@ -513,6 +542,8 @@ struct PPFeature
 {
     const char* name;
     uint32_t value;
+    // The C standard's year from which clang gives the answer (a C11 feature's from 2011), or 0 for every mode.
+    uint32_t standard;
 };
 
 struct Preprocessor
@@ -543,7 +574,7 @@ struct Preprocessor
     // The search directories: quoted ones first, then -I, then the system ones.
     char** directories;
     uint32_t* directory_lengths;
-    bool* directory_system;
+    uint8_t* directory_system;
     uint32_t directory_count;
     uint32_t angled_first; // The first directory <...> searches.
     // The location space.
@@ -552,6 +583,9 @@ struct Preprocessor
     uint32_t location_top;
     PPLineDirective* line_directives;
     uint32_t line_directive_count;
+    // The starts of the expansions read from files into the output, by token (PPExpansionStart).
+    PPExpansionStart* expansion_starts;
+    uint32_t expansion_start_count;
     // Scratch spellings: the arena, and the range of the chunk being filled (BUSTER_PP_NONE before the first).
     Arena scratch;
     uint32_t scratch_range;
@@ -592,7 +626,8 @@ struct Preprocessor
     uint32_t main_file;
     char date[16];
     char time[16];
-    char timestamp[32];
+    char timestamp[32]; // __TIMESTAMP__'s with SOURCE_DATE_EPOCH (`has_epoch`); else each file's modification time.
+    bool has_epoch;
     // The phases' TSC ticks, the tokens the prepared files have, and what the run did, when PPOptions.timing is set.
     uint64_t ticks[PP_PHASE_COUNT];
     uint64_t input_tokens;
@@ -654,16 +689,21 @@ typedef enum PPSeverity
 
 static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location);
 static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, uint32_t* column);
+static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** name, uint32_t* name_length);
 
-// Prints "file:line:column: error: message" to stderr for `location` (0 for none).
+// Prints "file:line:column: error: message" to stderr for `location` (0 for none): the presumed file and line, as #line
+// gives them, and the column.
 static __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, PPSeverity severity, uint32_t location, const char* format, ...)
 {
     const uint32_t range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
     if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
     {
         uint32_t column;
-        const uint32_t line = pp_line_of(pp, range, location, &column);
-        fprintf(stderr, "%s:%u:%u: ", pp->files[pp->ranges[range].file].path, line, column);
+        pp_line_of(pp, range, location, &column);
+        const char* name;
+        uint32_t name_length;
+        const uint32_t line = pp_presumed(pp, location, &name, &name_length);
+        fprintf(stderr, "%.*s:%u:%u: ", (int)name_length, name, line, column);
     }
     fprintf(stderr, "%s: ", severity == PP_SEVERITY_WARNING ? "warning" : severity == PP_SEVERITY_ERROR ? "error" : "fatal error");
     va_list arguments;
@@ -710,6 +750,8 @@ static uint32_t pp_add_range(Preprocessor* pp, uint32_t length, uint32_t file, c
             .bytes = bytes,
             .parent = parent,
             .include_location = include_location,
+            .first_line_directive = BUSTER_PP_NONE,
+            .last_line_directive = BUSTER_PP_NONE,
         };
         pp->range_count += 1;
         pp->location_top += (uint32_t)size;
@@ -1358,6 +1400,8 @@ static uint32_t pp_read_data(Preprocessor* pp, int fd, const struct stat* stats)
             pp->datas[result] = (PPFileData){
                 .device = (uint64_t)stats->st_dev,
                 .inode = (uint64_t)stats->st_ino,
+                .modified = (int64_t)stats->st_mtime,
+                .has_modified = true,
                 .bytes = bytes,
                 .length = length,
                 .mapped = length != 0,
@@ -1390,7 +1434,7 @@ static void pp_grow_file_slots(Preprocessor* pp)
 
 // The record of `path` (`length` bytes, not NUL-terminated): looked up by name, and opened the first time. Its data is
 // BUSTER_PP_NONE if there is no regular file by that name. Returns BUSTER_PP_NONE if memory runs out.
-static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t length, bool system)
+static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t length, uint8_t system)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
     uint32_t slot = (uint32_t)hash & pp->file_slot_mask;
@@ -1470,7 +1514,7 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
     if (length != 0 && length < PATH_MAX && name[0] == '/')
     {
         // An absolute path: its record, if a file is there (a record is kept for a missing one too).
-        const uint32_t candidate = pp_lookup_path(pp, (const char*)name, length, false);
+        const uint32_t candidate = pp_lookup_path(pp, (const char*)name, length, BUSTER_PP_USER_FILE);
         result = candidate != BUSTER_PP_NONE && pp->files[candidate].data != BUSTER_PP_NONE ? candidate : BUSTER_PP_NONE;
     }
     else if (length != 0 && length < PATH_MAX)
@@ -1633,6 +1677,65 @@ static bool pp_same_definition(const Preprocessor* pp, const PPMacro* a, const P
     return result;
 }
 
+// Whether `id` names a parameter of a function-like macro being defined: an identifier of its parameter list, or
+// __VA_ARGS__ when it is variadic.
+static bool pp_names_parameter(const PPFileData* data, const PPMacro* macro, IdentId id)
+{
+    bool result = id == C_NAME_VA_ARGS && (macro->flags & BUSTER_PP_MACRO_VARIADIC);
+    for (uint32_t t = macro->parameters_begin; !result && t < macro->body_begin; t += 1)
+    {
+        result = (data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[t] == id;
+    }
+    return result;
+}
+
+// Checks a function-like macro's replacement list as it is defined, for what pp_compile_macro would reject at its first
+// expansion: # not followed by a parameter (or by __VA_OPT__ and its '(' in a variadic macro), and __VA_OPT__ not followed
+// by '(', inside another, or left open. Returns false after a diagnostic.
+static bool pp_check_replacement_list(Preprocessor* pp, const PPFileData* data, const PPMacro* macro)
+{
+    const bool variadic = (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0;
+    bool result = true;
+    uint32_t va_opt_depth = 0;
+    for (uint32_t t = macro->body_begin; result && t < macro->body_end; t += 1)
+    {
+        const uint8_t kind = data->kinds[t] & 0x7F;
+        const bool next_is_identifier = t + 1 < macro->body_end && (data->kinds[t + 1] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
+        const bool va_opt = variadic && kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT;
+        const bool next_va_opt = variadic && next_is_identifier && data->values[t + 1] == C_NAME_VA_OPT;
+        if (kind == C_TOKEN_HASH && !(next_is_identifier && pp_names_parameter(data, macro, data->values[t + 1])) && !next_va_opt)
+        {
+            // At the token after '#', as clang reports it.
+            pp_diagnose(pp, PP_SEVERITY_ERROR, macro->base + data->starts[t + (t + 1 < macro->body_end)], "'#' is not followed by a macro parameter");
+            result = false;
+        }
+        else if (va_opt && (va_opt_depth != 0 || t + 1 >= macro->body_end || (data->kinds[t + 1] & 0x7F) != C_TOKEN_L_PAREN))
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, macro->base + data->starts[t], "__VA_OPT__ must be followed by '(' and can't nest");
+            result = false;
+        }
+        else if (va_opt)
+        {
+            va_opt_depth = 1;
+            t += 1;
+        }
+        else if (va_opt_depth != 0 && kind == C_TOKEN_L_PAREN)
+        {
+            va_opt_depth += 1;
+        }
+        else if (va_opt_depth != 0 && kind == C_TOKEN_R_PAREN)
+        {
+            va_opt_depth -= 1;
+        }
+    }
+    if (result && va_opt_depth != 0)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, macro->location, "unterminated __VA_OPT__");
+        result = false;
+    }
+    return result;
+}
+
 // #define, on the line [begin, end) of a file's tokens (the name's token first), read in the range at `base`.
 static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint32_t begin, uint32_t end)
 {
@@ -1716,8 +1819,8 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
                 pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid macro parameter list");
             }
         }
-        // ## can't begin or end a replacement list, and in a function-like macro # must precede a parameter (checked by
-        // pp_compile_macro, which reports it at the first expansion... and here, for every definition).
+        // ## can't begin or end a replacement list, and in a function-like macro # must precede a parameter and
+        // __VA_OPT__ a '(' (pp_check_replacement_list): clang rejects such a definition when it reads it, used or not.
         if (valid && macro.body_begin < macro.body_end)
         {
             const bool starts_pasting = (data->kinds[macro.body_begin] & 0x7F) == C_TOKEN_HASHHASH;
@@ -1727,10 +1830,14 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
                 pp_diagnose(pp, PP_SEVERITY_ERROR, location, "'##' cannot appear at either end of a macro expansion");
                 valid = false;
             }
+            bool to_check = false;
             for (uint32_t t = macro.body_begin; valid && t < macro.body_end; t += 1)
             {
-                macro.flags |= (data->kinds[t] & 0x7F) == C_TOKEN_HASHHASH ? BUSTER_PP_MACRO_PASTES : 0;
+                const uint8_t kind = data->kinds[t] & 0x7F;
+                macro.flags |= kind == C_TOKEN_HASHHASH ? BUSTER_PP_MACRO_PASTES : 0;
+                to_check |= kind == C_TOKEN_HASH || (kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT);
             }
+            valid = valid && (!to_check || !(macro.flags & BUSTER_PP_MACRO_FUNCTION) || pp_check_replacement_list(pp, data, &macro));
         }
         if (valid)
         {
@@ -1845,7 +1952,7 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             }
             else
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, macro->base + data->starts[t], "'#' is not followed by a macro parameter");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, macro->base + data->starts[t + (t + 1 < macro->body_end)], "'#' is not followed by a macro parameter");
                 result = false;
             }
         }
@@ -2674,6 +2781,7 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
     bool va_opt_pasted_after = false; // Whether ## follows the open __VA_OPT__.
     bool va_opt_paste_left = false; // Whether ## precedes the next __VA_OPT__ (set by the ##).
     uint32_t space_at = BUSTER_PP_NONE; // Where the token that takes a pending leading space goes (pp_pend_space).
+    bool va_opt_string_space = false; // Whether #__VA_OPT__'s string takes a space pending before it.
     bool placemarkers = false;
     for (uint32_t i = 0; i <= count && !pp->fatal; i += 1)
     {
@@ -2689,11 +2797,13 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     space_at = BUSTER_PP_NONE;
                 }
                 const bool space_after = space_at != BUSTER_PP_NONE;
-                const PPToken string = pp_stringize(pp, out, va_opt_mark, out->count, va_opt_flags);
+                PPToken string = pp_stringize(pp, out, va_opt_mark, out->count, va_opt_flags);
+                string.flags |= va_opt_string_space ? BUSTER_PP_SPACE : 0;
                 out->count = va_opt_mark;
                 pp_push_token(pp, out, string);
                 space_at = space_after ? out->count : BUSTER_PP_NONE;
                 va_opt_mark = BUSTER_PP_NONE;
+                va_opt_string_space = false;
             }
             // Content of placemarkers alone gives no tokens.
             bool only_placemarkers = true;
@@ -2801,6 +2911,10 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     va_opt_flags = item->flags;
                     va_opt_pasted_after = content_pasted_after;
                     va_opt_mark = item->kind == PP_ITEM_STRINGIZE_VA_OPT ? out->count : BUSTER_PP_NONE;
+                    // A space pending before #__VA_OPT__ goes to its string, as clang saves it there, not to the
+                    // content's first token, whose leading space a string drops.
+                    va_opt_string_space = va_opt_mark != BUSTER_PP_NONE && space_at == out->count;
+                    space_at = va_opt_string_space ? BUSTER_PP_NONE : space_at;
                 }
                 else
                 {
@@ -3243,6 +3357,13 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
                 valid = pp_new_argument(pp);
                 count += 1;
             }
+            // So is it in F() when the variadic parameter is F's only one. GNU's `, ## __VA_ARGS__` then drops its comma,
+            // except in C99 and later without GNU extensions, as clang has it.
+            else if (variadic && parameter_count == 1 && count == 1 && first->raw_begin == first->raw_end &&
+                     (pp->options.language.gnu || pp->options.language.standard < 1999))
+            {
+                invocation->variadic_omitted = true;
+            }
             if (valid && count != parameter_count)
             {
                 pp_diagnose(pp, PP_SEVERITY_ERROR, invocation->name_location, "too %s arguments provided to function-like macro invocation",
@@ -3507,13 +3628,18 @@ static PPToken pp_string_token(Preprocessor* pp, const uint8_t* bytes, uint32_t 
         n += 1;
         for (uint32_t i = 0; i < length; i += 1)
         {
-            if (bytes[i] == '"' || bytes[i] == '\\')
+            // Quotes and backslashes are escaped, and a line break (\n, \r, \r\n or \n\r) is written \n, as clang's
+            // Lexer::Stringify writes them.
+            const bool line_break = bytes[i] == '\n' || bytes[i] == '\r';
+            const bool pair = line_break && i + 1 < length && (bytes[i + 1] == '\n' || bytes[i + 1] == '\r') && bytes[i + 1] != bytes[i];
+            if (bytes[i] == '"' || bytes[i] == '\\' || line_break)
             {
                 text[n] = '\\';
                 n += 1;
             }
-            text[n] = bytes[i];
+            text[n] = line_break ? 'n' : bytes[i];
             n += 1;
+            i += pair ? 1 : 0;
         }
         text[n] = '"';
         n += 1;
@@ -3642,7 +3768,7 @@ static bool pp_header_name(Preprocessor* pp, const PPTokens* tokens, uint32_t be
 }
 
 // The answer of a feature query (__has_attribute and the like) about `name` (a scoped one as "scope::name").
-static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t length);
+static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t length, uint32_t standard);
 
 // Builds the name a feature query's argument holds: an identifier, or `scope::identifier`; names with leading and
 // trailing "__" lose them for the attribute, feature and extension queries, as clang normalizes them.
@@ -3778,7 +3904,7 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
     }
     else if (pp_feature_name(pp, builtin, tokens, first, last, text, &length))
     {
-        result = pp_feature(builtin, text, length);
+        result = pp_feature(builtin, text, length, pp->options.language.standard);
     }
     else
     {
@@ -3923,6 +4049,15 @@ static void pp_finish_builtin(Preprocessor* pp)
     }
 }
 
+// __TIMESTAMP__'s text for a time: "Sun Jan  1 00:00:00 2000" (strftime's "%a %b %e %T %Y" in the C locale).
+static void pp_format_timestamp(char* text, uint32_t capacity, const struct tm* calendar)
+{
+    static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    static const char days[7][4] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    snprintf(text, capacity, "%s %s %2d %02d:%02d:%02d %d", days[calendar->tm_wday % 7], months[calendar->tm_mon % 12], calendar->tm_mday, calendar->tm_hour,
+             calendar->tm_min, calendar->tm_sec, calendar->tm_year + 1900);
+}
+
 // Expands a builtin macro whose name was just read, from the context it was read in (`expansion_end` from
 // pp_expansion_end, for __LINE__ and __FILE__ in a token a macro made).
 static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint32_t expansion_end)
@@ -3978,8 +4113,31 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
             pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->time, (uint32_t)strlen(pp->time), flags));
             break;
         case PP_BUILTIN_TIMESTAMP:
-            pp_emit(pp, pp_string_token(pp, (const uint8_t*)pp->timestamp, (uint32_t)strlen(pp->timestamp), flags));
+        {
+            // SOURCE_DATE_EPOCH's time when it is set, else the modification time of the file being read (where a
+            // macro's expansion is, the file it is expanded in), as clang does: in local time, or ??? for a file the
+            // preprocessor made.
+            char text[32];
+            const PPContext* file_context = pp_current_file_context(pp);
+            const PPFileData* data = file_context != 0 ? &pp->datas[pp->files[file_context->file].data] : 0;
+            if (pp->has_epoch)
+            {
+                snprintf(text, sizeof(text), "%s", pp->timestamp);
+            }
+            else if (data != 0 && data->has_modified)
+            {
+                const time_t modified = (time_t)data->modified;
+                struct tm calendar;
+                localtime_r(&modified, &calendar);
+                pp_format_timestamp(text, sizeof(text), &calendar);
+            }
+            else
+            {
+                snprintf(text, sizeof(text), "??? ??? ?? ??:??:?? ????");
+            }
+            pp_emit(pp, pp_string_token(pp, (const uint8_t*)text, (uint32_t)strlen(text), flags));
             break;
+        }
         case PP_BUILTIN_PRAGMA:
             pp_start_builtin(pp, id, name, flags, expansion_end);
             break;
@@ -4036,6 +4194,17 @@ BUSTER_INLINE void pp_take_pending_flags(Preprocessor* pp, PPContext* context, u
     }
 }
 
+// A macro's name read from a file is expanded into the output: its tokens there start at the output's end
+// (PPExpansionStart). One that gives none is replaced by the next.
+BUSTER_INLINE void pp_note_expansion(Preprocessor* pp, uint32_t location)
+{
+    const uint32_t token = pp->output.count;
+    const uint32_t count = pp->expansion_start_count;
+    const bool replaces = count != 0 && pp->expansion_starts[count - 1].token == token;
+    pp->expansion_starts[replaces ? count - 1 : count] = (PPExpansionStart){ .token = token, .location = location };
+    pp->expansion_start_count = replaces ? count : count + 1;
+}
+
 // Expands the macro whose name is the top context's current token.
 static void pp_expand_current(Preprocessor* pp)
 {
@@ -4045,6 +4214,10 @@ static void pp_expand_current(Preprocessor* pp)
     {
         name.flags |= context->pending_flags;
         context->pending_flags = 0;
+    }
+    if (context->kind == BUSTER_PP_CONTEXT_FILE && pp->capture_count == 0)
+    {
+        pp_note_expansion(pp, name.location);
     }
     const PPMacroId id = pp->macro_of[name.value];
     PPMacro* macro = &pp->macros[id];
@@ -4208,7 +4381,8 @@ static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t be
 }
 
 // Enters a file (prepared on first use) included at `include_location` from range `parent`, unless its guard is defined
-// or #pragma once read it.
+// or #pragma once read it. The inclusion is as much a system header as the file and as the includer there are, as
+// clang has it (HandleHeaderIncludeOrImport): a file included from a system header is one too.
 static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location, uint32_t search_index)
 {
     PPFileData* data = &pp->datas[pp->files[file].data];
@@ -4224,6 +4398,9 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
         PPContext* context = range != BUSTER_PP_NONE ? pp_push_context(pp, BUSTER_PP_CONTEXT_FILE) : 0;
         if (context != 0)
         {
+            const uint32_t note = parent != BUSTER_PP_NONE ? pp->ranges[parent].last_line_directive : BUSTER_PP_NONE;
+            const uint8_t includer = parent == BUSTER_PP_NONE ? BUSTER_PP_USER_FILE : note != BUSTER_PP_NONE ? pp->line_directives[note].system : pp->ranges[parent].system;
+            pp->ranges[range].system = pp->files[file].system > includer ? pp->files[file].system : includer;
             context->file = file;
             context->search_index = search_index;
             context->range = range;
@@ -4559,6 +4736,75 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     }
 }
 
+// A #line's or line marker's file name from its string literal's spelling (quotes included, line splices removed), read as
+// clang reads an unevaluated string literal: a simple escape or a UCN (as UTF-8) stands for its character, and an octal or
+// hex escape is an error. Writes the name to `out` (room for the spelling's length) and returns its length, or
+// BUSTER_PP_NONE after a diagnostic.
+static uint32_t pp_decode_file_name(Preprocessor* pp, const uint8_t* spelling, uint32_t length, char* out, uint32_t location)
+{
+    static const char simple[] = "'\"?\\abfnrtv";
+    static const char meaning[] = "'\"?\\\a\b\f\n\r\t\v";
+    uint32_t result = 0;
+    bool valid = length >= 2 && spelling[0] == '"' && spelling[length - 1] == '"';
+    bool reported = false;
+    for (uint32_t i = 1; valid && i + 1 < length; i += 1)
+    {
+        uint8_t c = spelling[i];
+        if (c == '\\' && i + 2 < length)
+        {
+            const uint8_t e = spelling[i + 1];
+            const char* found = e != 0 ? strchr(simple, e) : 0;
+            if (found != 0)
+            {
+                c = (uint8_t)meaning[found - simple];
+                i += 1;
+            }
+            else if (e == 'u' || e == 'U')
+            {
+                // A UCN: four or eight hex digits, written as UTF-8.
+                const uint32_t digits = e == 'u' ? 4 : 8;
+                uint32_t code = 0;
+                valid = i + 2 + digits < length;
+                for (uint32_t k = 0; valid && k < digits; k += 1)
+                {
+                    const int32_t v = hex_digit_value(spelling[i + 2 + k]);
+                    valid = v >= 0;
+                    code = code * 16 + (uint32_t)(v >= 0 ? v : 0);
+                }
+                valid = valid && code <= 0x10FFFF && (code < 0xD800 || code > 0xDFFF);
+                if (valid)
+                {
+                    uint8_t utf8[4];
+                    const uint32_t n = code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+                    utf8[0] = (uint8_t)(n == 1 ? code : n == 2 ? 0xC0 | (code >> 6) : n == 3 ? 0xE0 | (code >> 12) : 0xF0 | (code >> 18));
+                    for (uint32_t k = 1; k < n; k += 1)
+                    {
+                        utf8[k] = (uint8_t)(0x80 | ((code >> (6 * (n - 1 - k))) & 0x3F));
+                    }
+                    memcpy(out + result, utf8, n - 1);
+                    result += n - 1;
+                    c = utf8[n - 1];
+                }
+                i += 1 + digits;
+            }
+            else
+            {
+                // An octal or hex escape (or another): clang allows none in an unevaluated string.
+                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid escape sequence in the file name of a #line directive");
+                valid = false;
+                reported = true;
+            }
+        }
+        out[result] = (char)c;
+        result += 1;
+    }
+    if (!valid && !reported)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid file name in a #line directive");
+    }
+    return valid ? result : BUSTER_PP_NONE;
+}
+
 // Where clang's lexer starts a token that starts at `start`: at the first of any line splices right before it (a
 // backslash, blanks, and a newline or CRLF, with nothing between them and the token), since it reads them as part of
 // the token after them. Blanks between the splice and the token are whitespace it skips first.
@@ -4582,6 +4828,39 @@ static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start)
     return result;
 }
 
+// Adds a line note to a range, from `location` on (PPLineDirective): `name` null keeps the presumed name, the name of
+// the range's latest note, and `system` BUSTER_PP_NONE keeps the system level (that note's, else the inclusion's).
+static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location, int64_t delta, const char* name, uint32_t name_length, uint32_t system)
+{
+    PPRange* record = &pp->ranges[range];
+    const uint32_t latest = record->last_line_directive;
+    if (pp->line_directive_count < BUSTER_PP_MAX_LINE_DIRECTIVES)
+    {
+        const uint32_t index = pp->line_directive_count;
+        const bool inherits = name == 0 && latest != BUSTER_PP_NONE;
+        const uint8_t level = latest != BUSTER_PP_NONE ? pp->line_directives[latest].system : record->system;
+        pp->line_directives[index] = (PPLineDirective){
+            .range = range,
+            .location = location,
+            .delta = delta,
+            .name = inherits ? pp->line_directives[latest].name : name,
+            .name_length = inherits ? pp->line_directives[latest].name_length : name_length,
+            .next_in_range = BUSTER_PP_NONE,
+            .system = system == BUSTER_PP_NONE ? level : (uint8_t)system,
+        };
+        pp->line_directive_count += 1;
+        if (latest != BUSTER_PP_NONE)
+        {
+            pp->line_directives[latest].next_in_range = index;
+        }
+        else
+        {
+            record->first_line_directive = index;
+        }
+        record->last_line_directive = index;
+    }
+}
+
 // The lines a #line or a line marker at directive d numbers, from its tokens [begin, stop) of `tokens` (expanded, for
 // #line): lines from the next on are numbered from the digits, and the file is named by the string literal if there is
 // one.
@@ -4592,10 +4871,14 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
     const uint32_t base = pp->ranges[context->range].base;
     uint64_t number = 0;
     bool valid = begin < stop && tokens->kinds[begin] == C_TOKEN_NUMERIC_CONSTANT;
+    // The operands' spellings without their line splices (translation phase 2), as clang reads them.
+    Scratch scratch = scratch_begin(0);
     if (valid)
     {
-        const uint8_t* digits = pp_location_bytes(pp, tokens->locations[begin]);
-        const uint32_t count = tokens->values[begin] - tokens->locations[begin];
+        uint8_t* buffer = arena_push(scratch.arena, (uint64_t)(tokens->values[begin] - tokens->locations[begin]) + 1, 1);
+        const uint8_t* digits = 0;
+        const uint32_t count = buffer != 0 ? pp_spelling(pp, tokens->kinds[begin], tokens->values[begin], tokens->locations[begin], buffer, &digits) : 0;
+        valid = count != 0;
         for (uint32_t i = 0; valid && i < count; i += 1)
         {
             valid = digits[i] >= '0' && digits[i] <= '9' && number < (1ull << 31);
@@ -4604,38 +4887,27 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
     }
     const char* name = 0;
     uint32_t name_length = 0;
+    bool name_reported = false;
     if (valid && begin + 1 < stop)
     {
         valid = tokens->kinds[begin + 1] == C_TOKEN_STRING_LITERAL;
-        if (valid)
-        {
-            const uint8_t* bytes = pp_location_bytes(pp, tokens->locations[begin + 1]);
-            const uint32_t spelled = tokens->values[begin + 1] - tokens->locations[begin + 1];
-            char* copy = arena_push(&pp->arena, spelled, 1);
-            for (uint32_t i = 1; copy != 0 && i + 1 < spelled; i += 1)
-            {
-                // The name is a string literal: its escapes stand for their characters.
-                i += bytes[i] == '\\' && i + 2 < spelled;
-                copy[name_length] = (char)bytes[i];
-                name_length += 1;
-            }
-            name = copy;
-        }
+        const uint32_t spelled = tokens->values[begin + 1] - tokens->locations[begin + 1];
+        uint8_t* buffer = valid ? arena_push(scratch.arena, (uint64_t)spelled + 1, 1) : 0;
+        char* copy = valid ? arena_push(&pp->arena, (uint64_t)spelled + 1, 1) : 0;
+        const uint8_t* spelling = 0;
+        const uint32_t length = buffer != 0 && copy != 0 ? pp_spelling(pp, tokens->kinds[begin + 1], tokens->values[begin + 1], tokens->locations[begin + 1], buffer, &spelling) : 0;
+        name_length = length >= 2 ? pp_decode_file_name(pp, spelling, length, copy, location) : BUSTER_PP_NONE;
+        name_reported = length >= 2 && name_length == BUSTER_PP_NONE;
+        valid = valid && name_length != BUSTER_PP_NONE;
+        name = valid ? copy : 0;
+        name_length = valid ? name_length : 0;
     }
-    // A #line without a name keeps the presumed one: the name of the range's latest #line, if it has one.
-    bool found = name != 0;
-    for (uint32_t i = pp->line_directive_count; valid && !found && i > 0; i -= 1)
-    {
-        const PPLineDirective* line = &pp->line_directives[i - 1];
-        found = line->range == context->range;
-        name = found ? line->name : 0;
-        name_length = found ? line->name_length : 0;
-    }
-    if (!valid)
+    scratch_end(scratch);
+    if (!valid && !name_reported)
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#line directive requires a simple digit sequence (and optionally a file name)");
     }
-    else if (pp->line_directive_count < BUSTER_PP_MAX_LINE_DIRECTIVES)
+    else if (valid)
     {
         // The line after the number token's is `number`, as clang counts: from where it lexes that token (the digits'
         // line, or for digits right after a line splice, the splice's, since its lexer reads a splice as part of the
@@ -4644,14 +4916,8 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         const uint32_t anchor = first < data->directive_end[d] ? pp_start_with_splices(data->bytes, data->starts[first]) : data->starts[hash];
         uint32_t column;
         const uint32_t physical = pp_line_of(pp, context->range, base + anchor, &column) + 1;
-        pp->line_directives[pp->line_directive_count] = (PPLineDirective){
-            .range = context->range,
-            .location = location + 1,
-            .delta = (int64_t)number - (int64_t)physical,
-            .name = name,
-            .name_length = name_length,
-        };
-        pp->line_directive_count += 1;
+        // A #line without a name keeps the presumed one, and any #line keeps the system level (clang's FileKind).
+        pp_add_line_note(pp, context->range, location + 1, (int64_t)number - (int64_t)physical, name, name_length, BUSTER_PP_NONE);
     }
 }
 
@@ -4693,10 +4959,13 @@ static void pp_line(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t ki
 }
 
 // Emits a #pragma or #ident line to the output: '#' starting a line, the line's tokens, and BUSTER_PP_KIND_PRAGMA_END.
-static void pp_emit_pragma(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, IdentId name, uint32_t location)
+// The name's location is the directive's, or for _Pragma (`from_operator`) the operator's, whose '#' is then one a
+// macro made (-E's line markers place it as the expansion the operator is in).
+static void pp_emit_pragma(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, IdentId name, uint32_t location, bool from_operator)
 {
     // The '#' isn't in any source here: its spelling is the scratch "#".
-    pp_emit(pp, (PPToken){ .kind = C_TOKEN_HASH, .flags = BUSTER_PP_START_OF_LINE, .value = pp->hash_location + 1, .location = pp->hash_location });
+    const uint8_t flags = (uint8_t)(BUSTER_PP_START_OF_LINE | (from_operator ? BUSTER_PP_FROM_MACRO : 0));
+    pp_emit(pp, (PPToken){ .kind = C_TOKEN_HASH, .flags = flags, .value = pp->hash_location + 1, .location = pp->hash_location });
     pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = 0, .value = name, .location = location });
     for (uint32_t i = begin; i < end; i += 1)
     {
@@ -4715,7 +4984,6 @@ static void pp_pragma(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, 
     const IdentId first = begin < end && tokens->kinds[begin] == C_TOKEN_RAW_IDENTIFIER ? tokens->values[begin] : 0;
     const IdentId second = begin + 1 < end && tokens->kinds[begin + 1] == C_TOKEN_RAW_IDENTIFIER ? tokens->values[begin + 1] : 0;
     const uint32_t file = pp_current_file(pp);
-    (void)from_operator;
     if (first == C_NAME_ONCE)
     {
         if (file != BUSTER_PP_NONE && file != pp->main_file)
@@ -4725,9 +4993,17 @@ static void pp_pragma(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, 
     }
     else if (first == C_NAME_GCC && second == C_NAME_SYSTEM_HEADER)
     {
-        if (file != BUSTER_PP_NONE && file != pp->main_file)
+        // The rest of the file is a system header, as are its later inclusions (clang's MarkFileSystemHeader), and the
+        // files it includes; a line note marks where, after the directive, with the presumed line and name kept.
+        const PPContext* context = pp_current_file_context(pp);
+        if (file != BUSTER_PP_NONE && file != pp->main_file && context != 0)
         {
-            pp->files[file].system = true;
+            pp->files[file].system = BUSTER_PP_SYSTEM_FILE;
+            const PPFileData* data = &pp->datas[pp->files[file].data];
+            const PPRange* range = &pp->ranges[context->range];
+            const uint32_t at = range->base + (context->position < data->token_count ? data->starts[context->position] : data->length);
+            const uint32_t latest = range->last_line_directive;
+            pp_add_line_note(pp, context->range, at, latest != BUSTER_PP_NONE ? pp->line_directives[latest].delta : 0, 0, 0, BUSTER_PP_SYSTEM_FILE);
         }
     }
     else if (first == C_NAME_GCC && second == C_NAME_DEPENDENCY)
@@ -4774,7 +5050,7 @@ static void pp_pragma(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, 
     }
     else
     {
-        pp_emit_pragma(pp, tokens, begin, end, C_NAME_PRAGMA, location);
+        pp_emit_pragma(pp, tokens, begin, end, C_NAME_PRAGMA, location, from_operator);
     }
 }
 
@@ -4858,7 +5134,7 @@ static void pp_directive(Preprocessor* pp, PPContext* context)
                 }
                 else
                 {
-                    pp_emit_pragma(pp, &pp->arguments, line, pp->arguments.count, data->values[hash + 1], location);
+                    pp_emit_pragma(pp, &pp->arguments, line, pp->arguments.count, data->values[hash + 1], location, false);
                 }
             }
             pp->arguments.count = line;
@@ -5191,7 +5467,9 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid character constant in preprocessor expression");
     }
-    *value = (PPValue){ .bits = (uint64_t)result, .is_unsigned = kind == C_TOKEN_UTF32_CHAR_CONSTANT };
+    // UTF-8, UTF-16 and UTF-32 character constants are unsigned in C (unsigned char, char16_t, char32_t), as in clang.
+    const bool is_unsigned = kind == C_TOKEN_UTF8_CHAR_CONSTANT || kind == C_TOKEN_UTF16_CHAR_CONSTANT || kind == C_TOKEN_UTF32_CHAR_CONSTANT;
+    *value = (PPValue){ .bits = (uint64_t)result, .is_unsigned = is_unsigned };
     return valid;
 }
 
@@ -5477,10 +5755,12 @@ static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin
 // ---------------------------------------------------------------------------------------------------------------------
 // Feature queries and predefines
 
-// What clang 23 answers nonzero, for x86-64 Linux in C (the same in C17 and C23), to the feature queries of the names
-// that clang's, glibc's and musl's headers, sqlite and Zig's libc headers ask about, and of the GNU attributes (with
-// their gnu:: spellings for __has_c_attribute): generated by asking clang (docs/c-preprocessor.md has the procedure).
-// Attribute names are looked up without leading and trailing "__", as clang normalizes them. Sorted for binary search.
+// What clang 23 answers nonzero, for x86-64 Linux in C, to the feature queries of the names that clang's, glibc's and
+// musl's headers, sqlite and Zig's libc headers ask about, of the GNU attributes (with their gnu:: spellings for
+// __has_c_attribute), and for __has_feature and __has_extension of every name in clang's Features.def: generated by
+// asking clang in the ten modes from c89 to gnu23 (docs/c-preprocessor.md has the procedure). Only __has_feature's
+// answers depend on the mode: C11's features hold from C11 on and c_fixed_enum from C23 (`standard`). Attribute names
+// are looked up without leading and trailing "__", as clang normalizes them. Sorted for binary search.
 static const PPFeature pp_features_attribute[] = {
     { "alias", 1 }, { "aligned", 1 }, { "alloc_align", 1 }, { "alloc_size", 1 }, { "allocating", 1 }, { "always_inline", 1 }, { "annotate", 1 },
     { "artificial", 1 }, { "assume", 1 }, { "assume_aligned", 1 }, { "availability", 1 }, { "blocking", 1 }, { "btf_decl_tag", 1 },
@@ -5527,16 +5807,48 @@ static const PPFeature pp_features_builtin[] = {
     { "__is_target_variant_environment", 1 }, { "__is_target_variant_os", 1 }, { "__is_target_vendor", 1 }, { "__sync_synchronize", 1 },
 };
 static const PPFeature pp_features_feature[] = {
-    { "assume_nonnull", 1 }, { "attribute_analyzer_noreturn", 1 }, { "attribute_availability", 1 }, { "attribute_availability_app_extension", 1 },
+    { "arc_cf_code_audited", 1 }, { "assume_nonnull", 1 }, { "attribute_analyzer_noreturn", 1 }, { "attribute_availability", 1 },
+    { "attribute_availability_app_extension", 1 }, { "attribute_availability_driverkit", 1 }, { "attribute_availability_in_templates", 1 },
     { "attribute_availability_swift", 1 }, { "attribute_availability_tvos", 1 }, { "attribute_availability_watchos", 1 },
-    { "attribute_availability_with_message", 1 }, { "attribute_availability_with_replacement", 1 }, { "attribute_deprecated_with_message", 1 },
-    { "c_static_assert", 1 }, { "c_thread_local", 1 }, { "enumerator_attributes", 1 }, { "nullability", 1 }, { "nullability_on_arrays", 1 },
-    { "objc_bool", 1 },
+    { "attribute_availability_with_message", 1 }, { "attribute_availability_with_replacement", 1 }, { "attribute_availability_with_strict", 1 },
+    { "attribute_availability_with_version_underscores", 1 }, { "attribute_cf_consumed", 1 }, { "attribute_cf_returns_not_retained", 1 },
+    { "attribute_cf_returns_on_parameters", 1 }, { "attribute_cf_returns_retained", 1 }, { "attribute_deprecated_with_message", 1 },
+    { "attribute_deprecated_with_replacement", 1 }, { "attribute_diagnose_if_objc", 1 }, { "attribute_ext_vector_type", 1 },
+    { "attribute_ns_consumed", 1 }, { "attribute_ns_consumes_self", 1 }, { "attribute_ns_returns_not_retained", 1 },
+    { "attribute_ns_returns_retained", 1 }, { "attribute_objc_ivar_unused", 1 }, { "attribute_objc_method_family", 1 },
+    { "attribute_overloadable", 1 }, { "attribute_unavailable_with_message", 1 }, { "attribute_unused_on_fields", 1 }, { "c_alignas", 1, 2011 },
+    { "c_alignof", 1, 2011 }, { "c_atomic", 1, 2011 }, { "c_fixed_enum", 1, 2023 }, { "c_generic_selections", 1, 2011 },
+    { "c_static_assert", 1, 2011 }, { "c_thread_local", 1, 2011 }, { "c_thread_safety_attributes", 1 }, { "clang_atomic_attributes", 1 },
+    { "enumerator_attributes", 1 }, { "ext_vector_type_boolean", 1 }, { "nullability", 1 }, { "nullability_nullable_result", 1 },
+    { "nullability_on_arrays", 1 }, { "nullability_on_classes", 1 }, { "objc_arc_fields", 1 }, { "objc_bool", 1 }, { "objc_bridge_id", 1 },
+    { "objc_bridge_id_on_typedefs", 1 }, { "objc_c_static_assert", 1, 2011 }, { "objc_nonfragile_abi", 1 }, { "objc_property_explicit_atomic", 1 },
+    { "objc_protocol_qualifier_mangling", 1 }, { "objc_subscripting", 1 }, { "objc_weak_class", 1 }, { "ownership_holds", 1 },
+    { "ownership_returns", 1 }, { "ownership_takes", 1 }, { "pragma_stdc_cx_limited_range", 1 }, { "tls", 1 },
+    { "undefined_behavior_sanitizer_finegrained_feature_checks", 1 },
 };
 static const PPFeature pp_features_extension[] = {
-    { "attribute_analyzer_noreturn", 1 }, { "attribute_deprecated_with_message", 1 }, { "attribute_overloadable", 1 },
-    { "attribute_unavailable_with_message", 1 }, { "c_alignof", 1 }, { "c_atomic", 1 }, { "c_generic_selections", 1 }, { "c_static_assert", 1 },
-    { "cxx_binary_literals", 1 }, { "cxx_fixed_enum", 1 }, { "enumerator_attributes", 1 }, { "gnu_asm", 1 },
+    { "arc_cf_code_audited", 1 }, { "assume_nonnull", 1 }, { "attribute_analyzer_noreturn", 1 }, { "attribute_availability", 1 },
+    { "attribute_availability_app_extension", 1 }, { "attribute_availability_driverkit", 1 }, { "attribute_availability_in_templates", 1 },
+    { "attribute_availability_swift", 1 }, { "attribute_availability_tvos", 1 }, { "attribute_availability_watchos", 1 },
+    { "attribute_availability_with_message", 1 }, { "attribute_availability_with_replacement", 1 }, { "attribute_availability_with_strict", 1 },
+    { "attribute_availability_with_version_underscores", 1 }, { "attribute_cf_consumed", 1 }, { "attribute_cf_returns_not_retained", 1 },
+    { "attribute_cf_returns_on_parameters", 1 }, { "attribute_cf_returns_retained", 1 }, { "attribute_deprecated_with_message", 1 },
+    { "attribute_deprecated_with_replacement", 1 }, { "attribute_diagnose_if_objc", 1 }, { "attribute_ext_vector_type", 1 },
+    { "attribute_ns_consumed", 1 }, { "attribute_ns_consumes_self", 1 }, { "attribute_ns_returns_not_retained", 1 },
+    { "attribute_ns_returns_retained", 1 }, { "attribute_objc_ivar_unused", 1 }, { "attribute_objc_method_family", 1 },
+    { "attribute_overloadable", 1 }, { "attribute_unavailable_with_message", 1 }, { "attribute_unused_on_fields", 1 }, { "c_alignas", 1 },
+    { "c_alignof", 1 }, { "c_atomic", 1 }, { "c_attributes", 1 }, { "c_countof", 1 }, { "c_fixed_enum", 1 },
+    { "c_generic_selection_with_controlling_type", 1 }, { "c_generic_selections", 1 }, { "c_static_assert", 1 }, { "c_thread_local", 1 },
+    { "c_thread_safety_attributes", 1 }, { "clang_atomic_attributes", 1 }, { "cxx_binary_literals", 1 }, { "cxx_fixed_enum", 1 },
+    { "cxx_type_aware_allocators", 1 }, { "enumerator_attributes", 1 }, { "ext_vector_type_boolean", 1 }, { "gnu_asm", 1 },
+    { "gnu_asm_goto_with_outputs", 1 }, { "gnu_asm_goto_with_outputs_full", 1 }, { "matrix_types_scalar_division", 1 }, { "nullability", 1 },
+    { "nullability_nullable_result", 1 }, { "nullability_on_arrays", 1 }, { "nullability_on_classes", 1 }, { "objc_arc_fields", 1 },
+    { "objc_bool", 1 }, { "objc_bridge_id", 1 }, { "objc_bridge_id_on_typedefs", 1 }, { "objc_c_static_assert", 1 }, { "objc_nonfragile_abi", 1 },
+    { "objc_property_explicit_atomic", 1 }, { "objc_protocol_qualifier_mangling", 1 }, { "objc_subscripting", 1 }, { "objc_weak_class", 1 },
+    { "overloadable_unmarked", 1 }, { "ownership_holds", 1 }, { "ownership_returns", 1 }, { "ownership_takes", 1 },
+    { "pragma_clang_attribute_external_declaration", 1 }, { "pragma_clang_attribute_namespaces", 1 }, { "pragma_stdc_cx_limited_range", 1 },
+    { "statement_attributes_with_gnu_syntax", 1 }, { "swiftasynccc", 1 }, { "swiftcc", 1 }, { "tls", 1 },
+    { "undefined_behavior_sanitizer_finegrained_feature_checks", 1 },
 };
 static const PPFeature pp_features_c_attribute[] = {
     { "_Noreturn", 202202 }, { "deprecated", 201904 }, { "fallthrough", 201910 }, { "gnu::alias", 1 }, { "gnu::aligned", 1 },
@@ -5569,7 +5881,7 @@ static int pp_compare_feature(const uint8_t* name, uint32_t length, const char* 
     return compared != 0 ? compared : (int)length - (int)entry_length;
 }
 
-static uint32_t pp_feature_lookup(const PPFeature* table, uint32_t count, const uint8_t* name, uint32_t length)
+static uint32_t pp_feature_lookup(const PPFeature* table, uint32_t count, const uint8_t* name, uint32_t length, uint32_t standard)
 {
     uint32_t low = 0;
     uint32_t high = count;
@@ -5580,7 +5892,7 @@ static uint32_t pp_feature_lookup(const PPFeature* table, uint32_t count, const 
         const int compared = pp_compare_feature(name, length, table[middle].name);
         if (compared == 0)
         {
-            result = table[middle].value;
+            result = table[middle].standard <= standard ? table[middle].value : 0;
             low = high;
         }
         else if (compared < 0)
@@ -5595,21 +5907,23 @@ static uint32_t pp_feature_lookup(const PPFeature* table, uint32_t count, const 
     return result;
 }
 
-static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t length)
+static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t length, uint32_t standard)
 {
     uint32_t result = 0;
     switch (builtin)
     {
-        case PP_BUILTIN_HAS_ATTRIBUTE: result = pp_feature_lookup(pp_features_attribute, BUSTER_ARRAY_LENGTH(pp_features_attribute), name, length); break;
-        case PP_BUILTIN_HAS_BUILTIN: result = pp_feature_lookup(pp_features_builtin, BUSTER_ARRAY_LENGTH(pp_features_builtin), name, length); break;
-        case PP_BUILTIN_HAS_FEATURE: result = pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length); break;
+        case PP_BUILTIN_HAS_ATTRIBUTE: result = pp_feature_lookup(pp_features_attribute, BUSTER_ARRAY_LENGTH(pp_features_attribute), name, length, standard); break;
+        case PP_BUILTIN_HAS_BUILTIN: result = pp_feature_lookup(pp_features_builtin, BUSTER_ARRAY_LENGTH(pp_features_builtin), name, length, standard); break;
+        case PP_BUILTIN_HAS_FEATURE: result = pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard); break;
         case PP_BUILTIN_HAS_EXTENSION:
             // An extension is anything that is a feature, or in the extension table.
-            result = pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length) |
-                     pp_feature_lookup(pp_features_extension, BUSTER_ARRAY_LENGTH(pp_features_extension), name, length);
+            result = pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) |
+                     pp_feature_lookup(pp_features_extension, BUSTER_ARRAY_LENGTH(pp_features_extension), name, length, standard);
             break;
-        case PP_BUILTIN_HAS_C_ATTRIBUTE: result = pp_feature_lookup(pp_features_c_attribute, BUSTER_ARRAY_LENGTH(pp_features_c_attribute), name, length); break;
-        case PP_BUILTIN_HAS_WARNING: result = pp_feature_lookup(pp_features_warning, BUSTER_ARRAY_LENGTH(pp_features_warning), name, length); break;
+        case PP_BUILTIN_HAS_C_ATTRIBUTE:
+            result = pp_feature_lookup(pp_features_c_attribute, BUSTER_ARRAY_LENGTH(pp_features_c_attribute), name, length, standard);
+            break;
+        case PP_BUILTIN_HAS_WARNING: result = pp_feature_lookup(pp_features_warning, BUSTER_ARRAY_LENGTH(pp_features_warning), name, length, standard); break;
         case PP_BUILTIN_IS_TARGET_ARCH: result = length == 6 && memcmp(name, "x86_64", 6) == 0; break;
         case PP_BUILTIN_IS_TARGET_VENDOR: result = length == 7 && memcmp(name, "unknown", 7) == 0; break;
         case PP_BUILTIN_IS_TARGET_OS: result = length == 5 && memcmp(name, "linux", 5) == 0; break;
@@ -6114,8 +6428,10 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer)
 #define BUSTER_PP_FILE_SLOTS (2u * BUSTER_PP_MAX_FILES)
 #define BUSTER_PP_INITIAL_FILE_SLOTS 1024u
 
-// A file that isn't on disk (the predefines, the command line), at a name in angle brackets. Returns its PPFile.
-static uint32_t pp_virtual_file(Preprocessor* pp, const char* name, const char* text, uint32_t length)
+// A file that isn't on disk (the predefines, the command line, the forced includes' lines), at a name in angle brackets,
+// and what it is for line markers: clang's predefines are a system header, and the rest of its <built-in> buffer, the
+// command line's and the forced includes', isn't. Returns its PPFile.
+static uint32_t pp_virtual_file(Preprocessor* pp, const char* name, const char* text, uint32_t length, uint8_t system)
 {
     uint32_t result = BUSTER_PP_NONE;
     uint8_t* bytes = arena_push(&pp->arena, (uint64_t)length + 64, 64);
@@ -6132,7 +6448,7 @@ static uint32_t pp_virtual_file(Preprocessor* pp, const char* name, const char* 
             .path_length = (uint32_t)strlen(name),
             .directory_length = BUSTER_PP_NONE,
             .data = data,
-            .system = true,
+            .system = system,
         };
         pp->file_count += 1;
     }
@@ -6175,7 +6491,7 @@ static bool pp_clang_resource_directory(char* path, uint32_t capacity)
     return result;
 }
 
-static bool pp_add_directory(Preprocessor* pp, const char* path, bool system)
+static bool pp_add_directory(Preprocessor* pp, const char* path, uint8_t system)
 {
     uint32_t length = (uint32_t)strlen(path);
     while (length > 1 && path[length - 1] == '/')
@@ -6284,8 +6600,9 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->file_slot_mask = BUSTER_PP_INITIAL_FILE_SLOTS - 1;
     pp->directories = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(char*));
     pp->directory_lengths = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(uint32_t));
-    pp->directory_system = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(bool));
+    pp->directory_system = pp_array(pp, BUSTER_PP_MAX_PUSHED, sizeof(uint8_t));
     pp->line_directives = pp_array(pp, BUSTER_PP_MAX_LINE_DIRECTIVES, sizeof(PPLineDirective));
+    pp->expansion_starts = pp_array(pp, (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1, sizeof(PPExpansionStart));
     pp->macro_of = pp_array(pp, BUSTER_INTERN_MAX_IDS, sizeof(PPMacroId));
     pp->is_macro = pp_array(pp, BUSTER_INTERN_MAX_IDS / 64, sizeof(uint64_t));
     pp->macros = pp_array(pp, BUSTER_PP_MAX_MACROS, sizeof(PPMacro));
@@ -6299,7 +6616,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->argument_records = pp_array(pp, BUSTER_PP_MAX_STACK_TOKENS, sizeof(PPArgument));
     pp->capture_frames = pp_array(pp, BUSTER_PP_MAX_CONTEXTS, sizeof(PPCapture));
     result = result && pp->ranges != 0 && pp->datas != 0 && pp->files != 0 && pp->file_slots != 0 && pp->directories != 0 && pp->directory_lengths != 0 &&
-             pp->directory_system != 0 && pp->line_directives != 0 && pp->macro_of != 0 && pp->is_macro != 0 && pp->macros != 0 && pp->items != 0 &&
+             pp->directory_system != 0 && pp->line_directives != 0 && pp->expansion_starts != 0 && pp->macro_of != 0 && pp->is_macro != 0 && pp->macros != 0 && pp->items != 0 &&
              pp->parameters != 0 && pp->pushed_names != 0 && pp->pushed_macros != 0 && pp->contexts != 0 && pp->conditionals != 0 && pp->invocations != 0 &&
              pp->argument_records != 0 && pp->capture_frames != 0 && pp->scratch.base != 0;
     if (result)
@@ -6310,29 +6627,29 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         // The search directories: -iquote ones for quoted names only, then -I, -isystem, the standard ones and -idirafter.
         for (uint32_t i = 0; result && i < options->quote_directory_count; i += 1)
         {
-            result = pp_add_directory(pp, options->quote_directories[i], false);
+            result = pp_add_directory(pp, options->quote_directories[i], BUSTER_PP_USER_FILE);
         }
         pp->angled_first = pp->directory_count;
         for (uint32_t i = 0; result && i < options->include_directory_count; i += 1)
         {
-            result = pp_add_directory(pp, options->include_directories[i], false);
+            result = pp_add_directory(pp, options->include_directories[i], BUSTER_PP_USER_FILE);
         }
         for (uint32_t i = 0; result && i < options->system_directory_count; i += 1)
         {
-            result = pp_add_directory(pp, options->system_directories[i], true);
+            result = pp_add_directory(pp, options->system_directories[i], BUSTER_PP_SYSTEM_FILE);
         }
         char resource[256];
         if (result && !options->no_standard_includes)
         {
             if (pp_clang_resource_directory(resource, sizeof(resource)))
             {
-                result = pp_add_directory(pp, resource, true);
+                result = pp_add_directory(pp, resource, BUSTER_PP_SYSTEM_FILE);
             }
-            result = result && pp_add_directory(pp, "/usr/local/include", true) && pp_add_directory(pp, "/usr/include", true);
+            result = result && pp_add_directory(pp, "/usr/local/include", BUSTER_PP_EXTERN_C_FILE) && pp_add_directory(pp, "/usr/include", BUSTER_PP_EXTERN_C_FILE);
         }
         for (uint32_t i = 0; result && i < options->after_directory_count; i += 1)
         {
-            result = pp_add_directory(pp, options->after_directories[i], true);
+            result = pp_add_directory(pp, options->after_directories[i], BUSTER_PP_SYSTEM_FILE);
         }
         if (result)
         {
@@ -6377,9 +6694,9 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         {
             pp_define_builtin(pp, builtins[i].name, builtins[i].builtin, builtins[i].function_like);
         }
-        // __DATE__, __TIME__ and __TIMESTAMP__ from SOURCE_DATE_EPOCH if it is set (reproducible builds), else now.
+        // __DATE__ and __TIME__ from SOURCE_DATE_EPOCH if it is set (reproducible builds), else now; __TIMESTAMP__ from
+        // SOURCE_DATE_EPOCH too, else each file's modification time (pp_expand_builtin).
         static const char months[12][4] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-        static const char days[7][4] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
         const char* epoch = getenv("SOURCE_DATE_EPOCH");
         const time_t now = epoch != 0 ? (time_t)strtoll(epoch, 0, 10) : time(0);
         struct tm calendar;
@@ -6393,8 +6710,8 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         }
         snprintf(pp->date, sizeof(pp->date), "%s %2d %d", months[calendar.tm_mon % 12], calendar.tm_mday, calendar.tm_year + 1900);
         snprintf(pp->time, sizeof(pp->time), "%02d:%02d:%02d", calendar.tm_hour, calendar.tm_min, calendar.tm_sec);
-        snprintf(pp->timestamp, sizeof(pp->timestamp), "%s %s %2d %02d:%02d:%02d %d", days[calendar.tm_wday % 7], months[calendar.tm_mon % 12], calendar.tm_mday,
-                 calendar.tm_hour, calendar.tm_min, calendar.tm_sec, calendar.tm_year + 1900);
+        pp_format_timestamp(pp->timestamp, sizeof(pp->timestamp), &calendar);
+        pp->has_epoch = epoch != 0;
         pp->zero_location = pp_scratch(pp, (const uint8_t*)"0", 1);
         pp->one_location = pp_scratch(pp, (const uint8_t*)"1", 1);
         pp->hash_location = pp_scratch(pp, (const uint8_t*)"#", 1);
@@ -6444,7 +6761,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     // The predefines.
     if (pp->options.predefines_path != 0)
     {
-        const uint32_t file = pp_lookup_path(pp, pp->options.predefines_path, (uint32_t)strlen(pp->options.predefines_path), true);
+        const uint32_t file = pp_lookup_path(pp, pp->options.predefines_path, (uint32_t)strlen(pp->options.predefines_path), BUSTER_PP_SYSTEM_FILE);
         result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE;
         if (result)
         {
@@ -6458,7 +6775,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     else
     {
         char* text = arena_push(&pp->arena, sizeof(pp_predefines_base) + sizeof(pp_predefines_c23) + 512, 1);
-        const uint32_t file = text != 0 ? pp_virtual_file(pp, "<built-in>", text, pp_predefines(&pp->options, text)) : BUSTER_PP_NONE;
+        const uint32_t file = text != 0 ? pp_virtual_file(pp, "<built-in>", text, pp_predefines(&pp->options, text), BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
         result = file != BUSTER_PP_NONE;
         if (result)
         {
@@ -6496,7 +6813,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
                 length += (uint64_t)sprintf(command_line + length, "#define %s 1\n", macro + 1);
             }
         }
-        const uint32_t file = pp_virtual_file(pp, "<command line>", command_line, (uint32_t)length);
+        const uint32_t file = pp_virtual_file(pp, "<command line>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE);
         if (file != BUSTER_PP_NONE)
         {
             pp_run_file(pp, file);
@@ -6508,14 +6825,14 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
         {
             length += (uint64_t)sprintf(command_line + length, "#include \"%s\"\n", pp->options.includes[i]);
         }
-        const uint32_t includes = length != 0 ? pp_virtual_file(pp, "<built-in>", command_line, (uint32_t)length) : BUSTER_PP_NONE;
+        const uint32_t includes = length != 0 ? pp_virtual_file(pp, "<built-in>", command_line, (uint32_t)length, BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
         if (includes != BUSTER_PP_NONE)
         {
             pp_run_file(pp, includes);
         }
     }
     // The main file.
-    const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), false) : BUSTER_PP_NONE;
+    const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), BUSTER_PP_USER_FILE) : BUSTER_PP_NONE;
     if (file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE)
     {
         pp->main_file = file;
@@ -6634,6 +6951,295 @@ static bool pp_needs_separation(uint8_t before_last, uint8_t before_kind, uint8_
 // lex as one), each line of the source on a line of its own, pragmas on lines of their own, and unless `-P`
 // (`markers` false) a line marker (`# 12 "file.h" 2`) wherever the output moves to another file or skips lines. A
 // token at a time through stdio: the scalar kernels' printer, and the oracle of pp_print_vector.
+// -E's line markers, kept the same way by both printers as clang's PrintPPOutputPPCallbacks keeps them: the include
+// stack's top (a range), and the presumed line, #line offset, name and system level of the output's current line. The
+// main file's range roots the stack, since clang includes its <built-in> buffer, and with it the forced includes, from
+// the main file. Per range, the latest of its line notes passed so far (`cursors`, BUSTER_PP_NONE before the first);
+// the next expansion start to pass; and the text of the markers one step writes, in the printer's scratch arena.
+typedef struct PPMarkers PPMarkers;
+struct PPMarkers
+{
+    uint32_t range;
+    uint32_t line;
+    int64_t delta;
+    const char* name;
+    uint32_t name_length;
+    uint8_t system;
+    uint32_t root;
+    uint32_t* cursors;
+    uint32_t expansion;
+    Arena* arena;
+    char* text;
+    uint64_t length;
+    uint64_t capacity;
+};
+
+// A position as a range's line notes give it.
+typedef struct PPPresumed PPPresumed;
+struct PPPresumed
+{
+    uint32_t line;
+    int64_t delta;
+    const char* name;
+    uint32_t name_length;
+    uint8_t system;
+};
+
+// The markers' state before the first token: the stack is the main file's, at its first line, which the text gives
+// (`# 1 "main.c"`, as clang's first line is), or nothing without a main file.
+static bool pp_markers_initialize(const Preprocessor* pp, PPMarkers* markers, Arena* arena)
+{
+    *markers = (PPMarkers){
+        .range = BUSTER_PP_NONE,
+        .root = BUSTER_PP_NONE,
+        .cursors = arena_push_array(arena, (uint64_t)pp->range_count + 1, sizeof(uint32_t), 4),
+        .arena = arena,
+        .capacity = 4096,
+        .text = arena_push(arena, 4096, 1),
+    };
+    for (uint32_t r = 0; markers->cursors != 0 && r <= pp->range_count; r += 1)
+    {
+        markers->cursors[r] = BUSTER_PP_NONE;
+    }
+    for (uint32_t r = 0; markers->root == BUSTER_PP_NONE && r < pp->range_count; r += 1)
+    {
+        markers->root = pp->ranges[r].parent == BUSTER_PP_NONE && pp->ranges[r].file == pp->main_file ? r : BUSTER_PP_NONE;
+    }
+    return markers->cursors != 0 && markers->text != 0;
+}
+
+// A range's parent on the stack: its includer, or the main file's range for another root (the command line's and the
+// forced includes' files).
+static uint32_t pp_print_parent(const Preprocessor* pp, const PPMarkers* markers, uint32_t range)
+{
+    const uint32_t parent = pp->ranges[range].parent;
+    return parent != BUSTER_PP_NONE || range == markers->root ? parent : markers->root;
+}
+
+static uint32_t pp_print_depth(const Preprocessor* pp, const PPMarkers* markers, uint32_t range)
+{
+    uint32_t result = 0;
+    for (uint32_t at = pp_print_parent(pp, markers, range); at != BUSTER_PP_NONE; at = pp_print_parent(pp, markers, at))
+    {
+        result += 1;
+    }
+    return result;
+}
+
+// The presumed position of `location` in `range`, at physical line `physical`: by the range's latest line note at or
+// before it, found from the range's cursor (going forward, as the printer mostly asks, else from the range's first).
+static PPPresumed pp_print_presumed(const Preprocessor* pp, PPMarkers* markers, uint32_t range, uint32_t location, uint32_t physical)
+{
+    const PPRange* record = &pp->ranges[range];
+    uint32_t at = markers->cursors[range];
+    at = at != BUSTER_PP_NONE && pp->line_directives[at].location > location ? BUSTER_PP_NONE : at;
+    uint32_t next = at == BUSTER_PP_NONE ? record->first_line_directive : pp->line_directives[at].next_in_range;
+    while (next != BUSTER_PP_NONE && pp->line_directives[next].location <= location)
+    {
+        at = next;
+        next = pp->line_directives[next].next_in_range;
+    }
+    markers->cursors[range] = at;
+    const PPFile* file = &pp->files[record->file];
+    const PPLineDirective* note = at != BUSTER_PP_NONE ? &pp->line_directives[at] : 0;
+    const bool renamed = note != 0 && note->name != 0;
+    const int64_t delta = note != 0 ? note->delta : 0;
+    return (PPPresumed){
+        .line = (uint32_t)((int64_t)physical + delta),
+        .delta = delta,
+        .name = renamed ? note->name : file->path,
+        .name_length = renamed ? note->name_length : file->path_length,
+        .system = note != 0 ? note->system : record->system,
+    };
+}
+
+// The presumed position where a range includes another (`child`): the line after the directive when `after`, for a
+// marker that goes back to it.
+static PPPresumed pp_print_includer(Preprocessor* pp, PPMarkers* markers, uint32_t range, uint32_t child, bool after)
+{
+    uint32_t column;
+    const uint32_t location = pp->ranges[child].include_location;
+    PPPresumed result = pp_print_presumed(pp, markers, range, location, pp_line_of(pp, range, location, &column));
+    result.line += after;
+    return result;
+}
+
+// Adds a line marker to the step's text: `# line "name"`, the flags, the system level's (3, or 3 4) and a line break,
+// with a break first when something is on the output's current line. The name is escaped as clang writes it
+// (raw_ostream::write_escaped): \\, \", \t and \n, and a byte outside ' ' to '~' as three octal digits.
+static bool pp_print_marker_line(PPMarkers* markers, bool* line_start, uint32_t line, const char* name, uint32_t name_length, const char* flags, uint8_t system)
+{
+    const uint64_t need = markers->length + 4 * (uint64_t)name_length + 64;
+    if (need > markers->capacity)
+    {
+        char* text = arena_push(markers->arena, 2 * need, 1);
+        if (text != 0)
+        {
+            memcpy(text, markers->text, markers->length);
+            markers->text = text;
+            markers->capacity = 2 * need;
+        }
+    }
+    const bool result = need <= markers->capacity;
+    if (result)
+    {
+        char* out = markers->text + markers->length;
+        uint64_t n = 0;
+        out[n] = '\n';
+        n += !*line_start;
+        n += (uint64_t)sprintf(out + n, "# %u \"", line);
+        for (uint32_t i = 0; i < name_length; i += 1)
+        {
+            const uint8_t c = (uint8_t)name[i];
+            const char escape = c == '\\' ? '\\' : c == '"' ? '"' : c == '\t' ? 't' : c == '\n' ? 'n' : 0;
+            if (escape != 0)
+            {
+                out[n] = '\\';
+                out[n + 1] = escape;
+                n += 2;
+            }
+            else if (c >= ' ' && c <= '~')
+            {
+                out[n] = (char)c;
+                n += 1;
+            }
+            else
+            {
+                out[n] = '\\';
+                out[n + 1] = (char)('0' + (c >> 6));
+                out[n + 2] = (char)('0' + ((c >> 3) & 7));
+                out[n + 3] = (char)('0' + (c & 7));
+                n += 4;
+            }
+        }
+        n += (uint64_t)sprintf(out + n, "\"%s%s\n", flags, system == BUSTER_PP_EXTERN_C_FILE ? " 3 4" : system == BUSTER_PP_SYSTEM_FILE ? " 3" : "");
+        markers->length += n;
+        *line_start = true;
+    }
+    return result;
+}
+
+// The first step: `# 1 "main.c"`, the main file's marker, in markers->text.
+static bool pp_print_start(const Preprocessor* pp, PPMarkers* markers)
+{
+    markers->length = 0;
+    bool line_start = true;
+    bool result = true;
+    if (markers->root != BUSTER_PP_NONE)
+    {
+        const PPRange* root = &pp->ranges[markers->root];
+        const PPFile* file = &pp->files[root->file];
+        result = pp_print_marker_line(markers, &line_start, 1, file->path, file->path_length, "", root->system);
+        markers->range = markers->root;
+        markers->line = 1;
+        markers->delta = 0;
+        markers->name = file->path;
+        markers->name_length = file->path_length;
+        markers->system = root->system;
+    }
+    return result;
+}
+
+// Where -E places a token that starts an output line: at its own location; or for one a macro made, at the start of
+// the expansion it came from (the expansion starts are passed in the output's order), as clang places a token by its
+// expansion location; or for a #pragma's '#', which is in no source, at the directive (its name's location).
+static uint32_t pp_print_location(const Preprocessor* pp, PPMarkers* markers, uint32_t token)
+{
+    uint32_t at = markers->expansion;
+    while (at < pp->expansion_start_count && pp->expansion_starts[at].token <= token)
+    {
+        at += 1;
+    }
+    markers->expansion = at;
+    const uint8_t flags = pp->output.flags[token];
+    const uint32_t own = pp->output.locations[token];
+    const bool directive = pp->output.kinds[token] == C_TOKEN_HASH && own == pp->hash_location && !(flags & BUSTER_PP_FROM_MACRO);
+    return (flags & BUSTER_PP_FROM_MACRO) && at != 0 ? pp->expansion_starts[at - 1].location : directive ? pp->output.locations[token + 1] : own;
+}
+
+// Places a token that starts an output line, at `location` in `range` (pp_print_location), at physical line
+// `physical`, as clang's printer does (FileChanged, MoveToLine): going back to an includer marks each file it goes back
+// to with flag 2, and going into an included file each file it goes into with flag 1; a #line, a new name or a new
+// system level, a marker; a jump forward of up to 8 lines, that many line breaks; any other jump, a marker. The markers
+// go to markers->text (markers->length bytes, ending in a line break); returns the line breaks to put after them, before
+// the token, and false in `*written` if memory ran out.
+static uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint32_t range, uint32_t location, uint32_t physical, bool line_start, bool* written)
+{
+    markers->length = 0;
+    const PPPresumed here = pp_print_presumed(pp, markers, range, location, physical);
+    uint32_t result = 0;
+    bool fits = true;
+    if (range != markers->range)
+    {
+        // The ranges from `range` up to below the stack's common part with the top, bottom up, then the common part.
+        uint32_t path[BUSTER_PP_MAX_INCLUDE_DEPTH + 8];
+        uint32_t path_count = 0;
+        uint32_t common = markers->range;
+        uint32_t down = range;
+        uint32_t common_depth = common != BUSTER_PP_NONE ? pp_print_depth(pp, markers, common) : 0;
+        uint32_t down_depth = pp_print_depth(pp, markers, down);
+        while (down != BUSTER_PP_NONE && down_depth > common_depth && path_count < BUSTER_ARRAY_LENGTH(path))
+        {
+            path[path_count] = down;
+            path_count += 1;
+            down = pp_print_parent(pp, markers, down);
+            down_depth -= 1;
+        }
+        while (common != BUSTER_PP_NONE && common_depth > down_depth)
+        {
+            common = pp_print_parent(pp, markers, common);
+            common_depth -= 1;
+        }
+        while (common != down && path_count < BUSTER_ARRAY_LENGTH(path))
+        {
+            path[path_count] = down;
+            path_count += 1;
+            down = pp_print_parent(pp, markers, down);
+            common = pp_print_parent(pp, markers, common);
+        }
+        if (common == BUSTER_PP_NONE)
+        {
+            // No common part (no main file's range): the token's position alone.
+            fits = pp_print_marker_line(markers, &line_start, here.line, here.name, here.name_length, "", here.system);
+        }
+        else
+        {
+            for (uint32_t at = markers->range; fits && at != common; at = pp_print_parent(pp, markers, at))
+            {
+                const uint32_t to = pp_print_parent(pp, markers, at);
+                const PPPresumed back = to == range ? here : pp_print_includer(pp, markers, to, at, true);
+                fits = pp_print_marker_line(markers, &line_start, back.line, back.name, back.name_length, " 2", back.system);
+            }
+            for (uint32_t k = path_count; fits && k > 0; k -= 1)
+            {
+                const uint32_t to = path[k - 1];
+                const PPPresumed into = to == range ? here : pp_print_includer(pp, markers, to, path[k - 2], false);
+                fits = pp_print_marker_line(markers, &line_start, into.line, into.name, into.name_length, " 1", into.system);
+            }
+        }
+    }
+    else if (here.name != markers->name || here.delta != markers->delta || here.system != markers->system)
+    {
+        fits = pp_print_marker_line(markers, &line_start, here.line, here.name, here.name_length, "", here.system);
+    }
+    else if (here.line > markers->line && here.line - markers->line <= 8)
+    {
+        result = here.line - markers->line;
+    }
+    else if (here.line != markers->line || !line_start)
+    {
+        fits = pp_print_marker_line(markers, &line_start, here.line, here.name, here.name_length, "", here.system);
+    }
+    markers->range = range;
+    markers->line = here.line;
+    markers->delta = here.delta;
+    markers->name = here.name;
+    markers->name_length = here.name_length;
+    markers->system = here.system;
+    *written = fits;
+    return result;
+}
+
 static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
 {
     const PPTokens* out = &pp->output;
@@ -6644,9 +7250,12 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
     uint8_t previous_kind = 0;
     bool line_start = true;
     bool force_line = false;
-    uint32_t current_range = BUSTER_PP_NONE;
-    uint32_t current_line = 0;
-    bool result = buffer != 0;
+    PPMarkers marked;
+    bool result = buffer != 0 && pp_markers_initialize(pp, &marked, scratch.arena) && (!markers || pp_print_start(pp, &marked));
+    if (result && markers)
+    {
+        fwrite(marked.text, 1, marked.length, stream);
+    }
     for (uint32_t i = 0; result && i < out->count; i += 1)
     {
         const uint8_t kind = out->kinds[i];
@@ -6656,44 +7265,20 @@ static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
             force_line = true;
             continue;
         }
-        if ((flags & BUSTER_PP_START_OF_LINE) || force_line)
+        if ((flags & BUSTER_PP_START_OF_LINE) || force_line || i == 0)
         {
-            uint32_t newlines = 1;
-            if (markers && (flags & BUSTER_PP_START_OF_LINE) && !(flags & BUSTER_PP_FROM_MACRO))
+            uint32_t breaks = !line_start;
+            const uint32_t place = markers ? pp_print_location(pp, &marked, i) : 0;
+            const uint32_t range = markers ? pp_find_range(pp, place) : BUSTER_PP_NONE;
+            if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
             {
-                const uint32_t range = pp_find_range(pp, out->locations[i]);
                 uint32_t column;
-                const uint32_t line = range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE ? pp_line_of(pp, range, out->locations[i], &column) : current_line;
-                if (range != current_range && range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
-                {
-                    const PPRange* record = &pp->ranges[range];
-                    const PPFile* file = &pp->files[record->file];
-                    const bool entering = current_range != BUSTER_PP_NONE && record->parent == current_range;
-                    const bool returning = current_range != BUSTER_PP_NONE && pp->ranges[current_range].parent == range;
-                    fprintf(stream, "%s# %u \"%s\"%s%s\n", line_start ? "" : "\n", line, file->path, entering ? " 1" : returning ? " 2" : "", file->system ? " 3" : "");
-                    current_range = range;
-                    current_line = line;
-                    newlines = 0;
-                    line_start = true;
-                }
-                else if (range == current_range && line > current_line)
-                {
-                    newlines = line - current_line;
-                    if (newlines > 8)
-                    {
-                        fprintf(stream, "%s# %u \"%s\"\n", line_start ? "" : "\n", line, pp->files[pp->ranges[range].file].path);
-                        newlines = 0;
-                        line_start = true;
-                    }
-                    current_line = line;
-                }
+                breaks = pp_print_place(pp, &marked, range, place, pp_line_of(pp, range, place, &column), line_start, &result);
+                fwrite(marked.text, 1, marked.length, stream);
             }
-            if (!line_start)
+            for (uint32_t n = 0; n < breaks; n += 1)
             {
-                for (uint32_t n = 0; n < (newlines == 0 ? 1 : newlines); n += 1)
-                {
-                    fputc('\n', stream);
-                }
+                fputc('\n', stream);
             }
             line_start = true;
             force_line = false;
@@ -6857,8 +7442,13 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
     // The state between tokens, as pp_print_scalar keeps it.
     bool line_start = true;
     bool force_line = false;
-    uint32_t current_range = BUSTER_PP_NONE;
-    uint32_t current_line = 0;
+    PPMarkers marked;
+    result = result && pp_markers_initialize(pp, &marked, scratch.arena) && (!markers || pp_print_start(pp, &marked));
+    if (result && markers)
+    {
+        memcpy(buffer, marked.text, marked.length);
+        used = marked.length;
+    }
     // The last character and kind of the token before the chunk, for its first token's space.
     uint8_t previous_last = 0;
     uint8_t previous_kind = 0;
@@ -6947,56 +7537,49 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
         for (uint32_t k = 0; result && k < available; k += 1)
         {
             const uint32_t i = c + k;
-            const uint8_t token_flags = out_flags[i];
             const uint32_t length = lengths[k];
             if ((pragma_ends >> k) & 1)
             {
                 force_line = true;
                 continue;
             }
-            // Room for a marker (with its path), the breaks, a space and the spelling, or a write of what the buffer
-            // holds.
-            const uint64_t room = (uint64_t)length + 16 + 4096 + 64;
+            // Room for the breaks, a space and the spelling, or a write of what the buffer holds.
+            const uint64_t room = (uint64_t)length + 16 + 64;
             if (used + room > capacity)
             {
                 result = fwrite(buffer, 1, used, stream) == used;
                 used = 0;
             }
             const uint32_t starts_line = (uint32_t)((line_starts >> k) & 1);
-            uint32_t newlines = starts_line;
-            if (markers && starts_line && (token_flags & BUSTER_PP_START_OF_LINE) && !(token_flags & BUSTER_PP_FROM_MACRO))
+            // A line start's break after something on the line; with markers, as many as pp_print_place puts.
+            uint32_t breaks = starts_line & (uint32_t)!line_start;
+            if (markers && starts_line)
             {
-                const uint32_t range = pp_directory_range(pp, directory, out_locations[i]);
-                const bool in_file = range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE;
-                const uint32_t line = in_file ? pp_print_line(pp, &lines, range, out_locations[i]) : current_line;
-                if (range != current_range && in_file)
+                const uint32_t place = pp_print_location(pp, &marked, i);
+                const uint32_t range = pp_directory_range(pp, directory, place);
+                if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
                 {
-                    const PPRange* record = &pp->ranges[range];
-                    const PPFile* file = &pp->files[record->file];
-                    const bool entering = current_range != BUSTER_PP_NONE && record->parent == current_range;
-                    const bool returning = current_range != BUSTER_PP_NONE && pp->ranges[current_range].parent == range;
-                    used += (uint64_t)snprintf((char*)buffer + used, capacity - used, "%s# %u \"%s\"%s%s\n", line_start ? "" : "\n", line, file->path,
-                                               entering ? " 1" : returning ? " 2" : "", file->system ? " 3" : "");
-                    current_range = range;
-                    current_line = line;
-                    newlines = 0;
-                    line_start = true;
-                }
-                else if (range == current_range && line > current_line)
-                {
-                    newlines = line - current_line;
-                    if (newlines > 8)
+                    bool placed = true;
+                    breaks = pp_print_place(pp, &marked, range, place, pp_print_line(pp, &lines, range, place), line_start, &placed);
+                    // The markers go through the buffer, or past it when they are longer than its room.
+                    if (used + marked.length + room > capacity)
                     {
-                        used += (uint64_t)snprintf((char*)buffer + used, capacity - used, "%s# %u \"%s\"\n", line_start ? "" : "\n", line,
-                                                   pp->files[pp->ranges[range].file].path);
-                        newlines = 0;
-                        line_start = true;
+                        result = result && fwrite(buffer, 1, used, stream) == used;
+                        used = 0;
                     }
-                    current_line = line;
+                    if (marked.length + room <= capacity)
+                    {
+                        memcpy(buffer + used, marked.text, marked.length);
+                        used += marked.length;
+                    }
+                    else
+                    {
+                        result = result && fwrite(marked.text, 1, marked.length, stream) == marked.length;
+                    }
+                    result = result && placed;
+                    line_start = line_start || marked.length != 0;
                 }
             }
-            // The breaks go out only after something on the line: a line start's one, or as many as the source skipped.
-            const uint32_t breaks = line_start ? 0 : newlines;
             if (BUSTER_LIKELY(breaks <= 1))
             {
                 buffer[used] = '\n';

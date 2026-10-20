@@ -11,28 +11,33 @@
 // scalar kernels, whose output streams must be the same token for token (kind, flags, value and location), whose
 // directive tables must be the same (pp_same_directive_tables), whose tokens' spellings must be the expected ones, and
 // which must give the expected number of warnings. A case can name more files and options for both sides (%d stands
-// for its directory). With --clang, each case is also preprocessed by `clang -E -P` and must give the same spellings,
-// and two more checks compare what the cases can't, since the files' runs read clang's predefines: our built-in
-// predefines with `clang -dM -E` in 14 option sets (pp_test_predefines), and __is_identifier of every predefined name
-// with clang's in each language mode (pp_test_keywords).
+// for its directory), and the text -E prints with line markers. Then __TIMESTAMP__ must be each file's modification
+// time (pp_test_timestamps). With --clang, each case is also preprocessed by `clang -E`: it must give the same
+// spellings, and its line markers must put every token where ours do (pp_compare_placed). More checks compare what the
+// cases can't, since the files' runs read clang's predefines: our built-in predefines with `clang -dM -E` in 14 option
+// sets (pp_test_predefines), and in each language mode __is_identifier of every predefined name (pp_test_keywords)
+// and the feature queries of every feature name (pp_test_features) with clang's.
 //
 // With files, each is preprocessed with the options (-I, -isystem, -D, -std=, -ffreestanding, ... as for -E) by both
-// kernels, which must agree, and with --clang compared with `clang -E -P` and the same options: our side then reads
-// clang's own predefines (`clang -dM -E` with the options, as --predefines), so that both start from the same macros.
-// The first difference is printed with the tokens around it. In both, the vectorized printer's text must be the scalar
-// printer's byte for byte, with line markers and without, and must lex back into the stream's tokens.
+// kernels, which must agree, and with --clang compared with `clang -E` and the same options, spellings and line
+// markers: our side then reads clang's own predefines (`clang -dM -E` with the options, as --predefines), so that both
+// start from the same macros. The first difference is printed with the tokens around it. In both, the vectorized
+// printer's text must be the scalar printer's byte for byte, with line markers and without, and must lex back into
+// the stream's tokens.
 //
 // main.c includes this file after c_preprocessor.c. Layout: the token spellings of a stream and of a text, the
-// comparison, clang's side (pp_test_clang), the cases, the files, the predefines and keywords checks, and
-// run_preprocessor_tests.
+// comparison, clang's side (pp_test_clang), the line markers' places (PPPlaced), the cases, the files, the predefines,
+// keywords, features and timestamps checks, and run_preprocessor_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 
 #define BUSTER_PP_TEST_CONTEXT 6
@@ -285,13 +290,13 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
     return result;
 }
 
-// Runs `clang -E -P` with the options' arguments on `path`: its output, or null. Also writes clang's predefines for the
-// same arguments to `predefines_path` (when it isn't null), as `clang -dM -E` gives them.
+// Runs `clang -E` with the options' arguments on `path`: its output, with line markers, or null. Also writes clang's
+// predefines for the same arguments to `predefines_path` (when it isn't null), as `clang -dM -E` gives them.
 static char* pp_test_clang(char** arguments, int argument_count, const char* path, const char* predefines_path, size_t* length)
 {
     char* result = 0;
     *length = 0;
-    // The command: env -u CPATH clang [arguments] -E -P path. The arguments are passed through a temporary argv.
+    // The command: env -u CPATH clang [arguments] -E path. The arguments are passed through a temporary argv.
     for (int pass = predefines_path != 0 ? 0 : 1; pass < 2; pass += 1)
     {
         int pipe_fds[2];
@@ -319,7 +324,6 @@ static char* pp_test_clang(char** arguments, int argument_count, const char* pat
             }
             else
             {
-                argv[n++] = "-P";
                 argv[n++] = (char*)path;
             }
             argv[n] = 0;
@@ -371,6 +375,236 @@ static char* pp_test_clang(char** arguments, int argument_count, const char* pat
     return result;
 }
 
+// The tokens of a text -E printed with line markers, and where the markers put each, as a compiler reading the text
+// takes them (GNU line markers, `# line "name" flags`): its presumed line, and its file on the include stack as a
+// state, which is the file's name as the marker spells it, its system level (flag 3, or 3 and 4) and its includer's
+// state. Flag 1 enters a file, 2 goes back to the includer, and a marker without either renames the current file. A
+// marker's line isn't lexed.
+typedef struct PPPlacedState PPPlacedState;
+struct PPPlacedState
+{
+    uint64_t name;
+    uint32_t name_length;
+    uint32_t parent;
+    uint8_t system;
+};
+
+typedef struct PPPlaced PPPlaced;
+struct PPPlaced
+{
+    Arena arena;
+    PPSpellings spellings;
+    const uint8_t* text;
+    uint32_t* lines;
+    uint32_t* states;
+    PPPlacedState* records;
+    uint32_t record_count;
+};
+
+// Is the line at `text[at]` a marker? Its line, name (escaped, as an offset and length) and flags if so.
+static bool pp_marker_line(const uint8_t* text, uint64_t at, uint64_t end, uint32_t* line, uint64_t* name, uint32_t* name_length, bool flags[5])
+{
+    bool result = at + 2 < end && text[at] == '#' && text[at + 1] == ' ' && text[at + 2] >= '0' && text[at + 2] <= '9';
+    uint64_t i = at + 2;
+    uint64_t number = 0;
+    while (result && i < end && text[i] >= '0' && text[i] <= '9')
+    {
+        number = number * 10 + (uint64_t)(text[i] - '0');
+        i += 1;
+    }
+    result = result && number <= UINT32_MAX && i + 1 < end && text[i] == ' ' && text[i + 1] == '"';
+    i += 2;
+    *name = i;
+    while (result && i < end && text[i] != '"')
+    {
+        i += text[i] == '\\' ? 2 : 1;
+    }
+    result = result && i < end;
+    *name_length = (uint32_t)(i - *name);
+    *line = (uint32_t)number;
+    i += 1;
+    memset(flags, 0, 5);
+    while (result && i + 1 < end && text[i] == ' ' && text[i + 1] >= '1' && text[i + 1] <= '4')
+    {
+        flags[text[i + 1] - '0'] = true;
+        i += 2;
+    }
+    return result;
+}
+
+static bool pp_placed_tokens(const uint8_t* text, uint64_t length, PPPlaced* placed)
+{
+    uint64_t line_count = 1;
+    for (uint64_t i = 0; i < length; i += 1)
+    {
+        line_count += text[i] == '\n';
+    }
+    const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY(length);
+    placed->arena = arena_reserve(length + 64 + line_count * 24 + capacity * 17 + 4096);
+    placed->text = text;
+    uint8_t* blank = arena_push(&placed->arena, length + 64, 64);
+    uint64_t* line_starts = arena_push_array(&placed->arena, line_count + 1, sizeof(uint64_t), 8);
+    uint32_t* line_lines = arena_push_array(&placed->arena, line_count + 1, sizeof(uint32_t), 4);
+    uint32_t* line_states = arena_push_array(&placed->arena, line_count + 1, sizeof(uint32_t), 4);
+    placed->records = arena_push_array(&placed->arena, line_count + 2, sizeof(PPPlacedState), 8);
+    uint8_t* kinds = arena_push(&placed->arena, capacity, 64);
+    uint32_t* starts = arena_push_array(&placed->arena, capacity, sizeof(uint32_t), 64);
+    uint32_t* ends = arena_push_array(&placed->arena, capacity, sizeof(uint32_t), 64);
+    bool result = blank != 0 && line_starts != 0 && line_lines != 0 && line_states != 0 && placed->records != 0 && kinds != 0 && starts != 0 && ends != 0;
+    if (result)
+    {
+        memcpy(blank, text, length);
+        memset(blank + length, 0, 64);
+        // State 0: before any marker.
+        placed->records[0] = (PPPlacedState){ .parent = UINT32_MAX };
+        placed->record_count = 1;
+        uint32_t state = 0;
+        uint32_t line = 1;
+        uint64_t at = 0;
+        for (uint64_t k = 0; k < line_count; k += 1)
+        {
+            uint64_t end = at;
+            while (end < length && text[end] != '\n')
+            {
+                end += 1;
+            }
+            line_starts[k] = at;
+            uint32_t number;
+            uint64_t name;
+            uint32_t name_length;
+            bool flags[5];
+            if (pp_marker_line(text, at, end, &number, &name, &name_length, flags))
+            {
+                const uint32_t includer = placed->records[state].parent;
+                const uint32_t parent = flags[1] ? state : flags[2] ? (includer != UINT32_MAX ? placed->records[includer].parent : UINT32_MAX) : includer;
+                placed->records[placed->record_count] = (PPPlacedState){
+                    .name = name,
+                    .name_length = name_length,
+                    .parent = parent,
+                    .system = (uint8_t)(flags[3] ? (flags[4] ? 2 : 1) : 0),
+                };
+                state = placed->record_count;
+                placed->record_count += 1;
+                memset(blank + at, ' ', end - at);
+                line = number;
+                line_lines[k] = 0;
+            }
+            else
+            {
+                line_lines[k] = line;
+                line += 1;
+            }
+            line_states[k] = state;
+            at = end + 1;
+        }
+        line_starts[line_count] = UINT64_MAX;
+        const int64_t count = c_tokenize(blank, length, kinds, starts, ends, 0);
+        result = count >= 0 && pp_spellings_initialize(&placed->spellings, (uint64_t)count + 1, length + 64);
+        placed->lines = result ? arena_push_array(&placed->arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
+        placed->states = result ? arena_push_array(&placed->arena, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
+        result = result && placed->lines != 0 && placed->states != 0;
+        uint64_t k = 0;
+        for (int64_t i = 0; result && i < count; i += 1)
+        {
+            while (line_starts[k + 1] <= starts[i])
+            {
+                k += 1;
+            }
+            pp_spellings_add(&placed->spellings, blank + starts[i], ends[i] - starts[i], 0);
+            placed->lines[i] = line_lines[k];
+            placed->states[i] = line_states[k];
+        }
+    }
+    return result;
+}
+
+static void pp_placed_release(PPPlaced* placed)
+{
+    arena_release(&placed->spellings.arena);
+    arena_release(&placed->arena);
+}
+
+// Are two states the same stack: the same names and system levels down to the root?
+static bool pp_same_placed_states(const PPPlaced* a, uint32_t x, const PPPlaced* b, uint32_t y)
+{
+    bool result = true;
+    while (result && x != UINT32_MAX && y != UINT32_MAX)
+    {
+        const PPPlacedState* p = &a->records[x];
+        const PPPlacedState* q = &b->records[y];
+        result = p->name_length == q->name_length && p->system == q->system && memcmp(a->text + p->name, b->text + q->name, p->name_length) == 0;
+        x = p->parent;
+        y = q->parent;
+    }
+    return result && x == y;
+}
+
+static void pp_print_placed_state(const PPPlaced* placed, uint32_t state)
+{
+    for (uint32_t at = state; at != UINT32_MAX; at = placed->records[at].parent)
+    {
+        const PPPlacedState* record = &placed->records[at];
+        printf("%s\"%.*s\"%s", at == state ? "" : " < ", (int)record->name_length, (const char*)placed->text + record->name,
+               record->system == 2 ? " 3 4" : record->system == 1 ? " 3" : "");
+    }
+}
+
+// Do two texts with line markers put the same tokens on the same presumed lines, in the same include stacks? Prints the
+// first token whose place differs, with its stacks.
+static bool pp_compare_placed(const PPPlaced* ours, const PPPlaced* theirs, const char* name, const char* their_name)
+{
+    const uint64_t count = ours->spellings.count < theirs->spellings.count ? ours->spellings.count : theirs->spellings.count;
+    uint64_t i = 0;
+    uint32_t last_ours = UINT32_MAX;
+    uint32_t last_theirs = UINT32_MAX;
+    bool same = true;
+    while (same && i < count)
+    {
+        same = ours->lines[i] == theirs->lines[i];
+        if (same && (ours->states[i] != last_ours || theirs->states[i] != last_theirs))
+        {
+            same = pp_same_placed_states(ours, ours->states[i], theirs, theirs->states[i]);
+            last_ours = ours->states[i];
+            last_theirs = theirs->states[i];
+        }
+        i += same;
+    }
+    const bool result = same && ours->spellings.count == theirs->spellings.count;
+    if (!result)
+    {
+        printf("%s: the line markers place token %lu (of %lu, %s %lu) differently\n", name, (unsigned long)i, (unsigned long)ours->spellings.count, their_name,
+               (unsigned long)theirs->spellings.count);
+        for (int side = 0; side < 2 && i < count; side += 1)
+        {
+            const PPPlaced* placed = side == 0 ? ours : theirs;
+            const PPSpellings* spellings = &placed->spellings;
+            printf("  %-6s line %u of ", side == 0 ? "ours" : their_name, placed->lines[i]);
+            pp_print_placed_state(placed, placed->states[i]);
+            printf(":");
+            const uint64_t first = i > BUSTER_PP_TEST_CONTEXT ? i - BUSTER_PP_TEST_CONTEXT : 0;
+            for (uint64_t k = first; k < spellings->count && k < i + BUSTER_PP_TEST_CONTEXT; k += 1)
+            {
+                printf("%s%.*s", k == i ? " >>" : " ", (int)(spellings->lengths[k] < 60 ? spellings->lengths[k] : 60), spellings->bytes + spellings->offsets[k]);
+            }
+            printf("\n");
+        }
+    }
+    return result;
+}
+
+// Our line markers against clang's (`theirs`, from pp_test_clang): the vectorized printer's text with markers must
+// place every token as clang's does.
+static bool pp_test_placed(Preprocessor* pp, const PPPlaced* theirs, const char* name)
+{
+    size_t length = 0;
+    char* text = pp_test_print(pp, true, true, &length);
+    PPPlaced ours = { 0 };
+    const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, &ours) && pp_compare_placed(&ours, theirs, name, "clang");
+    pp_placed_release(&ours);
+    free(text);
+    return result;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The cases
 
@@ -400,11 +634,26 @@ struct PPTestCase
     const char* options;
     // More files, ended by one without a path; or null.
     const PPTestFile* files;
+    // The text -E prints with line markers (compared byte for byte, %d for the directory), or null.
+    const char* markers;
 };
 
 static const PPTestFile pp_test_files_include_next[] = {
     { "first/wrapper.h", "LAYER_ONE\n#include_next <wrapper.h>\n" },
     { "second/wrapper.h", "LAYER_TWO\n" },
+    { 0, 0 },
+};
+
+static const PPTestFile pp_test_files_renamed[] = {
+    { "inc.h", "int in_header;\n#line 50 \"renamed.h\"\nint after;\n" },
+    { 0, 0 },
+};
+
+static const PPTestFile pp_test_files_stack[] = {
+    { "a.h", "a_token\n#include \"b.h\"\na_after\n" },
+    { "b.h", "b_token\n" },
+    { "sys/s.h", "sys_first\n\n\n\n\n\n\n\n\n\n\nsys_far\n" },
+    { "p.h", "user_before\n#pragma GCC system_header\nuser_after\n" },
     { 0, 0 },
 };
 
@@ -538,6 +787,47 @@ static const PPTestCase pp_test_cases[] = {
       "__BASE_FILE__\n", "c17", "\"logical.c\"\n\"logical.c\"\n", false, 0, 0, 0 },
     { "#line continued, its number indented", "#line \\\n 100\n__LINE__\n#line \\\n200\n__LINE__\n# \\\n 400\n__LINE__\n#line \\\r\n 500\n__LINE__\n",
       0, "c17", "100\n201\n400\n500\n", false, 0, 0, 0 },
+    // #193's third review: -E's line markers give the presumed positions, as clang's do: #line's numbers and names in
+    // the main file and in an included one, a line that starts with a macro on the line of its name (also when the
+    // invocation spans lines), the line after a _Pragma's pragma, flag 1 and 2 for each file the stack goes into and
+    // back to, 3 for system headers (from -isystem, and after #pragma GCC system_header) on every marker, and names
+    // escaped as clang writes them.
+    { "line markers: #line in the main file and in an included one", "#line 100 \"logical.c\"\nint x;\nint y;\n#line 7\nint z;\n#include \"inc.h\"\nint w;\n",
+      0, "c17", "int x; int y; int z; int in_header; int after; int w;", false, 0, 0, pp_test_files_renamed,
+      "# 1 \"%d/case.c\"\n# 100 \"logical.c\"\nint x;\nint y;\n# 7 \"logical.c\"\nint z;\n# 1 \"%d/inc.h\" 1\nint in_header;\n# 50 \"renamed.h\"\nint after;\n# 9 \"logical.c\" 2\nint w;\n" },
+    { "line markers: lines that start with macros, and the line after _Pragma", "#define E int a;\n#define F(x) x\nE\nE\n\nE\nF(int\nb;)\nc;\n\n\n\n\n\n\n\n\n\n\n\nE\nd;\n_Pragma(\"bar\") t\nu\n",
+      0, "c17", "int a; int a; int a; int b; c; int a; d; #pragma bar\nt u", false, 0, 0, 0,
+      "# 1 \"%d/case.c\"\n\n\nint a;\nint a;\n\nint a;\nint b;\n\nc;\n# 21 \"%d/case.c\"\nint a;\nd;\n#pragma bar\n# 23 \"%d/case.c\"\nt\nu\n" },
+    { "line markers: the include stack, system headers and escaped names", "#include \"a.h\"\nmain_token\n#include <s.h>\n#include \"p.h\"\n#line 5 \"a\\\\b\\\"c.c\"\nescaped\n#line 7 \"\xc3\xb1.c\"\nutf8\n",
+      0, "c17", "a_token b_token a_after main_token sys_first sys_far user_before user_after escaped utf8", false, 0, "-isystem %d/sys", pp_test_files_stack,
+      "# 1 \"%d/case.c\"\n# 1 \"%d/a.h\" 1\na_token\n# 1 \"%d/b.h\" 1\nb_token\n# 3 \"%d/a.h\" 2\na_after\n# 2 \"%d/case.c\" 2\nmain_token\n# 1 \"%d/sys/s.h\" 1 3\nsys_first\n# 12 \"%d/sys/s.h\" 3\nsys_far\n# 4 \"%d/case.c\" 2\n# 1 \"%d/p.h\" 1\nuser_before\n# 3 \"%d/p.h\" 3\nuser_after\n# 5 \"a\\\\b\\\"c.c\" 2\nescaped\n# 7 \"\\303\\261.c\"\nutf8\n" },
+    // #193's third review: GNU comma elision when a variadic macro's only argument is omitted (C17 keeps the comma),
+    // the space before a stringized __VA_OPT__ (outside the string), a definition checked where it is made, the
+    // signedness of UTF-16, UTF-32 and (C23) UTF-8 character constants in #if, the standard features each mode has,
+    // and #line's number and file name read without their line splices, with the file name's escapes decoded (clang
+    // rejects numeric ones).
+    { "comma elision with an omitted sole variadic argument (GNU)", "#define F(...) call(0, ##__VA_ARGS__)\nF()\nF(1)\n#define G(x, ...) call(x, ##__VA_ARGS__)\nG(0)\nG(0,)\nG(0, 1)\n",
+      0, "gnu17", "call(0)\ncall(0,1)\ncall(0)\ncall(0,)\ncall(0, 1)\n", false, 0, 0, 0 },
+    { "comma elision with an omitted sole variadic argument (C17)", "#define F(...) call(0, ##__VA_ARGS__)\nF()\nF(1)\n#define G(x, ...) call(x, ##__VA_ARGS__)\nG(0)\nG(0,)\nG(0, 1)\n",
+      0, "c17", "call(0,)\ncall(0,1)\ncall(0)\ncall(0,)\ncall(0, 1)\n", false, 0, 0, 0 },
+    { "the space before a stringized __VA_OPT__", "#define S(x) #x\n#define E(x) S(x)\n#define F(x, ...) a x#__VA_OPT__(b)\nE(F(, 1))\n#define G(x, ...) a x#__VA_OPT__()\nE(G(, 1))\n#define H(x, ...) a x#__VA_OPT__(b c)\nE(H(, 1))\n#define K(x, ...) a x #__VA_OPT__(b)\nE(K(, 1))\nE(F(, ))\n",
+      0, "c23", "\"a \\\"b\\\"\"\n\"a \\\"\\\"\"\n\"a \\\"b c\\\"\"\n\"a \\\"b\\\"\"\n\"a \\\"\\\"\"\n", false, 0, 0, 0 },
+    { "an unused definition whose # names no parameter", "#define F(x) # y\nOK\n",
+      0, "c17", "", true, 0, 0, 0 },
+    { "UTF-16, UTF-32 and wide character constants' signedness in #if", "#if u'a' < -1\nunsigned_char16\n#else\nwrong_signed_char16\n#endif\n#if U'a' < -1\nunsigned_char32\n#endif\n#if 'a' < -1\nwrong\n#else\nsigned_char\n#endif\n#if L'a' < -1\nwrong\n#else\nsigned_wchar\n#endif\n",
+      0, "gnu17", "unsigned_char16\nunsigned_char32\nsigned_char\nsigned_wchar\n", false, 0, 0, 0 },
+    { "UTF-8 character constants' signedness in #if (C23)", "#if u8'a' < -1\nunsigned_char8\n#else\nwrong_signed_char8\n#endif\n",
+      0, "c23", "unsigned_char8\n", false, 0, 0, 0 },
+    { "standard features in C99", "__has_feature(c_alignas) __has_feature(c_alignof) __has_feature(c_atomic) __has_feature(c_generic_selections) __has_feature(c_static_assert) __has_feature(c_thread_local) __has_feature(c_fixed_enum)\n__has_extension(c_alignas) __has_extension(c_atomic) __has_extension(c_generic_selections) __has_extension(c_fixed_enum)\n",
+      0, "c99", "0 0 0 0 0 0 0\n1 1 1 1\n", false, 0, 0, 0 },
+    { "standard features in GNU17", "__has_feature(c_alignas) __has_feature(c_alignof) __has_feature(c_atomic) __has_feature(c_generic_selections) __has_feature(c_static_assert) __has_feature(c_thread_local) __has_feature(c_fixed_enum)\n__has_extension(c_alignas) __has_extension(c_atomic) __has_extension(c_generic_selections) __has_extension(c_fixed_enum)\n",
+      0, "gnu17", "1 1 1 1 1 1 0\n1 1 1 1\n", false, 0, 0, 0 },
+    { "standard features in C23", "__has_feature(c_alignas) __has_feature(c_alignof) __has_feature(c_atomic) __has_feature(c_generic_selections) __has_feature(c_static_assert) __has_feature(c_thread_local) __has_feature(c_fixed_enum)\n__has_extension(c_alignas) __has_extension(c_atomic) __has_extension(c_generic_selections) __has_extension(c_fixed_enum)\n",
+      0, "c23", "1 1 1 1 1 1 1\n1 1 1 1\n", false, 0, 0, 0 },
+    { "#line's operands as phase 2 leaves them", "#line 1\\\n00\n__LINE__\n#line 100 \"virtual\\\n.c\"\n__FILE__\n#line 300 \"a\\\\b.c\"\n__FILE__\n#line 400 \"\\u00f1.c\"\n__FILE__\n#line 500 \"\\n.c\"\n__FILE__\n",
+      0, "c17", "101\n\"virtual.c\"\n\"a\\\\b.c\"\n\"\xc3\xb1.c\"\n\"\\n.c\"\n", false, 0, 0, 0 },
+    { "#line with a numeric escape in its file name", "#line 200 \"\\x76irtual.c\"\n__FILE__\n",
+      0, "c17", "", true, 0, 0, 0 },
     { "#include of a missing absolute path", "#include \"/buster-missing-directory/absent.h\"\nafter\n", 0, "c17", "", true },
     { "-include of a missing absolute path", "x\n", 0, "c17", "", true, 0, "-include /buster-missing-directory/absent.h", 0 },
 };
@@ -641,6 +931,51 @@ static int pp_test_arguments(const PPTestCase* test, const char* directory, cons
     return count;
 }
 
+// A case's text with line markers (PPTestCase.markers, %d for its directory) against the vectorized printer's, byte for
+// byte: the first line that differs is printed.
+static bool pp_test_markers(Preprocessor* pp, const PPTestCase* test, const char* directory)
+{
+    size_t length = 0;
+    char* text = pp_test_print(pp, true, true, &length);
+    char* wanted = 0;
+    size_t wanted_length = 0;
+    FILE* stream = open_memstream(&wanted, &wanted_length);
+    for (const char* at = test->markers; stream != 0 && *at != 0; at += 1)
+    {
+        if (at[0] == '%' && at[1] == 'd')
+        {
+            fputs(directory, stream);
+            at += 1;
+        }
+        else
+        {
+            fputc(*at, stream);
+        }
+    }
+    if (stream != 0)
+    {
+        fclose(stream);
+    }
+    const bool result = text != 0 && wanted != 0 && length == wanted_length && memcmp(text, wanted, length) == 0;
+    if (!result && text != 0 && wanted != 0)
+    {
+        size_t line = 0;
+        size_t at = 0;
+        while (at < length && at < wanted_length && text[at] == wanted[at])
+        {
+            line = text[at] == '\n' ? at + 1 : line;
+            at += 1;
+        }
+        const char* ours_end = memchr(text + line, '\n', length - line);
+        const char* wanted_end = memchr(wanted + line, '\n', wanted_length - line);
+        printf("%s: the line markers differ at byte %zu:\n  ours   %.*s\n  wanted %.*s\n", test->name, at, (int)((ours_end != 0 ? ours_end : text + length) - (text + line)),
+               text + line, (int)((wanted_end != 0 ? wanted_end : wanted + wanted_length) - (wanted + line)), wanted + line);
+    }
+    free(text);
+    free(wanted);
+    return result;
+}
+
 static bool pp_test_case(const PPTestCase* test, const char* directory, bool with_clang)
 {
     char path[4096];
@@ -685,15 +1020,16 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
         result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), &expected) &&
-                 pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name);
+                 pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name) &&
+                 (test->markers == 0 || pp_test_markers(&runs[0], test, directory));
         if (result && with_clang)
         {
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
-            PPSpellings theirs = { 0 };
-            result = clang_text != 0 && pp_text_spellings((const uint8_t*)clang_text, length, &theirs) &&
-                     pp_compare_spellings(&runs[0], &ours, &theirs, test->name, "clang");
-            arena_release(&theirs.arena);
+            PPPlaced theirs = { 0 };
+            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, &theirs) &&
+                     pp_compare_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], &theirs, test->name);
+            pp_placed_release(&theirs);
             free(clang_text);
         }
         arena_release(&ours.arena);
@@ -736,9 +1072,10 @@ static bool pp_test_file(int argument_count, char** arguments, const PPOptions* 
     result = result && pp_stream_spellings(&runs[0], &ours) && pp_test_printed(&runs[0], &ours, path);
     if (result && with_clang)
     {
-        PPSpellings theirs = { 0 };
-        result = text != 0 && pp_text_spellings((const uint8_t*)text, length, &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs, path, "clang");
-        arena_release(&theirs.arena);
+        PPPlaced theirs = { 0 };
+        result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, &theirs) && pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") &&
+                 pp_test_placed(&runs[0], &theirs, path);
+        pp_placed_release(&theirs);
     }
     arena_release(&ours.arena);
     free(text);
@@ -859,30 +1196,82 @@ static bool pp_test_predefines(const char* directory)
     return failures == 0;
 }
 
-// __is_identifier of every predefined name, in each language mode, must be clang's: 0 exactly for the mode's keywords.
-static bool pp_test_keywords(const char* directory)
+// Clang's feature names, for __has_feature and __has_extension: every FEATURE and EXTENSION of clang 23's Features.def
+// (names only, separated by spaces).
+static const char pp_test_feature_names[] =
+    "address_sanitizer alignment_sanitizer arc_cf_code_audited array_bounds_sanitizer assume_nonnull attribute_analyzer_noreturn "
+    "attribute_availability attribute_availability_app_extension attribute_availability_driverkit attribute_availability_in_templates "
+    "attribute_availability_swift attribute_availability_tvos attribute_availability_watchos attribute_availability_with_message "
+    "attribute_availability_with_replacement attribute_availability_with_strict attribute_availability_with_version_underscores "
+    "attribute_cf_consumed attribute_cf_returns_not_retained attribute_cf_returns_on_parameters attribute_cf_returns_retained "
+    "attribute_deprecated_with_message attribute_deprecated_with_replacement attribute_diagnose_if_objc attribute_ext_vector_type "
+    "attribute_ns_consumed attribute_ns_consumes_self attribute_ns_returns_not_retained attribute_ns_returns_retained attribute_objc_ivar_unused "
+    "attribute_objc_method_family attribute_overloadable attribute_unavailable_with_message attribute_unused_on_fields blocks bool_sanitizer "
+    "builtin_sanitizer c_alignas c_alignof c_atomic c_attributes c_countof c_fixed_enum c_generic_selection_with_controlling_type "
+    "c_generic_selections c_static_assert c_thread_local c_thread_safety_attributes cfi_cast_strict_sanitizer cfi_derived_cast_sanitizer "
+    "cfi_icall_sanitizer cfi_mfcall_sanitizer cfi_nvcall_sanitizer cfi_sanitizer cfi_unrelated_cast_sanitizer cfi_vcall_sanitizer "
+    "clang_atomic_attributes coverage_sanitizer cuda_implicit_host_device_templates cuda_noinline_keyword cxx_abi_relative_vtable "
+    "cxx_access_control_sfinae cxx_aggregate_nsdmi cxx_alias_templates cxx_alignas cxx_alignof cxx_atomic cxx_attributes "
+    "cxx_attributes_on_using_declarations cxx_auto_type cxx_binary_literals cxx_constexpr cxx_constexpr_string_builtins "
+    "cxx_contextual_conversions cxx_decltype cxx_decltype_auto cxx_decltype_incomplete_return_types cxx_default_function_template_args "
+    "cxx_defaulted_functions cxx_delegating_constructors cxx_deleted_functions cxx_exceptions cxx_explicit_conversions "
+    "cxx_explicit_this_parameter cxx_fixed_enum cxx_generalized_initializers cxx_generalized_nttp cxx_generic_lambdas cxx_implicit_moves "
+    "cxx_inheriting_constructors cxx_init_captures cxx_inline_namespaces cxx_lambdas cxx_local_type_template_args cxx_noexcept "
+    "cxx_nonstatic_member_init cxx_nullptr cxx_override_control cxx_range_for cxx_raw_string_literals cxx_reference_qualified_functions "
+    "cxx_relaxed_constexpr cxx_return_type_deduction cxx_rtti cxx_rvalue_references cxx_static_assert cxx_strong_enums cxx_thread_local "
+    "cxx_trailing_return cxx_type_aware_allocators cxx_unicode_literals cxx_unrestricted_unions cxx_user_literals cxx_variable_templates "
+    "cxx_variadic_templates dataflow_sanitizer datasizeof define_target_os_macros enum_sanitizer enumerator_attributes experimental_library "
+    "ext_vector_type_boolean float_cast_overflow_sanitizer function_sanitizer gnu_asm gnu_asm_constexpr_strings gnu_asm_goto_with_outputs "
+    "gnu_asm_goto_with_outputs_full has_nothrow_assign has_nothrow_constructor has_nothrow_copy has_trivial_assign has_trivial_constructor "
+    "has_trivial_copy has_trivial_destructor has_virtual_destructor hwaddress_sanitizer integer_divide_by_zero_sanitizer is_abstract is_base_of "
+    "is_class is_constructible is_convertible_to is_empty is_enum is_final is_literal is_pod is_polymorphic is_sealed is_standard_layout "
+    "is_trivial is_trivially_assignable is_trivially_constructible is_trivially_copyable is_union kcfi kcfi_arity leak_sanitizer matrix_types "
+    "matrix_types_scalar_division memory_sanitizer memtag_globals memtag_heap memtag_stack modules nonnull_attribute_sanitizer null_sanitizer "
+    "nullability nullability_nullable_result nullability_on_arrays nullability_on_classes numerical_stability_sanitizer objc_arc objc_arc_fields "
+    "objc_arc_weak objc_arr objc_array_literals objc_bool objc_boxed_expressions objc_boxed_nsvalue_expressions objc_bridge_id "
+    "objc_bridge_id_on_typedefs objc_c_static_assert objc_class_property objc_constant_literals objc_cxx_static_assert "
+    "objc_default_synthesize_properties objc_dictionary_literals objc_fixed_enum objc_generics objc_generics_variance objc_instancetype "
+    "objc_kindof objc_modules objc_nonfragile_abi objc_property_explicit_atomic objc_protocol_qualifier_mangling objc_subscripting "
+    "objc_weak_class object_size_sanitizer overflow_behavior_types overloadable_unmarked ownership_holds ownership_returns ownership_takes "
+    "pointer_overflow_sanitizer pragma_clang_attribute_external_declaration pragma_clang_attribute_namespaces pragma_stdc_cx_limited_range "
+    "ptrauth_calls ptrauth_elf_got ptrauth_function_pointer_type_discrimination ptrauth_indirect_gotos ptrauth_init_fini "
+    "ptrauth_init_fini_address_discrimination ptrauth_intrinsics ptrauth_member_function_pointer_type_discrimination ptrauth_objc_interface_sel "
+    "ptrauth_objc_isa ptrauth_objc_method_list_pointer ptrauth_objc_signable_class ptrauth_qualifier ptrauth_returns "
+    "ptrauth_signed_block_descriptors ptrauth_type_info_vtable_pointer_discrimination ptrauth_vtable_pointer_address_discrimination "
+    "ptrauth_vtable_pointer_type_discrimination realtime_sanitizer return_sanitizer returns_nonnull_attribute_sanitizer safe_stack scudo "
+    "shadow_call_stack shift_base_sanitizer shift_exponent_sanitizer shift_sanitizer signed_integer_overflow_sanitizer "
+    "speculative_load_hardening statement_attributes_with_gnu_syntax swiftasynccc swiftcc thread_sanitizer tls type_sanitizer "
+    "undefined_behavior_sanitizer undefined_behavior_sanitizer_finegrained_feature_checks underlying_type unreachable_sanitizer "
+    "vla_bound_sanitizer xray_instrument ";
+
+// Writes `S(name) first(name) second(name)` (without `second` when it is null) for each name of a list separated by
+// spaces, a line each, to a file that defines S to stringize its argument, so that the output names what it answers for.
+static void pp_test_write_names(FILE* file, const char* names, const char* first, const char* second)
+{
+    const char* at = names;
+    while (*at != 0)
+    {
+        const char* end = strchr(at, ' ');
+        const int length = (int)(end != 0 ? end - at : (long)strlen(at));
+        fprintf(file, "S(%.*s) %s(%.*s)", length, at, first, length, at);
+        if (second != 0)
+        {
+            fprintf(file, " %s(%.*s)", second, length, at);
+        }
+        fputc('\n', file);
+        at += length + (end != 0);
+    }
+}
+
+// A file preprocessed in each language mode, by both kernels and with clang's predefines for the mode, must give
+// clang's tokens. Returns how many modes differ.
+static uint32_t pp_test_modes(const char* directory, const char* path, const char* label)
 {
     static const char* const modes[] = { "-std=c89", "-std=gnu89", "-std=c99", "-std=gnu99", "-std=c11", "-std=gnu11", "-std=c17", "-std=gnu17", "-std=c23", "-std=gnu23" };
-    char path[4096];
-    snprintf(path, sizeof(path), "%s/keywords.c", directory);
-    FILE* file = fopen(path, "w");
-    bool result = file != 0;
-    for (uint32_t name = 1; result && name < C_NAME_COUNT; name += 1)
+    uint32_t result = 0;
+    for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
     {
-        // Not __VA_ARGS__ and __VA_OPT__, which clang warns about outside a macro's body.
-        if (name != C_NAME_VA_ARGS && name != C_NAME_VA_OPT)
-        {
-            fprintf(file, "__is_identifier(%s)\n", c_name_spellings[name]);
-        }
-    }
-    if (file != 0)
-    {
-        fclose(file);
-    }
-    uint32_t failures = 0;
-    for (uint32_t m = 0; result && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
-    {
-        char* arguments[2] = { (char*)modes[m], path };
+        char* arguments[2] = { (char*)modes[m], (char*)path };
         Arena arena = arena_reserve(1ull << 20);
         PPOptions options;
         const char* input;
@@ -892,14 +1281,168 @@ static bool pp_test_keywords(const char* directory)
         const bool passed = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers) && pp_test_file(1, arguments, &options, path, true, directory, &tokens);
         if (!passed)
         {
-            printf("keywords: __is_identifier differs from clang's with %s\n", modes[m]);
+            printf("%s: the answers differ from clang's with %s\n", label, modes[m]);
         }
-        failures += !passed;
+        result += !passed;
         arena_release(&arena);
     }
+    return result;
+}
+
+// __is_identifier of every predefined name, in each language mode, must be clang's: 0 exactly for the mode's keywords.
+static bool pp_test_keywords(const char* directory)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/keywords.c", directory);
+    FILE* file = fopen(path, "w");
+    bool result = file != 0;
+    uint32_t count = 0;
+    if (result)
+    {
+        fputs("#define S(x) #x\n", file);
+        for (uint32_t name = 1; name < C_NAME_COUNT; name += 1)
+        {
+            // Not __VA_ARGS__ and __VA_OPT__, which clang warns about outside a macro's body.
+            if (name != C_NAME_VA_ARGS && name != C_NAME_VA_OPT)
+            {
+                fprintf(file, "S(%s) __is_identifier(%s)\n", c_name_spellings[name], c_name_spellings[name]);
+                count += 1;
+            }
+        }
+        fclose(file);
+    }
+    const uint32_t failures = result ? pp_test_modes(directory, path, "keywords") : 1;
     unlink(path);
-    printf("keywords: %u of %lu modes differ from clang's __is_identifier (%u names)\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(modes), C_NAME_COUNT - 3);
+    printf("keywords: %u of 10 modes differ from clang's __is_identifier (%u names)\n", failures, count);
     return result && failures == 0;
+}
+
+// __has_feature and __has_extension of every feature name, in each language mode, must be clang's: the standard
+// features of the mode and the extensions it offers.
+static bool pp_test_features(const char* directory)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/features.c", directory);
+    FILE* file = fopen(path, "w");
+    bool result = file != 0;
+    uint32_t count = 0;
+    if (result)
+    {
+        fputs("#define S(x) #x\n", file);
+        pp_test_write_names(file, pp_test_feature_names, "__has_feature", "__has_extension");
+        fclose(file);
+    }
+    for (const char* at = pp_test_feature_names; *at != 0; at += 1)
+    {
+        count += *at == ' ';
+    }
+    const uint32_t failures = result ? pp_test_modes(directory, path, "features") : 1;
+    unlink(path);
+    printf("features: %u of 10 modes differ from clang's __has_feature and __has_extension (%u names)\n", failures, count);
+    return result && failures == 0;
+}
+
+// __TIMESTAMP__ is the modification time of the file it is read in (local time, here UTC), or SOURCE_DATE_EPOCH's time
+// when that is set: a file and the header it includes, written with times of their own, give each theirs (both kernels,
+// and with --clang clang too). The environment is restored after.
+static bool pp_test_timestamps(const char* directory, bool with_clang)
+{
+    static const struct
+    {
+        const char* epoch;
+        const char* expected;
+    } runs[] = {
+        { 0, "\"Sat Jan  1 00:00:00 2000\"\n\"Mon Jan  1 00:00:00 2001\"\n" },
+        { "1234567890", "\"Fri Feb 13 23:31:30 2009\"\n\"Fri Feb 13 23:31:30 2009\"\n" },
+    };
+    char path[4096];
+    char header[4096];
+    snprintf(path, sizeof(path), "%s/timestamp.c", directory);
+    snprintf(header, sizeof(header), "%s/timestamp.h", directory);
+    const struct timeval main_time[2] = { { .tv_sec = 946684800 }, { .tv_sec = 946684800 } };
+    const struct timeval header_time[2] = { { .tv_sec = 978307200 }, { .tv_sec = 978307200 } };
+    bool result = pp_test_write_file(path, "__TIMESTAMP__\n#include \"timestamp.h\"\n") && pp_test_write_file(header, "__TIMESTAMP__\n") &&
+                  utimes(path, main_time) == 0 && utimes(header, header_time) == 0;
+    const char* saved_zone = getenv("TZ");
+    const char* saved_epoch = getenv("SOURCE_DATE_EPOCH");
+    char* zone = saved_zone != 0 ? strdup(saved_zone) : 0;
+    char* epoch = saved_epoch != 0 ? strdup(saved_epoch) : 0;
+    setenv("TZ", "UTC", 1);
+    tzset();
+    for (uint32_t r = 0; result && r < BUSTER_ARRAY_LENGTH(runs); r += 1)
+    {
+        if (runs[r].epoch != 0)
+        {
+            setenv("SOURCE_DATE_EPOCH", runs[r].epoch, 1);
+        }
+        else
+        {
+            unsetenv("SOURCE_DATE_EPOCH");
+        }
+        const PPTestCase test = { .name = runs[r].epoch != 0 ? "__TIMESTAMP__ with SOURCE_DATE_EPOCH" : "__TIMESTAMP__ of each file", .standard = "c17", .expected = runs[r].expected };
+        char text[256];
+        char* arguments[BUSTER_PP_TEST_MAX_ARGUMENTS + 1];
+        const int argument_count = pp_test_arguments(&test, directory, path, text, sizeof(text), arguments);
+        Arena arena = arena_reserve(1ull << 20);
+        PPOptions options;
+        const char* input;
+        const char* output;
+        bool markers;
+        result = pp_parse_options(argument_count + 1, arguments, &options, &arena, &input, &output, &markers);
+        static InternTable tables[2];
+        static Preprocessor preprocessors[2];
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            options.scalar = k == 1;
+            result = result && pp_test_run(&preprocessors[k], &tables[k], &options, path);
+        }
+        PPSpellings ours = { 0 };
+        PPSpellings expected = { 0 };
+        result = result && pp_same_streams(&preprocessors[0], &preprocessors[1], test.name) && pp_stream_spellings(&preprocessors[0], &ours) &&
+                 pp_text_spellings((const uint8_t*)test.expected, strlen(test.expected), &expected) &&
+                 pp_compare_spellings(&preprocessors[0], &ours, &expected, test.name, "wanted");
+        if (result && with_clang)
+        {
+            size_t length;
+            char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
+            PPPlaced theirs = { 0 };
+            result = clang_text != 0 && pp_placed_tokens((const uint8_t*)clang_text, length, &theirs) &&
+                     pp_compare_spellings(&preprocessors[0], &ours, &theirs.spellings, test.name, "clang");
+            pp_placed_release(&theirs);
+            free(clang_text);
+        }
+        arena_release(&ours.arena);
+        arena_release(&expected.arena);
+        for (uint32_t k = 0; k < 2; k += 1)
+        {
+            pp_release(&preprocessors[k]);
+            intern_release(&tables[k]);
+        }
+        arena_release(&arena);
+    }
+    if (zone != 0)
+    {
+        setenv("TZ", zone, 1);
+    }
+    else
+    {
+        unsetenv("TZ");
+    }
+    if (epoch != 0)
+    {
+        setenv("SOURCE_DATE_EPOCH", epoch, 1);
+    }
+    else
+    {
+        unsetenv("SOURCE_DATE_EPOCH");
+    }
+    tzset();
+    free(zone);
+    free(epoch);
+    unlink(path);
+    unlink(header);
+    printf("timestamps: %s\n", result ? "each file's modification time, and SOURCE_DATE_EPOCH's" : "differ");
+    return result;
 }
 
 static int run_preprocessor_tests(int argument_count, char** arguments)
@@ -952,10 +1495,12 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
         }
         printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
         passed_all = failures == 0;
+        passed_all &= pp_test_timestamps(directory, with_clang);
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);
             passed_all &= pp_test_keywords(directory);
+            passed_all &= pp_test_features(directory);
         }
     }
     else if (passed_all)

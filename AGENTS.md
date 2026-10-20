@@ -1110,7 +1110,7 @@ the others its measurements are informational.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 63 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 77 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
@@ -1119,9 +1119,12 @@ the others its measurements are informational.
   - the behaviors probed against GCC and clang;
   - inputs past the vectorized kernels' limits;
   - directives and builtins that nest through the main loop's frames;
-  - #193's review fixes.
+  - #193's review fixes, line markers among them.
 
-  A case can also give extra files and options for both sides;
+  A case can also give extra files and options for both sides, and the exact
+  text `-E` prints with line markers. Then `__TIMESTAMP__` in two files with
+  modification times of their own must give each file's time (in UTC), and
+  `SOURCE_DATE_EPOCH`'s when it is set;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, ...), by both kernels, which must agree.
 
@@ -1129,16 +1132,20 @@ In both, the vectorized printer's text must be the scalar printer's byte for
 byte, with line markers and without, and must lex back into the stream's
 spellings.
 
-`--clang` also compares every case and file with `clang -E -P` and the same
-options, token spelling by token spelling, and prints the first difference with
-the tokens around it. For files, our side reads clang's own predefines for the
-options through `--predefines`. Without files, `--clang` also checks the
-built-in predefines and the keywords:
+`--clang` also compares every case and file with `clang -E` and the same
+options, token spelling by token spelling, and then where clang's line markers
+put each token (its presumed line and include stack) with where ours put it. It
+prints the first difference with the tokens around it. For files, our side
+reads clang's own predefines for the options through `--predefines`. Without
+files, `--clang` also checks the built-in predefines, the keywords and the
+features:
 - in 14 option sets (the ten modes from `c89` to `gnu23`, and `-ffreestanding`
   and `-O2`), `pp_predefines` must give `clang -dM -E` line for line, but for
   the patch release's three macros;
 - in each mode, `__is_identifier` of every predefined name must give clang's
-  answer. `sqlite3.c`, musl 1.2.5's 1,357 sources,
+  answer;
+- in each mode, `__has_feature` and `__has_extension` of every name in clang
+  23's `Features.def` must give clang's answers. `sqlite3.c`, musl 1.2.5's 1,357 sources,
 Lua 5.4.8 and this repository's translation units are token-identical;
 `docs/c-preprocessor.md` has the configurations. The 9700X job runs the cases
 and the repository's translation units with `--clang`.

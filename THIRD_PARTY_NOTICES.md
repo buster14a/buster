@@ -37,7 +37,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/import.c`, `src/buster/compiler/runtime.c`, `src/buster/compiler/import_test.c`, `src/buster/compiler/import_benchmark.c` | Original readers of ELF relocatable objects, archives, shared libraries and linker scripts, their vector and exact paths, the C runtime's search and import, and their tests and benchmark; Default. The formats are read from their specifications. The archive header's vector size parse uses the widely published multiply-add method for decimal digits (as in simdjson's and Wojciech Muła's write-ups), written here from the method, not copied. The tests and the benchmark make their inputs themselves, and read the system's C runtime files and the libraries and archives named on the command line at run time without copying them; `readelf` is an external oracle for `--cross-check`, not vendored. The benchmark's clock, counter and median helpers are its own, not the lexer benchmark's MIT ones. |
 | `src/buster/compiler/c_intern.c`, `src/buster/compiler/c_refine.c`, `src/buster/compiler/c_refine_test.c` | Original intern table, token refinement and tests; Default. The hash's constants are wyhash's public-domain ones, noted below. |
 | `src/buster/compiler/c_preprocessor.c` | Original preprocessor; Default, with the clang-generated predefined macros and feature tables noted below. |
-| `src/buster/compiler/c_preprocessor_test.c` | Original preprocessor tests; Default. Some expected texts are clang 23's `-E` output for the cases' own inputs. |
+| `src/buster/compiler/c_preprocessor_test.c` | Original preprocessor tests; Default. Some expected texts are clang 23's `-E` output for the cases' own inputs, and `pp_test_feature_names` lists the names in clang 23's `Features.def` (names only, noted below). |
 | `src/buster/compiler/c_preprocessor_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `src/buster/compiler/c_refine_benchmark.c` | Original benchmark body under Default; the corpus loader and the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `build.sh`, `.gitignore`, `.github/workflows/9700x.yml` | Original build/configuration; Default. The referenced GitHub action runs externally and is not vendored. |
@@ -215,12 +215,19 @@ compiler's own. LLVM's terms are retained in [LICENSES/LLVM.txt](LICENSES/LLVM.t
   under `-std=c23`. `__BUSTER__` is the compiler's own.
 - The feature tables are clang's nonzero answers, under `-std=gnu17` and
   `-std=c23` (the same), to `__has_attribute`, `__has_builtin`,
-  `__has_feature`, `__has_extension`, `__has_c_attribute` and `__has_warning`.
-  The names asked about are those that `/usr/include` (glibc 2.44), clang 23's
-  resource headers, musl 1.2.5, SQLite 3.53's amalgamation and Zig 0.14.1's
-  `lib/libc` query, and a list of common GNU attribute names. Only the names
-  were read from those inputs. A local script ran the queries;
-  `docs/c-preprocessor.md` records its procedure.
+  `__has_c_attribute` and `__has_warning`. The names asked about are those that
+  `/usr/include` (glibc 2.44), clang 23's resource headers, musl 1.2.5, SQLite
+  3.53's amalgamation and Zig 0.14.1's `lib/libc` query, and a list of common
+  GNU attribute names. Only the names were read from those inputs.
+- The `__has_feature` and `__has_extension` tables are clang's nonzero answers
+  for every `FEATURE` and `EXTENSION` name of clang 23.1.3's
+  `clang/include/clang/Basic/Features.def`, in the ten modes from `-std=c89`
+  to `-std=gnu23`, with the first standard of each answer that depends on the
+  mode. `c_preprocessor_test.c` keeps the same names (`pp_test_feature_names`)
+  to ask clang again under `--clang`. Only the names were read from
+  `Features.def`.
+- A local script ran the queries; `docs/c-preprocessor.md` records its
+  procedure.
 
 SQLite, musl, Lua and the system's headers are test oracle inputs only (the
 tests read them where they are installed): none of their code is included.

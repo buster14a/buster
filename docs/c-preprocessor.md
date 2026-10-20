@@ -19,7 +19,11 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on top of `main` at 75261db, with `-march=native` (AVX-512 intrinsic headers) | 8 | 4,571,031 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 63 | |
+| The built-in cases (`pp_test_cases`) | 77 | |
+
+The line markers agree too: where clang's `-E` markers put each token (its
+presumed line, and its file and the files that include it), ours put it, on the
+cases, `sqlite3.c`, this repository's translation units and Lua.
 
 **Speed**, measured on 2026-10-20 on the Ryzen 7 9700X (clang 23.1.1,
 `build.sh`'s `-O3 -march=native`), pinned to CPU 2 and under the
@@ -240,9 +244,15 @@ arenas. Popping a context gives its tokens back when they are on top.
   same way. An operand that isn't a string literal is expanded first, as in
   clang and GCC, and must then be one.
 - **`#line` and line markers** set presumed lines and files apart from the
-  physical ones. One without a file name keeps the presumed name. `__LINE__`
-  in a macro's expansion is the line of the end of the outermost expansion, as
-  in clang. Where clang and GCC differ, we follow clang:
+  physical ones. One without a file name keeps the presumed name. The number and
+  the file name are read as translation phase 2 leaves them (a line splice inside
+  `1\` and `00` makes `100`), and the name's escapes are decoded as a string
+  literal's; clang rejects numeric escapes there, and so do we. Each `#line`
+  adds a line note to its inclusion's range (`PPLineDirective`), as does
+  `#pragma GCC system_header`, after which the file is a system header.
+  Diagnostics, `__LINE__`, `__FILE__` and `-E`'s line markers give the presumed
+  file and line. `__LINE__` in a macro's expansion is the line of the end of the
+  outermost expansion, as in clang. Where clang and GCC differ, we follow clang:
   - The lines after a `#line` count from the line where clang lexes its
     number. For digits right after a line splice, clang reads the splice as part
     of the token, so that is the splice's line: `#line \` then `100` on the next
@@ -257,7 +267,8 @@ arenas. Popping a context gives its tokens back when they are on top.
 
 `__FILE__`, `__LINE__`, `__COUNTER__`, `__INCLUDE_LEVEL__`, `__BASE_FILE__`,
 `__FILE_NAME__`, and `__DATE__`, `__TIME__` and `__TIMESTAMP__` (from
-`SOURCE_DATE_EPOCH` when it is set) are built in. So are the feature queries:
+`SOURCE_DATE_EPOCH` when it is set) are built in. Without it, `__TIMESTAMP__`
+is the modification time of the file being read, in local time, as clang's is. So are the feature queries:
 `__has_attribute`, `__has_builtin`, `__has_feature`, `__has_extension`,
 `__has_c_attribute`, `__has_declspec_attribute`, `__has_warning`,
 `__is_identifier` and the `__is_target_*` queries.
@@ -283,6 +294,12 @@ corpora query:
    are stored without leading and trailing `__`, because clang normalizes them.
    An earlier version kept `__x__` spellings, and `sqlite3.c` differed from
    clang at glibc's `sys/cdefs.h`.
+4. For `__has_feature` and `__has_extension`, ask about every `FEATURE` and
+   `EXTENSION` name of clang 23's `Features.def` (251 names), in each of the ten
+   modes from `c89` to `gnu23`. Only `__has_feature` depends on the mode: C11's
+   features hold from C11 on, and `c_fixed_enum` from C23. `PPFeature.standard`
+   keeps the first standard of each, while `__has_extension` answers 1 in every
+   mode.
 
 The configuration is clang's (the owner's decision in #117): `-std=gnu17` by
 default, clang's include search, and clang's predefined macros plus
@@ -322,9 +339,30 @@ until then, because it can be a macro name.
 
 `pp_print` writes `-E`'s text. A token gets a space where whitespace was before
 it, or where it would otherwise lex together with the token before
-(`pp_needs_separation`). Each source line goes on a line of its own, pragmas on
-lines of their own, and unless `-P`, a line marker (`# 12 "file.h" 2`) appears
-wherever the output moves to another file or skips lines.
+(`pp_needs_separation`). Each source line goes on a line of its own, and
+pragmas on lines of their own.
+
+Unless `-P`, line markers give every line its presumed position, as clang's
+printer does. Both printers share the code (`pp_print_place`), which starts
+with `# 1 "main.c"` and then marks:
+
+- the file and line that `#line` gives;
+- flag 1 for each file the include stack goes into, and 2 for each it goes back
+  to. The main file roots the stack: clang includes its `<built-in>` buffer,
+  and with it the forced includes, from the main file;
+- 3 on every marker in a system header, or 3 and 4 in the standard
+  directories, which clang wraps in `extern "C"` for C++. A system header is a
+  file from `-isystem`, `-idirafter` or the resource directory, a file that a
+  system header includes, or the rest of a file after `#pragma GCC
+  system_header`;
+- names escaped as clang writes them (`\\`, `\"`, and octal for other bytes).
+
+A line that a macro's expansion starts goes on the line of the macro's name, as
+clang places a token by its expansion location. `PPExpansionStart` records
+where each expansion read from a file starts in the output. A `_Pragma`'s pragma
+goes on that line too, and the line after a pragma gets a marker when it is the
+pragma's own line. A jump forward of up to 8 lines is blank lines, and any other
+jump is a marker.
 
 ### Vectorized kernels and their scalar twins
 
@@ -471,7 +509,7 @@ the mispredictions it saves.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 63 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 77 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -523,13 +561,31 @@ the mispredictions it saves.
     - spliced literals from macros as header names;
     - pending spaces in `#__VA_OPT__`;
     - `__BASE_FILE__` after `#line`;
-    - `#line` continued with its number indented.
+    - `#line` continued with its number indented;
+  - the cases from #193's third review:
+    - GNU's comma elision when a variadic macro's only argument is omitted, and
+      C17's, which keeps the comma;
+    - the space before a stringized `__VA_OPT__`;
+    - an unused definition whose `#` names no parameter;
+    - the signedness of `u'a'`, `U'a'`, `L'a'` and (C23) `u8'a'` in `#if`;
+    - the standard features in C99, GNU17 and C23;
+    - `#line`'s number and file name across line splices and with escapes;
+    - line markers: `#line` in the main file and in a header, lines that macros
+      start, the line after `_Pragma`, the include stack, system headers and
+      escaped names, each with the exact text `-E` prints.
 
   A case can name more files, and options for both sides (`-I`, `-include`,
-  with `%d` for its directory). Each case is preprocessed by both kernels, with
-  the built-in predefines. Their streams and directive tables must be the same,
-  and their tokens' spellings must be the expected ones. With `--clang`, each
-  case is also preprocessed by `clang -E -P` and must give the same spellings.
+  with `%d` for its directory), and the text `-E` prints with line markers. Each
+  case is preprocessed by both kernels, with the built-in predefines. Their
+  streams and directive tables must be the same, and their tokens' spellings
+  must be the expected ones. With `--clang`, each case is also preprocessed by
+  `clang -E`. It must give the same spellings, and its line markers must place
+  every token as ours do: on the same presumed line, in the same include stack
+  (each file's name as the marker spells it, and its system flags).
+- **Timestamps.** `__TIMESTAMP__` in a file and in the header it includes,
+  written with modification times of their own, must give each file's time in
+  UTC, and `SOURCE_DATE_EPOCH`'s time when that is set, by both kernels and with
+  `--clang` by clang.
 - **Predefines and keywords.** The cases and files under `--clang` give our side
   clang's predefines, so `--clang` checks our built-in ones separately:
   - In ten language modes (`c89` to `gnu23`), with `-ffreestanding` and with
@@ -538,12 +594,15 @@ the mispredictions it saves.
     out.
   - In each mode, `__is_identifier` of every predefined name (keywords,
     directive names, the preprocessor's names) must give clang's answer.
+  - In each mode, `__has_feature` and `__has_extension` of every name in clang
+    23's `Features.def` (251) must give clang's answers.
 - **Files.** With files, each is preprocessed with the options, by both
   kernels, and compared. With `--clang`, our side reads clang's own predefines
   for the same options (`clang -dM -E`, through `--predefines`), so both start
-  from the same macros. clang's `-E -P` text is lexed with `c_tokenize` and
-  compared with our stream's spellings, token for token. The first difference
-  is printed with the tokens around it.
+  from the same macros. clang's `-E` text, without its line markers' lines, is
+  lexed with `c_tokenize` and compared with our stream's spellings, token for
+  token. Then the places its markers give the tokens are compared with ours.
+  The first difference is printed with the tokens around it.
 
 In both, the two printers must give the same bytes, with line markers and
 without, and the text must lex back into the stream's spellings.
@@ -649,11 +708,17 @@ cleared once and reused.
 - The feature tests (`__has_attribute` and the others) always answer from
   clang's table, which #117 and #125 keep for the oracle's mode. Outside it, they
   are to answer what the compiler implements (#123, #148).
-- Line markers in `-E` output aren't compared with clang's; the oracle compares
-  `-P` output. The printer's spacing also differs from clang's in places: it
-  puts a space between `<` and `>`, where clang doesn't.
-- Diagnostics give `file:line:column: error: message` and no more: no notes, no
-  macro backtraces (#108), and no carets.
+- The printer's spacing differs from clang's in places. It puts a space between
+  `<` and `>`, where clang doesn't, and it doesn't indent a line's first token
+  to its column. Line markers differ in form but not in what they say: clang
+  marks every file it enters, even one that gives no tokens, and we mark only
+  where a token needs it.
+- Diagnostics give `file:line:column: error: message` (the presumed file and
+  line) and no more: no notes, no macro backtraces (#108), and no carets.
+- A `#pragma` among a macro's arguments goes to the output, where clang rejects
+  it.
+- Before C23, `u8'a'` is one character constant here, because the lexer has no
+  language mode. clang lexes it as `u8` and `'a'`.
 - C++ (`-x c++`), dependency output (`-M`) and `-dM` aren't supported.
 - Stringizing an identifier that pasting made from a UCN gives its UTF-8
   spelling, where clang keeps the UCN.
