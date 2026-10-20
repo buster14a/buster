@@ -340,6 +340,181 @@ static bool spike_load_path(SpikeCorpus* corpus, const char* path)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Generated worst cases
+
+// Text appended to a buffer in the arena; `ok` turns false if the buffer is full.
+typedef struct SpikeText SpikeText;
+struct SpikeText
+{
+    char* bytes;
+    uint64_t length;
+    uint64_t capacity;
+    bool ok;
+};
+
+static void spike_text(SpikeText* text, const char* format, ...) __attribute__((format(printf, 2, 3)));
+
+#include <stdarg.h>
+
+static void spike_text(SpikeText* text, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    const uint64_t room = text->capacity - text->length;
+    const int written = vsnprintf(text->bytes + text->length, room, format, arguments);
+    va_end(arguments);
+    if (written < 0 || (uint64_t)written >= room)
+    {
+        text->ok = false;
+    }
+    else
+    {
+        text->length += (uint64_t)written;
+    }
+}
+
+typedef enum SpikeCase
+{
+    // One expression of `size` binary operators of every precedence.
+    SPIKE_CASE_CHAIN,
+    // Parentheses nested `size` deep, then blocks and if-statements nested a hundredth as deep.
+    SPIKE_CASE_NESTING,
+    // Tokens without brackets: a declaration of `size` names with initializers.
+    SPIKE_CASE_FLAT,
+    // Nothing but brackets: a call of a call of ..., `size` times.
+    SPIKE_CASE_BRACKETS,
+    // Casts of casts: each `(` after a cast's `)` is decided by that cast, the longest chain for K2's rounds.
+    SPIKE_CASE_CASTS,
+    // Ternaries nested in their third operands, and in their middle ones.
+    SPIKE_CASE_TERNARIES,
+    // if ... else if ... chains and switch statements, for the statement stack.
+    SPIKE_CASE_STATEMENTS,
+    // Declarations of typedef'd types, pointers to functions and structs.
+    SPIKE_CASE_DECLARATIONS,
+    SPIKE_CASE_COUNT,
+} SpikeCase;
+
+static const char* const spike_case_names[SPIKE_CASE_COUNT] = { "chain", "nesting", "flat", "brackets", "casts", "ternaries", "statements", "declarations" };
+
+static void spike_generate(SpikeText* text, SpikeCase which, uint32_t size)
+{
+    static const char* const operators[] = { "*", "/", "+", "-", "<<", ">>", "<", ">=", "==", "!=", "&", "^", "|", "&&", "||" };
+    spike_text(text, "typedef int T;\nint f(int a, int b, int c, int d)\n{\n    int x;\n");
+    switch (which)
+    {
+        case SPIKE_CASE_CHAIN:
+            spike_text(text, "    x = a");
+            for (uint32_t i = 0; i < size; i += 1)
+            {
+                spike_text(text, " %s %c", operators[(i * 7) % (sizeof(operators) / sizeof(operators[0]))], 'a' + (int)(i % 4));
+            }
+            spike_text(text, ";\n");
+            break;
+        case SPIKE_CASE_NESTING:
+            spike_text(text, "    x = ");
+            for (uint32_t i = 0; i < size; i += 1)
+            {
+                spike_text(text, "(");
+            }
+            spike_text(text, "a");
+            for (uint32_t i = 0; i < size; i += 1)
+            {
+                spike_text(text, i % 3 == 0 ? ") + b" : ")");
+            }
+            spike_text(text, ";\n");
+            for (uint32_t i = 0; i < size / 100; i += 1)
+            {
+                spike_text(text, "    if (a) {\n");
+            }
+            spike_text(text, "    x = 1;\n");
+            for (uint32_t i = 0; i < size / 100; i += 1)
+            {
+                spike_text(text, "    }\n");
+            }
+            break;
+        case SPIKE_CASE_FLAT:
+            spike_text(text, "    int y0 = 0");
+            for (uint32_t i = 1; i < size; i += 1)
+            {
+                spike_text(text, ", y%u = a %s b", i, operators[i % (sizeof(operators) / sizeof(operators[0]))]);
+            }
+            spike_text(text, ";\n");
+            break;
+        case SPIKE_CASE_BRACKETS:
+            spike_text(text, "    x = g");
+            for (uint32_t i = 0; i < size; i += 1)
+            {
+                spike_text(text, i % 5 == 4 ? "[0]" : "()");
+            }
+            spike_text(text, ";\n");
+            break;
+        case SPIKE_CASE_CASTS:
+            for (uint32_t i = 0; i < size / 100; i += 1)
+            {
+                spike_text(text, "    x = ");
+                for (uint32_t j = 0; j < 100; j += 1)
+                {
+                    spike_text(text, "(T)");
+                }
+                spike_text(text, "(a) * b;\n");
+            }
+            break;
+        case SPIKE_CASE_TERNARIES:
+            spike_text(text, "    x = a");
+            for (uint32_t i = 0; i < size; i += 1)
+            {
+                spike_text(text, i % 2 == 0 ? " ? b : c" : " ? b ? c : d : a");
+            }
+            spike_text(text, ";\n");
+            break;
+        case SPIKE_CASE_STATEMENTS:
+            for (uint32_t i = 0; i < size / 20; i += 1)
+            {
+                spike_text(text, "    if (a == %u) x = 1; else if (b) { x = 2; } else if (c) do x++; while (d); else\n", i);
+                spike_text(text, "    switch (x) { case 1: case 2 ... 3: x = 4; break; default: L%u: goto L%u; }\n", i, i);
+            }
+            break;
+        case SPIKE_CASE_DECLARATIONS:
+            for (uint32_t i = 0; i < size / 30; i += 1)
+            {
+                spike_text(text, "    T v%u, *p%u = &v%u, (*q%u)(T, const char *) = 0;\n", i, i, i, i);
+                spike_text(text, "    struct s%u { T m : 3; unsigned n; struct s%u *next; } w%u = { .m = 1, .n = (unsigned)(T)2 };\n", i, i, i);
+            }
+            break;
+        default:
+            break;
+    }
+    spike_text(text, "    return x;\n}\n");
+}
+
+// Adds the generated cases to the corpus, each `size` operations long.
+static bool spike_load_generated(SpikeCorpus* corpus, uint32_t size)
+{
+    bool result = true;
+    for (uint32_t which = 0; result && which < SPIKE_CASE_COUNT; which += 1)
+    {
+        SpikeText text = { .capacity = 64ull * size + 4096, .length = 0, .ok = true };
+        text.bytes = arena_push(corpus->memory, text.capacity, 64);
+        result = text.bytes != 0;
+        if (result)
+        {
+            spike_generate(&text, (SpikeCase)which, size);
+            result = text.ok;
+        }
+        if (result)
+        {
+            SpikeFile* file = &corpus->files[corpus->file_count];
+            *file = (SpikeFile){ 0 };
+            file->source = (uint8_t*)text.bytes;
+            char path[64];
+            snprintf(path, sizeof(path), "generated %s", spike_case_names[which]);
+            result = spike_add_source(corpus, file, path, text.length, text.length);
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Checks
 
 static void spike_print_token_text(const SpikeFile* file, uint32_t token)
@@ -500,6 +675,9 @@ struct SpikeKernelCopy
     uint8_t* group_roles;
     uint8_t* group_typed;
     uint64_t rounds[BUSTER_SPIKE_ROLE_ROUNDS + 1];
+    // K4 in byte lanes: 64-token blocks, and those whose depths span too much for bytes.
+    uint64_t byte_blocks;
+    uint64_t wide_blocks;
 };
 
 static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels, SpikeKernelCopy* copy, uint32_t count)
@@ -508,8 +686,22 @@ static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels
     const uint8_t* kinds = file->tokens.kinds;
     // K1 on ( [ {.
     const bool twin_balanced = spike_brackets_scalar(kinds, spike_kind_deltas, count, kernels->depths, kernels->enclosing, kernels->stack);
-    const bool vector_balanced = spike_brackets_avx512(kinds, spike_kind_deltas, count, copy->depths, copy->enclosing, copy->open_stack);
+    const bool narrow_balanced = spike_brackets16_avx512(kinds, spike_kind_deltas, count, copy->depths, copy->enclosing, copy->open_stack);
     uint32_t first = BUSTER_SPIKE_NONE;
+    for (uint32_t i = 0; i < count && first == BUSTER_SPIKE_NONE; i += 1)
+    {
+        if (kernels->depths[i] != copy->depths[i] || kernels->enclosing[i] != copy->enclosing[i])
+        {
+            first = i;
+        }
+    }
+    if (first != BUSTER_SPIKE_NONE || twin_balanced != narrow_balanced)
+    {
+        printf("%s: K1 in 16-bit lanes differs at token %u\n", file->path, first);
+        result += 1;
+    }
+    const bool vector_balanced = spike_brackets_avx512(kinds, spike_kind_deltas, count, copy->depths, copy->enclosing, copy->open_stack);
+    first = BUSTER_SPIKE_NONE;
     for (uint32_t i = 0; i < count && first == BUSTER_SPIKE_NONE; i += 1)
     {
         if (kernels->depths[i] != copy->depths[i] || kernels->enclosing[i] != copy->enclosing[i])
@@ -597,6 +789,27 @@ static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels
         if (first != BUSTER_SPIKE_NONE)
         {
             printf("%s: K4 differs at token %u: twin %d, vector %d (L %d)\n", file->path, first, (int)kernels->parents[first], (int)copy->parents[first],
+                   (int)copy->lefts[first]);
+            spike_print_context(file, first);
+            result += 1;
+        }
+        // In byte lanes.
+        uint64_t wide = 0;
+        spike_parents_left8_avx512(kernels->roles, kernels->node_depths, count, copy->lefts, copy->left_keys, &copy->candidates, &wide);
+        spike_parents_right8_avx512(kernels->roles, kernels->node_depths, count, copy->lefts, copy->left_keys, copy->parents, &copy->candidates);
+        copy->wide_blocks += wide;
+        copy->byte_blocks += (count + 63) / 64;
+        first = BUSTER_SPIKE_NONE;
+        for (uint32_t i = 0; i < count && first == BUSTER_SPIKE_NONE; i += 1)
+        {
+            if (kernels->parents[i] != copy->parents[i])
+            {
+                first = i;
+            }
+        }
+        if (first != BUSTER_SPIKE_NONE)
+        {
+            printf("%s: K4 in byte lanes differs at token %u: twin %d, vector %d (L %d)\n", file->path, first, (int)kernels->parents[first], (int)copy->parents[first],
                    (int)copy->lefts[first]);
             spike_print_context(file, first);
             result += 1;
@@ -708,6 +921,295 @@ static void spike_report(const char* name, const SpikeSample* samples, uint32_t 
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The benchmark
+
+// What is timed: whole paths over every file (each file through all of a path before the next), then each kernel alone
+// over every file, the twins' and the vector path's, in order, with each file's arrays kept between the kernels.
+typedef enum SpikeTimed
+{
+    SPIKE_TIMED_SCALAR_PARSER,
+    SPIKE_TIMED_TWINS,
+    SPIKE_TIMED_VECTOR,
+    SPIKE_TIMED_TWIN_K1,
+    SPIKE_TIMED_TWIN_K3_PASS,
+    SPIKE_TIMED_TWIN_K3,
+    SPIKE_TIMED_TWIN_K2,
+    SPIKE_TIMED_TWIN_SECONDARY,
+    SPIKE_TIMED_TWIN_K4,
+    SPIKE_TIMED_TWIN_K5,
+    SPIKE_TIMED_TWIN_FALLBACK,
+    SPIKE_TIMED_VECTOR_K1_16,
+    SPIKE_TIMED_VECTOR_K1,
+    SPIKE_TIMED_VECTOR_K3_PASS,
+    SPIKE_TIMED_VECTOR_K3_GATHER,
+    SPIKE_TIMED_VECTOR_K3,
+    SPIKE_TIMED_VECTOR_K2,
+    SPIKE_TIMED_VECTOR_SECONDARY,
+    SPIKE_TIMED_VECTOR_K4_8,
+    SPIKE_TIMED_VECTOR_K4,
+    SPIKE_TIMED_VECTOR_K5,
+    SPIKE_TIMED_VECTOR_FALLBACK,
+    SPIKE_TIMED_COUNT,
+} SpikeTimed;
+
+static const char* const spike_timed_names[SPIKE_TIMED_COUNT] =
+{
+    "scalar-parser",
+    "twins",
+    "vector",
+    "twin-k1",
+    "twin-k3-pass",
+    "twin-k3",
+    "twin-k2",
+    "twin-k1-secondary",
+    "twin-k4",
+    "twin-k5",
+    "twin-fallback",
+    "vector-k1-16",
+    "vector-k1",
+    "vector-k3-pass",
+    "vector-k3-gather",
+    "vector-k3",
+    "vector-k2",
+    "vector-k1-secondary",
+    "vector-k4-8",
+    "vector-k4",
+    "vector-k5",
+    "vector-fallback",
+};
+
+// A file's arrays for the kernels run one at a time over the corpus.
+typedef struct SpikeStageFile SpikeStageFile;
+struct SpikeStageFile
+{
+    SpikeKernels kernels;
+    bool statements_ok;
+};
+
+// Each file's own arrays, with the scratch they share from `shared`.
+static bool spike_stage_files_reserve(SpikeStageFile* stages, const SpikeCorpus* corpus, const SpikeKernels* shared, Arena* arena)
+{
+    bool result = true;
+    for (uint32_t f = 0; result && f < corpus->file_count; f += 1)
+    {
+        const uint64_t slots = corpus->files[f].tokens.count + 2 * BUSTER_SPIKE_TOKEN_PADDING;
+        SpikeKernels* k = &stages[f].kernels;
+        *k = *shared;
+        uint8_t* vkinds = arena_push(arena, slots, 64);
+        uint8_t* roles = arena_push(arena, slots, 64);
+        uint8_t* flags = arena_push(arena, slots, 64);
+        k->depths = arena_push_array(arena, slots, sizeof(uint32_t), 64);
+        k->node_depths = arena_push_array(arena, slots, sizeof(uint32_t), 64);
+        k->enclosing = arena_push_array(arena, slots, sizeof(uint32_t), 64);
+        k->parents = arena_push_array(arena, slots, sizeof(uint32_t), 64);
+        k->typedef_log = arena_push_array(arena, slots, sizeof(uint32_t), 64);
+        k->typedef_tokens = arena_push_array(arena, slots, sizeof(uint32_t), 64);
+        k->typedef_scopes = arena_push(arena, slots, 64);
+        result = vkinds != 0 && roles != 0 && flags != 0 && k->depths != 0 && k->node_depths != 0 && k->enclosing != 0 && k->parents != 0 && k->typedef_log != 0 &&
+                 k->typedef_tokens != 0 && k->typedef_scopes != 0;
+        if (result)
+        {
+            memset(vkinds, SPIKE_KIND_END, slots);
+            memset(roles, SPIKE_ROLE_NONE, slots);
+            memset(flags, 0, slots);
+            k->vkinds = vkinds + BUSTER_SPIKE_TOKEN_PADDING;
+            k->roles = roles + BUSTER_SPIKE_TOKEN_PADDING;
+            k->flags = flags + BUSTER_SPIKE_TOKEN_PADDING;
+            k->typedef_count = 0;
+        }
+    }
+    return result;
+}
+
+typedef struct SpikeBench SpikeBench;
+struct SpikeBench
+{
+    const SpikeCorpus* corpus;
+    SpikeMeanings* meanings;
+    SpikeTree* tree;
+    Arena* scratch;
+    SpikeKernels* kernels;
+    SpikeVectorBuffers* buffers;
+    SpikeStageFile* stages;
+    uint8_t* typed;
+    SpikeStatement* statements;
+    uint64_t wide_blocks;
+};
+
+static void spike_run_stage(SpikeBench* bench, SpikeTimed which)
+{
+    const SpikeCorpus* corpus = bench->corpus;
+    SpikeVectorBuffers* buffers = bench->buffers;
+    for (uint32_t f = 0; f < corpus->file_count; f += 1)
+    {
+        const SpikeFile* file = &corpus->files[f];
+        const uint32_t count = (uint32_t)file->tokens.count;
+        const uint8_t* kinds = file->tokens.kinds;
+        const uint32_t* names = file->tokens.names;
+        SpikeStageFile* stage = &bench->stages[f];
+        SpikeKernels* k = &stage->kernels;
+        switch (which)
+        {
+            case SPIKE_TIMED_SCALAR_PARSER: spike_parse_scalar(kinds, names, count, bench->meanings, bench->tree, bench->scratch); break;
+            case SPIKE_TIMED_TWINS: spike_parse_twins(bench->kernels, kinds, names, count, bench->meanings, bench->scratch, bench->typed, bench->statements); break;
+            case SPIKE_TIMED_VECTOR: spike_parse_vector(bench->kernels, kinds, names, count, bench->meanings, bench->scratch, buffers); break;
+            case SPIKE_TIMED_TWIN_K1: k->unbalanced = !spike_brackets_scalar(kinds, spike_kind_deltas, count, k->depths, k->enclosing, k->stack); break;
+            case SPIKE_TIMED_VECTOR_K1: k->unbalanced = !spike_brackets_avx512(kinds, spike_kind_deltas, count, k->depths, k->enclosing, buffers->open_stack); break;
+            case SPIKE_TIMED_VECTOR_K1_16: k->unbalanced = !spike_brackets16_avx512(kinds, spike_kind_deltas, count, k->depths, k->enclosing, buffers->open_stack); break;
+            case SPIKE_TIMED_TWIN_K3_PASS:
+            case SPIKE_TIMED_VECTOR_K3_PASS:
+                k->unsupported = false;
+                k->typedef_count = 0;
+                if (!k->unbalanced)
+                {
+                    spike_typedefs(k, kinds, names, count);
+                }
+                spike_typedefs_clear(k);
+                break;
+            case SPIKE_TIMED_TWIN_K3:
+                spike_typedefs_mark(k);
+                spike_classify_scalar(k, kinds, names, count);
+                spike_typedefs_clear(k);
+                break;
+            case SPIKE_TIMED_VECTOR_K3_GATHER:
+                spike_typedefs_mark(k);
+                spike_classify_gather_avx512(k, kinds, names, count);
+                spike_typedefs_clear(k);
+                break;
+            case SPIKE_TIMED_VECTOR_K3:
+                spike_typedefs_mark(k);
+                spike_classify_mask_avx512(k, kinds, names, count);
+                spike_typedefs_clear(k);
+                break;
+            case SPIKE_TIMED_TWIN_K2: spike_roles_scalar(k, count, bench->typed); break;
+            case SPIKE_TIMED_VECTOR_K2: spike_roles_avx512(k, count, buffers->typed, buffers->group_roles, buffers->group_typed, buffers->rounds); break;
+            case SPIKE_TIMED_TWIN_SECONDARY:
+                spike_secondary_scalar(k, count, k->stack);
+                spike_after_colons(k, count);
+                break;
+            case SPIKE_TIMED_VECTOR_SECONDARY:
+                spike_secondary_avx512(k, count, buffers->secondary);
+                spike_after_colons_avx512(k, count);
+                break;
+            case SPIKE_TIMED_TWIN_K4: spike_parents_scalar(k, count); break;
+            case SPIKE_TIMED_VECTOR_K4:
+            case SPIKE_TIMED_VECTOR_K4_8:
+                if (spike_deepest(k, count) > BUSTER_SPIKE_MAX_VECTOR_DEPTH)
+                {
+                    spike_parents_scalar(k, count);
+                }
+                else if (which == SPIKE_TIMED_VECTOR_K4)
+                {
+                    spike_parents_left_avx512(k->roles, k->node_depths, count, buffers->lefts, buffers->left_keys, &buffers->candidates);
+                    spike_parents_right_avx512(k->roles, k->node_depths, count, buffers->lefts, buffers->left_keys, k->parents, &buffers->candidates);
+                }
+                else
+                {
+                    spike_parents_left8_avx512(k->roles, k->node_depths, count, buffers->lefts, buffers->left_keys, &buffers->candidates, &bench->wide_blocks);
+                    spike_parents_right8_avx512(k->roles, k->node_depths, count, buffers->lefts, buffers->left_keys, k->parents, &buffers->candidates);
+                }
+                break;
+            case SPIKE_TIMED_TWIN_K5: stage->statements_ok = spike_statements(k, count, bench->statements); break;
+            case SPIKE_TIMED_VECTOR_K5: stage->statements_ok = spike_statements_avx512(k, count, buffers->statements); break;
+            case SPIKE_TIMED_TWIN_FALLBACK:
+            case SPIKE_TIMED_VECTOR_FALLBACK:
+            {
+                spike_typedefs_mark(k);
+                const bool everything = k->unbalanced || k->unsupported || !stage->statements_ok;
+                spike_fallback(k, kinds, names, count, everything, bench->meanings, bench->scratch);
+                spike_typedefs_clear(k);
+                break;
+            }
+            default: break;
+        }
+    }
+}
+
+// The stages run in this order, so that each finds its inputs; the variants of a kernel come right before it.
+static const SpikeTimed spike_stage_order[] =
+{
+    SPIKE_TIMED_TWIN_K1,
+    SPIKE_TIMED_TWIN_K3_PASS,
+    SPIKE_TIMED_TWIN_K3,
+    SPIKE_TIMED_TWIN_K2,
+    SPIKE_TIMED_TWIN_SECONDARY,
+    SPIKE_TIMED_TWIN_K4,
+    SPIKE_TIMED_TWIN_K5,
+    SPIKE_TIMED_TWIN_FALLBACK,
+    SPIKE_TIMED_VECTOR_K1_16,
+    SPIKE_TIMED_VECTOR_K1,
+    SPIKE_TIMED_VECTOR_K3_PASS,
+    SPIKE_TIMED_VECTOR_K3_GATHER,
+    SPIKE_TIMED_VECTOR_K3,
+    SPIKE_TIMED_VECTOR_K2,
+    SPIKE_TIMED_VECTOR_SECONDARY,
+    SPIKE_TIMED_VECTOR_K4_8,
+    SPIKE_TIMED_VECTOR_K4,
+    SPIKE_TIMED_VECTOR_K5,
+    SPIKE_TIMED_VECTOR_FALLBACK,
+};
+
+// Times everything (or only `only`), `passes` interleaved passes after a warm-up one, and prints the medians.
+static void spike_benchmark(SpikeBench* bench, uint32_t passes, int32_t only)
+{
+    SpikeCounters counters = {
+        .cycles = spike_open_counter(PERF_COUNT_HW_CPU_CYCLES),
+        .instructions = spike_open_counter(PERF_COUNT_HW_INSTRUCTIONS),
+    };
+    if (counters.cycles < 0 || counters.instructions < 0)
+    {
+        fprintf(stderr, "perf_event_open failed (see /proc/sys/kernel/perf_event_paranoid): cycles and instructions read as 0\n");
+    }
+    static SpikeSample samples[SPIKE_TIMED_COUNT][BUSTER_SPIKE_PASSES];
+    for (uint32_t pass = 0; pass <= passes; pass += 1)
+    {
+        for (uint32_t which = SPIKE_TIMED_SCALAR_PARSER; which <= SPIKE_TIMED_VECTOR; which += 1)
+        {
+            if (only < 0 || only == (int32_t)which)
+            {
+                const SpikeSample before = spike_sample(&counters);
+                spike_run_stage(bench, (SpikeTimed)which);
+                const SpikeSample after = spike_sample(&counters);
+                if (pass > 0)
+                {
+                    samples[which][pass - 1] = spike_difference(before, after);
+                }
+            }
+        }
+        for (uint32_t i = 0; i < sizeof(spike_stage_order) / sizeof(spike_stage_order[0]); i += 1)
+        {
+            const SpikeTimed which = spike_stage_order[i];
+            if (only < 0 || only == (int32_t)which || only == SPIKE_TIMED_COUNT)
+            {
+                const SpikeSample before = spike_sample(&counters);
+                spike_run_stage(bench, which);
+                const SpikeSample after = spike_sample(&counters);
+                if (pass > 0)
+                {
+                    samples[which][pass - 1] = spike_difference(before, after);
+                }
+            }
+        }
+    }
+    printf("%u interleaved passes over %u files, %lu tokens, medians:\n", passes, bench->corpus->file_count, (unsigned long)bench->corpus->token_count);
+    for (uint32_t which = 0; which < SPIKE_TIMED_COUNT; which += 1)
+    {
+        if (only < 0 || only == (int32_t)which)
+        {
+            spike_report(spike_timed_names[which], samples[which], passes, bench->corpus->token_count);
+        }
+    }
+    if (counters.cycles >= 0)
+    {
+        close(counters.cycles);
+    }
+    if (counters.instructions >= 0)
+    {
+        close(counters.instructions);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The command
 
 static bool spike_allocate_tree(Arena* arena, SpikeTree* tree, uint64_t count)
@@ -725,6 +1227,9 @@ int run_parse_spike(int argc, char** argv)
     bool check_only = false;
     bool show_flags = false;
     bool fixtures = false;
+    uint32_t generated = 0;
+    uint32_t passes = BUSTER_SPIKE_PASSES;
+    int32_t only = -1;
     bool valid = true;
     uint32_t path_count = 0;
     for (int i = 1; i < argc; i += 1)
@@ -746,6 +1251,28 @@ int run_parse_spike(int argc, char** argv)
         {
             fixtures = true;
         }
+        else if (strcmp(argv[i], "--generated") == 0 && i + 1 < argc)
+        {
+            generated = (uint32_t)strtoul(argv[i + 1], 0, 10);
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--passes") == 0 && i + 1 < argc)
+        {
+            passes = (uint32_t)strtoul(argv[i + 1], 0, 10);
+            passes = passes == 0 ? 1 : passes > BUSTER_SPIKE_PASSES ? BUSTER_SPIKE_PASSES : passes;
+            i += 1;
+        }
+        else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
+        {
+            // A path or a stage alone (for perf), or "stages" for every stage.
+            only = strcmp(argv[i + 1], "stages") == 0 ? SPIKE_TIMED_COUNT : -2;
+            for (uint32_t t = 0; t < SPIKE_TIMED_COUNT; t += 1)
+            {
+                only = strcmp(argv[i + 1], spike_timed_names[t]) == 0 ? (int32_t)t : only;
+            }
+            valid &= only != -2;
+            i += 1;
+        }
         else if (argv[i][0] == '-')
         {
             valid = false;
@@ -761,9 +1288,9 @@ int run_parse_spike(int argc, char** argv)
         .memory = &memory,
         .files = BUSTER_ARENA_PUSH_ARRAY(&memory, SpikeFile, BUSTER_SPIKE_MAX_FILES),
     };
-    if (!valid || (path_count == 0 && !fixtures))
+    if (!valid || (path_count == 0 && !fixtures && generated == 0))
     {
-        fprintf(stderr, "usage: %s [--fixtures] [--check-only] [--flags] [--dump FILE] path...\n", argv[0]);
+        fprintf(stderr, "usage: %s [--fixtures] [--generated N] [--check-only] [--flags] [--dump FILE] [--passes N] [--only NAME|stages] path...\n", argv[0]);
     }
     else if (corpus.files == 0 || !spike_names_init(&corpus.names, &memory))
     {
@@ -771,10 +1298,10 @@ int run_parse_spike(int argc, char** argv)
     }
     else
     {
-        bool loaded = !fixtures || spike_load_fixtures(&corpus);
+        bool loaded = (!fixtures || spike_load_fixtures(&corpus)) && (generated == 0 || spike_load_generated(&corpus, generated));
         for (int i = 1; loaded && i < argc; i += 1)
         {
-            if (strcmp(argv[i], "--dump") == 0)
+            if (strcmp(argv[i], "--dump") == 0 || strcmp(argv[i], "--generated") == 0 || strcmp(argv[i], "--passes") == 0 || strcmp(argv[i], "--only") == 0)
             {
                 i += 1;
             }
@@ -793,7 +1320,7 @@ int run_parse_spike(int argc, char** argv)
         uint8_t* typed = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 1);
         SpikeStatement* statements = BUSTER_ARENA_PUSH_ARRAY(&memory, SpikeStatement, corpus.max_tokens + 1);
         SpikeVectorBuffers buffers;
-        const bool buffers_reserved = spike_vector_buffers_reserve(&buffers, &memory, corpus.max_tokens);
+        bool buffers_reserved = spike_vector_buffers_reserve(&buffers, &memory, corpus.max_tokens);
         SpikeKernelCopy copy = {
             .depths = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
             .enclosing = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
@@ -801,11 +1328,7 @@ int run_parse_spike(int argc, char** argv)
             .parents = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
             .lefts = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
             .left_keys = BUSTER_ARENA_PUSH_ARRAY(&memory, uint16_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
-            .candidates = {
-                .positions = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
-                .keys = BUSTER_ARENA_PUSH_ARRAY(&memory, uint16_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
-                .count = 0,
-            },
+
             .typed = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
             .roles = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
             .flags = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
@@ -814,6 +1337,11 @@ int run_parse_spike(int argc, char** argv)
             .group_typed = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
             .rounds = { 0 },
         };
+        buffers_reserved &= spike_candidates_reserve(&copy.candidates, &memory, corpus.max_tokens);
+        // The check's K1 and K2 use the vector path's padded stacks.
+        copy.open_stack = buffers.open_stack;
+        copy.group_roles = buffers.group_roles;
+        copy.group_typed = buffers.group_typed;
         if (loaded && (meanings.meanings == 0 || marks == 0 || typed == 0 || statements == 0 || !spike_allocate_tree(&memory, &tree, corpus.max_tokens) ||
                        !spike_kernels_reserve(&kernels, &memory, corpus.max_tokens, BUSTER_SPIKE_NAME_CAPACITY) || !buffers_reserved))
         {
@@ -994,30 +1522,29 @@ int run_parse_spike(int argc, char** argv)
                 printf(" %u:%lu", r, (unsigned long)copy.rounds[r]);
             }
             printf(" (0: the twin)\n");
+            printf("K4 in byte lanes: %lu of %lu blocks span too many depths and run as 16-bit blocks\n", (unsigned long)copy.wide_blocks, (unsigned long)copy.byte_blocks);
             result = failed == 0 && broken == 0 && twin_failures == 0 && kernel_failures == 0 && vector_failures == 0 ? 0 : 1;
+            SpikeStageFile* stages = BUSTER_ARENA_PUSH_ARRAY(&memory, SpikeStageFile, corpus.file_count + 1);
+            if (result == 0 && !check_only && (stages == 0 || !spike_stage_files_reserve(stages, &corpus, &kernels, &memory)))
+            {
+                fprintf(stderr, "can't reserve memory for the stages\n");
+                result = 1;
+            }
             if (result == 0 && !check_only)
             {
-                SpikeCounters counters = {
-                    .cycles = spike_open_counter(PERF_COUNT_HW_CPU_CYCLES),
-                    .instructions = spike_open_counter(PERF_COUNT_HW_INSTRUCTIONS),
+                SpikeBench bench = {
+                    .corpus = &corpus,
+                    .meanings = &meanings,
+                    .tree = &tree,
+                    .scratch = &scratch,
+                    .kernels = &kernels,
+                    .buffers = &buffers,
+                    .stages = stages,
+                    .typed = typed,
+                    .statements = statements,
+                    .wide_blocks = 0,
                 };
-                SpikeSample samples[BUSTER_SPIKE_PASSES];
-                for (uint32_t pass = 0; pass <= BUSTER_SPIKE_PASSES; pass += 1)
-                {
-                    const SpikeSample before = spike_sample(&counters);
-                    for (uint32_t i = 0; i < corpus.file_count; i += 1)
-                    {
-                        const SpikeFile* file = &corpus.files[i];
-                        spike_parse_scalar(file->tokens.kinds, file->tokens.names, (uint32_t)file->tokens.count, &meanings, &tree, &scratch);
-                    }
-                    const SpikeSample after = spike_sample(&counters);
-                    if (pass > 0)
-                    {
-                        samples[pass - 1] = spike_difference(before, after);
-                    }
-                }
-                printf("%d passes over %lu tokens, medians:\n", BUSTER_SPIKE_PASSES, (unsigned long)corpus.token_count);
-                spike_report("scalar parser", samples, BUSTER_SPIKE_PASSES, corpus.token_count);
+                spike_benchmark(&bench, passes, only);
             }
         }
     }
