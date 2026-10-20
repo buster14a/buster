@@ -8,7 +8,9 @@
 // order:
 //   - The templates: every form's longest encoding fits in a slot, and with 32-bit addresses, every one's but those
 //     of the FS and GS forms with no room for the 67; and for APX, REX2's positions are in every legacy form of maps 0
-//     and 1 but the XSAVE family's, and only there, but in the FS and GS forms with no room for its payload.
+//     and 1 but the XSAVE family's, and only there, but in the FS and GS forms with no room for its payload. And every
+//     form's template, built for each mode into a template that ends at a PROT_NONE page, rejected without writing past
+//     it where its positions don't fit.
 //   - Known encodings: x86_encode_scalar and x86_encode on x86_known_encodings, instructions on the paths most worth
 //     pinning down (REX, SIB, RBP and R13 bases, RSP and R12 bases, RIP, absolute and index-only addresses,
 //     displacement sizes, byte registers, prefixes, opcode maps; VEX2 and VEX3, BMI, opmasks, EVEX's opmasks,
@@ -93,7 +95,8 @@
 //     x86_known_encodings_apx, x86_known_encodings_32 and x86_known_encodings_16) and x86_check_known,
 //     x86_known_invalid_apx and x86_check_known_invalid_apx, x86_known_fixups (and x86_known_fixups_32 and
 //     x86_known_fixups_16) and x86_check_known_fixups, x86_check_digest, x86_compare_encoders and x86_check_random,
-//     the page-edge check (x86_test_report_fault and x86_check_page_edges), and x86_check_invalid.
+//     the page-edge check (x86_test_report_fault and x86_check_page_edges), the templates at a page end
+//     (x86_test_report_template_fault and x86_check_template_bounds), and x86_check_invalid.
 //   - The cross-check modes (x86_print_assembly, the object reader x86_elf_section and x86_compare_object),
 //     x86_check_mode (one entry point's checks) and run_x86_encoder_tests.
 
@@ -3987,6 +3990,61 @@ static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Bu
     return result;
 }
 
+// The template x86_check_template_bounds is building, for its fault handler.
+static volatile uint32_t x86_test_template_form;
+static volatile uint32_t x86_test_template_encoder;
+
+static void x86_test_report_template_fault(int signal_number)
+{
+    (void)signal_number;
+    char message[120];
+    const int length = snprintf(message, sizeof(message), "templates at a page end: build_template wrote past form %u's in mode %u\n",
+                                (unsigned)x86_test_template_form, (unsigned)x86_test_template_encoder);
+    if (length > 0 && write(STDOUT_FILENO, message, (size_t)length) < 0)
+    {
+        _exit(1);
+    }
+    _exit(1);
+}
+
+// Every template index's form (with its segment override, or none) as build_template builds it for each of the five
+// entry points' modes, into a template that ends where a PROT_NONE page starts: a form whose positions don't fit in a
+// slot (APX's map 4 forms with an imm32, a segment override and a 67 ask for 17) must be rejected without writing past
+// it.
+static bool x86_check_template_bounds(void)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint64_t mapped = 0;
+    uint8_t* end = x86_map_guarded(sizeof(X86Template), page, &mapped);
+    uint32_t rejected = 0;
+    const bool result = end != 0;
+    if (result)
+    {
+        struct sigaction action;
+        struct sigaction previous_segv;
+        struct sigaction previous_bus;
+        memset(&action, 0, sizeof(action));
+        action.sa_handler = x86_test_report_template_fault;
+        sigaction(SIGSEGV, &action, &previous_segv);
+        sigaction(SIGBUS, &action, &previous_bus);
+        X86Template* template = (X86Template*)(end - sizeof(X86Template));
+        for (uint32_t encoder = X86_ENCODER_MODE_64; encoder <= X86_ENCODER_MODE_16; encoder += 1)
+        {
+            x86_test_template_encoder = encoder;
+            for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
+            {
+                x86_test_template_form = form;
+                rejected += !build_template(x86_form_description(form), x86_form_segment(form), (X86EncoderMode)encoder, template);
+            }
+        }
+        sigaction(SIGSEGV, &previous_segv, 0);
+        sigaction(SIGBUS, &previous_bus, 0);
+        munmap(end - (mapped - 2 * page) - page, mapped);
+    }
+    printf("templates at a page end: every form's in each mode, %u of them rejected, %s\n", rejected, result ? "none written past" : "can't map the guarded page");
+    return result;
+}
+
 // The lowest bit of a register operand of the class (in a form of the family) past its last register (or of a default
 // flags value, past 15), or for a group, its low bit (for control registers, past CR15: x86_validate alone finds the
 // numbers below without a register). With `extended` (APX's forms with REX2), a general register's last is R31.
@@ -4278,10 +4336,11 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
             // An immediate or a relative displacement just outside its field's range, above or below: imm8's [-128,
             // 255], imm16's [-32768, 65535], ENTER's [0, 2^24), rel8's [-128, 127] or rel16's [-32768, 32767] (imm32, a
             // 64-bit immediate and rel32 take any value), or in 16- and 32-bit modes a ptr16:32's selector's [-32768,
-            // 65535]; or an /is4 register past the last (16) or with one of bits 3 to 0 set (or below 0, for one with a
-            // selector there). x86_encode writes the field's low bytes, so only x86_validate checks this. In a new
-            // instruction of a random form with such a field, each kind of field as often, as only one form (ENTER) has
-            // the third and few have a rel8, a rel16 or a far pointer.
+            // 65535]; or an /is4 register past the last (16, or 8 to 15 in 16- and 32-bit modes, whose bit 7 the
+            // processor ignores there) or with one of bits 3 to 0 set (or below 0, for one with a selector there).
+            // x86_encode writes the field's low bytes, so only x86_validate checks this. In a new instruction of a
+            // random form with such a field, each kind of field as often, as only one form (ENTER) has the third and
+            // few have a rel8, a rel16 or a far pointer.
             const uint32_t kind = 1 + x86_random_below(state, legacy ? 7 : 6);
             uint16_t form_index = x86_random_form(state, false);
             while (x86_range_kind(&x86_form_descriptions[form_index]) != kind)
@@ -4298,7 +4357,8 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
                 case 5:
                 {
                     const bool selector = x86_form_has_is4_selector(&x86_form_descriptions[form_index]);
-                    instruction->immediate = above ? 16 << 4 : selector ? -1 : instruction->immediate | (int32_t)(1 + x86_random_below(state, 15));
+                    const int32_t past_last = legacy ? ((int32_t)(8 + x86_random_below(state, 8)) << 4) | (int32_t)(instruction->immediate & 0x0f) : 16 << 4;
+                    instruction->immediate = above ? past_last : selector ? -1 : instruction->immediate | (int32_t)(1 + x86_random_below(state, 15));
                     break;
                 }
                 case 6: instruction->displacement = above ? 32768 : -32769; break;
@@ -5461,6 +5521,7 @@ static int run_x86_encoder_tests(int argc, char** argv)
         // Every check for x86_encode, then again for 32-bit addresses, for APX, and in 32-bit and 16-bit modes: all
         // five passes, or the one that --address32, --apx, --mode32 or --mode16 asks for.
         bool passed = x86_check_templates();
+        passed = x86_check_template_bounds() && passed;
         for (uint32_t pass = X86_ENCODER_MODE_64; pass <= X86_ENCODER_MODE_16; pass += 1)
         {
             if (mode == X86_ENCODER_MODE_64 || mode == pass)

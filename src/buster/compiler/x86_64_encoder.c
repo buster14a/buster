@@ -5673,6 +5673,19 @@ static bool x86_form_takes_rex2(const X86FormDescription* form)
     return form->family == BUSTER_X86_FAMILY_LEGACY && form->opcode_bytes != 0 && x86_legacy_map(form) <= 1 && !x86_form_is_xsave(form);
 }
 
+// Appends a position to a template that build_template is building: its byte (zero where the canonical slot gives it
+// all) and its layout, if the slot has room for it. A form whose positions don't fit in a slot is rejected once all of
+// them are counted, so those past the slot's are counted, not written.
+BUSTER_INLINE void template_append(X86Template* template, uint32_t* position, uint8_t byte, uint8_t layout)
+{
+    if (*position < sizeof(template->layout))
+    {
+        template->bytes[*position] = byte;
+        template->layout[*position] = layout;
+    }
+    *position += 1;
+}
+
 // Builds the template of a form with a segment override (x86_form_segment's) or none, for the mode's entry point: for
 // 32-bit addresses, with a 67 for a memory operand, and for APX, with REX2's positions in a legacy form of maps 0 and 1
 // (and otherwise x86_encode's template, whose general registers and base can't be 16 to 31). In 16- and 32-bit modes,
@@ -5725,33 +5738,26 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     prefixes = (properties & BUSTER_X86_LEGACY_SIZE_16) ? x86_prefixes_without(prefixes, 0x66) : prefixes;
     if ((prefixes & 0xff) == 0x9b)
     {
-        template->bytes[position] = 0x9b;
-        template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
-        position += 1;
+        template_append(template, &position, 0x9b, BUSTER_X86_LAYOUT_STATIC);
         static_length += 1;
         last_static = position;
         prefixes >>= 8;
     }
     if (segment != 0 && memory)
     {
-        template->bytes[position] = (uint8_t)(0x63 + segment);
-        template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
-        position += 1;
+        template_append(template, &position, (uint8_t)(0x63 + segment), BUSTER_X86_LAYOUT_STATIC);
         static_length += 1;
         last_static = position;
     }
     else if (override_position)
     {
-        template->layout[position] = BUSTER_X86_LAYOUT_OVERRIDE;
-        position += 1;
+        template_append(template, &position, 0, BUSTER_X86_LAYOUT_OVERRIDE);
     }
     // NOTRACK's 3E, which GNU as puts with the segment overrides (but in 16- and 32-bit modes, a branch hint's comes
     // after the mode's 66), and then a 32-bit address's 67, present with a memory operand, or the other address size's.
     while ((prefixes & 0xff) == 0x3e && !(legacy && form->syntax == X86_SYNTAX_REL))
     {
-        template->bytes[position] = 0x3e;
-        template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
-        position += 1;
+        template_append(template, &position, 0x3e, BUSTER_X86_LAYOUT_STATIC);
         static_length += 1;
         last_static = position;
         prefixes >>= 8;
@@ -5759,9 +5765,7 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     const bool other_moffs = (properties & (mode16 ? BUSTER_X86_LEGACY_ADDRESS_32 : BUSTER_X86_LEGACY_ADDRESS_16)) != 0;
     if (other_moffs || ((address32 || legacy) && (memory || (properties & BUSTER_X86_LEGACY_IMPLICIT_ADDRESS))))
     {
-        template->bytes[position] = 0x67;
-        template->layout[position] = other_moffs ? BUSTER_X86_LAYOUT_STATIC : BUSTER_X86_LAYOUT_ADDRESS32;
-        position += 1;
+        template_append(template, &position, 0x67, other_moffs ? BUSTER_X86_LAYOUT_STATIC : BUSTER_X86_LAYOUT_ADDRESS32);
         static_length += other_moffs ? 1 : 0;
         last_static = position;
         address_size_position = !other_moffs;
@@ -5769,9 +5773,7 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     // The mode's operand size's 66: a 16-bit form's in 32-bit mode, and a 32-bit form's in 16-bit mode.
     if ((properties & BUSTER_X86_LEGACY_SIZE_16) ? !mode16 : (properties & BUSTER_X86_LEGACY_SIZE_32) && mode16)
     {
-        template->bytes[position] = 0x66;
-        template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
-        position += 1;
+        template_append(template, &position, 0x66, BUSTER_X86_LAYOUT_STATIC);
         static_length += 1;
         last_static = position;
     }
@@ -5779,9 +5781,7 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     {
         for (; prefixes != 0 && !(rex2 && (uint8_t)prefixes == 0xd5); prefixes >>= 8)
         {
-            template->bytes[position] = (uint8_t)prefixes;
-            template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
-            position += 1;
+            template_append(template, &position, (uint8_t)prefixes, BUSTER_X86_LAYOUT_STATIC);
             static_length += 1;
             last_static = position;
         }
@@ -5791,18 +5791,15 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
         // with REX.R: F4, which REX.R's 4 makes F0.
         if (!legacy || lock_control)
         {
-            template->bytes[position] = lock_control ? 0xf4 : always_rex2 && rex2 ? 0xd5 : (uint8_t)((always_rex2 ? 0 : 0x40) | (form->w << 3));
-            template->layout[position] = always_rex2 && rex2 ? BUSTER_X86_LAYOUT_STATIC | BUSTER_X86_CANONICAL_REX : BUSTER_X86_CANONICAL_REX;
-            position += 1;
+            const uint8_t byte = lock_control ? 0xf4 : always_rex2 && rex2 ? 0xd5 : (uint8_t)((always_rex2 ? 0 : 0x40) | (form->w << 3));
+            template_append(template, &position, byte, always_rex2 && rex2 ? BUSTER_X86_LAYOUT_STATIC | BUSTER_X86_CANONICAL_REX : BUSTER_X86_CANONICAL_REX);
         }
         // REX2's payload, after D5: in map 0 a position of its own, present with REX2 alone (but always, in a form that
         // always has REX2), whose template byte is W. Like REX's, it comes before the opcode, the last of the form's
         // own bytes.
         if (rex2 && !rex2_map1)
         {
-            template->bytes[position] = (uint8_t)(form->w << 3);
-            template->layout[position] = BUSTER_X86_CANONICAL_REX2_PAYLOAD;
-            position += 1;
+            template_append(template, &position, (uint8_t)(form->w << 3), BUSTER_X86_CANONICAL_REX2_PAYLOAD);
             static_length += always_rex2 ? 1 : 0;
         }
 
@@ -5811,11 +5808,10 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
         for (uint32_t i = 0; i < opcode_bytes; i += 1)
         {
             const bool last = i + 1 == opcode_bytes;
-            template->bytes[position] = x86_opcode_byte(form, i);
-            template->layout[position] = i == 0 && rex2_map1 ? BUSTER_X86_CANONICAL_REX2_MAP1
-                                         : last && form->encoding == BUSTER_X86_ENCODING_PR ? BUSTER_X86_CANONICAL_OPCODE_REGISTER
-                                                                                             : BUSTER_X86_LAYOUT_STATIC;
-            position += 1;
+            const uint8_t layout = i == 0 && rex2_map1 ? BUSTER_X86_CANONICAL_REX2_MAP1
+                                   : last && form->encoding == BUSTER_X86_ENCODING_PR ? BUSTER_X86_CANONICAL_OPCODE_REGISTER
+                                                                                       : BUSTER_X86_LAYOUT_STATIC;
+            template_append(template, &position, x86_opcode_byte(form, i), layout);
             static_length += 1;
             last_static = position;
         }
@@ -5829,13 +5825,9 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
         {
             // C4 (C5 for VEX2), or XOP's 8F (for maps 8 and up, never in two bytes); R, X and B (inverted) and the
             // map; W, vvvv (inverted), L and pp.
-            template->bytes[position] = map >= 8 ? 0x8f : 0xc4;
-            template->layout[position] = map >= 8 ? BUSTER_X86_LAYOUT_STATIC : BUSTER_X86_CANONICAL_VEX_ESCAPE;
-            template->bytes[position + 1] = (uint8_t)(0xe0 | map);
-            template->layout[position + 1] = BUSTER_X86_CANONICAL_PREFIX_P0;
-            template->bytes[position + 2] = (uint8_t)((form->w << 7) | 0x78 | (form->vector_length << 2) | pp);
-            template->layout[position + 2] = BUSTER_X86_CANONICAL_PREFIX_P1;
-            position += 3;
+            template_append(template, &position, map >= 8 ? 0x8f : 0xc4, map >= 8 ? BUSTER_X86_LAYOUT_STATIC : BUSTER_X86_CANONICAL_VEX_ESCAPE);
+            template_append(template, &position, (uint8_t)(0xe0 | map), BUSTER_X86_CANONICAL_PREFIX_P0);
+            template_append(template, &position, (uint8_t)((form->w << 7) | 0x78 | (form->vector_length << 2) | pp), BUSTER_X86_CANONICAL_PREFIX_P1);
             static_length += 3;
             flags |= map == 1 && !form->w ? BUSTER_X86_TEMPLATE_VEX2 : 0;
             valid = form->vector_length <= 1 && form->disp8_scale == 1 && form->evex == BUSTER_X86_EVEX_NONE && form->vvvv != BUSTER_X86_OPERAND_DFV;
@@ -5851,15 +5843,11 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
             const bool nf = (form->evex & BUSTER_X86_EVEX_NF) != 0;
             const bool scc = (form->evex & BUSTER_X86_EVEX_SOURCE_CONDITION) != 0;
             const bool dfv = form->vvvv == BUSTER_X86_OPERAND_DFV;
-            template->bytes[position] = 0x62;
-            template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
-            template->bytes[position + 1] = (uint8_t)(0xf0 | map);
-            template->layout[position + 1] = BUSTER_X86_CANONICAL_PREFIX_P0;
-            template->bytes[position + 2] = (uint8_t)((form->w << 7) | (dfv ? 0 : 0x78) | 0x04 | pp);
-            template->layout[position + 2] = BUSTER_X86_CANONICAL_PREFIX_P1;
-            template->bytes[position + 3] = (uint8_t)(((rounding ? 0 : form->vector_length) << 5) | (b << 4) | (scc ? form->evex >> 8 : 0x08 | (nf << 2)));
-            template->layout[position + 3] = BUSTER_X86_CANONICAL_PREFIX_P2;
-            position += 4;
+            template_append(template, &position, 0x62, BUSTER_X86_LAYOUT_STATIC);
+            template_append(template, &position, (uint8_t)(0xf0 | map), BUSTER_X86_CANONICAL_PREFIX_P0);
+            template_append(template, &position, (uint8_t)((form->w << 7) | (dfv ? 0 : 0x78) | 0x04 | pp), BUSTER_X86_CANONICAL_PREFIX_P1);
+            template_append(template, &position, (uint8_t)(((rounding ? 0 : form->vector_length) << 5) | (b << 4) | (scc ? form->evex >> 8 : 0x08 | (nf << 2))),
+                            BUSTER_X86_CANONICAL_PREFIX_P2);
             static_length += 4;
             // NF and ND are in the opmask's and EVEX.b's places, so a form with either has no other decoration; and a
             // source condition is in NF's and the opmask's, so a form with one has no other, and has a default flags
@@ -5871,9 +5859,7 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
         }
 
         // The opcode's last byte: the map stands for its escape bytes.
-        template->bytes[position] = x86_opcode_byte(form, form->opcode_bytes - 1u);
-        template->layout[position] = BUSTER_X86_LAYOUT_STATIC;
-        position += 1;
+        template_append(template, &position, x86_opcode_byte(form, form->opcode_bytes - 1u), BUSTER_X86_LAYOUT_STATIC);
         static_length += 1;
         last_static = position;
         flags |= legacy ? 0 : BUSTER_X86_TEMPLATE_NO_REX;
@@ -5888,36 +5874,30 @@ static bool build_template(const X86FormDescription* form, uint32_t segment, X86
     {
         if (form->encoding == BUSTER_X86_ENCODING_R || (form->encoding & BUSTER_X86_ENCODING_DIGIT))
         {
-            template->bytes[position] = (form->encoding & BUSTER_X86_ENCODING_DIGIT) ? (uint8_t)((form->encoding & 7) << 3) : 0;
-            template->layout[position] = BUSTER_X86_CANONICAL_MODRM;
-            position += 1;
+            template_append(template, &position, (form->encoding & BUSTER_X86_ENCODING_DIGIT) ? (uint8_t)((form->encoding & 7) << 3) : 0, BUSTER_X86_CANONICAL_MODRM);
             static_length += 1;
             // A /r ModRM's template byte is zero, so it may be past the form's own bytes.
             last_static = (form->encoding & BUSTER_X86_ENCODING_DIGIT) ? position : last_static;
             if (form->rm & BUSTER_X86_OPERAND_MEMORY)
             {
-                template->layout[position] = BUSTER_X86_CANONICAL_SIB;
-                position += 1;
+                template_append(template, &position, 0, BUSTER_X86_CANONICAL_SIB);
                 for (uint32_t i = 0; i < 4; i += 1)
                 {
-                    template->layout[position] = (uint8_t)(BUSTER_X86_CANONICAL_DISPLACEMENT + i);
-                    position += 1;
+                    template_append(template, &position, 0, (uint8_t)(BUSTER_X86_CANONICAL_DISPLACEMENT + i));
                 }
             }
         }
 
         for (uint32_t i = 0; i < form->relative_bytes; i += 1)
         {
-            template->layout[position] = (uint8_t)(BUSTER_X86_CANONICAL_DISPLACEMENT + i);
-            position += 1;
+            template_append(template, &position, 0, (uint8_t)(BUSTER_X86_CANONICAL_DISPLACEMENT + i));
             static_length += 1;
         }
 
         // An immediate's bytes past the fourth are the displacement field's.
         for (uint32_t i = 0; i < form->immediate_bytes; i += 1)
         {
-            template->layout[position] = (uint8_t)(BUSTER_X86_CANONICAL_IMMEDIATE + i);
-            position += 1;
+            template_append(template, &position, 0, (uint8_t)(BUSTER_X86_CANONICAL_IMMEDIATE + i));
             static_length += 1;
         }
     }
@@ -6339,10 +6319,12 @@ static bool instruction_is_valid(const X86Instruction* instruction, X86EncoderMo
             case 3: result = result && immediate >= 0 && immediate < (1 << 24); break;
             default: break;
         }
-        // An /is4 register: 0 to 15 in bits 7 to 4, and bits 3 to 0 clear or a selector.
+        // An /is4 register: 0 to 15 in bits 7 to 4 (0 to 7 in 16- and 32-bit modes, where the processor ignores bit 7),
+        // and bits 3 to 0 clear or a selector.
         if (x86_form_has_is4(form))
         {
-            result = result && (immediate & ~(int64_t)(x86_form_has_is4_selector(form) ? 0xff : 0xf0)) == 0;
+            const int64_t is4_bits = (legacy ? 0x70 : 0xf0) | (x86_form_has_is4_selector(form) ? 0x0f : 0);
+            result = result && (immediate & ~is4_bits) == 0;
         }
         if (form->relative_bytes == 1)
         {

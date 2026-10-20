@@ -223,8 +223,10 @@ yet compared against a performance baseline. Keep just one compiler executable.
 ## x86-64 encoder tests
 
 `./build/compiler test-x86-encoder` (about 1.5 s) checks that every form fits a
-template, both encoders on 761 known encodings from GNU as (each also with the
-fixup flag, whose end they must report), a digest of the scalar encoder's output
+template (and that building each, in every mode, at a `PROT_NONE` page writes
+nothing past it), both encoders on 761 known encodings from GNU as (each also
+with the fixup flag, whose end they must report), a digest of the scalar
+encoder's output
 for 100,000 random instructions, every batch width and variant of `x86_encode`
 against the scalar encoder (bytes, offsets and fixup ends, in each of the four
 loops: with neither, either or both of offsets and fixup ends) on every count

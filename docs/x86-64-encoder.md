@@ -252,7 +252,10 @@ bytes are present (REX, SIB, no/8-bit/32-bit displacement, VEX2's missing byte);
 every form-dependent decision (byte order, widths, which fields exist, the
 prefix's map, pp, W and L) is in the template. So one code path encodes every
 form, and the template builder checks that each form's longest encoding fits in
-15 bytes (the longest EVEX one is 12).
+15 bytes (the longest EVEX one is 12). It counts every position a form asks for,
+but writes only those that fit in the slot's 16, so a form that doesn't fit
+(APX's map 4 forms with an imm32, a segment override and a `67` ask for 17) is
+rejected without writing past its template.
 
 A segment override is the form's too, as `lock` and `rep` are: the form number
 plus `BUSTER_X86_FORM_FS` or `BUSTER_X86_FORM_GS` (8,189 or twice that) names a
@@ -743,7 +746,8 @@ EVEX forms, `udb` (`salc` in these modes), and the instructions GNU as takes in
 tile configuration, `vpcmpestriq` and `vpcmpestrmq`, MOVRS and AVX10.2's
 `vmovrs`, CMPccXADD, PREFETCHIT0 and PREFETCHIT1, the descriptor table
 registers' 10-byte operands and the 64-bit flag pushes. It takes registers 0 to
-7 (and CR8), 16-bit addresses by their rules, with displacements in [-32768,
+7 (and CR8; an /is4 register too, as the processor ignores the immediate's bit 7
+there), 16-bit addresses by their rules, with displacements in [-32768,
 65535], no RIP, and instructions within x86's 15 bytes, which a `66` and a `67`
 can go past where REX was: in 16-bit mode, HLE's locked arithmetic by an imm32
 with an FS or GS override and a 32-bit address with a SIB byte and a disp32
@@ -1192,7 +1196,8 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
 
 `./build/compiler test-x86-encoder` (about 1.5 s) checks:
 
-- that every form's template fits;
+- that every form's template fits, and that building every form's in every mode
+  into a template that ends at a `PROT_NONE` page writes nothing past it;
 - 761 known encodings from GNU as, on the paths most worth pinning down (VEX2
   and VEX3, BMI, opmasks, EVEX's opmasks, zeroing, broadcasts, rounding,
   compressed displacements, registers 16–31, x87's register forms and memory
@@ -1284,8 +1289,9 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   only memory, a segment override without a memory operand) are rejected by
   `x86_encode` and found by `x86_validate`, and that immediates, rel8s and rel16s
   just outside their fields' ranges (above and below, in an imm8, imm16, ENTER's,
-  rel8 or rel16 form, each kind as often), /is4 registers past the last or with
-  bits 3 to 0 set (or below 0 where those are a selector), control registers
+  rel8 or rel16 form, each kind as often), /is4 registers past the last (or past
+  7 in 16- and 32-bit modes) or with bits 3 to 0 set (or below 0 where those are
+  a selector), control registers
   that don't exist (CR1, CR5 to CR7 and CR9 to CR15), segment registers past GS,
   MOV to CS, complex multiplications into one of their sources, AMX products
   with a tile twice, `push2` and `pop2` with RSP and `pop2` with one register
@@ -1688,7 +1694,12 @@ instruction longer than 15 bytes left out (398 of their 597 streams accepted,
 and the invalid instructions' longest), its `67` not dropped (a fault at a page
 end), and VEX's and EVEX's templates with `NO_REX`, under which an invalid
 instruction's REX bits light the override position without counting (a fault
-at a page end, once the streams had instructions with an index past 7).
+at a page end, once the streams had instructions with an index past 7). Two
+more came from a review, with checks of their own: `build_template` writing the
+positions past a slot's 16 (it faults at a page end on the FS copy of map 4's
+`add` by an imm32 with 32-bit addresses, which asks for 17), and validation
+taking an /is4 register up to 15 in these modes (51 and 61 broken instructions
+not found, once the breaker tried 8 to 15 there).
 
 ## Coverage
 
