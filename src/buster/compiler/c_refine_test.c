@@ -12,7 +12,9 @@
 // that command. The checks, in this order:
 //   - hash: intern_hash_bytes, and intern_hash_vector up to 64 bytes, agree with intern_hash_bytes_scalar on random
 //     spellings of every length from 0 to 200 bytes.
-//   - long hashes: long spellings made of repeated or swapped 64-byte chunks and 16-byte lanes all hash differently.
+//   - structured hashes: long spellings made of repeated or swapped 64-byte chunks and 16-byte lanes, and 32-byte ones
+//     whose two lanes change in bits their rotations line up, all hash differently; and a bit flipped in one lane with
+//     the bit its rotation lines up with in another always changes the hash.
 //   - names: every predefined name has its C_NAME id and spelling, and is a keyword in exactly the language modes
 //     clang makes it one in (every name in every mode from c89 to gnu23).
 //   - table: random spellings of 1 to 200 bytes, enough to grow the table seven times, get ids in the order they are
@@ -52,8 +54,10 @@
 #define BUSTER_REFINE_TEST_DEFAULT_INPUTS 20000
 #define BUSTER_REFINE_TEST_HASH_ROUNDS 200000
 #define BUSTER_REFINE_TEST_HASH_LENGTHS 201
-// refine_check_long_hashes's spellings: 8,192 + 4,096 + 2 * 2,048 + 3 * 2,048.
-#define BUSTER_REFINE_TEST_LONG_HASHES 22528
+// refine_check_long_hashes's spellings: 8,192 + 4,096 + 2 * 2,048 + 3 * 2,048 + 65,536.
+#define BUSTER_REFINE_TEST_LONG_HASHES 88064
+// refine_check_aligned_flips's spellings.
+#define BUSTER_REFINE_TEST_FLIPS 20000
 #define BUSTER_REFINE_TEST_TABLE_SPELLINGS 300000
 // A random input is up to this long, and is made of up to this many pieces.
 #define BUSTER_REFINE_TEST_INPUT_BYTES 8192
@@ -511,11 +515,16 @@ static void refine_test_long_hash(const uint8_t* bytes, uint32_t length, uint64_
     *count += 1;
 }
 
-// Long spellings made of repeated or swapped parts, which a fold that XORed every 64-byte chunk alike would hash alike:
-// `X X` for 8,192 64-byte X (an index in base 26, then 'a's), as such a fold would hash every one of them by its length
-// alone; a 16-byte lane eight times, for 4,096 lanes; `X Y` and `Y X` for 2,048 random pairs; and `X` two, three and four
-// times for 2,048 random X. All of them must hash differently: the chance that two of 22,528 random 64-bit hashes are
-// equal is about 2^-37.
+// Spellings made of repeated, swapped or paired parts, which a fold that XORed every 64-byte chunk alike, or a chunk's
+// rotated lanes without a round, would hash alike:
+//   - `X X` for 8,192 64-byte X (an index in base 26, then 'a's), as such a fold would hash every one of them by its
+//     length alone;
+//   - a 16-byte lane eight times, for 4,096 lanes;
+//   - `X Y` and `Y X` for 2,048 random pairs;
+//   - `X` two, three and four times for 2,048 random X;
+//   - 65,536 spellings of 32 bytes (#192's review): 'a's, where each set bit b of a 16-bit index makes byte b an 'e' and
+//     the byte that lane 1's rotation by 17 lines its changed bit up with a 'c'.
+// All of them must hash differently: the chance that two of 88,064 random 64-bit hashes are equal is about 2^-32.
 static bool refine_check_long_hashes(uint64_t* random)
 {
     static uint64_t hashes[BUSTER_REFINE_TEST_LONG_HASHES];
@@ -557,15 +566,78 @@ static bool refine_check_long_hashes(uint64_t* random)
             refine_test_long_hash(bytes, times * 64, hashes, &count, &differences);
         }
     }
+    for (uint32_t index = 0; index < 65536; index += 1)
+    {
+        memset(bytes, 'a', 32);
+        for (uint32_t b = 0; b < 16; b += 1)
+        {
+            if (index & (1u << b))
+            {
+                bytes[b] = 'e';
+                bytes[16 + (b / 8) * 8 + ((b + 6) & 7)] = 'c';
+            }
+        }
+        refine_test_long_hash(bytes, 32, hashes, &count, &differences);
+    }
     qsort(hashes, count, sizeof(hashes[0]), refine_test_compare_hashes);
     uint64_t equal = 0;
     for (uint32_t i = 1; i < count; i += 1)
     {
         equal += hashes[i] == hashes[i - 1];
     }
-    printf("long hashes: %lu equal hashes and %lu differences in %u spellings of repeated and swapped parts\n", (unsigned long)equal, (unsigned long)differences, count);
+    printf("structured hashes: %lu equal hashes and %lu differences in %u spellings of repeated, swapped and paired parts\n", (unsigned long)equal,
+           (unsigned long)differences, count);
     return equal == 0 && differences == 0;
 }
+
+// The same bit flipped in two lanes of one chunk, both inside a random spelling of 17 to 200 bytes: the hash must change,
+// which a fold of the lanes as they are can't do (the two flips would cancel), nor one AES round per lane where the two
+// lanes' bytes there are equal once whitened (a third of the spellings make them so).
+static bool refine_check_aligned_flips(uint64_t* random)
+{
+    uint8_t bytes[BUSTER_REFINE_TEST_HASH_LENGTHS];
+    uint64_t unchanged = 0;
+    uint64_t differences = 0;
+    uint32_t tried = 0;
+    for (uint32_t i = 0; i < BUSTER_REFINE_TEST_FLIPS; i += 1)
+    {
+        const uint32_t length = 17 + (uint32_t)(refine_test_random(random) % (BUSTER_REFINE_TEST_HASH_LENGTHS - 17));
+        refine_test_letters(random, bytes, length);
+        // Half of the spellings repeat one letter, so that the two lanes' bytes are equal.
+        if (refine_test_random(random) % 2 == 0)
+        {
+            memset(bytes, bytes[0], length);
+        }
+        // Two lanes j < k of one chunk, and a byte offset and bit in a lane, inside the spelling in both.
+        const uint32_t lanes = (length + 15) / 16;
+        const uint32_t k_lane = 1 + (uint32_t)(refine_test_random(random) % (lanes - 1));
+        const uint32_t chunk_first = k_lane & ~3u;
+        const uint32_t j_lane = k_lane == chunk_first ? k_lane : chunk_first + (uint32_t)(refine_test_random(random) % (k_lane - chunk_first));
+        const uint32_t offset = (uint32_t)(refine_test_random(random) % 16);
+        const uint8_t bit = (uint8_t)(1u << (refine_test_random(random) % 8));
+        const uint64_t equal_whitened = refine_test_random(random) % 3;
+        if (j_lane != k_lane && k_lane * 16 + offset < length && equal_whitened == 0)
+        {
+            // Lane k's byte such that both bytes are equal after the whitening: hashed again, before the flips.
+            const uint8_t j_white = (uint8_t)(intern_lane_whitening[2 * (j_lane & 3) + offset / 8] >> (8 * (offset % 8)));
+            const uint8_t k_white = (uint8_t)(intern_lane_whitening[2 * (k_lane & 3) + offset / 8] >> (8 * (offset % 8)));
+            bytes[k_lane * 16 + offset] = (uint8_t)(bytes[j_lane * 16 + offset] ^ j_white ^ k_white);
+        }
+        const uint64_t base = intern_hash_bytes_scalar(bytes, length);
+        if (j_lane != k_lane && k_lane * 16 + offset < length)
+        {
+            bytes[j_lane * 16 + offset] ^= bit;
+            bytes[k_lane * 16 + offset] ^= bit;
+            const uint64_t after = intern_hash_bytes_scalar(bytes, length);
+            unchanged += after == base;
+            differences += intern_hash_bytes(bytes, length) != after;
+            tried += 1;
+        }
+    }
+    printf("aligned flips: %lu of %u hashes unchanged and %lu differences\n", (unsigned long)unchanged, tried, (unsigned long)differences);
+    return unchanged == 0 && differences == 0;
+}
+
 
 // The language modes, by their -std= names.
 typedef struct RefineTestMode RefineTestMode;
@@ -1199,6 +1271,7 @@ static int run_refinement_tests(int argument_count, char** arguments)
     {
         bool passed = refine_check_hash(&random);
         passed &= refine_check_long_hashes(&random);
+        passed &= refine_check_aligned_flips(&random);
         passed &= refine_check_names(&state.scalar_table);
         passed &= refine_check_table(&random);
         passed &= refine_check_fixtures(&state);
