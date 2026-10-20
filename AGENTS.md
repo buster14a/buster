@@ -22,6 +22,19 @@ ISA, and output ABI separate. Do not add other host operating systems, older-CPU
 production fallbacks, or hot-path CPU dispatch. Broader output targets and extra
 applications are outside the current scope.
 
+## Issue ownership
+
+Every issue being investigated, tackled or fixed must be claimed in the issue
+itself before work begins. Read its latest comments and linked pull requests,
+then post a comment identifying who is taking the work and the scope being
+claimed. A local plan, branch, pull request or assignee alone does not replace
+this comment. When work covers several issues, claim each one.
+
+Respect existing claims: coordinate with the current owner before taking over
+or starting overlapping work. Keep the claim current with the branch or pull
+request, and comment on the issue when handing off or stopping so others know
+whether the work is still owned.
+
 ## Coding standards
 
 Follow [the C coding style](docs/coding-style.md) for new or modified compiler
