@@ -55,6 +55,12 @@ jobs:
       - name: Execute compiler
         run: ./build/compiler
 
+      - name: Check the no-recursion rule on the call graph
+        # Writes the translation units' LLVM IR to a temporary directory and fails on any cycle not in the allowlist.
+        run: |
+          ./build/compiler test-call-graph
+          ./build.sh check-call-graph
+
       - name: Test the C lexer
         run: |
           ./build/compiler test-lexer

@@ -102,6 +102,13 @@ or infrastructure machinery merely to match its style.
   ID, by every lane of a group. `executable_test.c` holds its tests (`main.c`
   includes it; `./build/compiler test-executable` runs them) and
   `executable_benchmark.c` provides `benchmark-executable`.
+- `src/buster/compiler/call_graph.c` is the call graph check, the coding
+  style's rule against recursion checked mechanically: `check-call-graph`
+  reads the LLVM IR of the translation units `build.sh` compiles, builds their
+  call graph and reports every cycle (Tarjan's algorithm, iterative) that isn't
+  in its allowlist, `call_graph_allowed`. `./build.sh check-call-graph` writes
+  that IR to a temporary directory and runs it. `call_graph_test.c` holds its
+  tests (`main.c` includes both; `./build/compiler test-call-graph` runs them).
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -109,6 +116,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ```sh
 ./build.sh
 ./build/compiler
+./build/compiler test-call-graph
+./build.sh check-call-graph
 ./build/compiler test-lexer
 ./build/compiler test-lexer --cplusplus
 ./build/compiler benchmark-lexer src
@@ -156,6 +165,40 @@ owner's computers:
   the owner's other computers.
 
 Where `~/llm-memory` doesn't exist, skip this.
+
+## Call graph check
+
+The coding style forbids recursion over input-dependent structures, and
+`./build.sh check-call-graph` checks it on every function of the compiler. It
+writes the LLVM IR of `build.sh`'s translation units, with the same flags, at
+`-O0 -Xclang -disable-llvm-passes` (no pass, not even the always-inliner, so a
+call in the IR is a call in the source) into a temporary directory, and runs
+`./build/compiler check-call-graph FILE.ll...` on them (so it needs a build).
+The command reads each `define` and the direct `call`, `invoke` and `callbr`
+instructions in its body; a callee is its translation unit's function of that
+name first (static functions are per unit: the benchmarks' copies of
+`lane.c` are separate functions), then an external one. Calls of functions
+defined nowhere (libc, intrinsics) and calls through pointers, which the style
+allows only at the thread-entry boundary, are left out.
+
+It reports each strongly connected component of more than one function and
+each function that calls itself, with the shortest call path through the
+component's first function, as `unit.ll:function -> ... -> unit.ll:function`,
+then a summary line, and exits with status 1 on a cycle not in
+`call_graph_allowed`, on an allowlist entry that matches no cycle, and on IR it
+can't read. An entry names a component's functions; add one only for the
+style's "trivial statically bounded recursion", with a comment saying what
+bounds its depth. The list is empty: the tree has no cycle. The 9700X job runs
+`test-call-graph` and the check after the build; the IR takes about 1.5 s.
+
+`./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
+on IR of the call forms clang writes and of what must be left out, a
+self-call, a two-function cycle, a cycle with a chord (whose path must be the
+shortest), a cycle through three translation units beside static and external
+functions of the same name, two units' copies of a cycle allowed by one entry,
+a cycle grown past its entry with an unused entry, malformed IR, and a chain of
+a million functions and a ring of 100,000, deeper than a recursive walk's
+stack.
 
 ## Lexer tests
 
