@@ -502,8 +502,9 @@ each of 32-bit and 16-bit mode, with 135,563 and 136,322).
 --vector] [--mode32 | --mode16] [--offsets] [--fixups] [--after-scalar MS]
 [--only NAME]` checks every implementation against the scalar loop, then
 reports 21 interleaved-pass medians per encoded instruction (time, cycles,
-instructions, IPC, and the throttle: dispatch slots Zen 5's power cap takes,
-PMCx1A0's undocumented umask 0x08, raw event `0x1000008a0`). The stream is
+instructions, IPC, and the throttle: PMCx1A0's undocumented umask 0x08, raw
+event `0x1000008a0`, which #199 reads as the dispatch slots Zen 5's power cap
+takes). The stream is
 a compiler-like mix of 16,384 legacy instructions by default (comparable with
 older measurements), a mix like vectorized code (AVX-512, AVX2, BMI) with
 `--vector`, or random instructions of every form with `--uniform`; `--section N`
@@ -990,8 +991,8 @@ includes clearing `in` and `out`; generation, allocation and postorder are
 outside the timed region. Both paths use direct calls through matching
 `noinline` benchmark wrappers. The output gives nanoseconds, cycles and instructions
 per function, cycles per block per iteration, IPC, and the throttle per block
-per iteration: the dispatch slots Zen 5's per-core power cap takes (PMCx1A0's
-undocumented umask 0x08). Hardware counter values
+per iteration (PMCx1A0's undocumented umask 0x08, which #199 reads as the
+dispatch slots Zen 5's per-core power cap takes). Hardware counter values
 are zero when unavailable. A scalar/vector disagreement fails the command.
 Run at least five independent processes, releasing the host lock between
 them, when recording a comparison; process-median ranges expose variation

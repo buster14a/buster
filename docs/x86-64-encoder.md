@@ -1185,13 +1185,16 @@ power management (#199), not the scalar loop's code:
 - **The boost.** While the core runs anything light (the scalar loop at 13 W,
   but also a spin, a sleep or the vectorized lexer), its clock climbs from
   about 5.31 to 5.52 GHz over 30 to 300 ms.
-- **The cap.** At that clock the vector loop would draw more than its core may,
-  and a fast throttle holds the core at about 21.5 W by withholding dispatch
-  slots (PMCx1A0's undocumented umask 0x08, the benchmark's "throttle"). That
-  rose from about 0.5 to 6–10 slots per instruction, while dispatch stalls on a
-  full FP queue fell from 20% to 5% of cycles. The throttle engages within
-  10 µs, at once on a core warm from scalar work, and 1–3 ms later on one
-  cooled by a spin or a sleep.
+- **The cap.** At that clock the vector loop would draw more than its core may.
+  The core then holds at about 21.5 W while dispatch loses slots, which #199
+  reads as a fast power throttle withholding them. That reading is an
+  inference: AMD doesn't document what PMCx1A0's umask 0x08 (the benchmark's
+  "throttle") counts. But it is the one dispatch counter that rose in this
+  state, from about 0.5 to 6–10 slots per instruction, and its extra slots
+  account for the extra cycles (8 slots a cycle), while dispatch stalls on a
+  full FP queue fell from 20% to 5% of cycles and every token stall fell too.
+  The throttle engages within 10 µs, at once on a core warm from scalar work,
+  and 1–3 ms later on one cooled by a spin or a sleep.
 - **The release.** It holds until the firmware has stepped the clock down to
   what the loop sustains (5.3 GHz) after 5 to 20 ms.
 - **The cost.** Under the cap a loop's speed follows its energy per
@@ -1389,12 +1392,12 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
 `--after-scalar MS` runs the scalar loop (on the stream's first 256
 instructions per call, as #182's experiment copy did) for MS ms before every
 timed pass of the other implementations, and every row of the benchmark has the
-throttle: the dispatch slots per encoded instruction that the power cap takes
-(PMCx1A0's undocumented umask 0x08, raw event `0x1000008a0`; see "Zen 5's
-costs"). `x86_encode_64` and `x86_encode_16` alone (`--only`) on the compiler
-mix, after MS ms of the scalar loop before each pass (medians of five
-processes, and of two at 10, 30 and 300 ms, measured on 2026-10-20, each under
-the 9700X's lock):
+throttle: PMCx1A0's undocumented umask 0x08 (raw event `0x1000008a0`) per
+encoded instruction, which #199 reads as the dispatch slots the power cap takes
+(see "Zen 5's costs"). `x86_encode_64` and `x86_encode_16` alone (`--only`)
+on the compiler mix, after MS ms of the scalar loop before each pass (medians
+of five processes, and of two at 10, 30 and 300 ms, measured on 2026-10-20,
+each under the 9700X's lock):
 
 | Before each pass | 64: ns | cycles | GHz | throttle | 16: ns | cycles | GHz | throttle |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

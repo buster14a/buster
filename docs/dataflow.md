@@ -97,8 +97,9 @@ whole distribution and doubles the repetition count, with bounded retries.
 The output includes the shortest retained sample and the number of restarts.
 Missing hardware counters are reported as zero; elapsed time is not
 relabeled as CPU cycles. It also gives the throttle per block per iteration:
-the dispatch slots that Zen 5's per-core power cap takes, which PMCx1A0's
-undocumented umask 0x08 counts (raw event `0x1000008a0`, #199).
+PMCx1A0's umask 0x08 (raw event `0x1000008a0`), which AMD doesn't document
+and #199 reads, from its controls, as the dispatch slots that Zen 5's per-core
+power cap takes.
 `--only scalar` or `--only avx512` times one solver alone, back to back, and
 `--after-scalar MS` runs complete scalar solves of the workload, untimed, for
 MS ms before every AVX-512 sample: "The power cap's state" below has why.
@@ -229,10 +230,13 @@ fast the AVX-512 solver runs (#199). Code that draws less than about 17 W per
 core (scalar phases, the vectorized lexer, even a spin or a sleep) lets the
 9700X's firmware boost the clock from about 5.31 to 5.52 GHz over 30 to
 300 ms. At that clock a heavy vector loop would draw more than the core's cap
-of about 21.5 W, and a fast throttle withholds dispatch slots from it until the
-firmware has stepped the clock down to what the loop sustains, 5 to 20 ms
-later. Run on its own, the AVX-512 solver draws about 20 W and holds the clock
-at 5.34 to 5.44 GHz (#199, and the table below), so it is such a loop.
+of about 21.5 W. The core holds at the cap while the loop loses dispatch slots,
+which #199 reads as a fast throttle withholding them, until the firmware has
+stepped the clock down to what the loop sustains, 5 to 20 ms later. The
+throttle column below is that reading of PMCx1A0's umask 0x08 (see "Measuring
+the alternatives"). Run on its own, the AVX-512 solver draws about 20 W and
+holds the clock at 5.34 to 5.44 GHz (#199, and the table below), so it is such
+a loop.
 
 `benchmark-dataflow` measures it in three states: alone, back to back
 (`--only avx512`), where the clock settles; after 100 ms of complete scalar

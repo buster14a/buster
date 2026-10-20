@@ -9,10 +9,10 @@
 // after warm-up and sample-size calibration; --only times one alone, back to back. Each retained sample lasts at least
 // 2 ms. Printed ranges are within one process; repeat this command in separately locked processes to measure variation
 // between runs rather than holding the shared host lock around a series. Hardware counters count this thread's user
-// cycles, instructions and the dispatch slots Zen 5's power cap withholds (BUSTER_DATAFLOW_BENCHMARK_THROTTLE_EVENT);
-// unavailable counters print zero, never a time estimate. --after-scalar MS runs the scalar solver for MS ms before
-// every AVX-512 sample (dataflow_benchmark_after_scalar), the state a compiler's vector phases run in after lighter
-// ones. Run on the 9700X through exclusive.sh with taskset -c 2.
+// cycles, instructions and the throttle, read as the dispatch slots Zen 5's power cap withholds
+// (BUSTER_DATAFLOW_BENCHMARK_THROTTLE_EVENT); unavailable counters print zero, never a time estimate. --after-scalar MS
+// runs the scalar solver for MS ms before every AVX-512 sample (dataflow_benchmark_after_scalar), the state a
+// compiler's vector phases run in after lighter ones. Run on the 9700X through exclusive.sh with taskset -c 2.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -38,8 +38,9 @@
 #define BUSTER_DATAFLOW_BENCHMARK_ARENA_BYTES (64ull << 20)
 #define BUSTER_DATAFLOW_BENCHMARK_AFTER_SCALAR_MAX_MS 10000
 // PMCx1A0 (dispatch slots not used) with its undocumented umask 0x08, as a raw perf config: the event's low byte in
-// bits 0-7, the umask in bits 8-15 and the event's high nibble in bits 32-35. It counts the slots that Zen 5's
-// per-core power cap withholds from a heavy vector loop at a boosted clock (#199).
+// bits 0-7, the umask in bits 8-15 and the event's high nibble in bits 32-35. #199 reads it as the slots that Zen 5's
+// per-core power cap withholds from a heavy vector loop at a boosted clock, an inference from its controls: it is the
+// one dispatch counter that rises in that state, by about the cycles lost.
 #define BUSTER_DATAFLOW_BENCHMARK_THROTTLE_EVENT 0x1000008a0ull
 // The group's read: its member count, enabled and running times, then cycles, instructions and the throttle's slots.
 #define BUSTER_DATAFLOW_BENCHMARK_READOUT_WORDS 6
@@ -559,7 +560,7 @@ int run_dataflow_benchmark(int argc, char** argv)
         {
             printf("; each avx512 sample after %" PRIu64 " ms of scalar solves", after_scalar);
         }
-        printf("\nthrottle: the dispatch slots Zen 5's power cap takes (PMCx1A0 umask 0x08)\n");
+        printf("\nthrottle: PMCx1A0 umask 0x08, read as the dispatch slots Zen 5's power cap takes (#199)\n");
         if (!counters.available)
         {
             printf("hardware counters unavailable; cycles, instructions, IPC and throttle are zero\n");

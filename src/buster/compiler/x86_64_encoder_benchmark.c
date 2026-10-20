@@ -63,8 +63,9 @@
 #define BUSTER_X86_BENCHMARK_AFTER_SCALAR_INSTRUCTIONS 256
 #define BUSTER_X86_BENCHMARK_AFTER_SCALAR_MAX_MS 10000
 // PMCx1A0 (dispatch slots not used) with its undocumented umask 0x08, as a raw perf config: the event's low byte in
-// bits 0-7, the umask in bits 8-15 and the event's high nibble in bits 32-35. It counts the slots that Zen 5's
-// per-core power cap withholds from a heavy vector loop at a boosted clock (#199).
+// bits 0-7, the umask in bits 8-15 and the event's high nibble in bits 32-35. #199 reads it as the slots that Zen 5's
+// per-core power cap withholds from a heavy vector loop at a boosted clock, an inference from its controls: it is the
+// one dispatch counter that rises in that state, by about the cycles lost.
 #define BUSTER_X86_BENCHMARK_THROTTLE_EVENT 0x1000008a0ull
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1139,7 +1140,7 @@ int run_x86_encoder_benchmark(int argc, char** argv)
                            median_cycles != 0 ? median_retired / median_cycles : 0.0, median_throttle / encoded);
                 }
             }
-            printf("  (per encoded instruction; GB/s of machine code; throttle: the dispatch slots the power cap takes, PMCx1A0 umask 0x08)\n");
+            printf("  (per encoded instruction; GB/s of machine code; throttle: PMCx1A0 umask 0x08, read as the dispatch slots the power cap takes)\n");
             if (counters.cycles >= 0)
             {
                 close(counters.cycles);
