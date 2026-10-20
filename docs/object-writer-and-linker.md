@@ -922,10 +922,11 @@ be `O_WRONLY`, and a shared mapping (5) needs `O_RDWR`.
    or it is a symbolic link (replaced, not written through: the open in place
    has `O_NOFOLLOW` too), or the output is a shared library (which
    running processes map without ETXTBSY to protect them): write a new file
-   with `O_CREAT | O_EXCL` beside it, named after it with `.tmp`, the process
-   id and 16 random hexadecimal digits (so that a file a killed link left
-   doesn't block the next), and rename it over the old one. If the output
-   doesn't exist, create it.
+   with `O_CREAT | O_EXCL` in its directory and rename it over the old one.
+   The new file's name is its own, `.buster-executable-`, the process id and
+   16 random hexadecimal digits: a suffix to the output's name could pass
+   `NAME_MAX`, and the random digits keep a file a killed link left from
+   blocking the next. If the output doesn't exist, create it.
 3. If it is a file of another type, such as `/dev/null` or a FIFO, open it
    once, with `O_WRONLY` (a FIFO's open waits for a reader), and write into
    it, in order, as GNU ld and lld do, rather than replace it: every chunk is

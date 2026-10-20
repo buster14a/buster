@@ -501,17 +501,18 @@ one allowed CPU; like the others, its measurements are informational.
   truncated) and with its mode restored; written beside it and renamed over it
   when it has another link (which keeps its bytes), when it is a symbolic link,
   when a process runs it (which runs on), when it is someone else's (checked
-  only when the test may `chown`, as root), and past a file a killed link
-  left under the old fixed name; and written in order into a FIFO, which a
-  failed link leaves in place: for a reader that opens it and reads to the
-  first end of file, with inotify counting one close after writing, and for
-  one that holds the read end of a FIFO that may be written but not read
-  (which only binds a user other than root). A directory and a path under a
-  regular file are refused, naming the call. A link with an undefined symbol
-  fails, naming it, and leaves the output alone; one whose `ABS32` falls
-  below 0 removes it, and so does one whose `PC32` leaves int32's range,
-  which only the checked path sees; one that fails while writing beside the
-  output leaves the output, its other link, and nothing beside them;
+  only when the test may `chown`, as root), past a file a killed link left
+  under the name without random digits, and with a name of `NAME_MAX` bytes;
+  and written in order into a FIFO, which a failed link leaves in place: for
+  a reader that opens it and reads to the first end of file, with inotify
+  counting one close after writing, and for one that holds the read end of a
+  FIFO that may be written but not read (which only binds a user other than
+  root). A directory and a path under a regular file are refused, naming the
+  call. A link with an undefined symbol fails, naming it, and leaves the
+  output alone; one whose `ABS32` falls below 0 removes it, and so does one
+  whose `PC32` leaves int32's range, which only the checked path sees; one
+  that fails while writing beside the output leaves the output, its other
+  link, and nothing beside them;
 - limits: a weak thread-local symbol defined nowhere (offset 0 in its field
   and its GOT slot); TLS blocks of 2 GB (linked) and past it, atoms past 2 GB
   and one whose padding wraps (refused); a bad entry point, the first of two

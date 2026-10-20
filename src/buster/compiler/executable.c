@@ -614,9 +614,11 @@ static int executable_write_all(int file, const struct iovec* pieces, uint64_t p
 // The output, open for writing: its descriptor, how it is being written, and for a renamed one the name it is written
 // under. Paths are copied with a NUL for the system calls.
 #define BUSTER_EXECUTABLE_PATH_BYTES 4096
-// The suffix of the file written beside the output: ".tmp", the process id, a dot, 16 random hexadecimal digits and a
-// NUL; and how many random names to try before giving up.
-#define BUSTER_EXECUTABLE_SUFFIX_BYTES 48
+// The name of the file written beside the output, in its directory: its own, since the output's may leave no room under
+// NAME_MAX for a suffix. The prefix, the process id, a dash and 16 random hexadecimal digits: at most 46 bytes and a NUL.
+// And how many random names to try before giving up.
+#define BUSTER_EXECUTABLE_TEMPORARY_PREFIX ".buster-executable-"
+#define BUSTER_EXECUTABLE_TEMPORARY_NAME_BYTES 48
 #define BUSTER_EXECUTABLE_NAME_ATTEMPTS 16
 
 typedef struct ExecutableFile ExecutableFile;
@@ -628,7 +630,7 @@ struct ExecutableFile
     uint64_t old_size;
     uint32_t old_mode;
     char path[BUSTER_EXECUTABLE_PATH_BYTES];
-    char written_path[BUSTER_EXECUTABLE_PATH_BYTES + BUSTER_EXECUTABLE_SUFFIX_BYTES];
+    char written_path[BUSTER_EXECUTABLE_PATH_BYTES + BUSTER_EXECUTABLE_TEMPORARY_NAME_BYTES];
 };
 
 // Records a failed system call in the result.
@@ -646,7 +648,7 @@ static void executable_fail_file(ExecutableResult* result, const char* call, int
 // writer, and needs no permission on the file.
 //   - A regular file with one link that this process's user owns is opened with O_RDWR and written in place.
 //   - One that is running (ETXTBSY), has other links or another owner, and a symbolic link (replaced, not written
-//     through) get a new file beside them, under a random name, renamed over them at the end.
+//     through) get a new file in the output's directory, under a random name of its own, renamed over them at the end.
 //   - A path with nothing there gets a new file, and a directory is an error.
 //   - A file of another type (/dev/null, a FIFO) is opened once, with O_WRONLY, and written in order, as GNU ld and lld
 //     write into one rather than replace it.
@@ -715,9 +717,11 @@ static bool executable_open(ExecutableFile* file, String8 path, ExecutableResult
             {
                 close(file->descriptor);
             }
-            // The path itself when nothing is there, once; otherwise random names beside it, so that a file a killed link
-            // left doesn't block the next ones.
+            // The path itself when nothing is there, once; otherwise random names in its directory, so that a file a killed
+            // link left doesn't block the next ones.
             const bool absent = found_error == ENOENT;
+            const char* slash = strrchr(file->path, '/');
+            const uint64_t directory_bytes = slash != 0 ? (uint64_t)(slash - file->path) + 1 : 0;
             const uint32_t attempts = absent ? 1 : BUSTER_EXECUTABLE_NAME_ATTEMPTS;
             file->descriptor = -1;
             int create_error = EEXIST;
@@ -730,7 +734,8 @@ static bool executable_open(ExecutableFile* file, String8 path, ExecutableResult
                     {
                         random = __rdtsc();
                     }
-                    snprintf(file->written_path + path.length, BUSTER_EXECUTABLE_SUFFIX_BYTES, ".tmp%d.%016llx", (int)getpid(), (unsigned long long)random);
+                    snprintf(file->written_path + directory_bytes, BUSTER_EXECUTABLE_TEMPORARY_NAME_BYTES, BUSTER_EXECUTABLE_TEMPORARY_PREFIX "%d-%016llx", (int)getpid(),
+                             (unsigned long long)random);
                 }
                 file->descriptor = open(file->written_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0777);
                 create_error = file->descriptor < 0 ? errno : 0;

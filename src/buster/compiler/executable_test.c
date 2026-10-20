@@ -22,11 +22,12 @@
 //     over a scribbled file, as above) and the program runs.
 //   - Files: in place (a smaller program after a larger one, then a file whose mode was changed), created, and written
 //     beside the output and renamed over it when a process runs it, when it has another link, when it is a symbolic
-//     link, when it is someone else's (as root), and past a file a killed link left; written in order into a FIFO,
-//     opened once for writing (inotify counts the closes after writing), for a reader that opens it and one that holds
-//     the read end of a FIFO that may be written but not read; a directory and a path under a regular file refused; a
-//     link that fails before opening the output leaves it alone, one whose fixup doesn't fit removes it, one that fails
-//     beside it leaves it and nothing beside it, and one into a FIFO leaves the FIFO.
+//     link, when it is someone else's (as root), past a file a killed link left, and with a name of NAME_MAX bytes;
+//     written in order into a FIFO, opened once for writing (inotify counts the closes after writing), for a reader
+//     that opens it and one that holds the read end of a FIFO that may be written but not read; a directory and a path
+//     under a regular file refused; a link that fails before opening the output leaves it alone, one whose fixup
+//     doesn't fit removes it, one that fails beside it leaves it and nothing beside it, and one into a FIFO leaves the
+//     FIFO.
 //   - Limits: a weak thread-local symbol defined nowhere, TLS blocks and atoms past 2 GB, refusals reported alike with
 //     every lane count (among them the first of two symbols defined nowhere in different lanes' ranges), and a lane
 //     short of scratch memory at every amount from none up (executable_test_limits).
@@ -41,6 +42,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <elf.h>
 
 // OS-dependent includes
@@ -1432,7 +1434,8 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         executable_test_link_end(&failing);
 
         // A link that fails after opening a file it writes beside the output leaves the output, its other link and no
-        // file beside them; and a file a killed link left under the old fixed name doesn't block the next one.
+        // file beside them; and a file a killed link left under the name without random digits doesn't block the next
+        // one.
         written = executable_test_write(&large.link, large.entry, path, 1, &result, 0, 0);
         const String8 before_failure = executable_test_read(scratch.arena, path.pointer);
         unlink(other.pointer);
@@ -1440,11 +1443,11 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         built = executable_test_failing(&failing, &failing_start, BUSTER_LINK_FIXUP_ABS32, below_zero, false);
         written = built && executable_test_write(&failing.link, failing_start, path, 2, &result, 0, 0);
         executable_test_expect(&tally, built && !written && result.error == EXECUTABLE_ERROR_FIXUP && executable_test_same_file(scratch.arena, path.pointer, before_failure) &&
-                                           executable_test_same_file(scratch.arena, other.pointer, before_failure) && !executable_test_leftover(directory->path, "file.tmp"),
+                                           executable_test_same_file(scratch.arena, other.pointer, before_failure) && !executable_test_leftover(directory->path, BUSTER_EXECUTABLE_TEMPORARY_PREFIX),
                                "a failure beside the output leaves it, and nothing beside it", 0);
         executable_test_link_end(&failing);
         char stale[BUSTER_EXECUTABLE_TEST_PATH_BYTES + 32];
-        snprintf(stale, sizeof(stale), "%s.tmp%d", path.pointer, (int)getpid());
+        snprintf(stale, sizeof(stale), "%s/" BUSTER_EXECUTABLE_TEMPORARY_PREFIX "%d", directory->path, (int)getpid());
         const int stale_file = open(stale, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
         if (stale_file >= 0)
         {
@@ -1456,6 +1459,32 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
                                "a file a killed link left beside the output", 0);
         unlink(stale);
         unlink(other.pointer);
+
+        // A name of NAME_MAX bytes with another link: written beside it under a name of its own, renamed over it, and
+        // the other link keeps its bytes. Only where the directory's path leaves room for such a name.
+        char longest_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        const int prefix = snprintf(longest_bytes, sizeof(longest_bytes), "%s/", directory->path);
+        if (prefix > 0 && (uint64_t)prefix + NAME_MAX < sizeof(longest_bytes))
+        {
+            memset(longest_bytes + prefix, 'n', NAME_MAX);
+            longest_bytes[prefix + NAME_MAX] = 0;
+            const String8 longest = {
+                .pointer = longest_bytes,
+                .length = (uint64_t)prefix + NAME_MAX,
+            };
+            const bool linked = executable_test_write(&small.link, small.entry, longest, 1, &result, 0, 0) && link(longest_bytes, other.pointer) == 0;
+            const String8 kept_bytes = linked ? executable_test_read(scratch.arena, other.pointer) : (String8){ 0 };
+            written = linked && executable_test_write(&large.link, large.entry, longest, 2, &result, 0, 0);
+            executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_RENAMED && executable_test_same_file(scratch.arena, other.pointer, kept_bytes) &&
+                                               executable_test_runs(longest_bytes, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
+                                   "a name of NAME_MAX bytes with another link", 0);
+            unlink(longest_bytes);
+            unlink(other.pointer);
+        }
+        else
+        {
+            printf("  %s leaves no room for a name of NAME_MAX bytes: not checked\n", directory->path);
+        }
 
         // Someone else's file, when this process may give it away (as root): written beside it and renamed over it,
         // never changed in place, so the new file is this user's.
@@ -1533,7 +1562,7 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         const bool directory_made = mkdir(path.pointer, 0755) == 0;
         written = directory_made && executable_test_write(&small.link, small.entry, path, 2, &result, 0, 0);
         executable_test_expect(&tally, directory_made && !written && result.error == EXECUTABLE_ERROR_FILE && strcmp(result.call, "open") == 0 && result.system_error == EISDIR &&
-                                           lstat(path.pointer, &status) == 0 && S_ISDIR(status.st_mode) && !executable_test_leftover(directory->path, "file.tmp"),
+                                           lstat(path.pointer, &status) == 0 && S_ISDIR(status.st_mode) && !executable_test_leftover(directory->path, BUSTER_EXECUTABLE_TEMPORARY_PREFIX),
                                "a directory", 0);
         rmdir(path.pointer);
     }
