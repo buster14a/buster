@@ -99,7 +99,9 @@ Missing hardware counters are reported as zero; elapsed time is not
 relabeled as CPU cycles.
 
 The benchmark includes output initialization in each solve, but excludes
-generation and postorder construction. `large-local` retains the original
+generation and postorder construction. Both timed paths call explicit
+`noinline` wrappers, so Clang cannot inline only the vector solver into the
+repetition loop. `large-local` retains the original
 control: 64 disconnected 64-block regions and mostly local live values.
 Its mostly empty chunks make it primarily a row-streaming workload; it does
 not model the liveness of one connected function. `large-dispatch` adds a
@@ -113,8 +115,8 @@ is not established.
 
 Measured on 2026-10-20 on `benchpress`, Ryzen 7 9700X, Linux
 6.18.50-2-lts, Clang 23.1.1 and glibc 2.44, for PR #194's review revision
-with main `c9b1b20` merged in. The
-`build.sh` builds at `-O3 -march=native`. Five independent benchmark processes
+with main `2c6ec00` merged in and matching non-inlined benchmark wrappers. The
+`build.sh` builds at `-O3 -march=native`. Twenty independent benchmark processes
 each ran 21 alternating passes. Each command acquired and released the shared
 host lock separately, including each benchmark process:
 
@@ -123,9 +125,10 @@ EXCLUSIVE_OWNER=astra ~/buster-fast-bench/exclusive.sh ./build.sh
 EXCLUSIVE_OWNER=astra ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-dataflow
 ```
 
-The tables report the median of those five process medians, followed by their
+The tables report the median of those twenty process medians, followed by their
 `[min-max]` range. They are not the within-process pass ranges printed by the
-command. Hardware core-cycle counters were available in all five processes.
+command. For this even process count, the median averages the middle two
+values. Hardware core-cycle counters were available in all twenty processes.
 
 Generator version 2, seed 1:
 
@@ -138,37 +141,57 @@ Generator version 2, seed 1:
 
 | CFG / implementation | Cycles/function, median [min-max] | Cycles/block/sweep, median [min-max] |
 | --- | --- | --- |
-| small-diamond / scalar | 518.5 [518.1-525.6] | 16.202 [16.192-16.426] |
-| small-diamond / AVX-512 | 451.2 [439.6-463.8] | 14.099 [13.738-14.492] |
-| medium-nested / scalar | 71,741.2 [71,551.5-71,810.1] | 93.413 [93.166-93.503] |
-| medium-nested / AVX-512 | 20,976.5 [20,936.0-21,007.5] | 27.313 [27.260-27.354] |
-| large-local / scalar | 8,346,945.2 [8,344,415.9-8,359,362.2] | 407.566 [407.442-408.172] |
-| large-local / AVX-512 | 2,513,589.9 [2,508,434.4-2,515,582.1] | 122.734 [122.482-122.831] |
-| large-dispatch / scalar | 5,010,762.8 [4,991,312.6-5,021,098.3] | 407.777 [406.194-408.618] |
-| large-dispatch / AVX-512 | 1,492,668.8 [1,489,479.2-1,492,963.9] | 121.474 [121.214-121.498] |
+| small-diamond / scalar | 521.35 [517.1-541.5] | 16.2920 [16.161-16.922] |
+| small-diamond / AVX-512 | 448.70 [446.1-508.8] | 14.0225 [13.939-15.901] |
+| medium-nested / scalar | 69,457.20 [69,407.9-72,335.3] | 90.4390 [90.375-94.187] |
+| medium-nested / AVX-512 | 20,976.90 [20,922.9-21,404.5] | 27.3140 [27.243-27.870] |
+| large-local / scalar | 8,359,363.25 [8,327,271.6-8,467,912.8] | 408.1720 [406.605-413.472] |
+| large-local / AVX-512 | 2,506,395.60 [2,503,280.9-2,586,904.8] | 122.3825 [122.231-126.314] |
+| large-dispatch / scalar | 4,919,843.05 [4,894,620.6-4,955,895.0] | 400.3775 [398.325-403.312] |
+| large-dispatch / AVX-512 | 1,485,373.75 [1,482,552.5-1,528,228.9] | 120.8800 [120.650-124.368] |
 
 | CFG | Scalar ns/function, median [min-max] | AVX-512 ns/function, median [min-max] |
 | --- | --- | --- |
-| small-diamond | 93.7 [93.6-95.0] | 81.5 [79.4-83.8] |
-| medium-nested | 13,171.7 [13,144.4-13,187.4] | 3,862.5 [3,852.4-3,864.4] |
-| large-local | 1,520,286.7 [1,519,406.2-1,529,181.5] | 457,702.9 [456,654.1-458,162.6] |
-| large-dispatch | 916,281.2 [912,234.2-918,737.1] | 272,139.2 [271,721.6-272,464.9] |
+| small-diamond | 94.30 [93.6-98.4] | 81.05 [80.6-91.9] |
+| medium-nested | 12,800.55 [12,771.2-13,323.3] | 3,873.55 [3,864.2-3,948.0] |
+| large-local | 1,523,340.90 [1,516,581.6-1,542,258.5] | 456,429.65 [455,657.2-470,406.1] |
+| large-dispatch | 900,102.75 [893,469.7-906,036.4] | 271,313.90 [270,539.9-278,814.2] |
 
 The small, medium and two large cases used respectively 65,536, 1,024,
 16 and 16 complete solves per sample, with no calibration restarts. The
-shortest retained sample across all five processes was 3.938 ms; the shortest
-small-case sample was 5.195 ms.
+shortest retained sample across all twenty processes was 3.947 ms; the shortest
+small-case sample was 5.271 ms.
 
 `dataflow_liveness` selects AVX-512. Ratios of the cycle medians above are
-1.15x, 3.42x, 3.32x and 3.36x. The one-ZMM case has a modest margin:
-paired process ratios were 1.13-1.18x, within about 1.1-1.2x. The scalar twin
+1.16x, 3.31x, 3.34x and 3.31x. The one-ZMM case has a modest margin:
+paired process ratios were 1.025-1.208x. The worst vector process took
+508.8 cycles against its paired scalar's 521.7; none of these twenty
+processes reversed the comparison. The scalar twin
 remains the correctness oracle and benchmark alternative. These figures
 replace the earlier 3.58x/5.43x/3.42x claims, which charged the scalar loop for
 whole padding words and used one process. Version 2 also changes the
 generated inputs, so this comparison does not isolate the gain of each edit.
 
-Inspection of the measured binary confirmed the scalar bound
-`(value_count + 63) >> 6` and 64-bit scalar `andn`, OR and XOR operations.
+The small-case margin is not a guarantee for every process. The
+[independent re-review of b9a6c66/7793927](https://github.com/buster14a/buster-fast/pull/194#pullrequestreview-5586061231)
+reported AVX-512 process medians of 437.8-1,029.1 cycles against scalar
+518.4-534.0, including one process where vector was only 0.51x as fast.
+Five processes can miss this slower tail. The review's counter probes
+associated it with loads blocked by older stores and reduced forwarding;
+some output rows also share their low 12 address bits with CFG columns.
+Those observations identify a performance risk in the current layout and
+per-sweep output stores, not a correctness failure. Matching call boundaries
+does not establish that the tail is eliminated. Store-once or one-ZMM
+specializations remain optional follow-ups.
+
+The same dataflow source also moved by 2-3% between builds in that review.
+Differences of a few percent should be treated as build/layout noise, not
+evidence of an algorithmic improvement.
+
+Inspection of the measured binary confirmed direct calls to both benchmark
+wrappers, with each solver body compiled inside its wrapper. The scalar
+kernel uses the bound `(value_count + 63) >> 6` and 64-bit scalar `andn`,
+OR and XOR operations.
 Both kernels load column bases at solve setup instead of reloading
 `Dataflow` members in every chunk; some stack-spill reloads remain.
 The vector kernel uses aligned 64-byte loads/stores, `vporq` and
@@ -180,13 +203,13 @@ The default tests passed 17,132 checks. `test-dataflow --seed 7 --count 64`
 passed 20,684, and seed 99 with the same count passed 20,668. Both solvers
 agreed on all rows and sweep counts. All documented test commands in `AGENTS.md` and
 `./build.sh check-call-graph` passed on the same host; the latter reported
-8 translation units, 2,218 functions and zero call-graph cycles.
+9 translation units, 2,267 functions and zero call-graph cycles.
 
 Raw logs, source hashes and toolchain provenance are retained on `benchpress`
-in `~/buster-fast-bench/astra-01a158dd-143-review-evidence/`
-(`benchmark-import-main-1.txt` through `benchmark-import-main-5.txt`). The measured
+in `~/buster-fast-bench/astra-01a158dd-143-rereview-evidence/`
+(`benchmark-1.txt` through `benchmark-20.txt`). The measured
 executable's SHA-256 is
-`ce28f5590af9827515fc21be1bc450c4f2c181d13738ce8b676839d9cebb099a`.
+`0668d939b9b66b081f78da29181adea5fe383bf5d1b1e078cec5755cf3330bc4`.
 
 Successor-count specializations and keeping a previous one-ZMM row in a
 register remain optional follow-ups. Skipping unchanged blocks, storing rows

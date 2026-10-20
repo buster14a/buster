@@ -190,6 +190,18 @@ static void dataflow_benchmark_stop_counters(DataflowBenchmarkCounters* counters
     }
 }
 
+static __attribute__((noinline)) uint64_t dataflow_benchmark_vector(Dataflow* flow)
+{
+    const uint64_t iterations = dataflow_liveness_vector(flow);
+    return iterations;
+}
+
+static __attribute__((noinline)) uint64_t dataflow_benchmark_scalar(Dataflow* flow)
+{
+    const uint64_t iterations = dataflow_liveness_scalar(flow);
+    return iterations;
+}
+
 static bool dataflow_benchmark_run(Dataflow* flow, bool vector, uint64_t repeats, DataflowBenchmarkCounters* counters, DataflowBenchmarkSample* sample)
 {
     struct timespec begin;
@@ -199,13 +211,13 @@ static bool dataflow_benchmark_run(Dataflow* flow, bool vector, uint64_t repeats
     bool valid = clock_gettime(CLOCK_MONOTONIC_RAW, &begin) == 0;
     if (valid)
     {
-        // Direct calls keep the timing free of a callback dispatch. The memory barrier makes every complete set of
-        // output rows observable, even when a build can inline the solver and sees repeated identical inputs.
+        // Both implementations cross an out-of-line wrapper with direct calls, so neither is inlined into the
+        // repetition loop. The memory barrier makes every complete set of output rows observable between solves.
         if (vector)
         {
             for (uint64_t repeat = 0; repeat < repeats; repeat += 1)
             {
-                sample->iterations += dataflow_liveness_vector(flow);
+                sample->iterations += dataflow_benchmark_vector(flow);
                 __asm__ volatile("" : : "r"(flow->in), "r"(flow->out) : "memory");
             }
         }
@@ -213,7 +225,7 @@ static bool dataflow_benchmark_run(Dataflow* flow, bool vector, uint64_t repeats
         {
             for (uint64_t repeat = 0; repeat < repeats; repeat += 1)
             {
-                sample->iterations += dataflow_liveness_scalar(flow);
+                sample->iterations += dataflow_benchmark_scalar(flow);
                 __asm__ volatile("" : : "r"(flow->in), "r"(flow->out) : "memory");
             }
         }
@@ -326,8 +338,8 @@ static bool dataflow_benchmark_workload(const DataflowBenchmarkWorkload* workloa
     uint64_t iterations = 0;
     if (valid)
     {
-        iterations = dataflow_liveness_scalar(&flows[0]);
-        const uint64_t vector_iterations = dataflow_liveness_vector(&flows[1]);
+        iterations = dataflow_benchmark_scalar(&flows[0]);
+        const uint64_t vector_iterations = dataflow_benchmark_vector(&flows[1]);
         valid = iterations == vector_iterations && dataflow_benchmark_equal(&flows[0], &flows[1]);
     }
 

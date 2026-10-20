@@ -960,7 +960,8 @@ Each workload first checks identical rows and iteration counts, then reports
 implementation order. Both paths use the same repetition count, calibrated
 with warm batches; every retained sample lasts at least 2 ms. Each timed solve
 includes clearing `in` and `out`; generation, allocation and postorder are
-outside the timed region. The output gives nanoseconds, cycles and instructions
+outside the timed region. Both paths use direct calls through matching
+`noinline` benchmark wrappers. The output gives nanoseconds, cycles and instructions
 per function, cycles per block per iteration, and IPC. Hardware counter values
 are zero when unavailable. A scalar/vector disagreement fails the command.
 Run at least five independent processes, releasing the host lock between
