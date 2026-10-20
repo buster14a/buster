@@ -144,6 +144,11 @@ jobs:
       - name: Test the direct path's executables
         run: ./build/compiler test-executable
 
+      - name: Test the dynamic PIEs
+        # --cross-check also links each bound program's objects with ld.lld as a PIE and compares the two files' dynamic
+        # symbols and relocations.
+        run: ./build/compiler test-dynamic --cross-check
+
       - name: Benchmark the direct path's executables
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"

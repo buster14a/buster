@@ -1937,6 +1937,7 @@ static bool executable_test_kernel(uint64_t seed)
                     .reference = reference,
                     .got_slots = got_slots,
                     .sizes = sizes,
+                    .base = BUSTER_EXECUTABLE_BASE,
                     .got = 1u << 20,
                     .checked = false,
                 };
