@@ -583,7 +583,7 @@ typedef enum SpikeRule
     SPIKE_RULE_LEFT,
     // R: a keyword before the group it introduces, `struct`, a tag with a body.
     SPIKE_RULE_RIGHT,
-    // The matching closer.
+    // R, the matching closer: an opener's right threshold is one depth up.
     SPIKE_RULE_OPENER,
 } SpikeRule;
 
@@ -627,28 +627,31 @@ typedef enum SpikeRule
     X(ELSE, HEAD, T, SELECT) \
     X(DO, HEAD, T, SELECT) \
     X(LABEL, HEAD, T, SELECT) \
-    X(OPEN_GROUP, OPENER, F, OPENER) \
-    X(OPEN_CALL, OPENER, F, OPENER) \
-    X(OPEN_FUNCTION, OPENER, F, OPENER) \
-    X(OPEN_CAST, OPENER, F, OPENER) \
-    X(OPEN_COMPOUND, OPENER, F, OPENER) \
-    X(OPEN_SIZEOF, OPENER, F, OPENER) \
-    X(OPEN_SPECIFIER, OPENER, F, OPENER) \
-    X(OPEN_ATTRIBUTE, OPENER, F, OPENER) \
-    X(OPEN_ATTRIBUTE_LIST, OPENER, F, OPENER) \
-    X(OPEN_ASM, OPENER, F, OPENER) \
-    X(OPEN_KEYWORD, OPENER, F, OPENER) \
-    X(OPEN_CONDITION, OPENER, F, OPENER) \
-    X(OPEN_FOR, OPENER, F, OPENER) \
-    X(OPEN_SUBSCRIPT, OPENER, F, OPENER) \
-    X(OPEN_BLOCK, OPENER, F, OPENER) \
-    X(OPEN_BODY, OPENER, F, OPENER) \
-    X(OPEN_STRUCT, OPENER, F, OPENER) \
-    X(OPEN_ENUM, OPENER, F, OPENER) \
-    X(OPEN_INITIALIZER, OPENER, F, OPENER) \
-    X(OPEN_COMPOUND_BODY, OPENER, F, OPENER) \
-    X(OPEN_TERNARY, OPENER, F, OPENER) \
-    X(OPEN_CASE, OPENER, F, OPENER) \
+    X(OPEN_GROUP, OPENER, O, OPENER) \
+    X(OPEN_CALL, OPENER, O, OPENER) \
+    X(OPEN_FUNCTION, OPENER, O, OPENER) \
+    X(OPEN_CAST, OPENER, O, OPENER) \
+    X(OPEN_COMPOUND, OPENER, O, OPENER) \
+    X(OPEN_SIZEOF, OPENER, O, OPENER) \
+    X(OPEN_SPECIFIER, OPENER, O, OPENER) \
+    X(OPEN_ATTRIBUTE, OPENER, O, OPENER) \
+    X(OPEN_ATTRIBUTE_SPECIFIER, OPENER, O, OPENER) \
+    X(OPEN_ATTRIBUTE_LEFT, OPENER, O, OPENER) \
+    X(OPEN_ATTRIBUTE_RIGHT, OPENER, O, OPENER) \
+    X(OPEN_ATTRIBUTE_LIST, OPENER, O, OPENER) \
+    X(OPEN_ASM, OPENER, O, OPENER) \
+    X(OPEN_KEYWORD, OPENER, O, OPENER) \
+    X(OPEN_CONDITION, OPENER, O, OPENER) \
+    X(OPEN_FOR, OPENER, O, OPENER) \
+    X(OPEN_SUBSCRIPT, OPENER, O, OPENER) \
+    X(OPEN_BLOCK, OPENER, O, OPENER) \
+    X(OPEN_BODY, OPENER, O, OPENER) \
+    X(OPEN_STRUCT, OPENER, O, OPENER) \
+    X(OPEN_ENUM, OPENER, O, OPENER) \
+    X(OPEN_INITIALIZER, OPENER, O, OPENER) \
+    X(OPEN_COMPOUND_BODY, OPENER, O, OPENER) \
+    X(OPEN_TERNARY, OPENER, O, OPENER) \
+    X(OPEN_CASE, OPENER, O, OPENER) \
     X(CLOSE_GROUP, OPERAND, F, SELECT) \
     X(CLOSE_CALL, POSTFIX, L, SELECT) \
     X(CLOSE_FUNCTION, POSTFIX, L, SELECT) \
@@ -710,6 +713,11 @@ static const uint8_t spike_role_levels[SPIKE_ROLE_COUNT] =
 #define BUSTER_SPIKE_RIGHT_THRESHOLD_F(level) (level)
 #define BUSTER_SPIKE_RIGHT_THRESHOLD_S(level) (level)
 #define BUSTER_SPIKE_RIGHT_THRESHOLD_T(level) SPIKE_LEVEL_TERMINATOR
+// An opener's right search finds the first token at its own depth again: its closer. Its left search isn't used, but
+// the scalar stacks pop what is at or above a token's left threshold before they push it, so it is the opener's own
+// level: below that, they would drop the candidates before the opener.
+#define BUSTER_SPIKE_RIGHT_THRESHOLD_O(level) BUSTER_SPIKE_LEVELS
+#define BUSTER_SPIKE_LEFT_THRESHOLD_O(level) (level)
 
 static const uint8_t spike_role_left_thresholds[SPIKE_ROLE_COUNT] =
 {
@@ -785,9 +793,10 @@ static uint32_t spike_select(uint32_t left, uint32_t left_depth, uint8_t left_le
     return result;
 }
 
-// The closer's role for each opener's role (SPIKE_ROLE_NONE for what isn't an opener). A cast's group becomes a
-// compound literal's when `{` follows its `)`, and an attribute's closer depends on where the attribute is; the parsers
-// decide those themselves.
+// The closer's role for each opener's role (SPIKE_ROLE_NONE for what isn't an opener). An attribute's opener says where
+// the attribute is: after a declarator (OPEN_ATTRIBUTE, a postfix group), among specifiers, after `*` or after struct,
+// union or enum. A cast's group becomes a compound literal's when `{` follows its `)`, or an abstract function
+// declarator's when no operand does; the parsers decide that at the closer.
 static const uint8_t spike_closer_roles[SPIKE_ROLE_COUNT] =
 {
     [SPIKE_ROLE_OPEN_GROUP] = SPIKE_ROLE_CLOSE_GROUP,
@@ -798,6 +807,9 @@ static const uint8_t spike_closer_roles[SPIKE_ROLE_COUNT] =
     [SPIKE_ROLE_OPEN_SIZEOF] = SPIKE_ROLE_CLOSE_SIZEOF,
     [SPIKE_ROLE_OPEN_SPECIFIER] = SPIKE_ROLE_CLOSE_SPECIFIER,
     [SPIKE_ROLE_OPEN_ATTRIBUTE] = SPIKE_ROLE_CLOSE_ATTRIBUTE,
+    [SPIKE_ROLE_OPEN_ATTRIBUTE_SPECIFIER] = SPIKE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER,
+    [SPIKE_ROLE_OPEN_ATTRIBUTE_LEFT] = SPIKE_ROLE_CLOSE_ATTRIBUTE_LEFT,
+    [SPIKE_ROLE_OPEN_ATTRIBUTE_RIGHT] = SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT,
     [SPIKE_ROLE_OPEN_ATTRIBUTE_LIST] = SPIKE_ROLE_CLOSE_ATTRIBUTE_LIST,
     [SPIKE_ROLE_OPEN_ASM] = SPIKE_ROLE_CLOSE_ASM,
     [SPIKE_ROLE_OPEN_KEYWORD] = SPIKE_ROLE_CLOSE_KEYWORD,
@@ -2152,8 +2164,10 @@ static void spike_parser_paren(SpikeParser* parser, uint32_t i, SpikeFrame* fram
         const uint8_t closer_role = frame->attribute_closer_role;
         const uint8_t continuation = frame->attribute_continuation;
         const bool list = parser->kinds[i - 1] == SPIKE_KIND_ATTRIBUTE && parser->kinds[i + 1] == SPIKE_KIND_L_PAREN;
-        SpikeFrame* group = spike_parser_open(parser, i, SPIKE_ROLE_OPEN_ATTRIBUTE, list ? SPIKE_MODE_ATTRIBUTE_LIST : SPIKE_MODE_OPERAND, continuation, false, step);
-        group->closer_role = closer_role;
+        const uint8_t opener_role = closer_role == SPIKE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ? SPIKE_ROLE_OPEN_ATTRIBUTE_SPECIFIER :
+                                    closer_role == SPIKE_ROLE_CLOSE_ATTRIBUTE_LEFT ? SPIKE_ROLE_OPEN_ATTRIBUTE_LEFT :
+                                    closer_role == SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT ? SPIKE_ROLE_OPEN_ATTRIBUTE_RIGHT : SPIKE_ROLE_OPEN_ATTRIBUTE;
+        SpikeFrame* group = spike_parser_open(parser, i, opener_role, list ? SPIKE_MODE_ATTRIBUTE_LIST : SPIKE_MODE_OPERAND, continuation, false, step);
         group->flags |= list ? 0 : BUSTER_SPIKE_FRAME_ATTRIBUTE;
     }
 }
@@ -2474,6 +2488,9 @@ static const uint8_t spike_role_preds[SPIKE_ROLE_COUNT] =
     [SPIKE_ROLE_OPEN_SIZEOF] = SPIKE_PRED_PARAMETER,
     [SPIKE_ROLE_OPEN_SPECIFIER] = SPIKE_PRED_PARAMETER,
     [SPIKE_ROLE_OPEN_ATTRIBUTE] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_ATTRIBUTE_SPECIFIER] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_ATTRIBUTE_LEFT] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_ATTRIBUTE_RIGHT] = SPIKE_PRED_EXPRESSION,
     [SPIKE_ROLE_OPEN_ATTRIBUTE_LIST] = SPIKE_PRED_EXPRESSION,
     [SPIKE_ROLE_OPEN_ASM] = SPIKE_PRED_EXPRESSION,
     [SPIKE_ROLE_OPEN_KEYWORD] = SPIKE_PRED_PARAMETER,
@@ -2546,8 +2563,6 @@ struct SpikeKernels
     // The depth before each token: of ( [ { after the first K1 pass, of every group after the second.
     uint32_t* depths;
     uint32_t* enclosing;
-    // A group's opener's closer and a closer's opener, from the first K1 pass, for the typedef pass.
-    uint32_t* matches;
     uint8_t* roles;
     uint32_t* parents;
     // Nonzero for a token the rules can't be sure of: its top-level declaration is parsed by the scalar parser.
@@ -2598,12 +2613,6 @@ static void spike_kernels_init_tables(void)
             }
         }
     }
-    // Attribute closers by position, and a compound literal's or cast's type group, close too.
-    spike_role_deltas[SPIKE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER] = -1;
-    spike_role_deltas[SPIKE_ROLE_CLOSE_ATTRIBUTE_LEFT] = -1;
-    spike_role_deltas[SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT] = -1;
-    spike_role_deltas[SPIKE_ROLE_CLOSE_COMPOUND] = -1;
-    spike_role_deltas[SPIKE_ROLE_CLOSE_FUNCTION] = -1;
 }
 
 // The depth before each token and its enclosing opener, from codes (kinds or roles) and their deltas. Returns false if
@@ -2634,31 +2643,20 @@ static bool spike_brackets_scalar(const uint8_t* codes, const int8_t* deltas, ui
     return balanced && depth == 0;
 }
 
-// Each closer's opener and each opener's closer, from K1's output (BUSTER_SPIKE_NONE for every other token).
-static void spike_matches(const uint8_t* codes, const int8_t* deltas, uint32_t count, const uint32_t* enclosing, uint32_t* matches)
-{
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        matches[i] = BUSTER_SPIKE_NONE;
-    }
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        if (deltas[codes[i]] < 0 && enclosing[i] != BUSTER_SPIKE_NONE)
-        {
-            matches[i] = enclosing[i];
-            matches[enclosing[i]] = i;
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // K3, type names
 
-// The token after the group `opener` opens.
+// The token after the group `opener` opens (or after `opener` if it isn't an opener): the first token after it whose
+// depth is the opener's again. The typedef pass is the only user, over typedef declarations alone.
 static uint32_t spike_after_group(const SpikeKernels* kernels, const uint8_t* kinds, uint32_t opener)
 {
     const bool group = kinds[opener] == SPIKE_KIND_L_PAREN || kinds[opener] == SPIKE_KIND_L_SQUARE || kinds[opener] == SPIKE_KIND_L_BRACE;
-    return group ? kernels->matches[opener] + 1 : opener + 1;
+    uint32_t result = opener + 1;
+    while (group && kernels->depths[result] > kernels->depths[opener])
+    {
+        result += 1;
+    }
+    return result;
 }
 
 // The typedef pass: every typedef declaration, in source order, adds its declarators' names. A file-scope name is a type
@@ -2846,13 +2844,6 @@ static uint8_t spike_closer_role(SpikeKernels* kernels, uint32_t closer)
             kernels->roles[opener] = role;
             result = spike_closer_roles[role];
         }
-        else if (opener_role == SPIKE_ROLE_OPEN_ATTRIBUTE)
-        {
-            // By what comes before the attribute's keyword.
-            const uint8_t before = opener >= 2 ? spike_pred_of(kernels->roles[opener - 2], kernels->vkinds[opener - 2]) : SPIKE_PRED_ITEM;
-            result = before == SPIKE_PRED_OPERAND ? SPIKE_ROLE_CLOSE_ATTRIBUTE : before == SPIKE_PRED_STAR ? SPIKE_ROLE_CLOSE_ATTRIBUTE_LEFT :
-                     before == SPIKE_PRED_LEAF ? SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT : SPIKE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
-        }
         else if (result == SPIKE_ROLE_NONE)
         {
             result = SPIKE_ROLE_ERROR;
@@ -2862,7 +2853,7 @@ static uint8_t spike_closer_role(SpikeKernels* kernels, uint32_t closer)
 }
 
 // The keyword of a tagged type whose body starts after `token`: back over the tag and the attribute groups between them
-// (`struct __attribute__((packed)) S {`), through the first K1 pass's matches. SPIKE_KIND_END if there is none.
+// (`struct __attribute__((packed)) S {`), through each group's closer's opener. SPIKE_KIND_END if there is none.
 static uint8_t spike_tag_keyword(const SpikeKernels* kernels, uint32_t token)
 {
     uint32_t t = token;
@@ -2871,7 +2862,7 @@ static uint8_t spike_tag_keyword(const SpikeKernels* kernels, uint32_t token)
     while (searching)
     {
         const uint8_t kind = kernels->vkinds[t];
-        const uint32_t opener = kind == SPIKE_KIND_R_PAREN ? kernels->matches[t] : BUSTER_SPIKE_NONE;
+        const uint32_t opener = kind == SPIKE_KIND_R_PAREN ? kernels->enclosing[t] : BUSTER_SPIKE_NONE;
         if (opener != BUSTER_SPIKE_NONE && opener >= 2 && kernels->vkinds[opener - 1] == SPIKE_KIND_ATTRIBUTE)
         {
             t = opener - 2;
@@ -3055,7 +3046,9 @@ static uint8_t spike_role_rule(SpikeKernels* kernels, uint32_t i, bool typed, bo
                 }
                 else if (previous == SPIKE_KIND_ATTRIBUTE)
                 {
-                    result = SPIKE_ROLE_OPEN_ATTRIBUTE;
+                    // Where the attribute is, by the token before its keyword.
+                    result = before_pred == SPIKE_PRED_OPERAND ? SPIKE_ROLE_OPEN_ATTRIBUTE : before_pred == SPIKE_PRED_STAR ? SPIKE_ROLE_OPEN_ATTRIBUTE_LEFT :
+                             before_pred == SPIKE_PRED_LEAF ? SPIKE_ROLE_OPEN_ATTRIBUTE_RIGHT : SPIKE_ROLE_OPEN_ATTRIBUTE_SPECIFIER;
                 }
                 else if (previous == SPIKE_KIND_L_PAREN && before == SPIKE_KIND_ATTRIBUTE)
                 {
@@ -3213,8 +3206,6 @@ static void spike_secondary_scalar(SpikeKernels* kernels, uint32_t count, uint32
                 const uint32_t opener = secondary[open - 1];
                 open -= 1;
                 kernels->roles[i] = kernels->roles[opener] == SPIKE_ROLE_OPEN_CASE ? SPIKE_ROLE_CLOSE_CASE : SPIKE_ROLE_CLOSE_TERNARY;
-                kernels->matches[i] = opener;
-                kernels->matches[opener] = i;
             }
             else
             {
@@ -3271,7 +3262,7 @@ static void spike_parents_resolve(SpikeKernels* kernels, uint32_t token, uint32_
     const uint8_t role = kernels->roles[token];
     const uint32_t left = kernels->lefts[token];
     uint32_t parent;
-    if (spike_role_rules[role] == SPIKE_RULE_RIGHT)
+    if (spike_role_rules[role] == SPIKE_RULE_RIGHT || spike_role_rules[role] == SPIKE_RULE_OPENER)
     {
         parent = right;
     }
@@ -3320,20 +3311,12 @@ static void spike_parents_scalar(SpikeKernels* kernels, uint32_t count)
         {
             kernels->parents[i] = left;
         }
-        else if (rule == SPIKE_RULE_OPENER)
-        {
-            kernels->parents[i] = BUSTER_SPIKE_NONE;
-        }
         else
         {
             kernels->lefts[i] = left;
             kernels->waiting[right_count] = i;
             kernels->waiting_thresholds[right_count] = base + spike_role_right_thresholds[role];
             right_count += 1;
-        }
-        if (spike_role_deltas[role] < 0 && kernels->matches[i] != BUSTER_SPIKE_NONE)
-        {
-            kernels->parents[kernels->matches[i]] = i;
         }
     }
     while (right_count != 0)
@@ -3603,6 +3586,9 @@ struct SpikeKernelResult
     bool everything;
 };
 
+static void spike_shifts_init(void);
+static void spike_parent_tables_init(void);
+
 // Reserves the kernels' arrays for up to `capacity` tokens, with padding around each per-token array, and up to
 // `name_capacity` names.
 static bool spike_kernels_reserve(SpikeKernels* kernels, Arena* arena, uint64_t capacity, uint64_t name_capacity)
@@ -3615,7 +3601,6 @@ static bool spike_kernels_reserve(SpikeKernels* kernels, Arena* arena, uint64_t 
         .vkinds = vkinds != 0 ? vkinds + BUSTER_SPIKE_TOKEN_PADDING : 0,
         .depths = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .enclosing = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .matches = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .roles = roles != 0 ? roles + BUSTER_SPIKE_TOKEN_PADDING : 0,
         .parents = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .flags = flags != 0 ? flags + BUSTER_SPIKE_TOKEN_PADDING : 0,
@@ -3628,7 +3613,7 @@ static bool spike_kernels_reserve(SpikeKernels* kernels, Arena* arena, uint64_t 
         .typedef_log = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .typedef_tokens = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
     };
-    const bool result = kernels->vkinds != 0 && kernels->depths != 0 && kernels->enclosing != 0 && kernels->matches != 0 && kernels->roles != 0 &&
+    const bool result = kernels->vkinds != 0 && kernels->depths != 0 && kernels->enclosing != 0 && kernels->roles != 0 &&
                         kernels->parents != 0 && kernels->flags != 0 && kernels->stack != 0 && kernels->stack_keys != 0 && kernels->waiting != 0 &&
                         kernels->waiting_thresholds != 0 && kernels->lefts != 0 && kernels->typedef_names != 0 && kernels->typedef_log != 0 &&
                         kernels->typedef_tokens != 0;
@@ -3640,6 +3625,8 @@ static bool spike_kernels_reserve(SpikeKernels* kernels, Arena* arena, uint64_t 
         memset(flags, 0, slots);
     }
     spike_kernels_init_tables();
+    spike_shifts_init();
+    spike_parent_tables_init();
     return result;
 }
 
@@ -3653,7 +3640,6 @@ static SpikeKernelResult spike_parse_twins(SpikeKernels* kernels, const uint8_t*
     kernels->unsupported = false;
     // K1, on ( [ {.
     kernels->unbalanced = !spike_brackets_scalar(kinds, spike_kind_deltas, count, kernels->depths, kernels->enclosing, kernels->stack);
-    spike_matches(kinds, spike_kind_deltas, count, kernels->enclosing, kernels->matches);
     // K3.
     if (!kernels->unbalanced)
     {
@@ -3680,4 +3666,627 @@ static SpikeKernelResult spike_parse_twins(SpikeKernels* kernels, const uint8_t*
         kernels->typedef_names[kernels->typedef_log[i]] = 0;
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The kernels in AVX-512
+//
+// Each works on blocks of 64 tokens in byte lanes or 32 in 16-bit lanes, and carries what crosses a block boundary in
+// a small state: the depth, the openers still open, the stacks of candidates of the nearest-smaller-value searches.
+// Loads past the last token read the padding (BUSTER_SPIKE_TOKEN_PADDING), which holds SPIKE_KIND_END and zeros, and
+// stores past it write the arrays' slack; the results there are never read.
+
+typedef uint8_t SpikeU8x64 __attribute__((ext_vector_type(64)));
+
+// Index vectors for _mm512_permutex2var_epi8 and _epi16 that shift lanes up (lane i gets lane i - s of the first
+// source) or down (lane i gets lane i + s), taking the second source's lane 0 where that falls outside the vector.
+typedef struct SpikeShifts SpikeShifts;
+struct SpikeShifts
+{
+    __m512i up8[6];
+    __m512i down8[6];
+    __m512i up16[5];
+    __m512i down16[5];
+    __m512i lanes8;
+    __m512i lanes16;
+};
+
+static SpikeShifts spike_shifts;
+
+static void spike_shifts_init(void)
+{
+    for (uint32_t k = 0; k < 6; k += 1)
+    {
+        uint8_t up[64];
+        uint8_t down[64];
+        const uint32_t s = 1u << k;
+        for (uint32_t i = 0; i < 64; i += 1)
+        {
+            up[i] = (uint8_t)(i >= s ? i - s : 64);
+            down[i] = (uint8_t)(i + s < 64 ? i + s : 64);
+        }
+        spike_shifts.up8[k] = _mm512_loadu_si512(up);
+        spike_shifts.down8[k] = _mm512_loadu_si512(down);
+    }
+    for (uint32_t k = 0; k < 5; k += 1)
+    {
+        uint16_t up[32];
+        uint16_t down[32];
+        const uint32_t s = 1u << k;
+        for (uint32_t i = 0; i < 32; i += 1)
+        {
+            up[i] = (uint16_t)(i >= s ? i - s : 32);
+            down[i] = (uint16_t)(i + s < 32 ? i + s : 32);
+        }
+        spike_shifts.up16[k] = _mm512_loadu_si512(up);
+        spike_shifts.down16[k] = _mm512_loadu_si512(down);
+    }
+    uint8_t lanes8[64];
+    uint16_t lanes16[32];
+    for (uint32_t i = 0; i < 64; i += 1)
+    {
+        lanes8[i] = (uint8_t)i;
+    }
+    for (uint32_t i = 0; i < 32; i += 1)
+    {
+        lanes16[i] = (uint16_t)i;
+    }
+    spike_shifts.lanes8 = _mm512_loadu_si512(lanes8);
+    spike_shifts.lanes16 = _mm512_loadu_si512(lanes16);
+}
+
+BUSTER_INLINE __m512i spike_up8(__m512i x, uint32_t k, __m512i fill)
+{
+    return _mm512_permutex2var_epi8(x, spike_shifts.up8[k], fill);
+}
+
+BUSTER_INLINE __m512i spike_down8(__m512i x, uint32_t k, __m512i fill)
+{
+    return _mm512_permutex2var_epi8(x, spike_shifts.down8[k], fill);
+}
+
+BUSTER_INLINE __m512i spike_up16(__m512i x, uint32_t k, __m512i fill)
+{
+    return _mm512_permutex2var_epi16(x, spike_shifts.up16[k], fill);
+}
+
+BUSTER_INLINE __m512i spike_down16(__m512i x, uint32_t k, __m512i fill)
+{
+    return _mm512_permutex2var_epi16(x, spike_shifts.down16[k], fill);
+}
+
+// The nearest previous lane whose key is below the lane's threshold, in byte lanes (keys and thresholds unsigned): the
+// lane index, or a negative byte (bit 7 set) if no earlier lane in the vector qualifies. The windows of the doubling
+// table are built with shifts and vpminub, and searched with in-register permutes: 32, 16, 8, 4, 2 and 1 lanes back.
+BUSTER_INLINE __m512i spike_previous_smaller8(__m512i keys, __m512i thresholds)
+{
+    const __m512i fill = _mm512_set1_epi8((char)0xFF);
+    const __m512i one = _mm512_set1_epi8(1);
+    __m512i windows[6];
+    windows[0] = keys;
+    for (uint32_t k = 1; k < 6; k += 1)
+    {
+        windows[k] = _mm512_min_epu8(windows[k - 1], spike_up8(windows[k - 1], k - 1, fill));
+    }
+    __m512i p = _mm512_sub_epi8(spike_shifts.lanes8, one);
+    for (int32_t k = 5; k >= 0; k -= 1)
+    {
+        const __m512i v = _mm512_permutexvar_epi8(p, windows[k]);
+        // 0 where every key in the window is at or above the threshold, so the search moves past it.
+        const __m512i below = _mm512_min_epu8(_mm512_subs_epu8(thresholds, v), one);
+        const __m512i step = _mm512_set1_epi8((char)(1 << k));
+        p = _mm512_sub_epi8(p, _mm512_andnot_si512(_mm512_sub_epi8(_mm512_setzero_si512(), below), step));
+    }
+    return p;
+}
+
+// The same in 16-bit lanes: 16, 8, 4, 2 and 1 lanes back; a negative lane (bit 15 set) if none qualifies.
+BUSTER_INLINE __m512i spike_previous_smaller16(__m512i keys, __m512i thresholds)
+{
+    const __m512i fill = _mm512_set1_epi16((short)0xFFFF);
+    const __m512i one = _mm512_set1_epi16(1);
+    __m512i windows[5];
+    windows[0] = keys;
+    for (uint32_t k = 1; k < 5; k += 1)
+    {
+        windows[k] = _mm512_min_epu16(windows[k - 1], spike_up16(windows[k - 1], k - 1, fill));
+    }
+    __m512i p = _mm512_sub_epi16(spike_shifts.lanes16, one);
+    for (int32_t k = 4; k >= 0; k -= 1)
+    {
+        const __m512i v = _mm512_permutexvar_epi16(p, windows[k]);
+        const __m512i below = _mm512_min_epu16(_mm512_subs_epu16(thresholds, v), one);
+        const __m512i step = _mm512_set1_epi16((short)(1 << k));
+        p = _mm512_sub_epi16(p, _mm512_andnot_si512(_mm512_sub_epi16(_mm512_setzero_si512(), below), step));
+    }
+    return p;
+}
+
+// The nearest next lane whose key is below the lane's threshold, in 16-bit lanes: the lane index, or 32 or more if no
+// later lane in the vector qualifies.
+BUSTER_INLINE __m512i spike_next_smaller16(__m512i keys, __m512i thresholds)
+{
+    const __m512i fill = _mm512_set1_epi16((short)0xFFFF);
+    const __m512i one = _mm512_set1_epi16(1);
+    __m512i windows[5];
+    windows[0] = keys;
+    for (uint32_t k = 1; k < 5; k += 1)
+    {
+        windows[k] = _mm512_min_epu16(windows[k - 1], spike_down16(windows[k - 1], k - 1, fill));
+    }
+    __m512i p = _mm512_add_epi16(spike_shifts.lanes16, one);
+    for (int32_t k = 4; k >= 0; k -= 1)
+    {
+        // A lane at or past the end reads lane p & 31, whatever it holds: p only grows from there, and stays past it.
+        const __m512i v = _mm512_permutexvar_epi16(p, windows[k]);
+        const __m512i below = _mm512_min_epu16(_mm512_subs_epu16(thresholds, v), one);
+        const __m512i step = _mm512_set1_epi16((short)(1 << k));
+        p = _mm512_add_epi16(p, _mm512_andnot_si512(_mm512_sub_epi16(_mm512_setzero_si512(), below), step));
+    }
+    return p;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// K1 in AVX-512
+
+// The inclusive prefix sum of signed bytes, in six shifted adds.
+BUSTER_INLINE __m512i spike_prefix_sum8(__m512i x)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    for (uint32_t k = 0; k < 6; k += 1)
+    {
+        x = _mm512_add_epi8(x, spike_up8(x, k, zero));
+    }
+    return x;
+}
+
+BUSTER_INLINE __m512i spike_prefix_sum16(__m512i x)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    for (uint32_t k = 0; k < 5; k += 1)
+    {
+        x = _mm512_add_epi16(x, spike_up16(x, k, zero));
+    }
+    return x;
+}
+
+// One block of K1's twin, for a block whose enclosing openers reach further back than the vector path's 16 depths.
+static void spike_brackets_block_scalar(const uint8_t* codes, const int8_t* deltas, uint32_t begin, uint32_t end, uint32_t* depths, uint32_t* enclosing,
+                                        uint32_t* open_stack, int64_t* depth)
+{
+    for (uint32_t i = begin; i < end; i += 1)
+    {
+        const int8_t delta = deltas[codes[i]];
+        depths[i] = (uint32_t)*depth;
+        enclosing[i] = *depth > 0 ? open_stack[*depth - 1] : BUSTER_SPIKE_NONE;
+        if (delta > 0)
+        {
+            open_stack[*depth] = i;
+        }
+        *depth += delta;
+        *depth = *depth < 0 ? 0 : *depth;
+    }
+}
+
+// K1 in AVX-512, 64 tokens a block in byte lanes. The depth is a prefix sum of the deltas; a token's enclosing opener is
+// the nearest previous token whose depth before it is lower, found in the block with spike_previous_smaller8 and before
+// it in open_stack (the open opener at each depth), of which the 16 entries below the block's starting depth are one
+// vpermd away. `open_stack` needs an entry per depth the input reaches. Returns false if a closer has no opener or a
+// group is still open at the end.
+static bool spike_brackets_avx512(const uint8_t* codes, const int8_t* deltas, uint32_t count, uint32_t* depths, uint32_t* enclosing, uint32_t* open_stack)
+{
+    const __m512i delta_low = _mm512_loadu_si512(deltas);
+    const __m512i delta_high = _mm512_loadu_si512(deltas + 64);
+    const __m512i bias = _mm512_set1_epi8(64);
+    const __m512i fill = _mm512_set1_epi8(0x7F);
+    const __m512i none = _mm512_set1_epi32((int)BUSTER_SPIKE_NONE);
+    int64_t base = 0;
+    bool balanced = true;
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const __m512i code = _mm512_loadu_si512(codes + block);
+        const __m512i delta = _mm512_permutex2var_epi8(delta_low, code, delta_high);
+        const __m512i after = spike_prefix_sum8(delta);
+        const __m512i before = _mm512_sub_epi8(after, delta);
+        const __m512i keys = _mm512_add_epi8(before, bias);
+        const __m512i p = spike_previous_smaller8(keys, keys);
+        const __mmask64 found = _mm512_cmplt_epu8_mask(p, _mm512_set1_epi8(64));
+        const uint32_t live = count - block < 64 ? count - block : 64;
+        const __mmask64 live_mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
+        // Tokens whose opener is before the block are at or below its starting depth; at most 15 depths below it the
+        // vector path handles them.
+        const __mmask64 deep = _mm512_mask_cmplt_epi8_mask(~found & live_mask, before, _mm512_set1_epi8(-15));
+        if (deep != 0)
+        {
+            spike_brackets_block_scalar(codes, deltas, block, block + live, depths, enclosing, open_stack, &base);
+        }
+        else
+        {
+            // The open openers at the 16 depths below the block's start.
+            uint32_t below[16];
+            for (int64_t j = 0; j < 16; j += 1)
+            {
+                const int64_t level = base - 16 + j;
+                below[j] = level >= 0 ? open_stack[level] : BUSTER_SPIKE_NONE;
+            }
+            const __m512i below_vector = _mm512_loadu_si512(below);
+            const __m512i base_vector = _mm512_set1_epi32((int)base);
+            const __m512i block_vector = _mm512_set1_epi32((int)block);
+            for (uint32_t q = 0; q < 4; q += 1)
+            {
+                const __m128i p_quarter = q == 0 ? _mm512_extracti32x4_epi32(p, 0) : q == 1 ? _mm512_extracti32x4_epi32(p, 1) :
+                                          q == 2 ? _mm512_extracti32x4_epi32(p, 2) : _mm512_extracti32x4_epi32(p, 3);
+                const __m128i before_quarter = q == 0 ? _mm512_extracti32x4_epi32(before, 0) : q == 1 ? _mm512_extracti32x4_epi32(before, 1) :
+                                               q == 2 ? _mm512_extracti32x4_epi32(before, 2) : _mm512_extracti32x4_epi32(before, 3);
+                const __m512i relative = _mm512_cvtepi8_epi32(before_quarter);
+                const __m512i inside = _mm512_add_epi32(block_vector, _mm512_cvtepu8_epi32(p_quarter));
+                const __m512i outside = _mm512_permutexvar_epi32(_mm512_add_epi32(relative, _mm512_set1_epi32(15)), below_vector);
+                const __mmask16 found_quarter = (__mmask16)(found >> (16 * q));
+                _mm512_storeu_si512(enclosing + block + 16 * q, _mm512_mask_blend_epi32(found_quarter, outside, inside));
+                _mm512_storeu_si512(depths + block + 16 * q, _mm512_add_epi32(base_vector, relative));
+            }
+            (void)none;
+            // The openers still open at the block's end, onto open_stack: an opener is if no token from it on in the
+            // block has a lower depth after it than it has.
+            __m512i suffix = after;
+            for (uint32_t k = 0; k < 6; k += 1)
+            {
+                suffix = _mm512_min_epi8(suffix, spike_down8(suffix, k, fill));
+            }
+            const __mmask64 openers = _mm512_cmpgt_epi8_mask(delta, _mm512_setzero_si512()) & live_mask;
+            uint64_t open = openers & _mm512_cmpeq_epi8_mask(suffix, after);
+            if (open != 0)
+            {
+                int8_t before_bytes[64];
+                _mm512_storeu_si512(before_bytes, before);
+                while (open != 0)
+                {
+                    const uint32_t lane = (uint32_t)__builtin_ctzll(open);
+                    open &= open - 1;
+                    open_stack[base + before_bytes[lane]] = block + lane;
+                }
+            }
+            int8_t after_bytes[64];
+            _mm512_storeu_si512(after_bytes, after);
+            const __mmask64 negative = _mm512_cmplt_epi8_mask(_mm512_add_epi8(after, _mm512_set1_epi8((char)(base < 64 ? base : 64))), _mm512_setzero_si512()) & live_mask;
+            balanced &= base >= 64 || negative == 0;
+            base += after_bytes[live - 1];
+            base = base < 0 ? 0 : base;
+        }
+    }
+    return balanced && base == 0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// K4 in AVX-512
+
+// Keys in 16-bit lanes are node depth * 32 + level, so the vector path takes depths below this, and the twin the rest.
+#define BUSTER_SPIKE_MAX_VECTOR_DEPTH 2047
+
+// K4's per-role tables, as bytes: a role's level, whether it closes a group, its thresholds and its parent rule; and per
+// level, whether an L candidate of it is weak (spike_level_is_weak) and which way equal keys go.
+typedef struct SpikeParentTables SpikeParentTables;
+struct SpikeParentTables
+{
+    uint8_t levels[128];
+    uint8_t closers[128];
+    uint8_t left_thresholds[128];
+    uint8_t right_thresholds[128];
+    uint8_t rules[128];
+    uint16_t weak[32];
+    uint16_t ties[32];
+};
+
+static SpikeParentTables spike_parent_tables;
+
+static void spike_parent_tables_init(void)
+{
+    for (uint32_t role = 0; role < SPIKE_ROLE_COUNT; role += 1)
+    {
+        spike_parent_tables.levels[role] = spike_role_levels[role];
+        spike_parent_tables.closers[role] = spike_role_deltas[role] < 0;
+        spike_parent_tables.left_thresholds[role] = spike_role_left_thresholds[role];
+        spike_parent_tables.right_thresholds[role] = spike_role_right_thresholds[role];
+        spike_parent_tables.rules[role] = spike_role_rules[role];
+    }
+    for (uint32_t level = 0; level < 32; level += 1)
+    {
+        spike_parent_tables.weak[level] = spike_level_is_weak((uint8_t)level);
+        spike_parent_tables.ties[level] = spike_level_ties_left[level];
+    }
+}
+
+BUSTER_INLINE __m512i spike_lookup8(const uint8_t* table, __m512i index)
+{
+    return _mm512_permutex2var_epi8(_mm512_loadu_si512(table), index, _mm512_loadu_si512(table + 64));
+}
+
+// The 32 roles of a block widened to 16-bit lanes, through a byte table.
+BUSTER_INLINE __m512i spike_lookup8_to16(const uint8_t* table, __m512i roles)
+{
+    return _mm512_cvtepu8_epi16(_mm512_castsi512_si256(spike_lookup8(table, roles)));
+}
+
+// A block's keys and thresholds: 32 tokens from `block`, in 16-bit lanes.
+typedef struct SpikeKeys SpikeKeys;
+struct SpikeKeys
+{
+    __m512i keys;
+    __m512i left;
+    __m512i right;
+    __m512i rules;
+};
+
+BUSTER_INLINE SpikeKeys spike_block_keys(const uint8_t* roles, const uint32_t* depths, uint32_t block)
+{
+    const __m512i role = _mm512_zextsi256_si512(_mm256_loadu_si256((const __m256i*)(roles + block)));
+    const __m512i depth = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi32_epi16(_mm512_loadu_si512(depths + block))),
+                                             _mm512_cvtepi32_epi16(_mm512_loadu_si512(depths + block + 16)), 1);
+    const __m512i node = _mm512_sub_epi16(depth, spike_lookup8_to16(spike_parent_tables.closers, role));
+    const __m512i base = _mm512_slli_epi16(node, 5);
+    SpikeKeys result = {
+        .keys = _mm512_add_epi16(base, spike_lookup8_to16(spike_parent_tables.levels, role)),
+        .left = _mm512_add_epi16(base, spike_lookup8_to16(spike_parent_tables.left_thresholds, role)),
+        .right = _mm512_add_epi16(base, spike_lookup8_to16(spike_parent_tables.right_thresholds, role)),
+        .rules = spike_lookup8_to16(spike_parent_tables.rules, role),
+    };
+    return result;
+}
+
+// A stack of search candidates from other blocks: positions and keys, keys increasing upward, with room for the
+// tokens.
+typedef struct SpikeCandidates SpikeCandidates;
+struct SpikeCandidates
+{
+    uint32_t* positions;
+    uint16_t* keys;
+    uint32_t count;
+};
+
+// The topmost candidate below each lane's threshold, among the stack's top 32: its index in the window (a negative
+// 16-bit lane if none), with the window's keys and positions loaded. `deep` gets the lanes for which every one of the
+// 32 is at or above the threshold while the stack holds more below them.
+typedef struct SpikeWindow SpikeWindow;
+struct SpikeWindow
+{
+    __m512i index;
+    __m512i keys;
+    __m512i positions_low;
+    __m512i positions_high;
+    __mmask32 valid;
+    __mmask32 deep;
+};
+
+BUSTER_INLINE SpikeWindow spike_search_window(const SpikeCandidates* stack, __m512i thresholds)
+{
+    uint16_t keys[32];
+    uint32_t positions[32];
+    const uint32_t count = stack->count;
+    const uint32_t start = count >= 32 ? count - 32 : 0;
+    const uint32_t missing = 32 - (count - start);
+    // The window's bottom lanes are padding below the stack: key 0, which a search finds only when nothing above does,
+    // and which then reads as no candidate.
+    for (uint32_t i = 0; i < 32; i += 1)
+    {
+        keys[i] = i < missing ? 0 : stack->keys[start + i - missing];
+        positions[i] = i < missing ? BUSTER_SPIKE_NONE : stack->positions[start + i - missing];
+    }
+    SpikeWindow result;
+    result.keys = _mm512_loadu_si512(keys);
+    result.positions_low = _mm512_loadu_si512(positions);
+    result.positions_high = _mm512_loadu_si512(positions + 16);
+    // From -1, steps of 16, 8, 4, 2, 1 and 1 reach every index up to 31.
+    static const short steps[6] = { 16, 8, 4, 2, 1, 1 };
+    __m512i j = _mm512_set1_epi16(-1);
+    for (uint32_t s = 0; s < 6; s += 1)
+    {
+        const __m512i candidate = _mm512_add_epi16(j, _mm512_set1_epi16(steps[s]));
+        const __m512i v = _mm512_permutexvar_epi16(candidate, result.keys);
+        j = _mm512_mask_mov_epi16(j, _mm512_cmplt_epu16_mask(v, thresholds), candidate);
+    }
+    result.index = j;
+    const __mmask32 any = _mm512_cmpge_epi16_mask(j, _mm512_setzero_si512());
+    result.valid = _mm512_mask_cmpge_epi16_mask(any, j, _mm512_set1_epi16((short)missing));
+    result.deep = start != 0 ? ~any : 0;
+    return result;
+}
+
+// The window's positions for 16 lanes of indices (low or high half of a 16-bit index vector).
+BUSTER_INLINE __m512i spike_window_positions(const SpikeWindow* window, __m256i index)
+{
+    return _mm512_permutex2var_epi32(window->positions_low, _mm512_cvtepu16_epi32(index), window->positions_high);
+}
+
+// The scalar search of the whole stack, for a lane the window doesn't reach.
+static uint32_t spike_search_stack(const SpikeCandidates* stack, uint32_t threshold, uint16_t* key)
+{
+    uint32_t low = 0;
+    uint32_t high = stack->count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (stack->keys[middle] < threshold)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    const uint32_t result = low != 0 ? stack->positions[low - 1] : BUSTER_SPIKE_NONE;
+    *key = low != 0 ? stack->keys[low - 1] : 0;
+    return result;
+}
+
+// K4's left pass in AVX-512: every token's L and L's key, 32 tokens a block. Within the block, spike_previous_smaller16;
+// before it, the stack of candidates. Then the block's keys replace the candidates they hide, and its suffix minima go
+// on top. Depths must be at most BUSTER_SPIKE_MAX_VECTOR_DEPTH.
+static void spike_parents_left_avx512(const uint8_t* roles, const uint32_t* depths, uint32_t count, uint32_t* lefts, uint16_t* left_keys, SpikeCandidates* stack)
+{
+    const __m512i ones = _mm512_set1_epi16((short)0xFFFF);
+    stack->count = 0;
+    for (uint32_t block = 0; block < count; block += 32)
+    {
+        const uint32_t live = count - block < 32 ? count - block : 32;
+        const __mmask32 live_mask = live == 32 ? ~(__mmask32)0 : (((__mmask32)1 << live) - 1);
+        const SpikeKeys keys = spike_block_keys(roles, depths, block);
+        const __m512i block_keys = _mm512_mask_mov_epi16(ones, live_mask, keys.keys);
+        const __m512i p = spike_previous_smaller16(block_keys, keys.left);
+        const __mmask32 found = _mm512_cmplt_epu16_mask(p, _mm512_set1_epi16(32));
+        const SpikeWindow window = spike_search_window(stack, keys.left);
+        const __m512i inside_key = _mm512_permutexvar_epi16(p, block_keys);
+        const __m512i outside_key = _mm512_maskz_permutexvar_epi16(window.valid, window.index, window.keys);
+        _mm512_storeu_si512(left_keys + block, _mm512_mask_mov_epi16(outside_key, found, inside_key));
+        const __m512i block_vector = _mm512_set1_epi32((int)block);
+        const __m512i none = _mm512_set1_epi32((int)BUSTER_SPIKE_NONE);
+        for (uint32_t half = 0; half < 2; half += 1)
+        {
+            const __m256i p_half = half == 0 ? _mm512_castsi512_si256(p) : _mm512_extracti64x4_epi64(p, 1);
+            const __m256i j_half = half == 0 ? _mm512_castsi512_si256(window.index) : _mm512_extracti64x4_epi64(window.index, 1);
+            const __m512i inside = _mm512_add_epi32(block_vector, _mm512_cvtepu16_epi32(p_half));
+            const __m512i outside = _mm512_mask_mov_epi32(none, (__mmask16)(window.valid >> (16 * half)), spike_window_positions(&window, j_half));
+            _mm512_storeu_si512(lefts + block + 16 * half, _mm512_mask_mov_epi32(outside, (__mmask16)(found >> (16 * half)), inside));
+        }
+        // The lanes the window didn't reach.
+        uint32_t deep = window.deep & ~found & live_mask;
+        if (deep != 0)
+        {
+            uint16_t thresholds[32];
+            _mm512_storeu_si512(thresholds, keys.left);
+            while (deep != 0)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctz(deep);
+                deep &= deep - 1;
+                lefts[block + lane] = spike_search_stack(stack, thresholds[lane], &left_keys[block + lane]);
+            }
+        }
+        // The block's suffix minima, which hide every candidate whose key isn't below the block's minimum.
+        __m512i suffix = block_keys;
+        for (uint32_t k = 0; k < 5; k += 1)
+        {
+            suffix = _mm512_min_epu16(suffix, spike_down16(suffix, k, ones));
+        }
+        const uint16_t minimum = (uint16_t)_mm_extract_epi16(_mm512_castsi512_si128(suffix), 0);
+        while (stack->count != 0 && stack->keys[stack->count - 1] >= minimum)
+        {
+            stack->count -= 1;
+        }
+        const __mmask32 minima = _mm512_mask_cmplt_epu16_mask(live_mask, block_keys, spike_down16(suffix, 0, ones));
+        _mm512_storeu_si512(stack->keys + stack->count, _mm512_maskz_compress_epi16(minima, block_keys));
+        const __m512i lanes_low = _mm512_add_epi32(block_vector, _mm512_cvtepu16_epi32(_mm512_castsi512_si256(spike_shifts.lanes16)));
+        const __m512i lanes_high = _mm512_add_epi32(lanes_low, _mm512_set1_epi32(16));
+        const uint32_t low_count = (uint32_t)__builtin_popcount(minima & 0xFFFF);
+        _mm512_storeu_si512(stack->positions + stack->count, _mm512_maskz_compress_epi32((__mmask16)minima, lanes_low));
+        _mm512_storeu_si512(stack->positions + stack->count + low_count, _mm512_maskz_compress_epi32((__mmask16)(minima >> 16), lanes_high));
+        stack->count += (uint32_t)__builtin_popcount(minima);
+    }
+}
+
+// K4's right pass in AVX-512, from the last block to the first: every token's R, as the left pass found L, then its
+// parent by its role's rule.
+static void spike_parents_right_avx512(const uint8_t* roles, const uint32_t* depths, uint32_t count, const uint32_t* lefts, const uint16_t* left_keys, uint32_t* parents,
+                                       SpikeCandidates* stack)
+{
+    const __m512i ones = _mm512_set1_epi16((short)0xFFFF);
+    const __m512i weak_table = _mm512_loadu_si512(spike_parent_tables.weak);
+    const __m512i ties_table = _mm512_loadu_si512(spike_parent_tables.ties);
+    const __m512i none = _mm512_set1_epi32((int)BUSTER_SPIKE_NONE);
+    stack->count = 0;
+    const uint32_t blocks = (count + 31) / 32;
+    for (uint32_t b = blocks; b-- > 0;)
+    {
+        const uint32_t block = b * 32;
+        const uint32_t live = count - block < 32 ? count - block : 32;
+        const __mmask32 live_mask = live == 32 ? ~(__mmask32)0 : (((__mmask32)1 << live) - 1);
+        const SpikeKeys keys = spike_block_keys(roles, depths, block);
+        const __m512i block_keys = _mm512_mask_mov_epi16(ones, live_mask, keys.keys);
+        const __m512i p = spike_next_smaller16(block_keys, keys.right);
+        const __mmask32 found = _mm512_cmplt_epu16_mask(p, _mm512_set1_epi16(32));
+        const SpikeWindow window = spike_search_window(stack, keys.right);
+        const __m512i inside_key = _mm512_permutexvar_epi16(p, block_keys);
+        const __m512i outside_key = _mm512_maskz_permutexvar_epi16(window.valid, window.index, window.keys);
+        __m512i right_key = _mm512_mask_mov_epi16(outside_key, found, inside_key);
+        const __m512i block_vector = _mm512_set1_epi32((int)block);
+        __m512i right[2];
+        for (uint32_t half = 0; half < 2; half += 1)
+        {
+            const __m256i p_half = half == 0 ? _mm512_castsi512_si256(p) : _mm512_extracti64x4_epi64(p, 1);
+            const __m256i j_half = half == 0 ? _mm512_castsi512_si256(window.index) : _mm512_extracti64x4_epi64(window.index, 1);
+            const __m512i inside = _mm512_add_epi32(block_vector, _mm512_cvtepu16_epi32(p_half));
+            const __m512i outside = _mm512_mask_mov_epi32(none, (__mmask16)(window.valid >> (16 * half)), spike_window_positions(&window, j_half));
+            right[half] = _mm512_mask_mov_epi32(outside, (__mmask16)(found >> (16 * half)), inside);
+        }
+        uint32_t deep = window.deep & ~found & live_mask;
+        if (deep != 0)
+        {
+            uint16_t thresholds[32];
+            uint16_t key_lanes[32];
+            uint32_t right_lanes[32];
+            _mm512_storeu_si512(thresholds, keys.right);
+            _mm512_storeu_si512(key_lanes, right_key);
+            _mm512_storeu_si512(right_lanes, right[0]);
+            _mm512_storeu_si512(right_lanes + 16, right[1]);
+            while (deep != 0)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctz(deep);
+                deep &= deep - 1;
+                right_lanes[lane] = spike_search_stack(stack, thresholds[lane], &key_lanes[lane]);
+            }
+            right_key = _mm512_loadu_si512(key_lanes);
+            right[0] = _mm512_loadu_si512(right_lanes);
+            right[1] = _mm512_loadu_si512(right_lanes + 16);
+        }
+        // The parents.
+        const __m512i left_key = _mm512_loadu_si512(left_keys + block);
+        const __m512i left_level = _mm512_and_si512(left_key, _mm512_set1_epi16(31));
+        const __mmask32 weak = _mm512_test_epi16_mask(_mm512_permutexvar_epi16(left_level, weak_table), ones);
+        const __mmask32 ties = _mm512_test_epi16_mask(_mm512_permutexvar_epi16(left_level, ties_table), ones);
+        const __mmask32 greater = _mm512_cmpgt_epu16_mask(left_key, right_key);
+        const __mmask32 equal = _mm512_cmpeq_epi16_mask(left_key, right_key);
+        const __mmask32 rule_left = _mm512_cmpeq_epi16_mask(keys.rules, _mm512_set1_epi16(SPIKE_RULE_LEFT));
+        const __mmask32 rule_right = _mm512_cmpge_epu16_mask(keys.rules, _mm512_set1_epi16(SPIKE_RULE_RIGHT));
+        __mmask32 left_valid = 0;
+        __mmask32 right_valid = 0;
+        __m512i left[2];
+        for (uint32_t half = 0; half < 2; half += 1)
+        {
+            left[half] = _mm512_loadu_si512(lefts + block + 16 * half);
+            left_valid |= (__mmask32)_mm512_cmpneq_epi32_mask(left[half], none) << (16 * half);
+            right_valid |= (__mmask32)_mm512_cmpneq_epi32_mask(right[half], none) << (16 * half);
+        }
+        const __mmask32 select_left = left_valid & (~right_valid | (~weak & (greater | (equal & ties))));
+        const __mmask32 take_left = rule_left | (~rule_right & select_left);
+        for (uint32_t half = 0; half < 2; half += 1)
+        {
+            _mm512_storeu_si512(parents + block + 16 * half, _mm512_mask_mov_epi32(right[half], (__mmask16)(take_left >> (16 * half)), left[half]));
+        }
+        // The block's prefix minima go on the stack, nearest on top: pushed from the right.
+        __m512i prefix = block_keys;
+        for (uint32_t k = 0; k < 5; k += 1)
+        {
+            prefix = _mm512_min_epu16(prefix, spike_up16(prefix, k, ones));
+        }
+        const uint16_t minimum = (uint16_t)_mm_extract_epi16(_mm512_extracti32x4_epi32(prefix, 3), 7);
+        while (stack->count != 0 && stack->keys[stack->count - 1] >= minimum)
+        {
+            stack->count -= 1;
+        }
+        const __mmask32 minima = _mm512_mask_cmplt_epu16_mask(live_mask, block_keys, spike_up16(prefix, 0, ones));
+        const uint32_t n = (uint32_t)__builtin_popcount(minima);
+        // Reversed: lane i of the stores is minimum n - 1 - i.
+        const __m512i reverse = _mm512_sub_epi16(_mm512_set1_epi16((short)(n - 1)), spike_shifts.lanes16);
+        _mm512_storeu_si512(stack->keys + stack->count, _mm512_permutexvar_epi16(reverse, _mm512_maskz_compress_epi16(minima, block_keys)));
+        const __m512i lanes_low = _mm512_add_epi32(block_vector, _mm512_cvtepu16_epi32(_mm512_castsi512_si256(spike_shifts.lanes16)));
+        const __m512i lanes_high = _mm512_add_epi32(lanes_low, _mm512_set1_epi32(16));
+        uint32_t positions[32];
+        const uint32_t low_count = (uint32_t)__builtin_popcount(minima & 0xFFFF);
+        _mm512_storeu_si512(positions, _mm512_maskz_compress_epi32((__mmask16)minima, lanes_low));
+        _mm512_storeu_si512(positions + low_count, _mm512_maskz_compress_epi32((__mmask16)(minima >> 16), lanes_high));
+        for (uint32_t i = 0; i < n; i += 1)
+        {
+            stack->positions[stack->count + i] = positions[n - 1 - i];
+        }
+        stack->count += n;
+    }
 }

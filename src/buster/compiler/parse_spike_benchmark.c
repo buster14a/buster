@@ -46,6 +46,51 @@
 #define BUSTER_SPIKE_CONTEXT_TOKENS 12
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Fixtures
+
+// Sources whose trees were checked by hand: each token's expected parent, -1 for the root. They cover declarations
+// (function pointers, bit-fields, typedefs of struct bodies, attributes), every statement, the dangling else, casts,
+// compound literals, designators, nested ternaries, sizeof, chained postfix operators and string concatenation.
+static const char spike_fixture_a[] =
+    "typedef int T;\n"
+    "int f(int a, T *b) { if (a) x = b * c; else y = -z; return a + b * c - d; }\n";
+
+static const int32_t spike_fixture_a_parents[] = { 3, 0, 1, -1, 40, 13, 13, 9, 7, 13, 9, 10, 11, 4, 40, 18, 18, 18, 40, 20, 24, 22, 20, 22, 18, 18, 27, 30, 27, 28, 25, 39, 33, 37, 35, 33, 35, 31, 37, 40, -1 };
+
+static const char spike_fixture_b[] =
+    "typedef struct S { int a : 3, b; struct S *next; } S;\n"
+    "int (*fp)(int, char *), *q[2] = { 0 };\n"
+    "void g(void) {\n"
+    "  S s = { .a = 1, [2] = (S){ 3 } };\n"
+    "  x = (int)*p + sizeof(int) * a ? b : c ? d : e;\n"
+    "  if (a) if (b) x; else y;\n"
+    "  do x++; while (c);\n"
+    "  switch (n) { case 1: case 2 ... 4: f(a, b); break; default: L: goto L; }\n"
+    "  for (int i = 0, j; i < n; i++, j--) { }\n"
+    "  y = f(a)(b)[c]->d.e;\n"
+    "  z = \"a\" \"b\" \"c\";\n"
+    "}\n"
+    "enum E { A = 1, B };\n"
+    "extern int h(void) __attribute__((__nothrow__)) __attribute__((__const__));\n";
+
+static const int32_t spike_fixture_b_parents[] = { 18, 16, 16, 16, 10, 6, 8, 6, 4, 8, 16, 12, 15, 12, 13, 16, 0, 16, -1, 40, 23, 23, 21, 29, 29, 26, 29, 26, 27, 30, 19, 36, 35, 35, 35, 31, 30, 39, 39, 36, -1, 187, 45, 45, 45, 41, 187, 67, 49, 47, 66, 53, 51, 55, 53, 66, 58, 58, 59, 55, 62, 62, 65, 65, 65, 59, 49, 187, 69, 90, 72, 72, 75, 72, 73, 84, 80, 79, 79, 76, 75, 80, 84, 84, 69, 88, 88, 88, 84, 88, 187, 94, 94, 94, 187, 98, 98, 98, 94, 100, 98, 98, 103, 101, 112, 106, 107, 104, 111, 111, 111, 112, 187, 116, 116, 116, 187, 142, 120, 120, 142, 125, 123, 125, 123, 120, 131, 131, 129, 131, 129, 132, 125, 134, 142, 136, 142, 138, 136, 141, 139, 138, 116, 161, 161, 151, 147, 149, 147, 145, 149, 161, 153, 155, 153, 161, 157, 158, 161, 160, 158, 187, 163, 161, 165, 180, 169, 169, 169, 172, 172, 172, 175, 175, 175, 176, 178, 176, 165, 178, 187, 182, 186, 182, 183, 184, 187, -1, 196, 196, 196, 192, 194, 192, 196, 194, 197, -1, 216, 198, 203, 203, 203, 209, 209, 209, 208, 208, 209, 215, 215, 215, 214, 214, 215, 199, -1 };
+
+typedef struct SpikeFixture SpikeFixture;
+struct SpikeFixture
+{
+    const char* name;
+    const char* source;
+    const int32_t* parents;
+    uint32_t count;
+};
+
+static const SpikeFixture spike_fixtures[] =
+{
+    { "a", spike_fixture_a, spike_fixture_a_parents, sizeof(spike_fixture_a_parents) / sizeof(int32_t) },
+    { "b", spike_fixture_b, spike_fixture_b_parents, sizeof(spike_fixture_b_parents) / sizeof(int32_t) },
+};
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Loading
 
 typedef struct SpikeFile SpikeFile;
@@ -55,6 +100,9 @@ struct SpikeFile
     uint8_t* source;
     uint64_t length;
     SpikeTokens tokens;
+    // For a fixture, each token's expected parent (-1 for the root).
+    const int32_t* expected;
+    uint32_t expected_count;
 };
 
 typedef struct SpikeCorpus SpikeCorpus;
@@ -97,34 +145,13 @@ static bool spike_names_init(SpikeNames* names, Arena* memory)
     return result;
 }
 
-// Reads a file, lexes and refines it, and adds it to the corpus. Returns false (with a message) if it can't.
-static bool spike_load_file(SpikeCorpus* corpus, const char* path)
+// Lexes and refines the source already in file->source, and adds the file to the corpus.
+static bool spike_add_source(SpikeCorpus* corpus, SpikeFile* file, const char* path, uint64_t length, uint64_t read_bytes)
 {
     bool result = false;
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    struct stat file_stats;
-    if (fd < 0 || fstat(fd, &file_stats) != 0)
     {
-        fprintf(stderr, "can't read %s\n", path);
-    }
-    else if (corpus->file_count == BUSTER_SPIKE_MAX_FILES)
-    {
-        fprintf(stderr, "too many files\n");
-    }
-    else
-    {
-        const uint64_t length = (uint64_t)file_stats.st_size;
         const uint64_t path_length = strlen(path);
-        SpikeFile* file = &corpus->files[corpus->file_count];
         file->path = arena_push(corpus->memory, path_length + 1, 1);
-        file->source = arena_push(corpus->memory, length + 1, 64);
-        uint64_t read_bytes = 0;
-        ssize_t n = 1;
-        while (file->source != 0 && n > 0 && read_bytes < length)
-        {
-            n = read(fd, file->source + read_bytes, length - read_bytes);
-            read_bytes += n > 0 ? (uint64_t)n : 0;
-        }
         const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY(length);
         if (capacity > corpus->lexer_capacity)
         {
@@ -176,9 +203,66 @@ static bool spike_load_file(SpikeCorpus* corpus, const char* path)
             }
         }
     }
+    return result;
+}
+
+// Reads a file, lexes and refines it, and adds it to the corpus. Returns false (with a message) if it can't.
+static bool spike_load_file(SpikeCorpus* corpus, const char* path)
+{
+    bool result = false;
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat file_stats;
+    if (fd < 0 || fstat(fd, &file_stats) != 0)
+    {
+        fprintf(stderr, "can't read %s\n", path);
+    }
+    else if (corpus->file_count == BUSTER_SPIKE_MAX_FILES)
+    {
+        fprintf(stderr, "too many files\n");
+    }
+    else
+    {
+        const uint64_t length = (uint64_t)file_stats.st_size;
+        SpikeFile* file = &corpus->files[corpus->file_count];
+        *file = (SpikeFile){ 0 };
+        file->source = arena_push(corpus->memory, length + 1, 64);
+        uint64_t read_bytes = 0;
+        ssize_t n = 1;
+        while (file->source != 0 && n > 0 && read_bytes < length)
+        {
+            n = read(fd, file->source + read_bytes, length - read_bytes);
+            read_bytes += n > 0 ? (uint64_t)n : 0;
+        }
+        result = spike_add_source(corpus, file, path, length, read_bytes);
+    }
     if (fd >= 0)
     {
         close(fd);
+    }
+    return result;
+}
+
+// Adds the fixtures to the corpus, each with its expected parents.
+static bool spike_load_fixtures(SpikeCorpus* corpus)
+{
+    bool result = true;
+    for (uint32_t i = 0; result && i < sizeof(spike_fixtures) / sizeof(spike_fixtures[0]); i += 1)
+    {
+        const SpikeFixture* fixture = &spike_fixtures[i];
+        const uint64_t length = strlen(fixture->source);
+        SpikeFile* file = &corpus->files[corpus->file_count];
+        *file = (SpikeFile){ 0 };
+        file->source = arena_push(corpus->memory, length + 1, 64);
+        result = file->source != 0;
+        if (result)
+        {
+            memcpy(file->source, fixture->source, length);
+            char path[64];
+            snprintf(path, sizeof(path), "fixture %s", fixture->name);
+            result = spike_add_source(corpus, file, path, length, length);
+            file->expected = fixture->parents;
+            file->expected_count = fixture->count;
+        }
     }
     return result;
 }
@@ -396,6 +480,91 @@ static void spike_print_both(const SpikeFile* file, const SpikeTree* expected, c
     }
 }
 
+// Each kernel against its scalar twin on one file, after spike_parse_twins has filled `kernels` (whose inputs the
+// vector kernels then read). `copy` holds a token array's worth of each output for the comparison. Returns the number
+// of kernels whose output differs, and prints the first difference of each.
+typedef struct SpikeKernelCopy SpikeKernelCopy;
+struct SpikeKernelCopy
+{
+    uint32_t* depths;
+    uint32_t* enclosing;
+    uint32_t* open_stack;
+    uint32_t* parents;
+    uint32_t* lefts;
+    uint16_t* left_keys;
+    SpikeCandidates candidates;
+    uint8_t* typed;
+};
+
+static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels, SpikeKernelCopy* copy, uint32_t count)
+{
+    uint32_t result = 0;
+    const uint8_t* kinds = file->tokens.kinds;
+    // K1 on ( [ {.
+    const bool twin_balanced = spike_brackets_scalar(kinds, spike_kind_deltas, count, kernels->depths, kernels->enclosing, kernels->stack);
+    const bool vector_balanced = spike_brackets_avx512(kinds, spike_kind_deltas, count, copy->depths, copy->enclosing, copy->open_stack);
+    uint32_t first = BUSTER_SPIKE_NONE;
+    for (uint32_t i = 0; i < count && first == BUSTER_SPIKE_NONE; i += 1)
+    {
+        if (kernels->depths[i] != copy->depths[i] || kernels->enclosing[i] != copy->enclosing[i])
+        {
+            first = i;
+        }
+    }
+    if (first != BUSTER_SPIKE_NONE || twin_balanced != vector_balanced)
+    {
+        printf("%s: K1 differs at token %u (balanced %d %d)\n", file->path, first, twin_balanced, vector_balanced);
+        if (first != BUSTER_SPIKE_NONE)
+        {
+            printf("  depth %u %u, enclosing %d %d\n", kernels->depths[first], copy->depths[first], (int)kernels->enclosing[first], (int)copy->enclosing[first]);
+            spike_print_context(file, first);
+        }
+        result += 1;
+    }
+    // K4, on the twins' roles and depths up to the second K1 pass.
+    kernels->unbalanced = !twin_balanced;
+    kernels->unsupported = false;
+    if (!kernels->unbalanced)
+    {
+        spike_typedefs(kernels, kinds, file->tokens.names, count);
+    }
+    spike_classify_scalar(kernels, kinds, file->tokens.names, count);
+    spike_roles_scalar(kernels, count, copy->typed);
+    spike_secondary_scalar(kernels, count, kernels->stack);
+    spike_after_colons(kernels, count);
+    for (uint32_t i = 0; i < kernels->typedef_count; i += 1)
+    {
+        kernels->typedef_names[kernels->typedef_log[i]] = 0;
+    }
+    uint32_t deepest = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        deepest = kernels->depths[i] > deepest ? kernels->depths[i] : deepest;
+    }
+    spike_parents_scalar(kernels, count);
+    if (deepest <= BUSTER_SPIKE_MAX_VECTOR_DEPTH)
+    {
+        spike_parents_left_avx512(kernels->roles, kernels->depths, count, copy->lefts, copy->left_keys, &copy->candidates);
+        spike_parents_right_avx512(kernels->roles, kernels->depths, count, copy->lefts, copy->left_keys, copy->parents, &copy->candidates);
+        first = BUSTER_SPIKE_NONE;
+        for (uint32_t i = 0; i < count && first == BUSTER_SPIKE_NONE; i += 1)
+        {
+            if (kernels->parents[i] != copy->parents[i])
+            {
+                first = i;
+            }
+        }
+        if (first != BUSTER_SPIKE_NONE)
+        {
+            printf("%s: K4 differs at token %u: twin %d, vector %d (L %d)\n", file->path, first, (int)kernels->parents[first], (int)copy->parents[first],
+                   (int)copy->lefts[first]);
+            spike_print_context(file, first);
+            result += 1;
+        }
+    }
+    return result;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Timing
 
@@ -515,6 +684,7 @@ int run_parse_spike(int argc, char** argv)
     const char* dump = 0;
     bool check_only = false;
     bool show_flags = false;
+    bool fixtures = false;
     bool valid = true;
     uint32_t path_count = 0;
     for (int i = 1; i < argc; i += 1)
@@ -532,6 +702,10 @@ int run_parse_spike(int argc, char** argv)
         {
             show_flags = true;
         }
+        else if (strcmp(argv[i], "--fixtures") == 0)
+        {
+            fixtures = true;
+        }
         else if (argv[i][0] == '-')
         {
             valid = false;
@@ -547,9 +721,9 @@ int run_parse_spike(int argc, char** argv)
         .memory = &memory,
         .files = BUSTER_ARENA_PUSH_ARRAY(&memory, SpikeFile, BUSTER_SPIKE_MAX_FILES),
     };
-    if (!valid || path_count == 0)
+    if (!valid || (path_count == 0 && !fixtures))
     {
-        fprintf(stderr, "usage: %s [--dump FILE] path...\n", argv[0]);
+        fprintf(stderr, "usage: %s [--fixtures] [--check-only] [--flags] [--dump FILE] path...\n", argv[0]);
     }
     else if (corpus.files == 0 || !spike_names_init(&corpus.names, &memory))
     {
@@ -557,7 +731,7 @@ int run_parse_spike(int argc, char** argv)
     }
     else
     {
-        bool loaded = true;
+        bool loaded = !fixtures || spike_load_fixtures(&corpus);
         for (int i = 1; loaded && i < argc; i += 1)
         {
             if (strcmp(argv[i], "--dump") == 0)
@@ -578,6 +752,20 @@ int run_parse_spike(int argc, char** argv)
         uint8_t* marks = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 1);
         uint8_t* typed = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 1);
         SpikeStatement* statements = BUSTER_ARENA_PUSH_ARRAY(&memory, SpikeStatement, corpus.max_tokens + 1);
+        SpikeKernelCopy copy = {
+            .depths = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .enclosing = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .open_stack = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .parents = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .lefts = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .left_keys = BUSTER_ARENA_PUSH_ARRAY(&memory, uint16_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .candidates = {
+                .positions = BUSTER_ARENA_PUSH_ARRAY(&memory, uint32_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+                .keys = BUSTER_ARENA_PUSH_ARRAY(&memory, uint16_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+                .count = 0,
+            },
+            .typed = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+        };
         if (loaded && (meanings.meanings == 0 || marks == 0 || typed == 0 || statements == 0 || !spike_allocate_tree(&memory, &tree, corpus.max_tokens) ||
                        !spike_kernels_reserve(&kernels, &memory, corpus.max_tokens, BUSTER_SPIKE_NAME_CAPACITY)))
         {
@@ -598,6 +786,7 @@ int run_parse_spike(int argc, char** argv)
             uint32_t broken = 0;
             uint64_t failed_tokens = 0;
             uint32_t twin_failures = 0;
+            uint32_t kernel_failures = 0;
             uint32_t flag_reports = 0;
             uint32_t role_reports = 0;
             uint32_t everything_files = 0;
@@ -622,6 +811,20 @@ int run_parse_spike(int argc, char** argv)
                 }
                 else
                 {
+                    if (file->expected != 0)
+                    {
+                        uint32_t wrong = count == file->expected_count ? BUSTER_SPIKE_NONE : 0;
+                        for (uint32_t t = 0; t < count && wrong == BUSTER_SPIKE_NONE; t += 1)
+                        {
+                            wrong = (int32_t)tree.parents[t] != file->expected[t] ? t : BUSTER_SPIKE_NONE;
+                        }
+                        if (wrong != BUSTER_SPIKE_NONE)
+                        {
+                            printf("%s: token %u's parent isn't the expected one (%u tokens, %u expected)\n", file->path, wrong, count, file->expected_count);
+                            spike_print_context(file, wrong);
+                            broken += 1;
+                        }
+                    }
                     const uint32_t bad = spike_check_tree(&tree, count, marks);
                     if (bad != BUSTER_SPIKE_NONE)
                     {
@@ -672,6 +875,10 @@ int run_parse_spike(int argc, char** argv)
                         }
                         twin_failures += 1;
                     }
+                    else if (spike_check_kernels(file, &kernels, &copy, count) != 0)
+                    {
+                        kernel_failures += 1;
+                    }
                     else if (role_differences != 0 && role_reports < 12)
                     {
                         printf("%s: %lu roles differ, the first at token %u\n", file->path, (unsigned long)role_differences, first_role_difference);
@@ -684,7 +891,8 @@ int run_parse_spike(int argc, char** argv)
             printf("twins: %u files differ from the scalar parser; %lu roles differ; %lu tokens flagged; fallback: %lu declarations, %lu tokens (%.2f%%), %u whole files\n",
                    twin_failures, (unsigned long)total_role_differences, (unsigned long)flagged_tokens, (unsigned long)fallback_items, (unsigned long)fallback_tokens,
                    corpus.token_count ? 100.0 * (double)fallback_tokens / (double)corpus.token_count : 0.0, everything_files);
-            result = failed == 0 && broken == 0 && twin_failures == 0 ? 0 : 1;
+            printf("kernels: %u files where a vector kernel differs from its twin\n", kernel_failures);
+            result = failed == 0 && broken == 0 && twin_failures == 0 && kernel_failures == 0 ? 0 : 1;
             if (result == 0 && !check_only)
             {
                 SpikeCounters counters = {
