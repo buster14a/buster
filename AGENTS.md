@@ -16,6 +16,24 @@ matrices, benchmark services, or acceptance bureaucracy. Reuse an idea only when
 it earns its place here. Do not copy implementation code without checking its
 license; do not select or change this repository's license on the owner's behalf.
 
+## Licensing and contributions
+
+Read [LICENSING.md](LICENSING.md), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+and [CONTRIBUTING.md](CONTRIBUTING.md) before importing or submitting material.
+Original contributions use `Apache-2.0 WITH LLVM-exception`; identified
+components and local changes to their portions follow their retained terms.
+Do not add the LLVM exception over Apache-only upstream material or label a
+mixed-source file as wholly first-party.
+
+Record the sources and revisions of imports, adaptations and generated data,
+including generator inputs, and preserve copyright, license, attribution and
+modification notices. Changes to the license remain the owner's decision.
+Follow the prospective DCO policy and its in-flight-PR transition. Never
+fabricate sign-offs, treat agent co-author trailers as human certification, or
+retroactively certify historical commits.
+
+## Host and output scope
+
 The Zen 5 requirement describes the **host compiler executable**, not necessarily
 the instruction set of every program it generates. Keep host ISA, generated-code
 ISA, and output ABI separate. Do not add other host operating systems, older-CPU

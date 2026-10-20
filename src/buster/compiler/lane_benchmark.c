@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: (Apache-2.0 WITH LLVM-exception) AND MIT
+// Original material Copyright (c) 2026 David Gonzalez Martin.
+// Timing/sort helpers adapted through c_lexer_benchmark.c retain MIT and the upstream notice:
+// Copyright (c) 2023 Niles Salter. See THIRD_PARTY_NOTICES.md and LICENSES/Accelerated-Zig-Parser.txt.
+//
 // The lane benchmark: what lane_sync, lane_broadcast and lane_run cost on groups of 1 to 8 lanes, each lane on a CPU of
 // its own, how fast lanes run after waiting at a sync, how well parts taken from a counter balance a phase, and what an
 // arena's first touches cost.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
 // The x86-64 encoder: turns a section's selected machine instructions into machine code. An instruction
 // (X86Instruction, 16 bytes) is a form (X86Form: the opcode, prefixes, operand roles and field widths) and its
 // operands in their encoding roles: the ModRM.reg and ModRM.rm registers, the memory operand's base, index, scale and

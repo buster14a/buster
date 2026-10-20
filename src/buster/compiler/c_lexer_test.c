@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2023 Niles Salter. Local modifications Copyright (c) 2026 David Gonzalez Martin.
+// Adapted for buster-fast: command integration, boundary/page-edge checks and extended comment tests.
+// Retain LICENSES/Accelerated-Zig-Parser.txt and the provenance in THIRD_PARTY_NOTICES.md.
+//
 // The C lexer tests: they check that c_tokenize (c_lexer.c) agrees with its scalar lexer, token by token, on inputs
 // that move tricky C across the vectorized path's 64-byte vector and 512-byte chunk boundaries. The compiler runs them
 // as a command:

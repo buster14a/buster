@@ -1,3 +1,10 @@
+// Mixed-source component: see THIRD_PARTY_NOTICES.md for the portion map and LICENSES/ for the retained terms.
+// Accelerated-Zig-Parser: MIT, with Apache-2.0 for its identified simdjson/simdjzon-derived portions.
+// Copyright (c) 2023, 2024 Niles Salter. Local modifications Copyright (c) 2026 David Gonzalez Martin.
+// Clang-following scalar portions retain LLVM's Apache-2.0 WITH LLVM-exception terms; identifier data also retains
+// the Unicode notice (Copyright 1991-2026 Unicode, Inc.). Those notices do not extend the LLVM exception to the
+// Apache-only portions. Local modifications follow each portion's applicable component terms.
+//
 // The C lexer: turns unpreprocessed C or C++ source bytes into preprocessing tokens (translation phase 3) with
 // AVX-512, falling back to a scalar lexer for the rare lines the vectorized path can't handle. main.c includes this
 // file directly, and every function in it is static.

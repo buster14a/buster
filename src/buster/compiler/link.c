@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
 // The link representation: the compiler's encoded code and data as the object writer and the linker take them
 // (docs/object-writer-and-linker.md, "Representation"). Four tables of column arrays, each indexed by a 32-bit id of its
 // own, in which id 0 means none and its record is zero:
