@@ -137,7 +137,7 @@ static bool preprocessor_fuzz_test_construct(PreprocessorFuzzCase test_case, uin
         BUSTER_S8_INIT(") #"),
         BUSTER_S8_INIT(" ## "),
         BUSTER_S8_INIT("(,)"),
-        BUSTER_S8_INIT("(+,*)"),
+        BUSTER_S8_INIT(") ## "),
         BUSTER_S8_INIT(",__VA_ARGS__)"),
         BUSTER_S8_INIT("#define "),
         BUSTER_S8_INIT(", ## __VA_ARGS__"),
@@ -161,6 +161,10 @@ static bool preprocessor_fuzz_test_construct(PreprocessorFuzzCase test_case, uin
         BUSTER_S8_INIT("__COUNTER__"),
         BUSTER_S8_INIT("// ppf_comment_splice\\\ncontinued"),
         BUSTER_S8_INIT("/**/+\\\n"),
+        BUSTER_S8_INIT(" ##\n"),
+        BUSTER_S8_INIT(" #\n"),
+        BUSTER_S8_INIT("# 1\n"),
+        BUSTER_S8_INIT("(+,*)"),
     };
     bool result = preprocessor_fuzz_test_contains(test_case.source, witnesses[family]);
     if (family == 10 && c23)
@@ -214,7 +218,7 @@ static void preprocessor_fuzz_test_generation(PreprocessorFuzzTestTally* tally, 
     for (uint64_t family = 0; family < BUSTER_PPF_CONSTRUCT_COUNT; family += 1)
     {
         const uint64_t mark = memory->length;
-        tally->case_id = 320 + family;
+        tally->case_id = 10 * BUSTER_PPF_CONSTRUCT_COUNT + family;
         PreprocessorFuzzCase baseline = { 0 };
         const bool baseline_valid = preprocessor_fuzz_generate(memory, seeds[0], tally->case_id, c23, &baseline);
         preprocessor_fuzz_test_expect(tally, baseline_valid, "generator baseline failed");
@@ -296,7 +300,7 @@ static void preprocessor_fuzz_test_batch(PreprocessorFuzzTestTally* tally, Arena
                 preprocessor_fuzz_test_expect(tally, preprocessor_fuzz_compare(memory, batched[i], individual[i]) == BUSTER_PPF_EQUAL,
                     "batch output differs from an individual process");
                 const uint64_t family = cases[i].id % BUSTER_PPF_CONSTRUCT_COUNT;
-                if (family == 8 || family == 16 || family == 17 || family == 19)
+                if (family == 8 || family == 16 || family == 17 || family == 19 || family >= 32)
                 {
                     preprocessor_fuzz_test_expect(tally, !individual[i].accepted, "invalid paste or argument family was accepted");
                 }
@@ -326,6 +330,173 @@ static void preprocessor_fuzz_test_batch(PreprocessorFuzzTestTally* tally, Arena
         }
     }
     arena_pop_to(memory, mark);
+}
+
+static bool preprocessor_fuzz_test_replace(Arena* memory, String8 source, String8 needle, String8 replacement, String8* result)
+{
+    uint64_t matches = 0;
+    uint64_t position = 0;
+    for (uint64_t offset = 0; needle.length != 0 && needle.length <= source.length && offset <= source.length - needle.length; offset += 1)
+    {
+        if (memcmp(source.pointer + offset, needle.pointer, needle.length) == 0)
+        {
+            matches += 1;
+            position = offset;
+        }
+    }
+    bool valid = matches == 1 && source.length - needle.length <= BUSTER_PPF_MAX_CASE_BYTES
+        && replacement.length <= BUSTER_PPF_MAX_CASE_BYTES - (source.length - needle.length);
+    if (valid)
+    {
+        const uint64_t length = source.length - needle.length + replacement.length;
+        char* data = arena_push(memory, length, 1);
+        valid = data != 0;
+        if (valid)
+        {
+            memcpy(data, source.pointer, position);
+            memcpy(data + position, replacement.pointer, replacement.length);
+            memcpy(data + position + replacement.length, source.pointer + position + needle.length, source.length - position - needle.length);
+            *result = (String8)
+            {
+                .pointer = data,
+                .length = length,
+            };
+        }
+    }
+    return valid;
+}
+
+static void preprocessor_fuzz_test_rejection_coverage(PreprocessorFuzzTestTally* tally, Arena* memory, const char* clang_path, bool c23)
+{
+    static const uint32_t families[] =
+    {
+        8,
+        32,
+        33,
+        34,
+        35,
+    };
+    static const String8 faults[] =
+    {
+        BUSTER_S8_INIT(" ## "),
+        BUSTER_S8_INIT(" ##\n"),
+        BUSTER_S8_INIT(" #\n"),
+        BUSTER_S8_INIT("# 1\n"),
+        BUSTER_S8_INIT("(+,*)\n"),
+    };
+    static const String8 repairs[] =
+    {
+        BUSTER_S8_INIT(" "),
+        BUSTER_S8_INIT("\n"),
+        BUSTER_S8_INIT("\n"),
+        BUSTER_S8_INIT("1\n"),
+        BUSTER_S8_INIT("(+,=)\n"),
+    };
+    static const uint64_t seeds[] =
+    {
+        1,
+        7,
+        99,
+    };
+    for (uint64_t seed = 0; seed < BUSTER_ARRAY_LENGTH(seeds); seed += 1)
+    {
+        for (uint64_t variant = 0; variant < BUSTER_ARRAY_LENGTH(families); variant += 1)
+        {
+            const uint64_t mark = memory->length;
+            PreprocessorFuzzCase cases[2] = { 0 };
+            tally->case_id = families[variant];
+            bool valid = preprocessor_fuzz_generate(memory, seeds[seed], tally->case_id, c23, cases);
+            cases[1] = cases[0];
+            valid = valid && preprocessor_fuzz_test_replace(memory, cases[0].source, faults[variant], repairs[variant], &cases[1].source);
+            preprocessor_fuzz_test_expect(tally, valid, "rejection case does not contain exactly one independent fault");
+            PreprocessorFuzzOutput outputs[2] = { 0 };
+            valid = valid && preprocessor_fuzz_clang(memory, clang_path, c23, cases, 2, true, outputs);
+            preprocessor_fuzz_test_expect(tally, valid, "independent rejection coverage could not run through clang");
+            if (valid)
+            {
+                preprocessor_fuzz_test_expect(tally, !outputs[0].accepted && outputs[1].accepted,
+                    "repairing the sole invalid operator did not change rejection to acceptance");
+                preprocessor_fuzz_test_expect(tally, preprocessor_fuzz_compare(memory, outputs[0], outputs[1]) == BUSTER_PPF_ACCEPTANCE,
+                    "incorrect acceptance of one invalid operator form would be hidden");
+            }
+            arena_pop_to(memory, mark);
+        }
+    }
+}
+
+static void preprocessor_fuzz_test_arithmetic_coverage(PreprocessorFuzzTestTally* tally, Arena* memory, const char* clang_path, bool c23)
+{
+    static const uint64_t seeds[] =
+    {
+        1,
+        7,
+        99,
+    };
+    const String8 expected_text = BUSTER_S8("100 200 101 201 102 202 103 203 104 204 105 205 106 206 "
+        "107 207 108 208 109 209 110 210 111 211 112 212");
+    for (uint64_t seed = 0; seed < BUSTER_ARRAY_LENGTH(seeds); seed += 1)
+    {
+        const uint64_t mark = memory->length;
+        PreprocessorFuzzCase cases[BUSTER_PPF_ARITHMETIC_COUNT + 1] = { 0 };
+        tally->case_id = 24;
+        bool valid = preprocessor_fuzz_generate(memory, seeds[seed], tally->case_id, c23, cases);
+        for (uint32_t operation = 0; valid && operation < BUSTER_PPF_ARITHMETIC_COUNT; operation += 1)
+        {
+            char marker[64];
+            const int marker_length = snprintf(marker, sizeof(marker), "/* ppf_arithmetic_%u */ ", operation);
+            valid = marker_length > 0 && (uint64_t)marker_length < sizeof(marker);
+            uint64_t found = 0;
+            String8 definition = { 0 };
+            for (uint64_t offset = 0; valid && (uint64_t)marker_length <= cases[0].source.length
+                && offset <= cases[0].source.length - (uint64_t)marker_length; offset += 1)
+            {
+                if (memcmp(cases[0].source.pointer + offset, marker, (size_t)marker_length) == 0)
+                {
+                    uint64_t end = offset + (uint64_t)marker_length;
+                    while (end < cases[0].source.length && cases[0].source.pointer[end] != '\n')
+                    {
+                        end += 1;
+                    }
+                    definition.pointer = cases[0].source.pointer + offset;
+                    definition.length = end - offset;
+                    found += 1;
+                }
+            }
+            cases[operation + 1] = cases[0];
+            valid = valid && found == 1 && preprocessor_fuzz_test_replace(memory, cases[0].source, definition, BUSTER_S8("0"), &cases[operation + 1].source);
+        }
+        preprocessor_fuzz_test_expect(tally, valid, "arithmetic case lacks an independent expression for each operator");
+        PreprocessorFuzzOutput outputs[BUSTER_PPF_ARITHMETIC_COUNT + 1] = { 0 };
+        valid = valid && preprocessor_fuzz_clang(memory, clang_path, c23, cases, BUSTER_ARRAY_LENGTH(cases), false, outputs);
+        preprocessor_fuzz_test_expect(tally, valid, "arithmetic sensitivity cases could not run through clang");
+        if (valid)
+        {
+            PreprocessorFuzzTokens tokens = { 0 };
+            const bool tokenized = outputs[0].accepted && preprocessor_fuzz_tokenize(memory, outputs[0].text, &tokens);
+            const uint64_t expected_count = 2 * BUSTER_PPF_ARITHMETIC_COUNT;
+            preprocessor_fuzz_test_expect(tally, tokenized && tokens.count >= expected_count, "arithmetic output lacks both branch outcomes");
+            if (tokenized && tokens.count >= expected_count)
+            {
+                const uint64_t start = tokens.starts[tokens.count - expected_count];
+                const String8 actual_text =
+                {
+                    .pointer = outputs[0].text.pointer + start,
+                    .length = outputs[0].text.length - start,
+                };
+                const PreprocessorFuzzOutput actual = preprocessor_fuzz_test_output(actual_text, true);
+                const PreprocessorFuzzOutput expected = preprocessor_fuzz_test_output(expected_text, true);
+                preprocessor_fuzz_test_expect(tally, preprocessor_fuzz_compare(memory, actual, expected) == BUSTER_PPF_EQUAL,
+                    "arithmetic predicates did not produce a true and a false outcome for every operator");
+            }
+            for (uint32_t operation = 0; operation < BUSTER_PPF_ARITHMETIC_COUNT; operation += 1)
+            {
+                const PreprocessorFuzzDifference difference = preprocessor_fuzz_compare(memory, outputs[0], outputs[operation + 1]);
+                preprocessor_fuzz_test_expect(tally, outputs[operation + 1].accepted && difference != BUSTER_PPF_INVALID
+                    && difference != BUSTER_PPF_EQUAL, "zeroing an arithmetic operator result did not change output tokens");
+            }
+        }
+        arena_pop_to(memory, mark);
+    }
 }
 
 static void preprocessor_fuzz_test_oracle(PreprocessorFuzzTestTally* tally, Arena* memory, const char* clang_path, bool c23)
@@ -604,6 +775,8 @@ static int run_preprocessor_fuzz_tests(int argc, char** argv)
             preprocessor_fuzz_test_generation(&tally, &memory, c23);
             preprocessor_fuzz_test_minimizer(&tally, &memory);
             preprocessor_fuzz_test_oracle(&tally, &memory, clang_path, c23);
+            preprocessor_fuzz_test_rejection_coverage(&tally, &memory, clang_path, c23);
+            preprocessor_fuzz_test_arithmetic_coverage(&tally, &memory, clang_path, c23);
             const uint64_t actual_count = count < BUSTER_PPF_CONSTRUCT_COUNT ? BUSTER_PPF_CONSTRUCT_COUNT : count;
             uint64_t first_id = 0;
             while (first_id < actual_count)

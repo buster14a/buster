@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Original, bounded preprocessing cases, included after preprocessor_fuzz.c. No fixtures or grammar implementation
-// are imported. The case id chooses one of 32 families, ensuring coverage independently of the random seed.
+// are imported. The case id chooses one of 36 families, ensuring coverage independently of the random seed.
 // The seed varies a small name alphabet, macro chains and collisions, redefinitions, nesting, operands and spacing.
 // @a through @h in templates mean case-prefixed names; $0 through $2 mean positive integer operands. Rendering
 // replaces only those explicit placeholders, never scans an unbounded source string, and shares the core's builder.
@@ -14,6 +14,7 @@
 
 #define BUSTER_PPF_GENERATOR_ALPHABET 8
 #define BUSTER_PPF_GENERATOR_PREFIX_BYTES 48
+#define BUSTER_PPF_ARITHMETIC_COUNT 13
 #define BUSTER_PPF_GENERATOR_TEXT(text) ((String8){ \
     .pointer = (char*)(text), \
     .length = sizeof(text) - 1, \
@@ -29,7 +30,7 @@ static const char* const preprocessor_fuzz_construct_names[BUSTER_PPF_CONSTRUCT_
     "stringification and suppressed expansion",
     "chained token paste",
     "empty arguments around paste",
-    "invalid paste and stringification positions",
+    "leading paste operator",
     "variadic forwarding",
     "VA_OPT and expansion to empty",
     "GNU comma variadics",
@@ -53,6 +54,10 @@ static const char* const preprocessor_fuzz_construct_names[BUSTER_PPF_CONSTRUCT_
     "COUNTER",
     "splices and comments at token boundaries",
     "redefinition identity",
+    "trailing paste operator",
+    "trailing stringification operator",
+    "stringification of a non-parameter",
+    "paste producing an invalid token",
 };
 
 typedef struct PreprocessorFuzzGenerator PreprocessorFuzzGenerator;
@@ -257,6 +262,60 @@ static void preprocessor_fuzz_generator_boundaries(PreprocessorFuzzGenerator* ge
         "+@b)\n"));
 }
 
+static void preprocessor_fuzz_generator_arithmetic(PreprocessorFuzzGenerator* generator)
+{
+    // Operands are 1..31: every result is nonzero, all shifts are nonnegative and bounded, and no divisor is zero.
+    // Each expression controls both a true and a false predicate, with different output tokens in either arm.
+    static const String8 expressions[BUSTER_PPF_ARITHMETIC_COUNT] =
+    {
+        BUSTER_PPF_GENERATOR_TEXT("+$0"),
+        BUSTER_PPF_GENERATOR_TEXT("-$0"),
+        BUSTER_PPF_GENERATOR_TEXT("~$0"),
+        BUSTER_PPF_GENERATOR_TEXT("$0 * $1"),
+        BUSTER_PPF_GENERATOR_TEXT("(32 + $0) / $1"),
+        BUSTER_PPF_GENERATOR_TEXT("($0 * 32 + $1) % 32"),
+        BUSTER_PPF_GENERATOR_TEXT("$0 + $1"),
+        BUSTER_PPF_GENERATOR_TEXT("$0 - 32"),
+        BUSTER_PPF_GENERATOR_TEXT("$0 << 1"),
+        BUSTER_PPF_GENERATOR_TEXT("($0 << 2) >> 1"),
+        BUSTER_PPF_GENERATOR_TEXT("(32 | $0) & 31"),
+        BUSTER_PPF_GENERATOR_TEXT("$0 ^ 32"),
+        BUSTER_PPF_GENERATOR_TEXT("$0 | 32"),
+    };
+    const int64_t a = generator->numbers[0];
+    const int64_t b = generator->numbers[1];
+    const int64_t values[BUSTER_PPF_ARITHMETIC_COUNT] =
+    {
+        a,
+        -a,
+        ~a,
+        a * b,
+        (32 + a) / b,
+        (a * 32 + b) % 32,
+        a + b,
+        a - 32,
+        a << 1,
+        (a << 2) >> 1,
+        (32 | a) & 31,
+        a ^ 32,
+        a | 32,
+    };
+    for (uint32_t operation = 0; operation < BUSTER_PPF_ARITHMETIC_COUNT; operation += 1)
+    {
+        preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT("#define @f "));
+        preprocessor_fuzz_format(generator->buffer, "/* ppf_arithmetic_%u */ (", operation);
+        preprocessor_fuzz_generator_text(generator, expressions[operation]);
+        preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT(")\n"));
+        for (uint32_t predicate = 0; predicate < 2; predicate += 1)
+        {
+            preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT("#if @f == "));
+            preprocessor_fuzz_format(generator->buffer, "(%" PRId64 ")\n%u\n#else\n%u\n#endif\n",
+                values[operation] + predicate, 100 + operation, 200 + operation);
+        }
+        preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT("#undef @f\n"));
+    }
+}
+
 static void preprocessor_fuzz_generator_family(PreprocessorFuzzGenerator* generator, uint32_t family, bool c23)
 {
     switch (family)
@@ -301,20 +360,8 @@ static void preprocessor_fuzz_generator_family(PreprocessorFuzzGenerator* genera
         } break;
         case 8:
         {
-            // Keep both illegal paste endpoints in every case; the seed changes their order, not their coverage.
-            if ((preprocessor_fuzz_generator_random(generator) & 1) == 0)
-            {
-                preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT("#define @f(@a) ## @a\n#define @g(@a) @a ##\n"));
-            }
-            else
-            {
-                preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT("#define @g(@a) @a ##\n#define @f(@a) ## @a\n"));
-            }
-            preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT(
-                "#define @h(@a) @a #\n"
-                "#define @e(@a) # 1\n"
-                "#define @d(@a,@b) @a ## @b\n"
-                "@d(+,*)\n"));
+            // A rejecting case has one fault: another rejection must not hide incorrect acceptance of this form.
+            preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT("#define @f(@a) ## @a\n"));
         } break;
         case 9:
         {
@@ -391,9 +438,9 @@ static void preprocessor_fuzz_generator_family(PreprocessorFuzzGenerator* genera
         case 24:
         {
             preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT(
-                "#if ((+$0 * $1 / $2 % 7 - 3 + 1) << 2 >> 1) & (~0 ^ 3) | 1\n$0\n#endif\n"
                 "#if ('A' != '\\n') && (0x10ULL >= 010u) && (-1 < 0)\n$1\n#endif\n"
                 "#if ($0 > 0) && ($1 <= 31) && ($2 == $2)\n$2\n#endif\n"));
+            preprocessor_fuzz_generator_arithmetic(generator);
         } break;
         case 25:
         {
@@ -442,6 +489,22 @@ static void preprocessor_fuzz_generator_family(PreprocessorFuzzGenerator* genera
             {
                 preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT("#define @f(@b) @b + $0\n@f($2)\n"));
             }
+        } break;
+        case 32:
+        {
+            preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT("#define @f(@a) @a ##\n"));
+        } break;
+        case 33:
+        {
+            preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT("#define @f(@a) @a #\n"));
+        } break;
+        case 34:
+        {
+            preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT("#define @f(@a) # 1\n"));
+        } break;
+        case 35:
+        {
+            preprocessor_fuzz_generator_text(generator, BUSTER_PPF_GENERATOR_TEXT("#define @f(@a,@b) @a ## @b\n@f(+,*)\n"));
         } break;
     }
 }

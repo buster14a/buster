@@ -780,8 +780,12 @@ on `PATH`, or the executable selected by `--clang PATH`. The defaults are
 64 generated cases, seed 1, `clang` and C17; the 9700X job runs both C17 and
 C23. The checks cover:
 
-- deterministic generation, including every one of the 32 construct families
+- deterministic generation, including every one of the 36 construct families
   even when `--fuzz N` is smaller, and repeatability for seeds 1, 7 and 99;
+- independent rejection of each invalid `#`/`##` form, with acceptance after
+  repairing its sole intentional fault; arithmetic and bitwise predicates
+  exercise both branch outcomes, and replacing an expression with zero must
+  change the accepted output tokens;
 - batched Clang preprocessing against one process per case: the same
   acceptance or rejection, token kinds, spellings and token counts, with
   whitespace ignored. Cases have distinct name prefixes and marker tokens

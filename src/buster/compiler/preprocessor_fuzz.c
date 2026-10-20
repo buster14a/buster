@@ -24,7 +24,7 @@
 
 #define BUSTER_PPF_MAX_CASE_BYTES 32768
 #define BUSTER_PPF_MAX_OUTPUT_BYTES (1ull << 20)
-#define BUSTER_PPF_CONSTRUCT_COUNT 32
+#define BUSTER_PPF_CONSTRUCT_COUNT 36
 
 typedef struct PreprocessorFuzzCase PreprocessorFuzzCase;
 struct PreprocessorFuzzCase

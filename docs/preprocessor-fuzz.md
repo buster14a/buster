@@ -54,7 +54,7 @@ rejected cases. Macro definitions are cleaned up, and conditional groups
 and final logical lines are terminated so that one case cannot consume the
 next case's markers.
 
-The 32 families cover object/function macros, both variadic syntaxes, empty
+The 36 families cover object/function macros, both variadic syntaxes, empty
 and parameterless macros, stringification, chained and empty-argument pastes,
 invalid `#`/`##` positions, variadic forwarding, C23 `__VA_OPT__`, GNU comma
 elision, self/mutual references, invocations crossing replacement boundaries,
@@ -64,6 +64,20 @@ arguments, undefinition/redefinition, conditional directives, macro-produced
 dead division, `_Pragma`, line/counter builtins, splices/comments and
 redefinition identity. Each case also has seed-dependent alias chains,
 redefinitions and nested calls using the same eight-name alphabet.
+
+Each of the five deliberately invalid `#`/`##` forms has its own compared
+case: leading paste, trailing paste, trailing stringification, stringification
+of a non-parameter, and a paste that cannot form a preprocessing token.
+No other intentional error shares that case, so one rejected construct cannot
+hide another construct's incorrect acceptance. The minimum coverage run
+includes all five. Regression checks repair each case's single fault and
+require Clang to accept the repaired input.
+
+Arithmetic and bitwise operators have separate predicates with distinguishable
+outputs for both true and false comparisons. Their bounded operands avoid
+overflow, invalid shifts and division by zero. Regression checks replace each
+operator expression with zero and require the accepted output token stream
+to change, making a broken evaluation observable.
 
 The oracle requires Clang 23, found in `PATH` or selected by `--clang PATH`.
 It launches the executable directly with:
@@ -143,18 +157,22 @@ glibc 2.44) with one shared-lock acquisition per command:
 
 | Command options | Checks | Failures |
 | --- | ---: | ---: |
-| `--std c17` | 984 | 0 |
-| `--std c23` | 984 | 0 |
-| `--std c17 --seed 99 --fuzz 128` | 1,116 | 0 |
-| `--std c23 --seed 7 --fuzz 256` | 1,380 | 0 |
+| `--std c17 --fuzz 0` | 1,139 | 0 |
+| `--std c23 --fuzz 0` | 1,139 | 0 |
+| `--std c17` | 1,195 | 0 |
+| `--std c23` | 1,195 | 0 |
+| `--std c17 --seed 99 --fuzz 128` | 1,327 | 0 |
+| `--std c23 --seed 7 --fuzz 256` | 1,591 | 0 |
 
 The unchanged `./build.sh`, every existing smoke test (including the object
 writer's external cross-check), and `./build.sh check-call-graph` passed.
-The call graph had 7 translation units, 1,582 functions and zero cycles.
-The base was main `1bc8ca0e18452c80841f783f9d139bea39180d43`.
+The call graph had 7 translation units, 1,586 functions and zero cycles.
+The review fixes include main's licensing updates through `08abc25`.
+Raw review logs and binary/source hashes are retained on benchpress in
+`~/buster-fast-bench/astra-01a158dd-109-review-evidence/`.
 
 `taskset -c 2 ./build/compiler benchmark-preprocessor-fuzz` measured C17,
-seed 1 and 16 cases. Its 21-pass median was **6.075 ms per batch**
-(2,633.7 cases/second) for batching and **86.927 ms**
-(184.1 cases/second) for individual processes. These figures include the
+seed 1 and 16 cases. Its 21-pass median was **5.964 ms per batch**
+(2,682.6 cases/second) for batching and **86.681 ms**
+(184.6 cases/second) for individual processes. These figures include the
 external clang processes; they do not measure the compiler's preprocessor.
