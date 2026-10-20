@@ -183,6 +183,12 @@ designs and the compilers already built this way.
   code, their barrier and broadcast, `lane_range`, and arenas).
   `lane_test.c` holds its tests (`main.c` includes it; `./build/compiler
   test-lanes` runs them) and `lane_benchmark.c` provides `benchmark-lanes`.
+- `src/buster/compiler/dataflow.c` provides aligned bitset liveness and
+  interference with AVX-512 and scalar implementations, independent of IR.
+  `dataflow_program.c` supplies the shared synthetic CFG generator;
+  `dataflow_test.c` provides `test-dataflow` and `dataflow_benchmark.c`
+  provides `benchmark-dataflow`.
+  `docs/dataflow.md` records the contracts and 9700X measurements.
 - `src/buster/compiler/link.c` is the representation the object writer and the
   linker share: names, atoms, symbols and fixups in column arrays indexed by
   32-bit ids, in arenas, and `link_add_code_fixups`, which turns the encoder's
@@ -244,6 +250,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler benchmark-x86-encoder
 ./build/compiler test-lanes
 ./build/compiler benchmark-lanes
+./build/compiler test-dataflow
+./build/compiler benchmark-dataflow
 ./build/compiler test-link
 ./build/compiler test-object-writer --cross-check
 ./build/compiler benchmark-object-writer
@@ -403,42 +411,42 @@ yet compared against a performance baseline. Keep just one compiler executable.
 
 ## x86-64 encoder tests
 
-`./build/compiler test-x86-encoder` (about 1.5 s) checks that every form fits a
+`./build/compiler test-x86-encoder` (about 1.8 s) checks that every form fits a
 template (and that building each, in every mode, at a `PROT_NONE` page writes
 nothing past it), both encoders on 761 known encodings from GNU as (each also
 with the fixup flag, whose end they must report), a digest of the scalar
-encoder's output
-for 100,000 random instructions, every batch width and variant of `x86_encode`
-against the scalar encoder (bytes, offsets and fixup ends, in each of the four
-loops: with neither, either or both of offsets and fixup ends) on every count
-from 0 to 199 and on 300,000 random instructions of every form (legacy with x87
-and MMX, VEX and EVEX, with opmasks, broadcasts, rounding, registers 16-31,
-gathers and scatters, FS and GS segment overrides, and one in eight marked with
-the fixup flag), the same between `PROT_NONE` guard pages, and that invalid
-operands are rejected (immediates and rel8s outside their fields' ranges by
-`x86_validate` alone: `x86_encode` writes their low bytes; and memory operands
-in the 232 FS and GS forms without room for the override). Then it runs those
-checks again with 32-bit addresses, but the known fixups: 34 known encodings, a
-digest of their own, `x86_encode_64_address32` against the scalar encoder on the
-random streams and at page edges, and invalid operands, among them MPX memory
-operands and memory operands in the 312 FS and GS forms and the 116 forms
-without room for the `67`. And again for APX, but the known fixups: 153 known
-encodings, 31 known invalid instructions (as GNU as rejects them), a digest of
-their own, `x86_encode_64_apx` against the scalar encoder on random streams in
-which half the forms have REX2 and a quarter are EVEX ones, and at page edges,
-and invalid operands, among them a high byte register with REX2, registers 16 to
-31 in forms without REX2 or EVEX and XMM16 to XMM31 in SSE's forms. And in
-32-bit and 16-bit modes: 159 and 150 known encodings, 13 and 16 known fixups, a
-digest of each, `x86_encode_64_mode32` and `x86_encode_64_mode16` against the
-scalar encoders on random streams with both address sizes and segment
-overrides in the decorations, and at page edges, streams of instructions longer
-than 15 bytes at a page end (16-bit mode has them), which the loop must reject
-without writing past the output's capacity, and invalid operands, among them
-registers that would need REX, 16-bit addresses that aren't ModRM's, forms of
-64-bit mode alone, instructions past 15 bytes and segment overrides where an
-instruction takes none. `--address32`, `--apx`, `--mode32` and
-`--mode16` run only their pass, and `--count N` and `--seed N` change the random
-streams.
+encoder's output for 100,000 random instructions, every batch width and variant
+of `x86_encode` against the scalar encoder (bytes, offsets and fixup ends, in
+each of the four loops: with neither, either or both of offsets and fixup ends)
+on every count from 0 to 199 and on 300,000 random instructions of every form
+(legacy with x87 and MMX, VEX and EVEX, with opmasks, broadcasts, rounding,
+registers 16-31, gathers and scatters, FS and GS segment overrides, and one in
+eight marked with the fixup flag), the same between `PROT_NONE` guard pages, and
+that `x86_validate` finds every invalid operand and the scalar encoder rejects
+it (memory operands in the 232 FS and GS forms without room for the override
+among them). `x86_encode` checks nothing: it takes what `x86_validate` accepts,
+as the code generator makes it (an immediate or rel8 outside its field's range,
+for one, gets its low bytes). Then it runs those checks again with 32-bit
+addresses, but the known fixups: 34 known encodings, a digest of their own,
+`x86_encode_16_address32` and `x86_encode_64_address32` against the scalar
+encoder on the random streams and at page edges, and invalid operands, among
+them MPX memory operands and memory operands in the 312 FS and GS forms and the
+116 forms without room for the `67`. And again for APX, but the known fixups:
+153 known encodings, 31 known invalid instructions (as GNU as rejects them), a
+digest of their own, `x86_encode_16_apx` and `x86_encode_64_apx` against the
+scalar encoder on random streams in which half the forms have REX2 and a quarter
+are EVEX ones, and at page edges, and invalid operands, among them a high byte
+register with REX2, registers 16 to 31 in forms without REX2 or EVEX and XMM16
+to XMM31 in SSE's forms. And in 32-bit and 16-bit modes: 159 and 150 known
+encodings, 13 and 16 known fixups, a digest of each, the modes' loops at 16 and
+64 instructions per iteration (`x86_encode_16_mode32` and the rest) against the
+scalar encoders on random streams with both address sizes and segment overrides
+in the decorations, and at page edges, instructions longer than 15 bytes (16-bit
+mode has them), which `x86_validate_16` must reject, and invalid operands, among
+them registers that would need REX, 16-bit addresses that aren't ModRM's, forms
+of 64-bit mode alone, instructions past 15 bytes and segment overrides where an
+instruction takes none. `--address32`, `--apx`, `--mode32` and `--mode16` run
+only their pass, and `--count N` and `--seed N` change the random streams.
 
 The digests were recorded when GNU as encoded the same streams to the same
 bytes. After changing the form table, the scalar encoder or the fixup interface,
@@ -503,14 +511,17 @@ their ends. The variants are the batch widths (`x86_encode_4` to
 `x86_encode_64`, instructions per loop iteration), the template gather, output
 store and fixup store alternatives that lost, `x86_encode_64_offsets_then_pick`,
 the other way to have fixup ends (every offset, then the caller picks the marked
-ones), and `x86_encode_64_apx`, `x86_encode_apx`'s loop (the streams have no
-registers 16 to 31, so its bytes are the same). `--mode32` and `--mode16` time
-`x86_encode_64_mode32` or `x86_encode_64_mode16` and the mode's scalar loop
-instead, on a mix like 32-bit compiler output or like real-mode code (or with
-`--uniform`, the mode's forms).
-Decide them, and any other performance question, with measurements on the 9700X
-(not Zen 4, and not llvm-mca, whose predictions are well off), using uops.info's
-Zen 5 port data to explain them;
+ones), and `x86_encode_64_apx` and `x86_encode_16_apx`, APX's loops (the streams
+have no registers 16 to 31, so their bytes are the same). The entry points use
+16 per iteration: it is up to 7% slower than 64 in these runs, but 1% to 7%
+faster after scalar code, where a compiler runs its encoder (measure that state
+too: see `docs/x86-64-encoder.md`'s "Zen 5's costs"). `--mode32` and `--mode16`
+time the mode's loops at 64 and 16 per iteration (`x86_encode_64_mode32` and
+`x86_encode_16_mode32`, or the 16-bit ones) and its scalar loop instead, on a
+mix like 32-bit compiler output or like real-mode code (or with `--uniform`, the
+mode's forms). Decide them, and any other performance question, with
+measurements on the 9700X (not Zen 4, and not llvm-mca, whose predictions are
+well off), using uops.info's Zen 5 port data to explain them;
 `docs/x86-64-encoder.md` has the current numbers. Clang's code for the loop
 changes a lot with small source changes, so compare every width after changing
 the encoder, and profile which loop the samples land in. The default 9700X job
@@ -906,6 +917,76 @@ affinity they start with. `docs/object-writer-and-linker.md` ("Patching and
 writing" and "The first executables") has the numbers. The default 9700X job
 runs it after the tests, pinned to one allowed CPU; like the others, its
 measurements are informational.
+
+## Dataflow tests
+
+`./build/compiler test-dataflow [--seed N] [--count N]` checks the IR-independent
+liveness and interference primitives in `dataflow.c`:
+
+- generated CFGs: chains, diamonds, self-loops, nested loops, irreducible
+  two-entry loops, several exits, random local components, and connected
+  dispatch loops. Every shape runs with 0, 1, 2, 3, 8, 17, 65, 257 and
+  2,049 blocks at each of 0, 1, 63, 64, 65, 511, 512, 513, 1,024 and 1,025
+  values, then `--count` more seeds and sizes per shape (24 by default). The
+  same seed must reproduce the columns and input rows. The postorder must
+  visit every block once, and every row must be 64-byte aligned and padded
+  to 512 bits;
+- the AVX-512 and scalar fixpoints: identical `in` and `out` rows and iteration
+  counts, both liveness equations satisfied, and all padding bits zero.
+  Solving again over poisoned output must reproduce the result and iteration
+  count, including zero padding after the poisoned rerun. Small graphs also
+  use an independent per-value reachability check: a value is live when a
+  path reaches its use before its definition. Graphs of 257 and 2,049 blocks
+  independently check selected boundary and seed-derived values at every
+  block with a reverse-reachability oracle;
+- handwritten graphs: disconnected cycles, a self-loop without a use, a value
+  both used and defined in one block, every combination of the transfer
+  function's three input bits, the exact postorder of a chain, and repeated
+  successor/self/exit edges compared with a deduplicated graph;
+- interference: empty rows and every bit position in rows of 512, 1,024 and
+  1,536 bits, with disjoint and intersecting inputs, checked by both paths;
+- page edges: each matrix ends at a `PROT_NONE` page for every boundary value
+  count above, with zero-size rows pointing at the inaccessible page itself.
+  Both solvers and the interference check must stay within the rows, and the
+  poisoned bytes before each matrix must remain unchanged;
+- failure handling: insufficient arena capacity leaves the arena and result
+  unchanged, successful allocations zero the rows, malformed successor
+  offsets or targets leave the postorder and scratch arena unchanged, and
+  missing scratch memory and an edge in an empty CFG are rejected.
+
+`--seed N` changes the generated inputs (1 by default). The command reports
+the check and failure counts and exits with status 1 on any failure. The
+9700X job runs it after the link tests.
+
+## Dataflow benchmark
+
+`./build/compiler benchmark-dataflow [--seed N]` compares the scalar and
+AVX-512 fixpoints on four generated functions: a small diamond CFG with
+16 blocks and 127 values, nested loops with 256 blocks and 1,025 values, and
+random local components and a connected dispatch loop, each with 4,096 blocks
+and 4,097 values. The local-components case is a streaming control, not a model
+of a large real function. `--seed N` selects the inputs (1 by default); generator
+version 2 mixes the seed before generating topology and rows.
+
+Each workload first checks identical rows and iteration counts, then reports
+21 interleaved-pass medians and minimum/maximum ranges with alternating
+implementation order. Both paths use the same repetition count, calibrated
+with warm batches; every retained sample lasts at least 2 ms. Each timed solve
+includes clearing `in` and `out`; generation, allocation and postorder are
+outside the timed region. Both paths use direct calls through matching
+`noinline` benchmark wrappers. The output gives nanoseconds, cycles and instructions
+per function, cycles per block per iteration, and IPC. Hardware counter values
+are zero when unavailable. A scalar/vector disagreement fails the command.
+Run at least five independent processes, releasing the host lock between
+them, when recording a comparison; process-median ranges expose variation
+that one process's 21 passes may miss.
+
+Run it under the 9700X's lock with `taskset -c 2`. `docs/dataflow.md` records
+the contracts, measurements and implementation choice. The default 9700X job
+runs it after the tests, pinned to one allowed CPU; like the other benchmarks,
+its measurements are informational. Building use/def rows from IR columns and
+running the corpora remain outside this module's current scope and wait for
+#131.
 
 ## Preprocessor harness tests
 
