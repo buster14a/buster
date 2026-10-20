@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
 // The import path's tests, for the test-import command:
 //
 //   build/compiler test-import [--seed N] [--cross-check]
@@ -1790,10 +1793,10 @@ static void import_test_script(ImportTestTally* tally, const char* text, ImportE
     arena_pop_to(arena, length);
 }
 
-// libc.so as Arch Linux installs it, GCC's libgcc_s_asneeded.so, and one with commas.
-static const char import_test_libc_script[] = "/* GNU ld script\n"
-                                              "   Use the shared library, but some functions are only in\n"
-                                              "   the static library, so try that secondarily.  */\n"
+// A script of libc.so's form (its paths as Arch Linux installs them, after a comment of two lines), GCC's
+// libgcc_s_asneeded.so, and one with commas.
+static const char import_test_libc_script[] = "/* A linker script that names libc's files:\n"
+                                              "   the shared library first, then its static part.  */\n"
                                               "OUTPUT_FORMAT(elf64-x86-64)\n"
                                               "GROUP ( /usr/lib/libc.so.6 /usr/lib/libc_nonshared.a  AS_NEEDED ( /usr/lib/ld-linux-x86-64.so.2 ) )\n";
 static const char import_test_asneeded_script[] = "INPUT ( AS_NEEDED ( -lgcc_s ) )\n";

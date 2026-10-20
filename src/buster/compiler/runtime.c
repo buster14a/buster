@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
 // The C runtime a dynamic PIE links (docs/object-writer-and-linker.md, "The runtime snapshot"): finding its files as
 // GCC's driver does, and importing them with import.c.
 //

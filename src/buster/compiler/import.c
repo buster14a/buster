@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
 // The import path's readers (docs/object-writer-and-linker.md, "Linking other compilers' objects" and "The runtime
 // snapshot"): ELF relocatable objects into the link representation (link.c), archives' members and symbol index,
 // shared libraries' dynamic symbols and version definitions, and the commands of the linker scripts that libc.so and
