@@ -1369,8 +1369,9 @@ static uint32_t spike_touch(const SpikeFile* file)
 }
 
 // Times the whole paths, then the stages (only `only`, if it names one; every stage for SPIKE_TIMED_COUNT), `passes`
-// interleaved passes after a warm-up one, and prints the medians.
-static void spike_benchmark(SpikeBench* bench, uint32_t passes, int32_t only)
+// interleaved passes after a warm-up one, and prints the medians. A stage named alone runs `repeat` times per file
+// after the stages before it, and the ones after it don't run, so that perf sees mostly that stage.
+static void spike_benchmark(SpikeBench* bench, uint32_t passes, int32_t only, uint32_t repeat)
 {
     SpikeCounters counters = spike_open_counters();
     if (counters.descriptors[SPIKE_COUNTER_CYCLES] < 0 || counters.descriptors[SPIKE_COUNTER_INSTRUCTIONS] < 0)
@@ -1403,13 +1404,19 @@ static void spike_benchmark(SpikeBench* bench, uint32_t passes, int32_t only)
             {
                 sink += spike_touch(&bench->corpus->files[f]);
                 SpikeSample before = spike_sample(&counters);
-                for (uint32_t i = 0; i < sizeof(spike_stage_order) / sizeof(spike_stage_order[0]); i += 1)
+                bool done = false;
+                for (uint32_t i = 0; !done && i < sizeof(spike_stage_order) / sizeof(spike_stage_order[0]); i += 1)
                 {
                     const SpikeTimed which = spike_stage_order[i];
-                    spike_run_stage(bench, which, f);
-                    const SpikeSample after = spike_sample(&counters);
-                    spike_accumulate(&totals[which], before, after, &overhead);
-                    before = after;
+                    const bool alone = only == (int32_t)which;
+                    for (uint32_t r = 0; r < (alone ? repeat : 1); r += 1)
+                    {
+                        spike_run_stage(bench, which, f);
+                        const SpikeSample after = spike_sample(&counters);
+                        spike_accumulate(&totals[which], before, after, &overhead);
+                        before = after;
+                    }
+                    done = alone;
                 }
             }
             for (uint32_t which = SPIKE_TIMED_TWIN_K1; which < SPIKE_TIMED_COUNT; which += 1)
@@ -1426,7 +1433,8 @@ static void spike_benchmark(SpikeBench* bench, uint32_t passes, int32_t only)
         const bool path = which <= SPIKE_TIMED_VECTOR;
         if (only < 0 || only == (int32_t)which || (!path && only == SPIKE_TIMED_COUNT))
         {
-            spike_report(spike_timed_names[which], samples[which], passes, bench->corpus->token_count);
+            const bool alone = !path && only == (int32_t)which;
+            spike_report(spike_timed_names[which], samples[which], passes, bench->corpus->token_count * (alone ? repeat : 1));
         }
     }
     spike_close_counters(&counters);
@@ -1452,6 +1460,8 @@ int run_parse_spike(int argc, char** argv)
     bool fixtures = false;
     uint32_t generated = 0;
     uint32_t passes = BUSTER_SPIKE_PASSES;
+    uint32_t repeat = 1;
+    bool check = true;
     int32_t only = -1;
     bool valid = true;
     uint32_t path_count = 0;
@@ -1465,6 +1475,16 @@ int run_parse_spike(int argc, char** argv)
         else if (strcmp(argv[i], "--check-only") == 0)
         {
             check_only = true;
+        }
+        else if (strcmp(argv[i], "--no-check") == 0)
+        {
+            check = false;
+        }
+        else if (strcmp(argv[i], "--repeat") == 0 && i + 1 < argc)
+        {
+            repeat = (uint32_t)strtoul(argv[i + 1], 0, 10);
+            repeat = repeat == 0 ? 1 : repeat;
+            i += 1;
         }
         else if (strcmp(argv[i], "--flags") == 0)
         {
@@ -1513,7 +1533,8 @@ int run_parse_spike(int argc, char** argv)
     };
     if (!valid || (path_count == 0 && !fixtures && generated == 0))
     {
-        fprintf(stderr, "usage: %s [--fixtures] [--generated N] [--check-only] [--flags] [--dump FILE] [--passes N] [--only NAME|stages] path...\n", argv[0]);
+        fprintf(stderr, "usage: %s [--fixtures] [--generated N] [--check-only | --no-check] [--flags] [--dump FILE] [--passes N] [--only NAME|stages] [--repeat N] path...\n",
+                argv[0]);
     }
     else if (corpus.files == 0 || !spike_names_init(&corpus.names, &memory))
     {
@@ -1524,7 +1545,8 @@ int run_parse_spike(int argc, char** argv)
         bool loaded = (!fixtures || spike_load_fixtures(&corpus)) && (generated == 0 || spike_load_generated(&corpus, generated));
         for (int i = 1; loaded && i < argc; i += 1)
         {
-            if (strcmp(argv[i], "--dump") == 0 || strcmp(argv[i], "--generated") == 0 || strcmp(argv[i], "--passes") == 0 || strcmp(argv[i], "--only") == 0)
+            if (strcmp(argv[i], "--dump") == 0 || strcmp(argv[i], "--generated") == 0 || strcmp(argv[i], "--passes") == 0 || strcmp(argv[i], "--only") == 0 ||
+                strcmp(argv[i], "--repeat") == 0)
             {
                 i += 1;
             }
@@ -1597,7 +1619,8 @@ int run_parse_spike(int argc, char** argv)
             uint64_t flagged_tokens = 0;
             uint64_t fallback_tokens = 0;
             uint64_t fallback_items = 0;
-            for (uint32_t i = 0; i < corpus.file_count; i += 1)
+            // --no-check skips the checks, for perf: only the benchmark runs.
+            for (uint32_t i = 0; check && i < corpus.file_count; i += 1)
             {
                 const SpikeFile* file = &corpus.files[i];
                 const uint32_t count = (uint32_t)file->tokens.count;
@@ -1772,7 +1795,7 @@ int run_parse_spike(int argc, char** argv)
                     .statements = statements,
                     .statements_ok = true,
                 };
-                spike_benchmark(&bench, passes, only);
+                spike_benchmark(&bench, passes, only, repeat);
             }
         }
     }
