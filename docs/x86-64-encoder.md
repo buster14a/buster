@@ -17,7 +17,7 @@ CET's `notrack` and the branch hints, and 16-bit near branches; and through
 entry points of their own, 32-bit addresses (`67`, see "32-bit addresses"),
 APX's general registers 16 to 31 in legacy and EVEX forms (REX2, and EVEX's B4
 and X4, see "APX's registers"), and 16- and 32-bit modes, with every
-instruction of theirs (scalar for now, see "16- and 32-bit modes").
+instruction of theirs (see "16- and 32-bit modes").
 For the instructions with a symbolic operand it reports where each one ends,
 which locates the fields their fixups patch (see "Fixups").
 This document records why it is built the way it is: the review of the
@@ -68,8 +68,10 @@ BMI at 0.64 ns (9.4 GB/s). That is:
   forms each mode has (111 of them its own: `aaa`, `bound`, `lds`, `pusha`, far
   pointers, the test registers' moves and the rest), with both address sizes,
   ModRM's 16-bit addresses, segment overrides of every segment and AMD's CR8,
-  and their 135,686 and 136,334 relocations, from scalar entry points of their
-  own.
+  and their 135,563 and 136,322 relocations, from entry points of their own,
+  whose loops encode a mix like 32-bit compiler output at **0.82 ns per
+  instruction** and one like real-mode code at 0.79 ns, 18× and 19× their
+  scalar encoders, and leave the other loops' code the same.
 
 ## The historical encoder
 
@@ -665,12 +667,12 @@ function's copies of the group).
 
 32-bit mode (protected mode, and compatibility mode under a 64-bit kernel, with
 a 32-bit code segment) and 16-bit mode (real mode, virtual-8086 mode, and
-protected mode with a 16-bit code segment) have entry points of their own,
-scalar ones for now: `x86_encode_scalar_32`, `x86_validate_32`,
-`x86_encode_scalar_16` and `x86_validate_16`, after
-`x86_encoder_initialize_legacy` (see "Next steps"). An instruction is the same
-record, with the form table's forms and their fixed operand sizes, and the mode
-decides the prefixes:
+protected mode with a 16-bit code segment) have entry points of their own:
+`x86_encode_mode32`, `x86_encode_scalar_32` and `x86_validate_32`, and
+`x86_encode_mode16`, `x86_encode_scalar_16` and `x86_validate_16`, after
+`x86_encoder_initialize_legacy`. An instruction is the same record, with the
+form table's forms and their fixed operand sizes, and the mode decides the
+prefixes:
 
 - **Operand size.** The table's 16-bit forms carry the `66` that 64-bit mode
   needs, and its 32-bit forms none. `x86_encoder_initialize_legacy` gives each
@@ -774,6 +776,121 @@ follows.
 
 The 64-bit entry points are unchanged: their random streams, which leave the
 new rows out, give the same three digests as before them.
+
+`x86_encode_mode32` and `x86_encode_mode16` run `x86_encode`'s loop
+(`x86_encode_64_mode32` and `x86_encode_64_mode16`) on templates of their own,
+which `x86_encoder_initialize_legacy` builds at the 64-bit table's indices (FS
+and GS copies, and the fixup copies): 1.58 MB more for each mode. A template
+has the mode's prefixes in the scalar encoder's order: FWAIT's `9B`, a segment
+override (an FS or GS form's, as a static byte, or in a form that takes one, a
+position for the decorations'), `notrack`'s `3E`, a `67` (a moffs form's of
+the other size, as a static byte, or in a form with a memory operand or an
+address it makes itself, a position for `BUSTER_X86_MODE_ADDRESS_SIZE`'s, with
+the layout and presence bit 23 of `x86_encode_address32`'s), the mode's `66`
+and the form's own prefixes; then no REX, but in a move to or from a control
+register, REX's position for CR8's `F0`: its template byte is `F4`, which
+REX.R's 4 makes `F0`, and REX.R makes it present.
+
+These modes have no REX, so REX's canonical byte and presence bit (10 and 10)
+are the segment override's: an override position's layout is REX's
+(`BUSTER_X86_LAYOUT_OVERRIDE`), and `compute_fields` puts the override's byte in
+that canonical byte, a `vpshufb` of a 16-byte table by the decorations' bits 3
+to 5 (`26`, `2E`, `36`, `3E`, `64` and `65` for ES to GS, and for 7, which is no
+segment, a bit that makes the instruction invalid), and sets the presence bit
+where those bits aren't zero. The template says which instructions have one: its
+checks allow those bits only with an override position, so the loop takes them
+where the check of bit 3 is clear (a form with embedded rounding, whose rm is a
+register, takes no override, and allows bit 5, the rounding mode's, but not bit
+3). An EVEX prefix's P2 has the decorations as they are, where an override's
+bits would be b's and L'L's: the loop clears them from the prefix.
+
+The mode tables come in two halves, a 32-bit address's and a 16-bit address's,
+which `vpermt2d` picks between by `BUSTER_X86_MODE_ADDRESS_SIZE` (the operands'
+bit 30, bit 4 of the table index), in the order the mode takes them: three
+lookups, as the 64-bit loop's three `vpermd`. A 32-bit address's entries are
+64-bit mode's but RIP, which these modes don't have (an absolute address is
+ModRM's mod 00 rm 101). A 16-bit address's have no SIB byte and a 16-bit
+displacement (presence bits `0x30`), and ModRM.rm comes from the base and the
+index rather than from a field: a `vpshufb` of a 16-byte table by the base's low
+3 bits and whether there is an index gives BX's 7, BP's 6, SI's 4 and DI's 5
+alone, and BX's 6 and BP's 4 with an index, which the index's low 3 bits (SI's 6
+or DI's 7) XORed in make 0 to 3, `[bx+si]` to `[bp+di]`. The table's bit 3 marks
+a base that can't be, and only SI and DI plus 2 carry into bit 3, which makes
+any other index invalid. The displacement's size is its low 16 bits', sign
+extended (`[bx+65535]` takes an 8-bit −1), and BP alone needs one, as RBP does,
+but `[bp+si]` and `[bp+di]` don't. `BUSTER_X86_MODE_ADDRESS_SIZE`'s `67` is
+present by the operands' bit 30, where `x86_encode_address32`'s is by the memory
+bit, and counts in the length.
+
+The loop rejects what the scalar encoders do, in `x86_encode`'s one test, with
+the modes' checks added: a register from 8 to 15 but CR8 (the templates' checks
+of reg, rm and vvvv, and the index's bits 3 and 4 among the mode's forbidden
+bits), SPL to DIL, which need REX, `BUSTER_X86_MODE_ADDRESS_SIZE` on a register
+operand of a form without an address of its own (the tables' register entry
+has a bit in the place of the flag of the templates whose forms make one), a
+16-bit address in a VSIB, SIB or MPX operand (a flag) or with a base or index
+that can't be, an override on a register operand of a form whose rm can be
+memory or past GS, and an instruction longer than 15 bytes. As `x86_encode`
+leaves x86_validate's rules on more than one field to it, `x86_encode_mode32`
+and `x86_encode_mode16` leave a 16-bit address's displacement outside [−32768,
+65535] to `x86_validate_32` and `x86_validate_16`: they write its low 16 bits.
+
+A template can have 16 positions, one of them the `67`'s (9 in 32-bit mode and
+51 in 16-bit mode, with their FS and GS copies), and in 16-bit mode an
+instruction can fill them: HLE's locked arithmetic by an imm32 (with the 32-bit
+form's `66`, `F2` or `F3` and `F0`) and TBM's `bextr` and LWP's `lwpins` and
+`lwpval` with their imm32, with an override and a 32-bit address with a SIB
+byte and a disp32, 16 bytes. Such an instruction is invalid, and the loop
+drops its `67`'s presence bit, so that it takes 15 bytes of the output, as
+the capacity allows. In 32-bit mode none can fill them: a `67` makes its address
+16-bit, without a SIB byte and with at most 2 displacement bytes. So that the
+length counts every byte the layout takes, it counts REX's presence bit in
+every form, which an invalid instruction's register bits set in a VEX or EVEX
+form too, lighting its override position (the other modes' templates of those
+forms, which have no REX position, leave it out with `NO_REX`).
+
+The mode is a constant parameter of the loop, as with 32-bit addresses and APX,
+so the other loops' code stays the same, with two precautions. The modes' work
+comes after the rest of `compute_fields`, whose first uses of the templates'
+checks and the records' fourth dwords as dwords have to come first: otherwise
+clang placed those conversions differently in every loop. And `encode_group`
+takes the modes' presence bits from a field of their own
+(`X86Fields.legacy_presence`): selecting them in `compute_fields` changed how
+clang 23 reassociated `x86_encode_64_address32`'s presence bits in `main.c`'s
+translation unit (an `or` of the `67`'s bit moved, and two lost `disjoint`).
+All twelve 64-bit and 32-bit-address loops disassemble as before (clang 23 on
+the 9700X).
+
+On the 9700X (clang 23, pinned to one CPU, medians of 21 passes),
+`x86_encode_64_mode32` encodes a mix like 32-bit compiler output (stack loads
+and stores, pushes and pops, calls, branches and arithmetic, x87 and SSE2:
+`--mode32`) at 0.824 ns per instruction (4.57 cycles), and
+`x86_encode_64_mode16` a mix like real-mode code (16-bit operands and addresses,
+`[bp+disp]` for the stack and BX, SI and DI for pointers, absolute globals,
+string instructions, segment registers and ES overrides, interrupts, and some
+`66` and `67`: `--mode16`) at 0.786 ns (4.36 cycles), 18× and 19× their scalar
+encoders:
+
+| Stream | `x86_encode_64_mode32` | scalar | `x86_encode_64_mode16` | scalar |
+| --- | ---: | ---: | ---: | ---: |
+| 16,384 mixed | **0.824** | 14.81 | **0.786** | 14.82 |
+| 16,384, with offsets | 0.852 | 14.63 | — | — |
+| 16,384, with fixup ends | 0.858 | 14.77 | 0.849 | 14.94 |
+| calls of 64, with fixup ends | 0.914 | 14.78 | — | — |
+| 16,384 uniform | 0.900 | 23.51 | 0.888 | 21.34 |
+
+In the same runs, `x86_encode_64` took 0.624 ns (3.37 cycles) on its compiler
+mix, 0.694 with fixup ends, and `x86_encode_64_apx` 0.756. So the modes' loops
+cost 32% and 26% more on their mixes, whose instructions are shorter (3.22 and
+2.58 bytes against 3.97); the loop has no branches but its own, so it does the
+same work on any stream. They run 4.8 more instructions per instruction (20.5
+against 15.7): about 48 vector operations per group of 16 for the modes'
+addresses, overrides, `67` and checks, and the spills and constants of the
+registers they take (76 more stack operands and 92 more broadcasts over the
+function's 12 copies of the group). The benchmark's scalar loops are one
+function per mode around a flattened helper, as clang stopped inlining
+`encode_one` into them once it had three: the 64-bit one measured 1.6% faster
+than before (12.50 ns on the compiler mix against 12.71, three runs each).
 
 ### What Niles Salter's tokenizer suggested
 
@@ -1073,7 +1190,7 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
 
 ## Correctness
 
-`./build/compiler test-x86-encoder` (about 1.3 s) checks:
+`./build/compiler test-x86-encoder` (about 1.5 s) checks:
 
 - that every form's template fits;
 - 761 known encodings from GNU as, on the paths most worth pinning down (VEX2
@@ -1224,8 +1341,8 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   or index from 16 to 31 in a form without REX2 or EVEX, and a vector register
   rm from 16 to 31 in a form with REX2;
 - then in 32-bit mode and in 16-bit mode, which is all `--mode32` and `--mode16`
-  run, the scalar encoder alone (so no random streams or page edges): 159 and
-  150 known encodings from GNU as (both operand and address sizes, ModRM's eight
+  run: both encoders on 159 and 150 known encodings from GNU as (both operand
+  and address sizes, ModRM's eight
   16-bit addresses and its absolute one, 16-bit displacements modulo 2^16,
   `[bp]`'s zero, 32-bit absolute addresses without a SIB byte, high byte
   registers, pushes and pops, branches by a rel16 and a rel32 with hints and
@@ -1236,14 +1353,24 @@ half-rate: 64 per iteration runs at about 1.2 ns there.
   the forms with fixed sizes, HLE, the rows of these modes alone, and segment
   overrides of every segment in the decorations), 13 and 16 known fixups (rel8s,
   rel16s and rel32s, 16- and 32-bit displacements and immediates, far pointers'
-  offsets and moffs), a digest of each, and the invalid operands, with the
-  64-bit breaks that apply and five more: a register that would need REX (8 to
-  15 but CR8, or SPL to DIL), a memory operand the address size can't have (RIP,
-  a VSIB, SIB or MPX operand with a 16-bit address, or a 16-bit address with
-  another base or index, an index alone, a scale or a displacement past 16
-  bits), a form that doesn't exist in the mode (which the 64-bit entry points
-  get too, with the rows of these modes), an instruction longer than 15 bytes,
-  and a segment override where the instruction can't take one, or past GS.
+  offsets and moffs), a digest of each, `x86_encode_64_mode32` and
+  `x86_encode_64_mode16` against the scalar encoders on the random streams
+  (of whose 300,000 instructions 40,300 and 116,400 have a 16-bit address,
+  17,500 an override in the decorations, 10,500 of them in EVEX forms, 1,100 to
+  1,200 the other address size without a memory operand, and 13 to 19 CR8) and
+  at page edges, streams of the instructions longer than 15 bytes at a page end
+  (in 16-bit mode, the longest of the 17 forms that have them, HLE's locked
+  arithmetic by an imm32, `bextr`, `lwpins` and `lwpval`: with an FS form, with
+  an override in the decorations, and with REX's bits instead, an index past 7,
+  which the loops must reject without writing past the output's capacity), and
+  the invalid operands, with the 64-bit breaks that apply and five more: a
+  register that would need REX (8 to 15 but CR8, or SPL to DIL), a memory
+  operand the address size can't have (RIP, a VSIB, SIB or MPX operand with a
+  16-bit address, or a 16-bit address with another base or index, an index
+  alone, a scale or a displacement past 16 bits, which only validation checks),
+  a form that doesn't exist in the mode (which the 64-bit entry points get too,
+  with the rows of these modes), an instruction longer than 15 bytes, and a
+  segment override where the instruction can't take one, or past GS.
 
 `--print-assembly` and `--compare-object` cross-check the scalar encoder against
 GNU as for any seed (AGENTS.md has the commands): 1.7 million random
@@ -1490,15 +1617,17 @@ and the digest) or with `D5` among the prefixes too (the same).
 
 With `--mode32` and `--mode16`, the same seeds cross-check the 16- and 32-bit
 streams, which GNU as assembles after `.code32` or `.code16`: 1.2 million
-instructions each, 0 differences, and 135,686 and 136,334 relocations (3,268 and
-3,331 PC32, 927 and 914 PC16, 211 and 207 PC8, 95,854 and 34,957 32, and 35,426
-and 96,925 16), 0 different. A quarter of their memory operands, and of the
-addresses instructions make themselves, have the other address size, and an
-eighth have an FS or GS form and another eighth an override in the decorations:
-of 400,000 instructions, about 27,500 and 25,000, with 57,500 to 58,000 16-bit
-addresses in 32-bit mode and 167,000 in 16-bit mode, 7,100 to 7,400 instructions
-of the rows of these modes alone (118 to 162 of them moves to and from test
-registers), and 19 to 34 moves to and from CR8. GNU as's relocations there are
+instructions each, 0 differences, and 135,563 and 136,322 relocations (3,374 and
+3,230 PC32, 939 and 883 PC16, 211 and 194 PC8, 95,848 and 35,096 32, and 35,191
+and 96,919 16), 0 different, and `x86_encode_mode32`'s and
+`x86_encode_mode16`'s bytes and fixup ends the same as the scalar encoders'. A
+quarter of their memory operands, and of the addresses instructions make
+themselves, have the other address size, and an eighth have an FS or GS form and
+another eighth an override in the decorations: of 400,000 instructions, about
+27,500 and 25,000, with 57,500 to 57,900 16-bit memory operands in 32-bit mode
+and 166,700 to 167,000 in 16-bit mode, 7,060 to 7,430 instructions of the rows
+of these modes alone (122 to 153 of them moves to and from test registers), and
+18 to 31 moves to and from CR8. GNU as's relocations there are
 R_X86_64_PC32 for every rel32 (never PLT32), PC16 for a rel16, and 32 or 16 for
 an address, an immediate (an imm16 too) or a far pointer's offset (never 32S).
 The printer writes 16- and 32-bit address registers, `addr16` or `addr32` where
@@ -1536,6 +1665,30 @@ fixups), and validation that takes any base in a 16-bit address (105 and 97
 broken instructions not found), registers 8 to 15 (640 and 518), displacements
 past 16 bits (94 and 102), a ptr16:32's selector past 16 bits (112 and 97) or
 instructions past 15 bytes (631 in 16-bit mode).
+
+Fifty broken copies of the modes' loops fail the tests too, most of them the
+known encodings, the random streams, the invalid instructions or the
+templates' check: for addresses, the lookup's halves swapped, a 16-bit
+absolute address as rm 101 or with a disp32, a 32-bit one with a SIB byte, a
+16-bit address with a scale, ModRM.rm's table with the pairs wrong or SP or SI
+with an index taken, its key without the index, the index ORed in, ModRM.rm
+left out or without the base's mask, the index's check off by one, the index
+taken from the base's bit, the 16-bit displacement not sign-extended or 32-bit,
+and `[bp+si]` with one; for overrides, the byte or the presence bit left out,
+the override counted not at all or twice, taken where the checks allow
+rounding or everywhere, left in EVEX's P2, CS's byte wrong, no mark past GS,
+and the position a static byte; the `67` from the memory bit or not counted;
+the modes' presence bits, length or invalid lanes not used; the checks of the
+index's bits 3 and 4, mode bit 7, register bit 4, SPL to DIL, the other address
+size on a register operand (and the tables' mark or the templates' flag for
+it), 16-bit VSIB, SIB and MPX operands (and either flag), an override on a
+register operand or past GS, and a 16-bit base that can't be, left out; and
+CR8's position left out. And three on the overlong streams: the check of an
+instruction longer than 15 bytes left out (398 of their 597 streams accepted,
+and the invalid instructions' longest), its `67` not dropped (a fault at a page
+end), and VEX's and EVEX's templates with `NO_REX`, under which an invalid
+instruction's REX bits light the override position without counting (a fault
+at a page end, once the streams had instructions with an index past 7).
 
 ## Coverage
 
@@ -1600,10 +1753,6 @@ knows.
 
 ## Next steps
 
-- **Vectorized 16- and 32-bit modes.** Their entry points are scalar (see "16-
-  and 32-bit modes"). A loop of their own would need templates per mode (the
-  forms' `66` and the moffs' `67`), ModRM's 16-bit addresses in the mode
-  tables, and the decorations' segment override as a prefix byte of its own.
 - **The rest of 64-bit mode** (#17): the instructions in "Coverage" that no
   assembler checks yet, once one does. Of #39's prefixes, `67` has its entry
   point (see "32-bit addresses"), and the CS, DS, ES and SS overrides on
@@ -1628,4 +1777,6 @@ knows.
   templates loaded such that the flags need only in-lane shuffles, and fewer
   operations between the flags and the store, are where to look. Clang's code
   for the loop moves with small source changes, so check every width after
-  one. The APX loop's 21% is mostly the registers its REX2 operations take.
+  one. The APX loop's 21% is mostly the registers its REX2 operations take,
+  and the 16- and 32-bit loops' 26–32% their Phase II's work and its registers
+  (see "16- and 32-bit modes").

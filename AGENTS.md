@@ -56,9 +56,10 @@ or infrastructure machinery merely to match its style.
   `x86_fixup_distance` gives its fields' offsets and addends from that; and
   `x86_encode_address32` and `x86_encode_apx`, the same for 32-bit addresses and
   for APX's general registers 16 to 31 (REX2, and EVEX's B4 and X4), each with
-  templates of its own; and `x86_encode_scalar_32` and `x86_encode_scalar_16`,
-  scalar ones for 32-bit and 16-bit modes, with their operand and address
-  sizes, segment overrides and own instructions);
+  templates of its own; and `x86_encode_mode32` and `x86_encode_mode16` (and
+  `x86_encode_scalar_32` and `x86_encode_scalar_16`), the same for 32-bit and
+  16-bit modes, with their operand and address sizes, segment overrides and own
+  instructions, and templates of their own);
   `docs/x86-64-encoder.md` explains its design and measurements.
   `x86_64_encoder_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-x86-encoder` runs them) and
@@ -195,7 +196,7 @@ yet compared against a performance baseline. Keep just one compiler executable.
 
 ## x86-64 encoder tests
 
-`./build/compiler test-x86-encoder` (about 1.3 s) checks that every form fits a
+`./build/compiler test-x86-encoder` (about 1.5 s) checks that every form fits a
 template, both encoders on 761 known encodings from GNU as (each also with the
 fixup flag, whose end they must report), a digest of the scalar encoder's output
 for 100,000 random instructions, every batch width and variant of `x86_encode`
@@ -218,11 +219,15 @@ their own, `x86_encode_64_apx` against the scalar encoder on random streams in
 which half the forms have REX2 and a quarter are EVEX ones, and at page edges,
 and invalid operands, among them a high byte register with REX2, registers 16 to
 31 in forms without REX2 or EVEX and XMM16 to XMM31 in SSE's forms. And in
-32-bit and 16-bit modes, with the scalar encoder alone: 159 and 150 known
-encodings, 13 and 16 known fixups, a digest of each, and invalid operands, among
-them registers that would need REX, 16-bit addresses that aren't ModRM's,
-forms of 64-bit mode alone, instructions past 15 bytes and segment overrides
-where an instruction takes none. `--address32`, `--apx`, `--mode32` and
+32-bit and 16-bit modes: 159 and 150 known encodings, 13 and 16 known fixups, a
+digest of each, `x86_encode_64_mode32` and `x86_encode_64_mode16` against the
+scalar encoders on random streams with both address sizes and segment
+overrides in the decorations, and at page edges, streams of instructions longer
+than 15 bytes at a page end (16-bit mode has them), which the loop must reject
+without writing past the output's capacity, and invalid operands, among them
+registers that would need REX, 16-bit addresses that aren't ModRM's, forms of
+64-bit mode alone, instructions past 15 bytes and segment overrides where an
+instruction takes none. `--address32`, `--apx`, `--mode32` and
 `--mode16` run only their pass, and `--count N` and `--seed N` change the random
 streams.
 
@@ -260,36 +265,40 @@ GNU as writes zeros and a relocation for them, and `--compare-object` reads
 `.text`, `.lengths` and `.rela.text` from its object and compares the bytes
 (with those fields zeroed where the reported fixup ends put them) and each
 relocation's offset, type, addend and symbol with the ones the fixup ends and
-`x86_fixup_distance` give. With `--address32`, the printer adds `addr32` where
-no general register gives the address size, and the relocations of displacements
-other than RIP-relative ones are R_X86_64_32; with `--apx`, it names registers
-16 to 31 `r16` to `r31` (`r16d`, `r16w`, `r16b`); and with `--mode32` and
-`--mode16`, the printed assembly is in `.code32` or `.code16`, and the printer
-writes the mode's mnemonics and prefixes (`addr16`, `data32`, `jcxz`, `lcall`,
-segment overrides as prefixes, which GNU as keeps on a default segment, and
-`.arch i386` around a test register's move), whose relocations are never PLT32
-or 32S. Cross-check more than one seed after changing forms (1.7 million
-instructions over seeds 1, 7 and 99 were last checked for each 64-bit entry
-point, with 198,573, 197,926 and 197,735 relocations, and 1.2 million for each
-of 32-bit and 16-bit mode, with 135,686 and 136,334).
+`x86_fixup_distance` give, and the mode's vectorized encoder's bytes and fixup
+ends with the scalar encoder's. With `--address32`, the printer adds `addr32`
+where no general register gives the address size, and the relocations of
+displacements other than RIP-relative ones are R_X86_64_32; with `--apx`, it
+names registers 16 to 31 `r16` to `r31` (`r16d`, `r16w`, `r16b`); and with
+`--mode32` and `--mode16`, the printed assembly is in `.code32` or `.code16`,
+and the printer writes the mode's mnemonics and prefixes (`addr16`, `data32`,
+`jcxz`, `lcall`, segment overrides as prefixes, which GNU as keeps on a default
+segment, and `.arch i386` around a test register's move), whose relocations are
+never PLT32 or 32S. Cross-check more than one seed after changing forms (1.7
+million instructions over seeds 1, 7 and 99 were last checked for each 64-bit
+entry point, with 198,573, 197,926 and 197,735 relocations, and 1.2 million for
+each of 32-bit and 16-bit mode, with 135,563 and 136,322).
 
 ## x86-64 encoder benchmark
 
 `./build/compiler benchmark-x86-encoder [--count N] [--section N] [--uniform |
---vector] [--offsets] [--fixups] [--only NAME]` checks every implementation
-against the scalar loop, then reports 21 interleaved-pass medians per encoded
-instruction (time, cycles, instructions, IPC). The stream is a compiler-like mix
-of 16,384 legacy instructions by default (comparable with older measurements), a
-mix like vectorized code (AVX-512, AVX2, BMI) with `--vector`, or random
-instructions of every form with `--uniform`; `--section N` encodes it N
-instructions per call, `--offsets` stores every instruction's offset, and
-`--fixups` marks the calls and RIP-relative operands and reports their ends.
-The variants are the batch widths (`x86_encode_4` to `x86_encode_64`,
-instructions per loop iteration), the template gather, output store and fixup
-store alternatives that lost, `x86_encode_64_offsets_then_pick`, the other
-way to have fixup ends (every offset, then the caller picks the marked ones),
-and `x86_encode_64_apx`, `x86_encode_apx`'s loop (the streams have no registers
-16 to 31, so its bytes are the same).
+--vector] [--mode32 | --mode16] [--offsets] [--fixups] [--only NAME]` checks
+every implementation against the scalar loop, then reports 21 interleaved-pass
+medians per encoded instruction (time, cycles, instructions, IPC). The stream is
+a compiler-like mix of 16,384 legacy instructions by default (comparable with
+older measurements), a mix like vectorized code (AVX-512, AVX2, BMI) with
+`--vector`, or random instructions of every form with `--uniform`; `--section N`
+encodes it N instructions per call, `--offsets` stores every instruction's
+offset, and `--fixups` marks the calls and RIP-relative operands and reports
+their ends. The variants are the batch widths (`x86_encode_4` to
+`x86_encode_64`, instructions per loop iteration), the template gather, output
+store and fixup store alternatives that lost, `x86_encode_64_offsets_then_pick`,
+the other way to have fixup ends (every offset, then the caller picks the marked
+ones), and `x86_encode_64_apx`, `x86_encode_apx`'s loop (the streams have no
+registers 16 to 31, so its bytes are the same). `--mode32` and `--mode16` time
+`x86_encode_64_mode32` or `x86_encode_64_mode16` and the mode's scalar loop
+instead, on a mix like 32-bit compiler output or like real-mode code (or with
+`--uniform`, the mode's forms).
 Decide them, and any other performance question, with measurements on the 9700X
 (not Zen 4, and not llvm-mca, whose predictions are well off), using uops.info's
 Zen 5 port data to explain them;
