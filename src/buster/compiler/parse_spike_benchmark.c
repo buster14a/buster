@@ -347,6 +347,157 @@ static uint32_t spike_check_tree(const SpikeTree* tree, uint32_t count, uint8_t*
     return result;
 }
 
+// The role the kernels can tell: a function declarator's parentheses look like a call's (both are postfix groups after
+// an operand, with the same tree), so they compare as one.
+static uint8_t spike_canonical_role(uint8_t role)
+{
+    uint8_t result = role;
+    if (role == SPIKE_ROLE_OPEN_FUNCTION)
+    {
+        result = SPIKE_ROLE_OPEN_CALL;
+    }
+    else if (role == SPIKE_ROLE_CLOSE_FUNCTION)
+    {
+        result = SPIKE_ROLE_CLOSE_CALL;
+    }
+    return result;
+}
+
+// Compares a kernel path's tree with the scalar parser's. Returns the first token whose parent differs, or
+// BUSTER_SPIKE_NONE; *role_differences counts the tokens whose (canonical) roles differ outside flagged declarations.
+static uint32_t spike_compare(const SpikeTree* expected, const SpikeKernels* kernels, uint32_t count, uint64_t* role_differences, uint32_t* first_role_difference)
+{
+    uint32_t result = BUSTER_SPIKE_NONE;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        if (result == BUSTER_SPIKE_NONE && expected->parents[i] != kernels->parents[i])
+        {
+            result = i;
+        }
+        if (spike_canonical_role(expected->roles[i]) != spike_canonical_role(kernels->roles[i]))
+        {
+            if (*role_differences == 0)
+            {
+                *first_role_difference = i;
+            }
+            *role_differences += 1;
+        }
+    }
+    return result;
+}
+
+static void spike_print_both(const SpikeFile* file, const SpikeTree* expected, const SpikeKernels* kernels, uint32_t begin, uint32_t end)
+{
+    for (uint32_t i = begin; i < end && i < file->tokens.count; i += 1)
+    {
+        printf("%6u  %-20.*s %-24s %-24s %c parents %10d %10d%s\n", i, (int)(file->tokens.ends[i] - file->tokens.starts[i] < 20 ? file->tokens.ends[i] - file->tokens.starts[i] : 20),
+               (const char*)file->source + file->tokens.starts[i], spike_role_names[expected->roles[i]], spike_role_names[kernels->roles[i]], kernels->flags[i] ? 'F' : ' ',
+               (int)expected->parents[i], (int)kernels->parents[i], expected->parents[i] != kernels->parents[i] ? "  <<" : "");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Timing
+
+// Passes after one warm-up pass; each implementation runs once per pass, in turn, and the medians are reported.
+#define BUSTER_SPIKE_PASSES 21
+
+typedef struct SpikeCounters SpikeCounters;
+struct SpikeCounters
+{
+    int cycles;
+    int instructions;
+};
+
+typedef struct SpikeSample SpikeSample;
+struct SpikeSample
+{
+    uint64_t nanoseconds;
+    uint64_t cycles;
+    uint64_t instructions;
+};
+
+// A counter of this thread's user-space events, or -1 where perf_event_open isn't allowed.
+static int spike_open_counter(uint64_t event)
+{
+    struct perf_event_attr attributes;
+    memset(&attributes, 0, sizeof(attributes));
+    attributes.size = sizeof(attributes);
+    attributes.type = PERF_TYPE_HARDWARE;
+    attributes.config = event;
+    attributes.exclude_kernel = 1;
+    attributes.exclude_hv = 1;
+    return (int)syscall(SYS_perf_event_open, &attributes, 0, -1, -1, PERF_FLAG_FD_CLOEXEC);
+}
+
+static uint64_t spike_read_counter(int fd)
+{
+    uint64_t value = 0;
+    if (fd < 0 || read(fd, &value, sizeof(value)) != sizeof(value))
+    {
+        value = 0;
+    }
+    return value;
+}
+
+static SpikeSample spike_sample(const SpikeCounters* counters)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    SpikeSample result = {
+        .nanoseconds = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec,
+        .cycles = spike_read_counter(counters->cycles),
+        .instructions = spike_read_counter(counters->instructions),
+    };
+    return result;
+}
+
+static SpikeSample spike_difference(SpikeSample before, SpikeSample after)
+{
+    SpikeSample result = {
+        .nanoseconds = after.nanoseconds - before.nanoseconds,
+        .cycles = after.cycles - before.cycles,
+        .instructions = after.instructions - before.instructions,
+    };
+    return result;
+}
+
+static void spike_sort(uint64_t* values, uint32_t count)
+{
+    for (uint32_t i = 1; i < count; i += 1)
+    {
+        const uint64_t value = values[i];
+        uint32_t j = i;
+        while (j > 0 && values[j - 1] > value)
+        {
+            values[j] = values[j - 1];
+            j -= 1;
+        }
+        values[j] = value;
+    }
+}
+
+// Prints the medians of `samples` per token.
+static void spike_report(const char* name, const SpikeSample* samples, uint32_t count, uint64_t tokens)
+{
+    uint64_t nanoseconds[BUSTER_SPIKE_PASSES];
+    uint64_t cycles[BUSTER_SPIKE_PASSES];
+    uint64_t instructions[BUSTER_SPIKE_PASSES];
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        nanoseconds[i] = samples[i].nanoseconds;
+        cycles[i] = samples[i].cycles;
+        instructions[i] = samples[i].instructions;
+    }
+    spike_sort(nanoseconds, count);
+    spike_sort(cycles, count);
+    spike_sort(instructions, count);
+    const double t = (double)tokens;
+    printf("  %-28s %9.3f ms  %7.3f ns/token  %7.3f cycles/token [%.3f-%.3f]  %7.3f instructions/token  IPC %.2f\n", name,
+           (double)nanoseconds[count / 2] / 1e6, (double)nanoseconds[count / 2] / t, (double)cycles[count / 2] / t, (double)cycles[0] / t,
+           (double)cycles[count - 1] / t, (double)instructions[count / 2] / t, cycles[count / 2] ? (double)instructions[count / 2] / (double)cycles[count / 2] : 0.0);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
 
@@ -362,6 +513,8 @@ int run_parse_spike(int argc, char** argv)
 {
     int result = 1;
     const char* dump = 0;
+    bool check_only = false;
+    bool show_flags = false;
     bool valid = true;
     uint32_t path_count = 0;
     for (int i = 1; i < argc; i += 1)
@@ -370,6 +523,14 @@ int run_parse_spike(int argc, char** argv)
         {
             dump = argv[i + 1];
             i += 1;
+        }
+        else if (strcmp(argv[i], "--check-only") == 0)
+        {
+            check_only = true;
+        }
+        else if (strcmp(argv[i], "--flags") == 0)
+        {
+            show_flags = true;
         }
         else if (argv[i][0] == '-')
         {
@@ -403,7 +564,7 @@ int run_parse_spike(int argc, char** argv)
             {
                 i += 1;
             }
-            else
+            else if (argv[i][0] != '-')
             {
                 loaded = spike_load_path(&corpus, argv[i]);
             }
@@ -413,8 +574,12 @@ int run_parse_spike(int argc, char** argv)
             .capacity = BUSTER_SPIKE_NAME_CAPACITY,
         };
         SpikeTree tree;
+        SpikeKernels kernels;
         uint8_t* marks = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 1);
-        if (loaded && (meanings.meanings == 0 || marks == 0 || !spike_allocate_tree(&memory, &tree, corpus.max_tokens)))
+        uint8_t* typed = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 1);
+        SpikeStatement* statements = BUSTER_ARENA_PUSH_ARRAY(&memory, SpikeStatement, corpus.max_tokens + 1);
+        if (loaded && (meanings.meanings == 0 || marks == 0 || typed == 0 || statements == 0 || !spike_allocate_tree(&memory, &tree, corpus.max_tokens) ||
+                       !spike_kernels_reserve(&kernels, &memory, corpus.max_tokens, BUSTER_SPIKE_NAME_CAPACITY)))
         {
             fprintf(stderr, "can't reserve memory\n");
             loaded = false;
@@ -432,6 +597,14 @@ int run_parse_spike(int argc, char** argv)
             uint32_t failed = 0;
             uint32_t broken = 0;
             uint64_t failed_tokens = 0;
+            uint32_t twin_failures = 0;
+            uint32_t flag_reports = 0;
+            uint32_t role_reports = 0;
+            uint32_t everything_files = 0;
+            uint64_t total_role_differences = 0;
+            uint64_t flagged_tokens = 0;
+            uint64_t fallback_tokens = 0;
+            uint64_t fallback_items = 0;
             for (uint32_t i = 0; i < corpus.file_count; i += 1)
             {
                 const SpikeFile* file = &corpus.files[i];
@@ -464,10 +637,78 @@ int run_parse_spike(int argc, char** argv)
                     {
                         spike_print_tree(file, &tree, 0, count);
                     }
+                    // The kernels' scalar twins, against the scalar parser.
+                    const SpikeKernelResult twins = spike_parse_twins(&kernels, file->tokens.kinds, file->tokens.names, count, &meanings, &scratch, typed, statements);
+                    uint64_t role_differences = 0;
+                    uint32_t first_role_difference = 0;
+                    const uint32_t different = spike_compare(&tree, &kernels, count, &role_differences, &first_role_difference);
+                    flagged_tokens += twins.flagged_tokens;
+                    for (uint32_t t = 0; show_flags && t < count && flag_reports < 60; t += 1)
+                    {
+                        if (kernels.flags[t])
+                        {
+                            printf("flag %s:%u ", file->path, t);
+                            spike_print_context(file, t);
+                            flag_reports += 1;
+                        }
+                    }
+                    fallback_tokens += twins.fallback.tokens;
+                    fallback_items += twins.fallback.items;
+                    everything_files += twins.everything;
+                    total_role_differences += role_differences;
+                    if (twins.fallback.error_token != BUSTER_SPIKE_NONE)
+                    {
+                        printf("%s: the scalar parser fails on a fallback declaration at token %u\n", file->path, twins.fallback.error_token);
+                        spike_print_context(file, twins.fallback.error_token);
+                        twin_failures += 1;
+                    }
+                    else if (different != BUSTER_SPIKE_NONE)
+                    {
+                        if (twin_failures < 12)
+                        {
+                            printf("%s: the twins' parent of token %u differs\n", file->path, different);
+                            spike_print_context(file, different);
+                            spike_print_both(file, &tree, &kernels, different > 10 ? different - 10 : 0, different + 6);
+                        }
+                        twin_failures += 1;
+                    }
+                    else if (role_differences != 0 && role_reports < 12)
+                    {
+                        printf("%s: %lu roles differ, the first at token %u\n", file->path, (unsigned long)role_differences, first_role_difference);
+                        spike_print_both(file, &tree, &kernels, first_role_difference > 6 ? first_role_difference - 6 : 0, first_role_difference + 4);
+                        role_reports += 1;
+                    }
                 }
             }
             printf("scalar parser: %u files fail (%lu tokens), %u trees break an invariant\n", failed, (unsigned long)failed_tokens, broken);
-            result = failed == 0 && broken == 0 ? 0 : 1;
+            printf("twins: %u files differ from the scalar parser; %lu roles differ; %lu tokens flagged; fallback: %lu declarations, %lu tokens (%.2f%%), %u whole files\n",
+                   twin_failures, (unsigned long)total_role_differences, (unsigned long)flagged_tokens, (unsigned long)fallback_items, (unsigned long)fallback_tokens,
+                   corpus.token_count ? 100.0 * (double)fallback_tokens / (double)corpus.token_count : 0.0, everything_files);
+            result = failed == 0 && broken == 0 && twin_failures == 0 ? 0 : 1;
+            if (result == 0 && !check_only)
+            {
+                SpikeCounters counters = {
+                    .cycles = spike_open_counter(PERF_COUNT_HW_CPU_CYCLES),
+                    .instructions = spike_open_counter(PERF_COUNT_HW_INSTRUCTIONS),
+                };
+                SpikeSample samples[BUSTER_SPIKE_PASSES];
+                for (uint32_t pass = 0; pass <= BUSTER_SPIKE_PASSES; pass += 1)
+                {
+                    const SpikeSample before = spike_sample(&counters);
+                    for (uint32_t i = 0; i < corpus.file_count; i += 1)
+                    {
+                        const SpikeFile* file = &corpus.files[i];
+                        spike_parse_scalar(file->tokens.kinds, file->tokens.names, (uint32_t)file->tokens.count, &meanings, &tree, &scratch);
+                    }
+                    const SpikeSample after = spike_sample(&counters);
+                    if (pass > 0)
+                    {
+                        samples[pass - 1] = spike_difference(before, after);
+                    }
+                }
+                printf("%d passes over %lu tokens, medians:\n", BUSTER_SPIKE_PASSES, (unsigned long)corpus.token_count);
+                spike_report("scalar parser", samples, BUSTER_SPIKE_PASSES, corpus.token_count);
+            }
         }
     }
     return result;

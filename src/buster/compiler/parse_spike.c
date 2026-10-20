@@ -118,8 +118,13 @@ typedef enum SpikeKind
     SPIKE_KIND_COUNT,
 } SpikeKind;
 
-// Kinds index 128-entry tables, two zmm registers for vpermi2b.
-_Static_assert(SPIKE_KIND_COUNT <= 128, "spike kinds must fit 128-entry tables");
+// The kernels read virtual kinds: the parser kinds, and SPIKE_VKIND_TYPE_NAME for an identifier that a typedef
+// declaration of the file declares (K3, spike_typedefs).
+#define SPIKE_VKIND_TYPE_NAME SPIKE_KIND_COUNT
+#define BUSTER_SPIKE_VKINDS (SPIKE_KIND_COUNT + 1)
+
+// Virtual kinds index 128-entry tables, two zmm registers for vpermi2b.
+_Static_assert(BUSTER_SPIKE_VKINDS <= 128, "spike kinds must fit 128-entry tables");
 
 static const char* const spike_kind_names[SPIKE_KIND_COUNT] =
 {
@@ -994,8 +999,8 @@ static bool spike_parser_starts_type(const SpikeParser* parser, uint32_t token)
 }
 
 // Whether the token can start a declaration: a type name, or a storage class, typedef, _Alignas, _Static_assert,
-// __label__ or __extension__ before one. A typedef name followed by `:` is a label instead.
-static bool spike_parser_starts_declaration(const SpikeParser* parser, uint32_t token)
+// __label__ or __extension__ before one. In a block, a typedef name followed by `:` is a label instead.
+static bool spike_parser_starts_declaration(const SpikeParser* parser, uint32_t token, bool block)
 {
     uint32_t i = token;
     while (parser->kinds[i] == SPIKE_KIND_EXTENSION)
@@ -1003,7 +1008,7 @@ static bool spike_parser_starts_declaration(const SpikeParser* parser, uint32_t 
         i += 1;
     }
     const uint8_t kind = parser->kinds[i];
-    const bool label = parser->kinds[i] == SPIKE_KIND_IDENTIFIER && parser->kinds[i + 1] == SPIKE_KIND_COLON;
+    const bool label = block && parser->kinds[i] == SPIKE_KIND_IDENTIFIER && parser->kinds[i + 1] == SPIKE_KIND_COLON;
     return !label && (spike_parser_starts_type(parser, i) || kind == SPIKE_KIND_STORAGE || kind == SPIKE_KIND_TYPEDEF || kind == SPIKE_KIND_ALIGNAS ||
                       kind == SPIKE_KIND_STATIC_ASSERT || kind == SPIKE_KIND_LABEL || kind == SPIKE_KIND_CALLING_CONVENTION);
 }
@@ -1348,11 +1353,17 @@ static bool spike_frame_is_block(const SpikeFrame* frame)
     return frame->role == SPIKE_ROLE_OPEN_BLOCK || frame->role == SPIKE_ROLE_OPEN_BODY;
 }
 
-// Whether a comma in this frame separates declarators or is the comma operator (COMMA), or separates arguments,
-// parameters, initializers or enumerators (SEPARATOR, below the specifiers).
-static uint8_t spike_frame_comma_role(const SpikeFrame* frame)
+// Whether a comma separates declarators or is the comma operator (COMMA), or separates arguments, parameters,
+// initializers or enumerators (SEPARATOR, below the specifiers), by the innermost group of ( [ { around it: the ?: and
+// case groups don't count, so the kernels decide it from the bracket depth of ( [ { alone.
+static uint8_t spike_frame_comma_role(const SpikeParser* parser)
 {
-    const uint8_t role = frame->role;
+    uint32_t index = parser->frame_count - 1;
+    while (index > 0 && (parser->frames[index].role == SPIKE_ROLE_OPEN_TERNARY || parser->frames[index].role == SPIKE_ROLE_OPEN_CASE))
+    {
+        index -= 1;
+    }
+    const uint8_t role = parser->frames[index].role;
     const bool comma = role == SPIKE_ROLE_NONE || role == SPIKE_ROLE_OPEN_BLOCK || role == SPIKE_ROLE_OPEN_BODY || role == SPIKE_ROLE_OPEN_STRUCT ||
                        role == SPIKE_ROLE_OPEN_FOR;
     return comma ? SPIKE_ROLE_COMMA : SPIKE_ROLE_SEPARATOR;
@@ -1548,7 +1559,7 @@ static void spike_parser_item(SpikeParser* parser, uint32_t i, SpikeFrame* frame
             step->role = SPIKE_ROLE_OPERAND;
             frame->mode = SPIKE_MODE_OPERATOR;
         }
-        else if (spike_parser_starts_declaration(parser, i))
+        else if (spike_parser_starts_declaration(parser, i, block))
         {
             frame->mode = SPIKE_MODE_SPECIFIERS;
             frame->flags |= BUSTER_SPIKE_FRAME_DECLARATION;
@@ -1573,7 +1584,7 @@ static void spike_parser_item(SpikeParser* parser, uint32_t i, SpikeFrame* frame
         }
         else
         {
-            frame->mode = spike_parser_starts_declaration(parser, i) ? SPIKE_MODE_SPECIFIERS : SPIKE_MODE_OPERAND;
+            frame->mode = spike_parser_starts_declaration(parser, i, block) ? SPIKE_MODE_SPECIFIERS : SPIKE_MODE_OPERAND;
             frame->flags |= frame->mode == SPIKE_MODE_SPECIFIERS ? BUSTER_SPIKE_FRAME_DECLARATION : 0;
             step->again = true;
         }
@@ -1592,7 +1603,7 @@ static void spike_parser_item(SpikeParser* parser, uint32_t i, SpikeFrame* frame
         step->role = SPIKE_ROLE_LEAF_RIGHT;
         frame->mode = SPIKE_MODE_KEYWORD_PAREN;
     }
-    else if (spike_parser_starts_declaration(parser, i))
+    else if (spike_parser_starts_declaration(parser, i, block))
     {
         frame->mode = SPIKE_MODE_SPECIFIERS;
         frame->flags |= BUSTER_SPIKE_FRAME_DECLARATION;
@@ -1831,7 +1842,7 @@ static void spike_parser_after_declarator(SpikeParser* parser, uint32_t i, Spike
     }
     else if (kind == SPIKE_KIND_COMMA)
     {
-        step->role = spike_frame_comma_role(frame);
+        step->role = spike_frame_comma_role(parser);
         frame->mode = step->role == SPIKE_ROLE_COMMA ? SPIKE_MODE_DECLARATOR : SPIKE_MODE_ITEM;
         frame->flags &= ~(BUSTER_SPIKE_FRAME_FUNCTION | BUSTER_SPIKE_FRAME_AFTER_STAR);
         if (step->role == SPIKE_ROLE_SEPARATOR)
@@ -2062,7 +2073,7 @@ static void spike_parser_operator(SpikeParser* parser, uint32_t i, SpikeFrame* f
     }
     else if (kind == SPIKE_KIND_COMMA)
     {
-        step->role = spike_frame_comma_role(frame);
+        step->role = spike_frame_comma_role(parser);
         if (frame->flags & BUSTER_SPIKE_FRAME_DECLARATION)
         {
             // The end of an initializer: the next declarator, or the next parameter.
@@ -2373,5 +2384,1300 @@ static SpikeParseResult spike_parse_scalar(const uint8_t* kinds, const uint32_t*
         result.error_message = parser.error_message;
     }
     arena_pop_to(scratch, mark);
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The kernels
+//
+// The data-parallel path builds the same tree as spike_parse_scalar in passes over the whole token array, each a kernel
+// with a scalar twin whose output is the same:
+//   - K1, brackets (spike_brackets_*): the depth before each token and its enclosing opener (a closer's is its opener),
+//     run on the kinds for ( [ {, then on the roles for every group, ? : and case ... : included.
+//   - K3, type names (spike_typedefs, spike_classify_*): a scalar pass over the typedef declarations only, in source
+//     order, then every identifier is classified against the set of names they declare.
+//   - K2, roles (spike_roles_*): each token's role from its kind, its neighbors' kinds, what the token before it is
+//     (SpikePred, from that token's role) and the role of the group it is in. A token the rules can't be sure of is
+//     flagged, and the top-level declaration it is in goes to the scalar parser.
+//   - K4, parents (spike_parents_*): L and R by nearest-smaller-value searches on (depth, level) keys, then each
+//     role's rule.
+//   - K5, statements (spike_statements): the statement stack over the statement-level tokens of blocks.
+//   - The fallback (spike_fallback): the scalar parser on every top-level declaration with a flagged token.
+
+// What the token before says about the next one, from its role (and for specifiers and `*`, its kind).
+typedef enum SpikePred
+{
+    // A declaration or a statement may start: the start, after `;` and the `{` and `}` of blocks, a label, case.
+    SPIKE_PRED_ITEM,
+    // A statement but not a declaration starts: after else, do, and the `)` of if, while, for and switch.
+    SPIKE_PRED_HEAD,
+    // An operand just ended.
+    SPIKE_PRED_OPERAND,
+    // After `*` or a qualifier or attribute that belongs to one.
+    SPIKE_PRED_STAR,
+    // After a type specifier.
+    SPIKE_PRED_TYPE,
+    // After another specifier: a qualifier, a storage class, typedef, an attribute.
+    SPIKE_PRED_SPECIFIER,
+    // A type name may start: the `(` of a cast, sizeof, a call or parameter list and a keyword's group, a separator.
+    SPIKE_PRED_PARAMETER,
+    // An operand comes next.
+    SPIKE_PRED_EXPRESSION,
+    // After a keyword that introduces what follows: struct, union, enum, if, __attribute__, typeof, ...
+    SPIKE_PRED_LEAF,
+    SPIKE_PRED_COUNT,
+} SpikePred;
+
+static const uint8_t spike_role_preds[SPIKE_ROLE_COUNT] =
+{
+    [SPIKE_ROLE_NONE] = SPIKE_PRED_ITEM,
+    [SPIKE_ROLE_ERROR] = SPIKE_PRED_ITEM,
+    [SPIKE_ROLE_OPERAND] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_MEMBER] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_STRING_NEXT] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_QUALIFIER_LEFT] = SPIKE_PRED_STAR,
+    [SPIKE_ROLE_LEAF_RIGHT] = SPIKE_PRED_LEAF,
+    // SPECIFIER: SPIKE_PRED_TYPE for a type keyword or a typedef name.
+    [SPIKE_ROLE_SPECIFIER] = SPIKE_PRED_SPECIFIER,
+    [SPIKE_ROLE_TAG] = SPIKE_PRED_TYPE,
+    // PREFIX: SPIKE_PRED_STAR for `*`.
+    [SPIKE_ROLE_PREFIX] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_POSTFIX] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_MEMBER_OPERATOR] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_MULTIPLICATIVE] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_ADDITIVE] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_SHIFT] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_RELATIONAL] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_EQUALITY] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_BITWISE_AND] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_BITWISE_XOR] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_BITWISE_OR] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_LOGICAL_AND] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_LOGICAL_OR] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_ASSIGN] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_RANGE] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_BITFIELD] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_COMMA] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_RETURN] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_ASSOCIATION] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_SEPARATOR] = SPIKE_PRED_PARAMETER,
+    [SPIKE_ROLE_ASM_COLON] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_TERMINATOR] = SPIKE_PRED_ITEM,
+    [SPIKE_ROLE_ELSE] = SPIKE_PRED_HEAD,
+    [SPIKE_ROLE_DO] = SPIKE_PRED_HEAD,
+    [SPIKE_ROLE_LABEL] = SPIKE_PRED_ITEM,
+    [SPIKE_ROLE_OPEN_GROUP] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_CALL] = SPIKE_PRED_PARAMETER,
+    [SPIKE_ROLE_OPEN_FUNCTION] = SPIKE_PRED_PARAMETER,
+    [SPIKE_ROLE_OPEN_CAST] = SPIKE_PRED_PARAMETER,
+    [SPIKE_ROLE_OPEN_COMPOUND] = SPIKE_PRED_PARAMETER,
+    [SPIKE_ROLE_OPEN_SIZEOF] = SPIKE_PRED_PARAMETER,
+    [SPIKE_ROLE_OPEN_SPECIFIER] = SPIKE_PRED_PARAMETER,
+    [SPIKE_ROLE_OPEN_ATTRIBUTE] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_ATTRIBUTE_LIST] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_ASM] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_KEYWORD] = SPIKE_PRED_PARAMETER,
+    [SPIKE_ROLE_OPEN_CONDITION] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_FOR] = SPIKE_PRED_PARAMETER,
+    [SPIKE_ROLE_OPEN_SUBSCRIPT] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_BLOCK] = SPIKE_PRED_ITEM,
+    [SPIKE_ROLE_OPEN_BODY] = SPIKE_PRED_ITEM,
+    [SPIKE_ROLE_OPEN_STRUCT] = SPIKE_PRED_ITEM,
+    [SPIKE_ROLE_OPEN_ENUM] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_INITIALIZER] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_COMPOUND_BODY] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_TERNARY] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_OPEN_CASE] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_CLOSE_GROUP] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_CLOSE_CALL] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_CLOSE_FUNCTION] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_CLOSE_CAST] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_CLOSE_COMPOUND] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_CLOSE_SIZEOF] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_CLOSE_SPECIFIER] = SPIKE_PRED_TYPE,
+    [SPIKE_ROLE_CLOSE_ATTRIBUTE] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER] = SPIKE_PRED_SPECIFIER,
+    [SPIKE_ROLE_CLOSE_ATTRIBUTE_LEFT] = SPIKE_PRED_STAR,
+    [SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT] = SPIKE_PRED_LEAF,
+    [SPIKE_ROLE_CLOSE_ATTRIBUTE_LIST] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_CLOSE_ASM] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_CLOSE_KEYWORD] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_CLOSE_CONDITION] = SPIKE_PRED_HEAD,
+    [SPIKE_ROLE_CLOSE_FOR] = SPIKE_PRED_HEAD,
+    [SPIKE_ROLE_CLOSE_SUBSCRIPT] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_CLOSE_BLOCK] = SPIKE_PRED_ITEM,
+    [SPIKE_ROLE_CLOSE_BODY] = SPIKE_PRED_ITEM,
+    [SPIKE_ROLE_CLOSE_STRUCT] = SPIKE_PRED_TYPE,
+    [SPIKE_ROLE_CLOSE_ENUM] = SPIKE_PRED_TYPE,
+    [SPIKE_ROLE_CLOSE_INITIALIZER] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_CLOSE_COMPOUND_BODY] = SPIKE_PRED_OPERAND,
+    [SPIKE_ROLE_CLOSE_TERNARY] = SPIKE_PRED_EXPRESSION,
+    [SPIKE_ROLE_CLOSE_CASE] = SPIKE_PRED_ITEM,
+};
+
+// The kinds of the next token after which an opener whose contents start a type name is a cast (an operand follows),
+// as opposed to an abstract function declarator.
+static bool spike_vkind_starts_operand(uint8_t vkind)
+{
+    return vkind == SPIKE_KIND_IDENTIFIER || vkind == SPIKE_VKIND_TYPE_NAME || vkind == SPIKE_KIND_NUMBER || vkind == SPIKE_KIND_CHARACTER ||
+           vkind == SPIKE_KIND_STRING || vkind == SPIKE_KIND_L_PAREN || vkind == SPIKE_KIND_MINUS || vkind == SPIKE_KIND_PLUS || vkind == SPIKE_KIND_EXCLAIM ||
+           vkind == SPIKE_KIND_TILDE || vkind == SPIKE_KIND_STAR || vkind == SPIKE_KIND_AMP || vkind == SPIKE_KIND_PLUSPLUS || vkind == SPIKE_KIND_MINUSMINUS ||
+           vkind == SPIKE_KIND_AMPAMP || vkind == SPIKE_KIND_SIZEOF || vkind == SPIKE_KIND_REAL_IMAG || vkind == SPIKE_KIND_EXTENSION ||
+           vkind == SPIKE_KIND_TYPE_ARGUMENT || vkind == SPIKE_KIND_GENERIC;
+}
+
+static bool spike_vkind_starts_type(uint8_t vkind)
+{
+    return vkind == SPIKE_KIND_TYPE || vkind == SPIKE_KIND_STRUCT || vkind == SPIKE_KIND_ENUM || vkind == SPIKE_KIND_QUALIFIER || vkind == SPIKE_KIND_ATOMIC ||
+           vkind == SPIKE_KIND_TYPEOF || vkind == SPIKE_KIND_ATTRIBUTE || vkind == SPIKE_VKIND_TYPE_NAME;
+}
+
+static bool spike_vkind_starts_declaration(uint8_t vkind)
+{
+    return spike_vkind_starts_type(vkind) || vkind == SPIKE_KIND_STORAGE || vkind == SPIKE_KIND_TYPEDEF || vkind == SPIKE_KIND_ALIGNAS ||
+           vkind == SPIKE_KIND_STATIC_ASSERT || vkind == SPIKE_KIND_LABEL || vkind == SPIKE_KIND_CALLING_CONVENTION || vkind == SPIKE_KIND_EXTENSION;
+}
+
+// The working arrays of the kernels, by token, and what they found.
+typedef struct SpikeKernels SpikeKernels;
+struct SpikeKernels
+{
+    uint8_t* vkinds;
+    // The depth before each token: of ( [ { after the first K1 pass, of every group after the second.
+    uint32_t* depths;
+    uint32_t* enclosing;
+    // A group's opener's closer and a closer's opener, from the first K1 pass, for the typedef pass.
+    uint32_t* matches;
+    uint8_t* roles;
+    uint32_t* parents;
+    // Nonzero for a token the rules can't be sure of: its top-level declaration is parsed by the scalar parser.
+    uint8_t* flags;
+    // The scratch stack K1's twin needs, and K4's.
+    uint32_t* stack;
+    uint32_t* stack_keys;
+    uint32_t* waiting;
+    uint32_t* waiting_thresholds;
+    uint32_t* lefts;
+    // By name: 0, or SPIKE_TYPEDEF_FILE, or SPIKE_TYPEDEF_SCOPED for a name some block declares as a typedef.
+    uint8_t* typedef_names;
+    // The file's typedef names in order, each with the token that declares it, for the fallback.
+    uint32_t* typedef_log;
+    uint32_t* typedef_tokens;
+    uint32_t typedef_count;
+    // What the kernels report.
+    bool unbalanced;
+    bool unsupported;
+};
+
+#define BUSTER_SPIKE_TYPEDEF_FILE 1
+#define BUSTER_SPIKE_TYPEDEF_SCOPED 2
+
+// ---------------------------------------------------------------------------------------------------------------------
+// K1, brackets: the scalar twin
+
+// The bracket deltas: of ( [ { by kind, for the first pass, and of every group by role, for the second.
+static int8_t spike_kind_deltas[128];
+static int8_t spike_role_deltas[128];
+
+static void spike_kernels_init_tables(void)
+{
+    spike_kind_deltas[SPIKE_KIND_L_PAREN] = 1;
+    spike_kind_deltas[SPIKE_KIND_L_SQUARE] = 1;
+    spike_kind_deltas[SPIKE_KIND_L_BRACE] = 1;
+    spike_kind_deltas[SPIKE_KIND_R_PAREN] = -1;
+    spike_kind_deltas[SPIKE_KIND_R_SQUARE] = -1;
+    spike_kind_deltas[SPIKE_KIND_R_BRACE] = -1;
+    for (uint32_t role = 0; role < SPIKE_ROLE_COUNT; role += 1)
+    {
+        spike_role_deltas[role] = spike_role_rules[role] == SPIKE_RULE_OPENER ? 1 : 0;
+        for (uint32_t opener = 0; opener < SPIKE_ROLE_COUNT; opener += 1)
+        {
+            if (spike_closer_roles[opener] == role && role != SPIKE_ROLE_NONE)
+            {
+                spike_role_deltas[role] = -1;
+            }
+        }
+    }
+    // Attribute closers by position, and a compound literal's or cast's type group, close too.
+    spike_role_deltas[SPIKE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER] = -1;
+    spike_role_deltas[SPIKE_ROLE_CLOSE_ATTRIBUTE_LEFT] = -1;
+    spike_role_deltas[SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT] = -1;
+    spike_role_deltas[SPIKE_ROLE_CLOSE_COMPOUND] = -1;
+    spike_role_deltas[SPIKE_ROLE_CLOSE_FUNCTION] = -1;
+}
+
+// The depth before each token and its enclosing opener, from codes (kinds or roles) and their deltas. Returns false if
+// a closer has no opener or a group is still open at the end.
+static bool spike_brackets_scalar(const uint8_t* codes, const int8_t* deltas, uint32_t count, uint32_t* depths, uint32_t* enclosing, uint32_t* stack)
+{
+    bool balanced = true;
+    uint32_t depth = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const int8_t delta = deltas[codes[i]];
+        depths[i] = depth;
+        enclosing[i] = depth != 0 ? stack[depth - 1] : BUSTER_SPIKE_NONE;
+        if (delta > 0)
+        {
+            stack[depth] = i;
+            depth += 1;
+        }
+        else if (delta < 0 && depth == 0)
+        {
+            balanced = false;
+        }
+        else if (delta < 0)
+        {
+            depth -= 1;
+        }
+    }
+    return balanced && depth == 0;
+}
+
+// Each closer's opener and each opener's closer, from K1's output (BUSTER_SPIKE_NONE for every other token).
+static void spike_matches(const uint8_t* codes, const int8_t* deltas, uint32_t count, const uint32_t* enclosing, uint32_t* matches)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        matches[i] = BUSTER_SPIKE_NONE;
+    }
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        if (deltas[codes[i]] < 0 && enclosing[i] != BUSTER_SPIKE_NONE)
+        {
+            matches[i] = enclosing[i];
+            matches[enclosing[i]] = i;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// K3, type names
+
+// The token after the group `opener` opens.
+static uint32_t spike_after_group(const SpikeKernels* kernels, const uint8_t* kinds, uint32_t opener)
+{
+    const bool group = kinds[opener] == SPIKE_KIND_L_PAREN || kinds[opener] == SPIKE_KIND_L_SQUARE || kinds[opener] == SPIKE_KIND_L_BRACE;
+    return group ? kernels->matches[opener] + 1 : opener + 1;
+}
+
+// The typedef pass: every typedef declaration, in source order, adds its declarators' names. A file-scope name is a type
+// name everywhere after it; a name some block declares is marked SCOPED, and its uses are left to the scalar parser. A
+// typedef declaration the pass can't read (a type specifier before `typedef`) marks the whole file unsupported.
+static void spike_typedefs(SpikeKernels* kernels, const uint8_t* kinds, const uint32_t* names, uint32_t count)
+{
+    kernels->typedef_count = 0;
+    for (uint32_t t = 0; t < count && !kernels->unsupported; t += 1)
+    {
+        if (kinds[t] == SPIKE_KIND_TYPEDEF)
+        {
+            const uint32_t depth = kernels->depths[t];
+            const uint8_t scope = depth == 0 ? BUSTER_SPIKE_TYPEDEF_FILE : BUSTER_SPIKE_TYPEDEF_SCOPED;
+            // What may come before `typedef` in its specifiers: no type specifier.
+            uint32_t back = t;
+            while (back > 0 && (kinds[back - 1] == SPIKE_KIND_EXTENSION || kinds[back - 1] == SPIKE_KIND_STORAGE || kinds[back - 1] == SPIKE_KIND_QUALIFIER))
+            {
+                back -= 1;
+            }
+            const uint8_t before = back > 0 ? kinds[back - 1] : SPIKE_KIND_SEMI;
+            if (before != SPIKE_KIND_SEMI && before != SPIKE_KIND_L_BRACE && before != SPIKE_KIND_R_BRACE && before != SPIKE_KIND_COLON)
+            {
+                kernels->unsupported = true;
+            }
+            // The specifiers.
+            uint32_t i = t + 1;
+            bool type_seen = false;
+            bool specifiers = true;
+            while (specifiers && i < count)
+            {
+                const uint8_t kind = kinds[i];
+                if (kind == SPIKE_KIND_TYPE)
+                {
+                    type_seen = true;
+                    i += 1;
+                }
+                else if (kind == SPIKE_KIND_QUALIFIER || kind == SPIKE_KIND_STORAGE || kind == SPIKE_KIND_EXTENSION || kind == SPIKE_KIND_CALLING_CONVENTION ||
+                         kind == SPIKE_KIND_TYPEDEF || (kind == SPIKE_KIND_ATOMIC && kinds[i + 1] != SPIKE_KIND_L_PAREN))
+                {
+                    i += 1;
+                }
+                else if (kind == SPIKE_KIND_ATOMIC || kind == SPIKE_KIND_TYPEOF)
+                {
+                    type_seen = true;
+                    i = spike_after_group(kernels, kinds, i + 1);
+                }
+                else if (kind == SPIKE_KIND_ALIGNAS || kind == SPIKE_KIND_ATTRIBUTE)
+                {
+                    i = spike_after_group(kernels, kinds, i + 1);
+                }
+                else if (kind == SPIKE_KIND_STRUCT || kind == SPIKE_KIND_ENUM)
+                {
+                    type_seen = true;
+                    i += 1;
+                    while (kinds[i] == SPIKE_KIND_ATTRIBUTE)
+                    {
+                        i = spike_after_group(kernels, kinds, i + 1);
+                    }
+                    i += kinds[i] == SPIKE_KIND_IDENTIFIER;
+                    i = kinds[i] == SPIKE_KIND_L_BRACE ? spike_after_group(kernels, kinds, i) : i;
+                }
+                else if (kind == SPIKE_KIND_IDENTIFIER && !type_seen && kernels->typedef_names[names[i]] != 0)
+                {
+                    type_seen = true;
+                    i += 1;
+                }
+                else
+                {
+                    specifiers = false;
+                }
+            }
+            // The declarators, to the `;` at the declaration's depth.
+            bool declarators = true;
+            while (declarators && i < count)
+            {
+                uint32_t name = BUSTER_SPIKE_NONE;
+                bool searching = true;
+                while (searching && i < count)
+                {
+                    const uint8_t kind = kinds[i];
+                    if (kind == SPIKE_KIND_STAR || kind == SPIKE_KIND_QUALIFIER || kind == SPIKE_KIND_CALLING_CONVENTION || kind == SPIKE_KIND_L_PAREN)
+                    {
+                        i += 1;
+                    }
+                    else if (kind == SPIKE_KIND_ATTRIBUTE)
+                    {
+                        i = spike_after_group(kernels, kinds, i + 1);
+                    }
+                    else
+                    {
+                        searching = false;
+                        name = kind == SPIKE_KIND_IDENTIFIER ? i : BUSTER_SPIKE_NONE;
+                    }
+                }
+                if (name != BUSTER_SPIKE_NONE)
+                {
+                    const uint32_t id = names[name];
+                    kernels->typedef_names[id] = kernels->typedef_names[id] == BUSTER_SPIKE_TYPEDEF_SCOPED ? BUSTER_SPIKE_TYPEDEF_SCOPED : scope;
+                    kernels->typedef_log[kernels->typedef_count] = id;
+                    kernels->typedef_tokens[kernels->typedef_count] = name;
+                    kernels->typedef_count += 1;
+                    i = name + 1;
+                }
+                while (i < count && !(kernels->depths[i] == depth && (kinds[i] == SPIKE_KIND_COMMA || kinds[i] == SPIKE_KIND_SEMI)))
+                {
+                    i = spike_after_group(kernels, kinds, i);
+                }
+                declarators = i < count && kinds[i] == SPIKE_KIND_COMMA;
+                i += 1;
+            }
+            t = i > t ? i - 1 : t;
+        }
+    }
+}
+
+// The declarator names of the typedef declarations are identifiers being declared, not uses of type names.
+static void spike_classify_declarators(SpikeKernels* kernels)
+{
+    for (uint32_t i = 0; i < kernels->typedef_count; i += 1)
+    {
+        const uint32_t token = kernels->typedef_tokens[i];
+        kernels->vkinds[token] = SPIKE_KIND_IDENTIFIER;
+        kernels->flags[token] = 0;
+    }
+}
+
+// K3's classification, the scalar twin: the virtual kinds, and a flag on every use of a name some block declares as a
+// typedef.
+static void spike_classify_scalar(SpikeKernels* kernels, const uint8_t* kinds, const uint32_t* names, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint8_t meaning = kinds[i] == SPIKE_KIND_IDENTIFIER ? kernels->typedef_names[names[i]] : 0;
+        kernels->vkinds[i] = meaning != 0 ? SPIKE_VKIND_TYPE_NAME : kinds[i];
+        kernels->flags[i] = meaning == BUSTER_SPIKE_TYPEDEF_SCOPED;
+    }
+    spike_classify_declarators(kernels);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// K2, roles: the scalar twin
+
+static uint8_t spike_pred_of(uint8_t role, uint8_t vkind)
+{
+    uint8_t result = spike_role_preds[role];
+    if (role == SPIKE_ROLE_SPECIFIER && (vkind == SPIKE_KIND_TYPE || vkind == SPIKE_VKIND_TYPE_NAME))
+    {
+        result = SPIKE_PRED_TYPE;
+    }
+    else if (role == SPIKE_ROLE_PREFIX && vkind == SPIKE_KIND_STAR)
+    {
+        result = SPIKE_PRED_STAR;
+    }
+    return result;
+}
+
+// Whether a role is a type specifier, for the typed state of a declaration's specifiers.
+static bool spike_role_is_type_specifier(uint8_t role, uint8_t vkind)
+{
+    return (role == SPIKE_ROLE_SPECIFIER && (vkind == SPIKE_KIND_TYPE || vkind == SPIKE_VKIND_TYPE_NAME)) || role == SPIKE_ROLE_TAG ||
+           role == SPIKE_ROLE_CLOSE_STRUCT || role == SPIKE_ROLE_CLOSE_ENUM || role == SPIKE_ROLE_CLOSE_SPECIFIER;
+}
+
+// Whether a role carries a declaration's typed state through: specifiers that aren't type specifiers, the keywords
+// before struct, typeof and attribute groups.
+static bool spike_role_propagates_typed(uint8_t role)
+{
+    return role == SPIKE_ROLE_SPECIFIER || role == SPIKE_ROLE_LEAF_RIGHT;
+}
+
+// The closer's role for the opener `opener` (whose role is final), and for a cast candidate the opener's final role.
+static uint8_t spike_closer_role(SpikeKernels* kernels, uint32_t closer)
+{
+    const uint32_t opener = kernels->enclosing[closer];
+    uint8_t result = SPIKE_ROLE_ERROR;
+    if (opener != BUSTER_SPIKE_NONE)
+    {
+        const uint8_t opener_role = kernels->roles[opener];
+        result = spike_closer_roles[opener_role];
+        if (opener_role == SPIKE_ROLE_OPEN_CAST)
+        {
+            const uint8_t after = kernels->vkinds[closer + 1];
+            const uint8_t role = after == SPIKE_KIND_L_BRACE ? SPIKE_ROLE_OPEN_COMPOUND : spike_vkind_starts_operand(after) ? SPIKE_ROLE_OPEN_CAST : SPIKE_ROLE_OPEN_FUNCTION;
+            kernels->roles[opener] = role;
+            result = spike_closer_roles[role];
+        }
+        else if (opener_role == SPIKE_ROLE_OPEN_ATTRIBUTE)
+        {
+            // By what comes before the attribute's keyword.
+            const uint8_t before = opener >= 2 ? spike_pred_of(kernels->roles[opener - 2], kernels->vkinds[opener - 2]) : SPIKE_PRED_ITEM;
+            result = before == SPIKE_PRED_OPERAND ? SPIKE_ROLE_CLOSE_ATTRIBUTE : before == SPIKE_PRED_STAR ? SPIKE_ROLE_CLOSE_ATTRIBUTE_LEFT :
+                     before == SPIKE_PRED_LEAF ? SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT : SPIKE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
+        }
+        else if (result == SPIKE_ROLE_NONE)
+        {
+            result = SPIKE_ROLE_ERROR;
+        }
+    }
+    return result;
+}
+
+// The keyword of a tagged type whose body starts after `token`: back over the tag and the attribute groups between them
+// (`struct __attribute__((packed)) S {`), through the first K1 pass's matches. SPIKE_KIND_END if there is none.
+static uint8_t spike_tag_keyword(const SpikeKernels* kernels, uint32_t token)
+{
+    uint32_t t = token;
+    bool searching = true;
+    uint8_t result = SPIKE_KIND_END;
+    while (searching)
+    {
+        const uint8_t kind = kernels->vkinds[t];
+        const uint32_t opener = kind == SPIKE_KIND_R_PAREN ? kernels->matches[t] : BUSTER_SPIKE_NONE;
+        if (opener != BUSTER_SPIKE_NONE && opener >= 2 && kernels->vkinds[opener - 1] == SPIKE_KIND_ATTRIBUTE)
+        {
+            t = opener - 2;
+        }
+        else if ((kind == SPIKE_KIND_IDENTIFIER || kind == SPIKE_VKIND_TYPE_NAME) && t > 0)
+        {
+            t -= 1;
+        }
+        else
+        {
+            searching = false;
+            result = kind == SPIKE_KIND_STRUCT || kind == SPIKE_KIND_ENUM ? kind : SPIKE_KIND_END;
+        }
+    }
+    return result;
+}
+
+// The role of token `i` from the rules, given the roles before it. Sets *flag if the rules can't be sure.
+static uint8_t spike_role_rule(SpikeKernels* kernels, uint32_t i, bool typed, bool* flag)
+{
+    const uint8_t* vk = kernels->vkinds;
+    const uint8_t kind = vk[i];
+    const uint8_t previous = vk[i - 1];
+    const uint8_t before = vk[i - 2];
+    const uint8_t next = vk[i + 1];
+    const uint8_t previous_role = i > 0 ? kernels->roles[i - 1] : SPIKE_ROLE_NONE;
+    const uint8_t pred = i > 0 ? spike_pred_of(previous_role, previous) : SPIKE_PRED_ITEM;
+    const uint8_t before_pred = i > 1 ? spike_pred_of(kernels->roles[i - 2], before) : SPIKE_PRED_ITEM;
+    const uint32_t opener = kernels->enclosing[i];
+    const uint8_t group = opener != BUSTER_SPIKE_NONE ? kernels->roles[opener] : SPIKE_ROLE_NONE;
+    const bool operand = pred == SPIKE_PRED_OPERAND;
+    const bool after_asm = previous == SPIKE_KIND_ASM || (previous_role == SPIKE_ROLE_LEAF_RIGHT && (previous == SPIKE_KIND_QUALIFIER || previous == SPIKE_KIND_STORAGE ||
+                                                                                                    previous == SPIKE_KIND_GOTO));
+    uint8_t result = SPIKE_ROLE_ERROR;
+    if (group == SPIKE_ROLE_OPEN_ATTRIBUTE_LIST && (kind >= SPIKE_KIND_TYPE || kind == SPIKE_KIND_IDENTIFIER))
+    {
+        // An attribute's name, whatever its spelling.
+        result = SPIKE_ROLE_OPERAND;
+    }
+    else
+    {
+        switch (kind)
+        {
+            case SPIKE_KIND_NUMBER:
+            case SPIKE_KIND_CHARACTER: result = SPIKE_ROLE_OPERAND; break;
+            case SPIKE_KIND_STRING: result = previous == SPIKE_KIND_STRING ? SPIKE_ROLE_STRING_NEXT : SPIKE_ROLE_OPERAND; break;
+            case SPIKE_KIND_IDENTIFIER:
+                if (previous == SPIKE_KIND_PERIOD || previous == SPIKE_KIND_ARROW)
+                {
+                    result = SPIKE_ROLE_MEMBER;
+                }
+                else if (previous == SPIKE_KIND_STRUCT || previous == SPIKE_KIND_ENUM || previous_role == SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT)
+                {
+                    result = next == SPIKE_KIND_L_BRACE ? SPIKE_ROLE_LEAF_RIGHT : SPIKE_ROLE_TAG;
+                }
+                else
+                {
+                    result = SPIKE_ROLE_OPERAND;
+                }
+                break;
+            case SPIKE_VKIND_TYPE_NAME:
+                if (previous == SPIKE_KIND_PERIOD || previous == SPIKE_KIND_ARROW)
+                {
+                    result = SPIKE_ROLE_MEMBER;
+                }
+                else if (previous == SPIKE_KIND_STRUCT || previous == SPIKE_KIND_ENUM || previous_role == SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT)
+                {
+                    result = next == SPIKE_KIND_L_BRACE ? SPIKE_ROLE_LEAF_RIGHT : SPIKE_ROLE_TAG;
+                }
+                else if (previous == SPIKE_KIND_GOTO)
+                {
+                    result = SPIKE_ROLE_OPERAND;
+                }
+                else if (next == SPIKE_KIND_COLON && (pred == SPIKE_PRED_ITEM || pred == SPIKE_PRED_HEAD) && (group == SPIKE_ROLE_OPEN_BLOCK || group == SPIKE_ROLE_OPEN_BODY))
+                {
+                    // A label spelled like a type name.
+                    result = SPIKE_ROLE_OPERAND;
+                }
+                else if (pred == SPIKE_PRED_ITEM || pred == SPIKE_PRED_PARAMETER || (pred == SPIKE_PRED_SPECIFIER && !typed))
+                {
+                    result = SPIKE_ROLE_SPECIFIER;
+                }
+                else
+                {
+                    // A declarator spelled like a type name, or one in an expression: it hides the typedef.
+                    result = SPIKE_ROLE_OPERAND;
+                    *flag = true;
+                }
+                break;
+            case SPIKE_KIND_TYPE:
+            case SPIKE_KIND_TYPEDEF:
+            case SPIKE_KIND_LABEL: result = SPIKE_ROLE_SPECIFIER; break;
+            case SPIKE_KIND_QUALIFIER:
+            case SPIKE_KIND_CALLING_CONVENTION:
+                result = after_asm ? SPIKE_ROLE_LEAF_RIGHT : pred == SPIKE_PRED_STAR ? SPIKE_ROLE_QUALIFIER_LEFT : SPIKE_ROLE_SPECIFIER;
+                break;
+            case SPIKE_KIND_STORAGE: result = after_asm ? SPIKE_ROLE_LEAF_RIGHT : SPIKE_ROLE_SPECIFIER; break;
+            case SPIKE_KIND_ATOMIC:
+                result = next == SPIKE_KIND_L_PAREN ? SPIKE_ROLE_LEAF_RIGHT : pred == SPIKE_PRED_STAR ? SPIKE_ROLE_QUALIFIER_LEFT : SPIKE_ROLE_SPECIFIER;
+                break;
+            case SPIKE_KIND_EXTENSION: result = spike_vkind_starts_declaration(next) ? SPIKE_ROLE_SPECIFIER : SPIKE_ROLE_PREFIX; break;
+            case SPIKE_KIND_GENERIC:
+                result = SPIKE_ROLE_LEAF_RIGHT;
+                *flag = true;
+                break;
+            case SPIKE_KIND_STRUCT:
+            case SPIKE_KIND_ENUM:
+            case SPIKE_KIND_TYPEOF:
+            case SPIKE_KIND_ALIGNAS:
+            case SPIKE_KIND_ATTRIBUTE:
+            case SPIKE_KIND_ASM:
+            case SPIKE_KIND_TYPE_ARGUMENT:
+            case SPIKE_KIND_STATIC_ASSERT:
+            case SPIKE_KIND_IF:
+            case SPIKE_KIND_WHILE:
+            case SPIKE_KIND_SWITCH:
+            case SPIKE_KIND_FOR: result = SPIKE_ROLE_LEAF_RIGHT; break;
+            case SPIKE_KIND_SIZEOF:
+            case SPIKE_KIND_REAL_IMAG: result = SPIKE_ROLE_PREFIX; break;
+            case SPIKE_KIND_ELSE: result = SPIKE_ROLE_ELSE; break;
+            case SPIKE_KIND_DO: result = SPIKE_ROLE_DO; break;
+            case SPIKE_KIND_CASE:
+            case SPIKE_KIND_DEFAULT: result = SPIKE_ROLE_OPEN_CASE; break;
+            case SPIKE_KIND_GOTO: result = after_asm ? SPIKE_ROLE_LEAF_RIGHT : SPIKE_ROLE_RETURN; break;
+            case SPIKE_KIND_RETURN:
+            case SPIKE_KIND_BREAK:
+            case SPIKE_KIND_CONTINUE: result = SPIKE_ROLE_RETURN; break;
+            case SPIKE_KIND_SEMI: result = SPIKE_ROLE_TERMINATOR; break;
+            case SPIKE_KIND_COMMA:
+                result = group == SPIKE_ROLE_NONE || group == SPIKE_ROLE_OPEN_BLOCK || group == SPIKE_ROLE_OPEN_BODY || group == SPIKE_ROLE_OPEN_STRUCT ||
+                         group == SPIKE_ROLE_OPEN_FOR ? SPIKE_ROLE_COMMA : SPIKE_ROLE_SEPARATOR;
+                break;
+            case SPIKE_KIND_QUESTION: result = SPIKE_ROLE_OPEN_TERNARY; break;
+            case SPIKE_KIND_COLON:
+                if (group == SPIKE_ROLE_OPEN_ASM)
+                {
+                    result = SPIKE_ROLE_ASM_COLON;
+                }
+                else if (group == SPIKE_ROLE_OPEN_STRUCT)
+                {
+                    result = SPIKE_ROLE_BITFIELD;
+                }
+                else
+                {
+                    // The closer of ? or case, or a label: spike_secondary decides.
+                    result = SPIKE_ROLE_CLOSE_TERNARY;
+                }
+                break;
+            case SPIKE_KIND_ELLIPSIS:
+                // In a parameter list (a cast candidate may turn out to be one), else a range.
+                result = group == SPIKE_ROLE_OPEN_CALL || group == SPIKE_ROLE_OPEN_FUNCTION || group == SPIKE_ROLE_OPEN_CAST ? SPIKE_ROLE_OPERAND : SPIKE_ROLE_RANGE;
+                break;
+            case SPIKE_KIND_STAR: result = operand ? SPIKE_ROLE_MULTIPLICATIVE : SPIKE_ROLE_PREFIX; break;
+            case SPIKE_KIND_AMP: result = operand ? SPIKE_ROLE_BITWISE_AND : SPIKE_ROLE_PREFIX; break;
+            case SPIKE_KIND_PLUS:
+            case SPIKE_KIND_MINUS: result = operand ? SPIKE_ROLE_ADDITIVE : SPIKE_ROLE_PREFIX; break;
+            case SPIKE_KIND_AMPAMP: result = operand ? SPIKE_ROLE_LOGICAL_AND : SPIKE_ROLE_PREFIX; break;
+            case SPIKE_KIND_PLUSPLUS:
+            case SPIKE_KIND_MINUSMINUS: result = operand ? SPIKE_ROLE_POSTFIX : SPIKE_ROLE_PREFIX; break;
+            case SPIKE_KIND_EXCLAIM:
+            case SPIKE_KIND_TILDE: result = SPIKE_ROLE_PREFIX; break;
+            case SPIKE_KIND_PERIOD:
+            case SPIKE_KIND_ARROW: result = SPIKE_ROLE_MEMBER_OPERATOR; break;
+            case SPIKE_KIND_L_SQUARE: result = SPIKE_ROLE_OPEN_SUBSCRIPT; break;
+            case SPIKE_KIND_L_PAREN:
+                if (previous == SPIKE_KIND_IF || previous == SPIKE_KIND_WHILE || previous == SPIKE_KIND_SWITCH)
+                {
+                    result = SPIKE_ROLE_OPEN_CONDITION;
+                }
+                else if (previous == SPIKE_KIND_FOR)
+                {
+                    result = SPIKE_ROLE_OPEN_FOR;
+                }
+                else if (previous == SPIKE_KIND_SIZEOF)
+                {
+                    result = SPIKE_ROLE_OPEN_SIZEOF;
+                }
+                else if (previous == SPIKE_KIND_TYPEOF || previous == SPIKE_KIND_ALIGNAS || previous == SPIKE_KIND_ATOMIC)
+                {
+                    result = SPIKE_ROLE_OPEN_SPECIFIER;
+                }
+                else if (previous == SPIKE_KIND_ATTRIBUTE)
+                {
+                    result = SPIKE_ROLE_OPEN_ATTRIBUTE;
+                }
+                else if (previous == SPIKE_KIND_L_PAREN && before == SPIKE_KIND_ATTRIBUTE)
+                {
+                    result = SPIKE_ROLE_OPEN_ATTRIBUTE_LIST;
+                }
+                else if (previous == SPIKE_KIND_ASM)
+                {
+                    // An asm statement at the start of a statement or a file-scope item, else an asm label.
+                    result = before_pred == SPIKE_PRED_ITEM || before_pred == SPIKE_PRED_HEAD ? SPIKE_ROLE_OPEN_ASM : SPIKE_ROLE_OPEN_ATTRIBUTE;
+                }
+                else if (after_asm)
+                {
+                    result = SPIKE_ROLE_OPEN_ASM;
+                }
+                else if (previous == SPIKE_KIND_TYPE_ARGUMENT || previous == SPIKE_KIND_GENERIC || previous == SPIKE_KIND_STATIC_ASSERT)
+                {
+                    result = SPIKE_ROLE_OPEN_KEYWORD;
+                }
+                else if (operand)
+                {
+                    result = SPIKE_ROLE_OPEN_CALL;
+                }
+                else if (spike_vkind_starts_type(next))
+                {
+                    // A cast, a compound literal's type or an abstract function declarator, which its closer decides.
+                    result = SPIKE_ROLE_OPEN_CAST;
+                }
+                else if ((pred == SPIKE_PRED_TYPE || pred == SPIKE_PRED_SPECIFIER || pred == SPIKE_PRED_STAR) && (next == SPIKE_KIND_R_PAREN || next == SPIKE_KIND_ELLIPSIS))
+                {
+                    result = SPIKE_ROLE_OPEN_FUNCTION;
+                }
+                else
+                {
+                    result = SPIKE_ROLE_OPEN_GROUP;
+                }
+                break;
+            case SPIKE_KIND_L_BRACE:
+                if (previous == SPIKE_KIND_EQUAL)
+                {
+                    result = SPIKE_ROLE_OPEN_INITIALIZER;
+                }
+                else if (previous == SPIKE_KIND_STRUCT || ((previous == SPIKE_KIND_IDENTIFIER || previous == SPIKE_VKIND_TYPE_NAME) && before == SPIKE_KIND_STRUCT))
+                {
+                    result = SPIKE_ROLE_OPEN_STRUCT;
+                }
+                else if (previous == SPIKE_KIND_ENUM || ((previous == SPIKE_KIND_IDENTIFIER || previous == SPIKE_VKIND_TYPE_NAME) && before == SPIKE_KIND_ENUM))
+                {
+                    result = SPIKE_ROLE_OPEN_ENUM;
+                }
+                else if (previous_role == SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT || (previous_role == SPIKE_ROLE_LEAF_RIGHT && (previous == SPIKE_KIND_IDENTIFIER ||
+                                                                                                            previous == SPIKE_VKIND_TYPE_NAME)))
+                {
+                    // A tagged type's body after attributes: `struct __attribute__((packed)) S {`.
+                    const uint8_t keyword = spike_tag_keyword(kernels, i - 1);
+                    result = keyword == SPIKE_KIND_ENUM ? SPIKE_ROLE_OPEN_ENUM : SPIKE_ROLE_OPEN_STRUCT;
+                    *flag = keyword == SPIKE_KIND_END;
+                }
+                else if (previous_role == SPIKE_ROLE_CLOSE_CONDITION || previous_role == SPIKE_ROLE_CLOSE_FOR || previous == SPIKE_KIND_L_PAREN)
+                {
+                    result = SPIKE_ROLE_OPEN_BLOCK;
+                }
+                else if (previous_role == SPIKE_ROLE_CLOSE_CALL || previous_role == SPIKE_ROLE_CLOSE_FUNCTION)
+                {
+                    result = SPIKE_ROLE_OPEN_BODY;
+                }
+                else if (previous_role == SPIKE_ROLE_CLOSE_COMPOUND)
+                {
+                    result = SPIKE_ROLE_OPEN_COMPOUND_BODY;
+                }
+                else if ((previous == SPIKE_KIND_L_BRACE || previous == SPIKE_KIND_COMMA) && (group == SPIKE_ROLE_OPEN_INITIALIZER || group == SPIKE_ROLE_OPEN_COMPOUND_BODY))
+                {
+                    result = SPIKE_ROLE_OPEN_INITIALIZER;
+                }
+                else if (pred == SPIKE_PRED_ITEM || pred == SPIKE_PRED_HEAD)
+                {
+                    result = SPIKE_ROLE_OPEN_BLOCK;
+                }
+                else
+                {
+                    result = SPIKE_ROLE_OPEN_BLOCK;
+                    *flag = true;
+                }
+                break;
+            case SPIKE_KIND_R_PAREN:
+            case SPIKE_KIND_R_SQUARE:
+            case SPIKE_KIND_R_BRACE: result = spike_closer_role(kernels, i); break;
+            default:
+                result = spike_binary_role(kind);
+                if (result == SPIKE_ROLE_NONE)
+                {
+                    result = SPIKE_ROLE_ERROR;
+                    *flag = true;
+                }
+                break;
+        }
+    }
+    if (result == SPIKE_ROLE_ERROR)
+    {
+        *flag = true;
+    }
+    return result;
+}
+
+// K2, the scalar twin: every token's role in source order, so that each rule sees the final roles before it. The typed
+// state of a declaration's specifiers (whether a type specifier came before) runs along with it: a type specifier sets
+// it, the other specifiers and the keywords before struct and attribute groups carry it, an attribute's closer takes
+// it from before the attribute, and anything else clears it.
+static void spike_roles_scalar(SpikeKernels* kernels, uint32_t count, uint8_t* typed)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const bool typed_before = i > 0 && typed[i - 1];
+        bool flag = false;
+        const uint8_t role = spike_role_rule(kernels, i, typed_before, &flag);
+        kernels->roles[i] = role;
+        kernels->flags[i] |= flag;
+        const uint32_t opener = kernels->enclosing[i];
+        if (role == SPIKE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER && opener != BUSTER_SPIKE_NONE && opener >= 2)
+        {
+            typed[i] = typed[opener - 2];
+        }
+        else
+        {
+            typed[i] = spike_role_is_type_specifier(role, kernels->vkinds[i]) || (spike_role_propagates_typed(role) && typed_before);
+        }
+    }
+}
+
+// K1's second part, the groups of ? : and case ... : (the secondary brackets), over their tokens only: each `:` that
+// isn't an asm operand's or a bit-field's closes the innermost ? or case still open in the same group of ( [ {, or is a
+// label if none is. Then the depth of the secondary brackets, added to the depth of ( [ {, gives every token's depth for
+// K4. `secondary` has a slot per token for the matching stack.
+static void spike_secondary_scalar(SpikeKernels* kernels, uint32_t count, uint32_t* secondary)
+{
+    uint32_t open = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint8_t role = kernels->roles[i];
+        if (role == SPIKE_ROLE_OPEN_TERNARY || role == SPIKE_ROLE_OPEN_CASE)
+        {
+            secondary[open] = i;
+            open += 1;
+        }
+        else if (role == SPIKE_ROLE_CLOSE_TERNARY)
+        {
+            const uint32_t depth = kernels->depths[i];
+            // Openers left open in a group that has ended: invalid C.
+            while (open != 0 && kernels->depths[secondary[open - 1]] > depth)
+            {
+                kernels->flags[secondary[open - 1]] = 1;
+                open -= 1;
+            }
+            if (open != 0 && kernels->depths[secondary[open - 1]] == depth)
+            {
+                const uint32_t opener = secondary[open - 1];
+                open -= 1;
+                kernels->roles[i] = kernels->roles[opener] == SPIKE_ROLE_OPEN_CASE ? SPIKE_ROLE_CLOSE_CASE : SPIKE_ROLE_CLOSE_TERNARY;
+                kernels->matches[i] = opener;
+                kernels->matches[opener] = i;
+            }
+            else
+            {
+                const uint8_t previous = kernels->vkinds[i - 1];
+                kernels->roles[i] = SPIKE_ROLE_LABEL;
+                kernels->flags[i] |= previous != SPIKE_KIND_IDENTIFIER && previous != SPIKE_VKIND_TYPE_NAME;
+            }
+        }
+    }
+    while (open != 0)
+    {
+        kernels->flags[secondary[open - 1]] = 1;
+        open -= 1;
+    }
+    // The depth of ? : and case : groups, added to each token's.
+    uint32_t inner = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint8_t role = kernels->roles[i];
+        const uint32_t before = inner;
+        inner += role == SPIKE_ROLE_OPEN_TERNARY || role == SPIKE_ROLE_OPEN_CASE;
+        inner -= (role == SPIKE_ROLE_CLOSE_TERNARY || role == SPIKE_ROLE_CLOSE_CASE) && inner != 0;
+        kernels->depths[i] += before;
+    }
+}
+
+// The roles that depend on whether a `:` before them ends a case label or a label (a statement starts) or a ternary's
+// middle (an operand follows), which the first K2 pass guessed as the latter: a `{` after a case label is a block; a
+// typedef name there stays flagged, since what follows it was decided from the guess.
+static void spike_after_colons(SpikeKernels* kernels, uint32_t count)
+{
+    for (uint32_t i = 1; i < count; i += 1)
+    {
+        const uint8_t previous = kernels->roles[i - 1];
+        if ((previous == SPIKE_ROLE_CLOSE_CASE || previous == SPIKE_ROLE_LABEL) && kernels->vkinds[i] == SPIKE_KIND_L_BRACE)
+        {
+            kernels->roles[i] = SPIKE_ROLE_OPEN_BLOCK;
+            kernels->flags[i] = 0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// K4, parents: the scalar twin
+
+// A token's node depth: a closer's is outside its group.
+static uint32_t spike_node_depth(const SpikeKernels* kernels, uint32_t token)
+{
+    return kernels->depths[token] - (spike_role_deltas[kernels->roles[token]] < 0);
+}
+
+static void spike_parents_resolve(SpikeKernels* kernels, uint32_t token, uint32_t right)
+{
+    const uint8_t role = kernels->roles[token];
+    const uint32_t left = kernels->lefts[token];
+    uint32_t parent;
+    if (spike_role_rules[role] == SPIKE_RULE_RIGHT)
+    {
+        parent = right;
+    }
+    else
+    {
+        const uint32_t left_depth = left != BUSTER_SPIKE_NONE ? spike_node_depth(kernels, left) : 0;
+        const uint8_t left_level = left != BUSTER_SPIKE_NONE ? spike_role_levels[kernels->roles[left]] : 0;
+        const uint32_t right_depth = right != BUSTER_SPIKE_NONE ? spike_node_depth(kernels, right) : 0;
+        const uint8_t right_level = right != BUSTER_SPIKE_NONE ? spike_role_levels[kernels->roles[right]] : 0;
+        parent = spike_select(left, left_depth, left_level, right, right_depth, right_level);
+    }
+    kernels->parents[token] = parent;
+}
+
+// K4, the scalar twin: L and R of every token with the two stacks of spike_parser_emit, then each role's rule; an
+// opener's parent is its closer.
+static void spike_parents_scalar(SpikeKernels* kernels, uint32_t count)
+{
+    uint32_t left_count = 0;
+    uint32_t right_count = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint8_t role = kernels->roles[i];
+        const uint32_t base = spike_node_depth(kernels, i) * BUSTER_SPIKE_LEVELS;
+        const uint32_t key = base + spike_role_levels[role];
+        const uint8_t rule = spike_role_rules[role];
+        while (right_count != 0 && kernels->waiting_thresholds[right_count - 1] > key)
+        {
+            right_count -= 1;
+            spike_parents_resolve(kernels, kernels->waiting[right_count], i);
+        }
+        const uint32_t left_threshold = base + spike_role_left_thresholds[role];
+        while (left_count != 0 && kernels->stack_keys[left_count - 1] >= left_threshold)
+        {
+            left_count -= 1;
+        }
+        const uint32_t left = left_count != 0 ? kernels->stack[left_count - 1] : BUSTER_SPIKE_NONE;
+        while (left_count != 0 && kernels->stack_keys[left_count - 1] >= key)
+        {
+            left_count -= 1;
+        }
+        kernels->stack[left_count] = i;
+        kernels->stack_keys[left_count] = key;
+        left_count += 1;
+        if (rule == SPIKE_RULE_LEFT)
+        {
+            kernels->parents[i] = left;
+        }
+        else if (rule == SPIKE_RULE_OPENER)
+        {
+            kernels->parents[i] = BUSTER_SPIKE_NONE;
+        }
+        else
+        {
+            kernels->lefts[i] = left;
+            kernels->waiting[right_count] = i;
+            kernels->waiting_thresholds[right_count] = base + spike_role_right_thresholds[role];
+            right_count += 1;
+        }
+        if (spike_role_deltas[role] < 0 && kernels->matches[i] != BUSTER_SPIKE_NONE)
+        {
+            kernels->parents[kernels->matches[i]] = i;
+        }
+    }
+    while (right_count != 0)
+    {
+        right_count -= 1;
+        spike_parents_resolve(kernels, kernels->waiting[right_count], BUSTER_SPIKE_NONE);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// K5, statements
+
+// The statement stack of spike_parser's, over the kernels' arrays: the same states and rules.
+typedef struct SpikeStatementStack SpikeStatementStack;
+struct SpikeStatementStack
+{
+    SpikeStatement* items;
+    uint32_t count;
+    uint32_t* parents;
+};
+
+static SpikeStatement* spike_k5_top(SpikeStatementStack* stack)
+{
+    return stack->count != 0 ? &stack->items[stack->count - 1] : 0;
+}
+
+static void spike_k5_complete(SpikeStatementStack* stack)
+{
+    bool completing = true;
+    while (completing)
+    {
+        SpikeStatement* top = spike_k5_top(stack);
+        completing = top != 0 && top->state == SPIKE_STATEMENT_STARTED;
+        if (completing && top->kind == SPIKE_KIND_IF)
+        {
+            top->state = SPIKE_STATEMENT_IF_DONE;
+            completing = false;
+        }
+        else if (completing && top->kind == SPIKE_KIND_DO)
+        {
+            top->state = SPIKE_STATEMENT_DO_DONE;
+            completing = false;
+        }
+        else if (completing)
+        {
+            stack->count -= 1;
+        }
+    }
+}
+
+static void spike_k5_flush(SpikeStatementStack* stack)
+{
+    SpikeStatement* top = spike_k5_top(stack);
+    while (top != 0 && top->state == SPIKE_STATEMENT_IF_DONE)
+    {
+        stack->count -= 1;
+        spike_k5_complete(stack);
+        top = spike_k5_top(stack);
+    }
+}
+
+static uint32_t spike_k5_owner(SpikeStatementStack* stack)
+{
+    uint32_t result = BUSTER_SPIKE_NONE;
+    SpikeStatement* top = spike_k5_top(stack);
+    if (top != 0 && top->state == SPIKE_STATEMENT_WAITING)
+    {
+        result = top->token;
+        top->state = SPIKE_STATEMENT_STARTED;
+    }
+    return result;
+}
+
+// K5: the statement-level tokens of blocks, in order, through the statement stack, which sets the parents of the
+// statements heads own, of `else` and of a do-statement's parts. Returns false if an else has no if.
+static bool spike_statements(SpikeKernels* kernels, uint32_t count, SpikeStatement* items)
+{
+    SpikeStatementStack stack = { .items = items, .count = 0, .parents = kernels->parents };
+    bool result = true;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint8_t role = kernels->roles[i];
+        const uint32_t opener = kernels->enclosing[i];
+        const uint8_t group = opener != BUSTER_SPIKE_NONE ? kernels->roles[opener] : SPIKE_ROLE_NONE;
+        // A closer's statement context is its opener's; the enclosing groups are those of ( [ { only, since no
+        // statement is inside a ? : or case group.
+        const uint32_t outer = opener != BUSTER_SPIKE_NONE ? kernels->enclosing[opener] : BUSTER_SPIKE_NONE;
+        const uint8_t outer_group = outer != BUSTER_SPIKE_NONE ? kernels->roles[outer] : SPIKE_ROLE_NONE;
+        const bool in_block = group == SPIKE_ROLE_OPEN_BLOCK || group == SPIKE_ROLE_OPEN_BODY;
+        const bool closer_in_block = outer_group == SPIKE_ROLE_OPEN_BLOCK || outer_group == SPIKE_ROLE_OPEN_BODY;
+        if (role == SPIKE_ROLE_OPEN_BLOCK || role == SPIKE_ROLE_OPEN_BODY)
+        {
+            const bool statement = role == SPIKE_ROLE_OPEN_BLOCK && in_block;
+            uint32_t owner = BUSTER_SPIKE_NONE;
+            if (statement)
+            {
+                spike_k5_flush(&stack);
+                owner = spike_k5_owner(&stack);
+            }
+            stack.items[stack.count] = (SpikeStatement){ .token = BUSTER_SPIKE_NONE, .owner = owner, .extra = BUSTER_SPIKE_NONE, .state = SPIKE_STATEMENT_BLOCK, .kind = statement };
+            stack.count += 1;
+        }
+        else if (role == SPIKE_ROLE_CLOSE_BLOCK || role == SPIKE_ROLE_CLOSE_BODY)
+        {
+            spike_k5_flush(&stack);
+            SpikeStatement* top = spike_k5_top(&stack);
+            while (top != 0 && top->state != SPIKE_STATEMENT_BLOCK)
+            {
+                stack.count -= 1;
+                top = spike_k5_top(&stack);
+            }
+            if (top != 0)
+            {
+                const bool statement = top->kind != 0;
+                if (top->owner != BUSTER_SPIKE_NONE)
+                {
+                    kernels->parents[i] = top->owner;
+                }
+                stack.count -= 1;
+                if (statement)
+                {
+                    spike_k5_complete(&stack);
+                }
+            }
+        }
+        else if (role == SPIKE_ROLE_TERMINATOR && in_block)
+        {
+            spike_k5_flush(&stack);
+            SpikeStatement* top = spike_k5_top(&stack);
+            if (top != 0 && top->state == SPIKE_STATEMENT_DO_WHILE)
+            {
+                kernels->parents[top->token] = i;
+                kernels->parents[top->extra] = i;
+                if (top->owner != BUSTER_SPIKE_NONE)
+                {
+                    kernels->parents[i] = top->owner;
+                }
+                stack.count -= 1;
+            }
+            else
+            {
+                const uint32_t owner = spike_k5_owner(&stack);
+                if (owner != BUSTER_SPIKE_NONE)
+                {
+                    kernels->parents[i] = owner;
+                }
+            }
+            spike_k5_complete(&stack);
+        }
+        else if (((role == SPIKE_ROLE_CLOSE_CONDITION || role == SPIKE_ROLE_CLOSE_FOR) && closer_in_block) ||
+                 ((role == SPIKE_ROLE_CLOSE_CASE || role == SPIKE_ROLE_LABEL || role == SPIKE_ROLE_DO) && in_block))
+        {
+            const uint8_t keyword = role == SPIKE_ROLE_CLOSE_CONDITION ? kernels->vkinds[opener - 1] : role == SPIKE_ROLE_CLOSE_FOR ? SPIKE_KIND_FOR :
+                                    role == SPIKE_ROLE_DO ? SPIKE_KIND_DO : SPIKE_KIND_CASE;
+            spike_k5_flush(&stack);
+            SpikeStatement* top = spike_k5_top(&stack);
+            if (keyword == SPIKE_KIND_WHILE && top != 0 && top->state == SPIKE_STATEMENT_DO_DONE)
+            {
+                top->state = SPIKE_STATEMENT_DO_WHILE;
+                top->extra = i;
+            }
+            else
+            {
+                const uint32_t owner = spike_k5_owner(&stack);
+                if (owner != BUSTER_SPIKE_NONE && keyword != SPIKE_KIND_DO)
+                {
+                    kernels->parents[i] = owner;
+                }
+                stack.items[stack.count] = (SpikeStatement){
+                    .token = i,
+                    .owner = keyword == SPIKE_KIND_DO ? owner : BUSTER_SPIKE_NONE,
+                    .extra = BUSTER_SPIKE_NONE,
+                    .state = SPIKE_STATEMENT_WAITING,
+                    .kind = keyword,
+                };
+                stack.count += 1;
+            }
+        }
+        else if (role == SPIKE_ROLE_ELSE)
+        {
+            SpikeStatement* top = spike_k5_top(&stack);
+            if (top != 0 && top->state == SPIKE_STATEMENT_IF_DONE)
+            {
+                kernels->parents[i] = top->token;
+                *top = (SpikeStatement){ .token = i, .owner = BUSTER_SPIKE_NONE, .extra = BUSTER_SPIKE_NONE, .state = SPIKE_STATEMENT_WAITING, .kind = SPIKE_KIND_ELSE };
+            }
+            else
+            {
+                result = false;
+            }
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The fallback
+
+typedef struct SpikeFallback SpikeFallback;
+struct SpikeFallback
+{
+    // Top-level declarations the scalar parser parsed, and their tokens.
+    uint32_t items;
+    uint64_t tokens;
+    // The first token of a declaration the scalar parser couldn't parse alone, or BUSTER_SPIKE_NONE.
+    uint32_t error_token;
+};
+
+// Parses every top-level declaration that has a flagged token with the scalar parser, in place: roles, depths and
+// parents of its tokens. The scalar parser sees the file-scope typedef names declared before each one. With
+// `everything`, the whole file is one declaration (unbalanced brackets, or a typedef the pass can't read).
+static SpikeFallback spike_fallback(SpikeKernels* kernels, const uint8_t* kinds, const uint32_t* names, uint32_t count, bool everything, SpikeMeanings* meanings,
+                                    Arena* scratch)
+{
+    SpikeFallback result = { .items = 0, .tokens = 0, .error_token = BUSTER_SPIKE_NONE };
+    uint32_t begin = 0;
+    bool flagged = false;
+    uint32_t visible = 0;
+    for (uint32_t i = 0; i < count && result.error_token == BUSTER_SPIKE_NONE; i += 1)
+    {
+        flagged |= kernels->flags[i] != 0;
+        const uint8_t role = kernels->roles[i];
+        const bool end = everything ? i + 1 == count : spike_node_depth(kernels, i) == 0 && (role == SPIKE_ROLE_TERMINATOR || role == SPIKE_ROLE_CLOSE_BODY);
+        if (end && (flagged || everything))
+        {
+            // The file-scope typedef names declared before this declaration.
+            while (visible < kernels->typedef_count && kernels->typedef_tokens[visible] < begin)
+            {
+                const uint32_t id = kernels->typedef_log[visible];
+                meanings->meanings[id] = kernels->typedef_names[id] == BUSTER_SPIKE_TYPEDEF_FILE ? SPIKE_MEANING_TYPEDEF : meanings->meanings[id];
+                visible += 1;
+            }
+            SpikeTree tree = { .roles = kernels->roles + begin, .depths = kernels->depths + begin, .parents = kernels->parents + begin };
+            const SpikeParseResult parse = spike_parse_scalar(kinds + begin, names + begin, i + 1 - begin, meanings, &tree, scratch);
+            if (parse.error_token != BUSTER_SPIKE_NONE)
+            {
+                result.error_token = begin + parse.error_token;
+            }
+            for (uint32_t j = begin; j <= i; j += 1)
+            {
+                kernels->parents[j] = kernels->parents[j] == BUSTER_SPIKE_ROOT ? BUSTER_SPIKE_ROOT : kernels->parents[j] + begin;
+            }
+            result.items += 1;
+            result.tokens += i + 1 - begin;
+        }
+        if (end)
+        {
+            begin = i + 1;
+            flagged = false;
+        }
+    }
+    for (uint32_t i = 0; i < visible; i += 1)
+    {
+        meanings->meanings[kernels->typedef_log[i]] = SPIKE_MEANING_ORDINARY;
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The kernels' scalar twins together
+
+typedef struct SpikeKernelResult SpikeKernelResult;
+struct SpikeKernelResult
+{
+    SpikeFallback fallback;
+    uint64_t flagged_tokens;
+    bool everything;
+};
+
+// Reserves the kernels' arrays for up to `capacity` tokens, with padding around each per-token array, and up to
+// `name_capacity` names.
+static bool spike_kernels_reserve(SpikeKernels* kernels, Arena* arena, uint64_t capacity, uint64_t name_capacity)
+{
+    const uint64_t slots = capacity + 2 * BUSTER_SPIKE_TOKEN_PADDING;
+    uint8_t* vkinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots);
+    uint8_t* roles = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots);
+    uint8_t* flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots);
+    *kernels = (SpikeKernels){
+        .vkinds = vkinds != 0 ? vkinds + BUSTER_SPIKE_TOKEN_PADDING : 0,
+        .depths = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .enclosing = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .matches = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .roles = roles != 0 ? roles + BUSTER_SPIKE_TOKEN_PADDING : 0,
+        .parents = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .flags = flags != 0 ? flags + BUSTER_SPIKE_TOKEN_PADDING : 0,
+        .stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .stack_keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .waiting = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .waiting_thresholds = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .lefts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .typedef_names = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, name_capacity),
+        .typedef_log = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .typedef_tokens = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+    };
+    const bool result = kernels->vkinds != 0 && kernels->depths != 0 && kernels->enclosing != 0 && kernels->matches != 0 && kernels->roles != 0 &&
+                        kernels->parents != 0 && kernels->flags != 0 && kernels->stack != 0 && kernels->stack_keys != 0 && kernels->waiting != 0 &&
+                        kernels->waiting_thresholds != 0 && kernels->lefts != 0 && kernels->typedef_names != 0 && kernels->typedef_log != 0 &&
+                        kernels->typedef_tokens != 0;
+    if (result)
+    {
+        memset(kernels->typedef_names, 0, name_capacity);
+        memset(vkinds, SPIKE_KIND_END, slots);
+        memset(roles, SPIKE_ROLE_NONE, slots);
+        memset(flags, 0, slots);
+    }
+    spike_kernels_init_tables();
+    return result;
+}
+
+// Every kernel's scalar twin in turn, then the fallback, into kernels->parents. `typed` and `statements` are scratch
+// arrays of a byte and a SpikeStatement per token.
+static SpikeKernelResult spike_parse_twins(SpikeKernels* kernels, const uint8_t* kinds, const uint32_t* names, uint32_t count, SpikeMeanings* meanings,
+                                           Arena* scratch, uint8_t* typed, SpikeStatement* statements)
+{
+    SpikeKernelResult result = { .flagged_tokens = 0, .everything = false };
+    kernels->unbalanced = false;
+    kernels->unsupported = false;
+    // K1, on ( [ {.
+    kernels->unbalanced = !spike_brackets_scalar(kinds, spike_kind_deltas, count, kernels->depths, kernels->enclosing, kernels->stack);
+    spike_matches(kinds, spike_kind_deltas, count, kernels->enclosing, kernels->matches);
+    // K3.
+    if (!kernels->unbalanced)
+    {
+        spike_typedefs(kernels, kinds, names, count);
+    }
+    spike_classify_scalar(kernels, kinds, names, count);
+    // K2.
+    spike_roles_scalar(kernels, count, typed);
+    // K1's second part, and the roles after the colons it resolved.
+    spike_secondary_scalar(kernels, count, kernels->stack);
+    spike_after_colons(kernels, count);
+    // K4 and K5.
+    spike_parents_scalar(kernels, count);
+    const bool statements_ok = spike_statements(kernels, count, statements);
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        result.flagged_tokens += kernels->flags[i] != 0;
+    }
+    result.everything = kernels->unbalanced || kernels->unsupported || !statements_ok;
+    result.fallback = spike_fallback(kernels, kinds, names, count, result.everything, meanings, scratch);
+    // The names this file declared as typedefs, for the next file.
+    for (uint32_t i = 0; i < kernels->typedef_count; i += 1)
+    {
+        kernels->typedef_names[kernels->typedef_log[i]] = 0;
+    }
     return result;
 }
