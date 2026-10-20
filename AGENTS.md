@@ -175,18 +175,21 @@ writes the LLVM IR of `build.sh`'s translation units, with the same flags, at
 call in the IR is a call in the source) into a temporary directory, and runs
 `./build/compiler check-call-graph FILE.ll...` on them (so it needs a build).
 The command reads each `define` and the direct `call`, `invoke` and `callbr`
-instructions in its body; a callee is its translation unit's function of that
-name first (static functions are per unit: the benchmarks' copies of
-`lane.c` are separate functions), then an external one. Calls of functions
-defined nowhere (libc, intrinsics) and calls through pointers, which the style
-allows only at the thread-entry boundary, are left out.
+instructions in its body; a callee is its translation unit's function or alias
+of that name first (static functions are per unit: the benchmarks' copies of
+`lane.c` are separate functions), then an external one, and an alias, through
+any chain of them, is the function it names. Calls of functions defined
+nowhere (libc, intrinsics) and calls through pointers, which the style allows
+only at the thread-entry boundary, are left out; a call of an ifunc or of an
+alias that leads to no definition fails the check.
 
 It reports each strongly connected component of more than one function and
 each function that calls itself, with the shortest call path through the
 component's first function, as `unit.ll:function -> ... -> unit.ll:function`,
 then a summary line, and exits with status 1 on a cycle not in
 `call_graph_allowed`, on an allowlist entry that matches no cycle, and on IR it
-can't read. An entry names a component's functions; add one only for the
+can't read. An entry names a component's functions, each as many times as
+the component has a function of that name; add one only for the
 style's "trivial statically bounded recursion", with a comment saying what
 bounds its depth. The list is empty: the tree has no cycle. The 9700X job runs
 `test-call-graph` and the check after the build; the IR takes about 1.5 s.
@@ -195,10 +198,12 @@ bounds its depth. The list is empty: the tree has no cycle. The 9700X job runs
 on IR of the call forms clang writes and of what must be left out, a
 self-call, a two-function cycle, a cycle with a chord (whose path must be the
 shortest), a cycle through three translation units beside static and external
-functions of the same name, two units' copies of a cycle allowed by one entry,
-a cycle grown past its entry with an unused entry, malformed IR, and a chain of
-a million functions and a ring of 100,000, deeper than a recursive walk's
-stack.
+functions of the same name, clang's IR of recursion through aliases and of a
+call of an ifunc, aliases that lead nowhere, two units' copies of a cycle
+allowed by one entry, a cycle grown past its entry with an unused entry, a
+cycle through two units' static functions of the same name that entries naming
+it once mustn't match, malformed IR, and a chain of a million functions and a
+ring of 100,000, deeper than a recursive walk's stack.
 
 ## Lexer tests
 

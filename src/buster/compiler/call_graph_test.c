@@ -13,8 +13,12 @@
 //     shortest one;
 //   - a cycle through three translation units' external functions, beside static functions of the same name in two of
 //     them and an external one in the third: a callee resolves to its own unit's static function first;
+//   - aliases: clang's IR of a function that calls itself through an alias and through an internal alias of an alias,
+//     and of a call of an ifunc (a problem); then hand-written aliases that lead to no definition: round a loop, and to
+//     a declaration;
 //   - allowed cycles: two units' copies of the same static pair, both allowed by one entry; then a cycle that grew past
-//     its entry, an allowed self-call and an entry without a cycle;
+//     its entry, an allowed self-call and an entry without a cycle; then a cycle through two units' static functions of
+//     the same name, which an entry naming the other functions once each, and another, mustn't match;
 //   - malformed IR: definitions without a closing brace or a name;
 //   - depth: a chain of BUSTER_CALL_GRAPH_TEST_CHAIN functions that ends in a self-call, and a ring of
 //     BUSTER_CALL_GRAPH_TEST_RING functions, which would overflow a recursive walk's stack.
@@ -168,6 +172,94 @@ static const CallGraphInput call_graph_test_units[] = {
     },
 };
 
+// clang 23's IR of this, at -O0 without LLVM's passes, without its metadata and attributes:
+//
+//   int again(int) __attribute__((alias("recurse")));
+//   static int hidden_again(int) __attribute__((alias("chain")));
+//   int chain(int) __attribute__((alias("again")));
+//   int recurse(int n)
+//   {
+//       int result = 0;
+//       if (n != 0)
+//       {
+//           result = again(n - 1) + hidden_again(n - 1) + n;
+//       }
+//       return result;
+//   }
+//   static int pick(void) { return 0; }
+//   static int (*resolve(void))(void) { return pick; }
+//   int dispatched(void) __attribute__((ifunc("resolve")));
+//   int use(void) { return dispatched(); }
+static const CallGraphInput call_graph_test_alias[] = {
+    {
+        .name = BUSTER_S8_INIT("alias.ll"),
+        .text = BUSTER_S8_INIT("@again = dso_local alias i32 (i32), ptr @recurse\n"
+                               "@hidden_again = internal alias i32 (i32), ptr @chain\n"
+                               "@chain = dso_local alias i32 (i32), ptr @again\n"
+                               "@dispatched = dso_local ifunc i32 (), ptr @resolve\n"
+                               "\n"
+                               "define dso_local i32 @recurse(i32 noundef %0) #0 {\n"
+                               "  %2 = alloca i32, align 4\n"
+                               "  %3 = alloca i32, align 4\n"
+                               "  store i32 %0, ptr %2, align 4\n"
+                               "  store i32 0, ptr %3, align 4\n"
+                               "  %4 = load i32, ptr %2, align 4\n"
+                               "  %5 = icmp ne i32 %4, 0\n"
+                               "  br i1 %5, label %6, label %16\n"
+                               "\n"
+                               "6:                                                ; preds = %1\n"
+                               "  %7 = load i32, ptr %2, align 4\n"
+                               "  %8 = sub i32 %7, 1\n"
+                               "  %9 = call i32 @again(i32 noundef %8)\n"
+                               "  %10 = load i32, ptr %2, align 4\n"
+                               "  %11 = sub i32 %10, 1\n"
+                               "  %12 = call i32 @hidden_again(i32 noundef %11)\n"
+                               "  %13 = add i32 %9, %12\n"
+                               "  %14 = load i32, ptr %2, align 4\n"
+                               "  %15 = add i32 %13, %14\n"
+                               "  store i32 %15, ptr %3, align 4\n"
+                               "  br label %16\n"
+                               "\n"
+                               "16:                                               ; preds = %6, %1\n"
+                               "  %17 = load i32, ptr %3, align 4\n"
+                               "  ret i32 %17\n"
+                               "}\n"
+                               "\n"
+                               "define dso_local i32 @use() #0 {\n"
+                               "  %1 = call i32 @dispatched()\n"
+                               "  ret i32 %1\n"
+                               "}\n"
+                               "\n"
+                               "define internal ptr @resolve() #1 {\n"
+                               "  ret ptr @pick\n"
+                               "}\n"
+                               "\n"
+                               "define internal i32 @pick() #0 {\n"
+                               "  ret i32 0\n"
+                               "}\n"),
+    },
+};
+
+// Invalid IR, which the verifier would refuse, but the check must not take for a call of nothing. The string holds the
+// keyword, which only an alias's own words may.
+static const CallGraphInput call_graph_test_lost_alias[] = {
+    {
+        .name = BUSTER_S8_INIT("lost.ll"),
+        .text = BUSTER_S8_INIT("@.str = private unnamed_addr constant [7 x i8] c\" alias \\00\", align 1\n"
+                               "@loop_a = dso_local alias void (), ptr @loop_b\n"
+                               "@loop_b = internal alias void (), ptr @loop_a\n"
+                               "@lost = dso_local alias void (), ptr @nowhere\n"
+                               "@empty = dso_local alias void ()\n"
+                               "declare void @nowhere()\n"
+                               "define dso_local void @f() {\n"
+                               "  call void @loop_a()\n"
+                               "  call void @lost()\n"
+                               "  call void @nowhere()\n"
+                               "  ret void\n"
+                               "}\n"),
+    },
+};
+
 static const CallGraphInput call_graph_test_copies[] = {
     {
         .name = BUSTER_S8_INIT("first.ll"),
@@ -233,6 +325,45 @@ static const CallGraphAllowed call_graph_test_grown_allowed[] = {
     },
 };
 
+static const CallGraphInput call_graph_test_same_names[] = {
+    {
+        .name = BUSTER_S8_INIT("one.ll"),
+        .text = BUSTER_S8_INIT("define dso_local void @x() {\n"
+                               "  call void @a()\n"
+                               "  ret void\n"
+                               "}\n"
+                               "define internal void @a() {\n"
+                               "  call void @y()\n"
+                               "  ret void\n"
+                               "}\n"),
+    },
+    {
+        .name = BUSTER_S8_INIT("two.ll"),
+        .text = BUSTER_S8_INIT("define dso_local void @y() {\n"
+                               "  call void @a()\n"
+                               "  ret void\n"
+                               "}\n"
+                               "define internal void @a() {\n"
+                               "  call void @x()\n"
+                               "  ret void\n"
+                               "}\n"),
+    },
+};
+
+// The first two have the component's size and none of its names is missing, but they name `a` once; the third names it
+// twice.
+static const CallGraphAllowed call_graph_test_same_names_allowed[] = {
+    {
+        .functions = BUSTER_S8_INIT("x a y b"),
+    },
+    {
+        .functions = BUSTER_S8_INIT("x a y y"),
+    },
+    {
+        .functions = BUSTER_S8_INIT("a y a x"),
+    },
+};
+
 static const CallGraphInput call_graph_test_malformed[] = {
     {
         .name = BUSTER_S8_INIT("broken.ll"),
@@ -286,6 +417,25 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .success = false,
     },
     {
+        .name = "aliases and an ifunc",
+        .inputs = call_graph_test_alias,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_alias),
+        .expected = BUSTER_S8_INIT("alias.ll:34: a call of dispatched, an ifunc, whose callee is chosen at run time\n"
+                                   "cycle: alias.ll:recurse -> alias.ll:recurse\n"
+                                   "call graph: 1 translation unit, 4 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+        .success = false,
+    },
+    {
+        .name = "aliases of nothing",
+        .inputs = call_graph_test_lost_alias,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_lost_alias),
+        .expected = BUSTER_S8_INIT("lost.ll:5: an alias without a target\n"
+                                   "lost.ll:8: a call of loop_a, an alias that leads to no definition\n"
+                                   "lost.ll:9: a call of lost, an alias that leads to no definition\n"
+                                   "call graph: 1 translation unit, 1 function, 0 calls between them, 0 cycles, 0 allowed\n"),
+        .success = false,
+    },
+    {
         .name = "allowed copies",
         .inputs = call_graph_test_copies,
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_copies),
@@ -307,6 +457,18 @@ static const CallGraphTestCase call_graph_test_cases[] = {
                                    "allowlist entry without a cycle: a b\n"
                                    "allowlist entry without a cycle: e\n"
                                    "call graph: 1 translation unit, 4 functions, 4 calls between them, 1 cycle, 1 allowed\n"),
+        .success = false,
+    },
+    {
+        .name = "names that repeat",
+        .inputs = call_graph_test_same_names,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_same_names),
+        .allowed = call_graph_test_same_names_allowed,
+        .allowed_count = BUSTER_ARRAY_LENGTH(call_graph_test_same_names_allowed),
+        .expected = BUSTER_S8_INIT("allowed cycle: one.ll:x -> one.ll:a -> two.ll:y -> two.ll:a -> one.ll:x\n"
+                                   "allowlist entry without a cycle: x a y b\n"
+                                   "allowlist entry without a cycle: x a y y\n"
+                                   "call graph: 2 translation units, 4 functions, 4 calls between them, 0 cycles, 1 allowed\n"),
         .success = false,
     },
     {
