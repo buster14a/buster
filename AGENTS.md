@@ -390,11 +390,11 @@ machine, with `build.sh`'s unoptimized build, the C and C++ runs take about
 ./build/compiler test-lexer --cplusplus --seed 7 --fuzz 2000000
 ```
 
-Both modes also check the entry point's loader: empty and missing files, a
-source past the lexer's length limit, and repeated successful loads whose
-descriptor and four mappings must be released. A child limits its address
-space to fail each token-array mapping in turn, including `ends`, and the
-source mapping; each failure must retain its cause, return zero tokens and
+Both modes also check the entry point's loader: empty and missing files,
+a borrowed source and a sparse file past the lexer's length limit, and repeated
+successful loads whose descriptor and four mappings must be released. A child
+limits its address space to fail each token-array mapping in turn, including
+`ends`, and the source mapping; each failure must retain its cause, return zero tokens and
 leave no mappings or descriptor behind. This checks the existing stub only,
 without replacing the driver being developed under #116, #117 and #145.
 

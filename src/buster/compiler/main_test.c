@@ -143,6 +143,25 @@ static int run_main_tests(void)
             close(after);
         }
         failures += written && !main_test_mapping_failures(path);
+        // A sparse extension reaches the file-size guard without writing or mapping the oversized range.
+        const off_t oversized_length = (off_t)UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK + 1;
+        const bool enlarged = ftruncate(fd, oversized_length) == 0;
+        failures += !enlarged;
+        if (enlarged)
+        {
+            PrimitiveTokenizeResult oversized_file = primitive_tokenize_file(path);
+            const int size_after = open("/dev/null", O_RDONLY | O_CLOEXEC);
+            failures += !oversized_file.error || oversized_file.error_number != EFBIG || oversized_file.token_count != 0
+                || oversized_file.operation == 0 || strcmp(oversized_file.operation, "file size") != 0
+                || oversized_file.content.pointer != 0 || oversized_file.content.length != 0 || oversized_file.owns_content
+                || oversized_file.kinds != 0 || oversized_file.starts != 0 || oversized_file.ends != 0 || oversized_file.token_capacity != 0
+                || before < 0 || size_after != before;
+            if (size_after >= 0)
+            {
+                close(size_after);
+            }
+            primitive_tokenize_release(&oversized_file);
+        }
         failures += close(fd) != 0;
         failures += unlink(name) != 0;
         PrimitiveTokenizeResult missing = primitive_tokenize_file(path);
