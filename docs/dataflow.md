@@ -218,18 +218,18 @@ apart. Differences of a few percent should be treated as build/layout noise,
 not evidence of an algorithmic improvement.
 
 Inspection of the measured binary confirmed direct calls to both benchmark
-wrappers, with each solver body compiled inside its wrapper. The scalar
-kernel uses the bound `(value_count + 63) >> 6` and 64-bit scalar `andn`,
-OR and XOR operations. Its word loop is unrolled by 4 around four copies of
-the edge loop, which takes one edge per iteration, with a loop for the last
-words after it.
+wrappers. The scalar solver's body is compiled inside its wrapper. The
+AVX-512 wrapper only tests the row width and the block count, then jumps,
+as a tail call, to one of the solver's two functions, for one-vector rows or
+the rest, each starting a 64-byte line. The scalar kernel uses the bound
+`(value_count + 63) >> 6` and 64-bit scalar `andn`, OR and XOR operations.
+Its word loop is unrolled by 4 around four copies of the edge loop, which
+takes one edge per iteration, with a loop for the last words after it.
 Both kernels load column bases at solve setup instead of reloading
-`Dataflow` members in every chunk. The vector kernel's two loops are
-functions of their own, each starting a 64-byte line, which the benchmark's
-wrapper reaches with a tail jump. The loop for one-vector rows keeps the bases
-and its counters in registers, with no stack access in its block loop; the
-general function's instructions are those of #204's wrapper, which store two
-stack slots and reload about ten in every block. The vector kernel uses
+`Dataflow` members in every chunk. The loop for one-vector rows keeps the
+bases and its counters in registers, with no stack access in its block loop;
+the general function's instructions are those of #204's wrapper, which store
+two stack slots and reload about ten in every block. The vector kernel uses
 aligned 64-byte loads/stores, `vporq` and `vpternlogq` with immediate `0xF4`.
 Clang folds the XOR-and-test into `vpcmpneqq`, with `kmovb` or `kmovd` and a
 scalar OR accumulating changes. Neither solver uses gathers or scatters.
