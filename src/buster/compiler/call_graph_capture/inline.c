@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
 // A fixture for ./build.sh check-call-graph, never built into the compiler: the IR capture must keep what the
 // production build may inline. again's body exists only for inlining (GNU extern inline), and strong.c defines the
 // out-of-line again, so the recursion recurse -> again -> recurse is there only in this unit's inlined body, which a

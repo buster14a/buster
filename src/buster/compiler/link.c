@@ -66,7 +66,7 @@
 //     (BUSTER_LINK_SOURCE_*), the fixup kinds (BUSTER_LINK_FIXUP_*), the instruction fields they patch (LinkField) and
 //     their properties (LinkFixupKind and link_fixup_kinds), LinkError, the tables (LinkNames, LinkAtoms, LinkSymbols
 //     and LinkFixups), Link, LinkCapacity, LinkReference and the entry points' prototypes.
-//   - Names: link_hash and link_add_name.
+//   - Names: link_hash, link_hash_rows, link_hash_names, link_add_name and link_add_name_hashed.
 //   - Tables: link_capacity_bytes, link_initialize, link_add_atom, link_add_symbol, link_define_symbol, link_add_fixup
 //     and link_fixup_addend.
 //   - Code: link_instruction_field, link_kind_fits and link_add_code_fixups.
@@ -75,6 +75,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+
+// CPU architecture dependent includes
+#include <immintrin.h>
 
 // ---------------------------------------------------------------------------------------------------------------------
 // API
@@ -85,22 +88,29 @@ typedef uint32_t SymbolId;
 typedef uint32_t FixupId;
 
 // Atom classes: the output section an atom goes to, numbered in the order of lld's segments, so that sorting atoms by
-// class gives the layout's order of sections: R (.rodata and the string pools), RX (.text), RW and RELRO (.tdata,
-// .tbss, .init_array, .fini_array, .data.rel.ro), RW (.data, .bss). TBSS and BSS are zero-fill: their atoms have no
-// bytes. The atoms of INIT_ARRAY and FINI_ARRAY, whose order is what the program runs, keep the order of their ids.
+// class gives the layout's order of sections: R (.rodata, the string pools and .eh_frame), RX (.text, .init and
+// .fini), RW and RELRO (.tdata, .tbss, .init_array, .fini_array, .data.rel.ro), RW (.data, .bss). TBSS and BSS are
+// zero-fill: their atoms have no bytes. The atoms of the classes whose order is what the program runs keep the order of
+// their ids: EH_FRAME, INIT, FINI, INIT_ARRAY and FINI_ARRAY.
 #define BUSTER_LINK_CLASS_NONE 0
 #define BUSTER_LINK_CLASS_RODATA 1
 // Pools of string literals: .rodata.str1.1 in an object (SHF_MERGE | SHF_STRINGS), .rodata in an executable.
 #define BUSTER_LINK_CLASS_STRINGS 2
-#define BUSTER_LINK_CLASS_TEXT 3
-#define BUSTER_LINK_CLASS_TDATA 4
-#define BUSTER_LINK_CLASS_TBSS 5
-#define BUSTER_LINK_CLASS_INIT_ARRAY 6
-#define BUSTER_LINK_CLASS_FINI_ARRAY 7
-#define BUSTER_LINK_CLASS_DATA_RELRO 8
-#define BUSTER_LINK_CLASS_DATA 9
-#define BUSTER_LINK_CLASS_BSS 10
-#define BUSTER_LINK_CLASS_COUNT 11
+// Unwind tables: CIEs and FDEs, as an object's .eh_frame holds them, the C runtime's (crtendS.o's terminator last).
+#define BUSTER_LINK_CLASS_EH_FRAME 3
+#define BUSTER_LINK_CLASS_TEXT 4
+// The C runtime's .init and .fini: fragments of one function each, from crti.o's prologue to crtn.o's epilogue, which
+// run into each other.
+#define BUSTER_LINK_CLASS_INIT 5
+#define BUSTER_LINK_CLASS_FINI 6
+#define BUSTER_LINK_CLASS_TDATA 7
+#define BUSTER_LINK_CLASS_TBSS 8
+#define BUSTER_LINK_CLASS_INIT_ARRAY 9
+#define BUSTER_LINK_CLASS_FINI_ARRAY 10
+#define BUSTER_LINK_CLASS_DATA_RELRO 11
+#define BUSTER_LINK_CLASS_DATA 12
+#define BUSTER_LINK_CLASS_BSS 13
+#define BUSTER_LINK_CLASS_COUNT 14
 // An atom's alignment is at most 2^this: 4 GB.
 #define BUSTER_LINK_MAX_ALIGNMENT_LOG2 32
 
@@ -124,9 +134,10 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_SYMBOL_INFO 0x3f
 #define BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT 6
 
-// Where a symbol is defined. A symbol of the program, a runtime archive member or a foreign object is defined in an
-// atom; one of a shared library or of the linker (__init_array_start, _GLOBAL_OFFSET_TABLE_) has none, and neither has
-// one defined nowhere (NONE: undefined, or a weak reference that binds to 0).
+// Where a symbol is defined. A symbol of the program, of the C runtime's objects and archive members (RUNTIME_ARCHIVE:
+// the crt objects, libc_nonshared.a's members) or of a foreign object is defined in an atom; one of a shared library or
+// of the linker (__init_array_start, _GLOBAL_OFFSET_TABLE_) has none, and neither has one defined nowhere (NONE:
+// undefined, or a weak reference that binds to 0).
 #define BUSTER_LINK_SOURCE_NONE 0
 #define BUSTER_LINK_SOURCE_PROGRAM 1
 #define BUSTER_LINK_SOURCE_RUNTIME_SHARED 2
@@ -416,8 +427,10 @@ struct LinkReference
 };
 
 // The 64-bit hash of a name's bytes. It is part of the format from the runtime snapshot on (docs/object-writer-and-
-// linker.md, "The runtime snapshot"), and the import path's vectorized hashing has to compute the same function.
+// linker.md, "The runtime snapshot"), so link_hash_names computes the same function eight names at a time.
 static __attribute__((unused)) uint64_t link_hash(const uint8_t* bytes, uint64_t length);
+// hashes[i] = link_hash(names[i], lengths[i]) for `count` names, eight at a time in vectors.
+static __attribute__((unused)) void link_hash_names(const uint8_t* const* names, const uint32_t* lengths, uint64_t count, uint64_t* hashes);
 // At most how many bytes link_initialize pushes for `capacity`: what to reserve for the tables' arena.
 static __attribute__((unused)) uint64_t link_capacity_bytes(LinkCapacity capacity);
 // Pushes the columns of every table from `arena`, with room for `capacity`, and has names' bytes copied to `name_arena`.
@@ -426,6 +439,8 @@ static __attribute__((unused)) uint64_t link_capacity_bytes(LinkCapacity capacit
 static __attribute__((unused)) bool link_initialize(Link* link, Arena* arena, Arena* name_arena, LinkCapacity capacity);
 // A copy of the name, with its hash: its id, or 0 if the table or the name arena is full or the name is empty.
 static __attribute__((unused)) NameId link_add_name(Link* link, const uint8_t* bytes, uint32_t length);
+// The same with the name's hash given, which the caller computed with link_hash or link_hash_names.
+static __attribute__((unused)) NameId link_add_name_hashed(Link* link, const uint8_t* bytes, uint32_t length, uint64_t hash);
 // An atom: its id, or 0. Its fixups are added after it, with link_add_fixup or link_add_code_fixups, and its address
 // starts at 0.
 static __attribute__((unused)) AtomId link_add_atom(Link* link, uint8_t class, uint8_t alignment_log2, uint64_t size, uint8_t* bytes, uint32_t unit);
@@ -465,38 +480,144 @@ static void link_fail(Link* link, LinkError error)
 // ---------------------------------------------------------------------------------------------------------------------
 // Names
 
-// The constants and the mixing step of wyhash (which is in the public domain): the 128-bit product's halves XORed
-// together.
-#define BUSTER_LINK_HASH_SEED 0x9E3779B97F4A7C15ull
-#define BUSTER_LINK_HASH_SECRET0 0xa0761d6478bd642full
-#define BUSTER_LINK_HASH_SECRET1 0xe7037ed1a0b428dbull
+// The name hash: eight bytes at a time, the last eight or fewer zero-extended (at least one word, so the empty name has
+// one), each word mixed in with an XOR, a 64-bit multiplication and a shift that folds the product's high half into its
+// low half; then SplitMix64's finalizer (THIRD_PARTY_NOTICES.md has its reference). The length is in the seed, so that
+// names that differ only in trailing zero bytes differ. Each step is an AVX-512 instruction on eight 64-bit lanes
+// (vpxorq, vpmullq, vpsrlq), which is what lets link_hash_names give each of eight names what link_hash gives it.
+#define BUSTER_LINK_HASH_SEED 0x243F6A8885A308D3ull
+#define BUSTER_LINK_HASH_MULTIPLIER 0x9E3779B97F4A7C15ull
+#define BUSTER_LINK_HASH_FINISH0 0xbf58476d1ce4e5b9ull
+#define BUSTER_LINK_HASH_FINISH1 0x94d049bb133111ebull
+// link_hash_names' batch, and the longest name it hashes in vectors: a 64-byte load each. A longer one goes to
+// link_hash.
+#define BUSTER_LINK_HASH_BATCH 8
+#define BUSTER_LINK_HASH_VECTOR_BYTES 64
 
-static uint64_t link_hash_mix(uint64_t a, uint64_t b)
+static uint64_t link_hash_finish(uint64_t hash)
 {
-    const unsigned __int128 product = (unsigned __int128)a * b;
-    return (uint64_t)product ^ (uint64_t)(product >> 64);
+    uint64_t result = (hash ^ (hash >> 30)) * BUSTER_LINK_HASH_FINISH0;
+    result = (result ^ (result >> 27)) * BUSTER_LINK_HASH_FINISH1;
+    return result ^ (result >> 31);
 }
 
-// Eight bytes at a time, the last eight or fewer zero-extended, each mixed into the hash with a multiplication; the
-// length is in the first and last steps, so that names that differ only in trailing zero bytes differ. Every load is
-// within the name.
+// Every load is within the name.
 static uint64_t link_hash(const uint8_t* bytes, uint64_t length)
 {
     uint64_t hash = BUSTER_LINK_HASH_SEED ^ length;
-    uint64_t i = 0;
-    for (; i + 8 < length; i += 8)
+    const uint64_t words = length == 0 ? 1 : (length + 7) / 8;
+    for (uint64_t i = 0; i < words; i += 1)
     {
-        uint64_t word;
-        memcpy(&word, bytes + i, sizeof(word));
-        hash = link_hash_mix(hash ^ BUSTER_LINK_HASH_SECRET0, word ^ BUSTER_LINK_HASH_SECRET1);
+        const uint64_t offset = i * 8;
+        const uint64_t take = length - offset < 8 ? length - offset : 8;
+        uint64_t word = 0;
+        if (take != 0)
+        {
+            memcpy(&word, bytes + offset, take);
+        }
+        hash = (hash ^ word) * BUSTER_LINK_HASH_MULTIPLIER;
+        hash ^= hash >> 32;
     }
-    uint64_t tail = 0;
-    memcpy(&tail, bytes + i, length - i);
-    hash = link_hash_mix(hash ^ BUSTER_LINK_HASH_SECRET0, tail ^ BUSTER_LINK_HASH_SECRET1);
-    return link_hash_mix(hash ^ length, BUSTER_LINK_HASH_SECRET1);
+    return link_hash_finish(hash);
+}
+
+static __m512i link_hash_finish_vector(__m512i hash)
+{
+    __m512i result = _mm512_mullo_epi64(_mm512_xor_si512(hash, _mm512_srli_epi64(hash, 30)), _mm512_set1_epi64((long long)BUSTER_LINK_HASH_FINISH0));
+    result = _mm512_mullo_epi64(_mm512_xor_si512(result, _mm512_srli_epi64(result, 27)), _mm512_set1_epi64((long long)BUSTER_LINK_HASH_FINISH1));
+    return _mm512_xor_si512(result, _mm512_srli_epi64(result, 31));
+}
+
+// Transposes eight rows of eight 64-bit words, so that words[j] holds word j of rows 0 to 7: unpacks within 128-bit
+// chunks, then two-input permutes of chunk pairs, then 256-bit halves (24 shuffles).
+static void link_transpose_words(const __m512i* rows, __m512i* words)
+{
+    const __m512i t0 = _mm512_unpacklo_epi64(rows[0], rows[1]);
+    const __m512i t1 = _mm512_unpackhi_epi64(rows[0], rows[1]);
+    const __m512i t2 = _mm512_unpacklo_epi64(rows[2], rows[3]);
+    const __m512i t3 = _mm512_unpackhi_epi64(rows[2], rows[3]);
+    const __m512i t4 = _mm512_unpacklo_epi64(rows[4], rows[5]);
+    const __m512i t5 = _mm512_unpackhi_epi64(rows[4], rows[5]);
+    const __m512i t6 = _mm512_unpacklo_epi64(rows[6], rows[7]);
+    const __m512i t7 = _mm512_unpackhi_epi64(rows[6], rows[7]);
+    // Words 0, 1, 8, 9, 4, 5, 12, 13 and 2, 3, 10, 11, 6, 7, 14, 15 of the pair (_mm512_set_epi64 lists the last first).
+    const __m512i even = _mm512_set_epi64(13, 12, 5, 4, 9, 8, 1, 0);
+    const __m512i odd = _mm512_set_epi64(15, 14, 7, 6, 11, 10, 3, 2);
+    const __m512i s0 = _mm512_permutex2var_epi64(t0, even, t2);
+    const __m512i s1 = _mm512_permutex2var_epi64(t0, odd, t2);
+    const __m512i s2 = _mm512_permutex2var_epi64(t1, even, t3);
+    const __m512i s3 = _mm512_permutex2var_epi64(t1, odd, t3);
+    const __m512i s4 = _mm512_permutex2var_epi64(t4, even, t6);
+    const __m512i s5 = _mm512_permutex2var_epi64(t4, odd, t6);
+    const __m512i s6 = _mm512_permutex2var_epi64(t5, even, t7);
+    const __m512i s7 = _mm512_permutex2var_epi64(t5, odd, t7);
+    words[0] = _mm512_shuffle_i64x2(s0, s4, 0x44);
+    words[1] = _mm512_shuffle_i64x2(s2, s6, 0x44);
+    words[2] = _mm512_shuffle_i64x2(s1, s5, 0x44);
+    words[3] = _mm512_shuffle_i64x2(s3, s7, 0x44);
+    words[4] = _mm512_shuffle_i64x2(s0, s4, 0xee);
+    words[5] = _mm512_shuffle_i64x2(s2, s6, 0xee);
+    words[6] = _mm512_shuffle_i64x2(s1, s5, 0xee);
+    words[7] = _mm512_shuffle_i64x2(s3, s7, 0xee);
+}
+
+// The hashes of eight names of up to 64 bytes, rows[lane] holding a name's bytes and zeros past its length: the rows
+// transposed so that a vector holds word j of the eight names, then the words mixed in lane by lane while a lane's name
+// has them. Each lane's hash is link_hash's for its name; a longer name's is not, and is the caller's to replace.
+static __m512i link_hash_rows(const __m512i* rows, __m512i lengths)
+{
+    const __m512i multiplier = _mm512_set1_epi64((long long)BUSTER_LINK_HASH_MULTIPLIER);
+    __m512i words[BUSTER_LINK_HASH_BATCH];
+    link_transpose_words(rows, words);
+    const __m512i word_counts = _mm512_max_epu64(_mm512_srli_epi64(_mm512_add_epi64(lengths, _mm512_set1_epi64(7)), 3), _mm512_set1_epi64(1));
+    const uint64_t most = _mm512_reduce_max_epu64(word_counts);
+    const uint64_t steps = most < BUSTER_LINK_HASH_BATCH ? most : BUSTER_LINK_HASH_BATCH;
+    __m512i hash = _mm512_xor_si512(_mm512_set1_epi64((long long)BUSTER_LINK_HASH_SEED), lengths);
+    for (uint64_t j = 0; j < steps; j += 1)
+    {
+        const __mmask8 active = _mm512_cmpgt_epu64_mask(word_counts, _mm512_set1_epi64((long long)j));
+        __m512i mixed = _mm512_mullo_epi64(_mm512_xor_si512(hash, words[j]), multiplier);
+        mixed = _mm512_xor_si512(mixed, _mm512_srli_epi64(mixed, 32));
+        hash = _mm512_mask_mov_epi64(hash, active, mixed);
+    }
+    return link_hash_finish_vector(hash);
+}
+
+// Each batch of eight: each name's first 64 bytes in a masked load (none past its length is read, so a name may end at
+// a page's end), hashed by link_hash_rows; the last batch's missing lanes are empty names, whose hashes aren't stored.
+// A name past 64 bytes goes to link_hash.
+static void link_hash_names(const uint8_t* const* names, const uint32_t* lengths, uint64_t count, uint64_t* hashes)
+{
+    for (uint64_t i = 0; i < count; i += BUSTER_LINK_HASH_BATCH)
+    {
+        const uint32_t batch = count - i < BUSTER_LINK_HASH_BATCH ? (uint32_t)(count - i) : BUSTER_LINK_HASH_BATCH;
+        __m512i rows[BUSTER_LINK_HASH_BATCH];
+        uint32_t long_names = 0;
+        for (uint32_t lane = 0; lane < BUSTER_LINK_HASH_BATCH; lane += 1)
+        {
+            const uint32_t length = lane < batch ? lengths[i + lane] : 0;
+            const uint64_t loaded = length < BUSTER_LINK_HASH_VECTOR_BYTES ? length : BUSTER_LINK_HASH_VECTOR_BYTES;
+            rows[lane] = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, (uint32_t)loaded), lane < batch ? names[i + lane] : 0);
+            long_names |= (length > BUSTER_LINK_HASH_VECTOR_BYTES ? 1u : 0u) << lane;
+        }
+        const __m512i length_vector = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32((__mmask8)_bzhi_u32(0xff, batch), lengths + i));
+        _mm512_mask_storeu_epi64(hashes + i, (__mmask8)_bzhi_u32(0xff, batch), link_hash_rows(rows, length_vector));
+        for (uint32_t lane = 0; long_names != 0 && lane < batch; lane += 1)
+        {
+            if ((long_names >> lane & 1) != 0)
+            {
+                hashes[i + lane] = link_hash(names[i + lane], lengths[i + lane]);
+            }
+        }
+    }
 }
 
 static NameId link_add_name(Link* link, const uint8_t* bytes, uint32_t length)
+{
+    return link_add_name_hashed(link, bytes, length, link_hash(bytes, length));
+}
+
+static NameId link_add_name_hashed(Link* link, const uint8_t* bytes, uint32_t length, uint64_t hash)
 {
     LinkNames* names = &link->names;
     NameId result = 0;
@@ -522,7 +643,7 @@ static NameId link_add_name(Link* link, const uint8_t* bytes, uint32_t length)
             result = names->count;
             names->bytes[result] = copy;
             names->length[result] = length;
-            names->hash[result] = link_hash(bytes, length);
+            names->hash[result] = hash;
             names->count += 1;
         }
     }
