@@ -504,19 +504,21 @@ the other way to have fixup ends (every offset, then the caller picks the marked
 ones), and `x86_encode_64_apx` and `x86_encode_16_apx`, APX's loops (the streams
 have no registers 16 to 31, so their bytes are the same). The entry points use
 16 per iteration: it is up to 7% slower than 64 in these runs, but 1% to 7%
-faster after scalar code, where a compiler runs its encoder (measure that state
-too: see `docs/x86-64-encoder.md`'s "Zen 5's costs"). `--mode32` and `--mode16`
+faster after scalar code, where a compiler runs its encoder (see
+`docs/x86-64-encoder.md`'s "Zen 5's costs" and #199). `--mode32` and `--mode16`
 time the mode's loops at 64 and 16 per iteration (`x86_encode_64_mode32` and
 `x86_encode_16_mode32`, or the 16-bit ones) and its scalar loop instead, on a
 mix like 32-bit compiler output or like real-mode code (or with `--uniform`, the
 mode's forms). Decide them, and any other performance question, with
 measurements on the 9700X (not Zen 4, and not llvm-mca, whose predictions are
-well off), using uops.info's Zen 5 port data to explain them;
-`docs/x86-64-encoder.md` has the current numbers. Clang's code for the loop
-changes a lot with small source changes, so compare every width after changing
-the encoder, and profile which loop the samples land in. The default 9700X job
-runs it after the tests, pinned to one allowed CPU; like the lexer's, its
-measurements are informational.
+well off), using uops.info's Zen 5 port data to explain them, and measure vector
+loops right after 100–300 ms of a warm scalar phase as well as back to back, in
+ns as well as cycles, since a boosted clock puts heavy AVX-512 code under the
+core's power cap for 5–20 ms (#199); `docs/x86-64-encoder.md` has the current
+numbers. Clang's code for the loop changes a lot with small source changes, so
+compare every width after changing the encoder, and profile which loop the
+samples land in. The default 9700X job runs it after the tests, pinned to one
+allowed CPU; like the lexer's, its measurements are informational.
 
 ## Lane tests
 

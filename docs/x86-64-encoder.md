@@ -1175,32 +1175,37 @@ main (medians of 5 to 11 interleaved rounds of `--only` runs):
   products land in bytes the payload doesn't use: 4 operations instead of 8.
 
 In the benchmark's full runs those made `x86_encode` 3.9% faster than main
-(3.23 cycles per instruction of the compiler mix against 3.36), but the 16- and
+(3.23 cycles per instruction of the compiler mix against 3.36). But the 16- and
 32-bit modes' full runs, which time the scalar loop between the vector loop's
-passes, had their loops only 2% faster than main and 1% to 3% slower on two
-rows, where `--only` runs had them 9% faster. An experiment copy of the
-benchmark with other work between the passes found why. After 20 to 60 ms of
-the scalar encoder, and only of it (not a scalar spin, a sleep, an AVX-512 loop,
-byte stores or a 64 MB sweep), the loops run slower for about 15 ms of
-continuous vector code, so for every pass of 3.3 ms between the scalar loop's.
-Then the 64-bit loop took 3.77 cycles per instruction against main's 3.43, 10%
-slower. The clock isn't it: an AVX-512 loop between the passes keeps 5.55 GHz,
-the scalar loop's clock, and the fast state. Nor is a warm-up: single-operation
-kernels (simple ALU operations, shuffles, permutes, shifts, multiplications,
-loads, stores, `vpcompressb`, `vpshufbitqmb`, a spill and its reload) run as fast
-after the scalar loop as after 100 ms of themselves, and Mysticial's Zen 5
-teardown found no warm-up either. What the state costs is stores: across the
-trees, about 0.8 cycles more per vector store per group (main's loop has 6, 2 of
-them spills; those changes had 13, with 9 spills; the first had 20), and the
-loop's spilled vector of invalid lanes had its store and reload back to back at
-the end of each group. Counted around the timed loop alone, dispatch stalled on
-that full queue fell from 20% to 5% of cycles in the slow state, while the
-dispatch slots lost to another back-end cause (PMCx1A0's undocumented umask
-0x08, which no token stall accounts for) rose from 1.5 to 9.5 per instruction,
-and store-to-load forwards fell from 0.60 to 0.38. Main's loop changes state
-too, but its longer chain limits it the same either way. A compiler runs its
-encoder after long scalar phases, in bursts far shorter than 15 ms, so the slow
-state is the one that counts there.
+passes, had their loops only 2% faster than main, and 1% to 3% slower on two
+rows, where `--only` runs had them 9% faster. The cause is Zen 5's per-core
+power management (#199), not the scalar loop's code:
+
+- **The boost.** While the core runs anything light (the scalar loop at 13 W,
+  but also a spin, a sleep or the vectorized lexer), its clock climbs from about
+  5.31 to 5.52 GHz over 30 to 300 ms.
+- **The cap.** At that clock the vector loop would draw more than its core may,
+  and a fast throttle holds the core at about 21.5 W by withholding dispatch
+  slots (PMCx1A0's undocumented umask 0x08). That rose from about 0.5 to 6–10
+  slots per instruction, while dispatch stalls on a full FP queue fell from 20%
+  to 5% of cycles. The throttle engages within 10 µs, at once on a core warm
+  from scalar work, and 1–3 ms later on one cooled by a spin or a sleep.
+- **The release.** It holds until the firmware has stepped the clock down to
+  what the loop sustains (5.3 GHz) after 5 to 20 ms.
+- **The cost.** Under the cap a loop's speed follows its energy per
+  instruction, and 512-bit stores and loads cost the most (a zmm store about six
+  `vpaddd zmm`, a spill about ten). So each extra vector store per group cost
+  about 0.8 cycles: main's loop has 6, 2 of them spills; those changes had 13,
+  with 9 spills; the first had 20. The loop's spilled vector of invalid lanes,
+  stored and reloaded back to back at the end of each group, cost more again.
+- **The scale.** After 300 ms of the scalar loop, the 64-bit loop with those
+  changes took 3.84 cycles per instruction where it takes 3.20 back to back. 1
+  to 30 ms of scalar code left it unchanged.
+
+Every scalar phase of the compiler triggers the same state (the object writer,
+import's exact path, the scalar lexer, the dataflow solver's scalar twin). A
+compiler runs its encoder in short bursts after them, so the throttled state is
+the one that counts there.
 
 What took the registers was the loop's validation: about 30 operations per
 group (50 in 16- and 32-bit modes), whose values pushed Phase I's template
@@ -1224,13 +1229,15 @@ vector loops alone, 64 is up to 7% faster on some streams (the uniform mix, the
 modes' mixes in `--only` runs) and 16 up to 10% on others (1,024 instructions,
 fixup ends, calls of 64). Clang folds 16's constants into memory operands (12.6
 instructions per encoded instruction against 13.9), so it keeps fewer values and
-spills fewer of them. A compiler runs its encoder after its scalar phases, in
-bursts far shorter than the slow state's 15 ms, so every entry point takes 16
-per iteration, and 64's loops stay for the benchmark and the tests. After the
-scalar loop, `x86_encode` takes 0.557 ns per instruction of the compiler mix
-against main's 0.620, 0.605 against 0.743 with fixup ends and 0.711 against
-0.772 on the uniform mix; APX's loop 0.646 against 0.781, and the 16- and 32-bit
-modes' 0.688 and 0.682 against 0.814 (see "Evaluation").
+spills fewer of them. A compiler runs its encoder in bursts after lighter
+phases, where the clock is boosted and the throttle caps the loop's power (16
+per iteration spends less energy per instruction, so it loses nothing to the
+throttle, while 64 loses 3% to 11%), so every entry point takes 16 per
+iteration, and 64's loops stay for the benchmark and the tests. After the scalar
+loop, `x86_encode` takes 0.557 ns per instruction of the compiler mix against
+main's 0.620, 0.605 against 0.743 with fixup ends and 0.711 against 0.772 on the
+uniform mix; APX's loop 0.646 against 0.781, and the 16- and 32-bit modes' 0.688
+and 0.682 against 0.814 (see "Evaluation").
 
 What didn't, against the best tree at the time:
 
@@ -1978,12 +1985,13 @@ knows.
   loop (see "Zen 5's costs"). What's left: the chain is about 48 cycles, the
   template's path again, and Phase III's `vpshufbitqmb` and `vpcompressb` take
   17 of them; the out-of-order window holds about one and a half groups; and
-  after scalar code, every store costs more, so the next gains are fewer spills
-  (clang's register allocation moves with small source changes: check every
-  width and both states after each change). APX's loop costs 20% more than
-  `x86_encode`'s, its REX2 and EVEX operations and their registers, which is
-  why it stays an entry point of its own; and the 16- and 32-bit loops cost
-  23% to 24% more, their Phase II's work for the modes' addresses, overrides and
-  `67`. The templates still carry checks and flags that only validation used
-  to read (the checks dword's register bits, `NO_MEMORY` aside, which
-  `x86_validate` reads): bits a later change can take.
+  under the power cap that a boosted clock brings after lighter code, the loop's
+  speed follows its energy, which its stores dominate (#199), so the next gains
+  are fewer spills (clang's register allocation moves with small source changes:
+  check every width and both states after each change). APX's loop costs 20%
+  more than `x86_encode`'s, its REX2 and EVEX operations and their registers,
+  which is why it stays an entry point of its own; and the 16- and 32-bit loops
+  cost 23% to 24% more, their Phase II's work for the modes' addresses,
+  overrides and `67`. The templates still carry checks and flags that only
+  validation used to read (the checks dword's register bits, `NO_MEMORY` aside,
+  which `x86_validate` reads): bits a later change can take.
