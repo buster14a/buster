@@ -761,17 +761,73 @@ struct SpikeKernelCopy
     uint32_t* lefts;
     uint16_t* left_keys;
     SpikeCandidates candidates;
+    SpikeBlockWork* works;
+    SpikeSlots slots;
     uint8_t* typed;
     uint8_t* roles;
     uint8_t* flags;
     uint8_t* classified_flags;
     uint8_t* group_roles;
     uint8_t* group_typed;
+    // K2 from random roles: the twin's roles and flags, and the random starts.
+    uint8_t* starts;
+    uint8_t* twin_flags;
+    uint8_t* random_roles;
     uint64_t rounds[BUSTER_SPIKE_ROLE_ROUNDS + 1];
     // K4 in byte lanes: 64-token blocks, and those whose depths span too much for bytes.
     uint64_t byte_blocks;
     uint64_t wide_blocks;
+    uint64_t top_wide_blocks;
 };
+
+// K4's window search against a scalar count, on random non-increasing windows (of every held length, with 0 and 255
+// common, as saturation makes them) and every threshold. Returns the number of differences.
+static uint32_t spike_check_top_search(void)
+{
+    uint32_t result = 0;
+    uint64_t state = 0x2545F4914F6CDD1Dull;
+    for (uint32_t trial = 0; trial < 4096; trial += 1)
+    {
+        uint8_t window[64] = { 0 };
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        const uint32_t held = (uint32_t)(state >> 59);
+        uint32_t key = (state >> 32) & 1 ? 255 : (uint32_t)((state >> 40) & 0xFF);
+        for (uint32_t l = 0; l < 32; l += 1)
+        {
+            state = state * 6364136223846793005ull + 1442695040888963407ull;
+            const uint32_t drop = (state >> 61) == 0 ? 0 : (uint32_t)((state >> 33) % 24);
+            key = key > drop ? key - drop : key == 0 ? 0 : (state >> 58) & 1;
+            window[l] = l < held + (trial & 1) * 32 ? (uint8_t)key : 0;
+        }
+        for (uint32_t base = 0; base < 256; base += 64)
+        {
+            uint8_t thresholds[64];
+            for (uint32_t lane = 0; lane < 64; lane += 1)
+            {
+                thresholds[lane] = (uint8_t)(base + lane);
+            }
+            uint8_t found[64];
+            _mm512_storeu_si512(found, spike_top_search8(_mm512_loadu_si512(window), _mm512_loadu_si512(thresholds)));
+            for (uint32_t lane = 0; lane < 64; lane += 1)
+            {
+                uint32_t expected = 0;
+                while (expected < 32 && window[expected] >= thresholds[lane])
+                {
+                    expected += 1;
+                }
+                if (found[lane] != expected && thresholds[lane] != 0)
+                {
+                    if (result < 4)
+                    {
+                        printf("K4's window search differs: threshold %u, %u against %u\n", thresholds[lane], found[lane], expected);
+                    }
+                    result += 1;
+                }
+            }
+        }
+    }
+    return result;
+}
 
 static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels, SpikeKernelCopy* copy, uint32_t count)
 {
@@ -855,6 +911,39 @@ static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels
         spike_print_context(file, first);
         result += 1;
     }
+    // From random roles rather than the guesses, the rounds must end at the same roles: the check of their end may not
+    // stop early. The twin's roles and flags are kept for what follows.
+    {
+        memcpy(copy->starts, kernels->roles, count);
+        memcpy(copy->twin_flags, kernels->flags, count);
+        uint64_t state = 0x9E3779B97F4A7C15ull ^ count;
+        for (uint32_t trial = 0; trial < 2; trial += 1)
+        {
+            for (uint32_t i = 0; i < count + 64; i += 1)
+            {
+                state = state * 6364136223846793005ull + 1442695040888963407ull;
+                copy->random_roles[i] = (uint8_t)((state >> 33) % SPIKE_ROLE_COUNT);
+            }
+            memcpy(kernels->flags, copy->classified_flags, count);
+            uint64_t random_rounds[BUSTER_SPIKE_ROLE_ROUNDS + 1] = { 0 };
+            spike_roles_starting_avx512(kernels, count, copy->typed, copy->group_roles, copy->group_typed, random_rounds, copy->random_roles);
+            uint32_t different = BUSTER_SPIKE_NONE;
+            for (uint32_t i = 0; i < count && different == BUSTER_SPIKE_NONE; i += 1)
+            {
+                different = kernels->roles[i] != copy->starts[i] || kernels->flags[i] != copy->twin_flags[i] ? i : BUSTER_SPIKE_NONE;
+            }
+            if (different != BUSTER_SPIKE_NONE)
+            {
+                printf("%s: K2 from random roles differs at token %u: twin %s, vector %s\n", file->path, different, spike_role_names[copy->starts[different]],
+                       spike_role_names[kernels->roles[different]]);
+                spike_print_context(file, different);
+                result += 1;
+            }
+        }
+        memcpy(kernels->roles, copy->starts, count);
+        memcpy(kernels->flags, copy->twin_flags, count);
+        spike_roles_scalar(kernels, count, copy->typed);
+    }
     spike_secondary_scalar(kernels, count, kernels->stack);
     spike_after_colons(kernels, count);
     for (uint32_t i = 0; i < kernels->typedef_count; i += 1)
@@ -906,6 +995,37 @@ static uint32_t spike_check_kernels(const SpikeFile* file, SpikeKernels* kernels
                    (int)copy->lefts[first]);
             spike_print_context(file, first);
             result += 1;
+        }
+        // With the stack's top in registers, and with windows of fewer lanes, whose stacks go through memory.
+        static const uint32_t reaches[] = { BUSTER_SPIKE_TOP_LANES, 1, 3, 8 };
+        for (uint32_t r = 0; r < sizeof(reaches) / sizeof(reaches[0]); r += 1)
+        {
+            uint64_t top_wide = 0;
+            if (reaches[r] == BUSTER_SPIKE_TOP_LANES)
+            {
+                spike_top_parents8_avx512(kernels->roles, kernels->node_depths, count, copy->lefts, copy->left_keys, copy->works, copy->parents, &copy->slots, &top_wide);
+                copy->top_wide_blocks += top_wide;
+            }
+            else
+            {
+                spike_top_parents8_reach(kernels->roles, kernels->node_depths, count, copy->lefts, copy->left_keys, copy->works, copy->parents, &copy->slots, reaches[r],
+                                         &top_wide);
+            }
+            first = BUSTER_SPIKE_NONE;
+            for (uint32_t i = 0; i < count && first == BUSTER_SPIKE_NONE; i += 1)
+            {
+                if (kernels->parents[i] != copy->parents[i])
+                {
+                    first = i;
+                }
+            }
+            if (first != BUSTER_SPIKE_NONE)
+            {
+                printf("%s: K4 with a window of %u lanes differs at token %u: twin %d, vector %d (L %d)\n", file->path, reaches[r], first, (int)kernels->parents[first],
+                       (int)copy->parents[first], (int)copy->lefts[first]);
+                spike_print_context(file, first);
+                result += 1;
+            }
         }
     }
     return result;
@@ -1212,6 +1332,10 @@ typedef enum SpikeTimed
     SPIKE_TIMED_VECTOR_K2,
     SPIKE_TIMED_VECTOR_SECONDARY,
     SPIKE_TIMED_VECTOR_K4_16,
+    SPIKE_TIMED_VECTOR_K4_BLOCKS,
+    SPIKE_TIMED_VECTOR_K4_PREPARE,
+    SPIKE_TIMED_VECTOR_K4_LEFT,
+    SPIKE_TIMED_VECTOR_K4_RIGHT,
     SPIKE_TIMED_VECTOR_K4,
     SPIKE_TIMED_VECTOR_K5,
     SPIKE_TIMED_VECTOR_FALLBACK,
@@ -1241,6 +1365,10 @@ static const char* const spike_timed_names[SPIKE_TIMED_COUNT] =
     "vector-k2",
     "vector-k1-secondary",
     "vector-k4-16",
+    "vector-k4-blocks",
+    "vector-k4-prepare",
+    "vector-k4-left",
+    "vector-k4-right",
     "vector-k4",
     "vector-k5",
     "vector-fallback",
@@ -1268,6 +1396,10 @@ static const SpikeTimed spike_stage_order[] =
     SPIKE_TIMED_VECTOR_K2,
     SPIKE_TIMED_VECTOR_SECONDARY,
     SPIKE_TIMED_VECTOR_K4_16,
+    SPIKE_TIMED_VECTOR_K4_BLOCKS,
+    SPIKE_TIMED_VECTOR_K4_PREPARE,
+    SPIKE_TIMED_VECTOR_K4_LEFT,
+    SPIKE_TIMED_VECTOR_K4_RIGHT,
     SPIKE_TIMED_VECTOR_K4,
     SPIKE_TIMED_VECTOR_K5,
     SPIKE_TIMED_VECTOR_FALLBACK,
@@ -1288,6 +1420,8 @@ struct SpikeBench
     SpikeStatement* statements;
     // K5's result for the file the stages are on, which the fallback reads.
     bool statements_ok;
+    // Whether the file's depths are past K4's 16-bit keys, for K4's loops as stages.
+    bool deep;
 };
 
 // Runs a whole path over every file.
@@ -1362,7 +1496,32 @@ static void spike_run_stage(SpikeBench* bench, SpikeTimed which, uint32_t f)
             spike_after_colons_avx512(k, count);
             break;
         case SPIKE_TIMED_TWIN_K4: spike_parents_scalar(k, count); break;
+        // K4's three loops alone, in turn; a file too deep for them gets the twin in the first.
+        case SPIKE_TIMED_VECTOR_K4_PREPARE:
+            bench->deep = spike_deepest(k, count) > BUSTER_SPIKE_MAX_VECTOR_DEPTH;
+            if (bench->deep)
+            {
+                spike_parents_scalar(k, count);
+            }
+            else
+            {
+                spike_top_prepare8_avx512(k->roles, k->node_depths, count, buffers->works);
+            }
+            break;
+        case SPIKE_TIMED_VECTOR_K4_LEFT:
+            if (!bench->deep)
+            {
+                spike_top_left8_avx512(k->roles, k->node_depths, count, buffers->lefts, buffers->left_keys, buffers->works, &buffers->slots, &buffers->wide_blocks);
+            }
+            break;
+        case SPIKE_TIMED_VECTOR_K4_RIGHT:
+            if (!bench->deep)
+            {
+                spike_top_right8_avx512(k->roles, k->node_depths, count, buffers->lefts, buffers->left_keys, buffers->works, k->parents, &buffers->slots);
+            }
+            break;
         case SPIKE_TIMED_VECTOR_K4_16:
+        case SPIKE_TIMED_VECTOR_K4_BLOCKS:
         case SPIKE_TIMED_VECTOR_K4:
             if (spike_deepest(k, count) > BUSTER_SPIKE_MAX_VECTOR_DEPTH)
             {
@@ -1373,10 +1532,14 @@ static void spike_run_stage(SpikeBench* bench, SpikeTimed which, uint32_t f)
                 spike_parents_left_avx512(k->roles, k->node_depths, count, buffers->lefts, buffers->left_keys, &buffers->candidates);
                 spike_parents_right_avx512(k->roles, k->node_depths, count, buffers->lefts, buffers->left_keys, k->parents, &buffers->candidates);
             }
-            else
+            else if (which == SPIKE_TIMED_VECTOR_K4_BLOCKS)
             {
                 spike_parents_left8_avx512(k->roles, k->node_depths, count, buffers->lefts, buffers->left_keys, &buffers->candidates, &buffers->wide_blocks);
                 spike_parents_right8_avx512(k->roles, k->node_depths, count, buffers->lefts, buffers->left_keys, k->parents, &buffers->candidates);
+            }
+            else
+            {
+                spike_top_parents8_avx512(k->roles, k->node_depths, count, buffers->lefts, buffers->left_keys, buffers->works, k->parents, &buffers->slots, &buffers->wide_blocks);
             }
             break;
         case SPIKE_TIMED_TWIN_K5: bench->statements_ok = spike_statements(k, count, bench->statements); break;
@@ -1651,9 +1814,15 @@ int run_parse_spike(int argc, char** argv)
             .classified_flags = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
             .group_roles = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
             .group_typed = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .starts = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .twin_flags = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
+            .random_roles = BUSTER_ARENA_PUSH_ARRAY(&memory, uint8_t, corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING),
             .rounds = { 0 },
         };
         buffers_reserved &= spike_candidates_reserve(&copy.candidates, &memory, corpus.max_tokens);
+        buffers_reserved &= copy.starts != 0 && copy.twin_flags != 0 && copy.random_roles != 0;
+        copy.works = BUSTER_ARENA_PUSH_ARRAY(&memory, SpikeBlockWork, (corpus.max_tokens + 2 * BUSTER_SPIKE_TOKEN_PADDING) / 64 + BUSTER_SPIKE_PREPARED_TOGETHER);
+        buffers_reserved &= copy.works != 0 && spike_slots_reserve(&copy.slots, &memory, corpus.max_tokens);
         // The check's K1 and K2 use the vector path's padded stacks.
         copy.open_stack = buffers.open_stack;
         copy.group_roles = buffers.group_roles;
@@ -1691,6 +1860,7 @@ int run_parse_spike(int argc, char** argv)
             uint64_t fallback_tokens = 0;
             uint64_t fallback_items = 0;
             // --no-check skips the checks, for perf: only the benchmark runs.
+            kernel_failures += check ? (spike_check_top_search() != 0) : 0;
             for (uint32_t i = 0; check && i < corpus.file_count; i += 1)
             {
                 const SpikeFile* file = &corpus.files[i];
@@ -1854,7 +2024,8 @@ int run_parse_spike(int argc, char** argv)
                 printf(" %u:%lu", r, (unsigned long)copy.rounds[r]);
             }
             printf(" (0: the twin)\n");
-            printf("K4 in byte lanes: %lu of %lu blocks span too many depths and run as 16-bit blocks\n", (unsigned long)copy.wide_blocks, (unsigned long)copy.byte_blocks);
+            printf("K4 in byte lanes: %lu of %lu blocks span too many depths and run as 16-bit blocks (with the stack's top in registers: %lu, as smaller parts)\n",
+                   (unsigned long)copy.wide_blocks, (unsigned long)copy.byte_blocks, (unsigned long)copy.top_wide_blocks);
             result = failed == 0 && broken == 0 && twin_failures == 0 && kernel_failures == 0 && vector_failures == 0 && postorder_failures == 0 ? 0 : 1;
             if (result == 0 && !check_only)
             {
@@ -1868,6 +2039,7 @@ int run_parse_spike(int argc, char** argv)
                     .typed = typed,
                     .statements = statements,
                     .statements_ok = true,
+                    .deep = false,
                 };
                 spike_benchmark(&bench, passes, only, repeat, set);
             }

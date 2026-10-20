@@ -19,7 +19,9 @@
 //   - The kernels' scalar twins: K1 brackets, K3 type names, K2 roles, K4 parents, K5 statements, the fallback, and
 //     spike_parse_twins, all of them in turn.
 //   - The kernels in AVX-512: K1 in byte lanes (and in 16-bit lanes for the comparison), K4 in 16-bit and in byte lanes,
-//     K2, K3's classification, K1's second part and K5; spike_parse_vector, the data-parallel parser.
+//     K2, K3's classification, K1's second part and K5; K4 with the stack's top in registers (spike_top_parents8_avx512,
+//     the vector path's: every block's in-block work, then the two passes' window work); spike_parse_vector, the
+//     data-parallel parser.
 //   - The postorder, from the parents: spike_postorder (a walk that emits each subtree's end) and
 //     spike_postorder_sorted (positions without a branch on the tree).
 
@@ -3881,7 +3883,20 @@ struct SpikeShifts
     __m512i lanes16;
     // Shift up by 2 taking lanes 0 and 1 of the second source below that.
     __m512i up2_with_fill;
+    // For K4 with the stack's top in registers: byte lanes reversed (lane i gets 63 - i), and every lane 63; with
+    // _mm512_maskz_permutexvar_epi8 under BUSTER_SPIKE_WORD_BYTES, half h of a byte vector as 16-bit lanes in order
+    // (words) and in the order _mm512_unpacklo_epi16 and _mm512_unpackhi_epi16 put back in order as 32-bit lanes
+    // (unpacked: word 8l + k gets byte 32h + 4l + k, word 8l + 4 + k byte 32h + 16 + 4l + k); and under
+    // BUSTER_SPIKE_DWORD_BYTES, quarter q as 32-bit lanes.
+    __m512i reverse8;
+    __m512i last8;
+    __m512i words[2];
+    __m512i unpacked[2];
+    __m512i dwords[4];
 };
+
+#define BUSTER_SPIKE_WORD_BYTES 0x5555555555555555ull
+#define BUSTER_SPIKE_DWORD_BYTES 0x1111111111111111ull
 
 static SpikeShifts spike_shifts;
 
@@ -3931,6 +3946,43 @@ static void spike_shifts_init(void)
         up2[i] = (uint8_t)(i >= 2 ? i - 2 : 64 + i);
     }
     spike_shifts.up2_with_fill = _mm512_loadu_si512(up2);
+    uint8_t reverse8[64];
+    uint8_t last8[64];
+    for (uint32_t i = 0; i < 64; i += 1)
+    {
+        reverse8[i] = (uint8_t)(63 - i);
+        last8[i] = 63;
+    }
+    spike_shifts.reverse8 = _mm512_loadu_si512(reverse8);
+    spike_shifts.last8 = _mm512_loadu_si512(last8);
+    for (uint32_t h = 0; h < 2; h += 1)
+    {
+        uint8_t words[64];
+        uint8_t unpacked[64];
+        for (uint32_t w = 0; w < 32; w += 1)
+        {
+            const uint32_t l = w / 8;
+            const uint32_t k = w % 8;
+            words[2 * w] = (uint8_t)(32 * h + w);
+            words[2 * w + 1] = 0;
+            unpacked[2 * w] = (uint8_t)(k < 4 ? 32 * h + 4 * l + k : 32 * h + 16 + 4 * l + k - 4);
+            unpacked[2 * w + 1] = 0;
+        }
+        spike_shifts.words[h] = _mm512_loadu_si512(words);
+        spike_shifts.unpacked[h] = _mm512_loadu_si512(unpacked);
+    }
+    for (uint32_t q = 0; q < 4; q += 1)
+    {
+        uint8_t dwords[64];
+        for (uint32_t d = 0; d < 16; d += 1)
+        {
+            dwords[4 * d] = (uint8_t)(16 * q + d);
+            dwords[4 * d + 1] = 0;
+            dwords[4 * d + 2] = 0;
+            dwords[4 * d + 3] = 0;
+        }
+        spike_shifts.dwords[q] = _mm512_loadu_si512(dwords);
+    }
 }
 
 BUSTER_INLINE __m512i spike_up8(__m512i x, uint32_t k, __m512i fill)
@@ -4168,6 +4220,8 @@ struct SpikeParentTables
     uint8_t rules[128];
     uint16_t weak[32];
     uint16_t ties[32];
+    // Both by level: bit 0 weak, bit 1 ties to the left.
+    uint16_t weak_ties[32];
 };
 
 static SpikeParentTables spike_parent_tables;
@@ -4186,6 +4240,7 @@ static void spike_parent_tables_init(void)
     {
         spike_parent_tables.weak[level] = spike_level_is_weak((uint8_t)level);
         spike_parent_tables.ties[level] = spike_level_ties_left[level];
+        spike_parent_tables.weak_ties[level] = (uint16_t)(spike_level_is_weak((uint8_t)level) | (spike_level_ties_left[level] << 1));
     }
 }
 
@@ -4526,6 +4581,11 @@ static void spike_parents_right_avx512(const uint8_t* roles, const uint32_t* nod
 // a block that hasn't converged after BUSTER_SPIKE_ROLE_ROUNDS rounds is done by the twin's loop. What crosses blocks:
 // the roles and kinds of the two tokens before the block, its typed state, and by depth the role of each open group's
 // opener (with the typed state before an attribute's keyword).
+//
+// The rounds start from each kind's commonest role, refined where that is often wrong by the rules a round applies to
+// `(`, the unary operators, tags, `{` and the closers, fed with those guesses. A round's roles are final as soon as no
+// lane reads anything that changed in them (its features, spike_features8): no further round needs to confirm them. On
+// sqlite3 and the libc corpus nearly every block converges in one round.
 
 #define BUSTER_SPIKE_ROLE_ROUNDS 8
 
@@ -4576,6 +4636,16 @@ typedef enum SpikeRuleClass
 #define BUSTER_SPIKE_ROLE_HEAD_CLOSER 0x10
 #define BUSTER_SPIKE_ROLE_CALL_CLOSER 0x20
 
+// The roles whose identity, beyond their pred class, a round reads from the token before (or from a group's opener),
+// in the high bits of SpikeRoleTables.features.
+#define BUSTER_SPIKE_FEATURE_ATTRIBUTE_RIGHT 0x10
+#define BUSTER_SPIKE_FEATURE_LEAF_RIGHT 0x20
+#define BUSTER_SPIKE_FEATURE_HEAD_CLOSER 0x30
+#define BUSTER_SPIKE_FEATURE_CALL_CLOSER 0x40
+#define BUSTER_SPIKE_FEATURE_COMPOUND_CLOSER 0x50
+#define BUSTER_SPIKE_FEATURE_BLOCK 0x60
+#define BUSTER_SPIKE_FEATURE_INITIALIZER 0x70
+
 typedef struct SpikeRoleTables SpikeRoleTables;
 struct SpikeRoleTables
 {
@@ -4598,6 +4668,9 @@ struct SpikeRoleTables
     uint8_t closers[128];
     uint8_t group_bits[128];
     uint8_t role_bits[128];
+    // What a round reads of a token's role: its pred class (before the fixes by kind) and, as BUSTER_SPIKE_FEATURE_*
+    // in the high bits, whether it is one of the roles the rules name.
+    uint8_t features[128];
     // By pred class.
     uint8_t attribute_by_before[64];
     uint8_t pred_bits[16];
@@ -4788,6 +4861,18 @@ static void spike_role_tables_init(void)
                                     (role == SPIKE_ROLE_CLOSE_CONDITION || role == SPIKE_ROLE_CLOSE_FOR ? BUSTER_SPIKE_ROLE_HEAD_CLOSER : 0) |
                                     (role == SPIKE_ROLE_CLOSE_CALL || role == SPIKE_ROLE_CLOSE_FUNCTION ? BUSTER_SPIKE_ROLE_CALL_CLOSER : 0));
     }
+    for (uint32_t r = 0; r < 128; r += 1)
+    {
+        const uint8_t role = r < SPIKE_ROLE_COUNT ? (uint8_t)r : SPIKE_ROLE_NONE;
+        const uint8_t named = role == SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT ? BUSTER_SPIKE_FEATURE_ATTRIBUTE_RIGHT :
+                              role == SPIKE_ROLE_LEAF_RIGHT ? BUSTER_SPIKE_FEATURE_LEAF_RIGHT :
+                              role == SPIKE_ROLE_CLOSE_CONDITION || role == SPIKE_ROLE_CLOSE_FOR ? BUSTER_SPIKE_FEATURE_HEAD_CLOSER :
+                              role == SPIKE_ROLE_CLOSE_CALL || role == SPIKE_ROLE_CLOSE_FUNCTION ? BUSTER_SPIKE_FEATURE_CALL_CLOSER :
+                              role == SPIKE_ROLE_CLOSE_COMPOUND ? BUSTER_SPIKE_FEATURE_COMPOUND_CLOSER :
+                              role == SPIKE_ROLE_OPEN_BLOCK || role == SPIKE_ROLE_OPEN_BODY ? BUSTER_SPIKE_FEATURE_BLOCK :
+                              role == SPIKE_ROLE_OPEN_INITIALIZER || role == SPIKE_ROLE_OPEN_COMPOUND_BODY ? BUSTER_SPIKE_FEATURE_INITIALIZER : 0;
+        t->features[r] = (uint8_t)(spike_role_preds[role] | named);
+    }
     for (uint32_t p = 0; p < 64; p += 1)
     {
         t->attribute_by_before[p] = p == SPIKE_PRED_OPERAND ? SPIKE_ROLE_OPEN_ATTRIBUTE : p == SPIKE_PRED_STAR ? SPIKE_ROLE_OPEN_ATTRIBUTE_LEFT :
@@ -4825,6 +4910,17 @@ BUSTER_INLINE __mmask64 spike_equal8(__m512i x, uint8_t value)
     return _mm512_cmpeq_epi8_mask(x, _mm512_set1_epi8((char)value));
 }
 
+// What a round reads of each lane's role: its features, with the pred class fixed by kind as spike_preds8 fixes it.
+// Two role vectors with the same features (and typed states) make a round compute the same roles.
+BUSTER_INLINE __m512i spike_features8(__m512i role, __mmask64 word, __mmask64 star)
+{
+    const SpikeRoleTables* t = &spike_role_tables;
+    __m512i features = spike_table8(t->features, role);
+    features = _mm512_mask_mov_epi8(features, spike_equal8(role, SPIKE_ROLE_SPECIFIER) & word, _mm512_set1_epi8(SPIKE_PRED_TYPE));
+    features = _mm512_mask_mov_epi8(features, spike_equal8(role, SPIKE_ROLE_PREFIX) & star, _mm512_set1_epi8(SPIKE_PRED_STAR));
+    return features;
+}
+
 // The pred class of each lane's previous token (index and one-hot bits), from its role and kind.
 BUSTER_INLINE __m512i spike_preds8(__m512i role, __m512i vkind)
 {
@@ -4857,7 +4953,8 @@ BUSTER_INLINE uint64_t spike_typed_carries(uint64_t generate, uint64_t propagate
 }
 
 // One block of K2 in AVX-512 (see above). Returns the rounds it took, or 0 if it didn't converge.
-static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, uint32_t live, SpikeRoleCarry* carry, uint64_t* typed_out)
+static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, uint32_t live, SpikeRoleCarry* carry, const uint8_t* starts, uint64_t* typed_out,
+                                         uint64_t* open_out)
 {
     const SpikeRoleTables* t = &spike_role_tables;
     const uint8_t* vkinds = kernels->vkinds;
@@ -4908,14 +5005,30 @@ static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, 
             window_index = _mm512_inserti32x4(window_index, _mm512_cvtepi32_epi8(index), 3);
         }
     }
+    // The block's openers still open at its end, the only ones a later block reads from the group stacks: those that
+    // nothing later in the block closes, as nothing later goes below the depth after them.
+    const __m512i after = _mm512_mask_mov_epi8(_mm512_set1_epi8(127), live_mask,
+                                               _mm512_add_epi8(_mm512_sub_epi8(window_index, _mm512_set1_epi8(63)), spike_table8((const uint8_t*)spike_kind_deltas, vk)));
+    __m512i lowest_after = after;
+    for (uint32_t k = 0; k < 6; k += 1)
+    {
+        lowest_after = _mm512_min_epi8(lowest_after, spike_down8(lowest_after, k, _mm512_set1_epi8(127)));
+    }
+    const __mmask64 block_openers = spike_equal8(vk, SPIKE_KIND_L_PAREN) | spike_equal8(vk, SPIKE_KIND_L_SQUARE) | spike_equal8(vk, SPIKE_KIND_L_BRACE);
+    *open_out = _mm512_mask_cmpeq_epi8_mask(block_openers & live_mask, lowest_after, after);
     // The 64 depths below the block's start, from the group stacks (which have BUSTER_SPIKE_DEPTH_PADDING entries below
     // depth 0). Lanes with no enclosing opener at all are at depth 0: their entry is below depth 0, SPIKE_ROLE_NONE.
     const __m512i outside_group = _mm512_permutexvar_epi8(window_index, _mm512_loadu_si512(carry->group_roles + (int64_t)depth_base - 64));
     const uint64_t outside_typed = _mm512_test_epi8_mask(_mm512_permutexvar_epi8(window_index, _mm512_loadu_si512(carry->group_typed + (int64_t)depth_base - 64)),
                                                          _mm512_set1_epi8(1));
-    // The tagged-type keyword before a `{` after a tag or an attribute, which doesn't depend on roles.
+    // The tagged-type keyword before a `{` after a tag or an attribute, which doesn't depend on roles. The rules read it
+    // only after a tag's name or an attribute's `)` (after `__attribute__`), so a `{` after a `)` whose opener, in the
+    // block, follows anything else (a function's or a statement's body) gets none.
     uint8_t tag_keywords[64];
-    uint64_t tag_lanes = spike_equal8(vk, SPIKE_KIND_L_BRACE) & (spike_equal8(vk_previous, SPIKE_KIND_R_PAREN) |
+    const __m512i previous_opener_lane = _mm512_permutex2var_epi8(enclosing_lane, spike_shifts.up8[0], _mm512_setzero_si512());
+    const __mmask64 previous_inside = (inside << 1) & ~(__mmask64)1;
+    const __mmask64 attribute_opener = spike_equal8(_mm512_permutexvar_epi8(previous_opener_lane, vk_previous), SPIKE_KIND_ATTRIBUTE) | ~previous_inside;
+    uint64_t tag_lanes = spike_equal8(vk, SPIKE_KIND_L_BRACE) & ((spike_equal8(vk_previous, SPIKE_KIND_R_PAREN) & attribute_opener) |
                                                                    _mm512_test_epi8_mask(previous_bits, _mm512_set1_epi8(BUSTER_SPIKE_VKIND_NAME))) & live_mask;
     __mmask64 tag_enum = 0;
     __mmask64 tag_none = 0;
@@ -4959,6 +5072,9 @@ static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, 
     const __mmask64 class_paren = spike_equal8(cls, SPIKE_RULE_CLASS_PAREN);
     const __mmask64 class_brace = spike_equal8(cls, SPIKE_RULE_CLASS_BRACE);
     const __mmask64 class_closer = spike_equal8(cls, SPIKE_RULE_CLASS_CLOSER);
+    const __mmask64 class_fixed = spike_equal8(cls, SPIKE_RULE_CLASS_FIXED);
+    // The classes whose rules read the token before.
+    const __mmask64 reads_previous = class_type_name | class_qualifier | class_storage | class_goto | class_atomic | class_unary | class_paren | class_brace;
     const __m512i unary = spike_table8(t->unary, vk);
     const __m512i binary = spike_table8(t->binary, vk);
     const __m512i cast_closer = spike_table8(t->cast_closers, vk_next);
@@ -4966,9 +5082,51 @@ static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, 
     const __m512i fill_previous = _mm512_castsi128_si512(_mm_cvtsi32_si128(carry->previous_role));
     const __m512i fill_before = _mm512_castsi128_si512(_mm_cvtsi32_si128(carry->before_role | (carry->previous_role << 8)));
     const __m512i up2 = spike_shifts.up2_with_fill;
-    // Rounds, from every lane's guessed role.
-    __m512i roles = spike_table8(t->guesses, vk);
-    uint64_t typed = 0;
+    // Rounds, from every lane's guessed role (or, for the check of the rounds' end, the roles in `starts`) and the typed
+    // state it gives (without the attributes' copies).
+    const __mmask64 star_kind = spike_equal8(vk, SPIKE_KIND_STAR);
+    __m512i roles = starts != 0 ? _mm512_loadu_si512(starts + block) : spike_table8(t->guesses, vk);
+    if (starts == 0)
+    {
+        // Where a kind's commonest role is often wrong, what a round would give from the others' guesses, by the same
+        // rules: `(` (a call's, a group's, a condition's, an attribute's), * & + - && ++ --, a tag's name, `{` after
+        // struct, enum or `=`, and the closers by their opener's guess. They change how many rounds a block takes,
+        // never their result.
+        const __m512i guess_previous = _mm512_permutex2var_epi8(roles, spike_shifts.up8[0], fill_previous);
+        const __m512i guess_pred_bits = spike_pred_bits8(spike_preds8(guess_previous, vk_previous));
+        const __mmask64 guess_operand = _mm512_test_epi8_mask(guess_pred_bits, _mm512_set1_epi8((char)BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_OPERAND)));
+        const __mmask64 guess_function = _mm512_test_epi8_mask(guess_pred_bits, _mm512_set1_epi8((char)(BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_TYPE) |
+                                                                                                      BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_SPECIFIER) |
+                                                                                                      BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_STAR)))) & next_function;
+        // An attribute's and an asm's `(` share their features with OPEN_ATTRIBUTE's.
+        const __m512i by_previous = _mm512_mask_mov_epi8(paren_previous, _mm512_cmpge_epu8_mask(paren_previous, _mm512_set1_epi8((char)BUSTER_SPIKE_PAREN_ASM)),
+                                                         _mm512_set1_epi8(SPIKE_ROLE_OPEN_ATTRIBUTE));
+        __m512i paren_guess = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPEN_GROUP), guess_function, _mm512_set1_epi8(SPIKE_ROLE_OPEN_FUNCTION));
+        paren_guess = _mm512_mask_mov_epi8(paren_guess, next_starts_type, _mm512_set1_epi8(SPIKE_ROLE_OPEN_CAST));
+        paren_guess = _mm512_mask_mov_epi8(paren_guess, guess_operand, _mm512_set1_epi8(SPIKE_ROLE_OPEN_CALL));
+        paren_guess = _mm512_mask_mov_epi8(paren_guess, previous_asm, _mm512_set1_epi8(SPIKE_ROLE_OPEN_ASM));
+        paren_guess = _mm512_mask_mov_epi8(paren_guess, attribute_list, _mm512_set1_epi8(SPIKE_ROLE_OPEN_ATTRIBUTE_LIST));
+        paren_guess = _mm512_mask_mov_epi8(paren_guess, _mm512_test_epi8_mask(paren_previous, paren_previous), by_previous);
+        roles = _mm512_mask_mov_epi8(roles, class_paren, paren_guess);
+        roles = _mm512_mask_mov_epi8(roles, class_unary, _mm512_mask_mov_epi8(unary, guess_operand, binary));
+        roles = _mm512_mask_mov_epi8(roles, class_identifier & previous_tag_keyword, tag_role);
+        __m512i brace_guess = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPEN_BLOCK), spike_equal8(vk_previous, SPIKE_KIND_EQUAL),
+                                                   _mm512_set1_epi8(SPIKE_ROLE_OPEN_INITIALIZER));
+        brace_guess = _mm512_mask_mov_epi8(brace_guess, spike_equal8(vk_previous, SPIKE_KIND_STRUCT) | (previous_name & spike_equal8(vk_before, SPIKE_KIND_STRUCT)),
+                                           _mm512_set1_epi8(SPIKE_ROLE_OPEN_STRUCT));
+        brace_guess = _mm512_mask_mov_epi8(brace_guess, spike_equal8(vk_previous, SPIKE_KIND_ENUM) | (previous_name & spike_equal8(vk_before, SPIKE_KIND_ENUM)),
+                                           _mm512_set1_epi8(SPIKE_ROLE_OPEN_ENUM));
+        roles = _mm512_mask_mov_epi8(roles, class_brace, brace_guess);
+        const __m512i group_guess = _mm512_mask_mov_epi8(outside_group, inside, _mm512_permutexvar_epi8(enclosing_lane, roles));
+        roles = _mm512_mask_mov_epi8(roles, class_closer, _mm512_mask_mov_epi8(spike_table8(t->closers, group_guess), spike_equal8(group_guess, SPIKE_ROLE_OPEN_CAST), cast_closer));
+    }
+    __m512i features = spike_features8(roles, word, star_kind);
+    const __m512i guessed_bits = spike_table8(t->role_bits, roles);
+    const uint64_t guessed_generate = (_mm512_test_epi8_mask(guessed_bits, _mm512_set1_epi8(BUSTER_SPIKE_ROLE_TYPE_IF_WORD)) & word) |
+                                      _mm512_test_epi8_mask(guessed_bits, _mm512_set1_epi8(BUSTER_SPIKE_ROLE_TYPE));
+    const uint64_t guessed_propagate = _mm512_test_epi8_mask(guessed_bits, _mm512_set1_epi8(BUSTER_SPIKE_ROLE_PROPAGATES)) & ~guessed_generate;
+    uint64_t guessed_carry;
+    uint64_t typed = spike_typed_carries(guessed_generate, guessed_propagate, carry->typed >> 63, &guessed_carry);
     __m512i new_roles = fixed;
     uint64_t new_typed = 0;
     __mmask64 flags = 0;
@@ -4994,15 +5152,14 @@ static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, 
         const __mmask64 previous_attribute_right = spike_equal8(previous_role, SPIKE_ROLE_CLOSE_ATTRIBUTE_RIGHT);
         const __mmask64 after_asm = previous_asm | (spike_equal8(previous_role, SPIKE_ROLE_LEAF_RIGHT) & previous_asm_qualifier);
         const __mmask64 in_block = _mm512_test_epi8_mask(group_bits, _mm512_set1_epi8(BUSTER_SPIKE_GROUP_BLOCK));
-        __m512i role = fixed;
+        // Each class's role. The classes split the lanes, so the roles combine with an OR of each class's lanes rather than
+        // a chain of blends.
         __mmask64 flag = fixed_flags;
         // Strings and identifiers.
-        role = _mm512_mask_mov_epi8(role, class_string, _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPERAND), spike_equal8(vk_previous, SPIKE_KIND_STRING),
-                                                                               _mm512_set1_epi8(SPIKE_ROLE_STRING_NEXT)));
+        const __m512i string_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPERAND), spike_equal8(vk_previous, SPIKE_KIND_STRING), _mm512_set1_epi8(SPIKE_ROLE_STRING_NEXT));
         const __mmask64 tag = previous_tag_keyword | previous_attribute_right;
         __m512i name_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPERAND), tag, tag_role);
         name_role = _mm512_mask_mov_epi8(name_role, previous_member, _mm512_set1_epi8(SPIKE_ROLE_MEMBER));
-        role = _mm512_mask_mov_epi8(role, class_identifier, name_role);
         // Typedef names.
         const __mmask64 type_position = _mm512_test_epi8_mask(pred_bits, _mm512_set1_epi8((char)(BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_ITEM) | BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_PARAMETER)))) |
                                         (_mm512_test_epi8_mask(pred_bits, _mm512_set1_epi8((char)BUSTER_SPIKE_PRED_BIT(SPIKE_PRED_SPECIFIER))) & ~typed_before);
@@ -5011,25 +5168,17 @@ static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, 
         __m512i type_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPERAND), ~type_settled & type_position, _mm512_set1_epi8(SPIKE_ROLE_SPECIFIER));
         type_role = _mm512_mask_mov_epi8(type_role, tag & ~previous_member, tag_role);
         type_role = _mm512_mask_mov_epi8(type_role, previous_member, _mm512_set1_epi8(SPIKE_ROLE_MEMBER));
-        role = _mm512_mask_mov_epi8(role, class_type_name, type_role);
         flag |= class_type_name & ~type_settled & ~type_position;
         // Qualifiers, storage classes, goto, _Atomic and __extension__.
         const __m512i qualifier_role = _mm512_mask_mov_epi8(_mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_SPECIFIER), star, _mm512_set1_epi8(SPIKE_ROLE_QUALIFIER_LEFT)),
                                                             after_asm, _mm512_set1_epi8(SPIKE_ROLE_LEAF_RIGHT));
-        role = _mm512_mask_mov_epi8(role, class_qualifier, qualifier_role);
-        role = _mm512_mask_mov_epi8(role, class_storage, _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_SPECIFIER), after_asm, _mm512_set1_epi8(SPIKE_ROLE_LEAF_RIGHT)));
-        role = _mm512_mask_mov_epi8(role, class_goto, _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_RETURN), after_asm, _mm512_set1_epi8(SPIKE_ROLE_LEAF_RIGHT)));
+        const __m512i storage_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_SPECIFIER), after_asm, _mm512_set1_epi8(SPIKE_ROLE_LEAF_RIGHT));
+        const __m512i goto_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_RETURN), after_asm, _mm512_set1_epi8(SPIKE_ROLE_LEAF_RIGHT));
         const __m512i atomic_role = _mm512_mask_mov_epi8(_mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_SPECIFIER), star, _mm512_set1_epi8(SPIKE_ROLE_QUALIFIER_LEFT)),
                                                          next_paren, _mm512_set1_epi8(SPIKE_ROLE_LEAF_RIGHT));
-        role = _mm512_mask_mov_epi8(role, class_atomic, atomic_role);
-        role = _mm512_mask_mov_epi8(role, class_extension, _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_PREFIX), next_starts_declaration,
-                                                                                  _mm512_set1_epi8(SPIKE_ROLE_SPECIFIER)));
-        // By the group: commas, colons and ellipses.
-        role = _mm512_mask_mov_epi8(role, class_comma, spike_table8(t->comma, group));
-        role = _mm512_mask_mov_epi8(role, class_colon, spike_table8(t->colon, group));
-        role = _mm512_mask_mov_epi8(role, class_ellipsis, spike_table8(t->ellipsis, group));
+        const __m512i extension_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_PREFIX), next_starts_declaration, _mm512_set1_epi8(SPIKE_ROLE_SPECIFIER));
         // * & + - && ++ --.
-        role = _mm512_mask_mov_epi8(role, class_unary, _mm512_mask_mov_epi8(unary, operand, binary));
+        const __m512i unary_role = _mm512_mask_mov_epi8(unary, operand, binary);
         // (.
         const __m512i attribute_role = _mm512_permutexvar_epi8(before_pred, _mm512_loadu_si512(t->attribute_by_before));
         const __m512i asm_role = _mm512_mask_mov_epi8(_mm512_set1_epi8(SPIKE_ROLE_OPEN_ATTRIBUTE), before_item_or_head, _mm512_set1_epi8(SPIKE_ROLE_OPEN_ASM));
@@ -5043,7 +5192,6 @@ static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, 
         paren_role = _mm512_mask_mov_epi8(paren_role, after_asm, _mm512_set1_epi8(SPIKE_ROLE_OPEN_ASM));
         paren_role = _mm512_mask_mov_epi8(paren_role, attribute_list, _mm512_set1_epi8(SPIKE_ROLE_OPEN_ATTRIBUTE_LIST));
         paren_role = _mm512_mask_mov_epi8(paren_role, _mm512_test_epi8_mask(paren_previous, paren_previous), by_previous);
-        role = _mm512_mask_mov_epi8(role, class_paren, paren_role);
         // {, from the lowest priority up.
         const __mmask64 previous_closer_head = _mm512_test_epi8_mask(spike_table8(t->role_bits, previous_role), _mm512_set1_epi8(BUSTER_SPIKE_ROLE_HEAD_CLOSER));
         const __mmask64 previous_closer_call = _mm512_test_epi8_mask(spike_table8(t->role_bits, previous_role), _mm512_set1_epi8(BUSTER_SPIKE_ROLE_CALL_CLOSER));
@@ -5067,18 +5215,26 @@ static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, 
         brace_role = _mm512_mask_mov_epi8(brace_role, brace_struct, _mm512_set1_epi8(SPIKE_ROLE_OPEN_STRUCT));
         brace_role = _mm512_mask_mov_epi8(brace_role, brace_initializer, _mm512_set1_epi8(SPIKE_ROLE_OPEN_INITIALIZER));
         brace_flag &= ~(brace_enum | brace_struct | brace_initializer);
-        role = _mm512_mask_mov_epi8(role, class_brace, brace_role);
         flag |= class_brace & brace_flag;
-        // Closers, by their opener's role.
-        const __m512i closer_role = _mm512_mask_mov_epi8(spike_table8(t->closers, group), spike_equal8(group, SPIKE_ROLE_OPEN_CAST), cast_closer);
-        role = _mm512_mask_mov_epi8(role, class_closer, closer_role);
-        // What depends on the group again, from this round's openers: a closer and the commas, colons and ellipses in a
-        // group then settle in the same round as their opener.
-        const __m512i group_now = _mm512_mask_mov_epi8(outside_group, inside, _mm512_permutexvar_epi8(enclosing_lane, role));
-        role = _mm512_mask_mov_epi8(role, class_comma, spike_table8(t->comma, group_now));
-        role = _mm512_mask_mov_epi8(role, class_colon, spike_table8(t->colon, group_now));
-        role = _mm512_mask_mov_epi8(role, class_ellipsis, spike_table8(t->ellipsis, group_now));
-        role = _mm512_mask_mov_epi8(role, class_closer, _mm512_mask_mov_epi8(spike_table8(t->closers, group_now), spike_equal8(group_now, SPIKE_ROLE_OPEN_CAST), cast_closer));
+        // What depends on the group, from this round's openers (( and { by their rules, [ fixed): a closer and the commas,
+        // colons and ellipses in a group then settle in the same round as their opener.
+        const __m512i opener_role = _mm512_mask_mov_epi8(_mm512_mask_mov_epi8(fixed, class_paren, paren_role), class_brace, brace_role);
+        const __m512i group_now = _mm512_mask_mov_epi8(outside_group, inside, _mm512_permutexvar_epi8(enclosing_lane, opener_role));
+        const __m512i closer_role = _mm512_mask_mov_epi8(spike_table8(t->closers, group_now), spike_equal8(group_now, SPIKE_ROLE_OPEN_CAST), cast_closer);
+        // The classes together; FIXED lanes keep their kind's role.
+        const __m512i fixed_part = _mm512_ternarylogic_epi64(_mm512_maskz_mov_epi8(class_fixed, fixed), _mm512_maskz_mov_epi8(class_string, string_role),
+                                                             _mm512_maskz_mov_epi8(class_identifier, name_role), 0xFE);
+        const __m512i specifier_part = _mm512_ternarylogic_epi64(_mm512_maskz_mov_epi8(class_type_name, type_role), _mm512_maskz_mov_epi8(class_qualifier, qualifier_role),
+                                                                 _mm512_maskz_mov_epi8(class_storage, storage_role), 0xFE);
+        const __m512i keyword_part = _mm512_ternarylogic_epi64(_mm512_maskz_mov_epi8(class_goto, goto_role), _mm512_maskz_mov_epi8(class_atomic, atomic_role),
+                                                               _mm512_maskz_mov_epi8(class_extension, extension_role), 0xFE);
+        const __m512i group_part = _mm512_ternarylogic_epi64(_mm512_maskz_mov_epi8(class_comma, spike_table8(t->comma, group_now)),
+                                                             _mm512_maskz_mov_epi8(class_colon, spike_table8(t->colon, group_now)),
+                                                             _mm512_maskz_mov_epi8(class_ellipsis, spike_table8(t->ellipsis, group_now)), 0xFE);
+        const __m512i operator_part = _mm512_ternarylogic_epi64(_mm512_maskz_mov_epi8(class_unary, unary_role), _mm512_maskz_mov_epi8(class_paren, paren_role),
+                                                                _mm512_maskz_mov_epi8(class_brace, brace_role), 0xFE);
+        __m512i role = _mm512_or_si512(_mm512_ternarylogic_epi64(fixed_part, specifier_part, keyword_part, 0xFE),
+                                       _mm512_ternarylogic_epi64(group_part, operator_part, _mm512_maskz_mov_epi8(class_closer, closer_role), 0xFE));
         // An attribute's names, whatever their spelling.
         const __mmask64 attribute_name = _mm512_test_epi8_mask(spike_table8(t->group_bits, group_now), _mm512_set1_epi8(BUSTER_SPIKE_GROUP_ATTRIBUTE_LIST)) & keyword;
         role = _mm512_mask_mov_epi8(role, attribute_name, _mm512_set1_epi8(SPIKE_ROLE_OPERAND));
@@ -5117,8 +5273,23 @@ static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, 
         new_typed = spike_typed_carries(generate | copied, propagate & ~copies, carry->typed >> 63, &carry_out);
         new_roles = role;
         flags = flag;
-        converged = _mm512_cmpneq_epi8_mask(new_roles, roles) == 0 && ((new_typed ^ typed) & live_mask) == 0;
+        // The round's roles are final when no lane reads what changed in them, so that the next round would compute them
+        // again. Of the roles before it a round reads, per class: the features of the token before (all of them, or for
+        // an identifier whether it is CLOSE_ATTRIBUTE_RIGHT), the pred of the token two back (for `(`), the features of
+        // the lane's opener (for typedef names and `{`), and the typed state before (for typedef names); an attribute's
+        // closer reads typed states before its opener. The commas, colons, ellipses, closers and attribute names of a
+        // group read its opener as this round sets it, which changes only if the opener is a lane that reads a change.
+        const __m512i new_features = spike_features8(new_roles, word, star_kind);
+        const uint64_t changed = _mm512_cmpneq_epi8_mask(new_features, features);
+        const __m512i attribute_right = _mm512_set1_epi8((char)(BUSTER_SPIKE_FEATURE_ATTRIBUTE_RIGHT | SPIKE_PRED_LEAF));
+        const uint64_t right_changed = _mm512_cmpeq_epi8_mask(new_features, attribute_right) ^ _mm512_cmpeq_epi8_mask(features, attribute_right);
+        const uint64_t typed_changed = (new_typed ^ typed) & live_mask;
+        const uint64_t opener_changed = _mm512_test_epi8_mask(_mm512_permutexvar_epi8(enclosing_lane, _mm512_movm_epi8(changed)), _mm512_set1_epi8(-1)) & inside;
+        const uint64_t affected = ((changed << 1) & reads_previous) | ((right_changed << 1) & class_identifier) | ((changed << 2) & class_paren) |
+                            (opener_changed & (class_type_name | class_brace)) | ((typed_changed << 1) & class_type_name) | (typed_changed != 0 ? copies : 0);
+        converged = (affected & live_mask) == 0;
         roles = new_roles;
+        features = new_features;
         typed = new_typed;
     }
     _mm512_storeu_si512(kernels->roles + block, roles);
@@ -5132,8 +5303,10 @@ static uint32_t spike_roles_block_avx512(SpikeKernels* kernels, uint32_t block, 
 // K2 in AVX-512: the blocks in order, each in rounds; a block that doesn't converge runs the twin's loop. `typed` is a
 // byte per token (the twin's array, which the fallback and the group stacks read), and `group_roles` and
 // `group_typed` have an entry per depth. `rounds` (BUSTER_SPIKE_ROLE_ROUNDS + 1 counters) counts the blocks by the
-// rounds they took, index 0 for those the twin did.
-static void spike_roles_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, uint8_t* group_roles, uint8_t* group_typed, uint64_t* rounds)
+// rounds they took, index 0 for those the twin did. `starts`, 0 but in a check, gives every token the role its rounds
+// start from instead of its kind's guess.
+static void spike_roles_starting_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, uint8_t* group_roles, uint8_t* group_typed, uint64_t* rounds,
+                                        const uint8_t* starts)
 {
     SpikeRoleCarry carry = {
         .previous_role = SPIKE_ROLE_NONE,
@@ -5146,7 +5319,8 @@ static void spike_roles_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* t
     {
         const uint32_t live = count - block < 64 ? count - block : 64;
         uint64_t typed_mask = 0;
-        const uint32_t taken = spike_roles_block_avx512(kernels, block, live, &carry, &typed_mask);
+        uint64_t openers = 0;
+        const uint32_t taken = spike_roles_block_avx512(kernels, block, live, &carry, starts, &typed_mask, &openers);
         rounds[taken] += 1;
         if (taken == 0)
         {
@@ -5173,9 +5347,10 @@ static void spike_roles_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* t
         else
         {
             _mm512_storeu_si512(typed + block, _mm512_maskz_mov_epi8(typed_mask, _mm512_set1_epi8(1)));
-            // A cast candidate's opener takes the role its closer decided, as spike_closer_role does.
+            // A cast candidate's opener takes the role its closer decided, as spike_closer_role does; one that stays a cast
+            // keeps OPEN_CAST.
             const __m512i role = _mm512_loadu_si512(kernels->roles + block);
-            uint64_t casts = (spike_equal8(role, SPIKE_ROLE_CLOSE_COMPOUND) | spike_equal8(role, SPIKE_ROLE_CLOSE_CAST) | spike_equal8(role, SPIKE_ROLE_CLOSE_FUNCTION)) &
+            uint64_t casts = (spike_equal8(role, SPIKE_ROLE_CLOSE_COMPOUND) | spike_equal8(role, SPIKE_ROLE_CLOSE_FUNCTION)) &
                              (live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1));
             while (casts != 0)
             {
@@ -5190,11 +5365,8 @@ static void spike_roles_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* t
                 }
             }
         }
-        // Every opener of the block onto the group stacks, in order, so each depth's entry is its open opener's when a
-        // later block reads it.
-        const __m512i kinds = _mm512_loadu_si512(kernels->vkinds + block);
-        uint64_t openers = (spike_equal8(kinds, SPIKE_KIND_L_PAREN) | spike_equal8(kinds, SPIKE_KIND_L_SQUARE) | spike_equal8(kinds, SPIKE_KIND_L_BRACE)) &
-                           (live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1));
+        // The openers still open at the block's end onto the group stacks, at their depths, which differ, for the later
+        // blocks that read them.
         while (openers != 0)
         {
             const uint32_t i = block + (uint32_t)__builtin_ctzll(openers);
@@ -5206,6 +5378,11 @@ static void spike_roles_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* t
         carry.before_role = live >= 2 ? kernels->roles[block + live - 2] : carry.previous_role;
         carry.typed = live == 64 ? typed_mask : typed_mask << (64 - live);
     }
+}
+
+static void spike_roles_avx512(SpikeKernels* kernels, uint32_t count, uint8_t* typed, uint8_t* group_roles, uint8_t* group_typed, uint64_t* rounds)
+{
+    spike_roles_starting_avx512(kernels, count, typed, group_roles, group_typed, rounds, 0);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -5783,6 +5960,718 @@ static void spike_parents_right8_avx512(const uint8_t* roles, const uint32_t* no
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// K4 with the stack's top in registers
+//
+// In the byte-lane passes above, a block reads the top of the candidate stack from memory that the block before it has
+// just written at another offset, so the load can't take the stores' data and waits for them to commit; and a block's
+// in-block work, about 140 cycles of latency in some 450 ops, hardly overlaps the next block's. Not for want of reorder
+// buffer: Zen 5 keeps waiting vector ops in its floating-point scheduling queues, which one block's chains fill (half the
+// cycles of a loop of that work alone stall on them: de_dispatch_stall_cycle_dynamic_tokens_part1.fp_sch_rsrc_stall), so
+// the next block's ops reach them only when they come close in program order. So K4 runs as three loops:
+//   - spike_top_prepare8_avx512: every block's in-block work for both passes, which depends on no other block (the
+//     searches by spike_previous_smaller8's and spike_next_smaller8's tables, both passes' candidates for other blocks,
+//     the least key), BUSTER_SPIKE_PREPARED_TOGETHER blocks at a time, each step for all of them before the next.
+//   - The left pass and the right pass: each block's window work on it. The top of the stack lives in registers
+//     (SpikeTop): its BUSTER_SPIKE_TOP_LANES nearest candidates, nearest first. A block looks there for the candidates
+//     its lanes didn't find in it, pops the ones its least key hides with a compress and pushes its own with an expand,
+//     so that what one block hands the next is a compare, a compress and an expand on registers.
+//
+// The whole stack is in memory too (SpikeSlots), nearest first and growing downward, written by each push with a
+// masked store. A lane whose candidate is deeper than the window searches it there, and a window that pops leave with
+// fewer candidates than the stack holds is reloaded from it. Neither happens on sqlite3 or the libc corpus, whose
+// stacks hold at most 32 candidates before a block; deep nesting does both.
+//
+// The left pass's candidates for later blocks are a block's suffix minima, the right pass's its prefix minima, each
+// pushed nearest first. A block whose depths span more than BUSTER_SPIKE_BYTE_DEPTH_RANGE runs as aligned parts that
+// fit, in its pass's order, each with its own in-block work.
+
+#define BUSTER_SPIKE_TOP_LANES 32
+
+typedef struct SpikeTop SpikeTop;
+struct SpikeTop
+{
+    // The nearest candidates, nearest first: 16-bit keys (0 below the stack's bottom, below every real key) and the
+    // positions' low and high halves (0xFFFF below the bottom, which reads as BUSTER_SPIKE_NONE).
+    __m512i keys;
+    __m512i low;
+    __m512i high;
+    // The candidates in the stack, and how many of them the window holds: the lesser of `count` and the window's
+    // lanes, between blocks.
+    uint32_t count;
+    uint32_t held;
+};
+
+// The stack in memory, nearest first: candidate s (0 at the bottom) at slot capacity - 1 - s, so the window's
+// candidates are the slots from capacity - count. BUSTER_SPIKE_TOP_LANES slots after the last hold key 0 and position
+// halves 0xFFFF, as the window does below the bottom.
+typedef struct SpikeSlots SpikeSlots;
+struct SpikeSlots
+{
+    uint16_t* keys;
+    uint16_t* low;
+    uint16_t* high;
+    uint32_t capacity;
+};
+
+BUSTER_INLINE void spike_top_reset(SpikeTop* top)
+{
+    top->keys = _mm512_setzero_si512();
+    top->low = _mm512_set1_epi16(-1);
+    top->high = _mm512_set1_epi16(-1);
+    top->count = 0;
+    top->held = 0;
+}
+
+// The window's first `reach` candidates from memory (the rest as below the bottom), for a stack that holds `count`.
+BUSTER_INLINE void spike_top_reload(SpikeTop* top, const SpikeSlots* slots, uint32_t reach)
+{
+    const __mmask32 lanes = reach == BUSTER_SPIKE_TOP_LANES ? ~(__mmask32)0 : (((__mmask32)1 << reach) - 1);
+    const uint32_t slot = slots->capacity - top->count;
+    top->keys = _mm512_maskz_loadu_epi16(lanes, slots->keys + slot);
+    top->low = _mm512_mask_loadu_epi16(_mm512_set1_epi16(-1), lanes, slots->low + slot);
+    top->high = _mm512_mask_loadu_epi16(_mm512_set1_epi16(-1), lanes, slots->high + slot);
+    top->held = top->count < reach ? top->count : reach;
+}
+
+// How many of the `below` candidates under the window a minimum hides: those whose key isn't below it, a run from the
+// nearest, counted 32 at a time. The padding's key 0 ends the run.
+static uint32_t spike_slots_hidden(const SpikeSlots* slots, uint32_t below, uint16_t minimum)
+{
+    uint32_t hidden = 0;
+    bool popping = true;
+    while (popping)
+    {
+        const __m512i keys = _mm512_loadu_si512(slots->keys + slots->capacity - below + hidden);
+        const uint32_t run = (uint32_t)__builtin_popcount(_mm512_cmpge_epu16_mask(keys, _mm512_set1_epi16((short)minimum)));
+        hidden += run;
+        popping = run == 32 && hidden < below;
+    }
+    return hidden < below ? hidden : below;
+}
+
+// The nearest of the stack's candidates below `skip`, the window's, whose key is below `threshold`: a binary search, as
+// keys decrease from the nearest. Its position, or BUSTER_SPIKE_NONE with key 0.
+static uint32_t spike_slots_search(const SpikeSlots* slots, uint32_t count, uint32_t skip, uint32_t threshold, uint16_t* key)
+{
+    uint32_t low = slots->capacity - count + skip;
+    uint32_t high = slots->capacity;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (slots->keys[middle] < threshold)
+        {
+            high = middle;
+        }
+        else
+        {
+            low = middle + 1;
+        }
+    }
+    const bool found = low < slots->capacity;
+    *key = found ? slots->keys[low] : 0;
+    return found ? ((uint32_t)slots->high[low] << 16) | slots->low[low] : BUSTER_SPIKE_NONE;
+}
+
+// The nearest window candidate below each lane's threshold: the first of the window's 32 keys (relative to the block,
+// saturated to bytes, nearest first, so non-increasing; lanes 32 to 63 zero) below it, 0 to 31, or 32 if none is. A
+// binary search for how many lead it at or above the threshold: steps of 16, 8, 4, 2, 1 and 1.
+BUSTER_INLINE __m512i spike_top_search8(__m512i window, __m512i thresholds)
+{
+    const __m512i one = _mm512_set1_epi8(1);
+    __m512i c = _mm512_setzero_si512();
+    for (int32_t k = 4; k >= -1; k -= 1)
+    {
+        const uint32_t step = k >= 0 ? 1u << k : 1u;
+        const __m512i v = _mm512_permutexvar_epi8(_mm512_add_epi8(c, _mm512_set1_epi8((char)(step - 1))), window);
+        // 0xFF where v is at or above the threshold, so the search moves past it.
+        const __m512i past = _mm512_sub_epi8(_mm512_min_epu8(_mm512_subs_epu8(thresholds, v), one), one);
+        c = _mm512_add_epi8(c, _mm512_and_si512(past, _mm512_set1_epi8((char)step)));
+    }
+    return c;
+}
+
+// The lanes' candidates from memory for the lanes in `deep`, whose candidate is under the window (rare: no lane of
+// sqlite3 or the libc corpus has one), into a block's candidates as 16-bit keys and 32-bit positions.
+static void spike_top_deep(const SpikeSlots* slots, uint32_t count, uint32_t reach, __mmask64 deep, __m512i thresholds, uint32_t base, uint32_t* positions,
+                           uint16_t* keys)
+{
+    uint8_t threshold_bytes[64];
+    _mm512_storeu_si512(threshold_bytes, thresholds);
+    while (deep != 0)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctzll(deep);
+        deep &= deep - 1;
+        positions[lane] = spike_slots_search(slots, count, reach, base * BUSTER_SPIKE_LEVELS + threshold_bytes[lane], &keys[lane]);
+    }
+}
+
+// A block's candidates, each lane's nearest below its threshold, as 16-bit keys (32 lanes a register) and positions
+// (16 lanes a register).
+typedef struct SpikeFound8 SpikeFound8;
+struct SpikeFound8
+{
+    __m512i keys[2];
+    __m512i positions[4];
+};
+
+// One block's (or part's) window work, after its in-block search: the lanes' candidates (in the block where p is below
+// 64, else in the window, else in memory under it), then the pop and the push. `block_keys` are its keys relative to
+// base * 32 (dead lanes 0xFF), `p` and `thresholds` its search's, and `push_keys` and `push_lanes` the keys and block
+// lanes from which `minima` picks its candidates for later blocks, nearest first; `minimum` holds the block's least key
+// in every lane. `reach` is the window's lanes: BUSTER_SPIKE_TOP_LANES, or fewer in the check of the paths through
+// memory.
+BUSTER_INLINE SpikeFound8 spike_top_block8(SpikeTop* top, const SpikeSlots* slots, uint32_t reach, __m512i block_keys, __m512i thresholds, __m512i p,
+                                           __m512i push_keys, __m512i push_lanes, __mmask64 minima, __m512i minimum, uint32_t block, uint32_t base, __mmask64 live)
+{
+    const __m512i ones = _mm512_set1_epi16(-1);
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i offset = _mm512_set1_epi16((short)(base * BUSTER_SPIKE_LEVELS));
+    // The window's keys relative to the block, saturated: a key below the block's lowest depth is below every key in it,
+    // and one too far above it above every threshold.
+    const __m512i window = _mm512_zextsi256_si512(_mm512_cvtusepi16_epi8(_mm512_subs_epu16(top->keys, offset)));
+    const __m512i c = spike_top_search8(window, thresholds);
+    const __mmask64 found = _mm512_cmplt_epu8_mask(p, _mm512_set1_epi8(64));
+    SpikeFound8 result;
+    // Keys: the block's from its key bytes, the window's from its keys (index 32 picks the second table's 0).
+    const __m512i inside_keys = _mm512_permutexvar_epi8(p, block_keys);
+    for (uint32_t h = 0; h < 2; h += 1)
+    {
+        const __m512i inside = _mm512_add_epi16(offset, _mm512_maskz_permutexvar_epi8(BUSTER_SPIKE_WORD_BYTES, spike_shifts.words[h], inside_keys));
+        const __m512i outside = _mm512_permutex2var_epi16(top->keys, _mm512_maskz_permutexvar_epi8(BUSTER_SPIKE_WORD_BYTES, spike_shifts.words[h], c), zero);
+        result.keys[h] = _mm512_mask_mov_epi16(outside, (__mmask32)(found >> (32 * h)), inside);
+    }
+    // Positions: the block's are block + lane; the window's from their halves, put together as 32-bit lanes by unpacking
+    // in an order that leaves them in lane order.
+    const __m512i block_vector = _mm512_set1_epi32((int)block);
+    for (uint32_t h = 0; h < 2; h += 1)
+    {
+        const __m512i index = _mm512_maskz_permutexvar_epi8(BUSTER_SPIKE_WORD_BYTES, spike_shifts.unpacked[h], c);
+        const __m512i low = _mm512_permutex2var_epi16(top->low, index, ones);
+        const __m512i high = _mm512_permutex2var_epi16(top->high, index, ones);
+        const __m512i outside[2] = {
+            _mm512_unpacklo_epi16(low, high),
+            _mm512_unpackhi_epi16(low, high),
+        };
+        for (uint32_t q = 0; q < 2; q += 1)
+        {
+            const __m512i inside = _mm512_add_epi32(block_vector, _mm512_maskz_permutexvar_epi8(BUSTER_SPIKE_DWORD_BYTES, spike_shifts.dwords[2 * h + q], p));
+            result.positions[2 * h + q] = _mm512_mask_mov_epi32(outside[q], (__mmask16)(found >> (32 * h + 16 * q)), inside);
+        }
+    }
+    // Lanes whose candidate is under the window: before the push, which may write over the slots they read.
+    const __mmask64 deep = top->count > reach ? _mm512_mask_cmpge_epu8_mask(live & ~found, c, _mm512_set1_epi8((char)reach)) : 0;
+    if (deep != 0)
+    {
+        uint32_t position_lanes[64];
+        uint16_t key_lanes[64];
+        for (uint32_t q = 0; q < 4; q += 1)
+        {
+            _mm512_storeu_si512(position_lanes + 16 * q, result.positions[q]);
+        }
+        _mm512_storeu_si512(key_lanes, result.keys[0]);
+        _mm512_storeu_si512(key_lanes + 32, result.keys[1]);
+        spike_top_deep(slots, top->count, reach, deep, thresholds, base, position_lanes, key_lanes);
+        for (uint32_t q = 0; q < 4; q += 1)
+        {
+            result.positions[q] = _mm512_loadu_si512(position_lanes + 16 * q);
+        }
+        result.keys[0] = _mm512_loadu_si512(key_lanes);
+        result.keys[1] = _mm512_loadu_si512(key_lanes + 32);
+    }
+    // The pop: the window's candidates whose key isn't below the block's minimum are hidden, nearest first; the padding's
+    // key 0 is below every real key.
+    const __mmask32 kept = _mm256_cmplt_epu8_mask(_mm512_castsi512_si256(window), _mm512_castsi512_si256(minimum));
+    const uint32_t hidden = (uint32_t)__builtin_popcount(~kept);
+    uint32_t popped = hidden;
+    if (hidden == top->held && top->count > top->held)
+    {
+        // The window emptied: the candidates under it may be hidden too.
+        const uint16_t least = (uint16_t)(base * BUSTER_SPIKE_LEVELS + (uint32_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(minimum)) % 256);
+        popped += spike_slots_hidden(slots, top->count - top->held, least);
+    }
+    // The push: the block's candidates, nearest first, into memory and onto the window.
+    const uint32_t n = (uint32_t)__builtin_popcountll(minima);
+    const __m512i new_keys = _mm512_maskz_compress_epi8(minima, push_keys);
+    const __m512i new_lanes = _mm512_maskz_compress_epi8(minima, push_lanes);
+    const __m512i keys = _mm512_add_epi16(offset, _mm512_cvtepu8_epi16(_mm512_castsi512_si256(new_keys)));
+    const __m512i low = _mm512_add_epi16(_mm512_set1_epi16((short)(block & 0xFFFF)), _mm512_cvtepu8_epi16(_mm512_castsi512_si256(new_lanes)));
+    const __m512i high = _mm512_set1_epi16((short)(block >> 16));
+    const uint32_t count = top->count - popped + n;
+    const uint32_t slot = slots->capacity - count;
+    const __mmask32 stored = n >= 32 ? ~(__mmask32)0 : (((__mmask32)1 << n) - 1);
+    _mm512_mask_storeu_epi16(slots->keys + slot, stored, keys);
+    _mm512_mask_storeu_epi16(slots->low + slot, stored, low);
+    _mm512_mask_storeu_epi16(slots->high + slot, stored, high);
+    if (n > 32)
+    {
+        const __mmask32 rest = ((__mmask32)1 << (n - 32)) - 1;
+        _mm512_mask_storeu_epi16(slots->keys + slot + 32, rest, _mm512_add_epi16(offset, _mm512_cvtepu8_epi16(_mm512_extracti64x4_epi64(new_keys, 1))));
+        _mm512_mask_storeu_epi16(slots->low + slot + 32, rest,
+                                 _mm512_add_epi16(_mm512_set1_epi16((short)(block & 0xFFFF)), _mm512_cvtepu8_epi16(_mm512_extracti64x4_epi64(new_lanes, 1))));
+        _mm512_mask_storeu_epi16(slots->high + slot + 32, rest, high);
+    }
+    // The kept candidates move up to the window's start, then down past the pushed ones.
+    const __mmask32 after = n >= 32 ? 0 : ~(((__mmask32)1 << n) - 1);
+    const __mmask32 reached = reach == BUSTER_SPIKE_TOP_LANES ? ~(__mmask32)0 : (((__mmask32)1 << reach) - 1);
+    top->keys = _mm512_maskz_mov_epi16(reached, _mm512_mask_expand_epi16(keys, after, _mm512_maskz_compress_epi16(kept, top->keys)));
+    top->low = _mm512_mask_mov_epi16(ones, reached, _mm512_mask_expand_epi16(low, after, _mm512_mask_compress_epi16(ones, kept, top->low)));
+    top->high = _mm512_mask_mov_epi16(ones, reached, _mm512_mask_expand_epi16(high, after, _mm512_mask_compress_epi16(ones, kept, top->high)));
+    const uint32_t held = top->held - hidden + n;
+    top->count = count;
+    top->held = held < reach ? held : reach;
+    if (top->held < reach && top->count > top->held)
+    {
+        spike_top_reload(top, slots, reach);
+    }
+    return result;
+}
+
+// The doubling tables of the in-block searches, as spike_previous_smaller8 and spike_next_smaller8 build them:
+// windows[k] holds in each lane the least key of the 2^k lanes ending at it (up) or starting at it (down).
+BUSTER_INLINE void spike_windows_up8(__m512i keys, __m512i* windows)
+{
+    const __m512i fill = _mm512_set1_epi8((char)0xFF);
+    windows[0] = keys;
+    for (uint32_t k = 1; k < 6; k += 1)
+    {
+        windows[k] = _mm512_min_epu8(windows[k - 1], spike_up8(windows[k - 1], k - 1, fill));
+    }
+}
+
+BUSTER_INLINE void spike_windows_down8(__m512i keys, __m512i* windows)
+{
+    const __m512i fill = _mm512_set1_epi8((char)0xFF);
+    windows[0] = keys;
+    for (uint32_t k = 1; k < 6; k += 1)
+    {
+        windows[k] = _mm512_min_epu8(windows[k - 1], spike_down8(windows[k - 1], k - 1, fill));
+    }
+}
+
+// spike_previous_smaller8's search on its table: a lane's nearest previous lane below its threshold, or a lane of 64 or
+// more (bit 7 set) if none is.
+BUSTER_INLINE __m512i spike_search_up8(const __m512i* windows, __m512i thresholds)
+{
+    const __m512i one = _mm512_set1_epi8(1);
+    __m512i p = _mm512_sub_epi8(spike_shifts.lanes8, one);
+    for (int32_t k = 5; k >= 0; k -= 1)
+    {
+        const __m512i v = _mm512_permutexvar_epi8(p, windows[k]);
+        const __m512i below = _mm512_min_epu8(_mm512_subs_epu8(thresholds, v), one);
+        const __m512i step = _mm512_set1_epi8((char)(1 << k));
+        p = _mm512_sub_epi8(p, _mm512_andnot_si512(_mm512_sub_epi8(_mm512_setzero_si512(), below), step));
+    }
+    return p;
+}
+
+// spike_next_smaller8's: the nearest next lane below the threshold, or 64 or more.
+BUSTER_INLINE __m512i spike_search_down8(const __m512i* windows, __m512i thresholds)
+{
+    const __m512i one = _mm512_set1_epi8(1);
+    __m512i p = _mm512_add_epi8(spike_shifts.lanes8, one);
+    for (int32_t k = 5; k >= 0; k -= 1)
+    {
+        const __m512i v = _mm512_permutexvar_epi8(p, windows[k]);
+        const __m512i below = _mm512_min_epu8(_mm512_subs_epu8(thresholds, v), one);
+        const __m512i step = _mm512_set1_epi8((char)(1 << k));
+        p = _mm512_add_epi8(p, _mm512_andnot_si512(_mm512_sub_epi8(_mm512_setzero_si512(), below), step));
+    }
+    return p;
+}
+
+// A block's in-block work for both passes, which depends on no other block, so that every block's runs first, many
+// blocks in flight at once, and the passes are left with the window work, whose chain from block to block is short.
+typedef struct SpikeBlockWork SpikeBlockWork;
+struct SpikeBlockWork
+{
+    // The keys relative to the block's lowest node depth * 32 (dead lanes 0xFF), and the searches' thresholds.
+    uint8_t keys[64];
+    uint8_t left_thresholds[64];
+    uint8_t right_thresholds[64];
+    // Each lane's L and R in the block: a lane, or 64 or more for none.
+    uint8_t lefts[64];
+    uint8_t rights[64];
+    // The block's candidates for each pass's later blocks: its suffix minima, by lane from the block's end (the left
+    // pass pushes the nearest first), and its prefix minima.
+    uint64_t left_minima;
+    uint64_t right_minima;
+    // The lowest node depth, or BUSTER_SPIKE_NONE for a block whose depths span more than BUSTER_SPIKE_BYTE_DEPTH_RANGE,
+    // which the passes run as parts; and the block's least key.
+    uint32_t base;
+    uint8_t minimum;
+} __attribute__((aligned(64)));
+
+// Blocks prepared together, each step for all of them before the next, so that their chains share the scheduling
+// queues. Four were faster on the libc corpus's small files and slower on sqlite3, whose blocks' work streams through
+// L3.
+#define BUSTER_SPIKE_PREPARED_TOGETHER 2
+
+_Static_assert(64 * BUSTER_SPIKE_PREPARED_TOGETHER <= BUSTER_SPIKE_TOKEN_PADDING, "the last group of prepared blocks reads the token arrays' padding");
+
+// Every block's in-block work for both passes. `works` has room for a group of BUSTER_SPIKE_PREPARED_TOGETHER blocks
+// past the last, and the token arrays BUSTER_SPIKE_TOKEN_PADDING tokens of padding, which the last group may read.
+static void spike_top_prepare8_avx512(const uint8_t* roles, const uint32_t* node_depths, uint32_t count, SpikeBlockWork* works)
+{
+    const __m512i fill = _mm512_set1_epi8((char)0xFF);
+    for (uint32_t first = 0; first < count; first += 64 * BUSTER_SPIKE_PREPARED_TOGETHER)
+    {
+        __mmask64 live_masks[BUSTER_SPIKE_PREPARED_TOGETHER];
+        __m512i relative[BUSTER_SPIKE_PREPARED_TOGETHER];
+        uint32_t lowest[BUSTER_SPIKE_PREPARED_TOGETHER];
+        uint32_t highest[BUSTER_SPIKE_PREPARED_TOGETHER];
+        SpikeKeys8 keys[BUSTER_SPIKE_PREPARED_TOGETHER];
+        __m512i block_keys[BUSTER_SPIKE_PREPARED_TOGETHER];
+        __m512i up[BUSTER_SPIKE_PREPARED_TOGETHER][6];
+        __m512i down[BUSTER_SPIKE_PREPARED_TOGETHER][6];
+        for (uint32_t b = 0; b < BUSTER_SPIKE_PREPARED_TOGETHER; b += 1)
+        {
+            const uint32_t block = first + 64 * b;
+            // A block past the end has no live lane.
+            const uint32_t live = block >= count ? 0 : count - block < 64 ? count - block : 64;
+            live_masks[b] = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
+            relative[b] = _mm512_maskz_mov_epi8(live_masks[b], spike_relative_depths8(node_depths, block, live_masks[b], &lowest[b], &highest[b]));
+        }
+        for (uint32_t b = 0; b < BUSTER_SPIKE_PREPARED_TOGETHER; b += 1)
+        {
+            keys[b] = spike_block_keys8(roles, relative[b], first + 64 * b);
+            block_keys[b] = _mm512_mask_mov_epi8(fill, live_masks[b], keys[b].keys);
+            up[b][0] = block_keys[b];
+            down[b][0] = block_keys[b];
+        }
+        for (uint32_t k = 1; k < 6; k += 1)
+        {
+            for (uint32_t b = 0; b < BUSTER_SPIKE_PREPARED_TOGETHER; b += 1)
+            {
+                up[b][k] = _mm512_min_epu8(up[b][k - 1], spike_up8(up[b][k - 1], k - 1, fill));
+                down[b][k] = _mm512_min_epu8(down[b][k - 1], spike_down8(down[b][k - 1], k - 1, fill));
+            }
+        }
+        __m512i lefts[BUSTER_SPIKE_PREPARED_TOGETHER];
+        __m512i rights[BUSTER_SPIKE_PREPARED_TOGETHER];
+        const __m512i one = _mm512_set1_epi8(1);
+        for (uint32_t b = 0; b < BUSTER_SPIKE_PREPARED_TOGETHER; b += 1)
+        {
+            lefts[b] = _mm512_sub_epi8(spike_shifts.lanes8, one);
+            rights[b] = _mm512_add_epi8(spike_shifts.lanes8, one);
+        }
+        // The searches of spike_search_up8 and spike_search_down8, step by step.
+        for (int32_t k = 5; k >= 0; k -= 1)
+        {
+            const __m512i step = _mm512_set1_epi8((char)(1 << k));
+            for (uint32_t b = 0; b < BUSTER_SPIKE_PREPARED_TOGETHER; b += 1)
+            {
+                const __m512i left = _mm512_permutexvar_epi8(lefts[b], up[b][k]);
+                const __m512i right = _mm512_permutexvar_epi8(rights[b], down[b][k]);
+                const __m512i left_below = _mm512_min_epu8(_mm512_subs_epu8(keys[b].left, left), one);
+                const __m512i right_below = _mm512_min_epu8(_mm512_subs_epu8(keys[b].right, right), one);
+                lefts[b] = _mm512_sub_epi8(lefts[b], _mm512_andnot_si512(_mm512_sub_epi8(_mm512_setzero_si512(), left_below), step));
+                rights[b] = _mm512_add_epi8(rights[b], _mm512_andnot_si512(_mm512_sub_epi8(_mm512_setzero_si512(), right_below), step));
+            }
+        }
+        for (uint32_t b = 0; b < BUSTER_SPIKE_PREPARED_TOGETHER; b += 1)
+        {
+            SpikeBlockWork* work = &works[first / 64 + b];
+            // A block that doesn't fit gets the rest too, unused.
+            work->base = highest[b] - lowest[b] <= BUSTER_SPIKE_BYTE_DEPTH_RANGE ? lowest[b] : BUSTER_SPIKE_NONE;
+            // A candidate is below every key between it and the block's end on its pass's side.
+            const __m512i prefix = _mm512_min_epu8(up[b][5], spike_up8(up[b][5], 5, fill));
+            const __m512i suffix = _mm512_min_epu8(down[b][5], spike_down8(down[b][5], 5, fill));
+            const __mmask64 suffix_minima = _mm512_cmplt_epu8_mask(block_keys[b], spike_down8(suffix, 0, fill));
+            work->right_minima = _mm512_cmplt_epu8_mask(block_keys[b], spike_up8(prefix, 0, fill));
+            work->left_minima = _mm512_movepi8_mask(_mm512_permutexvar_epi8(spike_shifts.reverse8, _mm512_movm_epi8(suffix_minima)));
+            work->minimum = (uint8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(suffix));
+            _mm512_store_si512(work->keys, block_keys[b]);
+            _mm512_store_si512(work->left_thresholds, keys[b].left);
+            _mm512_store_si512(work->right_thresholds, keys[b].right);
+            _mm512_store_si512(work->lefts, lefts[b]);
+            _mm512_store_si512(work->rights, rights[b]);
+        }
+    }
+}
+
+// The prefix minima of byte lanes: lane i gets the least of lanes 0 to i.
+BUSTER_INLINE __m512i spike_prefix_minima8(__m512i x)
+{
+    const __m512i fill = _mm512_set1_epi8((char)0xFF);
+    for (uint32_t k = 0; k < 6; k += 1)
+    {
+        x = _mm512_min_epu8(x, spike_up8(x, k, fill));
+    }
+    return x;
+}
+
+// A block's L and L's key into the left pass's outputs; `partial` stores only the live lanes.
+BUSTER_INLINE void spike_top_store_lefts8(const SpikeFound8* found, uint32_t block, __mmask64 live, bool partial, uint32_t* lefts, uint16_t* left_keys)
+{
+    for (uint32_t h = 0; h < 2; h += 1)
+    {
+        if (partial)
+        {
+            _mm512_mask_storeu_epi16(left_keys + block + 32 * h, (__mmask32)(live >> (32 * h)), found->keys[h]);
+        }
+        else
+        {
+            _mm512_storeu_si512(left_keys + block + 32 * h, found->keys[h]);
+        }
+    }
+    for (uint32_t q = 0; q < 4; q += 1)
+    {
+        if (partial)
+        {
+            _mm512_mask_storeu_epi32(lefts + block + 16 * q, (__mmask16)(live >> (16 * q)), found->positions[q]);
+        }
+        else
+        {
+            _mm512_storeu_si512(lefts + block + 16 * q, found->positions[q]);
+        }
+    }
+}
+
+// One block or part (the live lanes) of the left pass: L by spike_previous_smaller8 in the block, else from the
+// window. Its candidates for later blocks are its suffix minima, which in the reversed block are its prefix minima,
+// nearest first.
+BUSTER_INLINE void spike_top_left8_block(SpikeTop* top, const SpikeSlots* slots, uint32_t reach, const uint8_t* roles, __m512i relative, uint32_t base, uint32_t block,
+                                         __mmask64 live, bool partial, uint32_t* lefts, uint16_t* left_keys)
+{
+    const SpikeKeys8 keys = spike_block_keys8(roles, relative, block);
+    const __m512i block_keys = _mm512_mask_mov_epi8(_mm512_set1_epi8((char)0xFF), live, keys.keys);
+    const __m512i p = spike_previous_smaller8(block_keys, keys.left);
+    const __m512i reversed = _mm512_permutexvar_epi8(spike_shifts.reverse8, block_keys);
+    const __m512i prefix = spike_prefix_minima8(reversed);
+    // A lane is a candidate if its key is below every key nearer the block's end; dead lanes (0xFF) never are.
+    const __mmask64 minima = _mm512_cmplt_epu8_mask(reversed, spike_up8(prefix, 0, _mm512_set1_epi8((char)0xFF)));
+    const __m512i minimum = _mm512_permutexvar_epi8(spike_shifts.last8, prefix);
+    const SpikeFound8 found = spike_top_block8(top, slots, reach, block_keys, keys.left, p, reversed, spike_shifts.reverse8, minima, minimum, block, base, live);
+    spike_top_store_lefts8(&found, block, live, partial, lefts, left_keys);
+}
+
+// A part of a block, lanes [start, start + size): the live lanes among them, and their depths relative to the part's
+// lowest, which it returns in *base; *fits says whether they span at most BUSTER_SPIKE_BYTE_DEPTH_RANGE.
+BUSTER_INLINE __mmask64 spike_top_part(const uint32_t* node_depths, uint32_t block, __mmask64 live, uint32_t start, uint32_t size, __m512i* relative, uint32_t* base,
+                                       bool* fits)
+{
+    const __mmask64 lanes = (size == 64 ? ~(__mmask64)0 : ((((__mmask64)1 << size) - 1) << start)) & live;
+    uint32_t highest;
+    // Dead lanes' depths are 0, so that spike_block_keys8's 16-bit shift never carries a byte into a live neighbor.
+    *relative = _mm512_maskz_mov_epi8(lanes, spike_relative_depths8(node_depths, block, lanes, base, &highest));
+    *fits = highest - *base <= BUSTER_SPIKE_BYTE_DEPTH_RANGE;
+    return lanes;
+}
+
+// One prepared block of the left pass: its window work on the in-block work of spike_top_prepare8_avx512.
+BUSTER_INLINE void spike_top_left8_prepared(SpikeTop* top, const SpikeSlots* slots, uint32_t reach, const SpikeBlockWork* work, uint32_t block, __mmask64 live,
+                                            bool partial, uint32_t* lefts, uint16_t* left_keys)
+{
+    const __m512i block_keys = _mm512_load_si512(work->keys);
+    const __m512i reversed = _mm512_permutexvar_epi8(spike_shifts.reverse8, block_keys);
+    const SpikeFound8 found = spike_top_block8(top, slots, reach, block_keys, _mm512_load_si512(work->left_thresholds), _mm512_load_si512(work->lefts), reversed,
+                                               spike_shifts.reverse8, work->left_minima, _mm512_set1_epi8((char)work->minimum), block, work->base, live);
+    spike_top_store_lefts8(&found, block, live, partial, lefts, left_keys);
+}
+
+// K4's left pass with the stack's top in registers, on the prepared blocks.
+BUSTER_INLINE void spike_top_left8_pass(const uint8_t* roles, const uint32_t* node_depths, uint32_t count, uint32_t* lefts, uint16_t* left_keys, const SpikeBlockWork* works,
+                                        const SpikeSlots* slots, uint32_t reach, uint64_t* wide_blocks)
+{
+    SpikeTop top;
+    spike_top_reset(&top);
+    for (uint32_t block = 0; block < count; block += 64)
+    {
+        const uint32_t live = count - block < 64 ? count - block : 64;
+        const __mmask64 live_mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
+        const SpikeBlockWork* work = &works[block / 64];
+        if (work->base != BUSTER_SPIKE_NONE)
+        {
+            spike_top_left8_prepared(&top, slots, reach, work, block, live_mask, live != 64, lefts, left_keys);
+        }
+        else
+        {
+            // Aligned parts from the block's start, each the largest that fits.
+            *wide_blocks += 1;
+            __m512i relative;
+            uint32_t base;
+            uint32_t start = 0;
+            while (start < live)
+            {
+                uint32_t size = start == 0 ? 32 : 1u << __builtin_ctz(start);
+                size = size > 32 ? 32 : size;
+                bool part_fits = false;
+                __mmask64 lanes = 0;
+                while (!part_fits)
+                {
+                    lanes = spike_top_part(node_depths, block, live_mask, start, size, &relative, &base, &part_fits);
+                    part_fits |= size == 1;
+                    size = part_fits ? size : size / 2;
+                }
+                spike_top_left8_block(&top, slots, reach, roles, relative, base, block, lanes, true, lefts, left_keys);
+                start += size;
+            }
+        }
+    }
+}
+
+// The parents of a block's live lanes from their R (`found`), their L and their roles' rules, as
+// spike_parents_right8_block picks them.
+BUSTER_INLINE void spike_top_parents8(const SpikeFound8* found, __m512i rules, uint32_t block, __mmask64 live, bool partial, const uint32_t* lefts, const uint16_t* left_keys,
+                                      uint32_t* parents)
+{
+    const __m512i weak_ties_table = _mm512_loadu_si512(spike_parent_tables.weak_ties);
+    // 32 lanes at a time with 16-bit keys. No real key is 0, which marks no candidate.
+    const __mmask64 rule_left = spike_equal8(rules, SPIKE_RULE_LEFT);
+    const __mmask64 rule_right = _mm512_cmpge_epu8_mask(rules, _mm512_set1_epi8(SPIKE_RULE_RIGHT));
+    for (uint32_t h = 0; h < 2; h += 1)
+    {
+        const __m512i left_key = _mm512_loadu_si512(left_keys + block + 32 * h);
+        const __m512i right_key = found->keys[h];
+        const __m512i weak_ties = _mm512_permutexvar_epi16(_mm512_and_si512(left_key, _mm512_set1_epi16(31)), weak_ties_table);
+        const __mmask32 weak = _mm512_test_epi16_mask(weak_ties, _mm512_set1_epi16(1));
+        const __mmask32 ties = _mm512_test_epi16_mask(weak_ties, _mm512_set1_epi16(2));
+        const __mmask32 greater = _mm512_cmpgt_epu16_mask(left_key, right_key);
+        const __mmask32 equal = _mm512_cmpeq_epi16_mask(left_key, right_key);
+        const __mmask32 left_valid = _mm512_test_epi16_mask(left_key, left_key);
+        const __mmask32 right_valid = _mm512_test_epi16_mask(right_key, right_key);
+        __m512i left[2];
+        for (uint32_t q = 0; q < 2; q += 1)
+        {
+            left[q] = _mm512_loadu_si512(lefts + block + 32 * h + 16 * q);
+        }
+        const __mmask32 select_left = left_valid & (~right_valid | (~weak & (greater | (equal & ties))));
+        const __mmask32 take_left = (__mmask32)(rule_left >> (32 * h)) | (~(__mmask32)(rule_right >> (32 * h)) & select_left);
+        for (uint32_t q = 0; q < 2; q += 1)
+        {
+            const __m512i parent = _mm512_mask_mov_epi32(found->positions[2 * h + q], (__mmask16)(take_left >> (16 * q)), left[q]);
+            if (partial)
+            {
+                _mm512_mask_storeu_epi32(parents + block + 32 * h + 16 * q, (__mmask16)(live >> (32 * h + 16 * q)), parent);
+            }
+            else
+            {
+                _mm512_storeu_si512(parents + block + 32 * h + 16 * q, parent);
+            }
+        }
+    }
+}
+
+// One block or part of the right pass: R by spike_next_smaller8 in the block, else from the window, then the parent
+// by the role's rule. Its candidates for earlier blocks are its prefix minima.
+BUSTER_INLINE void spike_top_right8_block(SpikeTop* top, const SpikeSlots* slots, uint32_t reach, const uint8_t* roles, __m512i relative, uint32_t base, uint32_t block,
+                                          __mmask64 live, bool partial, const uint32_t* lefts, const uint16_t* left_keys, uint32_t* parents)
+{
+    const SpikeKeys8 keys = spike_block_keys8(roles, relative, block);
+    const __m512i block_keys = _mm512_mask_mov_epi8(_mm512_set1_epi8((char)0xFF), live, keys.keys);
+    const __m512i p = spike_next_smaller8(block_keys, keys.right);
+    const __m512i prefix = spike_prefix_minima8(block_keys);
+    const __mmask64 minima = _mm512_cmplt_epu8_mask(block_keys, spike_up8(prefix, 0, _mm512_set1_epi8((char)0xFF)));
+    const __m512i minimum = _mm512_permutexvar_epi8(spike_shifts.last8, prefix);
+    const SpikeFound8 found = spike_top_block8(top, slots, reach, block_keys, keys.right, p, block_keys, spike_shifts.lanes8, minima, minimum, block, base, live);
+    spike_top_parents8(&found, keys.rules, block, live, partial, lefts, left_keys, parents);
+}
+
+// One prepared block of the right pass.
+BUSTER_INLINE void spike_top_right8_prepared(SpikeTop* top, const SpikeSlots* slots, uint32_t reach, const uint8_t* roles, const SpikeBlockWork* work, uint32_t block,
+                                             __mmask64 live, bool partial, const uint32_t* lefts, const uint16_t* left_keys, uint32_t* parents)
+{
+    const __m512i block_keys = _mm512_load_si512(work->keys);
+    const SpikeFound8 found = spike_top_block8(top, slots, reach, block_keys, _mm512_load_si512(work->right_thresholds), _mm512_load_si512(work->rights), block_keys,
+                                               spike_shifts.lanes8, work->right_minima, _mm512_set1_epi8((char)work->minimum), block, work->base, live);
+    spike_top_parents8(&found, spike_lookup8(spike_parent_tables.rules, _mm512_loadu_si512(roles + block)), block, live, partial, lefts, left_keys, parents);
+}
+
+// K4's right pass with the stack's top in registers, from the last block to the first, on the prepared blocks; a block
+// whose depths don't fit runs as aligned parts from its end, each the largest that fits.
+BUSTER_INLINE void spike_top_right8_pass(const uint8_t* roles, const uint32_t* node_depths, uint32_t count, const uint32_t* lefts, const uint16_t* left_keys,
+                                         const SpikeBlockWork* works, uint32_t* parents, const SpikeSlots* slots, uint32_t reach)
+{
+    SpikeTop top;
+    spike_top_reset(&top);
+    for (uint32_t b = (count + 63) / 64; b-- > 0;)
+    {
+        const uint32_t block = b * 64;
+        const uint32_t live = count - block < 64 ? count - block : 64;
+        const __mmask64 live_mask = live == 64 ? ~(__mmask64)0 : (((__mmask64)1 << live) - 1);
+        const SpikeBlockWork* work = &works[b];
+        if (work->base != BUSTER_SPIKE_NONE)
+        {
+            spike_top_right8_prepared(&top, slots, reach, roles, work, block, live_mask, live != 64, lefts, left_keys, parents);
+        }
+        else
+        {
+            uint32_t end = live;
+            while (end > 0)
+            {
+                uint32_t size = 1u << __builtin_ctz(end);
+                size = size > 32 ? 32 : size;
+                bool part_fits = false;
+                __mmask64 lanes = 0;
+                __m512i relative;
+                uint32_t part_base;
+                while (!part_fits)
+                {
+                    lanes = spike_top_part(node_depths, block, live_mask, end - size, size, &relative, &part_base, &part_fits);
+                    part_fits |= size == 1;
+                    size = part_fits ? size : size / 2;
+                }
+                spike_top_right8_block(&top, slots, reach, roles, relative, part_base, block, lanes, true, lefts, left_keys, parents);
+                end -= size;
+            }
+        }
+    }
+}
+
+// The passes alone, as the vector path runs them, for the benchmark's stages.
+static void spike_top_left8_avx512(const uint8_t* roles, const uint32_t* node_depths, uint32_t count, uint32_t* lefts, uint16_t* left_keys, const SpikeBlockWork* works,
+                                   const SpikeSlots* slots, uint64_t* wide_blocks)
+{
+    spike_top_left8_pass(roles, node_depths, count, lefts, left_keys, works, slots, BUSTER_SPIKE_TOP_LANES, wide_blocks);
+}
+
+static void spike_top_right8_avx512(const uint8_t* roles, const uint32_t* node_depths, uint32_t count, const uint32_t* lefts, const uint16_t* left_keys,
+                                    const SpikeBlockWork* works, uint32_t* parents, const SpikeSlots* slots)
+{
+    spike_top_right8_pass(roles, node_depths, count, lefts, left_keys, works, parents, slots, BUSTER_SPIKE_TOP_LANES);
+}
+
+// K4 with the stack's top in registers: every block's in-block work, then the left pass, then the right pass.
+static void spike_top_parents8_avx512(const uint8_t* roles, const uint32_t* node_depths, uint32_t count, uint32_t* lefts, uint16_t* left_keys, SpikeBlockWork* works,
+                                      uint32_t* parents, const SpikeSlots* slots, uint64_t* wide_blocks)
+{
+    spike_top_prepare8_avx512(roles, node_depths, count, works);
+    spike_top_left8_avx512(roles, node_depths, count, lefts, left_keys, works, slots, wide_blocks);
+    spike_top_right8_avx512(roles, node_depths, count, lefts, left_keys, works, parents, slots);
+}
+
+// The same with a window of `reach` lanes, fewer than BUSTER_SPIKE_TOP_LANES, so that the check takes the paths through
+// memory (deep lanes, reloads, pops under the window) that real stacks never need.
+static void spike_top_parents8_reach(const uint8_t* roles, const uint32_t* node_depths, uint32_t count, uint32_t* lefts, uint16_t* left_keys, SpikeBlockWork* works,
+                                     uint32_t* parents, const SpikeSlots* slots, uint32_t reach, uint64_t* wide_blocks)
+{
+    spike_top_prepare8_avx512(roles, node_depths, count, works);
+    spike_top_left8_pass(roles, node_depths, count, lefts, left_keys, works, slots, reach, wide_blocks);
+    spike_top_right8_pass(roles, node_depths, count, lefts, left_keys, works, parents, slots, reach);
+}
+
+// Memory for the stack's slots, with their padding.
+static bool spike_slots_reserve(SpikeSlots* slots, Arena* arena, uint64_t capacity)
+{
+    const uint64_t count = capacity + BUSTER_SPIKE_TOP_LANES;
+    slots->keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, count);
+    slots->low = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, count);
+    slots->high = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, count);
+    slots->capacity = (uint32_t)capacity;
+    const bool result = slots->keys != 0 && slots->low != 0 && slots->high != 0;
+    if (result)
+    {
+        for (uint64_t i = capacity; i < count; i += 1)
+        {
+            slots->keys[i] = 0;
+            slots->low[i] = 0xFFFF;
+            slots->high[i] = 0xFFFF;
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The vector path together
 
 // What the vector kernels need besides SpikeKernels' arrays.
@@ -5798,6 +6687,9 @@ struct SpikeVectorBuffers
     uint32_t* lefts;
     uint16_t* left_keys;
     SpikeCandidates candidates;
+    // K4 with the stack's top in registers: each block's in-block work, and the stack's slots.
+    SpikeBlockWork* works;
+    SpikeSlots slots;
     uint32_t* secondary;
     SpikeStatement* statements;
     // The postorder's: each token's last child, the end of its subtree, the counting sort's cursors, and the postorder.
@@ -5848,6 +6740,7 @@ static bool spike_vector_buffers_reserve(SpikeVectorBuffers* buffers, Arena* are
         .typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
         .lefts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .left_keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, slots),
+        .works = BUSTER_ARENA_PUSH_ARRAY(arena, SpikeBlockWork, slots / 64 + BUSTER_SPIKE_PREPARED_TOGETHER),
         .secondary = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .statements = BUSTER_ARENA_PUSH_ARRAY(arena, SpikeStatement, slots),
         .last_children = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
@@ -5859,7 +6752,8 @@ static bool spike_vector_buffers_reserve(SpikeVectorBuffers* buffers, Arena* are
     };
     bool result = open_stack != 0 && group_roles != 0 && group_typed != 0 && buffers->typed != 0 && buffers->lefts != 0 && buffers->left_keys != 0 &&
                   buffers->secondary != 0 && buffers->statements != 0 && buffers->last_children != 0 && buffers->subtree_ends != 0 && buffers->cursors != 0 && buffers->postorder != 0 &&
-                  spike_candidates_reserve(&buffers->candidates, arena, capacity);
+                  buffers->works != 0 && spike_candidates_reserve(&buffers->candidates, arena, capacity) &&
+                  spike_slots_reserve(&buffers->slots, arena, capacity);
     if (result)
     {
         for (uint32_t i = 0; i < BUSTER_SPIKE_DEPTH_PADDING; i += 1)
@@ -5904,11 +6798,12 @@ static SpikeKernelResult spike_parse_vector(SpikeKernels* kernels, const uint8_t
     // K1's second part, and the roles after the colons it resolved.
     spike_secondary_avx512(kernels, count, buffers->secondary);
     spike_after_colons_avx512(kernels, count);
-    // K4 in byte lanes: 16-bit keys hold every depth but the deepest nesting, which the twin takes.
+    // K4 in byte lanes with the stack's top in registers: 16-bit keys hold every depth but the deepest nesting, which the
+    // twin takes.
     if (spike_deepest(kernels, count) <= BUSTER_SPIKE_MAX_VECTOR_DEPTH)
     {
-        spike_parents_left8_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, &buffers->candidates, &buffers->wide_blocks);
-        spike_parents_right8_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, kernels->parents, &buffers->candidates);
+        spike_top_parents8_avx512(kernels->roles, kernels->node_depths, count, buffers->lefts, buffers->left_keys, buffers->works, kernels->parents, &buffers->slots,
+                                  &buffers->wide_blocks);
     }
     else
     {
