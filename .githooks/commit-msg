@@ -2,11 +2,25 @@
 # Git's commit-msg hook (AGENTS.md, "David's sign-off"). Where David's opt-in
 # BUSTER_DCO_SIGN_OFF=davidgmbb is set, it ends the message with his sign-off,
 # once, after the trailers already there, as "The maintainer's standing
-# certification" in CONTRIBUTING.md authorizes. Anywhere else it does nothing.
-# A merge's message has no final newline, and without one git
-# interpret-trailers leaves out the blank line before a new trailer block.
+# certification" in CONTRIBUTING.md authorizes. Anywhere else it does nothing,
+# and so it does while a rebase or a cherry-pick is in progress: those copy
+# commits, the copies keep the trailers they had, and the certification
+# doesn't reach copies of commits from before it.
+#
+# git interpret-trailers runs outside the repository with no configuration but
+# the comment character, so that no trailer.* setting changes the line it adds,
+# and with --no-divider, since in a commit message a "---" line ends nothing. A
+# merge's message has no final newline, and without one git interpret-trailers
+# leaves out the blank line before a new trailer block.
 
-if [ "$BUSTER_DCO_SIGN_OFF" = davidgmbb ]; then
-    [ -z "$(tail -c 1 "$1")" ] || echo >> "$1"
-    git interpret-trailers --in-place --where end --if-exists addIfDifferent --if-missing add --trailer "Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>" "$1"
+copying()
+{
+    [ -e "$(git rev-parse --git-path rebase-merge)" ] || [ -e "$(git rev-parse --git-path rebase-apply)" ] || [ -e "$(git rev-parse --git-path CHERRY_PICK_HEAD)" ]
+}
+
+if [ "$BUSTER_DCO_SIGN_OFF" = davidgmbb ] && ! copying; then
+    message="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+    comment="$(git config core.commentChar)"
+    [ -z "$(tail -c 1 "$message")" ] || echo >> "$message"
+    cd / && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.commentChar="${comment:-#}" interpret-trailers --in-place --no-divider --where end --if-exists addIfDifferent --if-missing add --trailer "Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>" "$message"
 fi

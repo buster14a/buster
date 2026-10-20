@@ -57,12 +57,15 @@ Where it is:
   last.
 - Don't use `git commit -s`, which signs off as the committer
   (`Claude <noreply@anthropic.com>` in cloud sessions), or `--no-verify`, which
-  skips the hook. Rebases, cherry-picks and reverts don't run it; for a revert,
-  use `git revert --no-commit` and then `git commit`.
+  skips the hook. The hook signs nothing while a rebase or a cherry-pick is in
+  progress, rewords, amends and continuations included, and a plain
+  `git revert` doesn't run it: for a revert, use `git revert --no-commit` and
+  then `git commit`.
 - Don't sign a commit from before the certification took effect, or a rebase,
   cherry-pick or amend of one: it still needs David's certification for its
-  PR's head. Unset the opt-in to amend one
-  (`env -u BUSTER_DCO_SIGN_OFF git commit --amend`), and to commit outside
+  PR's head. Unset the opt-in to amend one outside a rebase
+  (`env -u BUSTER_DCO_SIGN_OFF git commit --amend`) or to commit its changes
+  again another way (`git cherry-pick --no-commit`), and to commit outside
   material whose provenance the PR can't record; then say so in the PR.
 
 ## Host and output scope
