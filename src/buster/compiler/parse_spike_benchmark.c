@@ -490,28 +490,31 @@ static void spike_generate(SpikeText* text, SpikeCase which, uint32_t size)
     spike_text(text, "    return x;\n}\n");
 }
 
-// Adds the generated cases to the corpus, each `size` operations long.
-static bool spike_load_generated(SpikeCorpus* corpus, uint32_t size)
+// Adds the generated cases to the corpus (only `only`, unless it is SPIKE_CASE_COUNT), each `size` operations long.
+static bool spike_load_generated(SpikeCorpus* corpus, uint32_t size, SpikeCase only)
 {
     bool result = true;
     for (uint32_t which = 0; result && which < SPIKE_CASE_COUNT; which += 1)
     {
-        SpikeText text = { .capacity = 64ull * size + 4096, .length = 0, .ok = true };
-        text.bytes = arena_push(corpus->memory, text.capacity, 64);
-        result = text.bytes != 0;
-        if (result)
+        if (only == SPIKE_CASE_COUNT || only == (SpikeCase)which)
         {
-            spike_generate(&text, (SpikeCase)which, size);
-            result = text.ok;
-        }
-        if (result)
-        {
-            SpikeFile* file = &corpus->files[corpus->file_count];
-            *file = (SpikeFile){ 0 };
-            file->source = (uint8_t*)text.bytes;
-            char path[64];
-            snprintf(path, sizeof(path), "generated %s", spike_case_names[which]);
-            result = spike_add_source(corpus, file, path, text.length, text.length);
+            SpikeText text = { .capacity = 64ull * size + 4096, .length = 0, .ok = true };
+            text.bytes = arena_push(corpus->memory, text.capacity, 64);
+            result = text.bytes != 0;
+            if (result)
+            {
+                spike_generate(&text, (SpikeCase)which, size);
+                result = text.ok;
+            }
+            if (result)
+            {
+                SpikeFile* file = &corpus->files[corpus->file_count];
+                *file = (SpikeFile){ 0 };
+                file->source = (uint8_t*)text.bytes;
+                char path[64];
+                snprintf(path, sizeof(path), "generated %s", spike_case_names[which]);
+                result = spike_add_source(corpus, file, path, text.length, text.length);
+            }
         }
     }
     return result;
@@ -1493,6 +1496,7 @@ int run_parse_spike(int argc, char** argv)
     uint32_t generated = 0;
     uint32_t passes = BUSTER_SPIKE_PASSES;
     uint32_t repeat = 1;
+    SpikeCase generated_case = SPIKE_CASE_COUNT;
     SpikeCounterSet set = SPIKE_COUNTERS_PIPELINE;
     bool check = true;
     int32_t only = -1;
@@ -1512,6 +1516,16 @@ int run_parse_spike(int argc, char** argv)
         else if (strcmp(argv[i], "--no-check") == 0)
         {
             check = false;
+        }
+        else if (strcmp(argv[i], "--case") == 0 && i + 1 < argc)
+        {
+            generated_case = SPIKE_CASE_COUNT + 1;
+            for (uint32_t c = 0; c < SPIKE_CASE_COUNT; c += 1)
+            {
+                generated_case = strcmp(argv[i + 1], spike_case_names[c]) == 0 ? (SpikeCase)c : generated_case;
+            }
+            valid &= generated_case != SPIKE_CASE_COUNT + 1;
+            i += 1;
         }
         else if (strcmp(argv[i], "--counters") == 0 && i + 1 < argc)
         {
@@ -1577,8 +1591,8 @@ int run_parse_spike(int argc, char** argv)
     if (!valid || (path_count == 0 && !fixtures && generated == 0))
     {
         fprintf(stderr,
-                "usage: %s [--fixtures] [--generated N] [--check-only | --no-check] [--flags] [--dump FILE] [--passes N] [--only NAME|stages] [--repeat N]\n"
-                "       [--counters pipeline|branches|memory] path...\n",
+                "usage: %s [--fixtures] [--generated N [--case NAME]] [--check-only | --no-check] [--flags] [--dump FILE] [--passes N] [--only NAME|stages]\n"
+                "       [--repeat N] [--counters pipeline|branches|memory] path...\n",
                 argv[0]);
     }
     else if (corpus.files == 0 || !spike_names_init(&corpus.names, &memory))
@@ -1587,11 +1601,11 @@ int run_parse_spike(int argc, char** argv)
     }
     else
     {
-        bool loaded = (!fixtures || spike_load_fixtures(&corpus)) && (generated == 0 || spike_load_generated(&corpus, generated));
+        bool loaded = (!fixtures || spike_load_fixtures(&corpus)) && (generated == 0 || spike_load_generated(&corpus, generated, generated_case));
         for (int i = 1; loaded && i < argc; i += 1)
         {
             if (strcmp(argv[i], "--dump") == 0 || strcmp(argv[i], "--generated") == 0 || strcmp(argv[i], "--passes") == 0 || strcmp(argv[i], "--only") == 0 ||
-                strcmp(argv[i], "--repeat") == 0 || strcmp(argv[i], "--counters") == 0)
+                strcmp(argv[i], "--repeat") == 0 || strcmp(argv[i], "--counters") == 0 || strcmp(argv[i], "--case") == 0)
             {
                 i += 1;
             }
