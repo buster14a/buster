@@ -164,9 +164,9 @@ designs and the compilers already built this way.
 - `docs/object-writer-and-linker.md` is the design of the object writer and the
   linker, with the 9700X measurements of mold, wild, lld and the kernel's file
   costs behind it, and the order to build it in. The lane base layer, the
-  encoder's fixups, the representation, the object writer and the direct
-  path's first executables below are implemented; the rest of the linker
-  isn't yet.
+  encoder's fixups, the representation, the object writer, the direct path's
+  first executables and the import of the C runtime's files below are
+  implemented; the rest of the linker isn't yet.
 - `src/buster/compiler/lane.c` is the lane base layer that every phase of the
   object writer and the linker runs on (groups of threads that run the same
   code, their barrier and broadcast, `lane_range`, and arenas).
@@ -186,6 +186,20 @@ designs and the compilers already built this way.
   `object_write_units` for a group of lanes). `object_writer_test.c` holds its
   tests (`main.c` includes it; `./build/compiler test-object-writer` runs them)
   and `object_writer_benchmark.c` provides `benchmark-object-writer`.
+- `src/buster/compiler/import.c` holds the import path's readers: ELF
+  relocatable objects into the representation, archives' members and symbol
+  index, shared libraries' exports at their default versions (indexed by name
+  hash), version definitions and references, and the commands of the linker
+  scripts that `libc.so` and GCC's `_asneeded` libraries are. The object,
+  archive and library readers each have a vector path and an exact one, which
+  takes what the vector path leaves to it (the design's "Step 5's phases,
+  data-parallel"). `runtime.c` finds the C runtime's files as GCC's driver
+  does (`Scrt1.o`, `crti.o`, `crtbeginS.o`, `crtendS.o` and `crtn.o`, and the
+  `libc.so.6` and `libc_nonshared.a` that `libc.so` names) and imports them
+  into a link of their own, with what each name they refer to binds to (the
+  first part of step 5 of the design's plan). `import_test.c` holds their
+  tests (`main.c` includes it; `./build/compiler test-import` runs them) and
+  `import_benchmark.c` provides `benchmark-import`.
 - `src/buster/compiler/executable.c` writes the direct path's first
   executables: a link in that representation laid out, patched and written as
   a static executable without libc (step 4 of the design's plan), with a build
@@ -219,6 +233,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-link
 ./build/compiler test-object-writer --cross-check
 ./build/compiler benchmark-object-writer
+./build/compiler test-import --cross-check
+./build/compiler benchmark-import
 ./build/compiler test-executable
 ./build/compiler benchmark-executable
 ```
@@ -537,6 +553,10 @@ informational.
 
 - random records of every table read back from the columns, with ids from 1
   and record 0 zero;
+- the name hash: `link_hash`'s values for known names, which pin it (it is
+  part of the snapshot's format), and `link_hash_names` against `link_hash`
+  on random names of 0 to 200 bytes, every count to 40, every length in every
+  lane of a batch, and names ending at a `PROT_NONE` page;
 - every table at its capacity, the side table of wide addends full, a name
   arena too small, and arenas too small for the tables: each add fails with
   `LINK_ERROR_FULL` and changes nothing;
@@ -562,8 +582,9 @@ informational.
   its TLS segment starting half its alignment past a multiple of it, as a
   linker may start `.tdata` when `.tbss` is more aligned. Every set with
   two thread-locals, an init function and a fini function must have every
-  class and every kind its options allow, and a copy of the defaults' program
-  with the hexadecimal digits' fixup one byte off must print something else.
+  class but the C runtime's (`EH_FRAME`, `INIT` and `FINI`) and every kind
+  its options allow, and a copy of the defaults' program with the
+  hexadecimal digits' fixup one byte off must print something else.
 
 `--seed N` changes the random records and programs. The programs check is
 what scales: `--functions 1000000` builds three programs of a million workers
@@ -678,6 +699,109 @@ with `--directory` on each file system to measure;
 for tmpfs and btrfs. The default 9700X job runs it after the tests, pinned to
 one allowed CPU; like the others, its measurements are informational.
 
+## Import tests
+
+`./build/compiler test-import [--seed N] [--cross-check]` (about 0.13 s on
+the 9700X, and 0.15 s with `--cross-check`) checks `import.c` and
+`runtime.c`:
+
+- round trips: each unit's object of `test-link`'s seven programs (with 500
+  workers in the one that takes `--functions`), with and without function
+  sections, and the object writer's unit of 33,000 functions in sections of
+  their own (past `SHN_LORESERVE` sections), imported into a link of its own.
+  Each of the unit's atoms must be in the atom its section became, byte for
+  byte where the writer put it, each symbol at the same place with the same
+  name, flags and size, and each fixup at its place, of its kind, pointing at
+  the same place with the same addend, and no other fixups;
+- an object made by hand with a section of every class, the sections the
+  import drops (`.sframe` with its relocations, a note, `.note.GNU-stack` and
+  `.comment`), every kind of symbol and every relocation type the
+  representation has, out of order, with `R_X86_64_NONE` and addends past
+  int32: each section, symbol and fixup imported exactly, the atoms' bytes in
+  place in the file; the same with `e_shnum` and `e_shstrndx` in section 0,
+  with `.eh_frame` as `SHT_PROGBITS` and with tables' `sh_entsize` 0; and one
+  without a symbol table, as `crtn.o` is. Then each check a well-formed object
+  never trips, one change at a time, with the error, the index of the
+  section, symbol or relocation, the type and the byte offset it reports;
+- archives made by hand (a 32-bit index, a 64-bit one and none, long names,
+  an odd member's padding, a member of no bytes, a member without a symbol,
+  an index of several of the vector path's batches with a member's symbols
+  across them, and no members), then malformed ones;
+- a shared library made by hand: version definitions, a name at a default
+  version and at a hidden one, IFUNC, `GNU_UNIQUE`, `COMMON`, TLS and
+  absolute symbols, weak and protected ones, hidden and local ones and one at
+  `VER_NDX_LOCAL`, which aren't exported, references, and a name exported
+  twice (the index finds the first); the same without `.gnu.version`; then
+  malformed ones;
+- linker scripts: `libc.so`'s and GCC's `_asneeded` ones, commas, comments
+  and `OUTPUT_FORMAT`, then each error at its offset;
+- page edges: every prefix of each input made by hand (the object also with
+  its relocations in order, which the vector path takes), and the input with
+  each byte set to 0, 0xff and a random value, ending at a `PROT_NONE` page,
+  through every reader: each succeeds, or fails reporting a place within its
+  input. A read past the end faults; the command then names the input and
+  exits with status 1;
+- the paths: each object, archive and library above (the round trips, the
+  inputs made by hand, every malformed one, every page-edge input and this
+  system's runtime) is read by its reader's vector path, its exact path and
+  the reader itself, each into a link (or a read) of its own. The reader's
+  result and records must be the exact path's; the vector path may take an
+  input only when the exact path reads it without an error, and must then
+  make the same records, column by column. Each well-formed input must take
+  the vector path (the object made by hand, whose relocations are out of
+  order, the exact one), and each check prints how many inputs each path
+  took. A library's index must find what a linear scan of its exports finds;
+- discovery: GCC's search under a directory of the test's own, whose newer
+  version's directory has no `crtbeginS.o`: the search picks the older
+  version and probes the newer one's `crtbeginS.o` too, so that installing it
+  leaves the probes stale (`runtime_probes_current`) and a fresh search picks
+  it;
+- the runtime: `runtime_import` on this system's files. Each crt object must
+  import with what it is for (`_start`, `_init` and `_fini` in `.init` and
+  `.fini` atoms, crti.o's fragment first, `__dso_handle`, `__TMC_END__`),
+  `libc.so.6` with its soname, `write`, `strlen`, `environ` and
+  `__errno_location` at `GLIBC_2.2.5`, `__libc_start_main` at `GLIBC_2.34`
+  and `GLIBC_ABI_DT_RELR`, `libc_nonshared.a` with `atexit` in its index, and
+  every reference to each name bound: `main` to the program,
+  `__libc_start_main` and `__cxa_finalize` to libc, `__gmon_start__` and the
+  `_ITM_` functions to nothing, `__TMC_END__` to `crtendS.o`, and
+  `_GLOBAL_OFFSET_TABLE_`, which the crt objects that use the GOT name, to the
+  linker.
+
+`--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
+version, type, binding and size) and references with `readelf -W --dyn-syms`,
+and every relocation of the crt objects and `libc_nonshared.a`'s members with
+`readelf -W -r`: each one must be a fixup of its kind at its offset, against
+the symbol (or the section) readelf names, with its addend, and there must be
+no other fixups. `--seed N` changes the programs and the random bytes. The
+default 9700X job runs it with `--cross-check` after the object writer's
+benchmark.
+
+## Import benchmark
+
+`./build/compiler benchmark-import [--units N] [--functions N] [--seed N]
+[--library PATH]... [--archive PATH]...` checks that each reader's vector
+path reads its inputs as the exact path does, then reports 21-run medians of
+both, the paths taking turns (time, cycles, instructions, IPC):
+
+- objects: the object writer's objects of a generated program of `--units`
+  units (64) of `--functions` workers (200), each about one of synth's
+  translation units; the same with function sections; one of 33,000
+  functions in sections of their own; and this system's crt objects and
+  `libc_nonshared.a`'s members, per symbol table entry and relocation;
+- `libc.so.6` and each `--library` (per export and reference), with its
+  exports' index against the open-addressing table it replaced, built and
+  looked up for every name; `libc_nonshared.a` and each `--archive` (per
+  index entry); `libc.so`'s script, which has no vector path; and
+  `runtime_import` end to end.
+
+Run it under the 9700X's lock with `taskset -c 2`. With `--library
+/usr/lib/libstdc++.so.6 --library /usr/lib/libLLVM.so.23.1 --archive
+/usr/lib/libc.a` it measures the larger files the design's "Step 5's phases,
+data-parallel" has the numbers for. The default 9700X job runs it after the
+import tests, pinned to one allowed CPU; like the others, its measurements are
+informational.
+
 ## Direct executable tests
 
 `./build/compiler test-executable` (about 0.1 s on the 9700X) checks
@@ -724,10 +848,11 @@ one allowed CPU; like the others, its measurements are informational.
   and its GOT slot); TLS blocks of 2 GB (linked) and past it, atoms past 2 GB
   and one whose padding wraps (refused); a bad entry point, the first of two
   symbols defined nowhere in different lanes' ranges, the smallest failing
-  fixup, an atom aligned past a page and a bad init array atom, each reported
-  alike with every lane count; and a lane with no scratch memory to
-  spare, then 64 bytes more at a time, until the link succeeds: every failure
-  must be `EXECUTABLE_ERROR_MEMORY` and leave no output;
+  fixup, an atom aligned past a page, a bad init array atom and an atom of
+  each of the C runtime's classes, which step 4's executables have no section
+  for, each reported alike with every lane count; and a lane with no scratch
+  memory to spare, then 64 bytes more at a time, until the link succeeds:
+  every failure must be `EXECUTABLE_ERROR_MEMORY` and leave no output;
 - the patch kernel: the fast path against the checked one, on random fixups
   of every kind with wide addends, at every count from 0 to 199 from four
   starts, with the kind column ending at a `PROT_NONE` page.
