@@ -1685,6 +1685,35 @@ static bool pp_same_definition(const Preprocessor* pp, const PPMacro* a, const P
     return result;
 }
 
+// Whether a replacement list's tokens [begin, end) hold a '##' (`*pastes`) and a '#' (`*hashes`), 64 kinds at a time:
+// two compares per 64, masked to the list (a masked load doesn't touch the bytes it leaves out).
+static void pp_scan_body_vector(const uint8_t* kinds, uint32_t begin, uint32_t end, bool* pastes, bool* hashes)
+{
+    uint64_t found_pastes = 0;
+    uint64_t found_hashes = 0;
+    for (uint32_t t = begin; t < end; t += 64)
+    {
+        const __mmask64 lanes = _bzhi_u64(~0ull, end - t < 64 ? end - t : 64);
+        const __m512i kind = _mm512_and_si512(_mm512_maskz_loadu_epi8(lanes, kinds + t), _mm512_set1_epi8(0x7F));
+        found_pastes |= _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_HASHHASH));
+        found_hashes |= _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_HASH));
+    }
+    *pastes = found_pastes != 0;
+    *hashes = found_hashes != 0;
+}
+
+// pp_scan_body_vector's scalar twin.
+static void pp_scan_body_scalar(const uint8_t* kinds, uint32_t begin, uint32_t end, bool* pastes, bool* hashes)
+{
+    *pastes = false;
+    *hashes = false;
+    for (uint32_t t = begin; t < end; t += 1)
+    {
+        *pastes |= (kinds[t] & 0x7F) == C_TOKEN_HASHHASH;
+        *hashes |= (kinds[t] & 0x7F) == C_TOKEN_HASH;
+    }
+}
+
 // Whether `id` names a parameter of a function-like macro being defined: an identifier of its parameter list, or
 // __VA_ARGS__ when it is variadic.
 static bool pp_names_parameter(const PPFileData* data, const PPMacro* macro, IdentId id)
@@ -1838,14 +1867,19 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
                 pp_diagnose(pp, PP_SEVERITY_ERROR, location, "'##' cannot appear at either end of a macro expansion");
                 valid = false;
             }
-            // A function-like macro with a '#', or a variadic one (which may have __VA_OPT__), gets the whole check.
-            bool to_check = (macro.flags & BUSTER_PP_MACRO_VARIADIC) != 0;
-            for (uint32_t t = macro.body_begin; valid && t < macro.body_end; t += 1)
+            bool pastes;
+            bool hashes;
+            if (pp->vectorized)
             {
-                const uint8_t kind = data->kinds[t] & 0x7F;
-                macro.flags |= kind == C_TOKEN_HASHHASH ? BUSTER_PP_MACRO_PASTES : 0;
-                to_check |= kind == C_TOKEN_HASH;
+                pp_scan_body_vector(data->kinds, macro.body_begin, macro.body_end, &pastes, &hashes);
             }
+            else
+            {
+                pp_scan_body_scalar(data->kinds, macro.body_begin, macro.body_end, &pastes, &hashes);
+            }
+            macro.flags |= pastes ? BUSTER_PP_MACRO_PASTES : 0;
+            // A function-like macro with a '#', or a variadic one (which may have __VA_OPT__), gets the whole check.
+            const bool to_check = hashes || (macro.flags & BUSTER_PP_MACRO_VARIADIC) != 0;
             valid = valid && (!to_check || !(macro.flags & BUSTER_PP_MACRO_FUNCTION) || pp_check_replacement_list(pp, data, &macro));
         }
         if (valid)
