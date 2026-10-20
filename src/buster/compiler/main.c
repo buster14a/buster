@@ -179,6 +179,11 @@ int run_lane_benchmark(int argc, char** argv);
 #include "buster/compiler/c_refine_test.c"
 int run_refinement_benchmark(int argc, char** argv);
 
+// The preprocessor (c_preprocessor.c) and its tests, for the -E and test-preprocessor commands.
+#include "buster/compiler/c_preprocessor.c"
+#include "buster/compiler/c_preprocessor_test.c"
+int run_preprocessor_benchmark(int argc, char** argv);
+
 // The link representation (atoms, symbols, fixups and names, which the object writer and the linker share), the test
 // programs generated in it, and their tests, for the test-link command.
 #include "buster/compiler/link.c"
@@ -205,7 +210,19 @@ int run_executable_benchmark(int argc, char** argv);
 int main(int argc, char** argv)
 {
     int result = 0;
-    if (argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
+    if (argc >= 2 && strcmp(argv[1], "-E") == 0)
+    {
+        result = run_preprocessor_command(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-preprocessor") == 0)
+    {
+        result = run_preprocessor_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-preprocessor") == 0)
+    {
+        result = run_preprocessor_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
     {
         result = run_c_lexer_tests(argv[0], argc - 2, argv + 2);
     }

@@ -170,6 +170,12 @@ designs and the compilers already built this way.
   9700X measurements. `c_refine_test.c` holds their tests (`main.c` includes
   it; `./build/compiler test-refinement` runs them) and `c_refine_benchmark.c`
   provides `benchmark-refinement`.
+- `src/buster/compiler/c_preprocessor.c` is the preprocessor: one translation
+  unit's token stream from its files' refined tokens, and `./build/compiler -E`
+  (as `clang -E`). `docs/c-preprocessor.md` explains the design, the `clang -E`
+  oracle and the 9700X measurements. `c_preprocessor_test.c` holds its tests
+  (`main.c` includes it; `./build/compiler test-preprocessor` runs them) and
+  `c_preprocessor_benchmark.c` provides `benchmark-preprocessor`.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -193,7 +199,15 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler benchmark-executable
 ./build/compiler test-refinement src
 ./build/compiler benchmark-refinement src
+./build/compiler test-preprocessor --clang
+clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
+./build/compiler -E -march=native -Isrc --predefines build/predefines.h -o build/main.i src/buster/compiler/main.c
+./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ```
+
+The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
+`#error` without AVX-512's), which the preprocessor's built-in predefines don't
+have: `--predefines` gives it clang's for those options.
 
 ## Sharing the 9700X
 
@@ -773,3 +787,45 @@ variants (`refine_tokens_16`, `_32`, `_64` and `_fused`; `refine_tokens` is the
 `docs/c-refinement.md` has the numbers for `sqlite3.c`, the C library corpus and
 `src`. Run it pinned to one CPU; the default 9700X job runs it on `src`, and like
 the others its measurements are informational.
+
+## Preprocessor tests
+
+`./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
+
+- without files, the 43 built-in cases (`pp_test_cases`: cases of our own on the
+  topics of the C standard's examples, the behaviors probed against GCC and
+  clang, inputs past the vectorized kernels' limits, and directives and builtins
+  that nest through the main loop's frames), each preprocessed by the vectorized
+  kernels and their scalar twins, which must give the same stream token for
+  token (kind, flags, value and location) and the same directive tables, with
+  the expected spellings and the expected number of warnings;
+- with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
+  `-ffreestanding`, ...), by both kernels, which must agree.
+
+In both, the vectorized printer's text must be the scalar printer's byte for
+byte, with line markers and without, and must lex back into the stream's
+spellings.
+
+`--clang` also compares every case and file with `clang -E -P` and the same
+options (our side reads clang's own predefines for them through
+`--predefines`), token spelling by token spelling, and prints the first
+difference with the tokens around it. `sqlite3.c`, musl 1.2.5's 1,357 sources,
+Lua 5.4.8 and this repository's translation units are token-identical;
+`docs/c-preprocessor.md` has the configurations. The 9700X job runs the cases
+and the repository's translation units with `--clang`.
+
+## Preprocessor benchmark
+
+`./build/compiler benchmark-preprocessor [--clang] [--only vectorized|scalar]
+[options] file...` preprocesses each file from nothing per run (a new intern
+table and preprocessor), with the vectorized kernels and their scalar twins, 21
+passes after a warm-up, and reports the medians of time, cycles and instructions
+per input token and per output token, IPC, each phase's share (read, lex,
+refine, directive tables, main loop) and what a run did (directives, runs,
+expansions, invocations, pastes, and the `#if` lines and their lengths).
+`--clang` also times `clang -E -P` with the same options, a process per file.
+Target options don't change our predefines: give `--predefines FILE` from
+`clang -dM -E` with the same options (the benchmark leaves it out of clang's
+command line), as the smoke commands above do for `main.c`. The default 9700X
+job runs that one, pinned to one allowed CPU; like the others, its measurements
+are informational.

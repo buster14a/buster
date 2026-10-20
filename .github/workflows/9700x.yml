@@ -118,3 +118,17 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-refinement src
+
+      - name: Test the preprocessor
+        # --clang also preprocesses each case, and the repository's own translation units (with clang's predefines for
+        # their options), with clang -E and compares the tokens.
+        run: |
+          ./build/compiler test-preprocessor --clang
+          ./build/compiler test-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+
+      - name: Benchmark the preprocessor on main.c
+        # Target options don't change the preprocessor's own predefines yet: it reads clang's for them.
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c

@@ -32,11 +32,14 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/object_writer.c`, `src/buster/compiler/object_writer_test.c` | Original ELF writer and tests; Default. ELF constants describe the format; no external linker implementation is vendored. |
 | `src/buster/compiler/executable.c`, `src/buster/compiler/executable_test.c`, `src/buster/compiler/executable_benchmark.c` | Original static-executable writer, tests and benchmarks; Default, with the generator reference below. |
 | `src/buster/compiler/c_intern.c`, `src/buster/compiler/c_refine.c`, `src/buster/compiler/c_refine_test.c` | Original intern table, token refinement and tests; Default. The hash's AES round keys are wyhash's public-domain constants, noted below. |
+| `src/buster/compiler/c_preprocessor.c` | Original preprocessor; Default, with the clang-generated predefined macros and feature tables noted below. |
+| `src/buster/compiler/c_preprocessor_test.c` | Original preprocessor tests; Default. Some expected texts are clang 23's `-E` output for the cases' own inputs. |
+| `src/buster/compiler/c_preprocessor_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `src/buster/compiler/c_refine_benchmark.c` | Original benchmark body under Default; the corpus loader and the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `build.sh`, `.gitignore`, `.github/workflows/9700x.yml` | Original build/configuration; Default. The referenced GitHub action runs externally and is not vendored. |
 | `.claude/settings.json`, `.claude/hooks/join-tailnet.sh` | Maintainer configuration: settings adapted from his older Buster configuration; locally added tailnet hook. Default. See the recorded import below. |
 | `AGENTS.md`, `CLAUDE.md`, `docs/coding-style.md` | Original project/contributor guidance; Default. The style adapts conventions, not a grant to import old compiler code. |
-| `docs/c-lexer.md`, `docs/x86-64-encoder.md`, `docs/object-writer-and-linker.md`, `docs/c-refinement.md` | Original design/measurement reports; Default. Referenced tools, articles and measurements are distinguished from vendored source. |
+| `docs/c-lexer.md`, `docs/x86-64-encoder.md`, `docs/object-writer-and-linker.md`, `docs/c-refinement.md`, `docs/c-preprocessor.md` | Original design/measurement reports; Default. Referenced tools, articles and measurements are distinguished from vendored source. |
 | `README.md`, `LICENSING.md`, `CONTRIBUTING.md`, this file | Original adoption documentation; Default, except quoted upstream notices retain their terms. |
 | `LICENSE`, `DCO`, `LICENSES/*` | Retained legal/attribution texts; their own terms. These are not original project prose. |
 
@@ -191,6 +194,29 @@ the last revision that has them (later ones changed the default secret). Only
 the constants are used, not wyhash's code. wyhash is released into the public
 domain under the Unlicense; its text at that revision is retained in
 [LICENSES/wyhash.txt](LICENSES/wyhash.txt).
+
+## Clang-generated predefines and feature tables
+
+`c_preprocessor.c`'s predefined macros (`pp_predefines_base`,
+`pp_predefines_c23`) and feature tables (`pp_features_*`) are generated data,
+the output of **clang 23.1.3** (the local package `clang 23.1.3-2`, target
+`x86_64-pc-linux-gnu`), which the configuration decided in #117 takes as the
+compiler's own. LLVM's terms are retained in [LICENSES/LLVM.txt](LICENSES/LLVM.txt).
+
+- The predefines are `clang -dM -E -x c /dev/null` (gnu17), without the macros
+  the language mode and options decide, and the difference of its output
+  under `-std=c23`. `__BUSTER__` is the compiler's own.
+- The feature tables are clang's nonzero answers, under `-std=gnu17` and
+  `-std=c23` (the same), to `__has_attribute`, `__has_builtin`,
+  `__has_feature`, `__has_extension`, `__has_c_attribute` and `__has_warning`.
+  The names asked about are those that `/usr/include` (glibc 2.44), clang 23's
+  resource headers, musl 1.2.5, SQLite 3.53's amalgamation and Zig 0.14.1's
+  `lib/libc` query, and a list of common GNU attribute names. Only the names
+  were read from those inputs. A local script ran the queries;
+  `docs/c-preprocessor.md` records its procedure.
+
+SQLite, musl, Lua and the system's headers are test oracle inputs only (the
+tests read them where they are installed): none of their code is included.
 
 ## Review limits and distribution
 
