@@ -28,6 +28,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/x86_64_encoder_benchmark.c`, `src/buster/compiler/object_writer_benchmark.c`, `src/buster/compiler/lane_benchmark.c` | Original benchmark bodies under Default; shared counter/timing/sort helpers adapted through the lexer benchmark retain MIT. |
 | `src/buster/compiler/x86_64_encoder.c`, `src/buster/compiler/x86_64_encoder_test.c` | Original encoder, handwritten form families and tests; Default. Tool-oracle and catalogue distinctions below. |
 | `src/buster/compiler/main.c`, `src/buster/compiler/lane_test.c` | Original integration, input handling and lane tests; Default. |
+| `src/buster/compiler/dataflow.c`, `src/buster/compiler/dataflow_program.c`, `src/buster/compiler/dataflow_test.c`, `src/buster/compiler/dataflow_benchmark.c`, `docs/dataflow.md` | Original liveness/interference kernels, synthetic CFG generator, tests, benchmark and documentation; Default, with the public-domain SplitMix64 seed-mixing reference below. No external corpus is incorporated. |
 | `src/buster/compiler/preprocessor_fuzz*.c`, `docs/preprocessor-fuzz.md` | Original independent test harness, generator, comparator, minimizer, tests and benchmark helpers; Default. Generated test programs are produced by this repository's C generator from a recorded seed, case ID and language mode. Clang 23 is an external oracle; no compiler implementation or external test fixtures are imported. |
 | `src/buster/compiler/call_graph.c`, `src/buster/compiler/call_graph_test.c`, `src/buster/compiler/call_graph_capture/*` | Original call graph check, tests and IR-capture fixture; Default. LLVM IR's text format and Tarjan's algorithm are referenced, not copied. The tests' IR is hand-written, or clang 23's output for C snippets written for them and recorded beside it, cut down by hand; clang runs externally and is not vendored. |
 | `src/buster/compiler/link.c`, `src/buster/compiler/link_program.c`, `src/buster/compiler/link_test.c` | Original representation, synthetic program generators and tests; Default, with the public-domain generator reference noted below. |
@@ -173,7 +174,8 @@ included. Future generated imports require a fresh input/notice review.
 `link_program.c` emits original synthetic support routines and fixtures;
 the executable's hash constants are generated from SplitMix64, not imported
 test corpora. Recognizable SplitMix64 arithmetic also appears in link/lane/
-executable tests and benchmarks, and its finalizer ends `link.c`'s name hash. The public-domain reference is
+executable tests and benchmarks, and in the dataflow generator's seed mixer.
+Its finalizer also ends `link.c`'s name hash. The public-domain reference is
 [Sebastiano Vigna's 2015 implementation](https://prng.di.unimi.it/splitmix64.c);
 its dedication, permission and disclaimer are retained in
 [LICENSES/SplitMix64.txt](LICENSES/SplitMix64.txt). This does not import the
