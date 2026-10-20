@@ -140,6 +140,8 @@ designs and the compilers already built this way.
   The benchmark is linked into this executable rather than built separately.
 - `src/buster/compiler/c_lexer_test.c` holds the lexer tests. `main.c` includes
   it, and `./build/compiler test-lexer` runs them.
+  The same command also runs `main_test.c`'s input-loader error and cleanup
+  regressions; these require no corpus or performance measurement.
 - `src/buster/compiler/c_lexer_benchmark.c` provides the `benchmark-lexer`
   command. The 9700X CI workflow runs it on the repository's C sources by
   default. `docs/c-lexer.md` records the GFNI classifier, the leading-comment
@@ -379,6 +381,14 @@ machine, with `build.sh`'s unoptimized build, the C and C++ runs take about
 ```sh
 ./build/compiler test-lexer --cplusplus --seed 7 --fuzz 2000000
 ```
+
+Both modes also check the entry point's loader: empty and missing files, a
+source past the lexer's length limit, and repeated successful loads whose
+descriptor and four mappings must be released. A child limits its address
+space to fail each token-array mapping in turn, including `ends`, and the
+source mapping; each failure must retain its cause, return zero tokens and
+leave no mappings or descriptor behind. This checks the existing stub only,
+without replacing the driver being developed under #116, #117 and #145.
 
 ## Lexer benchmarks
 

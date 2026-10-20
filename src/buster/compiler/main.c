@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <limits.h>
 #include <assert.h>
+#include <errno.h>
 
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
 #define BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) (BUSTER_ARRAY_LENGTH(strlit) - 1)
@@ -63,84 +64,170 @@ struct PrimitiveTokenizeResult
     uint32_t* starts;
     uint32_t* ends;
     uint64_t token_count;
-    int file_descriptor;
+    uint64_t token_capacity;
+    const char* operation;
+    int error_number;
     bool error;
+    bool owns_content;
 };
+
+static void primitive_tokenize_error(PrimitiveTokenizeResult* result, const char* operation, int error_number)
+{
+    if (!result->error)
+    {
+        result->error = true;
+        result->operation = operation;
+        result->error_number = error_number;
+    }
+}
+
+// Chunk results borrow source bytes; file results own them. Both own their token arrays, and no result owns an fd.
+static void primitive_tokenize_release(PrimitiveTokenizeResult* result)
+{
+    if (result->kinds != 0)
+    {
+        munmap(result->kinds, result->token_capacity * sizeof(*result->kinds));
+    }
+    if (result->starts != 0)
+    {
+        munmap(result->starts, result->token_capacity * sizeof(*result->starts));
+    }
+    if (result->ends != 0)
+    {
+        munmap(result->ends, result->token_capacity * sizeof(*result->ends));
+    }
+    if (result->owns_content && result->content.length != 0)
+    {
+        munmap(result->content.pointer, result->content.length);
+    }
+    *result = (PrimitiveTokenizeResult)
+    {
+        .operation = result->operation,
+        .error_number = result->error_number,
+        .error = result->error,
+    };
+}
 
 static PrimitiveTokenizeResult primitive_tokenize_chunk(String8 chunk)
 {
-    PrimitiveTokenizeResult result = {0};
-    uint64_t maximum_token_length = compute_maximum_token_count(chunk);
-    (void)maximum_token_length;
-    uint8_t* kinds = mmap(0, maximum_token_length * sizeof(*kinds), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    uint32_t* starts = mmap(0, maximum_token_length * sizeof(*starts), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    uint32_t* ends = mmap(0, maximum_token_length * sizeof(*ends), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    uint32_t flags = 0;
-
-    int64_t tokenize_result = -1;
-    if (kinds != MAP_FAILED && starts != MAP_FAILED && starts != MAP_FAILED)
-    {
-        tokenize_result = c_tokenize((const uint8_t*)chunk.pointer, chunk.length, kinds, starts, ends, flags);
-    }
-
+    PrimitiveTokenizeResult result = { 0 };
     result.content = chunk;
-    result.error = tokenize_result < 0;
-    result.token_count = (uint64_t)tokenize_result;
-
-    if (!result.error)
+    if (chunk.length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
     {
-        result.kinds = kinds;
-        result.starts = starts;
-        result.ends = ends;
+        primitive_tokenize_error(&result, "tokenize", EFBIG);
     }
-    else
+    else if (chunk.length != 0)
     {
-        munmap(kinds, maximum_token_length * sizeof(*kinds));
-        munmap(starts, maximum_token_length * sizeof(*starts));
-        munmap(ends, maximum_token_length * sizeof(*ends));
+        result.token_capacity = compute_maximum_token_count(chunk);
+        const uint64_t sizes[] =
+        {
+            result.token_capacity * sizeof(*result.kinds),
+            result.token_capacity * sizeof(*result.starts),
+            result.token_capacity * sizeof(*result.ends),
+        };
+        const char* operations[] =
+        {
+            "mmap token kinds",
+            "mmap token starts",
+            "mmap token ends",
+        };
+        void* mappings[3] = { 0 };
+        for (uint32_t index = 0; index < 3 && !result.error; index += 1)
+        {
+            void* mapping = mmap(0, sizes[index], PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (mapping == MAP_FAILED)
+            {
+                primitive_tokenize_error(&result, operations[index], errno);
+            }
+            else
+            {
+                mappings[index] = mapping;
+            }
+        }
+        result.kinds = mappings[0];
+        result.starts = mappings[1];
+        result.ends = mappings[2];
+        if (!result.error)
+        {
+            const int64_t count = c_tokenize((const uint8_t*)chunk.pointer, chunk.length, result.kinds, result.starts, result.ends, 0);
+            if (count < 0)
+            {
+                primitive_tokenize_error(&result, "tokenize", EFBIG);
+            }
+            else
+            {
+                result.token_count = (uint64_t)count;
+            }
+        }
     }
-
+    if (result.error)
+    {
+        primitive_tokenize_release(&result);
+    }
     return result;
 }
 
 static PrimitiveTokenizeResult primitive_tokenize_file(String8 path)
 {
-    PrimitiveTokenizeResult result = {0};
-
+    PrimitiveTokenizeResult result = { 0 };
     assert(strlen(path.pointer) == path.length && path.pointer[path.length] == 0);
-    int fd = open(path.pointer, O_RDONLY | O_CLOEXEC, 0644);
-    if (fd != -1)
+    const int fd = open(path.pointer, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+    {
+        primitive_tokenize_error(&result, "open", errno);
+    }
+    else
     {
         struct stat file_stats;
-        if (fstat(fd, &file_stats) == 0)
+        if (fstat(fd, &file_stats) != 0)
         {
-            uint64_t length = (uint64_t)file_stats.st_size;
+            primitive_tokenize_error(&result, "fstat", errno);
+        }
+        else if (file_stats.st_size < 0 || (uint64_t)file_stats.st_size > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
+        {
+            primitive_tokenize_error(&result, "file size", EFBIG);
+        }
+        else if (file_stats.st_size != 0)
+        {
+            const uint64_t length = (uint64_t)file_stats.st_size;
             void* mapped = mmap(0, length, PROT_READ, MAP_PRIVATE, fd, 0);
-            if (mapped != MAP_FAILED)
+            if (mapped == MAP_FAILED)
             {
-                String8 chunk = { .pointer = (char*)mapped, .length = length };
+                primitive_tokenize_error(&result, "mmap source", errno);
+            }
+            else
+            {
+                const String8 chunk =
+                {
+                    .pointer = mapped,
+                    .length = length,
+                };
                 result = primitive_tokenize_chunk(chunk);
-                result.file_descriptor = fd;
+                result.content = chunk;
+                result.owns_content = true;
             }
         }
+        if (close(fd) != 0)
+        {
+            primitive_tokenize_error(&result, "close", errno);
+        }
     }
-
+    if (result.error)
+    {
+        primitive_tokenize_release(&result);
+    }
     return result;
 }
 
 static bool parse_compile_unit(String8 path)
 {
-    bool result = false;
-
-    String8 current_file_path = path;
-
-    while (true)
+    PrimitiveTokenizeResult tokens = primitive_tokenize_file(path);
+    const bool result = !tokens.error;
+    if (tokens.error)
     {
-        PrimitiveTokenizeResult result = primitive_tokenize_file(current_file_path);
-        (void)result;
-        break;
+        fprintf(stderr, "%.*s: %s: %s\n", (int)path.length, path.pointer, tokens.operation, strerror(tokens.error_number));
     }
-
+    primitive_tokenize_release(&tokens);
     return result;
 }
 
@@ -160,6 +247,7 @@ int run_c_lexer_benchmark(int argc, char** argv);
 
 // The lexer tests, for the test-lexer command.
 #include "buster/compiler/c_lexer_test.c"
+#include "buster/compiler/main_test.c"
 
 // The x86-64 encoder and its tests, for the test-x86-encoder command. Its benchmark is another translation unit.
 #include "buster/compiler/x86_64_encoder.c"
@@ -215,6 +303,10 @@ int main(int argc, char** argv)
     if (argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
     {
         result = run_c_lexer_tests(argv[0], argc - 2, argv + 2);
+        if (result == 0)
+        {
+            result = run_main_tests();
+        }
     }
     else if (argc >= 2 && strcmp(argv[1], "benchmark-lexer") == 0)
     {
@@ -283,7 +375,8 @@ int main(int argc, char** argv)
     else
     {
         printf("Hello world\n");
-        compile(BUSTER_S8(__FILE__), (CompileOptions){0});
+        const CompileResult compiled = compile(BUSTER_S8(__FILE__), (CompileOptions){0});
+        result = compiled.success ? 0 : 1;
     }
     return result;
 }
