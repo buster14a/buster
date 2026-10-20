@@ -172,6 +172,13 @@ int run_x86_encoder_benchmark(int argc, char** argv);
 #include "buster/compiler/lane_test.c"
 int run_lane_benchmark(int argc, char** argv);
 
+// Independent preprocessor fuzz tooling (#109); command names await agreement with #117.
+#include "buster/compiler/preprocessor_fuzz.c"
+#include "buster/compiler/preprocessor_fuzz_generate.c"
+#include "buster/compiler/preprocessor_fuzz_clang.c"
+#include "buster/compiler/preprocessor_fuzz_test.c"
+int run_preprocessor_fuzz_benchmark(int argc, char** argv);
+
 // Token refinement: identifier interning (c_intern.c) and the per-file pass after the lexer (c_refine.c), and their
 // tests, for the test-refinement command. Its benchmark is another translation unit.
 #include "buster/compiler/c_intern.c"
@@ -235,6 +242,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "benchmark-lanes") == 0)
     {
         result = run_lane_benchmark(argc - 1, argv + 1);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-preprocessor-fuzz") == 0)
+    {
+        result = run_preprocessor_fuzz_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-preprocessor-fuzz") == 0)
+    {
+        result = run_preprocessor_fuzz_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-refinement") == 0)
     {
