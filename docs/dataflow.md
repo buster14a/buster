@@ -113,7 +113,7 @@ is not established.
 
 Measured on 2026-10-20 on `benchpress`, Ryzen 7 9700X, Linux
 6.18.50-2-lts, Clang 23.1.1 and glibc 2.44, for PR #194's review revision
-with main `08abc25` merged in. The unchanged
+with main `c9b1b20` merged in. The
 `build.sh` builds at `-O3 -march=native`. Five independent benchmark processes
 each ran 21 alternating passes. Each command acquired and released the shared
 host lock separately, including each benchmark process:
@@ -138,29 +138,29 @@ Generator version 2, seed 1:
 
 | CFG / implementation | Cycles/function, median [min-max] | Cycles/block/sweep, median [min-max] |
 | --- | --- | --- |
-| small-diamond / scalar | 518.8 [518.0-525.5] | 16.212 [16.187-16.421] |
-| small-diamond / AVX-512 | 440.2 [438.4-464.0] | 13.758 [13.699-14.500] |
-| medium-nested / scalar | 69,450.9 [69,386.4-69,567.7] | 90.431 [90.347-90.583] |
-| medium-nested / AVX-512 | 20,971.8 [20,923.7-21,409.1] | 27.307 [27.244-27.876] |
-| large-local / scalar | 8,357,559.4 [8,319,162.3-8,362,964.6] | 408.084 [406.209-408.348] |
-| large-local / AVX-512 | 2,552,560.4 [2,514,636.6-2,560,820.1] | 124.637 [122.785-125.040] |
-| large-dispatch / scalar | 4,890,768.7 [4,881,680.4-4,943,278.1] | 398.012 [397.272-402.285] |
-| large-dispatch / AVX-512 | 1,494,478.5 [1,487,195.2-1,506,317.4] | 121.621 [121.028-122.584] |
+| small-diamond / scalar | 518.5 [518.1-525.6] | 16.202 [16.192-16.426] |
+| small-diamond / AVX-512 | 451.2 [439.6-463.8] | 14.099 [13.738-14.492] |
+| medium-nested / scalar | 71,741.2 [71,551.5-71,810.1] | 93.413 [93.166-93.503] |
+| medium-nested / AVX-512 | 20,976.5 [20,936.0-21,007.5] | 27.313 [27.260-27.354] |
+| large-local / scalar | 8,346,945.2 [8,344,415.9-8,359,362.2] | 407.566 [407.442-408.172] |
+| large-local / AVX-512 | 2,513,589.9 [2,508,434.4-2,515,582.1] | 122.734 [122.482-122.831] |
+| large-dispatch / scalar | 5,010,762.8 [4,991,312.6-5,021,098.3] | 407.777 [406.194-408.618] |
+| large-dispatch / AVX-512 | 1,492,668.8 [1,489,479.2-1,492,963.9] | 121.474 [121.214-121.498] |
 
 | CFG | Scalar ns/function, median [min-max] | AVX-512 ns/function, median [min-max] |
 | --- | --- | --- |
-| small-diamond | 93.6 [93.4-94.8] | 79.4 [79.1-83.7] |
-| medium-nested | 12,772.8 [12,702.0-12,834.0] | 3,860.3 [3,853.7-3,933.5] |
-| large-local | 1,520,669.3 [1,516,123.3-1,522,174.6] | 465,119.9 [457,192.0-466,540.8] |
-| large-dispatch | 892,745.9 [891,196.7-906,911.1] | 272,883.1 [271,284.5-274,963.9] |
+| small-diamond | 93.7 [93.6-95.0] | 81.5 [79.4-83.8] |
+| medium-nested | 13,171.7 [13,144.4-13,187.4] | 3,862.5 [3,852.4-3,864.4] |
+| large-local | 1,520,286.7 [1,519,406.2-1,529,181.5] | 457,702.9 [456,654.1-458,162.6] |
+| large-dispatch | 916,281.2 [912,234.2-918,737.1] | 272,139.2 [271,721.6-272,464.9] |
 
 The small, medium and two large cases used respectively 65,536, 1,024,
 16 and 16 complete solves per sample, with no calibration restarts. The
-shortest retained sample across all five processes was 3.939 ms; the shortest
-small-case sample was 5.175 ms.
+shortest retained sample across all five processes was 3.938 ms; the shortest
+small-case sample was 5.195 ms.
 
 `dataflow_liveness` selects AVX-512. Ratios of the cycle medians above are
-1.18x, 3.31x, 3.27x and 3.27x. The one-ZMM case has a modest margin:
+1.15x, 3.42x, 3.32x and 3.36x. The one-ZMM case has a modest margin:
 paired process ratios were 1.13-1.18x, within about 1.1-1.2x. The scalar twin
 remains the correctness oracle and benchmark alternative. These figures
 replace the earlier 3.58x/5.43x/3.42x claims, which charged the scalar loop for
@@ -180,13 +180,13 @@ The default tests passed 17,132 checks. `test-dataflow --seed 7 --count 64`
 passed 20,684, and seed 99 with the same count passed 20,668. Both solvers
 agreed on all rows and sweep counts. All documented test commands in `AGENTS.md` and
 `./build.sh check-call-graph` passed on the same host; the latter reported
-7 translation units, 1,605 functions and zero call-graph cycles.
+8 translation units, 2,218 functions and zero call-graph cycles.
 
 Raw logs, source hashes and toolchain provenance are retained on `benchpress`
 in `~/buster-fast-bench/astra-01a158dd-143-review-evidence/`
-(`benchmark-final-1.txt` through `benchmark-final-5.txt`). The measured
+(`benchmark-import-main-1.txt` through `benchmark-import-main-5.txt`). The measured
 executable's SHA-256 is
-`6c3cf7c14a1d9df9352dd52848f22654c4e1980ff676604f7e9fb1b0e1c24e3d`.
+`ce28f5590af9827515fc21be1bc450c4f2c181d13738ce8b676839d9cebb099a`.
 
 Successor-count specializations and keeping a previous one-ZMM row in a
 register remain optional follow-ups. Skipping unchanged blocks, storing rows
