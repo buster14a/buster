@@ -161,6 +161,15 @@ designs and the compilers already built this way.
   that IR to a temporary directory and runs it. `call_graph_test.c` holds its
   tests (`main.c` includes both; `./build/compiler test-call-graph` runs them),
   and `call_graph_capture/` the C fixture that checks the IR capture itself.
+- `src/buster/compiler/c_intern.c` is the identifier intern table (an
+  `IdentId` per distinct spelling) and the predefined names that get the first
+  ids (keywords, directive names, the preprocessor's names), and
+  `src/buster/compiler/c_refine.c` is token refinement: per file, after the
+  lexer, each identifier's `IdentId` (in place of its end) and each token's
+  exact leading-space bit. `docs/c-refinement.md` explains the design and its
+  9700X measurements. `c_refine_test.c` holds their tests (`main.c` includes
+  it; `./build/compiler test-refinement` runs them) and `c_refine_benchmark.c`
+  provides `benchmark-refinement`.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -182,6 +191,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler benchmark-object-writer
 ./build/compiler test-executable
 ./build/compiler benchmark-executable
+./build/compiler test-refinement src
+./build/compiler benchmark-refinement src
 ```
 
 ## Sharing the 9700X
@@ -720,3 +731,45 @@ affinity they start with. `docs/object-writer-and-linker.md` ("Patching and
 writing" and "The first executables") has the numbers. The default 9700X job
 runs it after the tests, pinned to one allowed CPU; like the others, its
 measurements are informational.
+
+## Refinement tests
+
+`./build/compiler test-refinement [--count N] [--seed N] [path...]` (about
+1.3 s without paths) compares `refine_tokens`, with each variant of its batched
+interning (`RefineVariant`), with `refine_tokens_scalar` and with an oracle of
+its own (splices and UCNs removed in plain passes, and a different table): every
+identifier must get the same id and every token the same leading-space bit, on:
+
+- the hash's three forms on spellings of 0 to 200 bytes, the predefined names
+  and the keyword rules, and 300,000 random spellings that grow the table seven
+  times;
+- 22 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
+  and trigraphs; comments; UCNs; identifiers of 62 to 65 bytes), each at all 64
+  misalignments from a cache line;
+- identifiers of every length from 1 to 130 bytes with a line splice (four
+  spellings, one a trigraph's) at every position inside, or a UCN at every
+  position, each followed by the same identifier written plainly: 50,570
+  inputs;
+- 20,000 random inputs (`--count N`) of identifiers, splices, comments,
+  digraphs, pp-numbers and other tokens, one in 16 with trigraphs;
+- 9,600 prefixes and suffixes of random inputs that end exactly at a readable
+  page's end, before a `PROT_NONE` page, or start at a page's start: a read
+  outside the source faults, and the test names the input and exits with 1;
+- every `.c` and `.h` file under each path. On the 9700X, `src` and the C
+  library corpus (`~/azp-bench/c-tokenizer/corpus/libc`) pass.
+
+`--seed N` picks another random sequence. The 9700X job runs it on `src`.
+
+## Refinement benchmark
+
+`./build/compiler benchmark-refinement [--cplusplus] [--trigraphs] [--only NAME]
+path...` lexes every `.c` and `.h` file once, checks every implementation
+against `refine_tokens_scalar`, and reports the share of identifiers the table
+finds and how often the vectorized path takes a scalar one. Then come 21
+interleaved passes, each from a table reset to the predefined names, with the
+medians per token and per identifier (time, cycles, instructions, IPC) of the
+variants (`refine_tokens_16`, `_32`, `_64` and `_fused`; `refine_tokens` is the
+64 one), the scalar path, `c_tokenize` and `c_tokenize` then refinement per file.
+`docs/c-refinement.md` has the numbers for `sqlite3.c`, the C library corpus and
+`src`. Run it pinned to one CPU; the default 9700X job runs it on `src`, and like
+the others its measurements are informational.

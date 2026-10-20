@@ -31,10 +31,12 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/link.c`, `src/buster/compiler/link_program.c`, `src/buster/compiler/link_test.c` | Original representation, synthetic program generators and tests; Default, with the public-domain generator reference noted below. |
 | `src/buster/compiler/object_writer.c`, `src/buster/compiler/object_writer_test.c` | Original ELF writer and tests; Default. ELF constants describe the format; no external linker implementation is vendored. |
 | `src/buster/compiler/executable.c`, `src/buster/compiler/executable_test.c`, `src/buster/compiler/executable_benchmark.c` | Original static-executable writer, tests and benchmarks; Default, with the generator reference below. |
+| `src/buster/compiler/c_intern.c`, `src/buster/compiler/c_refine.c`, `src/buster/compiler/c_refine_test.c` | Original intern table, token refinement and tests; Default. The hash's AES round keys are wyhash's public-domain constants, noted below. |
+| `src/buster/compiler/c_refine_benchmark.c` | Original benchmark body under Default; the corpus loader and the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `build.sh`, `.gitignore`, `.github/workflows/9700x.yml` | Original build/configuration; Default. The referenced GitHub action runs externally and is not vendored. |
 | `.claude/settings.json`, `.claude/hooks/join-tailnet.sh` | Maintainer configuration: settings adapted from his older Buster configuration; locally added tailnet hook. Default. See the recorded import below. |
 | `AGENTS.md`, `CLAUDE.md`, `docs/coding-style.md` | Original project/contributor guidance; Default. The style adapts conventions, not a grant to import old compiler code. |
-| `docs/c-lexer.md`, `docs/x86-64-encoder.md`, `docs/object-writer-and-linker.md` | Original design/measurement reports; Default. Referenced tools, articles and measurements are distinguished from vendored source. |
+| `docs/c-lexer.md`, `docs/x86-64-encoder.md`, `docs/object-writer-and-linker.md`, `docs/c-refinement.md` | Original design/measurement reports; Default. Referenced tools, articles and measurements are distinguished from vendored source. |
 | `README.md`, `LICENSING.md`, `CONTRIBUTING.md`, this file | Original adoption documentation; Default, except quoted upstream notices retain their terms. |
 | `LICENSE`, `DCO`, `LICENSES/*` | Retained legal/attribution texts; their own terms. These are not original project prose. |
 
@@ -177,6 +179,18 @@ configuration at Buster commit `5180a65a57ef19e9a2b5251eb33356e57b7120e1`, with
 the repository name changed and local Tailscale permissions added. This is
 maintainer configuration under his confirmed contribution authority, not an
 import of the older compiler's frameworks or implementation.
+
+## wyhash's constants
+
+`c_intern.c`'s identifier hash mixes with two AES rounds whose round keys are the
+four 64-bit constants of wyhash's default secret, `_wyp` in `wyhash.h`
+(`0xa0761d6478bd642f`, `0xe7037ed1a0b428db`, `0x8ebc6af09c88c6e3`,
+`0x589965cc75374cc3`). They are as in
+[wangyi-fudan/wyhash at `e92bc3e9adf862aad364ff74a24ef2cae854b0b1`](https://github.com/wangyi-fudan/wyhash/tree/e92bc3e9adf862aad364ff74a24ef2cae854b0b1),
+the last revision that has them (later ones changed the default secret). Only
+the constants are used, not wyhash's code. wyhash is released into the public
+domain under the Unlicense; its text at that revision is retained in
+[LICENSES/wyhash.txt](LICENSES/wyhash.txt).
 
 ## Review limits and distribution
 
