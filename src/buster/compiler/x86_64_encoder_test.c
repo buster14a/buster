@@ -36,38 +36,39 @@
 //     that end exactly at the end of a writable one, with a PROT_NONE page after them, for every count from 0 to
 //     BUSTER_X86_TEST_SHORT_COUNTS - 1. A read or write past the end faults, and the fault handler names the count and
 //     exits with status 1.
-//   - Invalid instructions: random valid instructions with one operand broken in ways x86_encode checks (a high byte
-//     register with a REX prefix, RSP as an index, RIP with a base, a register past its class's last, a group's
-//     register that isn't a multiple of its size, vvvv or reg in a form without them, decorations the form can't have,
-//     unknown mode bits): x86_encode must reject them and x86_validate must find them. And with an immediate, rel8 or
-//     rel16 just outside its field's range, an /is4 register outside its bits, a control or segment register that
-//     doesn't exist, MOV to CS, a complex multiplication into one of its sources, an AMX product of tiles with one
-//     twice, push2 or pop2 with RSP, pop2 with one register twice, a VSIB operand without an index, an EVEX gather or
-//     scatter without an opmask, a gather whose destination, index and mask aren't different registers, a SIB operand
-//     without a SIB byte or with SIB's none and a scale, a RIP-relative operand of MPX's bndmk or a MIB operand, a MIB
-//     operand's scaled index, a 3DNow! form's immediate other than its operation byte, or a NOTRACK form with a segment
-//     override, which only x86_validate checks: it must find them.
+//   - Invalid instructions: random valid instructions with one operand broken in ways the encoding can't represent (a
+//     high byte register with a REX prefix, RSP as an index, RIP with a base, a register past its class's last, a
+//     group's register that isn't a multiple of its size, vvvv or reg in a form without them, decorations the form
+//     can't have, unknown mode bits), or in ways it can but the instruction doesn't allow (an immediate, rel8 or rel16
+//     just outside its field's range, an /is4 register outside its bits, a control or segment register that doesn't
+//     exist, MOV to CS, a complex multiplication into one of its sources, an AMX product of tiles with one twice, push2
+//     or pop2 with RSP, pop2 with one register twice, a VSIB operand without an index, an EVEX gather or scatter
+//     without an opmask, a gather whose destination, index and mask aren't different registers, a SIB operand without a
+//     SIB byte or with SIB's none and a scale, a RIP-relative operand of MPX's bndmk or a MIB operand, a MIB operand's
+//     scaled index, a 3DNow! form's immediate other than its operation byte, or a NOTRACK form with a segment
+//     override): x86_validate must find them all, and the scalar encoder, which validates first, reject them.
+//     x86_encode takes what x86_validate accepts and doesn't check them.
 // Then the same again with 32-bit addresses (x86_test_mode, from the seed's first state again), but the known fixups:
 // x86_encode_address32 and x86_encode_scalar_address32 on x86_known_encodings_address32, a digest of their own
 // (BUSTER_X86_TEST_DIGEST_ADDRESS32), x86_encode_64_address32 on the random streams and at page edges, and the invalid
-// instructions, with two more breaks: an MPX memory operand, which only x86_validate_address32 checks, and a memory
-// operand in a form without room for the 67, which x86_encode_address32 rejects too. --address32 runs only this pass.
+// instructions, with two more breaks: an MPX memory operand and a memory operand in a form without room for the 67.
+// --address32 runs only this pass.
 // And again for APX, but the known fixups, which is all --apx runs: x86_encode_apx and x86_encode_scalar_apx on
-// x86_known_encodings_apx, the instructions of x86_known_invalid_apx, which they and x86_validate_apx must reject (as GNU
-// as does), a digest of their own (BUSTER_X86_TEST_DIGEST_APX), x86_encode_64_apx on the random streams (in which half
-// the forms have REX2 and a quarter are EVEX ones, whose general registers, bases and general indexes are 16 to 31 half
-// the time) and at page edges, and the invalid instructions, with three more breaks: a high byte register with REX2, a
-// general register, base or index from 16 to 31 in a form without REX2 or EVEX, and a vector register rm from 16 to 31
-// in a form with REX2.
+// x86_known_encodings_apx, the instructions of x86_known_invalid_apx, which x86_validate_apx and x86_encode_scalar_apx
+// must reject (as GNU as does), a digest of their own (BUSTER_X86_TEST_DIGEST_APX), x86_encode_64_apx on the random
+// streams (in which half the forms have REX2 and a quarter are EVEX ones, whose general registers, bases and general
+// indexes are 16 to 31 half the time) and at page edges, and the invalid instructions, with three more breaks: a high
+// byte register with REX2, a general register, base or index from 16 to 31 in a form without REX2 or EVEX, and a vector
+// register rm from 16 to 31 in a form with REX2.
 // And in 32-bit mode and in 16-bit mode, which is all --mode32 and --mode16 run: x86_encode_mode32 and
 // x86_encode_scalar_32, and x86_encode_mode16 and x86_encode_scalar_16, on the known encodings of
 // x86_known_encodings_32 and x86_known_encodings_16 and the known fixups of x86_known_fixups_32 and x86_known_fixups_16
 // (with x86_fixup_distance_address16 for a 16-bit address), a digest of each (BUSTER_X86_TEST_DIGEST_32 and
 // BUSTER_X86_TEST_DIGEST_16), x86_encode_64_mode32 and x86_encode_64_mode16 on the random streams (with both address
-// sizes and segment overrides in the decorations) and at page edges, streams of instructions longer than 15 bytes at a
-// page end (x86_check_overlong), and the invalid instructions, with five more breaks: a register that would need REX, a
-// memory operand the instruction's address size can't have (but a 16-bit address's displacement outside its range,
-// which only x86_validate_32 and x86_validate_16 check), a form that doesn't exist in the mode (which 64-bit mode's
+// sizes and segment overrides in the decorations) and at page edges, instructions longer than 15 bytes, which
+// x86_validate_32 and x86_validate_16 must reject (x86_check_overlong), and the invalid instructions, with five more
+// breaks: a register that would need REX, a memory operand the instruction's address size can't have (a 16-bit
+// address's displacement outside its range among them), a form that doesn't exist in the mode (which 64-bit mode's
 // passes break with too), an instruction longer than 15 bytes, and a segment override in the decorations that the
 // instruction can't take.
 //
@@ -139,6 +140,8 @@
 #define BUSTER_X86_TEST_REPORTED 3
 // Broken copies of each random instruction in the invalid-instruction check.
 #define BUSTER_X86_TEST_INVALID_INSTRUCTIONS 20000
+// Instructions longer than 15 bytes of each kind, in 16- and 32-bit modes (x86_check_overlong).
+#define BUSTER_X86_TEST_OVERLONG_INSTRUCTIONS 4096
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Random instructions
@@ -3449,7 +3452,7 @@ static bool x86_check_known(void)
     return scalar == 0 && vectorized == 0;
 }
 
-// Instructions that x86_encode_apx, x86_encode_scalar_apx and x86_validate_apx must reject, as GNU as does: the XSAVE
+// Instructions that x86_validate_apx and x86_encode_scalar_apx must reject, as GNU as does: the XSAVE
 // family with a base or index from 16 to 31 (REX2 is #UD with it), a high byte register with REX2, XMM16 to XMM31 in
 // SSE's forms (which only EVEX has), and registers 16 to 31 in VEX forms that have no EVEX one.
 static const X86Instruction x86_known_invalid_apx[] = {
@@ -3507,8 +3510,7 @@ static bool x86_check_known_invalid_apx(void)
     {
         const X86Instruction* instruction = &x86_known_invalid_apx[i];
         const bool rejected = x86_validate_apx(instruction, 1) == 0 &&
-                              x86_encode_scalar_apx(instruction, 1, output, sizeof(output), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION &&
-                              x86_encode_apx(instruction, 1, output, sizeof(output), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
+                              x86_encode_scalar_apx(instruction, 1, output, sizeof(output), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
         if (!rejected && failures < BUSTER_X86_TEST_REPORTED)
         {
             printf("  accepted: ");
@@ -4143,8 +4145,9 @@ static const uint16_t* x86_overflowing_rows(uint64_t* state, uint32_t* count)
     return rows[mode16];
 }
 
-// Breaks one operand of a valid instruction in one of the ways x86_encode checks, or in one that only x86_validate
-// checks (and then sets *validate_only). Returns false if this instruction can't be broken that way.
+// Breaks one operand of a valid instruction, in a way the encoding can't represent, or in one it can but the
+// instruction doesn't allow (and then sets *validate_only): x86_validate must find either (x86_encode doesn't check
+// them, but takes what x86_validate accepts). Returns false if this instruction can't be broken that way.
 static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, bool* validate_only)
 {
     const X86FormDescription* form = x86_form_description(instruction->form);
@@ -4651,11 +4654,11 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
         case 24:
         {
             // A memory operand in a form whose template has no room for its bytes (a segment override's, or a 32-bit
-            // address's 67: see x86_form_lacks_room), which the encoder rejects too: in a new instruction of one such
-            // form's row, chosen evenly (none if every template has room), with a memory operand (bextr's, LWP's and
-            // map 4's rm can be a register), given the form's segment override. In 16- and 32-bit modes, which have no
-            // templates, an instruction longer than 15 bytes: a form's longest (x86_longest_legacy_instruction), chosen
-            // evenly among those that overflow in the mode (none in 32-bit mode).
+            // address's 67: see x86_form_lacks_room): in a new instruction of one such form's row, chosen evenly (none
+            // if every template has room), with a memory operand (bextr's, LWP's and map 4's rm can be a register),
+            // given the form's segment override. In 16- and 32-bit modes, which have no templates, an instruction
+            // longer than 15 bytes: a form's longest (x86_longest_legacy_instruction), chosen evenly among those that
+            // overflow in the mode (none in 32-bit mode).
             if (legacy)
             {
                 uint32_t overflowing = 0;
@@ -4937,14 +4940,7 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
             broken_for_validate += validate_only;
             const bool validated = x86_test_validate(instructions, count) == victim;
             // The scalar encoder validates the instructions first, so it rejects them all.
-            bool rejected = x86_test_encode_scalar(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
-            uint64_t variants = 0;
-            const X86Variant* mode_variants = x86_mode_variants(&variants);
-            for (uint64_t v = 0; v < variants && !validate_only; v += 1)
-            {
-                rejected = rejected && mode_variants[v].encode(instructions, count, buffers->output, 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION &&
-                           mode_variants[v].encode(instructions, count, buffers->output, 0, buffers->fixup_ends) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
-            }
+            const bool rejected = x86_test_encode_scalar(instructions, count, buffers->output, BUSTER_X86_ENCODER_CAPACITY(count), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
             if (!(validated && rejected))
             {
                 if (failures < BUSTER_X86_TEST_REPORTED)
@@ -4952,82 +4948,53 @@ static bool x86_check_invalid(uint64_t* state, X86Instruction* instructions, X86
                     printf("  instruction %lu of %lu (form %s, reg 0x%02x, rm 0x%02x, index 0x%02x, mode 0x%02x): %s%s\n", (unsigned long)victim,
                            (unsigned long)count, x86_form_description(instructions[victim].form)->mnemonic, instructions[victim].reg, instructions[victim].rm,
                            instructions[victim].index, instructions[victim].mode, validated ? "" : "x86_validate missed it ",
-                           rejected ? "" : "an encoder accepted it");
+                           rejected ? "" : "the scalar encoder accepted it");
                 }
                 failures += 1;
             }
         }
     }
-    printf("invalid instructions%s: %lu broken (%lu in a way only x86_validate checks), %lu not caught\n", x86_test_mode_words(), (unsigned long)broken,
+    printf("invalid instructions%s: %lu broken (%lu in a way the encoding can represent), %lu not caught\n", x86_test_mode_words(), (unsigned long)broken,
            (unsigned long)broken_for_validate, (unsigned long)failures);
     return failures == 0;
 }
 
-// In 16- and 32-bit modes, streams of 1 to BUSTER_X86_TEST_SHORT_COUNTS - 1 instructions longer than 15 bytes (the
-// longest of the forms that can be, x86_overflowing_rows', so none in 32-bit mode), with the output's capacity ending
-// at a page end, as in x86_check_page_edges: the mode's loop must reject them without writing past it, as
-// compute_fields keeps every instruction within 15 bytes of the output (the stores after one byte more end past the
-// capacity, as a zeroed copy's padding's end exactly at it). Three kinds of streams: of the FS forms, of the forms
-// without FS and with an override in the decorations instead, and of those with neither but an index past 7, whose REX
-// bits (invalid in these modes) make REX's presence bit, the override position's, present: the length must count every
-// byte the layout takes.
-static bool x86_check_overlong(uint64_t* state, X86Instruction* instructions)
+// In 16- and 32-bit modes, BUSTER_X86_TEST_OVERLONG_INSTRUCTIONS instructions longer than 15 bytes of each of three
+// kinds (the longest of the forms that can be, x86_overflowing_rows', so none in 32-bit mode): of the FS forms, of the
+// forms without FS and with an override in the decorations instead, and of those with neither but an index past 7,
+// whose REX bits (invalid in these modes) make REX's presence bit, the override position's, present. x86_validate must
+// reject every one, and so must the scalar encoder, which validates first: x86_encode doesn't check them, and its
+// template of 16 positions makes such an instruction 16 bytes long.
+static bool x86_check_overlong(uint64_t* state)
 {
-    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     uint32_t overflowing = 0;
     const uint16_t* rows = x86_overflowing_rows(state, &overflowing);
-    uint64_t output_mapped = 0;
-    uint8_t* output_end = x86_map_guarded(BUSTER_X86_ENCODER_CAPACITY(BUSTER_X86_TEST_SHORT_COUNTS), page, &output_mapped);
     uint64_t accepted = 0;
-    bool result = output_end != 0;
-    if (!result)
+    uint64_t tested = 0;
+    for (uint32_t kind = 0; kind < 3 && overflowing != 0; kind += 1)
     {
-        printf("instructions longer than 15 bytes: can't map the guarded buffer\n");
-    }
-    else if (overflowing != 0)
-    {
-        struct sigaction action;
-        struct sigaction previous_segv;
-        struct sigaction previous_bus;
-        memset(&action, 0, sizeof(action));
-        action.sa_handler = x86_test_report_fault;
-        sigaction(SIGSEGV, &action, &previous_segv);
-        sigaction(SIGBUS, &action, &previous_bus);
-        uint64_t variants = 0;
-        const X86Variant* mode_variants = x86_mode_variants(&variants);
-        for (uint64_t v = 0; v < variants; v += 1)
+        for (uint64_t i = 0; i < BUSTER_X86_TEST_OVERLONG_INSTRUCTIONS; i += 1)
         {
-            x86_test_page_edge_variant = mode_variants[v].name;
-            x86_test_page_edge_outputs = 0;
-            for (uint32_t kind = 0; kind < 3; kind += 1)
+            X86Instruction instruction = x86_longest_legacy_instruction(state, rows[x86_random_below(state, overflowing)]);
+            instruction.form = (uint16_t)(instruction.form - (kind != 0 ? BUSTER_X86_FORM_FS : 0));
+            instruction.decorations |= (uint8_t)(kind == 1 ? BUSTER_X86_SEGMENT_OVERRIDE(x86_random_below(state, 6)) : 0);
+            instruction.index |= (uint8_t)(kind == 2 ? 8 : 0);
+            uint8_t output[BUSTER_X86_ENCODER_CAPACITY(1)];
+            const bool rejected = x86_test_validate(&instruction, 1) == 0 &&
+                                  x86_test_encode_scalar(&instruction, 1, output, sizeof(output), 0, 0) == X86_ENCODER_ERROR_INVALID_INSTRUCTION;
+            if (!rejected && accepted < BUSTER_X86_TEST_REPORTED)
             {
-                for (uint64_t n = 1; n < BUSTER_X86_TEST_SHORT_COUNTS; n += 1)
-                {
-                    x86_test_page_edge_count = n;
-                    for (uint64_t i = 0; i < n; i += 1)
-                    {
-                        X86Instruction instruction = x86_longest_legacy_instruction(state, rows[x86_random_below(state, overflowing)]);
-                        instruction.form = (uint16_t)(instruction.form - (kind != 0 ? BUSTER_X86_FORM_FS : 0));
-                        instruction.decorations |= (uint8_t)(kind == 1 ? BUSTER_X86_SEGMENT_OVERRIDE(x86_random_below(state, 6)) : 0);
-                        instruction.index |= (uint8_t)(kind == 2 ? 8 : 0);
-                        instructions[i] = instruction;
-                    }
-                    accepted += mode_variants[v].encode(instructions, n, output_end - BUSTER_X86_ENCODER_CAPACITY(n), 0, 0) != X86_ENCODER_ERROR_INVALID_INSTRUCTION;
-                }
+                printf("  accepted: ");
+                x86_print_instruction(stdout, &instruction, 0);
+                printf("\n");
             }
+            accepted += !rejected;
+            tested += 1;
         }
-        sigaction(SIGSEGV, &previous_segv, 0);
-        sigaction(SIGBUS, &previous_bus, 0);
-        printf("instructions longer than 15 bytes%s: streams of 1 to %d at a page end, with an FS form, an override in the decorations or REX's bits, %lu "
-               "accepted\n",
-               x86_test_mode_words(), BUSTER_X86_TEST_SHORT_COUNTS - 1, (unsigned long)accepted);
-        result = accepted == 0;
     }
-    if (output_end != 0)
-    {
-        munmap(output_end - (output_mapped - 2 * page) - page, output_mapped);
-    }
-    return result;
+    printf("instructions longer than 15 bytes%s: %lu with an FS form, an override in the decorations or REX's bits, %lu accepted\n", x86_test_mode_words(),
+           (unsigned long)tested, (unsigned long)accepted);
+    return accepted == 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -5426,7 +5393,7 @@ static bool x86_check_mode(uint64_t seed, uint64_t count, X86Instruction* instru
     passed = x86_check_page_edges(&state, instructions, buffers) && passed;
     if (x86_mode_is_legacy(x86_test_mode))
     {
-        passed = x86_check_overlong(&state, instructions) && passed;
+        passed = x86_check_overlong(&state) && passed;
     }
     passed = x86_check_invalid(&state, instructions, buffers) && passed;
     return passed;
