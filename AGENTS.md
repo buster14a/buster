@@ -1111,7 +1111,7 @@ the others its measurements are informational.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- without files, the 81 built-in cases (`pp_test_cases`), each preprocessed by
+- without files, the 83 built-in cases (`pp_test_cases`), each preprocessed by
   the vectorized kernels and their scalar twins. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The

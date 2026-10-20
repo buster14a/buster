@@ -3579,10 +3579,28 @@ BUSTER_INLINE bool pp_collecting(const Preprocessor* pp)
     return pp->invocation_count != 0 && pp->invocations[pp->invocation_count - 1].collecting && pp->capture_count == pp->invocations[pp->invocation_count - 1].capture_mark;
 }
 
+// The directives clang rejects among a function-like macro's arguments (Preprocessor::HandleDirective's
+// err_embedded_directive): the inclusions, #pragma and #embed. Their names, by kind, or null for the others.
+static const char* pp_embedded_directive_name(uint8_t kind)
+{
+    const char* result = 0;
+    switch (kind)
+    {
+        case PP_DIRECTIVE_INCLUDE: result = "include"; break;
+        case PP_DIRECTIVE_INCLUDE_NEXT: result = "include_next"; break;
+        case PP_DIRECTIVE_IMPORT: result = "import"; break;
+        case PP_DIRECTIVE_PRAGMA: result = "pragma"; break;
+        case PP_DIRECTIVE_EMBED: result = "embed"; break;
+        default: break;
+    }
+    return result;
+}
+
 // One step of the main loop while it collects the top invocation's arguments (or a builtin's operand) a token at a time:
 // the top context's tokens up to its end or its next directive. An exhausted buffer is popped (which enables its macro
 // again); a directive runs, as clang runs one among a macro's arguments (its line may start a capture, during which the
-// collection waits); the end of a file or of a barrier leaves the invocation unterminated.
+// collection waits), but for those clang rejects there (pp_embedded_directive_name), which are an error and skipped;
+// the end of a file or of a barrier leaves the invocation unterminated.
 static void pp_collect_step(Preprocessor* pp)
 {
     PPInvocation* invocation = &pp->invocations[pp->invocation_count - 1];
@@ -3605,8 +3623,21 @@ static void pp_collect_step(Preprocessor* pp)
         }
         else if (context->next_directive < data->directive_count)
         {
-            // Undefined behavior that clang allows, and warns about only with -pedantic (-Wembedded-directive).
-            pp_directive(pp, context);
+            const uint32_t d = context->next_directive;
+            const char* rejected = invocation->builtin ? 0 : pp_embedded_directive_name(data->directive_kind[d]);
+            if (rejected != 0)
+            {
+                // At the directive's name, as clang reports it.
+                pp_diagnose(pp, PP_SEVERITY_ERROR, base + data->starts[data->directive_hash[d] + 1], "embedding a #%s directive within macro arguments is not supported",
+                            rejected);
+                context->position = data->directive_end[d];
+                context->next_directive = d + 1;
+            }
+            else
+            {
+                // Undefined behavior that clang allows, and warns about only with -pedantic (-Wembedded-directive).
+                pp_directive(pp, context);
+            }
         }
         else
         {

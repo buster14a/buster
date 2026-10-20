@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on this branch (`main` at 2aa1358), with `-march=native` (AVX-512 intrinsic headers) | 11 | 6,379,384 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 81 | |
+| The built-in cases (`pp_test_cases`) | 83 | |
 
 The line markers agree too: where clang's `-E` markers put each token (its
 presumed line, and its file and the files that include it), ours put it, on the
@@ -249,8 +249,11 @@ arenas. Popping a context gives its tokens back when they are on top.
 
 ### Directives and `#if`
 
-- **Directives** run in their file's order (`pp_directive`). `#if` lines are
-  expanded first (#123): with `#define BAD(x,y) x`, `#if 0 && BAD(1)` is an
+- **Directives** run in their file's order (`pp_directive`), even among a
+  macro's arguments, as clang runs them there. The exceptions are the ones
+  clang rejects there: `#include`, `#include_next`, `#import`, `#pragma` and
+  `#embed` are an error, and the invocation goes on without them. `#if` lines
+  are expanded first (#123): with `#define BAD(x,y) x`, `#if 0 && BAD(1)` is an
   error, as in clang, while `#if 0 && (1/0)` is not. They are then evaluated by
   `pp_evaluate` with an explicit stack, over C23's integer constants: binary,
   digit separators, `true` and `false` in C23 mode, and character constants
@@ -552,7 +555,7 @@ the mispredictions it saves.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 81 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 83 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -617,8 +620,9 @@ the mispredictions it saves.
       start, the line after `_Pragma`, the include stack, system headers and
       escaped names, each with the exact text `-E` prints;
   - lexing by the language mode: the literal prefixes before C11, `u8'a'`
-    before C23 and both in C23, and a paste that would form `u8'a'` before C23,
-    which fails as clang's does and must then give clang's output.
+    before C23 and both in C23, and a paste that would form `u8'a'` before C23;
+  - `#pragma` and `#include` among a macro's arguments, which fail as clang's
+    do and must then give clang's output.
 
   A case can name more files, and options for both sides (`-I`, `-include`,
   with `%d` for its directory), and the text `-E` prints with line markers. A
@@ -767,8 +771,6 @@ cleared once and reused.
   where a token needs it.
 - Diagnostics give `file:line:column: error: message` (the presumed file and
   line) and no more: no notes, no macro backtraces (#108), and no carets.
-- A `#pragma` among a macro's arguments goes to the output, where clang rejects
-  it.
 - C++ (`-x c++`), dependency output (`-M`) and `-dM` aren't supported.
 - Stringizing an identifier that pasting made from a UCN gives its UTF-8
   spelling, where clang keeps the UCN.
