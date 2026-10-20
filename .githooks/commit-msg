@@ -1,0 +1,12 @@
+#!/bin/sh
+# Git's commit-msg hook (AGENTS.md, "David's sign-off"). Where David's opt-in
+# BUSTER_DCO_SIGN_OFF=davidgmbb is set, it ends the message with his sign-off,
+# once, after the trailers already there, as "The maintainer's standing
+# certification" in CONTRIBUTING.md authorizes. Anywhere else it does nothing.
+# A merge's message has no final newline, and without one git
+# interpret-trailers leaves out the blank line before a new trailer block.
+
+if [ "$BUSTER_DCO_SIGN_OFF" = davidgmbb ]; then
+    [ -z "$(tail -c 1 "$1")" ] || echo >> "$1"
+    git interpret-trailers --in-place --where end --if-exists addIfDifferent --if-missing add --trailer "Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>" "$1"
+fi

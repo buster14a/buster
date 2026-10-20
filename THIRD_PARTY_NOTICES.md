@@ -33,6 +33,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/executable.c`, `src/buster/compiler/executable_test.c`, `src/buster/compiler/executable_benchmark.c` | Original static-executable writer, tests and benchmarks; Default, with the generator reference below. |
 | `build.sh`, `.gitignore`, `.github/workflows/9700x.yml` | Original build/configuration; Default. The referenced GitHub action runs externally and is not vendored. |
 | `.claude/settings.json`, `.claude/hooks/join-tailnet.sh` | Maintainer configuration: settings adapted from his older Buster configuration; locally added tailnet hook. Default. See the recorded import below. |
+| `.githooks/commit-msg`, `.claude/hooks/enable-sign-off.sh` | Original hooks that add the maintainer's sign-off where his opt-in is set; Default. |
 | `AGENTS.md`, `CLAUDE.md`, `docs/coding-style.md` | Original project/contributor guidance; Default. The style adapts conventions, not a grant to import old compiler code. |
 | `docs/c-lexer.md`, `docs/x86-64-encoder.md`, `docs/object-writer-and-linker.md` | Original design/measurement reports; Default. Referenced tools, articles and measurements are distinguished from vendored source. |
 | `README.md`, `LICENSING.md`, `CONTRIBUTING.md`, this file | Original adoption documentation; Default, except quoted upstream notices retain their terms. |
