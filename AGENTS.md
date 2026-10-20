@@ -61,9 +61,9 @@ or infrastructure machinery merely to match its style.
 - `docs/object-writer-and-linker.md` is the design of the object writer and the
   linker, with the 9700X measurements of mold, wild, lld and the kernel's file
   costs behind it, and the order to build it in. The lane base layer, the
-  encoder's fixups, the representation and the direct path's first
-  executables below are implemented; the object writer and the rest of the
-  linker aren't yet.
+  encoder's fixups, the representation, the object writer and the direct
+  path's first executables below are implemented; the rest of the linker
+  isn't yet.
 - `src/buster/compiler/lane.c` is the lane base layer that every phase of the
   object writer and the linker runs on (groups of threads that run the same
   code, their barrier and broadcast, `lane_range`, and arenas).
@@ -77,6 +77,12 @@ or infrastructure machinery merely to match its style.
   libc, from a seed and sizes) for the object writer's and the linker's tests
   and benchmarks. `link_test.c` holds the tests of both (`main.c` includes
   them; `./build/compiler test-link` runs them).
+- `src/buster/compiler/object_writer.c` is the object writer: an ELF
+  relocatable object per unit of the representation (`object_prepare` once per
+  link, then `object_build` per object, `object_write_file`, and
+  `object_write_units` for a group of lanes). `object_writer_test.c` holds its
+  tests (`main.c` includes it; `./build/compiler test-object-writer` runs them)
+  and `object_writer_benchmark.c` provides `benchmark-object-writer`.
 - `src/buster/compiler/executable.c` writes the direct path's first
   executables: a link in that representation laid out, patched and written as
   a static executable without libc (step 4 of the design's plan), with a build
@@ -98,6 +104,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-lanes
 ./build/compiler benchmark-lanes
 ./build/compiler test-link
+./build/compiler test-object-writer --cross-check
+./build/compiler benchmark-object-writer
 ./build/compiler test-executable
 ./build/compiler benchmark-executable
 ```
@@ -382,6 +390,86 @@ set and wild 0.10.0 the `*-no-sizes` ones, 37 links per seed, for seeds 1, 2,
 what its model predicts. GNU ld and lld (with `-z norelro`) also start the TLS
 segment off its alignment when told where: seed 1's `static-defaults` with
 `--section-start=.tdata=0x500008 --section-start=.tbss=0x500030`.
+
+## Object writer tests
+
+`./build/compiler test-object-writer [--seed N] [--cross-check] [--keep]` checks
+`object_writer.c`:
+
+- objects: each unit's object of `test-link`'s seven programs (with 500 workers
+  in the one that takes `--functions`), of a link made by hand (gaps between
+  atoms, an atom of no size, weak, hidden and protected symbols, pointers into
+  a string pool, units without atoms between and after the others) and of a
+  link without atoms, with and without function sections.
+  Each is built twice, the second time over poisoned memory, and must come out
+  the same; the test's own ELF reader reads it back and checks the rules every
+  object keeps; and it is compared with the representation, from which the test
+  works out every section, symbol and relocation again, with its own tables of
+  section formats and relocation types. Among them, every local-exec TLS
+  reference must be an `R_X86_64_TPOFF32` against its TLS symbol over a zero
+  field, and every call through the GOT an `R_X86_64_GOTPCRELX`. Then an arena
+  too small for an object (`OBJECT_ERROR_FULL`) and an addend past int64
+  (`OBJECT_ERROR_RANGE`);
+- many sections: one unit of 33,000 functions in sections of their own, 66,039
+  sections: `e_shnum` and `e_shstrndx` in section 0, and symbols' indices
+  through `SHN_XINDEX` and `.symtab_shndx`;
+- lanes: every unit's object of a program of 24 units and a 25th without
+  atoms written by `object_write_units` with groups of 1, 2, 3 and 8 lanes,
+  byte-identical to `object_build`'s; and a group in which a lane has no room
+  to start, which writes no object and gives every unit `OBJECT_ERROR_FULL`;
+- files: `object_write_file` into a new file, over a larger and a smaller one
+  (in place: the same inode, truncated), over one with another hard link (a
+  new file with its mode, and the other link keeps the old bytes), also with a
+  name of `NAME_MAX` bytes, into `/dev/null`, into a pipe, and into a missing
+  directory (an error);
+- with `--cross-check`, which needs `readelf`, `llvm-readobj`, `as`,
+  `ld.bfd`, `ld.lld`, `mold` and `wild` on `PATH`, and a `cc` that takes
+  `-fuse-ld=wild` (GCC 16 on the 9700X):
+  - `readelf -W` and `llvm-readobj` list every object's sections, symbols and
+    relocations, which must be what the test's reader read, field by field;
+  - GNU ld, lld, mold and wild link each program's objects, without errors or
+    warnings: the static programs with `-static -e _start`, and the ones that
+    call libc through `cc` as a PIE, with `-no-pie` and with `-static`. The
+    executable must exit with status 0 having printed what the program's model
+    predicts. wild links only the programs without `SIZE32` and `SIZE64`, which
+    wild 0.10 refuses, and among them one of 33,000 functions past
+    `SHN_LORESERVE` sections;
+  - GNU as assembles each unit as `test-link --print-assembly` writes it, and
+    its object must match the writer's: the same sections and bytes, symbols
+    and relocations. They may differ where GNU as does: it orders sections as
+    the source names them and places them in the file its own way, keeps an
+    empty `.text`, `.data` and `.bss`, adds a `.note.gnu.property` where
+    binutils is built to (as on the 9700X), writes no `.comment` or
+    `STT_FILE`, keeps only the unnamed symbols relocations into `SHF_MERGE`
+    sections need, and for a `.reloc` against a named local symbol keeps the
+    symbol where the writer, like GNU as for an instruction, names the
+    section's. So a relocation's target is compared by where it points, but
+    its form must be the same for the GOT, TLS and size types and into
+    `SHF_MERGE` sections.
+
+The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
+removed at the end unless `--keep`. `--seed N` changes the programs. On the
+9700X (binutils 2.47, LLVM 23.1.1, mold 3.0.0, wild 0.10.0 and GCC 16.2.1)
+the checks take about 0.03 s, and 3.5 s with `--cross-check`.
+
+## Object writer benchmark
+
+`./build/compiler benchmark-object-writer [--units N] [--functions N]
+[--filler N] [--function-sections] [--directory DIR] [--seed N]` generates a
+program of `--units` units (64 by default), each of `--functions` workers (200)
+of up to `--filler` filler instructions (40), with 8 globals, 2 thread-locals,
+20 strings and an init and a fini function per unit: by default each unit is
+about one of synth's translation units. It reports, per object, 21-pass medians
+of `object_prepare` (once per link), of `object_build` alone (with cycles,
+instructions and IPC), and of writing each object to a file in `--directory`
+(`$TMPDIR` or `/tmp`) over the one from the pass before (in place) and as a new
+file, each against its floor: the same system calls without the writer's
+`fstat`. Each way writes files of its own and the ways take turns going first,
+since rewriting pages just written costs less. Run it pinned to one CPU, and
+with `--directory` on each file system to measure;
+`docs/object-writer-and-linker.md` ("The object writer (`-c`)") has the numbers
+for tmpfs and btrfs. The default 9700X job runs it after the tests, pinned to
+one allowed CPU; like the others, its measurements are informational.
 
 ## Direct executable tests
 
