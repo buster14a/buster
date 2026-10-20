@@ -309,15 +309,17 @@ static bool executable_test_reset(Link* link, const char* path)
 }
 
 static const char* const executable_test_error_names[] = {
-    "none",
-    "memory",
-    "layout",
-    "undefined",
-    "unsupported",
-    "entry",
-    "fixup",
-    "file",
+    [EXECUTABLE_ERROR_NONE] = "none",
+    [EXECUTABLE_ERROR_MEMORY] = "memory",
+    [EXECUTABLE_ERROR_LAYOUT] = "layout",
+    [EXECUTABLE_ERROR_UNDEFINED] = "undefined",
+    [EXECUTABLE_ERROR_UNSUPPORTED] = "unsupported",
+    [EXECUTABLE_ERROR_ENTRY] = "entry",
+    [EXECUTABLE_ERROR_RELOCATION] = "relocation",
+    [EXECUTABLE_ERROR_FIXUP] = "fixup",
+    [EXECUTABLE_ERROR_FILE] = "file",
 };
+_Static_assert(BUSTER_ARRAY_LENGTH(executable_test_error_names) == EXECUTABLE_ERROR_FILE + 1, "every error has a name");
 
 static void executable_test_print_failure(const char* what, const ExecutableResult* result)
 {
