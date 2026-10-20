@@ -8,7 +8,7 @@
 //
 // Usage: build/compiler spike-parse [--fixtures] [--generated N [--case NAME]] [--check-only | --no-check] [--flags]
 //                                   [--dump FILE] [--passes N] [--only NAME|stages] [--repeat N]
-//                                   [--counters pipeline|branches|memory] [--statements N] path...
+//                                   [--counters pipeline|branches|memory|stalls] [--statements N] path...
 //
 // Paths are files, or directories whose files ending in .i are read (preprocessed with `clang -E -P`). Each file is
 // lexed by c_tokenize and refined by spike_refine, with one identifier table for all of them, outside what is timed.
@@ -1330,6 +1330,7 @@ typedef enum SpikeCounterSet
     SPIKE_COUNTERS_PIPELINE,
     SPIKE_COUNTERS_BRANCHES,
     SPIKE_COUNTERS_MEMORY,
+    SPIKE_COUNTERS_STALLS,
     SPIKE_COUNTER_SET_COUNT,
 } SpikeCounterSet;
 
@@ -1338,6 +1339,7 @@ static const char* const spike_counter_set_names[SPIKE_COUNTER_SET_COUNT] =
     "pipeline",
     "branches",
     "memory",
+    "stalls",
 };
 
 #define BUSTER_SPIKE_DISPATCH_SLOTS 8
@@ -1345,12 +1347,15 @@ static const char* const spike_counter_set_names[SPIKE_COUNTER_SET_COUNT] =
 // AMD raw events: the event's low byte in bits 0-7, its high nibble in bits 32-35, the unit mask in bits 8-15.
 // ex_ret_ops (0xc1), de_no_dispatch_per_slot.no_ops_from_frontend (0x1a0, 0x01) and .backend_stalls (0x1a0, 0x1e);
 // ex_ret_brn (0xc2), ex_ret_brn_misp (0xc3) and ex_ret_brn_tkn (0xc4); ls_dmnd_fills_from_sys.local_l2 (0x43, 0x01),
-// .local_ccx (0x43, 0x02) and .dram_io_near (0x43, 0x08).
+// .local_ccx (0x43, 0x02) and .dram_io_near (0x43, 0x08); ls_bad_status2.stli_other (0x24, 0x02), the dispatch slots
+// the per-core power cap throttles (0x1a0, 0x08: one of backend_stalls' bits) and
+// de_dispatch_stall_cycle_dynamic_tokens_part1.fp_sch_rsrc_stall (0xae, 0x40).
 static const uint64_t spike_counter_configs[SPIKE_COUNTER_SET_COUNT][3] =
 {
     { 0xc1, 0x1000001a0, 0x100001ea0 },
     { 0xc2, 0xc3, 0xc4 },
     { 0x143, 0x243, 0x843 },
+    { 0x224, 0x1000008a0, 0x40ae },
 };
 
 static const char* const spike_counter_names[SPIKE_COUNTER_SET_COUNT][SPIKE_COUNTER_COUNT] =
@@ -1358,6 +1363,7 @@ static const char* const spike_counter_names[SPIKE_COUNTER_SET_COUNT][SPIKE_COUN
     { "cycles", "instructions", "ex_ret_ops", "de_no_dispatch_per_slot.no_ops_from_frontend", "de_no_dispatch_per_slot.backend_stalls" },
     { "cycles", "instructions", "ex_ret_brn", "ex_ret_brn_misp", "ex_ret_brn_tkn" },
     { "cycles", "instructions", "ls_dmnd_fills_from_sys.local_l2", "ls_dmnd_fills_from_sys.local_ccx", "ls_dmnd_fills_from_sys.dram_io_near" },
+    { "cycles", "instructions", "ls_bad_status2.stli_other", "de_no_dispatch_per_slot.0x08", "de_dispatch_stall_cycle_dynamic_tokens_part1.fp_sch_rsrc_stall" },
 };
 
 typedef struct SpikeCounters SpikeCounters;
@@ -1569,9 +1575,15 @@ static void spike_report(const char* name, const SpikeSample* samples, uint32_t 
     {
         printf("branches/token %.3f mispredicted %.4f (%.2f%%) taken %.3f\n", first / t, second / t, first != 0 ? 100.0 * second / first : 0.0, third / t);
     }
-    else
+    else if (set == SPIKE_COUNTERS_MEMORY)
     {
         printf("fills/token from L2 %.4f L3 %.4f DRAM %.4f\n", first / t, second / t, third / t);
+    }
+    else
+    {
+        const double slots = cycles * BUSTER_SPIKE_DISPATCH_SLOTS;
+        printf("store-to-load conflicts/token %.4f throttled slots %.1f%% FP queue stalls %.1f%%\n", first / t, slots != 0 ? 100.0 * second / slots : 0.0,
+               cycles != 0 ? 100.0 * third / cycles : 0.0);
     }
 }
 
@@ -2050,7 +2062,7 @@ int run_parse_spike(int argc, char** argv)
     {
         fprintf(stderr,
                 "usage: %s [--fixtures] [--generated N [--case NAME]] [--check-only | --no-check] [--flags] [--dump FILE] [--passes N] [--only NAME|stages]\n"
-                "       [--repeat N] [--counters pipeline|branches|memory] [--statements N] path...\n",
+                "       [--repeat N] [--counters pipeline|branches|memory|stalls] [--statements N] path...\n",
                 argv[0]);
     }
     else if (corpus.files == 0 || !spike_names_init(&corpus.names, &memory))
