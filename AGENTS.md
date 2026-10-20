@@ -740,9 +740,11 @@ interning (`RefineVariant`), with `refine_tokens_scalar` and with an oracle of
 its own (splices and UCNs removed in plain passes, and a different table): every
 identifier must get the same id and every token the same leading-space bit, on:
 
-- the hash's three forms on spellings of 0 to 200 bytes, the predefined names
-  and the keyword rules, and 300,000 random spellings that grow the table seven
-  times;
+- the hash's three forms on spellings of 0 to 200 bytes, 22,528 long spellings
+  of repeated and swapped 64-byte chunks and 16-byte lanes that must all hash
+  differently, the predefined names, every name's keyword answer in each of the
+  ten modes from `c89` to `gnu23`, and 300,000 random spellings that grow the
+  table seven times;
 - 22 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
   and trigraphs; comments; UCNs; identifiers of 62 to 65 bytes), each at all 64
   misalignments from a cache line;

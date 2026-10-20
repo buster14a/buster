@@ -12,8 +12,9 @@
 // that command. The checks, in this order:
 //   - hash: intern_hash_bytes, and intern_hash_vector up to 64 bytes, agree with intern_hash_bytes_scalar on random
 //     spellings of every length from 0 to 200 bytes.
-//   - names: every predefined name has its C_NAME id and spelling, and the keywords are keywords in the language
-//     modes clang makes them keywords in.
+//   - long hashes: long spellings made of repeated or swapped 64-byte chunks and 16-byte lanes all hash differently.
+//   - names: every predefined name has its C_NAME id and spelling, and is a keyword in exactly the language modes
+//     clang makes it one in (every name in every mode from c89 to gnu23).
 //   - table: random spellings of 1 to 200 bytes, enough to grow the table seven times, get ids in the order they are
 //     first added, and the same id again; absent ones aren't found.
 //   - fixtures: the boundary cases of docs/c-refinement.md, each with the leading-space bits and identifier equalities
@@ -44,12 +45,15 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 
 #define BUSTER_REFINE_TEST_DEFAULT_INPUTS 20000
 #define BUSTER_REFINE_TEST_HASH_ROUNDS 200000
 #define BUSTER_REFINE_TEST_HASH_LENGTHS 201
+// refine_check_long_hashes's spellings: 8,192 + 4,096 + 2 * 2,048 + 3 * 2,048.
+#define BUSTER_REFINE_TEST_LONG_HASHES 22528
 #define BUSTER_REFINE_TEST_TABLE_SPELLINGS 300000
 // A random input is up to this long, and is made of up to this many pieces.
 #define BUSTER_REFINE_TEST_INPUT_BYTES 8192
@@ -471,6 +475,162 @@ static bool refine_check_hash(uint64_t* random)
     return failures == 0;
 }
 
+// Writes `index` in base 26 (lowercase letters, the least significant first) into `count` bytes at `out`.
+static void refine_test_base26(uint64_t index, uint8_t* out, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        out[i] = (uint8_t)('a' + index % 26);
+        index /= 26;
+    }
+}
+
+// `count` random lowercase letters at `out`.
+static void refine_test_letters(uint64_t* random, uint8_t* out, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        out[i] = (uint8_t)('a' + refine_test_random(random) % 26);
+    }
+}
+
+static int refine_test_compare_hashes(const void* a, const void* b)
+{
+    const uint64_t x = *(const uint64_t*)a;
+    const uint64_t y = *(const uint64_t*)b;
+    return (x > y) - (x < y);
+}
+
+// Records a spelling's hash for refine_check_long_hashes, and counts a difference between intern_hash_bytes and
+// intern_hash_bytes_scalar.
+static void refine_test_long_hash(const uint8_t* bytes, uint32_t length, uint64_t* hashes, uint32_t* count, uint64_t* differences)
+{
+    const uint64_t hash = intern_hash_bytes_scalar(bytes, length);
+    *differences += intern_hash_bytes(bytes, length) != hash;
+    hashes[*count] = hash;
+    *count += 1;
+}
+
+// Long spellings made of repeated or swapped parts, which a fold that XORed every 64-byte chunk alike would hash alike:
+// `X X` for 8,192 64-byte X (an index in base 26, then 'a's), as such a fold would hash every one of them by its length
+// alone; a 16-byte lane eight times, for 4,096 lanes; `X Y` and `Y X` for 2,048 random pairs; and `X` two, three and four
+// times for 2,048 random X. All of them must hash differently: the chance that two of 22,528 random 64-bit hashes are
+// equal is about 2^-37.
+static bool refine_check_long_hashes(uint64_t* random)
+{
+    static uint64_t hashes[BUSTER_REFINE_TEST_LONG_HASHES];
+    uint8_t bytes[256];
+    uint8_t swapped[128];
+    uint32_t count = 0;
+    uint64_t differences = 0;
+    for (uint32_t i = 0; i < 8192; i += 1)
+    {
+        memset(bytes, 'a', 64);
+        refine_test_base26(i, bytes, 8);
+        memcpy(bytes + 64, bytes, 64);
+        refine_test_long_hash(bytes, 128, hashes, &count, &differences);
+    }
+    for (uint32_t i = 0; i < 4096; i += 1)
+    {
+        memset(bytes, 'b', 16);
+        refine_test_base26(i, bytes, 4);
+        for (uint32_t lane = 1; lane < 8; lane += 1)
+        {
+            memcpy(bytes + lane * 16, bytes, 16);
+        }
+        refine_test_long_hash(bytes, 128, hashes, &count, &differences);
+    }
+    for (uint32_t i = 0; i < 2048; i += 1)
+    {
+        refine_test_letters(random, bytes, 128);
+        memcpy(swapped, bytes + 64, 64);
+        memcpy(swapped + 64, bytes, 64);
+        refine_test_long_hash(bytes, 128, hashes, &count, &differences);
+        refine_test_long_hash(swapped, 128, hashes, &count, &differences);
+    }
+    for (uint32_t i = 0; i < 2048; i += 1)
+    {
+        refine_test_letters(random, bytes, 64);
+        for (uint32_t times = 2; times <= 4; times += 1)
+        {
+            memcpy(bytes + (times - 1) * 64, bytes, 64);
+            refine_test_long_hash(bytes, times * 64, hashes, &count, &differences);
+        }
+    }
+    qsort(hashes, count, sizeof(hashes[0]), refine_test_compare_hashes);
+    uint64_t equal = 0;
+    for (uint32_t i = 1; i < count; i += 1)
+    {
+        equal += hashes[i] == hashes[i - 1];
+    }
+    printf("long hashes: %lu equal hashes and %lu differences in %u spellings of repeated and swapped parts\n", (unsigned long)equal, (unsigned long)differences, count);
+    return equal == 0 && differences == 0;
+}
+
+// The language modes, by their -std= names.
+typedef struct RefineTestMode RefineTestMode;
+struct RefineTestMode
+{
+    const char* name;
+    CLanguage language;
+};
+
+static const RefineTestMode refine_test_modes[] = {
+    { "c89", { .standard = 1989, .gnu = false } },
+    { "gnu89", { .standard = 1989, .gnu = true } },
+    { "c99", { .standard = 1999, .gnu = false } },
+    { "gnu99", { .standard = 1999, .gnu = true } },
+    { "c11", { .standard = 2011, .gnu = false } },
+    { "gnu11", { .standard = 2011, .gnu = true } },
+    { "c17", { .standard = 2017, .gnu = false } },
+    { "gnu17", { .standard = 2017, .gnu = true } },
+    { "c23", { .standard = 2023, .gnu = false } },
+    { "gnu23", { .standard = 2023, .gnu = true } },
+};
+
+// The names that are keywords in some modes only, with the modes clang 23 makes them keywords in (where its
+// __is_identifier gives 0), written out mode by mode rather than computed from the years as c_name_is_keyword computes
+// them. Every other keyword name is a keyword in every mode, and the other names in none.
+typedef struct RefineTestKeyword RefineTestKeyword;
+struct RefineTestKeyword
+{
+    IdentId name;
+    const char* modes;
+};
+
+static const RefineTestKeyword refine_test_keywords[] = {
+    { C_NAME_INLINE, " gnu89 c99 gnu99 c11 gnu11 c17 gnu17 c23 gnu23 " },
+    { C_NAME_RESTRICT, " c99 gnu99 c11 gnu11 c17 gnu17 c23 gnu23 " },
+    { C_NAME_ALIGNAS, " c23 gnu23 " },
+    { C_NAME_ALIGNOF, " c23 gnu23 " },
+    { C_NAME_BOOL, " c23 gnu23 " },
+    { C_NAME_CONSTEXPR, " c23 gnu23 " },
+    { C_NAME_FALSE, " c23 gnu23 " },
+    { C_NAME_NULLPTR, " c23 gnu23 " },
+    { C_NAME_STATIC_ASSERT, " c23 gnu23 " },
+    { C_NAME_THREAD_LOCAL, " c23 gnu23 " },
+    { C_NAME_TRUE, " c23 gnu23 " },
+    { C_NAME_TYPEOF_UNQUAL, " c23 gnu23 " },
+    { C_NAME_TYPEOF, " gnu89 gnu99 gnu11 gnu17 c23 gnu23 " },
+    { C_NAME_ASM, " gnu89 gnu99 gnu11 gnu17 gnu23 " },
+};
+
+// Is `name` a keyword in the mode `mode` names, by refine_test_keywords?
+static bool refine_test_expected_keyword(IdentId name, const char* mode)
+{
+    bool result = name != 0 && name <= C_NAME_KEYWORD_COUNT;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refine_test_keywords); i += 1)
+    {
+        if (refine_test_keywords[i].name == name)
+        {
+            char key[16];
+            snprintf(key, sizeof(key), " %s ", mode);
+            result = strstr(refine_test_keywords[i].modes, key) != 0;
+        }
+    }
+    return result;
+}
+
 static bool refine_check_names(InternTable* table)
 {
     uint64_t failures = 0;
@@ -486,21 +646,23 @@ static bool refine_check_names(InternTable* table)
         }
         failures += !same;
     }
-    const CLanguage gnu17 = { .standard = 17, .gnu = true };
-    const CLanguage c17 = { .standard = 17, .gnu = false };
-    const CLanguage c23 = { .standard = 23, .gnu = false };
-    const CLanguage c89 = { .standard = 89, .gnu = false };
-    const bool keywords = c_name_is_keyword(C_NAME_INT, c89) && c_name_is_keyword(C_NAME_ASM, gnu17) && !c_name_is_keyword(C_NAME_ASM, c17) &&
-                          c_name_is_keyword(C_NAME_TYPEOF, gnu17) && !c_name_is_keyword(C_NAME_TYPEOF, c17) && c_name_is_keyword(C_NAME_TYPEOF, c23) &&
-                          !c_name_is_keyword(C_NAME_BOOL, gnu17) && c_name_is_keyword(C_NAME_BOOL, c23) && !c_name_is_keyword(C_NAME_INLINE, c89) &&
-                          c_name_is_keyword(C_NAME_INLINE, (CLanguage){ .standard = 89, .gnu = true }) && !c_name_is_keyword(C_NAME_RESTRICT, c89) &&
-                          c_name_is_keyword(C_NAME_GNU_ATTRIBUTE2, c89) && !c_name_is_keyword(C_NAME_DEFINE, c23) && !c_name_is_keyword(0, c23);
-    if (!keywords)
+    uint64_t wrong = 0;
+    for (uint32_t name = 0; name < C_NAME_COUNT; name += 1)
     {
-        printf("names: the keyword rules are wrong\n");
+        for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(refine_test_modes); m += 1)
+        {
+            const bool keyword = c_name_is_keyword(name, refine_test_modes[m].language);
+            const bool expected = refine_test_expected_keyword(name, refine_test_modes[m].name);
+            if (keyword != expected && wrong < BUSTER_REFINE_TEST_REPORTED)
+            {
+                printf("names: %s is%s a keyword in %s\n", name == 0 ? "id 0" : c_name_spellings[name], keyword ? "" : " not", refine_test_modes[m].name);
+            }
+            wrong += keyword != expected;
+        }
     }
-    printf("names: %lu of %u predefined names are wrong\n", (unsigned long)failures, C_NAME_COUNT - 1);
-    return failures == 0 && keywords;
+    printf("names: %lu of %u predefined names are wrong, and %lu of %u keyword answers (every name in %u modes)\n", (unsigned long)failures, C_NAME_COUNT - 1,
+           (unsigned long)wrong, C_NAME_COUNT * (uint32_t)BUSTER_ARRAY_LENGTH(refine_test_modes), (uint32_t)BUSTER_ARRAY_LENGTH(refine_test_modes));
+    return failures == 0 && wrong == 0;
 }
 
 // A random spelling of 1 to 200 bytes (mostly short) from the identifier characters, written to `out`.
@@ -1036,6 +1198,7 @@ static int run_refinement_tests(int argument_count, char** arguments)
     else
     {
         bool passed = refine_check_hash(&random);
+        passed &= refine_check_long_hashes(&random);
         passed &= refine_check_names(&state.scalar_table);
         passed &= refine_check_table(&random);
         passed &= refine_check_fixtures(&state);

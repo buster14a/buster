@@ -23,18 +23,19 @@
 // the preprocessor's built-in names: BUSTER_C_NAMES), so that classifying a keyword is one compare against
 // C_NAME_KEYWORD_COUNT.
 //
-// The hash (intern_hash_bytes_scalar defines it) folds the spelling's 16-byte lanes into 128 bits, rotating lane k's two
-// qwords by intern_lane_rotations[k % 4] so that lanes don't cancel each other, then mixes the 128 bits and the length
-// with two AES rounds. intern_hash_bytes computes it 64 bytes at a time, and
-// intern_hash_vector from a spelling of up to 64 bytes that one masked load read (zero past its end), as c_refine.c
-// does: all three must agree on every spelling (test-refinement checks it).
+// The hash (intern_hash_bytes_scalar defines it) folds each 64-byte chunk of the spelling into 128 bits: the XOR of its
+// four 16-byte lanes, lane k's two qwords rotated by intern_lane_rotations[k] so that lanes don't cancel each other.
+// Chunks after the first are chained with an AES round (the state's round, XORed with the chunk's fold), so that equal
+// or swapped chunks don't cancel either. Two more AES rounds mix the result and the length. intern_hash_bytes computes
+// it 64 bytes at a time, and intern_hash_vector from a spelling of up to 64 bytes that one masked load read (zero past
+// its end), as c_refine.c does: all three must agree on every spelling (test-refinement checks it).
 //
 // main.c includes this file after c_lexer.c (BUSTER_INLINE) and lane.c (Arena); every function is static. Layout, in
 // this order:
 //   - The predefined names: BUSTER_C_NAMES (keywords, then directive names, then the preprocessor's names), IdentId,
 //     the C_NAME_* ids, CLanguage and c_keyword_kind (which keyword kinds a language mode has).
-//   - The table: InternTable, the hash (intern_mix, intern_hash_bytes_scalar, intern_fold, intern_hash_vector,
-//     intern_hash_bytes), the bucket helpers (intern_bucket_key, intern_bucket_matches, intern_bucket_empties,
+//   - The table: InternTable, the hash (intern_mix, intern_chain, intern_hash_bytes_scalar, intern_fold,
+//     intern_hash_vector, intern_chain_chunks, intern_hash_bytes), the bucket helpers (intern_bucket_key, intern_bucket_matches, intern_bucket_empties,
 //     intern_slot_id, intern_first_bytes), intern_allocate_buckets, intern_place, intern_grow, intern_insert,
 //     intern_find_hashed, intern_find_or_add_hashed, intern_find_or_add, intern_find, intern_bytes, intern_length,
 //     intern_initialize, intern_release and intern_reset.
@@ -268,8 +269,8 @@ static const uint8_t c_name_keyword_rules[C_NAME_COUNT] =
 #undef BUSTER_C_NAME_RULE
 };
 
-// A language mode: the C standard's year (89, 99, 11, 17 or 23) and whether GNU extensions are on (gnu17 rather than
-// c17), as clang's -std= gives them.
+// A language mode: the C standard's year in full (1989, 1999, 2011, 2017 or 2023, so that later standards compare
+// greater) and whether GNU extensions are on (gnu17 rather than c17), as clang's -std= gives them.
 typedef struct CLanguage CLanguage;
 struct CLanguage
 {
@@ -286,10 +287,10 @@ static __attribute__((unused)) bool c_name_is_keyword(IdentId id, CLanguage lang
         switch (c_name_keyword_rules[id])
         {
             case BUSTER_C_KEYWORD_ALL: result = true; break;
-            case BUSTER_C_KEYWORD_C99_OR_GNU: result = language.standard >= 99 || language.gnu; break;
-            case BUSTER_C_KEYWORD_C99: result = language.standard >= 99; break;
-            case BUSTER_C_KEYWORD_C23: result = language.standard >= 23; break;
-            case BUSTER_C_KEYWORD_C23_OR_GNU: result = language.standard >= 23 || language.gnu; break;
+            case BUSTER_C_KEYWORD_C99_OR_GNU: result = language.standard >= 1999 || language.gnu; break;
+            case BUSTER_C_KEYWORD_C99: result = language.standard >= 1999; break;
+            case BUSTER_C_KEYWORD_C23: result = language.standard >= 2023; break;
+            case BUSTER_C_KEYWORD_C23_OR_GNU: result = language.standard >= 2023 || language.gnu; break;
             case BUSTER_C_KEYWORD_GNU: result = language.gnu; break;
         }
     }
@@ -347,7 +348,7 @@ struct InternTable
 #define BUSTER_INTERN_SECRET2 0x8ebc6af09c88c6e3ull
 #define BUSTER_INTERN_SECRET3 0x589965cc75374cc3ull
 
-// The rotations of a 16-byte lane's qwords, by its index modulo 4.
+// The rotations of a 16-byte lane's qwords, by its index in its 64-byte chunk.
 static const uint8_t intern_lane_rotations[4] = { 0, 17, 31, 47 };
 
 // Two AES rounds mix the folded lanes and the length: two FP0/FP1 ops on Zen 5, where two 64x64-bit multiplications
@@ -360,13 +361,23 @@ BUSTER_INLINE uint64_t intern_mix(__m128i folded, uint64_t length)
     return (uint64_t)_mm_cvtsi128_si64(_mm_aesenc_si128(first, _mm_set_epi64x((long long)BUSTER_INTERN_SECRET3, (long long)BUSTER_INTERN_SECRET2)));
 }
 
+// The state after a 64-byte chunk past the first, whose fold is `folded`: XORed into an AES round of the state (the first
+// chunk's fold is the state). A plain XOR of the chunks' folds would lose two equal chunks (an identifier `X X` of two
+// equal 64-byte halves would hash as its length alone) and couldn't tell `X Y` from `Y X`.
+BUSTER_INLINE __m128i intern_chain(__m128i state, __m128i folded)
+{
+    return _mm_xor_si128(_mm_aesenc_si128(state, _mm_set_epi64x((long long)BUSTER_INTERN_SECRET1, (long long)BUSTER_INTERN_SECRET0)), folded);
+}
+
 // The hash of a spelling of any length, a 16-byte lane at a time: the plain definition, which test-refinement checks
 // intern_hash_bytes and intern_hash_vector against.
 static __attribute__((unused)) uint64_t intern_hash_bytes_scalar(const uint8_t* bytes, uint64_t length)
 {
+    __m128i state = _mm_setzero_si128();
     uint64_t x0 = 0;
     uint64_t x1 = 0;
-    for (uint64_t lane = 0; lane * 16 < length; lane += 1)
+    const uint64_t lanes = (length + 15) / 16;
+    for (uint64_t lane = 0; lane < lanes; lane += 1)
     {
         uint8_t chunk[16] = { 0 };
         const uint64_t remaining = length - lane * 16;
@@ -378,40 +389,61 @@ static __attribute__((unused)) uint64_t intern_hash_bytes_scalar(const uint8_t* 
         const uint8_t rotation = intern_lane_rotations[lane & 3];
         x0 ^= __builtin_rotateleft64(q0, rotation);
         x1 ^= __builtin_rotateleft64(q1, rotation);
+        if ((lane & 3) == 3 || lane + 1 == lanes)
+        {
+            // The end of a 64-byte chunk.
+            const __m128i folded = _mm_set_epi64x((long long)x1, (long long)x0);
+            state = lane < 4 ? folded : intern_chain(state, folded);
+            x0 = 0;
+            x1 = 0;
+        }
     }
-    return intern_mix(_mm_set_epi64x((long long)x1, (long long)x0), length);
+    return intern_mix(state, length);
 }
 
 // The rotation of each qword of a 64-byte chunk: four 16-byte lanes, which take intern_lane_rotations in order.
 #define BUSTER_INTERN_CHUNK_ROTATIONS _mm512_setr_epi64(0, 0, 17, 17, 31, 31, 47, 47)
 
-// Folds four 16-byte lanes (already rotated and XORed) into the hash.
-BUSTER_INLINE uint64_t intern_fold(__m512i lanes, uint64_t length)
+// The fold of a 64-byte chunk whose four lanes are rotated already: their XOR, into the lowest lane with two 128-bit
+// lane swaps.
+BUSTER_INLINE __m128i intern_fold(__m512i lanes)
 {
     __m512i r = _mm512_xor_si512(lanes, _mm512_shuffle_i64x2(lanes, lanes, _MM_SHUFFLE(1, 0, 3, 2)));
     r = _mm512_xor_si512(r, _mm512_shuffle_i64x2(r, r, _MM_SHUFFLE(2, 3, 0, 1)));
-    return intern_mix(_mm512_castsi512_si128(r), length);
+    return _mm512_castsi512_si128(r);
 }
 
-// The hash of a spelling of up to 64 bytes in `v`, zero past its length: its four lanes rotated at once, then folded
-// into the lowest with two 128-bit lane swaps.
+// The hash of a spelling of up to 64 bytes in `v`, zero past its length: one chunk, its four lanes rotated at once.
 BUSTER_INLINE uint64_t intern_hash_vector(__m512i v, uint64_t length)
 {
-    return intern_fold(_mm512_rolv_epi64(v, BUSTER_INTERN_CHUNK_ROTATIONS), length);
+    return intern_mix(intern_fold(_mm512_rolv_epi64(v, BUSTER_INTERN_CHUNK_ROTATIONS)), length);
 }
 
-// The hash of a spelling of any length: 64-byte chunks (masked loads, which never read past it) rotated and XORed, since
-// lane k's rotation repeats every four lanes.
-static uint64_t intern_hash_bytes(const uint8_t* bytes, uint64_t length)
+// The state after the chunks past a spelling's first 64 bytes, chained onto the first's (`state`): out of line, since
+// nearly every spelling is one chunk.
+static __attribute__((noinline)) __m128i intern_chain_chunks(const uint8_t* bytes, uint64_t length, __m128i state)
 {
-    __m512i lanes = _mm512_setzero_si512();
-    for (uint64_t offset = 0; offset < length; offset += BUSTER_INTERN_VECTOR_BYTES)
+    for (uint64_t offset = BUSTER_INTERN_VECTOR_BYTES; offset < length; offset += BUSTER_INTERN_VECTOR_BYTES)
     {
         const uint64_t remaining = length - offset;
         const __mmask64 mask = remaining >= BUSTER_INTERN_VECTOR_BYTES ? ~0ull : _bzhi_u64(~0ull, (uint32_t)remaining);
-        lanes = _mm512_xor_si512(lanes, _mm512_rolv_epi64(_mm512_maskz_loadu_epi8(mask, bytes + offset), BUSTER_INTERN_CHUNK_ROTATIONS));
+        const __m512i chunk = _mm512_maskz_loadu_epi8(mask, bytes + offset);
+        state = intern_chain(state, intern_fold(_mm512_rolv_epi64(chunk, BUSTER_INTERN_CHUNK_ROTATIONS)));
     }
-    return intern_fold(lanes, length);
+    return state;
+}
+
+// The hash of a spelling of any length: its first 64 bytes (a masked load, which never reads past it) rotated and folded,
+// then any later chunks chained.
+static uint64_t intern_hash_bytes(const uint8_t* bytes, uint64_t length)
+{
+    const __mmask64 mask = length >= BUSTER_INTERN_VECTOR_BYTES ? ~0ull : _bzhi_u64(~0ull, (uint32_t)length);
+    __m128i state = intern_fold(_mm512_rolv_epi64(_mm512_maskz_loadu_epi8(mask, bytes), BUSTER_INTERN_CHUNK_ROTATIONS));
+    if (length > BUSTER_INTERN_VECTOR_BYTES)
+    {
+        state = intern_chain_chunks(bytes, length, state);
+    }
+    return intern_mix(state, length);
 }
 
 // A key for intern_bucket_matches: the spelling's first 16 bytes (zero past its end) in each 128-bit lane.
