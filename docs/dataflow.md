@@ -40,7 +40,11 @@ in[block]  = use[block] | (out[block] & ~def[block])
 The AVX-512 loop handles eight 64-bit words at once. It ORs successor rows,
 then computes the transfer with `_mm512_ternarylogic_epi64(use, out, def,
 0xF4)`. An XOR with the previous input row and a mask test detect changes.
-Every vector access is inside the allocated padded row.
+Every vector access is inside the allocated padded row. Rows of one vector,
+up to 512 values, take a loop of their own without the word loop, which
+keeps its pointers and counters in registers. The two loops are separate
+functions, so that Clang compiles each alone ("Where the AVX-512 solver's
+frame falls" below has why).
 
 The scalar twin visits the same blocks and successors in the same order,
 but processes only `ceil(value_count / 64)` words per row. Whole padding
@@ -122,16 +126,19 @@ is not established.
 ## 9700X results and selection
 
 Measured on 2026-10-20 on `benchpress`, Ryzen 7 9700X, Linux
-6.18.50-2-lts, Clang 23.1.1 and glibc 2.44, for the build whose scalar twin
-doesn't unroll its edge loop and whose wrappers start 64-byte lines ("Where
-the scalar twin's code falls"). The `build.sh` builds at `-O3 -march=native`.
-Twenty independent benchmark processes each ran 21 alternating passes. Each
-command acquired and released the shared host lock separately, including each
+6.18.50-2-lts, Clang 23.1.1 and glibc 2.44, for the build whose AVX-512
+solver takes rows of one vector in a loop of their own ("Where the AVX-512
+solver's frame falls"), whose scalar twin doesn't unroll its edge loop and
+whose wrappers start 64-byte lines ("Where the scalar twin's code falls").
+The `build.sh` builds at `-O3 -march=native`. Twenty independent benchmark
+processes each ran 21 alternating passes, taking turns with twenty of #204's
+build, which ran one-vector rows through the general loop. Each command
+acquired and released the shared host lock separately, including each
 benchmark process:
 
 ```sh
-EXCLUSIVE_OWNER=claude-layout ~/buster-fast-bench/exclusive.sh ./build.sh
-EXCLUSIVE_OWNER=claude-layout ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-dataflow
+EXCLUSIVE_OWNER=claude-vector-stack ~/buster-fast-bench/exclusive.sh ./build.sh
+EXCLUSIVE_OWNER=claude-vector-stack ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-dataflow
 ```
 
 The tables report the median of those twenty process medians, followed by their
@@ -150,56 +157,58 @@ Generator version 2, seed 1:
 
 | CFG / implementation | Cycles/function, median [min-max] | Cycles/block/sweep, median [min-max] |
 | --- | --- | --- |
-| small-diamond / scalar | 449.80 [449.2-477.1] | 14.0570 [14.038-14.909] |
-| small-diamond / AVX-512 | 446.85 [445.4-653.9] | 13.9630 [13.918-20.434] |
-| medium-nested / scalar | 57,411.65 [57,264.7-60,537.9] | 74.7545 [74.563-78.825] |
-| medium-nested / AVX-512 | 20,889.80 [20,834.2-21,361.1] | 27.2005 [27.128-27.814] |
-| large-local / scalar | 7,203,081.25 [7,201,212.1-7,257,646.6] | 351.7130 [351.622-354.377] |
-| large-local / AVX-512 | 2,492,339.15 [2,489,964.9-2,551,784.8] | 121.6965 [121.580-124.599] |
-| large-dispatch / scalar | 4,222,700.05 [4,218,900.6-4,229,655.6] | 343.6440 [343.335-344.210] |
-| large-dispatch / AVX-512 | 1,483,226.45 [1,480,504.4-1,498,228.8] | 120.7055 [120.484-121.926] |
+| small-diamond / scalar | 450.00 [449.3-462.9] | 14.0625 [14.039-14.467] |
+| small-diamond / AVX-512 | 335.30 [334.8-436.9] | 10.4790 [10.461-13.654] |
+| medium-nested / scalar | 57,402.50 [57,247.9-60,695.4] | 74.7430 [74.542-79.031] |
+| medium-nested / AVX-512 | 20,905.45 [20,793.3-21,332.7] | 27.2210 [27.075-27.777] |
+| large-local / scalar | 7,203,865.75 [7,195,344.4-7,219,687.4] | 351.7510 [351.335-352.524] |
+| large-local / AVX-512 | 2,488,878.65 [2,484,487.4-2,512,491.0] | 121.5270 [121.313-122.680] |
+| large-dispatch / scalar | 4,221,975.25 [4,216,003.9-4,236,411.5] | 343.5850 [343.099-344.760] |
+| large-dispatch / AVX-512 | 1,485,458.15 [1,483,054.1-1,527,434.9] | 120.8865 [120.691-124.303] |
 
 | CFG | Scalar ns/function, median [min-max] | AVX-512 ns/function, median [min-max] |
 | --- | --- | --- |
-| small-diamond | 81.30 [81.1-86.2] | 80.65 [80.4-118.0] |
-| medium-nested | 10,560.15 [10,502.8-11,164.9] | 3,854.15 [3,848.4-3,942.6] |
-| large-local | 1,313,107.80 [1,310,587.1-1,325,066.1] | 454,739.90 [454,332.2-465,765.6] |
-| large-dispatch | 772,729.20 [770,790.8-775,904.8] | 271,343.70 [270,590.1-274,002.1] |
+| small-diamond | 81.30 [81.1-83.6] | 60.50 [60.4-78.9] |
+| medium-nested | 10,552.55 [10,495.8-11,138.5] | 3,855.20 [3,848.8-3,928.6] |
+| large-local | 1,312,028.60 [1,309,915.9-1,318,461.2] | 454,105.55 [453,034.8-458,828.8] |
+| large-dispatch | 771,656.80 [770,510.3-775,758.9] | 271,677.70 [271,168.1-279,211.2] |
 
-The small, medium and two large cases used respectively 65,536, 1,024 or
-2,048 (six and fourteen processes), 16 and 16 complete solves per sample, with
-no calibration restarts. The shortest retained sample across all twenty
-processes was 3.924 ms; the shortest small-case sample was 5.261 ms. The same
-change on #201's head, whose wrappers sat 0x82800 bytes earlier, measured
-within 0.3% of these medians on the three larger CFGs (twenty processes).
+The small, medium and two large cases used respectively 131,072 or 65,536
+(eighteen and two processes), 1,024 or 2,048 (nine and eleven), 16 and 16
+complete solves per sample, with no calibration restarts. The shortest
+retained sample across all twenty processes was 3.923 ms; the shortest
+small-case sample was 5.146 ms. #204's build, in the same turns, took 455.85
+[445.8-513.5] cycles per function on the small diamond with AVX-512, and
+within 0.2% of these medians on the three larger CFGs, whose loop compiles to
+the same instructions.
 
 `dataflow_liveness` selects AVX-512. Ratios of the cycle medians above are
-1.01x, 2.75x, 2.89x and 2.85x. On the three larger CFGs AVX-512 is 2.68 to
+1.34x, 2.75x, 2.89x and 2.84x. On the three larger CFGs AVX-512 is 2.69 to
 2.90 times as fast in every paired process. On the small diamond, whose rows
-are one ZMM register each, the two now measure alike: paired process ratios
-were 0.708-1.032x, the scalar twin was ahead in 5 of the 20 processes (in 16
-of 20 on #201's head), and the worst vector process took 653.9 cycles against
-its paired scalar's 463.1. The scalar twin remains the correctness oracle and
-benchmark alternative. These figures replace #194's 1.16x/3.31x/3.34x/3.31x,
-whose scalar twin unrolled its edge loop by 8 and took 16% to 21% more cycles
-(521.35, 69,457.20, 8,359,363.25 and 4,919,843.05 per function), and before
-them the 3.58x/5.43x/3.42x claims, which charged the scalar loop for whole
-padding words and used one process. Version 2 also changes the generated
-inputs, so this comparison does not isolate the gain of each edit.
+are one ZMM register each, the one-vector loop takes 26% fewer cycles than
+#204's build did in the same turns, and AVX-512 is now 1.03 to 1.38 times as
+fast as the scalar twin in every paired process, where #204's build measured
+alike (paired ratios of 0.88-1.05, the scalar twin ahead in 9 of 20). The
+scalar twin remains the correctness oracle and benchmark alternative. These
+figures replace #204's 1.01x/2.75x/2.89x/2.85x, and before them #194's
+1.16x/3.31x/3.34x/3.31x, whose scalar twin unrolled its edge loop by 8 and
+took 16% to 21% more cycles (521.35, 69,457.20, 8,359,363.25 and 4,919,843.05
+per function), and the 3.58x/5.43x/3.42x claims, which charged the scalar loop
+for whole padding words and used one process. Version 2 also changes the
+generated inputs, so this comparison does not isolate the gain of each edit.
 
-The small case also varies by process. The
+The small case also varied by process with AVX-512. The
 [independent re-review of b9a6c66/7793927](https://github.com/buster14a/buster-fast/pull/194#pullrequestreview-5586061231)
-reported AVX-512 process medians of 437.8-1,029.1 cycles against 518.4-534.0
-for the scalar twin then, including one process where vector was only 0.51x as
-fast. Five processes can miss this slower tail. The review's counter
-probes associated it with loads blocked by older stores and reduced forwarding;
-some output rows also share their low 12 address bits with CFG columns.
-Those observations identify a performance risk in the current layout and
-per-sweep output stores, not a correctness failure. The scalar twin's own
-differences between processes on this case follow the stack's position, with
-the same kind of blocked loads ("Where the scalar twin's code falls");
-whether the AVX-512 tail has the same cause hasn't been measured. Store-once or
-one-ZMM specializations remain optional follow-ups.
+reported process medians of 437.8-1,029.1 cycles against 518.4-534.0 for the
+scalar twin then, including one process where vector was only 0.51x as fast,
+and #204's twenty processes took 445.4-653.9. Five processes can miss such a
+tail. Most of it followed where the solver's stack frame fell in its page,
+through the slots that the general loop reloads in every block, which the
+one-vector loop doesn't have ("Where the AVX-512 solver's frame falls"). The two processes
+above 337 here, at 436.2 and 436.9, are in a state that follows the data
+instead: some of the small diamond's out rows share their low 12 address bits
+with its CFG columns, as the review found. It is a performance risk of this
+layout, not a correctness failure.
 
 The same dataflow source also moved by 2-3% between builds in that review.
 The scalar twin's part of that was where its code fell in 64-byte lines,
@@ -209,31 +218,37 @@ apart. Differences of a few percent should be treated as build/layout noise,
 not evidence of an algorithmic improvement.
 
 Inspection of the measured binary confirmed direct calls to both benchmark
-wrappers, with each solver body compiled inside its wrapper. The scalar
-kernel uses the bound `(value_count + 63) >> 6` and 64-bit scalar `andn`,
-OR and XOR operations. Its word loop is unrolled by 4 around four copies of
-the edge loop, which takes one edge per iteration, with a loop for the last
-words after it.
+wrappers. The scalar solver's body is compiled inside its wrapper. The
+AVX-512 wrapper only tests the row width and the block count, then jumps,
+as a tail call, to one of the solver's two functions, for one-vector rows or
+the rest, each starting a 64-byte line. The scalar kernel uses the bound
+`(value_count + 63) >> 6` and 64-bit scalar `andn`, OR and XOR operations.
+Its word loop is unrolled by 4 around four copies of the edge loop, which
+takes one edge per iteration, with a loop for the last words after it.
 Both kernels load column bases at solve setup instead of reloading
-`Dataflow` members in every chunk; some stack-spill reloads remain.
-The vector kernel uses aligned 64-byte loads/stores, `vporq` and
-`vpternlogq` with immediate `0xF4`. Clang folds the XOR-and-test into
-`vpcmpneqq`, with `kmovd` and a scalar OR accumulating changes. Neither
-solver uses gathers or scatters.
+`Dataflow` members in every chunk. The loop for one-vector rows keeps the
+bases and its counters in registers, with no stack access in its block loop;
+the general function's instructions are those of #204's wrapper, which store
+two stack slots and reload about ten in every block. The vector kernel uses
+aligned 64-byte loads/stores, `vporq` and `vpternlogq` with immediate `0xF4`.
+Clang folds the XOR-and-test into `vpcmpneqq`, with `kmovb` or `kmovd` and a
+scalar OR accumulating changes. Neither solver uses gathers or scatters.
 
 The default tests passed 17,132 checks. `test-dataflow --seed 7 --count 64`
 passed 20,684, and seed 99 with the same count passed 20,668. Both solvers
 agreed on all rows and sweep counts. All documented test commands in
 `AGENTS.md` and `./build.sh check-call-graph` passed on the same host; the
-latter reported 11 translation units, 3,060 functions and zero call-graph
+latter reported 11 translation units, 3,064 functions and zero call-graph
 cycles.
 
-Raw logs are retained on `benchpress` in `~/buster-fast-bench/layout-claude/`
-(`rebased-final.txt` for the twenty processes above, `rebased-tests.txt` for
-the tests, and `final.txt` for #201's head). The measured executable's
-SHA-256 is
-`3bf6b1c3e9165b0cef2cac6f10bfd0518636bb7b8227df0aaacc52d172fecb2a`. #194's
-logs are in `~/buster-fast-bench/astra-01a158dd-143-rereview-evidence/`.
+Raw logs are retained on `benchpress` in `~/buster-fast-bench/layout-claude/vs/`
+(`final-final.txt` for the twenty processes above and #204's twenty,
+`final-tests.txt` for the tests, `final-states.txt` for "The power cap's
+state", and `s1.txt` to `s14.txt`, `s13-sp.txt` and `one-*.txt` for "Where
+the AVX-512 solver's frame falls"). The measured executable's SHA-256 is
+`a409c4c1937d7d102bd2240396f1c564e3a762e4274eab35a898cad7b4c00ad9`. #204's
+logs are in `~/buster-fast-bench/layout-claude/`, and #194's in
+`~/buster-fast-bench/astra-01a158dd-143-rereview-evidence/`.
 
 Successor-count specializations and keeping a previous one-ZMM row in a
 register remain optional follow-ups. Skipping unchanged blocks, storing rows
@@ -333,6 +348,90 @@ in all of them. Rebased onto main, whose changes to the units before this one
 moved the wrappers 0x82800 bytes, the change measured the same again ("9700X
 results and selection").
 
+## Where the AVX-512 solver's frame falls
+
+On the small diamond, each process's AVX-512 passes stayed within a few cycles
+of their median, but the medians of processes spread much wider: 445.4 to
+653.9 cycles per function over #204's twenty processes, and 437.8 to 1,029.1
+in #194's re-review. Most of that spread followed where the solver's stack
+frame fell in its page, and the rest the data's layout (the last paragraph
+below).
+
+Measured on 2026-10-20 on `benchpress` (the kernel, Clang and glibc above),
+every run under its own lock, `taskset -c 2`, in cycles per function, with the
+harness of "Where the scalar twin's code falls" given copies of the AVX-512
+wrapper too. Each copy compiles to the benchmark wrapper's instructions and
+solves a flow laid out as the benchmark lays out its second, so every address
+has the same low 12 bits. Without ASLR (`setarch -R`), every process had the
+same addresses, and the frame moved down 16 bytes per sample across 4 KB,
+starting at two places. The harness, its logs and the builds' logs are on
+`benchpress` in `~/buster-fast-bench/layout-claude/vs/`.
+
+The general loop keeps part of its state on the stack: in every block it
+stores the block's place in the postorder and a row pointer, and reloads ten
+slots. The small diamond's four matrices are 1 KB each, so every slot shares
+its low 12 bits with one of their rows. At the 134 of the 256 places where a
+slot shares them with an in or out row, which the sweep stores, the solve took
+456.3 to 478.1 cycles (each place's median over eight sweeps), with twice as
+many loads blocked by an older store they can't forward from
+(`ls_bad_status2.stli_other`, a median of 1.18 against 0.56 per block per
+sweep). Where the slots share them only with use or def rows, which the sweep
+only loads, it took 453.7 to 456.8.
+
+At places of the first kind some processes also fall into slower states: about
+500, 600, 670 to 720 and 800 to 1,117 cycles, which last until the frame moves
+away and change little within a process. With the frame held at one place for
+a run, 23 of 102 processes at nine places of the first kind were in one, and
+none of 38 at two places of the second, though every process of a build had
+the same addresses. In the 670-to-720 state, blocked loads and forwarded ones
+(`ls_stlf`) both fall, to 0.4 and 3.4 per block per sweep from 1.1 and 4.2, as
+if a load waited for a store to commit instead of trying it; in the slowest
+states both rise.
+
+The benchmark shows the same. `main` aligns its frame to 64 bytes, so the
+wrappers' frames take one of 64 places in a page under ASLR. Sixty-four
+processes ran under `perf record --user-regs=sp`, sampling every 20 million
+cycles, which gave each process's place. The 35 whose slots shared low bits
+with in or out rows took 458.6 cycles (the median; 450.6 to 942.7, four above
+480), and the 29 others 446.5 (445.3 to 513.6, one above 480).
+
+Rows of one vector now take a loop without the word loop, which keeps every
+pointer and counter in registers, with no stack access in its block loop. It
+is a function of its own, and so is the general loop: inlined into one
+function with it, the general loop compiled with other registers and stack
+slots, and medium-nested took 3.6% more cycles after 100 ms of scalar code
+(31.82 against 30.72 cycles per block per sweep, in five processes of each
+build taking turns, and again in another five). Neither its block loop nor
+its edge loop is unrolled. Clang unrolls the edge loop by 8 otherwise, whose
+remainder loop then takes a register and leaves a base to reload in every
+block, and the solve took 364.7 to 374.3 cycles in the harness, depending on
+the place again; alone in its function, Clang unrolls the block loop by 2,
+which leaves `postorder`'s base on the stack. As committed, the solve took
+343.5 to 345.6 cycles at every place (four sweeps), and 341.6 to 344.7 with the
+function at each of the four places of a 64-byte line. In the benchmark,
+sixty-four processes took a median of 335.4 cycles where the general loop's
+slots would share low bits with in or out rows (28 processes) and 335.6 where
+they wouldn't (36).
+
+What remains follows the data instead. The benchmark lays each flow's CFG
+columns out before its four matrices, so that out rows 12 to 15, which every
+sweep stores first, sit exactly 4 KB past `successor_offsets`, `postorder`
+and `successors`, as #194's re-review found. With the one-vector loop, 5 of
+92 harness processes ran at 445 to 451 cycles, at places of both kinds; with
+the columns moved to share their low 12 bits with use rows only, or the
+matrices moved to a page start, the loop took 312 to 322 cycles, and none of
+68 processes was slower. The benchmark's processes fall into it too: 6 of the
+sixty-four above, at 436.0 to 463.4 and at places of both kinds, and 2 of the
+twenty in "9700X results and selection". Built with `dataflow_create`
+allocating the matrices before the columns, whose low 12 bits then fall among
+use rows', twenty processes of the loop as first written, inlined beside the
+general one, took 320.05 [317.5-321.8] cycles, none slower, and the scalar
+twin 427.30 [426.6-438.1], against 338.15 and 452.00 for the same loop and
+today's order in the same turns. That order would just move the alias to
+other sizes, though: whether a function's columns share low bits with a row
+the sweep stores depends on its sizes and on where its arena stands, so the
+layout stays as it was.
+
 ## The power cap's state
 
 A compiler runs liveness after lighter phases, and on Zen 5 that changes how
@@ -405,3 +504,14 @@ scalar ones, and they are throttled less and run up to 1% faster: over the
 twenty processes in "9700X results and selection", large-dispatch took 120.7
 cycles per block per sweep with 70 slots of throttle, and large-local 121.7
 with 101.
+
+With the AVX-512 solver's loop for one-vector rows (five processes of each
+state, taking turns with #204's build), the small diamond takes 60.5 ns per
+function (10.48 cycles per block per sweep) alone and 60.5 ns (10.47) after
+100 ms of scalar code, against 83.2 and 82.7 ns for #204's build, with 0.05
+slots of throttle per block per sweep. It is still too light to be capped, so
+it is 1.34 times as fast as the scalar twin in every state. The three larger
+CFGs, whose loop compiles as before, took within 0.2% of #204's build alone,
+and 30.71, 129.24 and 130.84 cycles per block per sweep after 100 ms against
+31.37, 130.84 and 132.62; in that state either build varies by about 2% from
+one set of five processes to the next.
