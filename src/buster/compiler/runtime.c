@@ -22,8 +22,8 @@
 // fills a link of the runtime's own: the crt objects as units 0 to 4 (RuntimeObject), then libc_nonshared.a's members
 // as units after them. libc.so.6 becomes an ImportLibrary: its exports with their default versions, its versions and
 // the names it refers to. Then it binds each name the runtime refers to (runtime_bind): to a definition in the
-// runtime's own objects, to an export of libc.so.6, to nothing for a weak reference that neither defines, or else to
-// the program (main): RuntimeBinding, by symbol.
+// runtime's own objects (an index of them by name hash, as libc.so.6's exports have), to an export of libc.so.6, to
+// nothing for a weak reference that neither defines, or else to the program (main): RuntimeBinding, by symbol.
 //
 // main.c includes this file after import.c. Layout, in this order:
 //   - API: RuntimeError, RuntimeObject, RuntimeProbe, RuntimeBinding, Runtime and the entry points' prototypes.
@@ -134,10 +134,12 @@ struct Runtime
     uint32_t probe_count;
     uint32_t probe_capacity;
     bool probes_full;
-    // The imported files: the crt objects (and their bytes, which their atoms point into), libc_nonshared.a and each of
-    // its members.
+    // The imported files: the crt objects (and their bytes, which their atoms point into), libc_nonshared.a's and
+    // libc.so.6's bytes, the archive and each of its members.
     String8 object_bytes[RUNTIME_OBJECTS];
     ImportObject objects[RUNTIME_OBJECTS];
+    String8 nonshared_bytes;
+    String8 libc_bytes;
     ImportArchive nonshared;
     ImportObject* member_objects;
     // The first unit of libc_nonshared.a's members, which follow it one per unit.
@@ -579,48 +581,83 @@ static String8 runtime_section(String8 bytes, const char* name)
     return result;
 }
 
-// The runtime symbol that defines `name` (a global or weak definition in an atom), or 0.
-static SymbolId runtime_definition(const Link* link, NameId name)
+// The runtime's first symbol that defines the name (a global or weak definition in an atom), by the definitions' index:
+// the name's bucket in symbol order, each hash compared, then the bytes of an equal one. 0 for none.
+static SymbolId runtime_definition(const Link* link, const ImportNameIndex* index, const SymbolId* definitions, NameId name)
 {
-    const LinkSymbols* symbols = &link->symbols;
     const LinkNames* names = &link->names;
+    const uint64_t hash = names->hash[name];
     SymbolId result = 0;
-    for (SymbolId symbol = 1; result == 0 && symbol < symbols->count; symbol += 1)
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    import_index_bucket(index, hash, &begin, &end);
+    for (uint32_t place = begin; result == 0 && place < end; place += 1)
     {
-        const NameId other = symbols->name[symbol];
-        const bool global = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
-        const bool same = other != 0 && names->hash[other] == names->hash[name] && names->length[other] == names->length[name] &&
-                          memcmp(names->bytes[other], names->bytes[name], names->length[name]) == 0;
-        result = global && symbols->atom[symbol] != 0 && same ? symbol : 0;
+        const SymbolId symbol = definitions[index->order[place]];
+        const NameId other = link->symbols.name[symbol];
+        const bool same = index->hash[place] == hash && names->length[other] == names->length[name] && import_same_bytes(names->bytes[other], names->bytes[name], names->length[name]);
+        result = same ? symbol : 0;
     }
     return result;
 }
 
-// Binds each undefined symbol of the runtime's link (see the orientation comment).
+// Binds each undefined symbol of the runtime's link (see the orientation comment). The definitions are found eight
+// symbols at a time (a compress of the ids whose binding isn't local, with an atom and a name) and indexed by their
+// names' hashes (import_index_build), rather than searched for each reference.
 static RuntimeError runtime_bind(Runtime* runtime)
 {
     Link* link = &runtime->link;
+    const LinkSymbols* symbols = &link->symbols;
+    const uint32_t count = symbols->count;
     RuntimeError result = RUNTIME_ERROR_NONE;
-    runtime->bindings = BUSTER_ARENA_PUSH_ARRAY(&runtime->tables, RuntimeBinding, link->symbols.count);
-    if (runtime->bindings == 0)
+    runtime->bindings = BUSTER_ARENA_PUSH_ARRAY(&runtime->tables, RuntimeBinding, count);
+    Scratch scratch = scratch_begin(&runtime->tables);
+    SymbolId* definitions = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, SymbolId, count);
+    uint64_t* hashes = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, count);
+    ImportNameIndex index = { 0 };
+    if (runtime->bindings == 0 || definitions == 0 || hashes == 0)
     {
         result = RUNTIME_ERROR_MEMORY;
     }
-    for (SymbolId symbol = 1; result == RUNTIME_ERROR_NONE && symbol < link->symbols.count; symbol += 1)
+    const __m512i lane_index = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
+    uint32_t defined = 0;
+    for (uint32_t first = 1; result == RUNTIME_ERROR_NONE && first < count; first += BUSTER_IMPORT_BATCH)
     {
-        const NameId name = link->symbols.name[symbol];
+        const uint32_t n = count - first < BUSTER_IMPORT_BATCH ? count - first : BUSTER_IMPORT_BATCH;
+        const __mmask8 loaded = (__mmask8)import_lane_mask(n);
+        const __m512i flags = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(loaded, symbols->flags + first));
+        const __m512i atoms = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(loaded, symbols->atom + first));
+        const __m512i names = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(loaded, symbols->name + first));
+        const uint32_t kept = _mm512_test_epi64_mask(flags, _mm512_set1_epi64(BUSTER_LINK_SYMBOL_BINDING)) & _mm512_test_epi64_mask(atoms, atoms) &
+                              _mm512_test_epi64_mask(names, names) & loaded;
+        import_store32(definitions + defined, _mm512_maskz_compress_epi64((__mmask8)kept, _mm512_add_epi64(lane_index, _mm512_set1_epi64(first))),
+                       (uint32_t)__builtin_popcount(kept));
+        defined += (uint32_t)__builtin_popcount(kept);
+    }
+    for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < defined; i += 1)
+    {
+        hashes[i] = link->names.hash[symbols->name[definitions[i]]];
+    }
+    if (result == RUNTIME_ERROR_NONE && !import_index_build(&index, hashes, defined, scratch.arena))
+    {
+        result = RUNTIME_ERROR_MEMORY;
+    }
+    for (SymbolId symbol = 1; result == RUNTIME_ERROR_NONE && symbol < count; symbol += 1)
+    {
+        const NameId name = symbols->name[symbol];
         RuntimeBinding binding = { 0 };
-        if (link->symbols.atom[symbol] == 0 && name != 0)
+        if (symbols->atom[symbol] == 0 && name != 0)
         {
-            const SymbolId definition = runtime_definition(link, name);
+            const SymbolId definition = runtime_definition(link, &index, definitions, name);
             const uint32_t export = definition == 0 ? import_library_find(&runtime->libc, link->names.bytes[name], link->names.length[name], link->names.hash[name]) : 0;
-            const bool weak = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
+            const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
             binding.kind = definition != 0 ? RUNTIME_BINDING_RUNTIME : export != 0 ? RUNTIME_BINDING_SHARED : weak ? RUNTIME_BINDING_NOWHERE : RUNTIME_BINDING_PROGRAM;
             binding.symbol = definition;
             binding.export = export != 0 ? export - 1 : 0;
         }
         runtime->bindings[symbol] = binding;
     }
+    scratch_end(scratch);
     return result;
 }
 
@@ -636,28 +673,26 @@ static RuntimeError runtime_import(Runtime* runtime)
         result = runtime_read_script(runtime);
     }
     // Read every file, then size the runtime's link for the objects and the archive's members.
-    String8 nonshared = { 0 };
-    String8 libc = { 0 };
     for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < RUNTIME_OBJECTS; i += 1)
     {
         runtime->object_bytes[i] = runtime_read(runtime, runtime->object_paths[i], &result);
     }
     if (result == RUNTIME_ERROR_NONE)
     {
-        nonshared = runtime_read(runtime, runtime->nonshared_path, &result);
+        runtime->nonshared_bytes = runtime_read(runtime, runtime->nonshared_path, &result);
     }
     if (result == RUNTIME_ERROR_NONE)
     {
-        libc = runtime_read(runtime, runtime->libc_path, &result);
+        runtime->libc_bytes = runtime_read(runtime, runtime->libc_path, &result);
     }
     if (result == RUNTIME_ERROR_NONE)
     {
-        const ImportResult archive = import_archive(&runtime->nonshared, nonshared, &runtime->files);
+        const ImportResult archive = import_archive(&runtime->nonshared, runtime->nonshared_bytes, &runtime->files);
         result = archive.error == IMPORT_ERROR_NONE ? result : runtime_fail_import(runtime, runtime->nonshared_path, archive);
     }
     if (result == RUNTIME_ERROR_NONE)
     {
-        const ImportResult library = import_library(&runtime->libc, libc, &runtime->files);
+        const ImportResult library = import_library(&runtime->libc, runtime->libc_bytes, &runtime->files);
         result = library.error == IMPORT_ERROR_NONE ? result : runtime_fail_import(runtime, runtime->libc_path, library);
     }
     LinkCapacity capacity = { 0 };

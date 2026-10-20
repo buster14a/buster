@@ -48,10 +48,16 @@
 //     type, binding and size; IFUNC as a function, GNU_UNIQUE as global) and its references, and the relocations of
 //     the crt objects and libc_nonshared.a's members against `readelf -W -r`: each one a fixup of its kind at its
 //     offset, against the symbol (or the section) readelf names, with its addend, and no other fixups.
+// Throughout, each object, archive and library is also read by its reader's vector path, its exact path and the reader
+// itself, each into a link (or a read) of its own (import_test_paths and its archive and library twins): the reader's
+// result and records must be the exact path's, and the vector path may take an input only when the exact path reads
+// it without an error, and must then make the same records, column by column. Each well-formed input must take the
+// vector path, and each check reports how many inputs each path took.
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
-// Layout, in this order: the tally, the round trips, files made by hand, objects, archives, shared libraries, linker
-// scripts, page edges, the runtime (discovery among it), the cross-check, and run_import_tests.
+// Layout, in this order: the tally, the paths' comparisons, the round trips, files made by hand, objects, archives,
+// shared libraries, linker scripts, page edges, the runtime (discovery among it), the cross-check, and
+// run_import_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -78,6 +84,9 @@ struct ImportTestTally
     const char* check;
     uint64_t checked;
     uint64_t failures;
+    // How many objects import_test_paths saw the vector path take, and leave to the exact path.
+    uint64_t vector;
+    uint64_t exact;
 };
 
 static void import_test_expect(ImportTestTally* tally, bool condition, const char* what, uint64_t index)
@@ -95,6 +104,10 @@ static void import_test_expect(ImportTestTally* tally, bool condition, const cha
 
 static bool import_test_report(const ImportTestTally* tally)
 {
+    if (tally->vector + tally->exact != 0)
+    {
+        printf("  the vector paths took %llu inputs and left %llu to the exact paths\n", (unsigned long long)tally->vector, (unsigned long long)tally->exact);
+    }
     printf("%s: %llu checks, %llu failed\n", tally->check, (unsigned long long)tally->checked, (unsigned long long)tally->failures);
     return tally->failures == 0;
 }
@@ -127,10 +140,290 @@ static bool import_test_same_result(ImportResult a, ImportResult b)
     return a.error == b.error && a.section == b.section && a.symbol == b.symbol && a.relocation == b.relocation && a.type == b.type && a.offset == b.offset;
 }
 
+// Whether a name of the columns (its bytes and length) is `text`.
+static bool import_test_name_is(const uint8_t* name, uint32_t length, const char* text)
+{
+    return strlen(text) == length && memcmp(name, text, length) == 0;
+}
+
 static void import_test_print_result(ImportResult result)
 {
     printf("%s at %llu (section %u, symbol %u, relocation %u, type %u)", import_test_errors[result.error], (unsigned long long)result.offset, result.section, result.symbol,
            result.relocation, result.type);
+}
+
+// Whether two links hold the same records: every column of every table, each name by its bytes (each link has copies
+// of its own), and the side table of wide addends.
+static bool import_test_same_tables(const Link* a, const Link* b)
+{
+    bool result = a->names.count == b->names.count && a->atoms.count == b->atoms.count && a->symbols.count == b->symbols.count && a->fixups.count == b->fixups.count &&
+                  a->fixups.wide_count == b->fixups.wide_count && a->error == b->error;
+    for (NameId name = 1; result && name < a->names.count; name += 1)
+    {
+        const uint32_t length = a->names.length[name];
+        result = length == b->names.length[name] && a->names.hash[name] == b->names.hash[name] && memcmp(a->names.bytes[name], b->names.bytes[name], (uint64_t)length + 1) == 0;
+    }
+    for (AtomId atom = 1; result && atom < a->atoms.count; atom += 1)
+    {
+        result = a->atoms.class[atom] == b->atoms.class[atom] && a->atoms.alignment_log2[atom] == b->atoms.alignment_log2[atom] && a->atoms.unit[atom] == b->atoms.unit[atom] &&
+                 a->atoms.size[atom] == b->atoms.size[atom] && a->atoms.bytes[atom] == b->atoms.bytes[atom] && a->atoms.fixup_begin[atom] == b->atoms.fixup_begin[atom] &&
+                 a->atoms.fixup_count[atom] == b->atoms.fixup_count[atom] && a->atoms.address[atom] == b->atoms.address[atom];
+    }
+    for (SymbolId symbol = 1; result && symbol < a->symbols.count; symbol += 1)
+    {
+        result = a->symbols.name[symbol] == b->symbols.name[symbol] && a->symbols.atom[symbol] == b->symbols.atom[symbol] && a->symbols.value[symbol] == b->symbols.value[symbol] &&
+                 a->symbols.size[symbol] == b->symbols.size[symbol] && a->symbols.flags[symbol] == b->symbols.flags[symbol] && a->symbols.source[symbol] == b->symbols.source[symbol] &&
+                 a->symbols.got_slot[symbol] == b->symbols.got_slot[symbol] && a->symbols.dynamic_index[symbol] == b->symbols.dynamic_index[symbol] &&
+                 a->symbols.version[symbol] == b->symbols.version[symbol] && a->symbols.reference[symbol] == b->symbols.reference[symbol];
+    }
+    for (FixupId fixup = 1; result && fixup < a->fixups.count; fixup += 1)
+    {
+        result = a->fixups.offset[fixup] == b->fixups.offset[fixup] && a->fixups.target[fixup] == b->fixups.target[fixup] && a->fixups.addend[fixup] == b->fixups.addend[fixup] &&
+                 a->fixups.kind[fixup] == b->fixups.kind[fixup];
+    }
+    for (uint32_t wide = 1; result && wide < a->fixups.wide_count; wide += 1)
+    {
+        result = a->fixups.wide_addends[wide] == b->fixups.wide_addends[wide];
+    }
+    return result;
+}
+
+// Whether two imports of an object made the same ImportObject.
+static bool import_test_same_object(const ImportObject* a, const ImportObject* b)
+{
+    bool result = a->section_count == b->section_count && a->symbol_count == b->symbol_count;
+    result = result && (a->section_count == 0 || memcmp(a->section_atoms, b->section_atoms, (uint64_t)a->section_count * sizeof(AtomId)) == 0);
+    result = result && (a->symbol_count == 0 || memcmp(a->symbols, b->symbols, (uint64_t)a->symbol_count * sizeof(SymbolId)) == 0);
+    return result;
+}
+
+// How many records of each table import_test_paths_agree makes room for when import_object_capacity can't count them.
+#define BUSTER_IMPORT_TEST_PATH_ROOM 4096
+
+// Which path an object must take, for import_test_paths.
+typedef enum ImportTestPath
+{
+    // Either, as long as the paths agree.
+    IMPORT_TEST_EITHER,
+    // The vector path must import it.
+    IMPORT_TEST_VECTOR,
+    // The vector path must leave it to the exact path.
+    IMPORT_TEST_EXACT,
+} ImportTestPath;
+
+// The paths against each other on one object, each into a link of its own with the same room (`room`, or what
+// import_object_capacity counts, or BUSTER_IMPORT_TEST_PATH_ROOM records of each table where it fails): import_object
+// must give import_object_scalar's result, records and ImportObject, and import_object_vector may take the object only
+// when the exact path imports it, into the same records and ImportObject. *taken says whether it took it.
+static bool import_test_paths_agree(String8 bytes, const LinkCapacity* room, bool* taken, Arena* arena)
+{
+    const uint64_t length = arena->length;
+    LinkCapacity capacity = {
+        .names = BUSTER_IMPORT_TEST_PATH_ROOM,
+        .atoms = BUSTER_IMPORT_TEST_PATH_ROOM,
+        .symbols = BUSTER_IMPORT_TEST_PATH_ROOM,
+        .fixups = BUSTER_IMPORT_TEST_PATH_ROOM,
+        .wide_addends = BUSTER_IMPORT_TEST_PATH_ROOM,
+    };
+    LinkCapacity counted;
+    if (room != 0)
+    {
+        capacity = *room;
+    }
+    else if (import_object_capacity(bytes, &counted).error == IMPORT_ERROR_NONE)
+    {
+        capacity = counted;
+    }
+    Link vector;
+    Link exact;
+    Link combined;
+    ImportObject vector_object = { 0 };
+    ImportObject exact_object = { 0 };
+    ImportObject combined_object = { 0 };
+    const bool linked = link_initialize(&vector, arena, arena, capacity) && link_initialize(&exact, arena, arena, capacity) && link_initialize(&combined, arena, arena, capacity);
+    bool result = linked;
+    *taken = false;
+    if (linked)
+    {
+        *taken = import_object_vector(&vector, bytes, BUSTER_IMPORT_TEST_UNIT, BUSTER_LINK_SOURCE_FOREIGN_OBJECT, arena, &vector_object);
+        const ImportResult exact_result = import_object_scalar(&exact, bytes, BUSTER_IMPORT_TEST_UNIT, BUSTER_LINK_SOURCE_FOREIGN_OBJECT, arena, &exact_object);
+        const ImportResult combined_result = import_object(&combined, bytes, BUSTER_IMPORT_TEST_UNIT, BUSTER_LINK_SOURCE_FOREIGN_OBJECT, arena, &combined_object);
+        result = import_test_same_result(exact_result, combined_result) && import_test_same_tables(&exact, &combined) && import_test_same_object(&exact_object, &combined_object);
+        if (*taken)
+        {
+            result = result && exact_result.error == IMPORT_ERROR_NONE && import_test_same_tables(&vector, &exact) && import_test_same_object(&vector_object, &exact_object);
+        }
+    }
+    arena_pop_to(arena, length);
+    return result;
+}
+
+// import_test_paths_agree as a check, with the path the object must take, counted in the tally.
+static void import_test_paths(ImportTestTally* tally, String8 bytes, ImportTestPath expected, const char* what, uint64_t index, Arena* arena)
+{
+    bool vector = false;
+    const bool agree = import_test_paths_agree(bytes, 0, &vector, arena);
+    const bool path = expected == IMPORT_TEST_EITHER || vector == (expected == IMPORT_TEST_VECTOR);
+    if ((!agree || !path) && tally->failures < BUSTER_IMPORT_TEST_REPORTED)
+    {
+        printf("  %s: %s (%llu): the paths %s, and the vector path %s it\n", tally->check, what, (unsigned long long)index, agree ? "agree" : "disagree",
+               vector ? "took" : "left");
+    }
+    tally->checked += 1;
+    tally->failures += agree && path ? 0 : 1;
+    tally->vector += vector ? 1 : 0;
+    tally->exact += vector ? 0 : 1;
+}
+
+// Whether two reads of a library are the same: its soname, versions, exports, references and index, column by column.
+static bool import_test_same_library(const ImportLibrary* a, const ImportLibrary* b)
+{
+    const ImportExports* x = &a->exports;
+    const ImportExports* y = &b->exports;
+    const ImportReferences* p = &a->references;
+    const ImportReferences* q = &b->references;
+    bool result = a->soname.pointer == b->soname.pointer && a->soname.length == b->soname.length && a->version_count == b->version_count && x->count == y->count &&
+                  p->count == q->count && a->index.bucket_bits == b->index.bucket_bits && (a->index.start == 0) == (b->index.start == 0);
+    for (uint32_t v = 0; result && v < a->version_count; v += 1)
+    {
+        const ImportVersion* c = &a->versions[v];
+        const ImportVersion* d = &b->versions[v];
+        result = c->name.pointer == d->name.pointer && c->name.length == d->name.length && c->hash == d->hash && c->index == d->index && c->base == d->base;
+    }
+    for (uint32_t i = 0; result && i < x->count; i += 1)
+    {
+        result = x->name[i] == y->name[i] && x->length[i] == y->length[i] && x->hash[i] == y->hash[i] && x->size[i] == y->size[i] && x->flags[i] == y->flags[i] &&
+                 x->version[i] == y->version[i] && a->index.order[i] == b->index.order[i] && a->index.hash[i] == b->index.hash[i];
+    }
+    for (uint32_t i = 0; result && i < p->count; i += 1)
+    {
+        result = p->name[i] == q->name[i] && p->length[i] == q->length[i] && p->hash[i] == q->hash[i] && p->weak[i] == q->weak[i];
+    }
+    const uint64_t buckets = a->index.start != 0 ? (uint64_t)1 << a->index.bucket_bits : 0;
+    result = result && (buckets == 0 || memcmp(a->index.start, b->index.start, (buckets + 1) * sizeof(uint32_t)) == 0);
+    return result;
+}
+
+// Whether import_library_find finds what a linear scan of the exports finds: each export's name, and each reference's,
+// at the name's first export, or nowhere.
+static bool import_test_index_agrees(const ImportLibrary* library)
+{
+    const ImportExports* exports = &library->exports;
+    const ImportReferences* references = &library->references;
+    bool result = true;
+    for (uint32_t i = 0; result && i < exports->count + references->count; i += 1)
+    {
+        const bool export = i < exports->count;
+        const uint32_t r = i - (export ? 0 : exports->count);
+        const uint8_t* name = export ? exports->name[i] : references->name[r];
+        const uint32_t length = export ? exports->length[i] : references->length[r];
+        const uint64_t hash = export ? exports->hash[i] : references->hash[r];
+        uint32_t first = 0;
+        for (uint32_t j = 0; first == 0 && j < exports->count; j += 1)
+        {
+            first = exports->length[j] == length && memcmp(exports->name[j], name, length) == 0 ? j + 1 : 0;
+        }
+        result = import_library_find(library, name, length, hash) == first;
+    }
+    return result;
+}
+
+// The library reader's paths against each other, as import_test_paths_agree does for objects: import_library must give
+// import_library_scalar's result and read, import_library_vector may take the library only when the exact path reads
+// it, and then read it the same; and the index must find what a linear scan finds. *taken says whether the vector
+// path took it.
+static bool import_test_library_paths_agree(String8 bytes, bool* taken, Arena* arena)
+{
+    const uint64_t length = arena->length;
+    ImportLibrary vector;
+    ImportLibrary exact;
+    ImportLibrary combined;
+    *taken = import_library_vector(&vector, bytes, arena);
+    const ImportResult exact_result = import_library_scalar(&exact, bytes, arena);
+    const ImportResult combined_result = import_library(&combined, bytes, arena);
+    bool result = import_test_same_result(exact_result, combined_result);
+    if (exact_result.error == IMPORT_ERROR_NONE)
+    {
+        result = result && import_test_same_library(&exact, &combined) && import_test_index_agrees(&exact);
+    }
+    if (*taken)
+    {
+        result = result && exact_result.error == IMPORT_ERROR_NONE && import_test_same_library(&vector, &exact);
+    }
+    arena_pop_to(arena, length);
+    return result;
+}
+
+// import_test_library_paths_agree as a check, with the path the library must take, counted in the tally.
+static void import_test_library_paths(ImportTestTally* tally, String8 bytes, ImportTestPath expected, const char* what, Arena* arena)
+{
+    bool vector = false;
+    const bool agree = import_test_library_paths_agree(bytes, &vector, arena);
+    const bool path = expected == IMPORT_TEST_EITHER || vector == (expected == IMPORT_TEST_VECTOR);
+    if ((!agree || !path) && tally->failures < BUSTER_IMPORT_TEST_REPORTED)
+    {
+        printf("  %s: %s: the paths %s, and the vector path %s it\n", tally->check, what, agree ? "agree" : "disagree", vector ? "took" : "left");
+    }
+    tally->checked += 1;
+    tally->failures += agree && path ? 0 : 1;
+    tally->vector += vector ? 1 : 0;
+    tally->exact += vector ? 0 : 1;
+}
+
+// Whether two reads of an archive are the same: its members and its index, field by field.
+static bool import_test_same_archive(const ImportArchive* a, const ImportArchive* b)
+{
+    bool result = a->member_count == b->member_count && a->symbol_count == b->symbol_count;
+    for (uint32_t m = 0; result && m < a->member_count; m += 1)
+    {
+        const ImportMember* x = &a->members[m];
+        const ImportMember* y = &b->members[m];
+        result = x->name.pointer == y->name.pointer && x->name.length == y->name.length && x->bytes.pointer == y->bytes.pointer && x->bytes.length == y->bytes.length &&
+                 x->offset == y->offset;
+    }
+    for (uint32_t i = 0; result && i < a->symbol_count; i += 1)
+    {
+        const ImportArchiveSymbol* x = &a->symbols[i];
+        const ImportArchiveSymbol* y = &b->symbols[i];
+        result = x->name.pointer == y->name.pointer && x->name.length == y->name.length && x->member == y->member;
+    }
+    return result;
+}
+
+// The archive reader's paths against each other, as import_test_paths_agree does for objects. *taken says whether the
+// vector path took the archive.
+static bool import_test_archive_paths_agree(String8 bytes, bool* taken, Arena* arena)
+{
+    const uint64_t length = arena->length;
+    ImportArchive vector;
+    ImportArchive exact;
+    ImportArchive combined;
+    *taken = import_archive_vector(&vector, bytes, arena);
+    const ImportResult exact_result = import_archive_scalar(&exact, bytes, arena);
+    const ImportResult combined_result = import_archive(&combined, bytes, arena);
+    bool result = import_test_same_result(exact_result, combined_result) && (exact_result.error != IMPORT_ERROR_NONE || import_test_same_archive(&exact, &combined));
+    if (*taken)
+    {
+        result = result && exact_result.error == IMPORT_ERROR_NONE && import_test_same_archive(&vector, &exact);
+    }
+    arena_pop_to(arena, length);
+    return result;
+}
+
+// import_test_archive_paths_agree as a check, with the path the archive must take, counted in the tally.
+static void import_test_archive_paths(ImportTestTally* tally, String8 bytes, ImportTestPath expected, const char* what, Arena* arena)
+{
+    bool vector = false;
+    const bool agree = import_test_archive_paths_agree(bytes, &vector, arena);
+    const bool path = expected == IMPORT_TEST_EITHER || vector == (expected == IMPORT_TEST_VECTOR);
+    if ((!agree || !path) && tally->failures < BUSTER_IMPORT_TEST_REPORTED)
+    {
+        printf("  %s: %s: the paths %s, and the vector path %s it\n", tally->check, what, agree ? "agree" : "disagree", vector ? "took" : "left");
+    }
+    tally->checked += 1;
+    tally->failures += agree && path ? 0 : 1;
+    tally->vector += vector ? 1 : 0;
+    tally->exact += vector ? 0 : 1;
 }
 
 // A link for an import, with room for what import_object_capacity says, from `arena`.
@@ -333,6 +626,7 @@ static void import_test_unit(ImportTestTally* tally, const Link* original, const
     import_test_expect(tally, atoms_match, "each atom's bytes where the writer put them, and its fixups", index);
     import_test_expect(tally, symbols_match, "each symbol at its place, with its flags and size", index);
     import_test_expect(tally, ready && imported.fixups.count == fixups + 1, "no other fixups", index);
+    import_test_paths(tally, object_bytes, IMPORT_TEST_VECTOR, "the vector path imports the object, as the exact path does", index, arena);
 }
 
 // The objects of a program's units, with function sections or not as `first_sections` to 1 say, read back.
@@ -396,7 +690,8 @@ static bool import_test_round_trips(uint64_t seed, Arena* arena)
     many.functions = BUSTER_OBJECT_TEST_MANY_FUNCTIONS;
     many.filler = 0;
     objects += import_test_program(&tally, many, 1, BUSTER_LINK_TEST_PROGRAMS, arena);
-    printf("  %llu objects read back, one of %u functions in sections of their own\n", (unsigned long long)objects, BUSTER_OBJECT_TEST_MANY_FUNCTIONS);
+    printf("  %llu objects read back, one of %u functions in sections of their own; the vector path imported %llu, the exact path %llu\n", (unsigned long long)objects,
+           BUSTER_OBJECT_TEST_MANY_FUNCTIONS, (unsigned long long)tally.vector, (unsigned long long)tally.exact);
     return import_test_report(&tally);
 }
 
@@ -663,6 +958,18 @@ static void import_test_case(ImportTestTally* tally, ImportTestReader reader, co
     }
     tally->checked += 1;
     tally->failures += same ? 0 : 1;
+    if (reader == IMPORT_TEST_READ_OBJECT && changed.bytes != 0)
+    {
+        import_test_paths(tally, import_test_bytes(&changed), IMPORT_TEST_EITHER, what, 0, arena);
+    }
+    if (reader == IMPORT_TEST_READ_LIBRARY && changed.bytes != 0)
+    {
+        import_test_library_paths(tally, import_test_bytes(&changed), IMPORT_TEST_EITHER, what, arena);
+    }
+    if (reader == IMPORT_TEST_READ_ARCHIVE && changed.bytes != 0)
+    {
+        import_test_archive_paths(tally, import_test_bytes(&changed), IMPORT_TEST_EITHER, what, arena);
+    }
     arena_pop_to(arena, length);
 }
 
@@ -996,7 +1303,7 @@ static bool import_test_object_fixups(const ImportTestObject* test, const Link* 
 
 // Imports `bytes`, the object made by hand or a change of it that imports the same, and checks every section, symbol
 // and fixup against what `test` says they must be.
-static void import_test_object_check(ImportTestTally* tally, const ImportTestObject* test, String8 bytes, const char* what, Arena* arena)
+static void import_test_object_check(ImportTestTally* tally, const ImportTestObject* test, String8 bytes, const char* what, ImportTestPath path, Arena* arena)
 {
     const uint64_t length = arena->length;
     Link link;
@@ -1047,7 +1354,33 @@ static void import_test_object_check(ImportTestTally* tally, const ImportTestObj
     import_test_expect(tally, sections, "each section an atom of its class, in place in the file, or none", 0);
     import_test_expect(tally, symbols, "each symbol, or none", 0);
     import_test_expect(tally, fixups, "each relocation a fixup in offset order, or none", 0);
+    import_test_paths(tally, bytes, path, what, 0, arena);
     arena_pop_to(arena, length);
+}
+
+// A copy of the object made by hand with each relocation section's entries in offset order (stably), which the vector
+// path takes: the object made by hand has them out of order, which it leaves to the exact path.
+static ImportTestFile import_test_sorted(const ImportTestObject* test, const ImportTestFile* base, Arena* arena)
+{
+    ImportTestFile result = import_test_changed(base, 0, 0, 0, arena);
+    for (uint32_t i = 1; result.bytes != 0 && i < IMPORT_TEST_SECTIONS; i += 1)
+    {
+        const uint32_t count = test->sections[i].type == SHT_RELA ? test->relocations[i].count : 0;
+        Elf64_Rela* entries = (Elf64_Rela*)(result.bytes + result.contents[i]);
+        for (uint32_t j = 1; j < count; j += 1)
+        {
+            Elf64_Rela entry;
+            memcpy(&entry, &entries[j], sizeof(entry));
+            uint32_t place = j;
+            while (place > 0 && entries[place - 1].r_offset > entry.r_offset)
+            {
+                memcpy(&entries[place], &entries[place - 1], sizeof(entry));
+                place -= 1;
+            }
+            memcpy(&entries[place], &entry, sizeof(entry));
+        }
+    }
+    return result;
 }
 
 static bool import_test_objects(Arena* arena)
@@ -1063,20 +1396,28 @@ static bool import_test_objects(Arena* arena)
     {
         const ImportTestFile* f = &test->file;
         const uint32_t sections = f->count;
-        import_test_object_check(&tally, test, import_test_bytes(f), "the object made by hand imports", arena);
-        // Changes that import the same: the section count and the names' index in section 0, .eh_frame as
-        // SHT_PROGBITS, and tables without sh_entsize.
-        ImportTestFile changed = import_test_changed(f, offsetof(Elf64_Ehdr, e_shnum), 2, 0, arena);
-        changed = import_test_changed(&changed, f->headers[0] + offsetof(Elf64_Shdr, sh_size), 8, sections, arena);
-        import_test_object_check(&tally, test, import_test_bytes(&changed), "e_shnum in section 0", arena);
-        changed = import_test_changed(f, offsetof(Elf64_Ehdr, e_shstrndx), 2, SHN_XINDEX, arena);
-        changed = import_test_changed(&changed, f->headers[0] + offsetof(Elf64_Shdr, sh_link), 4, sections - 1, arena);
-        import_test_object_check(&tally, test, import_test_bytes(&changed), "e_shstrndx in section 0", arena);
-        changed = import_test_changed(f, f->headers[IMPORT_TEST_EH_FRAME] + offsetof(Elf64_Shdr, sh_type), 4, SHT_PROGBITS, arena);
-        import_test_object_check(&tally, test, import_test_bytes(&changed), ".eh_frame as SHT_PROGBITS", arena);
-        changed = import_test_changed(f, f->headers[IMPORT_TEST_SYMTAB] + offsetof(Elf64_Shdr, sh_entsize), 8, 0, arena);
-        changed = import_test_changed(&changed, f->headers[IMPORT_TEST_RELA_TEXT] + offsetof(Elf64_Shdr, sh_entsize), 8, 0, arena);
-        import_test_object_check(&tally, test, import_test_bytes(&changed), "tables without sh_entsize", arena);
+        // Out of order, its relocations go to the exact path; in order, to the vector path. Changes that import the
+        // same: the section count and the names' index in section 0, .eh_frame as SHT_PROGBITS, and tables without
+        // sh_entsize.
+        const ImportTestFile sorted = import_test_sorted(test, f, arena);
+        for (uint32_t order = 0; order < 2; order += 1)
+        {
+            const ImportTestFile* g = order == 0 ? f : &sorted;
+            const ImportTestPath path = order == 0 ? IMPORT_TEST_EXACT : IMPORT_TEST_VECTOR;
+            import_test_object_check(&tally, test, import_test_bytes(g), order == 0 ? "the object made by hand imports" : "in offset order", path, arena);
+            ImportTestFile changed = import_test_changed(g, offsetof(Elf64_Ehdr, e_shnum), 2, 0, arena);
+            changed = import_test_changed(&changed, g->headers[0] + offsetof(Elf64_Shdr, sh_size), 8, sections, arena);
+            import_test_object_check(&tally, test, import_test_bytes(&changed), "e_shnum in section 0", path, arena);
+            changed = import_test_changed(g, offsetof(Elf64_Ehdr, e_shstrndx), 2, SHN_XINDEX, arena);
+            changed = import_test_changed(&changed, g->headers[0] + offsetof(Elf64_Shdr, sh_link), 4, sections - 1, arena);
+            import_test_object_check(&tally, test, import_test_bytes(&changed), "e_shstrndx in section 0", path, arena);
+            changed = import_test_changed(g, g->headers[IMPORT_TEST_EH_FRAME] + offsetof(Elf64_Shdr, sh_type), 4, SHT_PROGBITS, arena);
+            import_test_object_check(&tally, test, import_test_bytes(&changed), ".eh_frame as SHT_PROGBITS", path, arena);
+            changed = import_test_changed(g, g->headers[IMPORT_TEST_SYMTAB] + offsetof(Elf64_Shdr, sh_entsize), 8, 0, arena);
+            changed = import_test_changed(&changed, g->headers[IMPORT_TEST_RELA_TEXT] + offsetof(Elf64_Shdr, sh_entsize), 8, 0, arena);
+            import_test_object_check(&tally, test, import_test_bytes(&changed), "tables without sh_entsize", path, arena);
+        }
+        ImportTestFile changed = { 0 };
 
         // Each check a well-formed object never trips. The ELF header and the section table.
         const ImportTestReader o = IMPORT_TEST_READ_OBJECT;
@@ -1224,6 +1565,8 @@ static bool import_test_objects(Arena* arena)
 // Archives
 
 #define BUSTER_IMPORT_TEST_MAX_MEMBERS 8
+// Enough for an index of several batches of the vector path's.
+#define BUSTER_IMPORT_TEST_ARCHIVE_SYMBOLS 64
 #define BUSTER_IMPORT_TEST_LONG_NAMES_BYTES 256
 
 // An archive to make: its members, and its symbol index (4 bytes an entry for "/", 8 for "/SYM64/", 0 for none).
@@ -1234,8 +1577,8 @@ struct ImportTestArchive
     const uint8_t* bytes[BUSTER_IMPORT_TEST_MAX_MEMBERS];
     uint64_t sizes[BUSTER_IMPORT_TEST_MAX_MEMBERS];
     uint32_t member_count;
-    const char* symbols[BUSTER_IMPORT_TEST_MAX_MEMBERS];
-    uint32_t symbol_members[BUSTER_IMPORT_TEST_MAX_MEMBERS];
+    const char* symbols[BUSTER_IMPORT_TEST_ARCHIVE_SYMBOLS];
+    uint32_t symbol_members[BUSTER_IMPORT_TEST_ARCHIVE_SYMBOLS];
     uint32_t symbol_count;
     uint32_t width;
 };
@@ -1367,6 +1710,14 @@ static void import_test_archive_check(ImportTestTally* tally, const ImportTestAr
         same = import_equal(read.symbols[s].name, archive->symbols[s]) && read.symbols[s].member == archive->symbol_members[s];
     }
     import_test_expect(tally, same, what, result.error);
+    // The vector path takes an archive with an index of a symbol or more in member order, walking the members without
+    // one; the exact path, one without.
+    bool indexed = symbols != 0;
+    for (uint32_t s = 1; indexed && s < symbols; s += 1)
+    {
+        indexed = archive->symbol_members[s - 1] <= archive->symbol_members[s];
+    }
+    import_test_archive_paths(tally, import_test_bytes(file), indexed ? IMPORT_TEST_VECTOR : IMPORT_TEST_EXACT, what, arena);
     arena_pop_to(arena, length);
 }
 
@@ -1421,7 +1772,7 @@ static bool import_test_archives(Arena* arena)
         .symbol_members = {
             0,
             1,
-            1,
+            2,
             3,
             4,
         },
@@ -1466,6 +1817,44 @@ static bool import_test_archives(Arena* arena)
     if (built)
     {
         import_test_archive_check(&tally, &archive, &file, "a 64-bit index", arena);
+    }
+    // A member without a symbol, which the index doesn't list.
+    archive.symbol_members[2] = 1;
+    for (uint32_t width = 4; width <= 8; width += 4)
+    {
+        archive.width = width;
+        built = import_test_archive(&file, &archive, arena);
+        import_test_expect(&tally, built, "the archive made by hand", width);
+        if (built)
+        {
+            import_test_archive_check(&tally, &archive, &file, "a member without a symbol", arena);
+        }
+    }
+    // An index of several batches, with a member's run of symbols across them, a batch of one member's, and a member
+    // without a symbol: 9, 1, 0, 16 and 11 symbols.
+    static char many_names[BUSTER_IMPORT_TEST_ARCHIVE_SYMBOLS][8];
+    static const uint32_t runs[] = { 9, 1, 0, 16, 11 };
+    ImportTestArchive many = archive;
+    many.symbol_count = 0;
+    for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(runs); m += 1)
+    {
+        for (uint32_t k = 0; k < runs[m]; k += 1)
+        {
+            snprintf(many_names[many.symbol_count], sizeof(many_names[0]), "s%02u", many.symbol_count);
+            many.symbols[many.symbol_count] = many_names[many.symbol_count];
+            many.symbol_members[many.symbol_count] = m;
+            many.symbol_count += 1;
+        }
+    }
+    for (uint32_t width = 4; width <= 8; width += 4)
+    {
+        many.width = width;
+        built = import_test_archive(&file, &many, arena);
+        import_test_expect(&tally, built, "the archive made by hand", width);
+        if (built)
+        {
+            import_test_archive_check(&tally, &many, &file, "an index of several batches", arena);
+        }
     }
     archive.width = 0;
     built = import_test_archive(&file, &archive, arena);
@@ -1671,23 +2060,24 @@ static void import_test_library_check(ImportTestTally* tally, const ImportTestLi
         const uint8_t unversioned_flags = (uint8_t)(exported_type | ((binding == STB_WEAK ? STB_WEAK : STB_GLOBAL) << 4));
         if (exported)
         {
-            const ImportExport* export = exports < library.export_count ? &library.exports[exports] : 0;
+            const ImportExports* e = &library.exports;
             const uint8_t flags = versioned ? s->flags[i] : unversioned_flags;
             const uint16_t version = versioned ? s->versions[i] : VER_NDX_GLOBAL;
             const uint32_t first = import_test_library_find(&library, name);
-            same = export != 0 && import_equal(export->name, name) && export->hash == link_hash((const uint8_t*)name, strlen(name)) && export->size == entry->st_size &&
-                   export->flags == flags && export->version == version && first <= exports && import_equal(library.exports[first].name, name);
+            same = exports < e->count && import_test_name_is(e->name[exports], e->length[exports], name) && e->hash[exports] == link_hash((const uint8_t*)name, strlen(name)) &&
+                   e->size[exports] == entry->st_size && e->flags[exports] == flags && e->version[exports] == version && first <= exports &&
+                   import_test_name_is(e->name[first], e->length[first], name);
             exports += 1;
         }
         if (s->references[i] != 0)
         {
-            const ImportReference* reference = references < library.reference_count ? &library.references[references] : 0;
-            same = same && reference != 0 && import_equal(reference->name, name) && reference->hash == link_hash((const uint8_t*)name, strlen(name)) &&
-                   reference->weak == (s->references[i] == 2);
+            const ImportReferences* r = &library.references;
+            same = same && references < r->count && import_test_name_is(r->name[references], r->length[references], name) &&
+                   r->hash[references] == link_hash((const uint8_t*)name, strlen(name)) && r->weak[references] == (s->references[i] == 2 ? 1 : 0);
             references += 1;
         }
     }
-    same = same && library.export_count == exports && library.reference_count == references;
+    same = same && library.exports.count == exports && library.references.count == references;
     // The first export of a name exported twice, and names that aren't exported.
     same = same && import_test_library_find(&library, "old_function") == (versioned ? 0 : 0) && import_test_library_find(&library, "hidden_function") == UINT32_MAX &&
            import_test_library_find(&library, "local_function") == UINT32_MAX && import_test_library_find(&library, "reference") == UINT32_MAX &&
@@ -1700,6 +2090,7 @@ static void import_test_library_check(ImportTestTally* tally, const ImportTestLi
         printf("\n");
     }
     import_test_expect(tally, same, what, exports);
+    import_test_library_paths(tally, bytes, IMPORT_TEST_VECTOR, what, arena);
     arena_pop_to(arena, length);
 }
 
@@ -1755,6 +2146,19 @@ static bool import_test_libraries(Arena* arena)
         import_test_case(&tally, l, f, "a soname outside .dynstr", f->contents[IMPORT_TEST_LIBRARY_DYNAMIC] + offsetof(Elf64_Dyn, d_un), 8, 0xffff, dynamic_bounds, arena);
         import_test_case(&tally, l, f, ".dynamic of 8-byte entries", dynamic + offsetof(Elf64_Shdr, sh_entsize), 8, 8, dynamic_bounds, arena);
         import_test_case(&tally, l, f, ".dynamic's strings in .text", dynamic + offsetof(Elf64_Shdr, sh_link), 4, IMPORT_TEST_LIBRARY_TEXT, dynamic_bounds, arena);
+        // .dynsym's names in a string table of no bytes, every st_name 0: even the empty name isn't a string of it.
+        const uint64_t text = f->headers[IMPORT_TEST_LIBRARY_TEXT];
+        ImportTestFile empty = import_test_changed(f, text + offsetof(Elf64_Shdr, sh_type), 4, SHT_STRTAB, arena);
+        empty = import_test_changed(&empty, text + offsetof(Elf64_Shdr, sh_size), 8, 0, arena);
+        empty = import_test_changed(&empty, dynsym + offsetof(Elf64_Shdr, sh_link), 4, IMPORT_TEST_LIBRARY_TEXT, arena);
+        for (uint32_t i = 1; i < test->symbols.count; i += 1)
+        {
+            empty = import_test_changed(&empty, f->contents[IMPORT_TEST_LIBRARY_DYNSYM] + (uint64_t)i * sizeof(Elf64_Sym) + offsetof(Elf64_Sym, st_name), 4, 0, arena);
+        }
+        const ImportResult empty_result = import_test_read(l, import_test_bytes(&empty), arena);
+        const ImportResult expected = import_test_result(IMPORT_ERROR_BOUNDS, f->contents[IMPORT_TEST_LIBRARY_DYNSYM] + sizeof(Elf64_Sym), 0, 1, 0, 0);
+        import_test_expect(&tally, import_test_same_result(empty_result, expected), "names in a string table of no bytes", empty_result.error);
+        import_test_library_paths(&tally, import_test_bytes(&empty), IMPORT_TEST_EXACT, "names in a string table of no bytes", arena);
     }
     arena_pop_to(arena, position);
     return import_test_report(&tally);
@@ -1846,7 +2250,7 @@ struct ImportTestInput
     uint64_t size;
 };
 
-#define BUSTER_IMPORT_TEST_INPUTS 7
+#define BUSTER_IMPORT_TEST_INPUTS 8
 
 // The input being read, for the fault handler.
 static char import_test_fault_input[256];
@@ -1879,6 +2283,11 @@ static bool import_test_edge(const uint8_t* end, uint64_t length, Arena* arena)
         const ImportResult read = import_test_read((ImportTestReader)reader, bytes, arena);
         result = result && read.offset <= length;
     }
+    // And the object and library readers' paths agree.
+    bool taken = false;
+    result = result && import_test_paths_agree(bytes, 0, &taken, arena);
+    result = result && import_test_library_paths_agree(bytes, &taken, arena);
+    result = result && import_test_archive_paths_agree(bytes, &taken, arena);
     return result;
 }
 
@@ -2062,8 +2471,8 @@ static String8 import_test_version_name(const ImportLibrary* library, uint16_t i
 static bool import_test_exported(const ImportLibrary* library, const char* name, const char* version)
 {
     const uint32_t found = import_test_library_find(library, name);
-    const ImportExport* export = found < library->export_count ? &library->exports[found] : 0;
-    return export != 0 && (export->version == VER_NDX_GLOBAL ? version[0] == 0 : import_equal(import_test_version_name(library, export->version), version));
+    const uint16_t index = found < library->exports.count ? library->exports.version[found] : VER_NDX_LOCAL;
+    return found < library->exports.count && (index == VER_NDX_GLOBAL ? version[0] == 0 : import_equal(import_test_version_name(library, index), version));
 }
 
 static void import_test_cross_check(ImportTestTally* tally, const Runtime* runtime, Arena* arena);
@@ -2086,7 +2495,7 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
     {
         printf("  GCC: %.*s; libc: %.*s (%.*s, %u exports, %u versions, %u references); libc_nonshared.a: %u members; %u probes\n", (int)runtime.gcc_directory.length,
                runtime.gcc_directory.pointer, (int)runtime.libc_path.length, runtime.libc_path.pointer, (int)runtime.libc.soname.length, runtime.libc.soname.pointer,
-               runtime.libc.export_count, runtime.libc.version_count, runtime.libc.reference_count, runtime.nonshared.member_count, runtime.probe_count);
+               runtime.libc.exports.count, runtime.libc.version_count, runtime.libc.references.count, runtime.nonshared.member_count, runtime.probe_count);
         const Link* link = &runtime.link;
         // What each crt object is for.
         const SymbolId start = import_test_runtime_symbol(&runtime, "_start", true);
@@ -2127,7 +2536,7 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
             relr = relr || import_equal(runtime.libc.versions[v].name, "GLIBC_ABI_DT_RELR");
         }
         import_test_expect(&tally, relr, "GLIBC_ABI_DT_RELR defined", 0);
-        import_test_expect(&tally, runtime.libc.reference_count != 0, "libc.so.6's references", 0);
+        import_test_expect(&tally, runtime.libc.references.count != 0, "libc.so.6's references", 0);
         // libc_nonshared.a's index.
         bool atexit_indexed = false;
         for (uint32_t s = 0; s < runtime.nonshared.symbol_count; s += 1)
@@ -2169,6 +2578,17 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
             found += runtime.probes[p].found ? 1 : 0;
         }
         import_test_expect(&tally, found >= RUNTIME_OBJECTS + 4, "the files found among the probes", found);
+        // The vector paths read libc.so.6, each crt object and each member, as the exact paths do.
+        import_test_library_paths(&tally, runtime.libc_bytes, IMPORT_TEST_VECTOR, "libc.so.6", arena);
+        import_test_archive_paths(&tally, runtime.nonshared_bytes, IMPORT_TEST_VECTOR, "libc_nonshared.a", arena);
+        for (uint32_t i = 0; i < RUNTIME_OBJECTS; i += 1)
+        {
+            import_test_paths(&tally, runtime.object_bytes[i], IMPORT_TEST_VECTOR, "a crt object", i, arena);
+        }
+        for (uint32_t m = 0; m < runtime.nonshared.member_count; m += 1)
+        {
+            import_test_paths(&tally, runtime.nonshared.members[m].bytes, IMPORT_TEST_VECTOR, "a member of libc_nonshared.a", m, arena);
+        }
         if (cross_check)
         {
             import_test_cross_check(&tally, &runtime, arena);
@@ -2284,9 +2704,10 @@ static void import_test_cross_check_library(ImportTestTally* tally, const Runtim
         if (global && !undefined && visible && !hidden_version)
         {
             const uint32_t found = import_test_library_find(library, name);
-            const ImportExport* export = found < library->export_count ? &library->exports[found] : 0;
-            const bool same_version = version[0] == 0 || (export != 0 && import_equal(import_test_version_name(library, export->version), version));
-            const bool same = export != 0 && export->size == strtoull(size_text, 0, 0) && export->flags == import_test_readelf_flags(type, binding) && same_version;
+            const ImportExports* e = &library->exports;
+            const bool exported = found < e->count;
+            const bool same_version = version[0] == 0 || (exported && import_equal(import_test_version_name(library, e->version[found]), version));
+            const bool same = exported && e->size[found] == strtoull(size_text, 0, 0) && e->flags[found] == import_test_readelf_flags(type, binding) && same_version;
             if (!same && exports_match)
             {
                 printf("  runtime: libc.so.6's export %s@@%s differs from readelf's\n", name, version);
@@ -2297,16 +2718,17 @@ static void import_test_cross_check_library(ImportTestTally* tally, const Runtim
         else if (global && undefined)
         {
             bool same = false;
-            for (uint32_t r = 0; !same && r < library->reference_count; r += 1)
+            const ImportReferences* r = &library->references;
+            for (uint32_t i = 0; !same && i < r->count; i += 1)
             {
-                same = import_equal(library->references[r].name, name) && library->references[r].weak == (strcmp(binding, "WEAK") == 0);
+                same = import_test_name_is(r->name[i], r->length[i], name) && r->weak[i] == (strcmp(binding, "WEAK") == 0 ? 1 : 0);
             }
             references_match = references_match && same;
             references += 1;
         }
     }
-    import_test_expect(tally, exports_match && exports == library->export_count, "libc.so.6's exports, as readelf lists them", exports);
-    import_test_expect(tally, references_match && references == library->reference_count, "libc.so.6's references, as readelf lists them", references);
+    import_test_expect(tally, exports_match && exports == library->exports.count, "libc.so.6's exports, as readelf lists them", exports);
+    import_test_expect(tally, references_match && references == library->references.count, "libc.so.6's references, as readelf lists them", references);
     printf("  readelf: %u exports and %u references of libc.so.6\n", exports, references);
 }
 
@@ -2541,6 +2963,9 @@ static bool import_test_edges(uint64_t seed, Arena* arena)
     result = result && import_test_archive(&archive32, &archive, arena);
     archive.width = 8;
     result = result && import_test_archive(&archive64, &archive, arena);
+    // In offset order, its relocations take the vector path.
+    const ImportTestFile sorted = result ? import_test_sorted(object, &object->file, arena) : (ImportTestFile){ 0 };
+    result = result && sorted.bytes != 0;
     if (result)
     {
         const ImportTestInput inputs[BUSTER_IMPORT_TEST_INPUTS] = {
@@ -2548,6 +2973,11 @@ static bool import_test_edges(uint64_t seed, Arena* arena)
                 .name = "the object made by hand",
                 .bytes = object->file.bytes,
                 .size = object->file.size,
+            },
+            {
+                .name = "the object made by hand, its relocations in order",
+                .bytes = sorted.bytes,
+                .size = sorted.size,
             },
             {
                 .name = "the shared library made by hand",

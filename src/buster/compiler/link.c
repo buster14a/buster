@@ -66,7 +66,7 @@
 //     (BUSTER_LINK_SOURCE_*), the fixup kinds (BUSTER_LINK_FIXUP_*), the instruction fields they patch (LinkField) and
 //     their properties (LinkFixupKind and link_fixup_kinds), LinkError, the tables (LinkNames, LinkAtoms, LinkSymbols
 //     and LinkFixups), Link, LinkCapacity, LinkReference and the entry points' prototypes.
-//   - Names: link_hash, link_hash_names, link_add_name and link_add_name_hashed.
+//   - Names: link_hash, link_hash_rows, link_hash_names, link_add_name and link_add_name_hashed.
 //   - Tables: link_capacity_bytes, link_initialize, link_add_atom, link_add_symbol, link_define_symbol, link_add_fixup
 //     and link_fixup_addend.
 //   - Code: link_instruction_field, link_kind_fits and link_add_code_fixups.
@@ -561,51 +561,54 @@ static void link_transpose_words(const __m512i* rows, __m512i* words)
     words[7] = _mm512_shuffle_i64x2(s3, s7, 0xee);
 }
 
-// Each batch: each name's first 64 bytes in a masked load (none past its length is read, so a name may end at a page's
-// end), the rows transposed so that a vector holds word j of the eight names, then the words mixed in lane by lane while
-// a lane's name has them. A name past 64 bytes, and those after the last whole batch, go to link_hash.
-static void link_hash_names(const uint8_t* const* names, const uint32_t* lengths, uint64_t count, uint64_t* hashes)
+// The hashes of eight names of up to 64 bytes, rows[lane] holding a name's bytes and zeros past its length: the rows
+// transposed so that a vector holds word j of the eight names, then the words mixed in lane by lane while a lane's name
+// has them. Each lane's hash is link_hash's for its name; a longer name's is not, and is the caller's to replace.
+static __m512i link_hash_rows(const __m512i* rows, __m512i lengths)
 {
     const __m512i multiplier = _mm512_set1_epi64((long long)BUSTER_LINK_HASH_MULTIPLIER);
-    const __m512i one = _mm512_set1_epi64(1);
-    uint64_t i = 0;
-    for (; i + BUSTER_LINK_HASH_BATCH <= count; i += BUSTER_LINK_HASH_BATCH)
+    __m512i words[BUSTER_LINK_HASH_BATCH];
+    link_transpose_words(rows, words);
+    const __m512i word_counts = _mm512_max_epu64(_mm512_srli_epi64(_mm512_add_epi64(lengths, _mm512_set1_epi64(7)), 3), _mm512_set1_epi64(1));
+    const uint64_t most = _mm512_reduce_max_epu64(word_counts);
+    const uint64_t steps = most < BUSTER_LINK_HASH_BATCH ? most : BUSTER_LINK_HASH_BATCH;
+    __m512i hash = _mm512_xor_si512(_mm512_set1_epi64((long long)BUSTER_LINK_HASH_SEED), lengths);
+    for (uint64_t j = 0; j < steps; j += 1)
     {
+        const __mmask8 active = _mm512_cmpgt_epu64_mask(word_counts, _mm512_set1_epi64((long long)j));
+        __m512i mixed = _mm512_mullo_epi64(_mm512_xor_si512(hash, words[j]), multiplier);
+        mixed = _mm512_xor_si512(mixed, _mm512_srli_epi64(mixed, 32));
+        hash = _mm512_mask_mov_epi64(hash, active, mixed);
+    }
+    return link_hash_finish_vector(hash);
+}
+
+// Each batch of eight: each name's first 64 bytes in a masked load (none past its length is read, so a name may end at
+// a page's end), hashed by link_hash_rows; the last batch's missing lanes are empty names, whose hashes aren't stored.
+// A name past 64 bytes goes to link_hash.
+static void link_hash_names(const uint8_t* const* names, const uint32_t* lengths, uint64_t count, uint64_t* hashes)
+{
+    for (uint64_t i = 0; i < count; i += BUSTER_LINK_HASH_BATCH)
+    {
+        const uint32_t batch = count - i < BUSTER_LINK_HASH_BATCH ? (uint32_t)(count - i) : BUSTER_LINK_HASH_BATCH;
         __m512i rows[BUSTER_LINK_HASH_BATCH];
-        __m512i words[BUSTER_LINK_HASH_BATCH];
         uint32_t long_names = 0;
         for (uint32_t lane = 0; lane < BUSTER_LINK_HASH_BATCH; lane += 1)
         {
-            const uint32_t length = lengths[i + lane];
+            const uint32_t length = lane < batch ? lengths[i + lane] : 0;
             const uint64_t loaded = length < BUSTER_LINK_HASH_VECTOR_BYTES ? length : BUSTER_LINK_HASH_VECTOR_BYTES;
-            rows[lane] = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, (uint32_t)loaded), names[i + lane]);
+            rows[lane] = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, (uint32_t)loaded), lane < batch ? names[i + lane] : 0);
             long_names |= (length > BUSTER_LINK_HASH_VECTOR_BYTES ? 1u : 0u) << lane;
         }
-        link_transpose_words(rows, words);
-        const __m512i length_vector = _mm512_cvtepu32_epi64(_mm256_loadu_si256((const __m256i*)(lengths + i)));
-        const __m512i word_counts = _mm512_max_epu64(_mm512_srli_epi64(_mm512_add_epi64(length_vector, _mm512_set1_epi64(7)), 3), one);
-        const uint64_t most = _mm512_reduce_max_epu64(word_counts);
-        const uint64_t steps = most < BUSTER_LINK_HASH_BATCH ? most : BUSTER_LINK_HASH_BATCH;
-        __m512i hash = _mm512_xor_si512(_mm512_set1_epi64((long long)BUSTER_LINK_HASH_SEED), length_vector);
-        for (uint64_t j = 0; j < steps; j += 1)
-        {
-            const __mmask8 active = _mm512_cmpgt_epu64_mask(word_counts, _mm512_set1_epi64((long long)j));
-            __m512i mixed = _mm512_mullo_epi64(_mm512_xor_si512(hash, words[j]), multiplier);
-            mixed = _mm512_xor_si512(mixed, _mm512_srli_epi64(mixed, 32));
-            hash = _mm512_mask_mov_epi64(hash, active, mixed);
-        }
-        _mm512_storeu_si512(hashes + i, link_hash_finish_vector(hash));
-        for (uint32_t lane = 0; long_names != 0 && lane < BUSTER_LINK_HASH_BATCH; lane += 1)
+        const __m512i length_vector = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32((__mmask8)_bzhi_u32(0xff, batch), lengths + i));
+        _mm512_mask_storeu_epi64(hashes + i, (__mmask8)_bzhi_u32(0xff, batch), link_hash_rows(rows, length_vector));
+        for (uint32_t lane = 0; long_names != 0 && lane < batch; lane += 1)
         {
             if ((long_names >> lane & 1) != 0)
             {
                 hashes[i + lane] = link_hash(names[i + lane], lengths[i + lane]);
             }
         }
-    }
-    for (; i < count; i += 1)
-    {
-        hashes[i] = link_hash(names[i], lengths[i]);
     }
 }
 

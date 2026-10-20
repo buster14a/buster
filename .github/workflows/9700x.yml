@@ -102,6 +102,11 @@ jobs:
         # libc_nonshared.a's members, with readelf's.
         run: ./build/compiler test-import --cross-check
 
+      - name: Benchmark the import path
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-import
+
       - name: Test the direct path's executables
         run: ./build/compiler test-executable
 

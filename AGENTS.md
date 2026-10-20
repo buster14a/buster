@@ -120,15 +120,18 @@ or infrastructure machinery merely to match its style.
   and `object_writer_benchmark.c` provides `benchmark-object-writer`.
 - `src/buster/compiler/import.c` holds the import path's readers: ELF
   relocatable objects into the representation, archives' members and symbol
-  index, shared libraries' exports at their default versions, version
-  definitions and references, and the commands of the linker scripts that
-  `libc.so` and GCC's `_asneeded` libraries are. `runtime.c` finds the C
-  runtime's files as GCC's driver does (`Scrt1.o`, `crti.o`, `crtbeginS.o`,
-  `crtendS.o` and `crtn.o`, and the `libc.so.6` and `libc_nonshared.a` that
-  `libc.so` names) and imports them into a link of their own, with what each
-  name they refer to binds to (the first part of step 5 of the design's
-  plan). `import_test.c` holds their tests (`main.c` includes it;
-  `./build/compiler test-import` runs them).
+  index, shared libraries' exports at their default versions (indexed by name
+  hash), version definitions and references, and the commands of the linker
+  scripts that `libc.so` and GCC's `_asneeded` libraries are. The object,
+  archive and library readers each have a vector path and an exact one, which
+  takes what the vector path leaves to it (the design's "Step 5's phases,
+  data-parallel"). `runtime.c` finds the C runtime's files as GCC's driver
+  does (`Scrt1.o`, `crti.o`, `crtbeginS.o`, `crtendS.o` and `crtn.o`, and the
+  `libc.so.6` and `libc_nonshared.a` that `libc.so` names) and imports them
+  into a link of their own, with what each name they refer to binds to (the
+  first part of step 5 of the design's plan). `import_test.c` holds their
+  tests (`main.c` includes it; `./build/compiler test-import` runs them) and
+  `import_benchmark.c` provides `benchmark-import`.
 - `src/buster/compiler/executable.c` writes the direct path's first
   executables: a link in that representation laid out, patched and written as
   a static executable without libc (step 4 of the design's plan), with a build
@@ -153,6 +156,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler test-object-writer --cross-check
 ./build/compiler benchmark-object-writer
 ./build/compiler test-import --cross-check
+./build/compiler benchmark-import
 ./build/compiler test-executable
 ./build/compiler benchmark-executable
 ```
@@ -525,8 +529,8 @@ one allowed CPU; like the others, its measurements are informational.
 
 ## Import tests
 
-`./build/compiler test-import [--seed N] [--cross-check]` (about 0.04 s on
-the 9700X, and 0.06 s with `--cross-check`) checks `import.c` and
+`./build/compiler test-import [--seed N] [--cross-check]` (about 0.13 s on
+the 9700X, and 0.15 s with `--cross-check`) checks `import.c` and
 `runtime.c`:
 
 - round trips: each unit's object of `test-link`'s seven programs (with 500
@@ -548,21 +552,33 @@ the 9700X, and 0.06 s with `--cross-check`) checks `import.c` and
   never trips, one change at a time, with the error, the index of the
   section, symbol or relocation, the type and the byte offset it reports;
 - archives made by hand (a 32-bit index, a 64-bit one and none, long names,
-  an odd member's padding, a member of no bytes and no members), then
-  malformed ones;
+  an odd member's padding, a member of no bytes, a member without a symbol,
+  an index of several of the vector path's batches with a member's symbols
+  across them, and no members), then malformed ones;
 - a shared library made by hand: version definitions, a name at a default
   version and at a hidden one, IFUNC, `GNU_UNIQUE`, `COMMON`, TLS and
   absolute symbols, weak and protected ones, hidden and local ones and one at
   `VER_NDX_LOCAL`, which aren't exported, references, and a name exported
-  twice (the table keeps the first); the same without `.gnu.version`; then
+  twice (the index finds the first); the same without `.gnu.version`; then
   malformed ones;
 - linker scripts: `libc.so`'s and GCC's `_asneeded` ones, commas, comments
   and `OUTPUT_FORMAT`, then each error at its offset;
-- page edges: every prefix of each input made by hand, and the input with
+- page edges: every prefix of each input made by hand (the object also with
+  its relocations in order, which the vector path takes), and the input with
   each byte set to 0, 0xff and a random value, ending at a `PROT_NONE` page,
   through every reader: each succeeds, or fails reporting a place within its
   input. A read past the end faults; the command then names the input and
   exits with status 1;
+- the paths: each object, archive and library above (the round trips, the
+  inputs made by hand, every malformed one, every page-edge input and this
+  system's runtime) is read by its reader's vector path, its exact path and
+  the reader itself, each into a link (or a read) of its own. The reader's
+  result and records must be the exact path's; the vector path may take an
+  input only when the exact path reads it without an error, and must then
+  make the same records, column by column. Each well-formed input must take
+  the vector path (the object made by hand, whose relocations are out of
+  order, the exact one), and each check prints how many inputs each path
+  took. A library's index must find what a linear scan of its exports finds;
 - discovery: GCC's search under a directory of the test's own, whose newer
   version's directory has no `crtbeginS.o`: the search picks the older
   version and probes the newer one's `crtbeginS.o` too, so that installing it
@@ -586,6 +602,31 @@ the symbol (or the section) readelf names, with its addend, and there must be
 no other fixups. `--seed N` changes the programs and the random bytes. The
 default 9700X job runs it with `--cross-check` after the object writer's
 benchmark.
+
+## Import benchmark
+
+`./build/compiler benchmark-import [--units N] [--functions N] [--seed N]
+[--library PATH]... [--archive PATH]...` checks that each reader's vector
+path reads its inputs as the exact path does, then reports 21-run medians of
+both, the paths taking turns (time, cycles, instructions, IPC):
+
+- objects: the object writer's objects of a generated program of `--units`
+  units (64) of `--functions` workers (200), each about one of synth's
+  translation units; the same with function sections; one of 33,000
+  functions in sections of their own; and this system's crt objects and
+  `libc_nonshared.a`'s members, per symbol table entry and relocation;
+- `libc.so.6` and each `--library` (per export and reference), with its
+  exports' index against the open-addressing table it replaced, built and
+  looked up for every name; `libc_nonshared.a` and each `--archive` (per
+  index entry); `libc.so`'s script, which has no vector path; and
+  `runtime_import` end to end.
+
+Run it under the 9700X's lock with `taskset -c 2`. With `--library
+/usr/lib/libstdc++.so.6 --library /usr/lib/libLLVM.so.23.1 --archive
+/usr/lib/libc.a` it measures the larger files the design's "Step 5's phases,
+data-parallel" has the numbers for. The default 9700X job runs it after the
+import tests, pinned to one allowed CPU; like the others, its measurements are
+informational.
 
 ## Direct executable tests
 

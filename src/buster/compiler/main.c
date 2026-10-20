@@ -189,6 +189,7 @@ int run_object_writer_benchmark(int argc, char** argv);
 #include "buster/compiler/import.c"
 #include "buster/compiler/runtime.c"
 #include "buster/compiler/import_test.c"
+int run_import_benchmark(int argc, char** argv);
 
 // The direct path's executables (layout, patching, the build ID and the output file) and their tests, for the
 // test-executable command. Its benchmark is another translation unit.
@@ -238,6 +239,10 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "test-import") == 0)
     {
         result = run_import_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-import") == 0)
+    {
+        result = run_import_benchmark(argc - 1, argv + 1);
     }
     else if (argc >= 2 && strcmp(argv[1], "test-executable") == 0)
     {

@@ -705,10 +705,11 @@ it once and keeps the result in a snapshot under `$XDG_CACHE_HOME/buster/`.
   through the GOT, `_init`/`_fini`, `__dso_handle`, the `.init_array` entries
   (`frame_dummy`), and weak undefined references (`__gmon_start__`, the
   `_ITM_*` clone table functions) that resolve to 0.
-- **libc.so.6's exports:** an open-addressing table keyed by the front end's
-  name hash, holding each name's default version, type and size, and the
-  library's undefined names, which decide the program's exports. It is a few
-  tens of kilobytes. The other shared libraries in the link get the same.
+- **libc.so.6's exports:** columns of each name's default version, type and
+  size, indexed by the front end's name hash in buckets filled by a counting
+  sort ("Step 5's phases, data-parallel"), and the library's undefined names,
+  which decide the program's exports. It is a few tens of kilobytes. The other
+  shared libraries in the link get the same.
 - **For `-static`, libc.a's 2,227 members:** each member's atoms and fixups,
   already converted; a table from symbol to defining member; and each member's
   undefined names. libgcc.a and libgcc_eh.a get the same.
@@ -787,6 +788,181 @@ are a few dozen records. `__libc_start_main`, `__cxa_finalize` and the
 program's imports each get a GOT slot and a `GLOB_DAT`. `__dso_handle` and the
 two init/fini entries become relative relocations. No ELF is parsed on the
 link's path.
+
+#### Step 5's phases, data-parallel
+
+Every phase of step 5 is designed as `c_lexer.c` and the encoder are:
+data-parallel, vectorized and branch-free first, with an exact scalar path for
+what the vector path leaves to it, which is also the oracle the tests compare
+the vector path with. A phase is never taken to be inherently sequential: the
+question is which representation and algorithm vectorize. The tools are prefix
+sums, compression and expansion in registers, permutes as table lookups,
+sorting and segmented scans, and bitsets. Gathers and scatters are left out:
+`vpgatherdd` (zmm) is 64 µops and about 12.6 cycles on Zen 5, `vpscatterdd`
+88 and 17, so the joins are scalar loads, permutes or sorted streams.
+
+What is done, in `import.c` and `runtime.c`, with each reader's vector path
+against its exact path on the 9700X (`benchmark-import`, one CPU, medians of
+21 runs):
+
+| Input | Records | Vector | Exact | |
+| --- | ---: | ---: | ---: | ---: |
+| 64 objects of a generated program (one of synth's translation units each) | 231,604 | 0.49 ms, 2.11 ns per record | 5.10 ms, 22.0 ns | 10.4× |
+| the same with function sections | 231,670 | 0.71 ms, 3.07 ns | 3.13 ms, 13.5 ns | 4.4× |
+| one object of 33,000 functions in sections of their own | 430,617 | 1.06 ms, 2.45 ns | 6.17 ms, 14.3 ns | 5.8× |
+| the crt objects and `libc_nonshared.a`'s members | 94 | 1.36 µs | 1.74 µs | 1.3× |
+| `libc.so.6` (glibc 2.44) | 2,651 names | 11.0 µs, 4.2 ns per name | 41.9 µs, 15.8 ns | 3.8× |
+| `libstdc++.so.6` | 6,345 names | 83 µs, 13.2 ns | 214 µs, 33.8 ns | 2.6× |
+| `libLLVM.so.23.1` | 48,048 names | 1.47 ms, 30.6 ns | 1.98 ms, 41.2 ns | 1.35× |
+| `libc.a` (2,231 members) | 4,880 index entries | 28 µs, 5.7 ns per entry | 111 µs, 22.7 ns | 4.0× |
+| `libc_nonshared.a` | 5 index entries | 0.12 µs | 0.16 µs | 1.3× |
+
+The records are an object's symbol table entries and relocations, and a
+library's exports and references. The small inputs are bound by what each
+file costs whatever its size: the ELF header, the arrays pushed, the tables
+set up. libLLVM's names are C++'s, mostly past 64 bytes, which take memchr and
+the scalar hash.
+
+- **Objects** (`import_object_vector`). Eight records at a time, one per
+  64-bit lane, written straight into the link's columns past their counts:
+  - *sections:* eight headers transposed 8×8 (`link_transpose_words`), so
+    that a vector holds one field of eight sections. Bounds, alignments and
+    the class chain of `import_section_class` are lane masks, and the 16 first
+    bytes of each name are compared with the names the classes depend on
+    (`.init`, `.fini`, `.eh_frame`, `.sframe`, `.data.rel.ro`) by a ternary
+    logic op and a test per pattern. Then the atoms are compressed into the
+    columns, and each section's atom id is expanded into its lane;
+  - *symbols:* eight 24-byte entries in three vectors, transposed to their
+    three words by six `vpermt2q`. Each symbol's atom, and the atom's class
+    and size, are a scalar load per symbol and column, in a pass of their own
+    between two vector passes. Then the classification of
+    `import_object_symbols` and the columns, as for sections;
+  - *names:* a masked 64-byte load per name gives its length (its first NUL).
+    Eight at a time, a second masked load of each gives its hash
+    (`link_hash_rows`, the same function as `link_hash`) and its copy, into
+    one push from the name arena per batch. The lengths are a pass of their
+    own because eight scalar stores read back as one vector can't be
+    forwarded and stall the load;
+  - *relocations:* eight entries in three vectors, the same way. Each type's
+    kind and field width come from a 64-byte table in a register (`vpermb`).
+    The order and overlap checks compare each field with the previous lane's
+    end (`valignq`), and the side table's indices are an expand of the wide
+    addends' ranks. `R_X86_64_NONE` entries are compressed away: a batch
+    without them skips the compression, and one without a wide addend the side
+    table. Each target is then a scalar load per fixup, in a tight pass.
+
+  Anything out of the ordinary sends the whole object to
+  `import_object_scalar`: a malformed record, relocations out of offset
+  order (which the exact path sorts), two relocation sections for one
+  section, a string table without its final NUL, or a table without room for
+  every record. `import_object` then returns the link's counts and the
+  arenas to where they were before running it. On the 9700X the vector path
+  takes every object above, and GCC's and glibc's on the 9700X and on Ubuntu
+  24.04.
+- **Archives** (`import_archive_vector`). The symbol index lists the header
+  offset of each member that defines a global symbol, in archive order. Those
+  members' headers are read on their own, from the index, rather than by
+  walking the chain of headers from the start. From each one, only the
+  members up to the next indexed one are walked: the members without a global
+  symbol, 122 of glibc 2.39's 2,211 in Ubuntu's `libc.a`, none of
+  `libc_nonshared.a`'s. The index's offsets are byte-swapped by `vpshufb`,
+  checked in order, and ranked: an expand of the lanes where the offset
+  changes, then a prefix maximum by shifts of 1, 2 and 4 lanes. Each header's
+  size is parsed in a vector: the digits right-aligned by a shuffle, then
+  multiply-adds of pairs, fours and eights. The index's names are split at
+  their NULs, found 64 bytes at a time. An archive without an index, or with a
+  special member past the first ones, is the exact path's.
+- **Shared libraries** (`import_library_vector`). `.dynsym` is read eight
+  entries at a time, as `.symtab` is. Each export's version is looked up in a
+  512-bit set of the defined versions' indices in a register: its word by
+  `vpermq`, its bit by a variable shift. The exports' and references' columns
+  are compressed into place, then their names' lengths come from a masked load
+  each and their hashes eight at a time. `.dynamic`'s tags are compared eight
+  entries at a time. The version definitions are a chain of entries that only
+  `vd_next` places, 47 in glibc 2.44's: both paths read them with the exact
+  code.
+- **The exports' index** (`import_index_build`). One bucket per export,
+  rounded up to a power of two, by the hash's top bits, filled by a counting
+  sort: the buckets by a vector shift, the counts, an exclusive prefix sum in
+  vectors (`import_exclusive_scan`: shifts of 1, 2, 4 and 8 lanes and a
+  carry), then each export placed in export order, so that a name exported
+  twice is found at its first entry. Split across lanes, the counts would be
+  per lane and the prefix sum would combine them, as rule 4's exchange does.
+  The open-addressing table it replaced is built by inserts whose probe
+  chains depend on the inserts before them, so it can't be split. The
+  benchmark keeps the table to compare:
+
+  | Exports | Index: build | Table: build | Index: lookup | Table: lookup |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 2,630 (`libc.so.6`) | 2.52 µs | 1.33 µs | 2.67 ns | 2.13 ns |
+  | 6,139 (`libstdc++.so.6`) | 6.65 µs | 4.96 µs | 3.15 ns | 2.48 ns |
+  | 47,626 (`libLLVM.so.23.1`) | 66.6 µs | 114.7 µs | 10.8 ns | 10.0 ns |
+
+  At libc's size the table is faster to build and to look up in; the index
+  wins its build from tens of thousands of exports, and it is the one a
+  group of lanes can build. A lookup reads its bucket's bounds, then scans its
+  entries, about one export: a dependent load more than the table's probe.
+  The snapshot stores the index, so a link only looks names up: a few hundred
+  to a few thousand of them, under 2 µs either way.
+- **The runtime's binding** (`runtime_bind`). The runtime's definitions are
+  found eight symbols at a time (a compress of the ids whose binding isn't
+  local, with an atom and a name) and indexed the same way. Each reference is
+  then looked up, rather than every reference scanning every symbol.
+- **Linker scripts** (`import_script`) have no vector path: `libc.so`'s is
+  255 bytes, read in 0.15 µs once per rebuild of the snapshot. A vector lexer
+  would classify 64 bytes at a time into word, space and punctuation masks,
+  as `c_lexer.c` does, with comments left to the exact one.
+- **The whole import** (`runtime_import`: the search's 19 probes, each file
+  read, imported and bound) takes 96 µs, against about 13 µs for the readers
+  alone. The rest is the probes and reading the files, above all
+  `libc.so.6`'s 2.2 MB, of which the import reads only the dynamic sections.
+  The snapshot saves all of it on a link. Reading only those sections, with
+  `pread` after the section table, is what is left for the snapshot's
+  rebuild.
+
+Each vector path is tested against its exact path on every input the tests
+have: every unit's object of test-link's programs, the objects, archives and
+libraries made by hand, every malformed one, every page-edge input (each
+prefix and each changed byte, ending at a `PROT_NONE` page), and this
+system's runtime. The vector path may take an input only when the exact path
+reads it without an error, and must then make the same records, column by
+column. The import of an input must give the exact path's result and records
+either way. The tests also check that each well-formed input takes the
+vector path.
+
+The phases still to come are designed the same way:
+
+- **Binding the program** (part 2). The program's undefined names already
+  have their hashes (`link_hash`, in the names' column). Each is looked up in
+  the runtime's definitions' index, then in `libc.so.6`'s exports' index: the
+  buckets eight at a time by a vector shift, then each bucket's scan.
+  `libc_nonshared.a`'s members are loaded by a frontier walk over a bitset of
+  loaded members: each round looks up the names that the members loaded in
+  the round before leave undefined.
+- **Exports** (part 2). A program definition whose name `libc.so.6` refers to
+  goes to `.dynsym`: each definition is a lookup in an index of the library's
+  references, built as the exports' is.
+- **`.dynsym`, `.dynstr` and `.gnu.hash`** (part 3). The imported and
+  exported symbols are a compress of the symbol columns by their masks, and
+  the names' offsets in `.dynstr` an exclusive prefix sum of their lengths
+  plus 1. `.gnu.hash`'s DJB hash, `h * 33 + c` per byte, is a chain within a
+  name but a dot product in closed form, `5381 * 33^n + sum(c[i] *
+  33^(n - 1 - i))` mod 2^32. So a name of up to 64 bytes is four `vpmulld` of
+  its bytes widened to dwords by a vector of powers of 33 right-aligned to
+  its length, and a reduction. The buckets are the counting sort's by `h mod
+  nbuckets`. Each symbol sets 2 Bloom bits in the word its hash selects; the
+  words are a segmented OR over the symbols sorted by word, with no scatter.
+- **Dynamic relocations and RELR** (part 3). Each fixup's need (a GOT slot,
+  `GLOB_DAT` for an import, `RELATIVE` for a program symbol's address) is a
+  lane mask, counted by `vpopcntq` and placed by prefix sums. The relative
+  relocations' addresses are in atom order, so the RELR words (a bitmap of 63
+  slots each) are built from their deltas in vectors.
+- **Layout** (part 3): prefix sums of each class's aligned sizes, as step 4's
+  layout is.
+- **The snapshot** (part 4): the runtime's link written as its columns are,
+  without a record at a time, and read back with one `pread`. It is
+  validated by one `statx` per probe (19 here, 0.18 µs each), which can go
+  through one `io_uring` submission if that measures faster.
 
 #### Layout
 
@@ -1923,13 +2099,14 @@ Where the decisions stand:
 | --- | --- | --- |
 | Encoding instructions | dependency chains (see the encoder document) | AVX-512 (done: 0.64 ns per instruction) |
 | Patching fixups | loads and stores | scalar, 32-bit targets (done: `executable_patch_pc32`, measured above) |
-| ELF records (`Rela`, `Sym`, dynamic tables) | stores | scalar (measured: ties the `vpermt2q` transpose) |
+| Writing ELF records (`Rela`, `Sym`, dynamic tables) | stores | scalar (measured: ties the `vpermt2q` transpose) |
+| Reading ELF records (objects, archives, `.dynsym`) | shuffles, compression and scalar joins | AVX-512 with an exact path (done: 2.1 against 22 ns per record; "Step 5's phases, data-parallel") |
 | Copying chunks | bandwidth | `memcpy`; the chunks stay in L2 |
 | Hashing names | arithmetic | vectorized, one name per masked load, several in flight |
 | Splitting strings at NULs | arithmetic | the lexer's bitmask-to-positions method |
 | Decoding and classifying relocations | shuffles and tables | `vpermt2q` transpose, `vpermb` classification, `vpcompressd` lists |
 | Bitsets (liveness, GOT needs) | bandwidth | 512-bit OR, `vpopcntq` for counts |
-| Prefix sums for layout | latency | scalar until a profile says otherwise |
+| Prefix sums for layout | latency | scalar until a profile says otherwise; the counting sorts' are vectors (`import_exclusive_scan`) |
 | Build ID | arithmetic | AES rounds on each chunk while it is in L2 (done: 260 GB/s, as fast as reading it; "Patching and writing") |
 | Probing hash tables | memory latency | scalar loads with software prefetch: gathers measured no faster than scalar loads in the patch kernel |
 
@@ -2109,10 +2286,12 @@ and with this document updated with what was measured:
    time, it reports the work done: bytes written, fixups applied, names looked
    up, page faults and peak memory.
 
-   In progress, in three parts: the runtime's files found and imported
-   (`import.c`, `runtime.c` and `test-import`, done: "The runtime snapshot");
-   the dynamic PIE; then the snapshot itself, `.eh_frame` for the generated
-   programs and `benchmark-link`.
+   In progress, in four parts: the runtime's files found and imported, each
+   reader with a vector path and an exact one (`import.c`, `runtime.c`,
+   `test-import` and `benchmark-import`, done: "The runtime snapshot" and
+   "Step 5's phases, data-parallel"); the runtime in the program's link,
+   bound; the dynamic PIE; then the snapshot itself, `.eh_frame` for the
+   generated programs and `benchmark-link`.
 6. **`-static`:** libc.a's closure, IRELATIVE for its IFUNCs, static TLS.
    Then `-static-pie` and `-shared`.
 7. **Foreign inputs:** objects, archives, shared libraries, the vector parse
