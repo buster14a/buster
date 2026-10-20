@@ -7,10 +7,13 @@ machine code and data into files:
 - **The linker:** executables written straight from the compiler, and links of
   other compilers' objects, archives and shared libraries.
 
-The first step of the plan, the lane base layer, is implemented
-(`src/buster/compiler/lane.c`); the rest isn't yet. The document records the
+The lane base layer, the encoder's fixups, the representation and the object
+writer are implemented (`src/buster/compiler/lane.c`, `x86_64_encoder.c`,
+`link.c` and `object_writer.c`, with generated test programs in
+`link_program.c`); the linker isn't yet. The document records the
 measurements on the Ryzen 7 9700X that the design rests on, the design itself,
-and the order to build it in, as `docs/x86-64-encoder.md` does for the encoder.
+and the order to build it in, as `docs/x86-64-encoder.md` does for the
+encoder.
 
 The premise is that most of what mold and wild do on every link is work this
 compiler can avoid altogether. What remains is memory traffic, and the design
@@ -326,9 +329,12 @@ Getting past this means not writing those bytes at the end:
   describes.
 - **Incremental output:** don't write the ones that didn't change.
 
-**Object writer.** It is bound by its file write, like the direct path. The
-work around it is a few microseconds per object. Objects aren't on the direct
-path's way, so their speed matters for `-c` builds and for other linkers.
+**Object writer.** Building an object costs about as much as writing its file,
+measured: 14 µs for an object like one of synth's translation units (151 KB),
+against 8 µs to overwrite its file in place on tmpfs and 35 µs to write a new
+one on btrfs, so an object costs 1.5–3× its file in all ("The object writer
+(`-c`)"). Objects aren't on the direct path's way, so their speed matters for
+`-c` builds and for other linkers.
 
 **Full link of foreign objects.** This path has to read inputs it didn't
 produce and hash names it didn't intern. mold's single thread manages about
@@ -346,12 +352,23 @@ it, the ELF importer converts foreign inputs into it, the object writer
 serializes it, and the linker lays it out and patches it. The tables are column
 arrays indexed by 32-bit ids, and id 0 of each kind means "none". Final
 addresses and file offsets are 64-bit, so the ids don't put a 4 GiB limit on
-the output.
+the output. `src/buster/compiler/link.c` implements it, and its orientation
+comment lists the rules its adds enforce.
 
 **Names** (`NameId`) are spellings interned by the front end. Each has its
 bytes in the name arena and a 64-bit hash computed once, when the name is
 interned. Local labels, `static` functions and string literals never need
-their name to be looked up: references carry ids.
+their name to be looked up: references carry ids, and their symbols can have
+no name (`NameId` 0).
+
+- **The bytes** are followed by a NUL, which the ELF string tables need, and
+  the length is kept.
+- **The hash** is `link_hash`: wyhash's mixing of 8 bytes at a time, scalar
+  for now. From the runtime snapshot on it is part of the format, so the
+  import path's vectorized hashing has to compute the same function, or
+  replace it everywhere.
+- **The table doesn't deduplicate:** the front end interns, and gives each
+  spelling one id.
 
 **Atoms** (`AtomId`) are what the linker places and keeps or drops as a whole:
 
@@ -369,10 +386,17 @@ Columns:
 | --- | --- |
 | `class` | the output section it goes to (`BUSTER_LINK_CLASS_TEXT`, `_RODATA`, `_DATA`, `_BSS`, `_TDATA`, `_INIT_ARRAY`, ...) |
 | `alignment_log2` | its alignment |
+| `unit` | the translation unit or input it comes from: the object the object writer puts it in, and the scope of its local symbols |
 | `size` | its size |
 | `bytes` | its contents: in a lane's buffer, the runtime snapshot or a mapped input; null for zero-fill |
-| fixup range | where its fixups are |
+| fixup range | where its fixups are: a first `FixupId` and a count |
 | `address` | after layout: an image offset for a loaded atom, a file offset otherwise |
+
+The classes are numbered in lld's order of segments, so that sorting atoms by
+class gives the layout's order: `_RODATA` and `_STRINGS` (pools of string
+literals: `.rodata.str1.1` in an object), `_TEXT`, `_TDATA`, `_TBSS`,
+`_INIT_ARRAY`, `_FINI_ARRAY`, `_DATA_RELRO`, `_DATA` and `_BSS`. `_TBSS` and
+`_BSS` are zero-fill.
 
 **Symbols** (`SymbolId`) are what binding is about. One atom can define
 several, and several definitions can compete for one name. Columns:
@@ -382,7 +406,7 @@ several, and several definitions can compete for one name. Columns:
 | `name` | its `NameId` |
 | `atom`, `value` | the defining atom and the offset in it |
 | `size` | its size |
-| `flags` | binding, visibility, type |
+| `flags` | binding, visibility, type, where ELF's `st_info` and `st_other` have them |
 | `source` | where it is defined: program, runtime shared library, runtime archive member, foreign object, foreign shared library, or the linker |
 | `got_slot`, `dynamic_index`, `version` | its GOT slot, `.dynsym` index and version |
 | `reference` | after layout: what code that refers to it uses (its address, its GOT slot's for an import, its offset in the TLS block for a TLS variable) |
@@ -392,7 +416,9 @@ because a small-code-model image (everything a PC32 field can reach) is under
 2 GiB, and the measured 32-bit kernel is the fastest (see "SIMD").
 
 **Fixups** are references the encoder couldn't fill in. They are sorted by
-atom and offset, 13 bytes each in columns:
+atom and offset: each atom's fixups are one range of consecutive ids, sorted
+by offset, whose fields don't overlap, and the ranges of different atoms don't
+interleave. 13 bytes each in columns:
 
 | Column | Contents |
 | --- | --- |
@@ -408,24 +434,34 @@ relocation, and an executable's patch kernel derives its arithmetic from it:
 
 | Kind | Where | Relocation in an object | Value in an executable |
 | --- | --- | --- | --- |
-| `CALL` | `call` or `jmp rel32` | `R_X86_64_PLT32` | S + A − P |
+| `CALL` | a branch's rel32: `call`, `jmp` or `jcc` | `R_X86_64_PLT32` | S + A − P |
 | `CALL_GOT` | `call` or `jmp [rip + slot]` (`ff 15`, `ff 25`) | `R_X86_64_GOTPCRELX` | G + A − P |
-| `LOAD_GOT` | `mov reg, [rip + slot]` | `R_X86_64_REX_GOTPCRELX`, or `R_X86_64_GOTPCRELX` without REX | G + A − P, or, when S turns out to be local, S + A − P with `mov` rewritten to `lea` |
-| `PC32` | any other RIP-relative operand | `R_X86_64_PC32` | S + A − P, checked to fit in int32 |
-| `TPOFF32` | `fs:[x@tpoff]` (local-exec) | `R_X86_64_TPOFF32` | S's offset from the end of the TLS block + A |
-| `GOTTPOFF` | `mov reg, [rip + x@gottpoff]` (initial-exec) | `R_X86_64_GOTTPOFF` | G + A − P, with a `TPOFF64` for the slot |
-| `ABS64` | 8 bytes of data | `R_X86_64_64` | S + A, and in a PIE a relative relocation (a symbolic one for an import) |
-| `PC64` | 8 bytes (unwind tables) | `R_X86_64_PC64` | S + A − P |
-| `ABS32`, `ABS32S` | 4 bytes, non-PIE only | `R_X86_64_32`, `R_X86_64_32S` | S + A, zero- or sign-extension checked |
-| `SIZE32`, `SIZE64` | 4 or 8 bytes | `R_X86_64_SIZE32`, `R_X86_64_SIZE64` | the size of S + A |
+| `LOAD_GOT` | `mov r64, [rip + slot]` | `R_X86_64_REX_GOTPCRELX`: loading a pointer has REX.W | G + A − P, or, when S turns out to be local, S + A − P with `mov` rewritten to `lea` |
+| `GOTPCREL` | any other instruction that reads the slot (`push [rip + slot]`) | `R_X86_64_GOTPCREL` | G + A − P, never rewritten |
+| `PC32` | any other RIP-relative operand or rel32, or 4 bytes of data | `R_X86_64_PC32` | S + A − P, checked to fit in int32 |
+| `TPOFF32` | a 32-bit displacement or immediate: `fs:[x@tpoff]` (local-exec), `[rax + x@tpoff]` | `R_X86_64_TPOFF32` | S's offset from the end of the TLS block + A |
+| `GOTTPOFF` | `mov` or `add r64, [rip + x@gottpoff]` (initial-exec) | `R_X86_64_GOTTPOFF` | G + A − P, with a `TPOFF64` for the slot |
+| `ABS64` | 8 bytes of data, or `movabs`'s imm64 | `R_X86_64_64` | S + A, and in a PIE a relative relocation (a symbolic one for an import) |
+| `PC64` | 8 bytes of data (unwind tables) | `R_X86_64_PC64` | S + A − P |
+| `ABS32`, `ABS32S` | 4 bytes: data, an imm32 or a disp32, non-PIE only | `R_X86_64_32`, `R_X86_64_32S` | S + A, zero- or sign-extension checked |
+| `SIZE32`, `SIZE64` | 4 or 8 bytes: data, an imm32 or an imm64 | `R_X86_64_SIZE32`, `R_X86_64_SIZE64` | the size of S + A |
 
-G is the address of S's GOT slot.
+G is the address of S's GOT slot. A linker that relaxes `CALL_GOT`,
+`LOAD_GOT` or `GOTTPOFF` rewrites the instruction's bytes before the field,
+from what its relocation type says they are, so those kinds go only on those
+instructions, without a segment override; any other read of a slot is
+`GOTPCREL`, which linkers leave alone.
 
 **Wide addends.** Any kind can carry a 64-bit addend: a bit in `kind` sends
 the patch to a side table that holds it. Initializers like
 `(char*)&x + 0x100000000` need it, and so do foreign `R_X86_64_PC64` and
 `R_X86_64_64` relocations with large addends, which GNU as and ld accept.
-The common case stays 13 bytes.
+The common case stays 13 bytes. The bit is the kind's top bit
+(`BUSTER_LINK_FIXUP_WIDE`), and the `addend` column then holds the side
+table's index. An addend goes there exactly when it doesn't fit in int32,
+after an instruction's distance to its end is taken off: from
+`lea rax, [rip + x]`, a source addend of INT32_MIN + 4 fits and
+INT32_MIN + 3 doesn't.
 
 In an executable, every code reference to a symbol goes the same way: directly
 for the program's, through the slot for an import. So the kernel reads one
@@ -440,6 +476,14 @@ Fixups use 0.4 bytes per byte of code at the measured density.
 "Lanes"). The address space is reserved up front, committed on touch, and
 backed by transparent huge pages: they fault 2.8× faster and tear down 10×
 faster.
+
+All the tables' columns come from one arena, each with room for counts given
+up front (count, place, fill: `link_initialize`, with `link_capacity_bytes`
+saying how much to reserve), so a small program's columns share a few base
+pages. An arena per column would cost a reservation for each of the 26
+columns (1.8 µs each, 47 µs in all, more than hello world's whole link is to
+take) and a huge page each once past its first 64 KB. Names' bytes go to an
+arena of their own, which grows as names are interned.
 
 An arena's first 64 KB stay in 4 KB pages (`MADV_NOHUGEPAGE`), and huge pages
 start right after them, on a 2 MB boundary. A huge page is cleared whole when
@@ -514,6 +558,26 @@ The cross-check is GNU as. The encoder's tests already assemble random streams
 with it; giving some instructions symbolic operands (`call f`, `cmpb $1,
 x(%rip)`) and comparing GNU as's relocation records (offset, type, addend) with
 the fixups pins all of this down.
+
+`link_add_code_fixups` (`link.c`) makes an atom's fixups from the encoder's
+output. The code generator gives a reference per symbolic field: the
+instruction, which field (a displacement and an immediate can both be
+symbolic), the kind, the target and the source's addend. With the fixup ends
+and `x86_fixup_distance`, that gives each fixup's offset and addend.
+
+- **It checks each kind against its field:** a rel32, a RIP-relative
+  displacement, another 32-bit displacement or immediate, or a 64-bit
+  immediate, from the form and the operands.
+- **A displacement after a base needs a placeholder that doesn't fit in 8
+  bits,** such as INT32_MIN. Otherwise the encoder makes it 8-bit or leaves it
+  out, and there is no 32-bit field to patch.
+- **It zeroes the fields in the atom's bytes,** as GNU as writes them. The
+  object writer then writes the bytes as they are, and the executable patches
+  over them.
+
+`test-link` checks each kind's offset, addend and bytes against what GNU as
+makes of the same instruction, alone and in streams across the encoder's
+groups.
 
 ### The direct path (no `-c`)
 
@@ -688,6 +752,14 @@ These are four `PT_LOAD`s, as lld writes for hello world, with `PT_PHDR`,
 File offsets are contiguous. Each segment's address continues at the next page
 plus its offset within a page, so there is no file padding, and segments stay
 4 KB-congruent.
+
+The TLS segment then needn't start on a multiple of its alignment: `.tdata`
+starts at its own alignment, which can be less than `.tbss`'s. The TLS block
+keeps `p_vaddr`'s remainder f modulo `p_align`, so it starts
+align_up(`p_memsz` + f, `p_align`) − f below the thread pointer, as glibc
+allocates it and GNU ld and lld compute `TPOFF`: a variable's `TPOFF` is its
+offset in the segment less that distance. With f = 0 it is just `p_memsz`
+rounded up, which is all an aligned segment exercises.
 
 Exact layout is a recurrence (x′ = align_up(x, a) + s), not a prefix sum of
 `size + align − 1`. It becomes a plain prefix sum in two ways:
@@ -873,43 +945,76 @@ anywhere.
 ### The object writer (`-c`)
 
 The object writer serializes the same state as an ET_REL file that GNU ld,
-lld, mold, wild and this linker accept. Its structure is count, place, fill:
+lld, mold, wild and this linker accept, one object per unit (`atoms.unit`).
+`src/buster/compiler/object_writer.c` implements it, and its orientation
+comment has the rules below in full. Its structure is count, place, fill:
 
-1. **Count:** sections, local and global symbols, relocations per section,
-   string-table bytes. Most of it is counted while the code is produced.
-2. **Place:** section indices, symbol indices, string offsets and file ranges,
+1. **Prepare,** once per link (`object_prepare`), for as many units as the
+   caller says the link has, so that a translation unit without atoms still
+   gets its object: counting sorts group the atoms by unit and class, and the
+   symbols defined in atoms by unit, locals first. Each symbol gets what it is
+   to its unit's object (local or global, in a string pool or not, and its
+   place among them) in one 64-bit word, and each unit the bytes its names
+   take.
+2. **Count,** per object (`object_build`): the sections, with their sizes,
+   alignments and relocations. Then one pass over the unit's fixups finds the
+   symbols they refer to, the undefined ones among them, and the sections
+   that need a section symbol. It notes what it found in a per-lane array
+   indexed by symbol id, each entry stamped with the object's number, so the
+   fill reads each relocation's symbol there instead of working it out again,
+   and nothing is cleared between objects.
+3. **Place:** section indices, symbol indices, string offsets and file ranges,
    with checked arithmetic.
-3. **Fill:** each range is written once, into one buffer per lane, then one
-   `pwritev`. Nothing is allocated per symbol or relocation, and no output
-   buffer grows.
+4. **Fill:** each range is written once, into one buffer of exactly the
+   object's size, and the gaps between ranges are zeroed. Nothing is
+   allocated per symbol or relocation, and no buffer grows. Then one `pwrite`
+   (`object_write_file`).
 
-**Sections:**
+The design had each lane fill part of an object and one `pwritev` write the
+parts. An object is a few to a few hundred microseconds of work, too little to
+split, so lanes take whole objects instead (`object_write_units`): the units
+are cut into parts by cost (their atoms' bytes, and a record's 24 bytes for
+each fixup and symbol) and taken from the counter, as rule 1 has it. Each lane
+builds an object in its scratch arena and writes it with one `pwrite`.
 
-- `.text`, or `.text.<name>` per function with `-ffunction-sections`;
-- `.rodata`, and `.rodata.str1.1` for string literals, marked `SHF_MERGE |
-  SHF_STRINGS`;
-- `.data`, `.data.rel.ro`, `.bss`, `.tdata`, `.tbss`;
-- `.init_array` and `.fini_array`, with priorities in their names;
-- `.eh_frame` (`SHT_X86_64_UNWIND`);
+**Sections**, in this order:
+
+- for each class with atoms, in class order: `.rodata`, `.rodata.str1.1`
+  (`SHF_MERGE | SHF_STRINGS`), `.text`, `.tdata`, `.tbss`, `.init_array`,
+  `.fini_array`, `.data.rel.ro`, `.data` and `.bss`. With function sections,
+  each `TEXT` atom has a section of its own, `.text.<name>`, after its first
+  named symbol at offset 0. Each section is followed by its `.rela.<section>`
+  if its atoms have fixups;
 - `.note.GNU-stack`, which must be there or linkers assume an executable
-  stack;
-- `.comment`;
-- `.symtab`, `.strtab`, `.shstrtab` and a `.rela.<section>` for each section
-  with relocations;
-- `.debug_*` when asked.
+  stack, and `.comment`;
+- `.symtab`, `.symtab_shndx` when it is needed, `.strtab` and `.shstrtab`,
+  where each `.rela.<section>`'s name ends with its section's.
+
+In a section, each atom starts at the next multiple of its alignment, in id
+order, with `int3` between code atoms and zeros elsewhere. A section's
+contents start in the file at a multiple of its alignment, as GNU as places
+them, up to 4 KB: linkers copy contents from any offset, and more would only
+pad the file. Not yet: `.eh_frame` and `.debug_*`, which wait for unwind tables
+and DWARF (step 9), and priorities in `.init_array`'s and `.fini_array`'s
+names, which the representation doesn't have.
 
 **Symbols:**
 
 - the null entry first;
 - an `STT_FILE` with the source's name;
-- section symbols for the sections relocations refer to, and every local
-  definition;
-- then the global and weak symbols. `.symtab`'s `sh_info` is the first
-  non-local index, and its `sh_link` is `.strtab`.
+- section symbols for the sections relocations refer to;
+- the unit's local symbols. Those without a name, string literals', are named
+  `.LC0`, `.LC1` and so on, as GCC names them: wild 0.10 never finishes a link
+  with a relocation against an unnamed local symbol in a string pool;
+- then the unit's global and weak symbols, from `.symtab`'s `sh_info`, and the
+  undefined symbols its fixups refer to, in the order they first do, with
+  their binding and visibility and no type but `STT_TLS`, as GNU as writes
+  them.
 
 **Section indices:** past `SHN_LORESERVE` (65,280 sections, reachable with
-function sections), indices go in `SHT_SYMTAB_SHNDX` and `e_shstrndx` in
-section 0. Internal ids never inherit `st_shndx`'s 16 bits.
+function sections), symbols' indices go in `SHT_SYMTAB_SHNDX`, and `e_shnum`
+and `e_shstrndx` in section 0's `sh_size` and `sh_link`. Internal ids never
+inherit `st_shndx`'s 16 bits.
 
 **Relocations.** Each fixup's kind names its relocation type (the table in
 "Representation"), so the type always matches the instruction. GNU as writes
@@ -936,16 +1041,133 @@ general-dynamic and local-dynamic sequences. The addends are the fixups' (A
 relative to the field, "Fixups from the encoder"), and the fields themselves
 are zero, as GNU as writes them.
 
+**Which symbol a relocation names.** Where GNU as and LLVM name a local
+target's section symbol instead of the target, so does the object writer,
+with the target's offset in its section added to the addend:
+
+- a global, weak or undefined target is named itself;
+- a local target is named through its section's symbol, except
+  - for the GOT kinds (`CALL_GOT`, `LOAD_GOT` and `GOTPCREL`), the TLS kinds
+    (`TPOFF32` and `GOTTPOFF`) and the size kinds, whose linkers need the
+    symbol itself;
+  - in a string pool, for a PC-relative kind or any addend. Linkers split a
+    pool into its strings and send a reference through the section's symbol
+    to the string its offset and addend land in, which is the target's only
+    for an absolute reference without an addend: `lea rax, [rip + .LC0]`'s
+    addend is −4, which would land in the string before.
+
 The scalar kernels decide the per-record costs. Writing `Elf64_Rela` from
 columns takes 0.18 ns per record in L1 and 0.61 ns from DRAM, and the AVX-512
 transpose of three qword columns into 24-byte records (three `vpermt2q` and
 three masked permutes per 8 records) takes 0.17 and 0.62 ns. `Elf64_Sym` has
 the same shape. Both are store-bound, so they stay scalar.
 
-What an object costs is then its file. For one of synth's translation units
-(68 KB of code, 2,000 relocations, 1,400 symbols, 175 KB written), the records
-and copies take a few microseconds, against 4–40 µs to write the file (in
-place on tmpfs, new on btrfs).
+**What an object costs** (`benchmark-object-writer` on the 9700X: one lane on
+CPU 2, medians of 21 passes, per object). The programs come from
+`link_program_generate`, with 8 globals, 2 thread-locals, 20 strings and an
+init and a fini function per unit:
+
+- **synth-like:** 64 units of 200 workers of up to 40 filler instructions,
+  each about one of synth's translation units: 54 KB of code, 2,411
+  relocations, 1,208 symbols and 17 sections, 151 KB written;
+- the same with function sections: 419 sections, 182 KB written;
+- **one large unit** of 12,800 workers: 3.4 MB of code, 153,649 relocations
+  and 12,854 symbols, 7.6 MB written;
+- **small:** 64 units of 4 workers of up to 4 filler instructions: 0.7 KB of
+  code, 59 relocations and 80 symbols, 6.1 KB written.
+
+| Objects | File system | Build (µs) | In place (floor) | New file (floor) | In all: in place, new (× the floor) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| synth-like | tmpfs | 14.5 | 8.5 (8.4) | 20.0 (19.7) | 25.1 (3.0×), 36.7 (1.9×) |
+| | btrfs | 14.5 | 24.2 (24.0) | 35.2 (34.5) | 41.0 (1.7×), 51.9 (1.5×) |
+| synth-like, function sections | tmpfs | 18.2 | 10.1 (10.0) | 24.2 (23.6) | 30.8 (3.1×), 44.9 (1.9×) |
+| one large unit | tmpfs | 605 | 435 (432) | 926 (917) | 1,004 (2.3×), 1,495 (1.6×) |
+| | btrfs | 596 | 1,107 (1,110) | 1,341 (1,342) | 1,665 (1.5×), 1,899 (1.4×) |
+| small | tmpfs | 0.59 | 0.85 (0.74) | 3.14 (3.07) | 1.58 (2.1×), 3.86 (1.3×) |
+| | btrfs | 0.60 | 1.84 (1.68) | 9.07 (9.18) | 2.60 (1.5×), 9.84 (1.1×) |
+
+- **Build** is `object_build` alone, one object after another: 10.7 GB/s and
+  6.0 ns per relocation for the synth-like objects, 12.9 GB/s and 3.9 ns for
+  the large one. `object_prepare` adds 1.4 µs per object (92 µs once for the
+  64 units).
+- **In place** overwrites the object's file from the pass before, and **new
+  file** unlinks it first. Their floors are the same system calls without the
+  writer's `fstat`.
+- **In all** is the build just before the write, as a compile does it (2 µs
+  more for the synth-like objects than one after another, since the writes
+  push the representation out of the caches), and the write.
+
+So an object costs 1.1–3.1× its file. The writer is within 0.7 µs of the
+floor (within 1% for the large object), and the build is what is left.
+
+**Where the build's time goes,** for the synth-like objects: 80,000 cycles and
+238,000 instructions per object (IPC 3.0).
+
+| Phase | Cycles | Instructions |
+| --- | ---: | ---: |
+| Count sections | 2,500 | 7,300 |
+| Count symbols: the pass over the fixups | 25,500 | 69,400 |
+| Place | 500 | 1,100 |
+| Fill sections: the atoms' bytes and the gaps | 9,300 | 13,900 |
+| Fill relocations | 17,900 | 86,900 |
+| Fill symbols and their names | 21,700 | 58,500 |
+| The rest: the buffer, its gaps and the headers | 700 | 1,000 |
+
+The estimate here was a few microseconds per object, from the record writers
+alone. The records cost 7 cycles per relocation and 18 per symbol instead,
+since each gathers its fields from several columns at random rather than
+streaming three of them. Counting the symbols mispredicts about 1,100 branches
+per object, mostly at the first meeting with each symbol. A version without
+that branch, which loads and stores every time, was a third slower, since the
+count of undefined symbols became a chain through the loop. What paid:
+
+- the per-lane array instead of a hash table of the symbols met: 19.7 µs per
+  object to 16.7;
+- the columns' pointers in locals (with `-fno-strict-aliasing`, every store
+  makes the compiler load them again otherwise), and each name of up to 64
+  bytes copied with one masked load and store: 16.7 µs to 14.4.
+
+Copying the atoms with AVX-512 instead of `memcpy` didn't.
+
+**Writing the file** (`object_write_file`):
+
+- One `open`, with `O_CREAT` and never `O_TRUNC`, then `fstat`. A regular
+  file with one link, or the empty one `open` just made, is written in place
+  with `pwrite`, and truncated only if it was longer.
+- A file with other hard links gets a new file beside it, in the same
+  directory under a name of its own (`mkstemp`, which a suffix to the
+  destination's name could take past `NAME_MAX`), with its mode, renamed over
+  it, so the other links keep the old contents.
+- Anything else (`/dev/null`, a pipe) is written as it is, in order: `write`,
+  since a pipe refuses `pwrite`.
+- A group of lanes that can't start, because a lane has no room for its
+  order of parts or its symbols, writes no object and gives every unit
+  `OBJECT_ERROR_FULL`.
+
+For a 155 KB file, each way writing files of its own (µs):
+
+| Way | tmpfs | btrfs |
+| --- | ---: | ---: |
+| `open`, `pwrite` over a file of the same size, `close` | 9.7 | 24.6 |
+| the same with `ftruncate` to the same size | 9.8 | 25.4 |
+| the same with `fstat` first, with or without `ftruncate` | 9.2–9.3 | 24.2–25.4 |
+| `open` with `O_TRUNC`, `pwrite`, `close` | 18.9 | 47.6 |
+| `unlink`, `open` with `O_CREAT \| O_EXCL`, `pwrite`, `close` | 21.5 | 38.7 |
+
+In place is 1.6–2.2× as fast as a new file, and `O_TRUNC` throws that away.
+`ftruncate` to the same size costs about 1 µs on btrfs, so a rebuild's object,
+which keeps its size or grows, skips it.
+
+The order of the writes matters as much as the way. A write costs less when
+the pages it writes are still in the CPU's caches: when the file was just
+written, or when a new file gets the pages an unlinked one just gave back.
+That is why the floors here are above those in "The floors", which rewrote one
+file over and over: on tmpfs, 8.4 µs for 151 KB here against 3.9 µs right
+after another write of the same file. So the benchmark gives each way files of
+its own, which it last wrote a pass before (39 MB of other writes earlier for
+the synth-like objects), and lets the ways take turns going first. A first
+version, whose floor rewrote the file the writer had just written, put the
+writer 1 µs behind its floor on tmpfs and 12 µs on btrfs.
 
 `-c` and the direct path can run from the same encoded state. The object gets
 the fixups as relocations, and each chunk before it is patched; the executable
@@ -1447,13 +1669,49 @@ The tests live in `build/compiler`, as the lexer's and the encoder's do:
 - **Fixup offsets and addends** against GNU as's relocation records for the
   same instructions with symbolic operands, over random streams of every form
   that takes a displacement or an immediate.
+- **Generated programs** (`link_program.c`), which every later step's tests
+  and benchmarks use, of two kinds. Static programs without libc, whose
+  `_start` sets up TLS from `PT_TLS` and runs the init and fini arrays, are
+  step 4's first executables. Programs whose `main` the C runtime calls are
+  step 5's: they import `write`, `strlen`, `environ` and `__errno_location`
+  from libc through the GOT, as "Binding before instruction selection" says,
+  keep a pointer to `strlen` in their data, and check that their TLS block
+  and libc's don't overlap. Their workers call each other directly and
+  through the GOT, read globals directly and through the GOT, use local-exec
+  and initial-exec TLS, and read string literals. Their data holds pointers,
+  wide addends among them, and both kinds read a weak symbol that nothing
+  defines through its GOT slot. Every class appears given two thread-locals,
+  an init function and a fini function, and every fixup kind, but options
+  leave out the absolute ones (for a PIE) and `SIZE32` and `SIZE64` (wild 0.10
+  refuses them, as linking each kind with GNU ld, lld, mold and wild on the
+  9700X showed). The program prints a checksum of what it read, which a model
+  of it predicts. The sizes come from options and the rest from a seed, so a
+  benchmark can scale them up. `test-link` lays them out in memory as a
+  static executable at a fixed address, patches every fixup, and runs them in
+  a child process, which does what the C runtime does around `main` and gives
+  libc's functions stand-ins: a reference for the direct path's patch kernel.
+  `test-link --print-assembly` writes them as GNU as source, with a `.reloc`
+  for each fixup. On the 9700X, GNU ld, lld, mold and wild link the objects,
+  statically or through `cc` with libc (as a PIE, with `-no-pie` and with
+  `-static`), into programs that print what the model predicts.
 - **Objects:**
   - read back with `readelf` and `llvm-readobj` in the tests' cross-check
-    mode;
+    mode, and compared with GNU as's objects of the same units
+    (`test-link --print-assembly`);
   - linked by GNU ld, lld, mold and wild;
   - run, with their output compared.
 
   This is the object writer's equivalent of the encoder's GNU as cross-check.
+  GNU as keeps a named local symbol for a `.reloc` where it names the
+  section's symbol for an instruction, so the comparison matches a
+  relocation's target by where it points, and by its form only where that
+  matters: the GOT, TLS and size types, and into `SHF_MERGE` sections.
+  `test-object-writer` also reads every object back itself and works out from
+  the representation alone what each section, symbol and relocation must be,
+  past `SHN_LORESERVE` sections too, and checks that lanes write the same
+  bytes. 49 copies of the writer, each with one rule broken (a type, an index,
+  a flag, a gap's byte, the section symbol rule, the file's handling), all
+  fail it.
 - **Direct executables against linked ones:** the same generated program
   linked directly and through the object writer and lld must behave the same,
   and must have the same symbols, segments, dynamic entries and relocations up
@@ -1525,10 +1783,17 @@ and with this document updated with what was measured:
    addends. Done when they match GNU as's relocations on random streams, and
    the compiler-like mix encodes no slower than the offsets loop (0.72 ns per
    instruction).
+
+   Then what steps 3 to 5 build on: the representation (`link.c`: the
+   tables in "Representation", and fixups from the encoder's marked
+   instructions) and generated test programs (`link_program.c`). Done:
+   `test-link`.
 3. **The object writer:** code, data, symbols and relocations from generated
    programs. Done when GNU ld, lld, mold and wild link its objects into
    programs that run, `readelf` agrees, and `benchmark-object-writer` reports
-   per-object costs against the file floor.
+   per-object costs against the file floor. Done: `object_writer.c`,
+   `test-object-writer` and `benchmark-object-writer`, whose costs are in "The
+   object writer (`-c`)".
 4. **The direct path, starting without libc:** layout, patching, the file
    write and the build ID, which every executable written straight from the
    compiler's state goes through. Linking libc needs step 5's runtime
@@ -1597,12 +1862,13 @@ and with this document updated with what was measured:
 
 - 15 CPUs online (CPU 10, CPU 2's SMT sibling, is offline);
 - amd-pstate-epp in active mode with the performance governor for the link
-  measurements. For the lanes' (2026-10-19), only CPU 2 had it, and the others
-  ran the powersave governor with the energy preference
+  measurements. For the lanes' and the object writer's (2026-10-19), only CPU 2
+  had it, and the others ran the powersave governor with the energy preference
   `balance_performance`;
 - tmpfs at `/tmp` and btrfs (zstd:3) at `/home`;
 - glibc 2.44, GCC 16.2.1's crt files and libgcc, clang 23.1.1;
-- GNU ld 2.47, lld 23.1.1, mold 3.0.0 and wild 0.10.0.
+- GNU ld and readelf 2.47, lld and llvm-readobj 23.1.1, mold 3.0.0 and wild
+  0.10.0.
 
 Every run took the machine's lock (`~/buster-fast-bench/exclusive.sh`), one
 run per lock. One-thread runs are pinned with `taskset -c 2`. The scripts are
@@ -1764,6 +2030,19 @@ and above).
   through a pipe and exits. The time is from the message to `waitpid`'s
   return.
 - **Small calls:** 1,000 of each, timed together.
+
+**The object writer.** `benchmark-object-writer` pinned to CPU 2, with the
+options of each program in "The object writer (`-c`)" (`--function-sections`;
+`--units 1 --functions 12800`; `--units 64 --functions 4 --filler 4`), and
+`--directory` in `/home` for btrfs.
+
+- **Phases:** a harness reading the hardware counters (user mode) around each
+  phase of `object_build`, over 20 passes of the 64 synth-like objects, less
+  the reads' own cost.
+- **Ways to write the file:** a program like the benchmark's files pass for a
+  155 KB buffer. Each way writes 64 files of its own, with 15 µs of spinning
+  before each write (about a build), and the ways take turns going first.
+  Medians of 21 passes.
 
 **Kernel prototypes.**
 

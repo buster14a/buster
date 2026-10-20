@@ -76,3 +76,17 @@ jobs:
       - name: Benchmark the lanes
         # It pins each lane to an allowed CPU of its own.
         run: ./build/compiler benchmark-lanes
+
+      - name: Test the link representation
+        run: ./build/compiler test-link
+
+      - name: Test the object writer
+        # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
+        # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)
+        # and runs them.
+        run: ./build/compiler test-object-writer --cross-check
+
+      - name: Benchmark the object writer
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-object-writer
