@@ -18,7 +18,10 @@
 //     a declaration;
 //   - binding: clang's IR of a weak function beside a strong alias of the same name that leads to recursion (the alias
 //     wins), and of a strong function beside a weak alias (the function wins), each in both orders; two strong
-//     definitions (a problem, and both count); and two weak ones (either may be linked, so both count);
+//     definitions (a problem, and both count); and two weak ones (either may be linked, so both count); then, in both
+//     orders, an alias of a weak function that another unit replaces (the alias keeps its own module's body, which
+//     calls the alias), and an available_externally body that calls back into its unit beside a strong definition in
+//     another (the unit's calls may run the body, inlined);
 //   - allowed cycles: two units' copies of the same static pair, both allowed by one entry; then a cycle that grew past
 //     its entry, an allowed self-call and an entry without a cycle; then a cycle through two units' static functions of
 //     the same name, which an entry naming the other functions once each, and another, mustn't match;
@@ -383,6 +386,168 @@ static const CallGraphInput call_graph_test_both_weak[] = {
     },
 };
 
+// clang 23's IR of these files, as for call_graph_test_alias:
+//
+//   alias_a.c:  int again(int) __attribute__((alias("recurse")));
+//               __attribute__((weak)) int recurse(int n)
+//               {
+//                   int result = 0;
+//                   if (n != 0)
+//                   {
+//                       result = again(n - 1) + 1;
+//                   }
+//                   return result;
+//               }
+//   alias_b.c:  int again(int);
+//               int recurse(int n) { return 100 + n; }
+//               int main(void) { return again(2) == 2 ? 0 : 1; }
+//   inline_a.c: int recurse(int n);
+//               extern inline __attribute__((always_inline, gnu_inline)) int again(int n)
+//               {
+//                   return recurse(n);
+//               }
+//               int recurse(int n)
+//               {
+//                   int result = 1;
+//                   if (n > 1)
+//                   {
+//                       result = again(n - 1) + again(n - 2);
+//                   }
+//                   return result;
+//               }
+//               int main(void) { return recurse(5) != 8; }
+//   inline_b.c: strong.c.
+#define BUSTER_CALL_GRAPH_TEST_ALIAS_A                                 \
+    "@again = dso_local alias i32 (i32), ptr @recurse\n"               \
+    "\n"                                                               \
+    "define weak dso_local i32 @recurse(i32 noundef %0) #0 {\n"        \
+    "  %2 = alloca i32, align 4\n"                                     \
+    "  %3 = alloca i32, align 4\n"                                     \
+    "  store i32 %0, ptr %2, align 4\n"                                \
+    "  store i32 0, ptr %3, align 4\n"                                 \
+    "  %4 = load i32, ptr %2, align 4\n"                               \
+    "  %5 = icmp ne i32 %4, 0\n"                                       \
+    "  br i1 %5, label %6, label %11\n"                                \
+    "\n"                                                               \
+    "6:                                                ; preds = %1\n" \
+    "  %7 = load i32, ptr %2, align 4\n"                               \
+    "  %8 = sub i32 %7, 1\n"                                           \
+    "  %9 = call i32 @again(i32 noundef %8)\n"                         \
+    "  %10 = add i32 %9, 1\n"                                          \
+    "  store i32 %10, ptr %3, align 4\n"                               \
+    "  br label %11\n"                                                 \
+    "\n"                                                               \
+    "11:                                               ; preds = %6, %1\n" \
+    "  %12 = load i32, ptr %3, align 4\n"                              \
+    "  ret i32 %12\n"                                                  \
+    "}\n"
+#define BUSTER_CALL_GRAPH_TEST_ALIAS_B                                 \
+    "define dso_local i32 @recurse(i32 noundef %0) #0 {\n"             \
+    "  %2 = alloca i32, align 4\n"                                     \
+    "  store i32 %0, ptr %2, align 4\n"                                \
+    "  %3 = load i32, ptr %2, align 4\n"                               \
+    "  %4 = add i32 100, %3\n"                                         \
+    "  ret i32 %4\n"                                                   \
+    "}\n"                                                              \
+    "\n"                                                               \
+    "define dso_local i32 @main() #0 {\n"                              \
+    "  %1 = alloca i32, align 4\n"                                     \
+    "  store i32 0, ptr %1, align 4\n"                                 \
+    "  %2 = call i32 @again(i32 noundef 2)\n"                          \
+    "  %3 = icmp eq i32 %2, 2\n"                                       \
+    "  %4 = zext i1 %3 to i64\n"                                       \
+    "  %5 = select i1 %3, i32 0, i32 1\n"                              \
+    "  ret i32 %5\n"                                                   \
+    "}\n"                                                              \
+    "\n"                                                               \
+    "declare i32 @again(i32 noundef) #1\n"
+#define BUSTER_CALL_GRAPH_TEST_INLINE_A                                \
+    "define dso_local i32 @recurse(i32 noundef %0) #0 {\n"             \
+    "  %2 = alloca i32, align 4\n"                                     \
+    "  %3 = alloca i32, align 4\n"                                     \
+    "  store i32 %0, ptr %2, align 4\n"                                \
+    "  store i32 1, ptr %3, align 4\n"                                 \
+    "  %4 = load i32, ptr %2, align 4\n"                               \
+    "  %5 = icmp sgt i32 %4, 1\n"                                      \
+    "  br i1 %5, label %6, label %14\n"                                \
+    "\n"                                                               \
+    "6:                                                ; preds = %1\n" \
+    "  %7 = load i32, ptr %2, align 4\n"                               \
+    "  %8 = sub i32 %7, 1\n"                                           \
+    "  %9 = call i32 @again(i32 noundef %8)\n"                         \
+    "  %10 = load i32, ptr %2, align 4\n"                              \
+    "  %11 = sub i32 %10, 2\n"                                         \
+    "  %12 = call i32 @again(i32 noundef %11)\n"                       \
+    "  %13 = add i32 %9, %12\n"                                        \
+    "  store i32 %13, ptr %3, align 4\n"                               \
+    "  br label %14\n"                                                 \
+    "\n"                                                               \
+    "14:                                               ; preds = %6, %1\n" \
+    "  %15 = load i32, ptr %3, align 4\n"                              \
+    "  ret i32 %15\n"                                                  \
+    "}\n"                                                              \
+    "\n"                                                               \
+    "define available_externally i32 @again(i32 noundef %0) #1 {\n"    \
+    "  %2 = alloca i32, align 4\n"                                     \
+    "  store i32 %0, ptr %2, align 4\n"                                \
+    "  %3 = load i32, ptr %2, align 4\n"                               \
+    "  %4 = call i32 @recurse(i32 noundef %3)\n"                       \
+    "  ret i32 %4\n"                                                   \
+    "}\n"                                                              \
+    "\n"                                                               \
+    "define dso_local i32 @main() #0 {\n"                              \
+    "  %1 = alloca i32, align 4\n"                                     \
+    "  store i32 0, ptr %1, align 4\n"                                 \
+    "  %2 = call i32 @recurse(i32 noundef 5)\n"                        \
+    "  %3 = icmp ne i32 %2, 8\n"                                       \
+    "  %4 = zext i1 %3 to i32\n"                                       \
+    "  ret i32 %4\n"                                                   \
+    "}\n"
+
+static const CallGraphInput call_graph_test_replaced_aliasee[] = {
+    {
+        .name = BUSTER_S8_INIT("alias_a.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_ALIAS_A),
+    },
+    {
+        .name = BUSTER_S8_INIT("alias_b.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_ALIAS_B),
+    },
+};
+
+static const CallGraphInput call_graph_test_replaced_aliasee_reversed[] = {
+    {
+        .name = BUSTER_S8_INIT("alias_b.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_ALIAS_B),
+    },
+    {
+        .name = BUSTER_S8_INIT("alias_a.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_ALIAS_A),
+    },
+};
+
+static const CallGraphInput call_graph_test_inline_body[] = {
+    {
+        .name = BUSTER_S8_INIT("inline_a.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_INLINE_A),
+    },
+    {
+        .name = BUSTER_S8_INIT("inline_b.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_STRONG),
+    },
+};
+
+static const CallGraphInput call_graph_test_inline_body_reversed[] = {
+    {
+        .name = BUSTER_S8_INIT("inline_b.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_STRONG),
+    },
+    {
+        .name = BUSTER_S8_INIT("inline_a.ll"),
+        .text = BUSTER_S8_INIT(BUSTER_CALL_GRAPH_TEST_INLINE_A),
+    },
+};
+
 static const CallGraphInput call_graph_test_copies[] = {
     {
         .name = BUSTER_S8_INIT("first.ll"),
@@ -603,6 +768,38 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_both_weak),
         .expected = BUSTER_S8_INIT("cycle: weak_alias.ll:recurse -> weak_alias.ll:recurse\n"
                                    "call graph: 2 translation units, 2 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+        .success = false,
+    },
+    {
+        .name = "replaced aliasee",
+        .inputs = call_graph_test_replaced_aliasee,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_replaced_aliasee),
+        .expected = BUSTER_S8_INIT("cycle: alias_a.ll:recurse -> alias_a.ll:recurse\n"
+                                   "call graph: 2 translation units, 3 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+        .success = false,
+    },
+    {
+        .name = "replaced aliasee, reversed",
+        .inputs = call_graph_test_replaced_aliasee_reversed,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_replaced_aliasee_reversed),
+        .expected = BUSTER_S8_INIT("cycle: alias_a.ll:recurse -> alias_a.ll:recurse\n"
+                                   "call graph: 2 translation units, 3 functions, 2 calls between them, 1 cycle, 0 allowed\n"),
+        .success = false,
+    },
+    {
+        .name = "inline body",
+        .inputs = call_graph_test_inline_body,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_inline_body),
+        .expected = BUSTER_S8_INIT("cycle: inline_a.ll:recurse -> inline_a.ll:again -> inline_a.ll:recurse\n"
+                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed\n"),
+        .success = false,
+    },
+    {
+        .name = "inline body, reversed",
+        .inputs = call_graph_test_inline_body_reversed,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_inline_body_reversed),
+        .expected = BUSTER_S8_INIT("cycle: inline_a.ll:recurse -> inline_a.ll:again -> inline_a.ll:recurse\n"
+                                   "call graph: 2 translation units, 4 functions, 6 calls between them, 1 cycle, 0 allowed\n"),
         .success = false,
     },
     {

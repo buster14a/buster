@@ -7,8 +7,9 @@
 // -disable-llvm-passes writes it (`./build.sh check-call-graph` makes them and runs the command): without any pass, not
 // even the always-inliner, so a call in the IR is a call in the source. The check reads each `define` and the direct
 // `call`, `invoke` and `callbr` instructions in its body, resolves each callee as the linker would (call_graph_resolve:
-// a symbol of the same translation unit first, then an external one, whose strong definitions win over its weak ones;
-// an alias, through any chain of them, to the function it names), builds the call graph of the defined functions, and
+// a symbol of the same translation unit first, then an external one, whose strong definitions win over its weak ones,
+// with the unit's own available_externally body, which clang may inline; an alias, through any chain of them, to the
+// definition of its target in its own module), builds the call graph of the defined functions, and
 // finds its strongly connected components with Tarjan's algorithm, run with explicit stacks. Calls of functions defined nowhere (libc, LLVM's
 // intrinsics) and calls through pointers are left out: the style allows function pointers only at the thread-entry
 // boundary. A call of an ifunc, whose callee is chosen at run time, or of an alias that leads to no definition is a
@@ -146,10 +147,13 @@ typedef enum CallGraphBinding
     CALL_GRAPH_BINDING_WEAK,
     // internal or private: the name belongs to its translation unit.
     CALL_GRAPH_BINDING_LOCAL,
+    // available_externally: a copy of an external definition, for inlining. It is never linked, but the calls of its
+    // own translation unit may run it, inlined, whichever definition the linker takes.
+    CALL_GRAPH_BINDING_AVAILABLE,
 } CallGraphBinding;
 
 // The binding of the definition whose linkage, if it has one, starts at line[at]. weak, linkonce and their _odr forms
-// and available_externally (a copy of a definition elsewhere) give way to a strong definition.
+// give way to a strong definition.
 static CallGraphBinding call_graph_binding(String8 line, uint64_t at)
 {
     CallGraphBinding result = CALL_GRAPH_BINDING_STRONG;
@@ -158,10 +162,13 @@ static CallGraphBinding call_graph_binding(String8 line, uint64_t at)
         result = CALL_GRAPH_BINDING_LOCAL;
     }
     else if (call_graph_starts_with(line, at, BUSTER_S8("weak ")) || call_graph_starts_with(line, at, BUSTER_S8("weak_odr ")) ||
-             call_graph_starts_with(line, at, BUSTER_S8("linkonce ")) || call_graph_starts_with(line, at, BUSTER_S8("linkonce_odr ")) ||
-             call_graph_starts_with(line, at, BUSTER_S8("available_externally ")))
+             call_graph_starts_with(line, at, BUSTER_S8("linkonce ")) || call_graph_starts_with(line, at, BUSTER_S8("linkonce_odr ")))
     {
         result = CALL_GRAPH_BINDING_WEAK;
+    }
+    else if (call_graph_starts_with(line, at, BUSTER_S8("available_externally ")))
+    {
+        result = CALL_GRAPH_BINDING_AVAILABLE;
     }
     return result;
 }
@@ -402,19 +409,22 @@ struct CallGraphSymbols
     // Each symbol's first definition, and how many of its definitions are strong.
     uint32_t* first;
     uint32_t* strong_count;
-    // Each definition's kind, its function's or alias's index, the next definition of its symbol, and whether it is
-    // strong (a local definition is).
+    // Each definition's kind, its function's or alias's index, the next definition of its symbol, its binding and its
+    // translation unit.
     uint8_t* kinds;
     uint32_t* indices;
     uint32_t* next;
-    bool* strong;
+    uint8_t* bindings;
+    uint32_t* units;
     // Each alias's translation unit (where its target is looked up) and its target's name.
     const uint32_t* alias_units;
     const String8* alias_targets;
-    // The resolution that last followed each alias, and the resolution's worklist of names to look up.
+    // The resolution that last followed each alias, and the resolution's worklist of names to look up: from a call, or
+    // as an alias's target.
     uint64_t* alias_stamps;
     uint32_t* work_units;
     String8* work_names;
+    bool* work_targets;
 };
 
 typedef struct CallGraphCallees CallGraphCallees;
@@ -429,8 +439,10 @@ struct CallGraphCallees
 
 // The functions a call of `name` from translation unit `unit` can reach, written to `callees` unless it is 0. The name
 // is the unit's own symbol if it has one, else the external symbol, whose strong definitions are the ones the linker
-// takes; without one, it takes one of the weak definitions, by link order, so all of them count. An alias's target is
-// looked up the same way from its unit, and each alias is followed once per resolution, which `stamp` tells apart.
+// takes; without one, it takes one of the weak definitions, by link order, so all of them count. The unit's own
+// available_externally definition counts too, as the call may be inlined from it. An alias refers to its target's
+// definition in its own module, whatever the linker takes for the target's name elsewhere, so a target counts only
+// that unit's definitions of the name. Each alias is followed once per resolution, which `stamp` tells apart.
 static CallGraphCallees call_graph_resolve(CallGraphSymbols* symbols, uint32_t unit, String8 name, uint64_t stamp, uint32_t* callees)
 {
     CallGraphCallees result = { 0 };
@@ -438,11 +450,13 @@ static CallGraphCallees call_graph_resolve(CallGraphSymbols* symbols, uint32_t u
     uint32_t work_count = 1;
     symbols->work_units[0] = unit;
     symbols->work_names[0] = name;
+    symbols->work_targets[0] = false;
     while (work_count != 0)
     {
         work_count -= 1;
         const uint32_t work_unit = symbols->work_units[work_count];
         const String8 work_name = symbols->work_names[work_count];
+        const bool target = symbols->work_targets[work_count];
         uint32_t symbol = symbols->table.slots[call_graph_find(&symbols->table, work_unit, work_name)];
         if (symbol == 0)
         {
@@ -452,7 +466,10 @@ static CallGraphCallees call_graph_resolve(CallGraphSymbols* symbols, uint32_t u
         for (uint32_t definition = symbol != 0 ? symbols->first[symbol - 1] : BUSTER_CALL_GRAPH_NONE; definition != BUSTER_CALL_GRAPH_NONE; definition = symbols->next[definition])
         {
             const uint32_t index = symbols->indices[definition];
-            const bool taken = !strong_only || symbols->strong[definition];
+            const uint8_t binding = symbols->bindings[definition];
+            const bool own = symbols->units[definition] == work_unit;
+            const bool linked = binding == CALL_GRAPH_BINDING_STRONG || binding == CALL_GRAPH_BINDING_LOCAL || (binding == CALL_GRAPH_BINDING_WEAK && !strong_only);
+            const bool taken = target ? own : linked || (binding == CALL_GRAPH_BINDING_AVAILABLE && own);
             if (taken && symbols->kinds[definition] == CALL_GRAPH_KIND_FUNCTION)
             {
                 if (callees != 0)
@@ -470,6 +487,7 @@ static CallGraphCallees call_graph_resolve(CallGraphSymbols* symbols, uint32_t u
                 symbols->alias_stamps[index] = stamp;
                 symbols->work_units[work_count] = symbols->alias_units[index];
                 symbols->work_names[work_count] = symbols->alias_targets[index];
+                symbols->work_targets[work_count] = true;
                 work_count += 1;
                 followed = true;
             }
@@ -625,7 +643,8 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     uint8_t* definition_kinds = BUSTER_ARENA_PUSH_ARRAY(work, uint8_t, definition_capacity + 1);
     uint32_t* definition_indices = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, definition_capacity + 1);
     uint32_t* definition_next = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, definition_capacity + 1);
-    bool* definition_strong = BUSTER_ARENA_PUSH_ARRAY(work, bool, definition_capacity + 1);
+    uint8_t* definition_bindings = BUSTER_ARENA_PUSH_ARRAY(work, uint8_t, definition_capacity + 1);
+    uint32_t* definition_units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, definition_capacity + 1);
     String8* names = BUSTER_ARENA_PUSH_ARRAY(work, String8, function_capacity + 1);
     uint32_t* units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
     uint32_t* alias_units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, alias_capacity + 1);
@@ -633,6 +652,7 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     uint64_t* alias_stamps = BUSTER_ARENA_PUSH_ARRAY(work, uint64_t, alias_capacity + 1);
     uint32_t* work_units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, alias_capacity + 1);
     String8* work_names = BUSTER_ARENA_PUSH_ARRAY(work, String8, alias_capacity + 1);
+    bool* work_targets = BUSTER_ARENA_PUSH_ARRAY(work, bool, alias_capacity + 1);
     uint32_t* call_callers = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, call_capacity + 1);
     uint32_t* call_units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, call_capacity + 1);
     String8* call_names = BUSTER_ARENA_PUSH_ARRAY(work, String8, call_capacity + 1);
@@ -659,8 +679,8 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     uint32_t* path = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 1);
     bool* allowed_used = BUSTER_ARENA_PUSH_ARRAY(work, bool, allowed_count + 1);
     bool memory = fits && symbol_names != 0 && symbol_scopes != 0 && symbol_first != 0 && symbol_last != 0 && symbol_strong_count != 0 && slots != 0 &&
-                  definition_kinds != 0 && definition_indices != 0 && definition_next != 0 && definition_strong != 0 && names != 0 && units != 0 && alias_units != 0 &&
-                  alias_targets != 0 && alias_stamps != 0 && work_units != 0 && work_names != 0 && call_callers != 0 && call_units != 0 && call_names != 0 &&
+                  definition_kinds != 0 && definition_indices != 0 && definition_next != 0 && definition_bindings != 0 && definition_units != 0 && names != 0 && units != 0 && alias_units != 0 &&
+                  alias_targets != 0 && alias_stamps != 0 && work_units != 0 && work_names != 0 && work_targets != 0 && call_callers != 0 && call_units != 0 && call_names != 0 &&
                   call_lines != 0 && callers_begin != 0 && calls_itself != 0 && visit != 0 && lowest != 0 && on_stack != 0 && component_stack != 0 &&
                   walk_functions != 0 && walk_calls != 0 && components != 0 && component_begin != 0 && members != 0 && component_first != 0 && queue != 0 &&
                   predecessors != 0 && reached != 0 && path != 0 && allowed_used != 0;
@@ -691,12 +711,14 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
             .kinds = definition_kinds,
             .indices = definition_indices,
             .next = definition_next,
-            .strong = definition_strong,
+            .bindings = definition_bindings,
+            .units = definition_units,
             .alias_units = alias_units,
             .alias_targets = alias_targets,
             .alias_stamps = alias_stamps,
             .work_units = work_units,
             .work_names = work_names,
+            .work_targets = work_targets,
         };
 
         // The definitions and their calls, and the aliases. Each definition is added to its symbol's list, in order;
@@ -749,7 +771,9 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
                         slots[slot] = symbol_count;
                     }
                     const uint32_t symbol = slots[slot] - 1;
-                    definition_strong[definition_count] = binding != CALL_GRAPH_BINDING_WEAK;
+                    const bool strong = binding == CALL_GRAPH_BINDING_STRONG || binding == CALL_GRAPH_BINDING_LOCAL;
+                    definition_bindings[definition_count] = (uint8_t)binding;
+                    definition_units[definition_count] = unit;
                     definition_next[definition_count] = BUSTER_CALL_GRAPH_NONE;
                     if (symbol_first[symbol] == BUSTER_CALL_GRAPH_NONE)
                     {
@@ -760,7 +784,7 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
                         definition_next[symbol_last[symbol]] = definition_count;
                     }
                     symbol_last[symbol] = definition_count;
-                    if (definition_strong[definition_count] && symbol_strong_count[symbol] != 0)
+                    if (strong && symbol_strong_count[symbol] != 0)
                     {
                         call_graph_append_location(&report, inputs[unit].name, line_number);
                         call_graph_append(&report, BUSTER_S8("a second strong definition of "));
@@ -768,7 +792,7 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
                         call_graph_append(&report, BUSTER_S8("\n"));
                         result.problem_count += 1;
                     }
-                    symbol_strong_count[symbol] += definition_strong[definition_count];
+                    symbol_strong_count[symbol] += strong;
                     if (define.is_define)
                     {
                         definition_kinds[definition_count] = CALL_GRAPH_KIND_FUNCTION;
