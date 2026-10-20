@@ -131,6 +131,16 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-import
 
+      - name: Test binding
+        # --cross-check also links the bound programs with ld.lld and ld.bfd and runs them, and compares what binding
+        # found with lld's link of the programs' own objects.
+        run: ./build/compiler test-bind --cross-check
+
+      - name: Benchmark binding
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-bind
+
       - name: Test the direct path's executables
         run: ./build/compiler test-executable
 

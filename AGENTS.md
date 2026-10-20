@@ -140,6 +140,8 @@ designs and the compilers already built this way.
   The benchmark is linked into this executable rather than built separately.
 - `src/buster/compiler/c_lexer_test.c` holds the lexer tests. `main.c` includes
   it, and `./build/compiler test-lexer` runs them.
+  The same command also runs `main_test.c`'s input-loader error and cleanup
+  regressions; these require no corpus or performance measurement.
 - `src/buster/compiler/c_lexer_benchmark.c` provides the `benchmark-lexer`
   command. The 9700X CI workflow runs it on the repository's C sources by
   default. `docs/c-lexer.md` records the GFNI classifier, the leading-comment
@@ -212,9 +214,22 @@ designs and the compilers already built this way.
   does (`Scrt1.o`, `crti.o`, `crtbeginS.o`, `crtendS.o` and `crtn.o`, and the
   `libc.so.6` and `libc_nonshared.a` that `libc.so` names) and imports them
   into a link of their own, with what each name they refer to binds to (the
-  first part of step 5 of the design's plan). `import_test.c` holds their
-  tests (`main.c` includes it; `./build/compiler test-import` runs them) and
-  `import_benchmark.c` provides `benchmark-import`.
+  first part of step 5 of the design's plan), each object's records as a
+  piece, and an index and a filter of their global names and libc's.
+  `import_test.c` holds their tests (`main.c` includes it; `./build/compiler
+  test-import` runs them) and `import_benchmark.c` provides
+  `benchmark-import`.
+- `src/buster/compiler/bind.c` is binding (the second part of step 5): the C
+  runtime that `runtime.c` imports joined to a program's link in the order
+  GCC's driver links it, one symbol per global name, and each name of the link
+  bound as GNU ld binds it: to the program, the runtime's objects, the linker,
+  an export of `libc.so.6` at its version (an import), a member of
+  `libc_nonshared.a`, which joins, or for a weak reference to nothing; with
+  the link's imports and exports listed. It has a vector path and an exact
+  one, its twin, which make the same link. `link_program.c`'s programs leave
+  room for it (`link_program_generate_begin`, `_atoms` and `_end`).
+  `bind_test.c` holds its tests (`main.c` includes it; `./build/compiler
+  test-bind` runs them) and `bind_benchmark.c` provides `benchmark-bind`.
 - `src/buster/compiler/executable.c` writes the direct path's first
   executables: a link in that representation laid out, patched and written as
   a static executable without libc (step 4 of the design's plan), with a build
@@ -264,6 +279,8 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build/compiler benchmark-object-writer
 ./build/compiler test-import --cross-check
 ./build/compiler benchmark-import
+./build/compiler test-bind --cross-check
+./build/compiler benchmark-bind
 ./build/compiler test-executable
 ./build/compiler benchmark-executable
 ./build/compiler test-refinement src
@@ -399,6 +416,14 @@ machine, with `build.sh`'s unoptimized build, the C and C++ runs take about
 ./build/compiler test-lexer --cplusplus --seed 7 --fuzz 2000000
 ```
 
+Both modes also check the entry point's loader: empty and missing files,
+a borrowed source and a sparse file past the lexer's length limit, and repeated
+successful loads whose descriptor and four mappings must be released. A child
+limits its address space to fail each token-array mapping in turn, including
+`ends`, and the source mapping; each failure must retain its cause, return zero tokens and
+leave no mappings or descriptor behind. This checks the existing stub only,
+without replacing the driver being developed under #116, #117 and #145.
+
 ## Lexer benchmarks
 
 `./build/compiler benchmark-lexer [--cplusplus] path...` checks each matching
@@ -412,42 +437,42 @@ yet compared against a performance baseline. Keep just one compiler executable.
 
 ## x86-64 encoder tests
 
-`./build/compiler test-x86-encoder` (about 1.5 s) checks that every form fits a
+`./build/compiler test-x86-encoder` (about 1.8 s) checks that every form fits a
 template (and that building each, in every mode, at a `PROT_NONE` page writes
 nothing past it), both encoders on 761 known encodings from GNU as (each also
 with the fixup flag, whose end they must report), a digest of the scalar
-encoder's output
-for 100,000 random instructions, every batch width and variant of `x86_encode`
-against the scalar encoder (bytes, offsets and fixup ends, in each of the four
-loops: with neither, either or both of offsets and fixup ends) on every count
-from 0 to 199 and on 300,000 random instructions of every form (legacy with x87
-and MMX, VEX and EVEX, with opmasks, broadcasts, rounding, registers 16-31,
-gathers and scatters, FS and GS segment overrides, and one in eight marked with
-the fixup flag), the same between `PROT_NONE` guard pages, and that invalid
-operands are rejected (immediates and rel8s outside their fields' ranges by
-`x86_validate` alone: `x86_encode` writes their low bytes; and memory operands
-in the 232 FS and GS forms without room for the override). Then it runs those
-checks again with 32-bit addresses, but the known fixups: 34 known encodings, a
-digest of their own, `x86_encode_64_address32` against the scalar encoder on the
-random streams and at page edges, and invalid operands, among them MPX memory
-operands and memory operands in the 312 FS and GS forms and the 116 forms
-without room for the `67`. And again for APX, but the known fixups: 153 known
-encodings, 31 known invalid instructions (as GNU as rejects them), a digest of
-their own, `x86_encode_64_apx` against the scalar encoder on random streams in
-which half the forms have REX2 and a quarter are EVEX ones, and at page edges,
-and invalid operands, among them a high byte register with REX2, registers 16 to
-31 in forms without REX2 or EVEX and XMM16 to XMM31 in SSE's forms. And in
-32-bit and 16-bit modes: 159 and 150 known encodings, 13 and 16 known fixups, a
-digest of each, `x86_encode_64_mode32` and `x86_encode_64_mode16` against the
-scalar encoders on random streams with both address sizes and segment
-overrides in the decorations, and at page edges, streams of instructions longer
-than 15 bytes at a page end (16-bit mode has them), which the loop must reject
-without writing past the output's capacity, and invalid operands, among them
-registers that would need REX, 16-bit addresses that aren't ModRM's, forms of
-64-bit mode alone, instructions past 15 bytes and segment overrides where an
-instruction takes none. `--address32`, `--apx`, `--mode32` and
-`--mode16` run only their pass, and `--count N` and `--seed N` change the random
-streams.
+encoder's output for 100,000 random instructions, every batch width and variant
+of `x86_encode` against the scalar encoder (bytes, offsets and fixup ends, in
+each of the four loops: with neither, either or both of offsets and fixup ends)
+on every count from 0 to 199 and on 300,000 random instructions of every form
+(legacy with x87 and MMX, VEX and EVEX, with opmasks, broadcasts, rounding,
+registers 16-31, gathers and scatters, FS and GS segment overrides, and one in
+eight marked with the fixup flag), the same between `PROT_NONE` guard pages, and
+that `x86_validate` finds every invalid operand and the scalar encoder rejects
+it (memory operands in the 232 FS and GS forms without room for the override
+among them). `x86_encode` checks nothing: it takes what `x86_validate` accepts,
+as the code generator makes it (an immediate or rel8 outside its field's range,
+for one, gets its low bytes). Then it runs those checks again with 32-bit
+addresses, but the known fixups: 34 known encodings, a digest of their own,
+`x86_encode_16_address32` and `x86_encode_64_address32` against the scalar
+encoder on the random streams and at page edges, and invalid operands, among
+them MPX memory operands and memory operands in the 312 FS and GS forms and the
+116 forms without room for the `67`. And again for APX, but the known fixups:
+153 known encodings, 31 known invalid instructions (as GNU as rejects them), a
+digest of their own, `x86_encode_16_apx` and `x86_encode_64_apx` against the
+scalar encoder on random streams in which half the forms have REX2 and a quarter
+are EVEX ones, and at page edges, and invalid operands, among them a high byte
+register with REX2, registers 16 to 31 in forms without REX2 or EVEX and XMM16
+to XMM31 in SSE's forms. And in 32-bit and 16-bit modes: 159 and 150 known
+encodings, 13 and 16 known fixups, a digest of each, the modes' loops at 16 and
+64 instructions per iteration (`x86_encode_16_mode32` and the rest) against the
+scalar encoders on random streams with both address sizes and segment overrides
+in the decorations, and at page edges, instructions longer than 15 bytes (16-bit
+mode has them), which `x86_validate_16` must reject, and invalid operands, among
+them registers that would need REX, 16-bit addresses that aren't ModRM's, forms
+of 64-bit mode alone, instructions past 15 bytes and segment overrides where an
+instruction takes none. `--address32`, `--apx`, `--mode32` and `--mode16` run
+only their pass, and `--count N` and `--seed N` change the random streams.
 
 The digests were recorded when GNU as encoded the same streams to the same
 bytes. After changing the form table, the scalar encoder or the fixup interface,
@@ -512,14 +537,17 @@ their ends. The variants are the batch widths (`x86_encode_4` to
 `x86_encode_64`, instructions per loop iteration), the template gather, output
 store and fixup store alternatives that lost, `x86_encode_64_offsets_then_pick`,
 the other way to have fixup ends (every offset, then the caller picks the marked
-ones), and `x86_encode_64_apx`, `x86_encode_apx`'s loop (the streams have no
-registers 16 to 31, so its bytes are the same). `--mode32` and `--mode16` time
-`x86_encode_64_mode32` or `x86_encode_64_mode16` and the mode's scalar loop
-instead, on a mix like 32-bit compiler output or like real-mode code (or with
-`--uniform`, the mode's forms).
-Decide them, and any other performance question, with measurements on the 9700X
-(not Zen 4, and not llvm-mca, whose predictions are well off), using uops.info's
-Zen 5 port data to explain them;
+ones), and `x86_encode_64_apx` and `x86_encode_16_apx`, APX's loops (the streams
+have no registers 16 to 31, so their bytes are the same). The entry points use
+16 per iteration: it is up to 7% slower than 64 in these runs, but 1% to 7%
+faster after scalar code, where a compiler runs its encoder (measure that state
+too: see `docs/x86-64-encoder.md`'s "Zen 5's costs"). `--mode32` and `--mode16`
+time the mode's loops at 64 and 16 per iteration (`x86_encode_64_mode32` and
+`x86_encode_16_mode32`, or the 16-bit ones) and its scalar loop instead, on a
+mix like 32-bit compiler output or like real-mode code (or with `--uniform`, the
+mode's forms). Decide them, and any other performance question, with
+measurements on the 9700X (not Zen 4, and not llvm-mca, whose predictions are
+well off), using uops.info's Zen 5 port data to explain them;
 `docs/x86-64-encoder.md` has the current numbers. Clang's code for the loop
 changes a lot with small source changes, so compare every width after changing
 the encoder, and profile which loop the samples land in. The default 9700X job
@@ -797,7 +825,13 @@ the 9700X, and 0.15 s with `--cross-check`) checks `import.c` and
   `__libc_start_main` and `__cxa_finalize` to libc, `__gmon_start__` and the
   `_ITM_` functions to nothing, `__TMC_END__` to `crtendS.o`, and
   `_GLOBAL_OFFSET_TABLE_`, which the crt objects that use the GOT name, to the
-  linker.
+  linker. Each object's piece must follow the one before, with its atoms in
+  its own unit and its names' bytes one run, and the global names (binding's
+  index of the runtime's names and libc's) must hold each name once, found by
+  its bytes and in its filter, each global symbol's its own: `main` defined by
+  none of them, `__libc_start_main` libc.so.6's, `__dso_handle` crtbeginS.o's,
+  `atexit` a member's, and `_GLOBAL_OFFSET_TABLE_` and the init and fini
+  arrays' bounds the linker's, whether or not the runtime refers to them.
 
 `--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
 version, type, binding and size) and references with `readelf -W --dyn-syms`,
@@ -832,6 +866,96 @@ Run it under the 9700X's lock with `taskset -c 2`. With `--library
 data-parallel" has the numbers for. The default 9700X job runs it after the
 import tests, pinned to one allowed CPU; like the others, its measurements are
 informational.
+
+## Bind tests
+
+`./build/compiler test-bind [--seed N] [--cross-check] [--keep]` (about
+5 ms on the 9700X, and 0.25 s with `--cross-check`) checks `bind.c` against
+this system's runtime (`runtime_import`). Every check binds by both paths,
+which must make the same link, column by column, and the same imports,
+exports and members:
+
+- programs: test-link's two sets that call libc, each generated with room for
+  the runtime, Scrt1.o, crti.o and crtbeginS.o joined after the program's
+  symbols, its atoms, then the rest (`link_program_generate_begin`, `_atoms`
+  and `_end`, which runs `link_check` on the whole link). Then: one symbol per
+  global name; every name's bytes in the link's own arena and every atom's in
+  the program's; every fixup's target defined, imported from `libc.so.6` at
+  its export's version and with its type, the linker's, or a weak reference
+  to nothing; `main` the program's, and what the crt objects refer to bound
+  as GNU ld binds it (`__libc_start_main` at `GLIBC_2.34`, `__cxa_finalize`
+  weakly, `__gmon_start__` and the `_ITM_` functions to nothing,
+  `_GLOBAL_OFFSET_TABLE_` to the linker, `__TMC_END__` to `crtendS.o`,
+  `__dso_handle` in `crtbeginS.o`, hidden); the crt objects' atoms before the
+  program's and after it in GCC's order, each with the runtime's bytes and
+  fixups; `.init`'s and `.fini`'s fragments `crti.o`'s first and `crtn.o`'s
+  last, and `crtendS.o`'s `.eh_frame` last;
+- names: every name of the programs and every export of `libc.so.6`, looked
+  up in the runtime's index, must find what a scan of the runtime's names
+  finds;
+- rules: links made by hand, each exercising one rule, with what binding
+  reports: a strong definition of `_start` (a duplicate); one of `data_start`,
+  which Scrt1.o defines weakly (the program's wins), and a weak one (Scrt1.o's
+  wins, first in link order); weak definitions of `_init`, with their atoms
+  before and after `bind_begin` (crti.o's strong one takes the symbol, with
+  its atom in `.init` and its visibility); a reference to
+  `__dso_handle` (defined by crtbeginS.o's atom, hidden); strong and weak
+  references to a name nothing defines (an error, and nothing); definitions
+  of `strlen`, which libc.so.6 defines, and `_dl_argv`, which it refers to
+  (exports), a hidden `qsort` and a name of the program's own (not); two
+  symbols named `write`; references added after `bind_begin` of a name the
+  runtime has and of `memcpy`; strong and weak references to `__cxa_finalize`,
+  which crtbeginS.o refers to weakly; strong and weak references to
+  `pthread_atfork`, which a member defines (it joins, and doesn't), and a
+  hidden one (it joins); hidden and protected references to `puts`, which only
+  libc.so.6 defines (an error), and a weak hidden one (nothing, not an
+  import); references to the init and fini arrays' bounds (the linker's); a
+  local `_init`; a symbol of the program's that it never defines (left to
+  `link_check`); and a link without room. Then the rules this system's runtime
+  can't reach through the entry points, on binding's own steps: a strong
+  reference joining a weak one that binding left to nothing (an error, but
+  not for a name left to `crtendS.o`), a name left to `crtendS.o` with source
+  `RUNTIME_ARCHIVE`, and an import a member came to define dropped from the
+  imports;
+- an atexit program: `main` registers a handler with `atexit` and returns 3,
+  the handler exits with 0. Bound, it must pass `link_check`, and `atexit.oS`
+  must join, defining `atexit`, its `__cxa_atexit` imported at `GLIBC_2.2.5`
+  and its `__dso_handle` bound to crtbeginS.o's;
+- the linkers' cases, programs whose binding GNU ld and lld decide for
+  themselves: a weak `_init` that exits with 7 if it runs, against crti.o's;
+  `main` returning a weak `data_start` of 7, after Scrt1.o's of 0; a call
+  through the GOT to a hidden `puts` (refused); `main` returning whether a
+  weak hidden `puts` isn't 0; and references to the arrays' bounds. Each must
+  bind, or fail to, as the linkers link it;
+- with `--cross-check`, which needs `ld.lld`, `ld.bfd`, `cc` and `readelf`:
+  each bound program written as objects, one per unit, linked by ld.lld and
+  ld.bfd as a PIE with only `libc.so.6` and the loader besides, in GCC's
+  order, without errors or warnings, must run and print what its model
+  predicts (the atexit program must exit with 0); and the program's own
+  objects, linked by `cc` with lld, must have in readelf's `.dynsym` the
+  imports at their versions and with their types, the weak references with
+  default visibility and the exports binding found, and lld's `--why-extract`
+  the members that joined. Each linkers' case's own objects, linked by `cc`
+  with GNU ld and with lld, must link, or fail to, as binding did, and run
+  with the case's status (0), and so must its bound link.
+
+The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
+removed at the end unless `--keep`. The default 9700X job runs it with
+`--cross-check` after the import benchmark.
+
+## Bind benchmark
+
+`./build/compiler benchmark-bind [--functions LIST] [--seed N]` binds
+generated programs that call libc, of 1, 64, 2,000 and 102,400 workers by
+default (`--functions` takes a list), 200 workers per unit as synth's
+translation units have, by each path, and reports 21-run medians (time,
+cycles, instructions, IPC) of the match (the program's global symbols looked
+up in the runtime's names, per global symbol), `bind_begin` and `bind_end`,
+each run on the same link put back as it was. The paths must make the same
+links. Run it under the 9700X's lock with `taskset -c 2`; the design's "Step
+5's phases, data-parallel" has the numbers. The default 9700X job runs it
+after the bind tests, pinned to one allowed CPU; like the others, its
+measurements are informational.
 
 ## Direct executable tests
 
