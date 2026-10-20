@@ -221,10 +221,12 @@ static bool pp_same_directive_tables(const Preprocessor* a, const Preprocessor* 
 }
 
 // Preprocesses `path` with `options`, in a fresh table: `pp` must be released by the caller. Returns whether it ran
-// without errors.
+// without errors. The run keeps its expansion starts, since its text is printed with line markers too.
 static bool pp_test_run(Preprocessor* pp, InternTable* table, const PPOptions* options, const char* path)
 {
-    bool result = intern_initialize(table) && pp_initialize(pp, options, table);
+    PPOptions with_starts = *options;
+    with_starts.expansion_starts = true;
+    bool result = intern_initialize(table) && pp_initialize(pp, &with_starts, table);
     if (result)
     {
         result = pp_run(pp, path);

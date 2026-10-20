@@ -180,6 +180,9 @@ struct PPOptions
     const char* predefines_path;
     // Measure the phases (PPPhase) in Preprocessor.ticks.
     bool timing;
+    // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
+    // need to place them: the printer can't print markers for a run without them.
+    bool expansion_starts;
 };
 
 // A column array of tokens: an output stream, or a stack of buffers.
@@ -330,7 +333,9 @@ struct PPLineDirective
 
 // The output token at `token` and the ones after it come from the expansion of a macro whose name, at `location`,
 // was read from a file into the output (or none, until the next start): -E's line markers place such a token that
-// starts a line on the line of that name, as clang places a token by its expansion location.
+// starts a line on the line of that name, as clang places a token by its expansion location. A start is recorded where
+// such a token can start a line: for a name that starts a line (whose first token does), and for a _Pragma (its '#',
+// and the token after its line).
 typedef struct PPExpansionStart PPExpansionStart;
 struct PPExpansionStart
 {
@@ -584,9 +589,11 @@ struct Preprocessor
     uint32_t location_top;
     PPLineDirective* line_directives;
     uint32_t line_directive_count;
-    // The starts of the expansions read from files into the output, by token (PPExpansionStart).
+    // The starts of the expansions read from files into the output, by token (PPExpansionStart), and the location of the
+    // name of the latest one.
     PPExpansionStart* expansion_starts;
     uint32_t expansion_start_count;
+    uint32_t expansion_location;
     // Scratch spellings: the arena, and the range of the chunk being filled (BUSTER_PP_NONE before the first).
     Arena scratch;
     uint32_t scratch_range;
@@ -1831,12 +1838,13 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
                 pp_diagnose(pp, PP_SEVERITY_ERROR, location, "'##' cannot appear at either end of a macro expansion");
                 valid = false;
             }
-            bool to_check = false;
+            // A function-like macro with a '#', or a variadic one (which may have __VA_OPT__), gets the whole check.
+            bool to_check = (macro.flags & BUSTER_PP_MACRO_VARIADIC) != 0;
             for (uint32_t t = macro.body_begin; valid && t < macro.body_end; t += 1)
             {
                 const uint8_t kind = data->kinds[t] & 0x7F;
                 macro.flags |= kind == C_TOKEN_HASHHASH ? BUSTER_PP_MACRO_PASTES : 0;
-                to_check |= kind == C_TOKEN_HASH || (kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT);
+                to_check |= kind == C_TOKEN_HASH;
             }
             valid = valid && (!to_check || !(macro.flags & BUSTER_PP_MACRO_FUNCTION) || pp_check_replacement_list(pp, data, &macro));
         }
@@ -3360,10 +3368,9 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
             }
             // So is it in F() when the variadic parameter is F's only one. GNU's `, ## __VA_ARGS__` then drops its comma,
             // except in C99 and later without GNU extensions, as clang has it.
-            else if (variadic && parameter_count == 1 && count == 1 && first->raw_begin == first->raw_end &&
-                     (pp->options.language.gnu || pp->options.language.standard < 1999))
+            else if (variadic && parameter_count == 1)
             {
-                invocation->variadic_omitted = true;
+                invocation->variadic_omitted = count == 1 && first->raw_begin == first->raw_end && (pp->options.language.gnu || pp->options.language.standard < 1999);
             }
             if (valid && count != parameter_count)
             {
@@ -4195,8 +4202,8 @@ BUSTER_INLINE void pp_take_pending_flags(Preprocessor* pp, PPContext* context, u
     }
 }
 
-// A macro's name read from a file is expanded into the output: its tokens there start at the output's end
-// (PPExpansionStart). One that gives none is replaced by the next.
+// An expansion whose tokens can start a line is read from a file into the output, from the name at `location`: they
+// start at the output's end (PPExpansionStart). One that gives none is replaced by the next.
 BUSTER_INLINE void pp_note_expansion(Preprocessor* pp, uint32_t location)
 {
     const uint32_t token = pp->output.count;
@@ -4216,9 +4223,13 @@ static void pp_expand_current(Preprocessor* pp)
         name.flags |= context->pending_flags;
         context->pending_flags = 0;
     }
-    if (context->kind == BUSTER_PP_CONTEXT_FILE && pp->capture_count == 0)
+    if (pp->options.expansion_starts && context->kind == BUSTER_PP_CONTEXT_FILE && pp->capture_count == 0)
     {
-        pp_note_expansion(pp, name.location);
+        pp->expansion_location = name.location;
+        if (name.flags & BUSTER_PP_START_OF_LINE)
+        {
+            pp_note_expansion(pp, name.location);
+        }
     }
     const PPMacroId id = pp->macro_of[name.value];
     PPMacro* macro = &pp->macros[id];
@@ -4966,6 +4977,10 @@ static void pp_emit_pragma(Preprocessor* pp, const PPTokens* tokens, uint32_t be
 {
     // The '#' isn't in any source here: its spelling is the scratch "#".
     const uint8_t flags = (uint8_t)(BUSTER_PP_START_OF_LINE | (from_operator ? BUSTER_PP_FROM_MACRO : 0));
+    if (from_operator && pp->options.expansion_starts)
+    {
+        pp_note_expansion(pp, pp->expansion_location);
+    }
     pp_emit(pp, (PPToken){ .kind = C_TOKEN_HASH, .flags = flags, .value = pp->hash_location + 1, .location = pp->hash_location });
     pp_emit(pp, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER, .flags = 0, .value = name, .location = location });
     for (uint32_t i = begin; i < end; i += 1)
@@ -7840,7 +7855,9 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     const char* input;
     const char* output;
     bool markers;
-    if (!pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers))
+    const bool parsed = pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
+    options.expansion_starts = markers;
+    if (!parsed)
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
                         "[-include file] [-std=...] [-ffreestanding] [-O...] [-nostdinc] [--predefines file] [--scalar] file\n");
