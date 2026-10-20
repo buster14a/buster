@@ -108,7 +108,8 @@ or infrastructure machinery merely to match its style.
   call graph and reports every cycle (Tarjan's algorithm, iterative) that isn't
   in its allowlist, `call_graph_allowed`. `./build.sh check-call-graph` writes
   that IR to a temporary directory and runs it. `call_graph_test.c` holds its
-  tests (`main.c` includes both; `./build/compiler test-call-graph` runs them).
+  tests (`main.c` includes both; `./build/compiler test-call-graph` runs them),
+  and `call_graph_capture/` the C fixture that checks the IR capture itself.
 - `build/` is disposable output. Do not commit generated binaries or captures.
 
 From the repository root, on the approved Linux Ryzen 7 9700X host:
@@ -170,10 +171,15 @@ Where `~/llm-memory` doesn't exist, skip this.
 
 The coding style forbids recursion over input-dependent structures, and
 `./build.sh check-call-graph` checks it on every function of the compiler. It
-writes the LLVM IR of `build.sh`'s translation units, with the same flags, at
-`-O0 -Xclang -disable-llvm-passes` (no pass, not even the always-inliner, so a
-call in the IR is a call in the source) into a temporary directory, and runs
+writes the LLVM IR of `build.sh`'s translation units, with the same flags and
+optimization level, `-O3`, but `-Xclang -disable-llvm-passes` (no pass, not
+even the always-inliner, so a call in the IR is a call in the source, while
+the IR holds every body the build may inline: at `-O0`, clang doesn't emit an
+`extern inline` body at all) into a temporary directory, and runs
 `./build/compiler check-call-graph FILE.ll...` on them (so it needs a build).
+First it captures `src/buster/compiler/call_graph_capture` the same way, a
+cycle through an `extern inline` body beside a strong definition in another
+unit, and fails unless the check reports it.
 The command reads each `define` and the direct `call`, `invoke` and `callbr`
 instructions in its body; a callee is its translation unit's function or alias
 of that name first (static functions are per unit: the benchmarks' copies of

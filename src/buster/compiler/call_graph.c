@@ -3,17 +3,18 @@
 //
 //   build/compiler check-call-graph FILE.ll...
 //
-// Each file is the LLVM IR text of one of the translation units build.sh compiles, as clang -S -emit-llvm -O0 -Xclang
-// -disable-llvm-passes writes it (`./build.sh check-call-graph` makes them and runs the command): without any pass, not
-// even the always-inliner, so a call in the IR is a call in the source. The check reads each `define` and the direct
-// `call`, `invoke` and `callbr` instructions in its body, resolves each callee as the linker would (call_graph_resolve:
-// a symbol of the same translation unit first, then an external one, whose strong definitions win over its weak ones,
-// with every definition of the name in the calling unit, which clang may inline whatever the linker takes; an alias,
-// through any chain of them, to the definition of its target in its own module), builds the call graph of the defined functions, and
-// finds its strongly connected components with Tarjan's algorithm, run with explicit stacks. Calls of functions defined nowhere (libc, LLVM's
-// intrinsics) and calls through pointers are left out: the style allows function pointers only at the thread-entry
-// boundary. A call of an ifunc, whose callee is chosen at run time, or of an alias that leads to no definition is a
-// problem in the IR, which fails the check.
+// Each file is the LLVM IR text of one of the translation units build.sh compiles, as clang -S -emit-llvm -O3 -Xclang
+// -disable-llvm-passes writes it (`./build.sh check-call-graph` makes them and runs the command): before any pass, not
+// even the always-inliner, so a call in the IR is a call in the source, at the build's own optimization level, so that
+// it holds every body the build may inline (at -O0, clang doesn't emit an extern inline body at all). The check reads
+// each `define` and the direct `call`, `invoke` and `callbr` instructions in its body, resolves each callee as the
+// linker would (call_graph_resolve: a symbol of the same translation unit first, then an external one, whose strong
+// definitions win over its weak ones, with every definition of the name in the calling unit, which clang may inline
+// whatever the linker takes; an alias, through any chain of them, to the definition of its target in its own module),
+// builds the call graph of the defined functions, and finds its strongly connected components with Tarjan's algorithm,
+// run with explicit stacks. Calls of functions defined nowhere (libc, LLVM's intrinsics) and calls through pointers are
+// left out: the style allows function pointers only at the thread-entry boundary. A call of an ifunc, whose callee is
+// chosen at run time, or of an alias that leads to no definition is a problem in the IR, which fails the check.
 //
 // Every component of more than one function, and every function that calls itself, is a cycle. The report names each
 // with one call path that closes it, the shortest through the component's first function, and the command exits with

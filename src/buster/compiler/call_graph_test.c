@@ -181,7 +181,8 @@ static const CallGraphInput call_graph_test_units[] = {
     },
 };
 
-// clang 23's IR of this, at -O0 without LLVM's passes, without its metadata and attributes:
+// clang 23's IR of this, at -O0 without LLVM's passes, without its metadata and attributes (-O3, as build.sh captures,
+// differs only in attributes, metadata and lifetime intrinsics):
 //
 //   int again(int) __attribute__((alias("recurse")));
 //   static int hidden_again(int) __attribute__((alias("chain")));
