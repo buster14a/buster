@@ -524,6 +524,20 @@ static const PPTestCase pp_test_cases[] = {
       0, "c17", "101\n", false, 0, 0, 0 },
     { "__BASE_FILE__ in a forced include", "main\n",
       "__BASE_FILE__\n", "c17", "\"<built-in>\"\nmain\n", false, 0, "-include %d/other.h", 0 },
+    // #193's re-review: a directory under both -iquote and -I (#include_next goes on from the directory this inclusion
+    // was found in, not the file's first), spliced string literals from macros, pending spaces in #__VA_OPT__,
+    // __BASE_FILE__ after #line (the presumed root, as clang walks to it), and #line continued with its number indented
+    // (clang counts from the line it lexes the number on).
+    { "#include_next through -iquote and -I", "#include \"wrapper.h\"\n",
+      0, "c17", "LAYER_ONE\nLAYER_ONE\nLAYER_TWO\n", false, 0, "-iquote %d/first -I %d/first -I %d/second", pp_test_files_include_next },
+    { "computed header names with line splices", "#define H \"oth\\\ner.h\"\n#include H\n#if __has_include(H) && __has_include(\"oth\\\ner.h\")\nfound\n#endif\n",
+      "spliced\n", "c17", "spliced\nfound\n", false, 0, 0, 0 },
+    { "#__VA_OPT__ after empty arguments", "#define F(x, ...) #__VA_OPT__(a x+b)\nF(, 1)\n#define G(x, ...) #__VA_OPT__(a x+b x-c)\nG(, 1)\n#define K(x, ...) #__VA_OPT__(a x) y\nK(, 1)\n",
+      0, "c23", "\"a +b\"\n\"a +b -c\"\n\"a\" y\n", false, 0, 0, 0 },
+    { "__BASE_FILE__ after #line", "#line 1 \"logical.c\"\n__BASE_FILE__\n#include \"other.h\"\n",
+      "__BASE_FILE__\n", "c17", "\"logical.c\"\n\"logical.c\"\n", false, 0, 0, 0 },
+    { "#line continued, its number indented", "#line \\\n 100\n__LINE__\n#line \\\n200\n__LINE__\n# \\\n 400\n__LINE__\n#line \\\r\n 500\n__LINE__\n",
+      0, "c17", "100\n201\n400\n500\n", false, 0, 0, 0 },
     { "#include of a missing absolute path", "#include \"/buster-missing-directory/absent.h\"\nafter\n", 0, "c17", "", true },
     { "-include of a missing absolute path", "x\n", 0, "c17", "", true, 0, "-include /buster-missing-directory/absent.h", 0 },
 };

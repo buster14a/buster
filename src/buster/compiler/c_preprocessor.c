@@ -280,8 +280,6 @@ struct PPFile
     // The length of the directory part (before the last '/'), or BUSTER_PP_NONE if there is none.
     uint32_t directory_length;
     uint32_t data;
-    // The index of the search directory it was found in (for #include_next), or BUSTER_PP_NONE.
-    uint32_t search_index;
     bool system;
 };
 
@@ -421,7 +419,10 @@ struct PPContext
     uint32_t end;
     // For __LINE__ and __FILE__ in a token a macro made: the end of the outermost expansion it is in.
     uint32_t expansion_end;
-    // A file: the file, its location range, the next directive and the conditional stack's depth when it was entered.
+    // A file: the file, its location range, the next directive and the conditional stack's depth when it was entered, and
+    // the search directory this inclusion of it was found in (for #include_next), or BUSTER_PP_NONE. The directory is the
+    // inclusion's, not the file's: one file can be found through two entries of the search list (-iquote d and -I d).
+    uint32_t search_index;
     uint32_t file;
     uint32_t range;
     uint32_t next_directive;
@@ -1389,7 +1390,7 @@ static void pp_grow_file_slots(Preprocessor* pp)
 
 // The record of `path` (`length` bytes, not NUL-terminated): looked up by name, and opened the first time. Its data is
 // BUSTER_PP_NONE if there is no regular file by that name. Returns BUSTER_PP_NONE if memory runs out.
-static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t length, uint32_t search_index, bool system)
+static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t length, bool system)
 {
     const uint64_t hash = intern_hash_bytes((const uint8_t*)path, length);
     uint32_t slot = (uint32_t)hash & pp->file_slot_mask;
@@ -1442,7 +1443,6 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
                 .path_length = length,
                 .directory_length = directory_length,
                 .data = data,
-                .search_index = search_index,
                 .system = system,
             };
             pp->file_count += 1;
@@ -1458,24 +1458,28 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
 
 // Finds the file an include names, `name` in `#include "name"` or (`angled`) `#include <name>`: from the includer's
 // directory (quoted only), then the search directories (the quoted ones only for a quoted name), or for #include_next
-// (`next`) from the directory after the includer's. Returns the PPFile, or BUSTER_PP_NONE if no file has the name.
-static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t length, bool angled, bool next, uint32_t includer)
+// (`next`) from the directory after the one the includer's inclusion was found in (`includer_search`). Returns the
+// PPFile, or BUSTER_PP_NONE if no file has the name; `*found_in` gets the search directory it was found in, or
+// BUSTER_PP_NONE (the includer's directory, or an absolute path).
+static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t length, bool angled, bool next, uint32_t includer, uint32_t includer_search,
+                                uint32_t* found_in)
 {
     char path[PATH_MAX];
     uint32_t result = BUSTER_PP_NONE;
+    *found_in = BUSTER_PP_NONE;
     if (length != 0 && length < PATH_MAX && name[0] == '/')
     {
         // An absolute path: its record, if a file is there (a record is kept for a missing one too).
-        const uint32_t candidate = pp_lookup_path(pp, (const char*)name, length, BUSTER_PP_NONE, false);
+        const uint32_t candidate = pp_lookup_path(pp, (const char*)name, length, false);
         result = candidate != BUSTER_PP_NONE && pp->files[candidate].data != BUSTER_PP_NONE ? candidate : BUSTER_PP_NONE;
     }
     else if (length != 0 && length < PATH_MAX)
     {
         uint32_t start = angled ? pp->angled_first : 0;
         const PPFile* from = includer != BUSTER_PP_NONE ? &pp->files[includer] : 0;
-        if (next && from != 0 && from->search_index != BUSTER_PP_NONE)
+        if (next && from != 0 && includer_search != BUSTER_PP_NONE)
         {
-            start = from->search_index + 1;
+            start = includer_search + 1;
         }
         else if (!angled && from != 0)
         {
@@ -1487,7 +1491,7 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
                 memcpy(path, directory, directory_length);
                 path[directory_length] = '/';
                 memcpy(path + directory_length + 1, name, length);
-                const uint32_t candidate = pp_lookup_path(pp, path, directory_length + 1 + length, BUSTER_PP_NONE, from->system);
+                const uint32_t candidate = pp_lookup_path(pp, path, directory_length + 1 + length, from->system);
                 result = candidate != BUSTER_PP_NONE && pp->files[candidate].data != BUSTER_PP_NONE ? candidate : BUSTER_PP_NONE;
             }
         }
@@ -1499,8 +1503,9 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
                 memcpy(path, pp->directories[i], directory_length);
                 path[directory_length] = '/';
                 memcpy(path + directory_length + 1, name, length);
-                const uint32_t candidate = pp_lookup_path(pp, path, directory_length + 1 + length, i, pp->directory_system[i]);
+                const uint32_t candidate = pp_lookup_path(pp, path, directory_length + 1 + length, pp->directory_system[i]);
                 result = candidate != BUSTER_PP_NONE && pp->files[candidate].data != BUSTER_PP_NONE ? candidate : BUSTER_PP_NONE;
+                *found_in = result != BUSTER_PP_NONE ? i : BUSTER_PP_NONE;
             }
         }
     }
@@ -2676,9 +2681,18 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
         {
             if (va_opt_mark != BUSTER_PP_NONE)
             {
+                // A pending space whose token is in the content goes to it before the content becomes a string; one
+                // for the token after the content waits after the string.
+                if (space_at != BUSTER_PP_NONE && space_at < out->count)
+                {
+                    out->flags[space_at] |= BUSTER_PP_SPACE;
+                    space_at = BUSTER_PP_NONE;
+                }
+                const bool space_after = space_at != BUSTER_PP_NONE;
                 const PPToken string = pp_stringize(pp, out, va_opt_mark, out->count, va_opt_flags);
                 out->count = va_opt_mark;
                 pp_push_token(pp, out, string);
+                space_at = space_after ? out->count : BUSTER_PP_NONE;
                 va_opt_mark = BUSTER_PP_NONE;
             }
             // Content of placemarkers alone gives no tokens.
@@ -3560,15 +3574,22 @@ static bool pp_in_condition(const Preprocessor* pp)
     return c != 0 && pp->capture_frames[c - 1].kind == BUSTER_PP_CAPTURE_CONDITION;
 }
 
-// The file of the innermost file context (for #include_next and __has_include_next).
-static uint32_t pp_current_file(const Preprocessor* pp)
+// The innermost file context (for #include_next, __has_include_next and pragmas), or null.
+static const PPContext* pp_current_file_context(const Preprocessor* pp)
 {
-    uint32_t result = BUSTER_PP_NONE;
-    for (uint32_t c = pp->context_count; result == BUSTER_PP_NONE && c > 0; c -= 1)
+    const PPContext* result = 0;
+    for (uint32_t c = pp->context_count; result == 0 && c > 0; c -= 1)
     {
-        result = pp->contexts[c - 1].kind == BUSTER_PP_CONTEXT_FILE ? pp->contexts[c - 1].file : BUSTER_PP_NONE;
+        result = pp->contexts[c - 1].kind == BUSTER_PP_CONTEXT_FILE ? &pp->contexts[c - 1] : 0;
     }
     return result;
+}
+
+// The file of the innermost file context, or BUSTER_PP_NONE.
+static uint32_t pp_current_file(const Preprocessor* pp)
+{
+    const PPContext* context = pp_current_file_context(pp);
+    return context != 0 ? context->file : BUSTER_PP_NONE;
 }
 
 // A header name from tokens [begin, end) of a stack: a string literal's contents, or the spellings between '<' and '>'
@@ -3579,15 +3600,19 @@ static bool pp_header_name(Preprocessor* pp, const PPTokens* tokens, uint32_t be
     *length = 0;
     if (begin < end && tokens->kinds[begin] == C_TOKEN_STRING_LITERAL && end - begin == 1)
     {
-        const uint8_t* bytes = pp_location_bytes(pp, tokens->locations[begin]);
-        const uint32_t spelled = tokens->values[begin] - tokens->locations[begin];
+        // The literal's spelling without its line splices (translation phase 2), as for a direct #include.
+        Scratch scratch = scratch_begin(0);
+        uint8_t* buffer = arena_push(scratch.arena, (uint64_t)(tokens->values[begin] - tokens->locations[begin]) + 1, 1);
+        const uint8_t* spelling = 0;
+        const uint32_t spelled = buffer != 0 ? pp_spelling(pp, tokens->kinds[begin], tokens->values[begin], tokens->locations[begin], buffer, &spelling) : 0;
         result = spelled >= 2 && spelled - 2 < capacity;
         if (result)
         {
-            memcpy(name, bytes + 1, spelled - 2);
+            memcpy(name, spelling + 1, spelled - 2);
             *length = spelled - 2;
             *angled = false;
         }
+        scratch_end(scratch);
     }
     else if (begin < end && tokens->kinds[begin] == C_TOKEN_LESS && tokens->kinds[end - 1] == C_TOKEN_GREATER)
     {
@@ -3731,7 +3756,10 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
     }
     else if (include && pp_header_name(pp, tokens, first, last, text, sizeof(text), &length, &angled))
     {
-        const uint32_t file = pp_find_include(pp, text, length, angled, builtin == PP_BUILTIN_HAS_INCLUDE_NEXT, pp_current_file(pp));
+        const PPContext* includer = pp_current_file_context(pp);
+        uint32_t found_in;
+        const uint32_t file = pp_find_include(pp, text, length, angled, builtin == PP_BUILTIN_HAS_INCLUDE_NEXT, includer != 0 ? includer->file : BUSTER_PP_NONE,
+                                              includer != 0 ? includer->search_index : BUSTER_PP_NONE, &found_in);
         result = file != BUSTER_PP_NONE;
     }
     else if (include)
@@ -3920,8 +3948,17 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
         }
         case PP_BUILTIN_BASE_FILE:
         {
-            const PPFile* main_file = &pp->files[pp->main_file];
-            pp_emit(pp, pp_string_token(pp, (const uint8_t*)main_file->path, main_file->path_length, flags));
+            // The presumed name at the root of the include stack, walking up from the name as clang does: #line in the
+            // main file changes it, and a forced include's root is the <built-in> file that includes it.
+            uint32_t at = where;
+            uint32_t range = pp_find_range(pp, at);
+            while (range != BUSTER_PP_NONE && pp->ranges[range].parent != BUSTER_PP_NONE)
+            {
+                at = pp->ranges[range].include_location;
+                range = pp->ranges[range].parent;
+            }
+            pp_presumed(pp, at, &file_name, &file_name_length);
+            pp_emit(pp, pp_string_token(pp, (const uint8_t*)file_name, file_name_length, flags));
             break;
         }
         case PP_BUILTIN_LINE:
@@ -4172,7 +4209,7 @@ static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t be
 
 // Enters a file (prepared on first use) included at `include_location` from range `parent`, unless its guard is defined
 // or #pragma once read it.
-static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location)
+static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint32_t include_location, uint32_t search_index)
 {
     PPFileData* data = &pp->datas[pp->files[file].data];
     const bool skipped = data->prepared && (data->once || (data->guard != 0 && pp_is_macro(pp, data->guard)));
@@ -4188,6 +4225,7 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
         if (context != 0)
         {
             context->file = file;
+            context->search_index = search_index;
             context->range = range;
             context->end = data->token_count;
             context->conditional_base = pp->conditional_count;
@@ -4392,7 +4430,8 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
 static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, const uint8_t* name, uint32_t length, bool angled, uint32_t location)
 {
     const bool next = kind == PP_DIRECTIVE_INCLUDE_NEXT && pp->include_depth != 0;
-    const uint32_t file = pp_find_include(pp, name, length, angled, next, context->file);
+    uint32_t found_in;
+    const uint32_t file = pp_find_include(pp, name, length, angled, next, context->file, context->search_index, &found_in);
     if (file == BUSTER_PP_NONE)
     {
         pp_diagnose(pp, PP_SEVERITY_FATAL, location, "'%.*s' file not found", (int)length, (const char*)name);
@@ -4403,7 +4442,7 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
     }
     else
     {
-        pp_enter_file(pp, file, context->range, location);
+        pp_enter_file(pp, file, context->range, location, found_in);
         if (kind == PP_DIRECTIVE_IMPORT)
         {
             pp->datas[pp->files[file].data].once = true;
@@ -4520,6 +4559,29 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
     }
 }
 
+// Where clang's lexer starts a token that starts at `start`: at the first of any line splices right before it (a
+// backslash, blanks, and a newline or CRLF, with nothing between them and the token), since it reads them as part of
+// the token after them. Blanks between the splice and the token are whitespace it skips first.
+static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start)
+{
+    uint32_t result = start;
+    bool moved = true;
+    while (moved)
+    {
+        uint32_t p = result;
+        const bool newline = p >= 1 && (bytes[p - 1] == '\n' || bytes[p - 1] == '\r');
+        p -= newline ? 1 : 0;
+        p -= newline && bytes[p] == '\n' && p >= 1 && bytes[p - 1] == '\r' ? 1 : 0;
+        while (newline && p >= 1 && (bytes[p - 1] == ' ' || bytes[p - 1] == '\t'))
+        {
+            p -= 1;
+        }
+        moved = newline && p >= 1 && bytes[p - 1] == '\\';
+        result = moved ? p - 1 : result;
+    }
+    return result;
+}
+
 // The lines a #line or a line marker at directive d numbers, from its tokens [begin, stop) of `tokens` (expanded, for
 // #line): lines from the next on are numbered from the digits, and the file is named by the string literal if there is
 // one.
@@ -4575,9 +4637,13 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
     }
     else if (pp->line_directive_count < BUSTER_PP_MAX_LINE_DIRECTIVES)
     {
-        // The next line is `number`: the directive's line ends where the next token's line starts.
+        // The line after the number token's is `number`, as clang counts: from where it lexes that token (the digits'
+        // line, or for digits right after a line splice, the splice's, since its lexer reads a splice as part of the
+        // token after it). The token is the directive's first operand (the macro name for a #line it expands).
+        const uint32_t first = (data->kinds[hash + 1] & 0x7F) == C_TOKEN_RAW_IDENTIFIER ? hash + 2 : hash + 1;
+        const uint32_t anchor = first < data->directive_end[d] ? pp_start_with_splices(data->bytes, data->starts[first]) : data->starts[hash];
         uint32_t column;
-        const uint32_t physical = pp_line_of(pp, context->range, base + data->starts[hash], &column) + 1;
+        const uint32_t physical = pp_line_of(pp, context->range, base + anchor, &column) + 1;
         pp->line_directives[pp->line_directive_count] = (PPLineDirective){
             .range = context->range,
             .location = location + 1,
@@ -6066,7 +6132,6 @@ static uint32_t pp_virtual_file(Preprocessor* pp, const char* name, const char* 
             .path_length = (uint32_t)strlen(name),
             .directory_length = BUSTER_PP_NONE,
             .data = data,
-            .search_index = BUSTER_PP_NONE,
             .system = true,
         };
         pp->file_count += 1;
@@ -6078,7 +6143,7 @@ static uint32_t pp_virtual_file(Preprocessor* pp, const char* name, const char* 
 static void pp_run_file(Preprocessor* pp, uint32_t file)
 {
     const uint32_t depth = pp->context_count;
-    pp_enter_file(pp, file, BUSTER_PP_NONE, 0);
+    pp_enter_file(pp, file, BUSTER_PP_NONE, 0, BUSTER_PP_NONE);
     pp_run_contexts(pp, depth);
 }
 
@@ -6379,7 +6444,7 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
     // The predefines.
     if (pp->options.predefines_path != 0)
     {
-        const uint32_t file = pp_lookup_path(pp, pp->options.predefines_path, (uint32_t)strlen(pp->options.predefines_path), BUSTER_PP_NONE, true);
+        const uint32_t file = pp_lookup_path(pp, pp->options.predefines_path, (uint32_t)strlen(pp->options.predefines_path), true);
         result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE;
         if (result)
         {
@@ -6431,18 +6496,26 @@ static bool pp_run(Preprocessor* pp, const char* main_path)
                 length += (uint64_t)sprintf(command_line + length, "#define %s 1\n", macro + 1);
             }
         }
-        for (uint32_t i = 0; i < pp->options.include_count; i += 1)
-        {
-            length += (uint64_t)sprintf(command_line + length, "#include \"%s\"\n", pp->options.includes[i]);
-        }
         const uint32_t file = pp_virtual_file(pp, "<command line>", command_line, (uint32_t)length);
         if (file != BUSTER_PP_NONE)
         {
             pp_run_file(pp, file);
         }
+        // The -include lines, in a file of their own named as clang's: its forced includes are in its <built-in> buffer,
+        // after the command line's macros, which __BASE_FILE__ in a forced header gives.
+        length = 0;
+        for (uint32_t i = 0; i < pp->options.include_count; i += 1)
+        {
+            length += (uint64_t)sprintf(command_line + length, "#include \"%s\"\n", pp->options.includes[i]);
+        }
+        const uint32_t includes = length != 0 ? pp_virtual_file(pp, "<built-in>", command_line, (uint32_t)length) : BUSTER_PP_NONE;
+        if (includes != BUSTER_PP_NONE)
+        {
+            pp_run_file(pp, includes);
+        }
     }
     // The main file.
-    const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), BUSTER_PP_NONE, false) : BUSTER_PP_NONE;
+    const uint32_t file = result && !pp->fatal ? pp_lookup_path(pp, main_path, (uint32_t)strlen(main_path), false) : BUSTER_PP_NONE;
     if (file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE)
     {
         pp->main_file = file;

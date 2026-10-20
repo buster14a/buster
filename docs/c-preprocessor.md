@@ -19,7 +19,7 @@ under the configuration `test-preprocessor --clang` defines (see "The oracle"):
 | musl 1.2.5, every source of `src/*/*.c` and `src/*/x86_64/*.c`, as its Makefile builds them | 1,357 | 5,124,927 |
 | This repository's translation units on top of `main` at 75261db, with `-march=native` (AVX-512 intrinsic headers) | 8 | 4,571,031 |
 | Lua 5.4.8 (`-DLUA_USE_LINUX -DLUA_COMPAT_5_3`) | 34 | 588,066 |
-| The built-in cases (`pp_test_cases`) | 58 | |
+| The built-in cases (`pp_test_cases`) | 63 | |
 
 **Speed**, measured on 2026-10-20 on the Ryzen 7 9700X (clang 23.1.1,
 `build.sh`'s `-O3 -march=native`), pinned to CPU 2 and under the
@@ -48,6 +48,15 @@ interleaved rounds:
 | --- | ---: | ---: |
 | `sqlite3.c` | 12.09 ms | 12.03 ms |
 | `main.c` | 15.65 ms | 15.67 ms |
+
+The second review's fixes (the inclusion's search position, the
+`#__VA_OPT__` and `#line` spacing and anchors, `__BASE_FILE__`, and #192's new
+hash) were also within noise against their reviewed commit:
+
+| Translation unit | Reviewed commit | With the fixes | Instructions/input token |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 11.99 ms | 11.97 ms | 127.04 → 127.07 |
+| `main.c` | 15.63 ms | 15.66 ms | 354.05 → 354.17 |
 
 That is 4.9 times `clang -E` on `sqlite3.c` and 5.7 times on `main.c`. clang's
 time includes starting a process, which ours doesn't. With printing, as whole
@@ -212,12 +221,15 @@ arenas. Popping a context gives its tokens back when they are on top.
   look in `-I`, `-isystem`, clang's resource directory (the highest version
   under `/usr/lib/clang`), `/usr/local/include`, `/usr/include` and
   `-idirafter`. `#include_next` resumes after the directory that found the
-  includer. `__has_include` and `__has_include_next` use the same search.
+  includer: this inclusion of it, which each file context keeps, since a file
+  can be found through two entries (`-iquote d` and `-I d`). `__has_include`
+  and `__has_include_next` use the same search.
   - As in clang, directories that don't exist are dropped, and so are later
     copies of a directory (by device and inode). A non-system directory that is
     also a system one is dropped in favor of the system one. Otherwise a
     repeated `-I` would make `#include_next` find the same file again.
-  - A header name is read without its line splices.
+  - A header name is read without its line splices, whether it is written out,
+    comes from a macro, or is `__has_include`'s operand.
   - `__has_include` also works inside a macro's argument in a `#if` line.
 - **Pragmas** are acted on when they are `once`, `GCC system_header`,
   `push_macro`/`pop_macro` and `GCC poison`. Every other pragma, and `#ident`,
@@ -231,8 +243,15 @@ arenas. Popping a context gives its tokens back when they are on top.
   physical ones. One without a file name keeps the presumed name. `__LINE__`
   in a macro's expansion is the line of the end of the outermost expansion, as
   in clang. Where clang and GCC differ, we follow clang:
-  - a `#line` continued onto the next line counts from the line of its `#`;
-  - `__BASE_FILE__` in a forced include is `<built-in>`.
+  - The lines after a `#line` count from the line where clang lexes its
+    number. For digits right after a line splice, clang reads the splice as part
+    of the token, so that is the splice's line: `#line \` then `100` on the next
+    line counts from the `#` line. With blanks between the splice and the digits,
+    it is the digits' line.
+  - `__BASE_FILE__` is the presumed name at the root of the include stack:
+    - a `#line` with a name in the main file renames it;
+    - a forced include's root is the `<built-in>` file that holds the
+      `-include` lines.
 
 ### Built-in macros and the predefines
 
@@ -452,7 +471,7 @@ the mispredictions it saves.
 
 `./build/compiler test-preprocessor [--clang] [--keep] [options] [file...]`:
 
-- **Cases.** Without files, it runs the 58 built-in cases. These are cases of
+- **Cases.** Without files, it runs the 63 built-in cases. These are cases of
   our own on the topics of C 6.10.4.5's examples (rescanning and
   redefinitions, `#` and `##` with indirection, placemarkers, variadic macros),
   inputs past the vectorized kernels' limits, and the behaviors probed against
@@ -498,7 +517,13 @@ the mispredictions it saves.
     - `#line` without a file name;
     - `__is_identifier`;
     - `true` in C99;
-    - the two places where we follow clang rather than GCC.
+    - the two places where we follow clang rather than GCC;
+  - the cases from #193's second review:
+    - a directory under both `-iquote` and `-I` with `#include_next`;
+    - spliced literals from macros as header names;
+    - pending spaces in `#__VA_OPT__`;
+    - `__BASE_FILE__` after `#line`;
+    - `#line` continued with its number indented.
 
   A case can name more files, and options for both sides (`-I`, `-include`,
   with `%d` for its directory). Each case is preprocessed by both kernels, with
