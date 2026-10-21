@@ -1574,11 +1574,16 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
 }
 
 #include "c_preprocessor_history_test.c"
+#include "c_preprocessor_directives_test.c"
 
 static int run_preprocessor_tests(int argument_count, char** arguments)
 {
     bool with_clang = false;
     bool keep = false;
+    // --tables: the files are paths whose .c and .h files' directive tables are checked, not preprocessed.
+    bool tables = false;
+    uint64_t seed = 1;
+    uint64_t count = BUSTER_PP_DIRECTIVE_TEST_SOURCES;
     // The arguments without ours, for clang and pp_parse_options; the files are those that don't start with '-' and
     // aren't an option's value.
     char** passed = calloc((size_t)argument_count + 1, sizeof(char*));
@@ -1597,6 +1602,15 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
         else if (strcmp(argument, "--keep") == 0)
         {
             keep = true;
+        }
+        else if (strcmp(argument, "--tables") == 0)
+        {
+            tables = true;
+        }
+        else if ((strcmp(argument, "--seed") == 0 || strcmp(argument, "--count") == 0) && i + 1 < argument_count)
+        {
+            i += 1;
+            *(argument[2] == 's' ? &seed : &count) = strtoull(arguments[i], 0, 10);
         }
         else if (argument[0] == '-')
         {
@@ -1627,12 +1641,17 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
         passed_all = failures == 0;
         passed_all &= pp_test_timestamps(directory, with_clang);
         passed_all &= pp_test_history(directory, with_clang);
+        passed_all &= pp_test_directives(directory, with_clang, seed, count);
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);
             passed_all &= pp_test_keywords(directory);
             passed_all &= pp_test_features(directory);
         }
+    }
+    else if (passed_all && tables)
+    {
+        passed_all = pp_directive_test_paths(files, file_count);
     }
     else if (passed_all)
     {

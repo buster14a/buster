@@ -19,7 +19,11 @@
 // implementation (for profiles). Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments
 // are invalid or a run fails.
 //
-// Layout: the clock and the counters, the passes, and run_preprocessor_benchmark.
+// With --tables, the arguments are paths, and it times the directive tables alone (#118): every .c and .h file under
+// them is read and prepared once, then each pass builds every file's table (pp_directive_table) by each kernel, whose
+// tables must be the same, and it reports the medians per input token and per directive, and the scan's share.
+//
+// Layout: the clock and the counters, the passes, the directive tables alone, and run_preprocessor_benchmark.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -28,6 +32,7 @@
 #include <stdlib.h>
 
 // OS-dependent includes
+#include <dirent.h>
 #include <fcntl.h>
 #include <time.h>
 #include <unistd.h>
@@ -209,11 +214,278 @@ static uint64_t pp_benchmark_clang(char** arguments, int argument_count, char** 
     return result;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The directive tables alone (--tables)
+
+#define BUSTER_PP_BENCHMARK_MAX_DEPTH 64
+#define BUSTER_PP_BENCHMARK_MAX_PATH 4096
+#define BUSTER_PP_BENCHMARK_MAX_FILES 65536
+
+// The files whose tables --tables builds: each read once and prepared once by the vectorized kernels (pp_prepare_data),
+// in one preprocessor whose arena then takes each pass's tables.
+typedef struct PPBenchmarkTables PPBenchmarkTables;
+struct PPBenchmarkTables
+{
+    InternTable table;
+    Preprocessor pp;
+    Arena bytes;
+    PPFileData* datas;
+    uint32_t count;
+    uint64_t tokens;
+    uint64_t directives;
+};
+
+static bool pp_benchmark_tables_file(PPBenchmarkTables* tables, const char* path)
+{
+    bool result = false;
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat file_stats;
+    if (fd >= 0 && fstat(fd, &file_stats) == 0 && (uint64_t)file_stats.st_size < UINT32_MAX - 64 && tables->count < BUSTER_PP_BENCHMARK_MAX_FILES)
+    {
+        const uint64_t length = (uint64_t)file_stats.st_size;
+        uint8_t* bytes = arena_push(&tables->bytes, length + 64, 64);
+        uint64_t done = 0;
+        for (ssize_t got = 1; bytes != 0 && done < length && got > 0; done += got > 0 ? (uint64_t)got : 0)
+        {
+            got = read(fd, bytes + done, length - done);
+        }
+        if (bytes != 0 && done == length)
+        {
+            memset(bytes + length, 0, 64);
+            PPFileData* data = &tables->datas[tables->count];
+            *data = (PPFileData){ .bytes = bytes, .length = (uint32_t)length };
+            result = pp_prepare_data(&tables->pp, data, path);
+            tables->count += result;
+            tables->tokens += result ? data->token_count : 0;
+            tables->directives += result ? data->directive_count : 0;
+        }
+    }
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    return result;
+}
+
+// A file, or the .c and .h files under a directory (a stack of open directories, no recursion).
+static bool pp_benchmark_tables_path(PPBenchmarkTables* tables, const char* path)
+{
+    struct stat path_stats;
+    bool result = stat(path, &path_stats) == 0;
+    if (result && !S_ISDIR(path_stats.st_mode))
+    {
+        result = pp_benchmark_tables_file(tables, path);
+    }
+    else if (result)
+    {
+        DIR* directories[BUSTER_PP_BENCHMARK_MAX_DEPTH];
+        static char paths[BUSTER_PP_BENCHMARK_MAX_DEPTH][BUSTER_PP_BENCHMARK_MAX_PATH];
+        directories[0] = opendir(path);
+        snprintf(paths[0], sizeof(paths[0]), "%s", path);
+        result = directories[0] != 0;
+        uint32_t depth = result ? 1 : 0;
+        while (depth != 0)
+        {
+            struct dirent* entry = readdir(directories[depth - 1]);
+            if (entry == 0)
+            {
+                closedir(directories[depth - 1]);
+                depth -= 1;
+            }
+            else if (entry->d_name[0] != '.')
+            {
+                char child[BUSTER_PP_BENCHMARK_MAX_PATH];
+                snprintf(child, sizeof(child), "%s/%s", paths[depth - 1], entry->d_name);
+                struct stat child_stats;
+                const bool listed = lstat(child, &child_stats) == 0;
+                const uint64_t name_length = strlen(entry->d_name);
+                const bool source = name_length > 2 && entry->d_name[name_length - 2] == '.' && (entry->d_name[name_length - 1] == 'c' || entry->d_name[name_length - 1] == 'h');
+                if (listed && S_ISDIR(child_stats.st_mode) && depth < BUSTER_PP_BENCHMARK_MAX_DEPTH)
+                {
+                    directories[depth] = opendir(child);
+                    if (directories[depth] != 0)
+                    {
+                        snprintf(paths[depth], sizeof(paths[depth]), "%s", child);
+                        depth += 1;
+                    }
+                }
+                else if (listed && S_ISREG(child_stats.st_mode) && source)
+                {
+                    result &= pp_benchmark_tables_file(tables, child);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// What a pass of one kernel measured: the whole tables, and the directive scan alone (both of its calls, as
+// pp_directive_table makes them); and a digest of the tables, which must be the same for both kernels.
+typedef struct PPBenchmarkTablesSample PPBenchmarkTablesSample;
+struct PPBenchmarkTablesSample
+{
+    uint64_t nanoseconds;
+    uint64_t cycles;
+    uint64_t instructions;
+    uint64_t scan_cycles;
+    uint64_t digest;
+};
+
+static bool pp_benchmark_tables_pass(PPBenchmarkTables* tables, bool vectorized, int cycles_fd, int instructions_fd, PPBenchmarkTablesSample* sample)
+{
+    Preprocessor* pp = &tables->pp;
+    pp->vectorized = vectorized;
+    const uint64_t arena_length = pp->arena.length;
+    bool result = true;
+    *sample = (PPBenchmarkTablesSample){ .digest = 14695981039346656037ull };
+    const uint64_t nanoseconds = pp_benchmark_nanoseconds();
+    const uint64_t cycles = pp_benchmark_read_counter(cycles_fd);
+    const uint64_t instructions = pp_benchmark_read_counter(instructions_fd);
+    for (uint32_t f = 0; result && f < tables->count; f += 1)
+    {
+        result = pp_directive_table(pp, &tables->datas[f]);
+    }
+    sample->instructions = pp_benchmark_read_counter(instructions_fd) - instructions;
+    sample->cycles = pp_benchmark_read_counter(cycles_fd) - cycles;
+    sample->nanoseconds = pp_benchmark_nanoseconds() - nanoseconds;
+    // Outside the time: the tables' digest, then the scan alone.
+    for (uint32_t f = 0; result && f < tables->count; f += 1)
+    {
+        const PPFileData* data = &tables->datas[f];
+        for (uint32_t d = 0; d < data->directive_count; d += 1)
+        {
+            const uint64_t entry = ((uint64_t)data->directive_hash[d] << 32 | data->directive_end[d]) ^ ((uint64_t)data->directive_next[d] << 8 | data->directive_kind[d]);
+            sample->digest = (sample->digest ^ entry) * 1099511628211ull;
+        }
+        sample->digest = (sample->digest ^ ((uint64_t)data->guard << 32 | data->note_count)) * 1099511628211ull;
+    }
+    uint32_t largest = 0;
+    for (uint32_t f = 0; f < tables->count; f += 1)
+    {
+        largest = tables->datas[f].token_count > largest ? tables->datas[f].token_count : largest;
+    }
+    Scratch scratch = scratch_begin(0);
+    uint64_t* lines = arena_push_array(scratch.arena, (uint64_t)largest / 64 + 1, sizeof(uint64_t), 64);
+    uint32_t* hashes = arena_push_array(scratch.arena, (uint64_t)largest + 1, sizeof(uint32_t), 64);
+    result = result && lines != 0 && hashes != 0;
+    const uint64_t scan_cycles = pp_benchmark_read_counter(cycles_fd);
+    for (uint32_t f = 0; result && f < tables->count; f += 1)
+    {
+        const PPFileData* data = &tables->datas[f];
+        if (vectorized)
+        {
+            pp_scan_directives_vector(data->kinds, data->token_count, 0, lines);
+            pp_scan_directives_vector(data->kinds, data->token_count, hashes, lines);
+        }
+        else
+        {
+            pp_scan_directives_scalar(data->kinds, data->token_count, 0, lines);
+            pp_scan_directives_scalar(data->kinds, data->token_count, hashes, lines);
+        }
+    }
+    sample->scan_cycles = pp_benchmark_read_counter(cycles_fd) - scan_cycles;
+    scratch_end(scratch);
+    arena_pop_to(&pp->arena, arena_length);
+    return result;
+}
+
+// --tables PATH...: builds the directive table of every .c and .h file under the paths, by each kernel in turn, 21
+// passes after a warm-up, and reports the medians per input token and per directive (#118).
+static int pp_benchmark_tables(char** paths, int path_count, uint32_t only)
+{
+    static PPBenchmarkTables tables;
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true } };
+    tables.bytes = arena_reserve(1ull << 36);
+    tables.datas = calloc(BUSTER_PP_BENCHMARK_MAX_FILES, sizeof(PPFileData));
+    bool ran = tables.bytes.base != 0 && tables.datas != 0 && intern_initialize(&tables.table) && pp_initialize(&tables.pp, &options, &tables.table);
+    for (int i = 0; ran && i < path_count; i += 1)
+    {
+        ran = pp_benchmark_tables_path(&tables, paths[i]);
+    }
+    const int cycles_fd = pp_benchmark_open_counter(PERF_COUNT_HW_CPU_CYCLES);
+    const int instructions_fd = pp_benchmark_open_counter(PERF_COUNT_HW_INSTRUCTIONS);
+    static PPBenchmarkTablesSample samples[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS][BUSTER_PP_BENCHMARK_PASSES];
+    uint64_t digest = 0;
+    bool have_digest = false;
+    for (uint32_t pass = 0; ran && pass <= BUSTER_PP_BENCHMARK_PASSES; pass += 1)
+    {
+        for (uint32_t order = 0; ran && order < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; order += 1)
+        {
+            const uint32_t implementation = order ^ (pass & 1);
+            PPBenchmarkTablesSample sample;
+            if (((only >> implementation) & 1) != 0)
+            {
+                ran = pp_benchmark_tables_pass(&tables, implementation == 0, cycles_fd, instructions_fd, &sample);
+                ran = ran && (!have_digest || sample.digest == digest);
+                digest = sample.digest;
+                have_digest = true;
+                if (pass > 0)
+                {
+                    samples[implementation][pass - 1] = sample;
+                }
+            }
+        }
+    }
+    if (!ran)
+    {
+        fprintf(stderr, "a file can't be read or prepared, or the kernels' tables differ\n");
+    }
+    else
+    {
+        static const char* const names[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS] = { "vectorized", "scalar" };
+        printf("directive tables: %u files, %lu input tokens, %lu directives (one per %.1f tokens); %d passes, medians:\n", tables.count, (unsigned long)tables.tokens,
+               (unsigned long)tables.directives, tables.directives != 0 ? (double)tables.tokens / (double)tables.directives : 0.0, BUSTER_PP_BENCHMARK_PASSES);
+        for (uint32_t implementation = 0; implementation < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; implementation += 1)
+        {
+            uint64_t nanoseconds[BUSTER_PP_BENCHMARK_PASSES];
+            uint64_t cycles[BUSTER_PP_BENCHMARK_PASSES];
+            uint64_t instructions[BUSTER_PP_BENCHMARK_PASSES];
+            uint64_t scan[BUSTER_PP_BENCHMARK_PASSES];
+            for (uint32_t pass = 0; pass < BUSTER_PP_BENCHMARK_PASSES; pass += 1)
+            {
+                nanoseconds[pass] = samples[implementation][pass].nanoseconds;
+                cycles[pass] = samples[implementation][pass].cycles;
+                instructions[pass] = samples[implementation][pass].instructions;
+                scan[pass] = samples[implementation][pass].scan_cycles;
+            }
+            pp_benchmark_sort(nanoseconds, BUSTER_PP_BENCHMARK_PASSES);
+            pp_benchmark_sort(cycles, BUSTER_PP_BENCHMARK_PASSES);
+            pp_benchmark_sort(instructions, BUSTER_PP_BENCHMARK_PASSES);
+            pp_benchmark_sort(scan, BUSTER_PP_BENCHMARK_PASSES);
+            const double median_cycles = (double)cycles[BUSTER_PP_BENCHMARK_PASSES / 2];
+            const double median_instructions = (double)instructions[BUSTER_PP_BENCHMARK_PASSES / 2];
+            const double tokens = tables.tokens != 0 ? (double)tables.tokens : 1.0;
+            const double directives = tables.directives != 0 ? (double)tables.directives : 1.0;
+            if (((only >> implementation) & 1) != 0)
+            {
+                printf("  %-10s %8.3f ms  %5.3f cycles/token  %6.2f cycles/directive  %5.3f instructions/token  IPC %.2f  (the scan %5.3f cycles/token)\n",
+                       names[implementation], (double)nanoseconds[BUSTER_PP_BENCHMARK_PASSES / 2] / 1e6, median_cycles / tokens, median_cycles / directives,
+                       median_instructions / tokens, median_cycles != 0 ? median_instructions / median_cycles : 0.0,
+                       (double)scan[BUSTER_PP_BENCHMARK_PASSES / 2] / tokens);
+            }
+        }
+    }
+    if (cycles_fd >= 0)
+    {
+        close(cycles_fd);
+    }
+    if (instructions_fd >= 0)
+    {
+        close(instructions_fd);
+    }
+    pp_release(&tables.pp);
+    intern_release(&tables.table);
+    arena_release(&tables.bytes);
+    free(tables.datas);
+    return ran ? 0 : 1;
+}
+
 int run_preprocessor_benchmark(int argc, char** argv)
 {
     int result = 1;
     bool with_clang = false;
     bool history_cost = false;
+    bool tables = false;
     uint32_t only = 3;
     char** passed = calloc((size_t)argc + 1, sizeof(char*));
     char** clang_passed = calloc((size_t)argc + 1, sizeof(char*));
@@ -236,6 +508,10 @@ int run_preprocessor_benchmark(int argc, char** argv)
         else if (strcmp(argument, "--history-cost") == 0)
         {
             history_cost = true;
+        }
+        else if (strcmp(argument, "--tables") == 0)
+        {
+            tables = true;
         }
         else if (strcmp(argument, "--only") == 0 && i + 1 < argc)
         {
@@ -264,6 +540,11 @@ int run_preprocessor_benchmark(int argc, char** argv)
             files[file_count++] = argv[i];
         }
     }
+    if (tables && file_count != 0 && only != 0)
+    {
+        result = pp_benchmark_tables(files, file_count, only);
+        file_count = 0;
+    }
     Arena arena = arena_reserve(1ull << 30);
     PPOptions options;
     const char* input;
@@ -275,9 +556,14 @@ int run_preprocessor_benchmark(int argc, char** argv)
         memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
         with_input[passed_count] = files[0];
     }
-    if (file_count == 0 || with_input == 0 || only == 0 || !pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers))
+    if (tables)
     {
-        fprintf(stderr, "usage: %s [--clang] [--history-cost] [--only vectorized|scalar] [-E's options] file...\n", argv[0]);
+        // --tables ran above.
+    }
+    else if (file_count == 0 || with_input == 0 || only == 0 || !pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers))
+    {
+        fprintf(stderr, "usage: %s [--clang] [--history-cost] [--only vectorized|scalar] [-E's options] file...\n"
+                        "       %s --tables [--only vectorized|scalar] path...\n", argv[0], argv[0]);
     }
     else
     {

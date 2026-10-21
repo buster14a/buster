@@ -259,6 +259,14 @@ typedef enum PPDirectiveKind
     PP_DIRECTIVE_EMBED,
 } PPDirectiveKind;
 
+// What a directive that a skip passes over must still report, as clang reports it while it skips (the file's notes,
+// PPFileData.note_*): an #elif, #elifdef, #elifndef or #else after its group's #else (an error); an #if, #ifdef or
+// #ifndef whose group has no #endif, when the skip goes to the end of the file (an error, innermost first); and an
+// #elifdef or #elifndef, a C23 extension before C23 (a warning, before the error).
+#define BUSTER_PP_NOTE_AFTER_ELSE 1
+#define BUSTER_PP_NOTE_UNTERMINATED 2
+#define BUSTER_PP_NOTE_ELIFDEF 4
+
 // A file's contents and everything prepared from them, shared by the paths that name it (by device and inode).
 typedef struct PPFileData PPFileData;
 struct PPFileData
@@ -285,6 +293,11 @@ struct PPFileData
     uint32_t* directive_end;
     uint8_t* directive_kind;
     uint32_t* directive_next;
+    // The directives a skip must still report (BUSTER_PP_NOTE_*), in order: each one's index and notes. Most files have
+    // none (pp_note_directives).
+    uint32_t note_count;
+    uint32_t* note_directives;
+    uint8_t* note_kinds;
     // The include guard's macro (0 if the file has none), and whether #pragma once (or #import) read it.
     IdentId guard;
     bool once;
@@ -492,8 +505,12 @@ struct PPContext
 typedef struct PPConditional PPConditional;
 struct PPConditional
 {
+    // A branch of the group was taken; the group's #else was read; the group is being skipped to its next directive
+    // (pp_skip_group) rather than read.
     bool taken;
     bool seen_else;
+    bool skipping;
+    // The opening directive's name, where clang reports the group unterminated.
     uint32_t location;
 };
 
@@ -1203,8 +1220,9 @@ BUSTER_INLINE __m512i pp_prefix_sum_words(__m512i x)
 // candidate's own pointer, which in a balanced file never passes its answer, so that about five rounds settle 32 lanes.
 // Lanes still unanswered at a block's end are its open groups (as many as the nesting depth); each later block answers
 // them with one compare of its levels against each one's. Returns false, having paired nothing, for a file with a
-// continuation that has no open group (an #endif or #else too many), which the stack then pairs.
-static bool pp_pair_conditionals_vector(PPFileData* data, uint32_t* scratch_indices)
+// continuation that has no open group (an #endif or #else too many), which the stack then pairs. Sets *notable if a
+// group has a directive after its #else or no #endif, for pp_note_directives.
+static bool pp_pair_conditionals_vector(PPFileData* data, uint32_t* scratch_indices, bool* notable)
 {
     const uint32_t count = data->directive_count;
     Scratch scratch = scratch_begin(0);
@@ -1295,12 +1313,84 @@ static bool pp_pair_conditionals_vector(PPFileData* data, uint32_t* scratch_indi
         _mm512_storeu_si512(carried + carried_count, _mm512_maskz_compress_epi32((__mmask16)(open >> 16), _mm512_add_epi32(entries, _mm512_set1_epi32(16))));
         carried_count += (uint32_t)__builtin_popcount(open >> 16);
     }
-    // Each opener's, #elif's and #else's answer, as directives.
+    // Each opener's, #elif's and #else's answer, as directives; an unanswered one is in a group without #endif.
+    bool found = false;
     for (uint32_t i = 0; result && i < n; i += 1)
     {
         if (kinds[i] != PP_DIRECTIVE_ENDIF)
         {
-            data->directive_next[conditionals[i]] = answers[i] != BUSTER_PP_NONE ? conditionals[answers[i]] : BUSTER_PP_NONE;
+            const uint32_t answer = answers[i];
+            data->directive_next[conditionals[i]] = answer != BUSTER_PP_NONE ? conditionals[answer] : BUSTER_PP_NONE;
+            found |= answer == BUSTER_PP_NONE || (kinds[i] == PP_DIRECTIVE_ELSE && kinds[answer] != PP_DIRECTIVE_ENDIF);
+        }
+    }
+    *notable = found;
+    scratch_end(scratch);
+    return result;
+}
+
+// The file's notes (BUSTER_PP_NOTE_*), with an explicit stack of the open groups and whether each has had its #else,
+// which pairs the directives as pp_pair_conditionals_scalar does: the scalar kernels' notes, and the vectorized
+// kernels' for a file whose pairing found a group with a directive after its #else or without its #endif, or that has
+// an #elifdef or #elifndef. Returns false if memory runs out.
+static bool pp_note_directives(Preprocessor* pp, PPFileData* data)
+{
+    const uint32_t count = data->directive_count;
+    Scratch scratch = scratch_begin(0);
+    uint8_t* notes = arena_push(scratch.arena, (uint64_t)count + 1, 1);
+    uint32_t* open = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(uint32_t), 4);
+    bool* seen_else = arena_push(scratch.arena, (uint64_t)count + 1, 1);
+    bool result = notes != 0 && open != 0 && seen_else != 0;
+    uint32_t open_count = 0;
+    for (uint32_t d = 0; result && d < count; d += 1)
+    {
+        const uint8_t kind = data->directive_kind[d];
+        uint8_t note = kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF ? BUSTER_PP_NOTE_ELIFDEF : 0;
+        switch (kind)
+        {
+            case PP_DIRECTIVE_IF:
+            case PP_DIRECTIVE_IFDEF:
+            case PP_DIRECTIVE_IFNDEF:
+                open[open_count] = d;
+                seen_else[open_count] = false;
+                open_count += 1;
+                break;
+            case PP_DIRECTIVE_ELIF:
+            case PP_DIRECTIVE_ELIFDEF:
+            case PP_DIRECTIVE_ELIFNDEF:
+            case PP_DIRECTIVE_ELSE:
+                if (open_count != 0)
+                {
+                    note |= seen_else[open_count - 1] ? BUSTER_PP_NOTE_AFTER_ELSE : 0;
+                    seen_else[open_count - 1] |= kind == PP_DIRECTIVE_ELSE;
+                }
+                break;
+            case PP_DIRECTIVE_ENDIF:
+                open_count -= open_count != 0;
+                break;
+        }
+        notes[d] = note;
+    }
+    for (uint32_t i = 0; result && i < open_count; i += 1)
+    {
+        notes[open[i]] |= BUSTER_PP_NOTE_UNTERMINATED;
+    }
+    uint32_t note_count = 0;
+    for (uint32_t d = 0; result && d < count; d += 1)
+    {
+        note_count += notes[d] != 0;
+    }
+    data->note_directives = result ? arena_push_array(&pp->arena, (uint64_t)note_count + 1, sizeof(uint32_t), 4) : 0;
+    data->note_kinds = result ? arena_push(&pp->arena, (uint64_t)note_count + 1, 1) : 0;
+    result = data->note_directives != 0 && data->note_kinds != 0;
+    data->note_count = 0;
+    for (uint32_t d = 0; result && d < count; d += 1)
+    {
+        if (notes[d] != 0)
+        {
+            data->note_directives[data->note_count] = d;
+            data->note_kinds[data->note_count] = notes[d];
+            data->note_count += 1;
         }
     }
     scratch_end(scratch);
@@ -1308,9 +1398,11 @@ static bool pp_pair_conditionals_vector(PPFileData* data, uint32_t* scratch_indi
 }
 
 // Each directive's kind and line end, then the conditional groups' pairing (pp_pair_conditionals_vector, or
-// pp_pair_conditionals_scalar for the scalar kernels and for files the vectorized pairing leaves to it).
+// pp_pair_conditionals_scalar for the scalar kernels and for files the vectorized pairing leaves to it), then the
+// notes (pp_note_directives) where there can be any.
 static bool pp_finish_directives(Preprocessor* pp, PPFileData* data, const uint64_t* lines)
 {
+    bool elifdef = false;
     for (uint32_t d = 0; d < data->directive_count; d += 1)
     {
         const uint32_t hash = data->directive_hash[d];
@@ -1324,15 +1416,20 @@ static bool pp_finish_directives(Preprocessor* pp, PPFileData* data, const uint6
         data->directive_end[d] = end;
         data->directive_kind[d] = kind;
         data->directive_next[d] = BUSTER_PP_NONE;
+        elifdef |= kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF;
     }
     Scratch scratch = scratch_begin(0);
     uint32_t* indices = arena_push_array(scratch.arena, (uint64_t)data->directive_count + 32, sizeof(uint32_t), 64);
-    const bool result = indices != 0;
-    if (result && !(pp->vectorized && pp_pair_conditionals_vector(data, indices)))
+    bool result = indices != 0;
+    bool notable = true;
+    if (result && !(pp->vectorized && pp_pair_conditionals_vector(data, indices, &notable)))
     {
         pp_pair_conditionals_scalar(data, indices);
+        notable = true;
     }
     scratch_end(scratch);
+    data->note_count = 0;
+    result = result && (!(notable || elifdef) || pp_note_directives(pp, data));
     return result;
 }
 
@@ -1555,6 +1652,42 @@ static int64_t pp_lex_for_mode(const Preprocessor* pp, const uint8_t* bytes, uin
 
 // Lexes, refines and indexes a file's bytes: tokens, values, leading-space bits and the directive table. Returns false
 // if memory runs out or the file is too big for 32-bit positions.
+// A file's directive table (#118) from its refined tokens, in pp->arena, by the kernels pp->vectorized picks: the
+// directives (pp_scan_directives_*), their kinds, line ends, pairing and notes (pp_finish_directives), and the include
+// guard. Returns false if memory runs out. benchmark-preprocessor --tables times it alone.
+static bool pp_directive_table(Preprocessor* pp, PPFileData* data)
+{
+    Scratch scratch = scratch_begin(0);
+    uint64_t* lines = arena_push_array(scratch.arena, data->token_count / 64 + 1, sizeof(uint64_t), 64);
+    bool result = lines != 0;
+    if (result)
+    {
+        const uint32_t directive_count = pp->vectorized ? pp_scan_directives_vector(data->kinds, data->token_count, 0, lines)
+                                                        : pp_scan_directives_scalar(data->kinds, data->token_count, 0, lines);
+        data->directive_count = directive_count;
+        data->directive_hash = arena_push_array(&pp->arena, directive_count + 1, sizeof(uint32_t), 4);
+        data->directive_end = arena_push_array(&pp->arena, directive_count + 1, sizeof(uint32_t), 4);
+        data->directive_kind = arena_push(&pp->arena, directive_count + 1, 1);
+        data->directive_next = arena_push_array(&pp->arena, directive_count + 1, sizeof(uint32_t), 4);
+        result = data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
+    }
+    if (result)
+    {
+        if (pp->vectorized)
+        {
+            pp_scan_directives_vector(data->kinds, data->token_count, data->directive_hash, lines);
+        }
+        else
+        {
+            pp_scan_directives_scalar(data->kinds, data->token_count, data->directive_hash, lines);
+        }
+        result = pp_finish_directives(pp, data, lines);
+    }
+    scratch_end(scratch);
+    data->guard = result ? pp_find_guard(data) : 0;
+    return result;
+}
+
 static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path)
 {
     const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY((uint64_t)data->length);
@@ -1613,36 +1746,9 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
             pp->ticks[PP_PHASE_REFINE] += now - tick;
             tick = now;
         }
-        Scratch scratch = scratch_begin(0);
-        uint64_t* lines = result ? arena_push_array(scratch.arena, data->token_count / 64 + 1, sizeof(uint64_t), 64) : 0;
-        result = lines != 0;
+        result = result && pp_directive_table(pp, data);
         if (result)
         {
-            const uint32_t directive_count = pp->vectorized ? pp_scan_directives_vector(data->kinds, data->token_count, 0, lines)
-                                                            : pp_scan_directives_scalar(data->kinds, data->token_count, 0, lines);
-            data->directive_count = directive_count;
-            data->directive_hash = arena_push_array(&pp->arena, directive_count + 1, sizeof(uint32_t), 4);
-            data->directive_end = arena_push_array(&pp->arena, directive_count + 1, sizeof(uint32_t), 4);
-            data->directive_kind = arena_push(&pp->arena, directive_count + 1, 1);
-            data->directive_next = arena_push_array(&pp->arena, directive_count + 1, sizeof(uint32_t), 4);
-            result = data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
-        }
-        if (result)
-        {
-            if (pp->vectorized)
-            {
-                pp_scan_directives_vector(data->kinds, data->token_count, data->directive_hash, lines);
-            }
-            else
-            {
-                pp_scan_directives_scalar(data->kinds, data->token_count, data->directive_hash, lines);
-            }
-            result = pp_finish_directives(pp, data, lines);
-        }
-        scratch_end(scratch);
-        if (result)
-        {
-            data->guard = pp_find_guard(data);
             data->prepared = true;
         }
         else
@@ -5034,7 +5140,62 @@ static void pp_line_text(const Preprocessor* pp, const PPFileData* data, uint32_
 
 static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location);
 
-// Skips to the next directive of directive d's conditional group (or to the end of the file if it is unterminated).
+static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start);
+
+// Where clang puts token t of the context's file in diagnostics: where its lexer starts the token, at the first of any
+// line splices right before it (pp_start_with_splices).
+static uint32_t pp_token_location(const Preprocessor* pp, const PPContext* context, const PPFileData* data, uint32_t t)
+{
+    return pp->ranges[context->range].base + pp_start_with_splices(data->bytes, data->starts[t]);
+}
+
+// A conditional directive's name, for diagnostics.
+static const char* pp_conditional_name(uint8_t kind)
+{
+    return kind == PP_DIRECTIVE_ELIFDEF ? "elifdef" : kind == PP_DIRECTIVE_ELIFNDEF ? "elifndef" : kind == PP_DIRECTIVE_ELSE ? "else" : "elif";
+}
+
+// The notes of the directives a skip passes over (PPFileData.note_*), from directive `from` (not included) to `to`
+// (the next directive of the group, or the directive count for a skip to the end of the file): what clang reports as
+// it skips them, at their names.
+static void pp_report_skipped(Preprocessor* pp, const PPContext* context, const PPFileData* data, uint32_t from, uint32_t to)
+{
+    uint32_t low = 0;
+    uint32_t high = data->note_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = data->note_directives[middle] <= from ? middle + 1 : low;
+        high = data->note_directives[middle] <= from ? high : middle;
+    }
+    uint32_t last = low;
+    for (; last < data->note_count && data->note_directives[last] < to; last += 1)
+    {
+        const uint32_t d = data->note_directives[last];
+        const uint8_t notes = data->note_kinds[last];
+        const uint32_t name = pp_token_location(pp, context, data, data->directive_hash[d] + 1);
+        const char* spelling = pp_conditional_name(data->directive_kind[d]);
+        if ((notes & BUSTER_PP_NOTE_ELIFDEF) != 0 && pp->options.language.standard < 2023)
+        {
+            pp_diagnose(pp, PP_SEVERITY_WARNING, name, "use of a '#%s' directive is a C23 extension", spelling);
+        }
+        if ((notes & BUSTER_PP_NOTE_AFTER_ELSE) != 0)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#%s after #else", spelling);
+        }
+    }
+    // A skip to the end leaves the groups opened inside it open, which are unterminated, innermost (last) first.
+    for (uint32_t i = last; to == data->directive_count && i > low; i -= 1)
+    {
+        if ((data->note_kinds[i - 1] & BUSTER_PP_NOTE_UNTERMINATED) != 0)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, pp_token_location(pp, context, data, data->directive_hash[data->note_directives[i - 1]] + 1), "unterminated conditional directive");
+        }
+    }
+}
+
+// Skips to the next directive of directive d's conditional group (or to the end of the file if it is unterminated),
+// reporting what the directives it passes over must (pp_report_skipped).
 static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
 {
     const PPFileData* data = &pp->datas[pp->files[context->file].data];
@@ -5049,23 +5210,34 @@ static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
         context->position = data->directive_hash[next];
         context->next_directive = next;
     }
+    if (pp->conditional_count > context->conditional_base)
+    {
+        pp->conditionals[pp->conditional_count - 1].skipping = true;
+    }
+    if (data->note_count != 0)
+    {
+        pp_report_skipped(pp, context, data, d, context->next_directive);
+    }
 }
 
 // A #if's, #ifdef's or #ifndef's group is open (taken or not), or a #elif's, #elifdef's or #elifndef's branch is
 // decided, at directive d: a group not taken is skipped to its next directive.
-static void pp_apply_condition(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind, bool taken, uint32_t location)
+static void pp_apply_condition(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind, bool taken)
 {
     if (kind == PP_DIRECTIVE_IF || kind == PP_DIRECTIVE_IFDEF || kind == PP_DIRECTIVE_IFNDEF)
     {
+        const PPFileData* data = &pp->datas[pp->files[context->file].data];
+        const uint32_t name = pp_token_location(pp, context, data, data->directive_hash[d] + 1);
         if (pp->conditional_count < BUSTER_PP_MAX_CONTEXTS)
         {
-            pp->conditionals[pp->conditional_count] = (PPConditional){ .taken = taken, .seen_else = false, .location = location };
+            pp->conditionals[pp->conditional_count] = (PPConditional){ .taken = taken, .location = name };
             pp->conditional_count += 1;
         }
     }
     else
     {
         pp->conditionals[pp->conditional_count - 1].taken = taken;
+        pp->conditionals[pp->conditional_count - 1].skipping = false;
     }
     if (!taken)
     {
@@ -5099,7 +5271,7 @@ static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d,
     if (!started)
     {
         pp->arguments.count = line;
-        pp_apply_condition(pp, context, d, kind, false, location);
+        pp_apply_condition(pp, context, d, kind, false);
     }
 }
 
@@ -5119,10 +5291,11 @@ static void pp_finish_condition(Preprocessor* pp)
     pp->capture_count -= 1;
     pp->captures.count = capture.begin;
     pp->arguments.count = capture.arguments_begin;
-    pp_apply_condition(pp, &pp->contexts[capture.context], capture.directive, capture.directive_kind, taken, capture.location);
+    pp_apply_condition(pp, &pp->contexts[capture.context], capture.directive, capture.directive_kind, taken);
 }
 
-// The conditional directives (C 6.10.2), at directive d.
+// The conditional directives (C 6.10.2), at directive d. Their structure is reported at the directive's name and
+// extra tokens at the first of them, where clang reports them, and in clang's order.
 static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t kind)
 {
     const PPFileData* data = &pp->datas[pp->files[context->file].data];
@@ -5130,6 +5303,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
     const uint32_t end = data->directive_end[d];
     const uint32_t base = pp->ranges[context->range].base;
     const uint32_t location = base + data->starts[hash];
+    const uint32_t name = pp_token_location(pp, context, data, hash + 1);
     const bool open = pp->conditional_count > context->conditional_base;
     PPConditional* group = open ? &pp->conditionals[pp->conditional_count - 1] : 0;
     switch (kind)
@@ -5147,22 +5321,26 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             }
             else if (hash + 3 < end)
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #%s directive", kind == PP_DIRECTIVE_IFDEF ? "ifdef" : "ifndef");
+                pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 3), "extra tokens at end of #%s directive", kind == PP_DIRECTIVE_IFDEF ? "ifdef" : "ifndef");
             }
             const bool defined = named && pp_is_macro(pp, data->values[hash + 2]);
-            pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_IFDEF ? defined : !defined), location);
+            pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_IFDEF ? defined : !defined));
             break;
         }
         case PP_DIRECTIVE_ELIF:
         case PP_DIRECTIVE_ELIFDEF:
         case PP_DIRECTIVE_ELIFNDEF:
+            if (kind != PP_DIRECTIVE_ELIF && pp->options.language.standard < 2023)
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, name, "use of a '#%s' directive is a C23 extension", pp_conditional_name(kind));
+            }
             if (!open)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#elif without #if");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#%s without #if", pp_conditional_name(kind));
             }
             else if (group->seen_else)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#elif after #else");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#%s after #else", pp_conditional_name(kind));
                 pp_skip_group(pp, context, d);
             }
             else if (group->taken)
@@ -5176,33 +5354,60 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             else
             {
                 const bool named = hash + 2 < end && (data->kinds[hash + 2] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
+                if (!named)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "macro name missing");
+                }
+                else if (hash + 3 < end)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 3), "extra tokens at end of #%s directive", pp_conditional_name(kind));
+                }
                 const bool defined = named && pp_is_macro(pp, data->values[hash + 2]);
-                pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_ELIFDEF ? defined : !defined), location);
+                pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_ELIFDEF ? defined : !defined));
             }
             break;
         case PP_DIRECTIVE_ELSE:
+        {
+            // clang checks the line's end before the structure in a group it is reading (or with no group), after it
+            // where it enters the #else from a skip, and not at all where it skips past a taken group.
+            const bool entering = open && !group->taken;
+            const bool extra = hash + 2 < end && !(open && group->taken && group->skipping);
+            if (extra && !entering)
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #else directive");
+            }
             if (!open)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#else without #if");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#else without #if");
             }
             else
             {
                 if (group->seen_else)
                 {
-                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#else after #else");
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#else after #else");
+                }
+                if (extra && entering)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #else directive");
                 }
                 group->seen_else = true;
                 if (group->taken)
                 {
                     pp_skip_group(pp, context, d);
                 }
+                group->skipping &= group->taken;
                 group->taken = true;
             }
             break;
+        }
         case PP_DIRECTIVE_ENDIF:
+            if (hash + 2 < end)
+            {
+                pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #endif directive");
+            }
             if (!open)
             {
-                pp_diagnose(pp, PP_SEVERITY_ERROR, location, "#endif without #if");
+                pp_diagnose(pp, PP_SEVERITY_ERROR, name, "#endif without #if");
             }
             else
             {
