@@ -110,6 +110,164 @@ the 2 ms proposed. Each phase's time includes the kernel clearing the fresh
 pages it writes, 13% of the samples (see "Where the time goes"). "Next steps"
 lists what would close the gap.
 
+## Object-macro eligibility cache experiment (#110)
+
+The cheap first step of [#110](https://github.com/buster14a/buster/issues/110)
+was measured on October 21, 2026 and **rejected**: caching whether an
+object-like macro's body needs rescanning did not save more time than the
+measured spread. No cache state, switch or benchmark overhead from this
+experiment is retained in the compiler.
+
+The reproducible prototype is
+[`d8109dd8f40c03db6c0288056154308ca552ecc5`](https://github.com/buster14a/buster/commit/d8109dd8f40c03db6c0288056154308ca552ecc5),
+on `codex/preprocessor-cache-110`, based on
+`ea83392b5b7d0dbef35441c2b96a1eadd407da0c`. It adds a definition epoch,
+advanced by definitions, undefinitions and macro push/pop, and an epoch-tagged
+eligibility flag per macro. It caches both answers to "the body contains no
+currently defined macro and no paste", leaving the existing body-copy,
+spacing, location and rescan paths intact. Disabled macro names still prevent
+direct copying; changing the disabled set does not invalidate this conservative
+classification. Epoch wrap clears the tags. `PPMacro` grows from 56 to 64 bytes.
+
+The classification has an exact scalar twin. Its vector path checks kind
+bytes with bounded masked AVX-512 loads, then tests the macro bitset with
+scalar loads for the selected identifiers; it uses no gather. Target assembly
+was inspected. Both measured variants use this classifier, so their difference
+isolates the epoch lookup and reuse within the instrumented prototype.
+
+### Inputs and method
+
+All target builds, tests and measurements took the shared 9700X lock, separately
+per command. `build.sh` used Clang 23.1.1, `-O3 -march=native`, on the Ryzen 7
+9700X. Timings were pinned to CPU 2. Each process ran one warm-up and 21 measured
+passes per variant, rotating their order, with a fresh preprocessor and intern
+table for each translation unit. Initialization, file reads, lexing, refinement,
+directives and expansion are included; teardown, printing and external Clang
+are outside the timed interval.
+The table gives the median and the 10th/90th percentile samples. These are
+end-to-end interleaved measurements, not isolated vector-kernel conditioning
+experiments or a claim about a particular power-cap state.
+
+The frozen inputs are under
+`~/buster-fast-bench/preprocessor-corpora-astra-01a158dd/` on the 9700X:
+
+- SQLite 3.53.2's `sqlite/sqlite3.c`, with the frozen Clang 23 and glibc headers:
+  1,242,079 input tokens and 706,237 output tokens. Its SHA-256 is
+  `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`.
+- The libc workload is the 1,587 sources in `config/musl-ordinary.txt`, from
+  Zig 0.14.1's patched musl 1.2.5, with the frozen generated-header overlay:
+  18,698,194 input tokens and 6,005,081 output tokens per pass. This partition
+  includes foreign-architecture sources and excludes four CRT/loader sources
+  that require different flags. It is a preprocessing workload, not a musl
+  build or a claim to cover all 8,983 C/header inputs in the mixed libc corpus.
+  The input-list SHA-256 is
+  `bf47f8562fd1df039a81464164df642c0efb7653e7cb91b0be964978929bb4dc`;
+  `manifests/libc.sha256` hashes to
+  `bf593a94954f3ed9431dd12e60233ec0229f7226a1fc270a701614a20f86baeb`.
+
+These inputs differ from the earlier measurements above, so compare cache on
+and off within this experiment rather than comparing their absolute times or
+token counts with the earlier tables. The corpus README and manifests retain
+the upstream versions, headers, generated overlay and licenses. No corpus
+source is imported into this repository.
+
+### Measurements and decision
+
+| Input / process | Cache off, ms | Off p10–p90, ms | Cache on, ms | On p10–p90, ms |
+| --- | ---: | ---: | ---: | ---: |
+| SQLite, round 2 | 12.169 | 12.122–12.261 | 12.212 | 12.120–12.292 |
+| SQLite, round 3 | 12.199 | 12.100–12.333 | 12.159 | 12.076–12.274 |
+| SQLite, round 4 | 12.175 | 12.087–12.281 | 12.119 | 12.062–12.208 |
+| SQLite, round 5 | 12.254 | 12.168–12.523 | 12.213 | 12.099–12.327 |
+| musl, round 1 | 582.319 | 576.483–589.217 | 584.071 | 574.638–588.091 |
+| musl, round 2 | 574.152 | 572.050–582.799 | 576.499 | 572.525–584.839 |
+| musl, round 3 | 576.837 | 573.781–586.469 | 576.376 | 571.776–585.285 |
+
+SQLite round 1 was a pilot with the same expansion/benchmark implementation
+but an earlier test/main layout; it is excluded from the table. The unchanged
+base compiler also took 12.126 ms on the same SQLite input. This control is
+consistent with no demonstrated gain, but lacks the prototype's added scan
+counters and is not an isolated measurement of their cost.
+
+| Per pass | SQLite | musl |
+| --- | ---: | ---: |
+| Cache hits | 24,265 | 144,118 |
+| Cache misses | 7,302 | 48,471 |
+| Body tokens inspected, cache off → on | 56,561 → 10,731 | 542,337 → 103,197 |
+| Instructions/input token, cache off → on | 129.64 → 128.82 | 227.65 → 227.21 |
+| Object expansions already copied directly | 28,180 / 31,567 | 182,990 / 192,589 |
+
+The scan counts fall by about 81%, but the uncached scan already inspects only
+1.79 tokens per object expansion on SQLite and 2.82 on musl. Instruction counts
+fall by 0.63% and 0.19%, respectively, including instrumentation. The time
+difference changes sign on both corpora and is smaller than the pass spread.
+Neither corpus demonstrates a repeatable gain. The added epoch checks and
+macro-table field therefore do not earn their place under #110's acceptance
+rule. Across processes, the medians themselves span 0.085/0.094 ms on SQLite
+and 8.167/7.695 ms on musl (cache off/on), also exceeding the paired changes.
+
+This result covers the eligibility cache only. Fully rescanned output replay
+and argument-keyed function-like caching were not implemented or measured.
+They remain separate hypotheses, requiring a profile that identifies enough
+repeated expansion work to repay storage, lookup and provenance replay. An
+epoch alone is insufficient for arbitrary output replay: with `A` expanding
+to `B` and `B` to `A`, the painted result depends on which macro is disabled,
+without a definition change. Dynamic builtins, `_Pragma`, function-like tails
+and #108's expansion histories also have to be handled. This negative result
+does not establish that every possible expansion cache would lose.
+
+### Correctness and reproduction
+
+The prototype runs every test with caching on and off, in vector and scalar
+modes. On the 9700X the 88 existing Clang-compared fixtures, six cache fixtures,
+guarded classifier tails (lengths 0–129, identifiers in every position), forced
+epoch wrap, predefined-macro/keyword/feature checks and 432 generated cases
+passed with zero cache mismatches. Generated cases use the unchanged #109
+generator: 72 case IDs, seeds 1/7/99, C17 and C23. This is a cache equivalence
+check, not #109's larger independent-oracle qualification. SQLite and all
+1,587 musl sources also matched Clang in their 706,237 and 6,005,081 output
+tokens, respectively, with zero cache mismatches.
+
+For provenance composition, the prototype's core and tests were applied to
+#108's draft at `42fbc1ed7654cd10420bfcfbc1636e1c6432968e`, preserving its
+history hooks. Local tests passed the same cases, all 26 Clang diagnostic
+checks and history run/lifetime checks; `main.c` matched in 1,482,336 tokens.
+`pp_same_streams` compared expansions, substitutions, generated tokens, source
+records and output runs as well as tokens and locations, with zero cache
+mismatches. This composition is correctness evidence, not a 9700X performance
+measurement. The standalone prototype also passed the local no-recursion
+call-graph check (17 translation units, 6,234 functions, zero cycles).
+
+Logs, source checksums and target assembly are retained on the 9700X under
+`~/buster-fast-bench/cache-110/`. Every tracked prototype source matched the
+`d8109dd` checkout. The tested/timed candidate binary SHA-256 is
+`c64180d9476601c67c18f43c04a8266fed85a452123e9f46a17b9adf1a708a18`;
+the unchanged control is
+`f449cef953cff2ed28c44e79ceda3214b3bd6279d8b5784a1d6b95d990e57f65`.
+To reproduce, use a separate checkout of `d8109dd` on the 9700X, build through
+the shared lock, and run from that checkout (Bash):
+
+```sh
+EXCLUSIVE_OWNER=cache-110-repro ~/buster-fast-bench/exclusive.sh ./build.sh
+EXCLUSIVE_OWNER=cache-110-repro ~/buster-fast-bench/exclusive.sh ./build/compiler test-preprocessor --clang
+corpus="$HOME/buster-fast-bench/preprocessor-corpora-astra-01a158dd"
+EXCLUSIVE_OWNER=cache-110-repro ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-preprocessor \
+    -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+mapfile -t units < "$corpus/config/musl-ordinary.txt"
+for i in "${!units[@]}"; do units[$i]="$corpus/libc/musl/${units[$i]}"; done
+EXCLUSIVE_OWNER=cache-110-repro ~/buster-fast-bench/exclusive.sh taskset -c 2 ./build/compiler benchmark-preprocessor \
+    -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+    -I "$corpus/libc/musl/arch/x86_64" -I "$corpus/libc/musl/arch/generic" \
+    -I "$corpus/musl-generated/obj/src/internal" -I "$corpus/libc/musl/src/include" \
+    -I "$corpus/libc/musl/src/internal" -I "$corpus/musl-generated/obj/include" \
+    -I "$corpus/libc/musl/include" "${units[@]}"
+```
+
+The prototype's default benchmark compares `vectorized` (cache off) with
+`cached`; `--only all` adds both scalar variants. For corpus correctness,
+replace `benchmark-preprocessor` with `test-preprocessor --clang`, keeping
+the same input list and preprocessing flags.
+
 ## Design
 
 ### What is data-parallel, and what is ordered
@@ -877,7 +1035,9 @@ cleared once and reused.
   - keep the hot fields of `Preprocessor` and `PPTokens` in locals across a
     step: with `-fno-strict-aliasing`, every byte store reloads them;
   - resolve chains of object-like aliases without a context each;
-  - memoize the expansions of macros without arguments (#110).
+  - reconsider fully rescanned object-macro replay only with evidence of
+    repeated expansion work; #110's cheaper eligibility cache was measured
+    and rejected (see "Object-macro eligibility cache experiment" above).
 - **Clearing pages.** In a single run, prefaulting the arenas on another core
   while the first files are lexed would hide most of the 13%. Across many
   translation units, the arenas are reused (#152).
