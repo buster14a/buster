@@ -341,6 +341,8 @@ static __attribute__((unused)) void pp_history_lookup(const Preprocessor* pp, co
                     0,
                 };
                 _mm512_store_si512(indices, middle);
+                // Clang otherwise turns these explicit scalar loads back into Zen 5's expensive gathers.
+#pragma clang loop vectorize(disable) interleave(disable)
                 for (uint32_t k = 0; k < take; k += 1)
                 {
                     if ((active >> k) & 1)
@@ -355,6 +357,7 @@ static __attribute__((unused)) void pp_history_lookup(const Preprocessor* pp, co
             }
             uint32_t indices[16] __attribute__((aligned(64)));
             _mm512_store_si512(indices, low);
+#pragma clang loop vectorize(disable) interleave(disable)
             for (uint32_t k = 0; k < take; k += 1)
             {
                 origins[i + k] = tokens[i + k] < pp->output.count && indices[k] != 0 ? pp->history_runs[indices[k] - 1].origin : 0;
