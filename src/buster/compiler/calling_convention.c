@@ -23,12 +23,19 @@
 // _Atomic types are MEMORY, so _Atomic aggregates and records with an _Atomic or nullptr_t member go in memory, and
 // _Atomic scalars and nullptr_t are passed as their values, in registers LLVM gives them without clang counting them
 // (BUSTER_ABI_PASS_UNCOUNTED), which shifts the arguments after them; records with a flexible array member go in memory;
-// __fp16 is MEMORY; vectors of 4 bytes or less are INTEGER whatever their elements.
+// __fp16 is MEMORY; vectors of 4 bytes or less are INTEGER whatever their elements. And where clang's LLVM types decide
+// the registers (abi_storage and abi_layout model the types it needs): an i128 at a record's offset 0 makes it one value
+// LLVM never splits (BUSTER_ABI_PASS_PAIR); a narrow low part with a high part not aligned to 8 goes in a general
+// register (LOW_GENERAL); a vector result LLVM demotes to a hidden pointer isn't in clang's count (DEMOTED); a vector of
+// one element is its element's value (HALVES for a <1 x i128>).
 //
 // Assignment (computeInfo): an argument whose classes need general and vector registers takes them in order (rdi,
 // rsi, rdx, rcx, r8 and r9; xmm0 to xmm7) if all of them are free, and otherwise goes whole to the stack, the registers
 // staying free for the arguments after it. A result in MEMORY makes the caller pass its address in rdi. The stack
-// arguments are at increasing offsets from rsp at the call, each aligned to 8 or to its alignment if larger.
+// arguments are at increasing offsets from rsp at the call, each aligned to 8 or to its alignment if larger. Where
+// clang's count runs ahead of the registers LLVM gives (after an UNCOUNTED one, a PAIR LLVM put on the stack, a
+// LOW_GENERAL one or a DEMOTED result), what clang leaves to LLVM as a value, a scalar or a small aggregate passed as an
+// integer, takes the register LLVM still has (abi_assign_call); one that needs two may be split (SPLIT).
 //
 // Entry points: abi_initialize (the table, with the builtin types classified), abi_classify_all (every complete type
 // not yet classified, in levels whose types depend only on earlier ones) and abi_classify (one such level: the vector
@@ -40,21 +47,28 @@
 // type table's columns never change once written, but a tag's at its completion, after which abi_classify_all
 // classifies it). Lanes may read it while none writes.
 //
-// main.c and calling_convention_benchmark.c include this file after lane.c (Arena, Scratch) and c_types.c (TypeTable).
+// main.c includes this file after lane.c (Arena, Scratch) and c_types.c (TypeTable).
 // Layout, in this order:
 //   - API: the classes (BUSTER_ABI_INTEGER ...) and AbiClasses, the registers (BUSTER_ABI_RAX ...), the convention's
-//     constants, the pass bits (BUSTER_ABI_PASS_*), AbiTable, AbiReturn, AbiLocation, AbiCall, AbiSignatures,
-//     AbiVaArg, AbiVaList and the prototypes.
-//   - Classes: abi_merge_class, abi_canonical and abi_post_merge.
-//   - Simple types (everything but records and arrays): AbiSimple, abi_simple, abi_simple_entry and abi_simple_row.
-//   - Entries, the scalar classification: abi_array_entry, abi_record_entry and abi_row_entry.
-//   - Finishing a type: abi_canonical_alignment_log2, abi_member_storage, abi_union_storage_member, abi_storage,
-//     abi_layout, abi_sse_part, abi_integer_part, abi_low_general, abi_is_pair, abi_value_class, abi_finish and abi_copy.
-//   - The vector classification: AbiFold, AbiFoldGroup, abi_aligned_lanes, abi_fold_entries, abi_fold_groups.
-//   - The drivers: abi_capacity_bytes, abi_initialize, abi_classify, abi_classify_scalar, abi_classifiable,
-//     abi_dependencies_classified, abi_classify_levels, abi_classify_all and abi_classify_all_scalar, abi_classes.
-//   - Assignment: abi_stack_place, abi_assign_call (the twin, one call), abi_assign_scalar, the vector path's
-//     abi_segmented_scans and abi_assign.
+//     constants, the pass bits (BUSTER_ABI_PASS_*), AbiReturn, AbiLocation, AbiCall, AbiSignatures, AbiVaArg, AbiVaList,
+//     AbiTable and the prototypes.
+//   - Classes: abi_merge_class, abi_merge, abi_canonical and abi_post_merge.
+//   - Simple types (everything but records and arrays): AbiSimple, abi_simple_fixed, abi_simple_current,
+//     abi_resolved_index, abi_simple_floating, abi_simple, abi_simple_entry and abi_simple_row.
+//   - Entries, the scalar classification: abi_row_at, abi_alignment_bytes_log2, abi_array_entry, abi_bit_field_classes,
+//     abi_member_row_at, abi_record_entry and abi_row_entry.
+//   - Finishing a type: abi_canonical_alignment_log2; clang's LLVM types (abi_member_storage, abi_union_storage_member,
+//     abi_storage, abi_layout and its helpers, abi_sse_part, abi_integer_part, abi_low_general, abi_is_pair); values
+//     and results (abi_value_class, abi_value_alignment_log2, abi_is_aggregate, abi_is_illegal_vector, abi_extension,
+//     abi_value_result, abi_result); abi_end_memory, abi_finish and abi_copy.
+//   - The vector classification: AbiFold, AbiFoldGroup, abi_lane_offsets, abi_aligned_lanes, abi_possible_lanes,
+//     abi_shifted_row, abi_member_entry, abi_write_entries, abi_merge_vector, abi_post_merge_vector, abi_fold_groups,
+//     abi_store_row and abi_classify_vector.
+//   - The drivers: abi_capacity_bytes, abi_initialize, abi_classify_scalar, abi_classify, abi_classifiable,
+//     abi_is_classified, abi_dependencies_classified, abi_classify_levels, abi_classify_all, abi_classify_all_scalar and
+//     abi_classes.
+//   - Assignment: abi_stack_place, abi_assign_call (the twin, one call), abi_assign_scalar, the vector path's AbiScan,
+//     abi_scan, abi_scan_add, abi_scan_or and abi_assign.
 //   - va_arg: abi_va_arg.
 
 #include <stdint.h>
@@ -175,7 +189,9 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 //   - UNCOUNTED: MEMORY by its class, but a scalar clang passes as its value, in a register LLVM gives it (VALUE says
 //     which kind) and clang doesn't count, or on the stack once there is none: nullptr_t and _Atomic scalars.
 //   - IGNORE: nothing to pass (both classes NO_CLASS: an empty struct, a struct of unnamed bit-fields).
-//   - PAIR: one 128-bit integer value (clang's i128) that LLVM never splits between a register and the stack.
+//   - PAIR: one 128-bit integer value (clang's i128) that LLVM never splits between a register and the stack; with a
+//     high eightbyte NO_CLASS (an i128 a union stores, as union { int a; unsigned _BitInt(128) : 127; }), clang counts
+//     one register for it all the same.
 //   - SIGN, ZERO: clang's Extend: the caller sign- or zero-extends the value to 32 bits (the callee, for a result).
 //   - AGGREGATE: clang's byval: a copy of it on the stack, and a result through a hidden pointer.
 //   - END_MEMORY: a type of no size that is MEMORY at offset 16 though not at 0 (see abi_member_row_at), which only the
@@ -536,9 +552,12 @@ static AbiSimple abi_simple_floating(uint8_t code, uint64_t size)
     return result;
 }
 
-// What a simple type is, by its kind; `index` is resolved (not ALIGNED). Records and arrays aren't simple.
-static AbiSimple abi_simple(const AbiTable* abi, const TypeTable* table, uint32_t index)
+// What a simple type is, by its kind; `type_index` is resolved (not ALIGNED), and an enum is its underlying integer
+// type (complete enums only reach here). Records and arrays aren't simple.
+static AbiSimple abi_simple(const AbiTable* abi, const TypeTable* table, uint32_t type_index)
 {
+    const bool enumeration = table->types.kind[type_index] == BUSTER_TYPE_KIND_ENUM;
+    const uint32_t index = enumeration ? table->types.base[type_index] >> BUSTER_TYPE_INDEX_SHIFT : type_index;
     const uint8_t kind = table->types.kind[index];
     const uint8_t code = table->types.code[index];
     const uint64_t size = table->types.size[index];
@@ -570,11 +589,6 @@ static AbiSimple abi_simple(const AbiTable* abi, const TypeTable* table, uint32_
         {
             result = abi_simple_fixed(BUSTER_ABI_INTEGER, BUSTER_ABI_INTEGER, size);
         }
-    }
-    else if (kind == BUSTER_TYPE_KIND_ENUM)
-    {
-        // An enum is its underlying integer type (complete enums only reach here).
-        result = abi_simple(abi, table, table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT);
     }
     else if (kind == BUSTER_TYPE_KIND_COMPLEX)
     {
@@ -844,7 +858,8 @@ static uint8_t abi_canonical_alignment_log2(const AbiTable* abi, const TypeTable
 }
 
 // A member's storage in clang's LLVM type of its record (see abi_storage): its type's, or for a bit-field an integer: in
-// a union iN for N the smaller of its width and its type's bits (lowerUnion's getStorageType), never an i128 below 128;
+// a union iN for N the smaller of its width and its type's bits rounded up to bytes (lowerUnion's getStorageType, an
+// i128 for 121 to 128 bits);
 // in a struct, an i128 for one wider than an eightbyte of a 16-byte type, and otherwise as aligned as its type (clang's
 // access units, which this doesn't work out, are integers no wider than the storage units). `bytes` is its size there.
 static uint8_t abi_member_storage(const AbiTable* abi, const TypeTable* table, uint32_t member, bool in_union, uint64_t* bytes)
@@ -853,7 +868,8 @@ static uint8_t abi_member_storage(const AbiTable* abi, const TypeTable* table, u
     const bool bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
     const uint32_t width = table->members.bit_width[member];
     const uint64_t type_bits = table->types.size[resolved] * 8;
-    const uint64_t bits = width < type_bits ? width : type_bits;
+    // getIntNType rounds the bits up to bytes: an i128 for 121 to 128.
+    const uint64_t bits = ((width < type_bits ? width : type_bits) + 7) & ~(uint64_t)7;
     // iN's alignment and size: those of the smallest of i8, i16, i32, i64 and i128 that holds it.
     const uint8_t integer_log2 = bits <= 8 ? 0 : bits <= 16 ? 1 : bits <= 32 ? 2 : bits <= 64 ? 3 : 4;
     uint8_t result = abi->storage[resolved];
@@ -947,7 +963,9 @@ static uint8_t abi_storage(const AbiTable* abi, const TypeTable* table, uint32_t
             const uint64_t offset = table->members.offset[member];
             if (member == stored)
             {
-                chosen = storage;
+                // A storage member of no size (a zero-length array LLVM aligns most) stores nothing at offset 0: the
+                // padding after it is bytes.
+                chosen = bytes != 0 ? storage : alignment;
                 largest = alignment;
             }
             else if (!zero_width && !in_union)
@@ -1057,6 +1075,8 @@ static uint64_t abi_layout(const AbiTable* abi, const TypeTable* table, uint32_t
         const uint32_t end = begin + table->tags.member_count[tag];
         uint64_t leaves = 0;
         uint64_t data = 0;
+        // The bytes the LLVM type's fields cover: the rest is padding, arrays of i8 GetINTEGERTypeAtOffset finds.
+        uint64_t covered = 0;
         for (uint32_t member = begin; member < end; member += 1)
         {
             const uint32_t type = abi_resolved_index(table, table->members.type[member]);
@@ -1064,27 +1084,37 @@ static uint64_t abi_layout(const AbiTable* abi, const TypeTable* table, uint32_t
             const uint64_t width = table->members.bit_width[member];
             const uint64_t offset = table->members.offset[member];
             const uint64_t unit = table->types.size[type];
+            const bool stores = !in_union || member == stored;
+            // A bit-field's storage: in a union, an integer of its width rounded to bytes at 0 (lowerUnion), in a struct
+            // its type's storage unit.
+            const uint64_t bits = ((width < unit * 8 ? width : unit * 8) + 7) & ~(uint64_t)7;
+            const uint64_t storage_bytes = in_union ? (bits <= 8 ? 1 : bits <= 16 ? 2 : bits <= 32 ? 4 : bits <= 64 ? 8 : 16) : unit;
+            const uint64_t storage_offset = in_union ? 0 : unit != 0 ? (offset / (unit * 8)) * unit : 0;
             if (bit_field && width != 0)
             {
-                // Data from its offset over its type's size (BitsContainNoUserData looks at a bit-field's type, not its
-                // width); in a union, an integer of its width at 0 (lowerUnion), in a struct its type's storage unit,
-                // unless a bit-field before it in the unit put one there.
+                // Its storage's integer, unless a bit-field before it in the unit put one there; and data from its
+                // offset over its type's size (BitsContainNoUserData looks at a bit-field's type, not its width).
                 const uint64_t first = offset >> 3;
-                const uint64_t bits = width < unit * 8 ? width : unit * 8;
-                const uint64_t unit_offset = in_union ? 0 : unit != 0 ? (offset / (unit * 8)) * unit : 0;
-                const uint64_t leaf_bytes = in_union ? (bits <= 8 ? 1 : bits <= 16 ? 2 : bits <= 32 ? 4 : bits <= 64 ? 8 : 16) : unit;
-                const uint64_t unit_layout = abi_layout_at(abi_integer_leaf(leaf_bytes), unit_offset);
-                const uint64_t slot_mask = unit_offset < 16 && (unit_offset & 1) == 0 ? 15ull << (unit_offset * 2) : 0;
-                const bool keep = in_union ? member == stored : (leaves & slot_mask) == 0;
+                const uint64_t unit_layout = abi_layout_at(abi_integer_leaf(storage_bytes), storage_offset);
+                const uint64_t slot_mask = storage_offset < 16 && (storage_offset & 1) == 0 ? 15ull << (storage_offset * 2) : 0;
+                const bool keep = in_union ? stores : (leaves & slot_mask) == 0;
                 leaves |= keep ? unit_layout & 0xffffffffu : 0;
+                covered |= stores ? abi_layout_bytes(storage_offset, storage_bytes) : 0;
                 data |= abi_layout_bytes(first, ((offset + unit * 8 - 1) >> 3) - first + 1);
             }
             else if (!bit_field)
             {
                 const uint64_t placed = abi_layout_at(abi->layout[type], offset >> 3);
-                leaves |= !in_union || member == stored ? placed & 0xffffffffu : 0;
+                leaves |= stores ? placed & 0xffffffffu : 0;
+                covered |= stores ? abi_layout_bytes(offset >> 3, table->types.size[type]) : 0;
                 data |= placed & ~(uint64_t)0xffffffffu;
             }
+        }
+        // An i8 at each even offset of the padding within the type's first 16 bytes.
+        const uint64_t holes = ~(covered >> BUSTER_ABI_LAYOUT_DATA_SHIFT) & ((1ull << (size < 16 ? size : 16)) - 1);
+        for (uint64_t offset = 0; offset < 16; offset += 2)
+        {
+            leaves |= (holes >> offset & 1) != 0 ? BUSTER_ABI_LEAF_I8 << (offset * 2) : 0;
         }
         result = leaves | data;
     }
@@ -1403,7 +1433,7 @@ static AbiReturn abi_result(const AbiTable* abi, const TypeTable* table, uint32_
         }
         const uint8_t classes_in_order[2] = {
             (pass & BUSTER_ABI_PASS_LOW_GENERAL) != 0 ? BUSTER_ABI_INTEGER : low,
-            high,
+            (pass & BUSTER_ABI_PASS_PAIR) != 0 ? BUSTER_ABI_INTEGER : high,
         };
         for (uint32_t i = 0; i < 2; i += 1)
         {
@@ -1492,7 +1522,10 @@ static void abi_finish(AbiTable* abi, const TypeTable* table, uint32_t index)
         pass |= high == BUSTER_ABI_SSE || high == BUSTER_ABI_X87UP ? BUSTER_ABI_PASS_HIGH_SSE : 0;
         pass |= high == BUSTER_ABI_SSEUP ? BUSTER_ABI_PASS_VECTOR : 0;
         pass |= high == BUSTER_ABI_SSEUP && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_PASS_WIDE : 0;
-        pass |= low == BUSTER_ABI_INTEGER && high == BUSTER_ABI_INTEGER && abi_is_pair(abi, table, index) ? BUSTER_ABI_PASS_PAIR : 0;
+        // An i128 at offset 0 makes clang's type for the low eightbyte the whole i128, a high one NO_CLASS too (which
+        // clang then counts as one register).
+        const bool pair_classes = low == BUSTER_ABI_INTEGER && (high == BUSTER_ABI_INTEGER || (high == BUSTER_ABI_NO_CLASS && size == 16));
+        pass |= pair_classes && abi_is_pair(abi, table, index) ? BUSTER_ABI_PASS_PAIR : 0;
         pass |= low == BUSTER_ABI_INTEGER && high == BUSTER_ABI_NO_CLASS ? abi_extension(table, index) : 0;
         pass |= abi_low_general(abi, table, index, low, high) ? BUSTER_ABI_PASS_LOW_GENERAL : 0;
     }
@@ -2232,11 +2265,17 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
         }
         else if (in_memory || clang_integers < need_integers || clang_vectors < need_vectors)
         {
-            // With no general register free, clang passes a small aggregate as an integer of its size: one of no size
-            // as an i0, which takes no slot (EMPTY).
-            const bool vanishes = (pass & BUSTER_ABI_PASS_EMPTY) != 0 && alignment_log2 == BUSTER_ABI_SLOT_LOG2 && clang_integers == 0;
-            location.kind = vanishes ? BUSTER_ABI_LOCATION_IGNORE : BUSTER_ABI_LOCATION_STACK;
-            location.stack_offset = vanishes ? 0 : abi_stack_place(&stack, &call.stack_alignment_log2, bytes, alignment_log2);
+            // With no general register free, clang passes an aggregate of 8 bytes or less, aligned to 8 or less, as an
+            // integer of its size (getIndirectResult), MEMORY or not: LLVM gives it a general register if it has one
+            // left (after a count of clang's that LLVM's runs behind), else 8 bytes of the stack, as a copy would take;
+            // one of no size is an i0, which takes none (EMPTY).
+            const bool integer = (pass & BUSTER_ABI_PASS_AGGREGATE) != 0 && bytes == BUSTER_ABI_SLOT_BYTES && alignment_log2 == BUSTER_ABI_SLOT_LOG2 && clang_integers == 0;
+            const bool vanishes = integer && (pass & BUSTER_ABI_PASS_EMPTY) != 0;
+            const bool in_register = integer && !vanishes && integers < BUSTER_ABI_INTEGER_ARGUMENTS;
+            location.kind = vanishes ? BUSTER_ABI_LOCATION_IGNORE : in_register ? BUSTER_ABI_LOCATION_REGISTERS : BUSTER_ABI_LOCATION_STACK;
+            location.registers[0] = in_register ? abi_integer_arguments[integers] : BUSTER_ABI_REGISTER_NONE;
+            integers += in_register ? 1 : 0;
+            location.stack_offset = vanishes || in_register ? 0 : abi_stack_place(&stack, &call.stack_alignment_log2, bytes, alignment_log2);
         }
         else if ((pass & (BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_PAIR)) != 0)
         {
@@ -2261,7 +2300,9 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
             }
             else
             {
-                const uint32_t slot_log2 = wide_on_stack ? (uint32_t)__builtin_ctz(bytes) : alignment_log2;
+                // A PAIR LLVM puts on the stack as an i128, aligned to 16 whatever the record's alignment.
+                const uint32_t pair_log2 = (pass & BUSTER_ABI_PASS_PAIR) != 0 && alignment_log2 < 4 ? 4 : alignment_log2;
+                const uint32_t slot_log2 = wide_on_stack ? (uint32_t)__builtin_ctz(bytes) : pair_log2;
                 location.kind = BUSTER_ABI_LOCATION_STACK;
                 location.stack_offset = abi_stack_place(&stack, &call.stack_alignment_log2, bytes, slot_log2);
             }
@@ -2387,8 +2428,8 @@ static __m512i abi_scan_or(__m512i values, AbiScan scan, __m512i carry)
 //   - an argument is UNCOUNTED, whose registers clang doesn't count but LLVM does, or a named WIDE one of a variadic
 //     call, the reverse;
 //   - a stack argument is EMPTY, whose slot depends on clang's count, or one is LOW_GENERAL, whose low eightbyte clang
-//     counts as SSE and LLVM puts in a general register, or the result is one LLVM demotes to a hidden pointer, which
-//     clang doesn't count (DEMOTED);
+//     counts as SSE and LLVM puts in a general register, or a PAIR of one class, which clang counts as one register and
+//     LLVM gives two, or the result is one LLVM demotes to a hidden pointer, which clang doesn't count (DEMOTED);
 // and the calls with one of those (rare in compiled code) go to the twin, which assigns them one argument at a time.
 static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
 {
@@ -2512,7 +2553,9 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __mmask16 empty = on_stack & _mm512_test_epi32_mask(pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_EMPTY));
             const __mmask16 general_low = _mm512_test_epi32_mask(pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_LOW_GENERAL));
             const __mmask16 demoted = _mm512_test_epi32_mask(lane_flags, _mm512_set1_epi32(BUSTER_ABI_LANE_DEMOTED));
-            const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | wide_named | empty | general_low | demoted);
+            const __mmask16 short_pair = _mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_PAIR)) &
+                                         (__mmask16)~_mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_HIGH_INTEGER));
+            const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | wide_named | empty | general_low | demoted | short_pair);
             // The registers: the low eightbyte's, then the high one's (first for a value whose low one is padding).
             const __mmask16 low_integer_lanes = _mm512_test_epi32_mask(low_integer, low_integer);
             const __mmask16 low_sse_lanes = _mm512_test_epi32_mask(low_sse, low_sse);

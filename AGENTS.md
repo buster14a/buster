@@ -305,6 +305,14 @@ designs and the compilers already built this way.
   `./build/compiler test-types` runs them) and `c_types_benchmark.c` provides
   `benchmark-types`. `docs/c-types.md` records the design and its 9700X
   measurements.
+- `src/buster/compiler/calling_convention.c` is the System V AMD64 calling
+  convention (#137, contract 3 for #136): every `TypeId`'s classes as clang 23
+  classifies them, a row of 16 offsets per type, records and arrays folded
+  four at a time in vectors with an exact twin; arguments' and results'
+  registers and stack slots as clang and LLVM's `CC_X86_64_C` give them, by
+  prefix sums 16 arguments at a time with an exact twin; and `va_arg`'s plan.
+  `calling_convention_test.c` holds its tests (`main.c` includes both;
+  `./build/compiler test-calling-convention` runs them).
 - `src/buster/compiler/call_graph.c` is the call graph check, the coding
   style's rule against recursion checked mechanically: `check-call-graph`
   reads the LLVM IR of the translation units `build.sh` compiles, builds their
@@ -373,6 +381,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
 ./build/compiler test-types
 ./build/compiler benchmark-types
+./build/compiler test-calling-convention --cross-check
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
@@ -1885,3 +1894,48 @@ Run it under the 9700X's lock with `taskset -c 2`. `docs/c-types.md` has the
 numbers and the layout designs the vector one was chosen over. The default
 9700X job runs it after the type tests, pinned to one allowed CPU; like the
 others, its measurements are informational.
+
+## Calling convention tests
+
+`./build/compiler test-calling-convention [--seed N] [--count N]
+[--cross-check] [--signatures N] [--clang PATH] [--gcc PATH] [--keep]`
+(about 0.02 s on the 9700X, and 18 s with `--cross-check`) checks
+`calling_convention.c`, by its vector paths and their twins at 16-, 32- and
+64-byte vectors:
+
+- merge: clang's merge and post-merge, written again as clang writes them,
+  against the module's 64-entry merge table and post-merge, on every pair of
+  classes;
+- fixtures: types whose classes, pass bits and results clang's IR shows
+  (scalars, vectors, complex types, `_BitInt`s, records with unaligned and
+  zero-size members, bit-fields, flexible array members, `_Atomic` and
+  `nullptr_t` members, `i128` storage, which LLVM never splits, and the
+  narrow low parts clang widens into a general register), and calls whose
+  locations clang and LLVM give (an `UNCOUNTED` argument that splits the
+  next record, an `__int128` without two registers left, a hidden pointer, a
+  record of a flexible array member alone as an `i0`);
+- worlds: random worlds of `--count` types (2,000 by default), classified by
+  both paths into tables that must be identical, and every type at every
+  offset it can be at compared with an oracle of the test's own, clang's
+  `classify` transcribed with an explicit stack of frames;
+- assignment: random calls over a world's types, named and variadic, by both
+  paths, which must give the same locations and totals, also with the
+  columns ending at a `PROT_NONE` page.
+
+With `--cross-check`, which needs clang 23 and GCC 16 on `PATH` (or `--clang
+PATH` and `--gcc PATH`) and libatomic: for each compiler and vector width
+(the C built with `-march=x86-64`, `x86-64-v3` and `x86-64-v4`), a world and
+`--signatures` random signatures (400) over its passable types are written
+as C (the types, every argument's and result's bytes, a C callee and a C
+caller of ours) and as our side, a caller and a callee per signature as
+`X86Instruction` records through `x86_encode`, `link_add_code_fixups` and the
+object writer. The compiler's driver links them and the program runs: each
+side checks every argument, result, hidden pointer, `al` and `va_arg` value
+against the bytes, both ways. GCC's worlds leave out what GCC lays out or
+passes otherwise than clang (the test names each, GCC's own bugs among
+them); an argument clang would pass as an `i0` becomes a long (its passes
+crash on them now and then), as does an unnamed one clang's `va_arg` reads
+elsewhere than its call puts it; and bytes clang doesn't pass aren't
+compared. The files go in a new directory under `$TMPDIR` (or `/tmp`),
+removed unless `--keep` or a failure. The 9700X job runs it with
+`--cross-check` after the type table's benchmark.

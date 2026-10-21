@@ -217,3 +217,8 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-types
+
+      - name: Test the calling convention
+        # --cross-check also links random signatures between our side, encoded and written as objects, and C that
+        # clang and GCC compile, at 16-, 32- and 64-byte vectors, and checks every argument, result and va_arg both ways.
+        run: ./build/compiler test-calling-convention --cross-check
