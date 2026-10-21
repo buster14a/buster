@@ -52,6 +52,15 @@ static bool x86_decode_test_mnemonic(const char* expected, int32_t immediate, co
         {"fdisi", "fndisi"},
         {"fsetpm", "fnsetpm"},
         {"retfd", "retf"},
+        {"iretd", "iret"},
+        {"pushfq", "pushf"},
+        {"popfq", "popf"},
+        {"xstore", "xstore-rng"},
+        {"xcryptecb", "xcrypt-ecb"},
+        {"xcryptcbc", "xcrypt-cbc"},
+        {"xcryptctr", "xcrypt-ctr"},
+        {"xcryptcfb", "xcrypt-cfb"},
+        {"xcryptofb", "xcrypt-ofb"},
         {"movsb", "movs"},
         {"movsw", "movs"},
         {"movsd", "movs"},
@@ -97,22 +106,28 @@ static bool x86_decode_test_mnemonic(const char* expected, int32_t immediate, co
     };
     static const char* const short_conditions[16] = {"eq", "lt", "le", "unord", "neq", "nlt", "nle", "ord", "eq_uq", "nge", "ngt", "false", "neq_oq", "ge", "gt", "true"};
     static const char* const integer_conditions[8] = {"eq", "lt", "le", "false", "neq", "nlt", "nle", "true"};
-    static const char* const compares[] = {"cmpps", "cmppd", "cmpss", "cmpsd", "vcmpps", "vcmppd", "vcmpss", "vcmpsd", "vcmpph", "vcmpsh", "vcmpbf16", "vpcmpb", "vpcmpw", "vpcmpd", "vpcmpq", "vpcmpub", "vpcmpuw", "vpcmpud", "vpcmpuq"};
+    static const char* const xop_conditions[8] = {"lt", "le", "gt", "ge", "eq", "neq", "false", "true"};
+    static const char* const compares[] = {"cmpps", "cmppd", "cmpss", "cmpsd", "vcmpps", "vcmppd", "vcmpss", "vcmpsd", "vcmpph", "vcmpsh", "vcmpbf16", "vpcmpb", "vpcmpw", "vpcmpd", "vpcmpq", "vpcmpub", "vpcmpuw", "vpcmpud", "vpcmpuq", "vpcomb", "vpcomw", "vpcomd", "vpcomq", "vpcomub", "vpcomuw", "vpcomud", "vpcomuq"};
     char predicate[2][64] = {{0}};
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(compares); i += 1)
     {
         const bool integer = i >= 11;
-        const uint32_t prefix = integer ? 5 : i < 4 ? 3 : 4;
+        const uint32_t prefix = integer ? 5 : i < 4 ? 3 : i == 10 ? 6 : 4;
         const uint32_t limit = integer || i < 4 ? 8 : 32;
         if (strcmp(expected, compares[i]) == 0 && immediate >= 0 && (uint32_t)immediate < limit)
         {
-            const char* condition = integer ? integer_conditions[immediate] : float_conditions[immediate];
+            const char* condition = i >= 19 ? xop_conditions[immediate] : integer ? integer_conditions[immediate] : float_conditions[immediate];
             snprintf(predicate[0], sizeof(predicate[0]), "%.*s%s%s", (int)prefix, expected, condition, expected + prefix);
             if (!integer && immediate < 16)
             {
                 snprintf(predicate[1], sizeof(predicate[1]), "%.*s%s%s", (int)prefix, expected, short_conditions[immediate], expected + prefix);
             }
         }
+    }
+    if ((strcmp(expected, "pclmulqdq") == 0 || strcmp(expected, "vpclmulqdq") == 0) && (immediate == 0 || immediate == 1 || immediate == 16 || immediate == 17))
+    {
+        static const char* const halves[4] = {"lqlq", "hqlq", "lqhq", "hqhq"};
+        snprintf(predicate[0], sizeof(predicate[0]), "%spclmul%sdq", expected[0] == 'v' ? "v" : "", halves[(immediate & 1) + ((immediate >> 3) & 2)]);
     }
     bool match = false;
     for (uint32_t alias = 0; alias <= BUSTER_ARRAY_LENGTH(aliases) + 2 && !match; alias += 1)
@@ -311,7 +326,7 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
             const X86DecodeResult result = offset < size && length <= size - offset ? x86_disassemble(bytes + offset, length, decoded, BUSTER_ARRAY_LENGTH(decoded)) : (X86DecodeResult){.status = X86_DECODE_BAD_ARGUMENT};
             bool same = seen < count && offset == expected[seen].offset && length == expected[seen].length && result.status == X86_DECODE_OK && result.count == 1 && result.consumed == length;
             same = same && x86_decode_test_mnemonic(x86_form_description(decoded[0].instruction.form)->mnemonic, decoded[0].instruction.immediate, cursor);
-            if (!same && mismatches < 16)
+            if (!same && mismatches < 64)
             {
                 fprintf(stderr, "objdump oracle mismatch at instruction %u: %s", seen, line);
                 if (seen < count)
