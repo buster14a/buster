@@ -191,7 +191,7 @@ static bool pp_same_streams(const Preprocessor* a, const Preprocessor* b, const 
     const bool result = i == x->count && i == y->count;
     if (!result)
     {
-        printf("%s: the vectorized and scalar kernels differ at token %u of %u/%u", name, i, x->count, y->count);
+        printf("%s: the preprocessor runs differ at token %u of %u/%u", name, i, x->count, y->count);
         if (i < x->count && i < y->count)
         {
             printf(" (kind %u/%u, flags %u/%u, value %u/%u, location %u/%u)", x->kinds[i], y->kinds[i], x->flags[i], y->flags[i], x->values[i], y->values[i],
@@ -232,15 +232,40 @@ static bool pp_same_directive_tables(const Preprocessor* a, const Preprocessor* 
 
 // Preprocesses `path` with `options`, in a fresh table: `pp` must be released by the caller. Returns whether it ran
 // without errors. The run keeps its expansion starts, since its text is printed with line markers too.
+static uint32_t pp_test_cache_mismatches;
+
 static bool pp_test_run(Preprocessor* pp, InternTable* table, const PPOptions* options, const char* path)
 {
     PPOptions with_starts = *options;
     with_starts.expansion_starts = true;
+    with_starts.macro_cache = true;
     bool result = intern_initialize(table) && pp_initialize(pp, &with_starts, table);
     if (result)
     {
         result = pp_run(pp, path);
     }
+    static Preprocessor uncached;
+    static InternTable uncached_table;
+    with_starts.macro_cache = false;
+    bool reference = intern_initialize(&uncached_table) && pp_initialize(&uncached, &with_starts, &uncached_table);
+    if (reference)
+    {
+        reference = pp_run(&uncached, path);
+    }
+    bool equal = result == reference && pp->errors == uncached.errors && pp->warnings == uncached.warnings &&
+                 pp_same_streams(pp, &uncached, path) && pp_same_directive_tables(pp, &uncached, path) &&
+                 pp->expansion_start_count == uncached.expansion_start_count;
+    for (uint32_t i = 0; equal && i < pp->expansion_start_count; i += 1)
+    {
+        equal = pp->expansion_starts[i].token == uncached.expansion_starts[i].token && pp->expansion_starts[i].location == uncached.expansion_starts[i].location;
+    }
+    if (!equal)
+    {
+        printf("%s: cache on/off differs (%s kernels)\n", path, options->scalar ? "scalar" : "vectorized");
+        pp_test_cache_mismatches += 1;
+    }
+    pp_release(&uncached);
+    intern_release(&uncached_table);
     return result;
 }
 
@@ -1085,6 +1110,8 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     return result;
 }
 
+#include "c_preprocessor_cache_test.c"
+
 // One file, by both kernels, and with --clang against clang with the same options.
 static bool pp_test_file(int argument_count, char** arguments, const PPOptions* base, const char* path, bool with_clang, const char* directory, uint64_t* tokens)
 {
@@ -1554,6 +1581,7 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
 
 static int run_preprocessor_tests(int argument_count, char** arguments)
 {
+    pp_test_cache_mismatches = 0;
     bool with_clang = false;
     bool keep = false;
     // The arguments without ours, for clang and pp_parse_options; the files are those that don't start with '-' and
@@ -1602,6 +1630,7 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
         }
         printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
         passed_all = failures == 0;
+        passed_all &= pp_test_cache_cases(directory, with_clang);
         passed_all &= pp_test_timestamps(directory, with_clang);
         if (with_clang)
         {
@@ -1647,5 +1676,7 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
     }
     free(passed);
     free(files);
+    printf("cache on/off: %u mismatches\n", pp_test_cache_mismatches);
+    passed_all = passed_all && pp_test_cache_mismatches == 0;
     return passed_all ? 0 : 1;
 }

@@ -139,6 +139,9 @@ struct PPStatistics
     uint64_t condition_tokens; // their tokens after expansion,
     uint64_t long_conditions; // the lines of more than 32 of them,
     uint64_t longest_condition; // and the most tokens a line had.
+    uint64_t cache_hits; // Object-body eligibility reused in the same definition epoch.
+    uint64_t cache_misses;
+    uint64_t cache_scan_tokens;
     uint64_t directives;
     uint64_t skipped_includes; // #include of a file whose guard is defined, or after #pragma once.
 };
@@ -160,6 +163,8 @@ struct PPOptions
     bool optimize;
     // The scalar twins of the vectorized kernels, for test-preprocessor's differential checks.
     bool scalar;
+    // Cache object-body eligibility between definition changes (#110).
+    bool macro_cache;
     bool no_standard_includes;
     // -iquote, -I and -isystem directories, and -idirafter ones after the standard directories.
     const char* const* quote_directories;
@@ -352,6 +357,7 @@ struct PPExpansionStart
 #define BUSTER_PP_MACRO_COMPILED 0x04 // pp_compile_macro made its body items.
 #define BUSTER_PP_MACRO_BUILTIN 0x08
 #define BUSTER_PP_MACRO_PASTES 0x10 // Its body has ## (an object-like macro then needs a buffer).
+#define BUSTER_PP_MACRO_DIRECT 0x20 // No identifier in its body names a macro at direct_epoch.
 
 // The built-in macros.
 typedef enum PPBuiltin
@@ -412,6 +418,7 @@ struct PPMacro
     // Bit i: parameter i appears as an operand of neither # nor ##, so it is substituted expanded. Bit 63 stands for
     // every parameter from 63 on.
     uint64_t expanded_parameters;
+    uint64_t direct_epoch;
 };
 
 // A body item of a compiled macro.
@@ -611,6 +618,7 @@ struct Preprocessor
     uint32_t macro_capacity; // Ids that macro_of has room for.
     PPMacro* macros;
     uint32_t macro_count;
+    uint64_t definition_epoch;
     PPItem* items;
     uint32_t item_count;
     IdentId* parameters;
@@ -1698,8 +1706,23 @@ BUSTER_INLINE bool pp_is_macro(const Preprocessor* pp, IdentId id)
     return (pp->is_macro[id / 64] >> (id % 64)) & 1;
 }
 
+static void pp_next_definition_epoch(Preprocessor* pp)
+{
+    pp->definition_epoch += 1;
+    if (pp->definition_epoch == 0)
+    {
+        // Never let an old tag become current after wraparound. Zero is the unevaluated tag.
+        for (uint32_t i = 1; i < pp->macro_count; i += 1)
+        {
+            pp->macros[i].direct_epoch = 0;
+        }
+        pp->definition_epoch = 1;
+    }
+}
+
 static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
 {
+    pp_next_definition_epoch(pp);
     pp->macro_of[name] = macro;
     if (macro != 0)
     {
@@ -3742,16 +3765,69 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
     }
 }
 
+// Eligibility depends on the definition table, not the disabled set: even a currently disabled macro makes a body
+// ineligible. Its normal rescan must paint that occurrence. Builtins and _Pragma are in the same macro-name bitset.
+static bool pp_direct_body_scalar(const Preprocessor* pp, const PPFileData* data, uint32_t begin, uint32_t end, uint64_t* scanned)
+{
+    bool direct = true;
+    uint32_t t = begin;
+    for (; direct && t < end; t += 1)
+    {
+        direct = (data->kinds[t] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro(pp, data->values[t]);
+    }
+    *scanned += t - begin;
+    return direct;
+}
+
+static bool pp_direct_body_vector(const Preprocessor* pp, const PPFileData* data, uint32_t begin, uint32_t end, uint64_t* scanned)
+{
+    bool direct = true;
+    uint32_t t = begin;
+    // Short replacement lists use the exact scalar twin; a vector masks identifiers in longer lists without a gather.
+    while (direct && end - t >= 16)
+    {
+        const uint32_t count = end - t < 64 ? end - t : 64;
+        const __mmask64 live = count == 64 ? UINT64_MAX : (1ull << count) - 1;
+        const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi8(live, data->kinds + t), _mm512_set1_epi8(0x7F));
+        uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
+        while (direct && identifiers != 0)
+        {
+            const uint32_t at = (uint32_t)__builtin_ctzll(identifiers);
+            direct = !pp_is_macro(pp, data->values[t + at]);
+            identifiers &= identifiers - 1;
+        }
+        t += count;
+    }
+    *scanned += t - begin;
+    if (direct)
+    {
+        direct = pp_direct_body_scalar(pp, data, t, end, scanned);
+    }
+    return direct;
+}
+
 // Expands an object-like macro whose name was just read. One whose body names no macro and has no ## goes straight to the
 // target (the main loop's commonest expansion: a constant); any other is built in a buffer and pushed as a context.
 static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint32_t expansion_end)
 {
     PPMacro* macro = &pp->macros[id];
     const PPFileData* data = &pp->datas[macro->data];
-    bool direct = (macro->flags & BUSTER_PP_MACRO_PASTES) == 0;
-    for (uint32_t t = macro->body_begin; direct && t < macro->body_end; t += 1)
+    const bool hit = pp->options.macro_cache && macro->direct_epoch == pp->definition_epoch;
+    bool direct = (macro->flags & BUSTER_PP_MACRO_DIRECT) != 0;
+    uint64_t scanned = 0;
+    if (!hit)
     {
-        direct = (data->kinds[t] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro(pp, data->values[t]);
+        direct = (macro->flags & BUSTER_PP_MACRO_PASTES) == 0;
+        if (direct)
+        {
+            direct = pp->vectorized ? pp_direct_body_vector(pp, data, macro->body_begin, macro->body_end, &scanned)
+                                   : pp_direct_body_scalar(pp, data, macro->body_begin, macro->body_end, &scanned);
+        }
+        if (pp->options.macro_cache)
+        {
+            macro->flags = (uint8_t)((macro->flags & ~BUSTER_PP_MACRO_DIRECT) | (direct ? BUSTER_PP_MACRO_DIRECT : 0));
+            macro->direct_epoch = pp->definition_epoch;
+        }
     }
     PPTokens* tokens = direct ? pp_target(pp) : &pp->expansions;
     const uint32_t begin = tokens->count;
@@ -3798,6 +3874,9 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
     {
         pp->statistics.direct_expansions += direct;
         pp->statistics.buffered_expansions += !direct;
+        pp->statistics.cache_hits += hit;
+        pp->statistics.cache_misses += pp->options.macro_cache && !hit;
+        pp->statistics.cache_scan_tokens += scanned;
     }
 }
 
@@ -5236,6 +5315,8 @@ static void pp_pragma(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, 
         const uint8_t* bytes = pp_location_bytes(pp, tokens->locations[begin + 2]);
         const uint32_t spelled = tokens->values[begin + 2] - tokens->locations[begin + 2];
         const IdentId name = spelled >= 2 ? intern_find_or_add(pp->table, bytes + 1, spelled - 2) : 0;
+        // Even a push or an unmatched pop ends the epoch. A matched pop also passes through pp_set_macro.
+        pp_next_definition_epoch(pp);
         if (name != 0 && first == C_NAME_PUSH_MACRO && pp->pushed_count < BUSTER_PP_MAX_PUSHED)
         {
             pp->pushed_names[pp->pushed_count] = name;
@@ -6792,6 +6873,7 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
     pp->options = *options;
     pp->table = table;
     pp->vectorized = !options->scalar;
+    pp->definition_epoch = 1;
     pp->refine_flags = options->trigraphs ? C_TOKENIZER_TRIGRAPHS : 0;
     pp->split_kinds = pp_split_kinds(options->language);
     pp->arena = arena_reserve(BUSTER_PP_ARENA_BYTES);
@@ -7939,6 +8021,10 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         else if (strcmp(argument, "-P") == 0)
         {
             *markers = false;
+        }
+        else if (strcmp(argument, "--macro-cache") == 0 || strcmp(argument, "--no-macro-cache") == 0)
+        {
+            options->macro_cache = strcmp(argument, "--macro-cache") == 0;
         }
         else if (strcmp(argument, "-ffreestanding") == 0)
         {

@@ -46,7 +46,7 @@
 #include "buster/compiler/c_preprocessor.c"
 
 #define BUSTER_PP_BENCHMARK_PASSES 21
-#define BUSTER_PP_BENCHMARK_IMPLEMENTATIONS 2
+#define BUSTER_PP_BENCHMARK_IMPLEMENTATIONS 4
 
 typedef struct PPBenchmarkSample PPBenchmarkSample;
 struct PPBenchmarkSample
@@ -104,13 +104,14 @@ static void pp_benchmark_sort(uint64_t* values, uint64_t count)
 
 // One pass of one implementation over the files: each preprocessed from nothing. Adds the files' input and output
 // tokens to `tokens` (the first time).
-static bool pp_benchmark_pass(const PPOptions* base, bool scalar, char** files, int file_count, int cycles_fd, int instructions_fd, PPBenchmarkSample* sample,
+static bool pp_benchmark_pass(const PPOptions* base, uint32_t implementation, char** files, int file_count, int cycles_fd, int instructions_fd, PPBenchmarkSample* sample,
                               uint64_t* input_tokens, uint64_t* output_tokens)
 {
     static InternTable table;
     static Preprocessor pp;
     PPOptions options = *base;
-    options.scalar = scalar;
+    options.scalar = (implementation & 1) != 0;
+    options.macro_cache = (implementation & 2) != 0;
     options.timing = true;
     bool result = true;
     *sample = (PPBenchmarkSample){ 0 };
@@ -186,7 +187,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
 {
     int result = 1;
     bool with_clang = false;
-    uint32_t only = 3;
+    uint32_t only = 5;
     char** passed = calloc((size_t)argc + 1, sizeof(char*));
     char** clang_passed = calloc((size_t)argc + 1, sizeof(char*));
     char** files = calloc((size_t)argc + 1, sizeof(char*));
@@ -200,7 +201,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
                                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0 || strcmp(argument, "-include") == 0 ||
                                  strcmp(argument, "--predefines") == 0;
         // --predefines (clang's predefines for the options, from `clang -dM -E`) is ours alone.
-        const bool ours = strcmp(argument, "--predefines") == 0;
+        const bool ours = strcmp(argument, "--predefines") == 0 || strcmp(argument, "--macro-cache") == 0 || strcmp(argument, "--no-macro-cache") == 0;
         if (strcmp(argument, "--clang") == 0)
         {
             with_clang = true;
@@ -208,7 +209,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
         else if (strcmp(argument, "--only") == 0 && i + 1 < argc)
         {
             i += 1;
-            only = strcmp(argv[i], "vectorized") == 0 ? 1 : strcmp(argv[i], "scalar") == 0 ? 2 : 0;
+            only = strcmp(argv[i], "vectorized") == 0 ? 1 : strcmp(argv[i], "scalar") == 0 ? 2 : strcmp(argv[i], "cached") == 0 ? 4 :
+                   strcmp(argv[i], "cached-scalar") == 0 ? 8 : strcmp(argv[i], "all") == 0 ? 15 : 0;
         }
         else if (argument[0] == '-')
         {
@@ -245,7 +247,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
     }
     if (file_count == 0 || with_input == 0 || only == 0 || !pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers))
     {
-        fprintf(stderr, "usage: %s [--clang] [--only vectorized|scalar] [-E's options] file...\n", argv[0]);
+        fprintf(stderr, "usage: %s [--clang] [--only vectorized|scalar|cached|cached-scalar|all] [-E's options] file...\n", argv[0]);
     }
     else
     {
@@ -262,14 +264,15 @@ int run_preprocessor_benchmark(int argc, char** argv)
         bool ran = true;
         for (uint32_t pass = 0; ran && pass <= BUSTER_PP_BENCHMARK_PASSES; pass += 1)
         {
-            for (uint32_t implementation = 0; ran && implementation < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; implementation += 1)
+            for (uint32_t slot = 0; ran && slot < BUSTER_PP_BENCHMARK_IMPLEMENTATIONS; slot += 1)
             {
+                const uint32_t implementation = (slot + pass) % BUSTER_PP_BENCHMARK_IMPLEMENTATIONS;
                 if (((only >> implementation) & 1) == 0)
                 {
                     continue;
                 }
                 PPBenchmarkSample sample;
-                ran = pp_benchmark_pass(&options, implementation == 1, files, file_count, cycles_fd, instructions_fd, &sample, &input_tokens, &output_tokens);
+                ran = pp_benchmark_pass(&options, implementation, files, file_count, cycles_fd, instructions_fd, &sample, &input_tokens, &output_tokens);
                 if (pass > 0)
                 {
                     samples[implementation][pass - 1] = sample;
@@ -286,7 +289,7 @@ int run_preprocessor_benchmark(int argc, char** argv)
         }
         else
         {
-            static const char* const names[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS] = { "vectorized", "scalar" };
+            static const char* const names[BUSTER_PP_BENCHMARK_IMPLEMENTATIONS] = { "vectorized", "scalar", "cached", "cached-scalar" };
             static const char* const phase_names[PP_PHASE_COUNT + 1] = { "read", "lex", "refine", "directives", "main loop" };
             printf("%d files, %lu input tokens, %lu output tokens; %d passes, medians:\n", file_count, (unsigned long)input_tokens, (unsigned long)output_tokens,
                    BUSTER_PP_BENCHMARK_PASSES);
@@ -336,8 +339,12 @@ int run_preprocessor_benchmark(int argc, char** argv)
                     printf("  %s %.1f%%", phase_names[phase], total != 0 ? 100.0 * (double)medians[phase] / (double)total : 0.0);
                 }
                 printf("\n");
+                const PPStatistics* cache_statistics = &samples[implementation][0].statistics;
+                printf("             p10/p90 %.3f/%.3f ms; cache %lu hits, %lu misses, %lu body tokens scanned\n",
+                       (double)nanoseconds[BUSTER_PP_BENCHMARK_PASSES / 10] / 1e6, (double)nanoseconds[BUSTER_PP_BENCHMARK_PASSES * 9 / 10] / 1e6,
+                       (unsigned long)cache_statistics->cache_hits, (unsigned long)cache_statistics->cache_misses, (unsigned long)cache_statistics->cache_scan_tokens);
             }
-            const PPStatistics* statistics = &samples[only == 2 ? 1 : 0][0].statistics;
+            const PPStatistics* statistics = &samples[__builtin_ctz(only)][0].statistics;
             printf("  per pass: %lu directives, %lu file runs (%lu tokens), %lu buffer runs (%lu tokens), %lu object-like expansions copied out and %lu "
                    "buffered, %lu invocations (%lu arguments, %lu expanded first), %lu pastes, %lu builtins, %lu includes skipped\n",
                    (unsigned long)statistics->directives, (unsigned long)statistics->file_runs, (unsigned long)statistics->file_run_tokens,
