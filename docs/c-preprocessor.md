@@ -430,7 +430,8 @@ only in temporary argument, capture and expansion buffers. Completed output
 keeps sorted, maximal eight-byte `(token index, origin)` runs. Ordinary file
 copies write no history; the preceding expansion records its closing boundary.
 Buffer copies build the runs outside their token-copy loop, comparing adjacent
-origins in groups of 16 and compressing the change positions. There is an exact
+origins in groups of eight and compressing packed run records directly into the
+table (register compression, then a masked store). There is an exact
 scalar builder. `pp_history_at` finds one token's origin; `pp_history_lookup`
 runs 16 binary searches together, with scalar record loads to avoid Zen 5's
 expensive gathers, and has a scalar twin.
@@ -467,7 +468,7 @@ scoped to each inclusion. Source bytes, definition locations and scratch
 spellings remain alive for the whole unit. Source excerpts and carets are not
 implemented.
 
-`test-preprocessor --clang` compares 26 original diagnostic fixtures with
+`test-preprocessor --clang` compares 28 original diagnostic fixtures with
 Clang, including preprocessor failures and calls to the later-token renderer.
 It checks object/function expansions, arguments, nested and cross-context
 invocations, pastes, stringification, builtins, redefinition, `#line`, CRLF,

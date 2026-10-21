@@ -45,7 +45,11 @@ static void pp_history_change(Preprocessor* pp, uint32_t token, uint32_t origin)
     {
         if (count <= BUSTER_PP_MAX_OUTPUT_TOKENS)
         {
-            pp->history_runs[count] = (PPHistoryRun){ .token = token, .origin = origin };
+            pp->history_runs[count] = (PPHistoryRun)
+            {
+                .token = token,
+                .origin = origin,
+            };
             count += 1;
         }
         else
@@ -102,23 +106,29 @@ static void pp_history_copy(Preprocessor* pp, PPTokens* target, uint32_t at, con
         }
         else if (pp->vectorized)
         {
-            uint32_t previous = ~source->origins[begin];
-            const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-            const __m512i shifted = _mm512_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14);
-            for (uint32_t i = begin; i < end; i += 16)
+            uint32_t previous = source->origins[begin];
+            pp_history_change(pp, at, previous);
+            const __m256i lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+            const __m256i shifted = _mm256_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6);
+            for (uint32_t i = begin + 1; i < end && !pp->fatal; i += 8)
             {
-                const uint32_t count = end - i < 16 ? end - i : 16;
-                const __mmask16 valid = (__mmask16)_bzhi_u32(~0u, count);
-                const __m512i values = _mm512_maskz_loadu_epi32(valid, source->origins + i);
-                const __m512i before = _mm512_mask_set1_epi32(_mm512_permutexvar_epi32(shifted, values), 1, (int)previous);
-                const __mmask16 changes = _mm512_mask_cmpneq_epi32_mask(valid, values, before);
-                uint32_t positions[16] __attribute__((aligned(64)));
-                uint32_t origins[16] __attribute__((aligned(64)));
-                _mm512_store_si512(positions, _mm512_maskz_compress_epi32(changes, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)(at + i - begin)))));
-                _mm512_store_si512(origins, _mm512_maskz_compress_epi32(changes, values));
-                for (uint32_t k = 0; k < (uint32_t)__builtin_popcount(changes); k += 1)
+                const uint32_t count = end - i < 8 ? end - i : 8;
+                const __mmask8 valid = (__mmask8)_bzhi_u32(~0u, count);
+                const __m256i values = _mm256_maskz_loadu_epi32(valid, source->origins + i);
+                const __m256i before = _mm256_mask_set1_epi32(_mm256_permutexvar_epi32(shifted, values), 1, (int)previous);
+                const __mmask8 changes = _mm256_mask_cmpneq_epi32_mask(valid, values, before);
+                const uint32_t added = (uint32_t)__builtin_popcount(changes);
+                if (added != 0 && added <= (uint64_t)BUSTER_PP_MAX_OUTPUT_TOKENS + 1 - pp->history_run_count)
                 {
-                    pp_history_change(pp, positions[k], origins[k]);
+                    const __m256i positions = _mm256_add_epi32(lanes, _mm256_set1_epi32((int)(at + i - begin)));
+                    const __m512i records = _mm512_or_si512(_mm512_cvtepu32_epi64(positions), _mm512_slli_epi64(_mm512_cvtepu32_epi64(values), 32));
+                    const __m512i packed = _mm512_maskz_compress_epi64(changes, records);
+                    _mm512_mask_storeu_epi64(pp->history_runs + pp->history_run_count, (__mmask8)_bzhi_u32(~0u, added), packed);
+                    pp->history_run_count += added;
+                }
+                else if (added != 0)
+                {
+                    pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "too many output history runs");
                 }
                 previous = source->origins[i + count - 1];
             }
@@ -141,6 +151,30 @@ static void pp_history_copy(Preprocessor* pp, PPTokens* target, uint32_t at, con
     }
 }
 
+static uint32_t pp_history_substitution(Preprocessor* pp, uint32_t source, uint32_t parameter)
+{
+    uint32_t result = 0;
+    if (!pp->options.no_history && !pp->fatal)
+    {
+        if (pp->substitution_count == BUSTER_PP_MAX_HISTORY)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "too many argument history records");
+        }
+        else
+        {
+            const uint32_t id = ++pp->substitution_count;
+            pp->substitutions[id - 1] = (PPSubstitution)
+            {
+                .expansion = pp->history_current,
+                .source = source,
+                .parameter = parameter,
+            };
+            result = BUSTER_PP_ORIGIN_ARGUMENT | id;
+        }
+    }
+    return result;
+}
+
 // One wrapper per contiguous origin run in an argument substitution, including repeated uses of the same parameter.
 static void pp_history_argument(Preprocessor* pp, uint32_t begin, uint32_t end, uint32_t parameter)
 {
@@ -153,16 +187,7 @@ static void pp_history_argument(Preprocessor* pp, uint32_t begin, uint32_t end, 
         {
             stop += 1;
         }
-        if (pp->substitution_count == BUSTER_PP_MAX_HISTORY)
-        {
-            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "too many argument history records");
-        }
-        else
-        {
-            const uint32_t id = ++pp->substitution_count;
-            pp->substitutions[id - 1] = (PPSubstitution){ .expansion = pp->history_current, .source = source, .parameter = parameter };
-            pp_history_fill(pp, out, i, stop, BUSTER_PP_ORIGIN_ARGUMENT | id);
-        }
+        pp_history_fill(pp, out, i, stop, pp_history_substitution(pp, source, parameter));
         i = stop;
     }
 }
@@ -238,7 +263,10 @@ static __attribute__((unused)) void pp_history_lookup(const Preprocessor* pp, co
             {
                 const __m512i middle = _mm512_add_epi32(low, _mm512_srli_epi32(_mm512_sub_epi32(high, low), 1));
                 uint32_t indices[16] __attribute__((aligned(64)));
-                uint32_t starts[16] __attribute__((aligned(64))) = { 0 };
+                uint32_t starts[16] __attribute__((aligned(64))) =
+                {
+                    0,
+                };
                 _mm512_store_si512(indices, middle);
                 for (uint32_t k = 0; k < take; k += 1)
                 {
@@ -328,14 +356,22 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
             const PPSubstitution* substitution = &pp->substitutions[index];
             if (count != 0)
             {
-                notes[count++] = (PPSource){ .location = substitution->parameter, .origin = substitution->expansion };
+                notes[count++] = (PPSource)
+                {
+                    .location = substitution->parameter,
+                    .origin = substitution->expansion,
+                };
             }
             origin = substitution->source;
         }
         else if (kind == BUSTER_PP_ORIGIN_GENERATED)
         {
             const PPGenerated* generated = &pp->generated[index];
-            notes[count++] = (PPSource){ .location = location, .origin = 0 };
+            notes[count++] = (PPSource)
+            {
+                .location = location,
+                .origin = 0,
+            };
             location = generated->anchor;
             origin = generated->expansion;
         }
@@ -344,7 +380,11 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
             const PPExpansion* expansion = &pp->history[index];
             if (expansion->builtin == PP_BUILTIN_NONE)
             {
-                notes[count++] = (PPSource){ .location = location, .origin = origin };
+                notes[count++] = (PPSource)
+                {
+                    .location = location,
+                    .origin = origin,
+                };
             }
             location = expansion->begin;
             origin = expansion->parent;

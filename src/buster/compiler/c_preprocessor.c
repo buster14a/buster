@@ -3341,6 +3341,7 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                     }
                     else
                     {
+                        pp->history_anchor = macro->base + pp->datas[macro->data].starts[next->token];
                         pp_append_tokens(pp, tokens, first, last, true, next->flags);
                     }
                     i += 1;
@@ -3371,6 +3372,10 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                             out->count -= 1;
                             PPToken moved = right;
                             moved.flags = (uint8_t)((moved.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (left.flags & BUSTER_PP_SPACE) | BUSTER_PP_FROM_MACRO);
+                            if (!right_single)
+                            {
+                                moved.origin = pp_history_substitution(pp, right.origin, macro->base + pp->datas[macro->data].starts[next->token]);
+                            }
                             pp_push_token(pp, out, moved);
                         }
                         else
@@ -3385,11 +3390,16 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                             {
                                 PPToken kept = right;
                                 kept.flags = (uint8_t)((kept.flags & ~BUSTER_PP_START_OF_LINE) | BUSTER_PP_FROM_MACRO);
+                                if (!right_single)
+                                {
+                                    kept.origin = pp_history_substitution(pp, right.origin, macro->base + pp->datas[macro->data].starts[next->token]);
+                                }
                                 pp_push_token(pp, out, kept);
                             }
                         }
                         if (!right_single && last - first > 1)
                         {
+                            pp->history_anchor = macro->base + pp->datas[macro->data].starts[next->token];
                             pp_append_tokens(pp, tokens, first + 1, last, false, 0);
                         }
                     }

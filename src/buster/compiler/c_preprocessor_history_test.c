@@ -83,13 +83,20 @@ static bool pp_test_history_case(const PPHistoryCase* test, const char* director
     bool result = pp_test_write_file(path, test->source) && (test->header == 0 || pp_test_write_file(header, test->header));
     static Preprocessor runs[2];
     static InternTable tables[2];
-    char* diagnostics[2] = { 0 };
+    char* diagnostics[2] =
+    {
+        0,
+    };
     for (uint32_t mode = 0; result && mode < 2; mode += 1)
     {
         size_t length = 0;
         FILE* stream = open_memstream(&diagnostics[mode], &length);
         const PPOptions options = {
-            .language = { .standard = 2017, .gnu = true },
+            .language =
+            {
+                .standard = 2017,
+                .gnu = true,
+            },
             .scalar = mode != 0,
             .diagnostics = stream,
         };
@@ -153,8 +160,15 @@ static bool pp_test_history_runs(void)
     PPHistoryRun scalar_runs[1025];
     static Preprocessor vector;
     static Preprocessor scalar;
-    vector = (Preprocessor){ .vectorized = true, .history_runs = vector_runs };
-    scalar = (Preprocessor){ .history_runs = scalar_runs };
+    vector = (Preprocessor)
+    {
+        .vectorized = true,
+        .history_runs = vector_runs,
+    };
+    scalar = (Preprocessor)
+    {
+        .history_runs = scalar_runs,
+    };
     for (uint32_t length = 0; result && length <= 200; length += 1)
     {
         uint32_t* origins = (uint32_t*)(mapping + 2 * page) - length;
@@ -162,7 +176,11 @@ static bool pp_test_history_runs(void)
         {
             origins[i] = (i * 71 + length * 23) % 17 < 9 ? i / 7 : 0;
         }
-        const PPTokens source = { .origins = origins, .count = length };
+        const PPTokens source =
+        {
+            .origins = origins,
+            .count = length,
+        };
         vector.history_run_count = 0;
         scalar.history_run_count = 0;
         vector.output.count = length;
@@ -212,7 +230,11 @@ static bool pp_test_history_lifetimes(const char* directory)
     for (uint32_t i = 0; result && i < 2; i += 1)
     {
         const PPOptions options = {
-            .language = { .standard = 2017, .gnu = true },
+            .language =
+            {
+                .standard = 2017,
+                .gnu = true,
+            },
             .no_history = i != 0,
         };
         result = pp_test_run(&runs[i], &tables[i], &options, path);
@@ -279,32 +301,133 @@ static bool pp_test_history_lifetimes(const char* directory)
 static bool pp_test_history(const char* directory, bool with_clang)
 {
     static const PPHistoryCase cases[] = {
-        { .name = "object", .source = "#define OBJ \"bad\"\n#if OBJ\n#endif\n" },
-        { .name = "function", .source = "#define FUN(x) \"bad\"\n#if FUN(1)\n#endif\n" },
-        { .name = "argument", .source = "#define ID(x) x\n#if ID(\"bad\")\n#endif\n" },
-        { .name = "nested", .source = "#define INNER \"bad\"\n#define OUT INNER\n#if OUT\n#endif\n" },
-        { .name = "argument prescan", .source = "#define OBJ \"bad\"\n#define ID(x) x\n#define OUT(x) ID(x)\n#if OUT(OBJ)\n#endif\n" },
-        { .name = "paste", .source = "#define CAT(a,b) a##b\n#if CAT(1,.2)\n#endif\n" },
-        { .name = "stringification", .source = "#define S(x) #x\n#if S(a b)\n#endif\n" },
-        { .name = "invalid paste", .source = "#define P(a,b) a##b\n#define OUT P(+,*)\nOUT\n" },
-        { .name = "arity", .source = "#define BAD(x,y) x\n#define OUT BAD(1)\nOUT\n" },
-        { .name = "arity across contexts", .source = "#define BAD(x,y) x\n#define NAME BAD\nNAME(1)\n" },
-        { .name = "extra arguments", .source = "#define BAD(x) x\n#define OUT BAD(1,2)\nOUT\n" },
-        { .name = "line/include", .source = "#line 30 \"caller.c\"\n#include \"history.h\"\n", .header = "#define OBJ \"bad\"\n#line 70 \"renamed.h\"\n#if OBJ\n#endif\n" },
-        { .name = "output/redefinition", .source = "#define OBJ missing\nint a=OBJ;\n#undef OBJ\n#define OBJ missing\nint b=OBJ;\n", .parser = true },
-        { .name = "output/nested", .source = "#define OBJ missing\n#define OUT OBJ\nint a=OUT;\n", .parser = true },
-        { .name = "output/argument", .source = "#define ID(x) x\n#define OBJ missing\nint a=ID(OBJ);\n", .parser = true },
-        { .name = "output/paste", .source = "#define CAT(a,b) a##b\nint a=CAT(mis,sing);\n", .parser = true },
-        { .name = "cross-context invocation", .source = "#define ALIAS F\n#define F(x) missing\nint a=ALIAS(1);\n", .parser = true },
-        { .name = "argument macro name", .source = "#define CALL(f) f()\n#define F() missing\nint a=CALL(F);\n", .parser = true },
-        { .name = "forwarded function", .source = "#define ID(x) x\n#define F(x) missing\nint a=ID(F)(1);\n", .parser = true },
-        { .name = "builtin", .source = "#define FILE_NAME __FILE__\n#if FILE_NAME\n#endif\n" },
-        { .name = "empty stringification", .source = "#define S(x) #x\n#if S()\n#endif\n" },
-        { .name = "header definition", .source = "#include \"history.h\"\nint a=OBJ;\n", .header = "#define OBJ missing\n", .parser = true },
-        { .name = "header errors", .source = "#include \"history.h\"\n", .header = "#define OBJ \"bad\"\n#if OBJ\n#endif\n#if OBJ\n#endif\n" },
-        { .name = "nested include stack", .source = "#define STEP\n#include \"history.h\"\n", .header = "#ifdef STEP\n#undef STEP\n#include \"history.h\"\n#else\n#define OBJ \"bad\"\n#if OBJ\n#endif\n#endif\n" },
-        { .name = "nested argument name", .source = "#define CALL(f) f()\n#define OUT(x) CALL(x)\n#define F() missing\nint a=OUT(F);\n", .parser = true },
-        { .name = "CRLF", .source = "#define OBJ \"bad\"\r\n#line 22 \"logical.c\"\r\n#if OBJ\r\n#endif\r\n" },
+        {
+            .name = "object",
+            .source = "#define OBJ \"bad\"\n#if OBJ\n#endif\n",
+        },
+        {
+            .name = "function",
+            .source = "#define FUN(x) \"bad\"\n#if FUN(1)\n#endif\n",
+        },
+        {
+            .name = "argument",
+            .source = "#define ID(x) x\n#if ID(\"bad\")\n#endif\n",
+        },
+        {
+            .name = "nested",
+            .source = "#define INNER \"bad\"\n#define OUT INNER\n#if OUT\n#endif\n",
+        },
+        {
+            .name = "argument prescan",
+            .source = "#define OBJ \"bad\"\n#define ID(x) x\n#define OUT(x) ID(x)\n#if OUT(OBJ)\n#endif\n",
+        },
+        {
+            .name = "paste",
+            .source = "#define CAT(a,b) a##b\n#if CAT(1,.2)\n#endif\n",
+        },
+        {
+            .name = "stringification",
+            .source = "#define S(x) #x\n#if S(a b)\n#endif\n",
+        },
+        {
+            .name = "invalid paste",
+            .source = "#define P(a,b) a##b\n#define OUT P(+,*)\nOUT\n",
+        },
+        {
+            .name = "arity",
+            .source = "#define BAD(x,y) x\n#define OUT BAD(1)\nOUT\n",
+        },
+        {
+            .name = "arity across contexts",
+            .source = "#define BAD(x,y) x\n#define NAME BAD\nNAME(1)\n",
+        },
+        {
+            .name = "extra arguments",
+            .source = "#define BAD(x) x\n#define OUT BAD(1,2)\nOUT\n",
+        },
+        {
+            .name = "line/include",
+            .source = "#line 30 \"caller.c\"\n#include \"history.h\"\n",
+            .header = "#define OBJ \"bad\"\n#line 70 \"renamed.h\"\n#if OBJ\n#endif\n",
+        },
+        {
+            .name = "output/redefinition",
+            .source = "#define OBJ missing\nint a=OBJ;\n#undef OBJ\n#define OBJ missing\nint b=OBJ;\n",
+            .parser = true,
+        },
+        {
+            .name = "output/nested",
+            .source = "#define OBJ missing\n#define OUT OBJ\nint a=OUT;\n",
+            .parser = true,
+        },
+        {
+            .name = "output/argument",
+            .source = "#define ID(x) x\n#define OBJ missing\nint a=ID(OBJ);\n",
+            .parser = true,
+        },
+        {
+            .name = "output/paste",
+            .source = "#define CAT(a,b) a##b\nint a=CAT(mis,sing);\n",
+            .parser = true,
+        },
+        {
+            .name = "empty paste left",
+            .source = "#define CAT(a,b) a##b\nint a=CAT(,missing);\n",
+            .parser = true,
+        },
+        {
+            .name = "empty paste right",
+            .source = "#define CAT(a,b) a##b\nint a=CAT(missing,);\n",
+            .parser = true,
+        },
+        {
+            .name = "cross-context invocation",
+            .source = "#define ALIAS F\n#define F(x) missing\nint a=ALIAS(1);\n",
+            .parser = true,
+        },
+        {
+            .name = "argument macro name",
+            .source = "#define CALL(f) f()\n#define F() missing\nint a=CALL(F);\n",
+            .parser = true,
+        },
+        {
+            .name = "forwarded function",
+            .source = "#define ID(x) x\n#define F(x) missing\nint a=ID(F)(1);\n",
+            .parser = true,
+        },
+        {
+            .name = "builtin",
+            .source = "#define FILE_NAME __FILE__\n#if FILE_NAME\n#endif\n",
+        },
+        {
+            .name = "empty stringification",
+            .source = "#define S(x) #x\n#if S()\n#endif\n",
+        },
+        {
+            .name = "header definition",
+            .source = "#include \"history.h\"\nint a=OBJ;\n",
+            .header = "#define OBJ missing\n",
+            .parser = true,
+        },
+        {
+            .name = "header errors",
+            .source = "#include \"history.h\"\n",
+            .header = "#define OBJ \"bad\"\n#if OBJ\n#endif\n#if OBJ\n#endif\n",
+        },
+        {
+            .name = "nested include stack",
+            .source = "#define STEP\n#include \"history.h\"\n",
+            .header = "#ifdef STEP\n#undef STEP\n#include \"history.h\"\n#else\n#define OBJ \"bad\"\n#if OBJ\n#endif\n#endif\n",
+        },
+        {
+            .name = "nested argument name",
+            .source = "#define CALL(f) f()\n#define OUT(x) CALL(x)\n#define F() missing\nint a=OUT(F);\n",
+            .parser = true,
+        },
+        {
+            .name = "CRLF",
+            .source = "#define OBJ \"bad\"\r\n#line 22 \"logical.c\"\r\n#if OBJ\r\n#endif\r\n",
+        },
     };
     uint32_t failures = 0;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
