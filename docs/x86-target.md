@@ -99,6 +99,42 @@ Compare several independent processes under the lock; a single interleaved
 run does not establish both power states.
 This is configuration work, not an end-to-end compiler speed claim.
 
+## 9700X measurements
+
+Measured on 2026-10-21 UTC with Clang 23.1.1, `build.sh`'s `-O3 -march=native`
+and CPU 2 of the Ryzen 7 9700X, taking the shared lock separately for each
+command. The workload builds all 8,352 eligibility bytes for `znver5`.
+`6a84160` expanded each predicate to eight qwords, shifted them to ones and
+narrowed them to bytes. `0e056d1` expands the predicate directly to bytes.
+Each process reports the median of 21 samples. These are ranges of medians
+from three independent processes per row and build.
+Each cell is **ns/table (core cycles/table)**.
+
+| Preceding work and sample size | Qword expansion | Direct bytes | Scalar source in the direct-byte build |
+| --- | ---: | ---: | ---: |
+| Isolated AVX-512, 10,000 tables | 384.0–389.5 (2,046–2,076) | 318.0–329.2 (1,688–1,758) | Not measured |
+| 100 ms predefines, one table | 491–531 (2,890–3,066) | 431 (2,505–2,552) | 441 (2,565–2,566) |
+| 100 ms predefines, 10,000 tables | 499.7–501.9 (2,756–2,771) | 410.0–411.3 (2,254–2,261) | 441.3–442.6 (2,433–2,439) |
+
+In the qword-expansion build, the scalar source took 441 ns for one table and
+435.9–438.9 ns/table for 10,000 tables after lighter work.
+The scalar source is a correctness oracle, not a claim of scalar machine code:
+Clang vectorized it with AVX-512 in both builds. Disassembly of the measured
+binary confirms that direct byte packing removes `vpmovm2q`, `vpsrlq` and
+`vpmovqb`, using masked byte moves instead. It wins in sustained repetition and
+avoids the previous loss against optimized C after lighter work. These timings
+alone do not identify a power mechanism; no energy or throttle counter was
+measured. The one-table result includes instrumentation overhead.
+
+Reproduce each command in a separate process under the shared lock, repeating
+the set across processes:
+
+```sh
+taskset -c 2 ./build/compiler benchmark-x86-target --only avx512
+taskset -c 2 ./build/compiler benchmark-x86-target --after-predefines 100 --iterations 1
+taskset -c 2 ./build/compiler benchmark-x86-target --after-predefines 100
+```
+
 ## Remaining acceptance for #180
 
 Tier 0 #136 and Tier 1 #141 have not yet supplied instruction selection on main.
@@ -119,8 +155,8 @@ the implementation and tests are original C. LLVM's
 [target macros](https://github.com/llvm/llvm-project/blob/main/clang/lib/Basic/Targets/X86.cpp)
 and [host detection](https://github.com/llvm/llvm-project/blob/main/llvm/lib/TargetParser/Host.cpp)
 were consulted for behavior, without copying implementation. Macro spellings
-and profile membership were checked with Clang 23.1.3 locally and the installed
-Clang on the 9700X:
+and profile membership were checked with Clang 23.1.3 locally and Clang 23.1.1
+on the 9700X:
 
 ```sh
 clang -march=x86-64-v3 -dM -E -x c /dev/null
