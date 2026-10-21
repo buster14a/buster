@@ -1848,7 +1848,7 @@ static void asm_parse(AsmParser* parser)
 {
     while (parser->at < parser->token_count && parser->result.error == 0)
     {
-        if (parser->options.vectorized && asm_parse_vector_batch(parser))
+        if (parser->options.vectorized && parser->options.intel && !parser->prefix && asm_parse_vector_batch(parser))
         {
             continue;
         }
@@ -1967,6 +1967,12 @@ static void asm_match_instructions(AsmParser* parser)
             fragment->size = match.length;
             const X86FormDescription* form = x86_form_description(instruction->record.form);
             instruction->branch = form->relative_bytes != 0;
+            if (instruction->branch && instruction->expressions[0].plus == 0)
+            {
+                // GAS treats a literal as an absolute destination, not a displacement from this instruction.
+                // The Link contract has no absolute-symbol target; require a label instead of changing its meaning.
+                asm_fail(parser, instruction->location, "direct branch requires a label or symbol target; absolute destinations are unsupported");
+            }
             instruction->local_branch = instruction->branch && asm_local_target(parser, instruction->expressions[0], fragment->section);
             if (instruction->branch && !instruction->local_branch && form->relative_bytes == 1)
             {

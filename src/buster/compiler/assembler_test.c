@@ -463,6 +463,10 @@ static int run_assembler_tests(int count, char** arguments)
                 "callw external\n",
                 "pushl $1\n",
                 ".intel_syntax noprefix\ncall dword ptr [rax]\n",
+                ".intel_syntax noprefix\njmp 200\n",
+                ".intel_syntax noprefix\ncall 200\n",
+                "jmp 200\n",
+                ".set destination,200\ncall destination\n",
                 ".quad x\n.equ x,1\n",
                 ".local .\n",
                 ".intel_syntax noprefix\nmov ah, r8b\n",
@@ -494,6 +498,9 @@ static int run_assembler_tests(int count, char** arguments)
         {
             asm_test_pair(&test, (String8){.pointer = (char*)bad[i], .length = strlen(bad[i])}, 0, 0);
         }
+        AsmResult padding = asm_test_pair(&test, BUSTER_S8("nop\n.p2align 2\nret\n"), 1, 0);
+        static const uint8_t padding_bytes[] = {0x90, 0x90, 0x90, 0x90, 0xc3};
+        asm_test_check(&test, padding.error == 0 && padding.link.atoms.count == 2 && padding.link.atoms.size[1] == sizeof(padding_bytes) && memcmp(padding.link.atoms.bytes[1], padding_bytes, sizeof(padding_bytes)) == 0, "default text alignment uses executable NOP padding", 0);
         static const int64_t boundaries[] = {-129, -128, 127, 128, 200, 255, 256, INT32_MIN, INT32_MAX};
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(boundaries); i += 1)
         {

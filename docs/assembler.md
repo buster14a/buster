@@ -115,6 +115,10 @@ Section flags/types, when supplied, must match the canonical section. `.bss`
 accepts only zero fill. Exported absolute symbols and forward constants are
 diagnosed; the shared object writer currently lacks the former's unit ownership.
 The writer automatically emits a non-executable-stack note.
+Default text alignment uses single-byte NOPs; other sections use zeros.
+Direct branches require label or symbol targets. Absolute numeric destinations
+are diagnosed because the shared writer has no absolute-symbol relocation;
+they are never interpreted as relative instruction displacements.
 
 Expressions use decimal, octal, hex and binary integers; parentheses, unary
 `+/-/~`, multiplication/division/remainder, bitwise `&/|/^`, and addition/
