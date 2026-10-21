@@ -14,7 +14,7 @@
 // for its directory), and the text -E prints with line markers. Then __TIMESTAMP__ must be each file's modification
 // time (pp_test_timestamps). With --clang, each case is also preprocessed by `clang -E`: it must give the same
 // spellings, and its line markers must put every token where ours do (pp_compare_placed). More checks compare what the
-// cases can't, since the files' runs read clang's predefines: our built-in predefines with `clang -dM -E` in 14 option
+// cases can't, since the files' runs read clang's predefines: our built-in predefines with `clang -dM -E` in 22 option
 // sets (pp_test_predefines), and in each language mode __is_identifier of every predefined name (pp_test_keywords)
 // and the feature queries of every feature name (pp_test_features) with clang's.
 //
@@ -1177,6 +1177,14 @@ static bool pp_test_predefines(const char* directory)
         { "-std=c89", 0 }, { "-std=gnu89", 0 }, { "-std=c99", 0 }, { "-std=gnu99", 0 }, { "-std=c11", 0 }, { "-std=gnu11", 0 },
         { "-std=c17", 0 }, { "-std=gnu17", 0 }, { "-std=c23", 0 }, { "-std=gnu23", 0 }, { "-ffreestanding", 0 }, { "-O2", 0 },
         { "-std=c99", "-ffreestanding" }, { "-std=c23", "-O2" },
+        { "-march=x86-64", 0 },
+        { "-march=x86-64-v2", 0 },
+        { "-march=x86-64-v3", 0 },
+        { "-march=x86-64-v4", 0 },
+        { "-march=znver5", 0 },
+        { "-march=native", 0 },
+        { "-march=x86-64", "-mtune=znver5" },
+        { "-march=znver5", "-mtune=generic" },
     };
     uint32_t failures = 0;
     char clang_path[4096];
@@ -1195,7 +1203,7 @@ static bool pp_test_predefines(const char* directory)
         const char* output;
         bool markers;
         bool passed = pp_parse_options(count + 1, arguments, &options, &arena, &input, &output, &markers);
-        char* ours = malloc(sizeof(pp_predefines_base) + sizeof(pp_predefines_c23) + 512);
+        char* ours = malloc(BUSTER_PP_PREDEFINES_BYTES);
         size_t ours_length = passed && ours != 0 ? pp_predefines(&options, ours) : 0;
         size_t clang_length = 0;
         free(pp_test_clang(arguments, count, empty_path, clang_path, &clang_length));

@@ -158,6 +158,14 @@ designs and the compilers already built this way.
 
 ## Current repository and exact smoke commands
 
+- `src/buster/compiler/x86_target.c` defines generated-code ISA profiles, with
+  x86-64 baseline as the default, independently of the compiler host.
+  `x86_target_forms.c` supplies explicit, fail-closed form eligibility and
+  scalar/vector table builders. `test-x86-target` checks the policy and Clang
+  predefines; `benchmark-x86-target` measures table construction.
+  `docs/x86-target.md` records the API, current catalogue coverage and the
+  selector/corpus acceptance still pending for #180.
+
 - `src/buster/compiler/main.c` is the executable entry point
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
   `-march=native`, so the machine executing the build determines the host ISA.
@@ -1921,8 +1929,8 @@ prints the first difference with the tokens around it. For files, our side
 reads clang's own predefines for the options through `--predefines`. Without
 files, `--clang` also checks the built-in predefines, the keywords and the
 features:
-- in 14 option sets (the ten modes from `c89` to `gnu23`, and `-ffreestanding`
-  and `-O2`), `pp_predefines` must give `clang -dM -E` line for line, but for
+- in 22 option sets (the ten modes from `c89` to `gnu23`, `-ffreestanding`,
+  `-O2`, the six ISA profiles and independent tuning), `pp_predefines` must give `clang -dM -E` line for line, but for
   the patch release's three macros;
 - in each mode, `__is_identifier` of every predefined name, and of clang's
   keyword candidates chosen apart from them (`pp_test_keyword_candidates`),

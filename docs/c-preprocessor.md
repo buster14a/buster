@@ -362,9 +362,10 @@ semantics, `__STDC_HOSTED__`, `__OPTIMIZE__` or `__NO_INLINE__`, C23's
 additions, and `__BUSTER__`. The C23 additions are the difference between that
 command's output under `-std=c23` and under the default.
 
-Target options such as `-march` don't change them yet, though #117 asks for
-clang's macros for the same `-march`. Until then, `--predefines FILE` replaces
-the built-in predefines (`__BUSTER__` too) with a file of `#define` lines, such
+`-march=` selects the target feature and CPU identity macros described in
+[Generated-code instruction set](x86-target.md), with x86-64 baseline as the
+default. `-mtune=` is independent and changes no ISA macros. `--predefines FILE`
+replaces the built-in predefines (`__BUSTER__` too) with a file of `#define` lines, such
 as `clang -dM -E` gives for the same options. The oracle uses this, so its runs
 start from clang's macros alone.
 
@@ -658,7 +659,8 @@ the mispredictions it saves.
 - **Predefines and keywords.** The cases and files under `--clang` give our side
   clang's predefines, so `--clang` checks our built-in ones separately:
   - In ten language modes (`c89` to `gnu23`), with `-ffreestanding` and with
-    `-O2`, 14 option sets in all, `pp_predefines` must give `clang -dM -E` line
+    `-O2`, the six target profiles and independent tuning, 22 option sets in all,
+    `pp_predefines` must give `clang -dM -E` line
     for line. Only the three macros that name clang's patch release are left
     out.
   - In each mode, `__is_identifier` of every predefined name (keywords,
@@ -773,9 +775,10 @@ cleared once and reused.
 ## Not yet
 
 - `#embed` is an error, and `__has_embed` isn't answered (C23).
-- Target options (`-march`, `-m*`, `-funsigned-char`) don't change the built-in
-  predefines; they come only through `--predefines`. #117's configuration asks
-  for clang's macros for the same `-march`.
+- Individual feature switches (`-m*`, other than the supported `-march=` and
+  `-mtune=`) are rejected. Other options such as `-funsigned-char` still need
+  `--predefines` for their macro effects. The target-builtin query table remains
+  a bounded subset; see [the target contract](x86-target.md).
 - The oracle uses the installed `/usr/include`, not the pinned copy of the
   headers that #125's decision asks for (with its hashed manifest).
 - The feature tests (`__has_attribute` and the others) always answer from
