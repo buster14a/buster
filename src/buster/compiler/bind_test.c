@@ -2893,11 +2893,15 @@ static bool bind_test_static_compiled(const Runtime* runtime, const char* direct
     return bind_test_report(&tally);
 }
 
-// The rules a static runtime adds, on links made by hand, each bound by both paths, which must make the same link:
+// The rules a static runtime adds, on links made by hand, each bound by both paths, which must make the same link, against
+// a static executable's runtime and a static PIE's (whose start object, crt1.o's here, is rcrt1.o):
 //   - a strong reference to a name nothing defines: an error naming it;
 //   - strong and weak references to __tls_get_addr: bound, the strong one left undefined for the relaxation;
-//   - references to the static linker's names (__ehdr_start, __rela_iplt_start and __rela_iplt_end, _end, etext): the
-//     linker's;
+//   - references to the kind's linker's names (__ehdr_start, _end and etext, with a static executable's IRELATIVE
+//     relocations' bounds, __rela_iplt_start and __rela_iplt_end, or a static PIE's _DYNAMIC and
+//     __preinit_array_start): the linker's;
+//   - a strong reference to a name only the other kind's linker defines (a static executable's _DYNAMIC, a static
+//     PIE's __rela_iplt_start, as GNU ld's and lld's leave them): an error naming it;
 //   - a weak reference to puts: bound to puts's member's definition if the closure loads it for another reason (GNU
 //     ld's archive scan, bind_test_static_expected, says), and otherwise to nothing, without the member; and a strong
 //     one, which loads it;
@@ -2913,6 +2917,7 @@ typedef enum BindTestStaticRule
     BIND_TEST_STATIC_NOWHERE,
     BIND_TEST_STATIC_TLS_GET_ADDR,
     BIND_TEST_STATIC_LINKER_NAMES,
+    BIND_TEST_STATIC_OTHER_KIND,
     BIND_TEST_STATIC_WEAK_PUTS,
     BIND_TEST_STATIC_STRONG_PUTS,
     BIND_TEST_STATIC_WEAK_START_MAIN,
@@ -2931,6 +2936,7 @@ static const char* const bind_test_static_rule_names[BIND_TEST_STATIC_RULES] = {
     [BIND_TEST_STATIC_NOWHERE] = "a strong reference to a name nothing defines",
     [BIND_TEST_STATIC_TLS_GET_ADDR] = "strong and weak references to __tls_get_addr",
     [BIND_TEST_STATIC_LINKER_NAMES] = "references to the static linker's names",
+    [BIND_TEST_STATIC_OTHER_KIND] = "a strong reference to a name only the other static kind's linker defines",
     [BIND_TEST_STATIC_WEAK_PUTS] = "a weak reference to puts",
     [BIND_TEST_STATIC_STRONG_PUTS] = "a strong reference to puts",
     [BIND_TEST_STATIC_WEAK_START_MAIN] = "a weak definition of __libc_start_main",
@@ -2940,12 +2946,29 @@ static const char* const bind_test_static_rule_names[BIND_TEST_STATIC_RULES] = {
     [BIND_TEST_STATIC_BLOCKED_MANY] = "weak definitions of 24 names that the members refer to",
 };
 
-static const char* const bind_test_static_linker_names[] = {
-    "__ehdr_start",
+// The kind's linker's names the rule refers to, a static executable's first, then a static PIE's.
+#define BUSTER_BIND_TEST_STATIC_LINKER_NAMES 5
+static const char* const bind_test_static_linker_names[2][BUSTER_BIND_TEST_STATIC_LINKER_NAMES] = {
+    {
+        "__ehdr_start",
+        "__rela_iplt_start",
+        "__rela_iplt_end",
+        "_end",
+        "etext",
+    },
+    {
+        "__ehdr_start",
+        "_DYNAMIC",
+        "__preinit_array_start",
+        "_end",
+        "etext",
+    },
+};
+
+// A name only the other static kind's linker defines, a static executable's first.
+static const char* const bind_test_static_other_kind_names[2] = {
+    "_DYNAMIC",
     "__rela_iplt_start",
-    "__rela_iplt_end",
-    "_end",
-    "etext",
 };
 
 // The first global symbol of a member that is absolute, or 0.
@@ -2969,10 +2992,15 @@ static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtim
     result = main != 0 && bind_test_define(test, main);
     const uint8_t strong = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE;
     const uint8_t weak = BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_NOTYPE;
-    memset(symbols, 0, BUSTER_ARRAY_LENGTH(bind_test_static_linker_names) * sizeof(SymbolId));
+    const bool pie = runtime->kind == RUNTIME_KIND_STATIC_PIE;
+    memset(symbols, 0, BUSTER_BIND_TEST_STATIC_LINKER_NAMES * sizeof(SymbolId));
     if (result && rule == BIND_TEST_STATIC_NOWHERE)
     {
         symbols[0] = bind_test_symbol(test, "buster_static_nowhere", strong, BUSTER_LINK_SOURCE_NONE);
+    }
+    else if (result && rule == BIND_TEST_STATIC_OTHER_KIND)
+    {
+        symbols[0] = bind_test_symbol(test, bind_test_static_other_kind_names[pie], strong, BUSTER_LINK_SOURCE_NONE);
     }
     else if (result && rule == BIND_TEST_STATIC_TLS_GET_ADDR)
     {
@@ -2980,9 +3008,9 @@ static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtim
     }
     else if (result && rule == BIND_TEST_STATIC_LINKER_NAMES)
     {
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bind_test_static_linker_names); i += 1)
+        for (uint32_t i = 0; i < BUSTER_BIND_TEST_STATIC_LINKER_NAMES; i += 1)
         {
-            symbols[i] = bind_test_symbol(test, bind_test_static_linker_names[i], strong, BUSTER_LINK_SOURCE_NONE);
+            symbols[i] = bind_test_symbol(test, bind_test_static_linker_names[pie][i], strong, BUSTER_LINK_SOURCE_NONE);
         }
     }
     else if (result && (rule == BIND_TEST_STATIC_WEAK_PUTS || rule == BIND_TEST_STATIC_STRONG_PUTS))
@@ -3057,7 +3085,7 @@ static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtim
 static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
 {
     BindTestTally tally = {
-        .check = "static rules",
+        .check = runtime->kind == RUNTIME_KIND_STATIC_PIE ? "static PIE rules" : "static rules",
     };
     const uint32_t words = (runtime->member_count + 63) / 64;
     uint64_t* expected = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
@@ -3069,8 +3097,8 @@ static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
         const char* what = bind_test_static_rule_names[r];
         BindTestLink vector;
         BindTestLink exact;
-        SymbolId symbols[BUSTER_ARRAY_LENGTH(bind_test_static_linker_names)];
-        SymbolId exact_symbols[BUSTER_ARRAY_LENGTH(bind_test_static_linker_names)];
+        SymbolId symbols[BUSTER_BIND_TEST_STATIC_LINKER_NAMES];
+        SymbolId exact_symbols[BUSTER_BIND_TEST_STATIC_LINKER_NAMES];
         bind_test_static_rule_link(&vector, runtime, rule, BIND_PATH_VECTOR, expected, arena, symbols);
         bind_test_static_rule_link(&exact, runtime, rule, BIND_PATH_EXACT, exact_expected, arena, exact_symbols);
         const Link* link = &vector.link;
@@ -3083,7 +3111,7 @@ static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
             members = members && vector.bind.members_joined[w] == expected[w];
         }
         bool holds = false;
-        if (rule == BIND_TEST_STATIC_NOWHERE)
+        if (rule == BIND_TEST_STATIC_NOWHERE || rule == BIND_TEST_STATIC_OTHER_KIND)
         {
             holds = vector.bind.error == BIND_ERROR_UNDEFINED && symbol != 0 && vector.bind.name == columns->name[symbol];
         }
@@ -3095,7 +3123,7 @@ static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
         else if (rule == BIND_TEST_STATIC_LINKER_NAMES)
         {
             holds = vector.bind.error == BIND_ERROR_NONE && members;
-            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bind_test_static_linker_names); i += 1)
+            for (uint32_t i = 0; i < BUSTER_BIND_TEST_STATIC_LINKER_NAMES; i += 1)
             {
                 holds = holds && symbols[i] != 0 && columns->source[symbols[i]] == BUSTER_LINK_SOURCE_LINKER && columns->atom[symbols[i]] == 0;
             }
@@ -3226,6 +3254,7 @@ static int run_bind_tests(int argc, char** argv)
         if (static_pie_imported == RUNTIME_ERROR_NONE)
         {
             passed = bind_test_static_programs(&static_pie_runtime, seed, cross_check, directory, keep, &arena) && passed;
+            passed = bind_test_static_rules(&static_pie_runtime, &arena) && passed;
         }
         if (static_pie_imported == RUNTIME_ERROR_NONE && cross_check)
         {

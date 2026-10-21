@@ -1234,7 +1234,8 @@ paths, which must make the same link and join the same members:
 - static rules, on links made by hand: a strong reference to a name nothing
   defines (an error naming it); strong and weak references to
   `__tls_get_addr` (left undefined); the static linker's names (the
-  linker's); weak and strong references to `puts` (the weak one binds to its
+  linker's), and `_DYNAMIC`, which only a PIE's linker defines (an error
+  naming it); weak and strong references to `puts` (the weak one binds to its
   member only if the closure loads it for another reason); a weak definition
   of `__libc_start_main` (crt1.o's reference takes it, and its member doesn't
   join); a weak absolute definition of `data_start` (crt1.o's weak one, first
@@ -1251,14 +1252,17 @@ paths, which must make the same link and join the same members:
   program, bound and checked as the static programs are, and linked by both
   linkers, with the same members, to run with the program's status.
 
-Then the static programs, and with `--cross-check` the C programs (compiled
-with `-fPIE`), against the static PIE's runtime
+Then the static programs, the static rules, and with `--cross-check` the C
+programs (compiled with `-fPIE`), against the static PIE's runtime
 (`runtime_import_static_pie`), by both paths, which must make the same link
 and join the same members, checked as against the static runtime: the
 members the oracle's scan loads, among them `libc.a`'s
 `dl-reloc-static-pie.o`, which `rcrt1.o` makes join by not defining
 `_dl_relocate_static_pie`; that name the member's, its `_DYNAMIC` the
-linker's and `__dso_handle` crtbeginS.o's; and with `--cross-check`, each
+linker's and `__dso_handle` crtbeginS.o's; the rules' linker's names a static
+PIE's (`_DYNAMIC` among them), and a strong reference to
+`__rela_iplt_start`, which a static PIE's linker leaves to libc.a's weak
+references, an error naming it; and with `--cross-check`, each
 linked by `cc -static-pie` with GNU ld (`--trace` twice) and with lld
 (`--why-extract`), which must load the same members and run as the model
 predicts, or with the program's status.
