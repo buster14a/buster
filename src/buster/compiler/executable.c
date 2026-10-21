@@ -51,18 +51,18 @@
 // between __rela_iplt_start and __rela_iplt_end. A PIE's come from each target's relocation class
 // (executable_relocation_class): RELATIVE for the image's symbols, to whose addresses the loader adds the load
 // address; SYMBOLIC for the dynamic symbols (an import, or a weak reference to nothing with default visibility, which a
-// library may define), .dynsym's undefined entries; NONE for a TLS symbol's offset and a weak reference to nothing that
-// isn't dynamic. A GOT slot gets a RELATIVE relocation, or GLOB_DAT (TPOFF64 for a TLS import); an ABS64 field of an atom
+// library may define), .dynsym's undefined entries; NONE for a TLS symbol's offset, a weak reference to nothing that
+// isn't dynamic and an absolute symbol's value. A GOT slot gets a RELATIVE relocation, or GLOB_DAT (TPOFF64 for a TLS import); an ABS64 field of an atom
 // the loader writes (TDATA, the init and fini arrays, DATA_RELRO and DATA), a RELATIVE relocation, or R_X86_64_64 with
 // the fixup's addend. With RELR (libc.so.6 defining GLIBC_ABI_DT_RELR, which the executable then needs), the RELATIVE
 // ones at even addresses are .relr.dyn's: each atom's encoded from its first, so that their words don't depend on the
 // layout, and the GOT's a word of marks at a time. The others are .rela.dyn's, RELATIVE ones first. A CALL to a dynamic
 // symbol goes to its stub in .plt.got (jmp [rip + slot], GNU ld's form). Refused (EXECUTABLE_ERROR_RELOCATION): an
 // ABS64 that needs a relocation outside the atoms the loader writes (a text relocation), an ABS32 or ABS32S that needs
-// one, and a fixup of another kind to a dynamic symbol, as lld refuses them; and a PC32 or PC64 to address 0 (a weak
-// reference to nothing that isn't dynamic), which no field measured from where the image loads reaches. GNU ld refuses
+// one, and a fixup of another kind to a dynamic symbol, as lld refuses them; a PC32 or PC64 to address 0 (a weak
+// reference to nothing that isn't dynamic), which no field measured from where the image loads reaches (GNU ld refuses
 // that PC32 in code and read-only data; a PC32 in writable data and a PC64 anywhere, it and lld write off by the load
-// address.
+// address); and a CALL, PC32 or PC64 to an absolute symbol, for the same reason, as GNU ld and lld refuse them.
 //
 // A PIE's passes are data-parallel and vectorized, each with an exact twin, scalar, that ExecutableOptions.exact selects
 // and the tests compare it with: the symbols' classes as bitsets, 64 symbols at a time (executable_mark_symbols); the
@@ -73,8 +73,9 @@
 // are both kinds' passes over atoms and symbols: the count's and the placement's blocks of 16 atoms of one bucket
 // (executable_atom_block), whose padded sizes they sum and scan in vectors, and the symbols' references 16 at a time
 // (executable_resolve), from gathers of their atoms' classes and addresses. And a static executable's with the C
-// runtime: its IFUNCs as a bitset, 64 symbols' types at a time, and a filter of them by two hashes that the count
-// tests the fixups' targets against 16 at a time (executable_mark_ifuncs and executable_mark_ifunc_target); the IFUNCs'
+// runtime: its IFUNCs as a bitset, 64 symbols' types at a time (and the atoms of those that have the type, 16 at a
+// time), and a filter of them by two hashes that the count tests the fixups' targets against 16 at a time
+// (executable_mark_ifuncs and executable_mark_ifunc_target); the IFUNCs'
 // slots that IRELATIVE relocations fill, from the bitsets (executable_ifunc_slots); and the TLS accesses and the calls
 // of __tls_get_addr, counted by compares of 64 kinds and 16 targets at a time. A TLS access's relaxation goes one
 // access at a time in the patch's path for the kinds other than CALL and PC32, and lane 0 places the prioritized array
@@ -87,9 +88,10 @@
 // of the TLS block, which is the TLS segment's memory size rounded up to its alignment, since the segment starts on a
 // multiple of its alignment), or for a weak symbol defined nowhere the image offset of address 0, or 0 if the symbol is
 // thread-local, as GNU ld resolves one; in a PIE, a dynamic symbol's is its stub's image offset, or address 0's; and
-// with the C runtime, an IFUNC's with a stub is its stub's image offset, an absolute symbol's its value less the base
-// (one farther than int32 from the base is refused), and __tls_get_addr's 0, the relaxation consuming its calls. Every
-// fixup's field is patched in place, in its atom's bytes.
+// with the C runtime, an IFUNC's with a stub is its stub's image offset (an IFUNC is one with a resolver: a weak one
+// defined nowhere is address 0, as any other is), and __tls_get_addr's 0, the relaxation consuming its calls; and an
+// absolute symbol's is its value less the base (one farther than int32 from the base is refused). Every fixup's field is
+// patched in place, in its atom's bytes.
 //
 // Patching and writing go a chunk at a time (BUSTER_EXECUTABLE_CHUNK_BYTES, about 256 KB, a quarter of Zen 5's L2), in
 // chunks that never split a field or a TLS access's sequence (executable_fixup_extent): boundary k is at k chunks'
@@ -236,7 +238,8 @@ typedef enum ExecutableError
     EXECUTABLE_ERROR_ENTRY,
     // A dynamic PIE can't relocate the fixup: an ABS64 that needs a relocation in an atom the loader doesn't write (a
     // text relocation), an ABS32 or ABS32S that needs one (no load address fits it), a fixup to a dynamic symbol of
-    // another kind than a GOT kind, ABS64 and CALL, or a PC32 or PC64 to address 0 (ExecutableResult.fixup).
+    // another kind than a GOT kind, ABS64 and CALL, a PC32 or PC64 to address 0, or a CALL, PC32 or PC64 to an absolute
+    // symbol (ExecutableResult.fixup).
     EXECUTABLE_ERROR_RELOCATION,
     // A fixup's value doesn't fit its field (ExecutableResult.fixup).
     EXECUTABLE_ERROR_FIXUP,
@@ -576,8 +579,8 @@ static void executable_hash_end(ExecutableHash* hash, uint8_t* output)
 // executable_patch_mixed, which takes each fixup by its kind, CALL and PC32 inline and the others through
 // executable_patch_other, once each (docs/object-writer-and-linker.md, "Patching and writing", has the variants it was
 // chosen over). Neither checks a CALL's or PC32's S + A - P: executable_write does that once for every fixup, from the
-// largest addend and the image's size, and runs every fixup through executable_patch_other when it can't rule out a
-// value outside int32.
+// largest addend, the image's size and the farthest absolute symbols, and runs every fixup through
+// executable_patch_other when it can't rule out a value outside int32.
 
 typedef struct ExecutablePatch ExecutablePatch;
 struct ExecutablePatch
@@ -2640,6 +2643,10 @@ struct ExecutableShared
     uint64_t words_per_lane;
     uint64_t* got_counts;
     uint64_t* addend_magnitudes;
+    // A static executable's: the lowest and highest reference of an absolute symbol in each lane's range of the symbols
+    // (two per lane, INT64_MAX and INT64_MIN without one), which the patch's range proof takes in (a dynamic PIE refuses
+    // the fixups it would be about: executable_refuses_absolute).
+    int64_t* absolute_bounds;
     ExecutablePiece* pieces;
     // Allocated by lane 0 once the layout is known: the GOT's bytes, the chunks' boundaries (chunk_count + 1) and their
     // hashes, the parts' boundaries, and each lane's order of the parts.
@@ -2823,10 +2830,11 @@ static ExecutableError executable_reference(const Link* link, const ExecutableLa
 }
 
 // A dynamic PIE's relocation class of a symbol: what its address needs when the program loads. Nothing for a TLS
-// symbol (its offset from the thread pointer is the executable's to know) or a weak reference to nothing that isn't
-// dynamic (address 0); RELATIVE for a symbol of the image's, to which the load address adds; SYMBOLIC for an import,
-// and for a weak reference to nothing with default visibility and a name, which a library may define, as GNU ld and lld
-// make it: the loader looks them up in .dynsym. The SYMBOLIC ones are .dynsym's undefined entries.
+// symbol (its offset from the thread pointer is the executable's to know), a weak reference to nothing that isn't
+// dynamic (address 0) or an absolute symbol (its value wherever the image loads, as GNU ld and lld leave it); RELATIVE
+// for a symbol of the image's, to which the load address adds; SYMBOLIC for an import, and for a weak reference to
+// nothing with default visibility and a name, which a library may define, as GNU ld and lld make it: the loader looks
+// them up in .dynsym. The SYMBOLIC ones are .dynsym's undefined entries.
 #define BUSTER_EXECUTABLE_RELOCATION_NONE 0
 #define BUSTER_EXECUTABLE_RELOCATION_RELATIVE 1
 #define BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC 2
@@ -2845,11 +2853,19 @@ static uint8_t executable_relocation_class(const Link* link, SymbolId symbol)
     {
         result = BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC;
     }
-    else if (tls || nowhere)
+    else if (tls || nowhere || source == BUSTER_LINK_SOURCE_ABSOLUTE)
     {
         result = BUSTER_EXECUTABLE_RELOCATION_NONE;
     }
     return result;
+}
+
+// Whether a dynamic PIE refuses a fixup of `kind` to an absolute symbol: one measured from its field (CALL, PC32 and
+// PC64), which no load address makes right, since the loader moves the field and not the symbol. GNU ld and lld refuse
+// them too.
+static bool executable_refuses_absolute(uint8_t kind)
+{
+    return kind == BUSTER_LINK_FIXUP_CALL || kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64;
 }
 
 // Whether a dynamic PIE's symbol is at address 0 wherever the image loads: a weak reference to nothing that isn't dynamic
@@ -2884,11 +2900,11 @@ static bool executable_kind_reads_got(uint8_t kind)
     return kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_GOTTPOFF;
 }
 
-// A dynamic PIE's filter of the symbols that the image doesn't define (sources NONE and RUNTIME_SHARED: weak references
-// to nothing and imports): a bit per hash of each, BUSTER_EXECUTABLE_FILTER_WORDS 32-bit words in two registers, so
-// that 16 fixups' targets are tested at once without a load ("permutes as table lookups" in
+// A dynamic PIE's filter of the symbols that the image doesn't define (sources NONE, RUNTIME_SHARED and ABSOLUTE: weak
+// references to nothing, imports and absolute symbols): a bit per hash of each, BUSTER_EXECUTABLE_FILTER_WORDS 32-bit
+// words in two registers, so that 16 fixups' targets are tested at once without a load ("permutes as table lookups" in
 // docs/object-writer-and-linker.md). A clear bit means that the image defines the target, so that no fixup to it needs
-// a stub and an ABS64 to it is RELATIVE. A set bit can be another symbol's (about the share of the 1,024 bits that are
+// a stub or is refused, and an ABS64 to it is RELATIVE. A set bit can be another symbol's (about the share of the 1,024 bits that are
 // set: a few hundredths with tens of such symbols), which the exact check tells apart. A static executable's filter of
 // its IFUNCs (with the C runtime) has a second hash, its bits in two registers of their own, and takes a target for an
 // IFUNC only if both its bits are set: its symbols are the joined members' IFUNCs, more than a PIE's outside the image,
@@ -2981,11 +2997,12 @@ static void executable_count_dynamic_symbol(const Link* link, ExecutableShared* 
 }
 
 // A dynamic PIE's symbols, 64 at a time over this lane's range of words of the bitsets: the SYMBOLIC and RELATIVE ones
-// (executable_relocation_class's), each set of bits a word of its bitset; this lane's part of the filter; and what the
-// dynamic ones add to its counts, one at a time. The classes are lane masks over the source and flags columns, which
-// link_check makes enough: a symbol of source NONE has no atom, and a TLS symbol is one by its type, its atom's class's.
-// Only the words with a weak reference to nothing of default visibility read the names (whether it has one). With
-// `exact`, its twin: executable_relocation_class of one symbol at a time.
+// (executable_relocation_class's), each set of bits a word of its bitset; this lane's part of the filter (the symbols
+// the image doesn't define); and what the dynamic ones add to its counts, one at a time. The classes are lane masks
+// over the source and flags columns, which link_check makes enough: a symbol of source NONE or ABSOLUTE has no atom,
+// and a TLS symbol is one by its type, its atom's class's. Only the words with a weak reference to nothing of default
+// visibility read the names (whether it has one). With `exact`, its twin: executable_relocation_class of one symbol at a
+// time.
 static void executable_mark_symbols(const Link* link, ExecutableShared* shared, uint32_t lane)
 {
     const LinkSymbols* symbols = &link->symbols;
@@ -3010,7 +3027,8 @@ static void executable_mark_symbols(const Link* link, ExecutableShared* shared, 
                 const SymbolId symbol = (SymbolId)(first + bit);
                 const bool symbol_valid = (valid >> bit & 1) != 0;
                 const uint8_t class = symbol_valid ? executable_relocation_class(link, symbol) : BUSTER_EXECUTABLE_RELOCATION_NONE;
-                const bool is_outside = symbol_valid && (symbols->source[symbol] == BUSTER_LINK_SOURCE_NONE || symbols->source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED);
+                const uint8_t source = symbol_valid ? symbols->source[symbol] : BUSTER_LINK_SOURCE_PROGRAM;
+                const bool is_outside = source == BUSTER_LINK_SOURCE_NONE || source == BUSTER_LINK_SOURCE_RUNTIME_SHARED || source == BUSTER_LINK_SOURCE_ABSOLUTE;
                 dynamic |= (uint64_t)(class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC) << bit;
                 relative |= (uint64_t)(class == BUSTER_EXECUTABLE_RELOCATION_RELATIVE) << bit;
                 outside |= (uint64_t)is_outside << bit;
@@ -3022,6 +3040,7 @@ static void executable_mark_symbols(const Link* link, ExecutableShared* shared, 
             const __m512i flags = _mm512_maskz_loadu_epi8(valid, symbols->flags + first);
             const uint64_t import = _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_RUNTIME_SHARED));
             const uint64_t nowhere = _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_NONE));
+            const uint64_t absolute = _mm512_mask_cmpeq_epi8_mask(valid, source, _mm512_set1_epi8(BUSTER_LINK_SOURCE_ABSOLUTE));
             const uint64_t weak = _mm512_cmpeq_epi8_mask(_mm512_and_si512(flags, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_BINDING)), _mm512_set1_epi8(BUSTER_LINK_SYMBOL_WEAK));
             const uint64_t visible = _mm512_cmpeq_epi8_mask(_mm512_and_si512(flags, _mm512_set1_epi8((char)BUSTER_LINK_SYMBOL_VISIBILITY)),
                                                             _mm512_set1_epi8(BUSTER_LINK_SYMBOL_DEFAULT));
@@ -3035,8 +3054,8 @@ static void executable_mark_symbols(const Link* link, ExecutableShared* shared, 
                 named |= (uint64_t)_mm512_mask_cmpneq_epi32_mask(lanes, names, _mm512_setzero_si512()) << (16 * part);
             }
             dynamic = import | (candidates & named);
-            relative = valid & ~dynamic & ~tls & ~nowhere;
-            outside = import | nowhere;
+            relative = valid & ~dynamic & ~tls & ~nowhere & ~absolute;
+            outside = import | nowhere | absolute;
         }
         shared->dynamic_bits[word] = dynamic;
         shared->relative_bits[word] = relative;
@@ -3055,9 +3074,10 @@ static void executable_mark_symbols(const Link* link, ExecutableShared* shared, 
 // A dynamic PIE's fixup that doesn't read a GOT slot and isn't ABS64, whose target the filter (or with `exact`, its
 // atom) says may be outside the image. A CALL to a dynamic symbol goes to the symbol's stub, which reads its GOT slot:
 // both are marked in this lane's bitsets. Any other kind of fixup to a dynamic symbol can't be relocated (lld refuses it
-// too: the code isn't position-independent), and nor can a PC32 or PC64 to address 0 (executable_is_absolute_zero); they
-// are only counted here, and executable_check_relocations reports them. A CALL to address 0 is patched, as GNU ld and
-// lld patch it: whatever it reaches, the program can only call it after checking that the symbol has an address.
+// too: the code isn't position-independent), and nor can a PC32 or PC64 to address 0 (executable_is_absolute_zero) or a
+// CALL, PC32 or PC64 to an absolute symbol (executable_refuses_absolute); they are only counted here, and
+// executable_check_relocations reports them. A CALL to address 0 is patched, as GNU ld and lld patch it: whatever it
+// reaches, the program can only call it after checking that the symbol has an address.
 static void executable_check_direct(const Link* link, ExecutableShared* shared, uint32_t lane, FixupId fixup, uint64_t* refused)
 {
     const SymbolId target = link->fixups.target[fixup];
@@ -3065,17 +3085,27 @@ static void executable_check_direct(const Link* link, ExecutableShared* shared, 
     const bool call = kind == BUSTER_LINK_FIXUP_CALL;
     const bool relative = kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64;
     const bool dynamic = executable_bit(shared->dynamic_bits, target);
+    const bool absolute = link->symbols.source[target] == BUSTER_LINK_SOURCE_ABSOLUTE;
     const uint64_t word = lane * shared->words_per_lane + target / 64;
     const uint64_t bit = dynamic && call ? 1ull << (target % 64) : 0;
     shared->got_marks[word] |= bit;
     shared->stub_marks[word] |= bit;
-    *refused += (dynamic && !call) || (relative && !dynamic && executable_is_absolute_zero(link, target)) ? 1 : 0;
+    *refused += (dynamic && !call) || (relative && !dynamic && executable_is_absolute_zero(link, target)) || (absolute && executable_refuses_absolute(kind)) ? 1 : 0;
 }
 
-// A static executable's IFUNCs (with the C runtime), 64 symbols at a time over this lane's range of words: their
-// bitset's words, a compare of the type in the flags column, and this lane's part of the filter, which the count tests
-// the fixups' targets against (a bit per hash of each, by both hashes, as a dynamic PIE's filter has the symbols outside
-// the image by one). With `exact`, its twin: one symbol at a time.
+// Whether a static executable's symbol is an IFUNC with a resolver, the code at it: of the type and defined in an atom.
+// A weak IFUNC defined nowhere has none, and is address 0, as any weak symbol defined nowhere is (cc -static's links
+// leave its GOT slot 0).
+static bool executable_is_ifunc(const Link* link, SymbolId symbol)
+{
+    return (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_IFUNC && link->symbols.atom[symbol] != 0;
+}
+
+// A static executable's IFUNCs with resolvers (with the C runtime; executable_is_ifunc), 64 symbols at a time over this
+// lane's range of words: their bitset's words, a compare of the type in the flags column and, for the words that have
+// IFUNCs, of the atoms of those 16 at a time with 0; and this lane's part of the filter, which the count tests the
+// fixups' targets against (a bit per hash of each, by both hashes, as a dynamic PIE's filter has the symbols outside the
+// image by one). With `exact`, its twin: one symbol at a time.
 static void executable_mark_ifuncs(const Link* link, ExecutableShared* shared, uint32_t lane)
 {
     const LinkSymbols* symbols = &link->symbols;
@@ -3094,14 +3124,20 @@ static void executable_mark_ifuncs(const Link* link, ExecutableShared* shared, u
         {
             for (uint64_t bit = 0; bit < 64; bit += 1)
             {
-                const bool ifunc = (valid >> bit & 1) != 0 && (symbols->flags[first + bit] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_IFUNC;
+                const bool ifunc = (valid >> bit & 1) != 0 && executable_is_ifunc(link, (SymbolId)(first + bit));
                 ifuncs |= (uint64_t)ifunc << bit;
             }
         }
         else
         {
             const __m512i types = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, symbols->flags + first), _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TYPE));
-            ifuncs = _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_IFUNC));
+            const uint64_t typed = _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_IFUNC));
+            for (uint32_t part = 0; typed != 0 && part < 4; part += 1)
+            {
+                const __mmask16 lanes = (__mmask16)(typed >> (16 * part));
+                const __m512i atoms = _mm512_maskz_loadu_epi32(lanes, symbols->atom + first + 16 * part);
+                ifuncs |= (uint64_t)_mm512_mask_cmpneq_epi32_mask(lanes, atoms, _mm512_setzero_si512()) << (16 * part);
+            }
         }
         shared->ifunc_bits[word] = ifuncs;
         for (uint64_t left = ifuncs; left != 0; left &= left - 1)
@@ -3119,16 +3155,16 @@ static void executable_mark_ifuncs(const Link* link, ExecutableShared* shared, u
 // an IFUNC: an IFUNC that such a fixup reaches gets a stub, which stands for its address everywhere (as lld's canonical
 // PLT entry does, so that &f is the same however it is taken) and jumps through a slot of its own after the GOT kinds',
 // which an IRELATIVE relocation fills at startup. Its bit is marked in this lane's bitset of the stubs, for an IFUNC by
-// its bit (with `exact`, its type).
+// its bit (with `exact`, executable_is_ifunc).
 static void executable_mark_ifunc_target(const Link* link, ExecutableShared* shared, uint32_t lane, SymbolId target)
 {
-    const bool ifunc = shared->exact ? (link->symbols.flags[target] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_IFUNC : executable_bit(shared->ifunc_bits, target);
+    const bool ifunc = shared->exact ? executable_is_ifunc(link, target) : executable_bit(shared->ifunc_bits, target);
     shared->stub_marks[lane * shared->words_per_lane + target / 64] |= ifunc ? 1ull << (target % 64) : 0;
 }
 
 // Of a word of the GOT's marks, the IFUNCs' slots that IRELATIVE relocations fill: those of IFUNCs without a stub (one
-// with a stub has its stub's address there, as every reference to it has). From the bitsets, or with `exact`, each
-// symbol's type.
+// with a stub has its stub's address there, as every reference to it has). From the bitsets, or with `exact`,
+// executable_is_ifunc of each symbol.
 static uint64_t executable_ifunc_slots(const Link* link, const ExecutableShared* shared, uint64_t word, uint64_t marks)
 {
     uint64_t result = 0;
@@ -3137,7 +3173,7 @@ static uint64_t executable_ifunc_slots(const Link* link, const ExecutableShared*
         for (uint64_t left = marks; left != 0; left &= left - 1)
         {
             const uint64_t bit = (uint64_t)__builtin_ctzll(left);
-            result |= (link->symbols.flags[word * 64 + bit] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_IFUNC ? 1ull << bit : 0;
+            result |= executable_is_ifunc(link, (SymbolId)(word * 64 + bit)) ? 1ull << bit : 0;
         }
     }
     else
@@ -3741,7 +3777,8 @@ static void executable_classify(const Link* link, ExecutableShared* shared, cons
 // Whether a dynamic PIE can't relocate a fixup of `kind` to `target` in an atom of class `atom_class`: an ABS64 that
 // needs a relocation outside the atoms the loader writes (a text relocation), an ABS32 or ABS32S that needs one (no load
 // address fits it), a fixup of another kind to a dynamic symbol, but for a GOT kind and a CALL, which goes to the
-// symbol's stub, or a PC32 or PC64 to address 0 (executable_is_absolute_zero).
+// symbol's stub, a PC32 or PC64 to address 0 (executable_is_absolute_zero), or a CALL, PC32 or PC64 to an absolute
+// symbol (executable_refuses_absolute). Every other fixup to an absolute symbol is its value, which needs no relocation.
 static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId target, uint8_t atom_class)
 {
     const uint8_t class = executable_relocation_class(link, target);
@@ -3750,7 +3787,9 @@ static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId targe
     const bool text = kind == BUSTER_LINK_FIXUP_ABS64 && !executable_class_is_written(atom_class);
     const bool direct = !executable_kind_reads_got(kind) && kind != BUSTER_LINK_FIXUP_ABS64 && kind != BUSTER_LINK_FIXUP_CALL;
     const bool relative = kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64;
-    return (relocated && (text || absolute32)) || (direct && class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC) || (relative && executable_is_absolute_zero(link, target));
+    const bool absolute = link->symbols.source[target] == BUSTER_LINK_SOURCE_ABSOLUTE;
+    return (relocated && (text || absolute32)) || (direct && class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC) || (relative && executable_is_absolute_zero(link, target)) ||
+           (absolute && executable_refuses_absolute(kind));
 }
 
 // A dynamic PIE's fixups that it can't relocate (executable_is_refused), which the lanes' counts point to and lane 0
@@ -4214,9 +4253,10 @@ static void executable_write_stub(uint8_t* stubs, const ExecutableLayout* layout
 
 // Fills this lane's range of the symbols' references and their GOT slots, and of the chunks' boundaries. Most symbols
 // are in an atom that isn't thread-local, whose reference comes from the columns directly (in locals, which the stores
-// to the references can't alias); executable_reference gives the others'. A static executable's IFUNCs (with the C
-// runtime) go one at a time: one with a stub keeps its reference (the stub's, from executable_place) and gets the stub's
-// bytes, and the GOT slot of each stays 0, which an IRELATIVE relocation fills at startup. A dynamic PIE's SYMBOLIC
+// to the references can't alias); executable_reference gives the others', and in a static executable, the lane's
+// lowest and highest reference of an absolute symbol, for the patch's range proof. A static executable's IFUNCs (with
+// the C runtime) go one at a time: one with a stub keeps its reference (the stub's, from executable_place) and gets the
+// stub's bytes, and the GOT slot of each stays 0, which an IRELATIVE relocation fills at startup. A dynamic PIE's SYMBOLIC
 // symbols come after, by this lane's range of the bitsets' words (as executable_mark_symbols counts them): their stubs,
 // their references (a stub's address from executable_place, or address 0) and their .dynsym entries, names and
 // versions, after the lanes' before them, with their indices; the other symbols' indices are 0. Then the RELR words of
@@ -4238,6 +4278,8 @@ static void executable_resolve(Link* link, ExecutableShared* shared, const Execu
     const uint64_t base = layout->base;
     const Range64 symbol_range = lane_range(symbols->count - 1);
     const SymbolId symbol_end = (SymbolId)symbol_range.end + 1;
+    int64_t absolute_low = INT64_MAX;
+    int64_t absolute_high = INT64_MIN;
     // 16 symbols at a time whose atoms are all defined and not thread-local, as most are: their classes and addresses
     // by gathers, their references and GOT slots in vectors, and a slot's value written one at a time. The class gather
     // reads 4 bytes, so an atom must be 3 below the end of the class column (and its id fit a gather's signed index).
@@ -4296,6 +4338,9 @@ static void executable_resolve(Link* link, ExecutableShared* shared, const Execu
             {
                 executable_lane_fail(error, failure, 0, symbol, 0);
             }
+            const bool absolute = !plain && !dynamic && symbols->source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
+            absolute_low = absolute && (int32_t)reference < absolute_low ? (int32_t)reference : absolute_low;
+            absolute_high = absolute && (int32_t)reference > absolute_high ? (int32_t)reference : absolute_high;
             if (stubbed)
             {
                 const uint64_t stub = (reference - layout->sections[EXECUTABLE_SECTION_PLT_GOT].address) / BUSTER_EXECUTABLE_STUB_BYTES;
@@ -4315,6 +4360,8 @@ static void executable_resolve(Link* link, ExecutableShared* shared, const Execu
             }
         }
     }
+    shared->absolute_bounds[2 * lane] = absolute_low;
+    shared->absolute_bounds[2 * lane + 1] = absolute_high;
     uint64_t entry = 1;
     uint64_t name_offset = 1;
     for (uint32_t other = 0; dynamic && other < lane; other += 1)
@@ -4822,13 +4869,15 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
         shared->got_marks = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, lanes * shared->words_per_lane);
         shared->got_counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, lanes);
         shared->addend_magnitudes = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, lanes);
+        shared->absolute_bounds = BUSTER_ARENA_PUSH_ARRAY(arena, int64_t, 2 * (uint64_t)lanes);
         // The atoms' pieces and the linker's: the headers, its sections', .shstrtab and the section headers.
         shared->pieces = BUSTER_ARENA_PUSH_ARRAY(arena, ExecutablePiece, (uint64_t)link->atoms.count + EXECUTABLE_SECTION_COUNT + 3);
         shared->exact = options->exact;
         shared->runtime = dynamic == 0 && options->runtime != 0;
         shared->crt = dynamic != 0 || shared->runtime;
         shared->relaxed = shared->runtime && options->runtime->tls_get_addr < link->symbols.count ? options->runtime->tls_get_addr : 0;
-        fits = shared->counts != 0 && shared->errors != 0 && shared->got_marks != 0 && shared->got_counts != 0 && shared->addend_magnitudes != 0 && shared->pieces != 0;
+        fits = shared->counts != 0 && shared->errors != 0 && shared->got_marks != 0 && shared->got_counts != 0 && shared->addend_magnitudes != 0 &&
+               shared->absolute_bounds != 0 && shared->pieces != 0;
     }
     if (fits && dynamic != 0)
     {
@@ -5371,7 +5420,19 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         result->phase_times[EXECUTABLE_PHASE_OPEN] = executable_now();
     }
 
-    // Patch, hash and write the chunks.
+    // Patch, hash and write the chunks. Every S + A - P of CALL and PC32 fits in int32 when the image's span from the
+    // lowest reference to its end, and from its start to the highest reference, do with the largest addend: S is in
+    // the image, address 0 (a weak symbol defined nowhere, at minus the base) or, in a static executable, an absolute
+    // symbol's value; P is in the image.
+    int64_t lowest = ok ? -(int64_t)layout->base : 0;
+    int64_t highest = ok ? (int64_t)layout->image_size : 0;
+    for (uint32_t other = 0; ok && other < lanes; other += 1)
+    {
+        lowest = shared->absolute_bounds[2 * other] < lowest ? shared->absolute_bounds[2 * other] : lowest;
+        highest = shared->absolute_bounds[2 * other + 1] > highest ? shared->absolute_bounds[2 * other + 1] : highest;
+    }
+    const bool proven = ok && highest + (int64_t)magnitude < (int64_t)BUSTER_EXECUTABLE_MAX_ADDRESS &&
+                        (int64_t)layout->image_size + (int64_t)magnitude - lowest < (int64_t)BUSTER_EXECUTABLE_MAX_ADDRESS;
     const ExecutablePatch patch = {
         .offsets = link->fixups.offset,
         .targets = link->fixups.target,
@@ -5384,8 +5445,7 @@ static bool executable_write(Link* link, const ExecutableOptions* options, Execu
         .base = ok ? layout->base : 0,
         .got = ok ? layout->sections[EXECUTABLE_SECTION_GOT].address : 0,
         .relaxed = shared != 0 ? shared->relaxed : 0,
-        // Every S + A - P of CALL and PC32 fits in int32 when the base, the image and the largest addend do together.
-        .checked = !ok || layout->base + layout->image_size + magnitude >= BUSTER_EXECUTABLE_MAX_ADDRESS,
+        .checked = !proven,
     };
     if (ok)
     {

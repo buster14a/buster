@@ -1358,17 +1358,21 @@ must have the same relocations in `.rela.dyn` alone and run alike. The checks:
 - imports: 256 of `libc.so.6`'s functions, each called through a stub and
   pointed to, which the loader must bind at their versions;
 - refusals: a pointer to `main` in `.rodata` (a text relocation), an `ABS32`
-  to `main` and a `PC32` to a dynamic symbol in `.data`, and a `lea` of and a
+  to `main` and a `PC32` to a dynamic symbol in `.data`, a `lea` of and a
   `PC64` in `.data` to a hidden weak reference to nothing, which stays at
-  address 0 wherever the program loads, each refused with its fixup by every
-  lane count and by the exact twins, without an output; a call to and a
-  pointer to a weak reference to nothing, and to a hidden one, loads through
-  the GOT slots of the first and of the program's data, the dynamic one's
-  first in its word of the bitsets, and a pointer to `main` at an odd
-  address, which RELR can't hold, all of which run; and a lane short of
-  scratch memory (lane 0 of 1 and of 8 lanes, the last of 2 and of 8), with
-  which every link that fails must fail with `EXECUTABLE_ERROR_MEMORY` and no
-  output, and one with room enough must run.
+  address 0 wherever the program loads, and a `lea` of, a call to and a
+  `PC64` in `.data` to an absolute symbol, which stays its value (GNU ld and
+  lld refuse them too), each refused with its fixup by every lane count and
+  by the exact twins, without an output; a call to and a pointer to a weak
+  reference to nothing, and to a hidden one, loads through the GOT slots of
+  the first and of the program's data, the dynamic one's first in its word of
+  the bitsets, a pointer to `main` at an odd address, which RELR can't hold,
+  and pointers in `.data` and `.rodata` to, a load through the GOT of and an
+  `ABS32` in `.data` to an absolute symbol at 42, which need no relocation
+  (as lld links them), all of which run; and a lane short of scratch memory
+  (lane 0 of 1 and of 8 lanes, the last of 2 and of 8), with which every link
+  that fails must fail with `EXECUTABLE_ERROR_MEMORY` and no output, and one
+  with room enough must run.
 
 With `--cross-check`, which needs `ld.lld`, `cc`, `objdump` and `readelf`, the
 bound link's objects (the object writer's) are linked by lld as a PIE against
@@ -1438,15 +1442,22 @@ The checks:
   accesses, from a thread too; GCC 14's heap trampolines, whose member's
   accesses are local-dynamic, where `cc` is GCC 14 or later (it says so
   otherwise); and assembly with each general- and local-dynamic sequence
-  through the PLT and the GOT (status 31), and with a local IFUNC called,
+  through the PLT and the GOT (status 31), with a local IFUNC called,
   pointed to and compared, and a global one called through the GOT (status
-  53). `cc` compiles each, and each must run as `cc -static`'s link of the
+  53), with a weak IFUNC defined nowhere, which has no resolver, loaded
+  through the GOT, taken by a `lea` and pointed to, each 0 (status 0), and
+  with absolute symbols that another object defines (combined with `ld -r`,
+  since GNU as resolves a `lea` of an absolute symbol its file defines),
+  taken by a `lea`, through the GOT, as an immediate and pointed to (status
+  0). `cc` compiles each, and each must run as `cc -static`'s link of the
   same object does, with the same status and output, both from directories
   of the same length (`argv[0]`);
 - refusals: assembly with a call of `__tls_get_addr` outside an access
   (refused naming the symbol), a general-dynamic access without its prefixes
-  (its fixup) and a pointer to an absolute symbol farther than int32 from the
-  image's base (the symbol), each refused alike by every lane count and by
+  (its fixup), a pointer to an absolute symbol farther than int32 from the
+  image's base (the symbol) and a `lea` of one whose offset from the base
+  fits int32 but not its distance from the `lea` (its fixup, as GNU ld says
+  the relocation is truncated), each refused alike by every lane count and by
   the exact twins, without an output; and on the TLS program a lane short of
   scratch memory (lane 0 of 1 and of 8 lanes, the last of 2 and of 8), with
   which every write that fails must fail with `EXECUTABLE_ERROR_MEMORY` and
@@ -1455,7 +1466,9 @@ The checks:
 With `--cross-check`, which needs a `cc` that takes `-fuse-ld=lld`, each
 compiled program is linked by `cc -static -fuse-ld=lld` too, which must run
 alike and have as many `IRELATIVE` relocations, the same TLS segment's
-alignment and init and fini arrays of the same sizes. `--seed N` and
+alignment and init and fini arrays of the same sizes; but lld 23 links the
+weak IFUNC's program wrong (an `IRELATIVE` relocation with resolver 0, which
+faults at startup), so that one only has to link. `--seed N` and
 `--functions N` change the generated programs. The default 9700X job runs it
 with `--cross-check` after test-dynamic.
 

@@ -1394,7 +1394,12 @@ inline, and the rest through `executable_patch_other`, which takes any kind.
 Neither checks a `CALL`'s, `PC32`'s or GOT kind's value per fixup. The count
 phase finds the largest addend magnitude with a vector maximum, and while the
 base, the image and that addend stay below 2^31 together, no such value can
-leave int32: S, G and P are all in the image. `ABS64`'s 8 bytes take any
+leave int32: G and P are in the image, and S too, or at address 0 (a weak
+symbol defined nowhere). A static executable's absolute symbols can be
+elsewhere, so the symbols' phase records each lane's lowest and highest
+absolute reference, and the proof takes the span from the lowest S to the
+image's end and from its start to the highest S, each with that addend.
+`ABS64`'s 8 bytes take any
 value, and `TPOFF32`'s offset from the thread pointer, which the TLS block
 bounds and the image doesn't, is checked inline. Otherwise every fixup goes
 through `executable_patch_other`, which checks each value's range. A value
@@ -1678,8 +1683,9 @@ compares each with lld's link of the same objects.
 - **Relocation classes.** Each symbol is RELATIVE (the image's: the load
   address adds to it), SYMBOLIC (an import, or a weak reference to nothing
   with default visibility, which a library may define: these are `.dynsym`'s
-  undefined entries) or NONE (a TLS symbol's offset, and a weak reference to
-  nothing that isn't dynamic, which stays 0). A GOT slot of a RELATIVE target
+  undefined entries) or NONE (a TLS symbol's offset, a weak reference to
+  nothing that isn't dynamic, which stays 0, and an absolute symbol, which
+  stays its value, as GNU ld and lld leave it). A GOT slot of a RELATIVE target
   is relocated RELATIVE, of a SYMBOLIC one by `GLOB_DAT` (`TPOFF64` for a TLS
   import). An `ABS64` field in an atom the loader writes (`.tdata`, the init
   and fini arrays, `.data.rel.ro` and `.data`) is relocated RELATIVE, or by
@@ -1695,7 +1701,10 @@ compares each with lld's link of the same objects.
   off by the load address. A `CALL`
   to it is patched so, as both linkers patch it: the program can only call it
   after checking that it has an address, which its absolute fields and GOT
-  slot say (0, with no relocation).
+  slot say (0, with no relocation). A `CALL`, `PC32` or `PC64` to an absolute
+  symbol is refused for the same reason, as GNU ld and lld refuse it; its
+  `ABS64` fields, GOT slot and `ABS32` fields need no relocation, wherever
+  they are (GNU ld refuses the `ABS32`, lld takes it).
 - **Stubs.** A `CALL` to a dynamic symbol (GCC 13's `crtbeginS.o` calls
   `__cxa_finalize` so, where GCC 16's reads the slot itself) goes to a stub
   in `.plt.got`, `jmp [rip + slot]` and a two-byte nop, GNU ld's form for a
@@ -1811,12 +1820,12 @@ in a static link defines. The link is the program's bound against the static
 runtime ("Static links, as built"), so `crt1.o`'s `_start` is the entry and
 `libc.a`'s startup does what a loader would: it applies the IRELATIVE
 relocations, sets up TLS from `PT_TLS` and runs the init and fini arrays.
-`test-static` runs the generated programs, and ten compiled ones (hello,
+`test-static` runs the generated programs, and twelve compiled ones (hello,
 stdio, threads, `setjmp` and signals, a weak `puts`, prioritized
 constructors, decimal floating point from a thread, GCC 14's heap
-trampolines, and assembly of every TLS sequence and of local and global
-IFUNCs) as `cc -static`'s link of the same object runs, and with
-`--cross-check` as lld's.
+trampolines, and assembly of every TLS sequence, of local and global IFUNCs,
+of a weak IFUNC defined nowhere and of absolute symbols) as `cc -static`'s
+link of the same object runs, and with `--cross-check` as lld's.
 
 - **The file** is step 4's at 0x400000 (`ET_EXEC`), with `.note.ABI-tag` in
   the R segment (one `PT_NOTE` with the build ID), `.init` and `.fini`
@@ -1834,7 +1843,10 @@ IFUNCs) as `cc -static`'s link of the same object runs, and with
   slot instead. `__rela_iplt_start` and `__rela_iplt_end` are the section's
   bounds. The generated programs have 18 stubs and 22 IRELATIVE
   relocations, and each compiled one as many IRELATIVE relocations as lld's
-  link of it: one per IFUNC it reaches.
+  link of it: one per IFUNC it reaches. An IFUNC is one with a resolver: a
+  weak IFUNC defined nowhere is address 0, as any weak symbol defined
+  nowhere is, and GNU ld links it so. lld 23 makes an IRELATIVE relocation of
+  it with resolver 0, whose program faults at startup.
 - **TLS:** `libgcc.a`'s PIC members (decimal floating point, split stacks)
   reach their thread-locals by general-dynamic accesses and GCC 14's heap
   trampolines by local-dynamic ones, which call `__tls_get_addr`. As GNU ld
@@ -1865,17 +1877,21 @@ IFUNCs) as `cc -static`'s link of the same object runs, and with
   file, lld's), `__bss_start`, and `_end` and `end` (the image's end).
 - **Absolute symbols** (glibc's `_nl_current_LC_CTYPE_used` and the like) are
   their values, as image offsets in the references column, which can't hold
-  one farther than int32 from the base: such a symbol is refused.
+  one farther than int32 from the base: such a symbol is refused. A `CALL` or
+  `PC32` can still be farther from one than int32 reaches, which the patch's
+  range proof takes in ("Patching and writing"): the link then takes the
+  checked path, which refuses the fixup, as GNU ld says the relocation is
+  truncated to fit.
 
 The passes it adds, each data-parallel with an exact twin that
 `ExecutableOptions.exact` selects, which the tests compare byte for byte:
 
 | Pass (phase) | Vector path | Exact twin |
 | --- | --- | --- |
-| IFUNCs (count) | 64 symbols' types compared at a time, a word of a bitset of the IFUNCs, and a filter of them in four registers, two hashes | each symbol's type |
-| Stubs (count) | the targets of the fixups that don't read a GOT slot, 16 at a time, against the filter: a target is taken only if both its bits are set, and a hit is looked up in the bitset | every target's type |
+| IFUNCs (count) | 64 symbols' types compared at a time, and the atoms of those of the type 16 at a time (a weak IFUNC defined nowhere has no resolver), a word of a bitset of the IFUNCs, and a filter of them in four registers, two hashes | each symbol's type and atom |
+| Stubs (count) | the targets of the fixups that don't read a GOT slot, 16 at a time, against the filter: a target is taken only if both its bits are set, and a hit is looked up in the bitset | every target's type and atom |
 | TLS accesses (count) | the accesses by compares of 64 kinds, and the calls of `__tls_get_addr` by compares of 16 targets | the same compares, which are the check itself |
-| IRELATIVE relocations (dynamic) | each lane's range of the GOT's words, the IFUNCs' slots from the bitsets, at their places by the lanes' counts | each slot's type |
+| IRELATIVE relocations (dynamic) | each lane's range of the GOT's words, the IFUNCs' slots from the bitsets, at their places by the lanes' counts | each slot's type and atom |
 
 With one hash, as a PIE's filter has, the IFUNC filter took a 46th of the
 largest program's 1.81 million targets for IFUNCs on the 9700X (39,664, in a

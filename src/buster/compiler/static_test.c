@@ -36,17 +36,19 @@
 //     floating point, whose members reach their thread-local state by general-dynamic accesses, from a thread too;
 //     GCC 14's heap trampolines, whose member's accesses are local-dynamic, where cc is GCC 14 or later; prioritized
 //     constructors and destructors beside libgcc's cpuinfo.o's; and assembly with each general- and local-dynamic
-//     sequence through the PLT and the GOT, and with a local IFUNC called, pointed to and compared, and a global one
-//     loaded through the GOT), compiled by cc: each must run as cc -static's link of the same object does, with the
-//     same status and output, both from directories of the same length (argv[0]).
+//     sequence through the PLT and the GOT, with a local IFUNC called, pointed to and compared, and a global one
+//     loaded through the GOT, with a weak IFUNC defined nowhere, and with absolute symbols that another object defines,
+//     combined with ld -r), compiled by cc: each must run as cc -static's link of the same object does, with the same
+//     status and output, both from directories of the same length (argv[0]).
 //   - Refusals: assembly with a call of __tls_get_addr outside an access (refused naming the symbol), a general-dynamic
-//     access without its prefixes (its fixup) and a pointer to an absolute symbol farther than int32 from the image's
-//     base (the symbol), each refused alike by every lane count and by the exact twins, without an output; and a lane
-//     short of scratch memory (lane 0 of 1 and of 8 lanes, the last of 2 and of 8), with which every write that fails
-//     must fail with EXECUTABLE_ERROR_MEMORY and no output, and one with room enough must run.
+//     access without its prefixes (its fixup), a pointer to an absolute symbol farther than int32 from the image's
+//     base (the symbol) and a lea of one whose offset from the base fits int32 but not its distance from the lea (its
+//     fixup), each refused alike by every lane count and by the exact twins, without an output; and a lane short of
+//     scratch memory (lane 0 of 1 and of 8 lanes, the last of 2 and of 8), with which every write that fails must fail
+//     with EXECUTABLE_ERROR_MEMORY and no output, and one with room enough must run.
 // With --cross-check, which needs cc with lld, each compiled program is linked by cc -static -fuse-ld=lld too, which
 // must run alike and have as many IRELATIVE relocations, the same TLS segment's size and alignment, and init and fini
-// arrays of the same sizes as ours.
+// arrays of the same sizes as ours; but lld need only link the one it links wrong (StaticTestSource.lld_wrong).
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, writing, the structure, the programs, the compiled programs, the refusals, and
@@ -801,8 +803,10 @@ static bool static_test_programs(const ExecutableTestDirectory* directory, const
 // ---------------------------------------------------------------------------------------------------------------------
 // The compiled programs
 
-// A program that cc compiles, or assembles: its name, its source, an option for cc and for the link, and a condition
-// for cc to meet, a preprocessor expression (0 for none), without which the program isn't compiled.
+// A program that cc compiles, or assembles: its name, its source, an option for cc and for the link, a condition for
+// cc to meet, a preprocessor expression (0 for none), without which the program isn't compiled, assembly that defines
+// absolute symbols (0 for none), which an object of its own holds (static_test_combine), and whether lld links it
+// wrong, so that the cross-check only has lld link it.
 typedef struct StaticTestSource StaticTestSource;
 struct StaticTestSource
 {
@@ -810,7 +814,9 @@ struct StaticTestSource
     const char* source;
     const char* option;
     const char* condition;
+    const char* definitions;
     bool assembly;
+    bool lld_wrong;
 };
 
 // test-bind's C programs come first (bind_test_static_sources), then these:
@@ -823,7 +829,12 @@ struct StaticTestSource
 //   - tls: each general- and local-dynamic sequence, through the PLT and through the GOT, two local-dynamic offsets from
 //     one module's block among them: the sum, 31, is its status;
 //   - ifunc: a local IFUNC called directly, called through a pointer in .data and its address compared with the
-//     pointer's (a stub's address everywhere), and a global one called through its GOT slot: 21 + 21 + 10 + 1 = 53.
+//     pointer's (a stub's address everywhere), and a global one called through its GOT slot: 21 + 21 + 10 + 1 = 53;
+//   - weak-ifunc: a weak IFUNC defined nowhere, which has no resolver: loaded through its GOT slot, taken by a lea and
+//     pointed to from .data, each 0, and called by a function that never runs: status 0. lld 23 links it wrong: it
+//     makes an IRELATIVE relocation of the IFUNC with resolver 0, and its program faults at startup (GNU ld's runs);
+//   - absolute: absolute symbols, one at 42 and one below the image, taken by a lea, through a GOT slot, as a 32-bit
+//     immediate and pointed to from .data, each its value: status 0.
 static const StaticTestSource static_test_sources[] = {
     {
         .name = "priorities",
@@ -957,6 +968,69 @@ static const StaticTestSource static_test_sources[] = {
                   "    .section .note.GNU-stack,\"\",@progbits\n",
         .assembly = true,
     },
+    {
+        .name = "weak-ifunc",
+        .source = "    .weak absent\n"
+                  "    .type absent, @gnu_indirect_function\n"
+                  "    .text\n"
+                  "    .globl main\n"
+                  "    .type main, @function\n"
+                  "main:\n"
+                  "    movq absent@GOTPCREL(%rip), %rax\n"
+                  "    leaq absent(%rip), %rdx\n"
+                  "    orq %rdx, %rax\n"
+                  "    orq pointer(%rip), %rax\n"
+                  "    setnz %al\n"
+                  "    movzbl %al, %eax\n"
+                  "    ret\n"
+                  "    .size main, .-main\n"
+                  "never:\n"
+                  "    call absent\n"
+                  "    ret\n"
+                  "    .data\n"
+                  "    .align 8\n"
+                  "pointer:\n"
+                  "    .quad absent\n"
+                  "    .section .note.GNU-stack,\"\",@progbits\n",
+        .assembly = true,
+        .lld_wrong = true,
+    },
+    {
+        .name = "absolute",
+        .source = "    .text\n"
+                  "    .globl main\n"
+                  "    .type main, @function\n"
+                  "main:\n"
+                  "    leaq buster_answer(%rip), %rax\n"
+                  "    subq $42, %rax\n"
+                  "    movq buster_answer@GOTPCREL(%rip), %rdx\n"
+                  "    subq $42, %rdx\n"
+                  "    orq %rdx, %rax\n"
+                  "    movl $buster_answer, %edx\n"
+                  "    subq $42, %rdx\n"
+                  "    orq %rdx, %rax\n"
+                  "    movq pointer(%rip), %rdx\n"
+                  "    subq $42, %rdx\n"
+                  "    orq %rdx, %rax\n"
+                  "    leaq buster_low(%rip), %rdx\n"
+                  "    subq $0x1000, %rdx\n"
+                  "    orq %rdx, %rax\n"
+                  "    setnz %al\n"
+                  "    movzbl %al, %eax\n"
+                  "    ret\n"
+                  "    .size main, .-main\n"
+                  "    .data\n"
+                  "    .align 8\n"
+                  "pointer:\n"
+                  "    .quad buster_answer\n"
+                  "    .section .note.GNU-stack,\"\",@progbits\n",
+        .definitions = "    .globl buster_answer\n"
+                       "    .set buster_answer, 42\n"
+                       "    .globl buster_low\n"
+                       "    .set buster_low, 0x1000\n"
+                       "    .section .note.GNU-stack,\"\",@progbits\n",
+        .assembly = true,
+    },
 };
 
 #define BUSTER_STATIC_TEST_SOURCES (BUSTER_ARRAY_LENGTH(bind_test_static_sources) + BUSTER_ARRAY_LENGTH(static_test_sources))
@@ -981,6 +1055,28 @@ static bool static_test_write_text(const char* path, const char* text)
     const bool result = file != 0 && fputs(text, file) >= 0;
     const bool closed = file != 0 && fclose(file) == 0;
     return result && closed;
+}
+
+// Assembles `definitions` into an object of its own beside the object at `object_path`, then combines the two with
+// ld -r into `object_path`: whether it could. GNU as resolves a PC-relative reference to an absolute symbol that its
+// file defines, so the absolute symbols such references reach come from another object, as a program's do when it
+// takes them from another file or a linker script. The files it makes beside the object are removed.
+static bool static_test_combine(const char* object_path, const char* definitions, const char* out, const char* err)
+{
+    char source_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES + 16];
+    char definitions_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES + 16];
+    char combined_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES + 16];
+    snprintf(source_path, sizeof(source_path), "%s.defs.s", object_path);
+    snprintf(definitions_path, sizeof(definitions_path), "%s.defs.o", object_path);
+    snprintf(combined_path, sizeof(combined_path), "%s.combined", object_path);
+    char* assemble[] = { "cc", "-c", "-o", definitions_path, source_path, 0 };
+    char* combine[] = { "ld", "-r", "-o", combined_path, (char*)object_path, definitions_path, 0 };
+    const bool result = static_test_write_text(source_path, definitions) && object_test_run(assemble, out, err) == 0 && object_test_run(combine, out, err) == 0 &&
+                        rename(combined_path, object_path) == 0;
+    unlink(source_path);
+    unlink(definitions_path);
+    unlink(combined_path);
+    return result;
 }
 
 // Whether cc's preprocessor makes `condition` true, from a file at `path` that it writes and removes.
@@ -1093,7 +1189,8 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
         }
         const bool wanted = program.condition == 0 || static_test_condition(source_path, program.condition, out, err);
         char* compile[] = { "cc", "-O2", "-c", "-o", object_path, source_path, (char*)program.option, 0 };
-        const bool compiled = wanted && static_test_write_text(source_path, program.source) && object_test_run(compile, out, err) == 0;
+        const bool compiled = wanted && static_test_write_text(source_path, program.source) && object_test_run(compile, out, err) == 0 &&
+                              (program.definitions == 0 || static_test_combine(object_path, program.definitions, out, err));
         static_test_expect(&tally, !wanted || compiled, program.name, s);
         char* reference[] = { "cc", "-static", "-o", paths[1], object_path, (char*)program.option, 0 };
         const bool referenced = compiled && object_test_run(reference, out, err) == 0;
@@ -1123,7 +1220,7 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
         char* lld[] = { "cc", "-static", "-fuse-ld=lld", "-o", paths[2], object_path, (char*)program.option, 0 };
         const bool lld_linked = cross_check && compiled && object_test_run(lld, out, err) == 0;
         static_test_expect(&tally, !cross_check || !compiled || lld_linked, "lld links it with -static", s);
-        if (lld_linked)
+        if (lld_linked && !program.lld_wrong)
         {
             const StaticTestRun lld_run = static_test_run(paths[2]);
             static_test_expect(&tally, !written || static_test_same_runs(&ours, &lld_run), "runs as lld's link does", s);
@@ -1180,7 +1277,8 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
 // The refusals
 
 // Assembly that cc assembles and that binding binds, which a static executable refuses: the error, and the symbol it
-// names (by name) or the fixup (the first of its kind).
+// names (by name) or the fixup (the first of its kind, or of its kind to `target`); and assembly that defines absolute
+// symbols in an object of its own (static_test_combine), or 0.
 typedef struct StaticTestRefusal StaticTestRefusal;
 struct StaticTestRefusal
 {
@@ -1189,6 +1287,8 @@ struct StaticTestRefusal
     ExecutableError error;
     const char* symbol;
     uint8_t kind;
+    const char* target;
+    const char* definitions;
 };
 
 static const StaticTestRefusal static_test_refusals[] = {
@@ -1248,6 +1348,25 @@ static const StaticTestRefusal static_test_refusals[] = {
         .error = EXECUTABLE_ERROR_UNSUPPORTED,
         .symbol = "far",
     },
+    {
+        // Its offset from the base is INT32_MIN, which a reference holds, but S + A - P is below it from anywhere in
+        // the image: GNU ld says the relocation is truncated to fit.
+        .name = "a lea of an absolute symbol farther than int32 from it",
+        .source = "    .text\n"
+                  "    .globl main\n"
+                  "    .type main, @function\n"
+                  "main:\n"
+                  "    leaq far_below(%rip), %rax\n"
+                  "    xorl %eax, %eax\n"
+                  "    ret\n"
+                  "    .section .note.GNU-stack,\"\",@progbits\n",
+        .error = EXECUTABLE_ERROR_FIXUP,
+        .kind = BUSTER_LINK_FIXUP_PC32,
+        .target = "far_below",
+        .definitions = "    .globl far_below\n"
+                       "    .set far_below, 0xffffffff80400000\n"
+                       "    .section .note.GNU-stack,\"\",@progbits\n",
+    },
 };
 
 // The link's symbol of a name, or 0.
@@ -1261,21 +1380,23 @@ static SymbolId static_test_symbol(const Link* link, const char* name)
     return result;
 }
 
-// The link's first fixup of a kind, or 0.
-static FixupId static_test_first_fixup(const Link* link, uint8_t kind)
+// The link's first fixup of a kind, to a symbol named `target` if it isn't null, or 0.
+static FixupId static_test_first_fixup(const Link* link, uint8_t kind, const char* target)
 {
     FixupId result = 0;
     for (FixupId fixup = 1; result == 0 && fixup < link->fixups.count; fixup += 1)
     {
-        result = (link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == kind ? fixup : 0;
+        const bool to = target == 0 || executable_named(link, link->fixups.target[fixup], target);
+        result = (link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == kind && to ? fixup : 0;
     }
     return result;
 }
 
-// Assembles `source` into the directory as NAME.o, then imports and binds it into `test` by the vector path: whether
-// it could. `test` holds arenas whenever the object could be read, which `*imported` says.
-static bool static_test_assemble(BindTestLink* test, const ExecutableTestDirectory* directory, const Runtime* runtime, const char* name, const char* source, bool* imported,
-                                 Arena* arena)
+// Assembles `source` into the directory as NAME.o, with `definitions` (if it isn't 0) combined into it
+// (static_test_combine), then imports and binds it into `test` by the vector path: whether it could. `test` holds
+// arenas whenever the object could be read, which `*imported` says.
+static bool static_test_assemble(BindTestLink* test, const ExecutableTestDirectory* directory, const Runtime* runtime, const char* name, const char* source,
+                                 const char* definitions, bool* imported, Arena* arena)
 {
     char source_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     char object_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
@@ -1286,7 +1407,8 @@ static bool static_test_assemble(BindTestLink* test, const ExecutableTestDirecto
     snprintf(out, sizeof(out), "%s/%s.cc.out", directory->path, name);
     snprintf(err, sizeof(err), "%s/%s.cc.err", directory->path, name);
     char* assemble[] = { "cc", "-c", "-o", object_path, source_path, 0 };
-    const bool assembled = static_test_write_text(source_path, source) && object_test_run(assemble, out, err) == 0;
+    const bool assembled = static_test_write_text(source_path, source) && object_test_run(assemble, out, err) == 0 &&
+                           (definitions == 0 || static_test_combine(object_path, definitions, out, err));
     const String8 object = assembled ? object_test_read_file(arena, object_path) : (String8){ 0 };
     *imported = object.pointer != 0;
     const bool result = object.pointer != 0 && bind_test_static_import(test, runtime, object) &&
@@ -1386,10 +1508,10 @@ static bool static_test_refused(const ExecutableTestDirectory* directory, const 
         bool imported = false;
         char name[32];
         snprintf(name, sizeof(name), "refusal-%u", r);
-        const bool bound = static_test_assemble(&test, directory, runtime, name, refusal->source, &imported, scratch.arena);
+        const bool bound = static_test_assemble(&test, directory, runtime, name, refusal->source, refusal->definitions, &imported, scratch.arena);
         static_test_expect(&tally, bound, refusal->name, r);
         const SymbolId symbol = bound && refusal->symbol != 0 ? static_test_symbol(&test.link, refusal->symbol) : 0;
-        const FixupId fixup = bound && refusal->kind != 0 ? static_test_first_fixup(&test.link, refusal->kind) : 0;
+        const FixupId fixup = bound && refusal->kind != 0 ? static_test_first_fixup(&test.link, refusal->kind, refusal->target) : 0;
         static_test_expect(&tally, !bound || symbol != 0 || fixup != 0, "what the refusal names is in the link", r);
         bool outcome = bound;
         for (uint32_t w = 0; bound && w < BUSTER_STATIC_TEST_WRITES; w += 1)
@@ -1421,8 +1543,12 @@ static bool static_test_refused(const ExecutableTestDirectory* directory, const 
     Scratch scratch = scratch_begin(0);
     BindTestLink test = { 0 };
     bool imported = false;
-    const uint32_t tls = BUSTER_ARRAY_LENGTH(static_test_sources) - 2;
-    const bool bound = static_test_assemble(&test, directory, runtime, "starved", static_test_sources[tls].source, &imported, scratch.arena);
+    uint32_t tls = 0;
+    while (strcmp(static_test_sources[tls].name, "tls") != 0)
+    {
+        tls += 1;
+    }
+    const bool bound = static_test_assemble(&test, directory, runtime, "starved", static_test_sources[tls].source, 0, &imported, scratch.arena);
     static_test_expect(&tally, bound, "the tls program bound", 0);
     if (bound)
     {
