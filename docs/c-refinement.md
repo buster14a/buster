@@ -21,8 +21,9 @@ pass as it would in a compiling process. `benchmark-preprocessor`
 preprocesses a file from nothing in each of 21 runs: a new table and
 preprocessor, with every file read, lexed, refined and indexed, as a compile
 of one translation unit does. A range is the rounds' medians: three rounds for
-`sqlite3.c` alone, two for the others, and one for `src` and for `main.c`'s
-files.
+`sqlite3.c` (alone in `benchmark-refinement`, with its headers in
+`benchmark-preprocessor`), one for `src` and for `main.c`'s files in
+`benchmark-refinement`, and two for the others.
 
 The budget's measure is `benchmark-preprocessor`'s refine phase on `sqlite3.c`
 and its headers (1,243,772 tokens):
