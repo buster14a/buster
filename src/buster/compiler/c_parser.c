@@ -3822,6 +3822,8 @@ struct ParseScalarResult
     uint32_t errors;
     // The scratch arena couldn't hold the parser's stacks: nothing was parsed.
     bool out_of_memory;
+    // A typedef name was declared again at file scope as an ordinary identifier, which changes how what follows parses.
+    bool retyped;
 };
 
 // Parses tokens [0, count) into `tree`, whose arrays have `count` entries, with the scratch arena's memory for its
@@ -3830,7 +3832,7 @@ struct ParseScalarResult
 static ParseScalarResult parse_scalar(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
                                       ParseTree* tree, Arena* scratch, ParseDiagnostic* diagnostics, uint32_t capacity, uint32_t* diagnostic_count)
 {
-    ParseScalarResult result = { .errors = 0, .out_of_memory = false };
+    ParseScalarResult result = { .errors = 0, .out_of_memory = false, .retyped = false };
     const uint64_t mark = scratch->length;
     const uint64_t slots = (uint64_t)count + 2;
     ParseScalar parser = {
@@ -3902,6 +3904,11 @@ static ParseScalarResult parse_scalar(const uint8_t* kinds, const uint32_t* name
             parse_scalar_recover(&parser, count);
         }
         parse_scalar_finish(&parser);
+        // What is still in the log is file scope's: every inner scope has been restored.
+        for (uint32_t k = 0; k < parser.log_count; k += 1)
+        {
+            result.retyped |= parser.log_meanings[k] == PARSE_MEANING_TYPEDEF && parser.meanings[parser.log_names[k]] != PARSE_MEANING_TYPEDEF;
+        }
         parse_scalar_restore(&parser, 0);
         result.errors = parser.errors;
         *diagnostic_count = parser.diagnostic_count;
@@ -4112,13 +4119,17 @@ struct ParseKernels
     uint32_t* waiting_thresholds;
     uint32_t* lefts;
     uint32_t* left_key_values;
-    // By name: 0, or PARSE_TYPEDEF_FILE, or PARSE_TYPEDEF_SCOPED for a name some block declares as a typedef.
+    // By name: 0, or PARSE_TYPEDEF_FILE, or PARSE_TYPEDEF_SCOPED for a name some block declares as a typedef; and the
+    // token of its first typedef declarator, before which it is no type name (0 for clang's predeclared ones).
     uint8_t* typedef_names;
+    uint32_t* typedef_first;
     // The file's typedef names in order, each with the token that declares it and its scope, for the fallback.
     uint32_t* typedef_log;
     uint32_t* typedef_tokens;
     uint8_t* typedef_scopes;
     uint32_t typedef_count;
+    // K6's twin's frames, one per node depth.
+    struct ParseCheckFrame* check_frames;
     // What the kernels report.
     bool unbalanced;
     bool unsupported;
@@ -4335,6 +4346,7 @@ static void parse_typedefs(ParseKernels* kernels, const uint8_t* kinds, const ui
                     if (name != BUSTER_PARSE_NONE)
                     {
                         const uint32_t id = names[name];
+                        kernels->typedef_first[id] = kernels->typedef_names[id] == 0 ? name : kernels->typedef_first[id];
                         kernels->typedef_names[id] = kernels->typedef_names[id] == BUSTER_PARSE_TYPEDEF_SCOPED ? BUSTER_PARSE_TYPEDEF_SCOPED : scope;
                         kernels->typedef_log[kernels->typedef_count] = id;
                         kernels->typedef_tokens[kernels->typedef_count] = name;
@@ -4375,15 +4387,22 @@ static void parse_classify_declarators(ParseKernels* kernels)
     }
 }
 
+// Whether a name after a token of kind `previous` is in the ordinary names' space: not a tag's or a member's.
+BUSTER_INLINE bool parse_classify_ordinary(uint8_t previous)
+{
+    return previous != PARSE_KIND_STRUCT && previous != PARSE_KIND_ENUM && previous != PARSE_KIND_PERIOD && previous != PARSE_KIND_ARROW;
+}
+
 // K3's classification, the scalar twin: the virtual kinds, and a flag on every use of a name some block declares as a
-// typedef.
+// typedef, and on an ordinary use of a typedef name before its first declarator (where it can't be one).
 static void parse_classify_scalar(ParseKernels* kernels, const uint8_t* kinds, const uint32_t* names, uint32_t count)
 {
     for (uint32_t i = 0; i < count; i += 1)
     {
         const uint8_t meaning = kinds[i] == PARSE_KIND_IDENTIFIER ? kernels->typedef_names[names[i]] : 0;
+        const bool early = meaning != 0 && i < kernels->typedef_first[names[i]] && parse_classify_ordinary(kinds[(int64_t)i - 1]);
         kernels->vkinds[i] = meaning != 0 ? PARSE_VKIND_TYPE_NAME : kinds[i];
-        kernels->flags[i] = meaning == BUSTER_PARSE_TYPEDEF_SCOPED;
+        kernels->flags[i] = meaning == BUSTER_PARSE_TYPEDEF_SCOPED || early;
     }
     parse_classify_declarators(kernels);
 }
@@ -4984,7 +5003,8 @@ static uint32_t parse_k5_owner(ParseStatementStack* stack)
 }
 
 // One token through the statement stack, if it is a statement-level token of a block: the stack sets the parents of the
-// statements heads own, of `else` and of a do-statement's parts. Returns false if it is an else without an if.
+// statements heads own, of `else` and of a do-statement's parts. Returns false if it is an else without an if, or any
+// other than its while (then its `;`) after a do's statement.
 static bool parse_statement_event(ParseKernels* kernels, ParseStatementStack* stack, uint32_t i)
 {
     bool result = true;
@@ -4997,6 +5017,18 @@ static bool parse_statement_event(ParseKernels* kernels, ParseStatementStack* st
     const uint8_t outer_group = outer != BUSTER_PARSE_NONE ? kernels->roles[outer] : PARSE_ROLE_NONE;
     const bool in_block = group == PARSE_ROLE_OPEN_BLOCK || group == PARSE_ROLE_OPEN_BODY;
     const bool closer_in_block = outer_group == PARSE_ROLE_OPEN_BLOCK || outer_group == PARSE_ROLE_OPEN_BODY;
+    // After a do's statement comes its while (`while (...)`), and right after that its `;`: any other event is an error.
+    const bool event = role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY ||
+                       (role == PARSE_ROLE_TERMINATOR && in_block) || ((role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR) && closer_in_block) ||
+                       ((role == PARSE_ROLE_CLOSE_CASE || role == PARSE_ROLE_LABEL || role == PARSE_ROLE_DO) && in_block);
+    if (event)
+    {
+        parse_k5_flush(stack);
+        const ParseStatement* waiting = parse_k5_top(stack);
+        const bool its_while = role == PARSE_ROLE_CLOSE_CONDITION && closer_in_block && kernels->vkinds[opener - 1] == PARSE_KIND_WHILE;
+        const bool its_end = role == PARSE_ROLE_TERMINATOR && in_block && waiting != 0 && i == waiting->extra + 1;
+        result = waiting == 0 || ((waiting->state != PARSE_STATEMENT_DO_DONE || its_while) && (waiting->state != PARSE_STATEMENT_DO_WHILE || its_end));
+    }
     if (role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_BODY)
     {
         const bool statement = role == PARSE_ROLE_OPEN_BLOCK && in_block;
@@ -5101,7 +5133,8 @@ static bool parse_statement_event(ParseKernels* kernels, ParseStatementStack* st
     return result;
 }
 
-// K5, the twin: every token through parse_statement_event. Returns false if an else has no if.
+// K5, the twin: every token through parse_statement_event. Returns false if an else has no if, or a do's statement isn't
+// followed by its while and its `;`.
 static bool parse_statements(ParseKernels* kernels, uint32_t count, ParseStatement* items)
 {
     ParseStatementStack stack = { .items = items, .count = 0, .parents = kernels->parents };
@@ -5154,6 +5187,1173 @@ static void parse_statement_contexts(const ParseKernels* kernels, uint32_t count
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// K6, the checks
+//
+// The kernels build the tree that C's grammar gives well-formed code. K6 checks that the code is well-formed, so that
+// every top-level declaration the vector path takes is one the scalar parser accepts, with the same tree. Each token
+// gets a class, its role refined by its kind or its typed state where what may follow it differs, and a mode: its
+// group's type (a block, a parameter list, a call's arguments, a declarator in parentheses, ...) and, in a group of
+// items, its part of its item (its start, a declaration's specifiers and declarators, an initializer, a bit-field's
+// width, a statement). A token passes if its class may follow the class before it (parse_check_tables.follows), may
+// appear in its mode (allows), may end its group if the next token closes it (ends), and doesn't skip the name a
+// declaration needs (named); and a label's name must start its statement, and a for's parentheses hold three clauses.
+// A token that fails is flagged: its top-level declaration goes to the scalar parser, which reports the error, or parses
+// it where the checks are stricter than C. What the checks don't take (asm statements, the builtins that take a type,
+// statement expressions, K&R parameter lists, storage classes in parameters, C23's attributes, _Alignas) fails them
+// wherever it is.
+//
+// The twin keeps a frame per node depth. The vector kernel finds the same modes with nearest-smaller-value searches: a
+// token's item starts at the nearest token at its depth before it that starts one, or at itself, and its part comes
+// from the nearest start, `,`, `=` or bit-field `:` at its depth before it.
+
+// The classes beyond the roles (a class below PARSE_ROLE_COUNT is that role, as nothing refines it): OPERAND is then a
+// name, SPECIFIER a specifier other than a type before any type specifier, PREFIX a prefix operator other than `*`,
+// RETURN `return`, OPEN_CASE `case`, and CLOSE_ATTRIBUTE_SPECIFIER an attribute's closer among the specifiers before any
+// type specifier.
+#define BUSTER_PARSE_CLASSES(X) \
+    X(CONSTANT) \
+    X(STRING) \
+    X(ELLIPSIS) \
+    X(WORD) \
+    X(TYPE) \
+    X(TYPED) \
+    X(STORAGE) \
+    X(TYPED_STORAGE) \
+    X(TYPED_ATTRIBUTE) \
+    X(STAR) \
+    X(SIZEOF) \
+    X(LABEL_ADDRESS) \
+    X(TAG_KEYWORD) \
+    X(ATTRIBUTE_KEYWORD) \
+    X(ASM_KEYWORD) \
+    X(ASM_QUALIFIER) \
+    X(SPECIFIER_KEYWORD) \
+    X(ALIGNAS_KEYWORD) \
+    X(OPERAND_KEYWORD) \
+    X(OFFSETOF_KEYWORD) \
+    X(VA_ARG_KEYWORD) \
+    X(BIT_CAST_KEYWORD) \
+    X(ATOMIC_KEYWORD) \
+    X(BITINT_KEYWORD) \
+    X(ALIGNAS_CLOSE) \
+    X(TYPED_ALIGNAS_CLOSE) \
+    X(EXTENSION) \
+    X(ASSERT_KEYWORD) \
+    X(STATEMENT_KEYWORD) \
+    X(BODY_NAME) \
+    X(JUMP) \
+    X(GOTO) \
+    X(DEFAULT)
+
+typedef enum ParseClass
+{
+    PARSE_CLASS_ROLES = PARSE_ROLE_COUNT - 1,
+#define BUSTER_PARSE_CLASS_ENUM(name) PARSE_CLASS_##name,
+    BUSTER_PARSE_CLASSES(BUSTER_PARSE_CLASS_ENUM)
+#undef BUSTER_PARSE_CLASS_ENUM
+    PARSE_CLASS_COUNT,
+} ParseClass;
+
+_Static_assert(PARSE_CLASS_COUNT <= 128, "classes must fit 128-entry tables");
+
+// The group types.
+typedef enum ParseGroupType
+{
+    PARSE_GROUP_FILE,
+    PARSE_GROUP_BLOCK,
+    PARSE_GROUP_STRUCT,
+    PARSE_GROUP_ENUM,
+    PARSE_GROUP_PARAMETERS,
+    PARSE_GROUP_ARGUMENTS,
+    // Declarators in parentheses: one that needs a name, an abstract one, and a parameter's, which may have one.
+    PARSE_GROUP_DECLARATOR,
+    PARSE_GROUP_ABSTRACT,
+    PARSE_GROUP_OPTIONAL,
+    PARSE_GROUP_EXPRESSION,
+    // A cast's or a compound literal's type name, and sizeof's, typeof's and _Atomic's type name or expression.
+    PARSE_GROUP_TYPE,
+    PARSE_GROUP_SIZEOF,
+    // A subscript (which has an expression), and an array declarator's (which may be empty).
+    PARSE_GROUP_SUBSCRIPT,
+    PARSE_GROUP_ARRAY,
+    PARSE_GROUP_CASE,
+    PARSE_GROUP_FOR,
+    PARSE_GROUP_INITIALIZER,
+    PARSE_GROUP_ATTRIBUTE,
+    PARSE_GROUP_ATTRIBUTE_LIST,
+    PARSE_GROUP_ASM_LABEL,
+    // __builtin_offsetof's (a type name, then a member designator) and __builtin_va_arg's (an expression, then a type
+    // name).
+    PARSE_GROUP_OFFSETOF,
+    PARSE_GROUP_VA_ARG,
+    // __builtin_bit_cast's (a type name, then an expression), _Static_assert's (a constant expression, then perhaps a
+    // message), _Alignas's (a type name or a constant expression) and _BitInt's (a constant expression).
+    PARSE_GROUP_BIT_CAST,
+    PARSE_GROUP_ASSERT,
+    PARSE_GROUP_ALIGNAS,
+    PARSE_GROUP_BITINT,
+    // What the checks don't take: asm statements and the other builtins' groups.
+    PARSE_GROUP_OTHER,
+    PARSE_GROUP_COUNT,
+} ParseGroupType;
+
+// What an item is, by its start: a statement or an expression, a declaration (or a designator, or an enumerator), or a
+// _Static_assert.
+#define BUSTER_PARSE_ITEM_OTHER 0
+#define BUSTER_PARSE_ITEM_DECLARATION 1
+#define BUSTER_PARSE_ITEM_ASSERTION 2
+
+// The parts of an item, in the groups of items.
+typedef enum ParsePart
+{
+    PARSE_PART_START,
+    PARSE_PART_DECLARATION,
+    PARSE_PART_INITIALIZER,
+    PARSE_PART_WIDTH,
+    PARSE_PART_OTHER,
+} ParsePart;
+
+#define BUSTER_PARSE_MODES(X) \
+    X(NONE) \
+    X(FILE_START) \
+    X(FILE_DECLARATION) \
+    X(FILE_INITIALIZER) \
+    X(BLOCK_START) \
+    X(BLOCK_DECLARATION) \
+    X(BLOCK_INITIALIZER) \
+    X(BLOCK_STATEMENT) \
+    X(STRUCT_START) \
+    X(STRUCT_DECLARATION) \
+    X(STRUCT_WIDTH) \
+    X(PARAMETERS_START) \
+    X(PARAMETERS_DECLARATION) \
+    X(FOR_START) \
+    X(FOR_DECLARATION) \
+    X(FOR_INITIALIZER) \
+    X(FOR_EXPRESSION) \
+    X(FOR_CLAUSE_START) \
+    X(TYPE_START) \
+    X(TYPE_DECLARATION) \
+    X(TYPE_ARGUMENT) \
+    X(SIZEOF_START) \
+    X(SIZEOF_TYPE) \
+    X(SIZEOF_EXPRESSION) \
+    X(ENUM_START) \
+    X(ENUM_NAME) \
+    X(ENUM_VALUE) \
+    X(ARGUMENTS_START) \
+    X(ARGUMENTS) \
+    X(DECLARATOR) \
+    X(ABSTRACT) \
+    X(OPTIONAL) \
+    X(EXPRESSION) \
+    X(CASE) \
+    X(SUBSCRIPT) \
+    X(INITIALIZER_START) \
+    X(INITIALIZER_DESIGNATOR) \
+    X(INITIALIZER) \
+    X(ATTRIBUTE) \
+    X(ATTRIBUTE_LIST_START) \
+    X(ATTRIBUTE_LIST) \
+    X(ASM_LABEL) \
+    X(MEMBER_START) \
+    X(MEMBER) \
+    X(CONDITIONAL) \
+    X(ASSERT_CONDITION) \
+    X(ASSERTION) \
+    X(MESSAGE_START) \
+    X(MESSAGE)
+
+typedef enum ParseCheckMode
+{
+#define BUSTER_PARSE_MODE_ENUM(name) PARSE_CHECK_##name,
+    BUSTER_PARSE_MODES(BUSTER_PARSE_MODE_ENUM)
+#undef BUSTER_PARSE_MODE_ENUM
+    PARSE_CHECK_MODE_COUNT,
+} ParseCheckMode;
+
+_Static_assert(PARSE_CHECK_MODE_COUNT <= 64, "modes must fit 64-entry tables");
+
+// A set of classes, two words of bits.
+typedef struct ParseClassSet ParseClassSet;
+struct ParseClassSet
+{
+    uint64_t words[2];
+};
+
+// K6's tables: by class, the classes that may follow it; by mode, the classes that may appear in it, and those that may
+// end a group in it; and the classes that need a name after them where one is required, and those that show a name
+// was skipped after them.
+typedef struct ParseCheckTables ParseCheckTables;
+struct ParseCheckTables
+{
+    ParseClassSet follows[128];
+    ParseClassSet allows[64];
+    ParseClassSet ends[64];
+    ParseClassSet before_name;
+    ParseClassSet after_name;
+    ParseClassSet operand_starts;
+    ParseClassSet specifier_ends;
+    uint64_t named_modes;
+    uint64_t declaration_modes;
+};
+
+static ParseCheckTables parse_check_tables;
+
+BUSTER_INLINE bool parse_class_set_has(const ParseClassSet* set, uint8_t c)
+{
+    return ((set->words[c >> 6] >> (c & 63)) & 1) != 0;
+}
+
+static void parse_class_set_add(ParseClassSet* set, const uint8_t* classes, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        set->words[classes[i] >> 6] |= (uint64_t)1 << (classes[i] & 63);
+    }
+}
+
+static void parse_class_set_union(ParseClassSet* set, const ParseClassSet* other)
+{
+    set->words[0] |= other->words[0];
+    set->words[1] |= other->words[1];
+}
+
+static void parse_class_set_remove(ParseClassSet* set, const uint8_t* classes, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        set->words[classes[i] >> 6] &= ~((uint64_t)1 << (classes[i] & 63));
+    }
+}
+
+#define BUSTER_PARSE_SET(name, ...) \
+    static const uint8_t name##_classes[] = { __VA_ARGS__ }; \
+    ParseClassSet name = { { 0, 0 } }; \
+    parse_class_set_add(&name, name##_classes, sizeof(name##_classes))
+
+#define BUSTER_PARSE_ADD(set, ...) \
+    do \
+    { \
+        static const uint8_t added[] = { __VA_ARGS__ }; \
+        parse_class_set_add(&(set), added, sizeof(added)); \
+    } while (0)
+
+#define BUSTER_PARSE_REMOVE(set, ...) \
+    do \
+    { \
+        static const uint8_t removed[] = { __VA_ARGS__ }; \
+        parse_class_set_remove(&(set), removed, sizeof(removed)); \
+    } while (0)
+
+static void parse_check_tables_init(void)
+{
+    ParseCheckTables* t = &parse_check_tables;
+    memset(t, 0, sizeof(*t));
+    // What may start an operand, a type name, a declaration, a statement and a declarator.
+    BUSTER_PARSE_SET(operand_starts, PARSE_ROLE_OPERAND, PARSE_CLASS_CONSTANT, PARSE_CLASS_STRING, PARSE_ROLE_PREFIX, PARSE_CLASS_STAR, PARSE_CLASS_SIZEOF,
+                     PARSE_CLASS_LABEL_ADDRESS, PARSE_ROLE_OPEN_GROUP, PARSE_ROLE_OPEN_CAST, PARSE_ROLE_OPEN_COMPOUND, PARSE_CLASS_OPERAND_KEYWORD,
+                     PARSE_CLASS_OFFSETOF_KEYWORD, PARSE_CLASS_VA_ARG_KEYWORD, PARSE_CLASS_BIT_CAST_KEYWORD);
+    BUSTER_PARSE_SET(type_starts, PARSE_CLASS_TYPE, PARSE_ROLE_SPECIFIER, PARSE_CLASS_TAG_KEYWORD, PARSE_CLASS_SPECIFIER_KEYWORD, PARSE_CLASS_ALIGNAS_KEYWORD,
+                     PARSE_CLASS_ATTRIBUTE_KEYWORD, PARSE_CLASS_ATOMIC_KEYWORD, PARSE_CLASS_BITINT_KEYWORD);
+    ParseClassSet declaration_starts = type_starts;
+    BUSTER_PARSE_ADD(declaration_starts, PARSE_CLASS_STORAGE, PARSE_CLASS_ASSERT_KEYWORD, PARSE_CLASS_EXTENSION);
+    ParseClassSet statement_starts = operand_starts;
+    BUSTER_PARSE_ADD(statement_starts, PARSE_CLASS_STATEMENT_KEYWORD, PARSE_ROLE_DO, PARSE_ROLE_OPEN_CASE, PARSE_CLASS_DEFAULT, PARSE_ROLE_RETURN, PARSE_CLASS_JUMP,
+                     PARSE_CLASS_GOTO, PARSE_ROLE_TERMINATOR, PARSE_ROLE_OPEN_BLOCK, PARSE_CLASS_ASM_KEYWORD, PARSE_ROLE_ELSE);
+    ParseClassSet item_starts = declaration_starts;
+    parse_class_set_union(&item_starts, &statement_starts);
+    BUSTER_PARSE_SET(declarator_starts, PARSE_ROLE_OPERAND, PARSE_CLASS_STAR, PARSE_ROLE_OPEN_GROUP, PARSE_CLASS_ATTRIBUTE_KEYWORD);
+    BUSTER_PARSE_SET(abstract_starts, PARSE_CLASS_STAR, PARSE_ROLE_OPEN_GROUP, PARSE_ROLE_OPEN_FUNCTION, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_CLASS_ATTRIBUTE_KEYWORD);
+    // What may follow a complete operand, and a declarator's name or suffix (and an abstract declarator's end).
+    BUSTER_PARSE_SET(after_operand, PARSE_ROLE_POSTFIX, PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_MULTIPLICATIVE, PARSE_ROLE_ADDITIVE, PARSE_ROLE_SHIFT,
+                     PARSE_ROLE_RELATIONAL, PARSE_ROLE_EQUALITY, PARSE_ROLE_BITWISE_AND, PARSE_ROLE_BITWISE_XOR, PARSE_ROLE_BITWISE_OR, PARSE_ROLE_LOGICAL_AND,
+                     PARSE_ROLE_LOGICAL_OR, PARSE_ROLE_ASSIGN, PARSE_ROLE_RANGE, PARSE_ROLE_COMMA, PARSE_ROLE_SEPARATOR, PARSE_ROLE_TERMINATOR, PARSE_ROLE_ASM_COLON,
+                     PARSE_ROLE_OPEN_CALL, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_ROLE_OPEN_TERNARY, PARSE_ROLE_CLOSE_GROUP, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION,
+                     PARSE_ROLE_CLOSE_SIZEOF, PARSE_ROLE_CLOSE_SPECIFIER, PARSE_ROLE_CLOSE_ASM, PARSE_ROLE_CLOSE_KEYWORD, PARSE_ROLE_CLOSE_CONDITION,
+                     PARSE_ROLE_CLOSE_FOR, PARSE_ROLE_CLOSE_SUBSCRIPT, PARSE_ROLE_CLOSE_ENUM, PARSE_ROLE_CLOSE_INITIALIZER, PARSE_ROLE_CLOSE_COMPOUND_BODY,
+                     PARSE_ROLE_CLOSE_TERNARY, PARSE_ROLE_CLOSE_CASE);
+    BUSTER_PARSE_SET(after_declarator, PARSE_ROLE_OPEN_CALL, PARSE_ROLE_OPEN_FUNCTION, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_CLASS_ATTRIBUTE_KEYWORD, PARSE_CLASS_ASM_KEYWORD,
+                     PARSE_ROLE_ASSIGN, PARSE_ROLE_COMMA, PARSE_ROLE_SEPARATOR, PARSE_ROLE_TERMINATOR, PARSE_ROLE_BITFIELD, PARSE_ROLE_CLOSE_GROUP, PARSE_ROLE_CLOSE_CALL,
+                     PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_CLOSE_CAST, PARSE_ROLE_CLOSE_COMPOUND, PARSE_ROLE_CLOSE_SIZEOF, PARSE_ROLE_CLOSE_SPECIFIER,
+                     PARSE_ROLE_CLOSE_KEYWORD, PARSE_ROLE_CLOSE_SUBSCRIPT);
+    // What may follow a type specifier (or another specifier after one): more specifiers, a declarator or an abstract one,
+    // the end of a type name, of a declaration that declares only a tag, and an anonymous bit-field's width.
+    ParseClassSet after_type = declarator_starts;
+    parse_class_set_union(&after_type, &abstract_starts);
+    parse_class_set_union(&after_type, &after_declarator);
+    BUSTER_PARSE_REMOVE(after_type, PARSE_ROLE_OPEN_CALL, PARSE_ROLE_CLOSE_SUBSCRIPT, PARSE_CLASS_ASM_KEYWORD, PARSE_ROLE_ASSIGN, PARSE_ROLE_COMMA);
+    BUSTER_PARSE_ADD(after_type, PARSE_CLASS_TYPE, PARSE_CLASS_TYPED, PARSE_CLASS_TYPED_STORAGE, PARSE_CLASS_ALIGNAS_KEYWORD, PARSE_CLASS_ATOMIC_KEYWORD,
+                     PARSE_CLASS_BITINT_KEYWORD);
+    // What may follow a specifier before any type specifier: more specifiers.
+    ParseClassSet after_untyped = type_starts;
+    BUSTER_PARSE_ADD(after_untyped, PARSE_CLASS_STORAGE);
+    // What may follow `*` or a qualifier of it: the rest of a declarator or an abstract one, or an operand.
+    ParseClassSet after_star = abstract_starts;
+    parse_class_set_union(&after_star, &declarator_starts);
+    BUSTER_PARSE_ADD(after_star, PARSE_ROLE_QUALIFIER_LEFT, PARSE_ROLE_CLOSE_GROUP, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_CLOSE_CAST,
+                     PARSE_ROLE_CLOSE_SIZEOF, PARSE_ROLE_CLOSE_SPECIFIER, PARSE_ROLE_CLOSE_KEYWORD, PARSE_ROLE_CLOSE_SUBSCRIPT, PARSE_ROLE_SEPARATOR);
+    ParseClassSet* f = t->follows;
+    f[PARSE_ROLE_NONE] = item_starts;
+    f[PARSE_ROLE_OPERAND] = after_operand;
+    parse_class_set_union(&f[PARSE_ROLE_OPERAND], &after_declarator);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPERAND], PARSE_ROLE_LABEL, PARSE_ROLE_CLOSE_ATTRIBUTE_LIST);
+    f[PARSE_ROLE_MEMBER] = after_operand;
+    f[PARSE_ROLE_STRING_NEXT] = after_operand;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_STRING_NEXT], PARSE_ROLE_STRING_NEXT, PARSE_ROLE_CLOSE_ATTRIBUTE);
+    f[PARSE_ROLE_QUALIFIER_LEFT] = after_star;
+    f[PARSE_ROLE_SPECIFIER] = after_untyped;
+    // `__extension__` before a declaration, before its specifiers.
+    f[PARSE_CLASS_EXTENSION] = declaration_starts;
+    BUSTER_PARSE_REMOVE(f[PARSE_CLASS_EXTENSION], PARSE_CLASS_ASSERT_KEYWORD);
+    f[PARSE_CLASS_STORAGE] = after_untyped;
+    f[PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER] = after_untyped;
+    // GNU's attribute statement: `__attribute__((fallthrough));`.
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER], PARSE_ROLE_TERMINATOR);
+    f[PARSE_CLASS_TYPE] = after_type;
+    f[PARSE_CLASS_TYPED] = after_type;
+    f[PARSE_CLASS_TYPED_STORAGE] = after_type;
+    f[PARSE_CLASS_TYPED_ATTRIBUTE] = after_type;
+    f[PARSE_ROLE_TAG] = after_type;
+    f[PARSE_ROLE_CLOSE_STRUCT] = after_type;
+    f[PARSE_ROLE_CLOSE_ENUM] = after_type;
+    f[PARSE_ROLE_CLOSE_SPECIFIER] = after_type;
+    f[PARSE_ROLE_PREFIX] = operand_starts;
+    f[PARSE_ROLE_POSTFIX] = after_operand;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_MEMBER_OPERATOR], PARSE_ROLE_MEMBER);
+    f[PARSE_ROLE_MULTIPLICATIVE] = operand_starts;
+    f[PARSE_ROLE_ADDITIVE] = operand_starts;
+    f[PARSE_ROLE_SHIFT] = operand_starts;
+    f[PARSE_ROLE_RELATIONAL] = operand_starts;
+    f[PARSE_ROLE_EQUALITY] = operand_starts;
+    f[PARSE_ROLE_BITWISE_AND] = operand_starts;
+    f[PARSE_ROLE_BITWISE_XOR] = operand_starts;
+    f[PARSE_ROLE_BITWISE_OR] = operand_starts;
+    f[PARSE_ROLE_LOGICAL_AND] = operand_starts;
+    f[PARSE_ROLE_LOGICAL_OR] = operand_starts;
+    f[PARSE_ROLE_ASSIGN] = operand_starts;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_ASSIGN], PARSE_ROLE_OPEN_INITIALIZER);
+    f[PARSE_ROLE_RANGE] = operand_starts;
+    f[PARSE_ROLE_BITFIELD] = operand_starts;
+    f[PARSE_ROLE_COMMA] = operand_starts;
+    parse_class_set_union(&f[PARSE_ROLE_COMMA], &declarator_starts);
+    f[PARSE_ROLE_RETURN] = operand_starts;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_RETURN], PARSE_ROLE_TERMINATOR);
+    f[PARSE_ROLE_SEPARATOR] = operand_starts;
+    parse_class_set_union(&f[PARSE_ROLE_SEPARATOR], &declaration_starts);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_SEPARATOR], PARSE_CLASS_ELLIPSIS, PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_ROLE_OPEN_INITIALIZER,
+                     PARSE_ROLE_CLOSE_INITIALIZER, PARSE_ROLE_CLOSE_COMPOUND_BODY, PARSE_ROLE_CLOSE_ENUM, PARSE_CLASS_WORD);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_ASM_COLON], PARSE_CLASS_STRING, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_ROLE_ASM_COLON, PARSE_ROLE_CLOSE_ASM, PARSE_ROLE_OPERAND);
+    f[PARSE_ROLE_TERMINATOR] = item_starts;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_TERMINATOR], PARSE_ROLE_CLOSE_BLOCK, PARSE_ROLE_CLOSE_BODY, PARSE_ROLE_CLOSE_STRUCT, PARSE_ROLE_CLOSE_FOR);
+    f[PARSE_ROLE_ELSE] = statement_starts;
+    BUSTER_PARSE_REMOVE(f[PARSE_ROLE_ELSE], PARSE_ROLE_ELSE);
+    f[PARSE_ROLE_DO] = f[PARSE_ROLE_ELSE];
+    f[PARSE_ROLE_LABEL] = item_starts;
+    BUSTER_PARSE_REMOVE(f[PARSE_ROLE_LABEL], PARSE_ROLE_ELSE);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_LABEL], PARSE_ROLE_CLOSE_BLOCK, PARSE_ROLE_CLOSE_BODY);
+    f[PARSE_ROLE_CLOSE_CASE] = f[PARSE_ROLE_LABEL];
+    // The openers: what their groups may start with (or end, empty).
+    f[PARSE_ROLE_OPEN_GROUP] = operand_starts;
+    parse_class_set_union(&f[PARSE_ROLE_OPEN_GROUP], &declarator_starts);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_GROUP], PARSE_ROLE_OPEN_BLOCK);
+    f[PARSE_ROLE_OPEN_CALL] = operand_starts;
+    parse_class_set_union(&f[PARSE_ROLE_OPEN_CALL], &declaration_starts);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_CALL], PARSE_ROLE_CLOSE_CALL, PARSE_CLASS_ELLIPSIS);
+    f[PARSE_ROLE_OPEN_FUNCTION] = declaration_starts;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_FUNCTION], PARSE_ROLE_CLOSE_FUNCTION, PARSE_CLASS_ELLIPSIS);
+    f[PARSE_ROLE_OPEN_CAST] = type_starts;
+    f[PARSE_ROLE_OPEN_COMPOUND] = type_starts;
+    f[PARSE_ROLE_OPEN_SIZEOF] = operand_starts;
+    parse_class_set_union(&f[PARSE_ROLE_OPEN_SIZEOF], &type_starts);
+    f[PARSE_ROLE_OPEN_SPECIFIER] = f[PARSE_ROLE_OPEN_SIZEOF];
+    f[PARSE_ROLE_OPEN_KEYWORD] = f[PARSE_ROLE_OPEN_SIZEOF];
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_ATTRIBUTE], PARSE_ROLE_OPEN_ATTRIBUTE_LIST, PARSE_CLASS_STRING);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER], PARSE_ROLE_OPEN_ATTRIBUTE_LIST);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_ATTRIBUTE_LEFT], PARSE_ROLE_OPEN_ATTRIBUTE_LIST);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_ATTRIBUTE_RIGHT], PARSE_ROLE_OPEN_ATTRIBUTE_LIST);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_ATTRIBUTE_LIST], PARSE_ROLE_OPERAND, PARSE_CLASS_WORD, PARSE_ROLE_CLOSE_ATTRIBUTE_LIST);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_ASM], PARSE_CLASS_STRING);
+    f[PARSE_ROLE_OPEN_CONDITION] = operand_starts;
+    f[PARSE_ROLE_OPEN_FOR] = operand_starts;
+    parse_class_set_union(&f[PARSE_ROLE_OPEN_FOR], &declaration_starts);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_FOR], PARSE_ROLE_TERMINATOR);
+    f[PARSE_ROLE_OPEN_SUBSCRIPT] = operand_starts;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_SUBSCRIPT], PARSE_ROLE_CLOSE_SUBSCRIPT, PARSE_ROLE_SPECIFIER, PARSE_CLASS_STORAGE);
+    f[PARSE_ROLE_OPEN_BLOCK] = item_starts;
+    BUSTER_PARSE_REMOVE(f[PARSE_ROLE_OPEN_BLOCK], PARSE_ROLE_ELSE);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_BLOCK], PARSE_ROLE_CLOSE_BLOCK);
+    f[PARSE_ROLE_OPEN_BODY] = item_starts;
+    BUSTER_PARSE_REMOVE(f[PARSE_ROLE_OPEN_BODY], PARSE_ROLE_ELSE);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_BODY], PARSE_ROLE_CLOSE_BODY);
+    f[PARSE_ROLE_OPEN_STRUCT] = declaration_starts;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_STRUCT], PARSE_ROLE_CLOSE_STRUCT, PARSE_ROLE_TERMINATOR);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_ENUM], PARSE_ROLE_OPERAND);
+    f[PARSE_ROLE_OPEN_INITIALIZER] = operand_starts;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_INITIALIZER], PARSE_ROLE_OPEN_INITIALIZER, PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_ROLE_CLOSE_INITIALIZER);
+    f[PARSE_ROLE_OPEN_COMPOUND_BODY] = operand_starts;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_COMPOUND_BODY], PARSE_ROLE_OPEN_INITIALIZER, PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_OPEN_SUBSCRIPT,
+                     PARSE_ROLE_CLOSE_COMPOUND_BODY);
+    f[PARSE_ROLE_OPEN_TERNARY] = operand_starts;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_OPEN_TERNARY], PARSE_ROLE_CLOSE_TERNARY);
+    f[PARSE_ROLE_OPEN_CASE] = operand_starts;
+    // The closers.
+    f[PARSE_ROLE_CLOSE_GROUP] = after_operand;
+    parse_class_set_union(&f[PARSE_ROLE_CLOSE_GROUP], &after_declarator);
+    f[PARSE_ROLE_CLOSE_CALL] = f[PARSE_ROLE_CLOSE_GROUP];
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_CLOSE_CALL], PARSE_ROLE_OPEN_BODY, PARSE_ROLE_CLOSE_ATTRIBUTE_LIST);
+    f[PARSE_ROLE_CLOSE_FUNCTION] = f[PARSE_ROLE_CLOSE_CALL];
+    f[PARSE_ROLE_CLOSE_CAST] = operand_starts;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_CLOSE_COMPOUND], PARSE_ROLE_OPEN_COMPOUND_BODY);
+    f[PARSE_ROLE_CLOSE_SIZEOF] = after_operand;
+    BUSTER_PARSE_REMOVE(f[PARSE_ROLE_CLOSE_SIZEOF], PARSE_ROLE_POSTFIX, PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_OPEN_CALL, PARSE_ROLE_OPEN_SUBSCRIPT);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_CLOSE_ATTRIBUTE], PARSE_CLASS_ATTRIBUTE_KEYWORD, PARSE_ROLE_ASSIGN, PARSE_ROLE_COMMA, PARSE_ROLE_SEPARATOR, PARSE_ROLE_TERMINATOR,
+                     PARSE_ROLE_BITFIELD, PARSE_ROLE_CLOSE_GROUP, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_OPEN_BODY);
+    f[PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT] = after_star;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT], PARSE_CLASS_BODY_NAME, PARSE_ROLE_TAG, PARSE_ROLE_OPEN_STRUCT, PARSE_ROLE_OPEN_ENUM, PARSE_CLASS_ATTRIBUTE_KEYWORD);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_CLOSE_ATTRIBUTE_LIST], PARSE_ROLE_CLOSE_ATTRIBUTE, PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER, PARSE_CLASS_TYPED_ATTRIBUTE,
+                     PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT, PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_CLOSE_ASM], PARSE_ROLE_TERMINATOR);
+    f[PARSE_ROLE_CLOSE_KEYWORD] = after_operand;
+    f[PARSE_ROLE_CLOSE_CONDITION] = statement_starts;
+    BUSTER_PARSE_REMOVE(f[PARSE_ROLE_CLOSE_CONDITION], PARSE_ROLE_ELSE);
+    f[PARSE_ROLE_CLOSE_FOR] = f[PARSE_ROLE_CLOSE_CONDITION];
+    f[PARSE_ROLE_CLOSE_SUBSCRIPT] = after_operand;
+    parse_class_set_union(&f[PARSE_ROLE_CLOSE_SUBSCRIPT], &after_declarator);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_CLOSE_SUBSCRIPT], PARSE_CLASS_STRING);
+    f[PARSE_ROLE_CLOSE_BLOCK] = item_starts;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_CLOSE_BLOCK], PARSE_ROLE_CLOSE_BLOCK, PARSE_ROLE_CLOSE_BODY, PARSE_ROLE_CLOSE_GROUP);
+    f[PARSE_ROLE_CLOSE_BODY] = declaration_starts;
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_CLOSE_BODY], PARSE_ROLE_TERMINATOR, PARSE_CLASS_ASM_KEYWORD);
+    BUSTER_PARSE_ADD(f[PARSE_ROLE_CLOSE_INITIALIZER], PARSE_ROLE_SEPARATOR, PARSE_ROLE_COMMA, PARSE_ROLE_TERMINATOR, PARSE_ROLE_CLOSE_INITIALIZER,
+                     PARSE_ROLE_CLOSE_COMPOUND_BODY);
+    f[PARSE_ROLE_CLOSE_COMPOUND_BODY] = after_operand;
+    f[PARSE_ROLE_CLOSE_TERNARY] = operand_starts;
+    // _Alignas's closer is a specifier but not a type specifier, as an attribute's is.
+    f[PARSE_CLASS_ALIGNAS_CLOSE] = after_untyped;
+    f[PARSE_CLASS_TYPED_ALIGNAS_CLOSE] = after_type;
+    // The refined classes.
+    f[PARSE_CLASS_CONSTANT] = after_operand;
+    f[PARSE_CLASS_STRING] = f[PARSE_ROLE_STRING_NEXT];
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_ELLIPSIS], PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_WORD], PARSE_ROLE_CLOSE_ATTRIBUTE_LIST, PARSE_ROLE_SEPARATOR, PARSE_ROLE_OPEN_CALL);
+    f[PARSE_CLASS_STAR] = after_star;
+    parse_class_set_union(&f[PARSE_CLASS_STAR], &operand_starts);
+    f[PARSE_CLASS_SIZEOF] = operand_starts;
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_SIZEOF], PARSE_ROLE_OPEN_SIZEOF);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_LABEL_ADDRESS], PARSE_ROLE_OPERAND);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_TAG_KEYWORD], PARSE_ROLE_TAG, PARSE_CLASS_BODY_NAME, PARSE_ROLE_OPEN_STRUCT, PARSE_ROLE_OPEN_ENUM, PARSE_CLASS_ATTRIBUTE_KEYWORD);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_ATTRIBUTE_KEYWORD], PARSE_ROLE_OPEN_ATTRIBUTE, PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER, PARSE_ROLE_OPEN_ATTRIBUTE_LEFT,
+                     PARSE_ROLE_OPEN_ATTRIBUTE_RIGHT);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_ASM_KEYWORD], PARSE_ROLE_OPEN_ASM, PARSE_ROLE_OPEN_ATTRIBUTE, PARSE_CLASS_ASM_QUALIFIER);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_ASM_QUALIFIER], PARSE_CLASS_ASM_QUALIFIER, PARSE_ROLE_OPEN_ASM);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_SPECIFIER_KEYWORD], PARSE_ROLE_OPEN_SPECIFIER);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_ALIGNAS_KEYWORD], PARSE_ROLE_OPEN_SPECIFIER);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_OPERAND_KEYWORD], PARSE_ROLE_OPEN_KEYWORD);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_OFFSETOF_KEYWORD], PARSE_ROLE_OPEN_KEYWORD);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_VA_ARG_KEYWORD], PARSE_ROLE_OPEN_KEYWORD);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_BIT_CAST_KEYWORD], PARSE_ROLE_OPEN_KEYWORD);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_ATOMIC_KEYWORD], PARSE_ROLE_OPEN_SPECIFIER);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_BITINT_KEYWORD], PARSE_ROLE_OPEN_SPECIFIER);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_ASSERT_KEYWORD], PARSE_ROLE_OPEN_KEYWORD);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_STATEMENT_KEYWORD], PARSE_ROLE_OPEN_CONDITION, PARSE_ROLE_OPEN_FOR);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_BODY_NAME], PARSE_ROLE_OPEN_STRUCT, PARSE_ROLE_OPEN_ENUM);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_JUMP], PARSE_ROLE_TERMINATOR);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_GOTO], PARSE_ROLE_OPERAND, PARSE_CLASS_STAR);
+    BUSTER_PARSE_ADD(f[PARSE_CLASS_DEFAULT], PARSE_ROLE_CLOSE_CASE);
+    // Where CLOSE_SPECIFIER may come, _Alignas's closers may.
+    for (uint32_t c = 0; c < PARSE_CLASS_COUNT; c += 1)
+    {
+        if (parse_class_set_has(&f[c], PARSE_ROLE_CLOSE_SPECIFIER))
+        {
+            BUSTER_PARSE_ADD(f[c], PARSE_CLASS_ALIGNAS_CLOSE, PARSE_CLASS_TYPED_ALIGNAS_CLOSE);
+        }
+    }
+    // The modes: what an expression, specifiers, a declarator and an abstract one hold.
+    ParseClassSet expression = operand_starts;
+    BUSTER_PARSE_ADD(expression, PARSE_ROLE_MEMBER, PARSE_ROLE_STRING_NEXT, PARSE_ROLE_POSTFIX, PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_MULTIPLICATIVE,
+                     PARSE_ROLE_ADDITIVE, PARSE_ROLE_SHIFT, PARSE_ROLE_RELATIONAL, PARSE_ROLE_EQUALITY, PARSE_ROLE_BITWISE_AND, PARSE_ROLE_BITWISE_XOR,
+                     PARSE_ROLE_BITWISE_OR, PARSE_ROLE_LOGICAL_AND, PARSE_ROLE_LOGICAL_OR, PARSE_ROLE_ASSIGN, PARSE_ROLE_COMMA, PARSE_ROLE_SEPARATOR,
+                     PARSE_ROLE_OPEN_CALL, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_ROLE_CLOSE_SUBSCRIPT, PARSE_ROLE_OPEN_TERNARY,
+                     PARSE_ROLE_CLOSE_TERNARY, PARSE_ROLE_CLOSE_GROUP, PARSE_ROLE_CLOSE_CAST, PARSE_ROLE_CLOSE_COMPOUND, PARSE_ROLE_OPEN_COMPOUND_BODY,
+                     PARSE_ROLE_CLOSE_COMPOUND_BODY, PARSE_ROLE_OPEN_SIZEOF, PARSE_ROLE_CLOSE_SIZEOF, PARSE_ROLE_OPEN_KEYWORD, PARSE_ROLE_CLOSE_KEYWORD);
+    // The other builtins that take a type are left to the scalar parser.
+    BUSTER_PARSE_REMOVE(expression, PARSE_CLASS_OPERAND_KEYWORD);
+    BUSTER_PARSE_SET(specifiers, PARSE_CLASS_TYPE, PARSE_ROLE_SPECIFIER, PARSE_CLASS_TYPED, PARSE_CLASS_STORAGE, PARSE_CLASS_TYPED_STORAGE, PARSE_CLASS_EXTENSION, PARSE_ROLE_TAG,
+                     PARSE_CLASS_TAG_KEYWORD, PARSE_CLASS_BODY_NAME, PARSE_ROLE_OPEN_STRUCT, PARSE_ROLE_CLOSE_STRUCT, PARSE_ROLE_OPEN_ENUM, PARSE_ROLE_CLOSE_ENUM,
+                     PARSE_CLASS_SPECIFIER_KEYWORD, PARSE_CLASS_ATOMIC_KEYWORD, PARSE_CLASS_BITINT_KEYWORD, PARSE_CLASS_ALIGNAS_KEYWORD, PARSE_ROLE_OPEN_SPECIFIER,
+                     PARSE_ROLE_CLOSE_SPECIFIER, PARSE_CLASS_ALIGNAS_CLOSE, PARSE_CLASS_TYPED_ALIGNAS_CLOSE, PARSE_CLASS_ATTRIBUTE_KEYWORD,
+                     PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER, PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER, PARSE_CLASS_TYPED_ATTRIBUTE, PARSE_ROLE_OPEN_ATTRIBUTE_RIGHT,
+                     PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT);
+    BUSTER_PARSE_SET(abstract, PARSE_CLASS_STAR, PARSE_ROLE_QUALIFIER_LEFT, PARSE_CLASS_ATTRIBUTE_KEYWORD, PARSE_ROLE_OPEN_ATTRIBUTE_LEFT,
+                     PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT, PARSE_ROLE_OPEN_ATTRIBUTE, PARSE_ROLE_CLOSE_ATTRIBUTE, PARSE_ROLE_OPEN_GROUP, PARSE_ROLE_CLOSE_GROUP,
+                     PARSE_ROLE_OPEN_CALL, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_OPEN_FUNCTION, PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_OPEN_SUBSCRIPT,
+                     PARSE_ROLE_CLOSE_SUBSCRIPT);
+    ParseClassSet declarator = abstract;
+    BUSTER_PARSE_ADD(declarator, PARSE_ROLE_OPERAND, PARSE_CLASS_ASM_KEYWORD);
+    ParseClassSet* a = t->allows;
+    // File scope: declarations (and `;`).
+    a[PARSE_CHECK_FILE_START] = declaration_starts;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_FILE_START], PARSE_CLASS_ALIGNAS_KEYWORD);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_FILE_START], PARSE_ROLE_TERMINATOR);
+    ParseClassSet declaration = specifiers;
+    parse_class_set_union(&declaration, &declarator);
+    BUSTER_PARSE_ADD(declaration, PARSE_ROLE_ASSIGN, PARSE_ROLE_COMMA, PARSE_ROLE_TERMINATOR);
+    a[PARSE_CHECK_FILE_DECLARATION] = declaration;
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_FILE_DECLARATION], PARSE_ROLE_OPEN_BODY, PARSE_ROLE_CLOSE_BODY);
+    ParseClassSet initializer = expression;
+    BUSTER_PARSE_ADD(initializer, PARSE_ROLE_OPEN_INITIALIZER, PARSE_ROLE_CLOSE_INITIALIZER, PARSE_ROLE_TERMINATOR);
+    a[PARSE_CHECK_FILE_INITIALIZER] = initializer;
+    // Blocks: declarations and statements.
+    a[PARSE_CHECK_BLOCK_START] = item_starts;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_BLOCK_START], PARSE_CLASS_ALIGNAS_KEYWORD, PARSE_CLASS_ASM_KEYWORD, PARSE_CLASS_OPERAND_KEYWORD);
+    a[PARSE_CHECK_BLOCK_DECLARATION] = declaration;
+    a[PARSE_CHECK_BLOCK_INITIALIZER] = initializer;
+    a[PARSE_CHECK_BLOCK_STATEMENT] = expression;
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_BLOCK_STATEMENT], PARSE_ROLE_TERMINATOR, PARSE_ROLE_LABEL, PARSE_ROLE_OPEN_CONDITION, PARSE_ROLE_CLOSE_CONDITION, PARSE_ROLE_OPEN_FOR,
+                     PARSE_ROLE_CLOSE_FOR, PARSE_ROLE_CLOSE_CASE, PARSE_ROLE_CLOSE_BLOCK);
+    // Struct bodies: member declarations, with widths and without initializers or storage classes.
+    a[PARSE_CHECK_STRUCT_START] = type_starts;
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_STRUCT_START], PARSE_ROLE_TERMINATOR, PARSE_CLASS_ASSERT_KEYWORD, PARSE_CLASS_EXTENSION);
+    a[PARSE_CHECK_STRUCT_DECLARATION] = declaration;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_STRUCT_DECLARATION], PARSE_ROLE_ASSIGN, PARSE_CLASS_ASM_KEYWORD, PARSE_CLASS_STORAGE, PARSE_CLASS_TYPED_STORAGE);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_STRUCT_DECLARATION], PARSE_ROLE_BITFIELD);
+    a[PARSE_CHECK_STRUCT_WIDTH] = expression;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_STRUCT_WIDTH], PARSE_ROLE_ASSIGN);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_STRUCT_WIDTH], PARSE_ROLE_TERMINATOR, PARSE_CLASS_ATTRIBUTE_KEYWORD, PARSE_ROLE_OPEN_ATTRIBUTE, PARSE_ROLE_CLOSE_ATTRIBUTE);
+    // Parameters: declarations without storage classes or initializers, and `...`.
+    a[PARSE_CHECK_PARAMETERS_START] = type_starts;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_PARAMETERS_START], PARSE_CLASS_ALIGNAS_KEYWORD);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_PARAMETERS_START], PARSE_CLASS_ELLIPSIS);
+    a[PARSE_CHECK_PARAMETERS_DECLARATION] = specifiers;
+    parse_class_set_union(&a[PARSE_CHECK_PARAMETERS_DECLARATION], &declarator);
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_PARAMETERS_DECLARATION], PARSE_CLASS_ASM_KEYWORD, PARSE_CLASS_STORAGE, PARSE_CLASS_TYPED_STORAGE);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_PARAMETERS_DECLARATION], PARSE_ROLE_SEPARATOR);
+    // A for's clauses: the first a declaration or an expression, the others expressions.
+    a[PARSE_CHECK_FOR_START] = operand_starts;
+    parse_class_set_union(&a[PARSE_CHECK_FOR_START], &type_starts);
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_FOR_START], PARSE_CLASS_ALIGNAS_KEYWORD, PARSE_CLASS_OPERAND_KEYWORD);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_FOR_START], PARSE_ROLE_TERMINATOR);
+    a[PARSE_CHECK_FOR_DECLARATION] = declaration;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_FOR_DECLARATION], PARSE_CLASS_ASM_KEYWORD, PARSE_CLASS_STORAGE, PARSE_CLASS_TYPED_STORAGE);
+    a[PARSE_CHECK_FOR_INITIALIZER] = initializer;
+    a[PARSE_CHECK_FOR_EXPRESSION] = expression;
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_FOR_EXPRESSION], PARSE_ROLE_TERMINATOR);
+    a[PARSE_CHECK_FOR_CLAUSE_START] = operand_starts;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_FOR_CLAUSE_START], PARSE_CLASS_OPERAND_KEYWORD);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_FOR_CLAUSE_START], PARSE_ROLE_TERMINATOR);
+    // Type names, and sizeof's type name or expression.
+    a[PARSE_CHECK_TYPE_START] = type_starts;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_TYPE_START], PARSE_CLASS_ALIGNAS_KEYWORD);
+    a[PARSE_CHECK_TYPE_DECLARATION] = specifiers;
+    parse_class_set_union(&a[PARSE_CHECK_TYPE_DECLARATION], &abstract);
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_TYPE_DECLARATION], PARSE_CLASS_STORAGE, PARSE_CLASS_TYPED_STORAGE);
+    // __builtin_offsetof's type name, which a `,` ends.
+    a[PARSE_CHECK_TYPE_ARGUMENT] = a[PARSE_CHECK_TYPE_DECLARATION];
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_TYPE_ARGUMENT], PARSE_ROLE_SEPARATOR);
+    a[PARSE_CHECK_SIZEOF_START] = a[PARSE_CHECK_TYPE_START];
+    parse_class_set_union(&a[PARSE_CHECK_SIZEOF_START], &operand_starts);
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_SIZEOF_START], PARSE_CLASS_OPERAND_KEYWORD);
+    a[PARSE_CHECK_SIZEOF_TYPE] = a[PARSE_CHECK_TYPE_DECLARATION];
+    a[PARSE_CHECK_SIZEOF_EXPRESSION] = expression;
+    // Enumerators: a name, then perhaps `=` and a constant expression.
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_ENUM_START], PARSE_ROLE_OPERAND);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_ENUM_NAME], PARSE_ROLE_ASSIGN, PARSE_ROLE_SEPARATOR, PARSE_CLASS_ATTRIBUTE_KEYWORD, PARSE_ROLE_OPEN_ATTRIBUTE, PARSE_ROLE_CLOSE_ATTRIBUTE);
+    a[PARSE_CHECK_ENUM_VALUE] = expression;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_ENUM_VALUE], PARSE_ROLE_ASSIGN, PARSE_ROLE_COMMA);
+    // A call's arguments.
+    a[PARSE_CHECK_ARGUMENTS_START] = operand_starts;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_ARGUMENTS_START], PARSE_CLASS_OPERAND_KEYWORD);
+    a[PARSE_CHECK_ARGUMENTS] = expression;
+    // Declarators in parentheses.
+    a[PARSE_CHECK_DECLARATOR] = declarator;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_DECLARATOR], PARSE_CLASS_ASM_KEYWORD);
+    a[PARSE_CHECK_ABSTRACT] = abstract;
+    a[PARSE_CHECK_OPTIONAL] = a[PARSE_CHECK_DECLARATOR];
+    // Expressions: in parentheses, conditions and a ternary's middle; a case's constant expression (with GNU's ranges); a
+    // subscript or an array's size (and an initializer's designator, with its range).
+    // A statement expression's block in parentheses, which the checks see first and last in its group (in a function).
+    a[PARSE_CHECK_EXPRESSION] = expression;
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_EXPRESSION], PARSE_ROLE_OPEN_BLOCK, PARSE_ROLE_CLOSE_BLOCK);
+    a[PARSE_CHECK_CONDITIONAL] = expression;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_CONDITIONAL], PARSE_ROLE_ASSIGN, PARSE_ROLE_COMMA, PARSE_ROLE_SEPARATOR);
+    a[PARSE_CHECK_ASSERT_CONDITION] = a[PARSE_CHECK_CONDITIONAL];
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_ASSERT_CONDITION], PARSE_ROLE_SEPARATOR);
+    a[PARSE_CHECK_CASE] = a[PARSE_CHECK_CONDITIONAL];
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_CASE], PARSE_ROLE_RANGE);
+    a[PARSE_CHECK_SUBSCRIPT] = expression;
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_SUBSCRIPT], PARSE_ROLE_RANGE);
+    // Initializer lists: designators, then an initializer; or an initializer.
+    a[PARSE_CHECK_INITIALIZER_START] = operand_starts;
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_INITIALIZER_START], PARSE_CLASS_OPERAND_KEYWORD);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_INITIALIZER_START], PARSE_ROLE_OPEN_INITIALIZER, PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_OPEN_SUBSCRIPT);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_INITIALIZER_DESIGNATOR], PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_MEMBER, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_ROLE_CLOSE_SUBSCRIPT,
+                     PARSE_ROLE_ASSIGN);
+    a[PARSE_CHECK_INITIALIZER] = expression;
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_INITIALIZER], PARSE_ROLE_OPEN_INITIALIZER, PARSE_ROLE_CLOSE_INITIALIZER);
+    // Attributes: `__attribute__((...))`'s outer group holds the list, and the list names with arguments; an asm label
+    // holds strings.
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_ATTRIBUTE], PARSE_ROLE_OPEN_ATTRIBUTE_LIST, PARSE_ROLE_CLOSE_ATTRIBUTE_LIST);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_ATTRIBUTE_LIST_START], PARSE_ROLE_OPERAND, PARSE_CLASS_WORD);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_ATTRIBUTE_LIST], PARSE_ROLE_OPEN_CALL, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_SEPARATOR);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_ASM_LABEL], PARSE_CLASS_STRING, PARSE_ROLE_STRING_NEXT);
+    // _Static_assert's item, and its message.
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_ASSERTION], PARSE_ROLE_OPEN_KEYWORD, PARSE_ROLE_CLOSE_KEYWORD, PARSE_ROLE_TERMINATOR);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_MESSAGE_START], PARSE_CLASS_STRING);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_MESSAGE], PARSE_ROLE_STRING_NEXT);
+    // __builtin_offsetof's member designator.
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_MEMBER_START], PARSE_ROLE_OPERAND);
+    BUSTER_PARSE_ADD(a[PARSE_CHECK_MEMBER], PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_MEMBER, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_ROLE_CLOSE_SUBSCRIPT);
+    // What may end a group's content in each mode, before its closer (or the end of the file).
+    BUSTER_PARSE_SET(operand_ends, PARSE_ROLE_OPERAND, PARSE_CLASS_CONSTANT, PARSE_CLASS_STRING, PARSE_ROLE_STRING_NEXT, PARSE_ROLE_MEMBER, PARSE_ROLE_POSTFIX,
+                     PARSE_ROLE_CLOSE_GROUP, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_SUBSCRIPT, PARSE_ROLE_CLOSE_SIZEOF, PARSE_ROLE_CLOSE_KEYWORD,
+                     PARSE_ROLE_CLOSE_COMPOUND_BODY);
+    BUSTER_PARSE_SET(item_ends, PARSE_ROLE_TERMINATOR, PARSE_ROLE_CLOSE_BLOCK, PARSE_ROLE_LABEL, PARSE_ROLE_CLOSE_CASE);
+    BUSTER_PARSE_SET(type_ends, PARSE_CLASS_TYPE, PARSE_CLASS_TYPED, PARSE_ROLE_TAG, PARSE_ROLE_CLOSE_STRUCT, PARSE_ROLE_CLOSE_ENUM, PARSE_ROLE_CLOSE_SPECIFIER,
+                     PARSE_CLASS_TYPED_ATTRIBUTE, PARSE_CLASS_STAR, PARSE_ROLE_QUALIFIER_LEFT, PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT, PARSE_ROLE_CLOSE_GROUP,
+                     PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_CLOSE_SUBSCRIPT, PARSE_ROLE_CLOSE_ATTRIBUTE);
+    ParseClassSet* e = t->ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_FILE_START], PARSE_ROLE_TERMINATOR);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_FILE_DECLARATION], PARSE_ROLE_TERMINATOR, PARSE_ROLE_CLOSE_BODY);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_FILE_INITIALIZER], PARSE_ROLE_TERMINATOR);
+    e[PARSE_CHECK_BLOCK_START] = item_ends;
+    e[PARSE_CHECK_BLOCK_DECLARATION] = item_ends;
+    e[PARSE_CHECK_BLOCK_INITIALIZER] = item_ends;
+    e[PARSE_CHECK_BLOCK_STATEMENT] = item_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_STRUCT_START], PARSE_ROLE_TERMINATOR);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_STRUCT_DECLARATION], PARSE_ROLE_TERMINATOR);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_STRUCT_WIDTH], PARSE_ROLE_TERMINATOR);
+    e[PARSE_CHECK_PARAMETERS_START] = type_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_PARAMETERS_START], PARSE_CLASS_ELLIPSIS);
+    e[PARSE_CHECK_PARAMETERS_DECLARATION] = type_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_PARAMETERS_DECLARATION], PARSE_ROLE_OPERAND, PARSE_CLASS_TYPED_STORAGE);
+    e[PARSE_CHECK_FOR_EXPRESSION] = operand_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_FOR_EXPRESSION], PARSE_ROLE_TERMINATOR);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_FOR_START], PARSE_ROLE_TERMINATOR);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_FOR_DECLARATION], PARSE_ROLE_TERMINATOR);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_FOR_INITIALIZER], PARSE_ROLE_TERMINATOR);
+    e[PARSE_CHECK_FOR_CLAUSE_START] = operand_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_FOR_CLAUSE_START], PARSE_ROLE_TERMINATOR);
+    e[PARSE_CHECK_TYPE_START] = type_ends;
+    e[PARSE_CHECK_TYPE_DECLARATION] = type_ends;
+    e[PARSE_CHECK_TYPE_ARGUMENT] = type_ends;
+    // An item's start that ends its group is all of it: a lone type, or an operand.
+    e[PARSE_CHECK_SIZEOF_START] = operand_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_SIZEOF_START], PARSE_CLASS_TYPE);
+    e[PARSE_CHECK_SIZEOF_TYPE] = type_ends;
+    e[PARSE_CHECK_SIZEOF_EXPRESSION] = operand_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_ENUM_START], PARSE_ROLE_OPERAND);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_ENUM_NAME], PARSE_ROLE_SEPARATOR, PARSE_ROLE_CLOSE_ATTRIBUTE);
+    e[PARSE_CHECK_ENUM_VALUE] = operand_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_ENUM_VALUE], PARSE_ROLE_SEPARATOR);
+    e[PARSE_CHECK_ARGUMENTS_START] = operand_ends;
+    e[PARSE_CHECK_ARGUMENTS] = operand_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_DECLARATOR], PARSE_ROLE_OPERAND, PARSE_ROLE_CLOSE_GROUP, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_CLOSE_SUBSCRIPT,
+                     PARSE_ROLE_CLOSE_ATTRIBUTE);
+    e[PARSE_CHECK_ABSTRACT] = type_ends;
+    e[PARSE_CHECK_OPTIONAL] = type_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_OPTIONAL], PARSE_ROLE_OPERAND);
+    e[PARSE_CHECK_EXPRESSION] = operand_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_EXPRESSION], PARSE_ROLE_CLOSE_BLOCK);
+    e[PARSE_CHECK_CASE] = operand_ends;
+    e[PARSE_CHECK_SUBSCRIPT] = operand_ends;
+    e[PARSE_CHECK_INITIALIZER_START] = operand_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_INITIALIZER_START], PARSE_ROLE_CLOSE_INITIALIZER);
+    e[PARSE_CHECK_INITIALIZER] = operand_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_INITIALIZER], PARSE_ROLE_CLOSE_INITIALIZER, PARSE_ROLE_SEPARATOR);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_ATTRIBUTE], PARSE_ROLE_CLOSE_ATTRIBUTE_LIST);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_ATTRIBUTE_LIST_START], PARSE_ROLE_OPERAND, PARSE_CLASS_WORD);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_ATTRIBUTE_LIST], PARSE_ROLE_CLOSE_CALL);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_ASM_LABEL], PARSE_CLASS_STRING, PARSE_ROLE_STRING_NEXT);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_MEMBER_START], PARSE_ROLE_OPERAND);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_MEMBER], PARSE_ROLE_MEMBER, PARSE_ROLE_CLOSE_SUBSCRIPT);
+    e[PARSE_CHECK_CONDITIONAL] = operand_ends;
+    e[PARSE_CHECK_ASSERT_CONDITION] = operand_ends;
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_ASSERTION], PARSE_ROLE_TERMINATOR);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_MESSAGE_START], PARSE_CLASS_STRING);
+    BUSTER_PARSE_ADD(e[PARSE_CHECK_MESSAGE], PARSE_ROLE_STRING_NEXT);
+    // Where a declarator needs a name: what comes before it, and what shows it was skipped; a declaration of nothing but
+    // specifiers (a tag's) ends right after them, and so does an anonymous bit-field's type.
+    BUSTER_PARSE_ADD(t->before_name, PARSE_CLASS_TYPE, PARSE_CLASS_TYPED, PARSE_CLASS_TYPED_STORAGE, PARSE_ROLE_TAG, PARSE_ROLE_CLOSE_STRUCT, PARSE_ROLE_CLOSE_ENUM,
+                     PARSE_ROLE_CLOSE_SPECIFIER, PARSE_CLASS_TYPED_ATTRIBUTE, PARSE_CLASS_TYPED_ALIGNAS_CLOSE, PARSE_CLASS_STAR, PARSE_ROLE_QUALIFIER_LEFT,
+                     PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT);
+    BUSTER_PARSE_ADD(t->after_name, PARSE_ROLE_OPEN_FUNCTION, PARSE_ROLE_OPEN_SUBSCRIPT, PARSE_ROLE_CLOSE_GROUP, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION,
+                     PARSE_ROLE_SEPARATOR, PARSE_ROLE_COMMA, PARSE_ROLE_TERMINATOR, PARSE_ROLE_ASSIGN, PARSE_ROLE_BITFIELD);
+    BUSTER_PARSE_ADD(t->specifier_ends, PARSE_CLASS_TYPE, PARSE_CLASS_TYPED, PARSE_CLASS_TYPED_STORAGE, PARSE_ROLE_TAG, PARSE_ROLE_CLOSE_STRUCT, PARSE_ROLE_CLOSE_ENUM,
+                     PARSE_ROLE_CLOSE_SPECIFIER, PARSE_CLASS_TYPED_ATTRIBUTE, PARSE_CLASS_TYPED_ALIGNAS_CLOSE);
+    t->operand_starts = operand_starts;
+    t->named_modes = (1ull << PARSE_CHECK_FILE_DECLARATION) | (1ull << PARSE_CHECK_BLOCK_DECLARATION) | (1ull << PARSE_CHECK_STRUCT_DECLARATION) |
+                     (1ull << PARSE_CHECK_FOR_DECLARATION) | (1ull << PARSE_CHECK_DECLARATOR);
+    t->declaration_modes = t->named_modes | (1ull << PARSE_CHECK_PARAMETERS_DECLARATION) | (1ull << PARSE_CHECK_TYPE_DECLARATION) | (1ull << PARSE_CHECK_TYPE_ARGUMENT) |
+                           (1ull << PARSE_CHECK_SIZEOF_TYPE) | (1ull << PARSE_CHECK_ABSTRACT) | (1ull << PARSE_CHECK_OPTIONAL);
+}
+
+#undef BUSTER_PARSE_SET
+#undef BUSTER_PARSE_ADD
+#undef BUSTER_PARSE_REMOVE
+
+// A token's class, from its role, its kind, its name (a keyword's IdentId) and the typed state after it.
+static uint8_t parse_check_class(uint8_t role, uint8_t vkind, uint32_t name, bool typed)
+{
+    uint8_t result = role;
+    if (role == PARSE_ROLE_OPERAND)
+    {
+        result = vkind == PARSE_KIND_IDENTIFIER || vkind == PARSE_VKIND_TYPE_NAME ? PARSE_ROLE_OPERAND :
+                 vkind == PARSE_KIND_NUMBER || vkind == PARSE_KIND_CHARACTER ? PARSE_CLASS_CONSTANT :
+                 vkind == PARSE_KIND_STRING ? PARSE_CLASS_STRING : vkind == PARSE_KIND_ELLIPSIS ? PARSE_CLASS_ELLIPSIS : PARSE_CLASS_WORD;
+    }
+    else if (role == PARSE_ROLE_SPECIFIER)
+    {
+        const bool storage = vkind == PARSE_KIND_STORAGE || vkind == PARSE_KIND_TYPEDEF || vkind == PARSE_KIND_LABEL;
+        result = vkind == PARSE_KIND_TYPE || vkind == PARSE_VKIND_TYPE_NAME ? PARSE_CLASS_TYPE : vkind == PARSE_KIND_EXTENSION ? PARSE_CLASS_EXTENSION :
+                 storage ? (typed ? PARSE_CLASS_TYPED_STORAGE : PARSE_CLASS_STORAGE) : typed ? PARSE_CLASS_TYPED : PARSE_ROLE_SPECIFIER;
+    }
+    else if (role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER)
+    {
+        result = typed ? PARSE_CLASS_TYPED_ATTRIBUTE : PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER;
+    }
+    else if (role == PARSE_ROLE_PREFIX)
+    {
+        result = vkind == PARSE_KIND_STAR ? PARSE_CLASS_STAR : vkind == PARSE_KIND_SIZEOF ? PARSE_CLASS_SIZEOF : vkind == PARSE_KIND_AMPAMP ? PARSE_CLASS_LABEL_ADDRESS :
+                 PARSE_ROLE_PREFIX;
+    }
+    else if (role == PARSE_ROLE_LEAF_RIGHT || role == PARSE_ROLE_QUALIFIER_LEFT)
+    {
+        switch (vkind)
+        {
+            case PARSE_KIND_STRUCT:
+            case PARSE_KIND_ENUM: result = PARSE_CLASS_TAG_KEYWORD; break;
+            case PARSE_KIND_ATTRIBUTE: result = PARSE_CLASS_ATTRIBUTE_KEYWORD; break;
+            case PARSE_KIND_ASM: result = PARSE_CLASS_ASM_KEYWORD; break;
+            case PARSE_KIND_TYPEOF:
+                result = name == C_NAME_BITINT || name == C_NAME_EXTINT ? PARSE_CLASS_BITINT_KEYWORD : PARSE_CLASS_SPECIFIER_KEYWORD;
+                break;
+            case PARSE_KIND_ATOMIC: result = role == PARSE_ROLE_LEAF_RIGHT ? PARSE_CLASS_ATOMIC_KEYWORD : role; break;
+            case PARSE_KIND_ALIGNAS: result = PARSE_CLASS_ALIGNAS_KEYWORD; break;
+            case PARSE_KIND_TYPE_ARGUMENT:
+                result = name == C_NAME_BUILTIN_OFFSETOF ? PARSE_CLASS_OFFSETOF_KEYWORD :
+                         name == C_NAME_BUILTIN_VA_ARG || name == C_NAME_BUILTIN_CONVERTVECTOR ? PARSE_CLASS_VA_ARG_KEYWORD :
+                         name == C_NAME_BUILTIN_BIT_CAST ? PARSE_CLASS_BIT_CAST_KEYWORD : PARSE_CLASS_OPERAND_KEYWORD;
+                break;
+            case PARSE_KIND_GENERIC: result = PARSE_CLASS_OPERAND_KEYWORD; break;
+            case PARSE_KIND_STATIC_ASSERT: result = PARSE_CLASS_ASSERT_KEYWORD; break;
+            case PARSE_KIND_IF:
+            case PARSE_KIND_WHILE:
+            case PARSE_KIND_SWITCH:
+            case PARSE_KIND_FOR: result = PARSE_CLASS_STATEMENT_KEYWORD; break;
+            case PARSE_KIND_IDENTIFIER:
+            case PARSE_VKIND_TYPE_NAME: result = role == PARSE_ROLE_LEAF_RIGHT ? PARSE_CLASS_BODY_NAME : role; break;
+            case PARSE_KIND_QUALIFIER:
+            case PARSE_KIND_STORAGE:
+            case PARSE_KIND_GOTO:
+            case PARSE_KIND_CALLING_CONVENTION: result = role == PARSE_ROLE_LEAF_RIGHT ? PARSE_CLASS_ASM_QUALIFIER : role; break;
+            default: break;
+        }
+    }
+    else if (role == PARSE_ROLE_RETURN)
+    {
+        result = vkind == PARSE_KIND_GOTO ? PARSE_CLASS_GOTO : vkind == PARSE_KIND_BREAK || vkind == PARSE_KIND_CONTINUE ? PARSE_CLASS_JUMP : PARSE_ROLE_RETURN;
+    }
+    else if (role == PARSE_ROLE_OPEN_CASE)
+    {
+        result = vkind == PARSE_KIND_DEFAULT ? PARSE_CLASS_DEFAULT : PARSE_ROLE_OPEN_CASE;
+    }
+    return result;
+}
+
+// The type of the group an opener of class `opener` opens, in mode `mode`, after a token of class `before`.
+static uint8_t parse_check_group(uint8_t opener, uint8_t mode, uint8_t before)
+{
+    const ParseCheckTables* t = &parse_check_tables;
+    const bool declaration = ((t->declaration_modes >> mode) & 1) != 0;
+    const bool named = ((t->named_modes >> mode) & 1) != 0;
+    const bool abstract = mode == PARSE_CHECK_TYPE_DECLARATION || mode == PARSE_CHECK_TYPE_ARGUMENT || mode == PARSE_CHECK_SIZEOF_TYPE || mode == PARSE_CHECK_ABSTRACT;
+    uint8_t result = PARSE_GROUP_OTHER;
+    switch (opener)
+    {
+        case PARSE_ROLE_OPEN_BLOCK:
+        case PARSE_ROLE_OPEN_BODY: result = PARSE_GROUP_BLOCK; break;
+        case PARSE_ROLE_OPEN_STRUCT: result = PARSE_GROUP_STRUCT; break;
+        case PARSE_ROLE_OPEN_ENUM: result = PARSE_GROUP_ENUM; break;
+        case PARSE_ROLE_OPEN_FUNCTION: result = PARSE_GROUP_PARAMETERS; break;
+        case PARSE_ROLE_OPEN_CALL: result = declaration ? PARSE_GROUP_PARAMETERS : PARSE_GROUP_ARGUMENTS; break;
+        case PARSE_ROLE_OPEN_GROUP:
+            result = named ? PARSE_GROUP_DECLARATOR : abstract ? PARSE_GROUP_ABSTRACT : declaration ? PARSE_GROUP_OPTIONAL : PARSE_GROUP_EXPRESSION;
+            break;
+        case PARSE_ROLE_OPEN_CAST:
+        case PARSE_ROLE_OPEN_COMPOUND: result = PARSE_GROUP_TYPE; break;
+        case PARSE_ROLE_OPEN_SIZEOF: result = PARSE_GROUP_SIZEOF; break;
+        case PARSE_ROLE_OPEN_SPECIFIER:
+            result = before == PARSE_CLASS_SPECIFIER_KEYWORD ? PARSE_GROUP_SIZEOF : before == PARSE_CLASS_ATOMIC_KEYWORD ? PARSE_GROUP_TYPE :
+                     before == PARSE_CLASS_ALIGNAS_KEYWORD ? PARSE_GROUP_ALIGNAS : before == PARSE_CLASS_BITINT_KEYWORD ? PARSE_GROUP_BITINT : PARSE_GROUP_OTHER;
+            break;
+        case PARSE_ROLE_OPEN_ATTRIBUTE: result = before == PARSE_CLASS_ASM_KEYWORD ? PARSE_GROUP_ASM_LABEL : PARSE_GROUP_ATTRIBUTE; break;
+        case PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER:
+        case PARSE_ROLE_OPEN_ATTRIBUTE_LEFT:
+        case PARSE_ROLE_OPEN_ATTRIBUTE_RIGHT: result = PARSE_GROUP_ATTRIBUTE; break;
+        case PARSE_ROLE_OPEN_ATTRIBUTE_LIST: result = PARSE_GROUP_ATTRIBUTE_LIST; break;
+        case PARSE_ROLE_OPEN_KEYWORD:
+            result = before == PARSE_CLASS_OFFSETOF_KEYWORD ? PARSE_GROUP_OFFSETOF : before == PARSE_CLASS_VA_ARG_KEYWORD ? PARSE_GROUP_VA_ARG :
+                     before == PARSE_CLASS_BIT_CAST_KEYWORD ? PARSE_GROUP_BIT_CAST : before == PARSE_CLASS_ASSERT_KEYWORD ? PARSE_GROUP_ASSERT : PARSE_GROUP_OTHER;
+            break;
+        case PARSE_ROLE_OPEN_CONDITION:
+        case PARSE_ROLE_OPEN_TERNARY: result = PARSE_GROUP_EXPRESSION; break;
+        case PARSE_ROLE_OPEN_FOR: result = PARSE_GROUP_FOR; break;
+        case PARSE_ROLE_OPEN_SUBSCRIPT: result = declaration ? PARSE_GROUP_ARRAY : PARSE_GROUP_SUBSCRIPT; break;
+        case PARSE_ROLE_OPEN_INITIALIZER:
+        case PARSE_ROLE_OPEN_COMPOUND_BODY: result = PARSE_GROUP_INITIALIZER; break;
+        case PARSE_ROLE_OPEN_CASE: result = PARSE_GROUP_CASE; break;
+        default: break;
+    }
+    return result;
+}
+
+// What an item that starts with a token of class `start` is, in a group of type `group` (BUSTER_PARSE_ITEM_*): a
+// declaration if specifiers start it (in an initializer list, a designator; an enumerator always), a _Static_assert, or
+// another.
+static uint8_t parse_check_item(uint8_t group, uint8_t start)
+{
+    const bool specifiers = start == PARSE_CLASS_TYPE || start == PARSE_ROLE_SPECIFIER || start == PARSE_CLASS_TYPED || start == PARSE_CLASS_STORAGE ||
+                            start == PARSE_CLASS_TYPED_STORAGE || start == PARSE_CLASS_TAG_KEYWORD || start == PARSE_CLASS_SPECIFIER_KEYWORD ||
+                            start == PARSE_CLASS_ALIGNAS_KEYWORD || start == PARSE_CLASS_ATTRIBUTE_KEYWORD || start == PARSE_CLASS_ATOMIC_KEYWORD ||
+                            start == PARSE_CLASS_BITINT_KEYWORD || start == PARSE_CLASS_EXTENSION;
+    uint8_t result = specifiers ? BUSTER_PARSE_ITEM_DECLARATION : start == PARSE_CLASS_ASSERT_KEYWORD ? BUSTER_PARSE_ITEM_ASSERTION : BUSTER_PARSE_ITEM_OTHER;
+    if (group == PARSE_GROUP_ENUM)
+    {
+        result = BUSTER_PARSE_ITEM_DECLARATION;
+    }
+    else if (group == PARSE_GROUP_INITIALIZER)
+    {
+        result = start == PARSE_ROLE_MEMBER_OPERATOR || start == PARSE_ROLE_OPEN_SUBSCRIPT ? BUSTER_PARSE_ITEM_DECLARATION : BUSTER_PARSE_ITEM_OTHER;
+    }
+    return result;
+}
+
+// The mode of a token in a group of type `group`: of its item's start, or by what its item is (`kind`) and in a
+// declaration by its part, and by its item's place in the group (`item`: 1 for the first, 2 for the second, 3 for any
+// later one).
+static uint8_t parse_check_mode(uint8_t group, bool start, uint8_t kind, uint8_t part, uint8_t item)
+{
+    const bool first = item == 1;
+    const bool declares = kind == BUSTER_PARSE_ITEM_DECLARATION;
+    const bool assertion = kind == BUSTER_PARSE_ITEM_ASSERTION && !start;
+    uint8_t result = PARSE_CHECK_NONE;
+    const bool initializer = part == PARSE_PART_INITIALIZER;
+    const bool width = part == PARSE_PART_WIDTH;
+    switch (group)
+    {
+        case PARSE_GROUP_FILE:
+            result = start ? PARSE_CHECK_FILE_START : assertion ? PARSE_CHECK_ASSERTION : !declares || width ? PARSE_CHECK_NONE :
+                     initializer ? PARSE_CHECK_FILE_INITIALIZER : PARSE_CHECK_FILE_DECLARATION;
+            break;
+        case PARSE_GROUP_BLOCK:
+            result = start ? PARSE_CHECK_BLOCK_START : assertion ? PARSE_CHECK_ASSERTION : !declares ? PARSE_CHECK_BLOCK_STATEMENT : width ? PARSE_CHECK_NONE :
+                     initializer ? PARSE_CHECK_BLOCK_INITIALIZER : PARSE_CHECK_BLOCK_DECLARATION;
+            break;
+        case PARSE_GROUP_STRUCT:
+            result = start ? PARSE_CHECK_STRUCT_START : assertion ? PARSE_CHECK_ASSERTION : !declares || initializer ? PARSE_CHECK_NONE :
+                     width ? PARSE_CHECK_STRUCT_WIDTH : PARSE_CHECK_STRUCT_DECLARATION;
+            break;
+        case PARSE_GROUP_PARAMETERS:
+            result = start ? PARSE_CHECK_PARAMETERS_START : declares && part == PARSE_PART_DECLARATION ? PARSE_CHECK_PARAMETERS_DECLARATION : PARSE_CHECK_NONE;
+            break;
+        case PARSE_GROUP_FOR:
+            result = !first ? (start ? PARSE_CHECK_FOR_CLAUSE_START : PARSE_CHECK_FOR_EXPRESSION) : start ? PARSE_CHECK_FOR_START :
+                     !declares ? PARSE_CHECK_FOR_EXPRESSION : width ? PARSE_CHECK_NONE : initializer ? PARSE_CHECK_FOR_INITIALIZER : PARSE_CHECK_FOR_DECLARATION;
+            break;
+        case PARSE_GROUP_TYPE:
+            result = !first ? PARSE_CHECK_NONE : start ? PARSE_CHECK_TYPE_START : declares && part == PARSE_PART_DECLARATION ? PARSE_CHECK_TYPE_DECLARATION :
+                                                                                                                                PARSE_CHECK_NONE;
+            break;
+        case PARSE_GROUP_SIZEOF:
+            // A type name, or an expression, whose commas (separators here) start the next operand.
+            result = !first ? (start ? PARSE_CHECK_ARGUMENTS_START : PARSE_CHECK_SIZEOF_EXPRESSION) : start ? PARSE_CHECK_SIZEOF_START :
+                     !declares ? PARSE_CHECK_SIZEOF_EXPRESSION : part == PARSE_PART_DECLARATION ? PARSE_CHECK_SIZEOF_TYPE : PARSE_CHECK_NONE;
+            break;
+        case PARSE_GROUP_ENUM:
+            result = start ? PARSE_CHECK_ENUM_START : initializer ? PARSE_CHECK_ENUM_VALUE : width ? PARSE_CHECK_NONE : PARSE_CHECK_ENUM_NAME;
+            break;
+        case PARSE_GROUP_ARGUMENTS: result = start ? PARSE_CHECK_ARGUMENTS_START : PARSE_CHECK_ARGUMENTS; break;
+        case PARSE_GROUP_DECLARATOR: result = PARSE_CHECK_DECLARATOR; break;
+        case PARSE_GROUP_ABSTRACT: result = PARSE_CHECK_ABSTRACT; break;
+        case PARSE_GROUP_OPTIONAL: result = PARSE_CHECK_OPTIONAL; break;
+        case PARSE_GROUP_EXPRESSION: result = PARSE_CHECK_EXPRESSION; break;
+        case PARSE_GROUP_SUBSCRIPT:
+        case PARSE_GROUP_ARRAY: result = PARSE_CHECK_SUBSCRIPT; break;
+        case PARSE_GROUP_CASE: result = PARSE_CHECK_CASE; break;
+        case PARSE_GROUP_INITIALIZER:
+            result = start ? PARSE_CHECK_INITIALIZER_START : declares && part == PARSE_PART_DECLARATION ? PARSE_CHECK_INITIALIZER_DESIGNATOR :
+                     declares && width ? PARSE_CHECK_NONE : PARSE_CHECK_INITIALIZER;
+            break;
+        case PARSE_GROUP_ATTRIBUTE: result = PARSE_CHECK_ATTRIBUTE; break;
+        case PARSE_GROUP_ATTRIBUTE_LIST: result = start ? PARSE_CHECK_ATTRIBUTE_LIST_START : PARSE_CHECK_ATTRIBUTE_LIST; break;
+        case PARSE_GROUP_ASM_LABEL: result = PARSE_CHECK_ASM_LABEL; break;
+        case PARSE_GROUP_OFFSETOF:
+            result = item == 1 ? (start ? PARSE_CHECK_TYPE_START : declares && part == PARSE_PART_DECLARATION ? PARSE_CHECK_TYPE_ARGUMENT : PARSE_CHECK_NONE) :
+                     item == 2 ? (start ? PARSE_CHECK_MEMBER_START : PARSE_CHECK_MEMBER) : PARSE_CHECK_NONE;
+            break;
+        case PARSE_GROUP_VA_ARG:
+            result = item == 1 ? (start ? PARSE_CHECK_ARGUMENTS_START : PARSE_CHECK_ARGUMENTS) :
+                     item == 2 ? (start ? PARSE_CHECK_TYPE_START : declares && part == PARSE_PART_DECLARATION ? PARSE_CHECK_TYPE_DECLARATION : PARSE_CHECK_NONE) :
+                     PARSE_CHECK_NONE;
+            break;
+        case PARSE_GROUP_BIT_CAST:
+            result = item == 1 ? (start ? PARSE_CHECK_TYPE_START : declares && part == PARSE_PART_DECLARATION ? PARSE_CHECK_TYPE_ARGUMENT : PARSE_CHECK_NONE) :
+                     item == 2 ? (start ? PARSE_CHECK_ARGUMENTS_START : PARSE_CHECK_ARGUMENTS) : PARSE_CHECK_NONE;
+            break;
+        case PARSE_GROUP_ASSERT:
+            result = item == 1 ? (start ? PARSE_CHECK_ARGUMENTS_START : PARSE_CHECK_ASSERT_CONDITION) :
+                     item == 2 ? (start ? PARSE_CHECK_MESSAGE_START : PARSE_CHECK_MESSAGE) : PARSE_CHECK_NONE;
+            break;
+        case PARSE_GROUP_ALIGNAS:
+            result = !first ? PARSE_CHECK_NONE : start ? PARSE_CHECK_SIZEOF_START : !declares ? PARSE_CHECK_CONDITIONAL :
+                     part == PARSE_PART_DECLARATION ? PARSE_CHECK_SIZEOF_TYPE : PARSE_CHECK_NONE;
+            break;
+        case PARSE_GROUP_BITINT: result = !first ? PARSE_CHECK_NONE : start ? PARSE_CHECK_ARGUMENTS_START : PARSE_CHECK_CONDITIONAL; break;
+        default: break;
+    }
+    return result;
+}
+
+// The part of a declaration after a token of class `c` at its depth.
+static uint8_t parse_check_part_after(uint8_t c, uint8_t part)
+{
+    return c == PARSE_ROLE_ASSIGN ? PARSE_PART_INITIALIZER : c == PARSE_ROLE_COMMA ? PARSE_PART_DECLARATION : c == PARSE_ROLE_BITFIELD ? PARSE_PART_WIDTH : part;
+}
+
+// Whether a token that isn't a closer, whose previous token has role `previous_role` and class `previous`, starts an
+// item: it is first in its group, or follows a token after which an item starts (`;`, `{`, `}`, a head, a label) or a
+// separator.
+static bool parse_check_starts(bool first_in_group, uint8_t previous_role, uint8_t previous)
+{
+    const uint8_t pred = parse_role_preds[previous_role];
+    return first_in_group || pred == PARSE_PRED_ITEM || pred == PARSE_PRED_HEAD || previous == PARSE_ROLE_SEPARATOR;
+}
+
+// A frame of the twin's: per node depth, the group's type, what its current item is, its part, how many items it has
+// started (to 3), how many `;` it has seen (for's clauses), whether the specifiers before its opener's keyword had a type
+// (for _Alignas's closer, which is a specifier as an attribute is), whether the last token at the depth closed a tag's
+// body (or was an attribute specifier after one), and its current item's first token.
+typedef struct ParseCheckFrame ParseCheckFrame;
+struct ParseCheckFrame
+{
+    uint8_t group;
+    uint8_t kind;
+    uint8_t part;
+    uint8_t items;
+    uint8_t terminators;
+    uint8_t typed;
+    uint8_t after_body;
+    uint32_t start;
+};
+
+// Whether a token of kind `kind` (before one of virtual kind `next`) may follow a tag's body, as the scalar parser's
+// parse_scalar_valid_after_tag has it: what may follow a type specifier, or a qualifier or storage class not before a
+// type specifier (which clang takes for the next declaration's, after a missing `;`).
+static bool parse_check_valid_after_tag(uint8_t kind, uint8_t next, bool in_struct)
+{
+    const bool next_type = next == PARSE_KIND_TYPE || next == PARSE_KIND_STRUCT || next == PARSE_KIND_ENUM || next == PARSE_KIND_TYPEOF || next == PARSE_VKIND_TYPE_NAME;
+    bool result = false;
+    switch (kind)
+    {
+        case PARSE_KIND_SEMI:
+        case PARSE_KIND_STAR:
+        case PARSE_KIND_AMPAMP:
+        case PARSE_KIND_IDENTIFIER:
+        case PARSE_VKIND_TYPE_NAME:
+        case PARSE_KIND_R_PAREN:
+        case PARSE_KIND_ELLIPSIS:
+        case PARSE_KIND_COMMA:
+        case PARSE_KIND_L_SQUARE:
+        case PARSE_KIND_L_PAREN:
+        case PARSE_KIND_ATTRIBUTE: result = true; break;
+        case PARSE_KIND_COLON: result = in_struct; break;
+        case PARSE_KIND_QUALIFIER:
+        case PARSE_KIND_STORAGE:
+        case PARSE_KIND_TYPEDEF:
+        case PARSE_KIND_ATOMIC: result = !next_type; break;
+        default: break;
+    }
+    return result;
+}
+
+// Why a token failed K6's checks, for test-parser's reports: bits of the checks.
+#define BUSTER_PARSE_CHECK_PAIR 0x01
+#define BUSTER_PARSE_CHECK_MODE 0x02
+#define BUSTER_PARSE_CHECK_END 0x04
+#define BUSTER_PARSE_CHECK_NAME 0x08
+#define BUSTER_PARSE_CHECK_LABEL 0x10
+#define BUSTER_PARSE_CHECK_CLAUSES 0x20
+#define BUSTER_PARSE_CHECK_ERROR 0x40
+#define BUSTER_PARSE_CHECK_TAG 0x80
+
+// The kind of each closer role's token: a closer's opener's role gave it its role, so a closer of another kind is
+// another bracket's.
+static uint8_t parse_check_closer_kind(uint8_t role)
+{
+    uint8_t result = PARSE_KIND_R_PAREN;
+    switch (role)
+    {
+        case PARSE_ROLE_CLOSE_SUBSCRIPT: result = PARSE_KIND_R_SQUARE; break;
+        case PARSE_ROLE_CLOSE_BLOCK:
+        case PARSE_ROLE_CLOSE_BODY:
+        case PARSE_ROLE_CLOSE_STRUCT:
+        case PARSE_ROLE_CLOSE_ENUM:
+        case PARSE_ROLE_CLOSE_INITIALIZER:
+        case PARSE_ROLE_CLOSE_COMPOUND_BODY: result = PARSE_KIND_R_BRACE; break;
+        case PARSE_ROLE_CLOSE_TERNARY:
+        case PARSE_ROLE_CLOSE_CASE: result = PARSE_KIND_COLON; break;
+        default: break;
+    }
+    return result;
+}
+
+static const char* const parse_class_names[PARSE_CLASS_COUNT] =
+{
+#define BUSTER_PARSE_ROLE_CLASS_NAME(name, level, compare, rule) #name,
+    BUSTER_PARSE_ROLES(BUSTER_PARSE_ROLE_CLASS_NAME)
+#undef BUSTER_PARSE_ROLE_CLASS_NAME
+#define BUSTER_PARSE_CLASS_NAME(name) #name,
+    BUSTER_PARSE_CLASSES(BUSTER_PARSE_CLASS_NAME)
+#undef BUSTER_PARSE_CLASS_NAME
+};
+
+static const char* const parse_check_mode_names[PARSE_CHECK_MODE_COUNT] =
+{
+#define BUSTER_PARSE_MODE_NAME(name) #name,
+    BUSTER_PARSE_MODES(BUSTER_PARSE_MODE_NAME)
+#undef BUSTER_PARSE_MODE_NAME
+};
+
+// K6, the twin: every token's mode from a frame per node depth (`frames` has a slot per token and one more), then the
+// checks, which flag the tokens that fail them. `names` are the tokens' IdentIds, `line_flags` their output flags
+// (BUSTER_PP_START_OF_LINE) and `typed` K2's typed state per token. For the tests, `classes`,
+// `modes` and `reasons` (each 0, or a byte per token) get each token's class, mode and failed checks (BUSTER_PARSE_CHECK_*;
+// an END failure is the token's before it, which ends its group).
+static void parse_check_scalar(ParseKernels* kernels, const uint32_t* names, const uint8_t* line_flags, uint32_t count, const uint8_t* typed, ParseCheckFrame* frames,
+                               uint8_t* classes, uint8_t* modes, uint8_t* reasons)
+{
+    frames[0] = (ParseCheckFrame){
+        .group = PARSE_GROUP_FILE,
+        .kind = 0,
+        .part = PARSE_PART_START,
+        .items = 0,
+        .terminators = 0,
+        .typed = 0,
+        .after_body = 0,
+        .start = BUSTER_PARSE_NONE,
+    };
+    uint8_t before_previous = PARSE_ROLE_NONE;
+    uint8_t previous = PARSE_ROLE_NONE;
+    uint8_t previous_role = PARSE_ROLE_NONE;
+    uint32_t previous_depth = 0;
+    uint8_t previous_mode = PARSE_CHECK_FILE_START;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint8_t role = kernels->roles[i];
+        const uint32_t depth = kernels->node_depths[i];
+        ParseCheckFrame* frame = &frames[depth];
+        // _Alignas's closer is a specifier as an attribute's is, whose specifiers had a type if they had before it.
+        const uint8_t alignas = role == PARSE_ROLE_CLOSE_SPECIFIER && frames[depth + 1].group == PARSE_GROUP_ALIGNAS;
+        const uint8_t c = alignas ? (frames[depth + 1].typed ? PARSE_CLASS_TYPED_ALIGNAS_CLOSE : PARSE_CLASS_ALIGNAS_CLOSE) :
+                                    parse_check_class(role, kernels->vkinds[i], names[i], typed[i] != 0);
+        // A closer is its group's, at the depth of its opener: it starts nothing.
+        const bool closer = parse_role_deltas[role] < 0;
+        const bool start = !closer && parse_check_starts(depth > previous_depth || i == 0, previous_role, previous);
+        if (start)
+        {
+            frame->kind = parse_check_item(frame->group, c);
+            frame->part = PARSE_PART_DECLARATION;
+            frame->items += frame->items < 3;
+            frame->start = i;
+        }
+        const uint8_t mode = parse_check_mode(frame->group, start, frame->kind, frame->part, frame->items);
+        const ParseCheckTables* t = &parse_check_tables;
+        // An attribute specifier after a tag's body is the tag's: the body's rule looks past it.
+        const bool transparent = c == PARSE_CLASS_ATTRIBUTE_KEYWORD || c == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER || c == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ||
+                                 c == PARSE_CLASS_TYPED_ATTRIBUTE;
+        // The token before this one ends its group if this one is at a lower depth (a closer), and it is the group's
+        // declarator that may need a name.
+        const bool previous_last = depth < previous_depth;
+        const bool named = ((t->named_modes >> (previous_last ? previous_mode : mode)) & 1) != 0;
+        const bool skipped = named && parse_class_set_has(&t->before_name, previous) && parse_class_set_has(&t->after_name, c) &&
+                             !(parse_class_set_has(&t->specifier_ends, previous) && (c == PARSE_ROLE_TERMINATOR || c == PARSE_ROLE_BITFIELD));
+        if (frame->group == PARSE_GROUP_FOR && role == PARSE_ROLE_TERMINATOR)
+        {
+            frame->terminators += 1;
+        }
+        // A label's name starts its statement; a for's group holds two `;`.
+        const uint8_t failed = (uint8_t)((!parse_class_set_has(&t->follows[previous], c) ? BUSTER_PARSE_CHECK_PAIR : 0) |
+                                         (!parse_class_set_has(&t->allows[mode], c) ? BUSTER_PARSE_CHECK_MODE : 0) |
+                                         (previous_last && !parse_class_set_has(&t->ends[previous_mode], previous) ? BUSTER_PARSE_CHECK_END : 0) |
+                                         (skipped ? BUSTER_PARSE_CHECK_NAME : 0) |
+                                         (role == PARSE_ROLE_LABEL && (frame->start != i - 1 || previous != PARSE_ROLE_OPERAND) ? BUSTER_PARSE_CHECK_LABEL : 0) |
+                                         ((frame->group == PARSE_GROUP_FOR && frame->terminators > 2) ||
+                                                  (role == PARSE_ROLE_CLOSE_FOR && frames[depth + 1].terminators != 2) ||
+                                                  (role == PARSE_ROLE_CLOSE_KEYWORD && frames[depth + 1].items != 2 &&
+                                                   !(frames[depth + 1].group == PARSE_GROUP_ASSERT && frames[depth + 1].items == 1)) ? BUSTER_PARSE_CHECK_CLAUSES : 0) |
+                                         // A statement expression: its block first and last in parentheses, in a function.
+                                         (mode == PARSE_CHECK_EXPRESSION && ((c == PARSE_ROLE_OPEN_BLOCK && (previous != PARSE_ROLE_OPEN_GROUP ||
+                                                                                                            frames[1].group != PARSE_GROUP_BLOCK)) ||
+                                                                             (c == PARSE_ROLE_CLOSE_BLOCK && kernels->roles[i + 1] != PARSE_ROLE_CLOSE_GROUP)) ?
+                                              BUSTER_PARSE_CHECK_CLAUSES : 0) |
+                                         (role == PARSE_ROLE_ERROR || (closer && kernels->vkinds[i] != parse_check_closer_kind(role)) ? BUSTER_PARSE_CHECK_ERROR : 0) |
+                                         // Only an array declarator's brackets may be empty.
+                                         (closer && depth == previous_depth && frames[depth + 1].group == PARSE_GROUP_SUBSCRIPT ? BUSTER_PARSE_CHECK_CLAUSES : 0) |
+                                         // After a tag's body (past its attributes), or a tag and a line break, what may
+                                         // follow a type; and nothing postfix after `&&label`.
+                                         (((frame->after_body && !transparent) || (previous == PARSE_ROLE_TAG && (line_flags[i] & BUSTER_PP_START_OF_LINE) != 0)) &&
+                                                  !parse_check_valid_after_tag(kernels->vkinds[i], kernels->vkinds[i + 1], frame->group == PARSE_GROUP_STRUCT) ?
+                                              BUSTER_PARSE_CHECK_TAG : 0) |
+                                         (before_previous == PARSE_CLASS_LABEL_ADDRESS && (c == PARSE_ROLE_OPEN_CALL || c == PARSE_ROLE_OPEN_SUBSCRIPT ||
+                                                                                           c == PARSE_ROLE_POSTFIX || c == PARSE_ROLE_MEMBER_OPERATOR) ?
+                                              BUSTER_PARSE_CHECK_TAG : 0) |
+                                         // A `*` outside declarators is an operator: an operand follows it.
+                                         (previous == PARSE_CLASS_STAR && ((t->declaration_modes >> previous_mode) & 1) == 0 &&
+                                                  !parse_class_set_has(&t->operand_starts, c) ? BUSTER_PARSE_CHECK_PAIR : 0));
+        kernels->flags[i] |= failed != 0;
+        if (classes != 0)
+        {
+            classes[i] = c;
+            modes[i] = mode;
+            reasons[i] = failed;
+        }
+        if (frame->kind == BUSTER_PARSE_ITEM_DECLARATION)
+        {
+            frame->part = parse_check_part_after(c, frame->part);
+        }
+        frame->after_body = c == PARSE_ROLE_CLOSE_STRUCT || c == PARSE_ROLE_CLOSE_ENUM || (frame->after_body && transparent);
+        if (parse_role_rules[role] == PARSE_RULE_OPENER)
+        {
+            frames[depth + 1] = (ParseCheckFrame){
+                .group = parse_check_group(c, mode, previous),
+                .kind = 0,
+                .part = PARSE_PART_START,
+                .items = 0,
+                .terminators = 0,
+                .typed = i >= 2 && typed[i - 2] != 0,
+                .after_body = 0,
+                .start = BUSTER_PARSE_NONE,
+            };
+        }
+        before_previous = previous;
+        previous = c;
+        previous_role = role;
+        previous_depth = depth;
+        previous_mode = mode;
+    }
+    // The file's last token ends it.
+    if (count != 0 && !parse_class_set_has(&parse_check_tables.ends[previous_mode], previous))
+    {
+        kernels->flags[count - 1] = 1;
+        if (classes != 0)
+        {
+            reasons[count - 1] |= BUSTER_PARSE_CHECK_END;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The fallback
 
 // What the scalar parser reads, for the fallback's ranges.
@@ -5179,7 +6379,8 @@ struct ParseFallback
     // Top-level declarations the scalar parser parsed, and their tokens.
     uint32_t items;
     uint64_t tokens;
-    // The scalar parser found an error in one, or ran out of memory.
+    // The scalar parser found an error in one, ran out of memory, or saw one declare a typedef name again as an ordinary
+    // identifier: the whole unit goes to the scalar parser.
     bool errors;
 };
 
@@ -5197,7 +6398,9 @@ static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input, 
     uint32_t diagnostic_count = 0;
     const ParseScalarResult parse = parse_scalar(input->kinds + begin, input->names + begin, input->flags + begin, end + 1 - begin, input->language, meanings, &tree,
                                                  input->scratch, input->diagnostics, input->diagnostic_capacity, &diagnostic_count);
-    result->errors |= parse.errors != 0 || parse.out_of_memory;
+    // A declaration that made a file-scope typedef name an ordinary one changes how the rest of the unit parses, which
+    // the kernels' type names don't know: the whole unit goes to the scalar parser.
+    result->errors |= parse.errors != 0 || parse.out_of_memory || parse.retyped;
     for (uint32_t j = begin; j <= end; j += 1)
     {
         kernels->parents[j] = kernels->parents[j] == BUSTER_PARSE_ROOT ? BUSTER_PARSE_ROOT : kernels->parents[j] + begin;
@@ -5315,18 +6518,22 @@ static bool parse_kernels_reserve(ParseKernels* kernels, Arena* arena, uint64_t 
         .lefts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .left_key_values = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .typedef_names = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, name_capacity),
+        .typedef_first = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, name_capacity),
         .typedef_log = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .typedef_tokens = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .typedef_scopes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
+        .check_frames = BUSTER_ARENA_PUSH_ARRAY(arena, ParseCheckFrame, slots),
     };
     const bool result = kernels->vkinds != 0 && kernels->depths != 0 && kernels->node_depths != 0 && kernels->enclosing != 0 && kernels->bracket_blocks != 0 &&
                         kernels->role_statics != 0 && kernels->roles != 0 &&
                         kernels->parents != 0 && kernels->flags != 0 && kernels->stack != 0 && kernels->stack_keys != 0 && kernels->waiting != 0 &&
-                        kernels->waiting_thresholds != 0 && kernels->lefts != 0 && kernels->left_key_values != 0 && kernels->typedef_names != 0 && kernels->typedef_log != 0 &&
-                        kernels->typedef_tokens != 0 && kernels->typedef_scopes != 0;
+                        kernels->waiting_thresholds != 0 && kernels->lefts != 0 && kernels->left_key_values != 0 && kernels->typedef_names != 0 &&
+                        kernels->typedef_first != 0 && kernels->typedef_log != 0 &&
+                        kernels->typedef_tokens != 0 && kernels->typedef_scopes != 0 && kernels->check_frames != 0;
     if (result)
     {
         memset(kernels->typedef_names, 0, name_capacity);
+        memset(kernels->typedef_first, 0, name_capacity * sizeof(uint32_t));
         memset(vkinds, PARSE_KIND_END, slots);
         memset(roles, PARSE_ROLE_NONE, slots);
         memset(flags, 0, slots);
@@ -5369,9 +6576,10 @@ static ParseKernelResult parse_twins(ParseKernels* kernels, const ParseInput* in
     // K1's second part, and the roles after the colons it resolved.
     parse_secondary_scalar(kernels, count, kernels->stack);
     parse_after_colons(kernels, count);
-    // K4 and K5.
+    // K4, K5 and K6.
     parse_parents_scalar(kernels, count);
     const bool statements_ok = parse_statements(kernels, count, statements);
+    parse_check_scalar(kernels, names, input->flags, count, typed, kernels->check_frames, 0, 0, 0);
     for (uint32_t i = 0; i < count; i += 1)
     {
         result.flagged_tokens += kernels->flags[i] != 0;
@@ -5559,10 +6767,11 @@ BUSTER_INLINE __m512i parse_prefix_sum8(__m512i x)
 }
 
 // One block of K1's twin, for a block whose enclosing openers reach further back than the vector path's 16 depths. Out
-// of line, so that this rare path leaves the block loop's code alone.
-__attribute__((noinline)) static void parse_brackets_block_scalar(const uint8_t* codes, const int8_t* deltas, uint32_t begin, uint32_t end, uint32_t* depths, uint32_t* enclosing,
+// of line, so that this rare path leaves the block loop's code alone. Returns false if a closer has no opener.
+__attribute__((noinline)) static bool parse_brackets_block_scalar(const uint8_t* codes, const int8_t* deltas, uint32_t begin, uint32_t end, uint32_t* depths, uint32_t* enclosing,
                                         uint32_t* open_stack, int64_t* depth)
 {
+    bool balanced = true;
     for (uint32_t i = begin; i < end; i += 1)
     {
         const int8_t delta = deltas[codes[i]];
@@ -5573,8 +6782,10 @@ __attribute__((noinline)) static void parse_brackets_block_scalar(const uint8_t*
             open_stack[*depth] = i;
         }
         *depth += delta;
+        balanced &= *depth >= 0;
         *depth = *depth < 0 ? 0 : *depth;
     }
+    return balanced;
 }
 
 // K1 in AVX-512, 64 tokens a block in byte lanes. The depth is a prefix sum of the deltas; a token's enclosing opener is
@@ -5623,7 +6834,7 @@ static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, ui
         const __mmask64 deep = _mm512_mask_cmplt_epi8_mask(~found & live_mask, before, _mm512_set1_epi8(-15));
         if (deep != 0)
         {
-            parse_brackets_block_scalar(codes, deltas, block, block + live, depths, enclosing, open_stack, &base);
+            balanced &= parse_brackets_block_scalar(codes, deltas, block, block + live, depths, enclosing, open_stack, &base);
         }
         else
         {
@@ -6879,7 +8090,9 @@ static void parse_classify_mask_avx512(ParseKernels* kernels, const uint8_t* kin
             lanes &= lanes - 1;
             const uint8_t meaning = kernels->typedef_names[names[block + lane]];
             type_names |= (uint64_t)(meaning != 0) << lane;
-            scoped |= (uint64_t)(meaning == BUSTER_PARSE_TYPEDEF_SCOPED) << lane;
+            const bool early = meaning != 0 && block + lane < kernels->typedef_first[names[block + lane]] &&
+                               parse_classify_ordinary(kinds[(int64_t)block + lane - 1]);
+            scoped |= (uint64_t)(meaning == BUSTER_PARSE_TYPEDEF_SCOPED || early) << lane;
         }
         _mm512_storeu_si512(kernels->vkinds + block, _mm512_mask_mov_epi8(kind, type_names, _mm512_set1_epi8(PARSE_VKIND_TYPE_NAME)));
         _mm512_storeu_si512(kernels->flags + block, _mm512_maskz_mov_epi8(scoped, _mm512_set1_epi8(1)));
@@ -7230,9 +8443,9 @@ static void parse_statement_sparse(ParseKernels* kernels, uint32_t count, const 
         }
         if (parse_statement_is_head(kernels, head))
         {
-            // Its `;` must come next.
+            // Its `;` must come next: the next event, and the token right after the `)`.
             const uint32_t next = parse_statement_next(kernels, count, contexts, i);
-            state->twin |= next == BUSTER_PARSE_NONE || kernels->roles[next] != PARSE_ROLE_TERMINATOR;
+            state->twin |= next == BUSTER_PARSE_NONE || next != i + 1 || kernels->roles[next] != PARSE_ROLE_TERMINATOR;
             state->pending_while = i;
             state->pending_do = head;
             state->open_dos -= 1;
@@ -8418,9 +9631,10 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
     // K1's second part, and the roles after the colons it resolved.
     parse_secondary_avx512(kernels, count, buffers->secondary);
     parse_after_colons_avx512(kernels, count);
-    // K4 and K5.
+    // K4, K5 and K6.
     parse_parents_vector(kernels, count, buffers);
     const bool statements_ok = parse_statements_vector(kernels, count, buffers);
+    parse_check_scalar(kernels, names, input->flags, count, buffers->typed, kernels->check_frames, 0, 0, 0);
     for (uint32_t block = 0; block < count; block += 64)
     {
         const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
@@ -8580,6 +9794,7 @@ static void parse_tables_initialize(void)
         parse_parent_tables_init();
         parse_role_tables_init();
         parse_statement_tables_init();
+        parse_check_tables_init();
         parse_tables_ready = true;
     }
 }
@@ -8715,6 +9930,11 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
             result = false;
         }
     }
+    if (result && scalar && !parser->options.scalar)
+    {
+        // The fallback's declarations may have left typedef names' meanings changed: the scalar parser starts afresh.
+        result = parse_prepare_meanings(parser, pp->table);
+    }
     if (result && scalar)
     {
         parser->tree.roles = parse_column(parser, 5, parser->tokens.count, 1);
@@ -8723,7 +9943,7 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
         const ParseScalarResult parsed = parser->tree.roles != 0 && parser->tree.parents != 0 && parser->tree.depths != 0 ?
             parse_scalar(parser->tokens.kinds, parser->tokens.names, parser->tokens.flags, parser->tokens.count, parser->language, &parser->meanings, &parser->tree,
                          &parser->scratch, parser->diagnostics, parser->diagnostic_capacity, &parser->diagnostic_count) :
-            (ParseScalarResult){ .errors = 0, .out_of_memory = true };
+            (ParseScalarResult){ .errors = 0, .out_of_memory = true, .retyped = false };
         parser->errors = parsed.errors + parsed.out_of_memory;
         result = parser->errors == 0;
     }

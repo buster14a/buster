@@ -8,13 +8,15 @@
 //   - files: every .c file under each path, preprocessed and parsed, must be accepted; with --clang, clang decides,
 //     and the parser must accept exactly what `clang -fsyntax-only` accepts.
 //   - mutations (--mutations N): N mutated copies of the files (a token deleted, duplicated, or swapped with the next,
-//     in the -E text, with spaces kept around the change), each checked against clang: a file clang accepts must be
-//     accepted, and one whose first error is a "Parse Issue" must be rejected with its first error on the same line.
+//     in the -E text, with spaces kept around the change). With --clang, each is checked against clang: a file clang
+//     accepts must be accepted, and one whose first error is a "Parse Issue" must be rejected with its first error on
+//     the same line. Without, each goes through both paths, which must agree as on any file.
 //
 // main.c includes this file after c_parser.c. Layout: running the parser on a file (ParseTestOutcome,
 // parse_test_parse_file), running clang (parse_test_clang), the snippets, the files and the mutations, then
 // run_parser_tests.
 
+#include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -423,6 +425,24 @@ static uint32_t parse_test_check_snippets(const char* directory, const char* cla
 // ---------------------------------------------------------------------------------------------------------------------
 // The trees
 
+// How many more reports of differences the checks print: the mutations' runs can find many, and the first ones say
+// enough.
+static uint32_t parse_test_report_budget = 200;
+
+static void parse_test_report(const char* format, ...) __attribute__((format(printf, 1, 2)));
+
+static void parse_test_report(const char* format, ...)
+{
+    if (parse_test_report_budget != 0)
+    {
+        parse_test_report_budget -= 1;
+        va_list arguments;
+        va_start(arguments, format);
+        vprintf(format, arguments);
+        va_end(arguments);
+    }
+}
+
 // The tree's invariants: every parent is another token or the root, no deeper than its child; every opener's parent is
 // a closer after it; and following parents always reaches the root (no cycle). `marks` has a byte per token. Returns
 // the first token that breaks one, or BUSTER_PARSE_NONE.
@@ -556,36 +576,22 @@ static uint8_t parse_test_canonical_role(uint8_t role)
     return result;
 }
 
-// The spelling of parser token `t`, for the checks' reports.
-static void parse_test_print_token(const Parser* parser, Preprocessor* pp, uint32_t t)
-{
-    if (t < parser->tokens.count)
-    {
-        const uint32_t start = pp->output.locations[parser->tokens.sources[t]];
-        const uint32_t end = parse_token_end(parser, pp, t);
-        const uint8_t* bytes = pp_location_bytes(pp, start);
-        const uint32_t length = bytes != 0 && end > start ? (end - start < 40 ? end - start : 40) : 0;
-        printf("%.*s", (int)length, (const char*)bytes);
-    }
-    else
-    {
-        printf("<end>");
-    }
-}
-
-// The tokens around `token`, the token itself marked.
+// The tokens around `token`, the token itself marked, as one report.
 static void parse_test_print_context(const Parser* parser, Preprocessor* pp, uint32_t token)
 {
+    char text[1024];
+    uint32_t length = 0;
     const uint32_t begin = token > 12 ? token - 12 : 0;
     const uint32_t end = token + 12 < parser->tokens.count ? token + 12 : parser->tokens.count;
-    printf("   ");
-    for (uint32_t i = begin; i < end; i += 1)
+    for (uint32_t i = begin; i < end && length < sizeof(text) - 64; i += 1)
     {
-        printf(i == token ? " >>" : " ");
-        parse_test_print_token(parser, pp, i);
-        printf(i == token ? "<<" : "");
+        const uint32_t start = pp->output.locations[parser->tokens.sources[i]];
+        const uint32_t stop = parse_token_end(parser, pp, i);
+        const uint8_t* bytes = pp_location_bytes(pp, start);
+        const uint32_t size = bytes != 0 && stop > start ? (stop - start < 40 ? stop - start : 40) : 0;
+        length += (uint32_t)snprintf(text + length, sizeof(text) - length, i == token ? " >>%.*s<<" : " %.*s", (int)size, (const char*)bytes);
     }
-    printf("\n");
+    parse_test_report("   %s%s\n", text, token >= parser->tokens.count ? " >><end><<" : "");
 }
 
 // The postorders of a tree, the walk's and the sorted one's, against a depth-first walk.
@@ -610,14 +616,14 @@ static uint32_t parse_test_postorders(const Parser* parser, Preprocessor* pp, co
         if (walk != BUSTER_PARSE_NONE || sorted != BUSTER_PARSE_NONE)
         {
             failures += 1;
-            printf("%s: the postorder differs from a depth-first walk's at position %d (walk) and %d (sorted): token %d where the walk has %d\n", name, (int)walk,
+            parse_test_report("%s: the postorder differs from a depth-first walk's at position %d (walk) and %d (sorted): token %d where the walk has %d\n", name, (int)walk,
                    (int)sorted, (int)found, (int)expected);
             if (expected != BUSTER_PARSE_NONE)
             {
                 parse_test_print_context(parser, pp, expected);
                 for (uint32_t t = expected > 6 ? expected - 6 : 0; t < expected + 40 && t < count; t += 1)
                 {
-                    printf("    %u %s depth %u parent %d\n", t, parse_role_names[tree->roles[t]], tree->depths[t], (int)tree->parents[t]);
+                    parse_test_report("    %u %s depth %u parent %d\n", t, parse_role_names[tree->roles[t]], tree->depths[t], (int)tree->parents[t]);
                 }
             }
         }
@@ -646,7 +652,7 @@ static uint32_t parse_test_compare_trees(const Parser* vector, const Parser* sca
     if (first != BUSTER_PARSE_NONE)
     {
         failures += 1;
-        printf("%s: the vector path's tree differs at token %u: role %s, depth %u, parent %d against the scalar parser's %s, %u, %d\n", name, first,
+        parse_test_report("%s: the vector path's tree differs at token %u: role %s, depth %u, parent %d against the scalar parser's %s, %u, %d\n", name, first,
                parse_role_names[vector->tree.roles[first]], vector->tree.depths[first], (int)vector->tree.parents[first], parse_role_names[scalar->tree.roles[first]],
                scalar->tree.depths[first], (int)scalar->tree.parents[first]);
         parse_test_print_context(scalar, pp, first);
@@ -658,7 +664,7 @@ static uint32_t parse_test_compare_trees(const Parser* vector, const Parser* sca
     if (broken != BUSTER_PARSE_NONE)
     {
         failures += 1;
-        printf("%s: the tree's invariants break at token %u\n", name, broken);
+        parse_test_report("%s: the tree's invariants break at token %u\n", name, broken);
         parse_test_print_context(scalar, pp, broken);
     }
     failures += parse_test_postorders(scalar, pp, &scalar->tree, count, name, scratch);
@@ -746,7 +752,7 @@ static uint32_t parse_test_kernel_differs(const Parser* parser, Preprocessor* pp
     uint32_t result = 0;
     if (token != BUSTER_PARSE_NONE)
     {
-        printf("%s: %s differs at token %u\n", name, kernel, token);
+        parse_test_report("%s: %s differs at token %u\n", name, kernel, token);
         parse_test_print_context(parser, pp, token);
         result = 1;
     }
@@ -772,10 +778,10 @@ static uint32_t parse_test_check_statements(const Parser* parser, Preprocessor* 
     const uint32_t first = verdict == PARSE_STATEMENTS_OK && twin_ok ? parse_test_first_word(parents, copies->parents, count) : BUSTER_PARSE_NONE;
     if (verdict != PARSE_STATEMENTS_TWIN && (twin_ok != (verdict == PARSE_STATEMENTS_OK) || first != BUSTER_PARSE_NONE))
     {
-        printf("%s: K5 differs: twin %s, vector %s\n", name, twin_ok ? "true" : "false", verdict == PARSE_STATEMENTS_OK ? "true" : "false");
+        parse_test_report("%s: K5 differs: twin %s, vector %s\n", name, twin_ok ? "true" : "false", verdict == PARSE_STATEMENTS_OK ? "true" : "false");
         if (first != BUSTER_PARSE_NONE)
         {
-            printf("  at token %u: twin %d, vector %d\n", first, (int)parents[first], (int)copies->parents[first]);
+            parse_test_report("  at token %u: twin %d, vector %d\n", first, (int)parents[first], (int)copies->parents[first]);
             parse_test_print_context(parser, pp, first);
         }
         result = 1;
@@ -874,7 +880,7 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
     }
     if (!reserved)
     {
-        printf("%s: can't reserve the kernel checks' memory\n", name);
+        parse_test_report("%s: can't reserve the kernel checks' memory\n", name);
         result += 1;
     }
     else
@@ -899,7 +905,7 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
         }
         if (twin_balanced != vector_balanced)
         {
-            printf("%s: K1 differs: balanced %d, and %d in AVX-512\n", name, twin_balanced, vector_balanced);
+            parse_test_report("%s: K1 differs: balanced %d, and %d in AVX-512\n", name, twin_balanced, vector_balanced);
             result += 1;
         }
         result += parse_test_kernel_differs(parser, pp, name, "K1", first);
@@ -929,7 +935,7 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
         first = first != BUSTER_PARSE_NONE ? first : parse_test_first_byte(copies.typed, copies.twin_typed, count);
         if (first != BUSTER_PARSE_NONE)
         {
-            printf("%s: K2 differs at token %u: twin %s%s, vector %s%s\n", name, first, parse_role_names[kernels->roles[first]], kernels->flags[first] ? " (flagged)" : "",
+            parse_test_report("%s: K2 differs at token %u: twin %s%s, vector %s%s\n", name, first, parse_role_names[kernels->roles[first]], kernels->flags[first] ? " (flagged)" : "",
                    parse_role_names[copies.roles[first]], copies.flags[first] ? " (flagged)" : "");
             parse_test_print_context(parser, pp, first);
             result += 1;
@@ -962,7 +968,7 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
         first = first != BUSTER_PARSE_NONE ? first : parse_test_first_word(copies.node_depths, kernels->node_depths, count);
         if (vector_unbalanced != kernels->unbalanced)
         {
-            printf("%s: K1's second part differs: unbalanced %d, and %d in AVX-512\n", name, kernels->unbalanced, vector_unbalanced);
+            parse_test_report("%s: K1's second part differs: unbalanced %d, and %d in AVX-512\n", name, kernels->unbalanced, vector_unbalanced);
             result += 1;
         }
         result += parse_test_kernel_differs(parser, pp, name, "K1's second part", first);
@@ -989,7 +995,7 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
                 first = parse_test_first_word(kernels->parents, copies.parents, count);
                 if (first != BUSTER_PARSE_NONE)
                 {
-                    printf("%s: K4 with a window of %u lanes differs at token %u: twin %d, vector %d\n", name, reaches[r], first, (int)kernels->parents[first],
+                    parse_test_report("%s: K4 with a window of %u lanes differs at token %u: twin %d, vector %d\n", name, reaches[r], first, (int)kernels->parents[first],
                            (int)copies.parents[first]);
                     parse_test_print_context(parser, pp, first);
                     result += 1;
@@ -1027,16 +1033,17 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
             }
             if (first != BUSTER_PARSE_NONE)
             {
-                printf("%s: the twins' tree differs at token %u: role %s, depth %u, parent %d against the scalar parser's %s, %u, %d\n", name, first,
+                parse_test_report("%s: the twins' tree differs at token %u: role %s, depth %u, parent %d against the scalar parser's %s, %u, %d\n", name, first,
                        parse_role_names[kernels->roles[first]], kernels->node_depths[first], (int)kernels->parents[first], parse_role_names[scalar->tree.roles[first]],
                        scalar->tree.depths[first], (int)scalar->tree.parents[first]);
                 parse_test_print_context(parser, pp, first);
                 result += 1;
             }
         }
-        else if (scalar->errors == 0)
+        else if (scalar->errors == 0 && !parser->statistics.whole)
         {
-            printf("%s: the twins' fallback found an error the scalar parser didn't\n", name);
+            // The vector path took the unit to the scalar parser too, as a declaration may make a typedef name ordinary.
+            parse_test_report("%s: the twins' fallback found an error the scalar parser didn't\n", name);
             result += 1;
         }
     }
@@ -1092,12 +1099,12 @@ static uint32_t parse_test_check_file(const char* path, const PPOptions* options
             if (token != BUSTER_PARSE_NONE)
             {
                 failures += 1;
-                printf("%s: the input's vector path and its twin differ at token %u\n", path, token);
+                parse_test_report("%s: the input's vector path and its twin differ at token %u\n", path, token);
             }
             else if (outcome->errors != alone.errors || outcome->line != alone.line || outcome->column != alone.column || strcmp(outcome->message, alone.message) != 0)
             {
                 failures += 1;
-                printf("%s: the paths differ: %u errors, first %u:%u: %s, and the scalar parser's %u, %u:%u: %s\n", path, outcome->errors, outcome->line, outcome->column,
+                parse_test_report("%s: the paths differ: %u errors, first %u:%u: %s, and the scalar parser's %u, %u:%u: %s\n", path, outcome->errors, outcome->line, outcome->column,
                        outcome->message, alone.errors, alone.line, alone.column, alone.message);
             }
             else
@@ -1119,6 +1126,218 @@ static uint32_t parse_test_check_file(const char* path, const PPOptions* options
         outcome->out_of_memory = true;
         failures += 1;
     }
+    return failures;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// K6's failures on valid code
+
+// A failure's signature: which checks failed, the class before, the token's class and its mode.
+typedef struct ParseTestFailure ParseTestFailure;
+struct ParseTestFailure
+{
+    uint32_t key;
+    uint32_t count;
+    char example[1100];
+};
+
+#define BUSTER_PARSE_TEST_FAILURES 4096
+
+// `--explain`: every file's units through the twins, with K6's reasons, tallied by signature; the commonest are printed
+// with an example each. Valid code that fails a check goes to the scalar parser for nothing, so these say what the
+// checks miss.
+static uint32_t parse_test_explain(char** files, uint32_t file_count, const PPOptions* options)
+{
+    static ParseTestFailure failures[BUSTER_PARSE_TEST_FAILURES];
+    uint32_t failure_count = 0;
+    uint64_t tokens = 0;
+    uint64_t flagged = 0;
+    uint64_t k3_flagged = 0;
+    uint32_t k3_reports = 0;
+    for (uint32_t f = 0; f < file_count; f += 1)
+    {
+        static InternTable table;
+        static Preprocessor pp;
+        static Parser parser;
+        const ParseOptions parse_options = { .scalar = false };
+        if (intern_initialize(&table) && pp_initialize(&pp, options, &table) && parse_initialize(&parser, &parse_options, options->language) && pp_run(&pp, files[f]) &&
+            parse_translation_unit(&parser, &pp))
+        {
+            const uint32_t count = parser.tokens.count;
+            const uint64_t slots = (uint64_t)count + 2 * BUSTER_PARSE_TOKEN_PADDING;
+            Arena arena = arena_reserve(slots * 64 + (uint64_t)parser.meanings.capacity + (64ull << 20));
+            ParseKernels kernels;
+            uint8_t* typed = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, slots);
+            ParseStatement* statements = BUSTER_ARENA_PUSH_ARRAY(&arena, ParseStatement, slots);
+            uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, slots);
+            uint8_t* modes = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, slots);
+            uint8_t* reasons = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, slots);
+            if (parse_kernels_reserve(&kernels, &arena, count, parser.meanings.capacity) && typed != 0 && statements != 0 && classes != 0 && modes != 0 && reasons != 0)
+            {
+                const uint8_t* kinds = parser.tokens.kinds;
+                const uint32_t* names = parser.tokens.names;
+                // The twins up to K5, as parse_twins runs them, then K6 with its reasons.
+                parse_kernels_predeclared(&kernels, parser.predeclared, true);
+                kernels.unbalanced = !parse_brackets_scalar(kinds, parse_kind_deltas, count, kernels.depths, kernels.enclosing, kernels.stack);
+                if (!kernels.unbalanced)
+                {
+                    parse_typedefs(&kernels, kinds, names, count);
+                }
+                parse_classify_scalar(&kernels, kinds, names, count);
+                // K3's own flags: uses of names some block declares as typedefs, and uses before a name's typedef.
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    if (kernels.flags[i] != 0 && k3_reports < 12)
+                    {
+                        k3_reports += 1;
+                        const uint32_t start = pp.output.locations[parser.tokens.sources[i]];
+                        const uint32_t stop = parse_token_end(&parser, &pp, i);
+                        const uint8_t* bytes = pp_location_bytes(&pp, start);
+                        printf("K3 flags token %u, %.*s (first typedef declarator at %u)\n", i, (int)(stop - start < 40 ? stop - start : 40), (const char*)bytes,
+                               kernels.typedef_first[names[i]]);
+                    }
+                    k3_flagged += kernels.flags[i] != 0;
+                }
+                parse_roles_scalar(&kernels, count, typed);
+                parse_secondary_scalar(&kernels, count, kernels.stack);
+                parse_after_colons(&kernels, count);
+                parse_parents_scalar(&kernels, count);
+                parse_statements(&kernels, count, statements);
+                memset(kernels.flags, 0, count);
+                parse_check_scalar(&kernels, names, parser.tokens.flags, count, typed, kernels.check_frames, classes, modes, reasons);
+                tokens += count;
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    flagged += reasons[i] != 0;
+                    if (reasons[i] != 0)
+                    {
+                        // An END failure is the token before's; its mode and class are its own.
+                        const uint32_t at = (reasons[i] & BUSTER_PARSE_CHECK_END) != 0 && i > 0 && reasons[i] == BUSTER_PARSE_CHECK_END ? i - 1 : i;
+                        const uint8_t before = at > 0 ? classes[at - 1] : PARSE_ROLE_NONE;
+                        const uint32_t key = (uint32_t)reasons[i] << 24 | (uint32_t)before << 16 | (uint32_t)classes[at] << 8 | modes[at];
+                        uint32_t k = 0;
+                        while (k < failure_count && failures[k].key != key)
+                        {
+                            k += 1;
+                        }
+                        if (k == failure_count && failure_count < BUSTER_PARSE_TEST_FAILURES)
+                        {
+                            failures[k].key = key;
+                            failures[k].count = 0;
+                            failure_count += 1;
+                            const uint32_t budget = parse_test_report_budget;
+                            parse_test_report_budget = 0;
+                            char text[1024];
+                            uint32_t length = 0;
+                            for (uint32_t t = at > 10 ? at - 10 : 0; t < at + 6 && t < count && length < sizeof(text) - 64; t += 1)
+                            {
+                                const uint32_t start = pp.output.locations[parser.tokens.sources[t]];
+                                const uint32_t stop = parse_token_end(&parser, &pp, t);
+                                const uint8_t* bytes = pp_location_bytes(&pp, start);
+                                const uint32_t size = bytes != 0 && stop > start ? (stop - start < 30 ? stop - start : 30) : 0;
+                                length += (uint32_t)snprintf(text + length, sizeof(text) - length, t == at ? " >>%.*s<<" : " %.*s", (int)size, (const char*)bytes);
+                            }
+                            parse_test_report_budget = budget;
+                            snprintf(failures[k].example, sizeof(failures[k].example), "%s", text);
+                        }
+                        if (k < failure_count)
+                        {
+                            failures[k].count += 1;
+                        }
+                    }
+                }
+                parse_typedefs_clear(&kernels);
+                parse_kernels_predeclared(&kernels, parser.predeclared, false);
+            }
+            arena_release(&arena);
+        }
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&table);
+    }
+    // The commonest first.
+    for (uint32_t a = 0; a < failure_count; a += 1)
+    {
+        for (uint32_t b = a + 1; b < failure_count; b += 1)
+        {
+            if (failures[b].count > failures[a].count)
+            {
+                const ParseTestFailure swap = failures[a];
+                failures[a] = failures[b];
+                failures[b] = swap;
+            }
+        }
+    }
+    printf("K3 flags %llu tokens; K6 on %llu tokens: %llu fail, %u signatures\n", (unsigned long long)k3_flagged, (unsigned long long)tokens, (unsigned long long)flagged,
+           failure_count);
+    static const char* const check_names[] = { "pair", "mode", "end", "name", "label", "clauses", "error", "tag" };
+    for (uint32_t k = 0; k < failure_count && k < 80; k += 1)
+    {
+        const uint32_t key = failures[k].key;
+        char checks[64] = "";
+        for (uint32_t bit = 0; bit < 8; bit += 1)
+        {
+            if ((key >> 24) & (1u << bit))
+            {
+                strcat(checks, checks[0] != 0 ? "+" : "");
+                strcat(checks, check_names[bit]);
+            }
+        }
+        printf("%7u %-10s %-24s %-24s %-24s\n        %s\n", failures[k].count, checks, parse_class_names[(key >> 16) & 0xFF], parse_class_names[(key >> 8) & 0xFF],
+               parse_check_mode_names[key & 0xFF], failures[k].example);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A look at a tree
+
+// `--print-tree FILE [FIRST LAST]`: each token of the file's unit (from FIRST to LAST, by the main file's lines) with its
+// kind, and its role, node depth and parent by the vector path and by the scalar parser, a difference marked.
+static uint32_t parse_test_print_tree(const char* path, const PPOptions* options, uint32_t first_line, uint32_t last_line)
+{
+    uint32_t failures = 0;
+    static InternTable table;
+    static Preprocessor pp;
+    static Parser vector;
+    static Parser scalar;
+    const ParseOptions vector_options = { .scalar = false };
+    const ParseOptions scalar_options = { .scalar = true };
+    if (intern_initialize(&table) && pp_initialize(&pp, options, &table) && parse_initialize(&vector, &vector_options, options->language) &&
+        parse_initialize(&scalar, &scalar_options, options->language) && pp_run(&pp, path))
+    {
+        parse_translation_unit(&vector, &pp);
+        parse_translation_unit(&scalar, &pp);
+        printf("vector path: %u errors%s; scalar parser: %u errors\n", vector.errors, vector.statistics.whole ? " (the whole unit went to the scalar parser)" : "",
+               scalar.errors);
+        for (uint32_t t = 0; t < scalar.tokens.count && t < vector.tokens.count; t += 1)
+        {
+            const uint32_t location = pp.output.locations[scalar.tokens.sources[t]];
+            const char* name;
+            uint32_t name_length;
+            const uint32_t line = pp_presumed(&pp, location, &name, &name_length);
+            if (line >= first_line && line <= last_line)
+            {
+                const uint32_t end = parse_token_end(&scalar, &pp, t);
+                const uint8_t* bytes = pp_location_bytes(&pp, location);
+                const int length = bytes != 0 && end > location ? (int)(end - location < 24 ? end - location : 24) : 0;
+                const bool differ = vector.tree.parents[t] != scalar.tree.parents[t] || vector.tree.depths[t] != scalar.tree.depths[t] ||
+                                    parse_test_canonical_role(vector.tree.roles[t]) != parse_test_canonical_role(scalar.tree.roles[t]);
+                printf("%7u %5u  %-24.*s %-14s | %-24s %3u %7d | %-24s %3u %7d%s\n", t, line, length, (const char*)bytes, parse_kind_names[scalar.tokens.kinds[t]],
+                       parse_role_names[vector.tree.roles[t]], vector.tree.depths[t], (int)vector.tree.parents[t], parse_role_names[scalar.tree.roles[t]],
+                       scalar.tree.depths[t], (int)scalar.tree.parents[t], differ ? "  <<" : "");
+            }
+        }
+    }
+    else
+    {
+        printf("%s: can't parse\n", path);
+        failures += 1;
+    }
+    parse_release(&scalar);
+    parse_release(&vector);
+    pp_release(&pp);
+    intern_release(&table);
     return failures;
 }
 
@@ -1280,12 +1499,16 @@ static void parse_test_compare(ParseTestTally* tally, const char* label, const P
 
 #define BUSTER_PARSE_TEST_BATCH 32
 
-// The mutations: `count` mutated copies of the files, spread over them in turn, each checked against clang.
+// The mutations: `count` mutated copies of the files, spread over them in turn, each checked against clang, or without
+// `clang`, by both paths, which must agree as they must on any file (parse_test_check_file).
 static uint32_t parse_test_mutations(char** files, uint32_t file_count, const PPOptions* options, const char* const* clang_arguments, uint32_t clang_argument_count,
                                      const char* clang, uint64_t count, uint64_t seed, const char* directory, bool keep)
 {
     uint32_t failures = 0;
     ParseTestTally tally = { 0 };
+    ParseTestKernelTally kernels = { 0 };
+    uint64_t rejected = 0;
+    uint64_t differ = 0;
     uint64_t state = seed;
     PPOptions plain = *options;
     // The mutated files are -E's text: nothing to include.
@@ -1327,7 +1550,7 @@ static uint32_t parse_test_mutations(char** files, uint32_t file_count, const PP
                          token, (int)(ends[token] - starts[token] < 40 ? ends[token] - starts[token] : 40), text + starts[token]);
                 free(mutated);
             }
-            if (!parse_test_clang(clang, clang_arguments, clang_argument_count, batch_paths, in_batch, batch_results))
+            if (clang != 0 && !parse_test_clang(clang, clang_arguments, clang_argument_count, batch_paths, in_batch, batch_results))
             {
                 printf("can't run %s\n", clang);
                 failures += 1;
@@ -1335,11 +1558,28 @@ static uint32_t parse_test_mutations(char** files, uint32_t file_count, const PP
             }
             for (uint32_t b = 0; b < in_batch && failures == 0; b += 1)
             {
-                const ParseTestOutcome ours = parse_test_parse_file(batch_paths[b], &plain, false);
-                char label[4096];
                 const uint64_t mismatches = tally.mismatches;
-                snprintf(label, sizeof(label), "%s", file);
-                parse_test_compare(&tally, label, &ours, &batch_results[b], batch_details[b]);
+                if (clang != 0)
+                {
+                    const ParseTestOutcome ours = parse_test_parse_file(batch_paths[b], &plain, false);
+                    char label[4096];
+                    snprintf(label, sizeof(label), "%s", file);
+                    parse_test_compare(&tally, label, &ours, &batch_results[b], batch_details[b]);
+                }
+                else
+                {
+                    ParseTestOutcome ours;
+                    const uint32_t budget = parse_test_report_budget;
+                    const uint32_t differences = parse_test_check_file(batch_paths[b], &plain, &ours, &kernels);
+                    tally.files += 1;
+                    rejected += ours.errors != 0;
+                    differ += differences != 0;
+                    tally.mismatches += differences != 0;
+                    if (differences != 0 && budget != 0)
+                    {
+                        printf("    in %s%s\n", file, batch_details[b]);
+                    }
+                }
                 if (keep && tally.mismatches != mismatches)
                 {
                     // Kept for a look: the mismatch's mutated file.
@@ -1362,9 +1602,17 @@ static uint32_t parse_test_mutations(char** files, uint32_t file_count, const PP
     {
         free(batch_paths[b]);
     }
-    printf("mutations: %llu (clang accepted %llu, a parse issue first in %llu, another issue first in %llu, of which we rejected %llu), %llu mismatches\n",
-           (unsigned long long)tally.files, (unsigned long long)tally.accepted, (unsigned long long)tally.parse_issues, (unsigned long long)tally.other_issues,
-           (unsigned long long)tally.other_rejected, (unsigned long long)tally.mismatches);
+    if (clang != 0)
+    {
+        printf("mutations: %llu (clang accepted %llu, a parse issue first in %llu, another issue first in %llu, of which we rejected %llu), %llu mismatches\n",
+               (unsigned long long)tally.files, (unsigned long long)tally.accepted, (unsigned long long)tally.parse_issues, (unsigned long long)tally.other_issues,
+               (unsigned long long)tally.other_rejected, (unsigned long long)tally.mismatches);
+    }
+    else
+    {
+        printf("mutations: %llu by both paths (the scalar parser rejected %llu), %llu where they differ; the fallback took %llu top-level declarations\n",
+               (unsigned long long)tally.files, (unsigned long long)rejected, (unsigned long long)differ, (unsigned long long)kernels.fallback_items);
+    }
     return failures + (uint32_t)(tally.mismatches != 0);
 }
 
@@ -1409,8 +1657,8 @@ static uint32_t parse_test_files(char** files, uint32_t file_count, const PPOpti
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
 
-// `test-parser [--clang [PATH]] [--mutations N] [--seed N] [--keep] [options] [file or directory...]`, with -E's
-// options for the files.
+// `test-parser [--clang [PATH]] [--mutations N] [--seed N] [--keep] [--reports N] [options] [file or directory...]`, with
+// -E's options for the files; --reports sets how many differences the checks print (200).
 static int run_parser_tests(int argument_count, char** arguments)
 {
     uint32_t failures = 0;
@@ -1418,6 +1666,10 @@ static int run_parser_tests(int argument_count, char** arguments)
     uint64_t mutations = 0;
     uint64_t seed = 1;
     bool keep = false;
+    const char* print_tree = 0;
+    bool explain = false;
+    uint32_t first_line = 0;
+    uint32_t last_line = UINT32_MAX;
     char** rest = malloc(sizeof(char*) * ((size_t)argument_count + 2));
     int rest_count = 0;
     const char** clang_arguments = malloc(sizeof(char*) * ((size_t)argument_count + 2));
@@ -1447,6 +1699,26 @@ static int run_parser_tests(int argument_count, char** arguments)
         else if (strcmp(argument, "--keep") == 0)
         {
             keep = true;
+        }
+        else if (strcmp(argument, "--print-tree") == 0 && i + 1 < argument_count)
+        {
+            print_tree = arguments[i + 1];
+            i += 1;
+            if (i + 2 < argument_count && arguments[i + 1][0] >= '0' && arguments[i + 1][0] <= '9')
+            {
+                first_line = (uint32_t)strtoul(arguments[i + 1], 0, 10);
+                last_line = (uint32_t)strtoul(arguments[i + 2], 0, 10);
+                i += 2;
+            }
+        }
+        else if (strcmp(argument, "--explain") == 0)
+        {
+            explain = true;
+        }
+        else if (strcmp(argument, "--reports") == 0 && i + 1 < argument_count)
+        {
+            parse_test_report_budget = (uint32_t)strtoul(arguments[i + 1], 0, 10);
+            i += 1;
         }
         else if (argument[0] != '-')
         {
@@ -1499,8 +1771,13 @@ static int run_parser_tests(int argument_count, char** arguments)
     valid = valid && mkdtemp(directory) != 0;
     if (!valid)
     {
-        printf("usage: test-parser [--clang [PATH]] [--mutations N] [--seed N] [--keep] [-E's options] [file or directory...]\n");
+        printf("usage: test-parser [--clang [PATH]] [--mutations N] [--seed N] [--keep] [--reports N] [--print-tree FILE [FIRST LAST]] [-E's options] [file or directory...]\n");
         failures += 1;
+    }
+    else if (print_tree != 0)
+    {
+        failures += parse_test_print_tree(print_tree, &options, first_line, last_line);
+        rmdir(directory);
     }
     else
     {
@@ -1511,17 +1788,21 @@ static int run_parser_tests(int argument_count, char** arguments)
         {
             file_count = parse_test_collect(inputs[i], files, file_count, 1u << 20);
         }
-        if (file_count != 0)
+        if (file_count != 0 && explain)
+        {
+            failures += parse_test_explain(files, file_count, &options);
+        }
+        else if (file_count != 0)
         {
             failures += parse_test_files(files, file_count, &options, clang_arguments, clang_argument_count, clang);
         }
-        if (file_count != 0 && mutations != 0 && clang != 0)
+        if (file_count != 0 && mutations != 0)
         {
             failures += parse_test_mutations(files, file_count, &options, clang_arguments, clang_argument_count, clang, mutations, seed, directory, keep);
         }
         else if (mutations != 0)
         {
-            printf("--mutations needs --clang and files\n");
+            printf("--mutations needs files\n");
             failures += 1;
         }
         for (uint32_t i = 0; i < file_count; i += 1)
