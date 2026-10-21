@@ -346,45 +346,18 @@ static bool snapshot_test_round_trip(const ExecutableTestDirectory* directory, c
 // ---------------------------------------------------------------------------------------------------------------------
 // The links
 
-// Writes a link bound against a static PIE's runtime to `path` as a static PIE with a group of `lanes` lanes, from
-// _start: ExecutableOptions.dynamic and .runtime together, from dynamic_static_pie_inputs. Whether executable_write
-// succeeded, and its result.
-static bool snapshot_test_write_static_pie(DynamicTestWrite* write, Link* link, const Bind* bind, const Runtime* runtime, String8 path, uint32_t lanes, ExecutableResult* result)
-{
-    ExecutableDynamic dynamic;
-    ExecutableRuntime inputs;
-    dynamic_static_pie_inputs(&dynamic, &inputs, runtime, bind);
-    write->link = link;
-    write->options = (ExecutableOptions){
-        .path = path,
-        .entry = dynamic_global(runtime, bind, "_start"),
-        .dynamic = &dynamic,
-        .runtime = &inputs,
-        .exact = write->exact,
-    };
-    write->succeeded = false;
-    const bool ran = lane_run(lanes, dynamic_test_lane_main, write, 0);
-    *result = write->result;
-    return ran && write->succeeded;
-}
-
 // Writes a bound link with a group of `lanes` lanes, as a dynamic PIE or, against a static runtime, as a static
-// executable or a static PIE, from its atoms' bytes as binding left them (`saved`: the TLS relaxation and a static
-// PIE's relaxed loads through the GOT rewrite them).
+// executable or a static PIE by its kind (static_test_write_with), from its atoms' bytes as binding left them (`saved`:
+// the TLS relaxation and a static PIE's relaxed loads through the GOT rewrite them).
 static bool snapshot_test_write_link(Link* link, const Bind* bind, const Runtime* runtime, const uint8_t* saved, char* path, uint32_t lanes, ExecutableResult* result)
 {
     DynamicTestWrite write = { 0 };
     const bool reset = executable_test_reset(link, path);
     bool written = false;
-    if (reset && runtime->kind == RUNTIME_KIND_STATIC)
+    if (reset && runtime_kind_is_static(runtime->kind))
     {
         static_test_restore(link, saved);
         written = static_test_write_with(&write, link, bind, runtime, snapshot_test_string(path), lanes, result);
-    }
-    else if (reset && runtime->kind == RUNTIME_KIND_STATIC_PIE)
-    {
-        static_test_restore(link, saved);
-        written = snapshot_test_write_static_pie(&write, link, bind, runtime, snapshot_test_string(path), lanes, result);
     }
     else if (reset)
     {
