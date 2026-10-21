@@ -798,6 +798,36 @@ static uint32_t parse_test_compare_trees(const Parser* vector, const Parser* sca
 // ---------------------------------------------------------------------------------------------------------------------
 // The kernels
 
+// An arena of `capacity` bytes after a page and before 4 GB and its own size of address space that may not be touched:
+// the kernels' checks put every array there, so that a load past an array's padding faults, and so does one whose
+// 32-bit index wrapped below 0 (`i - 1` at token 0 is 2^32 - 1 elements on). parse_test_release_guarded releases it.
+static Arena parse_test_guarded_arena(uint64_t capacity)
+{
+    const uint64_t page = 4096;
+    const uint64_t bytes = (capacity + page - 1) & ~(page - 1);
+    uint8_t* mapping = mmap(0, page + bytes + (4ull << 30) + bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    Arena result = { 0 };
+    if (mapping != MAP_FAILED && mprotect(mapping + page, bytes, PROT_READ | PROT_WRITE) == 0)
+    {
+        result.base = mapping + page;
+        result.capacity = bytes;
+    }
+    else if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page + bytes + (4ull << 30) + bytes);
+    }
+    return result;
+}
+
+static void parse_test_release_guarded(Arena* arena)
+{
+    if (arena->base != 0)
+    {
+        munmap(arena->base - 4096, 4096 + arena->capacity + (4ull << 30) + arena->capacity);
+    }
+    *arena = (Arena){ 0 };
+}
+
 // What the kernel checks did over every unit: blocks K2's rounds left to the twin's loop from random roles, K4's blocks
 // whose depths span more than byte lanes hold, and units K5 left to its twin (whose stack alone decides them).
 typedef struct ParseTestKernelTally ParseTestKernelTally;
@@ -970,7 +1000,7 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
     const uint8_t* kinds = parser->tokens.kinds;
     const uint32_t* names = parser->tokens.names;
     const uint64_t slots = (uint64_t)count + 2 * BUSTER_PARSE_TOKEN_PADDING;
-    Arena arena = arena_reserve(slots * 1024 + (uint64_t)parser->meanings.capacity + (64ull << 20));
+    Arena arena = parse_test_guarded_arena(slots * 1024 + (uint64_t)parser->meanings.capacity + (64ull << 20));
     ParseKernels kernels_storage;
     ParseKernels* kernels = &kernels_storage;
     ParseVectorBuffers buffers;
@@ -1199,7 +1229,7 @@ static uint32_t parse_test_check_kernels(Parser* parser, const Parser* scalar, P
             result += 1;
         }
     }
-    arena_release(&arena);
+    parse_test_release_guarded(&arena);
     return result;
 }
 

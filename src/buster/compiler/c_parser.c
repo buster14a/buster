@@ -4502,8 +4502,9 @@ static uint8_t parse_role_rule(ParseKernels* kernels, uint32_t i, bool typed, bo
 {
     const uint8_t* vk = kernels->vkinds;
     const uint8_t kind = vk[i];
-    const uint8_t previous = vk[i - 1];
-    const uint8_t before = vk[i - 2];
+    // The padding's PARSE_KIND_END before token 0 (with a signed index: `i - 1` would wrap past it to 2^32 - 1).
+    const uint8_t previous = vk[(int64_t)i - 1];
+    const uint8_t before = vk[(int64_t)i - 2];
     const uint8_t next = vk[i + 1];
     const uint8_t previous_role = i > 0 ? kernels->roles[i - 1] : PARSE_ROLE_NONE;
     const uint8_t pred = i > 0 ? parse_pred_of(previous_role, previous) : PARSE_PRED_ITEM;
@@ -4828,7 +4829,7 @@ static void parse_secondary_scalar(ParseKernels* kernels, uint32_t count, uint32
             }
             else
             {
-                const uint8_t previous = kernels->vkinds[i - 1];
+                const uint8_t previous = kernels->vkinds[(int64_t)i - 1];
                 kernels->roles[i] = PARSE_ROLE_LABEL;
                 kernels->flags[i] |= previous != PARSE_KIND_IDENTIFIER && previous != PARSE_VKIND_TYPE_NAME;
             }
@@ -5176,7 +5177,7 @@ static ParseStatementContext parse_statement_context_block(const ParseKernels* k
         const bool closer = parse_kind_deltas[kernels->vkinds[i]] < 0;
         const uint32_t group = closer && opener != BUSTER_PARSE_NONE ? kernels->enclosing[opener] : opener;
         const uint8_t role = group != BUSTER_PARSE_NONE ? kernels->roles[group] : PARSE_ROLE_NONE;
-        const uint8_t keyword = closer && opener != BUSTER_PARSE_NONE ? kernels->vkinds[opener - 1] : PARSE_KIND_END;
+        const uint8_t keyword = closer && opener != BUSTER_PARSE_NONE ? kernels->vkinds[(int64_t)opener - 1] : PARSE_KIND_END;
         result.blocks |= (uint64_t)(role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_BODY) << lane;
         result.ifs |= (uint64_t)(keyword == PARSE_KIND_IF) << lane;
         result.whiles |= (uint64_t)(keyword == PARSE_KIND_WHILE) << lane;
@@ -7999,7 +8000,7 @@ __attribute__((noinline)) static uint64_t parse_roles_twin_block(ParseKernels* k
         openers &= openers - 1;
         carry->group_roles[kernels->depths[i]] = kernels->roles[i];
         carry->group_typed[kernels->depths[i]] = i >= 2 ? typed[i - 2] : 0;
-        carry->group_keywords[kernels->depths[i]] = kernels->vkinds[i - 1];
+        carry->group_keywords[kernels->depths[i]] = kernels->vkinds[(int64_t)i - 1];
     }
     carry->previous_feature = parse_role_features(kernels->roles[block + live - 1], kernels->vkinds[block + live - 1]);
     carry->before_feature = live >= 2 ? parse_role_features(kernels->roles[block + live - 2], kernels->vkinds[block + live - 2]) : carry->previous_feature;
@@ -8206,7 +8207,7 @@ static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32
                 }
                 else
                 {
-                    const uint8_t previous = kernels->vkinds[i - 1];
+                    const uint8_t previous = kernels->vkinds[(int64_t)i - 1];
                     kernels->roles[i] = PARSE_ROLE_LABEL;
                     kernels->flags[i] |= previous != PARSE_KIND_IDENTIFIER && previous != PARSE_VKIND_TYPE_NAME;
                 }
