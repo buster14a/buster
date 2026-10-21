@@ -51,6 +51,7 @@ static bool x86_decode_test_mnemonic(const char* expected, int32_t immediate, co
         {"feni", "fneni"},
         {"fdisi", "fndisi"},
         {"fsetpm", "fnsetpm"},
+        {"retfd", "retf"},
         {"movsb", "movs"},
         {"movsw", "movs"},
         {"movsd", "movs"},
@@ -283,7 +284,9 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
     valid = valid && input != 0;
     uint32_t seen = 0;
     char line[2048];
-    while (valid && fgets(line, sizeof(line), input) != 0)
+    const bool prepared = valid;
+    uint32_t mismatches = 0;
+    while (prepared && fgets(line, sizeof(line), input) != 0)
     {
         char* end;
         const uint64_t offset = strtoull(line, &end, 16);
@@ -306,9 +309,9 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
             }
             X86Decoded decoded[16];
             const X86DecodeResult result = offset < size && length <= size - offset ? x86_disassemble(bytes + offset, length, decoded, BUSTER_ARRAY_LENGTH(decoded)) : (X86DecodeResult){.status = X86_DECODE_BAD_ARGUMENT};
-            valid = seen < count && offset == expected[seen].offset && length == expected[seen].length && result.status == X86_DECODE_OK && result.count == 1 && result.consumed == length;
-            valid = valid && x86_decode_test_mnemonic(x86_form_description(decoded[0].instruction.form)->mnemonic, decoded[0].instruction.immediate, cursor);
-            if (!valid)
+            bool same = seen < count && offset == expected[seen].offset && length == expected[seen].length && result.status == X86_DECODE_OK && result.count == 1 && result.consumed == length;
+            same = same && x86_decode_test_mnemonic(x86_form_description(decoded[0].instruction.form)->mnemonic, decoded[0].instruction.immediate, cursor);
+            if (!same && mismatches < 16)
             {
                 fprintf(stderr, "objdump oracle mismatch at instruction %u: %s", seen, line);
                 if (seen < count)
@@ -316,10 +319,11 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
                     fprintf(stderr, "expected offset=%u length=%u mnemonic=%s; decoder status=%u count=%llu\n", expected[seen].offset, expected[seen].length, x86_form_description(expected[seen].instruction.form)->mnemonic, result.status, (unsigned long long)result.count);
                 }
             }
+            mismatches += !same;
             seen += 1;
         }
     }
-    valid = valid && seen == count;
+    valid = valid && mismatches == 0 && seen == count;
     if (input != 0)
     {
         fclose(input);
