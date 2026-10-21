@@ -16,10 +16,10 @@ on:
 permissions:
   contents: read
 
-# Repository-local serialization. Retain pending runs so a new PR cannot discard an oracle qualification before it
-# starts. The runner's job hooks also take the shared host benchmark lock (see AGENTS.md).
+# Keep each PR/ref's pending runs separate: older branches using a single repository-wide pending slot otherwise
+# cancel another PR's qualification. The runner's job hooks serialize all jobs with the shared host lock (AGENTS.md).
 concurrency:
-  group: buster-fast-9700x
+  group: buster-fast-9700x-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
   queue: max
 

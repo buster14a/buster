@@ -118,6 +118,8 @@ then compares SQLite, four musl sources and seven libc headers, including the
 three regressions. The libc subset must produce five identical files and two
 explicit skips. Its input lists live
 under `tests/preprocessor-oracle/`. The runner hooks hold the lock for the job.
-The existing concurrency group uses `queue: max` to retain pending runs, as
+The `buster-fast-9700x` concurrency prefix is scoped per PR/ref, so an older
+branch's repository-wide pending slot cannot cancel another PR's qualification.
+Each queue uses `queue: max` to retain pending runs, as
 [GitHub documents](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency),
-while still running one at a time.
+while the runner hooks serialize all CI jobs with the shared machine lock.
