@@ -13,7 +13,9 @@
 //     them by name;
 //   - binding's exports.
 // A static executable's with the C runtime (ExecutableRuntime, dynamic_static_inputs) are crt1.o's ABI note and the
-// link's __tls_get_addr.
+// link's __tls_get_addr. A static PIE's (dynamic_static_pie_inputs) are both: an ExecutableDynamic without an
+// interpreter, a library, versions or exports, with rcrt1.o's ABI note, crti.o's _init and _fini and RELR when libc.a's
+// startup takes it (dynamic_static_relr), and the static executable's ExecutableRuntime.
 //
 // main.c includes this file after bind.c and executable.c.
 
@@ -44,6 +46,33 @@ static __attribute__((unused)) void dynamic_static_inputs(ExecutableRuntime* inp
     *inputs = (ExecutableRuntime){
         .note = runtime->abi_note,
         .tls_get_addr = dynamic_global(runtime, bind, "__tls_get_addr"),
+    };
+}
+
+// Whether a static runtime's libc.a relocates a static PIE with DT_RELR too: glibc's startup does from 2.36 on
+// (_dl_relocate_static_pie applies DT_RELR before DT_RELA), and an older one would leave RELR's relocations undone.
+// libc.a has no version definitions to say so, as libc.so.6's GLIBC_ABI_DT_RELR does: the release that took DT_RELR
+// added arc4random, which a member of a libc.a from it on defines.
+static bool dynamic_static_relr(const Runtime* runtime)
+{
+    static const char name[] = "arc4random";
+    const uint64_t length = sizeof(name) - 1;
+    const uint32_t entry = runtime_find_global_name(&runtime->global_names, (const uint8_t*)name, (uint32_t)length, link_hash((const uint8_t*)name, length));
+    return entry != 0 && runtime->global_names.member[entry - 1] != 0;
+}
+
+// Fills `dynamic` and `inputs` for a link that `bind` bound against a static PIE's runtime (runtime_import_static_pie),
+// which executable_write takes together for a static PIE: no interpreter, library, versions or exports, rcrt1.o's ABI
+// note, and crti.o's _init and _fini for DT_INIT and DT_FINI, as GNU ld and lld give a static PIE them, and RELR when
+// libc.a takes it (dynamic_static_relr); and the link's __tls_get_addr, as for a static executable.
+static __attribute__((unused)) void dynamic_static_pie_inputs(ExecutableDynamic* dynamic, ExecutableRuntime* inputs, const Runtime* runtime, const Bind* bind)
+{
+    dynamic_static_inputs(inputs, runtime, bind);
+    *dynamic = (ExecutableDynamic){
+        .note = runtime->abi_note,
+        .init = dynamic_global(runtime, bind, "_init"),
+        .fini = dynamic_global(runtime, bind, "_fini"),
+        .relr = dynamic_static_relr(runtime),
     };
 }
 
@@ -80,6 +109,7 @@ static __attribute__((unused)) bool dynamic_inputs(ExecutableDynamic* dynamic, c
         .exports = bind->exports,
         .export_count = bind->export_count,
         .relr_version = relr_version,
+        .relr = relr_version != 0,
     };
     return versions != 0;
 }
