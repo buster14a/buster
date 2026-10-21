@@ -1095,7 +1095,9 @@ both, the paths taking turns (time, cycles, instructions, IPC):
   looked up for every name; `libc_nonshared.a` and each `--archive` (per
   index entry); `libc.so`'s script, which has no vector path;
   `runtime_import` end to end; the static runtime's archives; and
-  `runtime_import_static` end to end.
+  `runtime_import_static` and `runtime_import_static_pie` end to end (a
+  static PIE's runtime is the static executable's archives with other crt
+  objects, so the archives' rows are its too).
 
 Run it under the 9700X's lock with `taskset -c 2`. With `--library
 /usr/lib/libstdc++.so.6 --library /usr/lib/libLLVM.so.23.1 --archive
@@ -1221,16 +1223,16 @@ removed at the end unless `--keep`. The default 9700X job runs it with
 `./build/compiler benchmark-bind [--functions LIST] [--seed N]` binds
 generated programs that call libc, of 1, 64, 2,000 and 102,400 workers by
 default (`--functions` takes a list), 200 workers per unit as synth's
-translation units have, by each path, against the dynamic PIE's runtime and
-against the static one, and reports 21-run medians (time, cycles,
-instructions, IPC) of the match (the program's global symbols looked up in
-the runtime's names, per global symbol), `bind_begin`, the static runtime's
-closure (the members the link needs, per member) and `bind_end`, each run on
-the same link put back as it was. The paths must make the same links. Run it
-under the 9700X's lock with `taskset -c 2`; the design's "Step 5's phases,
-data-parallel" and "Static links, as built" have the numbers. The default
-9700X job runs it after the bind tests, pinned to one allowed CPU; like the
-others, its measurements are informational.
+translation units have, by each path, against the dynamic PIE's runtime, a
+static executable's and a static PIE's, and reports 21-run medians (time,
+cycles, instructions, IPC) of the match (the program's global symbols looked
+up in the runtime's names, per global symbol), `bind_begin`, the static
+runtimes' closure (the members the link needs, per member) and `bind_end`,
+each run on the same link put back as it was. The paths must make the same
+links. Run it under the 9700X's lock with `taskset -c 2`; the design's "Step
+5's phases, data-parallel" and "Static links, as built" have the numbers. The
+default 9700X job runs it after the bind tests, pinned to one allowed CPU;
+like the others, its measurements are informational.
 
 ## Direct executable tests
 
@@ -1584,43 +1586,46 @@ it after benchmark-executable.
 ## Snapshot benchmark
 
 `./build/compiler benchmark-snapshot [--directory PATH] [--runs N] [--only
-dynamic|static]` reports, for a dynamic PIE's runtime and a static
-executable's (`--only` one of them), medians of `--runs` runs (41 by default)
-of the import without a snapshot, `snapshot_write` into a directory under
-`--directory` (`TMPDIR` or `/tmp`), `runtime_open` (or
-`runtime_open_static`) from the snapshot phase by phase (the compiler's
-identity, the mapping, the header and the directory's hash, the view, the
-probes' `stat`s), `runtime_release` of a loaded runtime, the alternatives the
-design weighed (the snapshot read with `pread` into new memory, mapped without
-the hash, and mapped and hashed whole as format 3 checked it), and binding a
-program of one worker against the imported runtime, against one loaded afresh
-each time (as a link binds, its pieces faulted in and checked), against one
-loaded once, and the checks alone of the pieces it read. Every binding must
-make the same link. Run it under the 9700X's lock with
-`taskset -c 2`, with `--directory` on each file system to measure (the cache
-directory is under `$HOME`, btrfs there). `docs/object-writer-and-linker.md`
-("The runtime snapshot") has the numbers. The default 9700X job runs it after
-the tests, pinned to one allowed CPU; like the others, its measurements are
-informational.
+dynamic|static|static-pie]` reports, for a dynamic PIE's runtime, a static
+executable's and a static PIE's (`--only` one of them), medians of `--runs`
+runs (41 by default) of the import without a snapshot, `snapshot_write` into
+a directory under `--directory` (`TMPDIR` or `/tmp`), `runtime_open` (or
+`runtime_open_static`, `runtime_open_static_pie`) from the snapshot phase by
+phase (the compiler's identity, the mapping, the header and the directory's
+hash, the view, the probes' `stat`s), `runtime_release` of a loaded runtime,
+the alternatives the design weighed (the snapshot read with `pread` into new
+memory, mapped without the hash, and mapped and hashed whole as format 3
+checked it), and binding a program of one worker against the imported
+runtime, against one loaded afresh each time (as a link binds, its pieces
+faulted in and checked), against one loaded once, and the checks alone of the
+pieces it read. Every binding must make the same link. Run it under the
+9700X's lock with `taskset -c 2`, with `--directory` on each file system to
+measure (the cache directory is under `$HOME`, btrfs there).
+`docs/object-writer-and-linker.md` ("The runtime snapshot") has the numbers.
+The default 9700X job runs it after the tests, pinned to one allowed CPU; like
+the others, its measurements are informational.
 
 ## Link benchmark
 
 `./build/compiler benchmark-link [--functions LIST [--filler N]] [--seed N]
 [--directory PATH] [--cache PATH] [--cpus LIST] [--linkers LIST] [--runs N]
-[--only direct|linkers] [--kinds dynamic|static|dynamic,static] [--keep]`
-(about 81 s on the 9700X) links generated programs that call libc, without
-`SIZE32` and `SIZE64`, as dynamic PIEs and as static executables (`--kinds`,
-both by default), by the direct path and by each linker, and reports medians:
+[--only direct|linkers] [--kinds LIST] [--keep]` (about 122 s on the 9700X)
+links generated programs that call libc, without `SIZE32` and `SIZE64`, as
+dynamic PIEs, static executables and static PIEs (`--kinds`, a list of
+`dynamic`, `static` and `static-pie`, every kind by default), by the direct
+path and by each linker, and reports medians:
 
 - the programs: one worker and 2,000 workers (about hello world's and tcc's
   outputs), and one of synth's shape, 102,400 workers in 512 units with up to
   64 filler instructions each (44 MB); or with `--functions`, a program of
   each count of workers, of up to `--filler` (8) filler instructions each;
 - the direct path, on a lane per CPU of `--cpus` (CPU 2): `runtime_open` (or
-  `runtime_open_static`), which must load the kind's snapshot in `--cache` (the
-  cache directory), and `bind_begin`; then, after the program's atoms,
-  `bind_end` and `dynamic_inputs` (or `dynamic_static_inputs`), and
-  `executable_write` over the file of the run before into a directory under
+  `runtime_open_static`, `runtime_open_static_pie`), which must load the
+  kind's snapshot in `--cache` (the cache directory), and `bind_begin`; then,
+  after the program's atoms, `bind_end` and `dynamic_inputs` (or
+  `dynamic_static_inputs`, `dynamic_static_pie_inputs`), and
+  `executable_write` (a static PIE's with `ExecutableOptions.dynamic` and
+  `.runtime` both set) over the file of the run before into a directory under
   `--directory` (`TMPDIR` or `/tmp`). Each part is the
   median of its runs after a warm-up, each run from the link and binding as
   they were before the part, put back outside the time (a static link's
@@ -1637,8 +1642,10 @@ both by default), by the direct path and by each linker, and reports medians:
 - each linker of `--linkers` (`ld.bfd`, `ld.lld`, `mold` and `wild`) linking
   them with the appendix's command, the clang driver's with the matched
   options (its `-static` one for a static executable, with
-  `--start-group -lgcc -lgcc_eh -lc --end-group`), with its own threads and
-  on one (pinned to the first of `--cpus`):
+  `--start-group -lgcc -lgcc_eh -lc --end-group`, and its `-static-pie` one
+  for a static PIE: `-static -pie --no-dynamic-linker -z text`, `rcrt1.o`,
+  `crtbeginS.o` and `crtendS.o`, with the same group), with its own threads
+  and on one (pinned to the first of `--cpus`):
   the wall time from `posix_spawn` to the wait's return, over the output of
   the run before, the median of 41 runs after a warm-up with a 20 ms pause
   before each, or past 4 MB of output 11 runs after 200 ms, and GNU ld's 5
@@ -1650,10 +1657,11 @@ both by default), by the direct path and by each linker, and reports medians:
   program that does nothing, is printed first.
 
 Every program written must run and print what its model predicts, but wild's
-static executable of a program whose `.tbss` is more aligned than its
-`.tdata`, which wild 0.10 links with the TLS segment off its alignment, so
-that it faults in glibc's startup: the benchmark doesn't run wild on such a
-program, and says so. `--only direct` and `--only linkers` run one side, and
+static executables and static PIEs of a program whose `.tbss` is more aligned
+than its `.tdata`, whose TLS segment wild 0.10 starts at `.tdata`'s
+alignment, off its own wherever the layout puts it there, so that glibc's
+static startup faults: the benchmark doesn't run wild on such a program, and
+says so. `--only direct` and `--only linkers` run one side, and
 `--keep` leaves the directory.
 Run it under the 9700X's lock without `taskset`: it pins its lanes and the
 linkers' runs on one thread itself, and the linkers' other runs need every CPU.
