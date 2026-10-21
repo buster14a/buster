@@ -263,7 +263,7 @@ struct BindBenchmarkState
 static bool bind_benchmark_save(BindBenchmarkState* state, const Bind* bind, Arena* arena)
 {
     const Runtime* runtime = bind->runtime;
-    const uint32_t words = (runtime->nonshared.member_count + 63) / 64;
+    const uint32_t words = (runtime->member_count + 63) / 64;
     state->bind = *bind;
     state->name_symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->global_names.count);
     state->named = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, runtime->global_names.count);
@@ -284,7 +284,7 @@ static bool bind_benchmark_save(BindBenchmarkState* state, const Bind* bind, Are
 static void bind_benchmark_load(const BindBenchmarkState* state, Bind* bind)
 {
     const Runtime* runtime = state->bind.runtime;
-    const uint32_t words = (runtime->nonshared.member_count + 63) / 64;
+    const uint32_t words = (runtime->member_count + 63) / 64;
     *bind = state->bind;
     memcpy(bind->name_symbols, state->name_symbols, runtime->global_names.count * sizeof(SymbolId));
     memcpy(bind->named, state->named, runtime->global_names.count * sizeof(uint32_t));

@@ -636,7 +636,7 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     const uint32_t unit = definition != 0 ? runtime->link.atoms.unit[runtime->link.symbols.atom[definition]] : 0;
     const bool after = definition != 0 && !bind->tail_joined && (unit == RUNTIME_OBJECT_END || unit == RUNTIME_OBJECT_INIT_EPILOGUE);
     const uint32_t export = entry != 0 ? names->export[entry - 1] : 0;
-    const bool member = definition != 0 && unit >= runtime->nonshared_unit;
+    const bool member = definition != 0 && unit >= runtime->member_unit;
     const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
     // A reference with a visibility other than default needs a definition within the executable: libc.so.6's can't be
     // one, as GNU ld and lld resolve it.
@@ -668,7 +668,7 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     }
     else if (member && members && !weak)
     {
-        const uint32_t m = unit - runtime->nonshared_unit;
+        const uint32_t m = unit - runtime->member_unit;
         bind->members_needed[m / 64] |= 1ull << (m % 64);
     }
     else if (weak)
@@ -737,7 +737,7 @@ static void bind_resolve(Bind* bind, Link* link, SymbolId first, SymbolId end, b
 static void bind_members(Bind* bind, Link* link, SymbolId first)
 {
     const Runtime* runtime = bind->runtime;
-    const uint32_t words = (runtime->nonshared.member_count + 63) / 64;
+    const uint32_t words = (runtime->member_count + 63) / 64;
     SymbolId from = first;
     bool joined = true;
     while (joined && bind->error == BIND_ERROR_NONE)
@@ -825,7 +825,7 @@ static LinkCapacity bind_capacity(const Runtime* runtime, uint64_t* name_bytes, 
 
 static bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena)
 {
-    const uint32_t words = (runtime->nonshared.member_count + 63) / 64;
+    const uint32_t words = (runtime->member_count + 63) / 64;
     *bind = (Bind){
         .runtime = runtime,
         .path = path,

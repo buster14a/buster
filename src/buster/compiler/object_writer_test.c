@@ -12,16 +12,18 @@
 //     for what the programs don't have) and a link without atoms, each unit's object built in memory with and without
 //     function sections, and again over bytes set to BUSTER_OBJECT_TEST_POISON, which must come out the same
 //     (object_build writes every byte). object_view_open reads each one back and checks the rules every object keeps:
-//     the header's fixed fields, section headers and contents inside the file, aligned and apart, names in
-//     .shstrtab, one symbol table with its locals before sh_info, symbols inside their sections, extended indices
-//     exactly where st_shndx is SHN_XINDEX, and relocation sections tied to the symbol table and a section with
-//     contents, in offset order, against a symbol, over zero fields. object_test_compare then checks it against the
-//     representation, from the representation alone: the sections in order with their atoms' bytes at the offsets
-//     the alignments give and int3 or zero between them; every symbol of the unit, then the undefined ones its fixups
-//     first refer to, in order; and a relocation per fixup, of its kind's type, against the target or, where GNU as
-//     and LLVM do so, the section symbol with the target's offset in the addend. Among them, each local-exec TLS
-//     reference must come out as R_X86_64_TPOFF32 against its TLS symbol over a zero field (not a frozen offset), and
-//     each call through the GOT as R_X86_64_GOTPCRELX.
+//     the header's fixed fields (EI_OSABI ELFOSABI_GNU exactly when a symbol is an STT_GNU_IFUNC), section headers
+//     and contents inside the file, aligned and apart, names in .shstrtab, one symbol table with its locals before
+//     sh_info, symbols inside their sections, extended indices exactly where st_shndx is SHN_XINDEX, and relocation
+//     sections tied to the symbol table and a section with contents, in offset order, against a symbol, over zero
+//     fields. object_test_compare then checks it against the representation, from the representation alone: the
+//     sections in order with their atoms' bytes at the offsets the alignments give and int3 or zero between them;
+//     every symbol of the unit, then the undefined ones its fixups first refer to, in order; and a relocation per
+//     fixup, of its kind's type, against the target or, where GNU as and LLVM do so, the section symbol with the
+//     target's offset in the addend. Among them, each local-exec TLS reference must come out as R_X86_64_TPOFF32
+//     against its TLS symbol over a zero field (not a frozen offset), each call through the GOT as
+//     R_X86_64_GOTPCRELX, and each reference to a local IFUNC against the IFUNC. Then links with an absolute symbol,
+//     which object_prepare refuses.
 //   - Many sections: one unit of BUSTER_OBJECT_TEST_MANY_FUNCTIONS functions in sections of their own, past
 //     SHN_LORESERVE: e_shnum and e_shstrndx in section 0, SHN_XINDEX and .symtab_shndx, compared as above.
 //   - Lanes: every unit's object (a trailing one without atoms among them) written by object_write_units in groups of 1,
@@ -32,12 +34,14 @@
 //     into a pipe, and into a missing directory (an error).
 //   - With --cross-check, which needs readelf, llvm-readobj, as, ld.bfd, ld.lld, mold and wild on PATH, and a cc that
 //     takes -fuse-ld=wild:
-//       - readelf -W and llvm-readobj list every object's sections, symbols and relocations (the link made by hand's
-//         too), which must be what object_view_open read, field by field;
+//       - readelf -W and llvm-readobj list every object's EI_OSABI, sections, symbols and relocations (the link made
+//         by hand's too), which must be what object_view_open read, field by field;
 //       - GNU ld, lld, mold and wild link each program's objects into an executable that writes LinkProgram.output and
 //         exits with status 0: a static program with -static -e _start, and one that calls libc through cc, as a PIE,
 //         with -no-pie and with -static. wild links only the programs without SIZE32 and SIZE64, which wild 0.10
-//         doesn't link, and among them one past SHN_LORESERVE sections;
+//         doesn't link, and among them one past SHN_LORESERVE sections. The same linkers link, the same three ways,
+//         a program whose main calls a local IFUNC directly and through a pointer (object_test_ifunc_link), which
+//         must exit with BUSTER_OBJECT_TEST_IFUNC_STATUS;
 //       - GNU as assembles each program's units as link_test_print_program writes them, and its objects must match
 //         the writer's (object_test_same_as; the comment that opens its part of the file says where they may differ).
 // The objects and programs go in a new directory under $TMPDIR (or /tmp), removed at the end unless --keep. The exit
@@ -77,6 +81,8 @@ extern char** environ;
 #define BUSTER_OBJECT_TEST_FUNCTIONS 500
 // The units of the link made by hand (object_test_hand_link).
 #define BUSTER_OBJECT_TEST_HAND_UNITS 4
+// The exit status of the program that calls a local IFUNC (object_test_ifunc_link): 21 from each call.
+#define BUSTER_OBJECT_TEST_IFUNC_STATUS 42
 // What the memory an object is built in holds the second time, which no byte of the object may keep.
 #define BUSTER_OBJECT_TEST_POISON 0xa5
 
@@ -239,6 +245,9 @@ static const uint32_t object_test_relocation_types[BUSTER_LINK_FIXUP_KINDS] = {
     [BUSTER_LINK_FIXUP_ABS32S] = R_X86_64_32S,
     [BUSTER_LINK_FIXUP_SIZE32] = R_X86_64_SIZE32,
     [BUSTER_LINK_FIXUP_SIZE64] = R_X86_64_SIZE64,
+    [BUSTER_LINK_FIXUP_TLSGD] = R_X86_64_TLSGD,
+    [BUSTER_LINK_FIXUP_TLSLD] = R_X86_64_TLSLD,
+    [BUSTER_LINK_FIXUP_DTPOFF32] = R_X86_64_DTPOFF32,
 };
 
 #define BUSTER_OBJECT_TEST_INT3 0xcc
@@ -265,6 +274,9 @@ static uint64_t object_test_relocation_width(uint32_t type)
         case R_X86_64_SIZE32:
         case R_X86_64_GOTPCRELX:
         case R_X86_64_REX_GOTPCRELX:
+        case R_X86_64_TLSGD:
+        case R_X86_64_TLSLD:
+        case R_X86_64_DTPOFF32:
         {
             result = 4;
         } break;
@@ -332,10 +344,13 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
     }
     else
     {
+        // EI_OSABI is ELFOSABI_SYSV or ELFOSABI_GNU, which the symbols decide (below).
         static const uint8_t identification[EI_NIDENT] = { ELFMAG0, ELFMAG1, ELFMAG2, ELFMAG3, ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ELFOSABI_SYSV };
-        valid = memcmp(header->e_ident, identification, EI_NIDENT) == 0 && header->e_type == ET_REL && header->e_machine == EM_X86_64 &&
-                header->e_version == EV_CURRENT && header->e_entry == 0 && header->e_phoff == 0 && header->e_flags == 0 && header->e_ehsize == sizeof(Elf64_Ehdr) &&
-                header->e_phentsize == 0 && header->e_phnum == 0 && header->e_shentsize == sizeof(Elf64_Shdr);
+        const uint8_t abi = header->e_ident[EI_OSABI];
+        valid = memcmp(header->e_ident, identification, EI_OSABI) == 0 && (abi == ELFOSABI_SYSV || abi == ELFOSABI_GNU) &&
+                memcmp(header->e_ident + EI_OSABI + 1, identification + EI_OSABI + 1, EI_NIDENT - EI_OSABI - 1) == 0 && header->e_type == ET_REL &&
+                header->e_machine == EM_X86_64 && header->e_version == EV_CURRENT && header->e_entry == 0 && header->e_phoff == 0 && header->e_flags == 0 &&
+                header->e_ehsize == sizeof(Elf64_Ehdr) && header->e_phentsize == 0 && header->e_phnum == 0 && header->e_shentsize == sizeof(Elf64_Shdr);
         if (!valid)
         {
             snprintf(error, error_size, "the ELF header isn't an x86-64 ET_REL one's");
@@ -509,6 +524,17 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
             snprintf(error, error_size, "symbol %llu is wrong: binding %u, type %u, st_shndx %u, section %llu, value %llu, size %llu", (unsigned long long)i, binding, type,
                      symbol->st_shndx, (unsigned long long)section, (unsigned long long)symbol->st_value, (unsigned long long)symbol->st_size);
         }
+    }
+    // EI_OSABI: ELFOSABI_GNU exactly when a symbol is an STT_GNU_IFUNC, as GNU as and LLVM mark it.
+    bool ifunc = false;
+    for (uint64_t i = 1; valid && i < view->symbol_count; i += 1)
+    {
+        ifunc = ifunc || ELF64_ST_TYPE(view->symbols[i].st_info) == STT_GNU_IFUNC;
+    }
+    if (valid && header->e_ident[EI_OSABI] != (ifunc ? ELFOSABI_GNU : ELFOSABI_SYSV))
+    {
+        snprintf(error, error_size, "EI_OSABI is %u, and the object has %s STT_GNU_IFUNC symbol", header->e_ident[EI_OSABI], ifunc ? "an" : "no");
+        valid = false;
     }
 
     // Relocations: tied to the symbol table and a section with contents, in offset order without overlapping fields,
@@ -828,10 +854,12 @@ static bool object_test_compare(ObjectTestTally* tally, const ObjectView* view, 
             const uint8_t kind = fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND;
             const int64_t addend = link_fixup_addend(link, fixup);
             const bool local = (symbols->flags[target] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
-            // GNU as and LLVM: a local target through its section's symbol, but for the GOT, TLS and size kinds, and in
-            // a string pool for a PC-relative kind or an addend.
+            // GNU as and LLVM: a local target through its section's symbol, but for the GOT, TLS and size kinds and an
+            // IFUNC, and in a string pool for a PC-relative kind or an addend.
             const bool kept = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL ||
                               kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64 ||
+                              kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32 ||
+                              (symbols->flags[target] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_IFUNC ||
                               (atoms->class[target_atom] == BUSTER_LINK_CLASS_STRINGS && (link_fixup_kinds[kind].pc_relative || addend != 0));
             const bool through_section = local && !kept;
             const uint64_t expected_symbol = through_section ? section_symbol[atom_section[target_atom]] : symbol_place[target];
@@ -985,11 +1013,12 @@ struct ObjectListedRelocation
     int64_t addend;
 };
 
-// What a tool lists: the header's section count and name table index, and the sections, symbols and relocations in its
-// order, pushed on an arena one after another. The names point into the tool's output.
+// What a tool lists: the header's EI_OSABI, section count and name table index, and the sections, symbols and
+// relocations in its order, pushed on an arena one after another. The names point into the tool's output.
 typedef struct ObjectListing ObjectListing;
 struct ObjectListing
 {
+    uint64_t abi;
     uint64_t section_count;
     uint64_t section_names_index;
     ObjectListedSection* sections;
@@ -1161,7 +1190,12 @@ static const ObjectTestName object_test_relocation_names[] = {
     { "R_X86_64_REX_GOTPCRELX", R_X86_64_REX_GOTPCRELX },
 };
 
-// readelf's names of section types, symbol types, bindings, visibilities and section flags.
+// readelf's names of OS ABIs, section types, symbol types, bindings, visibilities and section flags.
+static const ObjectTestName readelf_abis[] = {
+    { "UNIX - System V", ELFOSABI_SYSV },
+    { "UNIX - GNU", ELFOSABI_GNU },
+};
+
 static const ObjectTestName readelf_section_types[] = {
     { "NULL", SHT_NULL },
     { "PROGBITS", SHT_PROGBITS },
@@ -1184,6 +1218,7 @@ static const ObjectTestName readelf_symbol_types[] = {
     { "FILE", STT_FILE },
     { "COMMON", STT_COMMON },
     { "TLS", STT_TLS },
+    { "IFUNC", STT_GNU_IFUNC },
 };
 
 static const ObjectTestName readelf_bindings[] = {
@@ -1257,12 +1292,15 @@ static void* object_test_list(Arena* arena, void** first, uint64_t* length, uint
     return result;
 }
 
-// Parses `readelf -W -h -S -r -s`: the header's counts, the section headers, the relocation sections (which come
-// before the symbols) and the symbols. Returns false, with the line in `error`, at a line it can't read.
+// Parses `readelf -W -h -S -r -s`: the header's OS ABI and counts, the section headers, the relocation sections (which
+// come before the symbols) and the symbols. Returns false, with the line in `error`, at a line it can't read.
 static bool readelf_listing(Arena* arena, String8 text, ObjectListing* listing, char* error, uint64_t error_size)
 {
     // Sections, relocations and symbols are listed one part after another, so each array is contiguous on the arena.
-    *listing = (ObjectListing){ 0 };
+    // An OS ABI no object has, until its line is read.
+    *listing = (ObjectListing){
+        .abi = UINT64_MAX,
+    };
     bool result = true;
     uint64_t position = 0;
     String8 line;
@@ -1278,7 +1316,11 @@ static bool readelf_listing(Arena* arena, String8 text, ObjectListing* listing, 
     while (result && object_test_next_line(text, &position, &line))
     {
         const uint64_t count = object_test_tokens(line, tokens, BUSTER_OBJECT_TEST_MAX_TOKENS);
-        if (object_test_starts_with(line, "  Number of section headers:"))
+        if (object_test_starts_with(line, "  OS/ABI:"))
+        {
+            result = object_test_lookup(readelf_abis, BUSTER_ARRAY_LENGTH(readelf_abis), object_test_value(line), &listing->abi);
+        }
+        else if (object_test_starts_with(line, "  Number of section headers:"))
         {
             result = object_test_parenthesized(object_test_value(line), &listing->section_count);
         }
@@ -1441,7 +1483,10 @@ static bool llvm_readobj_name(String8 value, String8* name)
 // braces). Returns false, with the line in `error`, at a line it can't read.
 static bool llvm_readobj_listing(Arena* arena, String8 text, ObjectListing* listing, char* error, uint64_t error_size)
 {
-    *listing = (ObjectListing){ 0 };
+    // An OS ABI no object has, until its line is read.
+    *listing = (ObjectListing){
+        .abi = UINT64_MAX,
+    };
     bool result = true;
     uint64_t position = 0;
     String8 line;
@@ -1471,6 +1516,11 @@ static bool llvm_readobj_listing(Arena* arena, String8 text, ObjectListing* list
         else if (count == 2 && object_test_equal(tokens[0], "Symbols") && object_test_equal(tokens[1], "["))
         {
             part = LLVM_READOBJ_SYMBOLS;
+        }
+        else if (part == LLVM_READOBJ_HEADER && count >= 2 && object_test_equal(tokens[0], "OS/ABI:"))
+        {
+            // "OS/ABI: SystemV (0x0)" or "OS/ABI: GNU/Linux (0x3)".
+            result = object_test_parenthesized(value, &listing->abi);
         }
         else if (part == LLVM_READOBJ_HEADER && count >= 2 && object_test_equal(tokens[0], "SectionHeaderCount:"))
         {
@@ -1601,16 +1651,18 @@ static bool llvm_readobj_listing(Arena* arena, String8 text, ObjectListing* list
     return result;
 }
 
-// Compares a tool's listing with the object as object_view_open read it: the header's section count and name table
-// index, then every section, symbol and relocation, field by field. Returns false, with the first difference in
+// Compares a tool's listing with the object as object_view_open read it: the header's OS ABI, section count and name
+// table index, then every section, symbol and relocation, field by field. Returns false, with the first difference in
 // `error`, if they differ.
 static bool object_compare_listing(const ObjectView* view, const ObjectListing* listing, char* error, uint64_t error_size)
 {
-    bool result = listing->section_count == view->section_count && listing->section_names_index == view->section_names_index;
+    const uint8_t abi = view->file[EI_OSABI];
+    bool result = listing->abi == abi && listing->section_count == view->section_count && listing->section_names_index == view->section_names_index;
     if (!result)
     {
-        snprintf(error, error_size, "it lists %llu sections and the names in section %llu, not %llu and %llu", (unsigned long long)listing->section_count,
-                 (unsigned long long)listing->section_names_index, (unsigned long long)view->section_count, (unsigned long long)view->section_names_index);
+        snprintf(error, error_size, "it lists OS ABI %llu, %llu sections and the names in section %llu, not %u, %llu and %llu", (unsigned long long)listing->abi,
+                 (unsigned long long)listing->section_count, (unsigned long long)listing->section_names_index, abi, (unsigned long long)view->section_count,
+                 (unsigned long long)view->section_names_index);
     }
     if (result)
     {
@@ -1771,8 +1823,9 @@ static NameId object_test_hand_name(Link* link, const char* text)
 // of data (zero), an atom of no size, a TEXT atom without a symbol at offset 0 (so its function section is .text), a
 // weak reference to a symbol defined nowhere, hidden and protected symbols, a reference to a weak definition in another
 // unit, pointers into a string pool without an addend (through the pool's section symbol) and with one (through the
-// string's own), and units without atoms between others (unit 1) and after them (unit 3): BUSTER_OBJECT_TEST_HAND_UNITS
-// in all. The fields are zero, as link_add_code_fixups leaves them.
+// string's own), a call to and a pointer to a local IFUNC (through the IFUNC itself, in an ELFOSABI_GNU object), and
+// units without atoms between others (unit 1) and after them (unit 3): BUSTER_OBJECT_TEST_HAND_UNITS in all. The fields
+// are zero, as link_add_code_fixups leaves them.
 static bool object_test_hand_link(Link* link, Arena* arena)
 {
     const LinkCapacity capacity = {
@@ -1794,11 +1847,13 @@ static bool object_test_hand_link(Link* link, Arena* arena)
         static const uint8_t small[] = { 'a', 'b', 'c' };
         static const uint8_t pointers[24] = { 0 };
         static const uint8_t hidden[] = { 1, 2, 3, 4 };
+        // xor eax, eax and ret: the IFUNC's resolver, which returns 0.
+        static const uint8_t resolver[] = { 0x31, 0xc0, 0xc3 };
         const uint8_t function = BUSTER_LINK_SYMBOL_FUNCTION;
         const uint8_t object = BUSTER_LINK_SYMBOL_OBJECT;
         const uint8_t program = BUSTER_LINK_SOURCE_PROGRAM;
         // Unit 0: code at 0, 16 and 24, with int3 between; the strings; an empty .rodata atom; data at 0 and 8, with
-        // zeros between; and .bss. Unit 2: data and code.
+        // zeros between; and .bss. Unit 2: data and code, the IFUNC, a call to it and a pointer to it.
         const AtomId entry_code = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_TEXT, 4, call, sizeof(call), 0);
         const AtomId load_code = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_TEXT, 4, load, sizeof(load), 0);
         const AtomId lea_code = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_TEXT, 2, lea, sizeof(lea), 0);
@@ -1809,6 +1864,9 @@ static bool object_test_hand_link(Link* link, Arena* arena)
         const AtomId zeros = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_BSS, 2, 0, 16, 0);
         const AtomId hidden_atom = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_DATA, 2, hidden, sizeof(hidden), 2);
         const AtomId jump_code = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_TEXT, 2, jump, sizeof(jump), 2);
+        const AtomId resolver_code = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_TEXT, 2, resolver, sizeof(resolver), 2);
+        const AtomId ifunc_call = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_TEXT, 0, call, sizeof(call), 2);
+        const AtomId ifunc_pointer = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_DATA, 3, pointers, 8, 2);
         const SymbolId weak_nowhere = link_add_symbol(link, object_test_hand_name(link, "weak_nowhere"), 0, 0, 0, BUSTER_LINK_SYMBOL_WEAK, BUSTER_LINK_SOURCE_NONE);
         link_add_symbol(link, object_test_hand_name(link, "entry"), entry_code, 0, sizeof(call), BUSTER_LINK_SYMBOL_GLOBAL | function, program);
         link_add_symbol(link, object_test_hand_name(link, "inside"), load_code, 3, 4, BUSTER_LINK_SYMBOL_LOCAL, program);
@@ -1822,6 +1880,8 @@ static bool object_test_hand_link(Link* link, Arena* arena)
         const SymbolId hidden_data = link_add_symbol(link, object_test_hand_name(link, "hidden_data"), hidden_atom, 0, sizeof(hidden),
                                                      BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_HIDDEN | object, program);
         link_add_symbol(link, object_test_hand_name(link, "far"), jump_code, 0, sizeof(jump), BUSTER_LINK_SYMBOL_GLOBAL | function, program);
+        const SymbolId chosen = link_add_symbol(link, object_test_hand_name(link, "chosen"), resolver_code, 0, sizeof(resolver),
+                                                BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_IFUNC, program);
         // Each atom's fixups together, in offset order.
         link_add_fixup(link, entry_code, 1, BUSTER_LINK_FIXUP_CALL, weak_nowhere, -4);
         link_add_fixup(link, load_code, 3, BUSTER_LINK_FIXUP_LOAD_GOT, hidden_data, -4);
@@ -1830,6 +1890,77 @@ static bool object_test_hand_link(Link* link, Arena* arena)
         link_add_fixup(link, table, 8, BUSTER_LINK_FIXUP_ABS64, there, 2);
         link_add_fixup(link, table, 16, BUSTER_LINK_FIXUP_ABS64, weak_nowhere, 0);
         link_add_fixup(link, jump_code, 1, BUSTER_LINK_FIXUP_CALL, weak_function, -4);
+        link_add_fixup(link, ifunc_call, 1, BUSTER_LINK_FIXUP_CALL, chosen, -4);
+        link_add_fixup(link, ifunc_pointer, 0, BUSTER_LINK_FIXUP_ABS64, chosen, 0);
+        result = link->error == LINK_ERROR_NONE && link_check(link) == LINK_ERROR_NONE;
+    }
+    return result;
+}
+
+// A program of one unit whose main calls a local IFUNC, chosen, directly and through a pointer, and returns the sum:
+// chosen's resolver returns answer, which returns 21, so the program exits with BUSTER_OBJECT_TEST_IFUNC_STATUS once
+// the linker has arranged the IFUNC's resolution (a call of the resolver itself returns answer's address).
+static bool object_test_ifunc_link(Link* link, Arena* arena)
+{
+    const LinkCapacity capacity = {
+        .names = 4,
+        .atoms = 4,
+        .symbols = 4,
+        .fixups = 4,
+        .wide_addends = 1,
+    };
+    bool result = link_initialize(link, arena, arena, capacity);
+    if (result)
+    {
+        // main: push rbx; call chosen; mov ebx, eax; call [rip + pointer]; add eax, ebx; pop rbx; ret.
+        static const uint8_t main_bytes[] = { 0x53, 0xe8, 0, 0, 0, 0, 0x89, 0xc3, 0xff, 0x15, 0, 0, 0, 0, 0x01, 0xd8, 0x5b, 0xc3 };
+        // chosen, the resolver: lea rax, [rip + answer]; ret. answer: mov eax, 21; ret.
+        static const uint8_t resolver[] = { 0x48, 0x8d, 0x05, 0, 0, 0, 0, 0xc3 };
+        static const uint8_t answer_bytes[] = { 0xb8, BUSTER_OBJECT_TEST_IFUNC_STATUS / 2, 0, 0, 0, 0xc3 };
+        static const uint8_t pointer_bytes[8] = { 0 };
+        const uint8_t program = BUSTER_LINK_SOURCE_PROGRAM;
+        const AtomId main_code = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_TEXT, 4, main_bytes, sizeof(main_bytes), 0);
+        const AtomId resolver_code = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_TEXT, 4, resolver, sizeof(resolver), 0);
+        const AtomId answer_code = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_TEXT, 4, answer_bytes, sizeof(answer_bytes), 0);
+        const AtomId pointer_data = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_DATA, 3, pointer_bytes, sizeof(pointer_bytes), 0);
+        link_add_symbol(link, object_test_hand_name(link, "main"), main_code, 0, sizeof(main_bytes), BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, program);
+        const SymbolId chosen = link_add_symbol(link, object_test_hand_name(link, "chosen"), resolver_code, 0, sizeof(resolver),
+                                                BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_IFUNC, program);
+        const SymbolId answer = link_add_symbol(link, object_test_hand_name(link, "answer"), answer_code, 0, sizeof(answer_bytes),
+                                                BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION, program);
+        const SymbolId pointer = link_add_symbol(link, object_test_hand_name(link, "pointer"), pointer_data, 0, sizeof(pointer_bytes),
+                                                 BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_OBJECT, program);
+        link_add_fixup(link, main_code, 2, BUSTER_LINK_FIXUP_CALL, chosen, -4);
+        link_add_fixup(link, main_code, 10, BUSTER_LINK_FIXUP_PC32, pointer, -4);
+        link_add_fixup(link, resolver_code, 3, BUSTER_LINK_FIXUP_PC32, answer, -4);
+        link_add_fixup(link, pointer_data, 0, BUSTER_LINK_FIXUP_ABS64, chosen, 0);
+        result = link->error == LINK_ERROR_NONE && link_check(link) == LINK_ERROR_NONE;
+    }
+    return result;
+}
+
+// A link of one unit with an absolute symbol, absolute = 42: global and pointed to by an ABS64 if `referenced`, local
+// and unreferenced otherwise. link_check accepts both; object_prepare refuses both, since no unit holds the symbol.
+static bool object_test_absolute_link(Link* link, bool referenced, Arena* arena)
+{
+    const LinkCapacity capacity = {
+        .names = 1,
+        .atoms = 1,
+        .symbols = 1,
+        .fixups = 1,
+        .wide_addends = 1,
+    };
+    bool result = link_initialize(link, arena, arena, capacity);
+    if (result)
+    {
+        static const uint8_t pointer_bytes[8] = { 0 };
+        const AtomId pointer_data = object_test_hand_atom(link, arena, BUSTER_LINK_CLASS_DATA, 3, pointer_bytes, sizeof(pointer_bytes), 0);
+        const uint8_t binding = referenced ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_LOCAL;
+        const SymbolId absolute = link_add_symbol(link, object_test_hand_name(link, "absolute"), 0, 42, 0, binding, BUSTER_LINK_SOURCE_ABSOLUTE);
+        if (referenced)
+        {
+            link_add_fixup(link, pointer_data, 0, BUSTER_LINK_FIXUP_ABS64, absolute, 0);
+        }
         result = link->error == LINK_ERROR_NONE && link_check(link) == LINK_ERROR_NONE;
     }
     return result;
@@ -1923,8 +2054,9 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
         arena_pop_to(arena, length);
         link_program_release(&program);
     }
-    // The link made by hand, each unit's object with and without function sections: of its 7 relocations, only the
-    // pointer to "hi" without an addend refers to a section symbol. Fewer units than its atoms have is an error.
+    // The link made by hand, each unit's object with and without function sections: of its 9 relocations, only the
+    // pointer to "hi" without an addend refers to a section symbol (the call to and the pointer to the local IFUNC refer
+    // to the IFUNC). Fewer units than its atoms have is an error.
     const uint64_t length = arena->length;
     Link hand;
     ObjectUnits units;
@@ -1944,7 +2076,7 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
         {
             object_test_unit(&tally, &hand, &units, &symbols, unit, object_options, &counts, arena);
         }
-        object_test_expect(&tally, counts.relocations == 7 && counts.section_symbol_relocations == 1, "the link made by hand's relocations", sections);
+        object_test_expect(&tally, counts.relocations == 9 && counts.section_symbol_relocations == 1, "the link made by hand's relocations", sections);
     }
     // An arena without room for the object: nothing pushed.
     if (prepared)
@@ -1983,6 +2115,18 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
     }
     object_test_expect(&tally, !overflow_made || overflow_prepared, "object_prepare on the link with an addend past int64", 0);
     arena_pop_to(arena, length);
+    // Absolute symbols, referenced or not: refused, with nothing left on the arena.
+    for (uint32_t referenced = 0; referenced < 2; referenced += 1)
+    {
+        Link absolute;
+        const bool absolute_made = object_test_absolute_link(&absolute, referenced == 1, arena);
+        object_test_expect(&tally, absolute_made, "the link with an absolute symbol", referenced);
+        const uint64_t before = arena->length;
+        const bool absolute_prepared = absolute_made && object_prepare(&units, &absolute, 1, arena);
+        object_test_expect(&tally, absolute_made && !absolute_prepared && arena->length == before && units.count == 0, "object_prepare refuses an absolute symbol",
+                           referenced);
+        arena_pop_to(arena, length);
+    }
     return object_test_report(&tally);
 }
 
@@ -2308,10 +2452,30 @@ static bool object_test_listing(ObjectTestTally* tally, const char* tool, const 
     return result;
 }
 
+// What a linked program must do: write `length` bytes, `output`, and exit with `status`.
+typedef struct ObjectTestExpected ObjectTestExpected;
+struct ObjectTestExpected
+{
+    const uint8_t* output;
+    uint64_t length;
+    int status;
+};
+
+// What a program of link_program_generate's must do: write its output and exit with status 0.
+static ObjectTestExpected object_test_program_expected(const LinkProgram* program)
+{
+    const ObjectTestExpected result = {
+        .output = program->output,
+        .length = BUSTER_LINK_PROGRAM_OUTPUT_BYTES,
+        .status = 0,
+    };
+    return result;
+}
+
 // Writes a program's objects to `directory`, lists each with readelf and llvm-readobj, and links them with each linker
-// that `linkers` names (a bit per linker of object_test_linkers) into a program that must print its output.
-static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* link, uint32_t unit_count, const uint8_t* output_expected, bool libc,
-                                            ObjectOptions options, const char* directory, const char* name, uint32_t linkers, bool keep, Arena* arena)
+// that `linkers` names (a bit per linker of object_test_linkers) into a program that must do what `expected` says.
+static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* link, uint32_t unit_count, ObjectTestExpected expected, bool libc, ObjectOptions options,
+                                            const char* directory, const char* name, uint32_t linkers, bool keep, Arena* arena)
 {
     static const char* const object_test_linkers[] = {
         "ld.bfd",
@@ -2413,13 +2577,13 @@ static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* 
             char* run_arguments[] = { program_path, 0 };
             const int run_status = link_status == 0 ? object_test_run(run_arguments, output_path, error_path) : -1;
             const String8 output = link_status == 0 ? object_test_read_file(arena, output_path) : (String8){ 0 };
-            const bool ran = run_status == 0 && output.pointer != 0 && output.length == BUSTER_LINK_PROGRAM_OUTPUT_BYTES &&
-                             memcmp(output.pointer, output_expected, BUSTER_LINK_PROGRAM_OUTPUT_BYTES) == 0;
+            const bool ran = run_status == expected.status && output.pointer != 0 && output.length == expected.length &&
+                             (expected.length == 0 || memcmp(output.pointer, expected.output, expected.length) == 0);
             if (link_status == 0 && !ran)
             {
-                printf("  %s linked by %s: status %d, output \"%.*s\", expected \"%.*s\"\n", name, linked_by, run_status,
-                       output.pointer != 0 ? (int)(output.length < 64 ? output.length : 64) : 0, output.pointer != 0 ? output.pointer : "", BUSTER_LINK_PROGRAM_OUTPUT_BYTES - 1,
-                       (const char*)output_expected);
+                printf("  %s linked by %s: status %d, output \"%.*s\", expected %d and \"%.*s\"\n", name, linked_by, run_status,
+                       output.pointer != 0 ? (int)(output.length < 64 ? output.length : 64) : 0, output.pointer != 0 ? output.pointer : "", expected.status,
+                       (int)(expected.length < 64 ? expected.length : 64), expected.length != 0 ? (const char*)expected.output : "");
             }
             object_test_expect(tally, ran, "the program runs and prints what it should", l);
             linked += ran ? 1 : 0;
@@ -2777,8 +2941,8 @@ static bool object_test_cross_check(uint64_t seed, const char* directory, bool k
             };
             char file[64];
             snprintf(file, sizeof(file), "%s%s", link_test_program_directories[i], sections == 1 ? "-sections" : "");
-            object_test_cross_check_program(&tally, &program.link, options[i].units, program.output, options[i].libc, object_options, directory, file, linkers, keep,
-                                            arena);
+            object_test_cross_check_program(&tally, &program.link, options[i].units, object_test_program_expected(&program), options[i].libc, object_options, directory,
+                                            file, linkers, keep, arena);
         }
         if (generated)
         {
@@ -2801,7 +2965,7 @@ static bool object_test_cross_check(uint64_t seed, const char* directory, bool k
         const ObjectOptions object_options = {
             .function_sections = true,
         };
-        object_test_cross_check_program(&tally, &program.link, many.units, program.output, false, object_options, directory, "many-sections",
+        object_test_cross_check_program(&tally, &program.link, many.units, object_test_program_expected(&program), false, object_options, directory, "many-sections",
                                         BUSTER_OBJECT_TEST_ALL_LINKERS, keep, arena);
         link_program_release(&program);
     }
@@ -2810,13 +2974,32 @@ static bool object_test_cross_check(uint64_t seed, const char* directory, bool k
     Link hand;
     const bool made = object_test_hand_link(&hand, arena);
     object_test_expect(&tally, made, "the link made by hand", 0);
+    const ObjectTestExpected nothing = { 0 };
     for (uint32_t sections = 0; made && sections < 2; sections += 1)
     {
         const ObjectOptions object_options = {
             .function_sections = sections == 1,
         };
-        object_test_cross_check_program(&tally, &hand, BUSTER_OBJECT_TEST_HAND_UNITS, 0, false, object_options, directory, sections == 1 ? "by-hand-sections" : "by-hand", 0,
-                                        keep, arena);
+        object_test_cross_check_program(&tally, &hand, BUSTER_OBJECT_TEST_HAND_UNITS, nothing, false, object_options, directory,
+                                        sections == 1 ? "by-hand-sections" : "by-hand", 0, keep, arena);
+    }
+    arena_pop_to(arena, length);
+    // The program that calls a local IFUNC, through cc by every linker, three ways each.
+    Link ifunc;
+    const bool ifunc_made = object_test_ifunc_link(&ifunc, arena);
+    object_test_expect(&tally, ifunc_made, "the program that calls a local IFUNC", 0);
+    const ObjectTestExpected ifunc_expected = {
+        .output = 0,
+        .length = 0,
+        .status = BUSTER_OBJECT_TEST_IFUNC_STATUS,
+    };
+    for (uint32_t sections = 0; ifunc_made && sections < 2; sections += 1)
+    {
+        const ObjectOptions object_options = {
+            .function_sections = sections == 1,
+        };
+        object_test_cross_check_program(&tally, &ifunc, 1, ifunc_expected, true, object_options, directory, sections == 1 ? "ifunc-sections" : "ifunc",
+                                        BUSTER_OBJECT_TEST_ALL_LINKERS, keep, arena);
     }
     arena_pop_to(arena, length);
     return object_test_report(&tally);

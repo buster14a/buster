@@ -97,7 +97,7 @@ static __attribute__((unused)) SnapshotResult runtime_open(Runtime* runtime, con
 // The file
 
 #define BUSTER_SNAPSHOT_MAGIC 0x504e535254535542ull
-#define BUSTER_SNAPSHOT_VERSION 1
+#define BUSTER_SNAPSHOT_VERSION 2
 #define BUSTER_SNAPSHOT_NAME "runtime.snapshot"
 #define BUSTER_SNAPSHOT_ALIGNMENT 64
 // The records with pointers start a page of their own, so that rebasing them copies a page (or as few as they need),
@@ -119,8 +119,9 @@ typedef enum SnapshotPath
     SNAPSHOT_PATH_OBJECTS,
     SNAPSHOT_PATH_LIBC_SCRIPT = SNAPSHOT_PATH_OBJECTS + RUNTIME_OBJECTS,
     SNAPSHOT_PATH_LIBC,
-    SNAPSHOT_PATH_NONSHARED,
-    SNAPSHOT_PATH_LOADER,
+    // BUSTER_RUNTIME_ARCHIVES of them, the archives' in their order.
+    SNAPSHOT_PATH_ARCHIVES,
+    SNAPSHOT_PATH_LOADER = SNAPSHOT_PATH_ARCHIVES + BUSTER_RUNTIME_ARCHIVES,
     SNAPSHOT_PATH_SONAME,
     SNAPSHOT_PATH_ABI_NOTE,
     SNAPSHOT_PATHS,
@@ -166,6 +167,7 @@ typedef enum SnapshotRegion
     SNAPSHOT_REGION_GLOBAL_LENGTH,
     SNAPSHOT_REGION_GLOBAL_HASH,
     SNAPSHOT_REGION_GLOBAL_DEFINITION,
+    SNAPSHOT_REGION_GLOBAL_MEMBER,
     SNAPSHOT_REGION_GLOBAL_EXPORT,
     SNAPSHOT_REGION_GLOBAL_REFERENCED,
     SNAPSHOT_REGION_GLOBAL_LINKER,
@@ -175,6 +177,13 @@ typedef enum SnapshotRegion
     SNAPSHOT_REGION_FILTER,
     SNAPSHOT_REGION_EXPORT_VERSION,
     SNAPSHOT_REGION_EXPORT_FLAGS,
+    SNAPSHOT_REGION_REFERENCE_BEGIN,
+    SNAPSHOT_REGION_REFERENCES,
+    SNAPSHOT_REGION_GROUP_BEGIN,
+    SNAPSHOT_REGION_GROUPS,
+    SNAPSHOT_REGION_GROUP_ATOMS,
+    SNAPSHOT_REGION_PRIORITY_ATOM,
+    SNAPSHOT_REGION_PRIORITY_VALUE,
     SNAPSHOT_REGIONS,
 } SnapshotRegion;
 
@@ -201,6 +210,10 @@ struct SnapshotPlace
 typedef struct SnapshotCounts SnapshotCounts;
 struct SnapshotCounts
 {
+    // The runtime's kind, and its archives' number and each one's first member.
+    uint32_t kind;
+    uint32_t archives;
+    uint32_t first_members[BUSTER_RUNTIME_ARCHIVES];
     uint32_t probes;
     uint32_t versions;
     uint32_t members;
@@ -210,12 +223,18 @@ struct SnapshotCounts
     uint32_t symbols;
     uint32_t fixups;
     uint32_t wide_addends;
+    uint32_t priorities;
     uint32_t pieces;
+    // The pieces' references, groups and the groups' atoms, and the groups' distinct signatures.
+    uint32_t references;
+    uint32_t groups;
+    uint32_t group_atoms;
+    uint32_t group_signatures;
     uint32_t globals;
     uint32_t bucket_bits;
     uint32_t filter_bits;
     uint32_t exports;
-    uint32_t nonshared_unit;
+    uint32_t member_unit;
     uint64_t names_run;
     uint64_t names_run_bytes;
     uint64_t global_strings;
@@ -259,7 +278,7 @@ static void snapshot_columns(Runtime* runtime, const SnapshotCounts* counts, Sna
     const uint64_t filter = counts->filter_bits < 32 ? (uint64_t)1 << counts->filter_bits : 0;
     columns[SNAPSHOT_REGION_PROBES] = (SnapshotColumn){ (void**)&runtime->probes, sizeof(RuntimeProbe), counts->probes };
     columns[SNAPSHOT_REGION_VERSIONS] = (SnapshotColumn){ (void**)&runtime->libc.versions, sizeof(ImportVersion), counts->versions };
-    columns[SNAPSHOT_REGION_MEMBERS] = (SnapshotColumn){ (void**)&runtime->nonshared.members, sizeof(ImportMember), counts->members };
+    columns[SNAPSHOT_REGION_MEMBERS] = (SnapshotColumn){ (void**)&runtime->members, sizeof(ImportMember), counts->members };
     columns[SNAPSHOT_REGION_NAME_BYTES] = (SnapshotColumn){ (void**)&link->names.bytes, sizeof(*link->names.bytes), counts->names };
     columns[SNAPSHOT_REGION_ATOM_BYTES] = (SnapshotColumn){ (void**)&link->atoms.bytes, sizeof(*link->atoms.bytes), counts->atoms };
     columns[SNAPSHOT_REGION_STRINGS] = (SnapshotColumn){ 0, 1, 0 };
@@ -294,6 +313,7 @@ static void snapshot_columns(Runtime* runtime, const SnapshotCounts* counts, Sna
     columns[SNAPSHOT_REGION_GLOBAL_LENGTH] = (SnapshotColumn){ (void**)&names->length, sizeof(*names->length), counts->globals };
     columns[SNAPSHOT_REGION_GLOBAL_HASH] = (SnapshotColumn){ (void**)&names->hash, sizeof(*names->hash), counts->globals };
     columns[SNAPSHOT_REGION_GLOBAL_DEFINITION] = (SnapshotColumn){ (void**)&names->definition, sizeof(*names->definition), counts->globals };
+    columns[SNAPSHOT_REGION_GLOBAL_MEMBER] = (SnapshotColumn){ (void**)&names->member, sizeof(*names->member), counts->globals };
     columns[SNAPSHOT_REGION_GLOBAL_EXPORT] = (SnapshotColumn){ (void**)&names->export, sizeof(*names->export), counts->globals };
     columns[SNAPSHOT_REGION_GLOBAL_REFERENCED] = (SnapshotColumn){ (void**)&names->referenced, sizeof(*names->referenced), counts->globals };
     columns[SNAPSHOT_REGION_GLOBAL_LINKER] = (SnapshotColumn){ (void**)&names->linker, sizeof(*names->linker), counts->globals };
@@ -303,6 +323,13 @@ static void snapshot_columns(Runtime* runtime, const SnapshotCounts* counts, Sna
     columns[SNAPSHOT_REGION_FILTER] = (SnapshotColumn){ (void**)&names->filter, sizeof(*names->filter), filter };
     columns[SNAPSHOT_REGION_EXPORT_VERSION] = (SnapshotColumn){ (void**)&runtime->libc.exports.version, sizeof(*runtime->libc.exports.version), counts->exports };
     columns[SNAPSHOT_REGION_EXPORT_FLAGS] = (SnapshotColumn){ (void**)&runtime->libc.exports.flags, sizeof(*runtime->libc.exports.flags), counts->exports };
+    columns[SNAPSHOT_REGION_REFERENCE_BEGIN] = (SnapshotColumn){ (void**)&runtime->reference_begin, sizeof(*runtime->reference_begin), (uint64_t)counts->pieces + 1 };
+    columns[SNAPSHOT_REGION_REFERENCES] = (SnapshotColumn){ (void**)&runtime->references, sizeof(*runtime->references), counts->references };
+    columns[SNAPSHOT_REGION_GROUP_BEGIN] = (SnapshotColumn){ (void**)&runtime->group_begin, sizeof(*runtime->group_begin), (uint64_t)counts->pieces + 1 };
+    columns[SNAPSHOT_REGION_GROUPS] = (SnapshotColumn){ (void**)&runtime->groups, sizeof(RuntimeGroup), counts->groups };
+    columns[SNAPSHOT_REGION_GROUP_ATOMS] = (SnapshotColumn){ (void**)&runtime->group_atoms, sizeof(*runtime->group_atoms), counts->group_atoms };
+    columns[SNAPSHOT_REGION_PRIORITY_ATOM] = (SnapshotColumn){ (void**)&link->priorities.atom, sizeof(*link->priorities.atom), counts->priorities };
+    columns[SNAPSHOT_REGION_PRIORITY_VALUE] = (SnapshotColumn){ (void**)&link->priorities.priority, sizeof(*link->priorities.priority), counts->priorities };
 }
 
 // The runtime's strings that the header points to, by SnapshotPath.
@@ -316,7 +343,10 @@ static void snapshot_paths(Runtime* runtime, String8** paths)
     }
     paths[SNAPSHOT_PATH_LIBC_SCRIPT] = &runtime->libc_script;
     paths[SNAPSHOT_PATH_LIBC] = &runtime->libc_path;
-    paths[SNAPSHOT_PATH_NONSHARED] = &runtime->nonshared_path;
+    for (uint32_t a = 0; a < BUSTER_RUNTIME_ARCHIVES; a += 1)
+    {
+        paths[SNAPSHOT_PATH_ARCHIVES + a] = &runtime->archives[a].path;
+    }
     paths[SNAPSHOT_PATH_LOADER] = &runtime->loader_path;
     paths[SNAPSHOT_PATH_SONAME] = &runtime->libc.soname;
     paths[SNAPSHOT_PATH_ABI_NOTE] = &runtime->abi_note;
@@ -369,24 +399,36 @@ static void snapshot_fail(SnapshotResult* result, const char* call, int error)
 static SnapshotCounts snapshot_counts(const Runtime* runtime)
 {
     const Link* link = &runtime->link;
+    const uint32_t pieces = RUNTIME_OBJECTS + runtime->member_count;
     SnapshotCounts result = {
+        .kind = runtime->kind,
+        .archives = runtime->archive_count,
         .probes = runtime->probe_count,
         .versions = runtime->libc.version_count,
-        .members = runtime->nonshared.member_count,
+        .members = runtime->member_count,
         .names = link->names.count,
         .atoms = link->atoms.count,
         .symbols = link->symbols.count,
         .fixups = link->fixups.count,
         .wide_addends = link->fixups.wide_count,
-        .pieces = RUNTIME_OBJECTS + runtime->nonshared.member_count,
+        .priorities = link->priorities.count,
+        .pieces = pieces,
+        .references = runtime->reference_begin[pieces],
+        .groups = runtime->group_begin[pieces],
+        .group_atoms = runtime->group_begin[pieces] != 0 ? runtime->groups[runtime->group_begin[pieces] - 1].first + runtime->groups[runtime->group_begin[pieces] - 1].count : 0,
+        .group_signatures = runtime->group_signatures,
         .globals = runtime->global_names.count,
         .bucket_bits = runtime->global_names.index.bucket_bits,
         .filter_bits = runtime->global_names.filter_bits,
         .exports = runtime->libc.exports.count,
-        .nonshared_unit = runtime->nonshared_unit,
+        .member_unit = runtime->member_unit,
         .names_run_bytes = runtime->names.length,
         .global_strings_bytes = runtime->global_names.strings_length,
     };
+    for (uint32_t a = 0; a < runtime->archive_count; a += 1)
+    {
+        result.first_members[a] = runtime->archives[a].first_member;
+    }
     return result;
 }
 
@@ -433,9 +475,9 @@ static uint64_t snapshot_strings_bytes(const Runtime* runtime)
     {
         result += runtime->libc.versions[v].name.length + 1;
     }
-    for (uint32_t m = 0; m < runtime->nonshared.member_count; m += 1)
+    for (uint32_t m = 0; m < runtime->member_count; m += 1)
     {
-        result += runtime->nonshared.members[m].name.length + 1;
+        result += runtime->members[m].name.length + 1;
     }
     for (AtomId atom = 1; atom < runtime->link.atoms.count; atom += 1)
     {
@@ -526,7 +568,7 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
         ImportMember* members = (ImportMember*)(image + header.regions[SNAPSHOT_REGION_MEMBERS].offset);
         for (uint32_t m = 0; m < header.counts.members; m += 1)
         {
-            const ImportMember* member = &runtime->nonshared.members[m];
+            const ImportMember* member = &runtime->members[m];
             members[m].name.pointer = (char*)(uintptr_t)snapshot_add_string(&strings, member->name.pointer, member->name.length, &fits);
             members[m].name.length = member->name.length;
             members[m].offset = member->offset;
@@ -696,8 +738,15 @@ static void snapshot_rebase(uint64_t* words, uint64_t count, const uint8_t* stri
 // its column's size (`runtime` only gives the columns' places, which this doesn't touch).
 static bool snapshot_valid_header(const SnapshotHeader* header, uint64_t bytes, Runtime* runtime)
 {
+    const SnapshotCounts* counts = &header->counts;
     bool result = header->magic == BUSTER_SNAPSHOT_MAGIC && header->version == BUSTER_SNAPSHOT_VERSION && header->header_bytes == sizeof(SnapshotHeader) &&
-                  header->file_bytes == bytes && header->counts.bucket_bits < 32 && header->counts.filter_bits < 32;
+                  header->file_bytes == bytes && counts->bucket_bits < 32 && counts->filter_bits < 32 && counts->kind < RUNTIME_KINDS &&
+                  counts->archives <= BUSTER_RUNTIME_ARCHIVES && counts->pieces < UINT32_MAX;
+    // The archives' members, one after another.
+    for (uint32_t a = 0; result && a < counts->archives; a += 1)
+    {
+        result = counts->first_members[a] <= counts->members && (a == 0 || counts->first_members[a - 1] <= counts->first_members[a]);
+    }
     SnapshotColumn columns[SNAPSHOT_REGIONS];
     snapshot_columns(runtime, &header->counts, columns);
     for (uint32_t r = 0; result && r < SNAPSHOT_REGIONS; r += 1)
@@ -742,7 +791,7 @@ static void snapshot_view(Runtime* runtime, uint8_t* file, uint64_t bytes)
     }
     for (uint32_t m = 0; m < counts.members; m += 1)
     {
-        ImportMember* member = &runtime->nonshared.members[m];
+        ImportMember* member = &runtime->members[m];
         member->name = snapshot_string(strings, (SnapshotString){ (uint64_t)(uintptr_t)member->name.pointer, member->name.length });
     }
     String8* paths[SNAPSHOT_PATHS];
@@ -772,8 +821,21 @@ static void snapshot_view(Runtime* runtime, uint8_t* file, uint64_t bytes)
     runtime->probe_capacity = counts.probes;
     runtime->libc.version_count = counts.versions;
     runtime->libc.exports.count = counts.exports;
-    runtime->nonshared.member_count = counts.members;
-    runtime->nonshared_unit = counts.nonshared_unit;
+    runtime->member_count = counts.members;
+    runtime->member_unit = counts.member_unit;
+    runtime->kind = (RuntimeKind)counts.kind;
+    runtime->archive_count = counts.archives;
+    for (uint32_t a = 0; a < counts.archives; a += 1)
+    {
+        RuntimeArchive* archive = &runtime->archives[a];
+        const uint32_t end = a + 1 < counts.archives ? counts.first_members[a + 1] : counts.members;
+        archive->first_member = counts.first_members[a];
+        archive->archive.members = runtime->members + counts.first_members[a];
+        archive->archive.member_count = end - counts.first_members[a];
+    }
+    runtime->group_signatures = counts.group_signatures;
+    link->priorities.count = counts.priorities;
+    link->priorities.capacity = counts.priorities;
     runtime->global_names.strings = strings + counts.global_strings;
     runtime->global_names.strings_length = counts.global_strings_bytes;
     runtime->global_names.count = counts.globals;

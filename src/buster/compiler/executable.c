@@ -634,7 +634,8 @@ BUSTER_INLINE bool executable_patch_other(ExecutablePatch patch, uint8_t* bytes,
             width = 8;
             break;
         default:
-            // link_check refuses other kinds.
+            // No other kind fits a field yet: link_check refuses kinds that don't exist, and the general- and
+            // local-dynamic TLS kinds of imported objects wait for step 6's static executables, which relax them.
             width = 0;
             break;
     }

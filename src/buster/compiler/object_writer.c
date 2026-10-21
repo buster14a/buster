@@ -22,9 +22,15 @@
 // REX_GOTPCRELX only on the instructions the psABI lets a linker rewrite, which link_add_code_fixups enforces), the
 // fixup's addend (relative to the field) and the target. A local target is replaced by its section's symbol, with the
 // target's offset added to the addend, where GNU as and LLVM do so: for every kind but the GOT, TLS and size kinds,
-// whose linkers need the symbol itself, and not into a string pool with a PC-relative kind or an addend, since linkers
-// split pools by string and the section's symbol would then name the wrong string. The fields are already zero:
-// link_add_code_fixups zeroes code's, and data's are zero, as GNU as writes them.
+// whose linkers need the symbol itself, not for an IFUNC, whose linkers resolve it through the symbol (a call or an
+// address through its section's symbol would reach the resolver), and not into a string pool with a PC-relative kind or
+// an addend, since linkers split pools by string and the section's symbol would then name the wrong string. The fields
+// are already zero: link_add_code_fixups zeroes code's, and data's are zero, as GNU as writes them. An object that
+// defines an IFUNC is ELFOSABI_GNU, as GNU as and LLVM mark it, and others ELFOSABI_SYSV.
+//
+// An absolute symbol (BUSTER_LINK_SOURCE_ABSOLUTE) is in no unit, so no object could define it as the link does:
+// object_prepare refuses a link with one, rather than writing objects that leave it undefined. The direct path's
+// programs have none: only an imported object's (the static runtime's) do, which no object is written for.
 //
 // Count, place, fill (docs/object-writer-and-linker.md, "Lanes", rule 3):
 //   - object_prepare, once per link, for the units its caller says the link has (an empty translation unit, without
@@ -112,13 +118,15 @@ struct ObjectUnits
     SymbolId* symbols;
     uint32_t* symbol_begin;
     // Each symbol's unit in the high 32 bits (UINT32_MAX without an atom), and in the low ones what it is to that unit's
-    // object (BUSTER_OBJECT_SYMBOL_LOCAL or _GLOBAL, _IN_POOL, and its place among the unit's local symbols or its
-    // global and weak ones): what an object needs of a symbol it meets, in one load.
+    // object (BUSTER_OBJECT_SYMBOL_LOCAL or _GLOBAL, _IN_POOL, _IFUNC, and its place among the unit's local symbols or
+    // its global and weak ones): what an object needs of a symbol it meets, in one load.
     uint64_t* symbol_info;
     // Each symbol's name's bytes in .strtab, with its NUL, or 0 without a name; and each unit's for its own symbols, the
     // names given to its local symbols without one among them.
     uint32_t* symbol_name_bytes;
     uint64_t* unit_name_bytes;
+    // Each unit's object's EI_OSABI: ELFOSABI_GNU if it defines an IFUNC, otherwise ELFOSABI_SYSV.
+    uint8_t* unit_abi;
     // A TEXT atom's name, for its own section with function sections: its first named symbol at offset 0's, or 0.
     NameId* atom_name;
     // The units' inclusive prefix sums of their costs (atoms' bytes, and fixups and symbols at a record's bytes each), by
@@ -134,15 +142,17 @@ struct ObjectUnits
 
 // What a symbol is to an object (ObjectUnits.symbol_info and ObjectSymbols.entries' low 32 bits): what kind of symbol
 // (in the top two bits) and its place among the object's symbols of that kind (in the bits below
-// BUSTER_OBJECT_SYMBOL_IN_POOL). A local one in a string pool has BUSTER_OBJECT_SYMBOL_IN_POOL too, which decides
-// whether a relocation can refer to its section's symbol instead (object_uses_section_symbol).
+// BUSTER_OBJECT_SYMBOL_IFUNC). A local one in a string pool has BUSTER_OBJECT_SYMBOL_IN_POOL too, and a local IFUNC
+// BUSTER_OBJECT_SYMBOL_IFUNC, which decide whether a relocation can refer to its section's symbol instead
+// (object_uses_section_symbol).
 #define BUSTER_OBJECT_SYMBOL_LOCAL 0x00000000u
 #define BUSTER_OBJECT_SYMBOL_GLOBAL 0x40000000u
 #define BUSTER_OBJECT_SYMBOL_UNDEFINED 0x80000000u
 #define BUSTER_OBJECT_SYMBOL_KIND 0xc0000000u
 #define BUSTER_OBJECT_SYMBOL_KIND_SHIFT 30
 #define BUSTER_OBJECT_SYMBOL_IN_POOL 0x20000000u
-#define BUSTER_OBJECT_SYMBOL_PLACE 0x1fffffffu
+#define BUSTER_OBJECT_SYMBOL_IFUNC 0x10000000u
+#define BUSTER_OBJECT_SYMBOL_PLACE 0x0fffffffu
 
 // What a lane's objects know of each of the link's symbols, one object after another: entry s is the stamp of the
 // object being built when it first met symbol s (in the high 32 bits) and what s is to that object (a code,
@@ -170,7 +180,8 @@ struct Object
 
 // Groups the link's atoms and symbols by unit, with what object_build needs, from `arena`, for units 0 to count - 1:
 // the caller's translation units, which an atomless one is among, since its object is still written. Returns false if
-// an atom's unit isn't below count, or the arena can't hold them (or the scratch arena the counting sorts' cursors).
+// an atom's unit isn't below count, the link has an absolute symbol (see the orientation comment), or the arena can't
+// hold them (or the scratch arena the counting sorts' cursors).
 static __attribute__((unused)) bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count, Arena* arena);
 // The calling lane's ObjectSymbols for the link's symbols, from `arena`. Returns false if the arena can't hold them.
 static __attribute__((unused)) bool object_map_symbols(ObjectSymbols* symbols, const Link* link, Arena* arena);
@@ -307,6 +318,9 @@ static const uint32_t object_relocation_types[BUSTER_LINK_FIXUP_KINDS] = {
     [BUSTER_LINK_FIXUP_ABS32S] = R_X86_64_32S,
     [BUSTER_LINK_FIXUP_SIZE32] = R_X86_64_SIZE32,
     [BUSTER_LINK_FIXUP_SIZE64] = R_X86_64_SIZE64,
+    [BUSTER_LINK_FIXUP_TLSGD] = R_X86_64_TLSGD,
+    [BUSTER_LINK_FIXUP_TLSLD] = R_X86_64_TLSLD,
+    [BUSTER_LINK_FIXUP_DTPOFF32] = R_X86_64_DTPOFF32,
 };
 
 // The prefix of a relocation section's name: ".rela" and its section's, which .shstrtab shares.
@@ -390,6 +404,20 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
     {
         prepared = atoms->unit[atom] < unit_count;
     }
+    // The symbols' sources and types, 64 at a time: an absolute symbol, which no unit holds, refuses the link, and an
+    // IFUNC makes its unit's object ELFOSABI_GNU (whose units are found below, since IFUNCs are rare).
+    uint64_t absolute = 0;
+    uint64_t ifunc = 0;
+    for (SymbolId first = 1; first < symbols->count; first += 64)
+    {
+        const uint64_t left = symbols->count - first;
+        const __mmask64 valid = left >= 64 ? ~0ull : (1ull << left) - 1;
+        const __m512i sources = _mm512_maskz_loadu_epi8(valid, symbols->source + first);
+        const __m512i types = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, symbols->flags + first), _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TYPE));
+        absolute |= _mm512_mask_cmpeq_epi8_mask(valid, sources, _mm512_set1_epi8(BUSTER_LINK_SOURCE_ABSOLUTE));
+        ifunc |= _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_IFUNC));
+    }
+    prepared = prepared && absolute == 0;
     ObjectUnits result = {
         .count = count,
     };
@@ -403,13 +431,15 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
         result.symbol_info = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, symbols->count);
         result.symbol_name_bytes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbols->count);
         result.unit_name_bytes = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, unit_count);
+        result.unit_abi = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, unit_count);
         result.atom_name = BUSTER_ARENA_PUSH_ARRAY(arena, NameId, atoms->count);
         result.cost_prefix = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, unit_count);
         result.part_boundaries = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_LANE_MAX_PARTS + 1);
         result.atom_section = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, atoms->count);
         result.atom_offset = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, atoms->count);
         prepared = result.atoms != 0 && result.atom_begin != 0 && result.symbols != 0 && result.symbol_begin != 0 && result.symbol_info != 0 &&
-                   result.symbol_name_bytes != 0 && result.unit_name_bytes != 0 && result.atom_name != 0 && result.cost_prefix != 0 && result.part_boundaries != 0 &&
+                   result.symbol_name_bytes != 0 && result.unit_name_bytes != 0 && result.unit_abi != 0 && result.atom_name != 0 && result.cost_prefix != 0 &&
+                   result.part_boundaries != 0 &&
                    result.atom_section != 0 && result.atom_offset != 0;
     }
     Scratch scratch = scratch_begin(arena);
@@ -441,6 +471,7 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
         // symbol without an atom is in no unit, and every object that refers to it has it undefined.
         memset(result.symbol_begin, 0, (2 * unit_count + 1) * sizeof(uint32_t));
         memset(result.unit_name_bytes, 0, unit_count * sizeof(uint64_t));
+        memset(result.unit_abi, ELFOSABI_SYSV, unit_count);
         memset(unnamed, 0, unit_count * sizeof(uint64_t));
         result.symbol_info[0] = (uint64_t)UINT32_MAX << 32;
         result.symbol_name_bytes[0] = 0;
@@ -488,6 +519,25 @@ static bool object_prepare(ObjectUnits* units, const Link* link, uint32_t count,
                 if (atoms->class[atom] == BUSTER_LINK_CLASS_TEXT && symbols->value[symbol] == 0 && name != 0 && result.atom_name[atom] == 0)
                 {
                     result.atom_name[atom] = name;
+                }
+            }
+        }
+        // The IFUNCs, if the link has one, 64 symbols' types at a time: each one in an atom makes its unit's object
+        // ELFOSABI_GNU, and a local one's relocations name it (BUSTER_OBJECT_SYMBOL_IFUNC).
+        for (SymbolId first = 1; ifunc != 0 && first < symbols->count; first += 64)
+        {
+            const uint64_t left = symbols->count - first;
+            const __mmask64 valid = left >= 64 ? ~0ull : (1ull << left) - 1;
+            const __m512i types = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, symbols->flags + first), _mm512_set1_epi8(BUSTER_LINK_SYMBOL_TYPE));
+            for (uint64_t ifuncs = _mm512_mask_cmpeq_epi8_mask(valid, types, _mm512_set1_epi8(BUSTER_LINK_SYMBOL_IFUNC)); ifuncs != 0; ifuncs &= ifuncs - 1)
+            {
+                const SymbolId symbol = first + (SymbolId)__builtin_ctzll(ifuncs);
+                const AtomId atom = symbols->atom[symbol];
+                const bool local = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
+                if (atom != 0)
+                {
+                    result.unit_abi[atoms->unit[atom]] = ELFOSABI_GNU;
+                    result.symbol_info[symbol] |= local ? BUSTER_OBJECT_SYMBOL_IFUNC : 0;
                 }
             }
         }
@@ -598,14 +648,15 @@ struct ObjectBuilder
     ObjectError error;
 };
 
-// Whether a fixup of `kind` with `addend` refers to its local target's section symbol rather than to the target (see the
-// orientation comment): GNU as and LLVM keep the symbol for the GOT, TLS and size kinds, and in a string pool
-// (`in_pool`) for a PC-relative kind or any addend.
-static bool object_uses_section_symbol(uint8_t kind, bool in_pool, int64_t addend)
+// Whether a fixup of `kind` with `addend` refers to its local target (whose code is `code`) through the target's section
+// symbol rather than itself (see the orientation comment): GNU as and LLVM keep the symbol for the GOT, TLS and size
+// kinds and for an IFUNC, and in a string pool for a PC-relative kind or any addend.
+static bool object_uses_section_symbol(uint8_t kind, uint32_t code, int64_t addend)
 {
     const bool kept = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_TPOFF32 ||
-                      kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64;
-    const bool pool = in_pool && (link_fixup_kinds[kind].pc_relative || addend != 0);
+                      kind == BUSTER_LINK_FIXUP_GOTTPOFF || kind == BUSTER_LINK_FIXUP_SIZE32 || kind == BUSTER_LINK_FIXUP_SIZE64 || kind == BUSTER_LINK_FIXUP_TLSGD ||
+                      kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32 || (code & BUSTER_OBJECT_SYMBOL_IFUNC) != 0;
+    const bool pool = (code & BUSTER_OBJECT_SYMBOL_IN_POOL) != 0 && (link_fixup_kinds[kind].pc_relative || addend != 0);
     return !kept && !pool;
 }
 
@@ -738,7 +789,7 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
                 {
                     const uint8_t kind = kinds[fixup];
                     const int64_t addend = (kind & BUSTER_LINK_FIXUP_WIDE) != 0 ? wide_addends[(uint32_t)addends[fixup]] : addends[fixup];
-                    if (object_uses_section_symbol(kind & BUSTER_LINK_FIXUP_KIND, (code & BUSTER_OBJECT_SYMBOL_IN_POOL) != 0, addend))
+                    if (object_uses_section_symbol(kind & BUSTER_LINK_FIXUP_KIND, code, addend))
                     {
                         const AtomId target_atom = symbols->atom[target];
                         const uint64_t place = units->atom_offset[target_atom] + symbols->value[target];
@@ -1017,7 +1068,7 @@ static void object_fill_relocations(const ObjectBuilder* builder, uint8_t* bytes
                     const uint8_t kind = kind_bits & BUSTER_LINK_FIXUP_KIND;
                     int64_t addend = (kind_bits & BUSTER_LINK_FIXUP_WIDE) != 0 ? wide_addends[(uint32_t)addends[fixup]] : addends[fixup];
                     uint64_t index = bases[code >> BUSTER_OBJECT_SYMBOL_KIND_SHIFT] + (code & BUSTER_OBJECT_SYMBOL_PLACE);
-                    if ((code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL && object_uses_section_symbol(kind, (code & BUSTER_OBJECT_SYMBOL_IN_POOL) != 0, addend))
+                    if ((code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL && object_uses_section_symbol(kind, code, addend))
                     {
                         const AtomId target_atom = symbol_atoms[target];
                         index = sections[atom_section[target_atom]].symbol;
@@ -1181,7 +1232,7 @@ static void object_fill_headers(const ObjectBuilder* builder, uint8_t* bytes)
             ELFCLASS64,
             ELFDATA2LSB,
             EV_CURRENT,
-            ELFOSABI_SYSV,
+            builder->units->unit_abi[builder->unit],
         },
         .e_type = ET_REL,
         .e_machine = EM_X86_64,

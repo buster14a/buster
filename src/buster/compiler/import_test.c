@@ -47,10 +47,18 @@
 //     crtendS.o, and _GLOBAL_OFFSET_TABLE_ to the linker; the objects' pieces, one after another; and the global names
 //     binding looks a program's up in, each once, found by its bytes, each global symbol's its own, with each name the
 //     linker defines among them as the linker's.
+//   - The static runtime (runtime_import_static, import_test_static_runtime): crt1.o, crtbeginT.o and crtend.o with
+//     what they are for and crt1.o's ABI note; the archives in GCC's group order, each one's members one after another;
+//     the bindings of main, __libc_start_main, __gmon_start__, __TMC_END__, _GLOBAL_OFFSET_TABLE_ and the IRELATIVE
+//     relocations' bounds, and none to a shared library; memcpy an IFUNC, _nl_current_LC_CTYPE_used absolute, and
+//     libgcc.a's priorities; each object's COMDAT groups as its ImportObject has them, numbered alike by signature;
+//     each piece's strong references against a scan of its symbols, and each global name's defining member; link_check
+//     on the whole runtime; and every crt object and member taking the vector path.
 //   - With --cross-check, which needs readelf: libc.so.6's exports against `readelf -W --dyn-syms` (name, version,
 //     type, binding and size; IFUNC as a function, GNU_UNIQUE as global) and its references, and the relocations of
-//     the crt objects and libc_nonshared.a's members against `readelf -W -r`: each one a fixup of its kind at its
-//     offset, against the symbol (or the section) readelf names, with its addend, and no other fixups.
+//     the crt objects and the archives' members, the static runtime's among them, against `readelf -W -r`: each one a
+//     fixup of its kind at its offset, against the symbol (or the section) readelf names, with its addend, and no other
+//     fixups.
 // Throughout, each object, archive and library is also read by its reader's vector path, its exact path and the reader
 // itself, each into a link (or a read) of its own (import_test_paths and its archive and library twins): the reader's
 // result and records must be the exact path's, and the vector path may take an input only when the exact path reads
@@ -59,8 +67,8 @@
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, the paths' comparisons, the round trips, files made by hand, objects, archives,
-// shared libraries, linker scripts, page edges, the runtime (discovery among it), the cross-check, and
-// run_import_tests.
+// shared libraries, linker scripts, page edges, the runtime (discovery and the static runtime among it), the
+// cross-check, and run_import_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -188,15 +196,31 @@ static bool import_test_same_tables(const Link* a, const Link* b)
     {
         result = a->fixups.wide_addends[wide] == b->fixups.wide_addends[wide];
     }
+    result = result && a->priorities.count == b->priorities.count;
+    for (uint32_t entry = 1; result && entry < a->priorities.count; entry += 1)
+    {
+        result = a->priorities.atom[entry] == b->priorities.atom[entry] && a->priorities.priority[entry] == b->priorities.priority[entry];
+    }
     return result;
 }
 
-// Whether two imports of an object made the same ImportObject.
+// Whether two imports of an object made the same ImportObject: its atoms and symbols by index, and its groups, each
+// signature by its bytes.
 static bool import_test_same_object(const ImportObject* a, const ImportObject* b)
 {
-    bool result = a->section_count == b->section_count && a->symbol_count == b->symbol_count;
+    bool result = a->section_count == b->section_count && a->symbol_count == b->symbol_count && a->group_count == b->group_count;
     result = result && (a->section_count == 0 || memcmp(a->section_atoms, b->section_atoms, (uint64_t)a->section_count * sizeof(AtomId)) == 0);
     result = result && (a->symbol_count == 0 || memcmp(a->symbols, b->symbols, (uint64_t)a->symbol_count * sizeof(SymbolId)) == 0);
+    uint64_t members = 0;
+    for (uint32_t g = 0; result && g < a->group_count; g += 1)
+    {
+        const ImportGroup* x = &a->groups[g];
+        const ImportGroup* y = &b->groups[g];
+        result = x->signature.length == y->signature.length && memcmp(x->signature.pointer, y->signature.pointer, x->signature.length) == 0 && x->first == y->first &&
+                 x->count == y->count;
+        members = result ? x->first + x->count : members;
+    }
+    result = result && (members == 0 || memcmp(a->group_sections, b->group_sections, members * sizeof(uint32_t)) == 0);
     return result;
 }
 
@@ -227,6 +251,7 @@ static bool import_test_paths_agree(String8 bytes, const LinkCapacity* room, boo
         .symbols = BUSTER_IMPORT_TEST_PATH_ROOM,
         .fixups = BUSTER_IMPORT_TEST_PATH_ROOM,
         .wide_addends = BUSTER_IMPORT_TEST_PATH_ROOM,
+        .priorities = BUSTER_IMPORT_TEST_PATH_ROOM,
     };
     LinkCapacity counted;
     if (room != 0)
@@ -701,10 +726,32 @@ static bool import_test_round_trips(uint64_t seed, Arena* arena)
 // ---------------------------------------------------------------------------------------------------------------------
 // Files made by hand
 
-#define BUSTER_IMPORT_TEST_MAX_SECTIONS 32
-#define BUSTER_IMPORT_TEST_MAX_SYMBOLS 32
-#define BUSTER_IMPORT_TEST_MAX_RELOCATIONS 16
+#define BUSTER_IMPORT_TEST_MAX_SECTIONS 48
+#define BUSTER_IMPORT_TEST_MAX_SYMBOLS 48
+#define BUSTER_IMPORT_TEST_MAX_RELOCATIONS 24
 #define BUSTER_IMPORT_TEST_STRING_BYTES 1024
+
+// Names no section of a file made by hand has, at the end of its .shstrtab, which the malformed cases give a section
+// (ImportTestFile.spare_names): ones the importer refuses.
+typedef enum ImportTestSpareName
+{
+    IMPORT_TEST_NAME_CTORS,
+    IMPORT_TEST_NAME_DTORS,
+    IMPORT_TEST_NAME_PRIORITY_HIGH,
+    IMPORT_TEST_NAME_PRIORITY_LETTER,
+    IMPORT_TEST_NAME_PRIORITY_DIGITS,
+    IMPORT_TEST_NAME_PRIORITY_EMPTY,
+    IMPORT_TEST_SPARE_NAMES,
+} ImportTestSpareName;
+
+static const char* const import_test_spare_names[IMPORT_TEST_SPARE_NAMES] = {
+    [IMPORT_TEST_NAME_CTORS] = ".ctors",
+    [IMPORT_TEST_NAME_DTORS] = ".dtors.00042",
+    [IMPORT_TEST_NAME_PRIORITY_HIGH] = ".init_array.65536",
+    [IMPORT_TEST_NAME_PRIORITY_LETTER] = ".init_array.1x",
+    [IMPORT_TEST_NAME_PRIORITY_DIGITS] = ".init_array.000101",
+    [IMPORT_TEST_NAME_PRIORITY_EMPTY] = ".fini_array.",
+};
 // What a symbol made by hand imports as when it imports as none: not a valid flags value, whose binding doesn't exist.
 #define BUSTER_IMPORT_TEST_NONE 0xff
 
@@ -837,6 +884,8 @@ struct ImportTestFile
     uint32_t count;
     uint64_t headers[BUSTER_IMPORT_TEST_MAX_SECTIONS];
     uint64_t contents[BUSTER_IMPORT_TEST_MAX_SECTIONS];
+    // An ELF file's spare names (import_test_spare_names), by their offsets in .shstrtab.
+    uint32_t spare_names[IMPORT_TEST_SPARE_NAMES];
     uint64_t index_header;
     uint64_t names_header;
 };
@@ -851,8 +900,8 @@ static String8 import_test_bytes(const ImportTestFile* file)
 }
 
 // An ELF file of `type` with sections 1 to count - 1 of `sections` and a .shstrtab after them: the ELF header, each
-// section's contents at its alignment (at least 8), the names, then the section headers. Its bytes are pushed from
-// `arena`.
+// section's contents at its alignment (at least 8), the names (the spare ones last), then the section headers. Its
+// bytes are pushed from `arena`.
 static bool import_test_elf(ImportTestFile* file, uint16_t type, const ImportTestSection* sections, uint32_t count, Arena* arena)
 {
     assert(count < BUSTER_IMPORT_TEST_MAX_SECTIONS);
@@ -870,6 +919,10 @@ static bool import_test_elf(ImportTestFile* file, uint16_t type, const ImportTes
         offset += sections[i].type == SHT_NOBITS ? 0 : sections[i].size;
     }
     name_offsets[count] = import_test_string(&names, ".shstrtab");
+    for (uint32_t i = 0; i < IMPORT_TEST_SPARE_NAMES; i += 1)
+    {
+        file->spare_names[i] = import_test_string(&names, import_test_spare_names[i]);
+    }
     file->contents[count] = offset;
     offset += names.length;
     const uint64_t table = (offset + 7) & ~7ull;
@@ -1001,6 +1054,17 @@ typedef enum ImportTestObjectSection
     IMPORT_TEST_RELA_EH_FRAME,
     IMPORT_TEST_INIT,
     IMPORT_TEST_FINI,
+    // A COMDAT group of two sections, as libc.a's DW.ref.__gcc_personality_v0's, whose signature is a symbol's name.
+    IMPORT_TEST_GROUP,
+    IMPORT_TEST_GROUP_DATA,
+    IMPORT_TEST_RELA_GROUP_DATA,
+    // A COMDAT group whose signature is its section's name, as libc.a's .stapsdt.base's.
+    IMPORT_TEST_SECTION_GROUP,
+    IMPORT_TEST_BASE,
+    // Init and fini arrays with priorities, as GCC and clang name them.
+    IMPORT_TEST_INIT_PRIORITY,
+    IMPORT_TEST_RELA_INIT_PRIORITY,
+    IMPORT_TEST_FINI_PRIORITY,
     IMPORT_TEST_SFRAME,
     IMPORT_TEST_RELA_SFRAME,
     IMPORT_TEST_PROPERTY,
@@ -1011,7 +1075,10 @@ typedef enum ImportTestObjectSection
     IMPORT_TEST_SECTIONS,
 } ImportTestObjectSection;
 
-#define BUSTER_IMPORT_TEST_TEXT_BYTES 0x58
+#define BUSTER_IMPORT_TEST_TEXT_BYTES 0x68
+// The priorities of IMPORT_TEST_INIT_PRIORITY and IMPORT_TEST_FINI_PRIORITY, by their names.
+#define BUSTER_IMPORT_TEST_INIT_PRIORITY 101
+#define BUSTER_IMPORT_TEST_FINI_PRIORITY 42
 
 typedef struct ImportTestSymbols ImportTestSymbols;
 struct ImportTestSymbols
@@ -1089,9 +1156,15 @@ struct ImportTestObject
     uint32_t global_function;
     uint32_t global_object;
     uint32_t callee;
+    uint32_t ifunc;
+    uint32_t tls_global;
+    uint32_t signature;
     uint32_t call;
     uint32_t call_got;
     uint32_t data_first;
+    // The groups' contents: the flag word and the sections.
+    uint32_t group[3];
+    uint32_t section_group[2];
 };
 
 // A .rela section for `target`, with the relocations made for it at `index`.
@@ -1116,6 +1189,10 @@ static bool import_test_object(ImportTestObject* test, Arena* arena)
     uint8_t fini[4];
     uint8_t sframe[16];
     uint8_t property[16];
+    uint8_t group_data[8];
+    uint8_t base[1];
+    uint8_t init_priority[8];
+    uint8_t fini_priority[8];
     static const char strings[] = "hello\0world";
     static const char comment[] = "GCC";
     for (uint32_t i = 0; i < sizeof(text); i += 1)
@@ -1133,6 +1210,10 @@ static bool import_test_object(ImportTestObject* test, Arena* arena)
     memset(fini, 0x99, sizeof(fini));
     memset(sframe, 0xaa, sizeof(sframe));
     memset(property, 0xbb, sizeof(property));
+    memset(group_data, 0xcc, sizeof(group_data));
+    memset(base, 0xdd, sizeof(base));
+    memset(init_priority, 0xee, sizeof(init_priority));
+    memset(fini_priority, 0xf0, sizeof(fini_priority));
     memset(test, 0, sizeof(*test));
 
     // The symbols, locals first, each with what it must import as.
@@ -1148,12 +1229,14 @@ static bool import_test_object(ImportTestObject* test, Arena* arena)
     import_test_add_symbol(s, "", ELF64_ST_INFO(STB_LOCAL, STT_SECTION), 0, IMPORT_TEST_SFRAME, 0, 0, none, 0);
     import_test_add_symbol(s, "", ELF64_ST_INFO(STB_LOCAL, STT_SECTION), 0, IMPORT_TEST_TDATA, 0, 0, local | BUSTER_LINK_SYMBOL_TLS, IMPORT_TEST_TDATA);
     const uint32_t local_function =
-        import_test_add_symbol(s, "local_function", ELF64_ST_INFO(STB_LOCAL, STT_FUNC), 0, IMPORT_TEST_TEXT, 0x50, 8, local | BUSTER_LINK_SYMBOL_FUNCTION, IMPORT_TEST_TEXT);
+        import_test_add_symbol(s, "local_function", ELF64_ST_INFO(STB_LOCAL, STT_FUNC), 0, IMPORT_TEST_TEXT, 0x60, 8, local | BUSTER_LINK_SYMBOL_FUNCTION, IMPORT_TEST_TEXT);
     const uint32_t local_object =
         import_test_add_symbol(s, "local_object", ELF64_ST_INFO(STB_LOCAL, STT_OBJECT), 0, IMPORT_TEST_RODATA, 0, 8, local | BUSTER_LINK_SYMBOL_OBJECT, IMPORT_TEST_RODATA);
     const uint32_t tls_local = import_test_add_symbol(s, "tls_local", ELF64_ST_INFO(STB_LOCAL, STT_TLS), 0, IMPORT_TEST_TDATA, 0, 8, local | BUSTER_LINK_SYMBOL_TLS, IMPORT_TEST_TDATA);
     import_test_add_symbol(s, "sframe_label", ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE), 0, IMPORT_TEST_SFRAME, 0, 0, none, 0);
     import_test_add_symbol(s, "", ELF64_ST_INFO(STB_LOCAL, STT_OBJECT), 0, IMPORT_TEST_DATA, 8, 8, local | BUSTER_LINK_SYMBOL_OBJECT, IMPORT_TEST_DATA);
+    const uint32_t base_symbol = import_test_add_symbol(s, "", ELF64_ST_INFO(STB_LOCAL, STT_SECTION), 0, IMPORT_TEST_BASE, 0, 0, local, IMPORT_TEST_BASE);
+    import_test_add_symbol(s, "absolute_local", ELF64_ST_INFO(STB_LOCAL, STT_OBJECT), 0, SHN_ABS, 0x1234, 4, local | BUSTER_LINK_SYMBOL_OBJECT, 0);
     const uint32_t first_global = s->count;
     test->global_function =
         import_test_add_symbol(s, "global_function", ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), 0, IMPORT_TEST_TEXT, 0, 0x50, global | BUSTER_LINK_SYMBOL_FUNCTION, IMPORT_TEST_TEXT);
@@ -1166,12 +1249,18 @@ static bool import_test_object(ImportTestObject* test, Arena* arena)
     import_test_add_symbol(s, "protected_function", ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), STV_PROTECTED, IMPORT_TEST_INIT, 0, 4,
                            global | BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_PROTECTED, IMPORT_TEST_INIT);
     const uint32_t tls_global = import_test_add_symbol(s, "tls_global", ELF64_ST_INFO(STB_GLOBAL, STT_TLS), 0, IMPORT_TEST_TBSS, 8, 8, global | BUSTER_LINK_SYMBOL_TLS, IMPORT_TEST_TBSS);
+    test->tls_global = tls_global;
     import_test_add_symbol(s, "internal_label", ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), STV_INTERNAL, IMPORT_TEST_EH_FRAME, 0, 0, global | BUSTER_LINK_SYMBOL_INTERNAL,
                            IMPORT_TEST_EH_FRAME);
     import_test_add_symbol(s, "string", ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT), 0, IMPORT_TEST_STRINGS, 6, 6, global | BUSTER_LINK_SYMBOL_OBJECT, IMPORT_TEST_STRINGS);
     import_test_add_symbol(s, "fini_label", ELF64_ST_INFO(STB_WEAK, STT_FUNC), 0, IMPORT_TEST_FINI, 0, 4, weak | BUSTER_LINK_SYMBOL_FUNCTION, IMPORT_TEST_FINI);
     import_test_add_symbol(s, "array_start", ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), 0, IMPORT_TEST_INIT_ARRAY, 0, 0, global, IMPORT_TEST_INIT_ARRAY);
     import_test_add_symbol(s, "array_end", ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), 0, IMPORT_TEST_FINI_ARRAY, 8, 0, global, IMPORT_TEST_FINI_ARRAY);
+    test->ifunc = import_test_add_symbol(s, "ifunc_function", ELF64_ST_INFO(STB_GLOBAL, STT_GNU_IFUNC), 0, IMPORT_TEST_TEXT, 0x50, 0x10, global | BUSTER_LINK_SYMBOL_IFUNC,
+                                         IMPORT_TEST_TEXT);
+    import_test_add_symbol(s, "absolute_global", ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), 0, SHN_ABS, 2, 0, global, 0);
+    test->signature = import_test_add_symbol(s, "DW.ref.signature", ELF64_ST_INFO(STB_WEAK, STT_OBJECT), STV_HIDDEN, IMPORT_TEST_GROUP_DATA, 0, 8,
+                                             weak | BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_HIDDEN, IMPORT_TEST_GROUP_DATA);
     test->callee = import_test_add_symbol(s, "callee", ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE), 0, SHN_UNDEF, 0, 0, global, 0);
     const uint32_t got_function = import_test_add_symbol(s, "got_function", ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), 0, SHN_UNDEF, 0, 0, global | BUSTER_LINK_SYMBOL_FUNCTION, 0);
     const uint32_t weak_reference = import_test_add_symbol(s, "weak_reference", ELF64_ST_INFO(STB_WEAK, STT_NOTYPE), 0, SHN_UNDEF, 0, 0, weak, 0);
@@ -1180,7 +1269,9 @@ static bool import_test_object(ImportTestObject* test, Arena* arena)
     // The relocations: .rela.text's of every type the representation has, out of order, and R_X86_64_NONE; the others'
     // with addends wider than int32, in reverse order, against sections' symbols, and in .sframe, which is dropped.
     ImportTestRelocations* r = &test->relocations[IMPORT_TEST_RELA_TEXT];
+    import_test_add_relocation(r, 0x5c, tls_local, R_X86_64_DTPOFF32, 0, BUSTER_LINK_FIXUP_DTPOFF32);
     import_test_add_relocation(r, 0x30, local_function, R_X86_64_PC64, 0, BUSTER_LINK_FIXUP_PC64);
+    import_test_add_relocation(r, 0x50, tls_global, R_X86_64_TLSGD, -4, BUSTER_LINK_FIXUP_TLSGD);
     import_test_add_relocation(r, 0x0e, test->global_object, R_X86_64_REX_GOTPCRELX, -4, BUSTER_LINK_FIXUP_LOAD_GOT);
     import_test_add_relocation(r, 0x48, weak_object, R_X86_64_SIZE64, 0, BUSTER_LINK_FIXUP_SIZE64);
     test->call = import_test_add_relocation(r, 0x01, test->callee, R_X86_64_PLT32, -4, BUSTER_LINK_FIXUP_CALL);
@@ -1193,6 +1284,9 @@ static bool import_test_object(ImportTestObject* test, Arena* arena)
     import_test_add_relocation(r, 0x40, local_object, R_X86_64_32S, 0, BUSTER_LINK_FIXUP_ABS32S);
     import_test_add_relocation(r, 0x15, weak_reference, R_X86_64_GOTPCREL, -4, BUSTER_LINK_FIXUP_GOTPCREL);
     import_test_add_relocation(r, 0x2c, tls_global, R_X86_64_GOTTPOFF, -4, BUSTER_LINK_FIXUP_GOTTPOFF);
+    import_test_add_relocation(r, 0x58, tls_local, R_X86_64_TLSLD, -4, BUSTER_LINK_FIXUP_TLSLD);
+    import_test_add_relocation(&test->relocations[IMPORT_TEST_RELA_GROUP_DATA], 0, test->callee, R_X86_64_64, 0, BUSTER_LINK_FIXUP_ABS64);
+    import_test_add_relocation(&test->relocations[IMPORT_TEST_RELA_INIT_PRIORITY], 0, local_function, R_X86_64_64, 0, BUSTER_LINK_FIXUP_ABS64);
     r = &test->relocations[IMPORT_TEST_RELA_DATA];
     import_test_add_relocation(r, 0x08, test->callee, R_X86_64_64, -1, BUSTER_LINK_FIXUP_ABS64);
     test->data_first = import_test_add_relocation(r, 0x00, local_object, R_X86_64_64, 0x123456789, BUSTER_LINK_FIXUP_ABS64);
@@ -1226,6 +1320,21 @@ static bool import_test_object(ImportTestObject* test, Arena* arena)
     sections[IMPORT_TEST_RELA_EH_FRAME] = import_test_rela_section(test, ".rela.eh_frame", IMPORT_TEST_RELA_EH_FRAME, IMPORT_TEST_EH_FRAME);
     sections[IMPORT_TEST_INIT] = import_test_section(".init", SHT_PROGBITS, ax, 4, 0, 0, 0, init, sizeof(init));
     sections[IMPORT_TEST_FINI] = import_test_section(".fini", SHT_PROGBITS, ax, 4, 0, 0, 0, fini, sizeof(fini));
+    test->group[0] = GRP_COMDAT;
+    test->group[1] = IMPORT_TEST_GROUP_DATA;
+    test->group[2] = IMPORT_TEST_RELA_GROUP_DATA;
+    test->section_group[0] = GRP_COMDAT;
+    test->section_group[1] = IMPORT_TEST_BASE;
+    sections[IMPORT_TEST_GROUP] = import_test_section(".group", SHT_GROUP, 0, 4, sizeof(uint32_t), IMPORT_TEST_SYMTAB, test->signature, test->group, sizeof(test->group));
+    sections[IMPORT_TEST_GROUP_DATA] = import_test_section(".data.rel.local.DW.ref.signature", SHT_PROGBITS, wa | SHF_GROUP, 8, 0, 0, 0, group_data, sizeof(group_data));
+    sections[IMPORT_TEST_RELA_GROUP_DATA] = import_test_rela_section(test, ".rela.data.rel.local.DW.ref.signature", IMPORT_TEST_RELA_GROUP_DATA, IMPORT_TEST_GROUP_DATA);
+    sections[IMPORT_TEST_RELA_GROUP_DATA].flags |= SHF_GROUP;
+    sections[IMPORT_TEST_SECTION_GROUP] =
+        import_test_section(".group", SHT_GROUP, 0, 4, sizeof(uint32_t), IMPORT_TEST_SYMTAB, base_symbol, test->section_group, sizeof(test->section_group));
+    sections[IMPORT_TEST_BASE] = import_test_section(".stapsdt.base", SHT_PROGBITS, SHF_ALLOC | SHF_GROUP, 1, 0, 0, 0, base, sizeof(base));
+    sections[IMPORT_TEST_INIT_PRIORITY] = import_test_section(".init_array.00101", SHT_INIT_ARRAY, wa, 8, 8, 0, 0, init_priority, sizeof(init_priority));
+    sections[IMPORT_TEST_RELA_INIT_PRIORITY] = import_test_rela_section(test, ".rela.init_array.00101", IMPORT_TEST_RELA_INIT_PRIORITY, IMPORT_TEST_INIT_PRIORITY);
+    sections[IMPORT_TEST_FINI_PRIORITY] = import_test_section(".fini_array.42", SHT_FINI_ARRAY, wa, 8, 8, 0, 0, fini_priority, sizeof(fini_priority));
     sections[IMPORT_TEST_SFRAME] = import_test_section(".sframe", BUSTER_IMPORT_SHT_GNU_SFRAME, SHF_ALLOC, 8, 0, 0, 0, sframe, sizeof(sframe));
     sections[IMPORT_TEST_RELA_SFRAME] = import_test_rela_section(test, ".rela.sframe", IMPORT_TEST_RELA_SFRAME, IMPORT_TEST_SFRAME);
     sections[IMPORT_TEST_PROPERTY] = import_test_section(".note.gnu.property", SHT_NOTE, SHF_ALLOC, 8, 0, 0, 0, property, sizeof(property));
@@ -1246,6 +1355,10 @@ static bool import_test_object(ImportTestObject* test, Arena* arena)
     test->classes[IMPORT_TEST_EH_FRAME] = BUSTER_LINK_CLASS_EH_FRAME;
     test->classes[IMPORT_TEST_INIT] = BUSTER_LINK_CLASS_INIT;
     test->classes[IMPORT_TEST_FINI] = BUSTER_LINK_CLASS_FINI;
+    test->classes[IMPORT_TEST_GROUP_DATA] = BUSTER_LINK_CLASS_DATA;
+    test->classes[IMPORT_TEST_BASE] = BUSTER_LINK_CLASS_RODATA;
+    test->classes[IMPORT_TEST_INIT_PRIORITY] = BUSTER_LINK_CLASS_INIT_ARRAY;
+    test->classes[IMPORT_TEST_FINI_PRIORITY] = BUSTER_LINK_CLASS_FINI_ARRAY;
     return import_test_elf(&test->file, ET_REL, sections, IMPORT_TEST_SECTIONS, arena);
 }
 
@@ -1266,7 +1379,8 @@ static bool import_test_object_symbol(const ImportTestObject* test, const Link* 
         const bool named = entry->st_name != 0 && !section_symbol ? name != 0 && link->names.length[name] == length && memcmp(link->names.bytes[name], text, length) == 0 : name == 0;
         const bool placed = link->symbols.atom[symbol] == atom && link->symbols.value[symbol] == (section_symbol ? 0 : entry->st_value) &&
                             link->symbols.size[symbol] == (section_symbol ? 0 : entry->st_size);
-        const uint8_t source = atom != 0 ? BUSTER_LINK_SOURCE_FOREIGN_OBJECT : BUSTER_LINK_SOURCE_NONE;
+        const bool absolute = entry->st_shndx == SHN_ABS;
+        const uint8_t source = atom != 0 ? BUSTER_LINK_SOURCE_FOREIGN_OBJECT : absolute ? BUSTER_LINK_SOURCE_ABSOLUTE : BUSTER_LINK_SOURCE_NONE;
         result = named && placed && link->symbols.flags[symbol] == flags && link->symbols.source[symbol] == source;
     }
     return result;
@@ -1347,6 +1461,19 @@ static void import_test_object_check(ImportTestTally* tally, const ImportTestObj
         fixups = fixups && (!kept_section || import_test_object_fixups(test, &link, &object, i, &fixup_count));
     }
     fixups = fixups && link.fixups.count == fixup_count + 1;
+    // The groups, in section order: each signature and its sections.
+    const ImportGroup* groups = object.groups;
+    bool grouped = imported && object.group_count == 2;
+    grouped = grouped && import_test_name_is((const uint8_t*)groups[0].signature.pointer, (uint32_t)groups[0].signature.length, "DW.ref.signature") &&
+              groups[0].count == 2 && object.group_sections[groups[0].first] == IMPORT_TEST_GROUP_DATA &&
+              object.group_sections[groups[0].first + 1] == IMPORT_TEST_RELA_GROUP_DATA;
+    grouped = grouped && import_test_name_is((const uint8_t*)groups[1].signature.pointer, (uint32_t)groups[1].signature.length, ".stapsdt.base") &&
+              groups[1].count == 1 && object.group_sections[groups[1].first] == IMPORT_TEST_BASE;
+    // The priorities, by atom: .init_array.00101's, then .fini_array.42's.
+    const LinkPriorities* priorities = &link.priorities;
+    const bool prioritized = imported && priorities->count == 3 && priorities->atom[1] == object.section_atoms[IMPORT_TEST_INIT_PRIORITY] &&
+                             priorities->priority[1] == BUSTER_IMPORT_TEST_INIT_PRIORITY && priorities->atom[2] == object.section_atoms[IMPORT_TEST_FINI_PRIORITY] &&
+                             priorities->priority[2] == BUSTER_IMPORT_TEST_FINI_PRIORITY;
     if (result.error != IMPORT_ERROR_NONE && tally->failures < BUSTER_IMPORT_TEST_REPORTED)
     {
         printf("  %s: %s: ", tally->check, what);
@@ -1357,12 +1484,14 @@ static void import_test_object_check(ImportTestTally* tally, const ImportTestObj
     import_test_expect(tally, sections, "each section an atom of its class, in place in the file, or none", 0);
     import_test_expect(tally, symbols, "each symbol, or none", 0);
     import_test_expect(tally, fixups, "each relocation a fixup in offset order, or none", 0);
+    import_test_expect(tally, grouped, "each COMDAT group with its signature and sections", 0);
+    import_test_expect(tally, prioritized, "each prioritized init and fini array with its priority", 0);
     import_test_paths(tally, bytes, path, what, 0, arena);
     arena_pop_to(arena, length);
 }
 
 // A copy of the object made by hand with each relocation section's entries in offset order (stably), which the vector
-// path takes: the object made by hand has them out of order, which it leaves to the exact path.
+// path reads in the file's order: the object made by hand has them out of order, which it sorts first.
 static ImportTestFile import_test_sorted(const ImportTestObject* test, const ImportTestFile* base, Arena* arena)
 {
     ImportTestFile result = import_test_changed(base, 0, 0, 0, arena);
@@ -1399,14 +1528,14 @@ static bool import_test_objects(Arena* arena)
     {
         const ImportTestFile* f = &test->file;
         const uint32_t sections = f->count;
-        // Out of order, its relocations go to the exact path; in order, to the vector path. Changes that import the
-        // same: the section count and the names' index in section 0, .eh_frame as SHT_PROGBITS, and tables without
-        // sh_entsize.
+        // Out of order, the vector path sorts its relocations; in order, it reads them as they are. Changes that
+        // import the same: the section count and the names' index in section 0, .eh_frame as SHT_PROGBITS, and tables
+        // without sh_entsize.
         const ImportTestFile sorted = import_test_sorted(test, f, arena);
         for (uint32_t order = 0; order < 2; order += 1)
         {
             const ImportTestFile* g = order == 0 ? f : &sorted;
-            const ImportTestPath path = order == 0 ? IMPORT_TEST_EXACT : IMPORT_TEST_VECTOR;
+            const ImportTestPath path = IMPORT_TEST_VECTOR;
             import_test_object_check(&tally, test, import_test_bytes(g), order == 0 ? "the object made by hand imports" : "in offset order", path, arena);
             ImportTestFile changed = import_test_changed(g, offsetof(Elf64_Ehdr, e_shnum), 2, 0, arena);
             changed = import_test_changed(&changed, g->headers[0] + offsetof(Elf64_Shdr, sh_size), 8, sections, arena);
@@ -1456,10 +1585,43 @@ static bool import_test_objects(Arena* arena)
         import_test_case(&tally, o, f, "an alignment of 3", text + offsetof(Elf64_Shdr, sh_addralign), 8, 3, text_bounds, arena);
         import_test_case(&tally, o, f, "an alignment of 2^33", text + offsetof(Elf64_Shdr, sh_addralign), 8, 1ull << 33, text_bounds, arena);
         const uint64_t data = f->headers[IMPORT_TEST_DATA];
-        import_test_case(&tally, o, f, "a section group", data + offsetof(Elf64_Shdr, sh_type), 4, SHT_GROUP,
-                         import_test_result(IMPORT_ERROR_UNSUPPORTED, data, IMPORT_TEST_DATA, 0, 0, SHT_GROUP), arena);
-        import_test_case(&tally, o, f, "a group's member", data + offsetof(Elf64_Shdr, sh_flags), 8, SHF_WRITE | SHF_ALLOC | SHF_GROUP,
+        import_test_case(&tally, o, f, "SHF_GROUP in no group", data + offsetof(Elf64_Shdr, sh_flags), 8, SHF_WRITE | SHF_ALLOC | SHF_GROUP,
+                         import_test_result(IMPORT_ERROR_BOUNDS, data, IMPORT_TEST_DATA, 0, 0, 0), arena);
+        import_test_case(&tally, o, f, ".ctors", data + offsetof(Elf64_Shdr, sh_name), 4, f->spare_names[IMPORT_TEST_NAME_CTORS],
                          import_test_result(IMPORT_ERROR_UNSUPPORTED, data, IMPORT_TEST_DATA, 0, 0, SHT_PROGBITS), arena);
+        // The groups and the priorities.
+        const uint64_t group = f->headers[IMPORT_TEST_GROUP];
+        const uint64_t group_contents = f->contents[IMPORT_TEST_GROUP];
+        const ImportResult group_bounds = import_test_result(IMPORT_ERROR_BOUNDS, group, IMPORT_TEST_GROUP, 0, 0, 0);
+        import_test_case(&tally, o, f, "a group without GRP_COMDAT", group_contents, 4, 0, import_test_result(IMPORT_ERROR_UNSUPPORTED, group, IMPORT_TEST_GROUP, 0, 0, SHT_GROUP),
+                         arena);
+        import_test_case(&tally, o, f, "a group with another flag", group_contents, 4, GRP_COMDAT | 2,
+                         import_test_result(IMPORT_ERROR_UNSUPPORTED, group, IMPORT_TEST_GROUP, 0, 0, SHT_GROUP), arena);
+        import_test_case(&tally, o, f, "a group's section past the sections", group_contents + 4, 4, 0xffff, group_bounds, arena);
+        import_test_case(&tally, o, f, "a group's section 0", group_contents + 4, 4, 0, group_bounds, arena);
+        import_test_case(&tally, o, f, "a group that holds itself", group_contents + 4, 4, IMPORT_TEST_GROUP, group_bounds, arena);
+        import_test_case(&tally, o, f, "a group's section without SHF_GROUP", f->headers[IMPORT_TEST_GROUP_DATA] + offsetof(Elf64_Shdr, sh_flags), 8, SHF_WRITE | SHF_ALLOC,
+                         group_bounds, arena);
+        import_test_case(&tally, o, f, "a group's signature past the symbols", group + offsetof(Elf64_Shdr, sh_info), 4, test->symbols.count, group_bounds, arena);
+        import_test_case(&tally, o, f, "a group's signature symbol 0", group + offsetof(Elf64_Shdr, sh_info), 4, 0, group_bounds, arena);
+        import_test_case(&tally, o, f, "a group's symbols in .strtab", group + offsetof(Elf64_Shdr, sh_link), 4, IMPORT_TEST_STRTAB, group_bounds, arena);
+        import_test_case(&tally, o, f, "a group of part of a word", group + offsetof(Elf64_Shdr, sh_size), 8, 10, group_bounds, arena);
+        import_test_case(&tally, o, f, "an empty group", group + offsetof(Elf64_Shdr, sh_size), 8, 0, group_bounds, arena);
+        import_test_case(&tally, o, f, "a section in two groups", f->contents[IMPORT_TEST_SECTION_GROUP] + 4, 4, IMPORT_TEST_GROUP_DATA,
+                         import_test_result(IMPORT_ERROR_BOUNDS, f->headers[IMPORT_TEST_SECTION_GROUP], IMPORT_TEST_SECTION_GROUP, 0, 0, 0), arena);
+        const uint64_t init_priority = f->headers[IMPORT_TEST_INIT_PRIORITY];
+        const ImportResult init_unsupported = import_test_result(IMPORT_ERROR_UNSUPPORTED, init_priority, IMPORT_TEST_INIT_PRIORITY, 0, 0, SHT_INIT_ARRAY);
+        import_test_case(&tally, o, f, "a priority past 65535", init_priority + offsetof(Elf64_Shdr, sh_name), 4, f->spare_names[IMPORT_TEST_NAME_PRIORITY_HIGH],
+                         init_unsupported, arena);
+        import_test_case(&tally, o, f, "a priority with a letter", init_priority + offsetof(Elf64_Shdr, sh_name), 4, f->spare_names[IMPORT_TEST_NAME_PRIORITY_LETTER],
+                         init_unsupported, arena);
+        import_test_case(&tally, o, f, "a priority of six digits", init_priority + offsetof(Elf64_Shdr, sh_name), 4, f->spare_names[IMPORT_TEST_NAME_PRIORITY_DIGITS],
+                         init_unsupported, arena);
+        const uint64_t fini_priority = f->headers[IMPORT_TEST_FINI_PRIORITY];
+        import_test_case(&tally, o, f, "a priority without digits", fini_priority + offsetof(Elf64_Shdr, sh_name), 4, f->spare_names[IMPORT_TEST_NAME_PRIORITY_EMPTY],
+                         import_test_result(IMPORT_ERROR_UNSUPPORTED, fini_priority, IMPORT_TEST_FINI_PRIORITY, 0, 0, SHT_FINI_ARRAY), arena);
+        import_test_case(&tally, o, f, ".dtors.00042", fini_priority + offsetof(Elf64_Shdr, sh_name), 4, f->spare_names[IMPORT_TEST_NAME_DTORS],
+                         import_test_result(IMPORT_ERROR_UNSUPPORTED, fini_priority, IMPORT_TEST_FINI_PRIORITY, 0, 0, SHT_FINI_ARRAY), arena);
         const uint64_t rela_data = f->headers[IMPORT_TEST_RELA_DATA];
         import_test_case(&tally, o, f, "SHT_REL", rela_data + offsetof(Elf64_Shdr, sh_type), 4, SHT_REL,
                          import_test_result(IMPORT_ERROR_UNSUPPORTED, rela_data, IMPORT_TEST_RELA_DATA, 0, 0, SHT_REL), arena);
@@ -1498,11 +1660,17 @@ static bool import_test_objects(Arena* arena)
         import_test_case(&tally, o, f, "a section index past the sections", function + offsetof(Elf64_Sym, st_shndx), 2, sections + 3, function_bounds, arena);
         import_test_case(&tally, o, f, "SHN_XINDEX without .symtab_shndx", function + offsetof(Elf64_Sym, st_shndx), 2, SHN_XINDEX, function_bounds, arena);
         const ImportResult object_unsupported = import_test_result(IMPORT_ERROR_UNSUPPORTED, object, 0, test->global_object, 0, STT_OBJECT);
-        import_test_case(&tally, o, f, "an absolute symbol", object + offsetof(Elf64_Sym, st_shndx), 2, SHN_ABS, object_unsupported, arena);
+        const ImportResult imports = import_test_result(IMPORT_ERROR_NONE, 0, 0, 0, 0, 0);
+        import_test_case(&tally, o, f, "a global absolute", object + offsetof(Elf64_Sym, st_shndx), 2, SHN_ABS, imports, arena);
+        const uint64_t tls = f->contents[IMPORT_TEST_SYMTAB] + (uint64_t)test->tls_global * sizeof(Elf64_Sym);
+        import_test_case(&tally, o, f, "an absolute TLS symbol", tls + offsetof(Elf64_Sym, st_shndx), 2, SHN_ABS,
+                         import_test_result(IMPORT_ERROR_UNSUPPORTED, tls, 0, test->tls_global, 0, STT_TLS), arena);
+        const uint64_t ifunc = f->contents[IMPORT_TEST_SYMTAB] + (uint64_t)test->ifunc * sizeof(Elf64_Sym);
+        import_test_case(&tally, o, f, "an absolute IFUNC", ifunc + offsetof(Elf64_Sym, st_shndx), 2, SHN_ABS,
+                         import_test_result(IMPORT_ERROR_UNSUPPORTED, ifunc, 0, test->ifunc, 0, STT_GNU_IFUNC), arena);
         import_test_case(&tally, o, f, "a common symbol", object + offsetof(Elf64_Sym, st_shndx), 2, SHN_COMMON, object_unsupported, arena);
         import_test_case(&tally, o, f, "a GNU_UNIQUE symbol", object + offsetof(Elf64_Sym, st_info), 1, ELF64_ST_INFO(STB_GNU_UNIQUE, STT_OBJECT), object_unsupported, arena);
-        import_test_case(&tally, o, f, "an IFUNC", function + offsetof(Elf64_Sym, st_info), 1, ELF64_ST_INFO(STB_GLOBAL, STT_GNU_IFUNC),
-                         import_test_result(IMPORT_ERROR_UNSUPPORTED, function, 0, test->global_function, 0, STT_GNU_IFUNC), arena);
+        import_test_case(&tally, o, f, "a global function as an IFUNC", function + offsetof(Elf64_Sym, st_info), 1, ELF64_ST_INFO(STB_GLOBAL, STT_GNU_IFUNC), imports, arena);
         import_test_case(&tally, o, f, "a symbol of type 7", function + offsetof(Elf64_Sym, st_info), 1, ELF64_ST_INFO(STB_GLOBAL, 7),
                          import_test_result(IMPORT_ERROR_UNSUPPORTED, function, 0, test->global_function, 0, 7), arena);
         import_test_case(&tally, o, f, "a global in a dropped section", function + offsetof(Elf64_Sym, st_shndx), 2, IMPORT_TEST_COMMENT,
@@ -2490,6 +2658,8 @@ static bool import_test_exported(const ImportLibrary* library, const char* name,
 }
 
 static void import_test_cross_check(ImportTestTally* tally, const Runtime* runtime, Arena* arena);
+static bool import_test_names(const Link* link, String8 bytes, const ImportObject* object, SymbolId symbol, const char* name);
+static void import_test_cross_check_relocations(ImportTestTally* tally, const Runtime* runtime, Arena* arena);
 
 static bool import_test_runtime(bool cross_check, Arena* arena)
 {
@@ -2509,7 +2679,7 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
     {
         printf("  GCC: %.*s; libc: %.*s (%.*s, %u exports, %u versions, %u references); libc_nonshared.a: %u members; %u probes\n", (int)runtime.gcc_directory.length,
                runtime.gcc_directory.pointer, (int)runtime.libc_path.length, runtime.libc_path.pointer, (int)runtime.libc.soname.length, runtime.libc.soname.pointer,
-               runtime.libc.exports.count, runtime.libc.version_count, runtime.libc.references.count, runtime.nonshared.member_count, runtime.probe_count);
+               runtime.libc.exports.count, runtime.libc.version_count, runtime.libc.references.count, runtime.member_count, runtime.probe_count);
         const Link* link = &runtime.link;
         // What each crt object is for.
         const SymbolId start = import_test_runtime_symbol(&runtime, "_start", true);
@@ -2553,11 +2723,11 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         import_test_expect(&tally, runtime.libc.references.count != 0, "libc.so.6's references", 0);
         // libc_nonshared.a's index.
         bool atexit_indexed = false;
-        for (uint32_t s = 0; s < runtime.nonshared.symbol_count; s += 1)
+        for (uint32_t s = 0; s < runtime.archives[0].archive.symbol_count; s += 1)
         {
-            atexit_indexed = atexit_indexed || import_equal(runtime.nonshared.symbols[s].name, "atexit");
+            atexit_indexed = atexit_indexed || import_equal(runtime.archives[0].archive.symbols[s].name, "atexit");
         }
-        import_test_expect(&tally, atexit_indexed, "libc_nonshared.a's index has atexit", runtime.nonshared.symbol_count);
+        import_test_expect(&tally, atexit_indexed, "libc_nonshared.a's index has atexit", runtime.archives[0].archive.symbol_count);
         import_test_expect(&tally, runtime.abi_note.length >= 16, "Scrt1.o's ABI note", runtime.abi_note.length);
         // The bindings, of every reference to each name.
         const char* const binding_names[] = {
@@ -2597,7 +2767,7 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         }
         // The objects' pieces: one after another from each table's first record to its last, each piece's atoms in the
         // object's unit, and its names' bytes one run.
-        const uint32_t piece_count = RUNTIME_OBJECTS + runtime.nonshared.member_count;
+        const uint32_t piece_count = RUNTIME_OBJECTS + runtime.member_count;
         bool pieces = true;
         for (uint32_t p = 0; p < piece_count; p += 1)
         {
@@ -2667,13 +2837,14 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
                            "__libc_start_main: libc.so.6's", 0);
         import_test_expect(&tally, dso_name != 0 && global_names->definition[dso_name - 1] == dso, "__dso_handle: crtbeginS.o's", 0);
         import_test_expect(&tally, atexit_name != 0 && global_names->definition[atexit_name - 1] != 0 &&
-                                       link->atoms.unit[link->symbols.atom[global_names->definition[atexit_name - 1]]] >= runtime.nonshared_unit,
+                                       link->atoms.unit[link->symbols.atom[global_names->definition[atexit_name - 1]]] >= runtime.member_unit,
                            "atexit: a member's", 0);
         // Each name the linker defines, whether or not the runtime refers to it (only _GLOBAL_OFFSET_TABLE_ does), and no
         // other name.
         uint32_t linker_found = 0;
         uint32_t linker_marked = 0;
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(runtime_linker_names); i += 1)
+        const uint32_t linker_count = runtime_linker_name_counts[runtime.kind];
+        for (uint32_t i = 0; i < linker_count; i += 1)
         {
             const uint8_t* bytes = (const uint8_t*)runtime_linker_names[i];
             const uint32_t length = (uint32_t)strlen(runtime_linker_names[i]);
@@ -2684,7 +2855,7 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         {
             linker_marked += global_names->linker[e] ? 1 : 0;
         }
-        import_test_expect(&tally, linker_found == BUSTER_ARRAY_LENGTH(runtime_linker_names) && linker_marked == linker_found,
+        import_test_expect(&tally, linker_found == linker_count && linker_marked == linker_found,
                            "_GLOBAL_OFFSET_TABLE_ and the arrays' bounds: the linker's", linker_found);
         uint32_t referenced = 0;
         for (uint32_t e = 0; e < global_names->count; e += 1)
@@ -2701,18 +2872,272 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         import_test_expect(&tally, found >= RUNTIME_OBJECTS + 4, "the files found among the probes", found);
         // The vector paths read libc.so.6, each crt object and each member, as the exact paths do.
         import_test_library_paths(&tally, runtime.libc_bytes, IMPORT_TEST_VECTOR, "libc.so.6", arena);
-        import_test_archive_paths(&tally, runtime.nonshared_bytes, IMPORT_TEST_VECTOR, "libc_nonshared.a", arena);
+        import_test_archive_paths(&tally, runtime.archives[0].bytes, IMPORT_TEST_VECTOR, "libc_nonshared.a", arena);
         for (uint32_t i = 0; i < RUNTIME_OBJECTS; i += 1)
         {
             import_test_paths(&tally, runtime.object_bytes[i], IMPORT_TEST_VECTOR, "a crt object", i, arena);
         }
-        for (uint32_t m = 0; m < runtime.nonshared.member_count; m += 1)
+        for (uint32_t m = 0; m < runtime.member_count; m += 1)
         {
-            import_test_paths(&tally, runtime.nonshared.members[m].bytes, IMPORT_TEST_VECTOR, "a member of libc_nonshared.a", m, arena);
+            import_test_paths(&tally, runtime.members[m].bytes, IMPORT_TEST_VECTOR, "a member of libc_nonshared.a", m, arena);
         }
         if (cross_check)
         {
             import_test_cross_check(&tally, &runtime, arena);
+        }
+    }
+    runtime_release(&runtime);
+    return import_test_report(&tally);
+}
+
+// The piece of the runtime's symbol `symbol`: the one whose range of symbols holds it.
+static uint32_t import_test_symbol_piece(const Runtime* runtime, SymbolId symbol)
+{
+    const uint32_t piece_count = RUNTIME_OBJECTS + runtime->member_count;
+    uint32_t low = 0;
+    uint32_t high = piece_count;
+    while (low + 1 < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool after = runtime->pieces[middle].begin.symbols <= symbol;
+        low = after ? middle : low;
+        high = after ? high : middle;
+    }
+    return low;
+}
+
+// Whether the path's last part, after its last '/', is `name`.
+static bool import_test_path_is(String8 path, const char* name)
+{
+    const uint64_t length = strlen(name);
+    return path.length > length && path.pointer[path.length - length - 1] == '/' && memcmp(path.pointer + path.length - length, name, length) == 0;
+}
+
+// The static runtime (runtime_import_static on this system's files): what each crt object is for; the archives of
+// GCC's group, in its order, every member imported by both paths; the bindings of a few names; an IFUNC, an absolute
+// symbol, the priorities and the COMDAT groups libc.a and libgcc.a bring; each piece's references and groups as a scan of
+// its records finds them, each group's signature number equal exactly to those of the groups of the same signature; each
+// global name's definition and member; and with --cross-check, every relocation against readelf's.
+static bool import_test_static_runtime(bool cross_check, Arena* arena)
+{
+    ImportTestTally tally = {
+        .check = "static runtime",
+    };
+    Runtime runtime;
+    const RuntimeError error = runtime_import_static(&runtime);
+    import_test_expect(&tally, error == RUNTIME_ERROR_NONE, "runtime_import_static", (uint64_t)error);
+    if (error != RUNTIME_ERROR_NONE)
+    {
+        printf("  runtime_import_static failed: error %d, %s, import error %s at offset %llu (section %u, symbol %u, relocation %u, type %u), errno %d\n", (int)error,
+               runtime.failed_file, import_test_errors[runtime.import.error], (unsigned long long)runtime.import.offset, runtime.import.section, runtime.import.symbol,
+               runtime.import.relocation, runtime.import.type, runtime.system_error);
+    }
+    else
+    {
+        const Link* link = &runtime.link;
+        const uint32_t piece_count = RUNTIME_OBJECTS + runtime.member_count;
+        printf("  GCC: %.*s; %u archives, %u members: %u atoms, %u symbols, %u fixups, %u priorities; %u global names, %u references, %u groups of %u signatures; %u probes\n",
+               (int)runtime.gcc_directory.length, runtime.gcc_directory.pointer, runtime.archive_count, runtime.member_count, link->atoms.count - 1, link->symbols.count - 1,
+               link->fixups.count - 1, link->priorities.count - 1, runtime.global_names.count, runtime.reference_begin[piece_count], runtime.group_begin[piece_count],
+               runtime.group_signatures, runtime.probe_count);
+        // What each crt object is for.
+        const SymbolId start = import_test_runtime_symbol(&runtime, "_start", true);
+        const SymbolId init = import_test_runtime_symbol(&runtime, "_init", true);
+        const SymbolId dso = import_test_runtime_symbol(&runtime, "__dso_handle", true);
+        const SymbolId tmc = import_test_runtime_symbol(&runtime, "__TMC_END__", true);
+        import_test_expect(&tally, import_test_path_is(runtime.object_paths[RUNTIME_OBJECT_START], "crt1.o") && import_test_path_is(runtime.object_paths[RUNTIME_OBJECT_BEGIN], "crtbeginT.o") &&
+                                       import_test_path_is(runtime.object_paths[RUNTIME_OBJECT_END], "crtend.o"),
+                           "crt1.o, crtbeginT.o and crtend.o", 0);
+        import_test_expect(&tally, start != 0 && link->atoms.unit[link->symbols.atom[start]] == RUNTIME_OBJECT_START && link->atoms.class[link->symbols.atom[start]] == BUSTER_LINK_CLASS_TEXT,
+                           "_start in crt1.o's .text", 0);
+        import_test_expect(&tally, init != 0 && link->atoms.unit[link->symbols.atom[init]] == RUNTIME_OBJECT_INIT_PROLOGUE && link->atoms.class[link->symbols.atom[init]] == BUSTER_LINK_CLASS_INIT,
+                           "_init in crti.o's .init", 0);
+        import_test_expect(&tally, dso != 0 && link->atoms.unit[link->symbols.atom[dso]] == RUNTIME_OBJECT_BEGIN, "__dso_handle in crtbeginT.o", 0);
+        import_test_expect(&tally, tmc != 0 && link->atoms.unit[link->symbols.atom[tmc]] == RUNTIME_OBJECT_END, "__TMC_END__ in crtend.o", 0);
+        import_test_expect(&tally, runtime.abi_note.length >= 16, "crt1.o's ABI note", runtime.abi_note.length);
+        // GCC's group, in its order, with each archive's members one after another.
+        const uint32_t last = runtime.archive_count - 1;
+        bool archived = runtime.archive_count >= 3 && import_test_path_is(runtime.archives[0].path, "libgcc.a") && import_test_path_is(runtime.archives[1].path, "libgcc_eh.a") &&
+                        import_test_path_is(runtime.archives[last].path, "libc.a") && (runtime.archive_count == 3 || import_test_path_is(runtime.archives[2].path, "libatomic_asneeded.a"));
+        uint32_t members = 0;
+        for (uint32_t a = 0; a < runtime.archive_count; a += 1)
+        {
+            archived = archived && runtime.archives[a].first_member == members && runtime.archives[a].archive.member_count != 0;
+            members += runtime.archives[a].archive.member_count;
+        }
+        import_test_expect(&tally, archived && members == runtime.member_count && runtime.member_unit == RUNTIME_OBJECTS, "libgcc.a, libgcc_eh.a, libatomic.a if GCC has it, and libc.a",
+                           runtime.archive_count);
+        // The bindings: a libc.a member's, the linker's, the program's, nothing, and no shared library's.
+        const char* const binding_names[] = {
+            "main",
+            "__libc_start_main",
+            "__gmon_start__",
+            "__TMC_END__",
+            "_GLOBAL_OFFSET_TABLE_",
+            "__rela_iplt_start",
+            "__rela_iplt_end",
+        };
+        const RuntimeBindingKind binding_kinds[] = {
+            RUNTIME_BINDING_PROGRAM,
+            RUNTIME_BINDING_RUNTIME,
+            RUNTIME_BINDING_NOWHERE,
+            RUNTIME_BINDING_RUNTIME,
+            RUNTIME_BINDING_LINKER,
+            RUNTIME_BINDING_LINKER,
+            RUNTIME_BINDING_LINKER,
+        };
+        const uint32_t libc_first = runtime.archives[last].first_member;
+        for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(binding_names); b += 1)
+        {
+            const uint64_t length = strlen(binding_names[b]);
+            uint32_t references = 0;
+            bool bound = true;
+            for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+            {
+                const NameId name = link->symbols.name[symbol];
+                const bool reference = name != 0 && link->symbols.atom[symbol] == 0 && link->symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE &&
+                                       link->names.length[name] == length && memcmp(link->names.bytes[name], binding_names[b], length) == 0;
+                const RuntimeBinding binding = runtime.bindings[symbol];
+                const uint32_t piece = binding.symbol != 0 ? import_test_symbol_piece(&runtime, binding.symbol) : 0;
+                // __libc_start_main is a member of libc.a's, __TMC_END__ crtend.o's.
+                const bool where = b == 1 ? piece >= RUNTIME_OBJECTS + libc_first : b == 3 ? binding.symbol == tmc : true;
+                references += reference ? 1 : 0;
+                bound = bound && (!reference || (binding.kind == binding_kinds[b] && where));
+            }
+            import_test_expect(&tally, references != 0 && bound, binding_names[b], references);
+        }
+        bool shared = false;
+        for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+        {
+            shared = shared || runtime.bindings[symbol].kind == RUNTIME_BINDING_SHARED;
+        }
+        import_test_expect(&tally, !shared, "no name bound to a shared library", 0);
+        // An IFUNC, an absolute symbol and the priorities.
+        const SymbolId memcpy_symbol = import_test_runtime_symbol(&runtime, "memcpy", true);
+        import_test_expect(&tally, memcpy_symbol != 0 && (link->symbols.flags[memcpy_symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_IFUNC &&
+                                       import_test_symbol_piece(&runtime, memcpy_symbol) >= RUNTIME_OBJECTS + libc_first,
+                           "memcpy: an IFUNC of libc.a's", 0);
+        SymbolId used = 0;
+        for (SymbolId symbol = 1; used == 0 && symbol < link->symbols.count; symbol += 1)
+        {
+            used = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE && import_test_names(link, (String8){ 0 }, 0, symbol, "_nl_current_LC_CTYPE_used") ? symbol : 0;
+        }
+        import_test_expect(&tally, used != 0 && link->symbols.atom[used] == 0 && link->symbols.value[used] != 0, "_nl_current_LC_CTYPE_used: absolute, not 0", 0);
+        bool prioritized = link->priorities.count >= 2;
+        for (uint32_t e = 1; e < link->priorities.count; e += 1)
+        {
+            const AtomId atom = link->priorities.atom[e];
+            const uint32_t unit = link->atoms.unit[atom];
+            prioritized = prioritized && link_class_is_array(link->atoms.class[atom]) && unit >= runtime.member_unit + runtime.archives[0].first_member &&
+                          unit < runtime.member_unit + runtime.archives[0].first_member + runtime.archives[0].archive.member_count;
+        }
+        import_test_expect(&tally, prioritized, "libgcc.a's prioritized init arrays", link->priorities.count - 1);
+        // Each piece's groups, as its ImportObject has them, and their signatures' numbers.
+        bool groups = runtime.group_begin[0] == 0 && runtime.group_begin[piece_count] != 0;
+        uint32_t group = 0;
+        uint32_t personality = UINT32_MAX;
+        for (uint32_t p = 0; groups && p < piece_count; p += 1)
+        {
+            const ImportObject* object = p < RUNTIME_OBJECTS ? &runtime.objects[p] : &runtime.member_objects[p - RUNTIME_OBJECTS];
+            groups = runtime.group_begin[p + 1] - runtime.group_begin[p] == object->group_count;
+            for (uint32_t g = 0; groups && g < object->group_count; g += 1)
+            {
+                const RuntimeGroup* runtime_group = &runtime.groups[group + g];
+                const ImportGroup* imported = &object->groups[g];
+                uint32_t atoms = 0;
+                for (uint32_t i = 0; i < imported->count; i += 1)
+                {
+                    const AtomId atom = object->section_atoms[object->group_sections[imported->first + i]];
+                    groups = groups && (atom == 0 || runtime.group_atoms[runtime_group->first + atoms] == atom);
+                    atoms += atom != 0 ? 1 : 0;
+                }
+                groups = groups && runtime_group->count == atoms && runtime_group->signature < runtime.group_signatures;
+                const bool is_personality = imported->signature.length == strlen("DW.ref.__gcc_personality_v0") &&
+                                            memcmp(imported->signature.pointer, "DW.ref.__gcc_personality_v0", imported->signature.length) == 0;
+                groups = groups && (!is_personality || personality == UINT32_MAX || personality == runtime_group->signature);
+                personality = is_personality ? runtime_group->signature : personality;
+            }
+            group += object->group_count;
+        }
+        // Two groups have the same number exactly when their signatures are the same.
+        uint32_t pairs = 0;
+        for (uint32_t p = 0; groups && p < piece_count; p += 1)
+        {
+            const ImportObject* object = p < RUNTIME_OBJECTS ? &runtime.objects[p] : &runtime.member_objects[p - RUNTIME_OBJECTS];
+            for (uint32_t g = 0; groups && g < object->group_count; g += 1)
+            {
+                const uint32_t x = runtime.group_begin[p] + g;
+                for (uint32_t q = 0; groups && q < piece_count; q += 1)
+                {
+                    const ImportObject* other = q < RUNTIME_OBJECTS ? &runtime.objects[q] : &runtime.member_objects[q - RUNTIME_OBJECTS];
+                    for (uint32_t h = 0; groups && h < other->group_count; h += 1)
+                    {
+                        const uint32_t y = runtime.group_begin[q] + h;
+                        const String8 a = object->groups[g].signature;
+                        const String8 b = other->groups[h].signature;
+                        const bool same = a.length == b.length && memcmp(a.pointer, b.pointer, a.length) == 0;
+                        groups = same == (runtime.groups[x].signature == runtime.groups[y].signature);
+                        pairs += 1;
+                    }
+                }
+            }
+        }
+        import_test_expect(&tally, groups && personality != UINT32_MAX, "each piece's COMDAT groups, DW.ref.__gcc_personality_v0's of one signature", pairs);
+        // Each piece's strong references, as a scan of its symbols finds them.
+        bool references = runtime.reference_begin[0] == 0;
+        for (uint32_t p = 0; references && p < piece_count; p += 1)
+        {
+            uint32_t at = runtime.reference_begin[p];
+            for (SymbolId symbol = runtime.pieces[p].begin.symbols; references && symbol < runtime.pieces[p].end.symbols; symbol += 1)
+            {
+                const bool strong = link->symbols.atom[symbol] == 0 && link->symbols.source[symbol] == BUSTER_LINK_SOURCE_NONE &&
+                                    (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL && runtime.symbol_names[symbol] != 0;
+                references = !strong || (at < runtime.reference_begin[p + 1] && runtime.references[at] == runtime.symbol_names[symbol] - 1);
+                at += strong ? 1 : 0;
+            }
+            references = references && at == runtime.reference_begin[p + 1];
+        }
+        import_test_expect(&tally, references, "each piece's strong references to global names", runtime.reference_begin[piece_count]);
+        // Each global name found by its bytes, with the first symbol that defines it, in an atom or absolute, and the
+        // member that symbol is in.
+        const RuntimeNames* names = &runtime.global_names;
+        const uint64_t length = arena->length;
+        SymbolId* first = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, names->count);
+        bool defined = first != 0;
+        if (first != 0)
+        {
+            memset(first, 0, names->count * sizeof(SymbolId));
+        }
+        for (SymbolId symbol = 1; defined && symbol < link->symbols.count; symbol += 1)
+        {
+            const uint32_t entry = runtime.symbol_names[symbol];
+            const bool definition = entry != 0 && (link->symbols.atom[symbol] != 0 || link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE);
+            first[entry - (entry != 0 ? 1 : 0)] = definition && first[entry - 1] == 0 ? symbol : first[entry - (entry != 0 ? 1 : 0)];
+        }
+        for (uint32_t e = 0; defined && e < names->count; e += 1)
+        {
+            const uint32_t piece = first[e] != 0 ? import_test_symbol_piece(&runtime, first[e]) : 0;
+            const uint32_t member = first[e] != 0 && piece >= RUNTIME_OBJECTS ? piece - RUNTIME_OBJECTS + 1 : 0;
+            defined = names->definition[e] == first[e] && names->member[e] == member &&
+                      runtime_find_global_name(names, runtime_global_name(names, e), names->length[e], names->hash[e]) == e + 1;
+        }
+        arena_pop_to(arena, length);
+        import_test_expect(&tally, defined, "each global name found, with its first definition and that definition's member", names->count);
+        import_test_expect(&tally, link_check(&runtime.link) == LINK_ERROR_NONE, "link_check of the runtime's link", 0);
+        // Every crt object and member by both paths, which must take each.
+        for (uint32_t i = 0; i < RUNTIME_OBJECTS; i += 1)
+        {
+            import_test_paths(&tally, runtime.object_bytes[i], IMPORT_TEST_VECTOR, "a static crt object", i, arena);
+        }
+        for (uint32_t m = 0; m < runtime.member_count; m += 1)
+        {
+            import_test_paths(&tally, runtime.members[m].bytes, IMPORT_TEST_VECTOR, "a member of the static runtime's archives", m, arena);
+        }
+        if (cross_check)
+        {
+            const uint64_t before = arena->length;
+            import_test_cross_check_relocations(&tally, &runtime, arena);
+            arena_pop_to(arena, before);
         }
     }
     runtime_release(&runtime);
@@ -2870,6 +3295,9 @@ static uint8_t import_test_kind_named(const char* type)
     result = strcmp(type, "R_X86_64_32S") == 0 ? BUSTER_LINK_FIXUP_ABS32S : result;
     result = strcmp(type, "R_X86_64_SIZE32") == 0 ? BUSTER_LINK_FIXUP_SIZE32 : result;
     result = strcmp(type, "R_X86_64_SIZE64") == 0 ? BUSTER_LINK_FIXUP_SIZE64 : result;
+    result = strcmp(type, "R_X86_64_TLSGD") == 0 ? BUSTER_LINK_FIXUP_TLSGD : result;
+    result = strcmp(type, "R_X86_64_TLSLD") == 0 ? BUSTER_LINK_FIXUP_TLSLD : result;
+    result = strcmp(type, "R_X86_64_DTPOFF32") == 0 ? BUSTER_LINK_FIXUP_DTPOFF32 : result;
     return result;
 }
 
@@ -2971,7 +3399,7 @@ static void import_test_relocation_line(ImportTestRelocationCheck* check, char* 
     }
 }
 
-// The crt objects' and libc_nonshared.a's members' relocations against `readelf -W -r`, and no other fixups.
+// The crt objects' and the archives' members' relocations against `readelf -W -r`, and no other fixups.
 static void import_test_cross_check_relocations(ImportTestTally* tally, const Runtime* runtime, Arena* arena)
 {
     const Link* link = &runtime->link;
@@ -2983,6 +3411,7 @@ static void import_test_cross_check_relocations(ImportTestTally* tally, const Ru
     for (uint32_t i = 0; i < RUNTIME_OBJECTS; i += 1)
     {
         snprintf(command, sizeof(command), "readelf -W -r '%.*s'", (int)runtime->object_paths[i].length, runtime->object_paths[i].pointer);
+        const uint64_t length = arena->length;
         const String8 output = import_test_run(command, arena);
         check.bytes = runtime->object_bytes[i];
         check.object = &runtime->objects[i];
@@ -2994,45 +3423,51 @@ static void import_test_cross_check_relocations(ImportTestTally* tally, const Ru
             import_test_relocation_line(&check, line);
         }
         import_test_expect(tally, output.pointer != 0, "readelf -r runs", i);
+        arena_pop_to(arena, length);
     }
-    // The archive's members, each after a "File: archive(member)" line.
-    snprintf(command, sizeof(command), "readelf -W -r '%.*s'", (int)runtime->nonshared_path.length, runtime->nonshared_path.pointer);
-    const String8 output = import_test_run(command, arena);
-    uint64_t position = 0;
-    char* line = 0;
-    check.object = 0;
-    while (output.pointer != 0 && import_test_next_line(output, &position, &line))
+    // Each archive's members, in its order, each after a "File: archive(member)" line with its name.
+    for (uint32_t a = 0; a < runtime->archive_count; a += 1)
     {
-        const char* open = strncmp(line, "File: ", 6) == 0 ? strrchr(line, '(') : 0;
-        const char* close = open != 0 ? strrchr(open, ')') : 0;
-        if (close != 0)
+        const RuntimeArchive* archive = &runtime->archives[a];
+        snprintf(command, sizeof(command), "readelf -W -r '%.*s'", (int)archive->path.length, archive->path.pointer);
+        const uint64_t length = arena->length;
+        const String8 output = import_test_run(command, arena);
+        uint64_t position = 0;
+        char* line = 0;
+        uint32_t next = 0;
+        check.object = 0;
+        while (output.pointer != 0 && import_test_next_line(output, &position, &line))
         {
-            const uint64_t length = (uint64_t)(close - open - 1);
-            check.object = 0;
-            for (uint32_t m = 0; m < runtime->nonshared.member_count; m += 1)
+            const char* open = strncmp(line, "File: ", 6) == 0 ? strrchr(line, '(') : 0;
+            const char* close = open != 0 ? strrchr(open, ')') : 0;
+            if (close != 0)
             {
-                const String8 name = runtime->nonshared.members[m].name;
-                const bool named = name.length == length && memcmp(name.pointer, open + 1, length) == 0;
-                check.object = named ? &runtime->member_objects[m] : check.object;
-                check.bytes = named ? runtime->nonshared.members[m].bytes : check.bytes;
+                const uint64_t name_length = (uint64_t)(close - open - 1);
+                const uint32_t m = archive->first_member + next;
+                const bool named = next < archive->archive.member_count && runtime->members[m].name.length == name_length &&
+                                   memcmp(runtime->members[m].name.pointer, open + 1, name_length) == 0;
+                check.object = named ? &runtime->member_objects[m] : 0;
+                check.bytes = named ? runtime->members[m].bytes : (String8){ 0 };
+                check.atom = 0;
+                check.same = check.same && named;
+                next += 1;
             }
-            check.atom = 0;
-            check.same = check.same && check.object != 0;
+            else
+            {
+                import_test_relocation_line(&check, line);
+            }
         }
-        else
-        {
-            import_test_relocation_line(&check, line);
-        }
+        import_test_expect(tally, output.pointer != 0 && next == archive->archive.member_count, "readelf -r runs on each archive, and lists each member", a);
+        arena_pop_to(arena, length);
     }
-    import_test_expect(tally, output.pointer != 0, "readelf -r runs on libc_nonshared.a", 0);
     uint64_t fixups = 0;
     for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
     {
         fixups += link->atoms.fixup_count[atom];
     }
-    import_test_expect(tally, check.same && fixups == check.compared, "every relocation of the crt objects and libc_nonshared.a's members, as readelf lists them", check.compared);
-    printf("  readelf: %llu relocations of the crt objects and libc_nonshared.a's members, and %llu in sections the import drops\n", (unsigned long long)check.compared,
-           (unsigned long long)check.dropped);
+    import_test_expect(tally, check.same && fixups == check.compared, "every relocation of the crt objects and the archives' members, as readelf lists them", check.compared);
+    printf("  readelf: %llu relocations of the crt objects and the archives' %u members, and %llu in sections the import drops\n", (unsigned long long)check.compared,
+           runtime->member_count, (unsigned long long)check.dropped);
 }
 
 static void import_test_cross_check(ImportTestTally* tally, const Runtime* runtime, Arena* arena)
@@ -3179,6 +3614,7 @@ static int run_import_tests(int argc, char** argv)
         passed = import_test_edges(seed, &arena) && passed;
         passed = import_test_discovery() && passed;
         passed = import_test_runtime(cross_check, &arena) && passed;
+        passed = import_test_static_runtime(cross_check, &arena) && passed;
         arena_release(&arena);
         result = passed ? 0 : 1;
     }

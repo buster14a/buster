@@ -464,22 +464,25 @@ static bool link_test_round_trips(uint64_t seed)
     // source.
     for (uint32_t i = 1; ready && i <= BUSTER_LINK_TEST_SYMBOLS; i += 1)
     {
-        static const uint8_t types[] = { BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SYMBOL_OBJECT, BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SYMBOL_TLS };
+        static const uint8_t types[] = { BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SYMBOL_OBJECT, BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SYMBOL_IFUNC };
         static const uint8_t bindings[] = { BUSTER_LINK_SYMBOL_LOCAL, BUSTER_LINK_SYMBOL_GLOBAL, BUSTER_LINK_SYMBOL_WEAK };
         const AtomId atom = link_test_below(&state, BUSTER_LINK_TEST_ATOMS + 1);
         const uint64_t atom_size = atom != 0 ? atoms[atom].size : UINT64_MAX;
         const uint64_t value = atom != 0 ? link_test_random(&state) % (atom_size + 1) : link_test_random(&state);
         const uint64_t size = atom != 0 ? link_test_random(&state) % (atom_size - value + 1) : link_test_random(&state);
         const bool tls = atom != 0 ? link_class_is_tls(atoms[atom].class) : link_test_below(&state, 4) == 0;
-        const uint8_t type = tls ? BUSTER_LINK_SYMBOL_TLS : types[link_test_below(&state, 3)];
+        const uint8_t type = tls ? BUSTER_LINK_SYMBOL_TLS : types[link_test_below(&state, 4)];
         const uint8_t visibility = (uint8_t)(link_test_below(&state, 4) << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
+        // An absolute symbol has no atom, and is neither a TLS variable nor an IFUNC.
+        const uint8_t source = (uint8_t)link_test_below(&state, BUSTER_LINK_SOURCE_COUNT);
+        const bool not_absolute = atom != 0 || type == BUSTER_LINK_SYMBOL_TLS || type == BUSTER_LINK_SYMBOL_IFUNC;
         symbols[i] = (LinkTestSymbol){
             .value = value,
             .size = size,
             .name = link_test_below(&state, BUSTER_LINK_TEST_NAMES + 1),
             .atom = atom,
             .flags = (uint8_t)(type | bindings[link_test_below(&state, 3)] | visibility),
-            .source = (uint8_t)link_test_below(&state, BUSTER_LINK_SOURCE_COUNT),
+            .source = source == BUSTER_LINK_SOURCE_ABSOLUTE && not_absolute ? BUSTER_LINK_SOURCE_NONE : source,
         };
         const SymbolId symbol = link_add_symbol(&link, symbols[i].name, atom, value, size, symbols[i].flags, symbols[i].source);
         link_test_expect(&tally, symbol == i, "a symbol's id", i);
@@ -645,6 +648,7 @@ static bool link_test_rules(void)
         .symbols = 16,
         .fixups = 32,
         .wide_addends = 4,
+        .priorities = 2,
     };
     Link link;
     link_test_expect(&tally, link_initialize(&link, &arenas.tables, &arenas.names, capacity), "the tables fit", 0);
@@ -684,12 +688,22 @@ static bool link_test_rules(void)
     link_test_expect(&tally, link_add_symbol(&link, name, data, 24, 9, object, program) == 0 && link_test_failed(&link, LINK_ERROR_RECORD), "a size past the atom", 0);
     link_test_expect(&tally, link_add_symbol(&link, name, data, 0, 8, tls, program) == 0 && link_test_failed(&link, LINK_ERROR_RECORD), "a TLS symbol outside TLS", 0);
     link_test_expect(&tally, link_add_symbol(&link, name, tdata, 0, 8, object, program) == 0 && link_test_failed(&link, LINK_ERROR_RECORD), "another symbol in TLS", 0);
+    const uint8_t absolute = BUSTER_LINK_SOURCE_ABSOLUTE;
+    link_test_expect(&tally, link_add_symbol(&link, name, data, 0, 0, object, absolute) == 0 && link_test_failed(&link, LINK_ERROR_RECORD), "an absolute symbol in an atom", 0);
+    link_test_expect(&tally, link_add_symbol(&link, name, 0, 2, 0, tls, absolute) == 0 && link_test_failed(&link, LINK_ERROR_RECORD), "an absolute TLS symbol", 0);
+    link_test_expect(&tally, link_add_symbol(&link, name, 0, 2, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_IFUNC, absolute) == 0 &&
+                         link_test_failed(&link, LINK_ERROR_RECORD),
+                     "an absolute IFUNC", 0);
     link_test_expect(&tally, link.symbols.count == 1, "no symbol added", link.symbols.count);
     const SymbolId defined = link_add_symbol(&link, name, data, 24, 8, object, program);
     const SymbolId later = link_add_symbol(&link, 0, 0, 0, 0, local, program);
     const SymbolId variable = link_add_symbol(&link, 0, tdata, 8, 8, tls, program);
     const SymbolId foreign = link_add_symbol(&link, name, 0, 0, 0, object, BUSTER_LINK_SOURCE_RUNTIME_SHARED);
-    link_test_expect(&tally, defined == 1 && later == 2 && variable == 3 && foreign == 4, "symbols that fit", 0);
+    // Absolute symbols, global and local, which a fixup of any unit can refer to.
+    const SymbolId global_absolute = link_add_symbol(&link, name, 0, 2, 0, object, absolute);
+    const SymbolId local_absolute = link_add_symbol(&link, 0, 0, 0x1234, 4, local, absolute);
+    link_test_expect(&tally, defined == 1 && later == 2 && variable == 3 && foreign == 4 && global_absolute == 5 && local_absolute == 6, "symbols that fit", 0);
+    link_test_expect(&tally, !link_define_symbol(&link, global_absolute, data, 0, 0) && link_test_failed(&link, LINK_ERROR_RECORD), "defining an absolute symbol", 0);
     link_test_expect(&tally, !link_define_symbol(&link, 0, data, 0, 0) && link_test_failed(&link, LINK_ERROR_ID), "defining symbol 0", 0);
     link_test_expect(&tally, !link_define_symbol(&link, later, 0, 0, 0) && link_test_failed(&link, LINK_ERROR_ID), "defining in atom 0", 0);
     link_test_expect(&tally, !link_define_symbol(&link, later, tdata, 0, 8) && link_test_failed(&link, LINK_ERROR_RECORD), "defining outside TLS in TLS", 0);
@@ -704,7 +718,8 @@ static bool link_test_rules(void)
     // Fixups.
     link_test_expect(&tally, link_add_fixup(&link, 0, 0, BUSTER_LINK_FIXUP_ABS64, defined, 0) == 0 && link_test_failed(&link, LINK_ERROR_ID), "a fixup of atom 0", 0);
     link_test_expect(&tally, link_add_fixup(&link, data, 0, BUSTER_LINK_FIXUP_ABS64, 0, 0) == 0 && link_test_failed(&link, LINK_ERROR_ID), "a fixup of symbol 0", 0);
-    link_test_expect(&tally, link_add_fixup(&link, data, 0, BUSTER_LINK_FIXUP_ABS64, 5, 0) == 0 && link_test_failed(&link, LINK_ERROR_ID), "a target that doesn't exist", 0);
+    link_test_expect(&tally, link_add_fixup(&link, data, 0, BUSTER_LINK_FIXUP_ABS64, link.symbols.count, 0) == 0 && link_test_failed(&link, LINK_ERROR_ID),
+                     "a target that doesn't exist", 0);
     link_test_expect(&tally, link_add_fixup(&link, data, 0, BUSTER_LINK_FIXUP_NONE, defined, 0) == 0 && link_test_failed(&link, LINK_ERROR_RECORD), "kind none", 0);
     link_test_expect(&tally, link_add_fixup(&link, data, 0, BUSTER_LINK_FIXUP_KINDS, defined, 0) == 0 && link_test_failed(&link, LINK_ERROR_RECORD),
                      "a kind past the last", 0);
@@ -721,11 +736,14 @@ static bool link_test_rules(void)
                      "a fixup overlapping it", 0);
     link_test_expect(&tally, link_add_fixup(&link, data, 16, BUSTER_LINK_FIXUP_PC32, defined, 0) == 2, "a fixup right after it", 0);
     link_test_expect(&tally, link_add_fixup(&link, other_unit, 0, BUSTER_LINK_FIXUP_ABS64, later, 0) == 3, "another atom's fixup", 0);
+    link_test_expect(&tally, link_add_fixup(&link, other_unit, 8, BUSTER_LINK_FIXUP_ABS64, local_absolute, 0) == 4 &&
+                         link_add_fixup(&link, other_unit, 16, BUSTER_LINK_FIXUP_PC32, global_absolute, 0) == 5,
+                     "fixups to absolute symbols", 0);
     link_test_expect(&tally, link_add_fixup(&link, data, 24, BUSTER_LINK_FIXUP_PC32, defined, 0) == 0 && link_test_failed(&link, LINK_ERROR_RECORD),
                      "a fixup of an atom whose range another follows", 0);
-    link_test_expect(&tally, link.fixups.count == 4 && link.atoms.fixup_begin[data] == 1 && link.atoms.fixup_count[data] == 2, "the refused fixups change nothing",
+    link_test_expect(&tally, link.fixups.count == 6 && link.atoms.fixup_begin[data] == 1 && link.atoms.fixup_count[data] == 2, "the refused fixups change nothing",
                      link.fixups.count);
-    link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check of valid fixups", link.error);
+    link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check of valid fixups, a local absolute symbol's from another unit among them", link.error);
 
     // What link_check refuses: TLS kinds and the others on the wrong symbols, and a local from another unit.
     static const struct
@@ -749,6 +767,21 @@ static bool link_test_rules(void)
             2,
             "a local of another unit",
         },
+        {
+            BUSTER_LINK_FIXUP_TLSGD,
+            1,
+            "general-dynamic TLS of a symbol outside TLS",
+        },
+        {
+            BUSTER_LINK_FIXUP_TLSLD,
+            5,
+            "local-dynamic TLS of an absolute symbol",
+        },
+        {
+            BUSTER_LINK_FIXUP_DTPOFF32,
+            1,
+            "a module offset of a symbol outside TLS",
+        },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(wrong); i += 1)
     {
@@ -756,7 +789,9 @@ static bool link_test_rules(void)
         const bool added = atom != 0 && link_add_fixup(&link, atom, 0, wrong[i].kind, wrong[i].target, 0) != 0;
         link_test_expect(&tally, added && link_check(&link) == LINK_ERROR_BINDING && link_test_failed(&link, LINK_ERROR_BINDING), wrong[i].what, i);
         // Retargeted to a symbol it can refer to, it passes again.
-        link.fixups.target[link.fixups.count - 1] = wrong[i].kind == BUSTER_LINK_FIXUP_TPOFF32 ? variable : defined;
+        const uint8_t kind = wrong[i].kind;
+        const bool tls_kind = kind == BUSTER_LINK_FIXUP_TPOFF32 || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32;
+        link.fixups.target[link.fixups.count - 1] = tls_kind ? variable : defined;
         link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check after retargeting", i);
     }
     // The size of a TLS symbol is fine.
@@ -859,6 +894,30 @@ static bool link_test_rules(void)
         link.fixups.target[link.fixups.count - 1] = shared[i].kind == BUSTER_LINK_FIXUP_TPOFF32 || shared[i].kind == BUSTER_LINK_FIXUP_GOTTPOFF ? variable : defined;
         link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check after retargeting", i);
     }
+    // Priorities: an init or fini array atom's each, after the atoms that have one, up to 65535.
+    const AtomId init_array = link_add_atom(&link, BUSTER_LINK_CLASS_INIT_ARRAY, 3, 8, bytes, 0);
+    const AtomId fini_array = link_add_atom(&link, BUSTER_LINK_CLASS_FINI_ARRAY, 3, 8, bytes, 0);
+    const AtomId last_array = link_add_atom(&link, BUSTER_LINK_CLASS_INIT_ARRAY, 3, 8, bytes, 0);
+    link_test_expect(&tally, init_array != 0 && fini_array != 0 && last_array != 0, "the arrays' atoms", 0);
+    link_test_expect(&tally, !link_add_priority(&link, 0, 1) && link_test_failed(&link, LINK_ERROR_ID), "a priority of atom 0", 0);
+    link_test_expect(&tally, !link_add_priority(&link, link.atoms.count, 1) && link_test_failed(&link, LINK_ERROR_ID), "a priority of an atom that doesn't exist", 0);
+    link_test_expect(&tally, !link_add_priority(&link, data, 1) && link_test_failed(&link, LINK_ERROR_RECORD), "a priority of an atom that isn't an array's", 0);
+    link_test_expect(&tally, !link_add_priority(&link, init_array, UINT16_MAX + 1) && link_test_failed(&link, LINK_ERROR_RECORD), "a priority past 65535", 0);
+    link_test_expect(&tally, link_add_priority(&link, init_array, UINT16_MAX), "an init array's priority", 0);
+    link_test_expect(&tally, !link_add_priority(&link, init_array, 1) && link_test_failed(&link, LINK_ERROR_RECORD), "a second priority of the same atom", 0);
+    link_test_expect(&tally, link_add_priority(&link, fini_array, 0), "a fini array's priority", 0);
+    link_test_expect(&tally, !link_add_priority(&link, last_array, 1) && link_test_failed(&link, LINK_ERROR_FULL), "a priority past the table", 0);
+    const LinkPriorities* priorities = &link.priorities;
+    link_test_expect(&tally, priorities->count == 3 && priorities->atom[1] == init_array && priorities->priority[1] == UINT16_MAX && priorities->atom[2] == fini_array &&
+                         priorities->priority[2] == 0,
+                     "the refused priorities change nothing", priorities->count);
+    link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check of valid priorities", link.error);
+    link.priorities.atom[2] = init_array;
+    link_test_expect(&tally, link_check(&link) == LINK_ERROR_RECORD && link_test_failed(&link, LINK_ERROR_RECORD), "link_check: priorities out of order", 0);
+    link.priorities.atom[2] = data;
+    link_test_expect(&tally, link_check(&link) == LINK_ERROR_RECORD && link_test_failed(&link, LINK_ERROR_RECORD), "link_check: a priority of an atom that isn't an array's", 0);
+    link.priorities.atom[2] = fini_array;
+    link_test_expect(&tally, link_check(&link) == LINK_ERROR_NONE, "link_check after putting the priorities back", 0);
     // A fixup outside every atom's range, and an atom whose range overlaps another's, which only lanes filling the
     // columns themselves could make.
     link.atoms.fixup_count[data] -= 1;
@@ -2363,7 +2422,9 @@ static bool link_test_programs(uint64_t seed, uint32_t functions)
         {
             const uint32_t absolute = (1u << BUSTER_LINK_FIXUP_ABS32) | (1u << BUSTER_LINK_FIXUP_ABS32S);
             const uint32_t sizes = (1u << BUSTER_LINK_FIXUP_SIZE32) | (1u << BUSTER_LINK_FIXUP_SIZE64);
-            const uint32_t expected = ((1u << BUSTER_LINK_FIXUP_KINDS) - 2) & ~(options[i].absolute ? 0 : absolute) & ~(options[i].sizes ? 0 : sizes);
+            // The general- and local-dynamic kinds, which only imported objects have.
+            const uint32_t imported = (1u << BUSTER_LINK_FIXUP_TLSGD) | (1u << BUSTER_LINK_FIXUP_TLSLD) | (1u << BUSTER_LINK_FIXUP_DTPOFF32);
+            const uint32_t expected = ((1u << BUSTER_LINK_FIXUP_KINDS) - 2) & ~imported & ~(options[i].absolute ? 0 : absolute) & ~(options[i].sizes ? 0 : sizes);
             const uint32_t runtime = (1u << BUSTER_LINK_CLASS_INIT) | (1u << BUSTER_LINK_CLASS_FINI);
             uint32_t classes = 0;
             uint32_t kinds = 0;
@@ -2436,6 +2497,9 @@ static const char* const link_test_relocations[BUSTER_LINK_FIXUP_KINDS] = {
     [BUSTER_LINK_FIXUP_ABS32S] = "R_X86_64_32S",
     [BUSTER_LINK_FIXUP_SIZE32] = "R_X86_64_SIZE32",
     [BUSTER_LINK_FIXUP_SIZE64] = "R_X86_64_SIZE64",
+    [BUSTER_LINK_FIXUP_TLSGD] = "R_X86_64_TLSGD",
+    [BUSTER_LINK_FIXUP_TLSLD] = "R_X86_64_TLSLD",
+    [BUSTER_LINK_FIXUP_DTPOFF32] = "R_X86_64_DTPOFF32",
 };
 
 // A symbol's name in the source: its own, or .Lsym_ and its id without one (a label that stays out of the object's

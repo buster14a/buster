@@ -232,7 +232,12 @@ designs and the compilers already built this way.
   `libc.so.6` and `libc_nonshared.a` that `libc.so` names) and imports them
   into a link of their own, with what each name they refer to binds to (the
   first part of step 5 of the design's plan), each object's records as a
-  piece, and an index and a filter of their global names and libc's.
+  piece, and an index and a filter of their global names and libc's;
+  `runtime_import_static` does the same for a static executable's runtime
+  (`crt1.o`, `crtbeginT.o` and `crtend.o`, and the archives of GCC's group:
+  `libgcc.a`, `libgcc_eh.a`, `libatomic.a` where GCC has it, and `libc.a`),
+  with each member's strong references and COMDAT groups (step 6's first
+  part).
   `import_test.c` holds their tests (`main.c` includes it; `./build/compiler
   test-import` runs them) and `import_benchmark.c` provides
   `benchmark-import`.
@@ -871,17 +876,20 @@ segment off its alignment when told where: seed 1's `static-defaults` with
 - objects: each unit's object of `test-link`'s seven programs (with 500 workers
   in the one that takes `--functions`), of a link made by hand (gaps between
   atoms, an atom of no size, weak, hidden and protected symbols, pointers into
-  a string pool, units without atoms between and after the others) and of a
-  link without atoms, with and without function sections.
+  a string pool, a call to and a pointer to a local IFUNC, units without atoms
+  between and after the others) and of a link without atoms, with and without
+  function sections.
   Each is built twice, the second time over poisoned memory, and must come out
   the same; the test's own ELF reader reads it back and checks the rules every
-  object keeps; and it is compared with the representation, from which the test
-  works out every section, symbol and relocation again, with its own tables of
-  section formats and relocation types. Among them, every local-exec TLS
-  reference must be an `R_X86_64_TPOFF32` against its TLS symbol over a zero
-  field, and every call through the GOT an `R_X86_64_GOTPCRELX`. Then an arena
-  too small for an object (`OBJECT_ERROR_FULL`) and an addend past int64
-  (`OBJECT_ERROR_RANGE`);
+  object keeps (`ELFOSABI_GNU` exactly when a symbol is an `STT_GNU_IFUNC`);
+  and it is compared with the representation, from which the test works out
+  every section, symbol and relocation again, with its own tables of section
+  formats and relocation types. Among them, every local-exec TLS reference
+  must be an `R_X86_64_TPOFF32` against its TLS symbol over a zero field, every
+  call through the GOT an `R_X86_64_GOTPCRELX`, and every reference to a local
+  IFUNC against the IFUNC. Then an arena too small for an object
+  (`OBJECT_ERROR_FULL`), an addend past int64 (`OBJECT_ERROR_RANGE`), and links
+  with an absolute symbol, referenced and not, which `object_prepare` refuses;
 - many sections: one unit of 33,000 functions in sections of their own, 66,041
   sections: `e_shnum` and `e_shstrndx` in section 0, and symbols' indices
   through `SHN_XINDEX` and `.symtab_shndx`;
@@ -897,15 +905,19 @@ segment off its alignment when told where: seed 1's `static-defaults` with
 - with `--cross-check`, which needs `readelf`, `llvm-readobj`, `as`,
   `ld.bfd`, `ld.lld`, `mold` and `wild` on `PATH`, and a `cc` that takes
   `-fuse-ld=wild` (GCC 16 on the 9700X):
-  - `readelf -W` and `llvm-readobj` list every object's sections, symbols and
-    relocations, which must be what the test's reader read, field by field;
+  - `readelf -W` and `llvm-readobj` list every object's OS ABI, sections,
+    symbols and relocations, which must be what the test's reader read, field
+    by field;
   - GNU ld, lld, mold and wild link each program's objects, without errors or
     warnings: the static programs with `-static -e _start`, and the ones that
     call libc through `cc` as a PIE, with `-no-pie` and with `-static`. The
     executable must exit with status 0 having printed what the program's model
     predicts. wild links only the programs without `SIZE32` and `SIZE64`, which
     wild 0.10 refuses, and among them one of 33,000 functions past
-    `SHN_LORESERVE` sections;
+    `SHN_LORESERVE` sections. The same linkers link, the same three ways, a
+    program whose `main` calls a local IFUNC directly and through a pointer,
+    which must exit with status 42, 21 from each call (calling the resolver
+    itself would return its implementation's address);
   - GNU as assembles each unit as `test-link --print-assembly` writes it, and
     its object must match the writer's: the same sections and bytes, symbols
     and relocations. They may differ where GNU as does: it orders sections as
@@ -922,7 +934,7 @@ segment off its alignment when told where: seed 1's `static-defaults` with
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
 removed at the end unless `--keep`. `--seed N` changes the programs. On the
 9700X (binutils 2.47, LLVM 23.1.1, mold 3.0.0, wild 0.10.0 and GCC 16.2.1)
-the checks take about 0.03 s, and 3.5 s with `--cross-check`.
+the checks take about 0.04 s, and 3.7 s with `--cross-check`.
 
 ## Object writer benchmark
 
@@ -945,8 +957,8 @@ one allowed CPU; like the others, its measurements are informational.
 
 ## Import tests
 
-`./build/compiler test-import [--seed N] [--cross-check]` (about 0.13 s on
-the 9700X, and 0.15 s with `--cross-check`) checks `import.c` and
+`./build/compiler test-import [--seed N] [--cross-check]` (about 0.19 s on
+the 9700X, and 0.26 s with `--cross-check`) checks `import.c` and
 `runtime.c`:
 
 - round trips: each unit's object of `test-link`'s seven programs (with 500
@@ -959,11 +971,13 @@ the 9700X, and 0.15 s with `--cross-check`) checks `import.c` and
   the same place with the same addend, and no other fixups;
 - an object made by hand with a section of every class, the sections the
   import drops (`.sframe` with its relocations, a note, `.note.GNU-stack` and
-  `.comment`), every kind of symbol and every relocation type the
-  representation has, out of order, with `R_X86_64_NONE` and addends past
-  int32: each section, symbol and fixup imported exactly, the atoms' bytes in
-  place in the file; the same with `e_shnum` and `e_shstrndx` in section 0,
-  with `.eh_frame` as `SHT_PROGBITS` and with tables' `sh_entsize` 0; and one
+  `.comment`), every kind of symbol (an IFUNC and absolute ones among them)
+  and every relocation type the representation has, out of order, with
+  `R_X86_64_NONE` and addends past int32, a COMDAT group and prioritized init
+  and fini arrays: each section, symbol, fixup, group and priority imported
+  exactly, the atoms' bytes in place in the file; the same with its
+  relocations in order, with `e_shnum` and `e_shstrndx` in section 0, with
+  `.eh_frame` as `SHT_PROGBITS` and with tables' `sh_entsize` 0; and one
   without a symbol table, as `crtn.o` is. Then each check a well-formed object
   never trips, one change at a time, with the error, the index of the
   section, symbol or relocation, the type and the byte offset it reports;
@@ -980,11 +994,10 @@ the 9700X, and 0.15 s with `--cross-check`) checks `import.c` and
 - linker scripts: `libc.so`'s and GCC's `_asneeded` ones, commas, comments
   and `OUTPUT_FORMAT`, then each error at its offset;
 - page edges: every prefix of each input made by hand (the object also with
-  its relocations in order, which the vector path takes), and the input with
-  each byte set to 0, 0xff and a random value, ending at a `PROT_NONE` page,
-  through every reader: each succeeds, or fails reporting a place within its
-  input. A read past the end faults; the command then names the input and
-  exits with status 1;
+  its relocations in order), and the input with each byte set to 0, 0xff and
+  a random value, ending at a `PROT_NONE` page, through every reader: each
+  succeeds, or fails reporting a place within its input. A read past the end
+  faults; the command then names the input and exits with status 1;
 - the paths: each object, archive and library above (the round trips, the
   inputs made by hand, every malformed one, every page-edge input and this
   system's runtime) is read by its reader's vector path, its exact path and
@@ -992,9 +1005,9 @@ the 9700X, and 0.15 s with `--cross-check`) checks `import.c` and
   result and records must be the exact path's; the vector path may take an
   input only when the exact path reads it without an error, and must then
   make the same records, column by column. Each well-formed input must take
-  the vector path (the object made by hand, whose relocations are out of
-  order, the exact one), and each check prints how many inputs each path
-  took. A library's index must find what a linear scan of its exports finds;
+  the vector path, which sorts relocations out of order, and each check
+  prints how many inputs each path took. A library's index must find what a
+  linear scan of its exports finds;
 - discovery: GCC's search under a directory of the test's own, whose newer
   version's directory has no `crtbeginS.o`: the search picks the older
   version and probes the newer one's `crtbeginS.o` too, so that installing it
@@ -1016,14 +1029,28 @@ the 9700X, and 0.15 s with `--cross-check`) checks `import.c` and
   its bytes and in its filter, each global symbol's its own: `main` defined by
   none of them, `__libc_start_main` libc.so.6's, `__dso_handle` crtbeginS.o's,
   `atexit` a member's, and `_GLOBAL_OFFSET_TABLE_` and the init and fini
-  arrays' bounds the linker's, whether or not the runtime refers to them.
+  arrays' bounds the linker's, whether or not the runtime refers to them;
+- the static runtime: `runtime_import_static` on this system's files.
+  `crt1.o`, `crtbeginT.o` and `crtend.o` with `_start`, `_init`,
+  `__dso_handle` and `__TMC_END__`, and `crt1.o`'s ABI note; the archives in
+  GCC's group order, each one's members one after another; `main` bound to
+  the program, `__libc_start_main` to `libc.a`'s member,
+  `__gmon_start__` to nothing, `__TMC_END__` to `crtend.o`, and
+  `_GLOBAL_OFFSET_TABLE_` and the IRELATIVE relocations' bounds to the
+  linker, and nothing to a shared library; `memcpy` an IFUNC of `libc.a`'s,
+  `_nl_current_LC_CTYPE_used` absolute, and `libgcc.a`'s priorities; each
+  object's COMDAT groups as its `ImportObject` has them, with the same
+  signature numbers for groups of the same signature and different ones
+  otherwise; each piece's strong references as a scan of its symbols finds
+  them, and each global name's defining member; `link_check` on the whole
+  runtime; and every crt object and member taking the vector path.
 
 `--cross-check`, which needs `readelf`, compares `libc.so.6`'s exports (name,
 version, type, binding and size) and references with `readelf -W --dyn-syms`,
-and every relocation of the crt objects and `libc_nonshared.a`'s members with
-`readelf -W -r`: each one must be a fixup of its kind at its offset, against
-the symbol (or the section) readelf names, with its addend, and there must be
-no other fixups. `--seed N` changes the programs and the random bytes. The
+and every relocation of the crt objects and the archives' members, the static
+runtime's among them, with `readelf -W -r`: each one must be a fixup of its
+kind at its offset, against the symbol (or the section) readelf names, with
+its addend, and there must be no other fixups. `--seed N` changes the programs and the random bytes. The
 default 9700X job runs it with `--cross-check` after the object writer's
 benchmark.
 
@@ -1037,13 +1064,15 @@ both, the paths taking turns (time, cycles, instructions, IPC):
 - objects: the object writer's objects of a generated program of `--units`
   units (64) of `--functions` workers (200), each about one of synth's
   translation units; the same with function sections; one of 33,000
-  functions in sections of their own; and this system's crt objects and
-  `libc_nonshared.a`'s members, per symbol table entry and relocation;
+  functions in sections of their own; this system's crt objects and
+  `libc_nonshared.a`'s members; and a static executable's crt objects and
+  archives' members, per symbol table entry and relocation;
 - `libc.so.6` and each `--library` (per export and reference), with its
   exports' index against the open-addressing table it replaced, built and
   looked up for every name; `libc_nonshared.a` and each `--archive` (per
-  index entry); `libc.so`'s script, which has no vector path; and
-  `runtime_import` end to end.
+  index entry); `libc.so`'s script, which has no vector path;
+  `runtime_import` end to end; the static runtime's archives; and
+  `runtime_import_static` end to end.
 
 Run it under the 9700X's lock with `taskset -c 2`. With `--library
 /usr/lib/libstdc++.so.6 --library /usr/lib/libLLVM.so.23.1 --archive
@@ -1351,14 +1380,16 @@ like the others, its measurements are informational.
 ## Snapshot tests
 
 `./build/compiler test-snapshot [--seed N] [--functions N] [--directory PATH]
-[--keep]` (about 0.05 s on the 9700X) checks `snapshot.c` with this system's
+[--keep]` (about 0.07 s on the 9700X) checks `snapshot.c` with this system's
 runtime, in a directory of its own under `--directory` (`TMPDIR` or `/tmp` by
 default), which it removes unless `--keep`:
 
 - round trip: the imported runtime written as a snapshot and loaded back must
   have the import's records, every one that binding and a dynamic PIE read,
   and the loaded runtime must use the file's mapping and no arena; so must it
-  after another snapshot was renamed over the file it maps;
+  after another snapshot was renamed over the file it maps. Then the same for
+  the static runtime (`runtime_import_static`), with its kind, its archives,
+  its members' references and COMDAT groups and its global names' members;
 - links: test-link's two sets that call libc and a program of `--functions`
   workers (2,000 by default), bound by both of binding's paths against the
   imported runtime and against a loaded one: the same links and bindings,
