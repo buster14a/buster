@@ -430,6 +430,72 @@ static uint32_t parse_test_check_snippets(const char* directory, const char* cla
     return failures;
 }
 
+// Trees checked by hand, which both paths must build: each fixture's parent of every token (-1 for the root). They
+// are the cases #127 names: `f(a ? b, c : d, e)` calls f with two arguments, `a ? (b, c) : d` and `e`; `(T) * p` is a
+// cast of `*p` where T names a type and a product where it doesn't; an if-statement with an else (c_parser.c's
+// example); and the declarator `(*a[3])(double)`, whose spine from the name out is array, pointer, function.
+typedef struct ParseTestFixture ParseTestFixture;
+struct ParseTestFixture
+{
+    const char* source;
+    uint32_t count;
+    int32_t parents[40];
+};
+
+static const ParseTestFixture parse_test_fixtures[] =
+{
+    { "int r = f(a ? b, c : d, e);\n", 16, { 15, 2, 0, 14, 14, 10, 10, 8, 10, 8, 12, 10, 14, 12, 2, -1 } },
+    { "typedef int T;\nint x = (T) * p;\nint y = (U) * p;\n", 22,
+      { 3, 0, 1, -1, 12, 6, 4, 9, 9, 6, 9, 10, -1, 21, 15, 13, 18, 18, 19, 15, 19, -1 } },
+    { "void g(int a, int b, int c, int x, int y, int z) { if (a) x = b * c; else y = -z; }\n", 39,
+      { 38, 20, 20, 5, 3, 8, 5, 6, 11, 8, 9, 14, 11, 12, 17, 14, 15, 20, 17, 18, 0, 38, 25, 25, 25, 38, 27, 31, 29, 27, 29, 25, 25, 34, 37, 34, 35,
+        32, -1 } },
+    { "int (*a[3])(double);\n", 12, { 11, 7, 7, 6, 6, 6, 2, 10, 10, 10, 0, -1 } },
+};
+
+// Each fixture through both paths, against its parents.
+static uint32_t parse_test_check_fixtures(const char* directory)
+{
+    uint32_t failures = 0;
+    const uint32_t count = (uint32_t)(sizeof(parse_test_fixtures) / sizeof(parse_test_fixtures[0]));
+    char path[4096];
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const ParseTestFixture* fixture = &parse_test_fixtures[i];
+        snprintf(path, sizeof(path), "%s/fixture_%u.c", directory, i);
+        const bool written = parse_test_write(path, fixture->source, strlen(fixture->source));
+        const ParseTestSnippet snippet = { .source = fixture->source, .error = "", .std = 0 };
+        const PPOptions options = parse_test_snippet_options(&snippet);
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            static InternTable table;
+            static Preprocessor pp;
+            static Parser parser;
+            const ParseOptions parse_options = { .scalar = scalar != 0 };
+            bool parsed = written && intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&parser, &parse_options, options.language) &&
+                          pp_run(&pp, path) && parse_translation_unit(&parser, &pp) && parser.tokens.count == fixture->count;
+            uint32_t first = BUSTER_PARSE_NONE;
+            for (uint32_t t = 0; parsed && t < fixture->count && first == BUSTER_PARSE_NONE; t += 1)
+            {
+                const uint32_t expected = fixture->parents[t] < 0 ? BUSTER_PARSE_ROOT : (uint32_t)fixture->parents[t];
+                first = parser.tree.parents[t] == expected ? BUSTER_PARSE_NONE : t;
+            }
+            if (!parsed || first != BUSTER_PARSE_NONE)
+            {
+                failures += 1;
+                printf("fixture %u (%s path): %s%s%u\n    %s", i, scalar ? "scalar" : "vector", parsed ? "" : "doesn't parse to its tokens",
+                       parsed ? "the parent differs at token " : "", parsed ? first : 0, fixture->source);
+            }
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&table);
+        }
+        remove(path);
+    }
+    printf("fixtures: %u trees checked by hand, %u failures\n", count, failures);
+    return failures;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The trees
 
@@ -2415,6 +2481,7 @@ static int run_parser_tests(int argument_count, char** arguments)
     {
         failures += parse_test_check_postorder_self(&arena);
         failures += parse_test_check_snippets(directory, clang);
+        failures += parse_test_check_fixtures(directory);
         if (input_count == 0)
         {
             // The generated inputs, with -E's options but no includes.
