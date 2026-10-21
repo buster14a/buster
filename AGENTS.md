@@ -1146,7 +1146,7 @@ informational.
 ## Bind tests
 
 `./build/compiler test-bind [--seed N] [--cross-check] [--keep]` (about
-44 ms on the 9700X, and 0.89 s with `--cross-check`) checks `bind.c` against
+71 ms on the 9700X, and 0.92 s with `--cross-check`) checks `bind.c` against
 this system's runtime (`runtime_import`). Every check binds by both paths,
 which must make the same link, column by column, and the same imports,
 exports and members:
@@ -1468,7 +1468,7 @@ push saves at the CFA less the new offset, and one a pop restores as it was.
 ## Static executable tests
 
 `./build/compiler test-static [--seed N] [--functions N] [--directory PATH]
-[--cross-check] [--keep]` (about 2.5 s on the 9700X, and 2.7 s with
+[--cross-check] [--keep]` (about 2.7 s on the 9700X, and 2.9 s with
 `--cross-check`) checks `executable.c`'s static executables with the C
 runtime against this system's static runtime (`runtime_import_static`), then
 its static PIEs against the static PIE's (`runtime_import_static_pie`), in a
