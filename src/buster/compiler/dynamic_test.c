@@ -146,6 +146,7 @@ static bool dynamic_test_write_with(DynamicTestWrite* write, Link* link, const B
     ExecutableDynamic dynamic;
     const bool prepared = dynamic_inputs(&dynamic, runtime, bind, scratch.arena);
     dynamic.relr_version = write->rela_only ? 0 : dynamic.relr_version;
+    dynamic.relr = dynamic.relr && !write->rela_only;
     write->link = link;
     write->options = (ExecutableOptions){
         .path = path,

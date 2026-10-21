@@ -192,8 +192,11 @@ static uint32_t static_test_write_lanes(uint32_t write)
 // Writes the link BUSTER_STATIC_TEST_WRITES times, each from its bytes as binding left them (static_test_save) with
 // zeroed fields over the last file scribbled over, every other time over poisoned scratch memory: whether every write
 // succeeded with the same bytes and build ID, which `file` then holds, read into `arena`, with the first write's result
-// in `result`. The link is then as the last write left it, but for its bytes, which are binding's again: the checks
-// read there the instructions a write rewrites.
+// in `result`. A static PIE without general- or local-dynamic TLS accesses (whose relaxation can't be repeated) is
+// written once more over the bytes the last write left, its loads and calls relaxed already, and must come out the
+// same: executable_relax_got takes the forms it writes, as a compiler writing a link again needs. The link is then as
+// the last write left it, but for its bytes, which are binding's again: the checks read there the instructions a write
+// rewrites.
 static bool static_test_lanes(StaticTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, String8 path, const char* name, ExecutableResult* result,
                               String8* file, Arena* arena)
 {
@@ -225,6 +228,22 @@ static bool static_test_lanes(StaticTestTally* tally, Link* link, const Bind* bi
         same = same && succeeded && identical;
         *file = w == 0 ? bytes : *file;
         *result = w == 0 ? written : *result;
+    }
+    bool accesses = false;
+    for (FixupId fixup = 1; fixup < link->fixups.count; fixup += 1)
+    {
+        const uint8_t kind = link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND;
+        accesses = accesses || kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD;
+    }
+    if (saved != 0 && same && static_test_pie(runtime) && !accesses)
+    {
+        ExecutableResult written;
+        DynamicTestWrite write = { 0 };
+        const bool succeeded = executable_test_reset(link, path.pointer) && static_test_write_with(&write, link, bind, runtime, path, 1, &written);
+        const String8 bytes = succeeded ? executable_test_read(arena, path.pointer) : (String8){ 0 };
+        const bool identical = bytes.length == file->length && memcmp(bytes.pointer, file->pointer, bytes.length) == 0;
+        static_test_expect(tally, succeeded && identical, "a write over the relaxed bytes the same file", 0);
+        same = same && succeeded && identical;
     }
     if (saved != 0)
     {
@@ -808,7 +827,7 @@ static void static_test_headers(StaticTestTally* tally, const Link* link, const 
 
 // A static PIE's .dynamic, with lld's tags: DT_FLAGS_1 PIE, without DT_NEEDED or versions; .dynsym with the null
 // symbol alone and its empty strings; .gnu.hash; .rela.dyn's address and size, and DT_RELACOUNT its RELATIVE
-// relocations (`relative`); the init and fini arrays'; and DT_INIT and DT_FINI crti.o's functions.
+// relocations (`relative`), and .relr.dyn's; the init and fini arrays'; and DT_INIT and DT_FINI crti.o's functions.
 static void static_test_dynamic(StaticTestTally* tally, const Link* link, const Bind* bind, const Runtime* runtime, String8 file, uint64_t relative)
 {
     const DynamicTestImage image = dynamic_test_image(file);
@@ -828,6 +847,8 @@ static void static_test_dynamic(StaticTestTally* tally, const Link* link, const 
         { DT_GNU_HASH, ".gnu.hash", false },
         { DT_RELA, ".rela.dyn", false },
         { DT_RELASZ, ".rela.dyn", true },
+        { DT_RELR, ".relr.dyn", false },
+        { DT_RELRSZ, ".relr.dyn", true },
         { DT_INIT_ARRAY, ".init_array", false },
         { DT_INIT_ARRAYSZ, ".init_array", true },
         { DT_FINI_ARRAY, ".fini_array", false },
@@ -854,12 +875,14 @@ static void static_test_dynamic(StaticTestTally* tally, const Link* link, const 
     static_test_expect(tally, dynamic_test_tag(&image, DT_FINI, &value) && fini != 0 && value == dynamic_test_address(link, fini), "DT_FINI _fini", 0);
 }
 
-// A relocation the test expects or the file has: where, and its addend.
+// A relocation the test expects or the file has: where, its addend, and whether .relr.dyn holds it (whose addend is the
+// field's bytes) rather than .rela.dyn.
 typedef struct StaticTestRelocation StaticTestRelocation;
 struct StaticTestRelocation
 {
     uint64_t offset;
     int64_t addend;
+    uint64_t packed;
 };
 
 static int static_test_by_offset(const void* a, const void* b)
@@ -869,18 +892,21 @@ static int static_test_by_offset(const void* a, const void* b)
     return x->offset != y->offset ? (x->offset < y->offset ? -1 : 1) : x->addend < y->addend ? -1 : x->addend > y->addend;
 }
 
-// A static PIE's RELATIVE relocations (`ifuncs->relative`, first in .rela.dyn), by the test's own rules: one of each GOT
-// slot that holds an address in the image (a symbol of the image's, static_test_in_image, or an IFUNC's stub: an
-// IFUNC's slot without a stub has an IRELATIVE relocation instead), its addend the slot's value; one of each ABS64 field
-// of an atom the loader writes (.tdata, the init and fini arrays, .data.rel.ro and .data) whose target is in the image,
-// its addend the target's value and the fixup's addend; and no others.
-static void static_test_relative(StaticTestTally* tally, const Link* link, const ExecutableTestImage* image, const StaticTestIfuncs* ifuncs, const uint8_t* stubbed,
-                                 Arena* arena)
+// A static PIE's RELATIVE relocations, by the test's own rules: one of each GOT slot that holds an address in the image
+// (a symbol of the image's, static_test_in_image, or an IFUNC's stub: an IFUNC's slot without a stub has an IRELATIVE
+// relocation instead), its addend the slot's value; one of each ABS64 field of an atom the loader writes (.tdata, the
+// init and fini arrays, .data.rel.ro and .data) whose target is in the image, its addend the target's value and the
+// fixup's addend; and no others. With .relr.dyn (`relr`), it holds those of the slots and of the fields at even addresses
+// in atoms aligned to 2 or more, each field holding its addend, and .rela.dyn the others, first (`ifuncs->relative`).
+static void static_test_relative(StaticTestTally* tally, const Link* link, const ExecutableTestImage* image, String8 file, const StaticTestIfuncs* ifuncs,
+                                 const uint8_t* stubbed, bool relr, Arena* arena)
 {
     const uint64_t length = arena->length;
-    StaticTestRelocation* expected = BUSTER_ARENA_PUSH_ARRAY(arena, StaticTestRelocation, (uint64_t)link->symbols.count + link->fixups.count);
-    StaticTestRelocation* actual = BUSTER_ARENA_PUSH_ARRAY(arena, StaticTestRelocation, ifuncs->relative_count + 1);
-    static_test_expect(tally, expected != 0 && actual != 0, "room for the relocations", 0);
+    const uint64_t capacity = (uint64_t)link->symbols.count + link->fixups.count;
+    StaticTestRelocation* expected = BUSTER_ARENA_PUSH_ARRAY(arena, StaticTestRelocation, capacity);
+    StaticTestRelocation* actual = BUSTER_ARENA_PUSH_ARRAY(arena, StaticTestRelocation, capacity + ifuncs->relative_count + 1);
+    uint64_t* relr_addresses = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, capacity + 1);
+    static_test_expect(tally, expected != 0 && actual != 0 && relr_addresses != 0, "room for the relocations", 0);
     uint64_t wanted = 0;
     bool known = true;
     for (SymbolId symbol = 1; expected != 0 && symbol < link->symbols.count; symbol += 1)
@@ -894,6 +920,7 @@ static void static_test_relative(StaticTestTally* tally, const Link* link, const
             expected[wanted] = (StaticTestRelocation){
                 .offset = ifuncs->got_address + 8 * (uint64_t)slot,
                 .addend = (int64_t)value,
+                .packed = relr,
             };
             wanted += 1;
         }
@@ -911,21 +938,44 @@ static void static_test_relative(StaticTestTally* tally, const Link* link, const
             if ((link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_ABS64 && static_test_in_image(link, target))
             {
                 known = known && static_test_symbol_value(link, image, stubbed, target, &value, 0);
+                const uint64_t offset = link->atoms.address[atom] + link->fixups.offset[fixup];
                 expected[wanted] = (StaticTestRelocation){
-                    .offset = link->atoms.address[atom] + link->fixups.offset[fixup],
+                    .offset = offset,
                     .addend = (int64_t)value + link_fixup_addend(link, fixup),
+                    .packed = relr && link->atoms.alignment_log2[atom] >= 1 && offset % 2 == 0,
                 };
                 wanted += 1;
             }
         }
     }
-    bool same = expected != 0 && actual != 0 && known && wanted == ifuncs->relative_count;
-    for (uint64_t i = 0; same && i < wanted; i += 1)
+    // The file's: .rela.dyn's RELATIVE ones, then .relr.dyn's addresses, each with its field's bytes.
+    const DynamicTestImage dynamic = dynamic_test_image(file);
+    const uint64_t relr_count = relr_addresses != 0 ? dynamic_test_relr(&dynamic, relr_addresses, capacity + 1) : UINT64_MAX;
+    static_test_expect(tally, relr_count != UINT64_MAX && (relr || relr_count == 0), ".relr.dyn read, and only with RELR", relr_count);
+    const uint64_t total = ifuncs->relative_count + (relr_count != UINT64_MAX ? relr_count : 0);
+    bool same = expected != 0 && actual != 0 && relr_count != UINT64_MAX && known && wanted == total;
+    for (uint64_t i = 0; same && i < ifuncs->relative_count; i += 1)
     {
         same = ELF64_R_SYM(ifuncs->relative[i].r_info) == 0;
         actual[i] = (StaticTestRelocation){
             .offset = ifuncs->relative[i].r_offset,
             .addend = ifuncs->relative[i].r_addend,
+            .packed = false,
+        };
+    }
+    for (uint64_t i = 0; same && i < relr_count; i += 1)
+    {
+        const uint64_t file_offset = dynamic_test_file_offset(&dynamic, relr_addresses[i]);
+        int64_t field = 0;
+        if (file_offset != UINT64_MAX)
+        {
+            memcpy(&field, file.pointer + file_offset, sizeof(field));
+        }
+        same = file_offset != UINT64_MAX;
+        actual[ifuncs->relative_count + i] = (StaticTestRelocation){
+            .offset = relr_addresses[i],
+            .addend = field,
+            .packed = true,
         };
     }
     if (same)
@@ -964,8 +1014,11 @@ static void static_test_structure(StaticTestTally* tally, const Link* link, cons
                            "the result's counts of relocations and stubs", result->relocations);
         if (pie)
         {
+            ExecutableDynamic dynamic_inputs;
+            ExecutableRuntime pie_inputs;
+            dynamic_static_pie_inputs(&dynamic_inputs, &pie_inputs, runtime, bind);
             static_test_dynamic(tally, link, bind, runtime, file, ifuncs.relative_count);
-            static_test_relative(tally, link, &image, &ifuncs, stubbed, arena);
+            static_test_relative(tally, link, &image, file, &ifuncs, stubbed, dynamic_inputs.relr, arena);
         }
         static_test_fields(tally, link, &image, file, stubbed, inputs.tls_get_addr, ifuncs.stub_count, pie, arena);
         // Each name of the linker's where its section or segment says, and a static executable's __rela_iplt_start and
@@ -1378,6 +1431,16 @@ static StaticTestShape static_test_shape(String8 file, bool pie)
             result.relatives += ELF64_R_TYPE(rela[r].r_info) == R_X86_64_RELATIVE ? 1 : 0;
         }
     }
+    // .relr.dyn's relocations: an even word an address's, an odd one a bitmap of up to 63.
+    const DynamicTestImage dynamic = dynamic_test_image(file);
+    const Elf64_Shdr* relr = pie && dynamic.valid ? dynamic_test_section(&dynamic, ".relr.dyn") : 0;
+    const uint8_t* relr_bytes = dynamic_test_bytes(&dynamic, relr);
+    for (uint64_t w = 0; relr != 0 && w < relr->sh_size / 8; w += 1)
+    {
+        uint64_t word = 0;
+        memcpy(&word, relr_bytes + 8 * w, sizeof(word));
+        result.relatives += (word & 1) == 0 ? 1 : (uint64_t)__builtin_popcountll(word >> 1);
+    }
     const Elf64_Phdr* tls = executable_test_segment(&image, PT_TLS);
     const Elf64_Shdr* init = executable_test_section(&image, ".init_array");
     const Elf64_Shdr* fini = executable_test_section(&image, ".fini_array");
@@ -1539,7 +1602,15 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
         const bool runs_alike = own_status ? ours.exited && ours.status == program.pie_status : static_test_same_runs(&ours, &theirs);
         static_test_expect(&tally, !written || !referenced || runs_alike,
                            own_status ? "runs with its status, where GNU ld's static PIE differs" : pie ? "runs as cc -static-pie's link does" : "runs as cc -static's link does", s);
-        char* lld[] = { "cc", flag, "-fuse-ld=lld", "-o", paths[2], object_path, (char*)program.option, 0 };
+        // lld packs a static PIE's RELATIVE relocations as ours are when asked, so that their counts compare.
+        ExecutableDynamic pie_dynamic = { 0 };
+        ExecutableRuntime pie_inputs = { 0 };
+        if (pie && bound)
+        {
+            dynamic_static_pie_inputs(&pie_dynamic, &pie_inputs, runtime, &test.bind);
+        }
+        char* const pack = pie_dynamic.relr ? "-Wl,-z,pack-relative-relocs" : "-Wl,-z,nopack-relative-relocs";
+        char* lld[] = { "cc", flag, "-fuse-ld=lld", pack, "-o", paths[2], object_path, (char*)program.option, 0 };
         const bool lld_linked = cross_check && compiled && !refusing && object_test_run(lld, out, err) == 0;
         static_test_expect(&tally, !cross_check || !compiled || refusing || lld_linked, pie ? "lld links it with -static-pie" : "lld links it with -static", s);
         if (lld_linked && !program.lld_wrong)

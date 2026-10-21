@@ -1238,11 +1238,12 @@ removed at the end unless `--keep`. The default 9700X job runs it with
 `./build/compiler benchmark-bind [--functions LIST] [--seed N]` binds
 generated programs that call libc, of 1, 64, 2,000 and 102,400 workers by
 default (`--functions` takes a list), 200 workers per unit as synth's
-translation units have, by each path, against the dynamic PIE's runtime and
-against the static one, and reports 21-run medians (time, cycles,
-instructions, IPC) of the match (the program's global symbols looked up in
-the runtime's names, per global symbol), `bind_begin`, the static runtime's
-closure (the members the link needs, per member) and `bind_end`, each run on
+translation units have, by each path, against the dynamic PIE's runtime,
+the static one and the static PIE's, and reports 21-run medians (time,
+cycles, instructions, IPC) of the match (the program's global symbols looked
+up in the runtime's names, per global symbol), `bind_begin`, the static
+runtimes' closure (the members the link needs, per member) and `bind_end`,
+each run on
 the same link put back as it was. The paths must make the same links. Run it
 under the 9700X's lock with `taskset -c 2`; the design's "Step 5's phases,
 data-parallel" and "Static links, as built" have the numbers. The default
@@ -1440,8 +1441,10 @@ written by groups of 1, 2, 3 and 8 lanes and by the writer's exact twins with
 1 and 8 lanes, each time from the atoms' bytes as binding left them (the TLS
 relaxation and a static PIE's GOT relaxation rewrite them), with zeroed fields
 over the last file scribbled over, every other time over poisoned scratch
-memory: the files must be byte-identical. Each file is read back and checked
-by the test's own rules:
+memory: the files must be byte-identical. A static PIE without general- or
+local-dynamic TLS accesses is then written once more over the bytes the last
+write left, its loads and calls relaxed already, and must come out the same.
+Each file is read back and checked by the test's own rules:
 
 - the headers: `_start` the entry, no `PT_INTERP`, a `PT_NOTE` with the start
   file's ABI note (`crt1.o`'s or `rcrt1.o`'s), and `PT_TLS` over `.tdata` and
@@ -1460,7 +1463,10 @@ by the test's own rules:
 - a static PIE's RELATIVE relocations: one of each GOT slot that holds an
   address in the image (an IFUNC's stub among them) and one of each `ABS64`
   field of an atom the loader writes whose target is in the image, with the
-  value as its addend, and no others;
+  value as its addend, and no others: `.relr.dyn`'s (decoded, the field
+  holding the addend) for the slots and the fields at even addresses in atoms
+  aligned to 2 or more when `libc.a` takes `DT_RELR` (it defines
+  `arc4random`, as glibc 2.36 and later do), and `.rela.dyn`'s for the others;
 - every fixup's field: test-executable's kinds' values, with an IFUNC's stub
   for its address, a general- or local-dynamic access as the local-exec
   sequence it relaxes to, `DTPOFF32` as an offset from the thread pointer, an
@@ -1527,18 +1533,20 @@ compiled program is linked by `cc -static -fuse-ld=lld` too (and
 relocations, the same TLS segment's alignment and init and fini arrays of the
 same sizes; but lld 23 links the weak IFUNC's program wrong (an `IRELATIVE`
 relocation with resolver 0, which faults at startup), so that one only has to
-link, and the static PIEs that a static PIE refuses aren't linked. A static
-PIE's RELATIVE relocations are printed beside lld's: ours have 6 more for
-hello world, the GOT slots of IFUNCs that only calls give stubs, whose loads
-lld points at the stub's IRELATIVE slot. `--seed N` and
+link, and the static PIEs that a static PIE refuses aren't linked; lld packs
+a static PIE's RELATIVE relocations into `.relr.dyn` (`-z
+pack-relative-relocs`) as ours are. A static PIE's RELATIVE relocations are
+printed beside lld's: ours have 6 more for hello world, the GOT slots of
+IFUNCs that only calls give stubs, whose loads lld points at the stub's
+IRELATIVE slot. `--seed N` and
 `--functions N` change the generated programs. The default 9700X job runs it
 with `--cross-check` after test-dynamic.
 
 ## Direct executable benchmark
 
 `./build/compiler benchmark-executable [--directory PATH] [--functions LIST]
-[--lanes N] [--seed N] [--only kernels|hash|links|dynamic|static]` (about
-3 s) reports medians of:
+[--lanes N] [--seed N] [--only kernels|hash|links|dynamic|static|static-pie]`
+(about 4 s) reports medians of:
 
 - the patch kernel and the variants it was chosen over (a branch on the kind,
   the checked path, 64-bit targets, and gathers with scalar stores or
@@ -1557,8 +1565,12 @@ with `--cross-check` after test-dynamic.
   runtime and written as dynamic PIEs the same way, with their dynamic
   symbols, relocations, RELR words and stubs (`--only dynamic` runs these
   alone);
-- and bound against its static runtime and written as static executables,
-  with their stubs, IRELATIVE relocations and GOT slots (`--only static`).
+- bound against its static runtime and written as static executables,
+  with their stubs, IRELATIVE relocations and GOT slots (`--only static`);
+- and bound against the static PIE's runtime and written as static PIEs,
+  with their stubs, relocations (RELATIVE among them) and GOT slots
+  (`--only static-pie`): each write over the last one's bytes, whose loads
+  and calls through the GOT it relaxed already.
 
 Run it under the 9700X's lock with `taskset -c 2` for one lane, or with
 `taskset -c 0-7` for 8 (one CPU per core), since the lanes' threads keep the
