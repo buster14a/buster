@@ -1198,10 +1198,10 @@ paths, which must make the same link and join the same members:
   `link_check`; one symbol per global name and none of a shared library;
   every fixup's target defined, absolute, the static linker's, a weak
   reference to nothing, or `__tls_get_addr`, left to the relaxation; `main`
-  the program's, `__libc_start_main` a member's, `_init` crti.o's and
-  `__dso_handle` crtbeginT.o's; and each joined object's atoms, in link
-  order, but those of a COMDAT group whose signature an object before it
-  has, with their priorities;
+  the program's, `__libc_start_main` a member's, `_init` crti.o's,
+  `__dso_handle` crtbeginT.o's and `_dl_relocate_static_pie` crt1.o's; and
+  each joined object's atoms, in link order, but those of a COMDAT group
+  whose signature an object before it has, with their priorities;
 - static rules, on links made by hand: a strong reference to a name nothing
   defines (an error naming it); strong and weak references to
   `__tls_get_addr` (left undefined); the static linker's names (the
@@ -1221,6 +1221,18 @@ paths, which must make the same link and join the same members:
   compiles (hello, stdio, threads, jumps and weak-puts), each imported as the
   program, bound and checked as the static programs are, and linked by both
   linkers, with the same members, to run with the program's status.
+
+Then the static programs, and with `--cross-check` the C programs (compiled
+with `-fPIE`), against the static PIE's runtime
+(`runtime_import_static_pie`), by both paths, which must make the same link
+and join the same members, checked as against the static runtime: the
+members the oracle's scan loads, among them `libc.a`'s
+`dl-reloc-static-pie.o`, which `rcrt1.o` makes join by not defining
+`_dl_relocate_static_pie`; that name the member's, its `_DYNAMIC` the
+linker's and `__dso_handle` crtbeginS.o's; and with `--cross-check`, each
+linked by `cc -static-pie` with GNU ld (`--trace` twice) and with lld
+(`--why-extract`), which must load the same members and run as the model
+predicts, or with the program's status.
 
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
 removed at the end unless `--keep`. The default 9700X job runs it with
