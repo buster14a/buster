@@ -484,8 +484,12 @@ static uint32_t parse_test_check_tree(const ParseTree* tree, uint32_t count, uin
 }
 
 // The postorder of a depth-first walk with an explicit stack, children in source order: the reference for a postorder's
-// `written` tokens. Returns the first position where they differ, or BUSTER_PARSE_NONE.
-static uint32_t parse_test_check_postorder(const uint32_t* parents, uint32_t count, const uint32_t* postorder, uint32_t written, Arena* scratch, uint32_t* expected)
+// `written` tokens, and with `sizes` (else 0), for each position's subtree size. The walk also checks the round trip:
+// each node's own token comes between its children before it and those after it, so an in-order walk must give the
+// tokens back in source order. Returns the first position where they differ (or count for the round trip), or
+// BUSTER_PARSE_NONE; *expected gets the walk's token there.
+static uint32_t parse_test_check_postorder(const uint32_t* parents, uint32_t count, const uint32_t* postorder, uint32_t written, const uint32_t* sizes, Arena* scratch,
+                                           uint32_t* expected)
 {
     uint32_t result = BUSTER_PARSE_NONE;
     *expected = BUSTER_PARSE_NONE;
@@ -496,7 +500,8 @@ static uint32_t parse_test_check_postorder(const uint32_t* parents, uint32_t cou
     uint32_t* children = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
     uint32_t* nodes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
     uint32_t* next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
-    if (offsets == 0 || cursors == 0 || children == 0 || nodes == 0 || next == 0)
+    uint32_t* firsts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    if (offsets == 0 || cursors == 0 || children == 0 || nodes == 0 || next == 0 || firsts == 0)
     {
         result = 0;
     }
@@ -521,6 +526,9 @@ static uint32_t parse_test_check_postorder(const uint32_t* parents, uint32_t cou
             }
         }
         uint32_t position = 0;
+        // The in-order walk's next token: each node comes before its first child after it.
+        uint32_t source = 0;
+        bool round_trip = true;
         for (uint32_t root = 0; root < count; root += 1)
         {
             uint32_t depth = 0;
@@ -528,6 +536,7 @@ static uint32_t parse_test_check_postorder(const uint32_t* parents, uint32_t cou
             {
                 nodes[0] = root;
                 next[0] = offsets[root];
+                firsts[0] = position;
                 depth = 1;
             }
             while (depth != 0)
@@ -536,14 +545,28 @@ static uint32_t parse_test_check_postorder(const uint32_t* parents, uint32_t cou
                 if (next[depth - 1] < offsets[top + 1])
                 {
                     const uint32_t child = children[next[depth - 1]];
+                    // Before the first child after the node, the node itself in order.
+                    if (child > top && (next[depth - 1] == offsets[top] || children[next[depth - 1] - 1] < top))
+                    {
+                        round_trip &= source == top;
+                        source += 1;
+                    }
                     next[depth - 1] += 1;
                     nodes[depth] = child;
                     next[depth] = offsets[child];
+                    firsts[depth] = position;
                     depth += 1;
                 }
                 else
                 {
-                    if (result == BUSTER_PARSE_NONE && (position >= written || postorder[position] != top))
+                    // A node with no child after it comes after all of them.
+                    if (offsets[top] == offsets[top + 1] || children[offsets[top + 1] - 1] < top)
+                    {
+                        round_trip &= source == top;
+                        source += 1;
+                    }
+                    const uint32_t size = position - firsts[depth - 1] + 1;
+                    if (result == BUSTER_PARSE_NONE && (position >= written || postorder[position] != top || (sizes != 0 && sizes[position] != size)))
                     {
                         result = position;
                         *expected = top;
@@ -555,9 +578,38 @@ static uint32_t parse_test_check_postorder(const uint32_t* parents, uint32_t cou
         }
         // A cycle leaves tokens unwalked.
         result = result == BUSTER_PARSE_NONE && (position != count || written != count) ? position : result;
+        result = result == BUSTER_PARSE_NONE && (!round_trip || source != count) ? count : result;
     }
     arena_pop_to(scratch, mark);
     return result;
+}
+
+// The check of the postorders on trees of its own: `a = b * c;` as the parser builds it passes, with its sizes; the
+// same with a parent that makes a subtree two runs, and with a cycle, fails.
+static uint32_t parse_test_check_postorder_self(Arena* scratch)
+{
+    uint32_t failures = 0;
+    // a = b * c ;  ->  ; <- = <- (a, * <- (b, c))
+    const uint32_t good[] = { 1, 5, 3, 1, 3, BUSTER_PARSE_NONE };
+    const uint32_t postorder[] = { 0, 2, 4, 3, 1, 5 };
+    const uint32_t sizes[] = { 1, 1, 1, 3, 5, 6 };
+    uint32_t expected;
+    failures += parse_test_check_postorder(good, 6, postorder, 6, sizes, scratch, &expected) != BUSTER_PARSE_NONE;
+    const uint32_t wrong_sizes[] = { 1, 1, 1, 2, 5, 6 };
+    failures += parse_test_check_postorder(good, 6, postorder, 6, wrong_sizes, scratch, &expected) == BUSTER_PARSE_NONE;
+    // b's parent the `;`: the `*`'s subtree is c alone and b sits between the `=`'s children.
+    const uint32_t split[] = { 1, 5, 5, 1, 3, BUSTER_PARSE_NONE };
+    uint32_t last_children[7];
+    uint32_t walk[7];
+    const uint32_t written = parse_postorder(split, 6, last_children, walk);
+    failures += parse_test_check_postorder(split, 6, walk, written, 0, scratch, &expected) == BUSTER_PARSE_NONE;
+    const uint32_t cycle[] = { 1, 0, BUSTER_PARSE_NONE };
+    failures += parse_test_check_postorder(cycle, 3, postorder, 0, 0, scratch, &expected) == BUSTER_PARSE_NONE;
+    if (failures != 0)
+    {
+        printf("the postorders' check fails on its own trees\n");
+    }
+    return failures;
 }
 
 // The role the paths can tell: a function declarator's parentheses look like a call's (both are postfix groups after
@@ -594,30 +646,28 @@ static void parse_test_print_context(const Parser* parser, Preprocessor* pp, uin
     parse_test_report("   %s%s\n", text, token >= parser->tokens.count ? " >><end><<" : "");
 }
 
-// The postorders of a tree, the walk's and the sorted one's, against a depth-first walk.
+// The postorders of a tree, the walk's and the parser's own (with its subtree sizes), against a depth-first walk.
 static uint32_t parse_test_postorders(const Parser* parser, Preprocessor* pp, const ParseTree* tree, uint32_t count, const char* name, Arena* scratch)
 {
     uint32_t failures = 0;
     const uint64_t mark = scratch->length;
     const uint64_t slots = (uint64_t)count + 1;
     uint32_t* last_children = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
-    uint32_t* ends = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
-    uint32_t* before = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
     uint32_t* postorder = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
-    if (last_children != 0 && ends != 0 && before != 0 && postorder != 0)
+    if (last_children != 0 && postorder != 0)
     {
         const uint32_t written = parse_postorder(tree->parents, count, last_children, postorder);
         uint32_t expected = BUSTER_PARSE_NONE;
-        const uint32_t walk = parse_test_check_postorder(tree->parents, count, postorder, written, scratch, &expected);
+        const uint32_t walk = parse_test_check_postorder(tree->parents, count, postorder, written, 0, scratch, &expected);
         const uint32_t found = walk < written ? postorder[walk] : BUSTER_PARSE_NONE;
-        parse_postorder_sorted(tree->parents, count, last_children, ends, before, postorder);
         uint32_t sorted_expected = BUSTER_PARSE_NONE;
-        const uint32_t sorted = parse_test_check_postorder(tree->parents, count, postorder, count, scratch, &sorted_expected);
+        const uint32_t sorted = parse_test_check_postorder(tree->parents, count, parser->postorder, count, parser->sizes, scratch, &sorted_expected);
         if (walk != BUSTER_PARSE_NONE || sorted != BUSTER_PARSE_NONE)
         {
             failures += 1;
-            parse_test_report("%s: the postorder differs from a depth-first walk's at position %d (walk) and %d (sorted): token %d where the walk has %d\n", name, (int)walk,
-                   (int)sorted, (int)found, (int)expected);
+            parse_test_report("%s: the postorder differs from a depth-first walk's at position %d (walk) and %d (the parser's, with sizes): token %d where the walk has "
+                              "%d%s\n",
+                              name, (int)walk, (int)sorted, (int)found, (int)expected, sorted == count ? " (the in-order walk isn't the source order)" : "");
             if (expected != BUSTER_PARSE_NONE)
             {
                 parse_test_print_context(parser, pp, expected);
@@ -1684,6 +1734,215 @@ static uint32_t parse_test_files(char** files, uint32_t file_count, const PPOpti
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Generated inputs
+
+// The pieces random streams are made of: C's tokens and some runs of them, every one valid on its own.
+static const char* const parse_test_pieces[] =
+{
+    "a", "b", "T", "x", "f", "0", "1", "'c'", "\"s\"", "1.5",
+    "int", "char", "long", "unsigned", "const", "static", "extern", "typedef", "struct", "union", "enum", "void",
+    "if", "else", "while", "for", "do", "switch", "case", "default", "return", "break", "continue", "goto", "sizeof",
+    "__attribute__", "__extension__", "asm", "_Alignas", "_Static_assert", "__builtin_offsetof", "__builtin_va_arg",
+    "+", "-", "*", "/", "%", "=", "==", "!=", "<", ">", "<=", ">=", "&&", "||", "!", "~", "&", "|", "^", "<<", ">>",
+    "++", "--", "+=", "-=", "?", ":", ",", ";", ".", "->", "...",
+    "(", ")", "[", "]", "{", "}",
+    "int a;", "T x;", "f(a, b)", "a[0]", "(int)a", "struct S { int a; };", "{ a = 1; }", "if (a) b; else x;", "x = a ? b : 1;",
+};
+
+// The opening pieces and their closers, for balanced streams.
+static const char parse_test_openers[] = "([{";
+static const char parse_test_closers[] = ")]}";
+
+// A random stream of `pieces` pieces into `text` (of `capacity` bytes), with `typedef int T;` first half the time.
+// With `balanced`, every opener gets its closer: an opener goes on a stack and a closer comes only for the stack's
+// top, and the stack is emptied at the end. Returns the length.
+static size_t parse_test_stream(char* text, size_t capacity, uint64_t* state, uint32_t pieces, bool balanced)
+{
+    size_t length = 0;
+    char stack[256];
+    uint32_t open = 0;
+    if (parse_test_random(state) % 2 == 0)
+    {
+        length += (size_t)snprintf(text + length, capacity - length, "typedef int T;\n");
+    }
+    const uint32_t piece_count = sizeof(parse_test_pieces) / sizeof(parse_test_pieces[0]);
+    for (uint32_t p = 0; p < pieces && length + 64 < capacity; p += 1)
+    {
+        const uint32_t pick = (uint32_t)(parse_test_random(state) % (piece_count + 6));
+        if (balanced && pick >= piece_count)
+        {
+            // A bracket: an opener, or the top's closer.
+            const uint32_t which = (pick - piece_count) % 3;
+            if (pick - piece_count < 3 && open < sizeof(stack))
+            {
+                stack[open] = parse_test_closers[which];
+                open += 1;
+                length += (size_t)snprintf(text + length, capacity - length, "%c ", parse_test_openers[which]);
+            }
+            else if (open != 0)
+            {
+                open -= 1;
+                length += (size_t)snprintf(text + length, capacity - length, "%c ", stack[open]);
+            }
+        }
+        else
+        {
+            const char* piece = pick < piece_count ? parse_test_pieces[pick] : (pick - piece_count < 3 ? "(" : ")");
+            const bool bracket = strlen(piece) == 1 && strchr("()[]{}", piece[0]) != 0;
+            if (!balanced || !bracket)
+            {
+                length += (size_t)snprintf(text + length, capacity - length, "%s%s", piece, parse_test_random(state) % 8 == 0 ? "\n" : " ");
+            }
+        }
+    }
+    while (open != 0 && length + 4 < capacity)
+    {
+        open -= 1;
+        length += (size_t)snprintf(text + length, capacity - length, "%c ", stack[open]);
+    }
+    length += (size_t)snprintf(text + length, capacity - length, "\n");
+    return length;
+}
+
+// `count` random streams of up to 300 pieces, half of them balanced, each through both paths (parse_test_check_file).
+static uint32_t parse_test_streams(uint64_t count, uint64_t seed, const PPOptions* options, const char* directory, bool keep)
+{
+    uint32_t failures = 0;
+    uint64_t state = seed ^ 0x5DEECE66Dull;
+    ParseTestKernelTally tally = { 0 };
+    uint64_t rejected = 0;
+    static char text[1 << 16];
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/stream.c", directory);
+    for (uint64_t s = 0; s < count; s += 1)
+    {
+        const uint32_t pieces = 1 + (uint32_t)(parse_test_random(&state) % 300);
+        const size_t length = parse_test_stream(text, sizeof(text), &state, pieces, s % 2 == 1);
+        parse_test_write(path, text, length);
+        ParseTestOutcome ours;
+        const uint32_t differences = parse_test_check_file(path, options, &ours, &tally);
+        rejected += ours.errors != 0;
+        if (differences != 0)
+        {
+            failures += 1;
+            if (keep)
+            {
+                char kept[4300];
+                snprintf(kept, sizeof(kept), "%s/stream_%llu.c", directory, (unsigned long long)s);
+                rename(path, kept);
+                printf("    kept as %s\n", kept);
+            }
+        }
+    }
+    remove(path);
+    printf("streams: %llu random streams (half with balanced brackets), %llu rejected, %u where the paths or a kernel and its twin differ\n", (unsigned long long)count,
+           (unsigned long long)rejected, failures);
+    return failures;
+}
+
+// Every block alignment: each snippet's source, and `file`'s -E text if given, after 0 to 63 file-scope `;`.
+static uint32_t parse_test_alignments(const char* file, const PPOptions* options, const char* directory)
+{
+    uint32_t failures = 0;
+    ParseTestKernelTally tally = { 0 };
+    uint32_t inputs = 0;
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/aligned.c", directory);
+    size_t file_length = 0;
+    char* file_text = file != 0 ? parse_test_preprocessed(file, options, &file_length) : 0;
+    PPOptions plain = *options;
+    plain.no_standard_includes = true;
+    plain.include_count = 0;
+    plain.macro_count = 0;
+    const uint32_t snippets = sizeof(parse_test_snippets) / sizeof(parse_test_snippets[0]);
+    for (uint32_t i = 0; i <= snippets; i += 1)
+    {
+        const char* source = i < snippets ? parse_test_snippets[i].source : file_text;
+        const size_t length = source != 0 ? strlen(source) : 0;
+        char* text = source != 0 ? malloc(length + 200) : 0;
+        for (uint32_t shift = 0; text != 0 && shift < 64; shift += 1)
+        {
+            for (uint32_t k = 0; k < shift; k += 1)
+            {
+                text[2 * k] = ';';
+                text[2 * k + 1] = ' ';
+            }
+            memcpy(text + 2 * shift, source, length);
+            parse_test_write(path, text, 2 * shift + length);
+            ParseTestOutcome ours;
+            const PPOptions* used = i < snippets ? &plain : &plain;
+            failures += parse_test_check_file(path, used, &ours, &tally) != 0;
+            inputs += 1;
+        }
+        free(text);
+    }
+    free(file_text);
+    remove(path);
+    printf("alignments: %u inputs (the snippets%s at 64 alignments), %u where the paths or a kernel and its twin differ\n", inputs, file != 0 ? " and the file" : "",
+           failures);
+    return failures;
+}
+
+// Deep nesting, 100,000 levels: parentheses in an initializer, blocks, declarator groups, subscripts, ternaries,
+// casts and if-statements' heads, each through both paths, which must agree (and not grow the native stack).
+static uint32_t parse_test_nesting(const PPOptions* options, const char* directory)
+{
+    uint32_t failures = 0;
+    ParseTestKernelTally tally = { 0 };
+    enum { DEPTH = 100000 };
+    static const char* const shapes[][4] =
+    {
+        // Before each level, the middle, after each level, and around the whole.
+        { "(", "1", ")", "int x = %s;\n" },
+        { "{", "x;", "}", "void f(int x) %s\n" },
+        { "(", "y", ")", "int %s;\n" },
+        { "a[", "0", "]", "int g(int *a) { return %s; }\n" },
+        { "1 ? ", "2", " : 3", "int z = %s;\n" },
+        { "(int)", "w", "", "long h(int w) { return %s; }\n" },
+        { "if (q) ", "q = 0;", "", "void k(int q) { %s }\n" },
+    };
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/deep.c", directory);
+    for (uint32_t s = 0; s < sizeof(shapes) / sizeof(shapes[0]); s += 1)
+    {
+        const size_t before = strlen(shapes[s][0]);
+        const size_t middle = strlen(shapes[s][1]);
+        const size_t after = strlen(shapes[s][2]);
+        const size_t inner_length = DEPTH * (before + after) + middle;
+        char* inner = malloc(inner_length + 1);
+        char* text = malloc(inner_length + 256);
+        size_t n = 0;
+        for (uint32_t d = 0; d < DEPTH; d += 1)
+        {
+            memcpy(inner + n, shapes[s][0], before);
+            n += before;
+        }
+        memcpy(inner + n, shapes[s][1], middle);
+        n += middle;
+        for (uint32_t d = 0; d < DEPTH; d += 1)
+        {
+            memcpy(inner + n, shapes[s][2], after);
+            n += after;
+        }
+        inner[n] = 0;
+        const int length = snprintf(text, inner_length + 256, shapes[s][3], inner);
+        parse_test_write(path, text, (size_t)length);
+        ParseTestOutcome ours;
+        const uint32_t differences = parse_test_check_file(path, options, &ours, &tally);
+        if (differences != 0)
+        {
+            printf("nesting: the %s...%s shape differs\n", shapes[s][0], shapes[s][2]);
+        }
+        failures += differences != 0;
+        printf("nesting: %u levels of `%s` ... `%s`: %s\n", (unsigned)DEPTH, shapes[s][0], shapes[s][2], ours.errors != 0 ? ours.message : "parsed");
+        free(inner);
+        free(text);
+    }
+    remove(path);
+    return failures;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The command
 
 // `test-parser [--clang [PATH]] [--mutations N] [--seed N] [--keep] [--reports N] [options] [file or directory...]`, with
@@ -1697,6 +1956,7 @@ static int run_parser_tests(int argument_count, char** arguments)
     bool keep = false;
     const char* print_tree = 0;
     bool explain = false;
+    uint64_t streams = 2000;
     uint32_t first_line = 0;
     uint32_t last_line = UINT32_MAX;
     char** rest = malloc(sizeof(char*) * ((size_t)argument_count + 2));
@@ -1743,6 +2003,11 @@ static int run_parser_tests(int argument_count, char** arguments)
         else if (strcmp(argument, "--explain") == 0)
         {
             explain = true;
+        }
+        else if (strcmp(argument, "--streams") == 0 && i + 1 < argument_count)
+        {
+            streams = strtoull(arguments[i + 1], 0, 10);
+            i += 1;
         }
         else if (strcmp(argument, "--reports") == 0 && i + 1 < argument_count)
         {
@@ -1810,7 +2075,18 @@ static int run_parser_tests(int argument_count, char** arguments)
     }
     else
     {
+        failures += parse_test_check_postorder_self(&arena);
         failures += parse_test_check_snippets(directory, clang);
+        if (input_count == 0)
+        {
+            // The generated inputs, with -E's options but no includes.
+            PPOptions plain = options;
+            plain.no_standard_includes = true;
+            plain.include_count = 0;
+            failures += parse_test_streams(streams, seed, &plain, directory, keep);
+            failures += parse_test_alignments(0, &plain, directory);
+            failures += parse_test_nesting(&plain, directory);
+        }
         char** files = malloc(sizeof(char*) * (1u << 20));
         uint32_t file_count = 0;
         for (uint32_t i = 0; i < input_count; i += 1)

@@ -580,7 +580,8 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
             break;
         }
         case PARSE_TIMED_POSTORDER_SORTED:
-            parse_postorder_sorted(k->parents, count, buffers->last_children, buffers->subtree_ends, buffers->cursors, buffers->postorder);
+            parse_postorder_sorted(k->parents, count, buffers->last_children, buffers->subtree_ends, buffers->cursors, buffers->postorder, buffers->first_children,
+                                   buffers->subtree_starts, buffers->sizes);
             break;
         case PARSE_TIMED_POSTORDER: parse_postorder(k->parents, count, buffers->last_children, buffers->postorder); break;
         default: break;

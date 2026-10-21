@@ -10265,11 +10265,15 @@ struct ParseVectorBuffers
     uint32_t* statement_previous;
     uint32_t* statement_owners;
     ParseStatementLevel* statement_levels;
-    // The postorder's: each token's last child, the end of its subtree, the counting sort's cursors, and the postorder.
+    // The postorder's: each token's last child and first child, its subtree's end and start, the counting sort's cursors, the
+    // postorder and the subtree sizes.
     uint32_t* last_children;
     uint32_t* subtree_ends;
     uint32_t* cursors;
     uint32_t* postorder;
+    uint32_t* first_children;
+    uint32_t* subtree_starts;
+    uint32_t* sizes;
     // K2's blocks by the rounds they took (index 0: the twin did them), and K4's blocks whose depths span more than
     // byte lanes hold, which run as two 16-bit blocks.
     uint64_t rounds[BUSTER_PARSE_ROLE_ROUNDS + 1];
@@ -10343,6 +10347,9 @@ static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* are
         .subtree_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .cursors = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .postorder = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .first_children = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .subtree_starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+        .sizes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .rounds = { 0 },
         .wide_blocks = 0,
         .statement_counts = { 0 },
@@ -10352,6 +10359,7 @@ static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* are
                   buffers->secondary != 0 && buffers->statements != 0 && buffers->contexts != 0 && buffers->statement_previous != 0 && buffers->statement_owners != 0 &&
                   buffers->statement_levels != 0 &&
                   buffers->last_children != 0 && buffers->subtree_ends != 0 && buffers->cursors != 0 && buffers->postorder != 0 &&
+                  buffers->first_children != 0 && buffers->subtree_starts != 0 && buffers->sizes != 0 &&
                   buffers->works != 0 && parse_candidates_reserve(&buffers->candidates, arena, capacity) &&
                   parse_slots_reserve(&buffers->slots, arena, capacity);
     if (result)
@@ -10500,8 +10508,11 @@ static uint32_t parse_postorder(const uint32_t* parents, uint32_t count, uint32_
 // (or v itself), backward. In postorder a subtree's tokens are a run that ends with its root, after every token whose
 // subtree ends before it, and its other tokens are those its subtree's source run holds, so the root's position is
 // C(v) + end(v) - v, where C(v), the number of tokens whose subtree ends before v, is an exclusive prefix sum of how
-// many subtrees end at each token. last_children has count + 1 entries: the roots' writes go to the last.
-static void parse_postorder_sorted(const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* ends, uint32_t* before, uint32_t* postorder)
+// many subtrees end at each token. With `sizes` (else 0), each position also gets its subtree's size, end(v) - start(v)
+// + 1, where start(v) comes from v's first child before it (or v itself), forward, in `starts`. last_children and
+// first_children have count + 1 entries: the roots' writes go to the last.
+static void parse_postorder_sorted(const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* ends, uint32_t* before, uint32_t* postorder,
+                                   uint32_t* first_children, uint32_t* starts, uint32_t* sizes)
 {
     // 0: no child after the token, as a child at 0 comes after none.
     memset(last_children, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -10530,6 +10541,25 @@ static void parse_postorder_sorted(const uint32_t* parents, uint32_t count, uint
     for (uint32_t v = 0; v < count; v += 1)
     {
         postorder[before[v] + ends[v] - v] = v;
+    }
+    if (sizes != 0)
+    {
+        // count: no child before the token, as no child comes after the last token.
+        for (uint32_t i = 0; i <= count; i += 1)
+        {
+            first_children[i] = count;
+        }
+        for (uint32_t i = count; i-- > 0;)
+        {
+            first_children[parents[i] == BUSTER_PARSE_NONE ? count : parents[i]] = i;
+        }
+        for (uint32_t v = 0; v < count; v += 1)
+        {
+            const uint32_t first = first_children[v];
+            const uint32_t start = starts[first < count ? first : 0];
+            starts[v] = __builtin_unpredictable(first < v) ? start : v;
+            sizes[before[v] + ends[v] - v] = ends[v] - starts[v] + 1;
+        }
     }
 }
 
@@ -10564,6 +10594,10 @@ struct Parser
     CLanguage language;
     ParseTokens tokens;
     ParseTree tree;
+    // The tree in postorder, for a unit without errors: the token at each position, and its subtree's size (its
+    // subtree is the `sizes[k]` positions ending at k).
+    uint32_t* postorder;
+    uint32_t* sizes;
     ParseMeanings meanings;
     ParseDiagnostic* diagnostics;
     uint32_t diagnostic_count;
@@ -10572,7 +10606,7 @@ struct Parser
     ParseStatistics statistics;
     // The token columns and the tree's, each in an arena of its own, so that their first pages are base pages
     // (lane.c), and the scalar parser's stacks.
-    Arena columns[11];
+    Arena columns[13];
     Arena scratch;
     // The vector path's arrays (ParseKernels and ParseVectorBuffers), in an arena of their own, and clang's predeclared
     // typedef names' IdentIds.
@@ -10753,6 +10787,29 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
     else if (result)
     {
         parser->diagnostic_count = 0;
+    }
+    if (result)
+    {
+        // The postorder and the subtree sizes, with the scratch arena's room for the passes.
+        const uint32_t count = parser->tokens.count;
+        const uint64_t mark = parser->scratch.length;
+        parser->postorder = parse_column(parser, 11, count, 4);
+        parser->sizes = parse_column(parser, 12, count, 4);
+        uint32_t* last_children = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
+        uint32_t* first_children = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
+        uint32_t* ends = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
+        uint32_t* starts = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
+        uint32_t* before = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
+        result = parser->postorder != 0 && parser->sizes != 0 && last_children != 0 && first_children != 0 && ends != 0 && starts != 0 && before != 0;
+        if (result)
+        {
+            parse_postorder_sorted(parser->tree.parents, count, last_children, ends, before, parser->postorder, first_children, starts, parser->sizes);
+        }
+        else
+        {
+            parser->errors += 1;
+        }
+        arena_pop_to(&parser->scratch, mark);
     }
     return result;
 }
