@@ -1918,6 +1918,10 @@ In both, the vectorized printer's text must be the scalar printer's byte for
 byte, with line markers and without, and must lex back into the stream's
 spellings.
 
+Every case and file runs with clang's answers to the feature queries
+(`--clang-features`, the oracle's mode), and a check runs a line of queries both
+ways: by default they answer what buster implements.
+
 `--clang` also compares every case and file with `clang -E` and the same
 options, token spelling by token spelling, and then where clang's line markers
 put each token (its presumed line and include stack) with where ours put it. It
@@ -1965,6 +1969,8 @@ expansions, invocations, pastes, and the `#if` lines and their lengths).
 `--clang` also times `clang -E -P` with the same options, a process per file.
 Our predefines follow the target options as clang's do; `--predefines FILE`
 still replaces them (the benchmark leaves it out of clang's command line). The
+runs answer the feature queries as clang does (`--clang-features`), so that they
+do the work `clang -E` does. The
 default 9700X job runs the smoke command above on `main.c`, pinned to one allowed
 CPU; like the others, its measurements are informational.
 

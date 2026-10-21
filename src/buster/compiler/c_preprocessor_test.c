@@ -1029,6 +1029,8 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     const char* output;
     bool markers;
     result = result && pp_parse_options(argument_count + 1, arguments, &options, &arena, &input, &output, &markers);
+    // The cases are compared with clang: the feature queries answer as clang's.
+    options.clang_features = true;
     static InternTable tables[2];
     static Preprocessor runs[2];
     bool ran[2] = { false, false };
@@ -1383,7 +1385,9 @@ static uint32_t pp_test_modes(const char* directory, const char* path, const cha
         const char* output;
         bool markers;
         uint64_t tokens = 0;
-        const bool passed = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers) && pp_test_file(1, arguments, &options, path, true, directory, &tokens);
+        bool passed = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers);
+        options.clang_features = true;
+        passed = passed && pp_test_file(1, arguments, &options, path, true, directory, &tokens);
         if (!passed)
         {
             printf("%s: the answers differ from clang's with %s\n", label, modes[m]);
@@ -1500,6 +1504,7 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
         const char* output;
         bool markers;
         result = pp_parse_options(argument_count + 1, arguments, &options, &arena, &input, &output, &markers);
+        options.clang_features = true;
         static InternTable tables[2];
         static Preprocessor preprocessors[2];
         for (uint32_t k = 0; k < 2; k += 1)
@@ -1553,6 +1558,55 @@ static bool pp_test_timestamps(const char* directory, bool with_clang)
     unlink(path);
     unlink(header);
     printf("timestamps: %s\n", result ? "each file's modification time, and SOURCE_DATE_EPOCH's" : "differ");
+    return result;
+}
+
+// Outside the oracle's mode, the feature queries answer what buster implements (pp_implemented_*): of builtins only the
+// preprocessor's __is_target_*, and no attribute, feature, extension or constexpr builtin; __has_warning answers as
+// clang does in both modes, and so do the queries that aren't about the compiler (__has_include, __is_identifier,
+// __is_target_*). With --clang-features, the same line gives clang's answers.
+static bool pp_test_implemented_features(const char* directory)
+{
+    static const char source[] =
+        "A __has_builtin(__builtin_expect) __has_constexpr_builtin(__builtin_clz) __has_feature(c_static_assert) __has_extension(c_atomic) "
+        "__has_attribute(packed) __has_attribute(__packed__) __has_c_attribute(gnu::packed) __has_warning(\"-Wreserved-identifier\") "
+        "__is_identifier(int) __is_target_arch(x86_64)\n";
+    static const char* const expected[2] = { "A 0 0 0 0 0 0 0 1 0 1\n", "A 1 1 1 1 1 1 1 1 0 1\n" };
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/case.c", directory);
+    pp_test_write_file(path, source);
+    bool result = true;
+    for (uint32_t clang = 0; clang < 2; clang += 1)
+    {
+        char* arguments[2] = { path, 0 };
+        Arena arena = arena_reserve(1ull << 20);
+        PPOptions options;
+        const char* input;
+        const char* output;
+        bool markers;
+        bool passed = pp_parse_options(1, arguments, &options, &arena, &input, &output, &markers);
+        options.clang_features = clang == 1;
+        static InternTable table;
+        static Preprocessor pp;
+        PPSpellings ours = { 0 };
+        PPSpellings wanted = { 0 };
+        passed = passed && pp_test_run(&pp, &table, &options, path) && pp_stream_spellings(&pp, &ours) &&
+                 pp_text_spellings((const uint8_t*)expected[clang], strlen(expected[clang]), pp.split_kinds, &wanted) &&
+                 pp_compare_spellings(&pp, &ours, &wanted, clang == 1 ? "clang's feature answers" : "implemented feature answers", "wanted");
+        pp_release(&pp);
+        intern_release(&table);
+        arena_release(&ours.arena);
+        arena_release(&wanted.arena);
+        arena_release(&arena);
+        result &= passed;
+    }
+    // The preprocessor's own builtins are what __has_builtin answers 1 for by default.
+    static const char* const own[] = { "__is_target_arch", "__is_target_vendor", "__is_target_os", "__is_target_environment" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(own); i += 1)
+    {
+        result &= pp_feature(PP_BUILTIN_HAS_BUILTIN, (const uint8_t*)own[i], (uint32_t)strlen(own[i]), 2017, false) == 1;
+    }
+    printf("feature answers: %s (what buster implements by default, clang's with --clang-features)\n", result ? "as expected" : "WRONG");
     return result;
 }
 
@@ -1627,6 +1681,7 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
         printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
         passed_all = failures == 0;
         passed_all &= pp_test_timestamps(directory, with_clang);
+        passed_all &= pp_test_implemented_features(directory);
         if (with_clang)
         {
             passed_all &= pp_test_predefines(directory);
@@ -1647,6 +1702,9 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
         memcpy(with_input, passed, (size_t)passed_count * sizeof(char*));
         with_input[passed_count] = files[0];
         passed_all = pp_parse_options(passed_count + 1, with_input, &options, &arena, &input, &output, &markers);
+        // The files are compared with clang (with --clang) and taken from its corpora: the feature queries answer as
+        // clang's.
+        options.clang_features = true;
         uint32_t failures = 0;
         uint64_t tokens = 0;
         for (int i = 0; passed_all && i < file_count; i += 1)

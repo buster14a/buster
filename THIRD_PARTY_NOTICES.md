@@ -255,6 +255,9 @@ compiler's own. LLVM's terms are retained in [LICENSES/LLVM.txt](LICENSES/LLVM.t
   mode. `c_preprocessor_test.c` keeps the same names (`pp_test_feature_names`)
   to ask clang again under `--clang`. Only the names were read from
   `Features.def`.
+- The `__has_constexpr_builtin` table is clang's nonzero answers, under
+  `-std=gnu17` and `-std=c23` (the same), for the names of the `__has_builtin`
+  table.
 - A local script ran the queries; `docs/c-preprocessor.md` records its
   procedure.
 - `c_predefines.c`'s generated block (`predefines_features`, `predefines_cpus`,

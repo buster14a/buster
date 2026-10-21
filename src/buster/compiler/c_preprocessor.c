@@ -190,6 +190,10 @@ struct PPOptions
     bool trigraphs;
     // -dM: -E prints the macros defined at the end (pp_print_macros) instead of the tokens.
     bool dump_macros;
+    // --clang-features: the feature queries (__has_builtin, __has_attribute, __has_feature, __has_extension,
+    // __has_c_attribute, __has_constexpr_builtin) answer as clang 23 does, from pp_features_*: the oracle's mode
+    // (#125). By default they answer what buster implements (pp_implemented_*; #123, #148, #154).
+    bool clang_features;
 };
 
 // A column array of tokens: an output stream, or a stack of buffers.
@@ -377,6 +381,7 @@ typedef enum PPBuiltin
     PP_BUILTIN_HAS_INCLUDE_NEXT,
     PP_BUILTIN_HAS_ATTRIBUTE,
     PP_BUILTIN_HAS_BUILTIN,
+    PP_BUILTIN_HAS_CONSTEXPR_BUILTIN,
     PP_BUILTIN_HAS_FEATURE,
     PP_BUILTIN_HAS_EXTENSION,
     PP_BUILTIN_HAS_C_ATTRIBUTE,
@@ -3975,7 +3980,7 @@ static bool pp_header_name(Preprocessor* pp, const PPTokens* tokens, uint32_t be
 }
 
 // The answer of a feature query (__has_attribute and the like) about `name` (a scoped one as "scope::name").
-static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t length, uint32_t standard);
+static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t length, uint32_t standard, bool clang);
 
 // Builds the name a feature query's argument holds: an identifier, or `scope::identifier`; names with leading and
 // trailing "__" lose them for the attribute, feature and extension queries, as clang normalizes them.
@@ -4111,7 +4116,7 @@ static uint64_t pp_builtin_value(Preprocessor* pp, PPBuiltin builtin, const PPTo
     }
     else if (pp_feature_name(pp, builtin, tokens, first, last, text, &length))
     {
-        result = pp_feature(builtin, text, length, pp->options.language.standard);
+        result = pp_feature(builtin, text, length, pp->options.language.standard, pp->options.clang_features);
     }
     else
     {
@@ -6093,6 +6098,29 @@ static const PPFeature pp_features_warning[] = {
     { "-Wreturn-mismatch", 1 }, { "-Wunnecessary-virtual-specifier", 1 }, { "-Wunused-but-set-variable", 1 }, { "-Wuser-defined-warnings", 1 },
 };
 
+// clang 23's nonzero answers to __has_constexpr_builtin for the builtins pp_features_builtin lists (the corpora ask about
+// none), in gnu17 and c23 alike.
+static const PPFeature pp_features_constexpr_builtin[] = {
+    { "__builtin_add_overflow", 1 }, { "__builtin_assume", 1 }, { "__builtin_assume_aligned", 1 }, { "__builtin_bitreverse16", 1 },
+    { "__builtin_bitreverse32", 1 }, { "__builtin_bitreverse64", 1 }, { "__builtin_bitreverse8", 1 }, { "__builtin_bswap16", 1 },
+    { "__builtin_bswap32", 1 }, { "__builtin_bswap64", 1 }, { "__builtin_clz", 1 }, { "__builtin_clzg", 1 }, { "__builtin_clzll", 1 },
+    { "__builtin_clzs", 1 }, { "__builtin_constant_p", 1 }, { "__builtin_copysign", 1 }, { "__builtin_ctz", 1 }, { "__builtin_ctzg", 1 },
+    { "__builtin_ctzll", 1 }, { "__builtin_ctzs", 1 }, { "__builtin_dynamic_object_size", 1 }, { "__builtin_elementwise_fshl", 1 },
+    { "__builtin_expect", 1 }, { "__builtin_memcpy", 1 }, { "__builtin_mul_overflow", 1 }, { "__builtin_nansf128", 1 },
+    { "__builtin_operator_new", 1 }, { "__builtin_popcount", 1 }, { "__builtin_popcountg", 1 }, { "__builtin_popcountll", 1 },
+    { "__builtin_rotateleft32", 1 }, { "__builtin_sadd_overflow", 1 }, { "__builtin_shufflevector", 1 }, { "__builtin_smul_overflow", 1 },
+    { "__builtin_ssub_overflow", 1 }, { "__builtin_sub_overflow", 1 }, { "__builtin_uadd_overflow", 1 }, { "__builtin_umul_overflow", 1 },
+};
+
+// What buster implements, which the feature queries answer outside the oracle's mode (#154: until everything clang
+// supports is, they say exactly what is). Only the preprocessor exists yet, so of builtins only its __is_target_*
+// (which clang's __has_builtin answers 1 for too), and no attribute, feature or extension: the parser, the checker and
+// the code generators add theirs here as they implement them (#127, #133, #147, #148). __has_warning and
+// __has_declspec_attribute answer as clang does in both modes. Sorted for binary search.
+static const PPFeature pp_implemented_builtin[] = {
+    { "__is_target_arch", 1 }, { "__is_target_environment", 1 }, { "__is_target_os", 1 }, { "__is_target_vendor", 1 },
+};
+
 static int pp_compare_feature(const uint8_t* name, uint32_t length, const char* entry)
 {
     const uint32_t entry_length = (uint32_t)strlen(entry);
@@ -6126,21 +6154,33 @@ static uint32_t pp_feature_lookup(const PPFeature* table, uint32_t count, const 
     return result;
 }
 
-static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t length, uint32_t standard)
+// A feature query's answer for `name`: clang's (`clang`, the oracle's mode) or what buster implements.
+static uint32_t pp_feature(PPBuiltin builtin, const uint8_t* name, uint32_t length, uint32_t standard, bool clang)
 {
     uint32_t result = 0;
     switch (builtin)
     {
-        case PP_BUILTIN_HAS_ATTRIBUTE: result = pp_feature_lookup(pp_features_attribute, BUSTER_ARRAY_LENGTH(pp_features_attribute), name, length, standard); break;
-        case PP_BUILTIN_HAS_BUILTIN: result = pp_feature_lookup(pp_features_builtin, BUSTER_ARRAY_LENGTH(pp_features_builtin), name, length, standard); break;
-        case PP_BUILTIN_HAS_FEATURE: result = pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard); break;
+        case PP_BUILTIN_HAS_ATTRIBUTE:
+            result = clang ? pp_feature_lookup(pp_features_attribute, BUSTER_ARRAY_LENGTH(pp_features_attribute), name, length, standard) : 0;
+            break;
+        case PP_BUILTIN_HAS_BUILTIN:
+            result = clang ? pp_feature_lookup(pp_features_builtin, BUSTER_ARRAY_LENGTH(pp_features_builtin), name, length, standard)
+                           : pp_feature_lookup(pp_implemented_builtin, BUSTER_ARRAY_LENGTH(pp_implemented_builtin), name, length, standard);
+            break;
+        case PP_BUILTIN_HAS_CONSTEXPR_BUILTIN:
+            result = clang ? pp_feature_lookup(pp_features_constexpr_builtin, BUSTER_ARRAY_LENGTH(pp_features_constexpr_builtin), name, length, standard) : 0;
+            break;
+        case PP_BUILTIN_HAS_FEATURE:
+            result = clang ? pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) : 0;
+            break;
         case PP_BUILTIN_HAS_EXTENSION:
             // An extension is anything that is a feature, or in the extension table.
-            result = pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) |
-                     pp_feature_lookup(pp_features_extension, BUSTER_ARRAY_LENGTH(pp_features_extension), name, length, standard);
+            result = clang ? pp_feature_lookup(pp_features_feature, BUSTER_ARRAY_LENGTH(pp_features_feature), name, length, standard) |
+                                 pp_feature_lookup(pp_features_extension, BUSTER_ARRAY_LENGTH(pp_features_extension), name, length, standard)
+                           : 0;
             break;
         case PP_BUILTIN_HAS_C_ATTRIBUTE:
-            result = pp_feature_lookup(pp_features_c_attribute, BUSTER_ARRAY_LENGTH(pp_features_c_attribute), name, length, standard);
+            result = clang ? pp_feature_lookup(pp_features_c_attribute, BUSTER_ARRAY_LENGTH(pp_features_c_attribute), name, length, standard) : 0;
             break;
         case PP_BUILTIN_HAS_WARNING: result = pp_feature_lookup(pp_features_warning, BUSTER_ARRAY_LENGTH(pp_features_warning), name, length, standard); break;
         case PP_BUILTIN_IS_TARGET_ARCH: result = length == 6 && memcmp(name, "x86_64", 6) == 0; break;
@@ -6856,14 +6896,25 @@ static bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTabl
         {
             pp_define_builtin(pp, builtins[i].name, builtins[i].builtin, builtins[i].function_like);
         }
-        // __FLT_EVAL_METHOD__ is a builtin in clang too (its value follows -ffp-eval-method and SSE), but not one of
-        // c_intern.c's predefined names.
-        static const char flt_eval_method[] = "__FLT_EVAL_METHOD__";
-        const IdentId flt_eval_method_id = result ? intern_find_or_add(table, (const uint8_t*)flt_eval_method, sizeof(flt_eval_method) - 1) : 0;
-        result = result && flt_eval_method_id != 0;
-        if (result)
+        // Two of clang's builtins that aren't among c_intern.c's predefined names: __FLT_EVAL_METHOD__ (its value
+        // follows -ffp-eval-method and SSE) and the __has_constexpr_builtin query.
+        static const struct
         {
-            pp_define_builtin(pp, flt_eval_method_id, PP_BUILTIN_FLT_EVAL_METHOD, false);
+            const char* name;
+            PPBuiltin builtin;
+            bool function_like;
+        } named_builtins[] = {
+            { "__FLT_EVAL_METHOD__", PP_BUILTIN_FLT_EVAL_METHOD, false },
+            { "__has_constexpr_builtin", PP_BUILTIN_HAS_CONSTEXPR_BUILTIN, true },
+        };
+        for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(named_builtins); i += 1)
+        {
+            const IdentId id = intern_find_or_add(table, (const uint8_t*)named_builtins[i].name, (uint32_t)strlen(named_builtins[i].name));
+            result = id != 0;
+            if (result)
+            {
+                pp_define_builtin(pp, id, named_builtins[i].builtin, named_builtins[i].function_like);
+            }
         }
         // __DATE__ and __TIME__ from SOURCE_DATE_EPOCH if it is set (reproducible builds), else now; __TIMESTAMP__ from
         // SOURCE_DATE_EPOCH too, else each file's modification time (pp_expand_builtin).
@@ -8038,6 +8089,10 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
         {
             options->dump_macros = true;
         }
+        else if (strcmp(argument, "--clang-features") == 0)
+        {
+            options->clang_features = true;
+        }
         else if (strcmp(argument, "-ffreestanding") == 0)
         {
             options->freestanding = true;
@@ -8160,7 +8215,7 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
     {
         fprintf(stderr, "usage: compiler -E [-P] [-o file] [-I dir] [-isystem dir] [-iquote dir] [-idirafter dir] [-D name[=value]] [-U name] "
                         "[-include file] [-dM] [-std=...] [-ansi] [-trigraphs] [-fno-trigraphs] [-ffreestanding] [-march=cpu] [-m[no-]feature] [-O...] [-f...] "
-                        "[-g...] [-pthread] [-nostdinc] [--predefines file] [--scalar] file\n");
+                        "[-g...] [-pthread] [-nostdinc] [--predefines file] [--clang-features] [--scalar] file\n");
     }
     else
     {

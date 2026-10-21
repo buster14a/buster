@@ -250,6 +250,8 @@ int run_preprocessor_benchmark(int argc, char** argv)
     }
     else
     {
+        // The feature queries answer as clang's, so that the runs do the work `clang -E` does on the same headers.
+        options.clang_features = true;
         const int cycles_fd = pp_benchmark_open_counter(PERF_COUNT_HW_CPU_CYCLES);
         const int instructions_fd = pp_benchmark_open_counter(PERF_COUNT_HW_INSTRUCTIONS);
         if (cycles_fd < 0 || instructions_fd < 0)
