@@ -12,8 +12,8 @@
 // and preprocessor, so that every file it includes is read, lexed, refined and given its directive table, as a
 // compile of one translation unit does. After a warm-up pass come BUSTER_PP_BENCHMARK_PASSES passes; it reports the
 // medians of wall time and of user-space cycles and instructions (perf_event_open; zero when unavailable), per input
-// token (the tokens of every file the runs prepared) and per output token, the share of the time each phase took
-// (PPPhase: reading, lexing, refining and directive tables; the rest is the main loop with its directives), and what
+// token (the tokens of every file the runs prepared) and per output token, each phase's share of the time and its median
+// time (PPPhase: reading, lexing, refining and directive tables; the rest is the main loop with its directives), and what
 // a run did (PPStatistics). With --clang it also times `clang -E -P` with the same options (but --predefines, which is
 // ours) writing to /dev/null, a process per file, the median of as many runs, for scale. --only runs one
 // implementation (for profiles). Run it pinned to one CPU (taskset -c 2 ...). The exit status is 1 if the arguments
