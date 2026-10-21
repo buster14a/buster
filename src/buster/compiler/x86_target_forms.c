@@ -370,8 +370,10 @@ static void x86_target_forms(const X86Target* target, uint8_t* allowed)
         const __m512i required = _mm512_maskz_loadu_epi64(active, x86_target_requirements + i);
         const __mmask8 known = _mm512_cmpneq_epi64_mask(required, zero);
         const __mmask8 supported = known & _mm512_cmpeq_epi64_mask(_mm512_andnot_si512(available, required), zero);
-        const __m512i flags = _mm512_maskz_set1_epi64(supported, 1);
-        _mm_mask_storeu_epi8(allowed + i, active, _mm512_cvtepi64_epi8(flags));
+        // Expand the result directly to bytes. Expanding to eight qwords then narrowing used extra 512-bit work
+        // and lost to Clang's vectorized scalar source after lighter phases on the 9700X.
+        const __m128i flags = _mm_maskz_set1_epi8(supported, 1);
+        _mm_mask_storeu_epi8(allowed + i, active, flags);
     }
 }
 
