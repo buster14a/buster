@@ -55,7 +55,10 @@
 // fixups' targets tested 16 at a time against a filter of the symbols outside the image in two registers
 // (executable_filter_test), whose few hits the exact check tells apart; the atoms the loader writes found 64 at a time
 // (executable_written_atoms), and a dense atom's RELR words from its fixup count alone (executable_atom_is_dense); and
-// the GOT's slots by class and their RELR words from the bitsets (executable_slots_of_class, executable_got_relr).
+// the GOT's slots by class and their RELR words from the bitsets (executable_slots_of_class, executable_got_relr). So
+// are both kinds' passes over atoms and symbols: the count's and the placement's blocks of 16 atoms of one bucket
+// (executable_atom_block), whose padded sizes they sum and scan in vectors, and the symbols' references 16 at a time
+// (executable_resolve), from gathers of their atoms' classes and addresses.
 //
 // The columns it writes are the linker's: atoms' address (an image offset, the address less the base) and symbols'
 // reference, got_slot and, in a PIE, dynamic_index (a dynamic symbol's or an export's .dynsym index, 0 for the others).
@@ -68,13 +71,13 @@
 // Patching and writing go a chunk at a time (BUSTER_EXECUTABLE_CHUNK_BYTES, about 256 KB, a quarter of Zen 5's L2), in
 // chunks that never split a field: boundary k is at k chunks' bytes, unless an atom of at most a chunk holds it, which
 // then ends there, or a larger atom's field does, which then ends there. The boundaries depend on the layout alone, not
-// on the lanes. For each chunk, a lane patches the fields in it (executable_patch_pc32 does CALL and PC32, and
-// executable_patch_other redoes every other kind after it), hashes it while it is in L2 and writes it from there with
-// pwritev. Every lane writes the chunks it patches: the writes take turns at the file's lock in the kernel, but each
-// lane's overlaps the others' patching (docs/object-writer-and-linker.md, "Patching and writing", has what one lane
-// writing them all costs instead). The build ID is a tree of the chunks' hashes: the hash of the chunks' hashes in
-// chunk order, so that the lanes need nothing from each other to compute it and it doesn't depend on how many there
-// are. Its note is hashed as zeros and written last.
+// on the lanes. For each chunk, a lane patches the fields in it (executable_patch_pc32 an atom's whose fixups are all
+// CALL and PC32, executable_patch_mixed another's, each fixup by its kind), hashes it while it is in L2 and writes it
+// from there with pwritev. Every lane writes the chunks it patches: the writes take turns at the file's lock in the
+// kernel, but each lane's overlaps the others' patching (docs/object-writer-and-linker.md, "Patching and writing", has
+// what one lane writing them all costs instead). The build ID is a tree of the chunks' hashes: the hash of the chunks'
+// hashes in chunk order, so that the lanes need nothing from each other to compute it and it doesn't depend on how many
+// there are. Its note is hashed as zeros and written last.
 //
 // The file: overwritten in place (O_RDWR) when it exists as a regular file with one link that no process is running,
 // then truncated to its size if that changed and given its mode; otherwise created, or written beside it and renamed
@@ -93,9 +96,11 @@
 //   - API: the base, the chunks, ExecutableSection, ExecutableError, ExecutableWrite, ExecutablePhase,
 //     ExecutableDynamic, ExecutableOptions, ExecutableResult and executable_write's prototype.
 //   - The chunk hash: ExecutableHash, executable_hash_begin, executable_hash_bytes and executable_hash_end.
-//   - Patching: ExecutablePatch, executable_patch_pc32, executable_patch_other and executable_patch_range.
+//   - Patching: ExecutablePatch, executable_patch_pc32, executable_patch_other, executable_patch_mixed and
+//     executable_patch_range.
 //   - The file: executable_write_all, executable_open and executable_close.
-//   - Layout: the buckets (executable_bucket), ExecutableLayout and executable_lay_out.
+//   - Layout: the buckets (executable_bucket), the blocks of atoms (executable_atom_block), ExecutableLayout and
+//     executable_lay_out.
 //   - Headers: executable_write_headers.
 //   - Chunks: executable_chunk_boundary, executable_patch_chunk and executable_chunk_runs.
 //   - Writing: ExecutableShared; the relocation classes (executable_relocation_class), the filter (ExecutableFilter)
@@ -521,13 +526,15 @@ static void executable_hash_end(ExecutableHash* hash, uint8_t* output)
 // Patching
 //
 // What the patch reads: the fixup columns, the symbols' references, sizes and GOT slots, and where the GOT is. Most
-// fixups are CALL and PC32: S + A - P into 4 bytes, S being the target's reference. executable_patch_pc32 does every
-// fixup of a range that way, in a loop built for those (0.38 ns a fixup in L1 and L2 on the 9700X, against 0.42 with a
-// branch on the kind per fixup and 0.60 with a range check of each value). executable_patch_other then redoes every
-// fixup of another kind, or with a wide addend, over what the loop wrote, which its field covers: a vector compare of
-// the kind column finds them. The loop doesn't check S + A - P's range: executable_write does that once for every
-// fixup, from the largest addend and the image's size, and runs every fixup through executable_patch_other when it
-// can't rule out a value outside int32.
+// fixups are CALL and PC32: S + A - P into 4 bytes, S being the target's reference. Vector compares of an atom's kinds,
+// 64 at a time, find its others (any other kind, or a wide addend). An atom without them goes through
+// executable_patch_pc32, a loop built for CALL and PC32 alone (0.37 ns a fixup in L1 on the 9700X, against 0.48 with a
+// branch on the kind per fixup and 0.60 with a range check of each value). An atom with them goes through
+// executable_patch_mixed, which takes each fixup by its kind, CALL and PC32 inline and the others through
+// executable_patch_other, once each (docs/object-writer-and-linker.md, "Patching and writing", has the variants it was
+// chosen over). Neither checks a CALL's or PC32's S + A - P: executable_write does that once for every fixup, from the
+// largest addend and the image's size, and runs every fixup through executable_patch_other when it can't rule out a
+// value outside int32.
 
 typedef struct ExecutablePatch ExecutablePatch;
 struct ExecutablePatch
@@ -658,8 +665,56 @@ static uint64_t executable_other_kinds(const uint8_t* kinds, FixupId begin, Fixu
     return valid & ~(call | pc32);
 }
 
-// Patches fixups [begin, end) of an atom at image offset `address`, all within `bytes`. Returns the first fixup whose
-// value doesn't fit its field, or 0.
+// Fixups [begin, end) of an atom at image offset `address`, each by its kind, unchecked: CALL and PC32 as
+// executable_patch_pc32 does them, and the other kinds a compiled program has most, with an addend in its column, in
+// the same 4 or 8 bytes executable_patch_other writes. A GOT kind's G + A - P can't leave int32 either: G and P are in
+// the image, as a PC32's S and P are. ABS64's 8 bytes take any value, and TPOFF32's offset from the thread pointer
+// depends on the TLS block, which the image's size doesn't bound, so its range is checked: one that doesn't fit goes
+// to executable_patch_other, as do the rest. Returns the first fixup whose value doesn't fit its field, or 0. The patch
+// comes by value, as executable_patch_other's does.
+BUSTER_INLINE FixupId executable_patch_mixed(ExecutablePatch patch, uint8_t* bytes, uint32_t address, FixupId begin, FixupId end)
+{
+    FixupId result = 0;
+    const uint32_t got = (uint32_t)patch.got;
+    for (FixupId i = begin; i < end; i += 1)
+    {
+        const uint8_t kind = patch.kinds[i];
+        const uint32_t offset = patch.offsets[i];
+        const SymbolId target = patch.targets[i];
+        const int32_t addend = patch.addends[i];
+        const int64_t tls = (int64_t)(int32_t)patch.reference[target] + addend;
+        if (kind == BUSTER_LINK_FIXUP_CALL || kind == BUSTER_LINK_FIXUP_PC32)
+        {
+            const uint32_t value = patch.reference[target] + (uint32_t)addend - (address + offset);
+            memcpy(bytes + offset, &value, sizeof(value));
+        }
+        else if (kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_GOTTPOFF)
+        {
+            const uint32_t value = got + 8 * patch.got_slots[target] + (uint32_t)addend - (address + offset);
+            memcpy(bytes + offset, &value, sizeof(value));
+        }
+        else if (kind == BUSTER_LINK_FIXUP_ABS64)
+        {
+            const int64_t value = (int64_t)patch.base + (int32_t)patch.reference[target] + addend;
+            memcpy(bytes + offset, &value, sizeof(value));
+        }
+        else if (kind == BUSTER_LINK_FIXUP_TPOFF32 && tls == (int32_t)tls)
+        {
+            const uint32_t value = (uint32_t)tls;
+            memcpy(bytes + offset, &value, sizeof(value));
+        }
+        else
+        {
+            const bool fits = executable_patch_other(patch, bytes, address, i);
+            result = result == 0 && !fits ? i : result;
+        }
+    }
+    return result;
+}
+
+// Patches fixups [begin, end) of an atom at image offset `address`, all within `bytes`: through executable_patch_pc32
+// if they are all CALL and PC32, which the vector compares of their kinds find 64 at a time, and otherwise through
+// executable_patch_mixed. Returns the first fixup whose value doesn't fit its field, or 0.
 static FixupId executable_patch_range(const ExecutablePatch* patch, uint8_t* bytes, uint32_t address, FixupId begin, FixupId end)
 {
     const ExecutablePatch local = *patch;
@@ -674,17 +729,18 @@ static FixupId executable_patch_range(const ExecutablePatch* patch, uint8_t* byt
     }
     else
     {
-        executable_patch_pc32(&local, bytes, address, begin, end);
+        uint64_t others = 0;
         for (FixupId group = begin; group < end; group += 64)
         {
-            uint64_t others = executable_other_kinds(local.kinds, group, end);
-            while (others != 0)
-            {
-                const FixupId fixup = group + (FixupId)__builtin_ctzll(others);
-                const bool fits = executable_patch_other(local, bytes, address, fixup);
-                result = result == 0 && !fits ? fixup : result;
-                others &= others - 1;
-            }
+            others |= executable_other_kinds(local.kinds, group, end);
+        }
+        if (others == 0)
+        {
+            executable_patch_pc32(&local, bytes, address, begin, end);
+        }
+        else
+        {
+            result = executable_patch_mixed(local, bytes, address, begin, end);
         }
     }
     return result;
@@ -1176,6 +1232,97 @@ static bool executable_in_file(uint8_t class, uint64_t size)
     return size != 0 && !link_class_is_zero_fill(class);
 }
 
+// The classes whose atoms the layout's vector passes take (executable_atom_block), the same in either kind of
+// executable: those whose alignment is their atoms' own, or for TEXT a function's at least. EH_FRAME's and the C
+// runtime's INIT and FINI keep id order, INIT_ARRAY's and FINI_ARRAY's atoms are entries, and a static executable has
+// no section for INIT and FINI: their atoms go through the scalar loops.
+#define BUSTER_EXECUTABLE_BLOCK_CLASSES                                                                                                                         \
+    ((1u << BUSTER_LINK_CLASS_RODATA) | (1u << BUSTER_LINK_CLASS_STRINGS) | (1u << BUSTER_LINK_CLASS_TEXT) | (1u << BUSTER_LINK_CLASS_TDATA) |                  \
+     (1u << BUSTER_LINK_CLASS_TBSS) | (1u << BUSTER_LINK_CLASS_DATA_RELRO) | (1u << BUSTER_LINK_CLASS_DATA) | (1u << BUSTER_LINK_CLASS_BSS))
+
+// Up to 16 atoms from `first` (the `lanes` of a block), as executable_count and executable_place take them: taken if
+// every one is of a class of BUSTER_EXECUTABLE_BLOCK_CLASSES, aligned to at most a page (as executable_alignment_log2
+// raises a function's), no larger than BUSTER_EXECUTABLE_MAX_ATOM_BYTES, and in the same bucket, as a run of
+// consecutive atoms mostly is. Then `bucket` is theirs, `sizes` their sizes and `padded` those padded to their
+// alignment (lanes 0 to 7 and 8 to 15, a masked-off lane's 0), and `in_file` the lanes whose bytes are in the file
+// (executable_in_file). A block that isn't taken goes through the scalar loop, atom by atom, which also finds any atom
+// the layout refuses.
+typedef struct ExecutableAtomBlock ExecutableAtomBlock;
+struct ExecutableAtomBlock
+{
+    __m512i sizes[2];
+    __m512i padded[2];
+    uint32_t bucket;
+    __mmask16 in_file;
+    bool taken;
+};
+
+static ExecutableAtomBlock executable_atom_block(const LinkAtoms* atoms, AtomId first, __mmask16 lanes)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i classes = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, atoms->class + first));
+    const __m512i alignments = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, atoms->alignment_log2 + first));
+    const __m512i sizes[2] = {
+        _mm512_maskz_loadu_epi64((__mmask8)lanes, atoms->size + first),
+        _mm512_maskz_loadu_epi64((__mmask8)(lanes >> 8), atoms->size + first + 8),
+    };
+    // A class's bit of BUSTER_EXECUTABLE_BLOCK_CLASSES, shifted down to bit 0.
+    const __m512i class_bits = _mm512_srlv_epi32(_mm512_set1_epi32((int)BUSTER_EXECUTABLE_BLOCK_CLASSES), classes);
+    const __mmask16 eligible = _mm512_mask_test_epi32_mask(lanes, class_bits, _mm512_set1_epi32(1));
+    const __mmask16 text = _mm512_mask_cmpeq_epi32_mask(lanes, classes, _mm512_set1_epi32(BUSTER_LINK_CLASS_TEXT));
+    const __m512i log2 = _mm512_mask_max_epu32(alignments, text, alignments, _mm512_set1_epi32(BUSTER_EXECUTABLE_FUNCTION_ALIGNMENT_LOG2));
+    const __mmask16 aligned = _mm512_mask_cmple_epu32_mask(lanes, log2, _mm512_set1_epi32(BUSTER_EXECUTABLE_PAGE_LOG2));
+    const __m512i largest = _mm512_set1_epi64((long long)BUSTER_EXECUTABLE_MAX_ATOM_BYTES);
+    const __mmask16 small = (__mmask16)(_mm512_mask_cmple_epu64_mask((__mmask8)lanes, sizes[0], largest) |
+                                        (uint32_t)_mm512_mask_cmple_epu64_mask((__mmask8)(lanes >> 8), sizes[1], largest) << 8);
+    // executable_bucket's, and whether every lane's is lane 0's.
+    const __m512i buckets = _mm512_add_epi32(_mm512_mullo_epi32(_mm512_sub_epi32(classes, _mm512_set1_epi32(1)), _mm512_set1_epi32(BUSTER_EXECUTABLE_ALIGNMENTS)),
+                                             _mm512_sub_epi32(_mm512_set1_epi32(BUSTER_EXECUTABLE_PAGE_LOG2), log2));
+    const uint32_t bucket = (uint32_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(buckets));
+    const __mmask16 same = _mm512_mask_cmpeq_epi32_mask(lanes, buckets, _mm512_set1_epi32((int)bucket));
+    const __mmask16 nonzero = (__mmask16)(_mm512_mask_cmpneq_epu64_mask((__mmask8)lanes, sizes[0], zero) |
+                                          (uint32_t)_mm512_mask_cmpneq_epu64_mask((__mmask8)(lanes >> 8), sizes[1], zero) << 8);
+    const __mmask16 zero_fill = _mm512_mask_cmpeq_epi32_mask(lanes, classes, _mm512_set1_epi32(BUSTER_LINK_CLASS_TBSS)) |
+                                _mm512_mask_cmpeq_epi32_mask(lanes, classes, _mm512_set1_epi32(BUSTER_LINK_CLASS_BSS));
+    ExecutableAtomBlock result = {
+        .sizes = { sizes[0], sizes[1] },
+        .bucket = bucket,
+        .in_file = nonzero & (__mmask16)~zero_fill,
+        .taken = (eligible & aligned & small & same) == lanes,
+    };
+    // executable_align's: the size plus the alignment less one, without the alignment's low bits.
+    for (uint32_t half = 0; half < 2; half += 1)
+    {
+        const __m512i half_log2 = _mm512_cvtepu32_epi64(half == 0 ? _mm512_castsi512_si256(log2) : _mm512_extracti64x4_epi64(log2, 1));
+        const __m512i low_bits = _mm512_sub_epi64(_mm512_sllv_epi64(_mm512_set1_epi64(1), half_log2), _mm512_set1_epi64(1));
+        result.padded[half] = _mm512_andnot_si512(low_bits, _mm512_add_epi64(sizes[half], low_bits));
+    }
+    return result;
+}
+
+// The lanes of a block of up to 16 records from `first`, whose end is `end`.
+static __mmask16 executable_block_lanes(uint64_t first, uint64_t end)
+{
+    const uint64_t left = end - first;
+    return left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
+}
+
+// The inclusive prefix sums of 8 64-bit lanes: three shifted adds.
+static __m512i executable_scan64(__m512i x)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    __m512i result = _mm512_add_epi64(x, _mm512_alignr_epi64(x, zero, 7));
+    result = _mm512_add_epi64(result, _mm512_alignr_epi64(result, zero, 6));
+    result = _mm512_add_epi64(result, _mm512_alignr_epi64(result, zero, 4));
+    return result;
+}
+
+// The last of 8 64-bit lanes.
+static uint64_t executable_last64(__m512i x)
+{
+    return (uint64_t)_mm_cvtsi128_si64(_mm512_castsi512_si128(_mm512_permutexvar_epi64(_mm512_set1_epi64(7), x)));
+}
+
 // A piece of the file: an atom's bytes, or bytes of the linker's own (atom 0).
 typedef struct ExecutablePiece ExecutablePiece;
 struct ExecutablePiece
@@ -1185,6 +1332,33 @@ struct ExecutablePiece
     uint8_t* bytes;
     AtomId atom;
 };
+
+_Static_assert(sizeof(ExecutablePiece) == 32, "four 64-bit lanes a piece, for executable_store_pieces");
+
+// The pieces of 8 atoms of a block (lanes 0 to 7 of their file offsets, sizes, bytes and ids, the ids zero-extended
+// over the record's padding), stored from `placed` as records, two to a vector, interleaved by permutes: the first
+// `count` of them.
+static void executable_store_pieces(ExecutablePiece* placed, __m512i offsets, __m512i sizes, __m512i bytes, __m512i atoms, uint32_t count)
+{
+    const __m512i pairs_low = _mm512_setr_epi64(0, 8, 1, 9, 2, 10, 3, 11);
+    const __m512i pairs_high = _mm512_setr_epi64(4, 12, 5, 13, 6, 14, 7, 15);
+    const __m512i records_low = _mm512_setr_epi64(0, 1, 8, 9, 2, 3, 10, 11);
+    const __m512i records_high = _mm512_setr_epi64(4, 5, 12, 13, 6, 7, 14, 15);
+    const __m512i places[2] = {
+        _mm512_permutex2var_epi64(offsets, pairs_low, sizes),
+        _mm512_permutex2var_epi64(offsets, pairs_high, sizes),
+    };
+    const __m512i owners[2] = {
+        _mm512_permutex2var_epi64(bytes, pairs_low, atoms),
+        _mm512_permutex2var_epi64(bytes, pairs_high, atoms),
+    };
+    for (uint32_t pair = 0; 2 * pair < count; pair += 1)
+    {
+        const __m512i record = _mm512_permutex2var_epi64(places[pair / 2], pair % 2 == 0 ? records_low : records_high, owners[pair / 2]);
+        const uint32_t records = count - 2 * pair >= 2 ? 2 : 1;
+        _mm512_mask_storeu_epi64(placed + 2 * pair, (__mmask8)((1u << (4 * records)) - 1), record);
+    }
+}
 
 // A section of the image: its image offset, file offset and size (in memory; in the file too, but for .tbss and
 // .bss), and its alignment.
@@ -2655,7 +2829,9 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
     ExecutableCounts* counts = &shared->counts[lane];
     memset(counts, 0, sizeof(*counts));
     // The columns in locals, which the stores to the counts can't alias. A run of atoms of one bucket, as consecutive
-    // atoms mostly are, is summed in registers: in the counts, each atom's add would wait for the last one's store.
+    // atoms mostly are, is summed in registers: in the counts, each atom's add would wait for the last one's store. A
+    // block of 16 that executable_atom_block takes adds its padded sizes and pieces at once; another (or with `exact`,
+    // every one) goes one atom at a time.
     const uint8_t* class_of = atoms->class;
     const uint8_t* alignment_of = atoms->alignment_log2;
     const uint64_t* size_of = atoms->size;
@@ -2663,32 +2839,51 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
     uint64_t run_bytes = 0;
     uint64_t run_pieces = 0;
     const Range64 atom_range = lane_range(atoms->count - 1);
-    for (AtomId atom = (AtomId)atom_range.begin + 1; atom < atom_range.end + 1; atom += 1)
+    const AtomId atom_end = (AtomId)atom_range.end + 1;
+    for (AtomId block = (AtomId)atom_range.begin + 1; block < atom_end; block += 16)
     {
-        const uint8_t class = class_of[atom];
-        const uint64_t size = size_of[atom];
-        const uint32_t log2 = executable_alignment_log2(class, alignment_of[atom], size, dynamic);
-        // Bounded before its padding is added, which could wrap: up to 2^32 atoms of 2 GB each sum to at most 2^63.
-        if (log2 == BUSTER_EXECUTABLE_ALIGNMENTS || size > BUSTER_EXECUTABLE_MAX_ATOM_BYTES)
+        const AtomId block_end = atom_end - block > 16 ? block + 16 : atom_end;
+        const ExecutableAtomBlock taken = shared->exact ? (ExecutableAtomBlock){ .taken = false } : executable_atom_block(atoms, block, executable_block_lanes(block, atom_end));
+        if (taken.taken)
         {
-            executable_lane_fail(error, EXECUTABLE_ERROR_LAYOUT, atom, 0, 0);
-        }
-        else
-        {
-            const uint32_t bucket = executable_bucket(class, log2);
-            if (bucket != run)
+            if (taken.bucket != run)
             {
                 counts->bytes[run] += run_bytes;
                 counts->pieces[run] += run_pieces;
-                run = bucket;
+                run = taken.bucket;
                 run_bytes = 0;
                 run_pieces = 0;
             }
-            run_bytes += executable_align(size, 1ull << log2);
-            run_pieces += executable_in_file(class, size) ? 1 : 0;
-            if (executable_class_is_ordered(class, dynamic) && alignment_of[atom] > counts->ordered_log2[class])
+            run_bytes += (uint64_t)_mm512_reduce_add_epi64(_mm512_add_epi64(taken.padded[0], taken.padded[1]));
+            run_pieces += (uint64_t)__builtin_popcount(taken.in_file);
+        }
+        for (AtomId atom = taken.taken ? block_end : block; atom < block_end; atom += 1)
+        {
+            const uint8_t class = class_of[atom];
+            const uint64_t size = size_of[atom];
+            const uint32_t log2 = executable_alignment_log2(class, alignment_of[atom], size, dynamic);
+            // Bounded before its padding is added, which could wrap: up to 2^32 atoms of 2 GB each sum to at most 2^63.
+            if (log2 == BUSTER_EXECUTABLE_ALIGNMENTS || size > BUSTER_EXECUTABLE_MAX_ATOM_BYTES)
             {
-                counts->ordered_log2[class] = alignment_of[atom];
+                executable_lane_fail(error, EXECUTABLE_ERROR_LAYOUT, atom, 0, 0);
+            }
+            else
+            {
+                const uint32_t bucket = executable_bucket(class, log2);
+                if (bucket != run)
+                {
+                    counts->bytes[run] += run_bytes;
+                    counts->pieces[run] += run_pieces;
+                    run = bucket;
+                    run_bytes = 0;
+                    run_pieces = 0;
+                }
+                run_bytes += executable_align(size, 1ull << log2);
+                run_pieces += executable_in_file(class, size) ? 1 : 0;
+                if (executable_class_is_ordered(class, dynamic) && alignment_of[atom] > counts->ordered_log2[class])
+                {
+                    counts->ordered_log2[class] = alignment_of[atom];
+                }
             }
         }
     }
@@ -3314,41 +3509,84 @@ static void executable_place(Link* link, ExecutableShared* shared, const Executa
     uint64_t run_address = addresses[0];
     uint64_t run_piece = pieces[0];
     const Range64 atom_range = lane_range(atoms->count - 1);
-    for (AtomId atom = (AtomId)atom_range.begin + 1; atom < atom_range.end + 1; atom += 1)
+    const AtomId atom_end = (AtomId)atom_range.end + 1;
+    // A block of 16 that executable_atom_block takes, whose atoms' bytes are either all in the file or none, is placed
+    // in vectors: each atom's address is the run's plus the padded sizes before it (prefix sums), and its piece's file
+    // offset that address's place in the block's section. Another block (or with `exact`, every one) goes one atom at a
+    // time.
+    const __m512i lane_ids = _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 6, 7);
+    for (AtomId block = (AtomId)atom_range.begin + 1; block < atom_end; block += 16)
     {
-        const uint8_t class = class_of[atom];
-        const uint64_t size = size_of[atom];
-        const uint32_t log2 = executable_alignment_log2(class, alignment_of[atom], size, layout->dynamic);
-        const uint32_t bucket = executable_bucket(class, log2);
-        if (bucket != run)
+        const AtomId block_end = atom_end - block > 16 ? block + 16 : atom_end;
+        const __mmask16 lanes = executable_block_lanes(block, atom_end);
+        ExecutableAtomBlock taken = shared->exact ? (ExecutableAtomBlock){ .taken = false } : executable_atom_block(atoms, block, lanes);
+        taken.taken = taken.taken && (taken.in_file == lanes || taken.in_file == 0);
+        if (taken.taken)
         {
-            addresses[run] = run_address;
-            pieces[run] = run_piece;
-            run = bucket;
-            run_address = addresses[bucket];
-            run_piece = pieces[bucket];
+            if (taken.bucket != run)
+            {
+                addresses[run] = run_address;
+                pieces[run] = run_piece;
+                run = taken.bucket;
+                run_address = addresses[run];
+                run_piece = pieces[run];
+            }
+            const uint8_t section = executable_class_section((uint8_t)(taken.bucket / BUSTER_EXECUTABLE_ALIGNMENTS + 1), layout->dynamic);
+            const uint64_t delta = layout->sections[section].offset - layout->sections[section].address;
+            const uint32_t count = block_end - block;
+            for (uint32_t half = 0; half < 2 && 8 * half < count; half += 1)
+            {
+                const __mmask8 half_lanes = (__mmask8)(lanes >> (8 * half));
+                const __m512i inclusive = executable_scan64(taken.padded[half]);
+                const __m512i address = _mm512_sub_epi64(_mm512_add_epi64(_mm512_set1_epi64((long long)run_address), inclusive), taken.padded[half]);
+                _mm512_mask_storeu_epi64(address_of + block + 8 * half, half_lanes, address);
+                if (taken.in_file != 0)
+                {
+                    const __m512i bytes = _mm512_maskz_loadu_epi64(half_lanes, bytes_of + block + 8 * half);
+                    const __m512i ids = _mm512_add_epi64(_mm512_set1_epi64((long long)(block + 8 * half)), lane_ids);
+                    const uint32_t records = count - 8 * half >= 8 ? 8 : count - 8 * half;
+                    executable_store_pieces(placed + run_piece, _mm512_add_epi64(address, _mm512_set1_epi64((long long)delta)), taken.sizes[half], bytes, ids, records);
+                    run_piece += records;
+                }
+                run_address += executable_last64(inclusive);
+            }
         }
-        address_of[atom] = run_address;
-        // An ordered class's atoms follow one another without padding, so each must land on a multiple of its alignment
-        // (the others' buckets keep theirs); .eh_frame's records need only 4 bytes whatever their atoms' alignment, as lld
-        // writes them one after another.
-        const uint32_t required = class == BUSTER_LINK_CLASS_EH_FRAME && alignment_of[atom] > 2 ? 2 : alignment_of[atom];
-        if (executable_class_is_ordered(class, layout->dynamic) && (run_address & ((1ull << required) - 1)) != 0)
+        for (AtomId atom = taken.taken ? block_end : block; atom < block_end; atom += 1)
         {
-            executable_lane_fail(error, EXECUTABLE_ERROR_LAYOUT, atom, 0, 0);
+            const uint8_t class = class_of[atom];
+            const uint64_t size = size_of[atom];
+            const uint32_t log2 = executable_alignment_log2(class, alignment_of[atom], size, layout->dynamic);
+            const uint32_t bucket = executable_bucket(class, log2);
+            if (bucket != run)
+            {
+                addresses[run] = run_address;
+                pieces[run] = run_piece;
+                run = bucket;
+                run_address = addresses[bucket];
+                run_piece = pieces[bucket];
+            }
+            address_of[atom] = run_address;
+            // An ordered class's atoms follow one another without padding, so each must land on a multiple of its
+            // alignment (the others' buckets keep theirs); .eh_frame's records need only 4 bytes whatever their atoms'
+            // alignment, as lld writes them one after another.
+            const uint32_t required = class == BUSTER_LINK_CLASS_EH_FRAME && alignment_of[atom] > 2 ? 2 : alignment_of[atom];
+            if (executable_class_is_ordered(class, layout->dynamic) && (run_address & ((1ull << required) - 1)) != 0)
+            {
+                executable_lane_fail(error, EXECUTABLE_ERROR_LAYOUT, atom, 0, 0);
+            }
+            if (executable_in_file(class, size))
+            {
+                const uint8_t section = executable_class_section(class, layout->dynamic);
+                placed[run_piece] = (ExecutablePiece){
+                    .offset = executable_file_offset(layout, section, run_address),
+                    .size = size,
+                    .bytes = bytes_of[atom],
+                    .atom = atom,
+                };
+                run_piece += 1;
+            }
+            run_address += executable_align(size, 1ull << log2);
         }
-        if (executable_in_file(class, size))
-        {
-            const uint8_t section = executable_class_section(class, layout->dynamic);
-            placed[run_piece] = (ExecutablePiece){
-                .offset = executable_file_offset(layout, section, run_address),
-                .size = size,
-                .bytes = bytes_of[atom],
-                .atom = atom,
-            };
-            run_piece += 1;
-        }
-        run_address += executable_align(size, 1ull << log2);
     }
 
     uint32_t slot = 1;
@@ -3422,27 +3660,70 @@ static void executable_resolve(Link* link, ExecutableShared* shared, const Execu
     uint8_t* got = shared->got;
     const uint64_t base = layout->base;
     const Range64 symbol_range = lane_range(symbols->count - 1);
-    for (SymbolId symbol = (SymbolId)symbol_range.begin + 1; symbol < symbol_range.end + 1; symbol += 1)
+    const SymbolId symbol_end = (SymbolId)symbol_range.end + 1;
+    // 16 symbols at a time whose atoms are all defined and not thread-local, as most are: their classes and addresses
+    // by gathers, their references and GOT slots in vectors, and a slot's value written one at a time. The class gather
+    // reads 4 bytes, so an atom must be 3 below the end of the class column (and its id fit a gather's signed index).
+    // Another block (or with `exact`, every one) goes one symbol at a time.
+    const uint64_t gather_limit = link->atoms.capacity > 3 ? link->atoms.capacity - 3 : 0;
+    const __m512i limit = _mm512_set1_epi32((int)(gather_limit < INT32_MAX ? gather_limit : INT32_MAX));
+    for (SymbolId block = (SymbolId)symbol_range.begin + 1; block < symbol_end; block += 16)
     {
-        const AtomId atom = atom_of[symbol];
-        const bool plain = atom != 0 && !link_class_is_tls(class_of[atom]);
-        const bool symbolic = !plain && dynamic && executable_bit(shared->dynamic_bits, symbol);
-        uint32_t reference = plain ? (uint32_t)(address_of[atom] + value_of[symbol]) : 0;
-        const ExecutableError failure = plain || symbolic ? EXECUTABLE_ERROR_NONE : executable_reference(link, layout, symbol, &reference);
-        if (failure != EXECUTABLE_ERROR_NONE)
+        const SymbolId block_end = symbol_end - block > 16 ? block + 16 : symbol_end;
+        const __mmask16 lanes = executable_block_lanes(block, symbol_end);
+        bool taken = false;
+        if (!shared->exact)
         {
-            executable_lane_fail(error, failure, 0, symbol, 0);
-        }
-        if (!symbolic)
-        {
-            reference_of[symbol] = reference;
-            const uint32_t slot = slot_of[symbol];
-            if (slot != 0)
+            const __m512i atoms = _mm512_maskz_loadu_epi32(lanes, atom_of + block);
+            const __mmask16 defined = _mm512_mask_cmpneq_epi32_mask(lanes, atoms, _mm512_setzero_si512()) & _mm512_mask_cmplt_epu32_mask(lanes, atoms, limit);
+            const __m512i classes = _mm512_and_si512(_mm512_mask_i32gather_epi32(_mm512_setzero_si512(), defined, atoms, class_of, 1), _mm512_set1_epi32(0xff));
+            const __mmask16 tls = _mm512_mask_cmpeq_epi32_mask(defined, classes, _mm512_set1_epi32(BUSTER_LINK_CLASS_TDATA)) |
+                                  _mm512_mask_cmpeq_epi32_mask(defined, classes, _mm512_set1_epi32(BUSTER_LINK_CLASS_TBSS));
+            taken = defined == lanes && tls == 0;
+            if (taken)
             {
-                // A TLS symbol's slot holds its offset from the thread pointer (TPOFF64), another's its address: in a
-                // dynamic PIE, the address at base 0, which a RELATIVE relocation's addend repeats.
-                const int64_t value = !plain && executable_is_tls(link, symbol) ? (int32_t)reference : (int64_t)base + (int32_t)reference;
-                memcpy(got + 8 * (uint64_t)slot, &value, sizeof(value));
+                __m256i references[2];
+                for (uint32_t half = 0; half < 2; half += 1)
+                {
+                    const __mmask8 half_lanes = (__mmask8)(lanes >> (8 * half));
+                    const __m256i half_atoms = half == 0 ? _mm512_castsi512_si256(atoms) : _mm512_extracti64x4_epi64(atoms, 1);
+                    const __m512i addresses = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), half_lanes, half_atoms, address_of, 8);
+                    const __m512i values = _mm512_maskz_loadu_epi64(half_lanes, value_of + block + 8 * half);
+                    references[half] = _mm512_cvtepi64_epi32(_mm512_add_epi64(addresses, values));
+                }
+                const __m512i reference = _mm512_inserti64x4(_mm512_castsi256_si512(references[0]), references[1], 1);
+                _mm512_mask_storeu_epi32(reference_of + block, lanes, reference);
+                const __mmask16 slotted = _mm512_mask_test_epi32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, slot_of + block), _mm512_set1_epi32(-1));
+                for (uint32_t left = slotted; left != 0; left &= left - 1)
+                {
+                    const SymbolId symbol = block + (SymbolId)__builtin_ctz(left);
+                    const int64_t value = (int64_t)base + (int32_t)reference_of[symbol];
+                    memcpy(got + 8 * (uint64_t)slot_of[symbol], &value, sizeof(value));
+                }
+            }
+        }
+        for (SymbolId symbol = taken ? block_end : block; symbol < block_end; symbol += 1)
+        {
+            const AtomId atom = atom_of[symbol];
+            const bool plain = atom != 0 && !link_class_is_tls(class_of[atom]);
+            const bool symbolic = !plain && dynamic && executable_bit(shared->dynamic_bits, symbol);
+            uint32_t reference = plain ? (uint32_t)(address_of[atom] + value_of[symbol]) : 0;
+            const ExecutableError failure = plain || symbolic ? EXECUTABLE_ERROR_NONE : executable_reference(link, layout, symbol, &reference);
+            if (failure != EXECUTABLE_ERROR_NONE)
+            {
+                executable_lane_fail(error, failure, 0, symbol, 0);
+            }
+            if (!symbolic)
+            {
+                reference_of[symbol] = reference;
+                const uint32_t slot = slot_of[symbol];
+                if (slot != 0)
+                {
+                    // A TLS symbol's slot holds its offset from the thread pointer (TPOFF64), another's its address: in
+                    // a dynamic PIE, the address at base 0, which a RELATIVE relocation's addend repeats.
+                    const int64_t value = !plain && executable_is_tls(link, symbol) ? (int32_t)reference : (int64_t)base + (int32_t)reference;
+                    memcpy(got + 8 * (uint64_t)slot, &value, sizeof(value));
+                }
             }
         }
     }

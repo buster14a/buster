@@ -1230,6 +1230,15 @@ measurements are informational.
   first of two atoms the header can't index, in different lanes' ranges,
   refused alike by every lane count, and one before a symbol defined nowhere,
   refused for the atom: by the count, before the layout;
+- blocks: 24 random links for the vector passes over blocks of 16 atoms (the
+  count's and the placement's) and 16 symbols (their references): atoms of
+  every class a static executable takes, in runs of random lengths so that
+  blocks change bucket at every lane, of sizes from 0, zero-fill ones among
+  them, aligned up to a page; symbols in half of them, thread-local or not,
+  weak ones defined nowhere, GOT slots for some, and a table pointing at
+  every one; every other link's atom table no larger than its atoms, past the
+  class gather's limit. Each is written by every lane count and by the exact
+  twins into the same file, which runs;
 - the patch kernel: the fast path against the checked one, on random fixups
   of every kind with wide addends, at every count from 0 to 199 from four
   starts, with the kind column ending at a `PROT_NONE` page.

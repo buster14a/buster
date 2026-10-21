@@ -78,9 +78,9 @@ programs by each linker, as the appendix measured them ("The whole link"):
 
 | Program (output) | Direct path, 1 lane | mold, 1 thread / 15 threads | wild, 1 / 15 | Factor (vs wild at 15 threads) |
 | --- | ---: | ---: | ---: | ---: |
-| 1 worker (7.2 KB) | 14.5 µs | 2.52 / 5.52 ms | 1.34 / 2.54 ms | 175× |
-| 2,000 workers (513 KB) | 92.8 µs | 3.29 / 6.63 ms | 2.51 / 2.92 ms | 31× |
-| 102,400 workers (44 MB) | 7.33 ms | 99.9 / 37.0 ms | 100 / 24.8 ms | 3.4× |
+| 1 worker (7.2 KB) | 14.6 µs | 2.46 / 5.57 ms | 1.35 / 2.58 ms | 176× |
+| 2,000 workers (513 KB) | 75.0 µs | 3.29 / 6.67 ms | 2.50 / 2.91 ms | 39× |
+| 102,400 workers (44 MB) | 6.65 ms | 99.4 / 36.9 ms | 99.9 / 25.2 ms | 3.8× |
 
 On these programs mold, wild and lld take what they took on hello world, tcc
 and synth, within 5% with their own threads. The writer's phases are in "The
@@ -1175,6 +1175,22 @@ Exact layout is a recurrence (x′ = align_up(x, a) + s), not a prefix sum of
   fragments, crt objects) keep their order, and their few atoms use the
   recurrence. An over-aligned function, past 16, goes first in `.text`.
 
+The count and the placement go through the atoms 16 at a time
+(`executable_atom_block`): a block of one bucket, as consecutive atoms mostly
+are, of the classes whose alignment is their own (a function's raised to 16),
+takes vectors. The count adds its sizes, padded to their alignment, and its
+pieces; the placement scans them into its atoms' addresses, and when its
+atoms are all in the file, or none, interleaves their pieces' records with
+permutes, two to a vector. A block with a bucket's change, or an atom of the
+classes that keep id order or are entries, goes one atom at a time, as the
+exact twins do every block, which also finds any atom the layout refuses.
+Then each symbol's reference, 16 at a time: a block whose symbols are all in
+atoms that aren't thread-local gathers their atoms' classes and addresses.
+On `benchmark-executable`'s 180,000 workers (185,457 atoms and 182,728
+symbols), linked as a dynamic PIE by `benchmark-link --functions 180000` on
+one lane, this took the count from 1.51 to 1.34 ms, the layout from 0.39 to
+0.30 and the symbols from 0.54 to 0.31.
+
 Everything except `.text`, `.eh_frame`, `.eh_frame_hdr` and the symbol table
 is sized before any function is encoded:
 
@@ -1229,18 +1245,23 @@ buffer before writing it 3–65% more.
 - the addend.
 
 Then it computes S + A − P and stores 4 bytes. That is `CALL` and `PC32`,
-which most fixups are, and `executable_patch_pc32` takes every fixup of an
-atom that way. A vector compare of the kind column then finds the others, 64
-fixups at a time, and `executable_patch_other` redoes each of them over what
-the loop wrote: any kind, with addends from the side table. Neither checks
-S + A − P per fixup. The count phase finds the largest addend magnitude with a
-vector maximum, and while the base, the image and that addend stay below 2^31
-together, no `CALL` or `PC32` value can leave int32. Otherwise every fixup
-goes through `executable_patch_other`, which checks each value's range. A
-value that doesn't fit fails the link, naming the fixup, and its field is
-zeroed, so that both paths leave the same bytes. `benchmark-executable`, ns
-per fixup on CPU 2, on the synthetic cases of "SIMD" (every fixup `CALL` or
-`PC32`):
+which most fixups are. Vector compares of an atom's kinds, 64 fixups at a
+time, find whether it has any other (another kind, or an addend from the side
+table). An atom without them goes through `executable_patch_pc32`, a loop
+built for those two kinds. An atom with them goes through
+`executable_patch_mixed`, which takes each fixup once, by its kind: `CALL`
+and `PC32` as the loop does, the GOT kinds' G + A − P, `ABS64` and `TPOFF32`
+inline, and the rest through `executable_patch_other`, which takes any kind.
+Neither checks a `CALL`'s, `PC32`'s or GOT kind's value per fixup. The count
+phase finds the largest addend magnitude with a vector maximum, and while the
+base, the image and that addend stay below 2^31 together, no such value can
+leave int32: S, G and P are all in the image. `ABS64`'s 8 bytes take any
+value, and `TPOFF32`'s offset from the thread pointer, which the TLS block
+bounds and the image doesn't, is checked inline. Otherwise every fixup goes
+through `executable_patch_other`, which checks each value's range. A value
+that doesn't fit fails the link, naming the fixup, and its field is zeroed,
+so that both paths leave the same bytes. `benchmark-executable`, ns per fixup
+on CPU 2, on the synthetic cases of "SIMD" (every fixup `CALL` or `PC32`):
 
 | Kernel | 64 KB, 2,000 fixups, 10,000 targets | 1 MB, 30,000, 100,000 | 64 MB, 2 M, 1 M |
 | --- | ---: | ---: | ---: |
@@ -1250,11 +1271,34 @@ per fixup on CPU 2, on the synthetic cases of "SIMD" (every fixup `CALL` or
 
 Clang unrolls `executable_patch_pc32`'s loop eight times and leaves the
 branching one rolled; an earlier build of the same source measured the
-branching one at 0.48 ns in L1. On the generated programs, half of whose fixups are of the other kinds so
-that the tests cover every kind, the kernel takes 1.5–1.7 ns per fixup, and
-3.1 ns on the smallest program's 91: 2.16 million fixups take 3.7 ms. A
-compiled program's fixups are mostly `CALL` and `PC32`, since the direct path
-reaches the program's own symbols directly.
+branching one at 0.48 ns in L1. A compiled program's fixups are mostly `CALL`
+and `PC32`, since the direct path reaches the program's own symbols directly.
+The generated programs have the other kinds so that the tests cover every
+kind: every worker of `benchmark-executable`'s 180,000 has 13 fixups, two
+`CALL`s and five `PC32`s, then a `CALL_GOT`, a `LOAD_GOT`, two `TPOFF32`s, a
+`GOTTPOFF` and an `ABS64`, 46% of the 2.34 million. Patching them all, one
+atom after another (#212's measurements, one process, ns per fixup, with
+cycles and instructions from the counters):
+
+| Kernel | ns | Cycles | Instructions |
+| --- | ---: | ---: | ---: |
+| `executable_patch_pc32` for every fixup, then `executable_patch_other` again for the others (before #212) | 1.49–1.51 | 15.3 | 38.6 |
+| `executable_patch_other` for every fixup (the checked path) | 1.37–1.45 | 14.6 | 44.9 |
+| the loop or a branch on the kind per fixup, chosen per group of 64 | 1.38 | 14.4 | 42.2 |
+| the same, chosen per atom | 1.27–1.30 | 13.9 | 39.9 |
+| **a branch on the kind per fixup, the GOT kinds, `ABS64` and `TPOFF32` inline too (`executable_patch_mixed`'s loop), for every atom** | **0.97–0.98** | **12.1** | **31.4** |
+| a branch-free kernel, each kind's terms from a table | 2.06–2.18 | 18.2 | 54.4 |
+| 16 at a time: gathers, each kind's value under masks, scatters | 1.72–1.75 | 16.3 | 20.1 |
+| `executable_patch_pc32` alone, which leaves the others wrong: the floor | 0.88 | 11.6 | 18.4 |
+
+The branches on the kind cost almost nothing: the workers' fixups come in the
+same order, and there are 0.006 branch misses per fixup. What the slower
+kernels pay for is instructions, and the vector one for its gathers' and
+scatters' cycles (17 for a `vpscatterdd`) over atoms of 13 fixups. Checking
+every `PC32`'s range in the chosen kernel would cost 0.22 ns per fixup, more
+than the count's pass over the addends that lets it skip the checks. In
+`benchmark-executable` the kernel now takes 1.21 ns per fixup on that program
+(1.65 before), and the write's chunks 6.61 ms (7.73).
 
 **The build ID** is a tree of the chunks' hashes: each chunk is hashed while it
 is in L2, and the build ID is the hash of the chunks' hashes in chunk order.
@@ -1766,22 +1810,24 @@ instructions, which come to 44 MB of output where synth's come to 46, with
   print what the program's model predicts.
 
 Medians on the 9700X in µs, the outputs on tmpfs over the file of the run
-before (a second run gave the same within 4%):
+before (a second run gave the same within 4%), with the patch and the passes
+over atoms and symbols that #212 made faster ("Patching and writing" and
+"Layout"):
 
 | | 1 worker | 2,000 workers | 102,400 workers |
 | --- | ---: | ---: | ---: |
-| **Direct path, 1 lane** | **14.5** | **92.8** | **7,330** |
-| `runtime_open` | 9.1 | 9.4 | 11.8 |
-| `bind_begin` | 0.5 | 2.1 | 86.9 |
-| `bind_end` and `dynamic_inputs` | 0.4 | 1.0 | 36.3 |
-| `executable_write` | 4.6 | 80.3 | 7,190 |
-| Direct path, 8 lanes | 19.6 | 57.9 | 4,310 |
-| One `pwrite` of the output | 0.7 | 12.1 | 2,920 |
-| The objects (`-c`), 1 lane | 5.4 | 128 | 16,830 |
-| GNU ld | 5,430 | 9,060 | 354,000 |
-| lld, its threads / 1 | 5,890 / 4,710 | 6,920 / 5,820 | 57,300 / 99,500 |
-| mold, its threads / 1 | 5,520 / 2,520 | 6,630 / 3,290 | 37,000 / 99,900 |
-| wild, its threads / 1 | 2,540 / 1,340 | 2,920 / 2,510 | 24,800 / 100,000 |
+| **Direct path, 1 lane** | **14.6** | **75.0** | **6,650** |
+| `runtime_open` | 9.3 | 9.2 | 11.8 |
+| `bind_begin` | 0.5 | 2.1 | 86.8 |
+| `bind_end` and `dynamic_inputs` | 0.4 | 1.0 | 37.2 |
+| `executable_write` | 4.5 | 62.8 | 6,510 |
+| Direct path, 8 lanes | 19.8 | 52.3 | 4,480 |
+| One `pwrite` of the output | 0.7 | 11.9 | 2,990 |
+| The objects (`-c`), 1 lane | 5.2 | 128 | 16,530 |
+| GNU ld | 5,440 | 9,070 | 355,000 |
+| lld, its threads / 1 | 5,860 / 4,800 | 6,870 / 5,860 | 55,800 / 98,000 |
+| mold, its threads / 1 | 5,570 / 2,460 | 6,670 / 3,290 | 36,900 / 99,400 |
+| wild, its threads / 1 | 2,580 / 1,350 | 2,910 / 2,500 | 25,200 / 99,900 |
 
 Its work and theirs, for the program of synth's shape. The direct path's
 page faults and memory are its warm-ups' (`getrusage`, and the growth of the
@@ -1808,16 +1854,16 @@ runtime's files, `libc.so.6`'s 3,170 definitions among them.
   and 29% less at synth's, and on this program the three take within 1% of
   each other (`perf stat`: 1.16 to 1.66 billion instructions in 97 to 102 ms
   of task-clock).
-- **Small links are the snapshot's.** One worker's link takes 14.5 µs, 9.1 of
+- **Small links are the snapshot's.** One worker's link takes 14.6 µs, 9.3 of
   them `runtime_open`, of which 4.1 are its probes' `stat`s ("The runtime
-  snapshot"), and 4.6 the write. More lanes cost a small link more than they
+  snapshot"), and 4.5 the write. More lanes cost a small link more than they
   save.
 - **Large links are the write's.** The program of synth's shape spends
-  7.19 ms of 7.33 writing, 5.69 of them on its chunks, patching 1.33 million
+  6.51 ms of 6.65 writing, 5.31 of them on its chunks, patching 1.33 million
   fixups, hashing and writing 44 MB, where one `pwrite` of the output takes
-  2.92. Eight lanes take 4.31 ms, 1.5 times that floor.
+  2.99. Eight lanes take 4.48 ms, 1.5 times that floor.
 - **The `-c` path pays before any linker starts.** Writing the objects takes
-  16.8 ms on one lane, 2.3 times the direct path's whole link, into 2.2 times
+  16.5 ms on one lane, 2.5 times the direct path's whole link, into 2.2 times
   the output's bytes.
 - **The outputs hold what each linker writes.** The linkers' have a symbol
   table, which the direct path doesn't write yet, and other sections besides:
@@ -1828,9 +1874,11 @@ runtime's files, `libc.so.6`'s 3,170 definitions among them.
 - **A program of `benchmark-executable`'s 180,000 workers** (45.7 MB, with
   2.34 million fixups: 1.8 times this program's, half of them kinds that the
   tests need and a compiled program rarely has, as "Patching and writing"
-  says) takes 10.5 ms on one lane and 5.8 on eight. GNU ld takes 825 ms on
-  it, lld 114 and 175 (its threads and one), mold 58.5 and 173, and wild
-  39.3 and 173.
+  says) takes 9.14 ms on one lane and 5.81 on eight, where it took 10.4 and
+  5.8 before #212: one lane's count, layout and symbols went from 1.51, 0.39
+  and 0.54 ms to 1.34, 0.30 and 0.31, and its chunks from 7.53 to 6.78, one
+  `pwrite` of the output taking 3.05. GNU ld takes 825 ms on it, lld 114 and
+  175 (its threads and one), mold 58.5 and 173, and wild 39.3 and 173.
 
 How the counts are taken: a process spawned by the benchmark itself would
 have the benchmark's peak resident set as its own, which Linux carries over to
@@ -2633,7 +2681,7 @@ Where the decisions stand:
 | Work | Bound by | Decision |
 | --- | --- | --- |
 | Encoding instructions | dependency chains (see the encoder document) | AVX-512 (done: 0.64 ns per instruction) |
-| Patching fixups | loads and stores | scalar, 32-bit targets (done: `executable_patch_pc32`, measured above) |
+| Patching fixups | loads and stores | scalar, 32-bit targets (done: `executable_patch_pc32` and `executable_patch_mixed`, measured above and, on a mix of kinds, in "Patching and writing": 0.97 ns against 1.72 for gathers and scatters) |
 | Writing ELF records (`Rela`, `Sym`, dynamic tables) | stores | scalar (measured: ties the `vpermt2q` transpose) |
 | Reading ELF records (objects, archives, `.dynsym`) | shuffles, compression and scalar joins | AVX-512 with an exact path (done: 2.1 against 22 ns per record; "Step 5's phases, data-parallel") |
 | Copying chunks | bandwidth | `memcpy`; the chunks stay in L2 |
@@ -2641,7 +2689,7 @@ Where the decisions stand:
 | Splitting strings at NULs | arithmetic | the lexer's bitmask-to-positions method |
 | Decoding and classifying relocations | shuffles and tables | `vpermt2q` transpose, `vpermb` classification, `vpcompressd` lists |
 | Bitsets (liveness, GOT needs) | bandwidth | 512-bit OR, `vpopcntq` for counts |
-| Prefix sums for layout | latency | scalar until a profile says otherwise; the counting sorts' are vectors (`import_exclusive_scan`) |
+| Prefix sums for layout | latency | atoms 16 at a time, a run of one bucket's padded sizes summed or scanned in vectors, the rest scalar (done: "Layout"); the counting sorts' are vectors (`import_exclusive_scan`) |
 | Build ID | arithmetic | AES rounds on each chunk while it is in L2 (done: 260 GB/s, as fast as reading it; "Patching and writing") |
 | Probing hash tables | memory latency | scalar loads with software prefetch: gathers measured no faster than scalar loads in the patch kernel |
 | Matching a program's names against the runtime's (binding) | the index's cache lines, for lookups that mostly miss | a blocked Bloom filter in L1 tested eight names at a time by two gathers, the index only behind it (done: 0.85 against 6.8 ns per global symbol; "Step 5's phases, data-parallel") |
