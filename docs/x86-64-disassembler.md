@@ -3,7 +3,8 @@
 `src/buster/compiler/x86_64_disassembler.c` decodes bounded raw machine-code
 slices into the encoder's semantic instruction records and retains each input
 instruction's offset and encoded length. Its AVX-512 path and scalar reference
-share the form catalogue and operand validation. It does not execute input.
+share the form catalogue; the scalar reference retains the full operand validator
+as an independent check on optimized validation. It does not execute input.
 
 ```sh
 ./build/compiler disassemble input.text
@@ -40,12 +41,19 @@ Clang's long alignment NOPs: repeated `66` and ignored `2e` prefixes before
 `0f 1f`, with a total instruction length of at most 15 bytes. A failure can therefore mean
 valid machine code outside this supported subset. No byte-skipping recovery is
 attempted; `consumed` identifies the first undecodable instruction.
+Ignored W/L settings without a matching catalogue row are also outside the subset.
+An incomplete supported encoding is `TRUNCATED`; required bytes beyond x86's
+15-byte limit are `UNSUPPORTED`. Output exhaustion returns `OUTPUT_FULL` after
+the complete prefix of records. Null pointers for nonempty slices, a source larger
+than `UINT32_MAX` or decoding before initialization return `BAD_ARGUMENT`.
 
 The decoder accepts non-shortest disp32 addressing and VEX3 encodings. It
 validates decoded operands without using byte-for-byte re-encoding as a validity
 test. `X86Decoded.length` is the actual input length; canonical re-encoding may
 have another length. The instruction record carries semantic displacement and
 immediate fields, not a promise to reproduce the original encoding choice.
+`address32` selects the additional address-size encoder mode; catalogue forms
+that already contain `67` carry that fact in their form number instead.
 
 The command accepts raw bytes, not ELF containers. To examine code from an
 object, first extract the intended section. Symbols, relocations, embedded data,
@@ -72,30 +80,48 @@ a claim that the assembly frontend implements every printed catalogue form.
 Initialization groups catalogue rows by encoding family, opcode map and opcode.
 Each bucket occupies contiguous arrays of 64-bit signature keys and masks and
 16-bit form numbers. Buckets are padded to eight entries with impossible keys.
-The keys include mandatory legacy prefixes, W, vector length and EVEX.b;
-embedded-rounding forms mask the length bits used for rounding. A candidate
-match must still pass fixed-opcode, ModRM and full operand validation.
+The keys include mandatory legacy prefixes, W, vector length, EVEX.b, fixed
+post-opcode bytes, ModRM `/digit` and memory/register admission where applicable.
+Embedded-rounding forms mask the length bits used for rounding. Missing trailing
+bytes are excluded from signature comparison so an incomplete candidate still
+receives the correct truncation result.
 
 The vector path classifies 64 input bytes at once using two nibble-table byte
 shuffles and a mask intersection. It reuses the prefix mask across instructions
 and matches eight candidate signatures in one vector comparison. Scalar lookup
 walks the same bucket and exits on the first complete match. Both paths produce
 the same records, counts, status and consumed offset, including malformed input.
+For ordinary operand classes, initialization packs register/decorator masks and
+memory admission into a small descriptor. Parsing establishes consistent addressing
+modes, base/index bounds, immediate widths and high-byte/REX exclusion; the compact
+checks validate the remaining constraints. Special classes, VSIB, grouped registers
+and other exceptional relationships retain the full validator. The benchmark's
+`compact` control uses these same checks with scalar classification and matching,
+separating validation specialization from SIMD's contribution.
 
-The experimental `batched` path computes speculative instruction lengths at
+The default `batched` AVX-512 path computes speculative instruction lengths at
 64 byte positions in parallel. A 256-byte opcode metadata table is derived
 from unprefixed one-byte catalogue forms whose layouts agree. Two 128-byte
 in-register lookups select ModRM/immediate metadata; byte masks derive optional
 REX, SIB and displacement lengths. A short dependency walk chooses up to sixteen
-reachable starts, after which the ordinary decoder validates every record. An
-unknown hint or a disagreement returns to the actual decoded boundary. Hints
+reachable starts. An independently derived direct-admission table selects only
+unambiguous ordinary legacy forms. `VPERMB` extracts fields at those starts;
+registers, SIB modes, signed displacements and immediates are constructed in lanes.
+Scalar loads select table entries and scalar stores publish the 24-byte records;
+costly gather/scatter instructions are avoided. Unknown or ambiguous rows use the
+ordinary matcher, and a disagreement resumes at the actual decoded boundary.
+The same classification/length window is reused across fallbacks. Hints alone
 never authorize an unchecked read, record or skipped input byte.
 
 Every vector source load is masked to the logical slice, including overlapping
 windows and zero-length tails. Neither input padding nor readable bytes after
 the slice are required. Output stores publish one complete record at a time
 within capacity. Initialization must finish before concurrent readers begin;
-the tables are read-only thereafter and the decode calls allocate nothing.
+the public initializer also initializes the encoder's validation prerequisites.
+Tables are read-only thereafter and decode calls allocate nothing. Source and
+output record storage must not overlap; in-place expansion is unsupported.
+Formatting accepts a successfully decoded record and a separate bounded output
+buffer, returns its NUL-terminated text length, or `-1` when capacity is insufficient.
 
 The design follows uops.info's measured Zen 5 costs:
 [VPSHUFB](https://uops.info/html-instr/VPSHUFB_ZMM_ZMM_ZMM.html#ZEN5) is one
@@ -113,7 +139,8 @@ explain candidates; actual 9700X measurements select the implementation.
 ## Validation and measurement
 
 Tests cover the supported catalogue with both address sizes, random encoded
-instructions, random bytes, all 64 alignments of independent semantic fixtures,
+instructions, 4,096 randomized dense ordinary instruction streams, random bytes,
+all 64 alignments of independent semantic fixtures,
 truncation, bounded formatting and input/output guard pages. The fixtures include
 non-shortest displacements and VEX prefixes, high EVEX registers, masks, signed
 relative targets and immediates, broadcasts and rounding. GNU objdump supplies
@@ -131,7 +158,9 @@ fails on incomplete coverage instead of timing only a supported prefix.
 Each result is a median of 21 interleaved passes with retained batches of at
 least 2 ms, reporting ns, hardware cycles and instructions per instruction
 (per byte for classification). The min/max are observed samples, not confidence
-intervals. `--only scalar|avx512|batched` isolates an implementation.
+intervals. `--only scalar|compact|avx512|batched` isolates an implementation.
+`--phase decode|classify|format` isolates work for profiling; `--iterations N`
+fixes the number of stream decodes per sample instead of calibrating to 2 ms.
 `--after-scalar MS` runs the scalar decoder as warm work before each sample;
 this is a transition-sensitive burst measurement, distinct from sustained
 back-to-back runs. Hardware counters are zero when unavailable. Initialization,

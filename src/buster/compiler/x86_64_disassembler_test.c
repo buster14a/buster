@@ -36,7 +36,7 @@ static bool x86_decode_test_process(char* const* arguments, const char* output)
     return success;
 }
 
-static bool x86_decode_test_mnemonic(const char* expected, const char* actual)
+static bool x86_decode_test_mnemonic(const char* expected, int32_t immediate, const char* actual)
 {
     // GNU's conventional aliases; the instruction catalogue contains the same semantic names.
     static const char* const aliases[][2] =
@@ -77,15 +77,47 @@ static bool x86_decode_test_mnemonic(const char* expected, const char* actual)
         {"outsb", "outs"},
         {"outsw", "outs"},
         {"outsd", "outs"},
+        {"cmpnbxadd", "cmpaexadd"},
+        {"cmpzxadd", "cmpexadd"},
+        {"cmpnzxadd", "cmpnexadd"},
+        {"cmpnbexadd", "cmpaxadd"},
+        {"cmpnlxadd", "cmpgexadd"},
+        {"cmpnlexadd", "cmpgxadd"},
     };
     const bool word_relative = strncmp(expected, "data16 ", 7) == 0;
     const char* last = strrchr(expected, ' ');
     expected = last != 0 ? last + 1 : expected;
-    bool match = false;
-    for (uint32_t alias = 0; alias <= BUSTER_ARRAY_LENGTH(aliases) && !match; alias += 1)
+    static const char* const float_conditions[32] =
     {
-        const char* name = alias == 0 ? expected : strcmp(expected, aliases[alias - 1][0]) == 0 ? aliases[alias - 1][1] : 0;
-        if (name != 0)
+        "eq_oq", "lt_os", "le_os", "unord_q", "neq_uq", "nlt_us", "nle_us", "ord_q",
+        "eq_uq", "nge_us", "ngt_us", "false_oq", "neq_oq", "ge_os", "gt_os", "true_uq",
+        "eq_os", "lt_oq", "le_oq", "unord_s", "neq_us", "nlt_uq", "nle_uq", "ord_s",
+        "eq_us", "nge_uq", "ngt_uq", "false_os", "neq_os", "ge_oq", "gt_oq", "true_us",
+    };
+    static const char* const short_conditions[16] = {"eq", "lt", "le", "unord", "neq", "nlt", "nle", "ord", "eq_uq", "nge", "ngt", "false", "neq_oq", "ge", "gt", "true"};
+    static const char* const integer_conditions[8] = {"eq", "lt", "le", "false", "neq", "nlt", "nle", "true"};
+    static const char* const compares[] = {"cmpps", "cmppd", "cmpss", "cmpsd", "vcmpps", "vcmppd", "vcmpss", "vcmpsd", "vcmpph", "vcmpsh", "vcmpbf16", "vpcmpb", "vpcmpw", "vpcmpd", "vpcmpq", "vpcmpub", "vpcmpuw", "vpcmpud", "vpcmpuq"};
+    char predicate[2][64] = {{0}};
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(compares); i += 1)
+    {
+        const bool integer = i >= 11;
+        const uint32_t prefix = integer ? 5 : i < 4 ? 3 : 4;
+        const uint32_t limit = integer || i < 4 ? 8 : 32;
+        if (strcmp(expected, compares[i]) == 0 && immediate >= 0 && (uint32_t)immediate < limit)
+        {
+            const char* condition = integer ? integer_conditions[immediate] : float_conditions[immediate];
+            snprintf(predicate[0], sizeof(predicate[0]), "%.*s%s%s", (int)prefix, expected, condition, expected + prefix);
+            if (!integer && immediate < 16)
+            {
+                snprintf(predicate[1], sizeof(predicate[1]), "%.*s%s%s", (int)prefix, expected, short_conditions[immediate], expected + prefix);
+            }
+        }
+    }
+    bool match = false;
+    for (uint32_t alias = 0; alias <= BUSTER_ARRAY_LENGTH(aliases) + 2 && !match; alias += 1)
+    {
+        const char* name = alias == 0 ? expected : alias > BUSTER_ARRAY_LENGTH(aliases) ? predicate[alias - BUSTER_ARRAY_LENGTH(aliases) - 1] : strcmp(expected, aliases[alias - 1][0]) == 0 ? aliases[alias - 1][1] : 0;
+        if (name != 0 && *name != 0)
         {
             const uint64_t length = strlen(name);
             const char* at = actual;
@@ -96,7 +128,8 @@ static bool x86_decode_test_mnemonic(const char* expected, const char* actual)
                     at += 1;
                 }
                 const char* end = at;
-                while (*end != 0 && *end != ' ' && *end != '\t' && *end != '\n')
+                // GNU annotates obsolete x87 instructions as, for example, fsetpm(287 only).
+                while (*end != 0 && *end != ' ' && *end != '\t' && *end != '\n' && *end != '(')
                 {
                     end += 1;
                 }
@@ -272,9 +305,9 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
                 cursor += 2;
             }
             X86Decoded decoded[16];
-            const X86DecodeResult result = offset < size ? x86_disassemble(bytes + offset, length, decoded, BUSTER_ARRAY_LENGTH(decoded)) : (X86DecodeResult){.status = X86_DECODE_BAD_ARGUMENT};
+            const X86DecodeResult result = offset < size && length <= size - offset ? x86_disassemble(bytes + offset, length, decoded, BUSTER_ARRAY_LENGTH(decoded)) : (X86DecodeResult){.status = X86_DECODE_BAD_ARGUMENT};
             valid = seen < count && offset == expected[seen].offset && length == expected[seen].length && result.status == X86_DECODE_OK && result.count == 1 && result.consumed == length;
-            valid = valid && x86_decode_test_mnemonic(x86_form_description(decoded[0].instruction.form)->mnemonic, cursor);
+            valid = valid && x86_decode_test_mnemonic(x86_form_description(decoded[0].instruction.form)->mnemonic, decoded[0].instruction.immediate, cursor);
             if (!valid)
             {
                 fprintf(stderr, "objdump oracle mismatch at instruction %u: %s", seen, line);
@@ -320,9 +353,9 @@ static bool x86_decode_test_equal(const uint8_t* bytes, uint32_t size, bool verb
     memset(vectorized, 0xa5, sizeof(vectorized));
     memset(scalar, 0xa5, sizeof(scalar));
     memset(batched, 0xa5, sizeof(batched));
-    const X86DecodeResult a = x86_disassemble(bytes, size, vectorized, BUSTER_ARRAY_LENGTH(vectorized));
+    const X86DecodeResult a = x86_disassemble_impl(bytes, size, vectorized, BUSTER_ARRAY_LENGTH(vectorized), true, true);
     const X86DecodeResult b = x86_disassemble_scalar(bytes, size, scalar, BUSTER_ARRAY_LENGTH(scalar));
-    const X86DecodeResult c = x86_disassemble_batched(bytes, size, batched, BUSTER_ARRAY_LENGTH(batched));
+    const X86DecodeResult c = x86_disassemble(bytes, size, batched, BUSTER_ARRAY_LENGTH(batched));
     bool result = a.count == b.count && a.consumed == b.consumed && a.status == b.status && memcmp(vectorized, scalar, sizeof(scalar)) == 0;
     result = result && a.count == c.count && a.consumed == c.consumed && a.status == c.status && memcmp(vectorized, batched, sizeof(batched)) == 0;
     for (uint64_t i = 0; i < a.count && result; i += 1)
@@ -338,9 +371,73 @@ static bool x86_decode_test_equal(const uint8_t* bytes, uint32_t size, bool verb
     }
     if (!result && verbose)
     {
-        fprintf(stderr, "disassembler twins disagree: length=%u statuses=%u/%u counts=%llu/%llu\n", size, a.status, b.status, (unsigned long long)a.count, (unsigned long long)b.count);
+        fprintf(stderr, "disassembler twins disagree: length=%u statuses=%u/%u/%u counts=%llu/%llu/%llu\n", size, a.status, b.status, c.status, (unsigned long long)a.count, (unsigned long long)b.count, (unsigned long long)c.count);
     }
     return result;
+}
+
+static uint64_t x86_decode_test_simple(uint64_t seed)
+{
+    bool present[X86_FORM_COUNT] = {0};
+    uint16_t forms[X86_FORM_COUNT];
+    uint32_t form_count = 0;
+    for (uint32_t entry = 0; entry < BUSTER_ARRAY_LENGTH(x86_decode_simple); entry += 1)
+    {
+        const uint32_t metadata = x86_decode_simple[entry];
+        const uint16_t row = (uint16_t)metadata;
+        if (metadata != 0 && metadata != UINT32_MAX && x86_decode_length_table[entry >> 5] != 0 && !present[row])
+        {
+            present[row] = true;
+            forms[form_count++] = row;
+        }
+    }
+    uint64_t failures = form_count == 0;
+    uint64_t state = seed ^ 0xd73b4e29156ac08full;
+    const X86EncoderMode saved = x86_test_mode;
+    x86_test_mode = X86_ENCODER_MODE_64;
+    uint32_t streams = 0;
+    for (uint32_t batch = 0; batch < 4096 && failures == 0; batch += 1)
+    {
+        uint8_t storage[32 * 15 + 64];
+        uint8_t* bytes = storage + (batch & 63);
+        uint32_t size = 0;
+        for (uint32_t i = 0; i < 32; i += 1)
+        {
+            const uint16_t row = forms[x86_random_below(&state, form_count)];
+            const X86Instruction instruction = x86_random_instruction(&state, row, false);
+            size += encode_one(&instruction, bytes + size, X86_ENCODER_MODE_64);
+        }
+        failures += !x86_decode_test_equal(bytes, size, true);
+        // The first 64 streams exercise every byte tail at every alignment. The rest vary one tail and four
+        // mutations per stream, keeping dense eligible runs around varied bases, indices, high bytes and immediates.
+        if (batch < 64)
+        {
+            for (uint32_t length = 0; length < size; length += 1)
+            {
+                failures += !x86_decode_test_equal(bytes, length, true);
+            }
+        }
+        else
+        {
+            failures += !x86_decode_test_equal(bytes, x86_random_below(&state, size), true);
+        }
+        for (uint32_t mutation = 0; mutation < 4; mutation += 1)
+        {
+            const uint32_t at = x86_random_below(&state, size);
+            const uint8_t original = bytes[at];
+            bytes[at] ^= (uint8_t)(1u << x86_random_below(&state, 8));
+            failures += !x86_decode_test_equal(bytes, size, true);
+            bytes[at] = original;
+        }
+        if (failures != 0)
+        {
+            fprintf(stderr, "ordinary lane stream failed: seed=%llu batch=%u bytes=%u\n", (unsigned long long)seed, batch, size);
+        }
+        streams += 1;
+    }
+    x86_test_mode = saved;
+    printf("disassembler lane streams: %u streams of 32 instructions, %u forms, failures=%llu\n", streams, form_count, (unsigned long long)failures);
+    return failures;
 }
 
 static uint64_t x86_decode_test_fixtures(void)
@@ -382,6 +479,7 @@ static uint64_t x86_decode_test_fixtures(void)
         {{0x0f, 0xb9, 0xc1}, 3, 0, 1, 0, 0, 0, 0, 0, 0, "ud1", 0, 4},
         {{0x41, 0x90}, 2, 0, 8, 0, 0, 0, 0, 0, 0, "xchg", 0, 4},
         {{0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0, 0, 0, 0, 0}, 15, 0, 0, 0, 0, BUSTER_X86_MEMORY_BASE_INDEX(0), 0, 0, 0, "nop", 0, 2},
+        {{0x62, 0xf1, 0x7c, 0x48, 0xc2, 0xca, 1}, 7, 1, 2, 0, 0, 0, 0, 0, 0, "vcmpps", 1, 64},
     };
     uint64_t failures = 0;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
@@ -563,6 +661,7 @@ static int run_x86_disassembler_tests(int argc, char** argv)
     {
         uint64_t state = seed;
         failures += x86_decode_test_fixtures();
+        failures += x86_decode_test_simple(seed);
         uint8_t bytes[128];
         for (uint32_t byte = 0; byte < 256; byte += 1)
         {
@@ -686,7 +785,7 @@ static int run_x86_disassembler_tests(int argc, char** argv)
     }
     else
     {
-        fprintf(stderr, "test-x86-disassembler [--count N] [--seed N]: invalid arguments or initialization failed\n");
+        fprintf(stderr, "test-x86-disassembler [--count N] [--seed N] [--objdump] [--file raw-binary]: invalid arguments or initialization failed\n");
     }
     return initialized && failures == 0 ? 0 : 1;
 }

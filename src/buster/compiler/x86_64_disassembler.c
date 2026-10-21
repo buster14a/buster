@@ -2,11 +2,13 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Bounded decoding of the encoder catalogue's 64-bit encodings, including 32-bit addresses. Initialize
-// once before sharing the read-only tables. No source padding is required. The decoder publishes complete records
+// once before sharing the read-only tables. Source and output storage must not overlap; no source padding is required.
+// The decoder publishes complete records
 // before the first error; consumed is that error's byte offset. Unsupported can include valid instructions outside
 // this catalogue. Actual input lengths are retained, including non-shortest displacements and VEX prefixes.
-// AVX-512 classifies 64 source bytes with nibble tables and matches eight form signatures at once. Prefix walking,
-// operand construction and validation are shared with the scalar twin; the benchmark measures their combined cost.
+// AVX-512 classifies 64 source bytes with nibble tables and matches eight form signatures at once. The batched path
+// derives ordinary legacy lengths and constructs up to sixteen records in lanes; complex forms use the matcher.
+// The scalar twin retains the full validator; optimized checks rely only on invariants established by raw parsing.
 // The form catalogue supplies facts, not instruction boundaries. Reserved prefix bits and all decoded operands are
 // checked before publishing a record; the decoder never executes the bytes or uses input bytes as table indices
 // without checking their range. Formatting preserves semantics but does not promise identical reassembled bytes.
@@ -776,7 +778,7 @@ static X86DecodeStatus x86_decode_candidate(const uint8_t* bytes, uint32_t size,
     return status;
 }
 
-static X86DecodeStatus x86_decode_one(const uint8_t* bytes, uint32_t size, uint64_t prefixes, bool vectorized, X86Decoded* output)
+static X86DecodeStatus x86_decode_one(const uint8_t* bytes, uint32_t size, uint64_t prefixes, bool vectorized, bool compact, X86Decoded* output)
 {
     X86DecodeHeader header;
     X86DecodeStatus status = x86_decode_header(bytes, size, prefixes, vectorized, &header);
@@ -810,7 +812,7 @@ static X86DecodeStatus x86_decode_one(const uint8_t* bytes, uint32_t size, uint6
             {
                 const uint32_t lane = (uint32_t)__builtin_ctz(matches);
                 matches &= matches - 1;
-                const X86DecodeStatus candidate = x86_decode_candidate(bytes, size, &header, x86_decode_forms[first + lane], vectorized, output);
+                const X86DecodeStatus candidate = x86_decode_candidate(bytes, size, &header, x86_decode_forms[first + lane], compact, output);
                 if (candidate != X86_DECODE_UNSUPPORTED)
                 {
                     status = candidate;
@@ -825,13 +827,13 @@ static X86DecodeStatus x86_decode_one(const uint8_t* bytes, uint32_t size, uint6
         const X86DecodeBucket bucket = x86_decode_buckets[wait.bucket];
         for (uint32_t i = 0; i < bucket.count && status != X86_DECODE_OK; i += 1)
         {
-            status = x86_decode_candidate(bytes, size, &wait, x86_decode_forms[bucket.first + i], vectorized, output);
+            status = x86_decode_candidate(bytes, size, &wait, x86_decode_forms[bucket.first + i], compact, output);
         }
     }
     return status;
 }
 
-static X86DecodeResult x86_disassemble_impl(const uint8_t* source, uint64_t size, X86Decoded* output, uint64_t capacity, bool vectorized)
+static X86DecodeResult x86_disassemble_impl(const uint8_t* source, uint64_t size, X86Decoded* output, uint64_t capacity, bool vectorized, bool compact)
 {
     X86DecodeResult result = {0};
     if (!x86_decode_initialized || size > UINT32_MAX || (size != 0 && source == 0) || (capacity != 0 && output == 0))
@@ -860,7 +862,7 @@ static X86DecodeResult x86_disassemble_impl(const uint8_t* source, uint64_t size
             }
             X86Decoded decoded = {.offset = (uint32_t)result.consumed};
             const uint64_t prefix_bits = vectorized ? prefixes >> (result.consumed - window_start) : 0;
-            result.status = x86_decode_one(source + result.consumed, available, prefix_bits, vectorized, &decoded);
+            result.status = x86_decode_one(source + result.consumed, available, prefix_bits, vectorized, compact, &decoded);
             if (result.status == X86_DECODE_OK)
             {
                 output[result.count] = decoded;
@@ -872,14 +874,9 @@ static X86DecodeResult x86_disassemble_impl(const uint8_t* source, uint64_t size
     return result;
 }
 
-static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86Decoded* output, uint64_t capacity)
-{
-    return x86_disassemble_impl(source, size, output, capacity, true);
-}
-
 static X86DecodeResult x86_disassemble_scalar(const uint8_t* source, uint64_t size, X86Decoded* output, uint64_t capacity)
 {
-    return x86_disassemble_impl(source, size, output, capacity, false);
+    return x86_disassemble_impl(source, size, output, capacity, false, false);
 }
 
 static __m512i x86_decode_extract(__m512i bytes, __m512i positions)
@@ -1020,42 +1017,61 @@ static X86DecodeResult x86_disassemble_batched(const uint8_t* source, uint64_t s
             const uint32_t span = remaining < 64 ? (uint32_t)remaining : 64;
             const uint64_t prefixes = x86_decode_classify(source + start, span);
             uint8_t lengths[64];
-            uint8_t offsets[16] = {0};
             x86_decode_lengths(source + start, remaining, lengths);
-            uint32_t count = 0;
-            uint32_t end = 0;
-            bool known = true;
-            while (known && count < 16 && count < capacity - result.count && end < span && end <= 49)
+            uint32_t offset = 0;
+            // Reuse this classification/length window across unsupported hints too. Rebuilding it after every
+            // VEX/EVEX instruction would charge the entire speculative pass to a single scalar fallback.
+            while (result.status == X86_DECODE_OK && offset < span && offset <= 49)
             {
-                offsets[count] = (uint8_t)end;
-                count += 1;
-                known = lengths[end] != 0;
-                end += lengths[end];
-            }
-            bool consistent = true;
-            const uint32_t fast = count >= 2 ? x86_decode_simple_batch(source + start, span, offsets, lengths, count, (uint32_t)start, output + result.count) : 0;
-            if (fast != 0)
-            {
-                result.count += fast;
-                result.consumed = start + offsets[fast - 1] + lengths[offsets[fast - 1]];
-            }
-            for (uint32_t i = fast; i < count && consistent && result.status == X86_DECODE_OK; i += 1)
-            {
-                const uint32_t offset = offsets[i];
-                const uint64_t available = remaining - offset;
-                X86Decoded decoded = {.offset = (uint32_t)(start + offset)};
-                result.status = x86_decode_one(source + start + offset, available < 15 ? (uint32_t)available : 15, prefixes >> offset, true, &decoded);
-                if (result.status == X86_DECODE_OK)
+                if (result.count == capacity)
                 {
-                    output[result.count] = decoded;
-                    result.count += 1;
-                    result.consumed = start + offset + decoded.length;
-                    consistent = lengths[offset] == decoded.length;
+                    result.status = X86_DECODE_OUTPUT_FULL;
+                }
+                else
+                {
+                    uint8_t offsets[16] = {0};
+                    uint32_t count = 0;
+                    uint32_t end = offset;
+                    bool known = true;
+                    while (known && count < 16 && count < capacity - result.count && end < span && end <= 49)
+                    {
+                        offsets[count] = (uint8_t)end;
+                        count += 1;
+                        known = lengths[end] != 0;
+                        end += lengths[end];
+                    }
+                    bool consistent = true;
+                    const uint32_t fast = count >= 2 ? x86_decode_simple_batch(source + start, span, offsets, lengths, count, (uint32_t)start, output + result.count) : 0;
+                    if (fast != 0)
+                    {
+                        result.count += fast;
+                        result.consumed = start + offsets[fast - 1] + lengths[offsets[fast - 1]];
+                    }
+                    for (uint32_t i = fast; i < count && consistent && result.status == X86_DECODE_OK; i += 1)
+                    {
+                        const uint32_t at = offsets[i];
+                        const uint64_t available = remaining - at;
+                        X86Decoded decoded = {.offset = (uint32_t)(start + at)};
+                        result.status = x86_decode_one(source + start + at, available < 15 ? (uint32_t)available : 15, prefixes >> at, true, true, &decoded);
+                        if (result.status == X86_DECODE_OK)
+                        {
+                            output[result.count] = decoded;
+                            result.count += 1;
+                            result.consumed = start + at + decoded.length;
+                            consistent = lengths[at] == decoded.length;
+                        }
+                    }
+                    offset = (uint32_t)(result.consumed - start);
                 }
             }
         }
     }
     return result;
+}
+
+static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86Decoded* output, uint64_t capacity)
+{
+    return x86_disassemble_batched(source, size, output, capacity);
 }
 
 typedef struct X86DisassemblyText X86DisassemblyText;
