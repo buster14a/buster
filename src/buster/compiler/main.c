@@ -283,6 +283,8 @@ int run_refinement_benchmark(int argc, char** argv);
 // The preprocessor (c_preprocessor.c) and its tests, for the -E and test-preprocessor commands.
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_preprocessor_test.c"
+#include "buster/compiler/x86_target_forms.c"
+#include "buster/compiler/x86_target_test.c"
 int run_preprocessor_benchmark(int argc, char** argv);
 
 // The link representation (atoms, symbols, fixups and names, which the object writer and the linker share), the test
@@ -415,6 +417,14 @@ int main(int argc, char** argv)
     else if (argc >= 2 && strcmp(argv[1], "test-x86-encoder") == 0)
     {
         result = run_x86_encoder_tests(argc - 2, argv + 2);
+    }
+    else if (argc >= 2 && strcmp(argv[1], "test-x86-target") == 0)
+    {
+        result = run_x86_target_tests();
+    }
+    else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
+    {
+        result = run_x86_target_benchmark(argc - 2, argv + 2);
     }
     else if (argc >= 2 && strcmp(argv[1], "benchmark-x86-encoder") == 0)
     {

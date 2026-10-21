@@ -77,6 +77,9 @@ jobs:
       - name: Test the x86-64 encoder
         run: ./build/compiler test-x86-encoder
 
+      - name: Test generated-code ISA policy
+        run: ./build/compiler test-x86-target
+
       - name: Benchmark the x86-64 encoder
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
@@ -226,7 +229,7 @@ jobs:
           ./build/compiler test-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
       - name: Benchmark the preprocessor on main.c
-        # Target options don't change the preprocessor's own predefines yet: it reads clang's for them.
+        # --predefines also supplies the macro effects of flags such as -funsigned-char.
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
