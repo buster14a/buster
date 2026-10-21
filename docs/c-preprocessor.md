@@ -422,6 +422,70 @@ instructions per input token. The common line start (the same file, no new
 line note, and a jump of up to 8 lines) is decided inline. With that, `-E`
 costs fewer instructions than before markers gave presumed positions.
 
+### Expansion history and diagnostics
+
+`c_preprocessor_history.c` implements #108. The four output columns stay the
+same: `kinds`, `flags`, `values`, and spelling `locations`. Origin handles live
+only in temporary argument, capture and expansion buffers. Completed output
+keeps sorted, maximal eight-byte `(token index, origin)` runs. Ordinary file
+copies write no history; the preceding expansion records its closing boundary.
+Buffer copies build the runs outside their token-copy loop, comparing adjacent
+origins in groups of 16 and compressing the change positions. There is an exact
+scalar builder. `pp_history_at` finds one token's origin; `pp_history_lookup`
+runs 16 binary searches together, with scalar record loads to avoid Zen 5's
+expensive gathers, and has a scalar twin.
+
+The append-only tables belong to the translation unit:
+
+- `PPExpansion` (28 bytes) snapshots the macro name and definition, the name
+  and closing token of this invocation, and both endpoints' parent origins.
+  Redefining a macro cannot change an earlier expansion's definition.
+- `PPSubstitution` (12 bytes) retains the expansion, parameter occurrence and
+  source origin for each argument run. Reusing an expanded argument retains
+  its original expansion and creates distinct substitution occurrences.
+- `PPGenerated` (24 bytes) distinguishes pastes, stringifications and builtins.
+  A paste retains both operand locations and origins; a stringification keeps
+  its raw argument's token locations and origins in `PPSource` records (eight
+  bytes each). These survive reuse of the temporary argument buffers. Builtins
+  retain their identity through the expansion record, even when `0` and `1`
+  reuse the same scratch spelling.
+
+Tagged handles distinguish these records from plain file tokens. Every table
+has a checked limit; exhausting it is a fatal diagnostic. The final stream has
+no per-token origin allocation. Temporary origin columns are released with
+their token buffers; all retained tables are released with `pp_release`.
+
+`pp_diagnose_output` is the later parser's entry point: it takes an output token
+index. It uses the same renderer as preprocessor errors. The renderer walks
+history iteratively, prints the include stack, the presumed primary location,
+and expansion notes from outermost to innermost. Plain argument forwarding
+points through to the argument; a macro name expanded after substitution also
+shows the parameter it passed through, matching Clang. Generated spellings get
+an additional scratch-space note. Per-file physical line tables are built only
+when a diagnostic needs them, with scalar/vector builders; `#line` remains
+scoped to each inclusion. Source bytes, definition locations and scratch
+spellings remain alive for the whole unit. Source excerpts and carets are not
+implemented.
+
+`test-preprocessor --clang` compares 26 original diagnostic fixtures with
+Clang, including preprocessor failures and calls to the later-token renderer.
+It checks object/function expansions, arguments, nested and cross-context
+invocations, pastes, stringification, builtins, redefinition, `#line`, CRLF,
+and include stacks. Only scratch-buffer line numbers are normalized, since
+they depend on each compiler's allocation order. Real and presumed locations,
+columns, note order and text are compared exactly. Every existing case and
+corpus comparison also compares the complete scalar/vector history tables.
+Separate checks cover guarded input tails, maximal runs across split copies,
+batched lookups, generated-input lifetimes and recording-on/off token equality.
+
+`benchmark-preprocessor --history-cost [options] file...` interleaves the same
+vectorized preprocessor with recording enabled and disabled, reversing order
+each pass. It checks an output digest including spelling locations outside the
+timed interval. It reports retained record bytes per unit (mean and maximum)
+and temporary-origin high-water bytes separately. These are used bytes, not
+RSS or virtual reservations; allocator page rounding and existing source/token
+storage are not included. Target-host measurements are pending.
+
 ### Vectorized kernels and their scalar twins
 
 `PPOptions.scalar` selects the scalar twin of each vectorized kernel:
@@ -786,8 +850,8 @@ cleared once and reused.
   to its column. Line markers differ in form but not in what they say: clang
   marks every file it enters, even one that gives no tokens, and we mark only
   where a token needs it.
-- Diagnostics give `file:line:column: error: message` (the presumed file and
-  line) and no more: no notes, no macro backtraces (#108), and no carets.
+- Diagnostics include presumed locations, include stacks and macro backtraces
+  (#108, above). Source excerpts and carets remain unimplemented.
 - C++ (`-x c++`), dependency output (`-M`) and `-dM` aren't supported.
 - Stringizing an identifier that pasting made from a UCN gives its UTF-8
   spelling, where clang keeps the UCN.
