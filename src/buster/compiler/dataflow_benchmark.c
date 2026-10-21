@@ -5,11 +5,11 @@
 // are original to this module; no external fixtures or benchmark implementation are incorporated.
 //
 // benchmark-dataflow [--seed N] [--after-scalar MS] [--only scalar|avx512] checks scalar/vector equality, then
-// measures complete solves including clearing in and out. Twenty-one passes alternate which implementation runs first,
-// after warm-up and sample-size calibration; --only times one alone, back to back. Each retained sample lasts at least
-// 2 ms. Printed ranges are within one process; repeat this command in separately locked processes to measure variation
-// between runs rather than holding the shared host lock around a series. Hardware counters count this thread's user
-// cycles, instructions and the throttle, read as the dispatch slots Zen 5's power cap withholds
+// measures complete solves including the rows each solver clears. Twenty-one passes alternate which implementation runs
+// first, after warm-up and sample-size calibration; --only times one alone, back to back. Each retained sample lasts at
+// least 2 ms. Printed ranges are within one process; repeat this command in separately locked processes to measure
+// variation between runs rather than holding the shared host lock around a series. Hardware counters count this
+// thread's user cycles, instructions and the throttle, read as the dispatch slots Zen 5's power cap withholds
 // (BUSTER_DATAFLOW_BENCHMARK_THROTTLE_EVENT); unavailable counters print zero, never a time estimate. --after-scalar MS
 // runs the scalar solver for MS ms before every AVX-512 sample (dataflow_benchmark_after_scalar), the state a
 // compiler's vector phases run in after lighter ones. Run on the 9700X through exclusive.sh with taskset -c 2.
@@ -552,7 +552,7 @@ int run_dataflow_benchmark(int argc, char** argv)
     else
     {
         DataflowBenchmarkCounters counters = dataflow_benchmark_open_counters();
-        printf("dataflow: generator=%u seed=%" PRIu64 ", 21 interleaved-pass median [min-max]; complete solves including in/out clearing", BUSTER_DATAFLOW_GENERATOR_VERSION,
+        printf("dataflow: generator=%u seed=%" PRIu64 ", 21 interleaved-pass median [min-max]; complete solves including the rows each solver clears", BUSTER_DATAFLOW_GENERATOR_VERSION,
                seed);
         if (timed != 3)
         {

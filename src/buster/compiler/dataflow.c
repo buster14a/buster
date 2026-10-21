@@ -3,8 +3,9 @@
 //
 // Backward liveness over a CFG's successor columns and per-block bitsets. The caller owns the CFG and fills use/def;
 // dataflow_postorder validates its edges and builds a DFS forest with an explicit stack, including unreachable
-// blocks. Both liveness solvers start with empty in/out, then visit that same postorder until in stops changing.
-// Their iteration counts include the final stable sweep. The scalar solver is the word-at-a-time test oracle.
+// blocks. Both liveness solvers start with empty in rows and visit that same postorder until in stops changing, storing
+// every block's out row in each sweep. Their iteration counts include the final stable sweep. The scalar solver is the
+// word-at-a-time test oracle.
 //
 // Each matrix is block_count contiguous rows of row_words uint64_t words, rounded to a whole 512-bit vector.
 // Every row starts at a 64-byte boundary, and the caller keeps the use/def padding bits zero. The matrices are
@@ -219,8 +220,9 @@ static __attribute__((noinline, aligned(64))) uint64_t dataflow_liveness_vector_
     uint64_t* restrict in_rows = dataflow->in;
     uint64_t* restrict out_rows = dataflow->out;
     const uint64_t matrix_bytes = (uint64_t)block_count * BUSTER_DATAFLOW_VECTOR_BYTES;
+    // Only in is cleared: every sweep stores every block's out row (the postorder holds every block) and nothing reads
+    // out, so clearing it too was only stores, up to 18% of a solve (docs/dataflow.md, "Clearing and storing out").
     memset(in_rows, 0, matrix_bytes);
-    memset(out_rows, 0, matrix_bytes);
     bool changed;
     do
     {
